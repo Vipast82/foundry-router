@@ -1,0 +1,230 @@
+"""Configuration loading and persistence.
+
+Config lives in one YAML file on a mounted volume (default /config/config.yaml,
+overridable via FOUNDRY_CONFIG). The web UI edits config through save_config(),
+which re-serializes the whole document — comments in a hand-edited file are
+lost on the first UI-driven save. That tradeoff (full round-trip vs. carrying a
+comment-preserving YAML dependency) was accepted to keep dependencies minimal
+(design doc §2); config.example.yaml remains the commented reference.
+
+``${VAR}`` strings are expanded from the environment at *load* time, but the
+raw (unexpanded) document is kept for saving, so secrets never get baked into
+the file by a UI round-trip.
+"""
+
+from __future__ import annotations
+
+import copy
+import logging
+import os
+import re
+import shutil
+from pathlib import Path
+from typing import Any, Literal, Optional
+
+import yaml
+from pydantic import BaseModel, Field
+
+log = logging.getLogger(__name__)
+
+_ENV_RE = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}")
+
+
+def _expand_env(value: Any) -> Any:
+    if isinstance(value, str):
+        return _ENV_RE.sub(lambda m: os.environ.get(m.group(1), ""), value)
+    if isinstance(value, list):
+        return [_expand_env(v) for v in value]
+    if isinstance(value, dict):
+        return {k: _expand_env(v) for k, v in value.items()}
+    return value
+
+
+# --------------------------------------------------------------------------- #
+# Pydantic models mirroring config.example.yaml                               #
+# --------------------------------------------------------------------------- #
+
+class ServerConfig(BaseModel):
+    host: str = "0.0.0.0"
+    port: int = 11435
+
+
+class AgentBrainConfig(BaseModel):
+    provider: Literal["ollama", "meridian", "openrouter"] = "ollama"
+    endpoint: str = "http://localhost:11434"
+    model: str = ""
+    api_key: Optional[str] = None
+    keep_alive: int | str = -1
+    max_tokens: int = 4096
+    options: dict = Field(default_factory=dict)
+
+
+class BackendConfig(BaseModel):
+    name: str
+    # `type` is required (§4.3): three different wire protocols, and e.g.
+    # Meridian would silently fail if spoken to in Ollama protocol.
+    type: Literal["ollama", "anthropic-compatible", "openai-compatible"]
+    url: str
+    api_key: Optional[str] = None
+    priority: int = 100
+    # Optional discovery fallback ONLY — used if the backend exposes no
+    # model-list endpoint (§4.3: "do not hardcode model lists for backends
+    # that can be discovered").
+    models: list[str] = Field(default_factory=list)
+
+
+class InternalPoolConfig(BaseModel):
+    backends: list[BackendConfig] = Field(default_factory=list)
+
+
+class OllaConfig(BaseModel):
+    url: str = "http://localhost:40114"
+
+
+class LiteLLMConfig(BaseModel):
+    url: str = "http://localhost:4000"
+    api_key: Optional[str] = None
+
+
+class BackendPoolConfig(BaseModel):
+    mode: Literal["internal", "olla", "litellm"] = "internal"
+    health_check_interval_seconds: int = 15
+    failure_threshold: int = 3
+    cooldown_seconds: int = 60
+    request_timeout_seconds: int = 300
+    internal: InternalPoolConfig = Field(default_factory=InternalPoolConfig)
+    olla: OllaConfig = Field(default_factory=OllaConfig)
+    litellm: LiteLLMConfig = Field(default_factory=LiteLLMConfig)
+
+
+class GuardrailsConfig(BaseModel):
+    authority: Literal["internal", "defer_to_pool"] = "internal"
+    max_steps_per_request: int = 12
+    max_paid_calls_per_request: int = 3
+    daily_spend_cap_usd: Optional[float] = None
+    weekly_spend_cap_usd: Optional[float] = None
+
+
+class MeridianConfig(BaseModel):
+    telemetry_path: str = "/telemetry"
+    min_window_fraction: float = 0.05
+
+
+class ResearchToolRef(BaseModel):
+    server: str = ""
+    tool: str = ""
+    query_param: str = "query"
+    url_param: str = "url"
+
+
+class ResearchConfig(BaseModel):
+    enabled: bool = True
+    sweep_hours: int = 24
+    stale_days: int = 14
+    max_pages_per_model: int = 3
+    model: Optional[str] = None  # None => reuse the agent_brain model
+    search: ResearchToolRef = Field(default_factory=ResearchToolRef)
+    fetch: ResearchToolRef = Field(default_factory=ResearchToolRef)
+
+
+class RegistryConfig(BaseModel):
+    openrouter_poll_hours: int = 24
+    research: ResearchConfig = Field(default_factory=ResearchConfig)
+
+
+class MCPServerConfig(BaseModel):
+    name: str
+    url: str
+    transport: Literal["streamable-http", "sse"] = "streamable-http"
+    headers: dict[str, str] = Field(default_factory=dict)
+
+
+class ToolSyncConfig(BaseModel):
+    periodic_seconds: int = 300
+
+
+class LoggingConfig(BaseModel):
+    level: str = "INFO"
+
+
+class AppConfig(BaseModel):
+    server: ServerConfig = Field(default_factory=ServerConfig)
+    agent_brain: AgentBrainConfig = Field(default_factory=AgentBrainConfig)
+    backend_pool: BackendPoolConfig = Field(default_factory=BackendPoolConfig)
+    guardrails: GuardrailsConfig = Field(default_factory=GuardrailsConfig)
+    meridian: MeridianConfig = Field(default_factory=MeridianConfig)
+    registry: RegistryConfig = Field(default_factory=RegistryConfig)
+    mcp_servers: list[MCPServerConfig] = Field(default_factory=list)
+    tool_sync: ToolSyncConfig = Field(default_factory=ToolSyncConfig)
+    logging: LoggingConfig = Field(default_factory=LoggingConfig)
+
+
+# --------------------------------------------------------------------------- #
+# Load / save                                                                 #
+# --------------------------------------------------------------------------- #
+
+def config_path() -> Path:
+    return Path(os.environ.get("FOUNDRY_CONFIG", "/config/config.yaml"))
+
+
+def data_dir() -> Path:
+    d = Path(os.environ.get("FOUNDRY_DATA_DIR", "/data"))
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
+def _example_path() -> Path:
+    # config.example.yaml is copied into the image next to the package dir.
+    candidates = [
+        Path(__file__).resolve().parent.parent / "config.example.yaml",
+        Path.cwd() / "config.example.yaml",
+    ]
+    for c in candidates:
+        if c.exists():
+            return c
+    return candidates[0]
+
+
+class ConfigStore:
+    """Holds both the raw (unexpanded) YAML document and the parsed config.
+
+    The raw document is the write-back target for UI edits; the parsed
+    AppConfig (with ${VAR} expanded) is what the rest of the app consumes.
+    """
+
+    def __init__(self, path: Optional[Path] = None):
+        self.path = path or config_path()
+        self.raw: dict = {}
+        self.config: AppConfig = AppConfig()
+
+    def load(self) -> AppConfig:
+        if not self.path.exists():
+            example = _example_path()
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            if example.exists():
+                shutil.copy(example, self.path)
+                log.warning(
+                    "No config found at %s — copied config.example.yaml there. "
+                    "Edit it for your deployment (backend URLs are placeholders).",
+                    self.path,
+                )
+            else:
+                self.path.write_text("{}\n", encoding="utf-8")
+        with open(self.path, "r", encoding="utf-8") as f:
+            self.raw = yaml.safe_load(f) or {}
+        self.config = AppConfig.model_validate(_expand_env(copy.deepcopy(self.raw)))
+        return self.config
+
+    def save(self, mutate) -> AppConfig:
+        """Apply ``mutate(raw_dict)`` to the raw document, persist, reload.
+
+        Callers mutate the *raw* document so ${VAR} references survive the
+        round trip instead of being replaced by their expanded secrets.
+        """
+        mutate(self.raw)
+        tmp = self.path.with_suffix(".yaml.tmp")
+        with open(tmp, "w", encoding="utf-8") as f:
+            yaml.safe_dump(self.raw, f, sort_keys=False, allow_unicode=True)
+        tmp.replace(self.path)
+        self.config = AppConfig.model_validate(_expand_env(copy.deepcopy(self.raw)))
+        return self.config

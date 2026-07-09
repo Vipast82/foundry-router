@@ -1,0 +1,29 @@
+# Foundry Router — primary way to run this service.
+#
+# SECURITY POSTURE (design doc §1/§2): built for internal/private-network use.
+# The port mapping below binds to all host interfaces by default because most
+# homelab hosts sit entirely on a LAN. If this host has ANY internet-facing
+# interface, pin the mapping to the LAN IP instead, e.g.:
+#     - "192.168.1.50:11435:11435"
+# There is no auth on the API or admin UI — do not expose it to the internet.
+
+services:
+  foundry-router:
+    build: .
+    image: foundry-router:latest
+    container_name: foundry-router
+    restart: unless-stopped
+    ports:
+      - "${FOUNDRY_PORT:-11435}:11435"
+    volumes:
+      # Both mounts are load-bearing: config.yaml and the SQLite DB must
+      # survive `docker compose down && up` and image rebuilds.
+      - ./config:/config
+      - ./data:/data
+    environment:
+      - MERIDIAN_API_KEY=${MERIDIAN_API_KEY:-}
+      - OPENROUTER_API_KEY=${OPENROUTER_API_KEY:-}
+      - LITELLM_KEY=${LITELLM_KEY:-}
+    # The container needs LAN access to your Ollama instances and Meridian;
+    # default bridge networking is fine as long as those are reachable by IP
+    # or resolvable hostname from inside the container.

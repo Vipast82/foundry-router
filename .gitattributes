@@ -1,0 +1,3 @@
+# This project deploys to Linux (Docker) — keep LF everywhere regardless of
+# which OS the repo is edited on.
+* text=auto eol=lf

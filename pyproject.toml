@@ -1,0 +1,33 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "foundry-router"
+version = "0.1.0"
+description = "Self-hosted agentic LLM routing middleware: Ollama-compatible facade, local-first routing brain, Claude via Meridian, dynamic tool sync."
+readme = "README.md"
+license = { file = "LICENSE" }
+requires-python = ">=3.11"
+dependencies = [
+    "fastapi>=0.115,<1.0",
+    "uvicorn[standard]>=0.32,<1.0",
+    "httpx>=0.27,<1.0",
+    "pydantic>=2.9,<3.0",
+    "PyYAML>=6.0,<7.0",
+    "langgraph>=0.2",
+    "mcp>=1.2",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0", "pytest-asyncio>=0.24"]
+
+[tool.setuptools.packages.find]
+include = ["foundry_router*"]
+
+[tool.setuptools.package-data]
+"foundry_router" = ["schema.sql", "ui/static/*"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]

@@ -1,0 +1,245 @@
+"""Research Agent (design doc §4.4): the *background* agent that keeps model
+metadata current. Distinct from the live Routing Agent and entirely off the
+hot path — `request_model_research` enqueues and returns immediately; the live
+request proceeds with a conservative default.
+
+Process per model: search (SearXNG MCP tool) -> fetch top results (Crawl4AI
+MCP tool) -> ask an LLM to extract benchmark scores / qualitative estimates ->
+write structured rows to model_benchmarks + summary fields on models.
+
+Degradation: with no MCP servers configured (or unreachable) the qualitative
+pass is skipped with a logged note — OpenRouter ingestion still keeps the
+structured half of the registry alive, honoring §2's "no cloud dependency for
+core function".
+"""
+
+from __future__ import annotations
+
+import asyncio
+import json
+import logging
+import re
+from typing import Awaitable, Callable, Optional
+
+from ..config import ResearchConfig
+from ..db import Database, utcnow
+from .models_db import ModelRegistry
+
+log = logging.getLogger(__name__)
+
+CATEGORIES = ["coding", "reasoning", "general_chat", "tool_calling", "agentic"]
+
+# Same benchmark categories used throughout the main guide, for consistency.
+_QUERIES = ["{name} benchmarks", "{name} SWE-bench", "{name} review"]
+
+EXTRACTION_PROMPT = """You are extracting model-capability data from web research text.
+
+Model being researched: {model}
+
+Research text (search results and fetched pages, may be noisy):
+---
+{text}
+---
+
+Return ONLY a JSON object, no prose, with this exact shape:
+{{
+  "reasoning_style": "<one-sentence summary of how this model reasons>",
+  "good_for": "<comma-separated task types this model is reportedly good at>",
+  "benefits_from_explicit_prompting": true/false,
+  "benchmarks": [
+    {{"category": "coding|reasoning|general_chat|tool_calling|agentic",
+      "score": <0-100 number>,
+      "score_type": "measured" or "estimated",
+      "source_type": "vendor" or "independent" or "community_report",
+      "source_url": "<url or empty string>",
+      "confidence": <0.0-1.0>}}
+  ]
+}}
+
+Rules: use "measured" ONLY when a real numeric benchmark result appears in the
+text (normalize to 0-100). Where no hard number exists, you may give an
+"estimated" score from the qualitative discussion, with confidence <= 0.5.
+Lower confidence when only a single source or vendor-published numbers exist.
+If the text contains nothing useful, return {{"benchmarks": []}}."""
+
+
+def extract_json(text: str) -> Optional[dict]:
+    """Find the first balanced JSON object in LLM output (models love to wrap
+    JSON in prose or code fences no matter how firmly asked not to)."""
+    text = re.sub(r"```(?:json)?", "", text)
+    start = text.find("{")
+    while start != -1:
+        depth = 0
+        for i in range(start, len(text)):
+            if text[i] == "{":
+                depth += 1
+            elif text[i] == "}":
+                depth -= 1
+                if depth == 0:
+                    try:
+                        return json.loads(text[start:i + 1])
+                    except json.JSONDecodeError:
+                        break
+        start = text.find("{", start + 1)
+    return None
+
+
+class ResearchAgent:
+    def __init__(self, cfg: ResearchConfig, db: Database, registry: ModelRegistry,
+                 mcp_manager, llm: Callable[[str], Awaitable[str]],
+                 available_models: Callable[[], list[str]]):
+        """`llm` is an async prompt->text callable wired up in main.py — by
+        default the same brain model, or registry.research.model if set (§7
+        open question: a larger off-hot-path model may extract better)."""
+        self.cfg = cfg
+        self.db = db
+        self.registry = registry
+        self.mcp = mcp_manager
+        self.llm = llm
+        self.available_models = available_models
+        self.queue: asyncio.Queue[str] = asyncio.Queue()
+        self._queued: set[str] = set()
+        self._tasks: list[asyncio.Task] = []
+
+    # -- lifecycle -----------------------------------------------------------------
+
+    def start(self) -> None:
+        if not self.cfg.enabled:
+            return
+        self._tasks = [
+            asyncio.create_task(self._worker_loop()),
+            asyncio.create_task(self._sweep_loop()),
+        ]
+
+    async def stop(self) -> None:
+        for t in self._tasks:
+            t.cancel()
+        for t in self._tasks:
+            try:
+                await t
+            except asyncio.CancelledError:
+                pass
+
+    # -- triggers (§4.4: either is sufficient, both exist) -----------------------------
+
+    def enqueue(self, model_id: str) -> bool:
+        """Non-blocking trigger used by the live agent's request_model_research
+        tool and by the web UI. Dedupes while queued."""
+        if not self.cfg.enabled or model_id in self._queued:
+            return False
+        self._queued.add(model_id)
+        self.queue.put_nowait(model_id)
+        return True
+
+    async def _sweep_loop(self) -> None:
+        # DESIGN DECISION (see design doc §7): sweep cadence. Daily default,
+        # configurable via registry.research.sweep_hours — balance freshness
+        # against SearXNG/Crawl4AI load shared with the rest of the MCP fleet.
+        while True:
+            try:
+                stale = self.registry.stale_or_missing(
+                    self.available_models(), self.cfg.stale_days)
+                for m in stale:
+                    self.enqueue(m)
+                if stale:
+                    self.db.log_event("info", "research",
+                                      f"sweep queued {len(stale)} stale/missing models")
+            except Exception:
+                log.exception("research sweep failed")
+            await asyncio.sleep(self.cfg.sweep_hours * 3600)
+
+    async def _worker_loop(self) -> None:
+        while True:
+            model_id = await self.queue.get()
+            try:
+                await self.research_model(model_id)
+            except Exception as e:
+                self.db.log_event("error", "research",
+                                  f"research failed for {model_id}", str(e))
+            finally:
+                self._queued.discard(model_id)
+
+    # -- the actual research pass ---------------------------------------------------
+
+    async def _search(self, query: str) -> str:
+        ref = self.cfg.search
+        if not ref.server or not ref.tool:
+            raise RuntimeError("no search MCP tool configured")
+        return await self.mcp.call_tool(ref.server, ref.tool, {ref.query_param: query})
+
+    async def _fetch(self, url: str) -> str:
+        ref = self.cfg.fetch
+        if not ref.server or not ref.tool:
+            raise RuntimeError("no fetch MCP tool configured")
+        return await self.mcp.call_tool(ref.server, ref.tool, {ref.url_param: url})
+
+    async def research_model(self, model_id: str) -> None:
+        corpus: list[str] = []
+        urls: list[str] = []
+        for q in _QUERIES:
+            try:
+                result = await self._search(q.format(name=model_id))
+                corpus.append(f"### search: {q.format(name=model_id)}\n{result[:4000]}")
+                urls += re.findall(r"https?://[^\s\"'<>\)\]]+", result)
+            except Exception as e:
+                self.db.log_event("warning", "research",
+                                  f"search unavailable for {model_id} — skipping "
+                                  f"qualitative pass", str(e))
+                # No search => nothing qualitative to do; mark the attempt so
+                # the sweep doesn't hammer an unconfigured setup every cycle.
+                self.registry.upsert_auto(model_id, source="research_agent",
+                                          reasoning_style="(research pending — no search MCP tool reachable)")
+                return
+
+        seen: set[str] = set()
+        fetched = 0
+        for u in urls:
+            if fetched >= self.cfg.max_pages_per_model:
+                break
+            base = u.split("#")[0]
+            if base in seen:
+                continue
+            seen.add(base)
+            try:
+                page = await self._fetch(base)
+                corpus.append(f"### page: {base}\n{page[:6000]}")
+                fetched += 1
+            except Exception:
+                continue
+
+        text = "\n\n".join(corpus)[:24000]
+        raw = await self.llm(EXTRACTION_PROMPT.format(model=model_id, text=text))
+        data = extract_json(raw)
+        if not data:
+            self.db.log_event("warning", "research",
+                              f"extraction produced no JSON for {model_id}", raw[:500])
+            return
+
+        self.registry.upsert_auto(
+            model_id, source="research_agent",
+            reasoning_style=data.get("reasoning_style"),
+            good_for=data.get("good_for"),
+            benefits_from_explicit_prompting=(
+                1 if data.get("benefits_from_explicit_prompting") else 0),
+        )
+        wrote = 0
+        for b in data.get("benchmarks") or []:
+            try:
+                cat = b.get("category")
+                if cat not in CATEGORIES:
+                    continue
+                score = float(b.get("score"))
+                self.registry.upsert_benchmark(
+                    model_id, cat, max(0.0, min(100.0, score)),
+                    score_type=("measured" if b.get("score_type") == "measured" else "estimated"),
+                    source_type=(b.get("source_type")
+                                 if b.get("source_type") in ("vendor", "independent", "community_report")
+                                 else "community_report"),
+                    source_url=str(b.get("source_url") or "")[:500],
+                    confidence=max(0.0, min(1.0, float(b.get("confidence", 0.4)))),
+                )
+                wrote += 1
+            except (TypeError, ValueError):
+                continue
+        self.db.log_event("info", "research",
+                          f"researched {model_id}: {wrote} benchmark rows at {utcnow()}")

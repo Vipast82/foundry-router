@@ -1,0 +1,10 @@
+# Pinned runtime dependencies. These exact versions were current when this
+# project was generated (July 2026); if pip cannot resolve one, relax it to the
+# range in pyproject.toml — the code only relies on long-stable APIs of each.
+fastapi==0.115.6
+uvicorn[standard]==0.34.0
+httpx==0.28.1
+pydantic==2.10.4
+PyYAML==6.0.2
+langgraph==1.0.2
+mcp==1.9.4
