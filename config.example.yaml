@@ -1,0 +1,150 @@
+# =============================================================================
+# Foundry Router — reference configuration.
+# Copy to /config/config.yaml (the container does this automatically on first
+# start if no config exists) and edit for your deployment.
+#
+# ${VAR} values are expanded from the container environment / .env at load time.
+# Secrets belong in .env, never in this file.
+#
+# INTERNAL-USE-ONLY: this service has no authentication. Run it on a private
+# network. See README.
+#
+# Active values below are the reference deployment from the design doc §5:
+# TrueNAS Ollama (4060 Ti pair) + RTX 3050 mini-PC Ollama + Meridian, with the
+# brain on the 3050. Someone with different hardware edits ONLY this file.
+# =============================================================================
+
+server:
+  host: "0.0.0.0"        # inside Docker keep 0.0.0.0; compose controls exposure
+  port: 11435
+
+# --- §4.2 Agent Brain --------------------------------------------------------
+# The model that makes routing decisions, on EVERY request. An explicit,
+# swappable choice. Reference default: local Ornith-9B on the 3050 node —
+# routing stays free. Choosing provider meridian/openrouter makes every routing
+# decision a paid call (see design doc §4.2 for why that inversion matters).
+agent_brain:
+  provider: "ollama"               # "ollama" | "meridian" | "openrouter"
+  endpoint: "http://192.168.1.60:11434"   # EDIT: the 3050 mini-PC's Ollama
+  model: "ornith:9b-q4_K_M"
+  keep_alive: -1                   # keep the brain permanently resident (§5)
+  api_key: ""                      # only for meridian/openrouter providers
+  max_tokens: 4096
+  options:                         # passed through to the brain's backend
+    temperature: 0.1               # routing should be boring and deterministic
+
+  # -- provider: meridian example --
+  # provider: "meridian"
+  # endpoint: "http://localhost:3456"
+  # model: "claude-haiku-4-5"      # a fast/cheap tier, not Opus/Fable
+  # api_key: "${MERIDIAN_API_KEY}"
+
+  # -- provider: openrouter example --
+  # provider: "openrouter"
+  # endpoint: "https://openrouter.ai/api/v1"
+  # model: "some/fast-cheap-model"
+  # api_key: "${OPENROUTER_API_KEY}"
+
+# --- §4.3 Backend Pool -------------------------------------------------------
+backend_pool:
+  mode: "internal"                 # "internal" | "olla" | "litellm"
+
+  # Health checking / failover knobs (internal mode). Tool Sync's removal
+  # grace period is tied to these same values (§4.2) — a backend must be
+  # unhealthy (failure_threshold consecutive failures) before its tools are
+  # delisted, so a momentary blip doesn't cause tool-set flapping.
+  health_check_interval_seconds: 15
+  failure_threshold: 3
+  cooldown_seconds: 60
+  request_timeout_seconds: 300     # generation calls can be slow on local GPUs
+
+  internal:
+    backends:
+      # `type` is REQUIRED — it selects the wire protocol (three different ones).
+      - name: truenas-ollama
+        type: ollama
+        url: http://192.168.1.50:11434      # EDIT: TrueNAS Ollama (4060 Ti pair)
+        priority: 100
+      - name: mini-pc-ollama
+        type: ollama
+        url: http://192.168.1.60:11434      # EDIT: RTX 3050 mini-PC Ollama
+        priority: 90
+      - name: meridian
+        type: anthropic-compatible
+        url: http://192.168.1.40:3456       # EDIT: Meridian bridge
+        api_key: "${MERIDIAN_API_KEY}"
+        priority: 100
+        # Discovery is attempted first for EVERY backend (§4.3). Only if
+        # Meridian exposes no model-list endpoint does this fallback list get
+        # used. Do not add it unless discovery genuinely returns nothing.
+        # models:
+        #   - claude-sonnet-5
+        #   - claude-opus-4-8
+      # - name: openrouter                  # optional — uncomment when connected
+      #   type: openai-compatible
+      #   url: https://openrouter.ai/api/v1
+      #   api_key: "${OPENROUTER_API_KEY}"
+      #   priority: 100
+
+  # mode: olla — forward model resolution to an existing Olla instance
+  olla:
+    url: http://localhost:40114
+
+  # mode: litellm — forward model resolution to an existing LiteLLM proxy
+  litellm:
+    url: http://localhost:4000
+    api_key: "${LITELLM_KEY}"
+
+# --- §4.7 Guardrails ---------------------------------------------------------
+guardrails:
+  # "internal": Foundry always enforces its own policies (recommended — they
+  #   encode usage-window and persona policy Olla/LiteLLM have no concept of).
+  # "defer_to_pool": skip spend/rate enforcement, trust LiteLLM/Olla budgets.
+  #   Only meaningful with mode: olla/litellm; inert under mode: internal.
+  authority: "internal"
+  max_steps_per_request: 12        # hard stop on the agent loop
+  max_paid_calls_per_request: 3    # Claude/metered calls per single request
+  daily_spend_cap_usd: null        # null = no cap; applies to metered backends only
+  weekly_spend_cap_usd: null
+
+# --- §4.7 Meridian usage-window awareness ------------------------------------
+meridian:
+  telemetry_path: "/telemetry"     # queried before committing to a Claude call
+  # Below this fraction of the session/weekly window remaining, the router
+  # treats the window as exhausted and falls back to local with a <think> note.
+  min_window_fraction: 0.05
+
+# --- §4.4 Model Registry & Research Agent --------------------------------------
+registry:
+  openrouter_poll_hours: 24        # structured metadata poll (no key required)
+  research:
+    enabled: true
+    sweep_hours: 24                # scheduled staleness sweep cadence (§7 open question — daily default)
+    stale_days: 14                 # registry rows older than this get re-researched
+    max_pages_per_model: 3         # Crawl4AI fetches per model per sweep
+    # Model used by the Research Agent. null = reuse the agent_brain model.
+    # §7 open question: a larger off-hot-path model may extract scores better.
+    model: null
+    # Which MCP tools implement search/fetch. Names vary by server build —
+    # adjust to match what your SearXNG / Crawl4AI MCP servers actually expose
+    # (check the Tools tab in the web UI after connecting them).
+    search:  { server: "searxng",  tool: "searxng_web_search", query_param: "query" }
+    fetch:   { server: "crawl4ai", tool: "md",                 url_param: "url" }
+
+# --- MCP server connections (§4.9 item 8) --------------------------------------
+# A CONNECTION list, not a tool list — tools are discovered per server via
+# Tool Sync once a connection exists. Reused from the existing MCP fleet.
+mcp_servers: []
+#  - name: searxng
+#    url: http://192.168.1.40:8971/mcp
+#    transport: streamable-http    # "streamable-http" | "sse"
+#  - name: crawl4ai
+#    url: http://192.168.1.40:8972/mcp
+#    transport: streamable-http
+
+# --- Tool Sync (§4.2) ----------------------------------------------------------
+tool_sync:
+  periodic_seconds: 300            # fallback sweep; health-change events also trigger immediate sync
+
+logging:
+  level: "INFO"

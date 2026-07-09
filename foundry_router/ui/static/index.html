@@ -1,0 +1,372 @@
+<!doctype html>
+<!--
+  Foundry Router admin panel.
+  Stack choice: one static HTML file, vanilla JS, zero build toolchain — the
+  best maintainability-per-dependency for a small internal admin surface.
+  Served by the same FastAPI app at /ui; talks to /admin/api/*.
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Foundry Router</title>
+<style>
+  :root { --bg:#14161a; --panel:#1d2026; --line:#2c3038; --fg:#d7dae0; --dim:#8b919c;
+          --accent:#e8a33d; --ok:#5fb26a; --bad:#d05f5f; --warn:#d0a75f; }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); color:var(--fg);
+         font:14px/1.45 system-ui, "Segoe UI", sans-serif; }
+  header { display:flex; align-items:center; gap:16px; padding:10px 18px;
+           background:var(--panel); border-bottom:1px solid var(--line); }
+  header h1 { font-size:16px; margin:0; color:var(--accent); font-weight:600; }
+  header .sub { color:var(--dim); font-size:12px; }
+  nav { display:flex; gap:2px; padding:0 12px; background:var(--panel);
+        border-bottom:1px solid var(--line); flex-wrap:wrap; }
+  nav button { background:none; border:none; color:var(--dim); padding:9px 13px;
+               cursor:pointer; font-size:13px; border-bottom:2px solid transparent; }
+  nav button.active { color:var(--fg); border-bottom-color:var(--accent); }
+  main { padding:16px 18px; max-width:1200px; }
+  h2 { font-size:14px; margin:18px 0 8px; color:var(--accent); }
+  .hint { color:var(--dim); font-size:12px; margin:4px 0 10px; }
+  table { border-collapse:collapse; width:100%; margin:6px 0 14px; font-size:13px; }
+  th,td { text-align:left; padding:6px 9px; border-bottom:1px solid var(--line);
+          vertical-align:top; word-break:break-word; }
+  th { color:var(--dim); font-weight:500; }
+  .pill { display:inline-block; padding:1px 8px; border-radius:9px; font-size:11px; }
+  .ok  { background:#1d3a23; color:var(--ok); }
+  .bad { background:#3a1d1d; color:var(--bad); }
+  .warn{ background:#3a331d; color:var(--warn); }
+  button.act { background:var(--panel); color:var(--fg); border:1px solid var(--line);
+               border-radius:5px; padding:5px 11px; cursor:pointer; font-size:12px; }
+  button.act:hover { border-color:var(--accent); }
+  button.primary { border-color:var(--accent); color:var(--accent); }
+  input, select, textarea { background:var(--bg); color:var(--fg);
+    border:1px solid var(--line); border-radius:5px; padding:5px 8px; font-size:13px; }
+  textarea { width:100%; font-family:ui-monospace, monospace; }
+  .row { display:flex; gap:8px; align-items:center; flex-wrap:wrap; margin:6px 0; }
+  .row label { color:var(--dim); font-size:12px; min-width:170px; }
+  .card { background:var(--panel); border:1px solid var(--line); border-radius:8px;
+          padding:12px 14px; margin:10px 0; }
+  code, .mono { font-family:ui-monospace, Consolas, monospace; font-size:12px; }
+  #toast { position:fixed; bottom:16px; right:16px; background:var(--panel);
+           border:1px solid var(--accent); padding:9px 14px; border-radius:6px;
+           display:none; z-index:9; }
+  details summary { cursor:pointer; color:var(--dim); }
+</style>
+</head>
+<body>
+<header>
+  <h1>Foundry Router</h1>
+  <span class="sub" id="hdr-info">loading…</span>
+</header>
+<nav id="nav"></nav>
+<main id="main"></main>
+<div id="toast"></div>
+
+<script>
+"use strict";
+const $ = (s, el=document) => el.querySelector(s);
+const esc = s => String(s ?? "").replace(/[&<>"]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
+
+async function api(path, opts={}) {
+  const r = await fetch("/admin/api/" + path, {
+    headers: {"Content-Type": "application/json"}, ...opts,
+    body: opts.body !== undefined ? JSON.stringify(opts.body) : undefined,
+  });
+  const data = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(data.error || r.statusText);
+  return data;
+}
+function toast(msg, isErr=false) {
+  const t = $("#toast");
+  t.textContent = msg; t.style.borderColor = isErr ? "var(--bad)" : "var(--accent)";
+  t.style.display = "block";
+  clearTimeout(t._h); t._h = setTimeout(() => t.style.display = "none", 3500);
+}
+const run = p => p.then(d => { toast("Saved"); render(); return d; })
+                  .catch(e => toast(e.message, true));
+
+/* ------------------------------------------------------------------ tabs -- */
+const TABS = {
+  "Backends":  tabBackends,  "Models":   tabModels,   "Personas": tabPersonas,
+  "Tools":     tabTools,     "Guardrails": tabGuardrails, "MCP":  tabMCP,
+  "Usage Log": tabUsage,     "Events":   tabEvents,
+};
+let current = "Backends";
+function render() {
+  const nav = $("#nav"); nav.innerHTML = "";
+  for (const name of Object.keys(TABS)) {
+    const b = document.createElement("button");
+    b.textContent = name; b.className = name === current ? "active" : "";
+    b.onclick = () => { current = name; render(); };
+    nav.appendChild(b);
+  }
+  $("#main").innerHTML = "<p class='hint'>loading…</p>";
+  TABS[current]().catch(e => $("#main").innerHTML =
+    `<p class="hint">failed to load: ${esc(e.message)}</p>`);
+}
+
+/* -------------------------------------------------------------- backends -- */
+async function tabBackends() {
+  const st = await api("status");
+  $("#hdr-info").textContent =
+    `v${st.version} · pool: ${st.pool_mode} · brain: ${st.brain.model} (${st.brain.provider}) · ${st.tool_count} tools`;
+  const rows = st.backends.map(b => `<tr>
+      <td>${esc(b.name)}</td><td class="mono">${esc(b.type)}</td>
+      <td class="mono">${esc(b.url)}</td><td>${b.priority}</td>
+      <td><span class="pill ${b.healthy ? "ok" : "bad"}">${b.healthy ? "healthy" : "down"}</span></td>
+      <td class="mono">${(b.models || []).slice(0, 8).map(esc).join(", ")}${(b.models||[]).length > 8 ? "…" : ""}</td>
+      <td class="mono">${esc(b.last_error || "")}</td></tr>`).join("");
+  $("#main").innerHTML = `
+    <h2>Backend Pool — mode: ${esc(st.pool_mode)}</h2>
+    <table><tr><th>name</th><th>type</th><th>url</th><th>prio</th><th>health</th><th>models</th><th>last error</th></tr>${rows}</table>
+    <div class="card">
+      <h2 style="margin-top:0">Edit backend list (internal mode)</h2>
+      <p class="hint">JSON list. Use <code>\${MERIDIAN_API_KEY}</code>-style references for api_key —
+      the value is written into config.yaml verbatim. Saving rebuilds the pool live.</p>
+      <textarea id="backends-json" rows="12"></textarea>
+      <div class="row"><button class="act primary" id="save-backends">Save backends</button>
+      <select id="pool-mode">
+        ${["internal","olla","litellm"].map(m =>
+          `<option ${m === st.pool_mode ? "selected" : ""}>${m}</option>`).join("")}
+      </select>
+      <button class="act" id="save-mode">Switch pool mode</button></div>
+    </div>
+    <div class="card">
+      <h2 style="margin-top:0">Agent Brain</h2>
+      <p class="hint">The model that makes routing decisions on every request (design doc §4.2).</p>
+      <div class="row"><label>provider</label>
+        <select id="brain-provider">${["ollama","meridian","openrouter"].map(p =>
+          `<option ${p === st.brain.provider ? "selected" : ""}>${p}</option>`).join("")}</select>
+        <label>endpoint</label><input id="brain-endpoint" size="34" value="${esc(st.brain.endpoint)}">
+        <label>model</label><input id="brain-model" size="24" value="${esc(st.brain.model)}">
+        <button class="act primary" id="save-brain">Save brain</button></div>
+    </div>`;
+  const cfg = await api("config");
+  $("#backends-json").value =
+    JSON.stringify(cfg.backend_pool.internal.backends, null, 2);
+  $("#save-backends").onclick = () =>
+    run(api("config/backends", {method: "POST", body: JSON.parse($("#backends-json").value)}));
+  $("#save-mode").onclick = () =>
+    run(api("config/pool_mode", {method: "POST", body: {mode: $("#pool-mode").value}}));
+  $("#save-brain").onclick = () =>
+    run(api("config/brain", {method: "POST", body: {
+      provider: $("#brain-provider").value, endpoint: $("#brain-endpoint").value,
+      model: $("#brain-model").value}}));
+}
+
+/* ---------------------------------------------------------------- models -- */
+async function tabModels() {
+  const d = await api("models");
+  const rows = d.models.map(m => `<tr>
+    <td class="mono">${esc(m.id)} ${m.reachable ? '<span class="pill ok">live</span>' : ""}</td>
+    <td>${esc(m.relative_cost_tier ?? "")}</td>
+    <td>${esc(m.good_for ?? "")}</td>
+    <td>${m.benefits_from_explicit_prompting ? "yes" : ""}</td>
+    <td class="mono">${esc(m.source ?? "")}</td>
+    <td><button class="act" onclick="editModel('${esc(m.id)}')">edit</button>
+        <button class="act" onclick="run(api('models/research',{method:'POST',body:{model_id:'${esc(m.id)}'}}))">research</button></td>
+    </tr>`).join("");
+  $("#main").innerHTML = `
+    <h2>Model Registry</h2>
+    <p class="hint">Edits made here are pinned as manual_override — automatic refreshes
+    supplement but never replace them (§4.4).</p>
+    <div class="row">
+      <button class="act primary" onclick="run(api('models/refresh',{method:'POST'}))">Poll OpenRouter now</button>
+    </div>
+    <table><tr><th>model</th><th>cost tier</th><th>good for</th><th>needs refine</th><th>source</th><th></th></tr>${rows}</table>
+    <div class="card" id="model-editor" style="display:none">
+      <h2 style="margin-top:0">Edit <span id="me-id" class="mono"></span></h2>
+      <div class="row"><label>relative_cost_tier</label>
+        <select id="me-tier"><option value="">-</option>
+        <option>low</option><option>medium</option><option>high</option><option>very_high</option></select></div>
+      <div class="row"><label>good_for</label><input id="me-good" size="60"></div>
+      <div class="row"><label>reasoning_style</label><input id="me-style" size="60"></div>
+      <div class="row"><label>benefits_from_explicit_prompting</label>
+        <input type="checkbox" id="me-refine"></div>
+      <button class="act primary" id="me-save">Save (manual override)</button>
+    </div>`;
+  window._models = Object.fromEntries(d.models.map(m => [m.id, m]));
+}
+window.editModel = id => {
+  const m = window._models[id] || {};
+  $("#model-editor").style.display = "block";
+  $("#me-id").textContent = id;
+  $("#me-tier").value = m.relative_cost_tier || "";
+  $("#me-good").value = m.good_for || "";
+  $("#me-style").value = m.reasoning_style || "";
+  $("#me-refine").checked = !!m.benefits_from_explicit_prompting;
+  $("#me-save").onclick = () => run(api("models/update", {method: "POST", body: {
+    id, relative_cost_tier: $("#me-tier").value || null,
+    good_for: $("#me-good").value || null,
+    reasoning_style: $("#me-style").value || null,
+    benefits_from_explicit_prompting: $("#me-refine").checked ? 1 : 0}}));
+};
+
+/* -------------------------------------------------------------- personas -- */
+async function tabPersonas() {
+  const d = await api("personas");
+  const rows = d.personas.map(p => `<tr>
+    <td><b>${esc(p.virtual_name)}</b> ${p.enabled ? "" : '<span class="pill warn">disabled</span>'}</td>
+    <td>${esc(p.benchmark_category)}</td><td>${esc(p.local_bias_strength)}</td>
+    <td class="mono">${esc(p.preferred_mcp_tools || "[]")}</td>
+    <td>${esc(p.description || "")}</td>
+    <td><button class="act" onclick='editPersona(${JSON.stringify(p.virtual_name)})'>edit</button>
+        <button class="act" onclick='run(api("personas/delete",{method:"POST",body:{virtual_name:${JSON.stringify(p.virtual_name)}}}))'>delete</button></td>
+    </tr>`).join("");
+  $("#main").innerHTML = `
+    <h2>Personas — virtual models advertised via /api/tags</h2>
+    <p class="hint">Each row is a routing policy. Adding a workload type (e.g. Foundry-Creative)
+    is adding a row here — never a code change (§4.8).</p>
+    <table><tr><th>name</th><th>category</th><th>local bias</th><th>MCP tools</th><th>description</th><th></th></tr>${rows}</table>
+    <div class="card">
+      <h2 style="margin-top:0" id="pe-title">Add / edit persona</h2>
+      <div class="row"><label>virtual_name</label><input id="pe-name" size="28"></div>
+      <div class="row"><label>description</label><input id="pe-desc" size="70"></div>
+      <div class="row"><label>benchmark_category</label>
+        <select id="pe-cat"><option>coding</option><option>reasoning</option>
+        <option>general_chat</option><option>tool_calling</option><option>agentic</option></select>
+        <label>local_bias_strength</label>
+        <select id="pe-bias"><option>strong</option><option>moderate</option>
+        <option>cost_aware_default</option></select>
+        <label>enabled</label><input type="checkbox" id="pe-enabled" checked></div>
+      <div class="row"><label>escalation_triggers (JSON list)</label>
+        <input id="pe-trig" size="70" value="[]"></div>
+      <div class="row"><label>preferred_mcp_tools (JSON list)</label>
+        <input id="pe-mcp" size="70" value="[]"></div>
+      <div class="row"><label>guardrail_overrides (JSON obj)</label>
+        <input id="pe-guard" size="70" value="{}"></div>
+      <button class="act primary" id="pe-save">Save persona</button>
+    </div>`;
+  window._personas = Object.fromEntries(d.personas.map(p => [p.virtual_name, p]));
+  $("#pe-save").onclick = () => run(api("personas", {method: "POST", body: {
+    virtual_name: $("#pe-name").value.trim(),
+    description: $("#pe-desc").value,
+    benchmark_category: $("#pe-cat").value,
+    local_bias_strength: $("#pe-bias").value,
+    enabled: $("#pe-enabled").checked ? 1 : 0,
+    escalation_triggers: JSON.parse($("#pe-trig").value || "[]"),
+    preferred_mcp_tools: JSON.parse($("#pe-mcp").value || "[]"),
+    guardrail_overrides: JSON.parse($("#pe-guard").value || "{}")}}));
+}
+window.editPersona = name => {
+  const p = window._personas[name]; if (!p) return;
+  $("#pe-title").textContent = "Edit " + name;
+  $("#pe-name").value = p.virtual_name;
+  $("#pe-desc").value = p.description || "";
+  $("#pe-cat").value = p.benchmark_category || "general_chat";
+  $("#pe-bias").value = p.local_bias_strength || "moderate";
+  $("#pe-enabled").checked = !!p.enabled;
+  $("#pe-trig").value = p.escalation_triggers || "[]";
+  $("#pe-mcp").value = p.preferred_mcp_tools || "[]";
+  $("#pe-guard").value = p.guardrail_overrides || "{}";
+};
+
+/* ----------------------------------------------------------------- tools -- */
+async function tabTools() {
+  const d = await api("tools");
+  const rows = d.tools.map(t => `<tr>
+    <td class="mono">${esc(t.name)}</td><td>${esc(t.kind)}</td>
+    <td class="mono">${esc(t.model_id || (t.server ? t.server + "/" + t.mcp_tool : ""))}</td>
+    <td>${t.disabled ? '<span class="pill bad">disabled</span>' : '<span class="pill ok">enabled</span>'}</td>
+    <td><button class="act" onclick='run(api("tools/toggle",{method:"POST",body:{name:${JSON.stringify(t.name)},disabled:${!t.disabled}}}))'>
+      ${t.disabled ? "enable" : "disable"}</button></td>
+    <td><details><summary>desc</summary>${esc(t.description)}</details></td></tr>`).join("");
+  $("#main").innerHTML = `
+    <h2>Dynamic tool registry — auto-discovered (§4.2 Tool Sync)</h2>
+    <p class="hint">Last sync: ${esc(d.last_sync || "never")}. Tools are generated from live
+    backend + MCP state; the one manual action is disabling one, which persists across syncs.</p>
+    <button class="act primary" onclick="run(api('tools/sync',{method:'POST'}))">Sync now</button>
+    <table><tr><th>tool</th><th>kind</th><th>target</th><th>state</th><th></th><th></th></tr>${rows}</table>`;
+}
+
+/* ------------------------------------------------------------ guardrails -- */
+async function tabGuardrails() {
+  const cfg = await api("config");
+  const g = cfg.guardrails;
+  $("#main").innerHTML = `
+    <h2>Guardrails (§4.7)</h2>
+    <div class="card">
+      <div class="row"><label>authority</label>
+        <select id="g-auth"><option ${g.authority === "internal" ? "selected" : ""}>internal</option>
+        <option ${g.authority === "defer_to_pool" ? "selected" : ""}>defer_to_pool</option></select>
+        <span class="hint">defer_to_pool only matters with pool mode olla/litellm</span></div>
+      <div class="row"><label>max_steps_per_request</label>
+        <input id="g-steps" type="number" value="${g.max_steps_per_request}"></div>
+      <div class="row"><label>max_paid_calls_per_request</label>
+        <input id="g-paid" type="number" value="${g.max_paid_calls_per_request}"></div>
+      <div class="row"><label>daily_spend_cap_usd</label>
+        <input id="g-daily" value="${g.daily_spend_cap_usd ?? ""}" placeholder="empty = no cap"></div>
+      <div class="row"><label>weekly_spend_cap_usd</label>
+        <input id="g-weekly" value="${g.weekly_spend_cap_usd ?? ""}" placeholder="empty = no cap"></div>
+      <button class="act primary" id="g-save">Save guardrails</button>
+      <p class="hint">Per-persona overrides live on each persona row (guardrail_overrides).</p>
+    </div>`;
+  $("#g-save").onclick = () => run(api("config/guardrails", {method: "POST", body: {
+    authority: $("#g-auth").value,
+    max_steps_per_request: +$("#g-steps").value,
+    max_paid_calls_per_request: +$("#g-paid").value,
+    daily_spend_cap_usd: $("#g-daily").value === "" ? null : +$("#g-daily").value,
+    weekly_spend_cap_usd: $("#g-weekly").value === "" ? null : +$("#g-weekly").value}}));
+}
+
+/* ------------------------------------------------------------------- mcp -- */
+async function tabMCP() {
+  const d = await api("mcp_servers");
+  const rows = d.servers.map(s => `<tr>
+    <td>${esc(s.name)}</td><td class="mono">${esc(s.url)}</td><td>${esc(s.transport)}</td>
+    <td><button class="act" onclick='run(api("mcp_servers/delete",{method:"POST",body:{name:${JSON.stringify(s.name)}}}))'>remove</button></td>
+    </tr>`).join("");
+  $("#main").innerHTML = `
+    <h2>MCP server connections (§4.9 item 8)</h2>
+    <p class="hint">A connection list, not a tool list — tools are discovered automatically
+    per server by Tool Sync once a connection exists.</p>
+    <table><tr><th>name</th><th>url</th><th>transport</th><th></th></tr>${rows}</table>
+    <div class="card">
+      <div class="row"><label>name</label><input id="mcp-name" size="16">
+      <label>url</label><input id="mcp-url" size="40" placeholder="http://host:port/mcp">
+      <label>transport</label><select id="mcp-tr"><option>streamable-http</option><option>sse</option></select>
+      <button class="act primary" id="mcp-add">Add / update</button></div>
+    </div>`;
+  $("#mcp-add").onclick = () => run(api("mcp_servers", {method: "POST", body: {
+    name: $("#mcp-name").value.trim(), url: $("#mcp-url").value.trim(),
+    transport: $("#mcp-tr").value}}));
+}
+
+/* ----------------------------------------------------------------- usage -- */
+async function tabUsage() {
+  const d = await api("usage?limit=100");
+  const rows = d.requests.map(r => `<tr>
+    <td class="mono">${esc((r.ts || "").slice(0, 19))}</td>
+    <td>${esc(r.persona || r.client_model)}</td><td>${esc(r.mode)}</td>
+    <td>${esc(r.summary)}</td>
+    <td class="mono">${(r.models_used || []).map(m => esc(m.model)).join(" → ")}</td>
+    <td>${r.steps ?? ""}</td><td>${r.duration_ms} ms</td>
+    <td>${r.est_cost_usd ? "$" + r.est_cost_usd.toFixed(4) : ""}</td>
+    <td>${(r.guardrail_events || []).length ? '<span class="pill warn">' + (r.guardrail_events || []).length + "</span>" : ""}</td>
+    <td><span class="pill ${r.status === "ok" ? "ok" : r.status === "error" ? "bad" : "warn"}">${esc(r.status)}</span></td>
+    </tr>`).join("");
+  $("#main").innerHTML = `
+    <h2>Usage log — every routed request (§4.9 item 6)</h2>
+    <table><tr><th>time (UTC)</th><th>persona</th><th>mode</th><th>request</th>
+    <th>models used</th><th>steps</th><th>time</th><th>cost</th><th>guard</th><th>status</th></tr>${rows}</table>`;
+}
+
+/* ---------------------------------------------------------------- events -- */
+async function tabEvents() {
+  const d = await api("events?limit=200");
+  const rows = d.events.map(e => `<tr>
+    <td class="mono">${esc((e.ts || "").slice(0, 19))}</td>
+    <td><span class="pill ${e.level === "error" ? "bad" : e.level === "warning" ? "warn" : "ok"}">${esc(e.level)}</span></td>
+    <td>${esc(e.source)}</td><td>${esc(e.message)}</td>
+    <td><details><summary>detail</summary><span class="mono">${esc(e.detail || "")}</span></details></td>
+    </tr>`).join("");
+  $("#main").innerHTML = `
+    <h2>Troubleshooting log — “why did it route weirdly” (§4.9 item 7)</h2>
+    <table><tr><th>time (UTC)</th><th>level</th><th>source</th><th>message</th><th></th></tr>${rows}</table>`;
+}
+
+render();
+</script>
+</body>
+</html>
