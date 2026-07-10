@@ -127,7 +127,8 @@ async def set_pool_mode(request: Request):
 async def set_brain(request: Request):
     svc = _svc(request)
     body = await request.json()
-    allowed = {"provider", "endpoint", "model", "api_key", "keep_alive", "max_tokens"}
+    allowed = {"provider", "endpoint", "model", "api_key", "keep_alive", "max_tokens",
+               "tool_result_limit_chars", "mcp_result_limit_chars", "worker_max_tokens"}
     updates = {k: v for k, v in body.items() if k in allowed}
 
     def mutate(raw):

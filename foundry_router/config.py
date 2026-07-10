@@ -58,6 +58,19 @@ class AgentBrainConfig(BaseModel):
     max_tokens: int = 4096
     options: dict = Field(default_factory=dict)
 
+    # Context-budget knobs — per-deployment tuning, editable live in the web
+    # UI (Backends tab). Found the hard way: a 6GB local brain at num_ctx 6144
+    # has only ~1500 tokens of headroom after the system prompt + tool
+    # schemas; feeding a 22k-char tool result back into it silently truncates
+    # the conversation (dropping the user's message) instead of erroring.
+    # Defaults are sized for a small local brain; raise them if the brain is
+    # Claude-class. The FULL untruncated tool result always reaches the user
+    # via return_to_user(use_last_result=true) — these only cap what the
+    # brain itself sees when deciding what to do next.
+    tool_result_limit_chars: int = 2000   # per tool result fed back to the brain
+    mcp_result_limit_chars: int = 2000    # same, for MCP tool results
+    worker_max_tokens: int = 8192         # output budget for worker-model calls
+
 
 class BackendConfig(BaseModel):
     name: str
