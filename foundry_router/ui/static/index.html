@@ -25,13 +25,18 @@
   nav button { background:none; border:none; color:var(--dim); padding:9px 13px;
                cursor:pointer; font-size:13px; border-bottom:2px solid transparent; }
   nav button.active { color:var(--fg); border-bottom-color:var(--accent); }
-  main { padding:16px 18px; max-width:1200px; }
+  main { padding:16px 18px; max-width:1200px; overflow-x:auto; }
   h2 { font-size:14px; margin:18px 0 8px; color:var(--accent); }
   .hint { color:var(--dim); font-size:12px; margin:4px 0 10px; }
   table { border-collapse:collapse; width:100%; margin:6px 0 14px; font-size:13px; }
   th,td { text-align:left; padding:6px 9px; border-bottom:1px solid var(--line);
-          vertical-align:top; word-break:break-word; }
-  th { color:var(--dim); font-weight:500; }
+          vertical-align:top; }
+  /* Long model ids/URLs may break anywhere, but headers must never split
+     mid-word ("person/a", "ste/ps") — headers stay on one line and the
+     table scrolls horizontally inside <main> if it gets too wide. */
+  td { word-break:break-word; }
+  th { color:var(--dim); font-weight:500; white-space:nowrap; }
+  .nw { white-space:nowrap; word-break:normal; }
   .pill { display:inline-block; padding:1px 8px; border-radius:9px; font-size:11px; }
   .ok  { background:#1d3a23; color:var(--ok); }
   .bad { background:#3a1d1d; color:var(--bad); }
@@ -112,7 +117,7 @@ async function tabBackends() {
   $("#hdr-info").textContent =
     `v${st.version} · pool: ${st.pool_mode} · brain: ${st.brain.model} (${st.brain.provider}) · ${st.tool_count} tools`;
   const rows = st.backends.map(b => `<tr>
-      <td>${esc(b.name)}</td><td class="mono">${esc(b.type)}</td>
+      <td class="nw">${esc(b.name)}</td><td class="mono nw">${esc(b.type)}</td>
       <td class="mono">${esc(b.url)}</td><td>${b.priority}</td>
       <td><span class="pill ${b.healthy ? "ok" : "bad"}">${b.healthy ? "healthy" : "down"}</span></td>
       <td class="mono">${(b.models || []).slice(0, 8).map(esc).join(", ")}${(b.models||[]).length > 8 ? "…" : ""}</td>
@@ -221,8 +226,8 @@ window.editModel = id => {
 async function tabPersonas() {
   const d = await api("personas");
   const rows = d.personas.map(p => `<tr>
-    <td><b>${esc(p.virtual_name)}</b> ${p.enabled ? "" : '<span class="pill warn">disabled</span>'}</td>
-    <td>${esc(p.benchmark_category)}</td><td>${esc(p.local_bias_strength)}</td>
+    <td class="nw"><b>${esc(p.virtual_name)}</b> ${p.enabled ? "" : '<span class="pill warn">disabled</span>'}</td>
+    <td class="nw">${esc(p.benchmark_category)}</td><td class="nw">${esc(p.local_bias_strength)}</td>
     <td class="mono">${esc(p.preferred_mcp_tools || "[]")}</td>
     <td>${esc(p.description || "")}</td>
     <td><button class="act" onclick='editPersona(${JSON.stringify(p.virtual_name)})'>edit</button>
@@ -351,11 +356,11 @@ async function tabMCP() {
 async function tabUsage() {
   const d = await api("usage?limit=100");
   const rows = d.requests.map(r => `<tr>
-    <td class="mono">${esc((r.ts || "").slice(0, 19))}</td>
-    <td>${esc(r.persona || r.client_model)}</td><td>${esc(r.mode)}</td>
+    <td class="mono nw">${esc((r.ts || "").slice(0, 19))}</td>
+    <td class="nw">${esc(r.persona || r.client_model)}</td><td class="nw">${esc(r.mode)}</td>
     <td>${esc(r.summary)}</td>
     <td class="mono">${(r.models_used || []).map(m => esc(m.model)).join(" → ")}</td>
-    <td>${r.steps ?? ""}</td><td>${r.duration_ms} ms</td>
+    <td>${r.steps ?? ""}</td><td class="nw">${r.duration_ms} ms</td>
     <td>${r.est_cost_usd ? "$" + r.est_cost_usd.toFixed(4) : ""}</td>
     <td>${(r.guardrail_events || []).length ? '<span class="pill warn">' + (r.guardrail_events || []).length + "</span>" : ""}</td>
     <td><span class="pill ${r.status === "ok" ? "ok" : r.status === "error" ? "bad" : "warn"}">${esc(r.status)}</span></td>
@@ -370,9 +375,9 @@ async function tabUsage() {
 async function tabEvents() {
   const d = await api("events?limit=200");
   const rows = d.events.map(e => `<tr>
-    <td class="mono">${esc((e.ts || "").slice(0, 19))}</td>
+    <td class="mono nw">${esc((e.ts || "").slice(0, 19))}</td>
     <td><span class="pill ${e.level === "error" ? "bad" : e.level === "warning" ? "warn" : "ok"}">${esc(e.level)}</span></td>
-    <td>${esc(e.source)}</td><td>${esc(e.message)}</td>
+    <td class="nw">${esc(e.source)}</td><td>${esc(e.message)}</td>
     <td><details><summary>detail</summary><span class="mono">${esc(e.detail || "")}</span></details></td>
     </tr>`).join("");
   $("#main").innerHTML = `
