@@ -139,12 +139,23 @@ async function tabBackends() {
         <select id="brain-provider">${["ollama","meridian","openrouter"].map(p =>
           `<option ${p === st.brain.provider ? "selected" : ""}>${p}</option>`).join("")}</select>
         <label>endpoint</label><input id="brain-endpoint" size="34" value="${esc(st.brain.endpoint)}">
-        <label>model</label><input id="brain-model" size="24" value="${esc(st.brain.model)}">
+        <label>model</label><input id="brain-model" size="24" value="${esc(st.brain.model)}"></div>
+      <p class="hint">Context budget — size these to the brain's real headroom (a 6GB local
+      brain with num_ctx ~6144 has ~1500 tokens free after system prompt + tool schemas;
+      a Claude-class brain can take far more). Tool-result limits only cap the preview the
+      brain sees — the full output still reaches the user via use_last_result. Applies live.</p>
+      <div class="row">
+        <label>tool_result_limit_chars</label><input id="brain-trl" type="number" size="8">
+        <label>mcp_result_limit_chars</label><input id="brain-mrl" type="number" size="8">
+        <label>worker_max_tokens</label><input id="brain-wmt" type="number" size="8">
         <button class="act primary" id="save-brain">Save brain</button></div>
     </div>`;
   const cfg = await api("config");
   $("#backends-json").value =
     JSON.stringify(cfg.backend_pool.internal.backends, null, 2);
+  $("#brain-trl").value = cfg.agent_brain.tool_result_limit_chars;
+  $("#brain-mrl").value = cfg.agent_brain.mcp_result_limit_chars;
+  $("#brain-wmt").value = cfg.agent_brain.worker_max_tokens;
   $("#save-backends").onclick = () =>
     run(api("config/backends", {method: "POST", body: JSON.parse($("#backends-json").value)}));
   $("#save-mode").onclick = () =>
@@ -152,7 +163,10 @@ async function tabBackends() {
   $("#save-brain").onclick = () =>
     run(api("config/brain", {method: "POST", body: {
       provider: $("#brain-provider").value, endpoint: $("#brain-endpoint").value,
-      model: $("#brain-model").value}}));
+      model: $("#brain-model").value,
+      tool_result_limit_chars: +$("#brain-trl").value,
+      mcp_result_limit_chars: +$("#brain-mrl").value,
+      worker_max_tokens: +$("#brain-wmt").value}}));
 }
 
 /* ---------------------------------------------------------------- models -- */

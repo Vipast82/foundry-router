@@ -32,6 +32,19 @@ agent_brain:
   max_tokens: 4096
   options:                         # passed through to the brain's backend
     temperature: 0.1               # routing should be boring and deterministic
+    # num_ctx: 6144                # set explicitly if the brain host is VRAM-tight
+
+  # --- context-budget knobs (editable LIVE in the web UI, Backends tab) -----
+  # Size these to the brain's real headroom. Example: a 6GB local brain at
+  # num_ctx 6144 has only ~1500 tokens free after the system prompt + tool
+  # schemas — a 22k-char tool result silently truncates the conversation
+  # (dropping the user's message!) instead of erroring. These limits cap only
+  # the PREVIEW the brain sees to decide what to do next; the full untruncated
+  # tool output still reaches the user via return_to_user(use_last_result).
+  # A Claude-class brain (provider: meridian/openrouter) can take 20000+.
+  tool_result_limit_chars: 2000    # per tool result fed back into the brain
+  mcp_result_limit_chars: 2000     # same, for MCP tool results
+  worker_max_tokens: 8192          # output budget for worker-model calls
 
   # -- provider: meridian example --
   # provider: "meridian"

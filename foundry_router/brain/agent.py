@@ -35,11 +35,12 @@ from .client import BrainClient, BrainUnreachable
 
 log = logging.getLogger(__name__)
 
-# Worker-model output budget. Generous because implementation tasks produce
-# long code; distinct from the brain's own max_tokens (routing is terse).
-WORKER_MAX_TOKENS = 8192
-TOOL_RESULT_LIMIT = 24000     # chars of a tool result fed back to a small brain
-MCP_RESULT_LIMIT = 12000
+# Context-budget limits (worker output tokens, chars of a tool result fed
+# back to the brain) are deployment-specific config, not constants — a 6GB
+# local brain and a Claude-class brain need wildly different sizing, and
+# getting it wrong shows up as silent context truncation, not an error. See
+# AgentBrainConfig in config.py (tool_result_limit_chars /
+# mcp_result_limit_chars / worker_max_tokens); editable live from the web UI.
 
 
 @dataclass
@@ -204,7 +205,20 @@ class AgentRunner:
                 if finalize:
                     done = True
                     break
-                msgs.append({"role": "tool", "content": result_text[:TOOL_RESULT_LIMIT],
+                # Truncation here caps only what the BRAIN sees — the full
+                # result is preserved in flags["last_tool_result"] and reaches
+                # the user via return_to_user(use_last_result=true). The
+                # explicit truncation notice matters: without it a small brain
+                # assumes the preview IS the output and retypes it, truncated.
+                limit = self.brain.cfg.tool_result_limit_chars
+                if len(result_text) > limit:
+                    result_text = (
+                        result_text[:limit]
+                        + f"\n...[preview truncated at {limit} of {len(result_text)} "
+                          f"chars to fit your context. The COMPLETE output is stored "
+                          f"and will reach the user verbatim if you call "
+                          f"return_to_user with use_last_result=true.]")
+                msgs.append({"role": "tool", "content": result_text,
                              "tool_call_id": tc.get("id"), "name": name})
             return {"messages": msgs, "done": done}
 
@@ -310,7 +324,7 @@ class AgentRunner:
             try:
                 result, backend_name = await self.pool.chat(
                     model_id, [{"role": "user", "content": prompt}],
-                    max_tokens=WORKER_MAX_TOKENS)
+                    max_tokens=self.brain.cfg.worker_max_tokens)
             except AllBackendsFailed as e:
                 emit("think", f"All backends failed for {model_id} — the brain will pick "
                               f"an alternative.")
@@ -327,7 +341,7 @@ class AgentRunner:
         emit("think", f"Calling MCP tool {tool.server}/{tool.mcp_tool}...")
         try:
             out = await self.tool_registry.mcp.call_tool(tool.server, tool.mcp_tool, args)
-            return out[:MCP_RESULT_LIMIT] or "(empty MCP result)", False
+            return out[:self.brain.cfg.mcp_result_limit_chars] or "(empty MCP result)", False
         except Exception as e:
             emit("think", f"MCP tool {name} failed: {e}")
             return f"ERROR: MCP tool {name} failed: {e}", False

@@ -28,6 +28,8 @@ class RecordingBrain:
 
     def __init__(self):
         self.calls: list[list[dict]] = []
+        from foundry_router.config import AgentBrainConfig
+        self.cfg = AgentBrainConfig()  # agent reads context-budget knobs off this
 
     async def chat(self, messages, tools=None):
         self.calls.append(messages)

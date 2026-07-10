@@ -278,7 +278,8 @@ async def _direct_dispatch_chat(svc, persona, model_name, messages, client_tools
     try:
         result, backend = await svc.pool.chat(
             model_id, prompts.sanitize_history(messages),
-            tools=client_tools, options=options, max_tokens=8192)
+            tools=client_tools, options=options,
+            max_tokens=svc.config_store.config.agent_brain.worker_max_tokens)
     except AllBackendsFailed as e:
         logger.finish("error", str(e))
         return JSONResponse({"error": str(e)}, status_code=502)
@@ -314,9 +315,9 @@ async def _passthrough_chat(svc, model_name, messages, client_tools, options,
     logger = RequestLogger(svc.db, "", model_name, "passthrough", user_text)
     try:
         if client_tools or not stream:
-            result, backend = await svc.pool.chat(model_name, messages,
-                                                  tools=client_tools, options=options,
-                                                  max_tokens=8192)
+            result, backend = await svc.pool.chat(
+                model_name, messages, tools=client_tools, options=options,
+                max_tokens=svc.config_store.config.agent_brain.worker_max_tokens)
             logger.record_model_call(model_name, backend, result.prompt_tokens,
                                      result.completion_tokens,
                                      estimate_cost_usd(svc.registry.get(model_name),
