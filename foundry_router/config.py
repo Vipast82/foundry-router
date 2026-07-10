@@ -134,8 +134,16 @@ class MeridianConfig(BaseModel):
     # Adaptive tier conservation (usage-aware routing): as the window fills,
     # progressively deny more expensive Claude tiers so remaining budget goes
     # to work that needs it. Both live-editable in the Guardrails tab.
-    conserve_premium_at: float = 0.7   # >=70% used: deny Opus/Fable-class
-    conserve_strong_at: float = 0.85   # >=85% used: deny Sonnet-class too (Haiku/local only)
+    conserve_premium_at: float = 0.7   # general window >=70% used: deny Opus-class and above
+    conserve_strong_at: float = 0.85   # general window >=85% used: deny Sonnet too (Haiku/local only)
+    # Fable/Mythos-class has its OWN weekly bucket on the plan (~50% of total
+    # usage) — this threshold applies to THAT bucket, not the general window.
+    conserve_fable_at: float = 0.8     # Fable bucket >=80% used: deny Fable, point at Opus
+    # Purchased usage credits kick in when windows exhaust. "last_resort":
+    # first Claude attempt after exhaustion is denied with instructions to try
+    # local; an insistent second attempt is permitted and logged as spending
+    # credits. "never": exhaustion is a hard stop (credits never burned).
+    usage_credits: Literal["never", "last_resort"] = "last_resort"
 
 
 class ResearchToolRef(BaseModel):

@@ -133,10 +133,19 @@ meridian:
   # Below this fraction of a window remaining, Claude routing is hard-stopped
   # and the router falls back to local with a <think> note.
   min_window_fraction: 0.05
-  # Adaptive conservation: as the window fills, progressively deny more
-  # expensive Claude tiers (live-editable in the Guardrails tab).
-  conserve_premium_at: 0.7         # >=70% used: deny Opus/Fable-class
-  conserve_strong_at: 0.85         # >=85% used: deny Sonnet too (Haiku/local only)
+  # Adaptive conservation: as windows fill, progressively deny more expensive
+  # Claude tiers (all live-editable in the Guardrails tab). Tier ladder:
+  # Haiku(1) < Sonnet(2) < Opus(3) < Fable/Mythos(4). Fable is split from
+  # Opus deliberately — Opus covers most hard coding/debugging, while Fable
+  # draws its OWN weekly bucket (~50% of plan usage) and is rarely needed.
+  conserve_premium_at: 0.7         # general window >=70%: deny Opus and above
+  conserve_strong_at: 0.85         # general window >=85%: deny Sonnet too (Haiku/local only)
+  conserve_fable_at: 0.8           # FABLE bucket >=80%: deny Fable, point the brain at Opus
+  # Purchased usage credits (if enabled on the plan) kick in when windows
+  # exhaust. "last_resort": first Claude attempt after exhaustion is denied
+  # with "try local first"; an insistent retry is permitted and logged as
+  # spending credits. "never": exhaustion is a hard stop.
+  usage_credits: "last_resort"
 
 # --- §4.4 Model Registry & Research Agent --------------------------------------
 registry:

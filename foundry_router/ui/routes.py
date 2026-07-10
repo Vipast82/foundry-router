@@ -177,6 +177,8 @@ async def quota(request: Request):
             "thresholds": {
                 "conserve_premium_at": svc.meridian_usage.cfg.conserve_premium_at,
                 "conserve_strong_at": svc.meridian_usage.cfg.conserve_strong_at,
+                "conserve_fable_at": svc.meridian_usage.cfg.conserve_fable_at,
+                "usage_credits": svc.meridian_usage.cfg.usage_credits,
                 "min_window_fraction": svc.meridian_usage.cfg.min_window_fraction}}
 
 
@@ -185,7 +187,7 @@ async def set_meridian(request: Request):
     svc = _svc(request)
     body = await request.json()
     allowed = {"quota_path", "min_window_fraction", "conserve_premium_at",
-               "conserve_strong_at"}
+               "conserve_strong_at", "conserve_fable_at", "usage_credits"}
     updates = {k: v for k, v in body.items() if k in allowed}
 
     def mutate(raw):
