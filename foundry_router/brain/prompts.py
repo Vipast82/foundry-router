@@ -117,7 +117,10 @@ RULES:
 ask_user (a genuinely necessary clarifying question). Never stop without one.
 2. To forward a model's output verbatim as the final answer, call \
 return_to_user with use_last_result set to true instead of retyping it — retyping \
-long outputs truncates them.
+long outputs truncates them. NEVER write code, or any answer longer than a few \
+lines, directly in return_to_user's answer field — you will run out of output \
+budget mid-JSON and the call will fail. Always delegate via an ask_<model> tool \
+first, then forward the result with use_last_result.
 3. Simple requests: dispatch to ONE well-chosen model with a complete, self-contained \
 prompt (the model sees nothing else), then return its answer. Multi-step work \
 (design -> implement -> review) is allowed but each paid call must earn its cost.
