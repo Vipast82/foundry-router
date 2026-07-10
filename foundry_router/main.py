@@ -159,6 +159,7 @@ class Services:
         await self.pool.start()
         self.pool.add_state_listener(self._on_pool_change)
         self.register_discovered()
+        self._apply_seed()
         await self.tool_registry.sync(self.pool)
         self.research.start()
         self._bg_tasks = [
@@ -166,12 +167,27 @@ class Services:
             asyncio.create_task(self._tool_sync_loop()),
         ]
 
+    def _apply_seed(self) -> None:
+        """Reference research seed (registry redesign item 4): fills tags,
+        good_for, and estimated scores for known model families so the
+        registry is useful before any research runs. Never-clobber semantics
+        live in reference_seed.py; idempotent, so calling per cycle is cheap."""
+        try:
+            from .registry.reference_seed import apply_reference_seed
+            count = apply_reference_seed(self.registry)
+            if count:
+                self.db.log_event("info", "registry",
+                                  f"reference seed applied to {count} models")
+        except Exception:
+            log.exception("reference seed application failed")
+
     async def _openrouter_loop(self) -> None:
         while True:
             try:
                 await poll_openrouter(
                     self.db, self.registry, self.http,
                     poll_hours=self.config_store.config.registry.openrouter_poll_hours)
+                self._apply_seed()  # newly-ingested models get seeded on arrival
             except Exception:
                 log.exception("openrouter poll loop error")
             await asyncio.sleep(3600)  # due-ness is checked inside via kv timestamp

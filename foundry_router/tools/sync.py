@@ -178,6 +178,11 @@ class ToolRegistry:
 
             # 1+2: model tools from pool state, described from the registry
             for model_id, backends in pool.available_models().items():
+                meta_row = self.registry.get(model_id)
+                if meta_row is not None and meta_row.get("enabled") == 0:
+                    # Governance disable (registry `enabled`): excluded from
+                    # tool generation entirely, not just deprioritized.
+                    continue
                 name = sanitize(model_id)
                 if name in new_tools:
                     # Two distinct model ids sanitizing identically is rare;

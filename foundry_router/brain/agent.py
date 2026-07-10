@@ -240,13 +240,20 @@ class AgentRunner:
             emit("think", f"Consulting routing brain ({self.brain.cfg.model or 'brain'}, "
                           f"step {ctx.guard.steps}/{effective['max_steps_per_request']})...")
 
+            def _on_retry():
+                emit("think", "Brain produced a malformed tool call — retrying once "
+                              "with corrective feedback...")
+                # Empirical tool-calling reliability: a malformed call is a
+                # data point against the brain model itself.
+                self.model_registry.record_tool_call(self.brain.cfg.model, ok=False)
+
             t0 = time.monotonic()
             result = await self.brain.chat(
                 [{"role": "system", "content": system}] + state["messages"], tools=specs,
-                on_retry=lambda: emit(
-                    "think", "Brain produced a malformed tool call — retrying once "
-                             "with corrective feedback..."))
+                on_retry=_on_retry)
             took = time.monotonic() - t0
+            if result.tool_calls:
+                self.model_registry.record_tool_call(self.brain.cfg.model, ok=True)
 
             msg: dict = {"role": "assistant", "content": result.content or ""}
             if result.tool_calls:

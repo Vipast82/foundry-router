@@ -188,10 +188,11 @@ const RESEARCH_PILL = {queued: "warn", running: "warn", ok: "ok", failed: "bad"}
 
 async function tabModels() {
   const d = await api("models");
+  const isEnabled = m => m.enabled === null || m.enabled === undefined || !!m.enabled;
   const rBtn = m => d.research_ready
     ? `<button class="act" onclick='doResearch(${JSON.stringify(m.id)})'>research</button>`
     : `<button class="act" disabled title="${esc(d.research_reason)}">research</button>`;
-  const rows = d.models.map(m => `<tr>
+  const rowHtml = m => `<tr${isEnabled(m) ? "" : ' style="opacity:.45"'}>
     <td class="mono">${esc(m.id)} ${m.reachable ? '<span class="pill ok">live</span>' : ""}</td>
     <td class="nw">${esc(m.relative_cost_tier ?? "")}</td>
     <td>${esc(parseTags(m.tags).join(", "))}${m.content_policy === "permissive" ? ' <span class="pill warn">permissive</span>' : ""}</td>
@@ -199,20 +200,42 @@ async function tabModels() {
     <td class="nw">${m.research_status
       ? `<span class="pill ${RESEARCH_PILL[m.research_status] || "warn"}" title="${esc(m.research_note || "")}">${esc(m.research_status)}</span>` : ""}</td>
     <td class="mono nw">${esc(m.source ?? "")}</td>
-    <td class="nw"><button class="act" onclick='editModel(${JSON.stringify(m.id)})'>edit</button>
+    <td class="nw"><button class="act" onclick='toggleModel(${JSON.stringify(m.id)}, ${isEnabled(m) ? "false" : "true"})'>
+        ${isEnabled(m) ? "disable" : "enable"}</button>
+        <button class="act" onclick='editModel(${JSON.stringify(m.id)})'>edit</button>
         ${rBtn(m)}</td>
-    </tr>`).join("");
+    </tr>`;
+  const header = "<tr><th>model</th><th>tier</th><th>tags</th><th>good for</th><th>research</th><th>source</th><th></th></tr>";
+  const renderTables = () => {
+    const q = ($("#model-search")?.value || "").toLowerCase();
+    const match = m => !q ||
+      (m.id + " " + (m.tags || "") + " " + (m.good_for || "") + " " +
+       (m.relative_cost_tier || "")).toLowerCase().includes(q);
+    const live = d.models.filter(m => m.reachable && match(m));
+    const known = d.models.filter(m => !m.reachable && match(m));
+    $("#live-count").textContent = live.length;
+    $("#known-count").textContent = known.length;
+    $("#live-table").innerHTML = header + live.map(rowHtml).join("");
+    $("#known-table").innerHTML = header + known.map(rowHtml).join("");
+  };
   $("#main").innerHTML = `
     <h2>Model Registry</h2>
     <p class="hint">Edits made here are pinned as manual_override — automatic refreshes
     supplement but never replace them (§4.4). Local models are tagged tier
-    <b>free</b> automatically at discovery; tags/policy are name-seeded and
-    research-refined.${d.research_ready ? "" :
+    <b>free</b> automatically at discovery; tags/policy are name-seeded,
+    reference-seeded, and research-refined. Disabling a model excludes it from
+    the brain's candidates and tools entirely (governance, not capability).${d.research_ready ? "" :
       ` <b>Research is unavailable:</b> ${esc(d.research_reason)}.`}</p>
     <div class="row">
+      <input id="model-search" size="34" placeholder="filter by id, tag, tier, good_for…">
       <button class="act primary" onclick="run(api('models/refresh',{method:'POST'}))">Poll OpenRouter now</button>
+      <button class="act" title="Fill tags/good_for/estimated scores for known model families (never overwrites manual edits or real research)"
+        onclick="api('models/seed',{method:'POST'}).then(r=>{toast('Reference seed applied to '+r.applied+' models');render()}).catch(e=>toast(e.message,true))">Apply reference seed</button>
     </div>
-    <table><tr><th>model</th><th>tier</th><th>tags</th><th>good for</th><th>research</th><th>source</th><th></th></tr>${rows}</table>
+    <h2>Live / Available (<span id="live-count"></span>) — reachable through a configured backend right now</h2>
+    <table id="live-table"></table>
+    <h2>Known catalog (<span id="known-count"></span>) — discovered but not currently reachable; reference material</h2>
+    <table id="known-table"></table>
     <div class="card" id="model-editor" style="display:none">
       <h2 style="margin-top:0">Edit <span id="me-id" class="mono"></span></h2>
       <div class="row"><label>relative_cost_tier</label>
@@ -227,10 +250,21 @@ async function tabModels() {
       <div class="row"><label>reasoning_style</label><input id="me-style" size="60"></div>
       <div class="row"><label>benefits_from_explicit_prompting</label>
         <input type="checkbox" id="me-refine"></div>
+      <div class="row"><label>tool-calling reliability</label>
+        <span id="me-reliability" class="hint"></span></div>
       <button class="act primary" id="me-save">Save (manual override)</button>
     </div>`;
   window._models = Object.fromEntries(d.models.map(m => [m.id, m]));
+  $("#model-search").addEventListener("input", renderTables);
+  renderTables();
 }
+window.toggleModel = async (id, enable) => {
+  try {
+    await api("models/toggle", {method: "POST", body: {id, enabled: enable}});
+    toast((enable ? "Enabled " : "Disabled ") + id);
+    render();
+  } catch (e) { toast(e.message, true); }
+};
 window.doResearch = async id => {
   try {
     const r = await api("models/research", {method: "POST", body: {model_id: id}});
@@ -249,6 +283,10 @@ window.editModel = id => {
   $("#me-good").value = m.good_for || "";
   $("#me-style").value = m.reasoning_style || "";
   $("#me-refine").checked = !!m.benefits_from_explicit_prompting;
+  const ok = m.tool_calls_ok || 0, fail = m.tool_calls_failed || 0;
+  $("#me-reliability").textContent = (ok + fail) >= 3
+    ? `${Math.round(100 * ok / (ok + fail))}% ok over ${ok + fail} observed calls (empirical, from live traffic)`
+    : `not enough observed calls yet (${ok + fail}/3 minimum)`;
   // The panel lives below a potentially very long table — without this,
   // clicking "edit" appears to do nothing (confirmed deployment bug).
   panel.scrollIntoView({behavior: "smooth", block: "start"});

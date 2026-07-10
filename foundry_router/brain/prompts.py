@@ -77,6 +77,11 @@ def _model_line(row: dict, tool_name: str) -> str:
         bits.append("tags: " + ", ".join(str(t) for t in tags))
     if row.get("content_policy") == "permissive":
         bits.append("PERMISSIVE (handles requests standard-alignment models decline)")
+    ok = row.get("tool_calls_ok") or 0
+    failed = row.get("tool_calls_failed") or 0
+    if ok + failed >= 3 and failed and ok / (ok + failed) < 0.9:
+        bits.append(f"WARNING: tool-calling unreliable in practice "
+                    f"({ok}/{ok + failed} calls ok)")
     if row.get("good_for"):
         bits.append(f"good for: {row['good_for']}")
     if row.get("benefits_from_explicit_prompting"):
