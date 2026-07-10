@@ -31,7 +31,7 @@ class RecordingBrain:
         from foundry_router.config import AgentBrainConfig
         self.cfg = AgentBrainConfig()  # agent reads context-budget knobs off this
 
-    async def chat(self, messages, tools=None):
+    async def chat(self, messages, tools=None, **kwargs):
         self.calls.append(messages)
         return ChatResult(content="final answer")
 

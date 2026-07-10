@@ -32,7 +32,7 @@ class ScriptedBrain:
         self.calls: list[list[dict]] = []
         self.cfg = cfg or AgentBrainConfig()
 
-    async def chat(self, messages, tools=None):
+    async def chat(self, messages, tools=None, **kwargs):
         self.calls.append(messages)
         return self.responses.pop(0)
 
