@@ -67,7 +67,7 @@ class Services:
         self.meridian_usage = MeridianUsage(cfg.meridian, self.http, db)
         self.guardrails = GuardrailEngine(cfg.guardrails, db, self.meridian_usage,
                                           pool_mode=cfg.backend_pool.mode)
-        self.brain = BrainClient(cfg.agent_brain, self.http)
+        self.brain = BrainClient(cfg.agent_brain, self.http, db=db)
         self.research = ResearchAgent(
             cfg.registry.research, db, self.registry, self.mcp,
             llm=self._research_llm, available_models=lambda: list(self.pool.available_models()))
@@ -128,7 +128,8 @@ class Services:
         await self.tool_registry.sync(self.pool)
 
     def rebuild_brain(self) -> None:
-        self.brain = BrainClient(self.config_store.config.agent_brain, self.http)
+        self.brain = BrainClient(self.config_store.config.agent_brain, self.http,
+                                 db=self.db)
         self.agent.brain = self.brain
 
     # -- background loops -----------------------------------------------------------
