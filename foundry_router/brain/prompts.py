@@ -103,16 +103,24 @@ _TIER_DISPLAY = [
 
 
 def _models_block(ranked: list[dict], tool_name_for: dict[str, str]) -> str:
+    pinned_lines: list[str] = []
     groups: dict = {}
     for row in ranked:
         tool_name = tool_name_for.get(row["id"])
         if not tool_name:
             continue
+        if row.get("_pinned"):
+            pinned_lines.append(_model_line(row, tool_name))
+            continue
         tier = row.get("relative_cost_tier")
         tier = tier if tier in dict(_TIER_DISPLAY) else None
         groups.setdefault(tier, []).append(_model_line(row, tool_name))
-    blocks = [f"[{label}]\n" + "\n".join(groups[tier])
-              for tier, label in _TIER_DISPLAY if tier in groups]
+    blocks = []
+    if pinned_lines:
+        blocks.append("[PINNED FOR THIS PERSONA — boosted defaults, in priority "
+                      "order; not mandatory]\n" + "\n".join(pinned_lines))
+    blocks += [f"[{label}]\n" + "\n".join(groups[tier])
+               for tier, label in _TIER_DISPLAY if tier in groups]
     return "\n".join(blocks) or "- (no models currently reachable)"
 
 
@@ -153,6 +161,10 @@ CLAUDE USAGE WINDOW: {meridian_note}
 
 SELECTION PROCEDURE (apply in order — this is structural policy, follow it \
 even when a pricier model would also work):
+a0. If a [PINNED FOR THIS PERSONA] group is listed, try those first, in order \
+— they are boosted, not hard-required: if one is denied by a guardrail, \
+unavailable, or clearly unsuited, fall through to the next pin, then continue \
+below.
 a. Start in the FREE/LOCAL tier: pick the model whose tags match the task; \
 break ties by score.
 b. Escalate to a paid tier ONLY when the task genuinely exceeds every local \
@@ -166,6 +178,10 @@ local model marked PERMISSIVE over any paid escalation — paid models' \
 behavior is fixed regardless of how you route.
 e. Guardrails apply to every choice. If one denies a model, take the next \
 candidate down the list — do not give up.
+f. Watch CLAUDE USAGE WINDOW above: as it fills, escalate to progressively \
+cheaper Claude tiers for the same task (Sonnet instead of Opus, Haiku instead \
+of Sonnet) — the guardrails enforce this too, but choosing well up front \
+avoids wasted denials.
 
 RULES:
 1. Every turn MUST end with exactly one of: return_to_user (deliver the result) or \

@@ -125,8 +125,17 @@ class GuardrailsConfig(BaseModel):
 
 
 class MeridianConfig(BaseModel):
-    telemetry_path: str = "/telemetry"
+    # Real per-profile usage-window data (buckets of five_hour/weekly
+    # utilization). The old default "/telemetry" pointed at the HTML dashboard
+    # and could never work — deployed configs that still carry telemetry_path
+    # are simply ignored (pydantic drops unknown keys) and get this default.
+    quota_path: str = "/v1/usage/quota"
     min_window_fraction: float = 0.05
+    # Adaptive tier conservation (usage-aware routing): as the window fills,
+    # progressively deny more expensive Claude tiers so remaining budget goes
+    # to work that needs it. Both live-editable in the Guardrails tab.
+    conserve_premium_at: float = 0.7   # >=70% used: deny Opus/Fable-class
+    conserve_strong_at: float = 0.85   # >=85% used: deny Sonnet-class too (Haiku/local only)
 
 
 class ResearchToolRef(BaseModel):

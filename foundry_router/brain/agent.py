@@ -30,7 +30,8 @@ from langgraph.graph import END, START, StateGraph
 
 from ..guardrails import GuardrailEngine, RequestGuardState
 from ..pool.base import AllBackendsFailed
-from ..usage import MeridianUsage, RequestLogger, estimate_cost_usd
+from ..usage import (MeridianUsage, RequestLogger, estimate_cost_usd,
+                     log_subscription_usage)
 from . import prompts
 from .client import BrainClient, BrainUnreachable
 
@@ -62,6 +63,23 @@ class RequestContext:
 class AgentState(TypedDict, total=False):
     messages: list
     done: bool
+
+
+def _apply_pins(ranked: list[dict], persona: Optional[dict]) -> list[dict]:
+    """Reorder candidates so the persona's pinned_models lead, in pin order,
+    marked _pinned for the prompt's [PINNED] group. Pins absent from the
+    reachable set are silently skipped — pinning never invents a backend."""
+    import json as _json
+    try:
+        pinned = _json.loads((persona or {}).get("pinned_models") or "[]")
+    except (_json.JSONDecodeError, TypeError):
+        pinned = []
+    if not pinned:
+        return ranked
+    by_id = {r["id"]: r for r in ranked}
+    front = [{**by_id[p], "_pinned": True} for p in pinned if p in by_id]
+    pinned_set = {r["id"] for r in front}
+    return front + [r for r in ranked if r["id"] not in pinned_set]
 
 
 class AgentRunner:
@@ -186,15 +204,22 @@ class AgentRunner:
         tool_name_for = {t.model_id: t.name for t in self.tool_registry.enabled()
                          if t.kind == "model" and t.model_id}
 
-        # Window state goes into the prompt so the brain factors it into the
-        # decision (§4.7) — the guardrail check at dispatch remains the hard stop.
+        # Real window state goes into the prompt so the brain factors current
+        # usage pressure into tier choice (§4.7) — the guardrail check at
+        # dispatch remains the hard stop.
         meridian_note = "no Claude/subscription backend configured"
         for s in getattr(self.pool, "backends_of_type", lambda t: [])("anthropic-compatible"):
             if s.healthy:
-                ok, note = await self.meridian_usage.window_available(s.config.url)
-                meridian_note = note if ok else f"EXHAUSTED — do not route to Claude ({note})"
+                snap = await self.meridian_usage.snapshot(s.config.url, s.config.api_key)
+                meridian_note = (snap["note"] if snap["available"]
+                                 else f"EXHAUSTED — do not route to Claude ({snap['note']})")
                 break
             meridian_note = f"backend {s.config.name} currently unreachable"
+
+        # Persona model pinning: an ordered boost, not a hard constraint —
+        # pinned models float to the top of the candidate list; a guardrail/
+        # quota denial falls through to the next pin, then the normal pool.
+        ranked = _apply_pins(ranked, persona)
 
         # Client/workspace system messages can't ride along in the message list
         # (the brain template demands a single, first system message) — carry
@@ -459,6 +484,12 @@ class AgentRunner:
             cost = estimate_cost_usd(meta, result.prompt_tokens, result.completion_tokens)
             ctx.logger.record_model_call(model_id, backend_name,
                                          result.prompt_tokens, result.completion_tokens, cost)
+            if backend_info and backend_info.get("type") == "anthropic-compatible":
+                # Subscription consumption is measured in tokens, not dollars
+                # — our own historical record alongside Meridian's snapshot.
+                log_subscription_usage(self.model_registry.db, model_id,
+                                       backend_name, result.prompt_tokens,
+                                       result.completion_tokens)
             flags["last_tool_result"] = result.content
             emit("think", f"{model_id} responded in {time.monotonic() - t0:.0f}s "
                           f"({len(result.content)} chars"

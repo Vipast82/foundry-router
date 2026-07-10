@@ -99,12 +99,34 @@ class GuardrailEngine:
             return Verdict(False, msg)
 
         if is_subscription and backend_info and backend_info.get("url"):
-            ok, note = await self.meridian_usage.window_available(backend_info["url"])
-            if not ok:
-                msg = f"Claude usage window check failed: {note} — route locally instead"
+            snap = await self.meridian_usage.snapshot(
+                backend_info["url"], backend_info.get("api_key"))
+            if not snap["available"]:
+                msg = (f"Claude usage window exhausted ({snap['note']}) — "
+                       f"route locally instead")
                 state.events.append(f"denied {model_id}: {msg}")
-                self.db.log_event("info", "guardrails", f"window-exhausted denial for {model_id}", note)
+                self.db.log_event("info", "guardrails",
+                                  f"window-exhausted denial for {model_id}", snap["note"])
                 return Verdict(False, msg)
+            # Adaptive tier conservation: as the real window fills, deny
+            # progressively more expensive Claude tiers so the remaining
+            # budget goes to work that genuinely needs them. This makes the
+            # static "cheapest sufficient tier" preference usage-aware.
+            worst = snap.get("worst_used")
+            if worst is not None:
+                from .usage import claude_premium_level
+                level = claude_premium_level(model_id)
+                mcfg = self.meridian_usage.cfg
+                if worst >= mcfg.conserve_strong_at and level >= 2:
+                    msg = (f"window {worst:.0%} used — conserving: only the cheapest "
+                           f"Claude tier (Haiku-class) or local models until reset")
+                    state.events.append(f"denied {model_id}: {msg}")
+                    return Verdict(False, msg)
+                if worst >= mcfg.conserve_premium_at and level >= 3:
+                    msg = (f"window {worst:.0%} used — conserving the premium tier; "
+                           f"use Sonnet/Haiku-class or local for this task")
+                    state.events.append(f"denied {model_id}: {msg}")
+                    return Verdict(False, msg)
 
         if is_metered:
             for cap_key, modifier, label in (

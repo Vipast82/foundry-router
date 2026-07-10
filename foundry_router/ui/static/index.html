@@ -335,6 +335,8 @@ async function tabPersonas() {
         <input id="pe-mcp" size="70" value="[]"></div>
       <div class="row"><label>guardrail_overrides (JSON obj)</label>
         <input id="pe-guard" size="70" value="{}"></div>
+      <div class="row"><label title="Ordered list of model ids boosted to the top of this persona's candidates. Not hard-required: guardrail/quota denial falls through to the next pin, then the normal pool.">pinned_models (JSON list, priority order)</label>
+        <input id="pe-pins" size="70" value="[]" placeholder='["claude-sonnet-4-6", "glm-4.7-flash:latest"]'></div>
       <button class="act primary" id="pe-save">Save persona</button>
     </div>`;
   window._personas = Object.fromEntries(d.personas.map(p => [p.virtual_name, p]));
@@ -346,7 +348,8 @@ async function tabPersonas() {
     enabled: $("#pe-enabled").checked ? 1 : 0,
     escalation_triggers: JSON.parse($("#pe-trig").value || "[]"),
     preferred_mcp_tools: JSON.parse($("#pe-mcp").value || "[]"),
-    guardrail_overrides: JSON.parse($("#pe-guard").value || "{}")}}));
+    guardrail_overrides: JSON.parse($("#pe-guard").value || "{}"),
+    pinned_models: JSON.parse($("#pe-pins").value || "[]")}}));
 }
 window.editPersona = name => {
   const p = window._personas[name]; if (!p) return;
@@ -361,6 +364,7 @@ window.editPersona = name => {
   $("#pe-trig").value = p.escalation_triggers || "[]";
   $("#pe-mcp").value = p.preferred_mcp_tools || "[]";
   $("#pe-guard").value = p.guardrail_overrides || "{}";
+  $("#pe-pins").value = p.pinned_models || "[]";
 };
 
 /* ----------------------------------------------------------------- tools -- */
@@ -402,7 +406,29 @@ async function tabGuardrails() {
         <input id="g-weekly" value="${g.weekly_spend_cap_usd ?? ""}" placeholder="empty = no cap"></div>
       <button class="act primary" id="g-save">Save guardrails</button>
       <p class="hint">Per-persona overrides live on each persona row (guardrail_overrides).</p>
+    </div>
+    <div class="card">
+      <h2 style="margin-top:0">Claude window conservation (usage-aware tier selection)</h2>
+      <p class="hint">As the real 5-hour/weekly window fills, progressively deny more
+      expensive Claude tiers so remaining budget goes to work that needs it.</p>
+      <div class="row"><label>conserve_premium_at (deny Opus/Fable)</label>
+        <input id="m-prem" type="number" step="0.05" min="0" max="1"
+          value="${cfg.meridian.conserve_premium_at}"></div>
+      <div class="row"><label>conserve_strong_at (Haiku/local only)</label>
+        <input id="m-strong" type="number" step="0.05" min="0" max="1"
+          value="${cfg.meridian.conserve_strong_at}"></div>
+      <div class="row"><label>min_window_fraction (hard stop below)</label>
+        <input id="m-min" type="number" step="0.01" min="0" max="1"
+          value="${cfg.meridian.min_window_fraction}"></div>
+      <div class="row"><label>quota_path</label>
+        <input id="m-path" size="30" value="${esc(cfg.meridian.quota_path)}"></div>
+      <button class="act primary" id="m-save">Save window policy</button>
     </div>`;
+  $("#m-save").onclick = () => run(api("config/meridian", {method: "POST", body: {
+    conserve_premium_at: +$("#m-prem").value,
+    conserve_strong_at: +$("#m-strong").value,
+    min_window_fraction: +$("#m-min").value,
+    quota_path: $("#m-path").value}}));
   $("#g-save").onclick = () => run(api("config/guardrails", {method: "POST", body: {
     authority: $("#g-auth").value,
     max_steps_per_request: +$("#g-steps").value,
@@ -435,8 +461,31 @@ async function tabMCP() {
 }
 
 /* ----------------------------------------------------------------- usage -- */
+function quotaCard(q) {
+  const lines = q.backends.flatMap(b =>
+    (b.buckets || []).filter(k => k.used !== null && k.used !== undefined).map(k =>
+      `<div class="row"><label>${esc(b.backend)} · ${esc(k.label)} window</label>
+       <b>${Math.round(k.used * 100)}% used</b>
+       ${k.resets_hhmm ? `<span class="hint">resets ${esc(k.resets_hhmm)}</span>` : ""}
+       ${k.used >= q.thresholds.conserve_strong_at ? '<span class="pill bad">Haiku/local only</span>'
+         : k.used >= q.thresholds.conserve_premium_at ? '<span class="pill warn">premium conserved</span>' : ""}
+      </div>`));
+  const o5 = q.observed.last_5h || {}, o7 = q.observed.last_7d || {};
+  return `<div class="card">
+    <h2 style="margin-top:0">Claude usage window (live from Meridian)</h2>
+    ${lines.join("") || `<p class="hint">${q.backends.length
+      ? "no usage signal yet (fresh window, or quota endpoint returned no buckets)"
+      : "no Claude/subscription backend configured"}</p>`}
+    <p class="hint">Observed through this router: ${o5.calls ?? 0} Claude calls /
+    ${(o5.prompt_tokens ?? 0) + (o5.completion_tokens ?? 0)} tokens in the last 5h ·
+    ${o7.calls ?? 0} calls / ${(o7.prompt_tokens ?? 0) + (o7.completion_tokens ?? 0)} tokens in 7d.
+    Above ${Math.round(q.thresholds.conserve_premium_at * 100)}% the router conserves the premium tier;
+    above ${Math.round(q.thresholds.conserve_strong_at * 100)}% only the cheapest Claude tier or local.</p>
+  </div>`;
+}
+
 async function tabUsage() {
-  const d = await api("usage?limit=100");
+  const [d, q] = await Promise.all([api("usage?limit=100"), api("quota")]);
   const rows = d.requests.map(r => `<tr>
     <td class="mono nw">${esc((r.ts || "").slice(0, 19))}</td>
     <td class="nw">${esc(r.persona || r.client_model)}</td><td class="nw">${esc(r.mode)}</td>
@@ -448,6 +497,7 @@ async function tabUsage() {
     <td><span class="pill ${r.status === "ok" ? "ok" : r.status === "error" ? "bad" : "warn"}">${esc(r.status)}</span></td>
     </tr>`).join("");
   $("#main").innerHTML = `
+    ${quotaCard(q)}
     <h2>Usage log — every routed request (§4.9 item 6)</h2>
     <table><tr><th>time (UTC)</th><th>persona</th><th>mode</th><th>request</th>
     <th>models used</th><th>steps</th><th>time</th><th>cost</th><th>guard</th><th>status</th></tr>${rows}</table>`;

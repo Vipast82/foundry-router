@@ -1,6 +1,14 @@
 """Usage & cost awareness (design doc §4.7). Two distinct signals, kept
-distinct: (1) the Claude Pro/Max usage window via Meridian's /telemetry, and
-(2) dollar cost for metered backends via the registry's cost fields.
+distinct: (1) the Claude Pro/Max usage window via Meridian's quota endpoint,
+and (2) dollar cost for metered backends via the registry's cost fields.
+
+The quota client hits GET {meridian}/v1/usage/quota with the same bearer auth
+every other Meridian call uses (the original /telemetry default pointed at an
+HTML dashboard with no auth — hence a whole night of "telemetry unreachable").
+Response shape: {"buckets": [{"type": "five_hour"|"seven_day"|...,
+"utilization": <0-1 | 0-100 | null>, "resetsAt": <sec|ms|iso>}]}. Utilization
+null means "no signal yet", not an error; resetsAt units are detected by
+magnitude because the OAuth and SDK sources disagree.
 """
 
 from __future__ import annotations
@@ -8,6 +16,7 @@ from __future__ import annotations
 import json
 import logging
 import time
+from datetime import datetime, timezone
 from typing import Any, Optional
 
 import httpx
@@ -17,99 +26,201 @@ from .db import Database, utcnow
 
 log = logging.getLogger(__name__)
 
-# Telemetry keys that plausibly express "how much window is left/used".
-# DESIGN DECISION: the community Meridian bridge's /telemetry shape is not
-# standardized, so parsing is deliberately lenient — we walk the JSON for
-# recognizable keys and treat anything unparseable as "window available" with
-# a logged warning (fail-open: an opaque telemetry format should not disable
-# Claude routing entirely).
-_REMAINING_KEYS = ("remaining_fraction", "remaining_pct", "remaining_percent",
-                   "remaining", "left_pct")
-_USED_KEYS = ("utilization", "used_fraction", "used_pct", "used_percent", "usage_pct")
+
+# --------------------------------------------------------------------------- #
+# Claude tier classification (for adaptive conservation)                      #
+# --------------------------------------------------------------------------- #
+
+def claude_premium_level(model_id: str) -> int:
+    """3 = premium (Opus/Fable/Mythos), 2 = mid (Sonnet), 1 = cheap (Haiku),
+    0 = not a recognizable Claude tier. Used to conserve the expensive tiers
+    as the shared subscription window fills."""
+    mid = model_id.lower()
+    if any(k in mid for k in ("opus", "fable", "mythos")):
+        return 3
+    if "sonnet" in mid:
+        return 2
+    if "haiku" in mid:
+        return 1
+    return 0
 
 
-def _walk(obj: Any):
-    if isinstance(obj, dict):
-        for k, v in obj.items():
-            if isinstance(v, (dict, list)):
-                yield from _walk(v)
-            else:
-                yield k.lower(), v
-    elif isinstance(obj, list):
-        for item in obj:
-            yield from _walk(item)
+# --------------------------------------------------------------------------- #
+# Quota parsing                                                               #
+# --------------------------------------------------------------------------- #
+
+_BUCKET_LABELS = {"five_hour": "5-hour", "seven_day": "weekly", "weekly": "weekly",
+                  "seven_days": "weekly", "daily": "daily"}
 
 
-def _as_fraction(value: Any) -> Optional[float]:
+def _normalize_reset(value: Any) -> Optional[datetime]:
+    """resetsAt arrives as epoch seconds, epoch milliseconds, or an ISO
+    string depending on the source. Magnitude disambiguates the numerics:
+    anything under ~1e10 is seconds (1e10 s ≈ year 2286; ms crossed 1e10 back
+    in 1970)."""
+    if value is None:
+        return None
+    if isinstance(value, str):
+        try:
+            return datetime.fromisoformat(value.replace("Z", "+00:00"))
+        except ValueError:
+            try:
+                value = float(value)
+            except ValueError:
+                return None
+    try:
+        ts = float(value)
+    except (TypeError, ValueError):
+        return None
+    if ts > 1e10:
+        ts /= 1000.0
+    try:
+        return datetime.fromtimestamp(ts, tz=timezone.utc)
+    except (OverflowError, OSError, ValueError):
+        return None
+
+
+def _normalize_utilization(value: Any) -> Optional[float]:
+    """null => no signal yet (NOT an error). Accepts 0-1 fractions or 0-100
+    percentages."""
+    if value is None:
+        return None
     try:
         f = float(value)
     except (TypeError, ValueError):
         return None
-    if 0.0 <= f <= 1.0:
-        return f
-    if 1.0 < f <= 100.0:
-        return f / 100.0
-    return None
+    if f > 1.0:
+        f /= 100.0
+    return max(0.0, min(1.0, f))
+
+
+def parse_quota(data: Any) -> Optional[list[dict]]:
+    """[{type, label, used (0-1 or None), resets_at (iso or None),
+    resets_hhmm}] — or None if the payload has no recognizable buckets."""
+    if not isinstance(data, dict) or not isinstance(data.get("buckets"), list):
+        return None
+    out = []
+    for b in data["buckets"]:
+        if not isinstance(b, dict):
+            continue
+        btype = str(b.get("type") or "window")
+        reset_dt = _normalize_reset(b.get("resetsAt") or b.get("resets_at"))
+        out.append({
+            "type": btype,
+            "label": _BUCKET_LABELS.get(btype, btype),
+            "used": _normalize_utilization(b.get("utilization")),
+            "resets_at": reset_dt.isoformat() if reset_dt else None,
+            "resets_hhmm": reset_dt.strftime("%H:%M UTC") if reset_dt else None,
+        })
+    return out
 
 
 class MeridianUsage:
-    """Cached window check — the cache keeps one slow telemetry endpoint from
-    adding latency to every escalation decision."""
+    """Cached quota snapshots — one slow endpoint must not add latency to
+    every escalation decision. The snapshot feeds three consumers: the
+    guardrail hard-stop + adaptive tier conservation, the brain's system
+    prompt, and the web UI's usage indicator."""
 
     def __init__(self, cfg: MeridianConfig, client: httpx.AsyncClient, db: Database):
         self.cfg = cfg
         self.client = client
         self.db = db
-        self._cache: dict[str, tuple[float, bool, str]] = {}  # url -> (ts, ok, note)
+        self._cache: dict[str, tuple[float, dict]] = {}
 
-    async def window_available(self, base_url: str) -> tuple[bool, str]:
+    def clear_cache(self) -> None:
+        self._cache.clear()
+
+    async def snapshot(self, base_url: str, api_key: Optional[str] = None) -> dict:
         cached = self._cache.get(base_url)
         if cached and time.monotonic() - cached[0] < 30:
-            return cached[1], cached[2]
-        ok, note = await self._check(base_url)
-        self._cache[base_url] = (time.monotonic(), ok, note)
-        return ok, note
+            return cached[1]
+        snap = await self._fetch(base_url, api_key)
+        self._cache[base_url] = (time.monotonic(), snap)
+        return snap
 
-    async def _check(self, base_url: str) -> tuple[bool, str]:
-        url = base_url.rstrip("/") + self.cfg.telemetry_path
+    async def window_available(self, base_url: str,
+                               api_key: Optional[str] = None) -> tuple[bool, str]:
+        snap = await self.snapshot(base_url, api_key)
+        return snap["available"], snap["note"]
+
+    async def _fetch(self, base_url: str, api_key: Optional[str]) -> dict:
+        url = base_url.rstrip("/") + self.cfg.quota_path
+        headers = {}
+        if api_key:
+            # Same auth every other Meridian call already sends.
+            headers["Authorization"] = f"Bearer {api_key}"
+            headers["x-api-key"] = api_key
         try:
-            r = await self.client.get(url, timeout=10)
+            r = await self.client.get(url, headers=headers, timeout=10)
             r.raise_for_status()
             data = r.json()
         except Exception as e:
-            log.info("Meridian telemetry unreachable (%s) — assuming window available", e)
-            return True, "telemetry unreachable; assuming window available"
+            log.info("Meridian quota unreachable (%s) — assuming window available", e)
+            return {"available": True, "buckets": [], "worst_used": None,
+                    "note": "quota endpoint unreachable; assuming window available"}
 
-        remaining: Optional[float] = None
-        for key, value in _walk(data):
-            frac = _as_fraction(value)
-            if frac is None:
-                continue
-            if any(k in key for k in _REMAINING_KEYS):
-                remaining = frac if remaining is None else min(remaining, frac)
-            elif any(k in key for k in _USED_KEYS):
-                r2 = 1.0 - frac
-                remaining = r2 if remaining is None else min(remaining, r2)
-
-        if remaining is None:
+        buckets = parse_quota(data)
+        if buckets is None:
             self.db.log_event("warning", "usage",
-                              "Meridian telemetry shape not recognized — assuming available",
+                              "quota payload shape not recognized — assuming available",
                               json.dumps(data)[:500])
-            return True, "telemetry shape unrecognized; assuming window available"
-        if remaining < self.cfg.min_window_fraction:
-            return False, f"usage window nearly exhausted ({remaining:.0%} remaining)"
-        return True, f"{remaining:.0%} of usage window remaining"
+            return {"available": True, "buckets": [], "worst_used": None,
+                    "note": "quota shape unrecognized; assuming window available"}
 
+        signaled = [b for b in buckets if b["used"] is not None]
+        worst_used = max((b["used"] for b in signaled), default=None)
+        available = worst_used is None or (1.0 - worst_used) >= self.cfg.min_window_fraction
+        if signaled:
+            note = "; ".join(
+                f"{b['label']} window {b['used']:.0%} used"
+                + (f", resets {b['resets_hhmm']}" if b["resets_hhmm"] else "")
+                for b in signaled)
+        else:
+            note = "no usage signal yet (fresh window)"
+        return {"available": available, "buckets": buckets,
+                "worst_used": worst_used, "note": note}
+
+
+# --------------------------------------------------------------------------- #
+# Metered cost + per-request logging (unchanged behavior)                     #
+# --------------------------------------------------------------------------- #
 
 def estimate_cost_usd(meta: Optional[dict], prompt_tokens: int,
                       completion_tokens: int) -> float:
     """Metered cost from registry fields; 0 for subscription (Meridian) and
-    local models, whose cost fields are NULL."""
+    local models, whose cost fields are NULL — subscription consumption is
+    tracked in tokens via log_subscription_usage instead."""
     if not meta:
         return 0.0
     cin = meta.get("cost_per_1k_input") or 0.0
     cout = meta.get("cost_per_1k_output") or 0.0
     return (prompt_tokens / 1000.0) * cin + (completion_tokens / 1000.0) * cout
+
+
+def log_subscription_usage(db: Database, model: str, backend: str,
+                           prompt_tokens: int, completion_tokens: int) -> None:
+    """Our own historical record of window consumption per Claude tier —
+    dollars are the wrong unit for subscription models; tokens against the
+    5-hour/weekly window are what actually deplete."""
+    try:
+        db.execute(
+            "INSERT INTO claude_usage_log (ts, model, backend, prompt_tokens, "
+            "completion_tokens) VALUES (?,?,?,?,?)",
+            (utcnow(), model, backend, prompt_tokens, completion_tokens))
+    except Exception:
+        log.exception("failed to write claude_usage_log row")
+
+
+def observed_subscription_usage(db: Database) -> dict:
+    """Observed consumption over the two window shapes, for the UI."""
+    def _window(modifier: str) -> dict:
+        row = db.query_one(
+            "SELECT COUNT(*) AS calls, COALESCE(SUM(prompt_tokens),0) AS ptok, "
+            "COALESCE(SUM(completion_tokens),0) AS ctok FROM claude_usage_log "
+            "WHERE ts > datetime('now', ?)", (modifier,))
+        return {"calls": row["calls"], "prompt_tokens": row["ptok"],
+                "completion_tokens": row["ctok"]} if row else {}
+    return {"last_5h": _window("-5 hours"), "last_7d": _window("-7 days")}
 
 
 class RequestLogger:

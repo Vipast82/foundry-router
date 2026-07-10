@@ -161,6 +161,42 @@ async def set_guardrails(request: Request):
 
 
 # --------------------------------------------------------------------------- #
+# Claude usage window (§4.7) — real quota data + our observed consumption     #
+# --------------------------------------------------------------------------- #
+
+@router.get("/admin/api/quota")
+async def quota(request: Request):
+    from ..usage import observed_subscription_usage
+    svc = _svc(request)
+    backends = []
+    for s in getattr(svc.pool, "backends_of_type", lambda t: [])("anthropic-compatible"):
+        snap = await svc.meridian_usage.snapshot(s.config.url, s.config.api_key)
+        backends.append({"backend": s.config.name, "healthy": s.healthy, **snap})
+    return {"backends": backends,
+            "observed": observed_subscription_usage(svc.db),
+            "thresholds": {
+                "conserve_premium_at": svc.meridian_usage.cfg.conserve_premium_at,
+                "conserve_strong_at": svc.meridian_usage.cfg.conserve_strong_at,
+                "min_window_fraction": svc.meridian_usage.cfg.min_window_fraction}}
+
+
+@router.post("/admin/api/config/meridian")
+async def set_meridian(request: Request):
+    svc = _svc(request)
+    body = await request.json()
+    allowed = {"quota_path", "min_window_fraction", "conserve_premium_at",
+               "conserve_strong_at"}
+    updates = {k: v for k, v in body.items() if k in allowed}
+
+    def mutate(raw):
+        raw.setdefault("meridian", {}).update(updates)
+    cfg = svc.config_store.save(mutate)
+    svc.meridian_usage.cfg = cfg.meridian
+    svc.meridian_usage.clear_cache()
+    return {"ok": True, "meridian": cfg.meridian.model_dump()}
+
+
+# --------------------------------------------------------------------------- #
 # Model registry (§4.9 item 2)                                                #
 # --------------------------------------------------------------------------- #
 

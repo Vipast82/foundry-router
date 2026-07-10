@@ -34,7 +34,7 @@ from ..brain.agent import RequestContext
 from ..brain.fallback import pick_fallback_model
 from ..guardrails import RequestGuardState
 from ..pool.base import AllBackendsFailed
-from ..usage import RequestLogger, estimate_cost_usd
+from ..usage import RequestLogger, estimate_cost_usd, log_subscription_usage
 from . import translate as tr
 
 log = logging.getLogger(__name__)
@@ -283,6 +283,10 @@ async def _direct_dispatch_chat(svc, persona, model_name, messages, client_tools
         # Empirical tool-calling reliability: direct dispatch is where worker
         # models actually exercise tool calling (client-supplied tools).
         svc.registry.record_tool_call(model_id, ok=True)
+        binfo = svc.pool.backend_info(model_id)
+        if binfo and binfo.get("type") == "anthropic-compatible":
+            log_subscription_usage(svc.db, model_id, backend,
+                                   result.prompt_tokens, result.completion_tokens)
     except AllBackendsFailed as e:
         if "invalid tool call" in str(e):
             svc.registry.record_tool_call(model_id, ok=False)
