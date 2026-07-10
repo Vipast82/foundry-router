@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from dataclasses import dataclass
 from typing import Any, AsyncIterator, Optional, TypedDict
 
@@ -83,8 +84,16 @@ class AgentRunner:
         def emit(kind: str, text: str = "") -> None:
             queue.put_nowait(AgentEvent(kind, text))
 
-        emit("think", "Checking model registry and available backends...")
-        system, specs = await self._build_context(ctx)
+        # Narration policy (§4.5, tightened per operator preference): stream a
+        # <think> line for every wait point and decision — routed requests take
+        # longer than a direct model call, and the narration is simultaneously
+        # the user's progress indicator and the first debugging artifact.
+        emit("think", "Analyzing request and checking available backends...")
+        system, specs, info = await self._build_context(ctx)
+        emit("think",
+             f"Persona {info['persona_name']} ({info['category']}): "
+             f"{info['n_models']} candidate models across {info['n_backends']} "
+             f"healthy backend(s). Claude window: {info['meridian_note']}.")
         graph, flags = self._build_graph(ctx, emit, system, specs)
 
         max_steps = self.guardrails.effective(ctx.persona)["max_steps_per_request"]
@@ -125,7 +134,7 @@ class AgentRunner:
 
     # -------------------------------------------------------- request context --
 
-    async def _build_context(self, ctx: RequestContext) -> tuple[str, list[dict]]:
+    async def _build_context(self, ctx: RequestContext) -> tuple[str, list[dict], dict]:
         persona = ctx.persona
         category = (persona or {}).get("benchmark_category") or "general_chat"
         available = self.pool.available_models()
@@ -157,12 +166,20 @@ class AgentRunner:
         # Snapshot: core tools + this persona's view of the dynamic set. Tool
         # Sync may swap the registry mid-request; this request keeps its list.
         specs = prompts.CORE_TOOL_SPECS + self.tool_registry.specs_for_persona(persona)
-        return system, specs
+        info = {
+            "persona_name": (persona or {}).get("virtual_name", "(none)"),
+            "category": category,
+            "n_models": len(available),
+            "n_backends": len({b for names in available.values() for b in names}),
+            "meridian_note": meridian_note,
+        }
+        return system, specs, info
 
     # --------------------------------------------------------------- the graph --
 
     def _build_graph(self, ctx: RequestContext, emit, system: str, specs: list[dict]):
-        flags: dict[str, Any] = {"finalized": False, "last_tool_result": ""}
+        flags: dict[str, Any] = {"finalized": False, "last_tool_result": "",
+                                 "nudged": False}
         effective = self.guardrails.effective(ctx.persona)
 
         async def brain_node(state: AgentState) -> AgentState:
@@ -177,19 +194,51 @@ class AgentRunner:
                 return {"done": True}
             ctx.guard.steps += 1
             ctx.logger.steps = ctx.guard.steps
+            emit("think", f"Consulting routing brain ({self.brain.cfg.model or 'brain'}, "
+                          f"step {ctx.guard.steps}/{effective['max_steps_per_request']})...")
 
+            t0 = time.monotonic()
             result = await self.brain.chat(
-                [{"role": "system", "content": system}] + state["messages"], tools=specs)
+                [{"role": "system", "content": system}] + state["messages"], tools=specs,
+                on_retry=lambda: emit(
+                    "think", "Brain produced a malformed tool call — retrying once "
+                             "with corrective feedback..."))
+            took = time.monotonic() - t0
+
             msg: dict = {"role": "assistant", "content": result.content or ""}
             if result.tool_calls:
                 msg["tool_calls"] = [
                     {"id": tc["id"], "type": "function",
                      "function": {"name": tc["name"], "arguments": tc["arguments"]}}
                     for tc in result.tool_calls]
+                names = ", ".join(tc["name"] for tc in result.tool_calls)
+                emit("think", f"Brain decided in {took:.1f}s → {names}")
                 if result.content.strip():
-                    # Free-text alongside tool calls = the brain thinking out
-                    # loud; surface it as narration.
+                    # Free-text alongside tool calls = the brain explaining its
+                    # choice (prompt rule 10); surface it as narration.
                     emit("think", result.content.strip())
+                return {"messages": state["messages"] + [msg]}
+
+            # No tool call at all: the brain tried to author an answer in
+            # prose (or returned nothing). Its role forbids that — nudge it
+            # ONCE, structurally, back toward delegation. This is the code-
+            # level enforcement of prompt rule 2; prose alone proved
+            # insufficient (a 9B brain confidently "answered" a current-events
+            # question from stale training data).
+            if not flags["nudged"]:
+                flags["nudged"] = True
+                emit("think", f"Brain replied in prose instead of dispatching "
+                              f"({took:.1f}s) — redirecting it to delegate to a "
+                              f"worker model...")
+                new = state["messages"] + ([msg] if (result.content or "").strip() else [])
+                new.append({"role": "user", "content":
+                            "(router) You replied with prose instead of a tool call. "
+                            "You must not author answers yourself — your knowledge is "
+                            "stale and unverifiable. Dispatch the task to a worker via "
+                            "an ask_<model> tool, then forward its output with "
+                            "return_to_user(use_last_result=true) — or call ask_user "
+                            "if the request is genuinely ambiguous."})
+                return {"messages": new}
             return {"messages": state["messages"] + [msg]}
 
         async def tools_node(state: AgentState) -> AgentState:
@@ -226,11 +275,20 @@ class AgentRunner:
             if state.get("done") or flags["finalized"]:
                 return "end"
             last = state["messages"][-1]
+            if last.get("role") == "user":
+                # brain_node appended a nudge correction — give it another try
+                return "brain"
             if last.get("tool_calls"):
                 return "tools"
-            # Content with no tool call: small brains skip return_to_user and
-            # just answer — accept it as the final answer rather than looping.
+            # Prose again even after the nudge: accept it rather than loop
+            # forever, but say plainly (to the user and the log) that this
+            # answer bypassed the worker-model path — that transparency is the
+            # difference between a quiet lie and a flagged degradation.
             content = (last.get("content") or "").strip()
+            if content:
+                emit("think", "Brain insisted on answering directly — forwarding its "
+                              "answer. Note: NOT produced or verified by a worker model.")
+                ctx.logger.record_guardrail("brain answered directly (prose, post-nudge)")
             emit("answer", content or flags["last_tool_result"]
                  or "The routing agent produced no answer — please retry.")
             flags["finalized"] = True
@@ -243,7 +301,8 @@ class AgentRunner:
         g.add_node("brain", brain_node)
         g.add_node("tools", tools_node)
         g.add_edge(START, "brain")
-        g.add_conditional_edges("brain", route_after_brain, {"tools": "tools", "end": END})
+        g.add_conditional_edges("brain", route_after_brain,
+                                {"tools": "tools", "end": END, "brain": "brain"})
         g.add_conditional_edges("tools", route_after_tools, {"brain": "brain", "end": END})
         return g.compile(), flags
 
@@ -259,6 +318,9 @@ class AgentRunner:
         if name == "return_to_user":
             answer = str(args.get("answer") or "")
             if args.get("use_last_result") or not answer.strip():
+                if flags["last_tool_result"]:
+                    emit("think", f"Forwarding the worker's full output verbatim "
+                                  f"({len(flags['last_tool_result'])} chars).")
                 answer = flags["last_tool_result"] or answer
             emit("answer", answer.strip() or "(empty answer)")
             flags["finalized"] = True
@@ -320,13 +382,16 @@ class AgentRunner:
             if not prompt.strip():
                 return f"ERROR: ask tool called with an empty prompt.", False
             emit("think", f"Routing to {model_id}"
-                          + (f" via {backend_info['name']}" if backend_info else "") + "...")
+                          + (f" via {backend_info['name']}" if backend_info else "")
+                          + " — waiting on generation (long tasks can take a few minutes)...")
+            t0 = time.monotonic()
             try:
                 result, backend_name = await self.pool.chat(
                     model_id, [{"role": "user", "content": prompt}],
                     max_tokens=self.brain.cfg.worker_max_tokens)
             except AllBackendsFailed as e:
-                emit("think", f"All backends failed for {model_id} — the brain will pick "
+                emit("think", f"All backends failed for {model_id} after "
+                              f"{time.monotonic() - t0:.0f}s — the brain will pick "
                               f"an alternative.")
                 return (f"ERROR: {e}. Pick a different model or finish with "
                         f"what you already have."), False
@@ -334,7 +399,9 @@ class AgentRunner:
             ctx.logger.record_model_call(model_id, backend_name,
                                          result.prompt_tokens, result.completion_tokens, cost)
             flags["last_tool_result"] = result.content
-            emit("think", f"{model_id} responded ({len(result.content)} chars).")
+            emit("think", f"{model_id} responded in {time.monotonic() - t0:.0f}s "
+                          f"({len(result.content)} chars"
+                          + (f", ~${cost:.4f}" if cost else "") + ").")
             return result.content or "(model returned empty output)", False
 
         # tool.kind == "mcp"

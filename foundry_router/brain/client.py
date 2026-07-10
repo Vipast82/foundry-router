@@ -61,7 +61,11 @@ class BrainClient:
     def model(self) -> str:
         return self.cfg.model
 
-    async def chat(self, messages: list[dict], tools: Optional[list[dict]] = None) -> ChatResult:
+    async def chat(self, messages: list[dict], tools: Optional[list[dict]] = None,
+                   on_retry=None) -> ChatResult:
+        """`on_retry` (optional zero-arg callable) fires when the malformed-
+        tool-call retry engages — the agent passes an emitter so the retry is
+        narrated to the client, not just written to the Events log."""
         msgs = messages
         for attempt in (1, 2):
             try:
@@ -78,6 +82,11 @@ class BrainClient:
                 # brain to delegate via ask_* tools, which only exist on agent
                 # calls (complete() has no tools and can't hit this anyway).
                 if attempt == 1 and tools and _MALFORMED_TOOL_CALL_MARKER in emsg:
+                    if on_retry is not None:
+                        try:
+                            on_retry()
+                        except Exception:  # narration must never break the retry
+                            log.exception("on_retry callback failed")
                     if self.db is not None:
                         self.db.log_event(
                             "warning", "brain",
