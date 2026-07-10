@@ -157,6 +157,8 @@ async function tabBackends() {
         <label>tool_result_limit_chars</label><input id="brain-trl" type="number" size="8">
         <label>mcp_result_limit_chars</label><input id="brain-mrl" type="number" size="8">
         <label>worker_max_tokens</label><input id="brain-wmt" type="number" size="8">
+        <label title="Caps what the brain sees of a large pasted user message before routing — the worker still receives the complete original (include_full_user_message)">user_input_preview_chars</label>
+        <input id="brain-uip" type="number" size="8">
         <button class="act primary" id="save-brain">Save brain</button></div>
     </div>`;
   const cfg = await api("config");
@@ -165,6 +167,7 @@ async function tabBackends() {
   $("#brain-trl").value = cfg.agent_brain.tool_result_limit_chars;
   $("#brain-mrl").value = cfg.agent_brain.mcp_result_limit_chars;
   $("#brain-wmt").value = cfg.agent_brain.worker_max_tokens;
+  $("#brain-uip").value = cfg.agent_brain.user_input_preview_chars;
   $("#save-backends").onclick = () =>
     run(api("config/backends", {method: "POST", body: JSON.parse($("#backends-json").value)}));
   $("#save-mode").onclick = () =>
@@ -175,7 +178,8 @@ async function tabBackends() {
       model: $("#brain-model").value,
       tool_result_limit_chars: +$("#brain-trl").value,
       mcp_result_limit_chars: +$("#brain-mrl").value,
-      worker_max_tokens: +$("#brain-wmt").value}}));
+      worker_max_tokens: +$("#brain-wmt").value,
+      user_input_preview_chars: +$("#brain-uip").value}}));
 }
 
 /* ---------------------------------------------------------------- models -- */
