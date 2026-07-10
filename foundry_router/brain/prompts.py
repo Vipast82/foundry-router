@@ -79,7 +79,8 @@ def _model_line(row: dict, tool_name: str) -> str:
 
 def build_system_prompt(persona: Optional[dict], ranked: list[dict],
                         tool_name_for: dict[str, str], meridian_note: str,
-                        pending_question: Optional[str]) -> str:
+                        pending_question: Optional[str],
+                        client_system: Optional[str] = None) -> str:
     p = persona or {}
     name = p.get("virtual_name", "Foundry-Chat")
     triggers = p.get("escalation_triggers") or "[]"
@@ -132,6 +133,17 @@ have, treating the model as unknown capability and moderate cost.
 Do not retry the same failing call more than once.
 8. Be decisive and terse. Any plain text you produce is shown to the user only as \
 collapsed routing narration."""]
+
+    if client_system:
+        # Workspace/client system instructions can't appear as a second
+        # system message (brain templates require exactly one, first), so
+        # they ride here — and must be relayed into worker prompts, since
+        # worker models only ever see prompts the brain writes.
+        parts.append(
+            f"\nCLIENT WORKSPACE INSTRUCTIONS (from the connecting client's own "
+            f"system prompt — honor them in your routing and INCLUDE the relevant "
+            f"parts in every prompt you write for a worker model, since workers "
+            f"never see them otherwise):\n{client_system[:4000]}")
 
     if pending_question:
         parts.append(

@@ -88,10 +88,19 @@ class AgentRunner:
 
         max_steps = self.guardrails.effective(ctx.persona)["max_steps_per_request"]
 
+        # The brain's chat template (Ornith, and most instruct templates)
+        # requires exactly one system message, strictly first. Clients like
+        # AnythingLLM send their own workspace system message in the history;
+        # prepending ours on top of it 400s the backend. Their system content
+        # is NOT dropped — _build_context folds it into the router's own
+        # system prompt; only ctx.messages keeps the original (the static
+        # fallback forwards the raw conversation and should keep it).
+        non_system = [m for m in ctx.messages if m.get("role") != "system"]
+
         async def runner() -> None:
             try:
                 await graph.ainvoke(
-                    {"messages": list(ctx.messages), "done": False},
+                    {"messages": non_system, "done": False},
                     config={"recursion_limit": 4 * max_steps + 16})
                 if not flags["finalized"]:
                     emit("answer", flags["last_tool_result"]
@@ -134,8 +143,16 @@ class AgentRunner:
                 break
             meridian_note = f"backend {s.config.name} currently unreachable"
 
+        # Client/workspace system messages can't ride along in the message list
+        # (the brain template demands a single, first system message) — carry
+        # their content inside our system prompt instead so the brain can honor
+        # them and relay them when writing worker prompts.
+        client_system = "\n\n".join(
+            m.get("content") or "" for m in ctx.messages
+            if m.get("role") == "system" and (m.get("content") or "").strip())
         system = prompts.build_system_prompt(
-            persona, ranked, tool_name_for, meridian_note, ctx.pending_question)
+            persona, ranked, tool_name_for, meridian_note, ctx.pending_question,
+            client_system=client_system or None)
         # Snapshot: core tools + this persona's view of the dynamic set. Tool
         # Sync may swap the registry mid-request; this request keeps its list.
         specs = prompts.CORE_TOOL_SPECS + self.tool_registry.specs_for_persona(persona)
