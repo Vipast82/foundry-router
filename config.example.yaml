@@ -126,10 +126,17 @@ guardrails:
 
 # --- §4.7 Meridian usage-window awareness ------------------------------------
 meridian:
-  telemetry_path: "/telemetry"     # queried before committing to a Claude call
-  # Below this fraction of the session/weekly window remaining, the router
-  # treats the window as exhausted and falls back to local with a <think> note.
+  # Real per-profile usage data (5-hour + weekly buckets), authenticated with
+  # the backend's api_key. Queried before committing to any Claude call,
+  # shown in the UI (Usage Log tab), and fed into adaptive tier selection.
+  quota_path: "/v1/usage/quota"
+  # Below this fraction of a window remaining, Claude routing is hard-stopped
+  # and the router falls back to local with a <think> note.
   min_window_fraction: 0.05
+  # Adaptive conservation: as the window fills, progressively deny more
+  # expensive Claude tiers (live-editable in the Guardrails tab).
+  conserve_premium_at: 0.7         # >=70% used: deny Opus/Fable-class
+  conserve_strong_at: 0.85         # >=85% used: deny Sonnet too (Haiku/local only)
 
 # --- §4.4 Model Registry & Research Agent --------------------------------------
 registry:

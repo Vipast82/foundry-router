@@ -174,7 +174,9 @@ class InternalPool(BackendPool):
         if not cands:
             return None
         c = cands[0].config
-        return {"name": c.name, "type": c.type, "url": c.url}
+        # api_key rides along for the guardrails' authenticated quota check —
+        # backend_info is internal plumbing, never serialized to the UI.
+        return {"name": c.name, "type": c.type, "url": c.url, "api_key": c.api_key}
 
     def backend_status(self) -> list[dict]:
         return [{

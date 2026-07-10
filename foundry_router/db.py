@@ -117,6 +117,7 @@ class Database:
             ("models", "enabled", "INTEGER DEFAULT 1"),
             ("models", "tool_calls_ok", "INTEGER DEFAULT 0"),
             ("models", "tool_calls_failed", "INTEGER DEFAULT 0"),
+            ("personas", "pinned_models", "TEXT"),
         ]
         with self._lock:
             for table, column, ddl in added:

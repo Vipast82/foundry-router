@@ -42,6 +42,18 @@ def pick_fallback_model(pool, registry: ModelRegistry,
     if not available:
         return None
 
+    # Persona pins are honored here too — but only LOCAL pins: the fallback
+    # runs blind (no brain, no quota check), so committing to a paid pin
+    # would bypass the usage-aware guardrails.
+    import json as _json
+    try:
+        pinned = _json.loads((persona or {}).get("pinned_models") or "[]")
+    except (_json.JSONDecodeError, TypeError):
+        pinned = []
+    for p in pinned:
+        if p in available and (pool.backend_info(p) or {}).get("type") == "ollama":
+            return p
+
     local, remote = [], []
     for model_id in available:
         info = pool.backend_info(model_id) or {}

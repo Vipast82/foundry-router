@@ -57,6 +57,9 @@ CREATE TABLE IF NOT EXISTS personas (
   escalation_triggers TEXT,         -- JSON list of trigger conditions (free-text, fed to the brain prompt)
   preferred_mcp_tools TEXT,         -- JSON list of MCP server/tool names to surface for this persona
   guardrail_overrides TEXT,         -- JSON object overriding global guardrail fields
+  pinned_models TEXT,               -- JSON ordered list: models boosted (not hard-required)
+                                    -- to the top of this persona's candidate list; guardrail/
+                                    -- quota denial falls through to the next pin, then the pool
   enabled INTEGER DEFAULT 1,
   created_at TEXT,
   updated_at TEXT
@@ -104,6 +107,22 @@ CREATE TABLE IF NOT EXISTS event_log (
 );
 
 CREATE INDEX IF NOT EXISTS idx_event_log_ts ON event_log(ts);
+
+-- §4.7 Subscription-window consumption (Claude via Meridian) -------------------
+-- Dollars are the wrong unit for subscription models: tokens against the
+-- 5-hour/weekly window are what deplete. Our own historical record, not just
+-- Meridian's live snapshot at any moment.
+
+CREATE TABLE IF NOT EXISTS claude_usage_log (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  ts TEXT,
+  model TEXT,                       -- claude tier actually called
+  backend TEXT,
+  prompt_tokens INTEGER,
+  completion_tokens INTEGER
+);
+
+CREATE INDEX IF NOT EXISTS idx_claude_usage_ts ON claude_usage_log(ts);
 
 -- Misc durable key/value state (last poll timestamps, etc.) --------------------
 
