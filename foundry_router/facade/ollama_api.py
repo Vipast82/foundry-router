@@ -280,7 +280,12 @@ async def _direct_dispatch_chat(svc, persona, model_name, messages, client_tools
             model_id, prompts.sanitize_history(messages),
             tools=client_tools, options=options,
             max_tokens=svc.config_store.config.agent_brain.worker_max_tokens)
+        # Empirical tool-calling reliability: direct dispatch is where worker
+        # models actually exercise tool calling (client-supplied tools).
+        svc.registry.record_tool_call(model_id, ok=True)
     except AllBackendsFailed as e:
+        if "invalid tool call" in str(e):
+            svc.registry.record_tool_call(model_id, ok=False)
         logger.finish("error", str(e))
         return JSONResponse({"error": str(e)}, status_code=502)
     cost = estimate_cost_usd(svc.registry.get(model_id),

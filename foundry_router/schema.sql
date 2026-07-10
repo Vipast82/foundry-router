@@ -25,6 +25,10 @@ CREATE TABLE IF NOT EXISTS models (
   research_status TEXT,             -- "queued" | "running" | "ok" | "failed" — surfaced in the UI so
                                     -- research never fails silently
   research_note TEXT,               -- human-readable outcome/error for the status above
+  enabled INTEGER DEFAULT 1,        -- governance switch, independent of reachability: 0 excludes the
+                                    -- model from ranking AND tool generation entirely
+  tool_calls_ok INTEGER DEFAULT 0,  -- empirical tool-calling reliability counters, updated from live
+  tool_calls_failed INTEGER DEFAULT 0,  -- traffic (a model can claim tool support and still misbehave)
   last_updated TEXT,
   source TEXT                       -- "openrouter_api" | "research_agent" | "discovery" | "manual_override"
 );

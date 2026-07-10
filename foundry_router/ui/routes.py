@@ -192,6 +192,30 @@ async def update_model(request: Request):
     return {"ok": True, "model": svc.registry.get(model_id)}
 
 
+@router.post("/admin/api/models/toggle")
+async def toggle_model(request: Request):
+    """Governance enable/disable (registry redesign item 2): excluded from
+    ranking and tool generation entirely — an immediate tool sync makes the
+    ask_* tool appear/disappear right away."""
+    svc = _svc(request)
+    body = await request.json()
+    model_id = body.get("id")
+    if not model_id:
+        return JSONResponse({"error": "id required"}, status_code=400)
+    enabled = bool(body.get("enabled", True))
+    svc.registry.set_enabled(model_id, enabled)
+    await svc.tool_registry.sync(svc.pool)
+    return {"ok": True, "id": model_id, "enabled": enabled}
+
+
+@router.post("/admin/api/models/seed")
+async def apply_seed(request: Request):
+    from ..registry.reference_seed import apply_reference_seed
+    svc = _svc(request)
+    count = apply_reference_seed(svc.registry)
+    return {"ok": True, "applied": count}
+
+
 @router.get("/admin/api/models/benchmarks")
 async def model_benchmarks(request: Request, model_id: str):
     svc = _svc(request)

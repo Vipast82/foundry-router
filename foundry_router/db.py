@@ -114,6 +114,9 @@ class Database:
             ("models", "content_policy", "TEXT"),
             ("models", "research_status", "TEXT"),
             ("models", "research_note", "TEXT"),
+            ("models", "enabled", "INTEGER DEFAULT 1"),
+            ("models", "tool_calls_ok", "INTEGER DEFAULT 0"),
+            ("models", "tool_calls_failed", "INTEGER DEFAULT 0"),
         ]
         with self._lock:
             for table, column, ddl in added:

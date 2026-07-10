@@ -163,7 +163,11 @@ class ModelRegistry:
             """,
             [category, category] + model_ids,
         )
+        # `known` includes disabled models ON PURPOSE: they're filtered out
+        # below, but must not be resurrected as unknown-model fillers —
+        # disable is governance (exclude entirely), not absence of data.
         known = {r["id"] for r in rows}
+        rows = [r for r in rows if (r.get("enabled") if r.get("enabled") is not None else 1)]
         # Reachable models with no registry row at all still matter — surface
         # them with empty metadata (unknown tier => mid-paid conservative) so
         # the brain can fire request_model_research (§4.4 on-demand trigger).
@@ -197,6 +201,42 @@ class ModelRegistry:
             if len(out) >= limit:
                 break
         return out
+
+    # -- governance & empirical reliability --------------------------------------------
+
+    def set_enabled(self, model_id: str, enabled: bool) -> None:
+        """Governance switch (§ registry redesign item 2): independent of
+        reachability, deliberately excludes a model from ranking and tool
+        generation. Does NOT touch `source` — it's orthogonal to data
+        provenance, so automatic refreshes keep updating a disabled model's
+        metadata for the day it's re-enabled."""
+        if self.get(model_id) is None:
+            self.db.execute("INSERT INTO models (id) VALUES (?)", (model_id,))
+        self.db.execute("UPDATE models SET enabled=? WHERE id=?",
+                        (1 if enabled else 0, model_id))
+
+    def record_tool_call(self, model_id: str, ok: bool) -> None:
+        """Empirical tool-calling reliability (item 3): updated from live
+        traffic — the brain's own malformed-call retries and direct-dispatch
+        outcomes — because a model can claim tool support in metadata and
+        still misbehave in practice."""
+        if self.get(model_id) is None:
+            self.db.execute("INSERT INTO models (id) VALUES (?)", (model_id,))
+        column = "tool_calls_ok" if ok else "tool_calls_failed"
+        self.db.execute(
+            f"UPDATE models SET {column} = COALESCE({column}, 0) + 1 WHERE id=?",
+            (model_id,))
+
+    @staticmethod
+    def tool_reliability(row: Optional[dict]) -> Optional[float]:
+        """ok/(ok+failed), or None below a minimum sample size."""
+        if not row:
+            return None
+        ok = row.get("tool_calls_ok") or 0
+        failed = row.get("tool_calls_failed") or 0
+        if ok + failed < 3:
+            return None
+        return ok / (ok + failed)
 
     # -- research support -----------------------------------------------------------------
 
