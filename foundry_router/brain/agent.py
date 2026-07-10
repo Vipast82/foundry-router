@@ -105,7 +105,15 @@ class AgentRunner:
         # is NOT dropped — _build_context folds it into the router's own
         # system prompt; only ctx.messages keeps the original (the static
         # fallback forwards the raw conversation and should keep it).
-        non_system = [m for m in ctx.messages if m.get("role") != "system"]
+        #
+        # Large messages are also previewed down to user_input_preview_chars
+        # for the BRAIN's view only (input-side twin of the tool-result cap:
+        # a 23k-char pasted file otherwise blows the brain's context before
+        # its first routing decision). ctx.messages stays untouched — workers
+        # get the full original via include_full_user_message, and the static
+        # fallback forwards the raw conversation.
+        non_system = self._preview_for_brain(
+            [m for m in ctx.messages if m.get("role") != "system"])
 
         async def runner() -> None:
             try:
@@ -131,6 +139,41 @@ class AgentRunner:
                 break
             yield ev
         await task
+
+    # ------------------------------------------------- brain-view previewing --
+
+    def _preview_for_brain(self, messages: list[dict]) -> list[dict]:
+        """Truncate oversized message contents for the brain's view only, with
+        an explicit notice — without it a small brain assumes the preview IS
+        the message. The newest user message's notice additionally names the
+        include_full_user_message flag, the delivery mechanism that gets the
+        complete original to whichever worker the brain dispatches."""
+        limit = self.brain.cfg.user_input_preview_chars
+        last_user_idx = max((i for i, m in enumerate(messages)
+                             if m.get("role") == "user"), default=-1)
+        out = []
+        for i, m in enumerate(messages):
+            content = m.get("content") or ""
+            if len(content) <= limit:
+                out.append(m)
+                continue
+            if i == last_user_idx:
+                notice = (f"\n...[preview truncated at {limit} of {len(content)} "
+                          f"chars to fit your context. The COMPLETE message will be "
+                          f"appended verbatim to your worker prompt if you set "
+                          f"include_full_user_message=true on your ask_* call.]")
+            else:
+                notice = (f"\n...[preview truncated at {limit} of {len(content)} "
+                          f"chars — older history, full text retained in the "
+                          f"conversation record.]")
+            out.append({**m, "content": content[:limit] + notice})
+        return out
+
+    def _full_last_user_message(self, ctx: RequestContext) -> str:
+        for m in reversed(ctx.messages):
+            if m.get("role") == "user":
+                return m.get("content") or ""
+        return ""
 
     # -------------------------------------------------------- request context --
 
@@ -335,10 +378,10 @@ class AgentRunner:
         if name == "refine_prompt":
             original = str(args.get("request") or "")
             if not original:
-                for m in reversed(ctx.messages):
-                    if m["role"] == "user":
-                        original = m["content"]
-                        break
+                original = self._full_last_user_message(ctx)
+            # refine works on a preview too — it tightens intent, it doesn't
+            # need (and the brain can't afford) the full pasted payload.
+            original = original[:self.brain.cfg.user_input_preview_chars]
             emit("think", "Refining the request before dispatch...")
             try:
                 refined = (await self.brain.complete(
@@ -381,6 +424,17 @@ class AgentRunner:
             prompt = str(args.get("prompt") or "")
             if not prompt.strip():
                 return f"ERROR: ask tool called with an empty prompt.", False
+            if args.get("include_full_user_message"):
+                # Delivery half of the input-preview mechanism: the brain only
+                # saw a capped preview of a large user message, so the
+                # complete original rides to the worker here — mirroring how
+                # use_last_result preserves full tool output for the user.
+                full = self._full_last_user_message(ctx)
+                if full:
+                    emit("think", f"Attaching the user's complete original message "
+                                  f"({len(full)} chars) to the worker prompt.")
+                    prompt = (prompt + "\n\n--- FULL ORIGINAL USER MESSAGE "
+                                       "(verbatim) ---\n" + full)
             emit("think", f"Routing to {model_id}"
                           + (f" via {backend_info['name']}" if backend_info else "")
                           + " — waiting on generation (long tasks can take a few minutes)...")

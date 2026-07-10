@@ -70,6 +70,12 @@ class AgentBrainConfig(BaseModel):
     tool_result_limit_chars: int = 2000   # per tool result fed back to the brain
     mcp_result_limit_chars: int = 2000    # same, for MCP tool results
     worker_max_tokens: int = 8192         # output budget for worker-model calls
+    # Input-side twin of tool_result_limit_chars: caps what the brain sees of
+    # a large pasted user message (file/code) before its FIRST routing
+    # decision — otherwise a 23k-char paste blows the brain's context before
+    # it ever gets to route. The worker still receives the complete original
+    # via the ask_* tools' include_full_user_message flag.
+    user_input_preview_chars: int = 2000
 
 
 class BackendConfig(BaseModel):

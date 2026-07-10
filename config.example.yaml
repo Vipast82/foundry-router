@@ -45,6 +45,10 @@ agent_brain:
   tool_result_limit_chars: 2000    # per tool result fed back into the brain
   mcp_result_limit_chars: 2000     # same, for MCP tool results
   worker_max_tokens: 8192          # output budget for worker-model calls
+  # Input-side twin of tool_result_limit_chars: what the brain sees of a large
+  # pasted user message (file/code) before routing. The dispatched worker
+  # still receives the COMPLETE original (ask_* include_full_user_message).
+  user_input_preview_chars: 2000
 
   # -- provider: meridian example --
   # provider: "meridian"

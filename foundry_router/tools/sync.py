@@ -52,7 +52,13 @@ _ASK_PARAMS = {
     "properties": {
         "prompt": {"type": "string",
                    "description": "The complete, self-contained prompt to send to this model. "
-                                  "Include all context it needs — it does not see the conversation."}},
+                                  "Include all context it needs — it does not see the conversation."},
+        "include_full_user_message": {
+            "type": "boolean",
+            "description": "Set true when the user's message was shown to you truncated "
+                           "([preview truncated...]) — the COMPLETE original user message "
+                           "is then appended verbatim to your prompt for this worker. "
+                           "Never retype truncated content yourself."}},
     "required": ["prompt"],
 }
 
