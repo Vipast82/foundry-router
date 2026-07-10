@@ -417,6 +417,14 @@ async function tabGuardrails() {
       <div class="row"><label>conserve_strong_at (Haiku/local only)</label>
         <input id="m-strong" type="number" step="0.05" min="0" max="1"
           value="${cfg.meridian.conserve_strong_at}"></div>
+      <div class="row"><label title="Applies to Fable's OWN weekly bucket, not the general window">conserve_fable_at (deny Fable, use Opus)</label>
+        <input id="m-fable" type="number" step="0.05" min="0" max="1"
+          value="${cfg.meridian.conserve_fable_at}"></div>
+      <div class="row"><label title="last_resort: first Claude attempt after exhaustion is denied with 'try local first'; an insistent retry is permitted and logged as spending purchased credits. never: hard stop.">usage_credits policy</label>
+        <select id="m-credits">
+          <option ${cfg.meridian.usage_credits === "last_resort" ? "selected" : ""}>last_resort</option>
+          <option ${cfg.meridian.usage_credits === "never" ? "selected" : ""}>never</option>
+        </select></div>
       <div class="row"><label>min_window_fraction (hard stop below)</label>
         <input id="m-min" type="number" step="0.01" min="0" max="1"
           value="${cfg.meridian.min_window_fraction}"></div>
@@ -427,6 +435,8 @@ async function tabGuardrails() {
   $("#m-save").onclick = () => run(api("config/meridian", {method: "POST", body: {
     conserve_premium_at: +$("#m-prem").value,
     conserve_strong_at: +$("#m-strong").value,
+    conserve_fable_at: +$("#m-fable").value,
+    usage_credits: $("#m-credits").value,
     min_window_fraction: +$("#m-min").value,
     quota_path: $("#m-path").value}}));
   $("#g-save").onclick = () => run(api("config/guardrails", {method: "POST", body: {
@@ -462,13 +472,22 @@ async function tabMCP() {
 
 /* ----------------------------------------------------------------- usage -- */
 function quotaCard(q) {
+  const pill = k => {
+    if (k.fable_scoped)
+      return k.used >= q.thresholds.conserve_fable_at
+        ? '<span class="pill bad">Fable conserved — use Opus</span>' : "";
+    if (k.used >= q.thresholds.conserve_strong_at)
+      return '<span class="pill bad">Haiku/local only</span>';
+    if (k.used >= q.thresholds.conserve_premium_at)
+      return '<span class="pill warn">Opus+ conserved</span>';
+    return "";
+  };
   const lines = q.backends.flatMap(b =>
     (b.buckets || []).filter(k => k.used !== null && k.used !== undefined).map(k =>
       `<div class="row"><label>${esc(b.backend)} · ${esc(k.label)} window</label>
        <b>${Math.round(k.used * 100)}% used</b>
        ${k.resets_hhmm ? `<span class="hint">resets ${esc(k.resets_hhmm)}</span>` : ""}
-       ${k.used >= q.thresholds.conserve_strong_at ? '<span class="pill bad">Haiku/local only</span>'
-         : k.used >= q.thresholds.conserve_premium_at ? '<span class="pill warn">premium conserved</span>' : ""}
+       ${pill(k)}
       </div>`));
   const o5 = q.observed.last_5h || {}, o7 = q.observed.last_7d || {};
   return `<div class="card">

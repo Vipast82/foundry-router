@@ -32,11 +32,16 @@ log = logging.getLogger(__name__)
 # --------------------------------------------------------------------------- #
 
 def claude_premium_level(model_id: str) -> int:
-    """3 = premium (Opus/Fable/Mythos), 2 = mid (Sonnet), 1 = cheap (Haiku),
-    0 = not a recognizable Claude tier. Used to conserve the expensive tiers
-    as the shared subscription window fills."""
+    """Claude tier ladder, per the model-choosing guidance and the plan's own
+    limit structure: 4 = Fable/Mythos (heaviest; has its OWN weekly bucket,
+    ~50% of total plan usage — rarely needed), 3 = Opus (complex debugging/
+    architecture), 2 = Sonnet (everyday strong work), 1 = Haiku (fast/cheap),
+    0 = not a recognizable Claude tier. Fable is deliberately split from Opus:
+    Opus covers most hard coding work without touching Fable's tighter budget."""
     mid = model_id.lower()
-    if any(k in mid for k in ("opus", "fable", "mythos")):
+    if any(k in mid for k in ("fable", "mythos")):
+        return 4
+    if "opus" in mid:
         return 3
     if "sonnet" in mid:
         return 2
@@ -45,12 +50,24 @@ def claude_premium_level(model_id: str) -> int:
     return 0
 
 
+def _is_fable_bucket(bucket_type: str) -> bool:
+    t = bucket_type.lower()
+    return "fable" in t or "mythos" in t
+
+
 # --------------------------------------------------------------------------- #
 # Quota parsing                                                               #
 # --------------------------------------------------------------------------- #
 
-_BUCKET_LABELS = {"five_hour": "5-hour", "seven_day": "weekly", "weekly": "weekly",
+_BUCKET_LABELS = {"five_hour": "5-hour", "session": "5-hour session",
+                  "seven_day": "weekly", "weekly": "weekly",
                   "seven_days": "weekly", "daily": "daily"}
+
+
+def _bucket_label(btype: str) -> str:
+    if _is_fable_bucket(btype):
+        return "Fable weekly"
+    return _BUCKET_LABELS.get(btype, btype)
 
 
 def _normalize_reset(value: Any) -> Optional[datetime]:
@@ -107,7 +124,8 @@ def parse_quota(data: Any) -> Optional[list[dict]]:
         reset_dt = _normalize_reset(b.get("resetsAt") or b.get("resets_at"))
         out.append({
             "type": btype,
-            "label": _BUCKET_LABELS.get(btype, btype),
+            "label": _bucket_label(btype),
+            "fable_scoped": _is_fable_bucket(btype),
             "used": _normalize_utilization(b.get("utilization")),
             "resets_at": reset_dt.isoformat() if reset_dt else None,
             "resets_hhmm": reset_dt.strftime("%H:%M UTC") if reset_dt else None,
@@ -168,7 +186,13 @@ class MeridianUsage:
                     "note": "quota shape unrecognized; assuming window available"}
 
         signaled = [b for b in buckets if b["used"] is not None]
-        worst_used = max((b["used"] for b in signaled), default=None)
+        # Fable-scoped buckets are kept SEPARATE from the general window:
+        # an exhausted Fable bucket must only gate Fable-class calls, and
+        # conversely Fable's utilization must not throttle Sonnet/Haiku.
+        general = [b for b in signaled if not b["fable_scoped"]]
+        fable = [b for b in signaled if b["fable_scoped"]]
+        worst_used = max((b["used"] for b in general), default=None)
+        fable_used = max((b["used"] for b in fable), default=None)
         available = worst_used is None or (1.0 - worst_used) >= self.cfg.min_window_fraction
         if signaled:
             note = "; ".join(
@@ -178,7 +202,7 @@ class MeridianUsage:
         else:
             note = "no usage signal yet (fresh window)"
         return {"available": available, "buckets": buckets,
-                "worst_used": worst_used, "note": note}
+                "worst_used": worst_used, "fable_used": fable_used, "note": note}
 
 
 # --------------------------------------------------------------------------- #

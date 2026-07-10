@@ -30,14 +30,26 @@ def test_parse_quota_real_shape():
     assert buckets[2]["used"] is None                     # null = no signal, not error
 
 
+def test_parse_quota_scopes_fable_buckets():
+    buckets = parse_quota({"buckets": [
+        {"type": "seven_day", "utilization": 0.11, "resetsAt": None},
+        {"type": "seven_day_fable", "utilization": 0.15, "resetsAt": None},
+    ]})
+    assert buckets[0]["fable_scoped"] is False
+    assert buckets[1]["fable_scoped"] is True
+    assert buckets[1]["label"] == "Fable weekly"
+
+
 def test_parse_quota_rejects_unknown_shape():
     assert parse_quota({"whatever": 1}) is None
     assert parse_quota([1, 2]) is None
 
 
 def test_claude_premium_level():
+    # Fable/Mythos split from Opus: own weekly bucket, tighter budget, rarely needed
+    assert claude_premium_level("claude-fable-5") == 4
+    assert claude_premium_level("claude-mythos-5") == 4
     assert claude_premium_level("claude-opus-4-8") == 3
-    assert claude_premium_level("claude-fable-5") == 3
     assert claude_premium_level("claude-sonnet-4-6") == 2
     assert claude_premium_level("claude-haiku-4-5") == 1
     assert claude_premium_level("glm-4.7-flash:latest") == 0
@@ -91,21 +103,23 @@ async def test_window_exhausted_below_min_fraction(tmp_path):
 # -- adaptive guardrail conservation ---------------------------------------------------
 
 class FixedUsage(MeridianUsage):
-    def __init__(self, cfg, db, worst_used):
+    def __init__(self, cfg, db, worst_used, fable_used=None):
         super().__init__(cfg, client=None, db=db)
         self._worst = worst_used
+        self._fable = fable_used
 
     async def snapshot(self, base_url, api_key=None):
         remaining = 1.0 - (self._worst or 0)
         return {"available": self._worst is None
                              or remaining >= self.cfg.min_window_fraction,
                 "buckets": [], "worst_used": self._worst,
+                "fable_used": self._fable,
                 "note": f"{self._worst:.0%} used" if self._worst is not None else "n/a"}
 
 
-def _engine(tmp_path, worst_used):
+def _engine(tmp_path, worst_used, fable_used=None, **meridian_kwargs):
     db = Database(tmp_path / "g.sqlite")
-    usage = FixedUsage(MeridianConfig(), db, worst_used)
+    usage = FixedUsage(MeridianConfig(**meridian_kwargs), db, worst_used, fable_used)
     return GuardrailEngine(GuardrailsConfig(), db, usage), db
 
 
@@ -134,13 +148,62 @@ async def test_only_cheapest_tier_at_85pct(tmp_path):
 
 
 async def test_hard_stop_when_exhausted(tmp_path):
-    engine, _ = _engine(tmp_path, 0.97)
+    engine, _ = _engine(tmp_path, 0.97, usage_credits="never")
     assert not (await _verdict(engine, "claude-haiku-4-5")).allowed
 
 
 async def test_no_signal_means_no_conservation(tmp_path):
     engine, _ = _engine(tmp_path, None)
     assert (await _verdict(engine, "claude-opus-4-8")).allowed
+
+
+# -- Fable's own bucket (split from Opus) ----------------------------------------------
+
+async def test_fable_conserved_on_its_own_bucket_opus_unaffected(tmp_path):
+    # General window healthy (30%), Fable bucket at 85% (>= conserve_fable_at 0.8)
+    engine, _ = _engine(tmp_path, 0.30, fable_used=0.85)
+    fable = await _verdict(engine, "claude-fable-5")
+    assert not fable.allowed and "Opus" in fable.reason
+    assert (await _verdict(engine, "claude-opus-4-8")).allowed
+    assert (await _verdict(engine, "claude-sonnet-4-6")).allowed
+
+
+async def test_fable_bucket_exhaustion_gates_only_fable(tmp_path):
+    # Fable bucket 100% used — Fable hard-denied; everyone else untouched
+    engine, _ = _engine(tmp_path, 0.30, fable_used=1.0)
+    assert not (await _verdict(engine, "claude-fable-5")).allowed
+    assert (await _verdict(engine, "claude-opus-4-8")).allowed
+
+
+async def test_general_thresholds_still_apply_to_fable(tmp_path):
+    # Fable bucket fresh, but general window at 75% — Fable is level>=3 too
+    engine, _ = _engine(tmp_path, 0.75, fable_used=0.10)
+    assert not (await _verdict(engine, "claude-fable-5")).allowed
+
+
+# -- purchased usage credits: last resort handshake --------------------------------------
+
+async def test_credits_last_resort_deny_then_permit(tmp_path):
+    engine, db = _engine(tmp_path, 0.97, usage_credits="last_resort")
+    state = RequestGuardState()
+    eff = engine.effective(None)
+    first = await engine.check_paid_call("claude-sonnet-4-6", MERIDIAN_INFO,
+                                         None, state, eff)
+    assert not first.allowed and "LAST RESORT" in first.reason
+    second = await engine.check_paid_call("claude-sonnet-4-6", MERIDIAN_INFO,
+                                          None, state, eff)
+    assert second.allowed  # insistence after considering local => permitted
+    assert any("PURCHASED USAGE CREDITS" in e for e in state.events)
+
+
+async def test_credits_never_policy_is_a_hard_stop(tmp_path):
+    engine, _ = _engine(tmp_path, 0.97, usage_credits="never")
+    state = RequestGuardState()
+    eff = engine.effective(None)
+    for _ in range(2):
+        verdict = await engine.check_paid_call("claude-sonnet-4-6", MERIDIAN_INFO,
+                                               None, state, eff)
+        assert not verdict.allowed
 
 
 # -- subscription token logging -----------------------------------------------------

@@ -182,6 +182,14 @@ f. Watch CLAUDE USAGE WINDOW above: as it fills, escalate to progressively \
 cheaper Claude tiers for the same task (Sonnet instead of Opus, Haiku instead \
 of Sonnet) — the guardrails enforce this too, but choosing well up front \
 avoids wasted denials.
+g. CLAUDE TIER GUIDE (when escalating, pick the LOWEST tier that fits):
+   - Haiku: quick answers, summaries, high-volume simple work.
+   - Sonnet: everyday strong coding and analysis — the default escalation.
+   - Opus: complex debugging, multi-file architecture, hard review — covers \
+almost every "really hard" task.
+   - Fable/Mythos: LAST resort for the very hardest work Opus demonstrably \
+cannot handle. It draws a separate, much tighter weekly budget (its own \
+"Fable" window above) — do not spend it on tasks Opus can do.
 
 RULES:
 1. Every turn MUST end with exactly one of: return_to_user (deliver the result) or \
