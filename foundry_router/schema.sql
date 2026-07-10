@@ -17,6 +17,14 @@ CREATE TABLE IF NOT EXISTS models (
   reasoning_style TEXT,             -- free-text summary from the Research Agent
   good_for TEXT,                    -- free-text, from Research Agent
   benefits_from_explicit_prompting INTEGER DEFAULT 0,  -- 1 => refine_prompt worth invoking for this target
+  tags TEXT,                        -- JSON list of capability tags: coding, vision, tool-calling,
+                                    -- reasoning, creative-writing, long-context. Seeded from name
+                                    -- heuristics at discovery, refined by the Research Agent.
+  content_policy TEXT,              -- "permissive" (uncensored/abliterated local models, detected
+                                    -- from naming, confirmable via manual override) | "standard" | NULL
+  research_status TEXT,             -- "queued" | "running" | "ok" | "failed" — surfaced in the UI so
+                                    -- research never fails silently
+  research_note TEXT,               -- human-readable outcome/error for the status above
   last_updated TEXT,
   source TEXT                       -- "openrouter_api" | "research_agent" | "discovery" | "manual_override"
 );

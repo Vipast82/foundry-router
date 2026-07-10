@@ -65,8 +65,17 @@ def sanitize(model_id: str) -> str:
 
 
 def _describe_model(model_id: str, backends: list[str], meta: Optional[dict]) -> str:
+    import json as _json
     parts = [f"Send a prompt to the model '{model_id}' (served by: {', '.join(backends)})."]
     if meta:
+        try:
+            tags = _json.loads(meta.get("tags") or "[]")
+        except (_json.JSONDecodeError, TypeError):
+            tags = []
+        if tags:
+            parts.append("Tags: " + ", ".join(str(t) for t in tags) + ".")
+        if meta.get("content_policy") == "permissive":
+            parts.append("Content policy: permissive/uncensored.")
         if meta.get("good_for"):
             parts.append(f"Good for: {meta['good_for']}.")
         if meta.get("reasoning_style"):

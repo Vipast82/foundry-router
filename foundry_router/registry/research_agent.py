@@ -46,6 +46,7 @@ Return ONLY a JSON object, no prose, with this exact shape:
   "reasoning_style": "<one-sentence summary of how this model reasons>",
   "good_for": "<comma-separated task types this model is reportedly good at>",
   "benefits_from_explicit_prompting": true/false,
+  "tags": ["<subset of: coding, vision, tool-calling, reasoning, creative-writing, long-context — only tags the text supports>"],
   "benchmarks": [
     {{"category": "coding|reasoning|general_chat|tool_calling|agentic",
       "score": <0-100 number>,
@@ -122,12 +123,31 @@ class ResearchAgent:
 
     # -- triggers (§4.4: either is sufficient, both exist) -----------------------------
 
+    def prerequisites(self) -> tuple[bool, str]:
+        """Can a research job actually succeed right now? The UI gates the
+        Research button on this instead of always reporting success — the
+        button must never claim an outcome that depends on tools that aren't
+        there (SearXNG/Crawl4AI MCP servers)."""
+        if not self.cfg.enabled:
+            return False, "research agent disabled in config (registry.research.enabled)"
+        s, f = self.cfg.search, self.cfg.fetch
+        if not s.server or not s.tool:
+            return False, "no search MCP tool configured (registry.research.search)"
+        if s.server not in self.mcp.servers:
+            return False, (f"MCP server '{s.server}' is not connected — add it on the "
+                           f"MCP tab (requires your SearXNG MCP server)")
+        if f.server and f.server not in self.mcp.servers:
+            return False, (f"MCP server '{f.server}' is not connected — add it on the "
+                           f"MCP tab (requires your Crawl4AI MCP server)")
+        return True, "ok"
+
     def enqueue(self, model_id: str) -> bool:
         """Non-blocking trigger used by the live agent's request_model_research
         tool and by the web UI. Dedupes while queued."""
         if not self.cfg.enabled or model_id in self._queued:
             return False
         self._queued.add(model_id)
+        self.registry.set_research_status(model_id, "queued")
         self.queue.put_nowait(model_id)
         return True
 
@@ -152,8 +172,13 @@ class ResearchAgent:
         while True:
             model_id = await self.queue.get()
             try:
+                self.registry.set_research_status(model_id, "running")
                 await self.research_model(model_id)
             except Exception as e:
+                # Failure is recorded ON THE MODEL ROW, not just the event log
+                # — the UI shows it, so a silently-unscored model can't sink to
+                # the bottom of its tier with nothing visibly wrong.
+                self.registry.set_research_status(model_id, "failed", str(e))
                 self.db.log_event("error", "research",
                                   f"research failed for {model_id}", str(e))
             finally:
@@ -185,10 +210,12 @@ class ResearchAgent:
                 self.db.log_event("warning", "research",
                                   f"search unavailable for {model_id} — skipping "
                                   f"qualitative pass", str(e))
-                # No search => nothing qualitative to do; mark the attempt so
-                # the sweep doesn't hammer an unconfigured setup every cycle.
-                self.registry.upsert_auto(model_id, source="research_agent",
-                                          reasoning_style="(research pending — no search MCP tool reachable)")
+                # No search => nothing qualitative to do. Record the failure on
+                # the model row (UI-visible) — set_research_status also bumps
+                # last_updated so the sweep doesn't hammer an unconfigured
+                # setup every cycle.
+                self.registry.set_research_status(
+                    model_id, "failed", f"search MCP tool unreachable: {e}")
                 return
 
         seen: set[str] = set()
@@ -211,14 +238,21 @@ class ResearchAgent:
         raw = await self.llm(EXTRACTION_PROMPT.format(model=model_id, text=text))
         data = extract_json(raw)
         if not data:
+            self.registry.set_research_status(
+                model_id, "failed", "extraction produced no parseable JSON")
             self.db.log_event("warning", "research",
                               f"extraction produced no JSON for {model_id}", raw[:500])
             return
 
+        tags = data.get("tags")
+        tags_json = None
+        if isinstance(tags, list) and tags:
+            tags_json = json.dumps([str(t)[:24] for t in tags][:8])
         self.registry.upsert_auto(
             model_id, source="research_agent",
             reasoning_style=data.get("reasoning_style"),
             good_for=data.get("good_for"),
+            tags=tags_json,
             benefits_from_explicit_prompting=(
                 1 if data.get("benefits_from_explicit_prompting") else 0),
         )
@@ -241,5 +275,7 @@ class ResearchAgent:
                 wrote += 1
             except (TypeError, ValueError):
                 continue
+        self.registry.set_research_status(
+            model_id, "ok", f"{wrote} benchmark rows, {fetched} pages")
         self.db.log_event("info", "research",
                           f"researched {model_id}: {wrote} benchmark rows at {utcnow()}")

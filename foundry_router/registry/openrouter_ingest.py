@@ -24,9 +24,12 @@ KV_LAST_POLL = "openrouter_last_poll"
 def cost_tier(cost_per_1k_output: Optional[float]) -> Optional[str]:
     """Rough dollar-cost banding used for relative_cost_tier when nothing
     better is known. Thresholds are per-1k-output-token USD; manually
-    overridable per model via the web UI."""
+    overridable per model via the web UI. "free" is the tier local models get
+    at discovery — cost is a fact about the backend, not a benchmark guess."""
     if cost_per_1k_output is None:
         return None
+    if cost_per_1k_output == 0:
+        return "free"
     if cost_per_1k_output <= 0.001:
         return "low"
     if cost_per_1k_output <= 0.01:
