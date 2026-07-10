@@ -68,13 +68,47 @@ Request:
 def _model_line(row: dict, tool_name: str) -> str:
     score = f"{row['score']:.0f}" if row.get("score") is not None else "?"
     stype = f" ({row['score_type']})" if row.get("score_type") else ""
-    tier = row.get("relative_cost_tier") or ("free/local" if not row.get("cost_per_1k_output") else "?")
-    bits = [f"- {tool_name}: score {score}{stype}, cost {tier}"]
+    bits = [f"- {tool_name}: score {score}{stype}"]
+    try:
+        tags = json.loads(row.get("tags") or "[]")
+    except (json.JSONDecodeError, TypeError):
+        tags = []
+    if tags:
+        bits.append("tags: " + ", ".join(str(t) for t in tags))
+    if row.get("content_policy") == "permissive":
+        bits.append("PERMISSIVE (handles requests standard-alignment models decline)")
     if row.get("good_for"):
         bits.append(f"good for: {row['good_for']}")
     if row.get("benefits_from_explicit_prompting"):
         bits.append("benefits from refine_prompt")
     return "; ".join(bits)
+
+
+# Display order + labels for the tier-grouped candidate list. Cost tier is
+# assigned at ingestion (local backends => free); unknown means no registry
+# data yet — treated as mid-tier paid so the brain stays conservative.
+_TIER_DISPLAY = [
+    ("free", "FREE / LOCAL — always try here first"),
+    ("low", "CHEAP PAID"),
+    ("medium", "MID PAID"),
+    ("high", "PREMIUM (subscription window / expensive)"),
+    ("very_high", "PREMIUM+ (most expensive)"),
+    (None, "UNKNOWN COST — treat as mid-tier paid"),
+]
+
+
+def _models_block(ranked: list[dict], tool_name_for: dict[str, str]) -> str:
+    groups: dict = {}
+    for row in ranked:
+        tool_name = tool_name_for.get(row["id"])
+        if not tool_name:
+            continue
+        tier = row.get("relative_cost_tier")
+        tier = tier if tier in dict(_TIER_DISPLAY) else None
+        groups.setdefault(tier, []).append(_model_line(row, tool_name))
+    blocks = [f"[{label}]\n" + "\n".join(groups[tier])
+              for tier, label in _TIER_DISPLAY if tier in groups]
+    return "\n".join(blocks) or "- (no models currently reachable)"
 
 
 def build_system_prompt(persona: Optional[dict], ranked: list[dict],
@@ -89,12 +123,7 @@ def build_system_prompt(persona: Optional[dict], ranked: list[dict],
     except (json.JSONDecodeError, TypeError):
         triggers_list = []
 
-    model_lines = []
-    for row in ranked:
-        tn = tool_name_for.get(row["id"])
-        if tn:
-            model_lines.append(_model_line(row, tn))
-    models_block = "\n".join(model_lines) or "- (no models currently reachable)"
+    models_block = _models_block(ranked, tool_name_for)
 
     parts = [f"""You are the routing brain (dispatcher) of Foundry Router. You are a \
 small local model with a training cutoff and no live knowledge. You NEVER answer the \
@@ -111,10 +140,27 @@ cost_aware_default = weigh quality gain against cost; moderate = in between)
 - Task category to optimize for: {p.get('benchmark_category', 'general_chat')}
 - Escalation triggers for this persona: {json.dumps(triggers_list)}
 
-CANDIDATE MODELS (best first for this category; scores 0-100, '?' = unknown):
+CANDIDATE MODELS grouped by cost tier (cheapest tier first; best score first \
+within a tier; scores 0-100, '?' = unknown):
 {models_block}
 
 CLAUDE USAGE WINDOW: {meridian_note}
+
+SELECTION PROCEDURE (apply in order — this is structural policy, follow it \
+even when a pricier model would also work):
+a. Start in the FREE/LOCAL tier: pick the model whose tags match the task; \
+break ties by score.
+b. Escalate to a paid tier ONLY when the task genuinely exceeds every local \
+candidate (a persona escalation trigger applies, or a local attempt already \
+failed) — and then use the CHEAPEST tier that suffices. Never reach for a \
+premium model when a cheap or local one would do.
+c. Within any tier, prefer a model whose tags match the task over a \
+higher-scored mismatch.
+d. If the task specifically needs permissive/uncensored handling, prefer a \
+local model marked PERMISSIVE over any paid escalation — paid models' \
+behavior is fixed regardless of how you route.
+e. Guardrails apply to every choice. If one denies a model, take the next \
+candidate down the list — do not give up.
 
 RULES:
 1. Every turn MUST end with exactly one of: return_to_user (deliver the result) or \

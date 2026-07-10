@@ -173,7 +173,11 @@ async def list_models(request: Request):
     # Reachable-but-unregistered models should be visible too
     for mid in sorted(reachable - {r["id"] for r in rows}):
         rows.append({"id": mid, "reachable": True, "source": None})
-    return {"models": rows}
+    # Research readiness rides along so the UI can grey out the button with a
+    # real reason instead of reporting success for work that can't happen.
+    ready, reason = (svc.research.prerequisites() if svc.research
+                     else (False, "research agent not initialized"))
+    return {"models": rows, "research_ready": ready, "research_reason": reason}
 
 
 @router.post("/admin/api/models/update")
@@ -206,8 +210,16 @@ async def research_model(request: Request):
     svc = _svc(request)
     body = await request.json()
     model_id = body.get("model_id") or ""
-    queued = bool(svc.research and svc.research.enqueue(model_id))
-    return {"ok": True, "queued": queued}
+    # Never report success for an action whose outcome depends on something
+    # that hasn't happened: check the prerequisites before queueing.
+    ready, reason = (svc.research.prerequisites() if svc.research
+                     else (False, "research agent not initialized"))
+    if not ready:
+        return JSONResponse({"ok": False, "queued": False, "error": reason},
+                            status_code=409)
+    queued = svc.research.enqueue(model_id)
+    return {"ok": True, "queued": queued,
+            "note": None if queued else "already queued"}
 
 
 # --------------------------------------------------------------------------- #

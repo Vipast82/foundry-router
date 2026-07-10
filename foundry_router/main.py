@@ -95,15 +95,36 @@ class Services:
 
     def register_discovered(self) -> None:
         """Give every discovered model a registry row (provider = backend
-        name), so ranking/ingest/research all have somewhere to attach."""
+        name), so ranking/ingest/research all have somewhere to attach.
+
+        Cost tier is stamped from the BACKEND TYPE at ingestion — a fact, not
+        an inference: ollama backends serve for free ("free" tier, zero cost
+        fields), anthropic-compatible ones draw subscription window ("high"
+        tier default). Capability tags and content policy are seeded from
+        name heuristics; the Research Agent refines them, manual overrides
+        pin them (upsert_auto never replaces a hand-set value)."""
+        import json as _json
+
+        from .registry.tagging import content_policy_from_name, tags_from_name
+
         for s in getattr(self.pool, "backends", {}).values():
             if not s.healthy:
                 continue
             for model_id in s.models:
                 try:
-                    self.registry.upsert_auto(model_id, source="discovery",
-                                              provider=s.config.name,
-                                              display_name=model_id)
+                    fields: dict = {"provider": s.config.name, "display_name": model_id}
+                    if s.config.type == "ollama":
+                        fields.update(relative_cost_tier="free",
+                                      cost_per_1k_input=0.0, cost_per_1k_output=0.0)
+                    elif s.config.type == "anthropic-compatible":
+                        fields.update(relative_cost_tier="high")
+                    tags = tags_from_name(model_id)
+                    if tags:
+                        fields["tags"] = _json.dumps(tags)
+                    policy = content_policy_from_name(model_id)
+                    if policy:
+                        fields["content_policy"] = policy
+                    self.registry.upsert_auto(model_id, source="discovery", **fields)
                 except Exception:
                     log.exception("failed to register discovered model %s", model_id)
 

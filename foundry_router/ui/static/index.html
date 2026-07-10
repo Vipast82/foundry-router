@@ -46,6 +46,8 @@
                border-radius:5px; padding:5px 11px; cursor:pointer; font-size:12px;
                white-space:nowrap; }
   button.act:hover { border-color:var(--accent); }
+  button.act:disabled { opacity:.35; cursor:not-allowed; }
+  button.act:disabled:hover { border-color:var(--line); }
   button.primary { border-color:var(--accent); color:var(--accent); }
   input, select, textarea { background:var(--bg); color:var(--fg);
     border:1px solid var(--line); border-radius:5px; padding:5px 8px; font-size:13px; }
@@ -177,30 +179,46 @@ async function tabBackends() {
 }
 
 /* ---------------------------------------------------------------- models -- */
+const parseTags = s => { try { const t = JSON.parse(s || "[]"); return Array.isArray(t) ? t : []; } catch (e) { return []; } };
+const RESEARCH_PILL = {queued: "warn", running: "warn", ok: "ok", failed: "bad"};
+
 async function tabModels() {
   const d = await api("models");
+  const rBtn = m => d.research_ready
+    ? `<button class="act" onclick='doResearch(${JSON.stringify(m.id)})'>research</button>`
+    : `<button class="act" disabled title="${esc(d.research_reason)}">research</button>`;
   const rows = d.models.map(m => `<tr>
     <td class="mono">${esc(m.id)} ${m.reachable ? '<span class="pill ok">live</span>' : ""}</td>
-    <td>${esc(m.relative_cost_tier ?? "")}</td>
+    <td class="nw">${esc(m.relative_cost_tier ?? "")}</td>
+    <td>${esc(parseTags(m.tags).join(", "))}${m.content_policy === "permissive" ? ' <span class="pill warn">permissive</span>' : ""}</td>
     <td>${esc(m.good_for ?? "")}</td>
-    <td>${m.benefits_from_explicit_prompting ? "yes" : ""}</td>
-    <td class="mono">${esc(m.source ?? "")}</td>
-    <td><button class="act" onclick="editModel('${esc(m.id)}')">edit</button>
-        <button class="act" onclick="run(api('models/research',{method:'POST',body:{model_id:'${esc(m.id)}'}}))">research</button></td>
+    <td class="nw">${m.research_status
+      ? `<span class="pill ${RESEARCH_PILL[m.research_status] || "warn"}" title="${esc(m.research_note || "")}">${esc(m.research_status)}</span>` : ""}</td>
+    <td class="mono nw">${esc(m.source ?? "")}</td>
+    <td class="nw"><button class="act" onclick='editModel(${JSON.stringify(m.id)})'>edit</button>
+        ${rBtn(m)}</td>
     </tr>`).join("");
   $("#main").innerHTML = `
     <h2>Model Registry</h2>
     <p class="hint">Edits made here are pinned as manual_override — automatic refreshes
-    supplement but never replace them (§4.4).</p>
+    supplement but never replace them (§4.4). Local models are tagged tier
+    <b>free</b> automatically at discovery; tags/policy are name-seeded and
+    research-refined.${d.research_ready ? "" :
+      ` <b>Research is unavailable:</b> ${esc(d.research_reason)}.`}</p>
     <div class="row">
       <button class="act primary" onclick="run(api('models/refresh',{method:'POST'}))">Poll OpenRouter now</button>
     </div>
-    <table><tr><th>model</th><th>cost tier</th><th>good for</th><th>needs refine</th><th>source</th><th></th></tr>${rows}</table>
+    <table><tr><th>model</th><th>tier</th><th>tags</th><th>good for</th><th>research</th><th>source</th><th></th></tr>${rows}</table>
     <div class="card" id="model-editor" style="display:none">
       <h2 style="margin-top:0">Edit <span id="me-id" class="mono"></span></h2>
       <div class="row"><label>relative_cost_tier</label>
-        <select id="me-tier"><option value="">-</option>
-        <option>low</option><option>medium</option><option>high</option><option>very_high</option></select></div>
+        <select id="me-tier"><option value="">-</option><option>free</option>
+        <option>low</option><option>medium</option><option>high</option><option>very_high</option></select>
+        <label>content_policy</label>
+        <select id="me-policy"><option value="">-</option>
+        <option>standard</option><option>permissive</option></select></div>
+      <div class="row"><label>tags (comma-separated)</label><input id="me-tags" size="60"
+        placeholder="coding, vision, tool-calling, reasoning, creative-writing, long-context"></div>
       <div class="row"><label>good_for</label><input id="me-good" size="60"></div>
       <div class="row"><label>reasoning_style</label><input id="me-style" size="60"></div>
       <div class="row"><label>benefits_from_explicit_prompting</label>
@@ -209,19 +227,37 @@ async function tabModels() {
     </div>`;
   window._models = Object.fromEntries(d.models.map(m => [m.id, m]));
 }
+window.doResearch = async id => {
+  try {
+    const r = await api("models/research", {method: "POST", body: {model_id: id}});
+    toast(r.queued ? "Research queued for " + id : (r.note || "Not queued"));
+    render();
+  } catch (e) { toast(e.message, true); }
+};
 window.editModel = id => {
   const m = window._models[id] || {};
-  $("#model-editor").style.display = "block";
+  const panel = $("#model-editor");
+  panel.style.display = "block";
   $("#me-id").textContent = id;
   $("#me-tier").value = m.relative_cost_tier || "";
+  $("#me-policy").value = m.content_policy || "";
+  $("#me-tags").value = parseTags(m.tags).join(", ");
   $("#me-good").value = m.good_for || "";
   $("#me-style").value = m.reasoning_style || "";
   $("#me-refine").checked = !!m.benefits_from_explicit_prompting;
-  $("#me-save").onclick = () => run(api("models/update", {method: "POST", body: {
-    id, relative_cost_tier: $("#me-tier").value || null,
-    good_for: $("#me-good").value || null,
-    reasoning_style: $("#me-style").value || null,
-    benefits_from_explicit_prompting: $("#me-refine").checked ? 1 : 0}}));
+  // The panel lives below a potentially very long table — without this,
+  // clicking "edit" appears to do nothing (confirmed deployment bug).
+  panel.scrollIntoView({behavior: "smooth", block: "start"});
+  $("#me-save").onclick = () => {
+    const tags = $("#me-tags").value.split(",").map(s => s.trim()).filter(Boolean);
+    run(api("models/update", {method: "POST", body: {
+      id, relative_cost_tier: $("#me-tier").value || null,
+      content_policy: $("#me-policy").value || null,
+      tags: tags.length ? JSON.stringify(tags) : null,
+      good_for: $("#me-good").value || null,
+      reasoning_style: $("#me-style").value || null,
+      benefits_from_explicit_prompting: $("#me-refine").checked ? 1 : 0}}));
+  };
 };
 
 /* -------------------------------------------------------------- personas -- */
@@ -273,6 +309,8 @@ async function tabPersonas() {
 window.editPersona = name => {
   const p = window._personas[name]; if (!p) return;
   $("#pe-title").textContent = "Edit " + name;
+  document.querySelector("#pe-name").closest(".card")
+    .scrollIntoView({behavior: "smooth", block: "start"});
   $("#pe-name").value = p.virtual_name;
   $("#pe-desc").value = p.description || "";
   $("#pe-cat").value = p.benchmark_category || "general_chat";

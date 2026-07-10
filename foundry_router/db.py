@@ -93,6 +93,7 @@ class Database:
         self._conn.execute("PRAGMA journal_mode=WAL")
         self._conn.execute("PRAGMA foreign_keys=ON")
         self._init_schema()
+        self._migrate()
         self._seed_personas()
 
     # -- setup ----------------------------------------------------------------
@@ -101,6 +102,26 @@ class Database:
         schema = SCHEMA_PATH.read_text(encoding="utf-8")
         with self._lock:
             self._conn.executescript(schema)
+            self._conn.commit()
+
+    def _migrate(self) -> None:
+        """Additive column migrations. schema.sql's CREATE TABLE IF NOT EXISTS
+        covers fresh installs but never alters an existing table, so columns
+        added after first deployment are applied here, guarded by PRAGMA
+        table_info. Additive-only by design — nothing here drops or rewrites."""
+        added = [
+            ("models", "tags", "TEXT"),
+            ("models", "content_policy", "TEXT"),
+            ("models", "research_status", "TEXT"),
+            ("models", "research_note", "TEXT"),
+        ]
+        with self._lock:
+            for table, column, ddl in added:
+                cols = {r["name"] for r in
+                        self._conn.execute(f"PRAGMA table_info({table})").fetchall()}
+                if column not in cols:
+                    self._conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {ddl}")
+                    log.info("migrated: %s.%s added", table, column)
             self._conn.commit()
 
     def _seed_personas(self) -> None:
