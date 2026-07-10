@@ -37,12 +37,14 @@
   td { word-break:break-word; }
   th { color:var(--dim); font-weight:500; white-space:nowrap; }
   .nw { white-space:nowrap; word-break:normal; }
-  .pill { display:inline-block; padding:1px 8px; border-radius:9px; font-size:11px; }
+  .pill { display:inline-block; padding:1px 8px; border-radius:9px; font-size:11px;
+          white-space:nowrap; }
   .ok  { background:#1d3a23; color:var(--ok); }
   .bad { background:#3a1d1d; color:var(--bad); }
   .warn{ background:#3a331d; color:var(--warn); }
   button.act { background:var(--panel); color:var(--fg); border:1px solid var(--line);
-               border-radius:5px; padding:5px 11px; cursor:pointer; font-size:12px; }
+               border-radius:5px; padding:5px 11px; cursor:pointer; font-size:12px;
+               white-space:nowrap; }
   button.act:hover { border-color:var(--accent); }
   button.primary { border-color:var(--accent); color:var(--accent); }
   input, select, textarea { background:var(--bg); color:var(--fg);
@@ -285,7 +287,7 @@ window.editPersona = name => {
 async function tabTools() {
   const d = await api("tools");
   const rows = d.tools.map(t => `<tr>
-    <td class="mono">${esc(t.name)}</td><td>${esc(t.kind)}</td>
+    <td class="mono">${esc(t.name)}</td><td class="nw">${esc(t.kind)}</td>
     <td class="mono">${esc(t.model_id || (t.server ? t.server + "/" + t.mcp_tool : ""))}</td>
     <td>${t.disabled ? '<span class="pill bad">disabled</span>' : '<span class="pill ok">enabled</span>'}</td>
     <td><button class="act" onclick='run(api("tools/toggle",{method:"POST",body:{name:${JSON.stringify(t.name)},disabled:${!t.disabled}}}))'>
