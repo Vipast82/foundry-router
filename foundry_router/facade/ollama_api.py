@@ -139,22 +139,36 @@ async def chat(request: Request):
         return await _direct_dispatch_chat(svc, persona, model_name, messages,
                                            client_tools, options, stream, user_text)
 
+    # Pipeline personas (Foundry-Coding) run the Prepare->Execute->Check
+    # mode instead of the generic brain loop — a distinct execution mode,
+    # like direct-dispatch, bookended by the paid steps.
+    if (persona.get("execution_mode") or "agent") == "pipeline":
+        return await _agent_chat(svc, persona, model_name, messages, stream,
+                                 user_text, mode="pipeline")
+
     return await _agent_chat(svc, persona, model_name, messages, stream, user_text)
 
 
 # ---- agent mode ---------------------------------------------------------------
 
 def _build_ctx(svc, persona: dict, model_name: str, messages: list[dict],
-               user_text: str) -> RequestContext:
+               user_text: str, mode: str = "agent") -> RequestContext:
     pending = prompts.find_pending_question(messages)
     return RequestContext(
         persona=persona,
         messages=prompts.sanitize_history(messages),
         guard=RequestGuardState(),
         logger=RequestLogger(svc.db, persona["virtual_name"], model_name,
-                             "agent", user_text),
+                             mode, user_text),
         pending_question=pending,
     )
+
+
+def _run_events(svc, ctx: RequestContext):
+    """Select the event source for this request's execution mode."""
+    if ctx.logger.mode == "pipeline":
+        return svc.agent.run_pipeline(ctx)
+    return svc.agent.run(ctx)
 
 
 async def _agent_events_to_chat_chunks(svc, ctx: RequestContext, model_name: str):
@@ -163,7 +177,7 @@ async def _agent_events_to_chat_chunks(svc, ctx: RequestContext, model_name: str
     t0 = time.monotonic_ns()
     status, error = "ok", ""
     try:
-        async for ev in svc.agent.run(ctx):
+        async for ev in _run_events(svc, ctx):
             if ev.kind == "think":
                 yield tr.chat_chunk(model_name, f"<think>{ev.text}</think>\n")
             elif ev.kind == "answer":
@@ -222,8 +236,9 @@ async def _fallback_chunks(svc, ctx: RequestContext, model_name: str):
         yield tr.chat_chunk(model_name, f"\n[foundry-router] fallback failed too: {e}")
 
 
-async def _agent_chat(svc, persona, model_name, messages, stream, user_text):
-    ctx = _build_ctx(svc, persona, model_name, messages, user_text)
+async def _agent_chat(svc, persona, model_name, messages, stream, user_text,
+                      mode: str = "agent"):
+    ctx = _build_ctx(svc, persona, model_name, messages, user_text, mode=mode)
     if stream:
         return StreamingResponse(_agent_events_to_chat_chunks(svc, ctx, model_name),
                                  media_type="application/x-ndjson")

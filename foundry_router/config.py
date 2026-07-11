@@ -173,6 +173,9 @@ class MCPServerConfig(BaseModel):
     url: str
     transport: Literal["streamable-http", "sse"] = "streamable-http"
     headers: dict[str, str] = Field(default_factory=dict)
+    # Media generation (ComfyUI, TTS, music) can take far longer than a text
+    # tool call — per-server budget instead of one global assumption.
+    timeout_seconds: int = 300
 
 
 class ToolSyncConfig(BaseModel):

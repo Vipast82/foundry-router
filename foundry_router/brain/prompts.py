@@ -56,6 +56,60 @@ def sanitize_history(messages: list[dict]) -> list[dict]:
     return [m for m in out if m["content"] or m.get("tool_calls")]
 
 
+# ---- Outcome judge (cross-cutting escalation mechanism) ----------------------
+
+JUDGE_PROMPT = """You are judging whether an answer adequately serves a request. \
+Be pragmatic: adequate means correct, complete enough to use, and on-topic — not \
+perfect. Reply ONLY with JSON: {{"adequate": true/false, "reasoning": "<one or two \
+sentences>"}}
+
+REQUEST:
+{request}
+
+ANSWER TO JUDGE:
+{answer}"""
+
+# ---- Coding pipeline (Prepare -> Execute -> Check) -----------------------------
+
+PIPELINE_PREPARE = """Turn the following raw coding request into a precise, \
+structured prompt for a code-generation model — like a good engineering ticket: \
+clarified requirements, concrete edge cases, relevant constraints (language, \
+runtime, style), and what "done" looks like. Do NOT write the code yourself. \
+Reply with only the structured prompt.
+
+RAW REQUEST:
+{request}"""
+
+PIPELINE_EXECUTE = """{spec}
+
+---
+ORIGINAL USER REQUEST (verbatim, for reference):
+{request}"""
+
+PIPELINE_REVIEW = """Review the following code against the original request. \
+Look for real problems only: incorrect behavior, missing requirements, bugs, \
+security issues — not style nitpicks. Reply ONLY with JSON: \
+{{"adequate": true/false, "feedback": "<specific, actionable problems, or empty>"}}
+
+ORIGINAL REQUEST:
+{request}
+
+CODE TO REVIEW:
+{code}"""
+
+PIPELINE_REVISE = """Your previous output was reviewed and specific problems were \
+found. Fix them and output the complete corrected version (full code, not a diff).
+
+SPECIFICATION:
+{spec}
+
+YOUR PREVIOUS OUTPUT:
+{code}
+
+REVIEW FEEDBACK (fix all of these):
+{feedback}"""
+
+
 REFINE_INSTRUCTION = """Rewrite the following request as an explicit, well-scoped \
 specification for another AI model that will not see any other context. Tighten vague \
 wording into concrete scope, state reasonable assumptions explicitly, and keep it short. \
@@ -222,7 +276,12 @@ have, treating the model as unknown capability and moderate cost.
 have. Do not retry the same failing call more than once.
 10. NARRATE: alongside every ask_<model> call, write ONE short line of plain text \
 saying which model you chose and why (e.g. "Best local coding score — keeping it \
-free."). It streams to the user live as status while they wait. One line, no more."""]
+free."). It streams to the user live as status while they wait. One line, no more.
+11. GENERATIVE MEDIA (images, video, music, voice): if your tool list contains a \
+matching media MCP tool (ComfyUI, TTS, music, transcription...), dispatch it — the \
+result comes back as a URL or artifact reference; forward it with \
+return_to_user(use_last_result=true). If NO media tool is present, say plainly that \
+no media backend is configured — never attempt a text-only imitation of media."""]
 
     if client_system:
         # Workspace/client system instructions can't appear as a second

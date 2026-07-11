@@ -65,6 +65,38 @@ class AgentState(TypedDict, total=False):
     done: bool
 
 
+def _json_list(value) -> list:
+    import json as _json
+    try:
+        out = _json.loads(value or "[]")
+        return out if isinstance(out, list) else []
+    except (_json.JSONDecodeError, TypeError):
+        return []
+
+
+def _filter_required_tags(ranked: list[dict], persona: Optional[dict]) -> list[dict]:
+    """Persona required_tags (Foundry-Vision): when any candidate carries one
+    of the required tags, the list is FILTERED to matches — a vision persona
+    must not quietly dispatch a text-only model. If nothing matches, the full
+    list survives (degrade with options rather than fail with none)."""
+    required = _json_list((persona or {}).get("required_tags"))
+    if not required:
+        return ranked
+    def matches(row: dict) -> bool:
+        return any(t in _json_list(row.get("tags")) for t in required)
+    matching = [r for r in ranked if matches(r)]
+    return matching or ranked
+
+
+def _boost_permissive(ranked: list[dict], persona: Optional[dict]) -> list[dict]:
+    """Persona prefer_permissive (Foundry-Creative): stable-sort PERMISSIVE
+    models to the front — tier/score order is preserved within each half."""
+    if not (persona or {}).get("prefer_permissive"):
+        return ranked
+    return sorted(ranked,
+                  key=lambda r: 0 if r.get("content_policy") == "permissive" else 1)
+
+
 def _apply_pins(ranked: list[dict], persona: Optional[dict]) -> list[dict]:
     """Reorder candidates so the persona's pinned_models lead, in pin order,
     marked _pinned for the prompt's [PINNED] group. Pins absent from the
@@ -216,9 +248,10 @@ class AgentRunner:
                 break
             meridian_note = f"backend {s.config.name} currently unreachable"
 
-        # Persona model pinning: an ordered boost, not a hard constraint —
-        # pinned models float to the top of the candidate list; a guardrail/
-        # quota denial falls through to the next pin, then the normal pool.
+        # Persona candidate shaping, in order: required-tag filter (Vision),
+        # permissive boost (Creative), then pins on top — pins always win.
+        ranked = _filter_required_tags(ranked, persona)
+        ranked = _boost_permissive(ranked, persona)
         ranked = _apply_pins(ranked, persona)
 
         # Client/workspace system messages can't ride along in the message list
@@ -391,6 +424,31 @@ class AgentRunner:
 
         # ---- core tools (fixed, intrinsic — §4.2) ----
         if name == "return_to_user":
+            # Outcome-based escalation (cross-cutting spec §2): before a LOCAL
+            # answer is delivered, the persona's configured judge decides
+            # adequate/inadequate. Inadequate converts this return_to_user
+            # into a tool result instructing the brain to escalate — normal
+            # tier selection takes it from there. Judged at most once.
+            judge_mode = (ctx.persona or {}).get("outcome_judge")
+            if (judge_mode and not flags.get("judged")
+                    and flags.get("last_worker_local")
+                    and flags.get("last_tool_result")):
+                flags["judged"] = True
+                adequate, reasoning, judge_desc = await self._judge_outcome(
+                    ctx, emit, flags, judge_mode, effective)
+                if not adequate:
+                    emit("think", f"Outcome judge ({judge_desc}): INADEQUATE — "
+                                  f"escalating. {reasoning}")
+                    ctx.logger.record_guardrail(
+                        f"outcome judge escalation ({judge_desc}): {reasoning[:200]}")
+                    return (f"OUTCOME JUDGE ({judge_desc}) found the local answer "
+                            f"INADEQUATE: {reasoning} Escalate now: dispatch a "
+                            f"higher-tier model per the SELECTION PROCEDURE (set "
+                            f"include_full_user_message=true if the user message "
+                            f"was truncated), then forward its result with "
+                            f"return_to_user(use_last_result=true)."), False
+                emit("think", f"Outcome judge ({judge_desc}): adequate — "
+                              f"delivering the local answer. {reasoning}")
             answer = str(args.get("answer") or "")
             if args.get("use_last_result") or not answer.strip():
                 if flags["last_tool_result"]:
@@ -491,6 +549,12 @@ class AgentRunner:
                                        backend_name, result.prompt_tokens,
                                        result.completion_tokens)
             flags["last_tool_result"] = result.content
+            # Tracked for the outcome judge: only LOCAL answers get judged
+            # (escalated answers already cost paid budget — judging them again
+            # would spend more to second-guess the expensive tier).
+            flags["last_worker_model"] = model_id
+            flags["last_worker_local"] = bool(
+                backend_info and backend_info.get("type") == "ollama")
             emit("think", f"{model_id} responded in {time.monotonic() - t0:.0f}s "
                           f"({len(result.content)} chars"
                           + (f", ~${cost:.4f}" if cost else "") + ").")
@@ -500,7 +564,250 @@ class AgentRunner:
         emit("think", f"Calling MCP tool {tool.server}/{tool.mcp_tool}...")
         try:
             out = await self.tool_registry.mcp.call_tool(tool.server, tool.mcp_tool, args)
+            flags["last_tool_result"] = out  # media artifacts (URLs) forward via use_last_result
+            flags["last_worker_local"] = False  # MCP results aren't judged
             return out[:self.brain.cfg.mcp_result_limit_chars] or "(empty MCP result)", False
         except Exception as e:
             emit("think", f"MCP tool {name} failed: {e}")
             return f"ERROR: MCP tool {name} failed: {e}", False
+
+    # ------------------------------------------------------ model pickers --
+
+    def _cheapest_claude(self, exclude_level_above: int = 4) -> Optional[str]:
+        """Lowest-tier Claude model currently reachable (Haiku first) — the
+        'cheapest adequate paid tier' used by Prepare/Check and the paid
+        judge. Conservation guardrails still apply at call time."""
+        from ..usage import claude_premium_level
+        best, best_level = None, 99
+        for model_id in self.pool.available_models():
+            info = self.pool.backend_info(model_id)
+            if not info or info.get("type") != "anthropic-compatible":
+                continue
+            level = claude_premium_level(model_id)
+            if 1 <= level <= exclude_level_above and level < best_level:
+                best, best_level = model_id, level
+        return best
+
+    def _best_local(self, category: str, exclude: Optional[str] = None,
+                    prefer_measured: bool = False) -> Optional[str]:
+        """Best local model for a category by registry score. With
+        prefer_measured, rows backed by real benchmark numbers outrank
+        estimates (pipeline spec: 'real measured coding benchmark score,
+        not just tag presence')."""
+        local = [m for m in self.pool.available_models()
+                 if m != exclude
+                 and (self.pool.backend_info(m) or {}).get("type") == "ollama"]
+        if not local:
+            return None
+        ranked = self.model_registry.ranked_for_category(
+            category, local, limit=50, per_tier=50)
+        def key(r: dict):
+            measured = 0 if (prefer_measured and r.get("score_type") == "measured") \
+                else (1 if r.get("score") is not None else 2)
+            return (measured, -(r.get("score") or -1))
+        ranked.sort(key=key)
+        return ranked[0]["id"] if ranked else local[0]
+
+    # ------------------------------------------------------ outcome judge --
+
+    async def _judge_outcome(self, ctx: RequestContext, emit, flags: dict,
+                             mode: str, effective: dict) -> tuple[bool, str, str]:
+        """Configurable adequacy judge (spec §2): 'paid' = cheapest Claude
+        tier, 'local_large' = best other local model (genuinely free),
+        'brain' = the routing brain itself. Judge failures fail OPEN — a
+        broken judge must never block answers."""
+        request = self._full_last_user_message(ctx)[:4000]
+        answer = (flags.get("last_tool_result") or "")[:6000]
+        prompt = prompts.JUDGE_PROMPT.format(request=request, answer=answer)
+        emit("think", f"Outcome check ({mode}): judging whether the local answer "
+                      f"is adequate...")
+
+        judge_model: Optional[str] = None
+        if mode == "paid":
+            judge_model = self._cheapest_claude()
+            if judge_model:
+                verdict = await self.guardrails.check_paid_call(
+                    judge_model, self.pool.backend_info(judge_model),
+                    self.model_registry.get(judge_model), ctx.guard, effective)
+                if not verdict.allowed:
+                    emit("think", f"Paid judge unavailable ({verdict.reason}) — "
+                                  f"falling back to a large local judge.")
+                    judge_model = None
+        if judge_model is None and mode in ("paid", "local_large"):
+            judge_model = self._best_local(
+                (ctx.persona or {}).get("benchmark_category") or "general_chat",
+                exclude=flags.get("last_worker_model"))
+
+        db = self.model_registry.db
+        try:
+            if judge_model:
+                result, backend = await self.pool.chat(
+                    judge_model, [{"role": "user", "content": prompt}],
+                    max_tokens=1024)
+                text = result.content
+                desc = judge_model
+                info = self.pool.backend_info(judge_model)
+                ctx.logger.record_model_call(judge_model, backend,
+                                             result.prompt_tokens,
+                                             result.completion_tokens, 0.0)
+                if info and info.get("type") == "anthropic-compatible":
+                    log_subscription_usage(db, judge_model, backend,
+                                           result.prompt_tokens,
+                                           result.completion_tokens)
+            else:
+                text = await self.brain.complete(prompt)
+                desc = f"brain:{self.brain.cfg.model}"
+        except Exception as e:
+            db.log_event("warning", "outcome_judge",
+                         "judge call failed — accepting local answer (fail-open)",
+                         str(e))
+            emit("think", "Outcome judge unavailable — accepting the local answer.")
+            return True, f"judge unavailable ({e.__class__.__name__})", mode
+
+        from ..registry.research_agent import extract_json
+        data = extract_json(text) or {}
+        adequate = bool(data.get("adequate", True))
+        reasoning = str(data.get("reasoning") or text[:200]).strip()
+        db.log_event("info", "outcome_judge",
+                     f"verdict={'adequate' if adequate else 'INADEQUATE'} "
+                     f"judge={desc} persona={(ctx.persona or {}).get('virtual_name')}",
+                     reasoning[:500])
+        return adequate, reasoning, desc
+
+    # ---------------------------------------------- coding pipeline (§1) --
+
+    async def run_pipeline(self, ctx: RequestContext) -> AsyncIterator[AgentEvent]:
+        """Prepare -> Execute -> Check: a distinct execution mode, not a
+        variant of the generic brain loop. The cheapest adequate Claude tier
+        structures the request, the best MEASURED local coder executes, and
+        (unless the persona opts out) the paid tier reviews — one bounded
+        retry on real problems, never a loop."""
+        from ..registry.research_agent import extract_json
+
+        persona = ctx.persona or {}
+        effective = self.guardrails.effective(persona)
+        user_text = self._full_last_user_message(ctx)
+        db = self.model_registry.db
+        yield AgentEvent("think", "Coding pipeline: Prepare → Execute → Check")
+
+        async def paid_call(model_id: str, prompt: str, purpose: str):
+            """Guardrail-checked paid step; returns content or None (skipped)."""
+            verdict = await self.guardrails.check_paid_call(
+                model_id, self.pool.backend_info(model_id),
+                self.model_registry.get(model_id), ctx.guard, effective)
+            if not verdict.allowed:
+                ctx.logger.record_guardrail(f"pipeline {purpose}: {verdict.reason}")
+                return None, f"{purpose} skipped — {verdict.reason}"
+            t0 = time.monotonic()
+            result, backend = await self.pool.chat(
+                model_id, [{"role": "user", "content": prompt}], max_tokens=4096)
+            ctx.logger.record_model_call(model_id, backend, result.prompt_tokens,
+                                         result.completion_tokens, 0.0)
+            log_subscription_usage(db, model_id, backend,
+                                   result.prompt_tokens, result.completion_tokens)
+            return result.content, f"{purpose} done in {time.monotonic() - t0:.0f}s"
+
+        # -- Prepare ---------------------------------------------------------
+        spec = user_text
+        claude = self._cheapest_claude()
+        if claude:
+            yield AgentEvent("think", f"Prepare: structuring the request via {claude}...")
+            try:
+                content, note = await paid_call(
+                    claude, prompts.PIPELINE_PREPARE.format(request=user_text[:12000]),
+                    "prepare")
+                yield AgentEvent("think", f"Prepare: {note}.")
+                if content and content.strip():
+                    spec = content.strip()
+            except AllBackendsFailed as e:
+                yield AgentEvent("think", f"Prepare failed ({e}) — executing from "
+                                          f"the raw request.")
+        else:
+            yield AgentEvent("think", "No Claude tier reachable — executing from "
+                                      "the raw request.")
+
+        # -- Execute ----------------------------------------------------------
+        executor = self._best_local("coding", prefer_measured=True)
+        if executor is None:
+            # No local coder at all: degrade to the paid tier end-to-end
+            # rather than failing (must degrade, not fail).
+            if claude:
+                yield AgentEvent("think", "No local coding model reachable — "
+                                          "executing on the paid tier directly.")
+                try:
+                    content, note = await paid_call(claude, spec, "execute(paid)")
+                    yield AgentEvent("answer", content or "(no output)")
+                except AllBackendsFailed as e:
+                    yield AgentEvent("error", f"pipeline: no executor available ({e})")
+            else:
+                yield AgentEvent("error", "pipeline: no local coding model and no "
+                                          "Claude tier reachable")
+            return
+
+        yield AgentEvent("think", f"Execute: dispatching to {executor} (best "
+                                  f"measured local coding score) — waiting on "
+                                  f"generation...")
+        t0 = time.monotonic()
+        try:
+            result, backend = await self.pool.chat(
+                executor,
+                [{"role": "user", "content": prompts.PIPELINE_EXECUTE.format(
+                    spec=spec, request=user_text[:8000])}],
+                max_tokens=self.brain.cfg.worker_max_tokens)
+        except AllBackendsFailed as e:
+            yield AgentEvent("error", f"pipeline execute failed: {e}")
+            return
+        code = result.content
+        ctx.logger.record_model_call(executor, backend, result.prompt_tokens,
+                                     result.completion_tokens, 0.0)
+        yield AgentEvent("think", f"Execute: {executor} responded in "
+                                  f"{time.monotonic() - t0:.0f}s ({len(code)} chars).")
+
+        # -- Check ------------------------------------------------------------
+        final = code
+        check_on = persona.get("pipeline_check_enabled")
+        check_on = True if check_on is None else bool(check_on)
+        if check_on and claude and code.strip():
+            yield AgentEvent("think", f"Check: {claude} reviewing the output "
+                                      f"against the original request...")
+            try:
+                review_raw, note = await paid_call(
+                    claude, prompts.PIPELINE_REVIEW.format(
+                        request=user_text[:6000], code=code[:16000]), "check")
+                yield AgentEvent("think", f"Check: {note}.")
+                review = extract_json(review_raw or "") or {}
+                if review and not review.get("adequate", True):
+                    feedback = str(review.get("feedback") or "").strip()
+                    yield AgentEvent("think", f"Check found problems — one retry "
+                                              f"with feedback: {feedback[:300]}")
+                    ctx.logger.record_guardrail("pipeline check: retry issued")
+                    try:
+                        retry, backend = await self.pool.chat(
+                            executor,
+                            [{"role": "user", "content": prompts.PIPELINE_REVISE.format(
+                                spec=spec[:6000], code=code[:12000],
+                                feedback=feedback[:4000])}],
+                            max_tokens=self.brain.cfg.worker_max_tokens)
+                        ctx.logger.record_model_call(
+                            executor, backend, retry.prompt_tokens,
+                            retry.completion_tokens, 0.0)
+                        if retry.content.strip():
+                            final = retry.content
+                            yield AgentEvent("think", "Retry complete — delivering "
+                                                      "the revised version.")
+                    except AllBackendsFailed:
+                        # Bounded degradation: forward original WITH the caveats.
+                        final = (code + "\n\n---\nREVIEWER CAVEATS (retry "
+                                        "unavailable):\n" + feedback)
+                        yield AgentEvent("think", "Retry unavailable — forwarding "
+                                                  "with reviewer caveats attached.")
+                elif review:
+                    yield AgentEvent("think", "Check passed — no real problems found.")
+            except AllBackendsFailed as e:
+                yield AgentEvent("think", f"Check unavailable ({e}) — delivering "
+                                          f"unreviewed output.")
+        elif not check_on:
+            yield AgentEvent("think", "Check disabled for this persona "
+                                      "(pipeline_check_enabled=false).")
+
+        yield AgentEvent("answer", final)

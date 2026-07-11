@@ -14,7 +14,9 @@ from .db import Database, utcnow
 
 PERSONA_FIELDS = ["description", "benchmark_category", "local_bias_strength",
                   "escalation_triggers", "preferred_mcp_tools",
-                  "guardrail_overrides", "pinned_models", "enabled"]
+                  "guardrail_overrides", "pinned_models", "execution_mode",
+                  "pipeline_check_enabled", "outcome_judge", "required_tags",
+                  "prefer_permissive", "enabled"]
 
 
 class PersonaStore:
@@ -38,7 +40,7 @@ class PersonaStore:
     def upsert(self, virtual_name: str, **fields) -> None:
         now = utcnow()
         for k in ("escalation_triggers", "preferred_mcp_tools", "guardrail_overrides",
-                  "pinned_models"):
+                  "pinned_models", "required_tags"):
             if k in fields and not isinstance(fields[k], (str, type(None))):
                 fields[k] = json.dumps(fields[k])
         fields = {k: v for k, v in fields.items() if k in PERSONA_FIELDS}
@@ -56,6 +58,20 @@ class PersonaStore:
 
     def delete(self, virtual_name: str) -> None:
         self.db.execute("DELETE FROM personas WHERE virtual_name=?", (virtual_name,))
+
+    def clone(self, source_name: str, new_name: str) -> Optional[dict]:
+        """Duplicate an existing persona under a new name (persona-management
+        spec §3) — new variants start from a working configuration instead of
+        being rebuilt from scratch. Returns the new row, or None if the source
+        is missing or the target name is taken."""
+        source = self.get(source_name)
+        if source is None or self.get(new_name) is not None:
+            return None
+        fields = {k: source.get(k) for k in PERSONA_FIELDS}
+        fields["description"] = f"(clone of {source['virtual_name']}) " \
+                                + (fields.get("description") or "")
+        self.upsert(new_name, **fields)
+        return self.get(new_name)
 
     @staticmethod
     def guardrail_overrides(persona: Optional[dict]) -> dict:

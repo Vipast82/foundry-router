@@ -58,10 +58,24 @@ Return ONLY a JSON object, no prose, with this exact shape:
 }}
 
 Rules: use "measured" ONLY when a real numeric benchmark result appears in the
-text (normalize to 0-100). Where no hard number exists, you may give an
-"estimated" score from the qualitative discussion, with confidence <= 0.5.
-Lower confidence when only a single source or vendor-published numbers exist.
-If the text contains nothing useful, return {{"benchmarks": []}}."""
+text — and quote that number EXACTLY as written in the source. NEVER
+recalculate, average, round, or paraphrase a number: if the source says 57.2,
+the score is 57.2, not your own synthesis of it. Where no directly-stated
+number exists, you may give an "estimated" score from the qualitative
+discussion, with confidence <= 0.5. Lower confidence when only a single source
+or vendor-published numbers exist. If the text contains nothing useful, return
+{{"benchmarks": []}}."""
+
+
+def measured_score_in_text(score: float, corpus: str) -> bool:
+    """Does this exact number literally appear in the fetched material?
+    Guards against LLM synthesis errors (confirmed live: a research run cited
+    coding 45.3 while every fetched source said 57.2) — a 'measured' score
+    that can't be found verbatim gets downgraded to an estimate."""
+    candidates = {f"{score:g}", f"{score:.1f}", f"{score:.2f}"}
+    if float(score).is_integer():
+        candidates.add(str(int(score)))
+    return any(c in corpus for c in candidates)
 
 
 def extract_json(text: str) -> Optional[dict]:
@@ -263,14 +277,25 @@ class ResearchAgent:
                 if cat not in CATEGORIES:
                     continue
                 score = float(b.get("score"))
+                score_type = "measured" if b.get("score_type") == "measured" else "estimated"
+                confidence_scale = 1.0
+                if score_type == "measured" and not measured_score_in_text(score, text):
+                    # The model claims "measured" but the number is nowhere in
+                    # the fetched material — synthesis, not quotation.
+                    self.db.log_event(
+                        "warning", "research",
+                        f"downgraded {model_id}/{cat} score {score} to estimated — "
+                        f"number not found verbatim in sources")
+                    score_type, confidence_scale = "estimated", 0.6
                 self.registry.upsert_benchmark(
                     model_id, cat, max(0.0, min(100.0, score)),
-                    score_type=("measured" if b.get("score_type") == "measured" else "estimated"),
+                    score_type=score_type,
                     source_type=(b.get("source_type")
                                  if b.get("source_type") in ("vendor", "independent", "community_report")
                                  else "community_report"),
                     source_url=str(b.get("source_url") or "")[:500],
-                    confidence=max(0.0, min(1.0, float(b.get("confidence", 0.4)))),
+                    confidence=max(0.0, min(1.0, float(b.get("confidence", 0.4))
+                                            * confidence_scale)),
                 )
                 wrote += 1
             except (TypeError, ValueError):
