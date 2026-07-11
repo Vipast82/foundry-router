@@ -520,13 +520,22 @@ function quotaCard(q) {
       return '<span class="pill warn">Opus+ conserved</span>';
     return "";
   };
-  const lines = q.backends.flatMap(b =>
-    (b.buckets || []).filter(k => k.used !== null && k.used !== undefined).map(k =>
+  const lines = q.backends.flatMap(b => {
+    const out = (b.buckets || []).filter(k => k.used !== null && k.used !== undefined).map(k =>
       `<div class="row"><label>${esc(b.backend)} · ${esc(k.label)} window</label>
        <b>${Math.round(k.used * 100)}% used</b>
        ${k.resets_hhmm ? `<span class="hint">resets ${esc(k.resets_hhmm)}</span>` : ""}
        ${pill(k)}
-      </div>`));
+      </div>`);
+    // Observed-exhaustion / hard-unavailable state must be visible even when
+    // the quota endpoint reports no buckets (the blind-sources case).
+    if (b.available === false) {
+      out.push(`<div class="row"><label>${esc(b.backend)}</label>
+        <span class="pill bad">window unavailable</span>
+        <span class="hint">${esc(b.note || "")}</span></div>`);
+    }
+    return out;
+  });
   const o5 = q.observed.last_5h || {}, o7 = q.observed.last_7d || {};
   return `<div class="card">
     <h2 style="margin-top:0">Claude usage window (live from Meridian)</h2>
