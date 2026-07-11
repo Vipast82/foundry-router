@@ -7,6 +7,7 @@ from foundry_router.brain.agent import AgentRunner, RequestContext
 from foundry_router.config import AgentBrainConfig, GuardrailsConfig, MeridianConfig
 from foundry_router.db import Database
 from foundry_router.guardrails import GuardrailEngine, RequestGuardState
+from foundry_router.pool.base import AllBackendsFailed
 from foundry_router.pool.protocols import ChatResult
 from foundry_router.registry.models_db import ModelRegistry
 from foundry_router.tools.mcp_client import MCPManager
@@ -136,3 +137,62 @@ async def test_no_local_coder_degrades_to_paid(tmp_path):
     events = await _run(runner, ctx)
     answers = [ev for ev in events if ev.kind == "answer"]
     assert answers and answers[0].text == "paid-tier code"
+
+
+class FlakyExecutePool(ScriptedPool):
+    """The live failure: the local coder's backend raises (with the
+    descriptive error text) while everything else works."""
+
+    def __init__(self, types, responses, fail_models, fail_times=99):
+        super().__init__(types, responses)
+        self.fail_models = fail_models
+        self.fail_times = fail_times
+        self.fail_counts: dict = {}
+
+    async def chat(self, model, messages, tools=None, options=None, max_tokens=4096):
+        if model in self.fail_models:
+            n = self.fail_counts.get(model, 0)
+            if n < self.fail_times:
+                self.fail_counts[model] = n + 1
+                self.calls.append((model, messages[-1]["content"]))
+                raise AllBackendsFailed(f"all backends failed for {model!r}: "
+                                        f"truenas-ollama: ReadError (no message)")
+        return await super().chat(model, messages, tools, options, max_tokens)
+
+
+async def test_execute_transient_failure_retries_and_recovers(tmp_path):
+    # first attempt fails (cold-load transport blip), retry succeeds
+    pool = FlakyExecutePool(
+        {HAIKU: "anthropic-compatible", CODER: "ollama"},
+        {HAIKU: ["SPEC", '{"adequate": true, "feedback": ""}'], CODER: ["the code"]},
+        fail_models={CODER}, fail_times=1)
+    runner, ctx = _runner(tmp_path, pool)
+    events = await _run(runner, ctx)
+    assert [m for m, _ in pool.calls].count(CODER) == 2   # fail + successful retry
+    answers = [ev for ev in events if ev.kind == "answer"]
+    assert answers[0].text == "the code"
+    thinks = " | ".join(ev.text for ev in events if ev.kind == "think")
+    assert "retrying once" in thinks
+    assert "ReadError (no message)" in thinks             # real error text surfaced
+
+
+async def test_execute_hard_failure_degrades_to_paid_cleanly(tmp_path):
+    pool = FlakyExecutePool(
+        {HAIKU: "anthropic-compatible", CODER: "ollama"},
+        {HAIKU: ["SPEC", "paid-tier code"], CODER: []},
+        fail_models={CODER})
+    runner, ctx = _runner(tmp_path, pool)
+    events = await _run(runner, ctx)
+    assert [m for m, _ in pool.calls].count(CODER) == 2   # exactly one retry
+    answers = [ev for ev in events if ev.kind == "answer"]
+    assert answers[0].text == "paid-tier code"            # degraded, not failed
+    assert not [ev for ev in events if ev.kind == "error"]  # no raw error leak
+
+
+async def test_total_failure_ends_with_clean_text_not_error(tmp_path):
+    pool = FlakyExecutePool({CODER: "ollama"}, {CODER: []}, fail_models={CODER})
+    runner, ctx = _runner(tmp_path, pool)
+    events = await _run(runner, ctx)
+    answers = [ev for ev in events if ev.kind == "answer"]
+    assert "could not reach any model" in answers[0].text
+    assert not [ev for ev in events if ev.kind == "error"]

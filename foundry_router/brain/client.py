@@ -99,8 +99,10 @@ class BrainClient:
                 # missing, second malformed attempt — funnels into the same
                 # degrade path. The brain host rebooting must never take the
                 # whole service down.
-                raise BrainUnreachable(f"agent brain ({self.cfg.provider} "
-                                       f"{self.cfg.model} @ {self.cfg.endpoint}): {e}") from e
+                from ..errors import describe_exception
+                raise BrainUnreachable(
+                    f"agent brain ({self.cfg.provider} {self.cfg.model} @ "
+                    f"{self.cfg.endpoint}): {describe_exception(e)}") from e
         raise AssertionError("unreachable")  # loop always returns or raises
 
     async def complete(self, prompt: str) -> str:
