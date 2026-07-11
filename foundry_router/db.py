@@ -27,27 +27,25 @@ def utcnow() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-# The four starter personas from design doc §4.8 — a starting point, not a
-# fixed list; rows are freely editable/addable via the web UI. Seeded with
-# INSERT OR IGNORE so user edits are never clobbered on restart.
+# Starter personas (design doc §4.8 + persona-expansion spec) — a starting
+# point, not a fixed list; rows are freely editable/addable via the web UI.
+# Seeded with INSERT OR IGNORE so user edits are never clobbered on restart.
 STARTER_PERSONAS = [
     {
         "virtual_name": "Foundry-Coding",
-        "description": "Local-first coding policy (Kilo/Cline default). Escalates only on "
-                       "multi-file architecture or an explicit review request.",
+        "description": "Coding pipeline: Prepare (cheapest Claude structures the request) -> "
+                       "Execute (best measured local coder) -> Check (paid review, one retry).",
         "benchmark_category": "coding",
         "local_bias_strength": "strong",
-        "escalation_triggers": json.dumps([
-            "multi-file architecture or system design",
-            "explicit request for review by Claude",
-            "local model failed twice on the same task",
-        ]),
+        "escalation_triggers": json.dumps([]),
         "preferred_mcp_tools": json.dumps([]),
         "guardrail_overrides": json.dumps({"max_paid_calls_per_request": 2}),
+        "execution_mode": "pipeline",
     },
     {
         "virtual_name": "Foundry-Chat",
-        "description": "General chat (AnythingLLM / Open WebUI default). Cost-aware routing.",
+        "description": "General chat (AnythingLLM / Open WebUI default). Cost-aware routing; "
+                       "generative-media requests route to media MCP tools when connected.",
         "benchmark_category": "general_chat",
         "local_bias_strength": "cost_aware_default",
         "escalation_triggers": json.dumps([
@@ -60,26 +58,57 @@ STARTER_PERSONAS = [
     {
         "virtual_name": "Foundry-Research",
         "description": "User-facing research: 'go research X and summarize it'. Uses the "
-                       "SearXNG/Crawl4AI MCP tools. Distinct from the background Research "
-                       "Agent that maintains the model registry (design doc §4.8 note).",
+                       "SearXNG/Crawl4AI MCP tools; local-first with outcome-judged escalation.",
         "benchmark_category": "agentic",
-        "local_bias_strength": "moderate",
-        "escalation_triggers": json.dumps([
-            "synthesis across many sources",
-        ]),
+        "local_bias_strength": "strong",
+        "escalation_triggers": json.dumps([]),
         "preferred_mcp_tools": json.dumps(["searxng", "crawl4ai"]),
         "guardrail_overrides": json.dumps({}),
+        "outcome_judge": "local_large",
     },
     {
         "virtual_name": "Foundry-RAG",
         "description": "Retrieval-augmented answering: leans on the connecting workspace's "
-                       "own retrieval (e.g., AnythingLLM vector search) rather than picking "
-                       "a specific model itself.",
+                       "own retrieval; local-first with outcome-judged escalation.",
         "benchmark_category": "general_chat",
-        "local_bias_strength": "moderate",
+        "local_bias_strength": "strong",
         "escalation_triggers": json.dumps([]),
         "preferred_mcp_tools": json.dumps([]),
         "guardrail_overrides": json.dumps({}),
+        "outcome_judge": "local_large",
+    },
+    {
+        "virtual_name": "Foundry-Vision",
+        "description": "Image/document UNDERSTANDING (describe this screenshot, read this "
+                       "scan) — distinct from image generation. Candidates filtered to "
+                       "vision-tagged models.",
+        "benchmark_category": "general_chat",
+        "local_bias_strength": "strong",
+        "escalation_triggers": json.dumps([]),
+        "preferred_mcp_tools": json.dumps([]),
+        "guardrail_overrides": json.dumps({}),
+        "required_tags": json.dumps(["vision"]),
+    },
+    {
+        "virtual_name": "Foundry-Creative",
+        "description": "Open creative writing / roleplay / NSFW front door. Strong local "
+                       "bias; PERMISSIVE-tagged local models preferred by default.",
+        "benchmark_category": "general_chat",
+        "local_bias_strength": "strong",
+        "escalation_triggers": json.dumps([]),
+        "preferred_mcp_tools": json.dumps([]),
+        "guardrail_overrides": json.dumps({"max_paid_calls_per_request": 1}),
+        "prefer_permissive": 1,
+    },
+    {
+        "virtual_name": "Foundry-Agent",
+        "description": "Full multi-step agentic loop with tool access for genuinely "
+                       "multi-part tasks across several tools.",
+        "benchmark_category": "agentic",
+        "local_bias_strength": "moderate",
+        "escalation_triggers": json.dumps(["task requires coordinating several tools"]),
+        "preferred_mcp_tools": json.dumps(["searxng", "crawl4ai"]),
+        "guardrail_overrides": json.dumps({"max_steps_per_request": 20}),
     },
 ]
 
@@ -118,6 +147,11 @@ class Database:
             ("models", "tool_calls_ok", "INTEGER DEFAULT 0"),
             ("models", "tool_calls_failed", "INTEGER DEFAULT 0"),
             ("personas", "pinned_models", "TEXT"),
+            ("personas", "execution_mode", "TEXT"),
+            ("personas", "pipeline_check_enabled", "INTEGER DEFAULT 1"),
+            ("personas", "outcome_judge", "TEXT"),
+            ("personas", "required_tags", "TEXT"),
+            ("personas", "prefer_permissive", "INTEGER DEFAULT 0"),
         ]
         with self._lock:
             for table, column, ddl in added:
@@ -136,14 +170,42 @@ class Database:
                     """INSERT OR IGNORE INTO personas
                        (virtual_name, description, benchmark_category,
                         local_bias_strength, escalation_triggers,
-                        preferred_mcp_tools, guardrail_overrides, enabled,
+                        preferred_mcp_tools, guardrail_overrides,
+                        execution_mode, pipeline_check_enabled, outcome_judge,
+                        required_tags, prefer_permissive, enabled,
                         created_at, updated_at)
-                       VALUES (?,?,?,?,?,?,?,1,?,?)""",
+                       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,1,?,?)""",
                     (p["virtual_name"], p["description"], p["benchmark_category"],
                      p["local_bias_strength"], p["escalation_triggers"],
-                     p["preferred_mcp_tools"], p["guardrail_overrides"], now, now),
+                     p["preferred_mcp_tools"], p["guardrail_overrides"],
+                     p.get("execution_mode"), p.get("pipeline_check_enabled", 1),
+                     p.get("outcome_judge"), p.get("required_tags"),
+                     p.get("prefer_permissive", 0), now, now),
                 )
             self._conn.commit()
+        self._seed_upgrades()
+
+    def _seed_upgrades(self) -> None:
+        """One-time data upgrades for EXISTING deployments (INSERT OR IGNORE
+        can't change rows that already exist). kv-flagged so it never re-runs
+        and never fights later manual edits. New installs get the same values
+        straight from STARTER_PERSONAS."""
+        if self.kv_get("persona_seed_v2"):
+            return
+        now = utcnow()
+        # Persona-expansion spec §3: RAG/Research go strong + outcome-judged
+        # escalation instead of static trigger phrases; §1: Foundry-Coding
+        # becomes the Prepare->Execute->Check pipeline.
+        self.execute(
+            "UPDATE personas SET local_bias_strength='strong', "
+            "outcome_judge='local_large', escalation_triggers='[]', updated_at=? "
+            "WHERE virtual_name IN ('Foundry-RAG', 'Foundry-Research')", (now,))
+        self.execute(
+            "UPDATE personas SET execution_mode='pipeline', updated_at=? "
+            "WHERE virtual_name='Foundry-Coding'", (now,))
+        self.kv_set("persona_seed_v2", utcnow())
+        self.log_event("info", "main",
+                       "persona seed v2 applied (pipeline mode, outcome-judged escalation)")
 
     # -- generic helpers --------------------------------------------------------
 

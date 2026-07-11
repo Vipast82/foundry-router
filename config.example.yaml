@@ -174,6 +174,25 @@ mcp_servers: []
 #  - name: crawl4ai
 #    url: http://192.168.1.40:8972/mcp
 #    transport: streamable-http
+#
+#  Media generation (see contrib/mcp-wrappers/README.md) — set generous
+#  per-server timeouts; generation runs far longer than a text tool call:
+#  - name: comfyui                 # community server, e.g. joenorton/comfyui-mcp-server
+#    url: http://192.168.1.40:8188/mcp
+#    transport: streamable-http
+#    timeout_seconds: 900
+#  - name: voicebox                # ships its own /mcp endpoint
+#    url: http://192.168.1.40:5001/mcp
+#    transport: streamable-http
+#    timeout_seconds: 300
+#  - name: acestep                 # contrib/mcp-wrappers/acestep_mcp.py
+#    url: http://192.168.1.40:8765/mcp
+#    transport: streamable-http
+#    timeout_seconds: 900
+#  - name: chatterbox              # contrib/mcp-wrappers/chatterbox_mcp.py
+#    url: http://192.168.1.40:8766/mcp
+#    transport: streamable-http
+#    timeout_seconds: 300
 
 # --- Tool Sync (§4.2) ----------------------------------------------------------
 tool_sync:

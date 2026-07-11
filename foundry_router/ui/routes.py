@@ -305,6 +305,20 @@ async def upsert_persona(request: Request):
     return {"ok": True, "persona": svc.personas.get(name)}
 
 
+@router.post("/admin/api/personas/clone")
+async def clone_persona(request: Request):
+    svc = _svc(request)
+    body = await request.json()
+    source, new_name = body.get("source") or "", body.get("new_name") or ""
+    if not source or not new_name:
+        return JSONResponse({"error": "source and new_name required"}, status_code=400)
+    cloned = svc.personas.clone(source, new_name)
+    if cloned is None:
+        return JSONResponse({"error": "source missing or new_name already exists"},
+                            status_code=409)
+    return {"ok": True, "persona": cloned}
+
+
 @router.post("/admin/api/personas/delete")
 async def delete_persona(request: Request):
     svc = _svc(request)
@@ -359,7 +373,8 @@ async def upsert_mcp(request: Request):
     if not body.get("name") or not body.get("url"):
         return JSONResponse({"error": "name and url required"}, status_code=400)
     entry = {"name": body["name"], "url": body["url"],
-             "transport": body.get("transport", "streamable-http")}
+             "transport": body.get("transport", "streamable-http"),
+             "timeout_seconds": int(body.get("timeout_seconds") or 300)}
     if body.get("headers"):
         entry["headers"] = body["headers"]
 

@@ -60,6 +60,14 @@ CREATE TABLE IF NOT EXISTS personas (
   pinned_models TEXT,               -- JSON ordered list: models boosted (not hard-required)
                                     -- to the top of this persona's candidate list; guardrail/
                                     -- quota denial falls through to the next pin, then the pool
+  execution_mode TEXT,              -- NULL/"agent" = generic brain loop | "pipeline" = the
+                                    -- Prepare->Execute->Check coding pipeline (§ coding spec)
+  pipeline_check_enabled INTEGER DEFAULT 1,  -- pipeline mode: paid review of local output
+  outcome_judge TEXT,               -- NULL = off | "paid" | "local_large" | "brain" — after a
+                                    -- local answer, this judge decides adequate/escalate
+  required_tags TEXT,               -- JSON list: when any candidate carries one of these tags,
+                                    -- the candidate list is FILTERED to tag matches (Foundry-Vision)
+  prefer_permissive INTEGER DEFAULT 0,  -- boost content_policy=permissive models to the front
   enabled INTEGER DEFAULT 1,
   created_at TEXT,
   updated_at TEXT

@@ -89,14 +89,31 @@ class MCPManager:
         return out
 
     async def call_tool(self, server: str, tool: str, arguments: dict[str, Any]) -> str:
-        async with self._session(server) as session:
-            result = await session.call_tool(tool, arguments)
-            texts = []
-            for block in getattr(result, "content", []) or []:
-                text = getattr(block, "text", None)
-                if text:
-                    texts.append(text)
-            joined = "\n".join(texts) if texts else str(result)
-            if getattr(result, "isError", False):
-                raise RuntimeError(f"MCP tool {server}/{tool} returned error: {joined[:500]}")
-            return joined
+        cfg = self.servers.get(server)
+        timeout = getattr(cfg, "timeout_seconds", 300) if cfg else 300
+
+        async def _call() -> str:
+            async with self._session(server) as session:
+                result = await session.call_tool(tool, arguments)
+                texts = []
+                for block in getattr(result, "content", []) or []:
+                    text = getattr(block, "text", None)
+                    if text:
+                        texts.append(text)
+                joined = "\n".join(texts) if texts else str(result)
+                if getattr(result, "isError", False):
+                    raise RuntimeError(
+                        f"MCP tool {server}/{tool} returned error: {joined[:500]}")
+                return joined
+
+        import asyncio
+        try:
+            # Per-server budget: media generation (ComfyUI/TTS/music) can run
+            # many minutes; a search tool should fail fast. Configurable per
+            # connection instead of one global assumption.
+            return await asyncio.wait_for(_call(), timeout=timeout)
+        except asyncio.TimeoutError:
+            raise RuntimeError(
+                f"MCP tool {server}/{tool} timed out after {timeout}s "
+                f"(raise timeout_seconds on this server's connection if its "
+                f"jobs legitimately run longer)") from None

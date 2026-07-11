@@ -310,7 +310,8 @@ async function tabPersonas() {
     <td class="nw">${esc(p.benchmark_category)}</td><td class="nw">${esc(p.local_bias_strength)}</td>
     <td class="mono">${esc(p.preferred_mcp_tools || "[]")}</td>
     <td>${esc(p.description || "")}</td>
-    <td><button class="act" onclick='editPersona(${JSON.stringify(p.virtual_name)})'>edit</button>
+    <td class="nw"><button class="act" onclick='editPersona(${JSON.stringify(p.virtual_name)})'>edit</button>
+        <button class="act" onclick='clonePersona(${JSON.stringify(p.virtual_name)})'>clone</button>
         <button class="act" onclick='run(api("personas/delete",{method:"POST",body:{virtual_name:${JSON.stringify(p.virtual_name)}}}))'>delete</button></td>
     </tr>`).join("");
   $("#main").innerHTML = `
@@ -337,6 +338,18 @@ async function tabPersonas() {
         <input id="pe-guard" size="70" value="{}"></div>
       <div class="row"><label title="Ordered list of model ids boosted to the top of this persona's candidates. Not hard-required: guardrail/quota denial falls through to the next pin, then the normal pool.">pinned_models (JSON list, priority order)</label>
         <input id="pe-pins" size="70" value="[]" placeholder='["claude-sonnet-4-6", "glm-4.7-flash:latest"]'></div>
+      <div class="row">
+        <label title="agent = generic brain loop; pipeline = Prepare (cheapest Claude) → Execute (best measured local coder) → Check (paid review)">execution_mode</label>
+        <select id="pe-mode"><option value="">agent</option><option>pipeline</option></select>
+        <label title="pipeline mode only: paid review of the local output (one bounded retry)">pipeline_check</label>
+        <input type="checkbox" id="pe-check" checked>
+        <label title="After a LOCAL answer, this judge decides adequate/escalate. paid = cheapest Claude; local_large = best other local model (free); brain = routing brain itself">outcome_judge</label>
+        <select id="pe-judge"><option value="">off</option><option>paid</option>
+          <option>local_large</option><option>brain</option></select></div>
+      <div class="row"><label title="When any candidate carries one of these tags, candidates are FILTERED to matches (e.g. vision)">required_tags (JSON list)</label>
+        <input id="pe-reqtags" size="40" value="[]" placeholder='["vision"]'>
+        <label title="Boost PERMISSIVE-tagged (uncensored) local models to the front">prefer_permissive</label>
+        <input type="checkbox" id="pe-perm"></div>
       <button class="act primary" id="pe-save">Save persona</button>
     </div>`;
   window._personas = Object.fromEntries(d.personas.map(p => [p.virtual_name, p]));
@@ -349,7 +362,22 @@ async function tabPersonas() {
     escalation_triggers: JSON.parse($("#pe-trig").value || "[]"),
     preferred_mcp_tools: JSON.parse($("#pe-mcp").value || "[]"),
     guardrail_overrides: JSON.parse($("#pe-guard").value || "{}"),
-    pinned_models: JSON.parse($("#pe-pins").value || "[]")}}));
+    pinned_models: JSON.parse($("#pe-pins").value || "[]"),
+    execution_mode: $("#pe-mode").value || null,
+    pipeline_check_enabled: $("#pe-check").checked ? 1 : 0,
+    outcome_judge: $("#pe-judge").value || null,
+    required_tags: JSON.parse($("#pe-reqtags").value || "[]"),
+    prefer_permissive: $("#pe-perm").checked ? 1 : 0}}));
+window.clonePersona = async source => {
+  const newName = prompt("New persona name (clone of " + source + "):",
+                         source + "-copy");
+  if (!newName) return;
+  try {
+    await api("personas/clone", {method: "POST",
+                                 body: {source, new_name: newName.trim()}});
+    toast("Cloned " + source + " → " + newName); render();
+  } catch (e) { toast(e.message, true); }
+};
 }
 window.editPersona = name => {
   const p = window._personas[name]; if (!p) return;
@@ -365,6 +393,12 @@ window.editPersona = name => {
   $("#pe-mcp").value = p.preferred_mcp_tools || "[]";
   $("#pe-guard").value = p.guardrail_overrides || "{}";
   $("#pe-pins").value = p.pinned_models || "[]";
+  $("#pe-mode").value = p.execution_mode || "";
+  $("#pe-check").checked = p.pipeline_check_enabled === null
+    || p.pipeline_check_enabled === undefined || !!p.pipeline_check_enabled;
+  $("#pe-judge").value = p.outcome_judge || "";
+  $("#pe-reqtags").value = p.required_tags || "[]";
+  $("#pe-perm").checked = !!p.prefer_permissive;
 };
 
 /* ----------------------------------------------------------------- tools -- */
@@ -452,22 +486,26 @@ async function tabMCP() {
   const d = await api("mcp_servers");
   const rows = d.servers.map(s => `<tr>
     <td>${esc(s.name)}</td><td class="mono">${esc(s.url)}</td><td>${esc(s.transport)}</td>
+    <td class="nw">${s.timeout_seconds ?? 300}s</td>
     <td><button class="act" onclick='run(api("mcp_servers/delete",{method:"POST",body:{name:${JSON.stringify(s.name)}}}))'>remove</button></td>
     </tr>`).join("");
   $("#main").innerHTML = `
     <h2>MCP server connections (§4.9 item 8)</h2>
     <p class="hint">A connection list, not a tool list — tools are discovered automatically
     per server by Tool Sync once a connection exists.</p>
-    <table><tr><th>name</th><th>url</th><th>transport</th><th></th></tr>${rows}</table>
+    <table><tr><th>name</th><th>url</th><th>transport</th><th>timeout</th><th></th></tr>${rows}</table>
     <div class="card">
       <div class="row"><label>name</label><input id="mcp-name" size="16">
       <label>url</label><input id="mcp-url" size="40" placeholder="http://host:port/mcp">
       <label>transport</label><select id="mcp-tr"><option>streamable-http</option><option>sse</option></select>
+      <label title="Per-server tool-call budget. Media generation (ComfyUI/TTS/music) can need 600-1800s; search tools should fail fast.">timeout (s)</label>
+      <input id="mcp-to" type="number" size="6" value="300">
       <button class="act primary" id="mcp-add">Add / update</button></div>
     </div>`;
   $("#mcp-add").onclick = () => run(api("mcp_servers", {method: "POST", body: {
     name: $("#mcp-name").value.trim(), url: $("#mcp-url").value.trim(),
-    transport: $("#mcp-tr").value}}));
+    transport: $("#mcp-tr").value,
+    timeout_seconds: +$("#mcp-to").value || 300}}));
 }
 
 /* ----------------------------------------------------------------- usage -- */
