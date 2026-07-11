@@ -530,9 +530,7 @@ class AgentRunner:
                           + " — waiting on generation (long tasks can take a few minutes)...")
             t0 = time.monotonic()
             try:
-                result, backend_name = await self.pool.chat(
-                    model_id, [{"role": "user", "content": prompt}],
-                    max_tokens=self.brain.cfg.worker_max_tokens)
+                result, backend_name = await self._dispatch_worker(model_id, prompt)
             except AllBackendsFailed as e:
                 emit("think", f"All backends failed for {model_id} after "
                               f"{time.monotonic() - t0:.0f}s — the brain will pick "
@@ -570,6 +568,35 @@ class AgentRunner:
         except Exception as e:
             emit("think", f"MCP tool {name} failed: {e}")
             return f"ERROR: MCP tool {name} failed: {e}", False
+
+    # ------------------------------------------------- canonical dispatch --
+
+    async def _dispatch_worker(self, model_id: str, prompt: str,
+                               max_tokens: Optional[int] = None):
+        """THE single worker-dispatch path. Agent ask_* tools, every pipeline
+        step, and outcome judges all call models through here, so timeout and
+        dispatch behavior can never diverge between execution modes again
+        (found live: the pipeline's Execute step failing on cold-load latency
+        the ask_* path tolerated fine).
+
+        Also the observed-exhaustion hook (Bug 2 mitigation): Meridian's quota
+        sources can be completely blind (oauth null, sdk count 0 — confirmed
+        live at 100% used), so an exhaustion-shaped failure on a subscription
+        backend is recorded as real signal, and a success clears it."""
+        from ..usage import looks_like_window_exhaustion
+        info = self.pool.backend_info(model_id)
+        is_subscription = bool(info and info.get("type") == "anthropic-compatible")
+        try:
+            result, backend = await self.pool.chat(
+                model_id, [{"role": "user", "content": prompt}],
+                max_tokens=max_tokens or self.brain.cfg.worker_max_tokens)
+        except AllBackendsFailed as e:
+            if is_subscription and looks_like_window_exhaustion(str(e)):
+                self.meridian_usage.note_observed_exhaustion(info["url"])
+            raise
+        if is_subscription:
+            self.meridian_usage.note_successful_call(info["url"])
+        return result, backend
 
     # ------------------------------------------------------ model pickers --
 
@@ -641,9 +668,8 @@ class AgentRunner:
         db = self.model_registry.db
         try:
             if judge_model:
-                result, backend = await self.pool.chat(
-                    judge_model, [{"role": "user", "content": prompt}],
-                    max_tokens=1024)
+                result, backend = await self._dispatch_worker(
+                    judge_model, prompt, max_tokens=1024)
                 text = result.content
                 desc = judge_model
                 info = self.pool.backend_info(judge_model)
@@ -699,8 +725,8 @@ class AgentRunner:
                 ctx.logger.record_guardrail(f"pipeline {purpose}: {verdict.reason}")
                 return None, f"{purpose} skipped — {verdict.reason}"
             t0 = time.monotonic()
-            result, backend = await self.pool.chat(
-                model_id, [{"role": "user", "content": prompt}], max_tokens=4096)
+            result, backend = await self._dispatch_worker(model_id, prompt,
+                                                          max_tokens=4096)
             ctx.logger.record_model_call(model_id, backend, result.prompt_tokens,
                                          result.completion_tokens, 0.0)
             log_subscription_usage(db, model_id, backend,
@@ -727,41 +753,70 @@ class AgentRunner:
                                       "the raw request.")
 
         # -- Execute ----------------------------------------------------------
-        executor = self._best_local("coding", prefer_measured=True)
-        if executor is None:
-            # No local coder at all: degrade to the paid tier end-to-end
-            # rather than failing (must degrade, not fail).
+        # Failure discipline (found live: transient transport error during a
+        # normal 70s cold model load killed the whole request, with the real
+        # exception text swallowed): retry the local coder ONCE, then degrade
+        # to the paid tier, and always end with clean user-facing text — never
+        # a raw internal error string in the chat.
+        UNREACHABLE = ("The coding pipeline could not reach any model to execute "
+                       "this request — details are in the Events log. Please "
+                       "retry shortly.")
+
+        async def paid_execute_or_apology():
             if claude:
-                yield AgentEvent("think", "No local coding model reachable — "
-                                          "executing on the paid tier directly.")
+                yield_events = []
                 try:
                     content, note = await paid_call(claude, spec, "execute(paid)")
-                    yield AgentEvent("answer", content or "(no output)")
+                    yield_events.append(AgentEvent(
+                        "answer", content if content and content.strip() else UNREACHABLE))
                 except AllBackendsFailed as e:
-                    yield AgentEvent("error", f"pipeline: no executor available ({e})")
-            else:
-                yield AgentEvent("error", "pipeline: no local coding model and no "
-                                          "Claude tier reachable")
+                    db.log_event("error", "pipeline",
+                                 "paid execute fallback failed too", str(e))
+                    yield_events.append(AgentEvent("answer", UNREACHABLE))
+                return yield_events
+            db.log_event("error", "pipeline",
+                         "no local coder and no Claude tier reachable")
+            return [AgentEvent("answer", UNREACHABLE)]
+
+        executor = self._best_local("coding", prefer_measured=True)
+        if executor is None:
+            yield AgentEvent("think", "No local coding model reachable — "
+                                      "executing on the paid tier directly.")
+            for ev in await paid_execute_or_apology():
+                yield ev
             return
 
-        yield AgentEvent("think", f"Execute: dispatching to {executor} (best "
-                                  f"measured local coding score) — waiting on "
-                                  f"generation...")
-        t0 = time.monotonic()
-        try:
-            result, backend = await self.pool.chat(
-                executor,
-                [{"role": "user", "content": prompts.PIPELINE_EXECUTE.format(
-                    spec=spec, request=user_text[:8000])}],
-                max_tokens=self.brain.cfg.worker_max_tokens)
-        except AllBackendsFailed as e:
-            yield AgentEvent("error", f"pipeline execute failed: {e}")
-            return
-        code = result.content
-        ctx.logger.record_model_call(executor, backend, result.prompt_tokens,
-                                     result.completion_tokens, 0.0)
-        yield AgentEvent("think", f"Execute: {executor} responded in "
-                                  f"{time.monotonic() - t0:.0f}s ({len(code)} chars).")
+        exec_prompt = prompts.PIPELINE_EXECUTE.format(
+            spec=spec, request=user_text[:8000])
+        code = None
+        for attempt in (1, 2):
+            yield AgentEvent("think", f"Execute: dispatching to {executor} (best "
+                                      f"measured local coding score"
+                                      + (", retry" if attempt == 2 else "")
+                                      + ") — waiting on generation...")
+            t0 = time.monotonic()
+            try:
+                result, backend = await self._dispatch_worker(executor, exec_prompt)
+            except AllBackendsFailed as e:
+                if attempt == 1:
+                    yield AgentEvent("think", f"Execute attempt failed ({e}) — "
+                                              f"retrying once (cold model loads can "
+                                              f"trip transport timeouts)...")
+                    continue
+                db.log_event("error", "pipeline",
+                             f"execute failed twice on {executor}", str(e))
+                yield AgentEvent("think", f"Execute failed twice on {executor} "
+                                          f"({e}) — degrading to the paid tier.")
+                for ev in await paid_execute_or_apology():
+                    yield ev
+                return
+            code = result.content
+            ctx.logger.record_model_call(executor, backend, result.prompt_tokens,
+                                         result.completion_tokens, 0.0)
+            yield AgentEvent("think", f"Execute: {executor} responded in "
+                                      f"{time.monotonic() - t0:.0f}s "
+                                      f"({len(code)} chars).")
+            break
 
         # -- Check ------------------------------------------------------------
         final = code
@@ -782,12 +837,10 @@ class AgentRunner:
                                               f"with feedback: {feedback[:300]}")
                     ctx.logger.record_guardrail("pipeline check: retry issued")
                     try:
-                        retry, backend = await self.pool.chat(
-                            executor,
-                            [{"role": "user", "content": prompts.PIPELINE_REVISE.format(
+                        retry, backend = await self._dispatch_worker(
+                            executor, prompts.PIPELINE_REVISE.format(
                                 spec=spec[:6000], code=code[:12000],
-                                feedback=feedback[:4000])}],
-                            max_tokens=self.brain.cfg.worker_max_tokens)
+                                feedback=feedback[:4000]))
                         ctx.logger.record_model_call(
                             executor, backend, retry.prompt_tokens,
                             retry.completion_tokens, 0.0)

@@ -34,7 +34,8 @@ from ..brain.agent import RequestContext
 from ..brain.fallback import pick_fallback_model
 from ..guardrails import RequestGuardState
 from ..pool.base import AllBackendsFailed
-from ..usage import RequestLogger, estimate_cost_usd, log_subscription_usage
+from ..usage import (RequestLogger, estimate_cost_usd,
+                     log_subscription_usage, looks_like_window_exhaustion)
 from . import translate as tr
 
 log = logging.getLogger(__name__)
@@ -302,9 +303,14 @@ async def _direct_dispatch_chat(svc, persona, model_name, messages, client_tools
         if binfo and binfo.get("type") == "anthropic-compatible":
             log_subscription_usage(svc.db, model_id, backend,
                                    result.prompt_tokens, result.completion_tokens)
+            svc.meridian_usage.note_successful_call(binfo["url"])
     except AllBackendsFailed as e:
         if "invalid tool call" in str(e):
             svc.registry.record_tool_call(model_id, ok=False)
+        binfo = svc.pool.backend_info(model_id)
+        if (binfo and binfo.get("type") == "anthropic-compatible"
+                and looks_like_window_exhaustion(str(e))):
+            svc.meridian_usage.note_observed_exhaustion(binfo["url"])
         logger.finish("error", str(e))
         return JSONResponse({"error": str(e)}, status_code=502)
     cost = estimate_cost_usd(svc.registry.get(model_id),

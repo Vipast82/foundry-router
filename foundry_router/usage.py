@@ -55,6 +55,21 @@ def _is_fable_bucket(bucket_type: str) -> bool:
     return "fable" in t or "mythos" in t
 
 
+# Confirmed live: Anthropic returns the SAME "authentication expired" /
+# "authentication_error" text for USAGE EXHAUSTION as for real credential
+# failure (session independently verified at 100% used while this error
+# fired). When Meridian's quota sources are blind (oauth null, sdk
+# entryCount 0 — both confirmed non-functional for this profile), a failure
+# of this shape on a subscription backend is the only real signal we get.
+EXHAUSTION_ERROR_MARKERS = ("authentication expired", "authentication_error",
+                            "rate_limit", "429", "overloaded")
+
+
+def looks_like_window_exhaustion(error_text: str) -> bool:
+    t = (error_text or "").lower()
+    return any(m in t for m in EXHAUSTION_ERROR_MARKERS)
+
+
 # --------------------------------------------------------------------------- #
 # Quota parsing                                                               #
 # --------------------------------------------------------------------------- #
@@ -144,17 +159,57 @@ class MeridianUsage:
         self.client = client
         self.db = db
         self._cache: dict[str, tuple[float, dict]] = {}
+        self._observed_exhausted: dict[str, float] = {}  # base_url -> monotonic deadline
 
     def clear_cache(self) -> None:
         self._cache.clear()
 
+    # -- observed-exhaustion fallback (quota endpoint blind) -----------------
+
+    def note_observed_exhaustion(self, base_url: str, ttl_seconds: int = 1800) -> None:
+        """A live subscription call just failed with the exhaustion-shaped
+        error. Treat the window as exhausted for a bounded TTL (or until a
+        call succeeds) so the guardrail isn't blind when the quota endpoint
+        reports nothing. Trade-off, stated plainly: a REAL credential failure
+        matches the same error text — but those calls would fail anyway, so a
+        30-minute backoff is the right behavior for both causes; the Events
+        log entry is how you tell them apart."""
+        self._observed_exhausted[base_url] = time.monotonic() + ttl_seconds
+        self.db.log_event(
+            "warning", "usage",
+            "window exhaustion OBSERVED from a live call failure — quota endpoint "
+            "reports no signal; treating window as exhausted (auto-clears on the "
+            "next successful Claude call or after the backoff)", base_url)
+
+    def note_successful_call(self, base_url: str) -> None:
+        if self._observed_exhausted.pop(base_url, None) is not None:
+            self._cache.pop(base_url, None)
+            self.db.log_event("info", "usage",
+                              "Claude call succeeded — clearing observed-exhaustion "
+                              "backoff", base_url)
+
+    def _apply_observed(self, base_url: str, snap: dict) -> dict:
+        deadline = self._observed_exhausted.get(base_url)
+        if deadline is None:
+            return snap
+        if time.monotonic() >= deadline:
+            self._observed_exhausted.pop(base_url, None)
+            return snap
+        if snap.get("worst_used") is not None:
+            return snap  # real quota data wins over the inference
+        minutes = int((deadline - time.monotonic()) / 60) + 1
+        return {**snap, "available": False,
+                "note": f"window exhaustion OBSERVED from a live call failure "
+                        f"(quota endpoint reports no data); backing off ~{minutes} "
+                        f"min or until a Claude call succeeds"}
+
     async def snapshot(self, base_url: str, api_key: Optional[str] = None) -> dict:
         cached = self._cache.get(base_url)
         if cached and time.monotonic() - cached[0] < 30:
-            return cached[1]
+            return self._apply_observed(base_url, cached[1])
         snap = await self._fetch(base_url, api_key)
         self._cache[base_url] = (time.monotonic(), snap)
-        return snap
+        return self._apply_observed(base_url, snap)
 
     async def window_available(self, base_url: str,
                                api_key: Optional[str] = None) -> tuple[bool, str]:

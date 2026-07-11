@@ -19,6 +19,7 @@ import httpx
 
 from ..config import BackendConfig, BackendPoolConfig
 from ..db import Database
+from ..errors import describe_exception
 from .base import AllBackendsFailed, BackendPool
 from .protocols import BaseProtocol, ChatResult, ProtocolError, make_protocol
 
@@ -92,7 +93,7 @@ class InternalPool(BackendPool):
             # backend is down — but we have no cheaper liveness probe that
             # works across all three protocols, so treat it as a failed check
             # and rely on failure_threshold to absorb blips.
-            changed = self._record_failure(s, f"discovery failed: {e}")
+            changed = self._record_failure(s, f"discovery failed: {describe_exception(e)}")
             if s.config.models and s.healthy:
                 s.models = list(s.config.models)
             return changed
@@ -201,13 +202,16 @@ class InternalPool(BackendPool):
                                                options=options, max_tokens=max_tokens)
                 s.consecutive_failures = 0
                 return result, s.config.name
-            except (httpx.HTTPError, ProtocolError, OSError) as e:
-                errors.append(f"{s.config.name}: {e}")
-                if self._record_failure(s, str(e)):
+            # ExceptionGroup: anyio TaskGroups can leak through httpcore on
+            # transport failures (observed live as an empty error string).
+            except (httpx.HTTPError, ProtocolError, OSError, ExceptionGroup) as e:
+                detail = describe_exception(e)
+                errors.append(f"{s.config.name}: {detail}")
+                if self._record_failure(s, detail):
                     self._notify()
                 self.db.log_event("warning", "backend_pool",
                                   f"call to {s.config.name} for {model} failed, trying next",
-                                  str(e)[:500])
+                                  detail)
         raise AllBackendsFailed(f"all backends failed for {model!r}: " + " | ".join(errors))
 
     async def chat_stream(self, model: str, messages: list[dict],
@@ -222,10 +226,11 @@ class InternalPool(BackendPool):
             async for chunk in s.protocol.chat_stream(model, messages, options=options):
                 yield chunk
             s.consecutive_failures = 0
-        except (httpx.HTTPError, ProtocolError, OSError) as e:
-            if self._record_failure(s, str(e)):
+        except (httpx.HTTPError, ProtocolError, OSError, ExceptionGroup) as e:
+            detail = describe_exception(e)
+            if self._record_failure(s, detail):
                 self._notify()
-            raise AllBackendsFailed(f"stream from {s.config.name} failed: {e}") from e
+            raise AllBackendsFailed(f"stream from {s.config.name} failed: {detail}") from e
 
     # -- convenience -------------------------------------------------------------------
 
