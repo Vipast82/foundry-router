@@ -35,6 +35,10 @@ class ChatResult:
     tool_calls: list[dict] = field(default_factory=list)  # [{"id","name","arguments":dict}]
     prompt_tokens: int = 0
     completion_tokens: int = 0
+    # Model reasoning, kept OUT of content: Ollama's native message.thinking
+    # when the backend separates it, plus any literal <think> blocks scrubbed
+    # from content at the dispatch layer (they leak to users otherwise).
+    thinking: str = ""
     raw: Any = None
 
 
@@ -158,6 +162,10 @@ class OllamaProtocol(BaseProtocol):
             tool_calls=tool_calls,
             prompt_tokens=data.get("prompt_eval_count") or 0,
             completion_tokens=data.get("eval_count") or 0,
+            # Reasoning models served with think-parsing enabled put their
+            # reasoning here, not in content — dropping it silently is fine
+            # for correctness but wasteful for narration; carry it along.
+            thinking=msg.get("thinking") or "",
             raw=data,
         )
 

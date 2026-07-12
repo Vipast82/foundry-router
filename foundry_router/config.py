@@ -76,6 +76,14 @@ class AgentBrainConfig(BaseModel):
     # it ever gets to route. The worker still receives the complete original
     # via the ask_* tools' include_full_user_message flag.
     user_input_preview_chars: int = 2000
+    # Streaming keep-alive: while a worker/brain/MCP call is in flight, emit a
+    # "still waiting" narration line every this-many seconds so reverse
+    # proxies and clients never mistake a working request for a dead one
+    # (found live: a failover-then-cold-load chain took 422s and produced a
+    # real answer, but the client's connection had already been closed —
+    # raising the proxy timeout can't keep up with worst-case chains; flowing
+    # bytes can). 0 disables.
+    heartbeat_seconds: float = 25.0
 
 
 class BackendConfig(BaseModel):
@@ -131,6 +139,11 @@ class MeridianConfig(BaseModel):
     # are simply ignored (pydantic drops unknown keys) and get this default.
     quota_path: str = "/v1/usage/quota"
     min_window_fraction: float = 0.05
+    # Active oauth-staleness watch: poll the quota endpoint on this interval
+    # so `sources.oauth` going null is caught within minutes (Events alert +
+    # UI banner) instead of whenever someone happens to compare numbers with
+    # the Claude app. The endpoint is read-only and free to poll. 0 disables.
+    quota_poll_seconds: int = 180
     # Adaptive tier conservation (usage-aware routing): as the window fills,
     # progressively deny more expensive Claude tiers so remaining budget goes
     # to work that needs it. Both live-editable in the Guardrails tab.

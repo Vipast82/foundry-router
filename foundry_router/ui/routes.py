@@ -129,7 +129,7 @@ async def set_brain(request: Request):
     body = await request.json()
     allowed = {"provider", "endpoint", "model", "api_key", "keep_alive", "max_tokens",
                "tool_result_limit_chars", "mcp_result_limit_chars", "worker_max_tokens",
-               "user_input_preview_chars"}
+               "user_input_preview_chars", "heartbeat_seconds"}
     updates = {k: v for k, v in body.items() if k in allowed}
 
     def mutate(raw):
@@ -182,12 +182,28 @@ async def quota(request: Request):
                 "min_window_fraction": svc.meridian_usage.cfg.min_window_fraction}}
 
 
+@router.get("/admin/api/meridian/health")
+async def meridian_health(request: Request):
+    """On-demand auth-validity probe (spec item 2): the free read-only quota
+    call answers 'is the Claude subscription login still valid' without
+    burning a real generation on finding out. Shares plumbing with the
+    background poll loop — same fetch, same edge-triggered alerting."""
+    svc = _svc(request)
+    from ..db import utcnow
+    out = []
+    for s in getattr(svc.pool, "backends_of_type", lambda t: [])("anthropic-compatible"):
+        health = await svc.meridian_usage.auth_health(s.config.url, s.config.api_key)
+        out.append({"backend": s.config.name, "url": s.config.url, **health})
+    return {"backends": out, "checked": utcnow()}
+
+
 @router.post("/admin/api/config/meridian")
 async def set_meridian(request: Request):
     svc = _svc(request)
     body = await request.json()
     allowed = {"quota_path", "min_window_fraction", "conserve_premium_at",
-               "conserve_strong_at", "conserve_fable_at", "usage_credits"}
+               "conserve_strong_at", "conserve_fable_at", "usage_credits",
+               "quota_poll_seconds"}
     updates = {k: v for k, v in body.items() if k in allowed}
 
     def mutate(raw):
@@ -413,7 +429,7 @@ async def usage_log(request: Request, limit: int = 100):
     rows = svc.db.query(
         "SELECT * FROM request_log ORDER BY id DESC LIMIT ?", (min(limit, 1000),))
     for r in rows:
-        for k in ("models_used", "guardrail_events"):
+        for k in ("models_used", "guardrail_events", "tool_calls"):
             try:
                 r[k] = json.loads(r[k]) if r[k] else []
             except (json.JSONDecodeError, TypeError):

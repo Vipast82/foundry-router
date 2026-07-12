@@ -49,6 +49,12 @@ agent_brain:
   # pasted user message (file/code) before routing. The dispatched worker
   # still receives the COMPLETE original (ask_* include_full_user_message).
   user_input_preview_chars: 2000
+  # Streaming keep-alive: while a worker/brain/MCP call is in flight, emit a
+  # "still working" narration line every N seconds — reverse proxies (NPM)
+  # and clients close idle connections long before a failover-then-cold-load
+  # chain finishes (seen live: 422s to a real answer, client gone at ~300s);
+  # flowing bytes reset their idle clocks. 0 disables.
+  heartbeat_seconds: 25
 
   # -- provider: meridian example --
   # provider: "meridian"
@@ -146,6 +152,13 @@ meridian:
   # with "try local first"; an insistent retry is permitted and logged as
   # spending credits. "never": exhaustion is a hard stop.
   usage_credits: "last_resort"
+  # Active oauth-staleness watch: poll the quota endpoint (free, read-only)
+  # this often. Meridian's sources.oauth has silently gone null twice —
+  # usage figures drift with no error anywhere until someone compares numbers
+  # with the Claude app. The poll raises an Events alert + Usage Log banner
+  # the moment it flips; fix is manual (meridian profile login <profile>
+  # --headless). 0 disables.
+  quota_poll_seconds: 180
 
 # --- §4.4 Model Registry & Research Agent --------------------------------------
 registry:

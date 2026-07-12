@@ -165,6 +165,7 @@ class Services:
         self._bg_tasks = [
             asyncio.create_task(self._openrouter_loop()),
             asyncio.create_task(self._tool_sync_loop()),
+            asyncio.create_task(self._quota_poll_loop()),
         ]
 
     def _apply_seed(self) -> None:
@@ -199,6 +200,28 @@ class Services:
                 await self.tool_registry.sync(self.pool)
             except Exception:
                 log.exception("periodic tool sync failed")
+
+    async def _quota_poll_loop(self) -> None:
+        """Active oauth-staleness watch (Meridian's oauth quota source has
+        silently gone null twice, quietly corrupting usage figures): poll the
+        free read-only quota endpoint every few minutes so the flip raises an
+        Events alert + UI banner the moment it happens. The alerting itself is
+        edge-triggered inside MeridianUsage — this loop just guarantees a
+        fetch happens even when no requests are flowing."""
+        while True:
+            interval = self.config_store.config.meridian.quota_poll_seconds
+            if interval <= 0:
+                await asyncio.sleep(60)  # disabled; re-check the knob later
+                continue
+            await asyncio.sleep(max(30, interval))
+            try:
+                for s in getattr(self.pool, "backends_of_type",
+                                 lambda t: [])("anthropic-compatible"):
+                    # snapshot's 30s cache is far shorter than any sane poll
+                    # interval, so this always reaches the endpoint.
+                    await self.meridian_usage.snapshot(s.config.url, s.config.api_key)
+            except Exception:
+                log.exception("quota poll loop error")
 
     async def shutdown(self) -> None:
         for t in self._bg_tasks:

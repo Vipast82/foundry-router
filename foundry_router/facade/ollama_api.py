@@ -190,7 +190,14 @@ async def _agent_events_to_chat_chunks(svc, ctx: RequestContext, model_name: str
             if ev.kind == "think":
                 yield tr.chat_chunk(model_name, "", thinking=ev.text + "\n")
             elif ev.kind == "answer":
-                for piece in tr.chunk_text(ev.text):
+                # Safety net for literal <think> tags in answer text: worker
+                # output is scrubbed at the dispatch layer, but a brain-prose
+                # answer (post-nudge) never passes through it — reroute any
+                # reasoning to the native field here, last exit before the wire.
+                reasoning, clean = prompts.split_think(ev.text)
+                if reasoning:
+                    yield tr.chat_chunk(model_name, "", thinking=reasoning + "\n")
+                for piece in tr.chunk_text(clean):
                     yield tr.chat_chunk(model_name, piece)
             elif ev.kind == "ask_user":
                 status = "asked_user"
