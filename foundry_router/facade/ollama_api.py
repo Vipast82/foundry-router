@@ -29,6 +29,7 @@ import time
 from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse, PlainTextResponse, StreamingResponse
 
+from .. import __version__
 from ..brain import prompts
 from ..brain.agent import RequestContext
 from ..brain.fallback import pick_fallback_model
@@ -87,8 +88,9 @@ async def root() -> PlainTextResponse:
 @router.get("/api/version")
 async def version() -> dict:
     # Clients gate features on Ollama's version number; we advertise one whose
-    # API surface we match. Foundry's own version is in the header field.
-    return {"version": "0.9.0", "foundry_router": "0.1.0"}
+    # API surface we match (do NOT bump this to our version). Foundry's own
+    # version rides alongside in a separate field.
+    return {"version": "0.9.0", "foundry_router": __version__}
 
 
 @router.get("/api/tags")

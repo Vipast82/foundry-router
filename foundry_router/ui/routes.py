@@ -24,6 +24,8 @@ from pathlib import Path
 from fastapi import APIRouter, Request
 from fastapi.responses import FileResponse, JSONResponse
 
+from .. import __version__
+
 log = logging.getLogger(__name__)
 
 router = APIRouter()
@@ -58,7 +60,7 @@ async def status(request: Request):
     svc = _svc(request)
     cfg = svc.config_store.config
     return {
-        "version": "0.1.0",
+        "version": __version__,
         "pool_mode": cfg.backend_pool.mode,
         "guardrail_authority": cfg.guardrails.authority,
         "brain": {"provider": cfg.agent_brain.provider, "model": cfg.agent_brain.model,

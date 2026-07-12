@@ -24,6 +24,7 @@ from typing import Optional
 import httpx
 from fastapi import FastAPI
 
+from . import __version__
 from .brain.agent import AgentRunner
 from .brain.client import BrainClient
 from .config import ConfigStore, data_dir
@@ -251,7 +252,7 @@ def create_app(config_path: Optional[Path] = None,
         yield
         await services.shutdown()
 
-    app = FastAPI(title="Foundry Router", version="0.1.0",
+    app = FastAPI(title="Foundry Router", version=__version__,
                   docs_url=None, redoc_url=None, lifespan=lifespan)
     app.state.services = services
     app.include_router(facade_router)
