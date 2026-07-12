@@ -54,6 +54,10 @@ def _canonical_messages(raw: list[dict]) -> list[dict]:
         if role not in ("system", "user", "assistant", "tool"):
             role = "user"
         out.append({"role": role, "content": m.get("content") or "",
+                    # Ollama multimodal convention: images: ["<base64>", ...].
+                    # This function is the universal entry point — dropping the
+                    # field here silently blinded the whole app (found live).
+                    **({"images": m["images"]} if m.get("images") else {}),
                     **({"tool_calls": m["tool_calls"]} if m.get("tool_calls") else {}),
                     **({"tool_call_id": m["tool_call_id"]} if m.get("tool_call_id") else {})})
     return out
@@ -408,6 +412,8 @@ async def generate(request: Request):
     stream = body.get("stream", True)
     prompt = body.get("prompt") or ""
     messages = [{"role": "user", "content": prompt}]
+    if body.get("images"):  # /api/generate carries images at the top level
+        messages[0]["images"] = body["images"]
     if body.get("system"):
         messages.insert(0, {"role": "system", "content": body["system"]})
 
