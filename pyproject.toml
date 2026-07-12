@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "foundry-router"
-version = "0.1.0"
+dynamic = ["version"]
 description = "Self-hosted agentic LLM routing middleware: Ollama-compatible facade, local-first routing brain, Claude via Meridian, dynamic tool sync."
 readme = "README.md"
 license = { file = "LICENSE" }
@@ -21,6 +21,9 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = ["pytest>=8.0", "pytest-asyncio>=0.24"]
+
+[tool.setuptools.dynamic]
+version = { attr = "foundry_router.__version__" }
 
 [tool.setuptools.packages.find]
 include = ["foundry_router*"]

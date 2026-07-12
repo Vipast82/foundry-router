@@ -6,4 +6,8 @@ with dynamic tool discovery, a self-maintaining model registry, and
 usage-aware guardrails. Internal/private-network use only.
 """
 
-__version__ = "0.1.0"
+# Single source of truth for the app version. pyproject.toml reads this
+# dynamically (tool.setuptools.dynamic), and main.py / ui.routes /
+# facade.ollama_api all import __version__ rather than repeating a literal,
+# so a bump is one edit here.
+__version__ = "0.4.0"
