@@ -341,16 +341,28 @@ window.editModel = id => {
 async function tabPersonas() {
   const [d, td] = await Promise.all([api("personas"), api("tools")]);
   // Same discovered set the Tools tab reads — no second source, no drift.
-  const mcpTools = (td.tools || []).filter(t => t.kind === "mcp");
-  const checklist = mcpTools.length
-    ? mcpTools.map(t => `<label class="mcp-item${t.disabled ? " disabled" : ""}"
-        title="${t.disabled ? "This tool is disabled on the Tools tab — a persona should not prefer it while disabled" : ""}">
-        <input type="checkbox" value="${esc(t.name)}" data-server="${esc(t.server || "")}">
-        <span class="mono">${esc(t.name)}</span>
-        <span class="hint">mcp · ${esc(t.server || "")}${t.mcp_tool ? "/" + esc(t.mcp_tool) : ""}</span>
-        ${t.disabled ? '<span class="pill bad">disabled</span>' : ""}
-      </label>`).join("")
-    : `<span class="hint">No MCP tools discovered yet — add a server on the MCP tab.
+  // Grouped by SERVER: the persona field is server-level (checking a server
+  // prefers ALL its tools, matching sync's server-name rule) — not per-call.
+  const servers = {};
+  for (const t of (td.tools || []).filter(x => x.kind === "mcp")) {
+    const s = t.server || t.name;
+    (servers[s] ||= {tools: [], disabled: 0}).tools.push(t.name);
+    if (t.disabled) servers[s].disabled++;
+  }
+  const serverNames = Object.keys(servers).sort();
+  const checklist = serverNames.length
+    ? serverNames.map(s => {
+        const info = servers[s];
+        const allDisabled = info.disabled === info.tools.length;
+        return `<label class="mcp-item${allDisabled ? " disabled" : ""}"
+          title="${allDisabled ? "Every tool on this server is disabled on the Tools tab — a persona should not prefer it while disabled" : ""}">
+          <input type="checkbox" value="${esc(s)}" data-tools="${esc(info.tools.join(","))}">
+          <span class="mono">${esc(s)}</span>
+          <span class="hint">mcp · ${info.tools.length} tool${info.tools.length === 1 ? "" : "s"}${info.disabled ? ", " + info.disabled + " disabled" : ""}</span>
+          ${allDisabled ? '<span class="pill bad">disabled</span>' : ""}
+        </label>`;
+      }).join("")
+    : `<span class="hint">No MCP servers discovered yet — add one on the MCP tab.
        Any existing entries on a persona are preserved.</span>`;
   const rows = d.personas.map(p => `<tr>
     <td class="nw"><b>${esc(p.virtual_name)}</b> ${p.enabled ? "" : '<span class="pill warn">disabled</span>'}</td>
@@ -379,7 +391,7 @@ async function tabPersonas() {
         <label>enabled</label><input type="checkbox" id="pe-enabled" checked></div>
       <div class="row"><label>escalation_triggers (JSON list)</label>
         <input id="pe-trig" size="70" value="[]"></div>
-      <div class="row"><label title="MCP tools preferentially loaded for this persona's sessions (writes to preferred_mcp_tools). Populated live from the Tools tab's discovered set. Model (ask_*) tools are always available and not listed here. Not auto-attached — checking is a deliberate per-persona context-cost choice.">preferred MCP tools</label>
+      <div class="row"><label title="MCP servers preferentially loaded for this persona's sessions (writes to preferred_mcp_tools). Checking a server prefers ALL of its tools. Populated live from the Tools tab's discovered set. Model (ask_*) tools are always available and not listed here. Not auto-attached — checking is a deliberate per-persona context-cost choice.">preferred MCP servers</label>
         <div id="pe-mcp" class="mcp-checklist">${checklist}</div></div>
       <div class="row"><label>guardrail_overrides (JSON obj)</label>
         <input id="pe-guard" size="70" value="{}"></div>
@@ -428,18 +440,19 @@ window.clonePersona = async source => {
 };
 }
 /* Read the MCP checklist back into a preferred_mcp_tools list. Writes the
-   checked tool NAMES, and preserves any prior entries that don't correspond
-   to a currently-listed tool or server (offline servers, unknown names) so
-   editing never silently drops config the UI can't currently show. A prior
-   server-shorthand whose server IS listed is dropped in favor of the explicit
-   tool names it auto-checked — behaviorally identical, just clearer. */
+   checked SERVER names, and preserves any prior entries that map to no
+   currently-listed server or its tools (offline servers, unknown names) so
+   editing never silently drops config the UI can't currently show. Any prior
+   explicit tool-name entries collapse into their server name — behaviorally
+   identical to the sync matcher (a server entry attaches all its tools). */
 function readPreferredMcp(prevList) {
   const boxes = [...document.querySelectorAll("#pe-mcp input[type=checkbox]")];
   const checked = boxes.filter(b => b.checked).map(b => b.value);
-  const listedNames = new Set(boxes.map(b => b.value));
-  const listedServers = new Set(boxes.map(b => b.dataset.server).filter(Boolean));
+  const listedServers = new Set(boxes.map(b => b.value));
+  const listedTools = new Set(boxes.flatMap(
+    b => (b.dataset.tools || "").split(",").filter(Boolean)));
   const preserved = (prevList || []).filter(
-    e => !listedNames.has(e) && !listedServers.has(e));
+    e => !listedServers.has(e) && !listedTools.has(e));
   return [...new Set([...checked, ...preserved])];
 }
 window.editPersona = name => {
@@ -453,12 +466,12 @@ window.editPersona = name => {
   $("#pe-bias").value = p.local_bias_strength || "moderate";
   $("#pe-enabled").checked = !!p.enabled;
   $("#pe-trig").value = p.escalation_triggers || "[]";
-  // Check a tool if its name OR its server is preferred — mirrors the actual
-  // match logic (a server entry attaches all its tools), so server-shorthand
-  // shows as fully checked instead of appearing unset.
+  // Check a server if its name OR any of its tools is preferred — so both a
+  // server-name entry and a prior explicit tool-name list show as checked.
   const pref = new Set(parseTags(p.preferred_mcp_tools));
   document.querySelectorAll("#pe-mcp input[type=checkbox]").forEach(b => {
-    b.checked = pref.has(b.value) || (!!b.dataset.server && pref.has(b.dataset.server));
+    const tools = (b.dataset.tools || "").split(",").filter(Boolean);
+    b.checked = pref.has(b.value) || tools.some(t => pref.has(t));
   });
   $("#pe-guard").value = p.guardrail_overrides || "{}";
   $("#pe-pins").value = p.pinned_models || "[]";
