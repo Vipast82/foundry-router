@@ -328,6 +328,8 @@ async def _direct_dispatch_chat(svc, persona, model_name, messages, client_tools
         # Empirical tool-calling reliability: direct dispatch is where worker
         # models actually exercise tool calling (client-supplied tools).
         svc.registry.record_tool_call(model_id, ok=True)
+        svc.registry.note_inference(model_id, result.completion_tokens,
+                                    result.eval_duration_ns, result.load_duration_ns)
         binfo = svc.pool.backend_info(model_id)
         if binfo and binfo.get("type") == "anthropic-compatible":
             log_subscription_usage(svc.db, model_id, backend,
@@ -382,6 +384,8 @@ async def _passthrough_chat(svc, model_name, messages, client_tools, options,
                                      estimate_cost_usd(svc.registry.get(model_name),
                                                        result.prompt_tokens,
                                                        result.completion_tokens))
+            svc.registry.note_inference(model_name, result.completion_tokens,
+                                        result.eval_duration_ns, result.load_duration_ns)
             logger.finish("ok")
             tool_calls = [{"function": {"name": tc["name"], "arguments": tc["arguments"]}}
                           for tc in result.tool_calls] or None
