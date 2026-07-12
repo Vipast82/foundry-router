@@ -61,6 +61,16 @@
            border:1px solid var(--accent); padding:9px 14px; border-radius:6px;
            display:none; z-index:9; }
   details summary { cursor:pointer; color:var(--dim); }
+  /* Persona MCP-tool selector: a live checklist replacing the old raw-JSON
+     input, populated from the same discovered set the Tools tab shows. */
+  .mcp-checklist { display:flex; flex-direction:column; gap:1px; flex:1;
+    min-width:280px; max-height:180px; overflow-y:auto; padding:6px 8px;
+    border:1px solid var(--line); border-radius:5px; background:var(--bg); }
+  .mcp-item { display:flex; align-items:center; gap:7px; color:var(--fg);
+    padding:2px 0; min-width:0; }
+  .mcp-item.disabled { opacity:.5; }
+  .mcp-item input { flex:none; }
+  .mcp-item .hint { white-space:nowrap; }
 </style>
 </head>
 <body>
@@ -329,7 +339,19 @@ window.editModel = id => {
 
 /* -------------------------------------------------------------- personas -- */
 async function tabPersonas() {
-  const d = await api("personas");
+  const [d, td] = await Promise.all([api("personas"), api("tools")]);
+  // Same discovered set the Tools tab reads — no second source, no drift.
+  const mcpTools = (td.tools || []).filter(t => t.kind === "mcp");
+  const checklist = mcpTools.length
+    ? mcpTools.map(t => `<label class="mcp-item${t.disabled ? " disabled" : ""}"
+        title="${t.disabled ? "This tool is disabled on the Tools tab — a persona should not prefer it while disabled" : ""}">
+        <input type="checkbox" value="${esc(t.name)}" data-server="${esc(t.server || "")}">
+        <span class="mono">${esc(t.name)}</span>
+        <span class="hint">mcp · ${esc(t.server || "")}${t.mcp_tool ? "/" + esc(t.mcp_tool) : ""}</span>
+        ${t.disabled ? '<span class="pill bad">disabled</span>' : ""}
+      </label>`).join("")
+    : `<span class="hint">No MCP tools discovered yet — add a server on the MCP tab.
+       Any existing entries on a persona are preserved.</span>`;
   const rows = d.personas.map(p => `<tr>
     <td class="nw"><b>${esc(p.virtual_name)}</b> ${p.enabled ? "" : '<span class="pill warn">disabled</span>'}</td>
     <td class="nw">${esc(p.benchmark_category)}</td><td class="nw">${esc(p.local_bias_strength)}</td>
@@ -357,8 +379,8 @@ async function tabPersonas() {
         <label>enabled</label><input type="checkbox" id="pe-enabled" checked></div>
       <div class="row"><label>escalation_triggers (JSON list)</label>
         <input id="pe-trig" size="70" value="[]"></div>
-      <div class="row"><label>preferred_mcp_tools (JSON list)</label>
-        <input id="pe-mcp" size="70" value="[]"></div>
+      <div class="row"><label title="MCP tools preferentially loaded for this persona's sessions (writes to preferred_mcp_tools). Populated live from the Tools tab's discovered set. Model (ask_*) tools are always available and not listed here. Not auto-attached — checking is a deliberate per-persona context-cost choice.">preferred MCP tools</label>
+        <div id="pe-mcp" class="mcp-checklist">${checklist}</div></div>
       <div class="row"><label>guardrail_overrides (JSON obj)</label>
         <input id="pe-guard" size="70" value="{}"></div>
       <div class="row"><label title="Ordered list of model ids boosted to the top of this persona's candidates. Not hard-required: guardrail/quota denial falls through to the next pin, then the normal pool.">pinned_models (JSON list, priority order)</label>
@@ -385,7 +407,8 @@ async function tabPersonas() {
     local_bias_strength: $("#pe-bias").value,
     enabled: $("#pe-enabled").checked ? 1 : 0,
     escalation_triggers: JSON.parse($("#pe-trig").value || "[]"),
-    preferred_mcp_tools: JSON.parse($("#pe-mcp").value || "[]"),
+    preferred_mcp_tools: readPreferredMcp(
+      parseTags((window._personas[$("#pe-name").value.trim()] || {}).preferred_mcp_tools)),
     guardrail_overrides: JSON.parse($("#pe-guard").value || "{}"),
     pinned_models: JSON.parse($("#pe-pins").value || "[]"),
     execution_mode: $("#pe-mode").value || null,
@@ -404,6 +427,21 @@ window.clonePersona = async source => {
   } catch (e) { toast(e.message, true); }
 };
 }
+/* Read the MCP checklist back into a preferred_mcp_tools list. Writes the
+   checked tool NAMES, and preserves any prior entries that don't correspond
+   to a currently-listed tool or server (offline servers, unknown names) so
+   editing never silently drops config the UI can't currently show. A prior
+   server-shorthand whose server IS listed is dropped in favor of the explicit
+   tool names it auto-checked — behaviorally identical, just clearer. */
+function readPreferredMcp(prevList) {
+  const boxes = [...document.querySelectorAll("#pe-mcp input[type=checkbox]")];
+  const checked = boxes.filter(b => b.checked).map(b => b.value);
+  const listedNames = new Set(boxes.map(b => b.value));
+  const listedServers = new Set(boxes.map(b => b.dataset.server).filter(Boolean));
+  const preserved = (prevList || []).filter(
+    e => !listedNames.has(e) && !listedServers.has(e));
+  return [...new Set([...checked, ...preserved])];
+}
 window.editPersona = name => {
   const p = window._personas[name]; if (!p) return;
   $("#pe-title").textContent = "Edit " + name;
@@ -415,7 +453,13 @@ window.editPersona = name => {
   $("#pe-bias").value = p.local_bias_strength || "moderate";
   $("#pe-enabled").checked = !!p.enabled;
   $("#pe-trig").value = p.escalation_triggers || "[]";
-  $("#pe-mcp").value = p.preferred_mcp_tools || "[]";
+  // Check a tool if its name OR its server is preferred — mirrors the actual
+  // match logic (a server entry attaches all its tools), so server-shorthand
+  // shows as fully checked instead of appearing unset.
+  const pref = new Set(parseTags(p.preferred_mcp_tools));
+  document.querySelectorAll("#pe-mcp input[type=checkbox]").forEach(b => {
+    b.checked = pref.has(b.value) || (!!b.dataset.server && pref.has(b.dataset.server));
+  });
   $("#pe-guard").value = p.guardrail_overrides || "{}";
   $("#pe-pins").value = p.pinned_models || "[]";
   $("#pe-mode").value = p.execution_mode || "";
