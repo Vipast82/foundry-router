@@ -129,6 +129,9 @@ async function tabBackends() {
   $("#main").innerHTML = `
     <h2>Backend Pool — mode: ${esc(st.pool_mode)}</h2>
     <table><tr><th>name</th><th>type</th><th>url</th><th>prio</th><th>health</th><th>models</th><th>last error</th></tr>${rows}</table>
+    <div class="row"><button class="act" id="test-meridian"
+      title="Free read-only probe of Meridian's quota endpoint — answers 'is the Claude subscription login still valid' without burning a real generation">Test Meridian Auth</button>
+      <span id="meridian-health" class="hint"></span></div>
     <div class="card">
       <h2 style="margin-top:0">Edit backend list (internal mode)</h2>
       <p class="hint">JSON list. Use <code>\${MERIDIAN_API_KEY}</code>-style references for api_key —
@@ -159,6 +162,8 @@ async function tabBackends() {
         <label>worker_max_tokens</label><input id="brain-wmt" type="number" size="8">
         <label title="Caps what the brain sees of a large pasted user message before routing — the worker still receives the complete original (include_full_user_message)">user_input_preview_chars</label>
         <input id="brain-uip" type="number" size="8">
+        <label title="While a worker/brain/MCP call is in flight, emit a 'still working' narration line every N seconds so reverse proxies and clients never mistake a slow request (failover + cold model load) for a dead one. 0 disables.">heartbeat_seconds</label>
+        <input id="brain-hb" type="number" size="6">
         <button class="act primary" id="save-brain">Save brain</button></div>
     </div>`;
   const cfg = await api("config");
@@ -168,6 +173,25 @@ async function tabBackends() {
   $("#brain-mrl").value = cfg.agent_brain.mcp_result_limit_chars;
   $("#brain-wmt").value = cfg.agent_brain.worker_max_tokens;
   $("#brain-uip").value = cfg.agent_brain.user_input_preview_chars;
+  $("#brain-hb").value = cfg.agent_brain.heartbeat_seconds;
+  $("#test-meridian").onclick = async () => {
+    const el = $("#meridian-health");
+    el.textContent = "checking…";
+    try {
+      const r = await api("meridian/health");
+      if (!r.backends.length) {
+        el.textContent = "no anthropic-compatible backend configured";
+        return;
+      }
+      el.innerHTML = r.backends.map(b =>
+        `${esc(b.backend)}: ` + (b.valid
+          ? '<span class="pill ok">auth valid</span>'
+          : '<span class="pill bad">auth stale/invalid</span>')
+        + ` <span class="hint">${esc(b.error || b.note || "")}${b.oauth_ok === false
+          ? " — oauth source NULL; on the host run: meridian profile login &lt;profile&gt; --headless"
+          : ""}</span>`).join("<br>");
+    } catch (e) { el.textContent = e.message; }
+  };
   $("#save-backends").onclick = () =>
     run(api("config/backends", {method: "POST", body: JSON.parse($("#backends-json").value)}));
   $("#save-mode").onclick = () =>
@@ -179,7 +203,8 @@ async function tabBackends() {
       tool_result_limit_chars: +$("#brain-trl").value,
       mcp_result_limit_chars: +$("#brain-mrl").value,
       worker_max_tokens: +$("#brain-wmt").value,
-      user_input_preview_chars: +$("#brain-uip").value}}));
+      user_input_preview_chars: +$("#brain-uip").value,
+      heartbeat_seconds: +$("#brain-hb").value}}));
 }
 
 /* ---------------------------------------------------------------- models -- */
@@ -464,6 +489,8 @@ async function tabGuardrails() {
           value="${cfg.meridian.min_window_fraction}"></div>
       <div class="row"><label>quota_path</label>
         <input id="m-path" size="30" value="${esc(cfg.meridian.quota_path)}"></div>
+      <div class="row"><label title="Active oauth-staleness watch: poll the (free, read-only) quota endpoint this often so sources.oauth going null raises an Events alert + Usage Log banner within minutes. 0 disables.">quota_poll_seconds</label>
+        <input id="m-poll" type="number" value="${cfg.meridian.quota_poll_seconds}"></div>
       <button class="act primary" id="m-save">Save window policy</button>
     </div>`;
   $("#m-save").onclick = () => run(api("config/meridian", {method: "POST", body: {
@@ -472,7 +499,8 @@ async function tabGuardrails() {
     conserve_fable_at: +$("#m-fable").value,
     usage_credits: $("#m-credits").value,
     min_window_fraction: +$("#m-min").value,
-    quota_path: $("#m-path").value}}));
+    quota_path: $("#m-path").value,
+    quota_poll_seconds: +$("#m-poll").value}}));
   $("#g-save").onclick = () => run(api("config/guardrails", {method: "POST", body: {
     authority: $("#g-auth").value,
     max_steps_per_request: +$("#g-steps").value,
@@ -520,6 +548,18 @@ function quotaCard(q) {
       return '<span class="pill warn">Opus+ conserved</span>';
     return "";
   };
+  // OAuth staleness (has silently corrupted usage figures twice): loudest
+  // thing on the card the moment sources.oauth goes null — don't make anyone
+  // discover it by comparing numbers with the Claude app again.
+  const alerts = q.backends.filter(b => b.oauth_ok === false).map(b =>
+    `<div class="row"><span class="pill bad">OAUTH STALE</span>
+     <span>${esc(b.backend)}: Meridian's oauth quota source is NULL — the figures
+     below are stale/partial${b.oauth_alert_since ? " (since " + esc(b.oauth_alert_since.slice(0, 19)) + " UTC)" : ""}.
+     Fix on the host: <code>meridian profile login &lt;profile&gt; --headless</code></span></div>`);
+  const credits = q.backends.filter(b => b.credits_used_usd !== null && b.credits_used_usd !== undefined)
+    .map(b => `<div class="row"><label>${esc(b.backend)} · purchased credits</label>
+     <b>$${b.credits_used_usd.toFixed(2)} used</b>
+     <span class="hint">extra usage beyond the plan windows (last-resort policy)</span></div>`);
   const lines = q.backends.flatMap(b => {
     const out = (b.buckets || []).filter(k => k.used !== null && k.used !== undefined).map(k =>
       `<div class="row"><label>${esc(b.backend)} · ${esc(k.label)} window</label>
@@ -539,6 +579,7 @@ function quotaCard(q) {
   const o5 = q.observed.last_5h || {}, o7 = q.observed.last_7d || {};
   return `<div class="card">
     <h2 style="margin-top:0">Claude usage window (live from Meridian)</h2>
+    ${alerts.join("")}${credits.join("")}
     ${lines.join("") || `<p class="hint">${q.backends.length
       ? "no usage signal yet (fresh window, or quota endpoint returned no buckets)"
       : "no Claude/subscription backend configured"}</p>`}
@@ -552,11 +593,23 @@ function quotaCard(q) {
 
 async function tabUsage() {
   const [d, q] = await Promise.all([api("usage?limit=100"), api("quota")]);
+  // Per-request MCP/tool call trail (visibility spec item 5) — same
+  // expandable-detail pattern as the Events tab.
+  const toolCell = r => {
+    const calls = Array.isArray(r.tool_calls) ? r.tool_calls : [];
+    if (!calls.length) return "";
+    const ok = calls.every(t => t.ok);
+    return `<details><summary><span class="pill ${ok ? "ok" : "bad"}">${calls.length}</span></summary>
+      ${calls.map(t => `<div class="mono nw">${t.ok ? "✓" : "✗"} ${esc(t.server)}/${esc(t.tool)}
+        ${((t.duration_ms || 0) / 1000).toFixed(1)}s${t.error ? " — " + esc(t.error) : ""}</div>`).join("")}
+      </details>`;
+  };
   const rows = d.requests.map(r => `<tr>
     <td class="mono nw">${esc((r.ts || "").slice(0, 19))}</td>
     <td class="nw">${esc(r.persona || r.client_model)}</td><td class="nw">${esc(r.mode)}</td>
     <td>${esc(r.summary)}</td>
     <td class="mono">${(r.models_used || []).map(m => esc(m.model)).join(" → ")}</td>
+    <td>${toolCell(r)}</td>
     <td>${r.steps ?? ""}</td><td class="nw">${r.duration_ms} ms</td>
     <td>${r.est_cost_usd ? "$" + r.est_cost_usd.toFixed(4) : ""}</td>
     <td>${(r.guardrail_events || []).length ? '<span class="pill warn">' + (r.guardrail_events || []).length + "</span>" : ""}</td>
@@ -566,7 +619,7 @@ async function tabUsage() {
     ${quotaCard(q)}
     <h2>Usage log — every routed request (§4.9 item 6)</h2>
     <table><tr><th>time (UTC)</th><th>persona</th><th>mode</th><th>request</th>
-    <th>models used</th><th>steps</th><th>time</th><th>cost</th><th>guard</th><th>status</th></tr>${rows}</table>`;
+    <th>models used</th><th>tools</th><th>steps</th><th>time</th><th>cost</th><th>guard</th><th>status</th></tr>${rows}</table>`;
 }
 
 /* ---------------------------------------------------------------- events -- */

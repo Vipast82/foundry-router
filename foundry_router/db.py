@@ -152,6 +152,7 @@ class Database:
             ("personas", "outcome_judge", "TEXT"),
             ("personas", "required_tags", "TEXT"),
             ("personas", "prefer_permissive", "INTEGER DEFAULT 0"),
+            ("request_log", "tool_calls", "TEXT"),
         ]
         with self._lock:
             for table, column, ddl in added:

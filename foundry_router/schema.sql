@@ -93,6 +93,9 @@ CREATE TABLE IF NOT EXISTS request_log (
   mode TEXT,                        -- "agent" | "direct" | "passthrough" | "fallback"
   summary TEXT,                     -- first ~200 chars of the user message
   models_used TEXT,                 -- JSON list of {model, backend, prompt_tokens, completion_tokens, est_cost_usd}
+  tool_calls TEXT,                  -- JSON list of {tool, server, duration_ms, ok, error?} — every MCP
+                                    -- invocation the request made (visibility: which requests actually
+                                    -- used searxng/crawl4ai, and what failed where)
   steps INTEGER,
   duration_ms INTEGER,
   guardrail_events TEXT,            -- JSON list of guardrail firings

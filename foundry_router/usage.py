@@ -23,6 +23,7 @@ import httpx
 
 from .config import MeridianConfig
 from .db import Database, utcnow
+from .errors import describe_exception
 
 log = logging.getLogger(__name__)
 
@@ -148,6 +149,33 @@ def parse_quota(data: Any) -> Optional[list[dict]]:
     return out
 
 
+def parse_sources(data: Any) -> Optional[bool]:
+    """Is Meridian's oauth quota source alive? Found live TWICE in one
+    session: `sources.oauth` silently goes null (credential staleness), the
+    five_hour bucket vanishes from the response, and seven_day serves a stale
+    cached read — usage figures drift (30% shown vs 43% real) with no error
+    anywhere. The fix is manual (`meridian profile login <profile>
+    --headless`) but the DETECTION must be automatic.
+
+    Returns True (oauth present), False (explicitly null/absent — stale),
+    or None (payload carries no `sources` at all; older builds — no signal)."""
+    if not isinstance(data, dict) or not isinstance(data.get("sources"), dict):
+        return None
+    return data["sources"].get("oauth") is not None
+
+
+def parse_extra_usage(data: Any) -> Optional[float]:
+    """extraUsage.usedCredits arrives in cents (confirmed live: 4343 ==
+    the Claude app's "$43.43 spent"). Returns dollars, or None if absent."""
+    extra = data.get("extraUsage") if isinstance(data, dict) else None
+    if not isinstance(extra, dict):
+        return None
+    try:
+        return float(extra.get("usedCredits")) / 100.0
+    except (TypeError, ValueError):
+        return None
+
+
 class MeridianUsage:
     """Cached quota snapshots — one slow endpoint must not add latency to
     every escalation decision. The snapshot feeds three consumers: the
@@ -160,9 +188,30 @@ class MeridianUsage:
         self.db = db
         self._cache: dict[str, tuple[float, dict]] = {}
         self._observed_exhausted: dict[str, float] = {}  # base_url -> monotonic deadline
+        self._oauth_alert: dict[str, str] = {}           # base_url -> iso since
 
     def clear_cache(self) -> None:
         self._cache.clear()
+
+    # -- oauth staleness alert (edge-triggered) -------------------------------
+
+    def _note_oauth_state(self, base_url: str, oauth_ok: Optional[bool]) -> None:
+        """One Events entry when oauth flips to null, one when it recovers —
+        not one per poll. None (no `sources` in the payload, or endpoint
+        unreachable) neither raises nor clears the alert: absence of signal
+        is not evidence of recovery."""
+        if oauth_ok is False and base_url not in self._oauth_alert:
+            self._oauth_alert[base_url] = utcnow()
+            self.db.log_event(
+                "error", "usage",
+                "Meridian oauth quota source went NULL — usage figures are now "
+                "stale/partial (five_hour bucket vanishes, seven_day serves a "
+                "cached read). Fix on the host: meridian profile login <profile> "
+                "--headless", base_url)
+        elif oauth_ok is True and self._oauth_alert.pop(base_url, None):
+            self.db.log_event("info", "usage",
+                              "Meridian oauth quota source restored — usage "
+                              "figures live again", base_url)
 
     # -- observed-exhaustion fallback (quota endpoint blind) -----------------
 
@@ -206,10 +255,30 @@ class MeridianUsage:
     async def snapshot(self, base_url: str, api_key: Optional[str] = None) -> dict:
         cached = self._cache.get(base_url)
         if cached and time.monotonic() - cached[0] < 30:
-            return self._apply_observed(base_url, cached[1])
+            return self._decorate(base_url, cached[1])
         snap = await self._fetch(base_url, api_key)
         self._cache[base_url] = (time.monotonic(), snap)
-        return self._apply_observed(base_url, snap)
+        return self._decorate(base_url, snap)
+
+    def _decorate(self, base_url: str, snap: dict) -> dict:
+        snap = self._apply_observed(base_url, snap)
+        alert_since = self._oauth_alert.get(base_url)
+        return {**snap, "oauth_alert_since": alert_since} if alert_since else snap
+
+    async def auth_health(self, base_url: str, api_key: Optional[str] = None) -> dict:
+        """Fresh (uncached) quota probe doubling as the auth-validity check —
+        /v1/usage/quota is read-only and free, so it's the cheapest way to
+        answer 'is the Claude subscription login still valid' without waiting
+        for a real generation to fail. Shares all plumbing with the passive
+        poll loop: the same fetch drives both."""
+        self._cache.pop(base_url, None)
+        snap = await self.snapshot(base_url, api_key)
+        valid = (snap.get("fetch_error") is None
+                 and snap.get("oauth_ok") is not False)
+        return {"valid": valid, "last_checked": utcnow(),
+                "oauth_ok": snap.get("oauth_ok"),
+                "note": snap.get("note", ""),
+                "error": snap.get("fetch_error")}
 
     async def window_available(self, base_url: str,
                                api_key: Optional[str] = None) -> tuple[bool, str]:
@@ -230,14 +299,19 @@ class MeridianUsage:
         except Exception as e:
             log.info("Meridian quota unreachable (%s) — assuming window available", e)
             return {"available": True, "buckets": [], "worst_used": None,
+                    "oauth_ok": None, "fetch_error": describe_exception(e),
                     "note": "quota endpoint unreachable; assuming window available"}
 
+        oauth_ok = parse_sources(data)
+        self._note_oauth_state(base_url, oauth_ok)
+        credits_used = parse_extra_usage(data)
         buckets = parse_quota(data)
         if buckets is None:
             self.db.log_event("warning", "usage",
                               "quota payload shape not recognized — assuming available",
                               json.dumps(data)[:500])
             return {"available": True, "buckets": [], "worst_used": None,
+                    "oauth_ok": oauth_ok, "credits_used_usd": credits_used,
                     "note": "quota shape unrecognized; assuming window available"}
 
         signaled = [b for b in buckets if b["used"] is not None]
@@ -256,8 +330,13 @@ class MeridianUsage:
                 for b in signaled)
         else:
             note = "no usage signal yet (fresh window)"
+        if oauth_ok is False:
+            note += ("; WARNING: oauth quota source is NULL — these figures "
+                     "are stale/partial")
         return {"available": available, "buckets": buckets,
-                "worst_used": worst_used, "fable_used": fable_used, "note": note}
+                "worst_used": worst_used, "fable_used": fable_used,
+                "oauth_ok": oauth_ok, "credits_used_usd": credits_used,
+                "note": note}
 
 
 # --------------------------------------------------------------------------- #
@@ -314,6 +393,7 @@ class RequestLogger:
         self.mode = mode
         self.summary = (user_message or "")[:200]
         self.models_used: list[dict] = []
+        self.tool_calls: list[dict] = []
         self.guardrail_events: list[str] = []
         self.steps = 0
         self.est_cost = 0.0
@@ -327,6 +407,16 @@ class RequestLogger:
             "est_cost_usd": round(est_cost_usd, 6)})
         self.est_cost += est_cost_usd
 
+    def record_tool_call(self, tool: str, server: str, duration_ms: int,
+                         ok: bool, error: str = "") -> None:
+        """One MCP/tool invocation this request made (visibility spec item 5):
+        without this there is no way to see whether a request actually used
+        searxng/crawl4ai/etc., how long the call took, or what it died of —
+        MCP-server failures were indistinguishable from backend failures."""
+        self.tool_calls.append({
+            "tool": tool, "server": server, "duration_ms": duration_ms,
+            "ok": ok, **({"error": error[:300]} if error else {})})
+
     def record_guardrail(self, event: str) -> None:
         self.guardrail_events.append(event)
 
@@ -334,12 +424,13 @@ class RequestLogger:
         try:
             self.db.execute(
                 """INSERT INTO request_log
-                   (ts, persona, client_model, mode, summary, models_used, steps,
-                    duration_ms, guardrail_events, est_cost_usd, status, error)
-                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""",
+                   (ts, persona, client_model, mode, summary, models_used,
+                    tool_calls, steps, duration_ms, guardrail_events,
+                    est_cost_usd, status, error)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                 (utcnow(), self.persona, self.client_model, self.mode, self.summary,
-                 json.dumps(self.models_used), self.steps,
-                 int((time.monotonic() - self._t0) * 1000),
+                 json.dumps(self.models_used), json.dumps(self.tool_calls),
+                 self.steps, int((time.monotonic() - self._t0) * 1000),
                  json.dumps(self.guardrail_events), round(self.est_cost, 6),
                  status, error[:1000]))
         except Exception:

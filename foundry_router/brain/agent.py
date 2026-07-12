@@ -29,6 +29,7 @@ from typing import Any, AsyncIterator, Optional, TypedDict
 
 from langgraph.graph import END, START, StateGraph
 
+from ..errors import describe_exception
 from ..guardrails import GuardrailEngine, RequestGuardState
 from ..pool.base import AllBackendsFailed
 from ..usage import (MeridianUsage, RequestLogger, estimate_cost_usd,
@@ -348,9 +349,10 @@ class AgentRunner:
                 self.model_registry.record_tool_call(self.brain.cfg.model, ok=False)
 
             t0 = time.monotonic()
-            result = await self.brain.chat(
-                [{"role": "system", "content": system}] + state["messages"], tools=specs,
-                on_retry=_on_retry)
+            result = await self._with_heartbeat(
+                self.brain.chat([{"role": "system", "content": system}]
+                                + state["messages"], tools=specs, on_retry=_on_retry),
+                emit, f"the routing brain ({self.brain.cfg.model or 'brain'})")
             took = time.monotonic() - t0
             if result.tool_calls:
                 self.model_registry.record_tool_call(self.brain.cfg.model, ok=True)
@@ -583,14 +585,20 @@ class AgentRunner:
                           + " — waiting on generation (long tasks can take a few minutes)...")
             t0 = time.monotonic()
             try:
-                result, backend_name = await self._dispatch_worker(model_id, prompt,
-                                                                   images=images)
+                result, backend_name = await self._with_heartbeat(
+                    self._dispatch_worker(model_id, prompt, images=images),
+                    emit, model_id)
             except AllBackendsFailed as e:
                 emit("think", f"All backends failed for {model_id} after "
                               f"{time.monotonic() - t0:.0f}s — the brain will pick "
                               f"an alternative.")
                 return (f"ERROR: {e}. Pick a different model or finish with "
                         f"what you already have."), False
+            if result.thinking:
+                # The worker's own reasoning, scrubbed/collected at dispatch —
+                # narration for the user's thought panel, never answer content.
+                emit("think", f"[{model_id} reasoning] {result.thinking[:2000]}"
+                              + ("…" if len(result.thinking) > 2000 else ""))
             cost = estimate_cost_usd(meta, result.prompt_tokens, result.completion_tokens)
             ctx.logger.record_model_call(model_id, backend_name,
                                          result.prompt_tokens, result.completion_tokens, cost)
@@ -614,14 +622,76 @@ class AgentRunner:
 
         # tool.kind == "mcp"
         emit("think", f"Calling MCP tool {tool.server}/{tool.mcp_tool}...")
+        t0 = time.monotonic()
         try:
-            out = await self.tool_registry.mcp.call_tool(tool.server, tool.mcp_tool, args)
-            flags["last_tool_result"] = out  # media artifacts (URLs) forward via use_last_result
-            flags["last_worker_local"] = False  # MCP results aren't judged
-            return out[:self.brain.cfg.mcp_result_limit_chars] or "(empty MCP result)", False
+            out = await self._with_heartbeat(
+                self.tool_registry.mcp.call_tool(tool.server, tool.mcp_tool, args),
+                emit, f"MCP tool {tool.server}/{tool.mcp_tool}")
         except Exception as e:
-            emit("think", f"MCP tool {name} failed: {e}")
-            return f"ERROR: MCP tool {name} failed: {e}", False
+            detail = describe_exception(e)
+            dur_ms = int((time.monotonic() - t0) * 1000)
+            # Per-call visibility (spec item 5): the request_log row shows
+            # which tools this request tried, and the Events entry makes
+            # MCP-server failures diagnosable separately from backend/model
+            # failures — same layer that logs backend_pool warnings.
+            ctx.logger.record_tool_call(tool.mcp_tool, tool.server, dur_ms,
+                                        ok=False, error=detail)
+            self.model_registry.db.log_event(
+                "warning", "mcp",
+                f"tool {tool.server}/{tool.mcp_tool} failed after {dur_ms / 1000:.1f}s",
+                detail)
+            emit("think", f"MCP tool {name} failed after {dur_ms / 1000:.1f}s: {detail}")
+            return f"ERROR: MCP tool {name} failed: {detail}", False
+        dur_ms = int((time.monotonic() - t0) * 1000)
+        ctx.logger.record_tool_call(tool.mcp_tool, tool.server, dur_ms, ok=True)
+        emit("think", f"MCP tool {tool.server}/{tool.mcp_tool} completed in "
+                      f"{dur_ms / 1000:.1f}s ({len(out)} chars).")
+        flags["last_tool_result"] = out  # media artifacts (URLs) forward via use_last_result
+        flags["last_worker_local"] = False  # MCP results aren't judged
+        return out[:self.brain.cfg.mcp_result_limit_chars] or "(empty MCP result)", False
+
+    # ------------------------------------------------- keep-alive heartbeat --
+
+    async def _with_heartbeat(self, coro, emit, label: str):
+        """Await a long call while emitting periodic 'still working' narration.
+
+        Found live: a failover-then-cold-load chain took 422s and produced a
+        real answer (request_log says ok), but the client/reverse-proxy had
+        long since closed the idle connection. Raising proxy timeouts can't
+        keep up with worst-case chains; flowing bytes can — every heartbeat
+        resets NPM's and the client's idle clocks. heartbeat_seconds=0
+        disables (UI brain card)."""
+        hb = float(self.brain.cfg.heartbeat_seconds or 0)
+        task = asyncio.ensure_future(coro)
+        if hb <= 0:
+            return await task
+        t0 = time.monotonic()
+        try:
+            while True:
+                done, _ = await asyncio.wait({task}, timeout=hb)
+                if done:
+                    return task.result()
+                emit("think", f"Still working — {label} has been running "
+                              f"{time.monotonic() - t0:.0f}s (cold model loads "
+                              f"and long generations can take several minutes)...")
+        except asyncio.CancelledError:
+            task.cancel()
+            raise
+
+    async def _heartbeat_events(self, task: asyncio.Task, label: str):
+        """Pipeline flavor of _with_heartbeat: async generators can't emit
+        into the queue, so keep-alives are YIELDED as events until `task`
+        settles — the caller then awaits the task for its result/exception."""
+        hb = float(self.brain.cfg.heartbeat_seconds or 0)
+        t0 = time.monotonic()
+        while True:
+            done, _ = await asyncio.wait({task}, timeout=hb if hb > 0 else None)
+            if done:
+                return
+            yield AgentEvent("think", f"Still working — {label} has been running "
+                                      f"{time.monotonic() - t0:.0f}s (cold model "
+                                      f"loads and long generations can take "
+                                      f"several minutes)...")
 
     # ------------------------------------------------- canonical dispatch --
 
@@ -654,6 +724,16 @@ class AgentRunner:
             raise
         if is_subscription:
             self.meridian_usage.note_successful_call(info["url"])
+        # Scrub literal <think> tags out of the answer text — they ride to the
+        # user verbatim via use_last_result otherwise (found live: a stray
+        # ", etc. </think>" rendered as visible content in AnythingLLM). The
+        # reasoning joins any native message.thinking the backend separated;
+        # callers surface .thinking as narration.
+        reasoning, clean = prompts.split_think(result.content)
+        result.content = clean
+        if reasoning:
+            result.thinking = (f"{result.thinking}\n{reasoning}".strip()
+                               if result.thinking else reasoning)
         return result, backend
 
     # ------------------------------------------------------ model pickers --
@@ -726,8 +806,9 @@ class AgentRunner:
         db = self.model_registry.db
         try:
             if judge_model:
-                result, backend = await self._dispatch_worker(
-                    judge_model, prompt, max_tokens=1024)
+                result, backend = await self._with_heartbeat(
+                    self._dispatch_worker(judge_model, prompt, max_tokens=1024),
+                    emit, f"outcome judge {judge_model}")
                 text = result.content
                 desc = judge_model
                 info = self.pool.backend_info(judge_model)
@@ -853,8 +934,11 @@ class AgentRunner:
                                       + (", retry" if attempt == 2 else "")
                                       + ") — waiting on generation...")
             t0 = time.monotonic()
+            task = asyncio.ensure_future(self._dispatch_worker(executor, exec_prompt))
+            async for hb_ev in self._heartbeat_events(task, f"Execute on {executor}"):
+                yield hb_ev
             try:
-                result, backend = await self._dispatch_worker(executor, exec_prompt)
+                result, backend = await task
             except AllBackendsFailed as e:
                 if attempt == 1:
                     yield AgentEvent("think", f"Execute attempt failed ({e}) — "
@@ -871,6 +955,10 @@ class AgentRunner:
             code = result.content
             ctx.logger.record_model_call(executor, backend, result.prompt_tokens,
                                          result.completion_tokens, 0.0)
+            if result.thinking:
+                yield AgentEvent("think", f"[{executor} reasoning] "
+                                          f"{result.thinking[:2000]}"
+                                          + ("…" if len(result.thinking) > 2000 else ""))
             yield AgentEvent("think", f"Execute: {executor} responded in "
                                       f"{time.monotonic() - t0:.0f}s "
                                       f"({len(code)} chars).")

@@ -42,6 +42,45 @@ def find_pending_question(messages: list[dict]) -> Optional[str]:
     return None
 
 
+_THINK_BLOCK_RE = re.compile(r"<think>(.*?)</think>", re.DOTALL)
+
+
+def split_think(text: str) -> tuple[str, str]:
+    """Separate a model's literal <think> reasoning from its answer text.
+
+    Reasoning workers (qwen3.6 etc.) sometimes emit <think> tags directly in
+    content — the backend's think-parsing misfired, or the model re-emits a
+    stray closing tag after the parser already consumed the opener. Found
+    live: a stray ", etc. </think>" rendered as visible answer text in
+    AnythingLLM. Nothing in the router writes these tags; they arrive in
+    worker output, so they're scrubbed at the dispatch layer and rerouted to
+    the NATIVE thinking field.
+
+    Handles, in order: complete <think>...</think> blocks; a dangling
+    </think> with no opener (everything before it is the reasoning tail);
+    a dangling <think> opener (tag stripped, text kept — hiding a possible
+    answer is worse than showing unlabeled reasoning). If scrubbing would
+    leave the answer EMPTY (model wrapped its whole reply in think tags),
+    the reasoning is returned as the answer instead: an empty reply is the
+    one outcome always worse than an unpolished one.
+
+    Returns (reasoning, clean_answer)."""
+    if "<think>" not in text and "</think>" not in text:
+        return "", text
+    thinking: list[str] = []
+    rest = _THINK_BLOCK_RE.sub(lambda m: (thinking.append(m.group(1).strip()), "")[1],
+                               text)
+    if "</think>" in rest:  # dangling closer — opener consumed upstream
+        head, _, rest = rest.partition("</think>")
+        if head.strip():
+            thinking.append(head.strip())
+    rest = rest.replace("<think>", "").strip()
+    reasoning = "\n".join(t for t in thinking if t)
+    if not rest and reasoning:
+        return "", reasoning
+    return reasoning, rest
+
+
 def sanitize_history(messages: list[dict]) -> list[dict]:
     """Strip <think> narration and hidden markers from history before feeding
     it back to the brain — clients echo our own output back to us, and routing
