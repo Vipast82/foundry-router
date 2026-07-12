@@ -19,8 +19,15 @@ def _line(obj: dict) -> bytes:
 
 
 def chat_chunk(model: str, content: str = "", done: bool = False,
-               tool_calls: Optional[list] = None, stats: Optional[dict] = None) -> bytes:
+               tool_calls: Optional[list] = None, stats: Optional[dict] = None,
+               thinking: Optional[str] = None) -> bytes:
+    """`thinking` is Ollama's NATIVE reasoning field on the message object —
+    a real, separate field alongside content (confirmed from a raw qwen3.6
+    response). Clients render it as a collapsible thought panel; literal
+    <think> tags glued into content render as ugly raw text (found live)."""
     msg: dict = {"role": "assistant", "content": content}
+    if thinking:
+        msg["thinking"] = thinking
     if tool_calls:
         msg["tool_calls"] = tool_calls
     obj: dict = {"model": model, "created_at": now_iso(), "message": msg, "done": done}
@@ -31,8 +38,11 @@ def chat_chunk(model: str, content: str = "", done: bool = False,
 
 
 def generate_chunk(model: str, response: str = "", done: bool = False,
-                   stats: Optional[dict] = None) -> bytes:
+                   stats: Optional[dict] = None,
+                   thinking: Optional[str] = None) -> bytes:
     obj: dict = {"model": model, "created_at": now_iso(), "response": response, "done": done}
+    if thinking:
+        obj["thinking"] = thinking
     if done:
         obj["done_reason"] = "stop"
         obj.update(_stats(stats))

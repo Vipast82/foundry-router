@@ -56,15 +56,17 @@ def test_fallback_none_when_nothing_reachable(tmp_path):
 
 def test_e2e_brain_unreachable_degrades_not_fails(client):
     """Full request path with a dead brain and zero backends: the request must
-    still return 200 with a <think> explanation — never a 500 (§4.2: 'the one
-    failure mode that must degrade, not fail entirely')."""
+    still return 200 with the explanation in Ollama's NATIVE thinking field
+    (never literal <think> tags in content — clients render those as raw
+    text) and never a 500 (§4.2: degrade, not fail)."""
     r = client.post("/api/chat", json={
         "model": "Foundry-Chat", "stream": False,
         "messages": [{"role": "user", "content": "hello"}]})
     assert r.status_code == 200
-    content = r.json()["message"]["content"]
-    assert "<think>" in content
-    assert "unreachable" in content.lower() or "reachable" in content.lower()
+    msg = r.json()["message"]
+    assert "unreachable" in msg["thinking"].lower()
+    assert "<think>" not in msg["content"]         # the live formatting bug
+    assert "reachable" in msg["content"].lower()   # clean user-facing text
 
 
 def test_e2e_brain_unreachable_streaming(client):
@@ -74,5 +76,13 @@ def test_e2e_brain_unreachable_streaming(client):
     assert r.status_code == 200
     lines = [json.loads(l) for l in r.text.strip().splitlines()]
     assert lines[-1]["done"] is True
-    body = "".join(l["message"]["content"] for l in lines if not l["done"])
-    assert "<think>" in body
+    thinking = "".join(l["message"].get("thinking") or ""
+                       for l in lines if not l["done"])
+    content = "".join(l["message"].get("content") or ""
+                      for l in lines if not l["done"])
+    assert "unreachable" in thinking.lower()   # narration in the native field
+    assert "<think>" not in content            # never raw tags in content
+    # thinking-typed chunks carry no content and vice versa
+    for line in lines:
+        if not line["done"] and line["message"].get("thinking"):
+            assert line["message"]["content"] == ""

@@ -177,14 +177,18 @@ def _run_events(svc, ctx: RequestContext):
 
 
 async def _agent_events_to_chat_chunks(svc, ctx: RequestContext, model_name: str):
-    """The heart of §4.5: think events become <think> blocks streamed live;
-    the final answer streams as normal content after them."""
+    """The heart of §4.5, corrected to the REAL Ollama wire format: think
+    events stream as `thinking`-typed chunks (message.thinking populated,
+    content empty) — the native reasoning field clients render as a
+    collapsible panel. Literal <think> tags glued into content rendered as
+    raw text in every client (found live). The final answer is the only
+    thing that ever lands in content."""
     t0 = time.monotonic_ns()
     status, error = "ok", ""
     try:
         async for ev in _run_events(svc, ctx):
             if ev.kind == "think":
-                yield tr.chat_chunk(model_name, f"<think>{ev.text}</think>\n")
+                yield tr.chat_chunk(model_name, "", thinking=ev.text + "\n")
             elif ev.kind == "answer":
                 for piece in tr.chunk_text(ev.text):
                     yield tr.chat_chunk(model_name, piece)
@@ -220,14 +224,15 @@ async def _fallback_chunks(svc, ctx: RequestContext, model_name: str):
     fb_model = pick_fallback_model(svc.pool, svc.registry, ctx.persona,
                                    _last_user_text(ctx.messages))
     if fb_model is None:
+        yield tr.chat_chunk(model_name, "",
+                            thinking="Routing brain unreachable and no backend is "
+                                     "reachable either — cannot serve this request.\n")
         yield tr.chat_chunk(model_name,
-                            "<think>Routing brain unreachable and no backend is "
-                            "reachable either — cannot serve this request.</think>\n"
                             "[foundry-router] No models are currently reachable.")
         return
-    yield tr.chat_chunk(model_name,
-                        f"<think>Routing brain unreachable — static fallback rule "
-                        f"selected {fb_model} (no model call needed).</think>\n")
+    yield tr.chat_chunk(model_name, "",
+                        thinking=f"Routing brain unreachable — static fallback rule "
+                                 f"selected {fb_model} (no model call needed).\n")
     try:
         ptoks = ctoks = 0
         async for chunk in svc.pool.chat_stream(fb_model, ctx.messages):
@@ -247,14 +252,25 @@ async def _agent_chat(svc, persona, model_name, messages, stream, user_text,
     if stream:
         return StreamingResponse(_agent_events_to_chat_chunks(svc, ctx, model_name),
                                  media_type="application/x-ndjson")
-    # Non-streaming: collapse the same event stream into one message.
+    # Non-streaming: collapse the same event stream into one message —
+    # narration accumulates in the native `thinking` field, the answer alone
+    # lands in `content`.
     parts: list[str] = []
+    thinking_parts: list[str] = []
     async for raw in _agent_events_to_chat_chunks(svc, ctx, model_name):
         obj = json.loads(raw)
-        if not obj.get("done"):
-            parts.append(obj["message"]["content"])
+        if obj.get("done"):
+            continue
+        msg = obj["message"]
+        if msg.get("thinking"):
+            thinking_parts.append(msg["thinking"])
+        if msg.get("content"):
+            parts.append(msg["content"])
+    message: dict = {"role": "assistant", "content": "".join(parts)}
+    if thinking_parts:
+        message["thinking"] = "".join(thinking_parts)
     return JSONResponse({"model": model_name, "created_at": tr.now_iso(),
-                         "message": {"role": "assistant", "content": "".join(parts)},
+                         "message": message,
                          "done": True, "done_reason": "stop", **tr._stats(None)})
 
 
@@ -443,15 +459,28 @@ async def generate(request: Request):
                 obj = json.loads(raw)
                 if obj.get("done"):
                     yield tr.generate_chunk(model_name, "", done=True)
-                else:
-                    yield tr.generate_chunk(model_name, obj["message"]["content"])
+                    continue
+                msg = obj["message"]
+                if msg.get("thinking"):
+                    yield tr.generate_chunk(model_name, "", thinking=msg["thinking"])
+                if msg.get("content"):
+                    yield tr.generate_chunk(model_name, msg["content"])
         return StreamingResponse(gen(), media_type="application/x-ndjson")
 
     parts: list[str] = []
+    thinking_parts: list[str] = []
     async for raw in chat_source():
         obj = json.loads(raw)
-        if not obj.get("done"):
-            parts.append(obj["message"]["content"])
-    return JSONResponse({"model": model_name, "created_at": tr.now_iso(),
-                         "response": "".join(parts), "done": True,
-                         "done_reason": "stop", **tr._stats(None)})
+        if obj.get("done"):
+            continue
+        msg = obj["message"]
+        if msg.get("thinking"):
+            thinking_parts.append(msg["thinking"])
+        if msg.get("content"):
+            parts.append(msg["content"])
+    body: dict = {"model": model_name, "created_at": tr.now_iso(),
+                  "response": "".join(parts), "done": True,
+                  "done_reason": "stop", **tr._stats(None)}
+    if thinking_parts:
+        body["thinking"] = "".join(thinking_parts)
+    return JSONResponse(body)

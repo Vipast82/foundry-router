@@ -9,8 +9,9 @@ research keeps dependencies minimal (§2) and the wire behavior identical
 everywhere.
 
 Streaming: nodes emit AgentEvents into a queue that `run()` drains as an async
-generator — the facade turns "think" events into <think> blocks (§4.5) live,
-while the graph is still executing.
+generator — the facade streams "think" events as Ollama's native `thinking`
+field (§4.5's intent, corrected to the real wire format) live, while the
+graph is still executing.
 
 The graph is built per request (cheap: a handful of node closures) because the
 tool set, system prompt, and guardrail state are all request-scoped. This is
