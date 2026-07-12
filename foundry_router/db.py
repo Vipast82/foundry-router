@@ -153,6 +153,10 @@ class Database:
             ("personas", "required_tags", "TEXT"),
             ("personas", "prefer_permissive", "INTEGER DEFAULT 0"),
             ("request_log", "tool_calls", "TEXT"),
+            ("models", "eval_tps_avg", "REAL"),
+            ("models", "eval_samples", "INTEGER DEFAULT 0"),
+            ("models", "cold_load_ms_avg", "REAL"),
+            ("models", "cold_load_samples", "INTEGER DEFAULT 0"),
         ]
         with self._lock:
             for table, column, ddl in added:

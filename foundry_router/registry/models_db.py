@@ -31,6 +31,25 @@ MODEL_FIELDS = [
 TIER_RANK = {"free": 0, "low": 1, "medium": 2, "high": 3, "very_high": 4}
 UNKNOWN_TIER_RANK = 2.5
 
+# Observed-telemetry scoring (design: feed data the router already collects
+# into ranking as a `measured`/`observed` benchmark source — more trustworthy
+# than the estimated/community_report rows that dominate the registry).
+#
+# Warm tokens/sec that maps to a latency score of 100. Deliberately a fixed,
+# transparent reference rather than a per-model-size normalization: the score
+# only feeds ranking for a persona whose category is 'latency' (none ship that
+# way), so it's forward-looking data, and a documented constant is easier to
+# reason about than a clever curve. Tune if the local fleet's "fast" differs.
+LATENCY_TARGET_TPS = 60.0
+
+
+def observed_confidence(n: int) -> float:
+    """Confidence for an observed benchmark, scaled by sample size so 2 lucky
+    calls don't outrank 200: ~0.17 at n=2, 0.5 at n=10, 0.9 at n=90, capped
+    at 0.95 (observation is strong evidence but never certainty)."""
+    n = max(0, int(n))
+    return round(min(0.95, n / (n + 10)), 3) if n else 0.0
+
 
 class ModelRegistry:
     def __init__(self, db: Database):
@@ -216,16 +235,75 @@ class ModelRegistry:
                         (1 if enabled else 0, model_id))
 
     def record_tool_call(self, model_id: str, ok: bool) -> None:
-        """Empirical tool-calling reliability (item 3): updated from live
-        traffic — the brain's own malformed-call retries and direct-dispatch
-        outcomes — because a model can claim tool support in metadata and
-        still misbehave in practice."""
+        """Empirical tool-calling reliability: updated from live traffic — the
+        brain's own malformed-call retries and direct-dispatch outcomes —
+        because a model can claim tool support in metadata and still misbehave
+        in practice. Measures the MODEL's tool-emission validity, NOT whether
+        an MCP server call succeeded (a searxng outage is not qwen's fault).
+
+        Each update rolls the ok/failed counters into a `tool_calling`
+        benchmark row so ranking can consume this observed signal — measured
+        quality, confidence scaled by sample size."""
         if self.get(model_id) is None:
             self.db.execute("INSERT INTO models (id) VALUES (?)", (model_id,))
         column = "tool_calls_ok" if ok else "tool_calls_failed"
         self.db.execute(
             f"UPDATE models SET {column} = COALESCE({column}, 0) + 1 WHERE id=?",
             (model_id,))
+        row = self.get(model_id)
+        okc = (row.get("tool_calls_ok") or 0) if row else 0
+        failc = (row.get("tool_calls_failed") or 0) if row else 0
+        total = okc + failc
+        if total:
+            self.upsert_benchmark(
+                model_id, "tool_calling", 100.0 * okc / total,
+                score_type="measured", source_type="observed",
+                source_url="observed:live-traffic",
+                confidence=observed_confidence(total))
+
+    def note_inference(self, model_id: str, eval_count: int,
+                       eval_duration_ns: int, load_duration_ns: int = 0) -> None:
+        """Fold one model response's timing into observed telemetry.
+
+        WARM inference (eval_count / eval_duration) becomes a running mean of
+        tokens/sec and a `latency` benchmark. COLD load (load_duration) is
+        tracked in a SEPARATE informational field and never scored — on a
+        shared pool most workers aren't resident, so raw latency would punish
+        a model for not happening to be warm, not for being slow. Non-Ollama
+        backends report zeros here and are skipped."""
+        updated = False
+        if eval_count > 0 and eval_duration_ns > 0:
+            tps = eval_count / (eval_duration_ns / 1e9)
+            if self.get(model_id) is None:
+                self.db.execute("INSERT INTO models (id) VALUES (?)", (model_id,))
+            # exact incremental mean: mean' = (mean*n + x) / (n+1)
+            self.db.execute(
+                "UPDATE models SET "
+                "eval_tps_avg = (COALESCE(eval_tps_avg,0)*COALESCE(eval_samples,0) + ?) "
+                "               / (COALESCE(eval_samples,0) + 1), "
+                "eval_samples = COALESCE(eval_samples,0) + 1 WHERE id=?",
+                (tps, model_id))
+            updated = True
+        # load_duration is 0 when the model was already warm — only cold loads
+        # contribute, giving a "typical cold-load time" stat that stays honest.
+        if load_duration_ns > 0:
+            if self.get(model_id) is None:
+                self.db.execute("INSERT INTO models (id) VALUES (?)", (model_id,))
+            self.db.execute(
+                "UPDATE models SET "
+                "cold_load_ms_avg = (COALESCE(cold_load_ms_avg,0)*COALESCE(cold_load_samples,0) + ?) "
+                "                   / (COALESCE(cold_load_samples,0) + 1), "
+                "cold_load_samples = COALESCE(cold_load_samples,0) + 1 WHERE id=?",
+                (load_duration_ns / 1e6, model_id))
+        if updated:
+            row = self.get(model_id)
+            n = (row.get("eval_samples") or 0) if row else 0
+            tps_avg = (row.get("eval_tps_avg") or 0.0) if row else 0.0
+            score = min(100.0, 100.0 * tps_avg / LATENCY_TARGET_TPS)
+            self.upsert_benchmark(
+                model_id, "latency", score, score_type="measured",
+                source_type="observed", source_url="observed:warm-eval",
+                confidence=observed_confidence(n))
 
     @staticmethod
     def tool_reliability(row: Optional[dict]) -> Optional[float]:

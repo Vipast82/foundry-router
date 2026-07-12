@@ -29,6 +29,10 @@ CREATE TABLE IF NOT EXISTS models (
                                     -- model from ranking AND tool generation entirely
   tool_calls_ok INTEGER DEFAULT 0,  -- empirical tool-calling reliability counters, updated from live
   tool_calls_failed INTEGER DEFAULT 0,  -- traffic (a model can claim tool support and still misbehave)
+  eval_tps_avg REAL,                -- observed WARM tokens/sec (running mean), from Ollama eval_duration
+  eval_samples INTEGER DEFAULT 0,   -- calls behind eval_tps_avg (confidence scales with this)
+  cold_load_ms_avg REAL,            -- informational only: typical cold-load time (Ollama load_duration);
+  cold_load_samples INTEGER DEFAULT 0,  -- NEVER mixed into a quality/speed score — pool-contention noise
   last_updated TEXT,
   source TEXT                       -- "openrouter_api" | "research_agent" | "discovery" | "manual_override"
 );

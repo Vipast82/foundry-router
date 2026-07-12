@@ -39,6 +39,14 @@ class ChatResult:
     # when the backend separates it, plus any literal <think> blocks scrubbed
     # from content at the dispatch layer (they leak to users otherwise).
     thinking: str = ""
+    # Ollama timing fields (nanoseconds), kept SEPARATE on purpose: eval_ is
+    # warm-state inference time (the only latency signal safe to score);
+    # load_ is cold model-load time (a shared 32GB pool means most workers
+    # aren't resident, so this is contention noise, never a quality signal).
+    # Zero for non-Ollama backends, which don't report them.
+    eval_duration_ns: int = 0
+    load_duration_ns: int = 0
+    prompt_eval_duration_ns: int = 0
     raw: Any = None
 
 
@@ -166,6 +174,10 @@ class OllamaProtocol(BaseProtocol):
             # reasoning here, not in content — dropping it silently is fine
             # for correctness but wasteful for narration; carry it along.
             thinking=msg.get("thinking") or "",
+            # Warm-inference vs cold-load timing, kept apart for scoring.
+            eval_duration_ns=data.get("eval_duration") or 0,
+            load_duration_ns=data.get("load_duration") or 0,
+            prompt_eval_duration_ns=data.get("prompt_eval_duration") or 0,
             raw=data,
         )
 

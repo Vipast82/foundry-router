@@ -724,6 +724,12 @@ class AgentRunner:
             raise
         if is_subscription:
             self.meridian_usage.note_successful_call(info["url"])
+        # Observed telemetry: warm tokens/sec (and cold-load time, separately)
+        # roll into the registry as measured/observed benchmark signal. No-ops
+        # for non-Ollama backends (they report no timing).
+        self.model_registry.note_inference(
+            model_id, result.completion_tokens,
+            result.eval_duration_ns, result.load_duration_ns)
         # Scrub literal <think> tags out of the answer text — they ride to the
         # user verbatim via use_last_result otherwise (found live: a stray
         # ", etc. </think>" rendered as visible content in AnythingLLM). The
