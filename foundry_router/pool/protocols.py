@@ -63,6 +63,19 @@ def _new_id() -> str:
     return "call_" + uuid.uuid4().hex[:12]
 
 
+# Base64 magic prefixes — clients send bare base64 with no media type, but
+# Anthropic/OpenAI image blocks require one. Sniff it from the first bytes.
+_IMAGE_MAGIC = (("iVBOR", "image/png"), ("/9j/", "image/jpeg"),
+                ("R0lGOD", "image/gif"), ("UklGR", "image/webp"))
+
+
+def _image_media_type(b64: str) -> str:
+    for prefix, media_type in _IMAGE_MAGIC:
+        if b64.startswith(prefix):
+            return media_type
+    return "image/jpeg"  # most common fallback; backends tolerate mismatches
+
+
 class BaseProtocol:
     """One instance per backend. Owns no connection state beyond the shared
     httpx client passed in (connection pooling lives there)."""
@@ -115,6 +128,8 @@ class OllamaProtocol(BaseProtocol):
                 ]
             if m["role"] == "tool" and m.get("name"):
                 mm["tool_name"] = m["name"]
+            if m.get("images"):  # Ollama-native multimodal field, passthrough
+                mm["images"] = m["images"]
             msgs.append(mm)
         payload: dict = {"model": model, "messages": msgs, "stream": stream}
         if tools:
@@ -202,6 +217,16 @@ class OpenAIProtocol(BaseProtocol):
                 ]
             if m["role"] == "tool":
                 mm["tool_call_id"] = m.get("tool_call_id") or _new_id()
+            if m.get("images"):
+                # OpenAI-style multimodal: content becomes typed parts with
+                # data-URI image_url blocks.
+                parts = ([{"type": "text", "text": mm["content"]}]
+                         if mm["content"] else [])
+                parts += [{"type": "image_url",
+                           "image_url": {"url": f"data:{_image_media_type(img)};"
+                                                f"base64,{img}"}}
+                          for img in m["images"]]
+                mm["content"] = parts
             msgs.append(mm)
         payload: dict = {"model": model, "messages": msgs, "max_tokens": max_tokens}
         if tools:
@@ -286,6 +311,17 @@ class AnthropicProtocol(BaseProtocol):
                     {"type": "tool_result",
                      "tool_use_id": m.get("tool_call_id") or _new_id(),
                      "content": content}]})
+            elif m.get("images"):
+                # Anthropic multimodal: base64 image blocks + optional text.
+                # This is what lets Claude-via-Meridian see attached photos.
+                blocks = [{"type": "image",
+                           "source": {"type": "base64",
+                                      "media_type": _image_media_type(img),
+                                      "data": img}}
+                          for img in m["images"]]
+                if content:
+                    blocks.append({"type": "text", "text": content})
+                out_msgs.append({"role": role, "content": blocks})
             else:
                 out_msgs.append({"role": role, "content": content})
 

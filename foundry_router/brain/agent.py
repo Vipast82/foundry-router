@@ -88,6 +88,18 @@ def _filter_required_tags(ranked: list[dict], persona: Optional[dict]) -> list[d
     return matching or ranked
 
 
+def _steer_vision_when_images(ranked: list[dict], messages: list[dict]) -> list[dict]:
+    """When the request actually carries an image, ANY persona's candidates
+    are filtered to vision-tagged models (not just Foundry-Vision) — routing a
+    photo to a text-only model is always wrong. Degrades to the full list if
+    no vision-tagged candidate is reachable (the brain's marker still tells it
+    images exist, so it can say so instead of hallucinating)."""
+    if not any(m.get("images") for m in messages if m.get("role") == "user"):
+        return ranked
+    matching = [r for r in ranked if "vision" in _json_list(r.get("tags"))]
+    return matching or ranked
+
+
 def _boost_permissive(ranked: list[dict], persona: Optional[dict]) -> list[dict]:
     """Persona prefer_permissive (Foundry-Creative): stable-sort PERMISSIVE
     models to the front — tier/score order is preserved within each half."""
@@ -140,10 +152,13 @@ class AgentRunner:
         # the user's progress indicator and the first debugging artifact.
         emit("think", "Analyzing request and checking available backends...")
         system, specs, info = await self._build_context(ctx)
+        attached = self._attached_images(ctx)
         emit("think",
              f"Persona {info['persona_name']} ({info['category']}): "
              f"{info['n_models']} candidate models across {info['n_backends']} "
-             f"healthy backend(s). Claude window: {info['meridian_note']}.")
+             f"healthy backend(s). Claude window: {info['meridian_note']}."
+             + (f" {len(attached)} image(s) attached — steering to vision-capable "
+                f"models." if attached else ""))
         graph, flags = self._build_graph(ctx, emit, system, specs)
 
         max_steps = self.guardrails.effective(ctx.persona)["max_steps_per_request"]
@@ -197,15 +212,30 @@ class AgentRunner:
         an explicit notice — without it a small brain assumes the preview IS
         the message. The newest user message's notice additionally names the
         include_full_user_message flag, the delivery mechanism that gets the
-        complete original to whichever worker the brain dispatches."""
+        complete original to whichever worker the brain dispatches.
+
+        Image handling: the brain NEVER sees image bytes (a single base64
+        image would blow its context like the 23k-char paste did) — the
+        images field is stripped from its view and replaced with a marker
+        naming the delivery mechanism. ctx.messages keeps the originals for
+        workers and the static fallback."""
         limit = self.brain.cfg.user_input_preview_chars
         last_user_idx = max((i for i, m in enumerate(messages)
                              if m.get("role") == "user"), default=-1)
         out = []
         for i, m in enumerate(messages):
             content = m.get("content") or ""
+            if m.get("images"):
+                n = len(m["images"])
+                m = {k: v for k, v in m.items() if k != "images"}
+                content = (content
+                           + f"\n[ATTACHED: {n} image(s) — bytes hidden from you. "
+                             f"Route to a vision-capable model (candidates tagged "
+                             f"'vision') and set include_images=true on your ask_* "
+                             f"call so the worker receives them. Vision-tagged "
+                             f"workers also receive them automatically.]")
             if len(content) <= limit:
-                out.append(m)
+                out.append({**m, "content": content})
                 continue
             if i == last_user_idx:
                 notice = (f"\n...[preview truncated at {limit} of {len(content)} "
@@ -224,6 +254,15 @@ class AgentRunner:
             if m.get("role") == "user":
                 return m.get("content") or ""
         return ""
+
+    @staticmethod
+    def _attached_images(ctx: RequestContext) -> Optional[list]:
+        """Images from the newest user message that carries any (originals
+        live in ctx.messages — the brain only ever saw the marker)."""
+        for m in reversed(ctx.messages):
+            if m.get("role") == "user" and m.get("images"):
+                return m["images"]
+        return None
 
     # -------------------------------------------------------- request context --
 
@@ -248,8 +287,10 @@ class AgentRunner:
                 break
             meridian_note = f"backend {s.config.name} currently unreachable"
 
-        # Persona candidate shaping, in order: required-tag filter (Vision),
-        # permissive boost (Creative), then pins on top — pins always win.
+        # Persona candidate shaping, in order: dynamic vision steer (an
+        # attached image beats any persona default), required-tag filter
+        # (Vision), permissive boost (Creative), then pins on top.
+        ranked = _steer_vision_when_images(ranked, ctx.messages)
         ranked = _filter_required_tags(ranked, persona)
         ranked = _boost_permissive(ranked, persona)
         ranked = _apply_pins(ranked, persona)
@@ -525,12 +566,24 @@ class AgentRunner:
                                   f"({len(full)} chars) to the worker prompt.")
                     prompt = (prompt + "\n\n--- FULL ORIGINAL USER MESSAGE "
                                        "(verbatim) ---\n" + full)
+            # Image delivery, mirroring include_full_user_message: explicit
+            # flag OR automatic for vision-tagged workers — a brain that
+            # forgets the flag must not strand the photo.
+            images = self._attached_images(ctx)
+            if images:
+                is_vision = "vision" in _json_list((meta or {}).get("tags"))
+                if args.get("include_images") or is_vision:
+                    emit("think", f"Attaching the user's {len(images)} image(s) "
+                                  f"to the worker call.")
+                else:
+                    images = None
             emit("think", f"Routing to {model_id}"
                           + (f" via {backend_info['name']}" if backend_info else "")
                           + " — waiting on generation (long tasks can take a few minutes)...")
             t0 = time.monotonic()
             try:
-                result, backend_name = await self._dispatch_worker(model_id, prompt)
+                result, backend_name = await self._dispatch_worker(model_id, prompt,
+                                                                   images=images)
             except AllBackendsFailed as e:
                 emit("think", f"All backends failed for {model_id} after "
                               f"{time.monotonic() - t0:.0f}s — the brain will pick "
@@ -572,7 +625,8 @@ class AgentRunner:
     # ------------------------------------------------- canonical dispatch --
 
     async def _dispatch_worker(self, model_id: str, prompt: str,
-                               max_tokens: Optional[int] = None):
+                               max_tokens: Optional[int] = None,
+                               images: Optional[list] = None):
         """THE single worker-dispatch path. Agent ask_* tools, every pipeline
         step, and outcome judges all call models through here, so timeout and
         dispatch behavior can never diverge between execution modes again
@@ -586,9 +640,12 @@ class AgentRunner:
         from ..usage import looks_like_window_exhaustion
         info = self.pool.backend_info(model_id)
         is_subscription = bool(info and info.get("type") == "anthropic-compatible")
+        message: dict = {"role": "user", "content": prompt}
+        if images:
+            message["images"] = images  # protocols translate per wire format
         try:
             result, backend = await self.pool.chat(
-                model_id, [{"role": "user", "content": prompt}],
+                model_id, [message],
                 max_tokens=max_tokens or self.brain.cfg.worker_max_tokens)
         except AllBackendsFailed as e:
             if is_subscription and looks_like_window_exhaustion(str(e)):

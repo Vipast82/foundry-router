@@ -53,7 +53,8 @@ def sanitize_history(messages: list[dict]) -> list[dict]:
             content = _THINK_RE.sub("", content)
             content = _COMMENT_RE.sub("", content)
         out.append({**m, "content": content.strip()})
-    return [m for m in out if m["content"] or m.get("tool_calls")]
+    # image-only messages (photo with no caption) must survive the filter
+    return [m for m in out if m["content"] or m.get("tool_calls") or m.get("images")]
 
 
 # ---- Outcome judge (cross-cutting escalation mechanism) ----------------------

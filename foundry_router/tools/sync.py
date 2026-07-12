@@ -58,7 +58,13 @@ _ASK_PARAMS = {
             "description": "Set true when the user's message was shown to you truncated "
                            "([preview truncated...]) — the COMPLETE original user message "
                            "is then appended verbatim to your prompt for this worker. "
-                           "Never retype truncated content yourself."}},
+                           "Never retype truncated content yourself."},
+        "include_images": {
+            "type": "boolean",
+            "description": "Set true when the user attached image(s) ([ATTACHED: N "
+                           "image(s)...]) — they are forwarded to this worker in its "
+                           "native format. Vision-tagged workers receive them "
+                           "automatically even without this flag."}},
     "required": ["prompt"],
 }
 
