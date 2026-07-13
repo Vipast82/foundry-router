@@ -407,8 +407,10 @@ async function tabPersonas() {
           <option>local_large</option><option>brain</option></select></div>
       <div class="row"><label title="When any candidate carries one of these tags, candidates are FILTERED to matches (e.g. vision)">required_tags (JSON list)</label>
         <input id="pe-reqtags" size="40" value="[]" placeholder='["vision"]'>
-        <label title="Boost PERMISSIVE-tagged (uncensored) local models to the front">prefer_permissive</label>
+        <label title="PREFER permissive/uncensored models (this persona is for content other models refuse). Off = the default AVOID: permissive models sink below standard ones for normal work.">prefer_permissive</label>
         <input type="checkbox" id="pe-perm"></div>
+      <div class="row"><label title="Optional JSON overriding the multi-signal ranking weights for this persona. Signals: primary (requested category), tool_calling, adequacy (observed outcome-judge quality), latency (warm tokens/sec). e.g. a speed-sensitive persona: {&quot;latency&quot;: 0.5}. Empty = defaults.">selection_weights (JSON obj)</label>
+        <input id="pe-weights" size="50" value="{}" placeholder='{"latency": 0.4, "adequacy": 0.8}'></div>
       <button class="act primary" id="pe-save">Save persona</button>
     </div>`;
   window._personas = Object.fromEntries(d.personas.map(p => [p.virtual_name, p]));
@@ -427,7 +429,8 @@ async function tabPersonas() {
     pipeline_check_enabled: $("#pe-check").checked ? 1 : 0,
     outcome_judge: $("#pe-judge").value || null,
     required_tags: JSON.parse($("#pe-reqtags").value || "[]"),
-    prefer_permissive: $("#pe-perm").checked ? 1 : 0}}));
+    prefer_permissive: $("#pe-perm").checked ? 1 : 0,
+    selection_weights: JSON.parse($("#pe-weights").value || "{}")}}));
 window.clonePersona = async source => {
   const newName = prompt("New persona name (clone of " + source + "):",
                          source + "-copy");
@@ -481,6 +484,7 @@ window.editPersona = name => {
   $("#pe-judge").value = p.outcome_judge || "";
   $("#pe-reqtags").value = p.required_tags || "[]";
   $("#pe-perm").checked = !!p.prefer_permissive;
+  $("#pe-weights").value = p.selection_weights || "{}";
 };
 
 /* ----------------------------------------------------------------- tools -- */

@@ -157,6 +157,11 @@ class Database:
             ("models", "eval_samples", "INTEGER DEFAULT 0"),
             ("models", "cold_load_ms_avg", "REAL"),
             ("models", "cold_load_samples", "INTEGER DEFAULT 0"),
+            ("models", "adequacy_ok", "INTEGER DEFAULT 0"),
+            ("models", "adequacy_failed", "INTEGER DEFAULT 0"),
+            ("models", "calls_ok", "INTEGER DEFAULT 0"),
+            ("models", "calls_failed", "INTEGER DEFAULT 0"),
+            ("personas", "selection_weights", "TEXT"),
         ]
         with self._lock:
             for table, column, ddl in added:

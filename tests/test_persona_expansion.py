@@ -5,9 +5,10 @@ import asyncio
 import json
 from contextlib import asynccontextmanager
 
-from foundry_router.brain.agent import (_boost_permissive, _filter_required_tags)
+from foundry_router.brain.agent import _filter_required_tags
 from foundry_router.config import MCPServerConfig
 from foundry_router.db import Database
+from foundry_router.registry.models_db import ModelRegistry
 from foundry_router.registry.research_agent import measured_score_in_text
 from foundry_router.tools.mcp_client import MCPManager
 
@@ -63,11 +64,24 @@ def test_required_tags_degrades_to_full_list_when_nothing_matches():
     assert _filter_required_tags(ranked, persona) == ranked
 
 
-def test_prefer_permissive_boosts_stably():
-    persona = {"prefer_permissive": 1}
-    ranked = [_row("clean-a"), _row("wild", policy="permissive"), _row("clean-b")]
-    out = _boost_permissive(ranked, persona)
-    assert [r["id"] for r in out] == ["wild", "clean-a", "clean-b"]
+def test_permissive_avoided_by_default_preferred_only_when_asked(tmp_path):
+    """The operator rule: uncensored/abliterated models exist for content other
+    models refuse — a normal persona must NOT pick one over a standard model
+    just because it scores higher, and a permissive persona should."""
+    reg = ModelRegistry(Database(tmp_path / "perm.sqlite"))
+    reg.upsert_auto("standard", source="discovery", relative_cost_tier="free")
+    reg.upsert_auto("wild", source="discovery", relative_cost_tier="free",
+                    content_policy="permissive")
+    # the permissive model even scores HIGHER on the category
+    reg.upsert_benchmark("standard", "general_chat", 60, "estimated",
+                         "community_report", confidence=0.5)
+    reg.upsert_benchmark("wild", "general_chat", 95, "estimated",
+                         "community_report", confidence=0.5)
+    order = lambda mode: [r["id"] for r in reg.ranked_for_category(
+        "general_chat", ["standard", "wild"], permissive_mode=mode)]
+    assert order("avoid") == ["standard", "wild"]    # normal persona: standard wins
+    assert order("prefer") == ["wild", "standard"]   # permissive persona: wild first
+    assert order("neutral") == ["wild", "standard"]  # pure score: higher wins
 
 
 # -- §6 media artifact forwarding + per-server timeout --------------------------------

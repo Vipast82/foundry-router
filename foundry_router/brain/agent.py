@@ -102,13 +102,13 @@ def _steer_vision_when_images(ranked: list[dict], messages: list[dict]) -> list[
     return matching or ranked
 
 
-def _boost_permissive(ranked: list[dict], persona: Optional[dict]) -> list[dict]:
-    """Persona prefer_permissive (Foundry-Creative): stable-sort PERMISSIVE
-    models to the front — tier/score order is preserved within each half."""
-    if not (persona or {}).get("prefer_permissive"):
-        return ranked
-    return sorted(ranked,
-                  key=lambda r: 0 if r.get("content_policy") == "permissive" else 1)
+def _json_obj(value) -> dict:
+    import json as _json
+    try:
+        out = _json.loads(value or "{}")
+        return out if isinstance(out, dict) else {}
+    except (_json.JSONDecodeError, TypeError):
+        return {}
 
 
 def _apply_pins(ranked: list[dict], persona: Optional[dict]) -> list[dict]:
@@ -272,15 +272,25 @@ class AgentRunner:
         persona = ctx.persona
         category = (persona or {}).get("benchmark_category") or "general_chat"
         available = self.pool.available_models()
-        # A tool-attached persona will invoke its MCP tools regularly, so blend
-        # tool_calling reliability into the within-tier quality score — a
-        # general_chat persona with tools routed to a weak tool-caller (found
-        # live: Foundry-Chat -> qwen3-14b over the stronger-tool-calling
-        # ornith:35b) otherwise, because ranking only saw general_chat.
+        # Multi-signal within-tier ranking (see ranked_for_category):
+        #  - tool-attached personas blend tool_calling reliability, so a strong
+        #    tool-caller isn't out-ranked on the primary category alone (found
+        #    live: Foundry-Chat -> qwen3-14b over the stronger ornith:35b);
+        #  - permissive/uncensored models are AVOIDED by default and only
+        #    preferred by a permissive persona (they exist for content other
+        #    models refuse, not as a general-quality choice);
+        #  - a persona can override signal weights (e.g. weight latency);
+        #  - a large request gates out models whose context can't hold it.
         has_tools = bool(_json_list((persona or {}).get("preferred_mcp_tools")))
+        overrides = _json_obj((persona or {}).get("selection_weights"))
+        permissive_mode = "prefer" if (persona or {}).get("prefer_permissive") else "avoid"
+        approx_tokens = sum(len(m.get("content") or "")
+                            for m in ctx.messages) // 4
+        min_context = approx_tokens + 1024 if approx_tokens > 2000 else None
         ranked = self.model_registry.ranked_for_category(
             category, list(available.keys()), limit=12,
-            blend_tool_calling=has_tools)
+            blend_tool_calling=has_tools, weights=overrides or None,
+            permissive_mode=permissive_mode, min_context=min_context)
         tool_name_for = {t.model_id: t.name for t in self.tool_registry.enabled()
                          if t.kind == "model" and t.model_id}
 
@@ -298,10 +308,10 @@ class AgentRunner:
 
         # Persona candidate shaping, in order: dynamic vision steer (an
         # attached image beats any persona default), required-tag filter
-        # (Vision), permissive boost (Creative), then pins on top.
+        # (Vision), then pins on top. Permissive preference/avoidance is handled
+        # inside ranked_for_category (within-tier) so it respects tier order.
         ranked = _steer_vision_when_images(ranked, ctx.messages)
         ranked = _filter_required_tags(ranked, persona)
-        ranked = _boost_permissive(ranked, persona)
         ranked = _apply_pins(ranked, persona)
 
         # Client/workspace system messages can't ride along in the message list
@@ -726,11 +736,18 @@ class AgentRunner:
                 model_id, [message],
                 max_tokens=max_tokens or self.brain.cfg.worker_max_tokens)
         except AllBackendsFailed as e:
+            # Reliability signal: a failed/timed-out dispatch marks the model
+            # down as a within-tier score multiplier (observed, deployment-real).
+            self.model_registry.record_call_outcome(model_id, ok=False)
             if is_subscription and looks_like_window_exhaustion(str(e)):
                 self.meridian_usage.note_observed_exhaustion(info["url"])
             raise
         if is_subscription:
             self.meridian_usage.note_successful_call(info["url"])
+        # Reliability: an empty response is a soft failure (the model produced
+        # nothing usable), everything else counts as a good call.
+        self.model_registry.record_call_outcome(
+            model_id, ok=bool(result.content and result.content.strip()))
         # Observed telemetry: warm tokens/sec (and cold-load time, separately)
         # roll into the registry as measured/observed benchmark signal. No-ops
         # for non-Ollama backends (they report no timing).
@@ -846,6 +863,11 @@ class AgentRunner:
         data = extract_json(text) or {}
         adequate = bool(data.get("adequate", True))
         reasoning = str(data.get("reasoning") or text[:200]).strip()
+        # Observed answer-quality signal: attribute the verdict to the model
+        # that produced the judged answer, feeding the `adequacy` benchmark that
+        # ranking now weighs. This is the closest thing to ground truth on
+        # whether a selection was actually good.
+        self.model_registry.record_outcome(flags.get("last_worker_model"), adequate)
         db.log_event("info", "outcome_judge",
                      f"verdict={'adequate' if adequate else 'INADEQUATE'} "
                      f"judge={desc} persona={(ctx.persona or {}).get('virtual_name')}",
