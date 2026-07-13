@@ -33,6 +33,10 @@ CREATE TABLE IF NOT EXISTS models (
   eval_samples INTEGER DEFAULT 0,   -- calls behind eval_tps_avg (confidence scales with this)
   cold_load_ms_avg REAL,            -- informational only: typical cold-load time (Ollama load_duration);
   cold_load_samples INTEGER DEFAULT 0,  -- NEVER mixed into a quality/speed score — pool-contention noise
+  adequacy_ok INTEGER DEFAULT 0,    -- outcome-judge verdicts on this model's answers (observed quality):
+  adequacy_failed INTEGER DEFAULT 0,--   ok/failed roll into an `adequacy` benchmark, confidence-scaled
+  calls_ok INTEGER DEFAULT 0,       -- call-level reliability: usable output vs failure/timeout/empty;
+  calls_failed INTEGER DEFAULT 0,   --   used as a within-tier score MULTIPLIER (penalty), not a booster
   last_updated TEXT,
   source TEXT                       -- "openrouter_api" | "research_agent" | "discovery" | "manual_override"
 );
@@ -71,7 +75,11 @@ CREATE TABLE IF NOT EXISTS personas (
                                     -- local answer, this judge decides adequate/escalate
   required_tags TEXT,               -- JSON list: when any candidate carries one of these tags,
                                     -- the candidate list is FILTERED to tag matches (Foundry-Vision)
-  prefer_permissive INTEGER DEFAULT 0,  -- boost content_policy=permissive models to the front
+  prefer_permissive INTEGER DEFAULT 0,  -- content_policy=permissive: prefer (this persona) vs the
+                                    -- default avoid (permissive/uncensored models are for content other
+                                    -- models refuse, not a general-quality choice) — see ranked_for_category
+  selection_weights TEXT,           -- optional JSON overriding the multi-signal ranking weights for this
+                                    -- persona, e.g. {"latency": 0.4} for a speed-sensitive workload
   enabled INTEGER DEFAULT 1,
   created_at TEXT,
   updated_at TEXT

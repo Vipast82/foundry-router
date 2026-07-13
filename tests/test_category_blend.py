@@ -77,9 +77,10 @@ def test_missing_tool_data_falls_back_to_primary_not_a_penalty(tmp_path):
 
 def test_only_tool_data_still_ranks(tmp_path):
     reg = _reg(tmp_path)
-    _model(reg, "A", chat=90)                       # primary only
-    _model(reg, "B", tool=90, tool_conf=0.9)        # tool only -> 81
-    # both contribute what they have; A's 45 (primary) < B's 81 (tool)
+    _model(reg, "A", chat=70)                        # primary only -> composite 70
+    _model(reg, "B", tool=90, tool_conf=0.9)         # tool only -> composite 90
+    # each contributes the signal it has (confidence-weighted average, so a
+    # single-signal model's composite is that signal's raw score); B's 90 > A's 70
     assert _order(reg, "general_chat", ["A", "B"],
                   blend_tool_calling=True) == ["B", "A"]
 

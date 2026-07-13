@@ -16,7 +16,7 @@ PERSONA_FIELDS = ["description", "benchmark_category", "local_bias_strength",
                   "escalation_triggers", "preferred_mcp_tools",
                   "guardrail_overrides", "pinned_models", "execution_mode",
                   "pipeline_check_enabled", "outcome_judge", "required_tags",
-                  "prefer_permissive", "enabled"]
+                  "prefer_permissive", "selection_weights", "enabled"]
 
 
 class PersonaStore:
@@ -40,7 +40,7 @@ class PersonaStore:
     def upsert(self, virtual_name: str, **fields) -> None:
         now = utcnow()
         for k in ("escalation_triggers", "preferred_mcp_tools", "guardrail_overrides",
-                  "pinned_models", "required_tags"):
+                  "pinned_models", "required_tags", "selection_weights"):
             if k in fields and not isinstance(fields[k], (str, type(None))):
                 fields[k] = json.dumps(fields[k])
         fields = {k: v for k, v in fields.items() if k in PERSONA_FIELDS}

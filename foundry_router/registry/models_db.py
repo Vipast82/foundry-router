@@ -12,6 +12,7 @@ prefers the manual one).
 from __future__ import annotations
 
 import logging
+from datetime import datetime, timezone
 from typing import Optional
 
 from ..db import Database, utcnow
@@ -31,17 +32,61 @@ MODEL_FIELDS = [
 TIER_RANK = {"free": 0, "low": 1, "medium": 2, "high": 3, "very_high": 4}
 UNKNOWN_TIER_RANK = 2.5
 
-# Category-blended ranking for tool-attached personas: a persona with MCP tools
-# attached (preferred_mcp_tools non-empty) will invoke those tools regularly,
-# so its within-tier quality score blends the requested category with the
-# tool_calling category instead of using the requested one alone. Tunable — a
-# higher weight favors reliable tool-callers over raw category quality. Note:
-# at 0.4 with today's mostly-estimated data, rankings barely move; the effect
-# grows as observed tool_calling data (record_tool_call) accrues real
-# confidence per model. Only the within-tier score changes — tier-first order
-# and per-tier caps are untouched.
-TOOL_BLEND_TOOLCALLING = 0.4
-TOOL_BLEND_PRIMARY = 1.0 - TOOL_BLEND_TOOLCALLING
+# ---- Multi-signal within-tier scoring --------------------------------------------
+# The within-tier quality score is a CONFIDENCE-WEIGHTED AVERAGE of several
+# signals (each a 0-100 benchmark): confidence modulates each signal's WEIGHT,
+# not its value, so a low-confidence or low-sample signal moves the score only
+# slightly — no single early verdict can tank a model. Signals: the persona's
+# requested category ("primary"), plus tool_calling (when the persona has MCP
+# tools), adequacy (observed outcome-judge verdicts), and latency (opt-in per
+# persona). Reliability (call success rate) is applied separately as a
+# MULTIPLIER — a penalty for flaky models, never a booster for healthy ones.
+# Only the within-tier score changes; tier-first order and per-tier caps are
+# untouched. All weights are persona-overridable (personas.selection_weights).
+DEFAULT_SELECTION_WEIGHTS = {"primary": 1.0, "tool_calling": 0.0,
+                             "adequacy": 0.6, "latency": 0.0}
+SIGNAL_WEIGHT_TOOL_CALLING = 0.5   # applied when the persona has MCP tools attached
+_SIGNAL_CATEGORIES = ("tool_calling", "adequacy", "latency")
+
+# Data hygiene: a benchmark's stored confidence is further discounted by its
+# SOURCE (a scraped community number is worth less than a vendor sheet, an
+# independent eval, a live observation, or a hand-set override) and its AGE.
+# Observed rows written from live traffic carry full weight.
+SOURCE_CONFIDENCE_FACTOR = {"manual_override": 1.0, "observed": 1.0,
+                            "independent": 1.0, "vendor": 0.9,
+                            "community_report": 0.8, "estimated": 0.7}
+_DEFAULT_SOURCE_FACTOR = 0.8
+RECENCY_FULL_DAYS = 30       # no decay within a month
+RECENCY_DECAY_DAYS = 365     # linear decay from full to floor over a year
+RECENCY_FLOOR = 0.6          # never discount an old number below this
+
+RELIABILITY_MIN_SAMPLE = 5   # below this, no reliability penalty (too little data)
+RELIABILITY_FLOOR = 0.4      # a model that always fails still keeps this much score
+
+
+def _recency_factor(last_updated: Optional[str]) -> float:
+    if not last_updated:
+        return 1.0
+    try:
+        dt = datetime.fromisoformat(last_updated)
+    except (ValueError, TypeError):
+        return 1.0
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    age_days = (datetime.now(timezone.utc) - dt).total_seconds() / 86400.0
+    if age_days <= RECENCY_FULL_DAYS:
+        return 1.0
+    frac = (age_days - RECENCY_FULL_DAYS) / (RECENCY_DECAY_DAYS - RECENCY_FULL_DAYS)
+    return max(RECENCY_FLOOR, 1.0 - (1.0 - RECENCY_FLOOR) * min(1.0, frac))
+
+
+def _effective_confidence(bench_row: dict) -> float:
+    """Stored confidence discounted by source trust and recency (0..1)."""
+    conf = bench_row.get("confidence")
+    conf = 0.5 if conf is None else conf
+    src = SOURCE_CONFIDENCE_FACTOR.get(bench_row.get("source_type"), _DEFAULT_SOURCE_FACTOR)
+    return max(0.0, min(1.0, conf)) * src * _recency_factor(bench_row.get("last_updated"))
+
 
 # Observed-telemetry scoring (design: feed data the router already collects
 # into ranking as a `measured`/`observed` benchmark source — more trustworthy
@@ -160,100 +205,151 @@ class ModelRegistry:
 
     # -- the routing query -------------------------------------------------------------
 
+    def _resolve_weights(self, weights: Optional[dict], blend_tool_calling: bool,
+                         category: str) -> dict:
+        w = dict(DEFAULT_SELECTION_WEIGHTS)
+        if blend_tool_calling and category != "tool_calling":
+            w["tool_calling"] = SIGNAL_WEIGHT_TOOL_CALLING
+        for k, v in (weights or {}).items():
+            if k in w:
+                try:
+                    w[k] = float(v)
+                except (TypeError, ValueError):
+                    pass
+        return w
+
+    @staticmethod
+    def _reliability_multiplier(model_row: dict) -> float:
+        """Flaky models (timeouts/empties/failures) are penalized; healthy ones
+        are untouched. Below RELIABILITY_MIN_SAMPLE calls, no penalty."""
+        ok = model_row.get("calls_ok") or 0
+        fail = model_row.get("calls_failed") or 0
+        n = ok + fail
+        if n < RELIABILITY_MIN_SAMPLE:
+            return 1.0
+        return RELIABILITY_FLOOR + (1.0 - RELIABILITY_FLOOR) * (ok / n)
+
     def ranked_for_category(self, category: str, model_ids: list[str],
                             limit: int = 20, per_tier: int = 5,
-                            blend_tool_calling: bool = False) -> list[dict]:
-        """Candidates among the currently-reachable models (`model_ids` from
-        the Backend Pool), two-level sorted: cost tier first (free/local ->
-        cheap -> ... -> premium), confidence-weighted quality score second
-        within a tier. Manual_override benchmark rows outrank automatic ones.
+                            blend_tool_calling: bool = False,
+                            weights: Optional[dict] = None,
+                            permissive_mode: str = "neutral",
+                            min_context: Optional[int] = None) -> list[dict]:
+        """Candidates among the currently-reachable models (`model_ids` from the
+        Backend Pool), sorted: cost tier first (free/local -> ... -> premium),
+        then WITHIN a tier a multi-signal quality score. Per-tier caps keep
+        local leading AND premium visible (the escalation-dropout guard).
 
-        Capped PER TIER (not just overall) deliberately: a flat top-N with
-        tier-first sorting would fill every slot with local models and push
-        Claude off the brain's candidate list entirely, silently breaking
-        escalation — the earlier LIMIT 12 dropout, inverted. Per-tier caps
-        keep local leading AND premium visible.
+        Within-tier ordering, in precedence:
+          1. tier (free first)
+          2. context fit — a model whose known context_length can't hold
+             `min_context` sinks below models that can (soft: unknown length
+             never sinks, and it degrades rather than removing)
+          3. permissive policy — permissive_mode 'avoid' (default for normal
+             personas) sinks content_policy=permissive models BELOW every
+             standard model in the tier (uncensored models are for content
+             other models refuse, not a general-quality pick); 'prefer'
+             (a permissive persona) floats them to the top; 'neutral' ignores
+             policy
+          4. the multi-signal quality score (see DEFAULT_SELECTION_WEIGHTS):
+             a confidence-weighted average of the requested category plus
+             tool_calling / adequacy / latency, times a reliability multiplier
 
-        Models with no benchmark row still appear (bottom of their tier) so
-        the brain knows they exist and can fire request_model_research.
-
-        blend_tool_calling: for a tool-attached persona, blend the within-tier
-        quality with the tool_calling category (TOOL_BLEND_* weights) so a
-        strong tool-caller isn't out-ranked by a model that merely scores
-        higher on the primary category it will spend half its time NOT doing.
-        Identity when category is already tool_calling."""
+        Models with no benchmark row still appear (bottom of their tier) so the
+        brain knows they exist and can fire request_model_research."""
         if not model_ids:
             return []
-        blend = blend_tool_calling and category != "tool_calling"
-        # tool_weighted mirrors the primary row's selection (manual_override
-        # first, then best score*confidence) so observed/measured rows win over
-        # estimated ones automatically as they accrue confidence.
-        tool_col = ""
-        if blend:
-            tool_col = """,
-              (SELECT b3.score * COALESCE(b3.confidence, 0.5)
-                 FROM model_benchmarks b3
-                WHERE b3.model_id = m.id AND b3.category = 'tool_calling'
-                ORDER BY (b3.source_type = 'manual_override') DESC,
-                         (b3.score * COALESCE(b3.confidence, 0.5)) DESC
-                LIMIT 1) AS tool_weighted"""
-        placeholders = ",".join("?" * len(model_ids))
-        rows = self.db.query(
-            f"""
-            SELECT m.*, b.score, b.score_type, b.confidence{tool_col}
-            FROM models m
-            LEFT JOIN model_benchmarks b
-              ON b.model_id = m.id AND b.category = ?
-             AND b.id = (
-                   SELECT b2.id FROM model_benchmarks b2
-                   WHERE b2.model_id = m.id AND b2.category = ?
-                   ORDER BY (b2.source_type = 'manual_override') DESC,
-                            (b2.score * COALESCE(b2.confidence, 0.5)) DESC
-                   LIMIT 1)
-            WHERE m.id IN ({placeholders})
-            """,
-            [category, category] + model_ids,
-        )
-        # `known` includes disabled models ON PURPOSE: they're filtered out
-        # below, but must not be resurrected as unknown-model fillers —
-        # disable is governance (exclude entirely), not absence of data.
-        known = {r["id"] for r in rows}
-        rows = [r for r in rows if (r.get("enabled") if r.get("enabled") is not None else 1)]
-        # Reachable models with no registry row at all still matter — surface
-        # them with empty metadata (unknown tier => mid-paid conservative) so
-        # the brain can fire request_model_research (§4.4 on-demand trigger).
+        w = self._resolve_weights(weights, blend_tool_calling, category)
+        # Which benchmark categories to fetch: the requested one plus any
+        # weighted signal (skipping a signal that IS the requested category, so
+        # it's never double-counted).
+        signals = [s for s in _SIGNAL_CATEGORIES if w.get(s, 0) > 0 and s != category]
+        needed = [category] + signals
+
+        ph = ",".join("?" * len(model_ids))
+        models = {r["id"]: r for r in
+                  self.db.query(f"SELECT * FROM models WHERE id IN ({ph})", model_ids)}
+        cph = ",".join("?" * len(needed))
+        bench = self.db.query(
+            f"SELECT * FROM model_benchmarks WHERE model_id IN ({ph}) "
+            f"AND category IN ({cph})", model_ids + needed)
+
+        # Best row per (model, category): manual_override first, then highest
+        # effective (source- and recency-discounted) score*confidence — so
+        # observed/measured rows win over estimated ones as they accrue.
+        grouped: dict = {}
+        for b in bench:
+            grouped.setdefault((b["model_id"], b["category"]), []).append(b)
+        best: dict = {}
+        for key, rowset in grouped.items():
+            rowset.sort(
+                key=lambda r: (r.get("source_type") == "manual_override",
+                               (r.get("score") or 0) * _effective_confidence(r)),
+                reverse=True)
+            best[key] = rowset[0]
+
+        def composite(mid: str, model_row: dict) -> Optional[float]:
+            # Confidence-weighted average: each signal's WEIGHT is scaled by its
+            # effective confidence, its VALUE is the raw 0-100 score. A missing
+            # or low-confidence signal barely moves the result; a single early
+            # verdict can't tank a model.
+            num = den = 0.0
+            for sig, cat in [("primary", category)] + [(s, s) for s in signals]:
+                base = w.get(sig, 0.0)
+                if base <= 0:
+                    continue
+                row = best.get((mid, cat))
+                if not row or row.get("score") is None:
+                    continue
+                eff = base * _effective_confidence(row)
+                num += eff * row["score"]
+                den += eff
+            if den <= 0:
+                return None
+            return (num / den) * self._reliability_multiplier(model_row)
+
+        rows: list[dict] = []
+        known = set(models)
         for mid in model_ids:
-            if mid not in known:
+            m = models.get(mid)
+            if m is None:
+                # Reachable but unregistered: surface with empty metadata so the
+                # brain can fire request_model_research (unknown tier => mid-paid).
                 rows.append({"id": mid, "display_name": mid, "provider": None,
                              "context_length": None, "relative_cost_tier": None,
                              "reasoning_style": None, "good_for": None,
                              "benefits_from_explicit_prompting": 0,
                              "tags": None, "content_policy": None,
                              "cost_per_1k_input": None, "cost_per_1k_output": None,
-                             "score": None, "score_type": None, "confidence": None})
+                             "score": None, "score_type": None, "confidence": None,
+                             "_composite": None})
+                continue
+            # Disabled is governance: excluded from candidacy, but its presence
+            # in `known` stops it being resurrected as an unknown filler.
+            if m.get("enabled") is not None and not m.get("enabled"):
+                continue
+            m = dict(m)
+            prim = best.get((mid, category))
+            m["score"] = prim.get("score") if prim else None
+            m["score_type"] = prim.get("score_type") if prim else None
+            m["confidence"] = prim.get("confidence") if prim else None
+            m["_composite"] = composite(mid, m)
+            rows.append(m)
 
         def sort_key(r: dict):
             tier = TIER_RANK.get(r.get("relative_cost_tier"), UNKNOWN_TIER_RANK)
-            primary = (r["score"] * (r.get("confidence") or 0.5)
-                       if r.get("score") is not None else None)
-            if blend:
-                # Combine only the signals that exist: missing tool_calling data
-                # falls back to primary (absence isn't evidence of bad
-                # tool-use), and vice versa — never penalize a data gap.
-                tw = r.get("tool_weighted")
-                if primary is not None and tw is not None:
-                    weighted = TOOL_BLEND_PRIMARY * primary + TOOL_BLEND_TOOLCALLING * tw
-                elif primary is not None:
-                    weighted = primary
-                elif tw is not None:
-                    weighted = tw
-                else:
-                    weighted = -1.0
-            elif primary is not None:
-                weighted = primary
+            cl = r.get("context_length")
+            fits = 1 if (min_context is not None and cl is not None and cl < min_context) else 0
+            is_perm = r.get("content_policy") == "permissive"
+            if permissive_mode == "avoid":
+                perm = 1 if is_perm else 0
+            elif permissive_mode == "prefer":
+                perm = 0 if is_perm else 1
             else:
-                weighted = -1.0  # unscored sinks to the bottom of its tier
-            return (tier, -weighted)
+                perm = 0
+            comp = r.get("_composite")
+            weighted = comp if comp is not None else -1.0
+            return (tier, fits, perm, -weighted)
 
         rows.sort(key=sort_key)
         out: list[dict] = []
@@ -307,6 +403,45 @@ class ModelRegistry:
                 score_type="measured", source_type="observed",
                 source_url="observed:live-traffic",
                 confidence=observed_confidence(total))
+
+    def record_outcome(self, model_id: str, adequate: bool) -> None:
+        """Observed answer quality: the outcome judge's adequate/inadequate
+        verdict on a model's real answer — the closest thing to ground truth on
+        'was this a good pick', and deployment-specific. Rolls into an
+        `adequacy` benchmark (measured/observed, confidence by sample size)."""
+        if not model_id:
+            return
+        if self.get(model_id) is None:
+            self.db.execute("INSERT INTO models (id) VALUES (?)", (model_id,))
+        column = "adequacy_ok" if adequate else "adequacy_failed"
+        self.db.execute(
+            f"UPDATE models SET {column} = COALESCE({column}, 0) + 1 WHERE id=?",
+            (model_id,))
+        row = self.get(model_id)
+        okc = (row.get("adequacy_ok") or 0) if row else 0
+        failc = (row.get("adequacy_failed") or 0) if row else 0
+        total = okc + failc
+        if total:
+            self.upsert_benchmark(
+                model_id, "adequacy", 100.0 * okc / total,
+                score_type="measured", source_type="observed",
+                source_url="observed:outcome-judge",
+                confidence=observed_confidence(total))
+
+    def record_call_outcome(self, model_id: str, ok: bool) -> None:
+        """Call-level reliability: did the dispatch produce usable output, or
+        fail/time out/come back empty? Accumulated per model and applied as a
+        within-tier score MULTIPLIER (penalty for flaky models) — kept out of
+        the additive signal blend so a healthy model gets no artificial boost,
+        only an unreliable one gets marked down."""
+        if not model_id:
+            return
+        if self.get(model_id) is None:
+            self.db.execute("INSERT INTO models (id) VALUES (?)", (model_id,))
+        column = "calls_ok" if ok else "calls_failed"
+        self.db.execute(
+            f"UPDATE models SET {column} = COALESCE({column}, 0) + 1 WHERE id=?",
+            (model_id,))
 
     def note_inference(self, model_id: str, eval_count: int,
                        eval_duration_ns: int, load_duration_ns: int = 0) -> None:
