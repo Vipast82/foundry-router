@@ -30,6 +30,50 @@ log = logging.getLogger(__name__)
 
 CATEGORIES = ["coding", "reasoning", "general_chat", "tool_calling", "agentic"]
 
+# Named, real benchmarks recognized during research and stored SEPARATELY (as
+# a tiebreaker source, not a ranking category). key (lowercased) -> (canonical
+# name, router category, scale). scale: "percent" (0-100 pass rate — the only
+# one that tiebreaks), "elo" (Chatbot Arena), "count" (AIME raw), "score"
+# (MT-Bench 0-10) — the latter three are stored but flagged out of naive
+# comparison. Ordered so a longest-substring match prefers the specific variant
+# (e.g. "swe-bench verified" over "swe-bench", "humaneval+" over "humaneval").
+KNOWN_BENCHMARKS = {
+    "swe-bench verified": ("SWE-Bench Verified", "coding", "percent"),
+    "swe-bench multilingual": ("SWE-Bench Multilingual", "coding", "percent"),
+    "swe-bench pro": ("SWE-Bench Pro", "coding", "percent"),
+    "swe-bench": ("SWE-Bench", "coding", "percent"),
+    "terminal-bench": ("Terminal-Bench", "coding", "percent"),
+    "livecodebench": ("LiveCodeBench", "coding", "percent"),
+    "humaneval+": ("HumanEval+", "coding", "percent"),
+    "humaneval": ("HumanEval", "coding", "percent"),
+    "mbpp": ("MBPP", "coding", "percent"),
+    "nl2repo": ("NL2Repo", "coding", "percent"),
+    "claweval": ("ClawEval", "coding", "percent"),
+    "mmlu-pro": ("MMLU-Pro", "reasoning", "percent"),
+    "mmlu": ("MMLU", "reasoning", "percent"),
+    "gpqa diamond": ("GPQA Diamond", "reasoning", "percent"),
+    "gpqa": ("GPQA", "reasoning", "percent"),
+    "arc-agi": ("ARC-AGI", "reasoning", "percent"),
+    "aime": ("AIME", "reasoning", "count"),
+    "bfcl": ("BFCL", "tool_calling", "percent"),
+    "chatbot arena": ("Chatbot Arena", "general_chat", "elo"),
+    "lmsys arena": ("Chatbot Arena", "general_chat", "elo"),
+    "mt-bench": ("MT-Bench", "general_chat", "score"),
+}
+
+
+def match_known_benchmark(name: Optional[str]) -> Optional[tuple[str, str, str]]:
+    """Map an extractor-supplied benchmark name to (canonical, category, scale)
+    via longest-substring match, or None if unrecognized."""
+    norm = " ".join((name or "").lower().split())
+    if not norm:
+        return None
+    best_key = None
+    for key in KNOWN_BENCHMARKS:
+        if key in norm and (best_key is None or len(key) > len(best_key)):
+            best_key = key
+    return KNOWN_BENCHMARKS[best_key] if best_key else None
+
 # Research is a background/on-demand task with no user waiting, so its brain
 # call can afford more patience than an interactive request: a cold-loading
 # local brain (or a momentary backend hiccup) throws a transient ReadTimeout
@@ -63,6 +107,11 @@ Return ONLY a JSON object, no prose, with this exact shape:
       "source_type": "vendor" or "independent" or "community_report",
       "source_url": "<url or empty string>",
       "confidence": <0.0-1.0>}}
+  ],
+  "named_benchmarks": [
+    {{"name": "<one of the recognized names listed below>",
+      "score": <the number EXACTLY as written in the source>,
+      "source_url": "<url or empty string>"}}
   ]
 }}
 
@@ -72,8 +121,16 @@ recalculate, average, round, or paraphrase a number: if the source says 57.2,
 the score is 57.2, not your own synthesis of it. Where no directly-stated
 number exists, you may give an "estimated" score from the qualitative
 discussion, with confidence <= 0.5. Lower confidence when only a single source
-or vendor-published numbers exist. If the text contains nothing useful, return
-{{"benchmarks": []}}."""
+or vendor-published numbers exist.
+
+For "named_benchmarks": include a row ONLY when one of these well-known
+benchmark names appears in the text WITH a numeric result next to it, quoting
+the number exactly — SWE-Bench Verified, SWE-Bench Pro, SWE-Bench Multilingual,
+Terminal-Bench, HumanEval, HumanEval+, MBPP, LiveCodeBench, NL2Repo, ClawEval,
+MMLU, MMLU-Pro, GPQA Diamond, AIME, ARC-AGI, BFCL, Chatbot Arena, MT-Bench.
+Omit the array if none appear. Never invent a named-benchmark number.
+
+If the text contains nothing useful, return {{"benchmarks": []}}."""
 
 
 def measured_score_in_text(score: float, corpus: str) -> bool:
@@ -317,6 +374,35 @@ class ResearchAgent:
             benefits_from_explicit_prompting=(
                 1 if data.get("benefits_from_explicit_prompting") else 0),
         )
+        # Named benchmarks (real, verifiable) — processed FIRST and
+        # independently of the generic-score path: they carry their own verbatim
+        # check, and must be captured even when the insufficient-source gate
+        # below skips synthesized generic scores (the motivating case: a niche
+        # model whose only real data IS a named SWE-Bench number).
+        named_wrote = 0
+        for nb in data.get("named_benchmarks") or []:
+            matched = match_known_benchmark(nb.get("name"))
+            if matched is None:
+                continue
+            canonical, category, scale = matched
+            try:
+                score = float(nb.get("score"))
+            except (TypeError, ValueError):
+                continue
+            # same discipline as generic scores: trust it only if the number
+            # actually appears in the fetched sources.
+            if not measured_score_in_text(score, text):
+                continue
+            self.registry.upsert_named_benchmark(
+                model_id, canonical, category, max(0.0, score), scale,
+                source_url=str(nb.get("source_url") or "")[:500],
+                measured_date=(str(nb.get("measured_date"))[:32]
+                               if nb.get("measured_date") else None))
+            named_wrote += 1
+        if named_wrote:
+            self.db.log_event("info", "research",
+                              f"{model_id}: recorded {named_wrote} named benchmark(s)")
+
         raw_benchmarks = data.get("benchmarks") or []
         # Insufficient-source gate (item 3): a low-web-presence model (e.g.
         # ornith:35b, "3 pages, 0 real benchmarks") has no per-category numbers

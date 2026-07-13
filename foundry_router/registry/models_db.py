@@ -63,6 +63,12 @@ RECENCY_FLOOR = 0.6          # never discount an old number below this
 RELIABILITY_MIN_SAMPLE = 5   # below this, no reliability penalty (too little data)
 RELIABILITY_FLOOR = 0.4      # a model that always fails still keeps this much score
 
+# Named-benchmark tiebreaker: when the top candidates in a tier land within this
+# many composite points of each other, a real named benchmark (SWE-Bench et al.)
+# relevant to the category breaks the tie. Only kicks in on a genuine near-tie —
+# the composite is still the primary signal.
+TIEBREAK_EPSILON = 3.0
+
 
 def _recency_factor(last_updated: Optional[str]) -> float:
     if not last_updated:
@@ -98,6 +104,40 @@ def _effective_confidence(bench_row: dict) -> float:
 # way), so it's forward-looking data, and a documented constant is easier to
 # reason about than a clever curve. Tune if the local fleet's "fast" differs.
 LATENCY_TARGET_TPS = 60.0
+
+
+def _apply_named_tiebreak(rows: list, named: dict, tier_fn, fits_fn, perm_fn,
+                          wval_fn, epsilon: float = TIEBREAK_EPSILON) -> None:
+    """In-place reorder of near-tie clusters by relevant named-benchmark score.
+
+    A cluster is a run of adjacent (already composite-sorted) rows sharing
+    tier/fits/permissive rank whose composites are all within `epsilon` of the
+    run's leader. Within such a cluster, a candidate with a higher relevant
+    named benchmark is floated ahead of one with a marginally higher composite —
+    but only within the near-tie, never across it. The row that wins a genuine
+    reorder gets an auditable `_tiebreak` note."""
+    i, n = 0, len(rows)
+    while i < n:
+        gk = (tier_fn(rows[i]), fits_fn(rows[i]), perm_fn(rows[i]))
+        leader_w = wval_fn(rows[i])
+        j = i + 1
+        while (j < n and (tier_fn(rows[j]), fits_fn(rows[j]), perm_fn(rows[j])) == gk
+               and abs(wval_fn(rows[j]) - leader_w) <= epsilon):
+            j += 1
+        if j - i > 1 and any(named.get(r["id"]) for r in rows[i:j]):
+            old_leader = rows[i]["id"]
+            cluster = rows[i:j]
+            cluster.sort(key=lambda r: (
+                0 if named.get(r["id"]) else 1,
+                -(named.get(r["id"])[0] if named.get(r["id"]) else 0.0),
+                -wval_fn(r)))
+            rows[i:j] = cluster
+            if cluster[0]["id"] != old_leader:
+                nb = named.get(cluster[0]["id"])
+                cluster[0]["_tiebreak"] = (
+                    f"near-tie on composite (~{leader_w:.0f}); broken by "
+                    f"{nb[1]} {nb[0]:g} over {old_leader}")
+        i = j
 
 
 def observed_confidence(n: int) -> float:
@@ -202,6 +242,48 @@ class ModelRegistry:
             (model_id, category, score, score_type, source_type, source_url,
              confidence, utcnow()),
         )
+
+    # -- named benchmarks (real, verifiable, heterogeneous scales) ----------------------
+
+    def named_benchmarks(self, model_id: str) -> list[dict]:
+        return self.db.query(
+            "SELECT * FROM model_named_benchmarks WHERE model_id=? "
+            "ORDER BY category, benchmark_name", (model_id,))
+
+    def upsert_named_benchmark(self, model_id: str, benchmark_name: str,
+                               category: str, score: float, scale: str,
+                               source_url: str = "",
+                               measured_date: Optional[str] = None) -> None:
+        """One row per (model, benchmark_name); a re-research replaces it. Scores
+        are stored on the benchmark's OWN scale (never coerced to 0-100)."""
+        self.db.execute("INSERT OR IGNORE INTO models (id) VALUES (?)", (model_id,))
+        self.db.execute(
+            "DELETE FROM model_named_benchmarks WHERE model_id=? AND benchmark_name=?",
+            (model_id, benchmark_name))
+        self.db.execute(
+            "INSERT INTO model_named_benchmarks (model_id, benchmark_name, category, "
+            "score, scale, source_url, measured_date, last_updated) "
+            "VALUES (?,?,?,?,?,?,?,?)",
+            (model_id, benchmark_name, category, score, scale, source_url,
+             measured_date, utcnow()))
+
+    def _named_tiebreak_scores(self, model_ids: list[str], category: str) -> dict:
+        """Best percent-scale named-benchmark score per model for a category —
+        the only scale directly comparable across models (ELO/count are stored
+        but excluded from tiebreaks). {model_id: (score, benchmark_name)}."""
+        if not model_ids:
+            return {}
+        ph = ",".join("?" * len(model_ids))
+        rows = self.db.query(
+            f"SELECT model_id, benchmark_name, score FROM model_named_benchmarks "
+            f"WHERE category=? AND scale='percent' AND model_id IN ({ph})",
+            [category] + model_ids)
+        best: dict = {}
+        for r in rows:
+            cur = best.get(r["model_id"])
+            if cur is None or r["score"] > cur[0]:
+                best[r["model_id"]] = (r["score"], r["benchmark_name"])
+        return best
 
     def reset_benchmarks(self, model_id: str) -> int:
         """Delete a model's AUTOMATIC benchmark rows (research/seed/observed),
@@ -355,19 +437,31 @@ class ModelRegistry:
             m["_composite"] = composite(mid, m)
             rows.append(m)
 
-        def sort_key(r: dict):
-            tier = TIER_RANK.get(r.get("relative_cost_tier"), UNKNOWN_TIER_RANK)
+        def _tier(r):
+            return TIER_RANK.get(r.get("relative_cost_tier"), UNKNOWN_TIER_RANK)
+
+        def _fits(r):
             cl = r.get("context_length")
-            fits = 1 if (min_context is not None and cl is not None and cl < min_context) else 0
+            return 1 if (min_context is not None and cl is not None
+                         and cl < min_context) else 0
+
+        def _perm(r):
             # 'prefer' floats permissive to the top (explicit front-door
             # persona); every other mode ignores content policy in ranking.
             is_perm = r.get("content_policy") == "permissive"
-            perm = (0 if is_perm else 1) if permissive_mode == "prefer" else 0
-            comp = r.get("_composite")
-            weighted = comp if comp is not None else -1.0
-            return (tier, fits, perm, -weighted)
+            return (0 if is_perm else 1) if permissive_mode == "prefer" else 0
 
-        rows.sort(key=sort_key)
+        def _wval(r):
+            c = r.get("_composite")
+            return c if c is not None else -1.0
+
+        rows.sort(key=lambda r: (_tier(r), _fits(r), _perm(r), -_wval(r)))
+        # Named-benchmark tiebreaker (layered on top; composite is untouched):
+        # within a run of same-tier candidates whose composites are near-equal,
+        # let a real named benchmark relevant to the category settle it.
+        named = self._named_tiebreak_scores(model_ids, category)
+        if named:
+            _apply_named_tiebreak(rows, named, _tier, _fits, _perm, _wval)
         out: list[dict] = []
         counts: dict = {}
         for r in rows:

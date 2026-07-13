@@ -275,7 +275,8 @@ async def apply_seed(request: Request):
 @router.get("/admin/api/models/benchmarks")
 async def model_benchmarks(request: Request, model_id: str):
     svc = _svc(request)
-    return {"benchmarks": svc.registry.benchmarks(model_id)}
+    return {"benchmarks": svc.registry.benchmarks(model_id),
+            "named": svc.registry.named_benchmarks(model_id)}
 
 
 @router.post("/admin/api/models/reset_benchmarks")
