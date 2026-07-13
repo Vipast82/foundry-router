@@ -19,6 +19,7 @@ import asyncio
 import json
 import logging
 import re
+import time
 from typing import Awaitable, Callable, Optional
 
 from ..config import ResearchConfig
@@ -60,6 +61,13 @@ KNOWN_BENCHMARKS = {
     "lmsys arena": ("Chatbot Arena", "general_chat", "elo"),
     "mt-bench": ("MT-Bench", "general_chat", "score"),
 }
+
+
+def _is_rate_limited(exc: BaseException) -> bool:
+    """A 429 anywhere in the exception chain (MCP wraps httpx's HTTPStatusError,
+    sometimes inside a TaskGroup) — described text is the reliable signal."""
+    text = describe_exception(exc).lower()
+    return "429" in text or "too many requests" in text
 
 
 def match_known_benchmark(name: Optional[str]) -> Optional[tuple[str, str, str]]:
@@ -181,6 +189,7 @@ class ResearchAgent:
         self.queue: asyncio.Queue[str] = asyncio.Queue()
         self._queued: set[str] = set()
         self._tasks: list[asyncio.Task] = []
+        self._last_search_ts = 0.0   # monotonic clock of the last search call, for pacing
 
     # -- lifecycle -----------------------------------------------------------------
 
@@ -288,11 +297,41 @@ class ResearchAgent:
 
     # -- the actual research pass ---------------------------------------------------
 
+    async def _pace_search(self) -> None:
+        """Global minimum gap between search calls so a sweep never bursts the
+        external engines SearXNG fans out to. Serial worker => this simple
+        monotonic gate is enough; no lock needed."""
+        interval = self.cfg.search_pace_seconds
+        if interval and interval > 0:
+            wait = self._last_search_ts + interval - time.monotonic()
+            if wait > 0:
+                await asyncio.sleep(wait)
+        self._last_search_ts = time.monotonic()
+
     async def _search(self, query: str) -> str:
         ref = self.cfg.search
         if not ref.server or not ref.tool:
             raise RuntimeError("no search MCP tool configured")
-        return await self.mcp.call_tool(ref.server, ref.tool, {ref.query_param: query})
+        attempts = max(1, self.cfg.search_retry_attempts)
+        for attempt in range(1, attempts + 1):
+            await self._pace_search()
+            try:
+                return await self.mcp.call_tool(
+                    ref.server, ref.tool, {ref.query_param: query})
+            except Exception as e:  # noqa: BLE001
+                # A 429 means "you're going too fast" — retrying immediately
+                # just 429s again, so back off longer and escalating. Any other
+                # failure propagates as before (research_model records it).
+                if _is_rate_limited(e) and attempt < attempts:
+                    backoff = self.cfg.search_429_backoff_seconds * attempt
+                    self.db.log_event(
+                        "warning", "research",
+                        f"search rate-limited (429) — backing off {backoff:.0f}s "
+                        f"before retry {attempt + 1}/{attempts}",
+                        describe_exception(e))
+                    await asyncio.sleep(backoff)
+                    continue
+                raise
 
     async def _fetch(self, url: str) -> str:
         ref = self.cfg.fetch

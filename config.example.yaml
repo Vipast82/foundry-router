@@ -176,6 +176,14 @@ registry:
     # (check the Tools tab in the web UI after connecting them).
     search:  { server: "searxng",  tool: "searxng_web_search", query_param: "query" }
     fetch:   { server: "crawl4ai", tool: "md",                 url_param: "url" }
+    # Search pacing — a full-registry sweep otherwise fires 20+ searches nearly
+    # back-to-back, and SearXNG fans each out to several external engines that
+    # 429 the burst (not a limit inside this deployment). A global minimum gap
+    # between search calls keeps under those thresholds; a 429 gets a longer,
+    # escalating backoff before retry. Raise the gap if 429s persist. 0 = off.
+    search_pace_seconds: 2.0
+    search_429_backoff_seconds: 45.0
+    search_retry_attempts: 3
 
 # --- MCP server connections (§4.9 item 8) --------------------------------------
 # A CONNECTION list, not a tool list — tools are discovered per server via
