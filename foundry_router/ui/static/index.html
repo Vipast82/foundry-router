@@ -295,6 +295,8 @@ async function tabModels() {
         categories in one research pass, so it's treated as synthesized (not a real
         per-category measurement) and its confidence is cut. Hover a pill for its
         source/type/confidence, timestamp, and which category it collided with.</p>
+      <div class="row"><label title="Real, named, independently-verifiable benchmarks (SWE-Bench, MMLU, BFCL, ...). Kept separate from the composite; used as an explicit tiebreaker when composite scores are near-equal. percent-scale rows break ties; elo/count/score scales are stored but flagged out of naive comparison.">named benchmarks</label>
+        <span id="me-named" class="hint">…</span></div>
       <div class="row"><button class="act primary" id="me-save">Save (manual override)</button>
         <button class="act" id="me-reset-bench" title="Delete this model's automatic benchmark rows (research/seed/observed; manual overrides kept) and re-apply reference-seed defaults — the fix for a row with a wrong number">Reset scores to seed</button></div>
     </div>`;
@@ -347,9 +349,18 @@ window.editModel = id => {
       return `<span class="pill${dup ? " bad" : ""}" style="border:1px solid var(--line)" title="${esc(tip)}">${esc(b.category)} ${b.score}${dup ? " ⚠" : ""}</span>`;
     }).join(" ");
   };
+  const renderNamed = rows => {
+    if (!rows || !rows.length) { $("#me-named").textContent = "none"; return; }
+    $("#me-named").innerHTML = rows.map(b => {
+      const off = b.scale !== "percent";   // elo/count/score: shown, not tiebroken
+      return `<span class="pill${off ? " warn" : ""}" style="border:1px solid var(--line)" title="${esc(b.category)} · ${esc(b.scale)}${off ? " (not used in tiebreak — non-percent scale)" : ""}${b.source_url ? " · " + esc(b.source_url) : ""}">${esc(b.benchmark_name)} ${b.score}${off ? " " + esc(b.scale) : ""}</span>`;
+    }).join(" ");
+  };
   $("#me-benchmarks").textContent = "…";
+  $("#me-named").textContent = "…";
   api("models/benchmarks?model_id=" + encodeURIComponent(id))
-    .then(r => renderBench(r.benchmarks)).catch(() => { $("#me-benchmarks").textContent = "—"; });
+    .then(r => { renderBench(r.benchmarks); renderNamed(r.named); })
+    .catch(() => { $("#me-benchmarks").textContent = "—"; $("#me-named").textContent = "—"; });
   $("#me-reset-bench").onclick = async () => {
     if (!confirm("Reset " + id + "'s automatic benchmark rows to reference-seed "
                  + "defaults? (manual overrides are kept)")) return;

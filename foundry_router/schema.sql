@@ -55,6 +55,28 @@ CREATE TABLE IF NOT EXISTS model_benchmarks (
 
 CREATE INDEX IF NOT EXISTS idx_benchmarks_model ON model_benchmarks(model_id, category);
 
+-- Named, real, independently-verifiable benchmark results (SWE-Bench Verified,
+-- MMLU-Pro, BFCL, Chatbot Arena, ...), kept SEPARATE from model_benchmarks on
+-- purpose: these have heterogeneous, real scales (0-100 pass rate vs ELO vs raw
+-- problem count) that must NOT be silently coerced into the router's internal
+-- 0-100 composite. They are not a ranking category (most models have most of
+-- them missing — sparse); they serve as an explicit within-tier TIEBREAKER when
+-- composite scores are near-equal (see ranked_for_category). scale='percent'
+-- rows participate in tiebreaks; elo/count/score are stored but flagged out.
+CREATE TABLE IF NOT EXISTS model_named_benchmarks (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  model_id TEXT REFERENCES models(id),
+  benchmark_name TEXT,              -- canonical, e.g. "SWE-Bench Verified"
+  category TEXT,                    -- router category this benchmark speaks to (coding/reasoning/...)
+  score REAL,                       -- as reported, on the benchmark's own scale
+  scale TEXT,                       -- "percent" | "elo" | "count" | "score"
+  source_url TEXT,
+  measured_date TEXT,               -- when the eval was run, if the source says (else NULL)
+  last_updated TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_named_bench_model ON model_named_benchmarks(model_id, category);
+
 -- §4.8 Personas ---------------------------------------------------------------
 
 CREATE TABLE IF NOT EXISTS personas (

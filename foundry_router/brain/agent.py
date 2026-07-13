@@ -189,6 +189,8 @@ class AgentRunner:
              f"healthy backend(s). Claude window: {info['meridian_note']}."
              + (f" {len(attached)} image(s) attached — steering to vision-capable "
                 f"models." if attached else ""))
+        for tb in info.get("tiebreaks", []):
+            emit("think", f"Tiebreaker — {tb}.")
         graph, flags = self._build_graph(ctx, emit, system, specs)
 
         max_steps = self.guardrails.effective(ctx.persona)["max_steps_per_request"]
@@ -363,6 +365,8 @@ class AgentRunner:
             "n_models": len(available),
             "n_backends": len({b for names in available.values() for b in names}),
             "meridian_note": meridian_note,
+            # Auditable named-benchmark tiebreaks (surfaced as narration).
+            "tiebreaks": [r["_tiebreak"] for r in ranked if r.get("_tiebreak")],
         }
         return system, specs, info
 
