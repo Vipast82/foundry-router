@@ -23,11 +23,20 @@ from typing import Awaitable, Callable, Optional
 
 from ..config import ResearchConfig
 from ..db import Database, utcnow
+from ..errors import describe_exception
 from .models_db import ModelRegistry
 
 log = logging.getLogger(__name__)
 
 CATEGORIES = ["coding", "reasoning", "general_chat", "tool_calling", "agentic"]
+
+# Research is a background/on-demand task with no user waiting, so its brain
+# call can afford more patience than an interactive request: a cold-loading
+# local brain (or a momentary backend hiccup) throws a transient ReadTimeout
+# that a retry clears — previously this failed the whole pass and needed manual
+# requeuing.
+LLM_RETRY_ATTEMPTS = 3
+LLM_RETRY_BACKOFF_SECONDS = 8
 
 # Same benchmark categories used throughout the main guide, for consistency.
 _QUERIES = ["{name} benchmarks", "{name} SWE-bench", "{name} review"]
@@ -191,12 +200,34 @@ class ResearchAgent:
             except Exception as e:
                 # Failure is recorded ON THE MODEL ROW, not just the event log
                 # — the UI shows it, so a silently-unscored model can't sink to
-                # the bottom of its tier with nothing visibly wrong.
-                self.registry.set_research_status(model_id, "failed", str(e))
+                # the bottom of its tier with nothing visibly wrong. Unwrap the
+                # exception (TaskGroup/transport errors stringify uselessly)
+                # so "why" is actually readable.
+                detail = describe_exception(e)
+                self.registry.set_research_status(model_id, "failed", detail)
                 self.db.log_event("error", "research",
-                                  f"research failed for {model_id}", str(e))
+                                  f"research failed for {model_id}", detail)
             finally:
                 self._queued.discard(model_id)
+
+    async def _extract_with_retry(self, prompt: str) -> str:
+        """Call the research LLM with retry-then-raise (item 1). A cold-loading
+        brain throws a transient timeout the first attempt clears; failing the
+        whole pass on it meant manual requeuing. Background task -> patience is
+        cheap, no user waiting on a heartbeat."""
+        last: Optional[BaseException] = None
+        for attempt in range(1, LLM_RETRY_ATTEMPTS + 1):
+            try:
+                return await self.llm(prompt)
+            except Exception as e:  # noqa: BLE001 — retry any transient failure
+                last = e
+                self.db.log_event(
+                    "warning", "research",
+                    f"brain extraction attempt {attempt}/{LLM_RETRY_ATTEMPTS} failed",
+                    describe_exception(e))
+                if attempt < LLM_RETRY_ATTEMPTS:
+                    await asyncio.sleep(LLM_RETRY_BACKOFF_SECONDS * attempt)
+        raise last if last else RuntimeError("extraction failed")
 
     # -- the actual research pass ---------------------------------------------------
 
@@ -221,15 +252,20 @@ class ResearchAgent:
                 corpus.append(f"### search: {q.format(name=model_id)}\n{result[:4000]}")
                 urls += re.findall(r"https?://[^\s\"'<>\)\]]+", result)
             except Exception as e:
+                # Unwrap the real cause — TaskGroup/SSE/transport failures (e.g.
+                # searxng dropping mid-sweep and taking every concurrent task
+                # with it) otherwise stringify as the useless "unhandled errors
+                # in a TaskGroup (1 sub-exception)" (item 2).
+                detail = describe_exception(e)
                 self.db.log_event("warning", "research",
                                   f"search unavailable for {model_id} — skipping "
-                                  f"qualitative pass", str(e))
+                                  f"qualitative pass", detail)
                 # No search => nothing qualitative to do. Record the failure on
                 # the model row (UI-visible) — set_research_status also bumps
                 # last_updated so the sweep doesn't hammer an unconfigured
                 # setup every cycle.
                 self.registry.set_research_status(
-                    model_id, "failed", f"search MCP tool unreachable: {e}")
+                    model_id, "failed", f"search MCP tool unreachable: {detail}")
                 return
 
         seen: set[str] = set()
@@ -249,7 +285,8 @@ class ResearchAgent:
                 continue
 
         text = "\n\n".join(corpus)[:24000]
-        raw = await self.llm(EXTRACTION_PROMPT.format(model=model_id, text=text))
+        raw = await self._extract_with_retry(
+            EXTRACTION_PROMPT.format(model=model_id, text=text))
         data = extract_json(raw)
         if not data:
             self.registry.set_research_status(
@@ -281,6 +318,31 @@ class ResearchAgent:
                 1 if data.get("benefits_from_explicit_prompting") else 0),
         )
         raw_benchmarks = data.get("benchmarks") or []
+        # Insufficient-source gate (item 3): a low-web-presence model (e.g.
+        # ornith:35b, "3 pages, 0 real benchmarks") has no per-category numbers
+        # to extract, so the LLM fabricates — and that just re-feeds the
+        # conflation guard every pass, leaving the model perpetually
+        # "demoted/flagged/needs manual reset". If NOT ONE extracted score
+        # appears verbatim in the fetched sources, the whole set is synthesized:
+        # record NO benchmark scores (qualitative fields are still saved).
+        # Absent rows rank gracefully (bottom of tier, §4.4), and a later pass
+        # that finds real sources can populate them — an honest "no data" state
+        # instead of a fabricated one. A single grounded number means the model
+        # has real coverage, so estimates for other categories are kept.
+        valid_scores = []
+        for b in raw_benchmarks:
+            try:
+                if b.get("category") in CATEGORIES:
+                    valid_scores.append(float(b.get("score")))
+            except (TypeError, ValueError):
+                continue
+        if valid_scores and not any(measured_score_in_text(s, text) for s in valid_scores):
+            self.db.log_event(
+                "info", "research",
+                f"no benchmark numbers for {model_id} found verbatim across "
+                f"{len(text)} chars of sources — recorded qualitative fields only, "
+                f"skipped {len(valid_scores)} synthesized score(s)")
+            return 0
         # Cross-category synthesis guard (found live: ornith:35b's `agentic` row
         # held its `reasoning` score, 27.8, both stamped vendor/0.95). The same
         # score assigned to two or more DISTINCT categories in one pass is

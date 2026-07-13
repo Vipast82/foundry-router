@@ -289,6 +289,12 @@ async function tabModels() {
         <span id="me-reliability" class="hint"></span></div>
       <div class="row"><label title="Live benchmark rows. A ⚠ marks two categories sharing the exact same score — the signature of an extractor conflating them; reset to clear it.">benchmark rows</label>
         <span id="me-benchmarks" class="hint">…</span></div>
+      <p class="hint" style="margin:0 0 6px">
+        Unflagged = passed integrity checks. <span class="pill bad" style="border:1px solid var(--line)">red ⚠</span>
+        = demoted by the conflation guard: the same score was written to two or more
+        categories in one research pass, so it's treated as synthesized (not a real
+        per-category measurement) and its confidence is cut. Hover a pill for its
+        source/type/confidence, timestamp, and which category it collided with.</p>
       <div class="row"><button class="act primary" id="me-save">Save (manual override)</button>
         <button class="act" id="me-reset-bench" title="Delete this model's automatic benchmark rows (research/seed/observed; manual overrides kept) and re-apply reference-seed defaults — the fix for a row with a wrong number">Reset scores to seed</button></div>
     </div>`;
@@ -329,11 +335,16 @@ window.editModel = id => {
   // corruption signature: two categories sharing one exact score).
   const renderBench = rows => {
     if (!rows || !rows.length) { $("#me-benchmarks").textContent = "none"; return; }
-    const counts = {};
-    rows.forEach(b => { counts[b.score] = (counts[b.score] || 0) + 1; });
+    const byScore = {};
+    rows.forEach(b => { (byScore[b.score] = byScore[b.score] || []).push(b.category); });
     $("#me-benchmarks").innerHTML = rows.map(b => {
-      const dup = counts[b.score] > 1;
-      return `<span class="pill${dup ? " bad" : ""}" style="border:1px solid var(--line)" title="${esc(b.source_type)} · ${esc(b.score_type)} · conf ${b.confidence}">${esc(b.category)} ${b.score}${dup ? " ⚠" : ""}</span>`;
+      const sharing = (byScore[b.score] || []).filter(c => c !== b.category);
+      const dup = sharing.length > 0;
+      let tip = `${b.source_type} · ${b.score_type} · conf ${b.confidence}`;
+      if (b.last_updated) tip += " · " + String(b.last_updated).slice(0, 19);
+      if (dup) tip += " — COLLISION with " + sharing.join(", ")
+                      + "; same score across categories, demoted as synthetic";
+      return `<span class="pill${dup ? " bad" : ""}" style="border:1px solid var(--line)" title="${esc(tip)}">${esc(b.category)} ${b.score}${dup ? " ⚠" : ""}</span>`;
     }).join(" ");
   };
   $("#me-benchmarks").textContent = "…";
