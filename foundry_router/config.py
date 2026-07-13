@@ -174,6 +174,17 @@ class ResearchConfig(BaseModel):
     model: Optional[str] = None  # None => reuse the agent_brain model
     search: ResearchToolRef = Field(default_factory=ResearchToolRef)
     fetch: ResearchToolRef = Field(default_factory=ResearchToolRef)
+    # Search pacing: a full-registry sweep otherwise fires 20+ searches nearly
+    # back-to-back, and SearXNG fans each one out to several external engines
+    # (Google/Bing/DDG/Brave) that rate-limit the burst with 429s — not a limit
+    # inside this deployment (searxng's own limiter is off), so the fix is to
+    # not burst. A global minimum gap between search calls keeps well under
+    # engine thresholds; a 429 gets a longer, escalating backoff before retry
+    # (a 429 means "slower", so retrying immediately just 429s again). 0
+    # disables pacing.
+    search_pace_seconds: float = 2.0
+    search_429_backoff_seconds: float = 45.0
+    search_retry_attempts: int = 3
 
 
 class RegistryConfig(BaseModel):
