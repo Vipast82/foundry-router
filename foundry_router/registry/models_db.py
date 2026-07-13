@@ -245,12 +245,13 @@ class ModelRegistry:
           2. context fit — a model whose known context_length can't hold
              `min_context` sinks below models that can (soft: unknown length
              never sinks, and it degrades rather than removing)
-          3. permissive policy — permissive_mode 'avoid' (default for normal
-             personas) sinks content_policy=permissive models BELOW every
-             standard model in the tier (uncensored models are for content
-             other models refuse, not a general-quality pick); 'prefer'
-             (a permissive persona) floats them to the top; 'neutral' ignores
-             policy
+          3. permissive policy — content policy is NOT a ranking input for
+             normal personas ('neutral', the default): a permissive model earns
+             its rank on merit like any other, and the request-level refusal
+             fallback (see AgentRunner) brings a permissive model in only when a
+             standard one actually declines the specific request. The one
+             exception is 'prefer' — an explicit permissive/creative front-door
+             persona, which floats content_policy=permissive models to the top
           4. the multi-signal quality score (see DEFAULT_SELECTION_WEIGHTS):
              a confidence-weighted average of the requested category plus
              tool_calling / adequacy / latency, times a reliability multiplier
@@ -340,13 +341,10 @@ class ModelRegistry:
             tier = TIER_RANK.get(r.get("relative_cost_tier"), UNKNOWN_TIER_RANK)
             cl = r.get("context_length")
             fits = 1 if (min_context is not None and cl is not None and cl < min_context) else 0
+            # 'prefer' floats permissive to the top (explicit front-door
+            # persona); every other mode ignores content policy in ranking.
             is_perm = r.get("content_policy") == "permissive"
-            if permissive_mode == "avoid":
-                perm = 1 if is_perm else 0
-            elif permissive_mode == "prefer":
-                perm = 0 if is_perm else 1
-            else:
-                perm = 0
+            perm = (0 if is_perm else 1) if permissive_mode == "prefer" else 0
             comp = r.get("_composite")
             weighted = comp if comp is not None else -1.0
             return (tier, fits, perm, -weighted)

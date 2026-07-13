@@ -111,6 +111,34 @@ def _json_obj(value) -> dict:
         return {}
 
 
+# High-precision refusal phrases. Ollama exposes no structured safety/refusal
+# signal (a decline is just ordinary text content), so refusal is detected by
+# language — but ONLY in the head of the response, where a genuine refusal
+# leads with its decline, to avoid false positives on long legitimate answers
+# that merely mention a limitation partway through.
+_REFUSAL_MARKERS = (
+    "i can't help", "i cannot help", "i can't assist", "i cannot assist",
+    "i can't provide", "i cannot provide", "i can't create", "i cannot create",
+    "i can't generate", "i cannot generate", "i can't write", "i cannot write",
+    "i won't help", "i will not help", "i won't be able to", "i'm not able to",
+    "i am not able to", "i'm unable to", "i am unable to", "i must decline",
+    "i have to decline", "i must refuse", "i cannot comply", "i can't comply",
+    "cannot fulfill", "can't fulfill", "unable to fulfill",
+    "against my guidelines", "against my programming",
+    "i'm sorry, but i can't", "i'm sorry but i can't", "i'm sorry, i can't",
+    "i apologize, but i can't", "i apologize but i can't",
+    "i'm not comfortable", "i am not comfortable", "not appropriate for me to",
+    "i must refrain", "i cannot in good conscience",
+)
+
+
+def _looks_like_refusal(text: Optional[str]) -> bool:
+    if not text:
+        return False
+    head = text.strip().lower()[:400]
+    return any(m in head for m in _REFUSAL_MARKERS)
+
+
 def _apply_pins(ranked: list[dict], persona: Optional[dict]) -> list[dict]:
     """Reorder candidates so the persona's pinned_models lead, in pin order,
     marked _pinned for the prompt's [PINNED] group. Pins absent from the
@@ -276,14 +304,16 @@ class AgentRunner:
         #  - tool-attached personas blend tool_calling reliability, so a strong
         #    tool-caller isn't out-ranked on the primary category alone (found
         #    live: Foundry-Chat -> qwen3-14b over the stronger ornith:35b);
-        #  - permissive/uncensored models are AVOIDED by default and only
-        #    preferred by a permissive persona (they exist for content other
-        #    models refuse, not as a general-quality choice);
+        #  - content policy is NOT a ranking input: a permissive model ranks on
+        #    merit like any other, and the request-level refusal fallback (in
+        #    _execute_tool) pulls a permissive model in only when a standard one
+        #    actually declines a specific request. Only an explicit front-door
+        #    persona (prefer_permissive) floats permissive models to the top;
         #  - a persona can override signal weights (e.g. weight latency);
         #  - a large request gates out models whose context can't hold it.
         has_tools = bool(_json_list((persona or {}).get("preferred_mcp_tools")))
         overrides = _json_obj((persona or {}).get("selection_weights"))
-        permissive_mode = "prefer" if (persona or {}).get("prefer_permissive") else "avoid"
+        permissive_mode = "prefer" if (persona or {}).get("prefer_permissive") else "neutral"
         approx_tokens = sum(len(m.get("content") or "")
                             for m in ctx.messages) // 4
         min_context = approx_tokens + 1024 if approx_tokens > 2000 else None
@@ -611,6 +641,46 @@ class AgentRunner:
                               f"an alternative.")
                 return (f"ERROR: {e}. Pick a different model or finish with "
                         f"what you already have."), False
+            # Request-level permissive fallback: content policy is NOT a ranking
+            # input, so a standard model may be routed a request it declines. If
+            # THIS response is a refusal and the model isn't already permissive,
+            # retry once on the best permissive model — the one job permissive
+            # models exist for. Retry-once-then-degrade, like the pipeline's
+            # cold-load fix; never a loop.
+            if (_looks_like_refusal(result.content)
+                    and (meta or {}).get("content_policy") != "permissive"):
+                category = (ctx.persona or {}).get("benchmark_category") or "general_chat"
+                alt = self._best_permissive(category, exclude=model_id)
+                if alt is None:
+                    emit("think", f"{model_id} declined this request and no permissive "
+                                  f"model is reachable — returning its response.")
+                else:
+                    alt_meta = self.model_registry.get(alt)
+                    alt_info = self.pool.backend_info(alt)
+                    alt_verdict = await self.guardrails.check_paid_call(
+                        alt, alt_info, alt_meta, ctx.guard, effective)
+                    if not alt_verdict.allowed:
+                        emit("think", f"{model_id} declined; permissive fallback {alt} "
+                                      f"blocked by guardrail ({alt_verdict.reason}) — "
+                                      f"returning the original response.")
+                    else:
+                        emit("think", f"{model_id} declined this request. Retrying once "
+                                      f"on the best permissive model ({alt}) — permissive "
+                                      f"models are kept for exactly this case...")
+                        try:
+                            alt_result, alt_backend = await self._with_heartbeat(
+                                self._dispatch_worker(alt, prompt, images=images),
+                                emit, alt)
+                            if _looks_like_refusal(alt_result.content):
+                                emit("think", f"{alt} also declined — delivering the "
+                                              f"original response.")
+                            else:
+                                model_id, meta, backend_info = alt, alt_meta, alt_info
+                                result, backend_name = alt_result, alt_backend
+                        except AllBackendsFailed as e:
+                            emit("think", f"Permissive fallback {alt} failed "
+                                          f"({describe_exception(e)}) — delivering the "
+                                          f"original response.")
             if result.thinking:
                 # The worker's own reasoning, scrubbed/collected at dispatch —
                 # narration for the user's thought panel, never answer content.
@@ -802,6 +872,18 @@ class AgentRunner:
             return (measured, -(r.get("score") or -1))
         ranked.sort(key=key)
         return ranked[0]["id"] if ranked else local[0]
+
+    def _best_permissive(self, category: str, exclude: Optional[str] = None) -> Optional[str]:
+        """Best-ranked reachable permissive model for the request-level refusal
+        fallback — content_policy=permissive, ranked on merit (neutral mode)
+        like everything else, excluding the model that just refused."""
+        available = self.pool.available_models()
+        ranked = self.model_registry.ranked_for_category(
+            category, list(available.keys()), limit=50, per_tier=50)
+        for r in ranked:
+            if r["id"] != exclude and r.get("content_policy") == "permissive":
+                return r["id"]
+        return None
 
     # ------------------------------------------------------ outcome judge --
 

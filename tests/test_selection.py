@@ -21,34 +21,38 @@ def _order(reg, ids, category="general_chat", **kw):
     return [r["id"] for r in reg.ranked_for_category(category, ids, **kw)]
 
 
-# -- the headline case: ornith:35b over qwen3-14b-abliterated ----------------------
+# -- content policy is NOT a ranking input (the correction) ------------------------
 
-def test_standard_model_beats_higher_scoring_permissive_by_default(tmp_path):
+def test_content_policy_is_not_a_ranking_input(tmp_path):
+    # A capable permissive model must NOT be deprioritized for ordinary requests
+    # (the plant-ID case). Ranking is pure merit; the request-level refusal
+    # fallback (test_refusal_fallback) handles "a standard model would refuse".
     reg = _reg(tmp_path)
     reg.upsert_auto("ornith:35b", source="discovery", relative_cost_tier="free")
-    reg.upsert_auto("qwen3-14b-abliterated", source="discovery",
-                    relative_cost_tier="free", content_policy="permissive")
-    reg.upsert_benchmark("ornith:35b", "general_chat", 64, "estimated",
-                         "community_report", confidence=0.5)
-    reg.upsert_benchmark("qwen3-14b-abliterated", "general_chat", 75, "estimated",
-                         "community_report", confidence=0.55)
-    # default avoid: the standard model wins despite the abliterated one scoring
-    # higher — permissive models are for refused content, not general quality
-    assert _order(reg, ["ornith:35b", "qwen3-14b-abliterated"],
-                  permissive_mode="avoid")[0] == "ornith:35b"
-    # a permissive persona explicitly wants it
-    assert _order(reg, ["ornith:35b", "qwen3-14b-abliterated"],
-                  permissive_mode="prefer")[0] == "qwen3-14b-abliterated"
-
-
-def test_permissive_still_reachable_as_last_resort(tmp_path):
-    # avoid SINKS permissive, it doesn't remove it — if it's the only option it
-    # still appears (a permissive request routed to a normal persona degrades,
-    # not fails)
-    reg = _reg(tmp_path)
-    reg.upsert_auto("only-wild", source="discovery", relative_cost_tier="free",
+    reg.upsert_auto("qwen-abl", source="discovery", relative_cost_tier="free",
                     content_policy="permissive")
-    assert _order(reg, ["only-wild"], permissive_mode="avoid") == ["only-wild"]
+    reg.upsert_benchmark("ornith:35b", "general_chat", 90, "measured",
+                         "independent", confidence=0.9)
+    reg.upsert_benchmark("qwen-abl", "general_chat", 60, "measured",
+                         "independent", confidence=0.9)
+    # the stronger model wins regardless of policy; if the permissive one were
+    # stronger IT would win — no penalty in either direction
+    assert _order(reg, ["ornith:35b", "qwen-abl"]) == ["ornith:35b", "qwen-abl"]
+
+
+def test_prefer_front_door_floats_permissive_regardless_of_score(tmp_path):
+    reg = _reg(tmp_path)
+    reg.upsert_auto("standard", source="discovery", relative_cost_tier="free")
+    reg.upsert_auto("wild", source="discovery", relative_cost_tier="free",
+                    content_policy="permissive")
+    reg.upsert_benchmark("standard", "general_chat", 90, "measured",
+                         "independent", confidence=0.9)
+    reg.upsert_benchmark("wild", "general_chat", 50, "measured",
+                         "independent", confidence=0.9)
+    # an explicit permissive front-door persona goes straight to permissive...
+    assert _order(reg, ["standard", "wild"], permissive_mode="prefer")[0] == "wild"
+    # ...but a normal persona ranks on merit -> the standard model leads
+    assert _order(reg, ["standard", "wild"])[0] == "standard"
 
 
 # -- adequacy signal (observed outcome-judge quality) -----------------------------
