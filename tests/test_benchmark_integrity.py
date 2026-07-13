@@ -65,6 +65,39 @@ def test_distinct_scores_are_kept_as_reported(tmp_path):
     assert rows["agentic"]["score"] == 80 and rows["agentic"]["source_type"] == "vendor"
 
 
+def test_ungrounded_scores_skipped_for_thin_source(tmp_path):
+    """Item 3: a low-web-presence model (ornith) has no real per-category
+    numbers, so the extractor fabricates. If NOT ONE score appears verbatim in
+    the sources, record none — an honest 'no data' state instead of feeding the
+    conflation guard every pass."""
+    agent, registry, db = _agent(tmp_path)
+    data = {"benchmarks": [
+        {"category": "coding", "score": 73.4, "score_type": "estimated",
+         "source_type": "community_report", "confidence": 0.5},
+        {"category": "reasoning", "score": 61.0, "score_type": "estimated",
+         "source_type": "community_report", "confidence": 0.5},
+    ]}
+    wrote = agent._write_extraction(
+        "ornith:35b", data, text="A short bio page with no benchmark numbers.")
+    assert wrote == 0
+    assert registry.benchmarks("ornith:35b") == []      # absent, not fabricated
+
+
+def test_one_grounded_number_keeps_the_estimate_set(tmp_path):
+    # a single real quoted number means the model has coverage -> estimates for
+    # the other categories are trustworthy enough to keep
+    agent, registry, db = _agent(tmp_path)
+    data = {"benchmarks": [
+        {"category": "coding", "score": 73.4, "score_type": "measured",
+         "source_type": "independent", "confidence": 0.8},
+        {"category": "reasoning", "score": 61.0, "score_type": "estimated",
+         "source_type": "community_report", "confidence": 0.5},
+    ]}
+    agent._write_extraction("m", data, text="Its SWE-bench score is 73.4 per the report.")
+    cats = {b["category"] for b in registry.benchmarks("m")}
+    assert cats == {"coding", "reasoning"}
+
+
 def test_duplicate_within_one_category_is_not_flagged(tmp_path):
     # two entries for the SAME category isn't a cross-category conflation
     agent, registry, db = _agent(tmp_path)
