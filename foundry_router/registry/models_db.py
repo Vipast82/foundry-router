@@ -31,6 +31,18 @@ MODEL_FIELDS = [
 TIER_RANK = {"free": 0, "low": 1, "medium": 2, "high": 3, "very_high": 4}
 UNKNOWN_TIER_RANK = 2.5
 
+# Category-blended ranking for tool-attached personas: a persona with MCP tools
+# attached (preferred_mcp_tools non-empty) will invoke those tools regularly,
+# so its within-tier quality score blends the requested category with the
+# tool_calling category instead of using the requested one alone. Tunable — a
+# higher weight favors reliable tool-callers over raw category quality. Note:
+# at 0.4 with today's mostly-estimated data, rankings barely move; the effect
+# grows as observed tool_calling data (record_tool_call) accrues real
+# confidence per model. Only the within-tier score changes — tier-first order
+# and per-tier caps are untouched.
+TOOL_BLEND_TOOLCALLING = 0.4
+TOOL_BLEND_PRIMARY = 1.0 - TOOL_BLEND_TOOLCALLING
+
 # Observed-telemetry scoring (design: feed data the router already collects
 # into ranking as a `measured`/`observed` benchmark source — more trustworthy
 # than the estimated/community_report rows that dominate the registry).
@@ -149,7 +161,8 @@ class ModelRegistry:
     # -- the routing query -------------------------------------------------------------
 
     def ranked_for_category(self, category: str, model_ids: list[str],
-                            limit: int = 20, per_tier: int = 5) -> list[dict]:
+                            limit: int = 20, per_tier: int = 5,
+                            blend_tool_calling: bool = False) -> list[dict]:
         """Candidates among the currently-reachable models (`model_ids` from
         the Backend Pool), two-level sorted: cost tier first (free/local ->
         cheap -> ... -> premium), confidence-weighted quality score second
@@ -162,13 +175,32 @@ class ModelRegistry:
         keep local leading AND premium visible.
 
         Models with no benchmark row still appear (bottom of their tier) so
-        the brain knows they exist and can fire request_model_research."""
+        the brain knows they exist and can fire request_model_research.
+
+        blend_tool_calling: for a tool-attached persona, blend the within-tier
+        quality with the tool_calling category (TOOL_BLEND_* weights) so a
+        strong tool-caller isn't out-ranked by a model that merely scores
+        higher on the primary category it will spend half its time NOT doing.
+        Identity when category is already tool_calling."""
         if not model_ids:
             return []
+        blend = blend_tool_calling and category != "tool_calling"
+        # tool_weighted mirrors the primary row's selection (manual_override
+        # first, then best score*confidence) so observed/measured rows win over
+        # estimated ones automatically as they accrue confidence.
+        tool_col = ""
+        if blend:
+            tool_col = """,
+              (SELECT b3.score * COALESCE(b3.confidence, 0.5)
+                 FROM model_benchmarks b3
+                WHERE b3.model_id = m.id AND b3.category = 'tool_calling'
+                ORDER BY (b3.source_type = 'manual_override') DESC,
+                         (b3.score * COALESCE(b3.confidence, 0.5)) DESC
+                LIMIT 1) AS tool_weighted"""
         placeholders = ",".join("?" * len(model_ids))
         rows = self.db.query(
             f"""
-            SELECT m.*, b.score, b.score_type, b.confidence
+            SELECT m.*, b.score, b.score_type, b.confidence{tool_col}
             FROM models m
             LEFT JOIN model_benchmarks b
               ON b.model_id = m.id AND b.category = ?
@@ -202,8 +234,23 @@ class ModelRegistry:
 
         def sort_key(r: dict):
             tier = TIER_RANK.get(r.get("relative_cost_tier"), UNKNOWN_TIER_RANK)
-            if r.get("score") is not None:
-                weighted = r["score"] * (r.get("confidence") or 0.5)
+            primary = (r["score"] * (r.get("confidence") or 0.5)
+                       if r.get("score") is not None else None)
+            if blend:
+                # Combine only the signals that exist: missing tool_calling data
+                # falls back to primary (absence isn't evidence of bad
+                # tool-use), and vice versa — never penalize a data gap.
+                tw = r.get("tool_weighted")
+                if primary is not None and tw is not None:
+                    weighted = TOOL_BLEND_PRIMARY * primary + TOOL_BLEND_TOOLCALLING * tw
+                elif primary is not None:
+                    weighted = primary
+                elif tw is not None:
+                    weighted = tw
+                else:
+                    weighted = -1.0
+            elif primary is not None:
+                weighted = primary
             else:
                 weighted = -1.0  # unscored sinks to the bottom of its tier
             return (tier, -weighted)

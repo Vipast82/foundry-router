@@ -272,8 +272,15 @@ class AgentRunner:
         persona = ctx.persona
         category = (persona or {}).get("benchmark_category") or "general_chat"
         available = self.pool.available_models()
+        # A tool-attached persona will invoke its MCP tools regularly, so blend
+        # tool_calling reliability into the within-tier quality score — a
+        # general_chat persona with tools routed to a weak tool-caller (found
+        # live: Foundry-Chat -> qwen3-14b over the stronger-tool-calling
+        # ornith:35b) otherwise, because ranking only saw general_chat.
+        has_tools = bool(_json_list((persona or {}).get("preferred_mcp_tools")))
         ranked = self.model_registry.ranked_for_category(
-            category, list(available.keys()), limit=12)
+            category, list(available.keys()), limit=12,
+            blend_tool_calling=has_tools)
         tool_name_for = {t.model_id: t.name for t in self.tool_registry.enabled()
                          if t.kind == "model" and t.model_id}
 
