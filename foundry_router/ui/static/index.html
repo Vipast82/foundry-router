@@ -287,7 +287,10 @@ async function tabModels() {
         <input type="checkbox" id="me-refine"></div>
       <div class="row"><label>tool-calling reliability</label>
         <span id="me-reliability" class="hint"></span></div>
-      <button class="act primary" id="me-save">Save (manual override)</button>
+      <div class="row"><label title="Live benchmark rows. A ⚠ marks two categories sharing the exact same score — the signature of an extractor conflating them; reset to clear it.">benchmark rows</label>
+        <span id="me-benchmarks" class="hint">…</span></div>
+      <div class="row"><button class="act primary" id="me-save">Save (manual override)</button>
+        <button class="act" id="me-reset-bench" title="Delete this model's automatic benchmark rows (research/seed/observed; manual overrides kept) and re-apply reference-seed defaults — the fix for a row with a wrong number">Reset scores to seed</button></div>
     </div>`;
   window._models = Object.fromEntries(d.models.map(m => [m.id, m]));
   $("#model-search").addEventListener("input", renderTables);
@@ -322,6 +325,29 @@ window.editModel = id => {
   $("#me-reliability").textContent = (ok + fail) >= 3
     ? `${Math.round(100 * ok / (ok + fail))}% ok over ${ok + fail} observed calls (empirical, from live traffic)`
     : `not enough observed calls yet (${ok + fail}/3 minimum)`;
+  // Live benchmark rows, with cross-category score-collision flagging (the
+  // corruption signature: two categories sharing one exact score).
+  const renderBench = rows => {
+    if (!rows || !rows.length) { $("#me-benchmarks").textContent = "none"; return; }
+    const counts = {};
+    rows.forEach(b => { counts[b.score] = (counts[b.score] || 0) + 1; });
+    $("#me-benchmarks").innerHTML = rows.map(b => {
+      const dup = counts[b.score] > 1;
+      return `<span class="pill${dup ? " bad" : ""}" style="border:1px solid var(--line)" title="${esc(b.source_type)} · ${esc(b.score_type)} · conf ${b.confidence}">${esc(b.category)} ${b.score}${dup ? " ⚠" : ""}</span>`;
+    }).join(" ");
+  };
+  $("#me-benchmarks").textContent = "…";
+  api("models/benchmarks?model_id=" + encodeURIComponent(id))
+    .then(r => renderBench(r.benchmarks)).catch(() => { $("#me-benchmarks").textContent = "—"; });
+  $("#me-reset-bench").onclick = async () => {
+    if (!confirm("Reset " + id + "'s automatic benchmark rows to reference-seed "
+                 + "defaults? (manual overrides are kept)")) return;
+    try {
+      const r = await api("models/reset_benchmarks", {method: "POST", body: {model_id: id}});
+      toast("Removed " + r.removed + ", reseeded " + r.reseeded);
+      renderBench(r.benchmarks);
+    } catch (e) { toast(e.message, true); }
+  };
   // The panel lives below a potentially very long table — without this,
   // clicking "edit" appears to do nothing (confirmed deployment bug).
   panel.scrollIntoView({behavior: "smooth", block: "start"});

@@ -258,6 +258,16 @@ class ResearchAgent:
                               f"extraction produced no JSON for {model_id}", raw[:500])
             return
 
+        wrote = self._write_extraction(model_id, data, text)
+        self.registry.set_research_status(
+            model_id, "ok", f"{wrote} benchmark rows, {fetched} pages")
+        self.db.log_event("info", "research",
+                          f"researched {model_id}: {wrote} benchmark rows at {utcnow()}")
+
+    def _write_extraction(self, model_id: str, data: dict, text: str) -> int:
+        """Persist an extraction: qualitative fields + benchmark rows. Split out
+        from research_model so the integrity guards are unit-testable without a
+        live search/fetch/LLM round trip. Returns benchmark rows written."""
         tags = data.get("tags")
         tags_json = None
         if isinstance(tags, list) and tags:
@@ -270,16 +280,50 @@ class ResearchAgent:
             benefits_from_explicit_prompting=(
                 1 if data.get("benefits_from_explicit_prompting") else 0),
         )
+        raw_benchmarks = data.get("benchmarks") or []
+        # Cross-category synthesis guard (found live: ornith:35b's `agentic` row
+        # held its `reasoning` score, 27.8, both stamped vendor/0.95). The same
+        # score assigned to two or more DISTINCT categories in one pass is
+        # almost never real — coding, reasoning, agentic, etc. are separate
+        # evals that essentially never land on the identical number. It's the
+        # extractor reusing one figure it found, and (worse) self-reporting it
+        # as high-confidence vendor data. Such rows are demoted to low-
+        # confidence estimates so a conflated number can't sit in the registry
+        # looking trustworthy — a real later pass can still replace them.
+        cats_by_score: dict = {}
+        for b in raw_benchmarks:
+            try:
+                c, s = b.get("category"), round(float(b.get("score")), 1)
+            except (TypeError, ValueError):
+                continue
+            if c in CATEGORIES:
+                cats_by_score.setdefault(s, set()).add(c)
+        duplicated = {s for s, cats in cats_by_score.items() if len(cats) >= 2}
+
         wrote = 0
-        for b in data.get("benchmarks") or []:
+        for b in raw_benchmarks:
             try:
                 cat = b.get("category")
                 if cat not in CATEGORIES:
                     continue
                 score = float(b.get("score"))
                 score_type = "measured" if b.get("score_type") == "measured" else "estimated"
+                source_type = (b.get("source_type")
+                               if b.get("source_type") in ("vendor", "independent",
+                                                           "community_report")
+                               else "community_report")
                 confidence_scale = 1.0
-                if score_type == "measured" and not measured_score_in_text(score, text):
+                if round(score, 1) in duplicated:
+                    # One number across multiple categories — strip its
+                    # unwarranted trust rather than believe the conflation.
+                    self.db.log_event(
+                        "warning", "research",
+                        f"demoted {model_id}/{cat} score {score} — the same number "
+                        f"was assigned to multiple categories this pass (extractor "
+                        f"synthesis, not a real per-category benchmark)")
+                    score_type, source_type, confidence_scale = \
+                        "estimated", "community_report", 0.4
+                elif score_type == "measured" and not measured_score_in_text(score, text):
                     # The model claims "measured" but the number is nowhere in
                     # the fetched material — synthesis, not quotation.
                     self.db.log_event(
@@ -290,9 +334,7 @@ class ResearchAgent:
                 self.registry.upsert_benchmark(
                     model_id, cat, max(0.0, min(100.0, score)),
                     score_type=score_type,
-                    source_type=(b.get("source_type")
-                                 if b.get("source_type") in ("vendor", "independent", "community_report")
-                                 else "community_report"),
+                    source_type=source_type,
                     source_url=str(b.get("source_url") or "")[:500],
                     confidence=max(0.0, min(1.0, float(b.get("confidence", 0.4))
                                             * confidence_scale)),
@@ -300,7 +342,4 @@ class ResearchAgent:
                 wrote += 1
             except (TypeError, ValueError):
                 continue
-        self.registry.set_research_status(
-            model_id, "ok", f"{wrote} benchmark rows, {fetched} pages")
-        self.db.log_event("info", "research",
-                          f"researched {model_id}: {wrote} benchmark rows at {utcnow()}")
+        return wrote
