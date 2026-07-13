@@ -203,6 +203,24 @@ class ModelRegistry:
              confidence, utcnow()),
         )
 
+    def reset_benchmarks(self, model_id: str) -> int:
+        """Delete a model's AUTOMATIC benchmark rows (research/seed/observed),
+        preserving any manual_override. Used to clear corrupted rows so the
+        reference seed / a fresh research pass can repopulate clean values —
+        the fix path for a row that got stamped with a wrong high-confidence
+        number (e.g. an extractor conflating two categories). Returns the count
+        removed."""
+        # Count first: db.execute returns lastrowid-or-rowcount, and SQLite's
+        # lastrowid lingers from a prior INSERT, so it can't be trusted for a
+        # DELETE's affected-row count.
+        row = self.db.query_one(
+            "SELECT COUNT(*) AS n FROM model_benchmarks WHERE model_id=? "
+            "AND source_type != 'manual_override'", (model_id,))
+        self.db.execute(
+            "DELETE FROM model_benchmarks WHERE model_id=? "
+            "AND source_type != 'manual_override'", (model_id,))
+        return row["n"] if row else 0
+
     # -- the routing query -------------------------------------------------------------
 
     def _resolve_weights(self, weights: Optional[dict], blend_tool_calling: bool,

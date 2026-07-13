@@ -39,6 +39,27 @@ def best_match(model_id: str) -> Optional[dict]:
     return best
 
 
+def apply_seed_to_model(registry: ModelRegistry, model_id: str) -> int:
+    """Apply the reference-seed benchmark defaults to ONE model, bypassing the
+    whole-registry source guard (used by the explicit operator 'reset scores'
+    action after clearing corrupted rows). Only fills categories with no
+    existing row, so a manual_override is still respected. Returns rows written."""
+    entry = best_match(model_id)
+    if entry is None:
+        return 0
+    existing = {b["category"] for b in registry.benchmarks(model_id)}
+    wrote = 0
+    for category, score in (entry.get("scores") or {}).items():
+        if category in existing:
+            continue
+        registry.upsert_benchmark(
+            model_id, category, float(score),
+            score_type="estimated", source_type="community_report",
+            source_url=SEED_SOURCE_URL, confidence=float(entry.get("confidence", 0.5)))
+        wrote += 1
+    return wrote
+
+
 def apply_reference_seed(registry: ModelRegistry) -> int:
     """Seed every matching registry row that real data hasn't already covered.
     Returns the number of models touched."""

@@ -278,6 +278,24 @@ async def model_benchmarks(request: Request, model_id: str):
     return {"benchmarks": svc.registry.benchmarks(model_id)}
 
 
+@router.post("/admin/api/models/reset_benchmarks")
+async def reset_benchmarks(request: Request):
+    """Clear a model's automatic benchmark rows (research/seed/observed; manual
+    overrides preserved) and re-apply the reference-seed defaults — the fix for
+    a row stamped with a wrong number (e.g. an extractor conflating two
+    categories into one score)."""
+    from ..registry.reference_seed import apply_seed_to_model
+    svc = _svc(request)
+    body = await request.json()
+    model_id = body.get("model_id") or ""
+    if not model_id:
+        return JSONResponse({"error": "model_id required"}, status_code=400)
+    removed = svc.registry.reset_benchmarks(model_id)
+    reseeded = apply_seed_to_model(svc.registry, model_id)
+    return {"ok": True, "removed": removed, "reseeded": reseeded,
+            "benchmarks": svc.registry.benchmarks(model_id)}
+
+
 @router.post("/admin/api/models/refresh")
 async def refresh_models(request: Request):
     from ..registry.openrouter_ingest import poll_openrouter
