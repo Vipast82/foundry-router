@@ -60,6 +60,27 @@ def find_pending_question(db, messages: list[dict]) -> Optional[str]:
         return None
 
 
+def build_worker_tool_prompt(client_system: Optional[str] = None) -> str:
+    """System prompt for worker-side tool calling: the selected worker owns the
+    tool loop for this request (search, read results, decide, repeat) and
+    produces the final answer itself, instead of the brain doing that work and
+    handing off only a synthesis task."""
+    parts = [
+        "You are answering the user's request directly. You have tools available "
+        "(web search, page fetch, etc.). Use them as needed: call a tool, read "
+        "its result, and decide whether to call another tool or answer.",
+        "When you have gathered enough information, STOP calling tools and write "
+        "your complete final answer as ordinary text (no tool call). Do not "
+        "narrate that you are about to answer — just answer.",
+        "Be efficient: only call tools that genuinely help, and prefer to finish "
+        "in as few tool calls as possible.",
+    ]
+    if client_system and client_system.strip():
+        parts.append("The user's workspace provided these instructions; honor "
+                     f"them:\n{client_system[:4000]}")
+    return "\n\n".join(parts)
+
+
 _THINK_BLOCK_RE = re.compile(r"<think>(.*?)</think>", re.DOTALL)
 
 

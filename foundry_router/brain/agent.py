@@ -993,6 +993,181 @@ class AgentRunner:
                      reasoning[:500])
         return adequate, reasoning, desc
 
+    # -------------------------------------- worker-side tool calling --
+
+    async def _select_tool_worker(self, ctx: RequestContext, persona: dict,
+                                  effective: dict):
+        """Select the best worker to own the tool loop — the SAME ranking used
+        for ordinary dispatch (composite + tool_calling blend + tiebreaks +
+        pins/steer/tags), then the first candidate that clears the paid
+        guardrail. Selection is unchanged; only what the worker is asked to do
+        differs. Returns (model_id, meta, backend_info) or (None, None, None)."""
+        category = persona.get("benchmark_category") or "general_chat"
+        available = self.pool.available_models()
+        overrides = _json_obj(persona.get("selection_weights"))
+        permissive_mode = "prefer" if persona.get("prefer_permissive") else "neutral"
+        ranked = self.model_registry.ranked_for_category(
+            category, list(available.keys()), limit=12, blend_tool_calling=True,
+            weights=overrides or None, permissive_mode=permissive_mode)
+        ranked = _steer_vision_when_images(ranked, ctx.messages)
+        ranked = _filter_required_tags(ranked, persona)
+        ranked = _apply_pins(ranked, persona)
+        for r in ranked:
+            mid = r["id"]
+            info = self.pool.backend_info(mid)
+            if info is None:
+                continue
+            meta = self.model_registry.get(mid)
+            verdict = await self.guardrails.check_paid_call(
+                mid, info, meta, ctx.guard, effective)
+            if verdict.allowed:
+                return mid, meta, info
+            ctx.logger.record_guardrail(f"worker-tools: {mid} denied ({verdict.reason})")
+        return None, None, None
+
+    async def run_worker_tools(self, ctx: RequestContext) -> AsyncIterator[AgentEvent]:
+        """Opt-out default for tool-attached personas: the brain's job shrinks to
+        selecting the best worker and handing off the request + tool schemas; the
+        WORKER then owns the tool loop (search, evaluate, decide, repeat) and
+        produces the final answer. Rationale: workers are bigger, longer-context,
+        and better-reasoning than the 6GB brain, so they should own the loop.
+        Any failure hands the request to the brain-mediated path (self.run)."""
+        persona = ctx.persona or {}
+        effective = self.guardrails.effective(persona)
+        yield AgentEvent("think", "Worker-side tool mode: selecting a worker to "
+                                  "own the tool loop for this request...")
+        worker, meta, info = await self._select_tool_worker(ctx, persona, effective)
+        if worker is None:
+            yield AgentEvent("think", "No worker cleared selection — handing to the "
+                                      "brain to handle tools itself.")
+            async for ev in self.run(ctx):
+                yield ev
+            return
+
+        preferred = set(_json_list(persona.get("preferred_mcp_tools")))
+        mcp_tools = [t for t in self.tool_registry.enabled()
+                     if t.kind == "mcp" and (t.server in preferred or t.name in preferred)]
+        if not mcp_tools:
+            # Tools attached but none reachable right now — hand to the brain,
+            # which will narrate the same and route without them.
+            yield AgentEvent("think", f"No MCP tools reachable for this persona — "
+                                      f"handing to the brain.")
+            async for ev in self.run(ctx):
+                yield ev
+            return
+
+        yield AgentEvent("think", f"Handing the request plus {len(mcp_tools)} tool(s) "
+                                  f"to {worker} — it will run its own tool loop and "
+                                  f"answer directly.")
+        async for ev in self._worker_tool_loop(ctx, worker, mcp_tools, effective):
+            yield ev
+
+    async def _worker_tool_loop(self, ctx: RequestContext, worker: str,
+                                mcp_tools: list, effective: dict):
+        """The worker's own bounded tool-call loop. On ANY failure (dispatch
+        error, unknown tool, tool execution failure, step-cap exhaustion) the
+        original request is handed to the brain-mediated path — the safety net
+        while worker tool-calling reliability is still sparse across the fleet."""
+        specs = [t.spec() for t in mcp_tools]
+        by_name = {t.name: t for t in mcp_tools}
+        client_system = "\n\n".join(
+            m.get("content") or "" for m in ctx.messages
+            if m.get("role") == "system" and (m.get("content") or "").strip())
+        messages: list[dict] = [
+            {"role": "system", "content": prompts.build_worker_tool_prompt(
+                client_system or None)}]
+        messages += [m for m in prompts.sanitize_history(ctx.messages)
+                     if m.get("role") != "system"]
+        images = self._attached_images(ctx)
+        cap = int(self.brain.cfg.worker_tool_max_steps or 6)
+
+        async def hand_to_brain(reason: str):
+            yield AgentEvent("think", f"{reason} — handing this request to the brain "
+                                      f"to complete with its own tool loop.")
+            ctx.logger.record_guardrail(f"worker-tools fallback: {reason}")
+            async for ev in self.run(ctx):
+                yield ev
+
+        for step in range(1, cap + 1):
+            task = asyncio.create_task(self.pool.chat(
+                worker, messages, tools=specs,
+                max_tokens=self.brain.cfg.worker_max_tokens))
+            async for hb in self._heartbeat_events(task, f"{worker} (tool step {step}/{cap})"):
+                yield hb
+            try:
+                result, backend = await task
+            except AllBackendsFailed as e:
+                self.model_registry.record_call_outcome(worker, ok=False)
+                async for ev in hand_to_brain(f"{worker} dispatch failed "
+                                               f"({describe_exception(e)})"):
+                    yield ev
+                return
+            self.model_registry.record_call_outcome(
+                worker, ok=bool(result.content and result.content.strip()))
+            self.model_registry.note_inference(
+                worker, result.completion_tokens,
+                result.eval_duration_ns, result.load_duration_ns)
+
+            if not result.tool_calls:
+                # No tool call => the worker produced its final answer.
+                reasoning, clean = prompts.split_think(result.content)
+                if reasoning.strip():
+                    emit_txt = reasoning[:2000] + ("…" if len(reasoning) > 2000 else "")
+                    yield AgentEvent("think", f"[{worker} reasoning] {emit_txt}")
+                ctx.logger.record_model_call(worker, backend, result.prompt_tokens,
+                                             result.completion_tokens, 0.0)
+                yield AgentEvent("think", f"{worker} finished after {step - 1} tool "
+                                          f"call(s).")
+                yield AgentEvent("answer", clean.strip() or "(worker returned empty output)")
+                return
+
+            # The worker asked to call tools — execute each through the SAME MCP
+            # infrastructure the brain uses (so request_log.tool_calls logging is
+            # identical regardless of who initiated the call).
+            messages.append({"role": "assistant", "content": result.content or "",
+                             "tool_calls": [
+                                 {"id": tc["id"], "type": "function",
+                                  "function": {"name": tc["name"],
+                                               "arguments": tc["arguments"]}}
+                                 for tc in result.tool_calls]})
+            for tc in result.tool_calls:
+                tool = by_name.get(tc["name"])
+                if tool is None:
+                    self.model_registry.record_tool_call(worker, ok=False)
+                    async for ev in hand_to_brain(
+                            f"{worker} called an unavailable tool "
+                            f"({tc['name']!r})"):
+                        yield ev
+                    return
+                yield AgentEvent("think", f"{worker} → {tool.server}/{tool.mcp_tool}...")
+                t0 = time.monotonic()
+                try:
+                    out = await self.tool_registry.mcp.call_tool(
+                        tool.server, tool.mcp_tool, tc["arguments"])
+                except Exception as e:
+                    dur = int((time.monotonic() - t0) * 1000)
+                    ctx.logger.record_tool_call(tc["name"], tool.server, dur,
+                                                ok=False, error=describe_exception(e))
+                    self.model_registry.record_tool_call(worker, ok=False)
+                    async for ev in hand_to_brain(
+                            f"{worker}'s {tool.server} call failed "
+                            f"({describe_exception(e)})"):
+                        yield ev
+                    return
+                dur = int((time.monotonic() - t0) * 1000)
+                ctx.logger.record_tool_call(tc["name"], tool.server, dur, ok=True)
+                self.model_registry.record_tool_call(worker, ok=True)
+                yield AgentEvent("think", f"{tool.server}/{tool.mcp_tool} returned "
+                                          f"{len(out)} chars in {dur}ms.")
+                messages.append({"role": "tool", "name": tc["name"],
+                                 "tool_call_id": tc.get("id"),
+                                 "content": out[:self.brain.cfg.mcp_result_limit_chars]
+                                            or "(empty tool result)"})
+
+        # Step cap hit without a final answer.
+        async for ev in hand_to_brain(f"{worker} hit the {cap}-step tool cap"):
+            yield ev
+
     # ---------------------------------------------- coding pipeline (§1) --
 
     async def run_pipeline(self, ctx: RequestContext) -> AsyncIterator[AgentEvent]:

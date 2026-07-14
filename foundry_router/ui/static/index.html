@@ -483,7 +483,9 @@ async function tabPersonas() {
         <input type="checkbox" id="pe-check" checked>
         <label title="After a LOCAL answer, this judge decides adequate/escalate. paid = cheapest Claude; local_large = best other local model (free); brain = routing brain itself">outcome_judge</label>
         <select id="pe-judge"><option value="">off</option><option>paid</option>
-          <option>local_large</option><option>brain</option></select></div>
+          <option>local_large</option><option>brain</option></select>
+        <label title="OFF (default) = the selected WORKER owns the MCP tool loop for this persona (search/crawl/etc. run on the bigger, longer-context worker; falls back to the brain on any tool failure). ON = the old behavior where the routing brain runs the tool loop itself.">brain_handles_tools</label>
+        <input type="checkbox" id="pe-braintools"></div>
       <div class="row"><label title="When any candidate carries one of these tags, candidates are FILTERED to matches (e.g. vision)">required_tags (JSON list)</label>
         <input id="pe-reqtags" size="40" value="[]" placeholder='["vision"]'>
         <label title="PREFER permissive/uncensored models (this persona is for content other models refuse). Off = the default AVOID: permissive models sink below standard ones for normal work.">prefer_permissive</label>
@@ -505,6 +507,7 @@ async function tabPersonas() {
     guardrail_overrides: JSON.parse($("#pe-guard").value || "{}"),
     pinned_models: JSON.parse($("#pe-pins").value || "[]"),
     execution_mode: $("#pe-mode").value || null,
+    brain_handles_tools: $("#pe-braintools").checked ? 1 : 0,
     pipeline_check_enabled: $("#pe-check").checked ? 1 : 0,
     outcome_judge: $("#pe-judge").value || null,
     required_tags: JSON.parse($("#pe-reqtags").value || "[]"),
@@ -558,6 +561,7 @@ window.editPersona = name => {
   $("#pe-guard").value = p.guardrail_overrides || "{}";
   $("#pe-pins").value = p.pinned_models || "[]";
   $("#pe-mode").value = p.execution_mode || "";
+  $("#pe-braintools").checked = !!p.brain_handles_tools;
   $("#pe-check").checked = p.pipeline_check_enabled === null
     || p.pipeline_check_enabled === undefined || !!p.pipeline_check_enabled;
   $("#pe-judge").value = p.outcome_judge || "";
