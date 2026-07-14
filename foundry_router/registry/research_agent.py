@@ -49,7 +49,10 @@ KNOWN_BENCHMARKS = {
     "humaneval": ("HumanEval", "coding", "percent"),
     "mbpp": ("MBPP", "coding", "percent"),
     "nl2repo": ("NL2Repo", "coding", "percent"),
-    "claweval": ("ClawEval", "coding", "percent"),
+    # ClawEval is a "real-user task distribution" agentic-coding benchmark;
+    # pinned to `agentic` (broad task completion) rather than left ambiguous
+    # between coding/agentic, which was repeatedly tripping the conflation guard.
+    "claweval": ("ClawEval", "agentic", "percent"),
     "mmlu-pro": ("MMLU-Pro", "reasoning", "percent"),
     "mmlu": ("MMLU", "reasoning", "percent"),
     "gpqa diamond": ("GPQA Diamond", "reasoning", "percent"),

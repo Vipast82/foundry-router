@@ -7,13 +7,20 @@ edit changes behavior on the very next request with no restart.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 from typing import Optional
 
-# Hidden marker embedded in ask_user responses (§4.6). HTML comments render as
-# nothing in every chat client, but survive round-trips in conversation
-# history, which is the entire session-state mechanism — no server-side state.
+# ask_user session state (§4.6). The old design embedded an HTML-comment marker
+# in the assistant's content so it survived round-trips in conversation history
+# (no server-side state). But HTML comments are NOT universally hidden — found
+# live: AnythingLLM renders the raw marker into visible text, duplicating the
+# question. So the marker never goes into content anymore; state is kept
+# server-side in `kv`, keyed by a fingerprint of the conversation's USER
+# messages (which clients echo back verbatim, unlike assistant text they may
+# reformat/strip). PENDING_MARKER_PREFIX and _PENDING_RE are retained only so
+# sanitize_history still scrubs any legacy marker echoed back from an old turn.
 PENDING_MARKER_PREFIX = "<!--foundry-router:pending_question "
 PENDING_MARKER_SUFFIX = "-->"
 _PENDING_RE = re.compile(
@@ -23,23 +30,34 @@ _THINK_RE = re.compile(r"<think>.*?</think>\s*", re.DOTALL)
 _COMMENT_RE = re.compile(r"<!--.*?-->\s*", re.DOTALL)
 
 
-def make_pending_marker(question: str) -> str:
-    return PENDING_MARKER_PREFIX + json.dumps({"question": question[:500]}) + PENDING_MARKER_SUFFIX
+def _conversation_fingerprint(messages: list[dict], drop_last_user: bool = False) -> str:
+    """Stable key over the USER-message contents (clients preserve those). At
+    ask_user time the conversation is [U1..Un]; the resuming request is
+    [U1..Un, assistant-question, U(reply)] — dropping its last user message
+    yields the same [U1..Un], so the fingerprints match."""
+    users = [m.get("content") or "" for m in messages if m.get("role") == "user"]
+    if drop_last_user and users:
+        users = users[:-1]
+    return hashlib.sha256("".join(users).encode("utf-8")).hexdigest()[:32]
 
 
-def find_pending_question(messages: list[dict]) -> Optional[str]:
-    """Scan backwards for the most recent assistant message; if it carries the
-    marker, the new user message is the answer to that question (§4.6)."""
-    for m in reversed(messages):
-        if m.get("role") == "assistant":
-            match = _PENDING_RE.search(m.get("content") or "")
-            if match:
-                try:
-                    return json.loads(match.group(1)).get("question")
-                except json.JSONDecodeError:
-                    return None
-            return None
-    return None
+def store_pending_question(db, messages: list[dict], question: str) -> None:
+    db.kv_set(f"pending_q:{_conversation_fingerprint(messages)}",
+              json.dumps({"question": question[:500]}))
+
+
+def find_pending_question(db, messages: list[dict]) -> Optional[str]:
+    """Look up (and consume) a pending question for the resuming conversation.
+    Server-side now — nothing is read from message content."""
+    key = f"pending_q:{_conversation_fingerprint(messages, drop_last_user=True)}"
+    raw = db.kv_get(key)
+    if not raw:
+        return None
+    db.kv_del(key)  # consume — a question is answered at most once
+    try:
+        return json.loads(raw).get("question")
+    except json.JSONDecodeError:
+        return None
 
 
 _THINK_BLOCK_RE = re.compile(r"<think>(.*?)</think>", re.DOTALL)

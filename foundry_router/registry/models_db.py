@@ -253,19 +253,32 @@ class ModelRegistry:
     def upsert_named_benchmark(self, model_id: str, benchmark_name: str,
                                category: str, score: float, scale: str,
                                source_url: str = "",
-                               measured_date: Optional[str] = None) -> None:
+                               measured_date: Optional[str] = None,
+                               source: str = "research") -> None:
         """One row per (model, benchmark_name); a re-research replaces it. Scores
-        are stored on the benchmark's OWN scale (never coerced to 0-100)."""
+        are stored on the benchmark's OWN scale (never coerced to 0-100). A
+        `manual` entry is never clobbered by an automated `research` write —
+        same never-clobber discipline as manual_override on composite rows."""
         self.db.execute("INSERT OR IGNORE INTO models (id) VALUES (?)", (model_id,))
+        existing = self.db.query_one(
+            "SELECT source FROM model_named_benchmarks WHERE model_id=? "
+            "AND benchmark_name=?", (model_id, benchmark_name))
+        if source != "manual" and existing and existing.get("source") == "manual":
+            return  # research must not overwrite a hand-entered number
         self.db.execute(
             "DELETE FROM model_named_benchmarks WHERE model_id=? AND benchmark_name=?",
             (model_id, benchmark_name))
         self.db.execute(
             "INSERT INTO model_named_benchmarks (model_id, benchmark_name, category, "
-            "score, scale, source_url, measured_date, last_updated) "
-            "VALUES (?,?,?,?,?,?,?,?)",
+            "score, scale, source_url, measured_date, source, last_updated) "
+            "VALUES (?,?,?,?,?,?,?,?,?)",
             (model_id, benchmark_name, category, score, scale, source_url,
-             measured_date, utcnow()))
+             measured_date, source, utcnow()))
+
+    def delete_named_benchmark(self, model_id: str, benchmark_name: str) -> None:
+        self.db.execute(
+            "DELETE FROM model_named_benchmarks WHERE model_id=? AND benchmark_name=?",
+            (model_id, benchmark_name))
 
     def _named_tiebreak_scores(self, model_ids: list[str], category: str) -> dict:
         """Best percent-scale named-benchmark score per model for a category —

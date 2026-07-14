@@ -295,8 +295,15 @@ async function tabModels() {
         categories in one research pass, so it's treated as synthesized (not a real
         per-category measurement) and its confidence is cut. Hover a pill for its
         source/type/confidence, timestamp, and which category it collided with.</p>
-      <div class="row"><label title="Real, named, independently-verifiable benchmarks (SWE-Bench, MMLU, BFCL, ...). Kept separate from the composite; used as an explicit tiebreaker when composite scores are near-equal. percent-scale rows break ties; elo/count/score scales are stored but flagged out of naive comparison.">named benchmarks</label>
+      <div class="row"><label title="Real, named, independently-verifiable benchmarks (SWE-Bench, MMLU, BFCL, ...). Kept separate from the composite; used as an explicit tiebreaker when composite scores are near-equal. percent-scale rows break ties; elo/count/score scales are stored but flagged out of naive comparison. ✎ = manually entered (never overwritten by research); ✕ removes a row.">named benchmarks</label>
         <span id="me-named" class="hint">…</span></div>
+      <div class="row"><label title="Add real vendor data the research pipeline hasn't captured yet (e.g. a brand-new source page). Stored as source=manual so a later research pass never clobbers it.">add named benchmark</label>
+        <input id="nb-name" placeholder="SWE-Bench Verified" size="18">
+        <select id="nb-cat"><option>coding</option><option>reasoning</option><option>general_chat</option><option>tool_calling</option><option>agentic</option></select>
+        <input id="nb-score" placeholder="75.6" size="6">
+        <select id="nb-scale"><option>percent</option><option>elo</option><option>count</option><option>score</option></select>
+        <input id="nb-url" placeholder="https://source" size="16">
+        <button class="act" id="nb-add">Add</button></div>
       <div class="row"><button class="act primary" id="me-save">Save (manual override)</button>
         <button class="act" id="me-reset-bench" title="Delete this model's automatic benchmark rows (research/seed/observed; manual overrides kept) and re-apply reference-seed defaults — the fix for a row with a wrong number">Reset scores to seed</button></div>
     </div>`;
@@ -353,8 +360,32 @@ window.editModel = id => {
     if (!rows || !rows.length) { $("#me-named").textContent = "none"; return; }
     $("#me-named").innerHTML = rows.map(b => {
       const off = b.scale !== "percent";   // elo/count/score: shown, not tiebroken
-      return `<span class="pill${off ? " warn" : ""}" style="border:1px solid var(--line)" title="${esc(b.category)} · ${esc(b.scale)}${off ? " (not used in tiebreak — non-percent scale)" : ""}${b.source_url ? " · " + esc(b.source_url) : ""}">${esc(b.benchmark_name)} ${b.score}${off ? " " + esc(b.scale) : ""}</span>`;
+      const manual = b.source === "manual";
+      const tip = `${b.category} · ${b.scale}${off ? " (not used in tiebreak — non-percent scale)" : ""}${manual ? " · manual (never auto-overwritten)" : ""}${b.source_url ? " · " + b.source_url : ""}`;
+      return `<span class="pill${off ? " warn" : ""}" style="border:1px solid var(--line)" title="${esc(tip)}">${esc(b.benchmark_name)} ${b.score}${off ? " " + esc(b.scale) : ""}${manual ? " ✎" : ""} <a href="#" data-nb="${esc(b.benchmark_name)}" title="remove" style="text-decoration:none">✕</a></span>`;
     }).join(" ");
+    $("#me-named").querySelectorAll("a[data-nb]").forEach(a => {
+      a.onclick = async ev => {
+        ev.preventDefault();
+        try {
+          const r = await api("models/named_benchmark/delete",
+                              {method: "POST", body: {model_id: id, benchmark_name: a.dataset.nb}});
+          renderNamed(r.named);
+        } catch (e) { toast(e.message, true); }
+      };
+    });
+  };
+  $("#nb-add").onclick = async () => {
+    const name = $("#nb-name").value.trim(), score = $("#nb-score").value.trim();
+    if (!name || score === "") { toast("name and score required", true); return; }
+    try {
+      const r = await api("models/named_benchmark/add", {method: "POST", body: {
+        model_id: id, benchmark_name: name, category: $("#nb-cat").value,
+        score: score, scale: $("#nb-scale").value, source_url: $("#nb-url").value.trim()}});
+      toast("Added " + name);
+      $("#nb-name").value = ""; $("#nb-score").value = ""; $("#nb-url").value = "";
+      renderNamed(r.named);
+    } catch (e) { toast(e.message, true); }
   };
   $("#me-benchmarks").textContent = "…";
   $("#me-named").textContent = "…";
