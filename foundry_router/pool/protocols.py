@@ -120,11 +120,34 @@ class BaseProtocol:
 # Ollama                                                                      #
 # --------------------------------------------------------------------------- #
 
+def context_length_from_model_info(info: dict) -> Optional[int]:
+    """Ollama's /api/show model_info carries the trained context window under an
+    architecture-prefixed key — qwen2.context_length, llama.context_length,
+    etc. — so match by suffix rather than a hardcoded name."""
+    if not isinstance(info, dict):
+        return None
+    for key, val in info.items():
+        if key.endswith(".context_length") and isinstance(val, (int, float)) and val > 0:
+            return int(val)
+    return None
+
+
 class OllamaProtocol(BaseProtocol):
     async def list_models(self) -> list[str]:
         r = await self.client.get(f"{self.url}/api/tags", timeout=10)
         r.raise_for_status()
         return [m["name"] for m in r.json().get("models", [])]
+
+    async def show_context_length(self, model: str) -> Optional[int]:
+        """The model's real trained context window from its GGUF metadata —
+        authoritative per-model ground truth Ollama already exposes (and which
+        OpenRouter, being cloud-only, never has for local pulls)."""
+        r = await self.client.post(f"{self.url}/api/show",
+                                   json={"model": model}, timeout=15)
+        if r.status_code >= 400:
+            raise ProtocolError(
+                f"ollama {self.url} /api/show HTTP {r.status_code}: {r.text[:200]}")
+        return context_length_from_model_info((r.json() or {}).get("model_info") or {})
 
     def _payload(self, model, messages, tools, options, keep_alive, stream):
         # Strip canonical-format fields Ollama doesn't know; keep tool_calls

@@ -31,7 +31,7 @@ from langgraph.graph import END, START, StateGraph
 
 from ..errors import describe_exception
 from ..guardrails import GuardrailEngine, RequestGuardState
-from ..pool.base import AllBackendsFailed
+from ..pool.base import AllBackendsFailed, ContextTooLarge
 from ..usage import (MeridianUsage, RequestLogger, estimate_cost_usd,
                      log_subscription_usage)
 from . import prompts
@@ -109,6 +109,13 @@ def _json_obj(value) -> dict:
         return out if isinstance(out, dict) else {}
     except (_json.JSONDecodeError, TypeError):
         return {}
+
+
+def estimate_tokens(text: str) -> int:
+    """Rough token count (~4 chars/token) — no tokenizer dependency in the
+    tree, and a heuristic is enough for a fit/no-fit gate. Same basis as the
+    ranking gate's min_context estimate, so the two agree."""
+    return max(1, len(text or "") // 4)
 
 
 # High-precision refusal phrases. Ollama exposes no structured safety/refusal
@@ -639,6 +646,16 @@ class AgentRunner:
                 result, backend_name = await self._with_heartbeat(
                     self._dispatch_worker(model_id, prompt, images=images),
                     emit, model_id)
+            except ContextTooLarge as e:
+                # Distinct from a backend failure: the request is too big for
+                # THIS model — steer the brain to a larger-context one rather
+                # than let it retry the same too-small model.
+                emit("think", f"{model_id} can't hold this request — {e}. "
+                              f"Routing to a larger-context model.")
+                ctx.logger.record_guardrail(f"context too large for {model_id}")
+                return (f"ERROR: {e}. Choose a model with a LARGER context window "
+                        f"(small-context models are de-prioritized for this "
+                        f"request), or shorten/summarize the input first."), False
             except AllBackendsFailed as e:
                 emit("think", f"All backends failed for {model_id} after "
                               f"{time.monotonic() - t0:.0f}s — the brain will pick "
@@ -802,6 +819,22 @@ class AgentRunner:
         from ..usage import looks_like_window_exhaustion
         info = self.pool.backend_info(model_id)
         is_subscription = bool(info and info.get("type") == "anthropic-compatible")
+        # Pre-dispatch context-fit guard (general, any backend): if the request
+        # plus the reserved reply wouldn't fit the target model's known context
+        # window, reject it HERE rather than send it to earn a raw API error.
+        # Critical for escalation — a request the brain assembled against a
+        # 262K-context local model may not fit Claude's 200K. context_length is
+        # None => unknown => don't gate (degrade gracefully, like the ranking
+        # gate). Raises ContextTooLarge (an AllBackendsFailed) so every existing
+        # degrade path reroutes to a model that fits.
+        reserve = max_tokens or self.brain.cfg.worker_max_tokens
+        ctx_limit = (self.model_registry.get(model_id) or {}).get("context_length")
+        if ctx_limit:
+            est = estimate_tokens(prompt)
+            if est + reserve > ctx_limit:
+                raise ContextTooLarge(
+                    f"request (~{est} prompt tokens + {reserve} reserved for the "
+                    f"reply) exceeds {model_id}'s {ctx_limit}-token context window")
         message: dict = {"role": "user", "content": prompt}
         if images:
             message["images"] = images  # protocols translate per wire format

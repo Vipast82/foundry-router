@@ -30,6 +30,13 @@ class AllBackendsFailed(Exception):
     whole request (§4.3)."""
 
 
+class ContextTooLarge(AllBackendsFailed):
+    """The request wouldn't fit the target model's context window — rejected
+    BEFORE dispatch rather than sent to earn a raw API error. Subclasses
+    AllBackendsFailed so every existing degrade path (agent tool loop, pipeline,
+    judge) treats it as a controlled failure and reroutes/degrades."""
+
+
 class BackendPool:  # interface — see internal.InternalPool for the implementation
     async def start(self) -> None: ...
     async def stop(self) -> None: ...
