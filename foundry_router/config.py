@@ -185,20 +185,10 @@ class ResearchConfig(BaseModel):
     model: Optional[str] = None  # None => reuse the agent_brain model
     search: ResearchToolRef = Field(default_factory=ResearchToolRef)
     fetch: ResearchToolRef = Field(default_factory=ResearchToolRef)
-    # Search pacing: a full-registry sweep otherwise fires 20+ searches nearly
-    # back-to-back, and SearXNG fans each one out to several external engines
-    # (Google/Bing/DDG/Brave) that rate-limit the burst with 429s — not a limit
-    # inside this deployment (searxng's own limiter is off), so the fix is to
-    # not burst. A global minimum gap between search calls keeps well under
-    # engine thresholds; a 429 gets a longer, escalating backoff before retry
-    # (a 429 means "slower", so retrying immediately just 429s again). 0
-    # disables pacing.
-    search_pace_seconds: float = 2.0
-    search_429_backoff_seconds: float = 45.0
-    # Research is unattended (nobody waiting), so it's cheap to retry more before
-    # giving up — raised from 3 so a full overnight sweep completes without
-    # manual requeuing of the occasional model that 429s a few times in a row.
-    search_retry_attempts: int = 6
+    # NOTE: SearXNG pacing / 429-backoff moved to the MCP server config
+    # (mcp.servers[].pace_seconds / rate_limit_retries / rate_limit_backoff_
+    # seconds) so it covers EVERY caller — the research sweep, the worker-side
+    # tool loop, and the brain's own tool calls — not just this background pass.
 
 
 class RegistryConfig(BaseModel):
@@ -214,6 +204,14 @@ class MCPServerConfig(BaseModel):
     # Media generation (ComfyUI, TTS, music) can take far longer than a text
     # tool call — per-server budget instead of one global assumption.
     timeout_seconds: int = 300
+    # Rate-limit handling, applied to EVERY caller of this server (research
+    # sweep, worker-side tool loop, the brain's own tool calls) since they all
+    # funnel through MCPManager. SearXNG fans each query out to external engines
+    # that 429 a burst; set pace_seconds on that server to space calls. 429-
+    # backoff is on by default so any caller recovers even without pacing.
+    pace_seconds: float = 0.0                    # min gap between calls to this server (0 = off)
+    rate_limit_retries: int = 3                  # extra attempts on a 429 before giving up
+    rate_limit_backoff_seconds: float = 30.0     # escalating backoff between those retries
 
 
 class ToolSyncConfig(BaseModel):

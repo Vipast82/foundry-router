@@ -108,6 +108,18 @@ async def ps() -> dict:
     return {"models": []}
 
 
+def _persona_context_length(svc, persona: dict):
+    """Safe floor: the minimum known context_length among the persona's routable
+    candidates, so a client sizing its budget from /api/show never assumes more
+    than some candidate the request could actually route to can hold. Uses the
+    per-model context_length auto-detected from Ollama /api/show (v0.12.0)."""
+    category = persona.get("benchmark_category") or "general_chat"
+    available = list(svc.pool.available_models().keys())
+    ranked = svc.registry.ranked_for_category(category, available, limit=50, per_tier=50)
+    lengths = [int(r["context_length"]) for r in ranked if r.get("context_length")]
+    return min(lengths) if lengths else None
+
+
 @router.post("/api/show")
 async def show(request: Request) -> JSONResponse:
     svc = _svc(request)
@@ -116,7 +128,8 @@ async def show(request: Request) -> JSONResponse:
     persona = svc.personas.get(name)
     if persona is None:
         return _model_not_found(name)
-    return JSONResponse(tr.show_response(persona))
+    return JSONResponse(tr.show_response(
+        persona, context_length=_persona_context_length(svc, persona)))
 
 
 # --------------------------------------------------------------------------- #

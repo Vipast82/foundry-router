@@ -14,12 +14,15 @@ whole service down with it.
 
 from __future__ import annotations
 
+import asyncio
 import logging
+import time
 from contextlib import asynccontextmanager
 from typing import Any
 
 from ..config import MCPServerConfig
 from ..db import Database
+from ..errors import describe_exception
 
 log = logging.getLogger(__name__)
 
@@ -28,10 +31,18 @@ class MCPUnavailable(Exception):
     pass
 
 
+def _is_rate_limited(exc: BaseException) -> bool:
+    """A 429 anywhere in the exception chain (the MCP client wraps httpx errors,
+    sometimes inside a TaskGroup) — the described text is the reliable signal."""
+    text = describe_exception(exc).lower()
+    return "429" in text or "too many requests" in text
+
+
 class MCPManager:
     def __init__(self, servers: list[MCPServerConfig], db: Database):
         self.servers = {s.name: s for s in servers}
         self.db = db
+        self._last_call: dict[str, float] = {}   # server name -> monotonic ts, for pacing
 
     def set_servers(self, servers: list[MCPServerConfig]) -> None:
         self.servers = {s.name: s for s in servers}
@@ -88,9 +99,22 @@ class MCPManager:
                                   f"MCP server {name} unreachable during sync", str(e))
         return out
 
+    async def _pace(self, server: str, cfg: MCPServerConfig) -> None:
+        """Per-server minimum gap between calls — every caller (research sweep,
+        worker tool loop, brain) funnels through here, so a shared rate-limited
+        server (SearXNG) is spaced no matter who's calling."""
+        gap = getattr(cfg, "pace_seconds", 0.0) or 0.0
+        if gap > 0:
+            wait = self._last_call.get(server, 0.0) + gap - time.monotonic()
+            if wait > 0:
+                await asyncio.sleep(wait)
+        self._last_call[server] = time.monotonic()
+
     async def call_tool(self, server: str, tool: str, arguments: dict[str, Any]) -> str:
         cfg = self.servers.get(server)
         timeout = getattr(cfg, "timeout_seconds", 300) if cfg else 300
+        retries = max(1, getattr(cfg, "rate_limit_retries", 3) if cfg else 3)
+        backoff = getattr(cfg, "rate_limit_backoff_seconds", 30.0) if cfg else 30.0
 
         async def _call() -> str:
             async with self._session(server) as session:
@@ -106,14 +130,30 @@ class MCPManager:
                         f"MCP tool {server}/{tool} returned error: {joined[:500]}")
                 return joined
 
-        import asyncio
-        try:
-            # Per-server budget: media generation (ComfyUI/TTS/music) can run
-            # many minutes; a search tool should fail fast. Configurable per
-            # connection instead of one global assumption.
-            return await asyncio.wait_for(_call(), timeout=timeout)
-        except asyncio.TimeoutError:
-            raise RuntimeError(
-                f"MCP tool {server}/{tool} timed out after {timeout}s "
-                f"(raise timeout_seconds on this server's connection if its "
-                f"jobs legitimately run longer)") from None
+        # 429-backoff around every attempt (SearXNG's external engines rate-limit
+        # bursts; this used to live only in the research agent, so worker/brain
+        # tool calls hammered on unrecovered). A 429 means "slower", so wait an
+        # escalating amount before retrying rather than immediately re-429ing.
+        for attempt in range(1, retries + 1):
+            await self._pace(server, cfg) if cfg else None
+            try:
+                # Per-server budget: media generation (ComfyUI/TTS/music) can run
+                # many minutes; a search tool should fail fast. Configurable per
+                # connection instead of one global assumption.
+                return await asyncio.wait_for(_call(), timeout=timeout)
+            except asyncio.TimeoutError:
+                raise RuntimeError(
+                    f"MCP tool {server}/{tool} timed out after {timeout}s "
+                    f"(raise timeout_seconds on this server's connection if its "
+                    f"jobs legitimately run longer)") from None
+            except Exception as e:  # noqa: BLE001
+                if _is_rate_limited(e) and attempt < retries:
+                    wait = backoff * attempt
+                    self.db.log_event(
+                        "warning", "mcp",
+                        f"{server}/{tool} rate-limited (429) — backing off "
+                        f"{wait:.0f}s before retry {attempt + 1}/{retries}",
+                        describe_exception(e))
+                    await asyncio.sleep(wait)
+                    continue
+                raise

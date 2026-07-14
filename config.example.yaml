@@ -167,7 +167,8 @@ registry:
     enabled: true
     sweep_hours: 24                # scheduled staleness sweep cadence (§7 open question — daily default)
     stale_days: 14                 # registry rows older than this get re-researched
-    max_pages_per_model: 3         # Crawl4AI fetches per model per sweep
+    max_pages_per_model: 5         # Crawl4AI fetches per model — more real per-category material
+    corpus_char_limit: 24000       # extraction-LLM context ceiling; raise only with a bigger research model
     # Model used by the Research Agent. null = reuse the agent_brain model.
     # §7 open question: a larger off-hot-path model may extract scores better.
     model: null
@@ -176,16 +177,9 @@ registry:
     # (check the Tools tab in the web UI after connecting them).
     search:  { server: "searxng",  tool: "searxng_web_search", query_param: "query" }
     fetch:   { server: "crawl4ai", tool: "md",                 url_param: "url" }
-    # Search pacing — a full-registry sweep otherwise fires 20+ searches nearly
-    # back-to-back, and SearXNG fans each out to several external engines that
-    # 429 the burst (not a limit inside this deployment). A global minimum gap
-    # between search calls keeps under those thresholds; a 429 gets a longer,
-    # escalating backoff before retry. Raise the gap if 429s persist. 0 = off.
-    max_pages_per_model: 5        # more real per-category material before synthesizing
-    corpus_char_limit: 24000      # extraction-LLM context ceiling; raise only with a bigger research model
-    search_pace_seconds: 2.0
-    search_429_backoff_seconds: 45.0
-    search_retry_attempts: 6      # unattended sweep — retry more before giving up
+    # NOTE: SearXNG pacing / 429-backoff now lives on the MCP server connection
+    # (mcp_servers[].pace_seconds / rate_limit_*), so it covers the worker-side
+    # tool loop and the brain's tool calls too — not just this sweep. See below.
 
 # --- MCP server connections (§4.9 item 8) --------------------------------------
 # A CONNECTION list, not a tool list — tools are discovered per server via
@@ -194,6 +188,13 @@ mcp_servers: []
 #  - name: searxng
 #    url: http://192.168.1.40:8971/mcp
 #    transport: streamable-http    # "streamable-http" | "sse"
+#    # SearXNG fans each query out to external engines that 429 a burst. These
+#    # apply to EVERY caller of this server (research sweep, worker tool loop,
+#    # brain tool calls). pace_seconds spaces calls; a 429 gets an escalating
+#    # backoff before retry. 429-backoff is on by default even without pacing.
+#    pace_seconds: 2.0
+#    rate_limit_retries: 6
+#    rate_limit_backoff_seconds: 45.0
 #  - name: crawl4ai
 #    url: http://192.168.1.40:8972/mcp
 #    transport: streamable-http
