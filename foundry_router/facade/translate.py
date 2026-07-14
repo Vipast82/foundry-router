@@ -95,15 +95,25 @@ def persona_tag_entry(persona: dict) -> dict:
     }
 
 
-def show_response(persona: dict) -> dict:
-    """Minimal /api/show shape — some clients (Open WebUI) call it per model."""
+def show_response(persona: dict, context_length: Optional[int] = None) -> dict:
+    """Minimal /api/show shape — some clients (Open WebUI, AnythingLLM) call it
+    per model and read model_info.*.context_length to size their own token
+    budget. A persona is virtual, so we surface a value derived from its real
+    routable candidates; without it clients fall back to a tiny built-in guess."""
+    model_info: dict = {"general.architecture": "foundry-router"}
+    if context_length:
+        # Both keys: clients look for either general.context_length or the
+        # architecture-prefixed <arch>.context_length (real Ollama uses the
+        # latter, e.g. qwen2.context_length).
+        model_info["general.context_length"] = int(context_length)
+        model_info["foundry-router.context_length"] = int(context_length)
     return {
         "modelfile": f"# Foundry Router virtual persona: {persona['virtual_name']}\n"
                      f"# {persona.get('description', '')}\n",
         "parameters": "",
         "template": "{{ .Prompt }}",
         "details": persona_tag_entry(persona)["details"],
-        "model_info": {"general.architecture": "foundry-router"},
+        "model_info": model_info,
         # Advertising "tools" matters: coding clients (Kilo/Cline) check it
         # before sending their own tool definitions.
         "capabilities": ["completion", "chat", "tools"],

@@ -97,7 +97,10 @@ def test_add_named_benchmark_endpoint(client):
                        json={"model_id": "x"}).status_code == 400
 
 
-# -- #4: retry ceiling raised -----------------------------------------------------
+# -- #4: retry ceiling raised (now on the MCP server config, generalized) ---------
 
-def test_research_retry_ceiling_raised():
-    assert ResearchConfig().search_retry_attempts >= 6
+def test_mcp_server_has_rate_limit_retry():
+    from foundry_router.config import MCPServerConfig
+    s = MCPServerConfig(name="searxng", url="http://x")
+    assert s.rate_limit_retries >= 1        # 429-backoff available on every MCP server
+    assert hasattr(s, "pace_seconds")
