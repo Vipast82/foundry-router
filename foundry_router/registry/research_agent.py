@@ -75,8 +75,11 @@ def _is_rate_limited(exc: BaseException) -> bool:
 
 def match_known_benchmark(name: Optional[str]) -> Optional[tuple[str, str, str]]:
     """Map an extractor-supplied benchmark name to (canonical, category, scale)
-    via longest-substring match, or None if unrecognized."""
-    norm = " ".join((name or "").lower().split())
+    via longest-substring match, or None if unrecognized (or not even a
+    string — the extraction LLM's JSON can hand us anything)."""
+    if not isinstance(name, str):
+        return None
+    norm = " ".join(name.lower().split())
     if not norm:
         return None
     best_key = None
@@ -133,6 +136,14 @@ the score is 57.2, not your own synthesis of it. Where no directly-stated
 number exists, you may give an "estimated" score from the qualitative
 discussion, with confidence <= 0.5. Lower confidence when only a single source
 or vendor-published numbers exist.
+
+CRITICAL — never assign the SAME numeric score to two different categories.
+Each category's score must reflect evidence specific to THAT capability
+(coding != reasoning != agentic != tool_calling != general_chat). If you have
+only one number, or cannot tell two categories apart from the sources, report
+the score for the single best-fitting category and OMIT the others entirely. An
+omitted category (no data) is ALWAYS better than duplicating one guess across
+categories — do not pad out the list to five entries.
 
 For "named_benchmarks": include a row ONLY when one of these well-known
 benchmark names appears in the text WITH a numeric result next to it, quoting
@@ -422,7 +433,10 @@ class ResearchAgent:
         # below skips synthesized generic scores (the motivating case: a niche
         # model whose only real data IS a named SWE-Bench number).
         named_wrote = 0
-        for nb in data.get("named_benchmarks") or []:
+        named_raw = data.get("named_benchmarks")
+        for nb in named_raw if isinstance(named_raw, list) else []:
+            if not isinstance(nb, dict):
+                continue
             matched = match_known_benchmark(nb.get("name"))
             if matched is None:
                 continue
@@ -445,7 +459,11 @@ class ResearchAgent:
             self.db.log_event("info", "research",
                               f"{model_id}: recorded {named_wrote} named benchmark(s)")
 
-        raw_benchmarks = data.get("benchmarks") or []
+        _bench = data.get("benchmarks")
+        # Only dict entries survive — the extraction LLM's JSON can hand us a
+        # bare string or a nested list where an object was asked for.
+        raw_benchmarks = [b for b in (_bench if isinstance(_bench, list) else [])
+                          if isinstance(b, dict)]
         # Insufficient-source gate (item 3): a low-web-presence model (e.g.
         # ornith:35b, "3 pages, 0 real benchmarks") has no per-category numbers
         # to extract, so the LLM fabricates — and that just re-feeds the
