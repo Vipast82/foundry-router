@@ -25,7 +25,7 @@ from typing import Awaitable, Callable, Optional
 from ..config import ResearchConfig
 from ..db import Database, utcnow
 from ..errors import describe_exception
-from .models_db import ModelRegistry
+from .models_db import CONFLATION_DEMOTED_URL, ModelRegistry
 
 log = logging.getLogger(__name__)
 
@@ -96,8 +96,23 @@ def match_known_benchmark(name: Optional[str]) -> Optional[tuple[str, str, str]]
 LLM_RETRY_ATTEMPTS = 3
 LLM_RETRY_BACKOFF_SECONDS = 8
 
-# Same benchmark categories used throughout the main guide, for consistency.
-_QUERIES = ["{name} benchmarks", "{name} SWE-bench", "{name} review"]
+# Category-TARGETED query variations (deeper research, 2026-07-14): one broad
+# search rarely surfaces grounding for all five categories at once, so the
+# extractor synthesizes for the uncovered ones. These aim searches at specific
+# capabilities (coding / agentic-tool-use / reasoning) plus a general and a
+# review query, widening the net of real per-category material before any
+# guessing. Each is a paced search call, so more queries = more pacing time on
+# a background sweep — acceptable for an unattended task.
+_QUERIES = [
+    "{name} benchmark results",
+    "{name} coding SWE-bench HumanEval evaluation",
+    "{name} agentic tool use function calling evaluation",
+    "{name} reasoning MMLU GPQA math evaluation",
+    "{name} capabilities review",
+]
+# Per-search snippet budget, trimmed from 4000 so five queries' snippets don't
+# crowd fetched PAGES (the richer material) out of the corpus cap.
+_SEARCH_SNIPPET_CHARS = 2500
 
 EXTRACTION_PROMPT = """You are extracting model-capability data from web research text.
 
@@ -359,7 +374,8 @@ class ResearchAgent:
         for q in _QUERIES:
             try:
                 result = await self._search(q.format(name=model_id))
-                corpus.append(f"### search: {q.format(name=model_id)}\n{result[:4000]}")
+                corpus.append(f"### search: {q.format(name=model_id)}\n"
+                              f"{result[:_SEARCH_SNIPPET_CHARS]}")
                 urls += re.findall(r"https?://[^\s\"'<>\)\]]+", result)
             except Exception as e:
                 # Unwrap the real cause — TaskGroup/SSE/transport failures (e.g.
@@ -394,7 +410,7 @@ class ResearchAgent:
             except Exception:
                 continue
 
-        text = "\n\n".join(corpus)[:24000]
+        text = "\n\n".join(corpus)[:self.cfg.corpus_char_limit]
         raw = await self._extract_with_retry(
             EXTRACTION_PROMPT.format(model=model_id, text=text))
         data = extract_json(raw)
@@ -406,6 +422,10 @@ class ResearchAgent:
             return
 
         wrote = self._write_extraction(model_id, data, text)
+        # Cross-pass conflation reconcile: catch a fresh score that matches a
+        # DIFFERENT category's score written on an earlier run (the in-pass guard
+        # only sees this pass's own output).
+        self.registry.reconcile_cross_category_collisions(model_id)
         self.registry.set_research_status(
             model_id, "ok", f"{wrote} benchmark rows, {fetched} pages")
         self.db.log_event("info", "research",
@@ -521,9 +541,12 @@ class ResearchAgent:
                                                            "community_report")
                                else "community_report")
                 confidence_scale = 1.0
+                source_url = str(b.get("source_url") or "")[:500]
                 if round(score, 1) in duplicated:
                     # One number across multiple categories — strip its
-                    # unwarranted trust rather than believe the conflation.
+                    # unwarranted trust rather than believe the conflation. Stamp
+                    # the demotion marker so the cross-pass reconciliation leaves
+                    # it alone (idempotent).
                     self.db.log_event(
                         "warning", "research",
                         f"demoted {model_id}/{cat} score {score} — the same number "
@@ -531,6 +554,7 @@ class ResearchAgent:
                         f"synthesis, not a real per-category benchmark)")
                     score_type, source_type, confidence_scale = \
                         "estimated", "community_report", 0.4
+                    source_url = CONFLATION_DEMOTED_URL
                 elif score_type == "measured" and not measured_score_in_text(score, text):
                     # The model claims "measured" but the number is nowhere in
                     # the fetched material — synthesis, not quotation.
@@ -543,7 +567,7 @@ class ResearchAgent:
                     model_id, cat, max(0.0, min(100.0, score)),
                     score_type=score_type,
                     source_type=source_type,
-                    source_url=str(b.get("source_url") or "")[:500],
+                    source_url=source_url,
                     confidence=max(0.0, min(1.0, float(b.get("confidence", 0.4))
                                             * confidence_scale)),
                 )

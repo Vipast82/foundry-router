@@ -181,6 +181,8 @@ registry:
     # 429 the burst (not a limit inside this deployment). A global minimum gap
     # between search calls keeps under those thresholds; a 429 gets a longer,
     # escalating backoff before retry. Raise the gap if 429s persist. 0 = off.
+    max_pages_per_model: 5        # more real per-category material before synthesizing
+    corpus_char_limit: 24000      # extraction-LLM context ceiling; raise only with a bigger research model
     search_pace_seconds: 2.0
     search_429_backoff_seconds: 45.0
     search_retry_attempts: 6      # unattended sweep — retry more before giving up
