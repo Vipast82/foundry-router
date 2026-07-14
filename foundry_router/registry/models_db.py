@@ -81,6 +81,11 @@ RELIABILITY_FLOOR = 0.4      # a model that always fails still keeps this much s
 # the composite is still the primary signal.
 TIEBREAK_EPSILON = 3.0
 
+# Sentinel source_url stamped on a benchmark row demoted for score conflation
+# (in-pass or cross-pass). Lets the cross-pass reconciliation skip rows it (or
+# the in-pass guard) already demoted, so a repeated sweep is idempotent.
+CONFLATION_DEMOTED_URL = "conflation:same-score-across-categories"
+
 
 def _recency_factor(last_updated: Optional[str]) -> float:
     if not last_updated:
@@ -294,6 +299,58 @@ class ModelRegistry:
             "VALUES (?,?,?,?,?,?,?,?,?)",
             (model_id, benchmark_name, category, score, scale, source_url,
              measured_date, source, utcnow()))
+
+    def reconcile_cross_category_collisions(self, model_id: str) -> int:
+        """Cross-PASS conflation guard (extends the in-pass check): two
+        categories can hold the identical score written on SEPARATE research
+        runs — the single-pass guard never sees those side by side, so they slip
+        through as full-trust (found live: claude-opus-4-8 agentic 83.4 ==
+        tool_calling 83.4, both vendor, never flagged). Scan all stored
+        non-manual rows; any score shared across 2+ distinct categories is
+        demoted to a low-confidence estimate, same as an in-pass collision.
+        Idempotent — rows already carrying the demotion marker are left alone,
+        so a repeated sweep doesn't keep shrinking confidence. Returns rows
+        demoted."""
+        rows = self.benchmarks(model_id)
+        by_score: dict = {}
+        for r in rows:
+            s = r.get("score")
+            if s is None:
+                continue
+            # manual_override rows COUNT toward a collision (a vendor row that
+            # matches a hand-verified value in another category is suspect) but
+            # are never themselves demoted.
+            try:
+                by_score.setdefault(round(float(s), 1), []).append(r)
+            except (TypeError, ValueError):
+                continue
+        demoted = 0
+        for group in by_score.values():
+            if len({r["category"] for r in group}) < 2:
+                continue
+            for r in group:
+                if r.get("source_type") == "manual_override":
+                    continue  # never demote a hand-set value
+                if r.get("source_url") == CONFLATION_DEMOTED_URL:
+                    continue  # already demoted — idempotent across passes
+                self.db.log_event(
+                    "warning", "research",
+                    f"demoted {model_id}/{r['category']} score {r['score']} — matches "
+                    f"another category's stored score (cross-pass conflation)")
+                self.upsert_benchmark(
+                    model_id, r["category"], float(r["score"]),
+                    score_type="estimated", source_type="community_report",
+                    source_url=CONFLATION_DEMOTED_URL,
+                    confidence=max(0.0, min(1.0, (r.get("confidence") or 0.5) * 0.4)))
+                demoted += 1
+        return demoted
+
+    def reconcile_all_cross_category_collisions(self) -> int:
+        """One-shot sweep across every model — fixes collisions that ACCUMULATED
+        before this guard existed (run at startup), without waiting for each
+        model to be re-researched."""
+        return sum(self.reconcile_cross_category_collisions(row["id"])
+                   for row in self.list_models())
 
     def delete_named_benchmark(self, model_id: str, benchmark_name: str) -> None:
         self.db.execute(

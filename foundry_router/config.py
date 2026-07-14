@@ -175,7 +175,13 @@ class ResearchConfig(BaseModel):
     enabled: bool = True
     sweep_hours: int = 24
     stale_days: int = 14
-    max_pages_per_model: int = 3
+    max_pages_per_model: int = 5   # raised from 3 — more real per-category material
+    # Total characters of assembled research corpus fed to the extraction LLM.
+    # The ceiling is that model's context: the default 6GB brain (num_ctx ~6144)
+    # is already near its limit at 24000 chars, so DON'T raise this unless you
+    # point registry.research.model at a larger dedicated research model — then
+    # a higher cap lets the extra pages actually reach the extractor.
+    corpus_char_limit: int = 24000
     model: Optional[str] = None  # None => reuse the agent_brain model
     search: ResearchToolRef = Field(default_factory=ResearchToolRef)
     fetch: ResearchToolRef = Field(default_factory=ResearchToolRef)

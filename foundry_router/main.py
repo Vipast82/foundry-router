@@ -195,6 +195,16 @@ class Services:
         self.pool.add_state_listener(self._on_pool_change)
         self.register_discovered()
         self._apply_seed()
+        # One-shot cross-pass conflation reconcile — demotes identical-score
+        # collisions across categories that accumulated before the cross-pass
+        # guard existed (e.g. claude-opus-4-8 agentic==tool_calling). Idempotent.
+        try:
+            fixed = self.registry.reconcile_all_cross_category_collisions()
+            if fixed:
+                self.db.log_event("info", "registry",
+                                  f"cross-pass conflation sweep demoted {fixed} row(s)")
+        except Exception:
+            log.exception("cross-pass conflation sweep failed")
         await self.tool_registry.sync(self.pool)
         await self.populate_context_lengths()
         self.research.start()
