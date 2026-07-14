@@ -107,6 +107,7 @@ class Services:
         import json as _json
 
         from .registry.tagging import content_policy_from_name, tags_from_name
+        from .usage import CLAUDE_DEFAULT_CONTEXT
 
         for s in getattr(self.pool, "backends", {}).values():
             if not s.healthy:
@@ -118,7 +119,11 @@ class Services:
                         fields.update(relative_cost_tier="free",
                                       cost_per_1k_input=0.0, cost_per_1k_output=0.0)
                     elif s.config.type == "anthropic-compatible":
-                        fields.update(relative_cost_tier="high")
+                        # Stamp a conservative context ceiling so oversized
+                        # requests are gated before escalation (local windows can
+                        # exceed Claude's). A manual override still wins.
+                        fields.update(relative_cost_tier="high",
+                                      context_length=CLAUDE_DEFAULT_CONTEXT)
                     tags = tags_from_name(model_id)
                     if tags:
                         fields["tags"] = _json.dumps(tags)
@@ -129,11 +134,39 @@ class Services:
                 except Exception:
                     log.exception("failed to register discovered model %s", model_id)
 
+    async def populate_context_lengths(self) -> None:
+        """Fill context_length for local Ollama models from /api/show GGUF
+        metadata — a direct API fact (no research/verification needed), and the
+        data completeness that lets the context-fit gate in ranked_for_category
+        actually fire for local models. Only probes models still missing the
+        value; once set it persists (upsert_auto fills NULLs, never clobbers a
+        manual override)."""
+        for s in getattr(self.pool, "backends", {}).values():
+            if not s.healthy or s.config.type != "ollama":
+                continue
+            probe = getattr(s.protocol, "show_context_length", None)
+            if probe is None:
+                continue
+            for model_id in list(s.models):
+                meta = self.registry.get(model_id)
+                if meta and meta.get("context_length"):
+                    continue  # already known
+                try:
+                    ctx = await probe(model_id)
+                except Exception as e:  # a probe failure must never break sync
+                    log.debug("context-length probe failed for %s: %s", model_id, e)
+                    continue
+                if ctx:
+                    self.registry.upsert_auto(model_id, source="discovery",
+                                              context_length=int(ctx))
+
     def _on_pool_change(self) -> None:
         """Pool health/model-list change -> immediate Tool Sync (§4.2 cadence:
         event-driven first, periodic sweep as the safety net)."""
         self.register_discovered()
-        asyncio.get_running_loop().create_task(self.tool_registry.sync(self.pool))
+        loop = asyncio.get_running_loop()
+        loop.create_task(self.tool_registry.sync(self.pool))
+        loop.create_task(self.populate_context_lengths())
 
     # -- live rebuilds used by the admin UI --------------------------------------
 
@@ -148,6 +181,7 @@ class Services:
             await self.pool.start()
         self.register_discovered()
         await self.tool_registry.sync(self.pool)
+        await self.populate_context_lengths()
 
     def rebuild_brain(self) -> None:
         self.brain = BrainClient(self.config_store.config.agent_brain, self.http,
@@ -162,6 +196,7 @@ class Services:
         self.register_discovered()
         self._apply_seed()
         await self.tool_registry.sync(self.pool)
+        await self.populate_context_lengths()
         self.research.start()
         self._bg_tasks = [
             asyncio.create_task(self._openrouter_loop()),

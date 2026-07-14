@@ -32,6 +32,15 @@ log = logging.getLogger(__name__)
 # Claude tier classification (for adaptive conservation)                      #
 # --------------------------------------------------------------------------- #
 
+# Conservative context ceiling stamped on subscription (Claude) models at
+# discovery, so the context-fit gate and the pre-dispatch size guard have a real
+# number to check against — critical because a request that fits a big-context
+# local model (ornith/fredrezones up to 262K) may NOT fit Claude. Standard
+# Claude models are 200K; a deployment using a 1M-window Sonnet beta can raise
+# this per-model via a manual override (which upsert_auto never clobbers).
+CLAUDE_DEFAULT_CONTEXT = 200_000
+
+
 def claude_premium_level(model_id: str) -> int:
     """Claude tier ladder, per the model-choosing guidance and the plan's own
     limit structure: 4 = Fable/Mythos (heaviest; has its OWN weekly bucket,
