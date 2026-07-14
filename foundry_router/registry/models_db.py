@@ -11,6 +11,7 @@ prefers the manual one).
 
 from __future__ import annotations
 
+import json
 import logging
 from datetime import datetime, timezone
 from typing import Optional
@@ -18,6 +19,17 @@ from typing import Optional
 from ..db import Database, utcnow
 
 log = logging.getLogger(__name__)
+
+
+def _scalar(v):
+    """Coerce a value SQLite can't bind (list/dict) into text. Guards the model
+    write path against malformed extraction-LLM JSON (a field arriving as a list
+    where a scalar column is expected)."""
+    if isinstance(v, (list, tuple)):
+        return ", ".join(str(x) for x in v)[:2000]
+    if isinstance(v, dict):
+        return json.dumps(v)[:2000]
+    return v
 
 MODEL_FIELDS = [
     "display_name", "provider", "context_length", "cost_per_1k_input",
@@ -167,6 +179,14 @@ class ModelRegistry:
         filled), never replaced."""
         existing = self.get(model_id)
         fields = {k: v for k, v in fields.items() if k in MODEL_FIELDS and v is not None}
+        # Shape guard (found live: ProgrammingError "type 'list' is not supported"
+        # crashing a whole research pass on hermes3:8b / qwen3.6:35b): the
+        # extraction LLM can emit a list/dict where a scalar column is expected
+        # (e.g. good_for as ["coding","chat"]), which SQLite cannot bind. Coerce
+        # any non-scalar to text so a bad JSON shape degrades to a usable string
+        # instead of taking down the write. Applies to every caller, harmless to
+        # the well-formed ones (discovery/OpenRouter pass scalars).
+        fields = {k: _scalar(v) for k, v in fields.items()}
         now = utcnow()
         if existing is None:
             cols = ["id", "last_updated", "source"] + list(fields.keys())
