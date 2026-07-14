@@ -93,6 +93,9 @@ CREATE TABLE IF NOT EXISTS personas (
                                     -- quota denial falls through to the next pin, then the pool
   execution_mode TEXT,              -- NULL/"agent" = generic brain loop | "pipeline" = the
                                     -- Prepare->Execute->Check coding pipeline (§ coding spec)
+  brain_handles_tools INTEGER DEFAULT 0,  -- 0 (default) = the selected WORKER owns the MCP tool
+                                    -- loop for this persona's requests; 1 = old brain-mediated tool
+                                    -- handling (the brain runs searxng/crawl4ai etc. itself)
   pipeline_check_enabled INTEGER DEFAULT 1,  -- pipeline mode: paid review of local output
   outcome_judge TEXT,               -- NULL = off | "paid" | "local_large" | "brain" — after a
                                     -- local answer, this judge decides adequate/escalate

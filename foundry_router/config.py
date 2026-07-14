@@ -70,6 +70,11 @@ class AgentBrainConfig(BaseModel):
     tool_result_limit_chars: int = 2000   # per tool result fed back to the brain
     mcp_result_limit_chars: int = 2000    # same, for MCP tool results
     worker_max_tokens: int = 8192         # output budget for worker-model calls
+    # Worker-side tool calling (opt-out default): when the selected worker owns
+    # the MCP tool loop itself, this bounds its tool-call turns before the
+    # request is handed to the brain to finish — mirrors the brain's own step
+    # cap, prevents a worker looping indefinitely on tool calls.
+    worker_tool_max_steps: int = 6
     # Input-side twin of tool_result_limit_chars: caps what the brain sees of
     # a large pasted user message (file/code) before its FIRST routing
     # decision — otherwise a 23k-char paste blows the brain's context before

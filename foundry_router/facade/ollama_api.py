@@ -175,6 +175,17 @@ def _run_events(svc, ctx: RequestContext):
     """Select the event source for this request's execution mode."""
     if ctx.logger.mode == "pipeline":
         return svc.agent.run_pipeline(ctx)
+    persona = ctx.persona or {}
+    # Worker-side tool calling is the opt-out default: a persona with MCP tools
+    # attached lets the selected worker own the tool loop, unless it explicitly
+    # sets brain_handles_tools. A tool-less persona has nothing to hand off, so
+    # it stays on the brain-mediated path (which is a no-op difference there).
+    try:
+        has_tools = bool(json.loads(persona.get("preferred_mcp_tools") or "[]"))
+    except (json.JSONDecodeError, TypeError):
+        has_tools = False
+    if has_tools and not persona.get("brain_handles_tools"):
+        return svc.agent.run_worker_tools(ctx)
     return svc.agent.run(ctx)
 
 
