@@ -162,6 +162,7 @@ class Database:
             ("models", "calls_ok", "INTEGER DEFAULT 0"),
             ("models", "calls_failed", "INTEGER DEFAULT 0"),
             ("personas", "selection_weights", "TEXT"),
+            ("model_named_benchmarks", "source", "TEXT DEFAULT 'research'"),
         ]
         with self._lock:
             for table, column, ddl in added:
@@ -251,6 +252,9 @@ class Database:
             "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
             (key, value),
         )
+
+    def kv_del(self, key: str) -> None:
+        self.execute("DELETE FROM kv WHERE key=?", (key,))
 
     # -- event log (troubleshooting, §4.9 item 7) ---------------------------------
 

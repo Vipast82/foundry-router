@@ -160,7 +160,7 @@ async def chat(request: Request):
 
 def _build_ctx(svc, persona: dict, model_name: str, messages: list[dict],
                user_text: str, mode: str = "agent") -> RequestContext:
-    pending = prompts.find_pending_question(messages)
+    pending = prompts.find_pending_question(svc.db, messages)
     return RequestContext(
         persona=persona,
         messages=prompts.sanitize_history(messages),
@@ -203,10 +203,12 @@ async def _agent_events_to_chat_chunks(svc, ctx: RequestContext, model_name: str
                     yield tr.chat_chunk(model_name, piece)
             elif ev.kind == "ask_user":
                 status = "asked_user"
-                # Question + hidden marker (§4.6) — next request's history scan
-                # finds the marker and resumes instead of starting fresh.
-                yield tr.chat_chunk(model_name, ev.text + "\n"
-                                    + prompts.make_pending_marker(ev.text))
+                # Pending state is stored SERVER-SIDE (§4.6) keyed by the
+                # conversation fingerprint — the next request resumes from it.
+                # Nothing internal is written into visible content (found live:
+                # the old HTML-comment marker rendered raw in AnythingLLM).
+                prompts.store_pending_question(svc.db, ctx.messages, ev.text)
+                yield tr.chat_chunk(model_name, ev.text)
             elif ev.kind == "brain_down":
                 ctx.logger.mode = "fallback"
                 svc.db.log_event("error", "brain",

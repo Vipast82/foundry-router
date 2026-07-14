@@ -279,6 +279,38 @@ async def model_benchmarks(request: Request, model_id: str):
             "named": svc.registry.named_benchmarks(model_id)}
 
 
+@router.post("/admin/api/models/named_benchmark/add")
+async def add_named_benchmark(request: Request):
+    """Manually add a named benchmark (real vendor data the research pipeline
+    hasn't captured yet — e.g. a brand-new vendor page SearXNG can't find).
+    Tagged source='manual' so a later research pass never clobbers it."""
+    svc = _svc(request)
+    b = await request.json()
+    model_id = (b.get("model_id") or "").strip()
+    name = (b.get("benchmark_name") or "").strip()
+    if not model_id or not name:
+        return JSONResponse({"error": "model_id and benchmark_name required"},
+                            status_code=400)
+    try:
+        score = float(b.get("score"))
+    except (TypeError, ValueError):
+        return JSONResponse({"error": "score must be a number"}, status_code=400)
+    svc.registry.upsert_named_benchmark(
+        model_id, name, (b.get("category") or "coding"), score,
+        (b.get("scale") or "percent"), source_url=str(b.get("source_url") or "")[:500],
+        source="manual")
+    return {"ok": True, "named": svc.registry.named_benchmarks(model_id)}
+
+
+@router.post("/admin/api/models/named_benchmark/delete")
+async def delete_named_benchmark(request: Request):
+    svc = _svc(request)
+    b = await request.json()
+    model_id, name = b.get("model_id") or "", b.get("benchmark_name") or ""
+    svc.registry.delete_named_benchmark(model_id, name)
+    return {"ok": True, "named": svc.registry.named_benchmarks(model_id)}
+
+
 @router.post("/admin/api/models/reset_benchmarks")
 async def reset_benchmarks(request: Request):
     """Clear a model's automatic benchmark rows (research/seed/observed; manual

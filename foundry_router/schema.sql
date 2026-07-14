@@ -72,6 +72,7 @@ CREATE TABLE IF NOT EXISTS model_named_benchmarks (
   scale TEXT,                       -- "percent" | "elo" | "count" | "score"
   source_url TEXT,
   measured_date TEXT,               -- when the eval was run, if the source says (else NULL)
+  source TEXT DEFAULT 'research',   -- 'research' | 'manual' — manual entries are never clobbered by a research pass
   last_updated TEXT
 );
 

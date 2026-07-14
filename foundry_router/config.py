@@ -184,7 +184,10 @@ class ResearchConfig(BaseModel):
     # disables pacing.
     search_pace_seconds: float = 2.0
     search_429_backoff_seconds: float = 45.0
-    search_retry_attempts: int = 3
+    # Research is unattended (nobody waiting), so it's cheap to retry more before
+    # giving up — raised from 3 so a full overnight sweep completes without
+    # manual requeuing of the occasional model that 429s a few times in a row.
+    search_retry_attempts: int = 6
 
 
 class RegistryConfig(BaseModel):

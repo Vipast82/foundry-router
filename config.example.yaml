@@ -183,7 +183,7 @@ registry:
     # escalating backoff before retry. Raise the gap if 429s persist. 0 = off.
     search_pace_seconds: 2.0
     search_429_backoff_seconds: 45.0
-    search_retry_attempts: 3
+    search_retry_attempts: 6      # unattended sweep — retry more before giving up
 
 # --- MCP server connections (§4.9 item 8) --------------------------------------
 # A CONNECTION list, not a tool list — tools are discovered per server via
