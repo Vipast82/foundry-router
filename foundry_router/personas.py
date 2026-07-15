@@ -17,7 +17,7 @@ PERSONA_FIELDS = ["description", "benchmark_category", "local_bias_strength",
                   "guardrail_overrides", "pinned_models", "execution_mode",
                   "pipeline_check_enabled", "outcome_judge", "required_tags",
                   "prefer_permissive", "selection_weights", "brain_handles_tools",
-                  "enabled"]
+                  "context_window", "enabled"]
 
 
 class PersonaStore:

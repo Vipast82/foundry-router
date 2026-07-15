@@ -104,6 +104,9 @@ CREATE TABLE IF NOT EXISTS personas (
   prefer_permissive INTEGER DEFAULT 0,  -- content_policy=permissive: prefer (this persona) vs the
                                     -- default avoid (permissive/uncensored models are for content other
                                     -- models refuse, not a general-quality choice) — see ranked_for_category
+  context_window INTEGER,           -- admin-set override: tells clients (AnythingLLM, etc.) the
+                                    -- max token budget to assume for this virtual persona;
+                                    -- overrides the auto-detected MAX of routable workers
   selection_weights TEXT,           -- optional JSON overriding the multi-signal ranking weights for this
                                     -- persona, e.g. {"latency": 0.4} for a speed-sensitive workload
   enabled INTEGER DEFAULT 1,

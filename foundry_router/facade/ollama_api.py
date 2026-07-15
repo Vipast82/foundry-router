@@ -109,15 +109,40 @@ async def ps() -> dict:
 
 
 def _persona_context_length(svc, persona: dict):
-    """Safe floor: the minimum known context_length among the persona's routable
-    candidates, so a client sizing its budget from /api/show never assumes more
-    than some candidate the request could actually route to can hold. Uses the
-    per-model context_length auto-detected from Ollama /api/show (v0.12.0)."""
+    """Report the context length for a virtual persona.
+
+    Priority order (highest wins):
+      1. ``context_window`` override on the persona (admin-set, pins a fixed
+         value regardless of backend discovery) — lets operators tell clients
+         "this persona can absorb up to N tokens" even when workers vary in
+         size (found live: a Foundry persona reported 2048 because one tiny
+         fallback worker had that window; the real workers held 32K-128K).
+      2. The **maximum** known context_length among routable candidates —
+         AnythingLLM / Open WebUI size their token budget from /api/show, so
+         reporting the largest available window lets long-context work (RAG,
+         document analysis) actually use it instead of being bottlenecked by
+         the smallest worker that happens to be healthy.
+
+    Why MAX not MIN: MIN was a "safe floor" in v1 but it punished operators
+    running heterogeneous workers — a single small model capped every persona's
+    reported budget even though every larger worker could handle more. Foundry's
+    job is to *rout* to the best available worker, so clients should know the
+    ceiling they can reach, not the floor of the weakest backend.
+    """
+    # 1) Persona-level override (admin-set via web UI or config).
+    cw = persona.get("context_window")
+    if cw:
+        try:
+            return int(cw)
+        except (TypeError, ValueError):
+            pass
+
+    # 2) Max context across routable candidates.
     category = persona.get("benchmark_category") or "general_chat"
     available = list(svc.pool.available_models().keys())
     ranked = svc.registry.ranked_for_category(category, available, limit=50, per_tier=50)
     lengths = [int(r["context_length"]) for r in ranked if r.get("context_length")]
-    return min(lengths) if lengths else None
+    return max(lengths) if lengths else None
 
 
 @router.post("/api/show")
