@@ -164,6 +164,7 @@ class Database:
             ("personas", "selection_weights", "TEXT"),
             ("model_named_benchmarks", "source", "TEXT DEFAULT 'research'"),
             ("personas", "brain_handles_tools", "INTEGER DEFAULT 0"),
+            ("personas", "context_window", "INTEGER"),
         ]
         with self._lock:
             for table, column, ddl in added:
