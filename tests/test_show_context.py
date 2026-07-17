@@ -1,9 +1,15 @@
-"""Persona /api/show now reports a real context_length in model_info, derived
-from the persona's routable candidates (safe floor = min known context) — a
-virtual persona otherwise returns nothing there and clients fall back to a tiny
-internal guess for token budgeting."""
+"""Persona /api/show reports a real context_length in model_info: a persona
+`context_window` override wins if set, else the MAX known context across the
+persona's routable candidates (so a heterogeneous fleet advertises the ceiling
+it can reach, not the floor of the weakest worker). A virtual persona otherwise
+returns nothing there and clients fall back to a tiny internal guess."""
 
+import types
+
+from foundry_router.db import Database
 from foundry_router.facade import translate as tr
+from foundry_router.facade.ollama_api import _persona_context_length
+from foundry_router.registry.models_db import ModelRegistry
 
 
 def test_show_response_includes_context_length():
@@ -29,22 +35,40 @@ def test_api_show_returns_model_info(client):
     assert "tools" in body["capabilities"]
 
 
-def test_persona_context_length_is_safe_floor(tmp_path):
-    # the derivation helper: minimum known context across the persona's candidates
-    import types
-    from foundry_router.db import Database
-    from foundry_router.facade.ollama_api import _persona_context_length
-    from foundry_router.registry.models_db import ModelRegistry
-
+def _svc(tmp_path):
     registry = ModelRegistry(Database(tmp_path / "s.sqlite"))
     registry.upsert_auto("big", source="discovery", relative_cost_tier="free",
                          context_length=262144)
     registry.upsert_auto("small", source="discovery", relative_cost_tier="free",
                          context_length=32768)
     registry.upsert_auto("unknown", source="discovery", relative_cost_tier="free")  # no ctx
-
     pool = types.SimpleNamespace(
         available_models=lambda: {"big": ["b"], "small": ["b"], "unknown": ["b"]})
-    svc = types.SimpleNamespace(pool=pool, registry=registry)
-    ctx = _persona_context_length(svc, {"benchmark_category": "general_chat"})
-    assert ctx == 32768        # the floor — never over-promises what a candidate can hold
+    return types.SimpleNamespace(pool=pool, registry=registry)
+
+
+def test_context_length_falls_back_to_max_candidate(tmp_path):
+    # no override -> advertise the ceiling the persona can reach, not the floor
+    ctx = _persona_context_length(_svc(tmp_path), {"benchmark_category": "general_chat"})
+    assert ctx == 262144
+
+
+def test_context_window_override_wins(tmp_path):
+    ctx = _persona_context_length(
+        _svc(tmp_path), {"benchmark_category": "general_chat", "context_window": 131072})
+    assert ctx == 131072          # pinned, ignores the 262144 candidate max
+
+
+def test_context_window_zero_and_negative_mean_auto(tmp_path):
+    for bad in (0, -5, "", None):
+        ctx = _persona_context_length(
+            _svc(tmp_path), {"benchmark_category": "general_chat", "context_window": bad})
+        assert ctx == 262144      # falls through to the discovered max
+
+
+def test_context_window_persists_through_persona_endpoint(client):
+    client.post("/admin/api/personas",
+                json={"virtual_name": "Foundry-Chat", "context_window": 200000})
+    personas = {p["virtual_name"]: p
+                for p in client.get("/admin/api/personas").json()["personas"]}
+    assert personas["Foundry-Chat"]["context_window"] == 200000

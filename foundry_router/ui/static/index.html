@@ -499,14 +499,11 @@ async function tabPersonas() {
         <input type="checkbox" id="pe-perm"></div>
       <div class="row"><label title="Optional JSON overriding the multi-signal ranking weights for this persona. Signals: primary (requested category), tool_calling, adequacy (observed outcome-judge quality), latency (warm tokens/sec). e.g. a speed-sensitive persona: {&quot;latency&quot;: 0.5}. Empty = defaults.">selection_weights (JSON obj)</label>
         <input id="pe-weights" size="50" value="{}" placeholder='{"latency": 0.4, "adequacy": 0.8}'></div>
-      <button class="act primary" id="pe-save">Save persona</button>
+      <div class="row"><button class="act primary" id="pe-save">Save persona</button>
+        <button class="act" id="pe-apply-ctx" title="Set a sensible default context_window on any persona that has none yet (never overwrites a value you've already set). Review the numbers against your workers' real windows afterward.">Apply default context windows</button></div>
     </div>`;
   window._personas = Object.fromEntries(d.personas.map(p => [p.virtual_name, p]));
-  // One-time migration: set large context windows on personas that lack them.
-  // Safe to call repeatedly — only updates NULL/0 values.
-  if (d.personas.some(p => !p.context_window || p.context_window === 0)) {
-    setTimeout(() => window.applyDefaultContextWindows(), 500);
-  }
+  $("#pe-apply-ctx").onclick = () => window.applyDefaultContextWindows();
   $("#pe-save").onclick = () => run(api("personas", {method: "POST", body: {
     virtual_name: $("#pe-name").value.trim(),
     description: $("#pe-desc").value,
@@ -553,51 +550,50 @@ function readPreferredMcp(prevList) {
     e => !listedServers.has(e) && !listedTools.has(e));
   return [...new Set([...checked, ...preserved])];
 }
-  // Apply default context_window values to personas that don't have one yet.
-  // This is a one-time migration — only sets values where the field is NULL/0,
-  // never overwrites an admin-set override (idempotent).
-  window.applyDefaultContextWindows = async () => {
-    const defaults = {
-      "Foundry-Agent":     32768,
-      "Foundry-Chat":      131072,
-      "Foundry-Coding":    131072,
-      "Foundry-Creative":   65536,
-      "Foundry-RAG":       131072,
-      "Foundry-Research":  131072,
-      "Foundry-Vision":     65536,
-    };
-    const updated = [];
-    for (const [name, ctx] of Object.entries(defaults)) {
-      const p = window._personas[name];
-      if (!p) continue;
-      // Only set if the persona currently has no override (NULL or 0).
-      if (p.context_window == null || p.context_window === 0) {
-        try {
-          await api("personas", {method: "POST", body: {
-            virtual_name: name, context_window: ctx}});
-          updated.push(name + ": " + formatCtx(ctx));
-        } catch (e) { /* logged below */ toast(e.message, true); return; }
-      }
-    }
-    if (updated.length) {
-      toast("Set default context windows for " + updated.join(", "));
-    } else {
-      toast("All personas already have context_window set");
-    }
+// Apply a sensible default context_window to personas that have none yet — an
+// explicit convenience wired to the "Apply default context windows" button,
+// never automatic (viewing a tab must not mutate config). Only fills NULL/0
+// values; never overwrites an admin-set override. The numbers are starting
+// points — review them against your workers' real windows, since advertising
+// more than a worker can hold just forces a degrade at dispatch time.
+window.applyDefaultContextWindows = async () => {
+  const defaults = {
+    "Foundry-Agent":     32768,
+    "Foundry-Chat":      131072,
+    "Foundry-Coding":    131072,
+    "Foundry-Creative":   65536,
+    "Foundry-RAG":       131072,
+    "Foundry-Research":  131072,
+    "Foundry-Vision":     65536,
   };
+  const updated = [];
+  for (const [name, ctx] of Object.entries(defaults)) {
+    const p = window._personas[name];
+    if (!p) continue;
+    if (p.context_window == null || p.context_window === 0) {
+      try {
+        await api("personas", {method: "POST", body: {
+          virtual_name: name, context_window: ctx}});
+        updated.push(name + ": " + formatCtx(ctx));
+      } catch (e) { toast(e.message, true); return; }
+    }
+  }
+  toast(updated.length
+    ? "Set default context windows for " + updated.join(", ")
+    : "All personas already have a context_window set");
+  if (updated.length) render();   // refresh so the new ctx pills appear
+};
 
-  window.editPersona = name => {
-    const p = window._personas[name]; if (!p) return;
-    $("#pe-title").textContent = "Edit " + name;
-    document.querySelector("#pe-name").closest(".card")
-      .scrollIntoView({behavior: "smooth", block: "start"});
-    $("#pe-name").value = p.virtual_name;
-    $("#pe-desc").value = p.description || "";
-    // context_window is nullable in DB — show 0 if unset so the field never
-    // appears blank (which would confuse operators into thinking it's broken).
-    const ctxVal = p.context_window != null ? p.context_window : 0;
-    $("#pe-ctx").value = ctxVal;
-    $("#pe-cat").value = p.benchmark_category || "general_chat";
+window.editPersona = name => {
+  const p = window._personas[name]; if (!p) return;
+  $("#pe-title").textContent = "Edit " + name;
+  document.querySelector("#pe-name").closest(".card")
+    .scrollIntoView({behavior: "smooth", block: "start"});
+  $("#pe-name").value = p.virtual_name;
+  $("#pe-desc").value = p.description || "";
+  // context_window is nullable — show 0 if unset so the field never reads blank.
+  $("#pe-ctx").value = p.context_window != null ? p.context_window : 0;
+  $("#pe-cat").value = p.benchmark_category || "general_chat";
   $("#pe-bias").value = p.local_bias_strength || "moderate";
   $("#pe-enabled").checked = !!p.enabled;
   $("#pe-trig").value = p.escalation_triggers || "[]";

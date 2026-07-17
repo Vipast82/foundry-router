@@ -112,8 +112,9 @@ def _persona_context_length(svc, persona: dict):
     """Report the context length for a virtual persona.
 
     Priority order (highest wins):
-      1. ``context_window`` override on the persona (admin-set, pins a fixed
-         value regardless of backend discovery) — lets operators tell clients
+      1. ``context_window`` override on the persona (admin-set in the web UI,
+         pins a fixed value regardless of backend discovery) — lets operators
+         tell clients
          "this persona can absorb up to N tokens" even when workers vary in
          size (found live: a Foundry persona reported 2048 because one tiny
          fallback worker had that window; the real workers held 32K-128K).
@@ -129,11 +130,14 @@ def _persona_context_length(svc, persona: dict):
     job is to *rout* to the best available worker, so clients should know the
     ceiling they can reach, not the floor of the weakest backend.
     """
-    # 1) Persona-level override (admin-set via web UI or config).
+    # 1) Persona-level override (admin-set via the web UI). A 0/blank/negative
+    #    value means "auto" and falls through to backend discovery.
     cw = persona.get("context_window")
     if cw:
         try:
-            return int(cw)
+            v = int(cw)
+            if v > 0:
+                return v
         except (TypeError, ValueError):
             pass
 
