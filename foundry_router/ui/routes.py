@@ -442,8 +442,26 @@ async def force_sync(request: Request):
 
 @router.get("/admin/api/mcp_servers")
 async def list_mcp(request: Request):
-    cfg = _svc(request).config_store.config
-    return {"servers": [s.model_dump() for s in cfg.mcp_servers]}
+    svc = _svc(request)
+    cfg = svc.config_store.config
+    return {"servers": [{**s.model_dump(), **svc.mcp.secret_meta(s.name)}
+                        for s in cfg.mcp_servers]}
+
+
+@router.post("/admin/api/mcp_servers/token")
+async def set_mcp_token(request: Request):
+    """Store a server's auth token in the DB (not config.yaml). Sent as
+    'Authorization: Bearer <token>' by default, or as the raw value of a named
+    header (x-api-key, etc.). An empty token clears it. Applies immediately —
+    the next tool call to that server uses it (sessions are opened per call)."""
+    svc = _svc(request)
+    b = await request.json()
+    server = (b.get("server") or "").strip()
+    if not server:
+        return JSONResponse({"error": "server required"}, status_code=400)
+    svc.mcp.set_secret(server, (b.get("token") or "").strip(),
+                       (b.get("header") or "Authorization").strip())
+    return {"ok": True, "server": server, **svc.mcp.secret_meta(server)}
 
 
 @router.post("/admin/api/mcp_servers")
@@ -479,6 +497,7 @@ async def delete_mcp(request: Request):
                               if s.get("name") != name]
     cfg = svc.config_store.save(mutate)
     svc.mcp.set_servers(cfg.mcp_servers)
+    svc.mcp.delete_secret(name)   # drop its DB token too — no orphan
     await svc.tool_registry.sync(svc.pool)
     return {"ok": True}
 

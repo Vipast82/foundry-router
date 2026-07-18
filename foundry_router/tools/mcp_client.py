@@ -15,6 +15,7 @@ whole service down with it.
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import time
 from contextlib import asynccontextmanager
@@ -25,6 +26,12 @@ from ..db import Database
 from ..errors import describe_exception
 
 log = logging.getLogger(__name__)
+
+# DB (kv) key prefix for a per-server auth secret set in the UI instead of
+# config.yaml. Value is JSON {"header": <name>, "token": <secret>}. Kept out of
+# config so operators can add a token without editing the file, and it survives
+# config saves untouched.
+_SECRET_KEY = "mcp_secret:"
 
 
 class MCPUnavailable(Exception):
@@ -47,6 +54,51 @@ class MCPManager:
     def set_servers(self, servers: list[MCPServerConfig]) -> None:
         self.servers = {s.name: s for s in servers}
 
+    # -- per-server auth secret (DB-backed, UI-set) --------------------------------
+
+    def set_secret(self, server: str, token: str, header: str = "Authorization") -> None:
+        """Store (or clear, if token is empty) a server's auth token in the DB.
+        Applied to that server's connection headers at session time."""
+        if not token:
+            self.db.kv_del(_SECRET_KEY + server)
+            return
+        self.db.kv_set(_SECRET_KEY + server,
+                       json.dumps({"header": (header or "Authorization").strip(),
+                                   "token": token}))
+
+    def delete_secret(self, server: str) -> None:
+        self.db.kv_del(_SECRET_KEY + server)
+
+    def secret_meta(self, server: str) -> dict:
+        """Presence + header name only — the token value is never returned to
+        the UI (write-only from the operator's side)."""
+        raw = self.db.kv_get(_SECRET_KEY + server)
+        if not raw:
+            return {"has_token": False, "token_header": "Authorization"}
+        try:
+            d = json.loads(raw)
+        except json.JSONDecodeError:
+            return {"has_token": False, "token_header": "Authorization"}
+        return {"has_token": bool(d.get("token")),
+                "token_header": d.get("header") or "Authorization"}
+
+    def _secret_headers(self, server: str) -> dict:
+        raw = self.db.kv_get(_SECRET_KEY + server)
+        if not raw:
+            return {}
+        try:
+            d = json.loads(raw)
+        except json.JSONDecodeError:
+            return {}
+        tok, hdr = d.get("token"), (d.get("header") or "Authorization").strip()
+        if not tok:
+            return {}
+        # Authorization defaults to a Bearer token unless a scheme is already
+        # present; any other header (x-api-key, etc.) gets the raw value.
+        if hdr.lower() == "authorization" and not tok.lower().startswith(("bearer ", "basic ")):
+            tok = "Bearer " + tok
+        return {hdr: tok}
+
     @asynccontextmanager
     async def _session(self, name: str):
         cfg = self.servers.get(name)
@@ -62,8 +114,12 @@ class MCPManager:
             raise MCPUnavailable(f"mcp package unavailable: {e}") from e
 
         kwargs: dict = {}
-        if cfg.headers:
-            kwargs["headers"] = cfg.headers
+        # config.yaml headers first, then the DB-stored token (UI-set) — the
+        # secret overrides/adds so an operator can attach auth without editing
+        # the file.
+        headers = {**(cfg.headers or {}), **self._secret_headers(name)}
+        if headers:
+            kwargs["headers"] = headers
         async with transport_client(cfg.url, **kwargs) as streams:
             # streamable-http yields (read, write, get_session_id); sse yields
             # (read, write) — take the first two either way.

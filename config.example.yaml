@@ -184,6 +184,9 @@ registry:
 # --- MCP server connections (§4.9 item 8) --------------------------------------
 # A CONNECTION list, not a tool list — tools are discovered per server via
 # Tool Sync once a connection exists. Reused from the existing MCP fleet.
+# Auth: set a server's token in the WEB UI (MCP tab) — it's stored in the DB,
+# not here, so you don't have to edit this file to add auth. (A static `headers`
+# map below still works too; the UI token merges over it.)
 mcp_servers: []
 #  - name: searxng
 #    url: http://192.168.1.40:8971/mcp
