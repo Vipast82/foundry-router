@@ -114,6 +114,14 @@ const formatCtx = n => n >= 1000 ? Math.round(n / 1000) + 'K' : String(n);
 const run = p => p.then(d => { toast("Saved"); render(); return d; })
                   .catch(e => toast(e.message, true));
 
+// Clear a log table (usage/events) after confirmation, then re-render the tab.
+function clearLog(kind, label) {
+  if (!confirm(`Permanently delete all ${label}? This cannot be undone.`)) return;
+  api(kind + "/clear", { method: "POST" })
+    .then(r => { toast(`Cleared ${r.removed} row(s)`); render(); })
+    .catch(e => toast(e.message, true));
+}
+
 /* ------------------------------------------------------------------ tabs -- */
 const TABS = {
   "Backends":  tabBackends,  "Models":   tabModels,   "Personas": tabPersonas,
@@ -977,7 +985,11 @@ async function tabUsage() {
   $("#main").innerHTML = `
     ${quotaCard(q)}
     ${mcpCard}
-    <h2>Usage log — every routed request</h2>
+    <div class="row" style="justify-content:space-between;align-items:baseline">
+      <h2 style="margin-bottom:0">Usage log — every routed request</h2>
+      <button class="act" onclick="clearLog('usage','usage log entries')"
+        ${reqs.length ? "" : "disabled"}>Clear usage log</button>
+    </div>
     <p class="hint">The <b>model(s)</b> column is who answered; the <b>tools (MCP)</b> column is which of
       Foundry's own MCP servers that request exercised — expand a badge for the per-call trail. A
       <b>direct · client tools</b> row bypassed Foundry's tools entirely.</p>
@@ -995,7 +1007,11 @@ async function tabEvents() {
     <td><details><summary>detail</summary><span class="mono">${esc(e.detail || "")}</span></details></td>
     </tr>`).join("");
   $("#main").innerHTML = `
-    <h2>Troubleshooting log — “why did it route weirdly” (§4.9 item 7)</h2>
+    <div class="row" style="justify-content:space-between;align-items:baseline">
+      <h2 style="margin-bottom:0">Troubleshooting log — “why did it route weirdly” (§4.9 item 7)</h2>
+      <button class="act" onclick="clearLog('events','event log entries')"
+        ${d.events.length ? "" : "disabled"}>Clear event log</button>
+    </div>
     <table><tr><th>time (UTC)</th><th>level</th><th>source</th><th>message</th><th></th></tr>${rows}</table>`;
 }
 
