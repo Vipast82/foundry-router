@@ -78,6 +78,10 @@ def apply_reference_seed(registry: ModelRegistry) -> int:
             tags=json.dumps(entry["tags"]) if entry.get("tags") else None,
             good_for=entry.get("good_for"),
             reasoning_style=entry.get("reasoning_style"),
+            # Only entries that specify a tier carry one (Claude tiers today);
+            # None is filtered by upsert_auto, so a discovery-set tier (e.g.
+            # ollama "free", OpenRouter pricing tier) is preserved for the rest.
+            relative_cost_tier=entry.get("relative_cost_tier"),
             benefits_from_explicit_prompting=1 if entry.get("refine") else 0,
         )
         existing_categories = {b["category"] for b in registry.benchmarks(row["id"])}
