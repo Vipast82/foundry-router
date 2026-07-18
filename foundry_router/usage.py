@@ -60,6 +60,20 @@ def claude_premium_level(model_id: str) -> int:
     return 0
 
 
+# Map the tier ladder to relative_cost_tier (the registry's TIER_RANK scale) so
+# subscription models rank by their real cost order instead of a flat "high".
+_PREMIUM_LEVEL_COST_TIER = {4: "very_high", 3: "high", 2: "medium", 1: "low"}
+
+
+def claude_cost_tier(model_id: str) -> str:
+    """relative_cost_tier for a Claude/subscription model, from its well-known
+    tier ladder: Haiku(low) < Sonnet(medium) < Opus(high) < Fable/Mythos
+    (very_high). An unrecognized Claude tier stays 'high' (conservative — don't
+    make an unknown model look cheap). Version bumps within a family (Opus
+    4.6->4.8) keep the same cost tier; only quality score differs."""
+    return _PREMIUM_LEVEL_COST_TIER.get(claude_premium_level(model_id), "high")
+
+
 def _is_fable_bucket(bucket_type: str) -> bool:
     t = bucket_type.lower()
     return "fable" in t or "mythos" in t

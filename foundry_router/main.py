@@ -98,16 +98,19 @@ class Services:
         """Give every discovered model a registry row (provider = backend
         name), so ranking/ingest/research all have somewhere to attach.
 
-        Cost tier is stamped from the BACKEND TYPE at ingestion — a fact, not
-        an inference: ollama backends serve for free ("free" tier, zero cost
-        fields), anthropic-compatible ones draw subscription window ("high"
-        tier default). Capability tags and content policy are seeded from
-        name heuristics; the Research Agent refines them, manual overrides
-        pin them (upsert_auto never replaces a hand-set value)."""
+        Cost tier is stamped at ingestion from what the backend actually is:
+        ollama backends serve for free ("free" tier, zero cost fields);
+        anthropic-compatible (subscription) ones are tiered by the well-known
+        Claude ladder — Haiku(low) < Sonnet(medium) < Opus(high) <
+        Fable/Mythos(very_high) — so ranking's "prefer the cheaper Claude tier"
+        logic has something to differentiate on (was a flat "high" for all).
+        Capability tags and content policy are seeded from name heuristics; the
+        Research Agent refines them, manual overrides pin them (upsert_auto
+        never replaces a hand-set value)."""
         import json as _json
 
         from .registry.tagging import content_policy_from_name, tags_from_name
-        from .usage import CLAUDE_DEFAULT_CONTEXT
+        from .usage import CLAUDE_DEFAULT_CONTEXT, claude_cost_tier
 
         for s in getattr(self.pool, "backends", {}).values():
             if not s.healthy:
@@ -119,10 +122,12 @@ class Services:
                         fields.update(relative_cost_tier="free",
                                       cost_per_1k_input=0.0, cost_per_1k_output=0.0)
                     elif s.config.type == "anthropic-compatible":
-                        # Stamp a conservative context ceiling so oversized
-                        # requests are gated before escalation (local windows can
-                        # exceed Claude's). A manual override still wins.
-                        fields.update(relative_cost_tier="high",
+                        # Per-tier cost (Haiku<Sonnet<Opus<Fable) so ranking can
+                        # prefer the cheaper Claude tier; plus a conservative
+                        # context ceiling so oversized requests are gated before
+                        # escalation (local windows can exceed Claude's). A
+                        # manual override still wins over both.
+                        fields.update(relative_cost_tier=claude_cost_tier(model_id),
                                       context_length=CLAUDE_DEFAULT_CONTEXT)
                     tags = tags_from_name(model_id)
                     if tags:
