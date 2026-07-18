@@ -175,7 +175,10 @@ class ResearchConfig(BaseModel):
     enabled: bool = True
     sweep_hours: int = 24
     stale_days: int = 14
-    max_pages_per_model: int = 5   # raised from 3 — more real per-category material
+    # Fetch-attempt budget. Ranking spends it best-first and an early-stop halts
+    # once enough page material fills the corpus cap, so a higher ceiling mainly
+    # buys resilience to dead/404 top candidates rather than more fetches.
+    max_pages_per_model: int = 8
     # Total characters of assembled research corpus fed to the extraction LLM.
     # The ceiling is that model's context: the default 6GB brain (num_ctx ~6144)
     # is already near its limit at 24000 chars, so DON'T raise this unless you
