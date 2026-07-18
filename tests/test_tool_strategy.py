@@ -53,6 +53,37 @@ async def test_research_logs_fetch_success(tmp_path):
     assert infos and "crawl4ai/md" in infos[0]["message"]      # crawl4ai USE is visible
 
 
+class _MCPNoUrls:
+    """SearXNG returns snippets with no URLs; records whether fetch was called."""
+    def __init__(self):
+        self.fetch_called = False
+
+    async def call_tool(self, server, tool, args):
+        if server == "searxng":
+            return "Great model. No links here, just prose about benchmarks."
+        self.fetch_called = True                       # should never happen
+        return "x"
+
+
+async def test_research_logs_when_no_urls_and_skips_crawl4ai(tmp_path):
+    db = Database(tmp_path / "r.sqlite")
+
+    async def _llm(p):
+        return "{}"
+
+    cfg = ResearchConfig(
+        search=ResearchToolRef(server="searxng", tool="web_search"),
+        fetch=ResearchToolRef(server="crawl4ai", tool="md", url_param="url"))
+    mcp = _MCPNoUrls()
+    agent = ResearchAgent(cfg, db, ModelRegistry(db), mcp,
+                          llm=_llm, available_models=lambda: [])
+    await agent.research_model("obscure:model")
+    assert mcp.fetch_called is False                   # crawl4ai genuinely not called
+    infos = db.query("SELECT * FROM event_log WHERE source='research' "
+                     "AND message LIKE '%no fetchable URLs%'")
+    assert infos and "crawl4ai/md" in infos[0]["message"]   # and it's explained, not silent
+
+
 # -- prompt guidance --------------------------------------------------------------
 
 def test_worker_prompt_steers_to_crawler():
