@@ -390,6 +390,15 @@ class ResearchAgent:
                               f"{fetch_errors} candidate URL(s) of {model_id} — using "
                               f"search snippets only (is the fetch server/tool right?)",
                               last_fetch_err)
+        else:
+            # No fetch was even attempted: the search step surfaced no URLs to
+            # open, so crawl4ai stays idle. Without this line the MCP activity
+            # counter shows crawl4ai "idle" with no explanation — making it look
+            # like the fetch server is bypassed when the search simply returned
+            # nothing to fetch (common for obscure model names).
+            self.db.log_event("info", "research",
+                              f"search returned no fetchable URLs for {model_id} — "
+                              f"{fetch_ref} not used, extracting from snippets only")
 
         text = "\n\n".join(corpus)[:self.cfg.corpus_char_limit]
         raw = await self._extract_with_retry(
