@@ -21,6 +21,16 @@ from ..db import Database, utcnow
 log = logging.getLogger(__name__)
 
 
+# Provenance authority ladder. An automatic upsert must never DOWNGRADE a row's
+# source (found live: discovery runs on every startup/pool-change and reset
+# research_agent rows to "discovery", which then let the reference seed
+# re-clobber real research data — so research provenance never survived a
+# restart). Source only moves up: discovery/openrouter < reference_seed <
+# research_agent < manual_override.
+SOURCE_AUTHORITY = {"manual_override": 3, "research_agent": 2, "reference_seed": 1,
+                    "discovery": 0, "openrouter_api": 0}
+
+
 def _scalar(v):
     """Coerce a value SQLite can't bind (list/dict) into text. Guards the model
     write path against malformed extraction-LLM JSON (a field arriving as a list
@@ -212,7 +222,13 @@ class ModelRegistry:
             return
         updates.append("last_updated=?")
         params.append(now)
-        if not manual:
+        # Source is monotonic — only claim provenance if this write is at least
+        # as authoritative as what's already there. A lower-authority pass
+        # (discovery/openrouter re-running at startup) still refreshes field
+        # VALUES it owns, but must not downgrade a researched/seeded row's
+        # source, which caused research to be re-clobbered on every restart.
+        if not manual and (SOURCE_AUTHORITY.get(source, 0)
+                           >= SOURCE_AUTHORITY.get(existing.get("source"), 0)):
             updates.append("source=?")
             params.append(source)
         params.append(model_id)

@@ -125,6 +125,14 @@ class Services:
                 continue
             for model_id in s.models:
                 try:
+                    # A row already refined by research/seed/manual owns its
+                    # tags & content_policy — don't re-stamp name heuristics over
+                    # them on every restart (that reverted real research
+                    # findings). Backend FACTS (provider, cost tier, context)
+                    # still refresh; source stays put (upsert_auto is monotonic).
+                    existing = self.registry.get(model_id)
+                    refined = bool(existing and existing.get("source") in
+                                   ("research_agent", "reference_seed", "manual_override"))
                     fields: dict = {"provider": s.config.name, "display_name": model_id}
                     if s.config.type == "ollama":
                         fields.update(relative_cost_tier="free",
@@ -137,12 +145,13 @@ class Services:
                         # manual override still wins over both.
                         fields.update(relative_cost_tier=claude_cost_tier(model_id),
                                       context_length=CLAUDE_DEFAULT_CONTEXT)
-                    tags = tags_from_name(model_id)
-                    if tags:
-                        fields["tags"] = _json.dumps(tags)
-                    policy = content_policy_from_name(model_id)
-                    if policy:
-                        fields["content_policy"] = policy
+                    if not refined:
+                        tags = tags_from_name(model_id)
+                        if tags:
+                            fields["tags"] = _json.dumps(tags)
+                        policy = content_policy_from_name(model_id)
+                        if policy:
+                            fields["content_policy"] = policy
                     self.registry.upsert_auto(model_id, source="discovery", **fields)
                 except Exception:
                     log.exception("failed to register discovered model %s", model_id)
