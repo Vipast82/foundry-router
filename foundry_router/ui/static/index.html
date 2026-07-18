@@ -738,8 +738,10 @@ async function tabMCP() {
     <td class="nw">${s.has_token
         ? '<span class="pill ok" title="' + esc(s.token_header) + '">token set</span> <a href="#" data-cleartoken="' + esc(s.name) + '">clear</a>'
         : '<span class="hint">none</span>'}</td>
-    <td><button class="act" onclick='run(api("mcp_servers/delete",{method:"POST",body:{name:${JSON.stringify(s.name)}}}))'>remove</button></td>
+    <td class="nw"><button class="act" onclick='editMcp(${JSON.stringify(s.name)})'>edit</button>
+      <button class="act" onclick='run(api("mcp_servers/delete",{method:"POST",body:{name:${JSON.stringify(s.name)}}}))'>remove</button></td>
     </tr>`).join("");
+  window._mcpServers = Object.fromEntries(d.servers.map(s => [s.name, s]));
   $("#main").innerHTML = `
     <h2>MCP server connections (§4.9 item 8)</h2>
     <p class="hint">A connection list, not a tool list — tools are discovered automatically
@@ -756,8 +758,28 @@ async function tabMCP() {
       <input id="mcp-token" type="password" size="26" placeholder="secret — saved to DB, leave blank to keep">
       <label title="Header the token is sent in. 'Authorization' (default) sends 'Bearer <token>'; any other name (e.g. x-api-key) sends the raw token.">header</label>
       <input id="mcp-hdr" size="16" value="Authorization">
-      <button class="act primary" id="mcp-add">Add / update</button></div>
+      <button class="act primary" id="mcp-add">Save server</button>
+      <button class="act" id="mcp-clear" title="Clear the form to add a new server">new</button></div>
     </div>`;
+  window.editMcp = name => {
+    const s = (window._mcpServers || {})[name]; if (!s) return;
+    $("#mcp-name").value = s.name;
+    $("#mcp-url").value = s.url;
+    $("#mcp-tr").value = s.transport;
+    $("#mcp-to").value = s.timeout_seconds ?? 300;
+    $("#mcp-hdr").value = s.token_header || "Authorization";
+    $("#mcp-token").value = "";   // write-only — blank keeps the existing token
+    $("#mcp-token").placeholder = s.has_token
+      ? "token is set — leave blank to keep, or type to replace"
+      : "secret — saved to DB, leave blank to keep";
+    document.querySelector("#mcp-name").closest(".card")
+      .scrollIntoView({behavior: "smooth", block: "nearest"});
+  };
+  $("#mcp-clear").onclick = () => {
+    for (const id of ["mcp-name", "mcp-url", "mcp-token"]) $("#" + id).value = "";
+    $("#mcp-to").value = 300; $("#mcp-hdr").value = "Authorization";
+    $("#mcp-tr").value = "streamable-http";
+  };
   $("#mcp-add").onclick = async () => {
     const name = $("#mcp-name").value.trim(), url = $("#mcp-url").value.trim();
     if (!name || !url) { toast("name and url required", true); return; }
