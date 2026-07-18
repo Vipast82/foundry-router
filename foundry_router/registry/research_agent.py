@@ -403,10 +403,20 @@ class ResearchAgent:
         tags_json = None
         if isinstance(tags, list) and tags:
             tags_json = json.dumps([str(t)[:24] for t in tags][:8])
+
+        def _nonblank(v):
+            # A web-research pass on an obscure/alias name often returns an empty
+            # or whitespace good_for/reasoning_style. Treat those as "no data"
+            # (-> None, which upsert_auto filters) so they don't OVERWRITE a
+            # richer seed value with a blank — the reference seed then supplements
+            # the gap instead.
+            v = v.strip() if isinstance(v, str) else v
+            return v or None
+
         self.registry.upsert_auto(
             model_id, source="research_agent",
-            reasoning_style=data.get("reasoning_style"),
-            good_for=data.get("good_for"),
+            reasoning_style=_nonblank(data.get("reasoning_style")),
+            good_for=_nonblank(data.get("good_for")),
             tags=tags_json,
             benefits_from_explicit_prompting=(
                 1 if data.get("benefits_from_explicit_prompting") else 0),

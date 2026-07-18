@@ -98,7 +98,10 @@ def test_seed_fills_catalog_and_respects_real_data(tmp_path):
                         "good_for='researched text' WHERE id='deepseek/deepseek-r1'")
 
     applied = apply_reference_seed(registry)
-    assert applied == 2  # opus + llama; manual and research rows skipped
+    # opus + llama fully seeded; the manual row is untouched; the research row
+    # keeps its real good_for but is SUPPLEMENTED for the gaps it left blank
+    # (reasoning_style/tags), so it counts too.
+    assert applied == 3
 
     opus = registry.get("anthropic/claude-opus-4.6")
     assert opus["good_for"] and "architecture" in opus["good_for"]
@@ -108,7 +111,10 @@ def test_seed_fills_catalog_and_respects_real_data(tmp_path):
     assert "reference-seed" in cats["coding"]["source_url"]
 
     assert registry.get("mistralai/mistral-large-2411")["good_for"] == "my own words"
-    assert registry.get("deepseek/deepseek-r1")["good_for"] == "researched text"
+    deepseek = registry.get("deepseek/deepseek-r1")
+    assert deepseek["good_for"] == "researched text"   # real research NOT overwritten
+    assert deepseek["source"] == "research_agent"      # provenance preserved
+    assert deepseek["reasoning_style"]                 # the blank gap WAS filled from seed
 
 
 def test_seed_is_idempotent_and_never_clobbers_benchmarks(tmp_path):

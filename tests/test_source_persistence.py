@@ -7,7 +7,7 @@ refresh their own fields but not overwrite a researched row's provenance."""
 
 from foundry_router.db import Database
 from foundry_router.registry.models_db import SOURCE_AUTHORITY, ModelRegistry
-from foundry_router.registry.reference_seed import apply_reference_seed
+from foundry_router.registry.reference_seed import apply_reference_seed  # noqa: F401 (used below)
 
 
 def _reg(tmp_path):
@@ -65,3 +65,22 @@ def test_authority_ladder_ordering():
     a = SOURCE_AUTHORITY
     assert a["discovery"] < a["reference_seed"] < a["research_agent"] < a["manual_override"]
     assert a["openrouter_api"] == a["discovery"]
+
+
+def test_seed_supplements_good_for_research_left_blank(tmp_path):
+    # research ran on a Claude alias, found nothing, left good_for blank
+    reg = _reg(tmp_path)
+    reg.upsert_auto("claude-fable-5", source="research_agent")   # no good_for
+    assert reg.get("claude-fable-5")["good_for"] is None
+    apply_reference_seed(reg)
+    row = reg.get("claude-fable-5")
+    assert row["good_for"] and "reasoning" in row["good_for"]    # filled from seed
+    assert row["source"] == "research_agent"                     # provenance kept
+
+
+def test_seed_does_not_overwrite_real_research_good_for(tmp_path):
+    reg = _reg(tmp_path)
+    reg.upsert_auto("claude-opus-4-8", source="research_agent",
+                    good_for="what research actually found")
+    apply_reference_seed(reg)
+    assert reg.get("claude-opus-4-8")["good_for"] == "what research actually found"
