@@ -151,6 +151,7 @@ function clearLog(kind, label) {
 const TABS = {
   "Backends":  tabBackends,  "Models":   tabModels,   "Personas": tabPersonas,
   "Tools":     tabTools,     "Guardrails": tabGuardrails, "MCP":  tabMCP,
+  "Ollama":    tabOllama,
   "Usage Log": tabUsage,     "Events":   tabEvents,
 };
 let current = "Backends";
@@ -891,6 +892,161 @@ async function tabMCP() {
       render();
     } catch (e) { toast(e.message, true); }
   });
+}
+
+/* ---------------------------------------------------------------- ollama -- */
+async function tabOllama() {
+  clearInterval(window._ollamaPoll);
+  const d = await api("ollama/backends");
+  const bes = d.backends || [];
+  if (!bes.length) {
+    $("#main").innerHTML = `<h2>Ollama model management</h2>
+      <p class="hint">No Ollama-type backend is configured. Add one on the
+      <b>Backends</b> tab first, then manage its models here.</p>`;
+    return;
+  }
+  if (!window._ollamaBackend || !bes.find(b => b.name === window._ollamaBackend))
+    window._ollamaBackend = bes[0].name;
+  const be = window._ollamaBackend;
+
+  let models = [], tagErr = "";
+  try {
+    const t = await api("ollama/tags?backend=" + encodeURIComponent(be));
+    if (t.ok) models = t.models || []; else tagErr = t.error;
+  } catch (e) { tagErr = e.message; }
+
+  const beOpts = bes.map(b => `<option ${b.name === be ? "selected" : ""}>${esc(b.name)}</option>`).join("");
+  const gb = n => n ? (n / 1e9).toFixed(2) + " GB" : "";
+  const nameOf = m => m.name || m.model || "";
+  const modelRows = models.map(m => {
+    const nm = nameOf(m), det = m.details || {};
+    return `<tr>
+      <td class="mono">${esc(nm)}</td>
+      <td class="nw">${gb(m.size)}</td>
+      <td class="nw">${esc(det.parameter_size || "")}</td>
+      <td class="nw">${esc(det.quantization_level || "")}</td>
+      <td class="nw">
+        <button class="act" onclick='ollShow(${JSON.stringify(nm)})'>show</button>
+        <button class="act" onclick='ollCopy(${JSON.stringify(nm)})'>copy</button>
+        <button class="act" onclick='ollRename(${JSON.stringify(nm)})'>rename</button>
+        <button class="act" onclick='ollPush(${JSON.stringify(nm)})'>push</button>
+        <button class="act" onclick='ollDelete(${JSON.stringify(nm)})'>delete</button>
+      </td></tr>`;
+  }).join("");
+
+  $("#main").innerHTML = `
+    <h2>Ollama model management</h2>
+    <div class="row"><label>backend</label><select id="oll-be">${beOpts}</select>
+      <span class="hint">Add / pull / copy / rename / delete models directly on this Ollama host via its REST API.</span></div>
+    ${tagErr ? `<p class="hint"><span class="pill bad">unreachable</span> ${esc(tagErr)}</p>` : ""}
+    <div id="oll-jobs"></div>
+    <h2>Installed models (${models.length})</h2>
+    <table><tr><th>model</th><th>size</th><th>params</th><th>quant</th><th></th></tr>${modelRows}</table>
+    <pre id="oll-detail" class="mono" style="display:none;white-space:pre-wrap;background:var(--panel);border:1px solid var(--line);border-radius:6px;padding:10px;max-height:340px;overflow:auto"></pre>
+
+    <div class="card">
+      <h2 style="margin-top:0">Pull a model</h2>
+      <div class="row"><label>model name</label>
+        <input id="oll-pull" size="30" placeholder="e.g. llama3.1:8b">
+        <button class="act primary" id="oll-pull-btn">Pull</button></div>
+      <p class="hint">Downloads from the Ollama registry onto this host. Large models take a while — progress shows above.</p>
+    </div>
+
+    <div class="card">
+      <h2 style="margin-top:0">Create a model (pseudo-model)</h2>
+      <div class="row"><label>new name</label><input id="oll-cr-name" size="22" placeholder="my-assistant:latest">
+        <label>from (base)</label><input id="oll-cr-from" size="22" placeholder="llama3.1:8b"></div>
+      <div class="row"><label>system prompt</label>
+        <textarea id="oll-cr-sys" rows="2" placeholder="You are..."></textarea></div>
+      <details><summary>advanced: raw Modelfile (overrides the fields above)</summary>
+        <textarea id="oll-cr-file" rows="4" placeholder="FROM llama3.1:8b
+SYSTEM You are a helpful assistant."></textarea></details>
+      <div class="row"><button class="act primary" id="oll-cr-btn">Create</button>
+        <span class="hint">Bakes a system prompt/params into a named model. Ollama's create API varies by version — if 'from' fails, use a raw Modelfile.</span></div>
+    </div>`;
+
+  $("#oll-be").onchange = e => { window._ollamaBackend = e.target.value; render(); };
+
+  window.ollShow = async name => {
+    const el = $("#oll-detail");
+    try {
+      const r = await api("ollama/show", {method: "POST", body: {backend: be, model: name}});
+      if (!r.ok) { toast(r.error, true); return; }
+      const i = r.info || {};
+      el.style.display = "block";
+      el.textContent = name + "\n\n"
+        + (i.details ? "details: " + JSON.stringify(i.details, null, 2) + "\n\n" : "")
+        + (i.parameters ? "parameters:\n" + i.parameters + "\n\n" : "")
+        + (i.template ? "template:\n" + i.template + "\n\n" : "")
+        + (i.system ? "system:\n" + i.system + "\n\n" : "")
+        + (i.modelfile ? "modelfile:\n" + i.modelfile : "");
+      el.scrollIntoView({behavior: "smooth", block: "nearest"});
+    } catch (e) { toast(e.message, true); }
+  };
+  const act = async (path, body, okMsg) => {
+    try {
+      const r = await api("ollama/" + path, {method: "POST", body});
+      if (r.ok) { toast(okMsg); render(); } else toast(r.error, true);
+    } catch (e) { toast(e.message, true); }
+  };
+  window.ollCopy = name => {
+    const dst = prompt("Copy '" + name + "' to a new (pseudo) name:", name.replace(/:.*/, "") + "-copy");
+    if (dst) act("copy", {backend: be, source: name, destination: dst}, "Copied to " + dst);
+  };
+  window.ollRename = name => {
+    const dst = prompt("Rename '" + name + "' to (copy + delete original):", name);
+    if (dst && dst !== name) act("rename", {backend: be, source: name, destination: dst}, "Renamed to " + dst);
+  };
+  window.ollDelete = name => {
+    if (confirm("Permanently DELETE '" + name + "' from " + be + "? This removes the model files from the host."))
+      act("delete", {backend: be, model: name}, "Deleted " + name);
+  };
+  window.ollPush = async name => {
+    if (!confirm("Push '" + name + "' to the Ollama registry? Requires the host to be logged in and a namespaced name (user/model).")) return;
+    try { await api("ollama/push", {method: "POST", body: {backend: be, model: name}}); toast("Push started"); pollJobs(); }
+    catch (e) { toast(e.message, true); }
+  };
+  $("#oll-pull-btn").onclick = async () => {
+    const m = $("#oll-pull").value.trim(); if (!m) { toast("model name required", true); return; }
+    try { await api("ollama/pull", {method: "POST", body: {backend: be, model: m}}); toast("Pull started"); pollJobs(); }
+    catch (e) { toast(e.message, true); }
+  };
+  $("#oll-cr-btn").onclick = async () => {
+    const name = $("#oll-cr-name").value.trim(); if (!name) { toast("new name required", true); return; }
+    try {
+      await api("ollama/create", {method: "POST", body: {backend: be, model: name,
+        from: $("#oll-cr-from").value.trim(), system: $("#oll-cr-sys").value,
+        modelfile: $("#oll-cr-file").value}});
+      toast("Create started"); pollJobs();
+    } catch (e) { toast(e.message, true); }
+  };
+
+  function renderJobs(jobs) {
+    const el = $("#oll-jobs"); if (!el) return;
+    jobs = (jobs || []).filter(j => j.backend === be);
+    if (!jobs.length) { el.innerHTML = ""; return; }
+    el.innerHTML = `<div class="card"><h2 style="margin-top:0">Tasks</h2>` + jobs.map(j => {
+      const cls = j.state === "error" ? "bad" : j.state === "done" ? "ok" : "warn";
+      const txt = j.state === "running"
+        ? esc(j.status_text || "working") + " · " + (j.percent || 0) + "%"
+        : esc(j.state) + (j.error ? " — " + esc(j.error) : "");
+      return `<div class="row"><span class="pill ${cls}">${esc(j.op)}</span>
+        <span class="mono">${esc(j.model)}</span><span class="hint">${txt}</span></div>`;
+    }).join("") + `</div>`;
+  }
+  function pollJobs() {
+    clearInterval(window._ollamaPoll);
+    window._ollamaPoll = setInterval(async () => {
+      if (current !== "Ollama") { clearInterval(window._ollamaPoll); return; }
+      try {
+        const j = await api("ollama/jobs");
+        renderJobs(j.jobs);
+        if (!(j.jobs || []).some(x => x.state === "running")) clearInterval(window._ollamaPoll);
+      } catch (e) { /* transient */ }
+    }, 1500);
+  }
+  renderJobs(d.jobs);
+  if ((d.jobs || []).some(j => j.state === "running")) pollJobs();
 }
 
 /* ----------------------------------------------------------------- usage -- */
