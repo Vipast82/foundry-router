@@ -61,6 +61,14 @@
            border:1px solid var(--accent); padding:9px 14px; border-radius:6px;
            display:none; z-index:9; }
   details summary { cursor:pointer; color:var(--dim); }
+  /* Per-request MCP tool trail. The old rendering forced every call onto one
+     nowrap line, so a long line (e.g. a 429 URL) was clipped no matter the
+     window size. This wraps and indents each call under the row instead. */
+  .trail { margin:4px 0 2px; padding-left:2px; border-left:2px solid var(--line);
+           display:flex; flex-direction:column; gap:2px; }
+  .trail .call { font-family:ui-monospace, Consolas, monospace; font-size:11.5px;
+           white-space:normal; word-break:break-word; padding-left:7px; color:var(--fg); }
+  .trail .call .err { color:var(--bad); }
   /* Persona MCP-tool selector: a live checklist replacing the old raw-JSON
      input, populated from the same discovered set the Tools tab shows. */
   .mcp-checklist { display:flex; flex-direction:column; gap:1px; flex:1;
@@ -873,35 +881,108 @@ function quotaCard(q) {
   </div>`;
 }
 
+// ms -> compact human string (244478 ms reads awful; "4m 4s" doesn't).
+function fmtDur(ms) {
+  if (ms == null) return "";
+  if (ms >= 60000) return `${Math.floor(ms / 60000)}m ${Math.round((ms % 60000) / 1000)}s`;
+  if (ms >= 1000) return `${(ms / 1000).toFixed(1)}s`;
+  return `${ms} ms`;
+}
+
+// A request's mode, made legible. "direct"/"passthrough" both mean Foundry did
+// NOT run its brain or its own MCP tools, so they're flagged, not left cryptic.
+function modeBadge(m) {
+  if (m === "direct")
+    return `<span class="pill warn" title="The client (e.g. AnythingLLM @agent) sent its own tools. Foundry forwarded them to one model and did NOT use its own MCP servers, tool loop, or routing brain.">direct · client tools</span>`;
+  if (m === "passthrough")
+    return `<span class="pill warn" title="A raw backend model was requested by name — no Foundry routing.">passthrough</span>`;
+  return `<span class="nw">${esc(m || "")}</span>`;
+}
+
 async function tabUsage() {
   const [d, q] = await Promise.all([api("usage?limit=100"), api("quota")]);
-  // Per-request MCP/tool call trail (visibility spec item 5) — same
-  // expandable-detail pattern as the Events tab.
+  const reqs = d.requests || [];
+
+  // ---- MCP usage, aggregated separately from "which model answered" -------------
+  // This card answers "is the TrueNAS worker actually using Foundry's MCP servers,
+  // and separately from which model it picked?" A request in `direct` mode never
+  // touches these servers (the client brought its own tools), which is exactly why
+  // an AnythingLLM @agent session shows nothing here.
+  const agg = {};            // server -> {n, ok, fail, ms, lastErr, tools:{}}
+  let mcpReqs = 0;
+  for (const r of reqs) {
+    const calls = Array.isArray(r.tool_calls) ? r.tool_calls : [];
+    if (calls.length) mcpReqs++;
+    for (const t of calls) {
+      const s = agg[t.server] || (agg[t.server] = { n: 0, ok: 0, fail: 0, ms: 0, lastErr: "", tools: {} });
+      s.n++; s.ms += t.duration_ms || 0;
+      s.tools[t.tool] = (s.tools[t.tool] || 0) + 1;
+      if (t.ok) s.ok++; else { s.fail++; if (t.error) s.lastErr = t.error; }
+    }
+  }
+  const servers = Object.keys(agg).sort();
+  const mcpRows = servers.map(name => {
+    const s = agg[name];
+    const tools = Object.entries(s.tools).map(([t, c]) => `${esc(t)}×${c}`).join(", ");
+    return `<tr>
+      <td class="nw"><b>${esc(name)}</b></td>
+      <td class="mono">${tools}</td>
+      <td class="nw">${s.n}</td>
+      <td class="nw"><span class="pill ok">${s.ok} ok</span>${s.fail ? ` <span class="pill bad">${s.fail} fail</span>` : ""}</td>
+      <td class="nw">${fmtDur(Math.round(s.ms / s.n))} avg</td>
+      <td class="trail" style="border:0"><span class="call ${s.lastErr ? "err" : ""}">${esc(s.lastErr || "—")}</span></td>
+    </tr>`;
+  }).join("");
+  const mcpCard = `<div class="card">
+    <h2 style="margin-top:0">MCP tool usage — Foundry's own servers (last ${reqs.length} requests)</h2>
+    ${servers.length
+      ? `<table><tr><th>server</th><th>tools used</th><th>calls</th><th>result</th><th>latency</th><th>last error</th></tr>${mcpRows}</table>
+         <p class="hint"><b>${mcpReqs}</b> of ${reqs.length} request(s) used a Foundry MCP server.
+         <b>direct · client tools</b> requests are not counted here — the client brought its own tools, so
+         Foundry's MCP servers (searxng / crawl4ai / …) were bypassed.</p>`
+      : `<p class="hint">No Foundry MCP tool calls in the last ${reqs.length} requests. If your client is
+         <b>AnythingLLM in @agent mode</b>, it runs its own web tools (DuckDuckGo) and hits Foundry in
+         <b>direct</b> mode, which bypasses Foundry's MCP servers. To let the worker use Foundry's
+         searxng / crawl4ai tools, send a <b>normal chat</b> (turn @agent off).</p>`}
+  </div>`;
+
+  // ---- per-request trail --------------------------------------------------------
   const toolCell = r => {
     const calls = Array.isArray(r.tool_calls) ? r.tool_calls : [];
-    if (!calls.length) return "";
+    if (!calls.length) return `<span class="hint">—</span>`;
     const ok = calls.every(t => t.ok);
-    return `<details><summary><span class="pill ${ok ? "ok" : "bad"}">${calls.length}</span></summary>
-      ${calls.map(t => `<div class="mono nw">${t.ok ? "✓" : "✗"} ${esc(t.server)}/${esc(t.tool)}
-        ${((t.duration_ms || 0) / 1000).toFixed(1)}s${t.error ? " — " + esc(t.error) : ""}</div>`).join("")}
+    const byServer = {};
+    for (const t of calls) byServer[t.server] = (byServer[t.server] || 0) + 1;
+    const chips = Object.entries(byServer).map(([s, c]) => `${esc(s)}×${c}`).join(" · ");
+    return `<details><summary><span class="pill ${ok ? "ok" : "bad"}">${calls.length}</span>
+        <span class="mono" style="color:var(--dim)"> ${chips}</span></summary>
+      <div class="trail">${calls.map(t => `<div class="call">${t.ok ? "✓" : "✗"}
+        ${esc(t.server)}/${esc(t.tool)} · ${fmtDur(t.duration_ms || 0)}${
+        t.error ? ` <span class="err">— ${esc(t.error)}</span>` : ""}</div>`).join("")}</div>
       </details>`;
   };
-  const rows = d.requests.map(r => `<tr>
+  const rows = reqs.map(r => `<tr>
     <td class="mono nw">${esc((r.ts || "").slice(0, 19))}</td>
-    <td class="nw">${esc(r.persona || r.client_model)}</td><td class="nw">${esc(r.mode)}</td>
+    <td class="nw">${esc(r.persona || r.client_model)}</td>
+    <td>${modeBadge(r.mode)}</td>
     <td>${esc(r.summary)}</td>
-    <td class="mono">${(r.models_used || []).map(m => esc(m.model)).join(" → ")}</td>
+    <td class="mono">${(r.models_used || []).map(m => esc(m.model)).join(" → ") || '<span class="hint">—</span>'}</td>
     <td>${toolCell(r)}</td>
-    <td>${r.steps ?? ""}</td><td class="nw">${r.duration_ms} ms</td>
+    <td>${r.steps ?? ""}</td>
+    <td class="nw">${fmtDur(r.duration_ms)}</td>
     <td>${r.est_cost_usd ? "$" + r.est_cost_usd.toFixed(4) : ""}</td>
     <td>${(r.guardrail_events || []).length ? '<span class="pill warn">' + (r.guardrail_events || []).length + "</span>" : ""}</td>
     <td><span class="pill ${r.status === "ok" ? "ok" : r.status === "error" ? "bad" : "warn"}">${esc(r.status)}</span></td>
     </tr>`).join("");
   $("#main").innerHTML = `
     ${quotaCard(q)}
-    <h2>Usage log — every routed request (§4.9 item 6)</h2>
+    ${mcpCard}
+    <h2>Usage log — every routed request</h2>
+    <p class="hint">The <b>model(s)</b> column is who answered; the <b>tools (MCP)</b> column is which of
+      Foundry's own MCP servers that request exercised — expand a badge for the per-call trail. A
+      <b>direct · client tools</b> row bypassed Foundry's tools entirely.</p>
     <table><tr><th>time (UTC)</th><th>persona</th><th>mode</th><th>request</th>
-    <th>models used</th><th>tools</th><th>steps</th><th>time</th><th>cost</th><th>guard</th><th>status</th></tr>${rows}</table>`;
+    <th>model(s)</th><th>tools (MCP)</th><th>steps</th><th>time</th><th>cost</th><th>guard</th><th>status</th></tr>${rows}</table>`;
 }
 
 /* ---------------------------------------------------------------- events -- */
