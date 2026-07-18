@@ -97,14 +97,87 @@ LLM_RETRY_BACKOFF_SECONDS = 8
 # a background sweep — acceptable for an unattended task.
 _QUERIES = [
     "{name} benchmark results",
+    "{name} model card benchmarks huggingface",
     "{name} coding SWE-bench HumanEval evaluation",
     "{name} agentic tool use function calling evaluation",
     "{name} reasoning MMLU GPQA math evaluation",
+    "{name} leaderboard scores comparison",
     "{name} capabilities review",
 ]
-# Per-search snippet budget, trimmed from 4000 so five queries' snippets don't
-# crowd fetched PAGES (the richer material) out of the corpus cap.
+# Per-search snippet budget, trimmed from 4000 so several queries' snippets
+# don't crowd fetched PAGES (the richer material) out of the corpus cap.
 _SEARCH_SNIPPET_CHARS = 2500
+
+# The fetch budget (max_pages_per_model) is small, so WHICH urls we spend it on
+# matters more than how many a search returned. These carry real, structured
+# benchmark numbers far more often than a random blog/news hit, so they're
+# fetched first. The model's OWN site / HF org page is prioritized even higher
+# (see _rank_urls) — e.g. ornith's benchmarks live on ornith.online, not a
+# leaderboard aggregator.
+_BENCHMARK_DOMAINS = (
+    "huggingface.co", "paperswithcode.com", "arxiv.org", "github.com",
+    "github.io", "ollama.com", "ollama.ai", "lmarena.ai", "livebench.ai",
+    "artificialanalysis.ai", "klu.ai", "openrouter.ai", "aider.chat",
+    "vellum.ai", "scale.com", "llm-stats.com",
+)
+_PATH_HINTS = ("benchmark", "eval", "leaderboard", "model", "card", "score", "result")
+# Dropped when deriving "does this host belong to the model itself" tokens —
+# quantization/format/variant noise and generic words that would false-match.
+_STOP_TOKENS = {"latest", "instruct", "chat", "uncensored", "abliterated", "gguf",
+                "fp16", "bf16", "awq", "gptq", "model", "the", "and", "ai", "llm"}
+
+
+def _model_tokens(model_id: str) -> list[str]:
+    """Significant lowercase tokens from a model id, used to spot the model's
+    OWN site (host or path contains one) — e.g. 'ornith:35b' -> ['ornith'],
+    'satgeze/qwen36-35b-uncensored-1m:latest' -> ['satgeze','qwen36']."""
+    out = []
+    for t in re.split(r"[^a-z0-9]+", model_id.lower()):
+        if len(t) < 3 or t in _STOP_TOKENS:
+            continue
+        if re.fullmatch(r"\d+[bmk]?", t):        # pure size/version tokens: 35b, 8b, 1m
+            continue
+        out.append(t)
+    return out
+
+
+def _seed_urls(model_id: str) -> list[str]:
+    """Authoritative candidate pages to try even if search never surfaced them.
+    A namespaced id (org/model) maps straight to a HuggingFace model card, which
+    almost always carries the model card's benchmark table."""
+    core = model_id.split(":")[0].strip("/")     # drop any ollama :tag
+    seeds = []
+    if core.count("/") == 1 and all(core.split("/")):
+        seeds.append(f"https://huggingface.co/{core}")
+    return seeds
+
+
+def _rank_urls(urls: list[str], model_id: str) -> list[str]:
+    """De-dupe and order candidate URLs so the limited fetch budget is spent on
+    the model's own site and known benchmark hosts before generic results.
+    Stable within a score band (original search order breaks ties)."""
+    toks = _model_tokens(model_id)
+    seen: set[str] = set()
+    scored: list[tuple[int, int, str]] = []
+    for i, u in enumerate(urls):
+        base = u.split("#")[0].rstrip(".,);]'\"")
+        if base in seen:
+            continue
+        seen.add(base)
+        host = re.sub(r"^https?://", "", base).split("/")[0].lower()
+        low = base.lower()
+        score = 0
+        if any(t in host for t in toks):         # the model's own / org domain
+            score += 4
+        if any(d in host for d in _BENCHMARK_DOMAINS):
+            score += 3
+        if any(t in low for t in toks):          # name appears in the path too
+            score += 1
+        if any(h in low for h in _PATH_HINTS):
+            score += 1
+        scored.append((-score, i, base))
+    scored.sort()
+    return [b for _, _, b in scored]
 
 EXTRACTION_PROMPT = """You are extracting model-capability data from web research text.
 
@@ -333,13 +406,14 @@ class ResearchAgent:
         return await self.mcp.call_tool(ref.server, ref.tool, {ref.url_param: url})
 
     async def research_model(self, model_id: str) -> None:
-        corpus: list[str] = []
+        search_corpus: list[str] = []
+        page_corpus: list[str] = []
         urls: list[str] = []
         for q in _QUERIES:
             try:
                 result = await self._search(q.format(name=model_id))
-                corpus.append(f"### search: {q.format(name=model_id)}\n"
-                              f"{result[:_SEARCH_SNIPPET_CHARS]}")
+                search_corpus.append(f"### search: {q.format(name=model_id)}\n"
+                                     f"{result[:_SEARCH_SNIPPET_CHARS]}")
                 urls += re.findall(r"https?://[^\s\"'<>\)\]]+", result)
             except Exception as e:
                 # Unwrap the real cause — TaskGroup/SSE/transport failures (e.g.
@@ -358,18 +432,22 @@ class ResearchAgent:
                     model_id, "failed", f"search MCP tool unreachable: {detail}")
                 return
 
-        seen: set[str] = set()
-        fetched, fetch_errors, last_fetch_err = 0, 0, ""
-        for u in urls:
-            if fetched >= self.cfg.max_pages_per_model:
+        # Spend the small fetch budget on the best sources: seed authoritative
+        # candidates (HF model card) the search may have missed, then rank the
+        # model's own site / benchmark hosts ahead of generic hits.
+        ranked = _rank_urls(_seed_urls(model_id) + urls, model_id)
+        fetched, fetch_errors, last_fetch_err, page_chars = 0, 0, "", 0
+        for base in ranked:
+            # Stop once the page budget is hit OR we've already gathered enough
+            # page material to fill the corpus cap — no point paying for crawl4ai
+            # calls whose content would be trimmed off anyway.
+            if (fetched >= self.cfg.max_pages_per_model
+                    or page_chars >= self.cfg.corpus_char_limit):
                 break
-            base = u.split("#")[0]
-            if base in seen:
-                continue
-            seen.add(base)
             try:
-                page = await self._fetch(base)
-                corpus.append(f"### page: {base}\n{page[:6000]}")
+                chunk = (await self._fetch(base))[:8000]
+                page_corpus.append(f"### page: {base}\n{chunk}")
+                page_chars += len(chunk)
                 fetched += 1
             except Exception as e:
                 fetch_errors += 1
@@ -400,7 +478,11 @@ class ResearchAgent:
                               f"search returned no fetchable URLs for {model_id} — "
                               f"{fetch_ref} not used, extracting from snippets only")
 
-        text = "\n\n".join(corpus)[:self.cfg.corpus_char_limit]
+        # Fetched pages first, then search snippets: pages carry the actual
+        # benchmark tables, so when the corpus is capped it's the snippets that
+        # get trimmed, not the richer material. (Previously snippets came first
+        # and could crowd pages out of the cap entirely.)
+        text = "\n\n".join(page_corpus + search_corpus)[:self.cfg.corpus_char_limit]
         raw = await self._extract_with_retry(
             EXTRACTION_PROMPT.format(model=model_id, text=text))
         data = extract_json(raw)
