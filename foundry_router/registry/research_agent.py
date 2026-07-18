@@ -359,7 +359,7 @@ class ResearchAgent:
                 return
 
         seen: set[str] = set()
-        fetched = 0
+        fetched, fetch_errors, last_fetch_err = 0, 0, ""
         for u in urls:
             if fetched >= self.cfg.max_pages_per_model:
                 break
@@ -371,8 +371,25 @@ class ResearchAgent:
                 page = await self._fetch(base)
                 corpus.append(f"### page: {base}\n{page[:6000]}")
                 fetched += 1
-            except Exception:
+            except Exception as e:
+                fetch_errors += 1
+                last_fetch_err = describe_exception(e)
                 continue
+        # Page fetching (Crawl4AI) was previously silent — a misconfigured tool
+        # name, an SSE/transport hiccup, or a bot-block would drop EVERY page and
+        # research quietly fell back to search snippets, with no way to tell it
+        # ever tried the fetch server. Surface it either way.
+        fetch_ref = f"{self.cfg.fetch.server}/{self.cfg.fetch.tool}"
+        if fetched:
+            self.db.log_event("info", "research",
+                              f"fetched {fetched} page(s) via {fetch_ref} for {model_id}"
+                              + (f" ({fetch_errors} failed)" if fetch_errors else ""))
+        elif fetch_errors:
+            self.db.log_event("warning", "research",
+                              f"page fetch via {fetch_ref} failed for all "
+                              f"{fetch_errors} candidate URL(s) of {model_id} — using "
+                              f"search snippets only (is the fetch server/tool right?)",
+                              last_fetch_err)
 
         text = "\n\n".join(corpus)[:self.cfg.corpus_char_limit]
         raw = await self._extract_with_retry(

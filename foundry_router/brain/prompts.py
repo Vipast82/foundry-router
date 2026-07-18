@@ -69,6 +69,16 @@ def build_worker_tool_prompt(client_system: Optional[str] = None) -> str:
         "You are answering the user's request directly. You have tools available "
         "(web search, page fetch, etc.). Use them as needed: call a tool, read "
         "its result, and decide whether to call another tool or answer.",
+        # Steer toward actually reading pages, and toward the crawler for it —
+        # models otherwise lean entirely on search snippets and never open a
+        # page (found live: SearXNG used constantly, Crawl4AI never).
+        "Tool strategy: use a web-SEARCH tool to find relevant pages, then — when "
+        "a search snippet is not enough to answer accurately — OPEN the most "
+        "relevant result and read its full content. For reading a full page, "
+        "PREFER a crawler tool (e.g. a crawl4ai markdown/crawl tool) over a plain "
+        "URL fetch: crawlers render JavaScript and are far less likely to be "
+        "blocked by bot detection. Don't answer a factual/current question from "
+        "search snippets alone if opening the top source would make it correct.",
         "When you have gathered enough information, STOP calling tools and write "
         "your complete final answer as ordinary text (no tool call). Do not "
         "narrate that you are about to answer — just answer.",
@@ -360,7 +370,12 @@ free."). It streams to the user live as status while they wait. One line, no mor
 matching media MCP tool (ComfyUI, TTS, music, transcription...), dispatch it — the \
 result comes back as a URL or artifact reference; forward it with \
 return_to_user(use_last_result=true). If NO media tool is present, say plainly that \
-no media backend is configured — never attempt a text-only imitation of media."""]
+no media backend is configured — never attempt a text-only imitation of media.
+12. WEB RESEARCH: a web-SEARCH tool (searxng...) finds pages; it does not read \
+them. When search snippets aren't enough to answer accurately, dispatch a worker \
+to OPEN the top result and read its full content — and for that, prefer a crawler \
+tool (crawl4ai markdown/crawl) over a plain URL fetch: crawlers render JavaScript \
+and are far less likely to be blocked (a bare fetch often 403s on bot detection)."""]
 
     if client_system:
         # Workspace/client system instructions can't appear as a second
