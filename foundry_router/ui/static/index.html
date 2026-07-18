@@ -735,25 +735,49 @@ async function tabMCP() {
   const rows = d.servers.map(s => `<tr>
     <td>${esc(s.name)}</td><td class="mono">${esc(s.url)}</td><td>${esc(s.transport)}</td>
     <td class="nw">${s.timeout_seconds ?? 300}s</td>
+    <td class="nw">${s.has_token
+        ? '<span class="pill ok" title="' + esc(s.token_header) + '">token set</span> <a href="#" data-cleartoken="' + esc(s.name) + '">clear</a>'
+        : '<span class="hint">none</span>'}</td>
     <td><button class="act" onclick='run(api("mcp_servers/delete",{method:"POST",body:{name:${JSON.stringify(s.name)}}}))'>remove</button></td>
     </tr>`).join("");
   $("#main").innerHTML = `
     <h2>MCP server connections (§4.9 item 8)</h2>
     <p class="hint">A connection list, not a tool list — tools are discovered automatically
     per server by Tool Sync once a connection exists.</p>
-    <table><tr><th>name</th><th>url</th><th>transport</th><th>timeout</th><th></th></tr>${rows}</table>
+    <table><tr><th>name</th><th>url</th><th>transport</th><th>timeout</th><th>auth token</th><th></th></tr>${rows}</table>
     <div class="card">
       <div class="row"><label>name</label><input id="mcp-name" size="16">
-      <label>url</label><input id="mcp-url" size="40" placeholder="http://host:port/mcp">
+      <label>url</label><input id="mcp-url" size="38" placeholder="http://host:port/mcp">
       <label>transport</label><select id="mcp-tr"><option>streamable-http</option><option>sse</option></select>
       <label title="Per-server tool-call budget. Media generation (ComfyUI/TTS/music) can need 600-1800s; search tools should fail fast.">timeout (s)</label>
-      <input id="mcp-to" type="number" size="6" value="300">
+      <input id="mcp-to" type="number" size="6" value="300"></div>
+      <div class="row">
+      <label title="Auth token stored in the DB (NOT config.yaml — stored in plaintext, same as config). Sent as 'Authorization: Bearer <token>' by default, or as the raw value of the header you name. Leave blank when editing a server to keep its existing token.">auth token</label>
+      <input id="mcp-token" type="password" size="26" placeholder="secret — saved to DB, leave blank to keep">
+      <label title="Header the token is sent in. 'Authorization' (default) sends 'Bearer <token>'; any other name (e.g. x-api-key) sends the raw token.">header</label>
+      <input id="mcp-hdr" size="16" value="Authorization">
       <button class="act primary" id="mcp-add">Add / update</button></div>
     </div>`;
-  $("#mcp-add").onclick = () => run(api("mcp_servers", {method: "POST", body: {
-    name: $("#mcp-name").value.trim(), url: $("#mcp-url").value.trim(),
-    transport: $("#mcp-tr").value,
-    timeout_seconds: +$("#mcp-to").value || 300}}));
+  $("#mcp-add").onclick = async () => {
+    const name = $("#mcp-name").value.trim(), url = $("#mcp-url").value.trim();
+    if (!name || !url) { toast("name and url required", true); return; }
+    try {
+      await api("mcp_servers", {method: "POST", body: {
+        name, url, transport: $("#mcp-tr").value,
+        timeout_seconds: +$("#mcp-to").value || 300}});
+      const tok = $("#mcp-token").value.trim();
+      if (tok) await api("mcp_servers/token", {method: "POST", body: {
+        server: name, token: tok, header: $("#mcp-hdr").value.trim() || "Authorization"}});
+      toast("Saved"); render();
+    } catch (e) { toast(e.message, true); }
+  };
+  $("#main").querySelectorAll("a[data-cleartoken]").forEach(a => a.onclick = async ev => {
+    ev.preventDefault();
+    try {
+      await api("mcp_servers/token", {method: "POST", body: {server: a.dataset.cleartoken, token: ""}});
+      render();
+    } catch (e) { toast(e.message, true); }
+  });
 }
 
 /* ----------------------------------------------------------------- usage -- */
