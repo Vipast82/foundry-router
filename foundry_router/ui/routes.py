@@ -556,3 +556,22 @@ async def event_log(request: Request, limit: int = 200):
     svc = _svc(request)
     return {"events": svc.db.query(
         "SELECT * FROM event_log ORDER BY id DESC LIMIT ?", (min(limit, 2000),))}
+
+
+@router.post("/admin/api/usage/clear")
+async def clear_usage(request: Request):
+    """Wipe the routed-request history. Records a single audit line in the
+    (separate) event log so the clear itself is accountable."""
+    svc = _svc(request)
+    n = svc.db.execute("DELETE FROM request_log")
+    svc.db.log_event("info", "admin", f"usage log cleared ({n} request(s) removed)")
+    return {"ok": True, "removed": n}
+
+
+@router.post("/admin/api/events/clear")
+async def clear_events(request: Request):
+    """Wipe the troubleshooting event log. Does not self-log (that would
+    immediately repopulate the tab the operator just emptied)."""
+    svc = _svc(request)
+    n = svc.db.execute("DELETE FROM event_log")
+    return {"ok": True, "removed": n}
