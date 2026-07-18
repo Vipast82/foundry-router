@@ -129,8 +129,15 @@ function render() {
 /* -------------------------------------------------------------- backends -- */
 async function tabBackends() {
   const st = await api("status");
-  $("#hdr-info").textContent =
-    `v${st.version} · pool: ${st.pool_mode} · brain: ${st.brain.model} (${st.brain.provider}) · ${st.tool_count} tools`;
+  const bh = st.brain.health || {};
+  const bhCls = bh.healthy === true ? (bh.model_present === false ? "warn" : "ok")
+              : bh.healthy === false ? "bad" : "";
+  const bhTxt = bh.healthy === true ? (bh.model_present === false ? "model missing" : "healthy")
+              : bh.healthy === false ? "DOWN" : "…";
+  $("#hdr-info").innerHTML =
+    `v${esc(st.version)} · pool: ${esc(st.pool_mode)} · brain: ${esc(st.brain.model)} `
+    + `(${esc(st.brain.provider)}) <span class="pill ${bhCls}" title="${esc(bh.error || "")}">brain: ${bhTxt}</span>`
+    + ` · ${st.tool_count} tools`;
   const rows = st.backends.map(b => `<tr>
       <td class="nw">${esc(b.name)}</td><td class="mono nw">${esc(b.type)}</td>
       <td class="mono">${esc(b.url)}</td><td>${b.priority}</td>
@@ -163,6 +170,9 @@ async function tabBackends() {
           `<option ${p === st.brain.provider ? "selected" : ""}>${p}</option>`).join("")}</select>
         <label>endpoint</label><input id="brain-endpoint" size="34" value="${esc(st.brain.endpoint)}">
         <label>model</label><input id="brain-model" size="24" value="${esc(st.brain.model)}"></div>
+      <div class="row"><button class="act" id="test-brain"
+        title="Free reachability probe of the brain endpoint (GET its model list — no generation). The brain runs on EVERY request; if it's down, routing silently degrades to the static fallback rule.">Test brain</button>
+        <span id="brain-health" class="hint"></span></div>
       <p class="hint">Context budget — size these to the brain's real headroom (a 6GB local
       brain with num_ctx ~6144 has ~1500 tokens free after system prompt + tool schemas;
       a Claude-class brain can take far more). Tool-result limits only cap the preview the
@@ -185,6 +195,26 @@ async function tabBackends() {
   $("#brain-wmt").value = cfg.agent_brain.worker_max_tokens;
   $("#brain-uip").value = cfg.agent_brain.user_input_preview_chars;
   $("#brain-hb").value = cfg.agent_brain.heartbeat_seconds;
+  const renderBrainHealth = h => {
+    const el = $("#brain-health"); h = h || {};
+    if (h.healthy === true) {
+      el.innerHTML = '<span class="pill ok">healthy</span> ' + esc(h.model || "")
+        + (h.model_present === false
+            ? ' <span class="pill warn" title="endpoint is up but the configured model is not present — pull it on the brain host">model not loaded</span>' : '')
+        + (h.checked_at ? ' · checked ' + esc(String(h.checked_at).slice(11, 19)) + "Z" : '');
+    } else if (h.healthy === false) {
+      el.innerHTML = '<span class="pill bad">DOWN</span> ' + esc(h.error || "unreachable")
+        + '<br><span class="hint">every request is degrading to the static fallback rule until this recovers</span>';
+    } else {
+      el.innerHTML = '<span class="hint">not probed yet — click Test brain</span>';
+    }
+  };
+  renderBrainHealth(st.brain.health);
+  $("#test-brain").onclick = async () => {
+    $("#brain-health").textContent = "probing…";
+    try { renderBrainHealth(await api("brain/health")); }
+    catch (e) { $("#brain-health").innerHTML = '<span class="pill bad">error</span> ' + esc(e.message); }
+  };
   $("#test-meridian").onclick = async () => {
     const el = $("#meridian-health");
     el.textContent = "checking…";

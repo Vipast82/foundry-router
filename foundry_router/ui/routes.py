@@ -64,7 +64,8 @@ async def status(request: Request):
         "pool_mode": cfg.backend_pool.mode,
         "guardrail_authority": cfg.guardrails.authority,
         "brain": {"provider": cfg.agent_brain.provider, "model": cfg.agent_brain.model,
-                  "endpoint": cfg.agent_brain.endpoint},
+                  "endpoint": cfg.agent_brain.endpoint,
+                  "health": getattr(svc, "_brain_health", None)},
         "backends": svc.pool.backend_status(),
         "tool_count": len(svc.tool_registry.enabled()),
         "last_tool_sync": svc.tool_registry.last_sync,
@@ -182,6 +183,16 @@ async def quota(request: Request):
                 "conserve_fable_at": svc.meridian_usage.cfg.conserve_fable_at,
                 "usage_credits": svc.meridian_usage.cfg.usage_credits,
                 "min_window_fraction": svc.meridian_usage.cfg.min_window_fraction}}
+
+
+@router.get("/admin/api/brain/health")
+async def brain_health(request: Request):
+    """On-demand brain reachability probe — a free GET of the endpoint's model
+    list (never a paid generation), returning whether the endpoint is up and the
+    configured model is actually present. Refreshes the cached snapshot the UI
+    header/status read, and the Backends tab's Test brain button drives it."""
+    svc = _svc(request)
+    return await svc.refresh_brain_health()
 
 
 @router.get("/admin/api/meridian/health")

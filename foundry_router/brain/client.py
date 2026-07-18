@@ -110,3 +110,23 @@ class BrainClient:
         extraction). Same degrade semantics."""
         result = await self.chat([{"role": "user", "content": prompt}])
         return result.content
+
+    async def health(self) -> dict:
+        """Cheap reachability probe of the brain endpoint — the brain runs on
+        EVERY request, so an unnoticed brain outage silently degrades every
+        request to the static fallback rule (found live: brain down, no visible
+        signal). Uses the endpoint's free model list (a GET, never a paid
+        generation), and reports whether the configured model is actually
+        present — the endpoint being up but the model unpulled is a distinct,
+        common failure. Returns {healthy, model_present, provider, model,
+        error}; never raises."""
+        from ..errors import describe_exception
+        base = {"provider": self.cfg.provider, "model": self.cfg.model}
+        try:
+            models = await self.protocol.list_models()
+            root = (self.cfg.model or "").split(":")[0].lower()
+            present = bool(root) and any(root in (m or "").lower() for m in models)
+            return {**base, "healthy": True, "model_present": present, "error": ""}
+        except Exception as e:
+            return {**base, "healthy": False, "model_present": None,
+                    "error": describe_exception(e)}

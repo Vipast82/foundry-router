@@ -76,6 +76,14 @@ class Services:
                                  self.registry, self.guardrails, self.meridian_usage,
                                  research=self.research)
         self._bg_tasks: list[asyncio.Task] = []
+        # Cached brain-health snapshot, refreshed by _brain_health_loop and on
+        # demand via /admin/api/brain/health. Cached (not probed per status
+        # call) so a down brain doesn't make the status endpoint hang on its
+        # timeout. None = not probed yet.
+        self._brain_health: dict = {"healthy": None, "checked_at": None,
+                                    "provider": cfg.agent_brain.provider,
+                                    "model": cfg.agent_brain.model,
+                                    "model_present": None, "error": ""}
 
     # -- research LLM: dedicated model if configured, else the brain (§7) ------
 
@@ -192,6 +200,16 @@ class Services:
         self.brain = BrainClient(self.config_store.config.agent_brain, self.http,
                                  db=self.db)
         self.agent.brain = self.brain
+        # New brain config — invalidate the health snapshot (unknown until the
+        # next probe reflects the new endpoint/model).
+        cfg = self.config_store.config.agent_brain
+        self._brain_health = {"healthy": None, "checked_at": None,
+                              "provider": cfg.provider, "model": cfg.model,
+                              "model_present": None, "error": ""}
+        try:
+            asyncio.get_running_loop().create_task(self.refresh_brain_health())
+        except RuntimeError:
+            pass  # no loop (tests) — the background loop will catch up
 
     # -- background loops -----------------------------------------------------------
 
@@ -212,12 +230,43 @@ class Services:
             log.exception("cross-pass conflation sweep failed")
         await self.tool_registry.sync(self.pool)
         await self.populate_context_lengths()
+        await self.refresh_brain_health()   # populate the indicator immediately
         self.research.start()
         self._bg_tasks = [
             asyncio.create_task(self._openrouter_loop()),
             asyncio.create_task(self._tool_sync_loop()),
             asyncio.create_task(self._quota_poll_loop()),
+            asyncio.create_task(self._brain_health_loop()),
         ]
+
+    async def refresh_brain_health(self) -> dict:
+        """Probe the brain and update the cached snapshot. Called on the
+        background loop, at startup, and on demand from the UI."""
+        from .db import utcnow
+        health = await self.brain.health()
+        prev = self._brain_health.get("healthy")
+        self._brain_health = {**health, "checked_at": utcnow()}
+        # Edge-triggered Events entry so an outage is logged the moment it's
+        # seen, not only when a request happens to hit the fallback path.
+        if prev is not False and health.get("healthy") is False:
+            self.db.log_event("error", "brain",
+                              "brain health check FAILED — routing will degrade to the "
+                              "static fallback rule until it recovers", health.get("error", ""))
+        elif prev is False and health.get("healthy") is True:
+            self.db.log_event("info", "brain", "brain recovered — health check OK")
+        return self._brain_health
+
+    async def _brain_health_loop(self) -> None:
+        """Periodic brain reachability check — the brain has no pool-style health
+        surface of its own, so an outage was invisible until requests started
+        failing (it degrades to the static fallback silently)."""
+        interval = max(15, self.config_store.config.backend_pool.health_check_interval_seconds)
+        while True:
+            await asyncio.sleep(interval)
+            try:
+                await self.refresh_brain_health()
+            except Exception:
+                log.exception("brain health loop error")
 
     def _apply_seed(self) -> None:
         """Reference research seed (registry redesign item 4): fills tags,
