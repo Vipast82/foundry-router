@@ -444,8 +444,39 @@ async def force_sync(request: Request):
 async def list_mcp(request: Request):
     svc = _svc(request)
     cfg = svc.config_store.config
-    return {"servers": [{**s.model_dump(), **svc.mcp.secret_meta(s.name)}
+    # Tools discovered per server on the last Tool Sync — a passive "is it
+    # working" signal (0 = unreachable or exposes nothing).
+    counts: dict = {}
+    for t in svc.tool_registry.status():
+        if t.get("kind") == "mcp" and t.get("server"):
+            counts[t["server"]] = counts.get(t["server"], 0) + 1
+    return {"servers": [{**s.model_dump(), **svc.mcp.secret_meta(s.name),
+                         "tool_count": counts.get(s.name, 0)}
                         for s in cfg.mcp_servers]}
+
+
+@router.post("/admin/api/mcp_servers/test")
+async def test_mcp(request: Request):
+    """Live connectivity probe of one server — opens a real session (using the
+    stored auth token) and lists its tools, so the operator can confirm a new
+    connection works without waiting for a request to route through it."""
+    import asyncio
+
+    from ..errors import describe_exception
+    svc = _svc(request)
+    name = ((await request.json()).get("name") or "").strip()
+    if not name:
+        return JSONResponse({"error": "name required"}, status_code=400)
+    try:
+        tools = await asyncio.wait_for(svc.mcp.list_tools(name), timeout=20)
+        return {"ok": True, "tool_count": len(tools),
+                "tools": [t["name"] for t in tools][:50], "error": ""}
+    except asyncio.TimeoutError:
+        return {"ok": False, "tool_count": 0, "tools": [],
+                "error": "timed out after 20s — server unreachable?"}
+    except Exception as e:
+        return {"ok": False, "tool_count": 0, "tools": [],
+                "error": describe_exception(e)}
 
 
 @router.post("/admin/api/mcp_servers/token")

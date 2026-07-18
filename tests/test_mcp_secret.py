@@ -72,3 +72,19 @@ def test_token_endpoint_roundtrip(client):
     assert "abc123" not in client.get("/admin/api/mcp_servers").text
     # missing server is rejected
     assert client.post("/admin/api/mcp_servers/token", json={"token": "x"}).status_code == 400
+
+
+def test_mcp_test_endpoint(client):
+    # name required
+    assert client.post("/admin/api/mcp_servers/test", json={}).status_code == 400
+    # an unconfigured/unreachable server reports a clean error, not a 500
+    r = client.post("/admin/api/mcp_servers/test", json={"name": "nope"})
+    assert r.status_code == 200
+    body = r.json()
+    assert body["ok"] is False and body["error"] and body["tool_count"] == 0
+
+
+def test_list_mcp_reports_tool_count(client):
+    client.post("/admin/api/mcp_servers", json={"name": "s1", "url": "http://x/mcp"})
+    servers = {s["name"]: s for s in client.get("/admin/api/mcp_servers").json()["servers"]}
+    assert "tool_count" in servers["s1"]   # passive "is it working" signal
