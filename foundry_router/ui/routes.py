@@ -450,8 +450,10 @@ async def list_mcp(request: Request):
     for t in svc.tool_registry.status():
         if t.get("kind") == "mcp" and t.get("server"):
             counts[t["server"]] = counts.get(t["server"], 0) + 1
+    usage = svc.mcp.usage()
     return {"servers": [{**s.model_dump(), **svc.mcp.secret_meta(s.name),
-                         "tool_count": counts.get(s.name, 0)}
+                         "tool_count": counts.get(s.name, 0),
+                         "usage": usage.get(s.name)}
                         for s in cfg.mcp_servers]}
 
 
@@ -503,7 +505,13 @@ async def upsert_mcp(request: Request):
         return JSONResponse({"error": "name and url required"}, status_code=400)
     entry = {"name": body["name"], "url": body["url"],
              "transport": body.get("transport", "streamable-http"),
-             "timeout_seconds": int(body.get("timeout_seconds") or 300)}
+             "timeout_seconds": int(body.get("timeout_seconds") or 300),
+             # Pacing / 429 handling — persist so a UI edit doesn't silently
+             # drop a throttle set in config.yaml (SearXNG needs a gap here).
+             "pace_seconds": float(body.get("pace_seconds") or 0.0),
+             "rate_limit_retries": int(body.get("rate_limit_retries") or 3),
+             "rate_limit_backoff_seconds": float(
+                 body.get("rate_limit_backoff_seconds") or 30.0)}
     if body.get("headers"):
         entry["headers"] = body["headers"]
 

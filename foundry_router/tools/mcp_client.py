@@ -22,7 +22,7 @@ from contextlib import asynccontextmanager
 from typing import Any
 
 from ..config import MCPServerConfig
-from ..db import Database
+from ..db import Database, utcnow
 from ..errors import describe_exception
 
 log = logging.getLogger(__name__)
@@ -50,6 +50,33 @@ class MCPManager:
         self.servers = {s.name: s for s in servers}
         self.db = db
         self._last_call: dict[str, float] = {}   # server name -> monotonic ts, for pacing
+        # Live, process-lifetime usage per server, incremented for EVERY caller
+        # (background research sweep, worker tool loop, brain). The Usage-tab MCP
+        # card only sees per-request tool_calls, so a background research sweep's
+        # searxng/crawl4ai use was invisible there; this makes it visible in the
+        # MCP tab regardless of who called. Resets on restart (in-memory).
+        self._usage: dict[str, dict] = {}
+
+    def _record_usage(self, server: str, tool: str, ok: bool,
+                      rate_limited: bool = False, error: str = "") -> None:
+        u = self._usage.setdefault(
+            server, {"calls": 0, "ok": 0, "fail": 0, "rate_limited": 0,
+                     "last_ts": "", "last_error": "", "tools": {}})
+        u["calls"] += 1
+        u["tools"][tool] = u["tools"].get(tool, 0) + 1
+        u["last_ts"] = utcnow()
+        if rate_limited:
+            u["rate_limited"] += 1
+        if ok:
+            u["ok"] += 1
+        else:
+            u["fail"] += 1
+            if error:
+                u["last_error"] = error[:300]
+
+    def usage(self) -> dict[str, dict]:
+        """Snapshot of live per-server tool usage (all callers)."""
+        return {k: {**v, "tools": dict(v["tools"])} for k, v in self._usage.items()}
 
     def set_servers(self, servers: list[MCPServerConfig]) -> None:
         self.servers = {s.name: s for s in servers}
@@ -190,19 +217,26 @@ class MCPManager:
         # bursts; this used to live only in the research agent, so worker/brain
         # tool calls hammered on unrecovered). A 429 means "slower", so wait an
         # escalating amount before retrying rather than immediately re-429ing.
+        seen_429 = False
         for attempt in range(1, retries + 1):
             await self._pace(server, cfg) if cfg else None
             try:
                 # Per-server budget: media generation (ComfyUI/TTS/music) can run
                 # many minutes; a search tool should fail fast. Configurable per
                 # connection instead of one global assumption.
-                return await asyncio.wait_for(_call(), timeout=timeout)
+                out = await asyncio.wait_for(_call(), timeout=timeout)
+                self._record_usage(server, tool, ok=True, rate_limited=seen_429)
+                return out
             except asyncio.TimeoutError:
+                self._record_usage(server, tool, ok=False, rate_limited=seen_429,
+                                   error=f"timed out after {timeout}s")
                 raise RuntimeError(
                     f"MCP tool {server}/{tool} timed out after {timeout}s "
                     f"(raise timeout_seconds on this server's connection if its "
                     f"jobs legitimately run longer)") from None
             except Exception as e:  # noqa: BLE001
+                if _is_rate_limited(e):
+                    seen_429 = True
                 if _is_rate_limited(e) and attempt < retries:
                     wait = backoff * attempt
                     self.db.log_event(
@@ -212,4 +246,6 @@ class MCPManager:
                         describe_exception(e))
                     await asyncio.sleep(wait)
                     continue
+                self._record_usage(server, tool, ok=False, rate_limited=seen_429,
+                                   error=describe_exception(e))
                 raise
