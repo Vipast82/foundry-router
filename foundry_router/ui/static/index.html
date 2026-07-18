@@ -738,15 +738,31 @@ async function tabMCP() {
     <td class="nw">${s.has_token
         ? '<span class="pill ok" title="' + esc(s.token_header) + '">token set</span> <a href="#" data-cleartoken="' + esc(s.name) + '">clear</a>'
         : '<span class="hint">none</span>'}</td>
-    <td class="nw"><button class="act" onclick='editMcp(${JSON.stringify(s.name)})'>edit</button>
+    <td class="nw"><span class="mcp-status" data-mcp="${esc(s.name)}">${s.tool_count
+        ? '<span class="pill ok">' + s.tool_count + ' tools</span>'
+        : '<span class="hint">no tools synced</span>'}</span></td>
+    <td class="nw"><button class="act" onclick='testMcp(${JSON.stringify(s.name)})'>test</button>
+      <button class="act" onclick='editMcp(${JSON.stringify(s.name)})'>edit</button>
       <button class="act" onclick='run(api("mcp_servers/delete",{method:"POST",body:{name:${JSON.stringify(s.name)}}}))'>remove</button></td>
     </tr>`).join("");
   window._mcpServers = Object.fromEntries(d.servers.map(s => [s.name, s]));
+  window.testMcp = async name => {
+    const el = [...document.querySelectorAll(".mcp-status")].find(x => x.dataset.mcp === name);
+    if (el) el.textContent = "probing…";
+    try {
+      const r = await api("mcp_servers/test", {method: "POST", body: {name}});
+      if (!el) return;
+      el.innerHTML = r.ok
+        ? '<span class="pill ok" title="' + esc((r.tools || []).join(", ")) + '">reachable · ' + r.tool_count + ' tools</span>'
+        : '<span class="pill bad" title="' + esc(r.error) + '">unreachable</span>';
+      if (!r.ok) toast(name + ": " + r.error, true);
+    } catch (e) { if (el) el.innerHTML = '<span class="pill bad">error</span>'; toast(e.message, true); }
+  };
   $("#main").innerHTML = `
     <h2>MCP server connections (§4.9 item 8)</h2>
     <p class="hint">A connection list, not a tool list — tools are discovered automatically
     per server by Tool Sync once a connection exists.</p>
-    <table><tr><th>name</th><th>url</th><th>transport</th><th>timeout</th><th>auth token</th><th></th></tr>${rows}</table>
+    <table><tr><th>name</th><th>url</th><th>transport</th><th>timeout</th><th>auth token</th><th>status</th><th></th></tr>${rows}</table>
     <div class="card">
       <div class="row"><label>name</label><input id="mcp-name" size="16">
       <label>url</label><input id="mcp-url" size="38" placeholder="http://host:port/mcp">
