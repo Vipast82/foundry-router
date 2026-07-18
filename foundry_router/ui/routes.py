@@ -583,3 +583,125 @@ async def clear_events(request: Request):
     svc = _svc(request)
     n = svc.db.execute("DELETE FROM event_log")
     return {"ok": True, "removed": n}
+
+
+# --------------------------------------------------------------------------- #
+# Ollama model management (proxies the Ollama REST API to a chosen backend)   #
+# --------------------------------------------------------------------------- #
+
+@router.get("/admin/api/ollama/backends")
+async def ollama_backends(request: Request):
+    """Ollama-type backends only — the targets these operations can act on."""
+    return {"backends": _svc(request).ollama_admin.backends(),
+            "jobs": _svc(request).ollama_admin.job_snapshot()}
+
+
+@router.get("/admin/api/ollama/tags")
+async def ollama_tags(request: Request, backend: str):
+    from ..errors import describe_exception
+    try:
+        return {"ok": True, "models": await _svc(request).ollama_admin.tags(backend)}
+    except Exception as e:
+        return {"ok": False, "models": [], "error": describe_exception(e)}
+
+
+@router.post("/admin/api/ollama/show")
+async def ollama_show(request: Request):
+    from ..errors import describe_exception
+    b = await request.json()
+    if not b.get("backend") or not b.get("model"):
+        return JSONResponse({"error": "backend and model required"}, status_code=400)
+    try:
+        return {"ok": True, "info": await _svc(request).ollama_admin.show(
+            b["backend"], b["model"])}
+    except Exception as e:
+        return {"ok": False, "error": describe_exception(e)}
+
+
+@router.post("/admin/api/ollama/copy")
+async def ollama_copy(request: Request):
+    from ..errors import describe_exception
+    b = await request.json()
+    if not b.get("backend") or not b.get("source") or not b.get("destination"):
+        return JSONResponse({"error": "backend, source, destination required"},
+                            status_code=400)
+    try:
+        await _svc(request).ollama_admin.copy(b["backend"], b["source"], b["destination"])
+        return {"ok": True}
+    except Exception as e:
+        return {"ok": False, "error": describe_exception(e)}
+
+
+@router.post("/admin/api/ollama/rename")
+async def ollama_rename(request: Request):
+    from ..errors import describe_exception
+    b = await request.json()
+    if not b.get("backend") or not b.get("source") or not b.get("destination"):
+        return JSONResponse({"error": "backend, source, destination required"},
+                            status_code=400)
+    try:
+        await _svc(request).ollama_admin.rename(b["backend"], b["source"], b["destination"])
+        return {"ok": True}
+    except Exception as e:
+        return {"ok": False, "error": describe_exception(e)}
+
+
+@router.post("/admin/api/ollama/delete")
+async def ollama_delete(request: Request):
+    from ..errors import describe_exception
+    b = await request.json()
+    if not b.get("backend") or not b.get("model"):
+        return JSONResponse({"error": "backend and model required"}, status_code=400)
+    try:
+        await _svc(request).ollama_admin.delete(b["backend"], b["model"])
+        return {"ok": True}
+    except Exception as e:
+        return {"ok": False, "error": describe_exception(e)}
+
+
+@router.post("/admin/api/ollama/pull")
+async def ollama_pull(request: Request):
+    b = await request.json()
+    if not b.get("backend") or not b.get("model"):
+        return JSONResponse({"error": "backend and model required"}, status_code=400)
+    try:
+        key = _svc(request).ollama_admin.start_pull(b["backend"], b["model"])
+        return {"ok": True, "job": key}
+    except ValueError as e:
+        return JSONResponse({"error": str(e)}, status_code=400)
+
+
+@router.post("/admin/api/ollama/push")
+async def ollama_push(request: Request):
+    b = await request.json()
+    if not b.get("backend") or not b.get("model"):
+        return JSONResponse({"error": "backend and model required"}, status_code=400)
+    try:
+        key = _svc(request).ollama_admin.start_push(b["backend"], b["model"])
+        return {"ok": True, "job": key}
+    except ValueError as e:
+        return JSONResponse({"error": str(e)}, status_code=400)
+
+
+@router.post("/admin/api/ollama/create")
+async def ollama_create(request: Request):
+    b = await request.json()
+    if not b.get("backend") or not b.get("model"):
+        return JSONResponse({"error": "backend and model required"}, status_code=400)
+    if not (b.get("from") or b.get("modelfile")):
+        return JSONResponse({"error": "either 'from' (base model) or a raw "
+                                      "'modelfile' is required"}, status_code=400)
+    try:
+        key = _svc(request).ollama_admin.start_create(
+            b["backend"], b["model"], from_model=b.get("from", ""),
+            system=b.get("system", ""), parameters=b.get("parameters") or None,
+            modelfile=b.get("modelfile", ""))
+        return {"ok": True, "job": key}
+    except ValueError as e:
+        return JSONResponse({"error": str(e)}, status_code=400)
+
+
+@router.get("/admin/api/ollama/jobs")
+async def ollama_jobs(request: Request):
+    """Progress of running/finished pull/create/push jobs — polled by the UI."""
+    return {"jobs": _svc(request).ollama_admin.job_snapshot()}

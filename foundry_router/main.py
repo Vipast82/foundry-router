@@ -33,6 +33,7 @@ from .facade import router as facade_router
 from .guardrails import GuardrailEngine
 from .personas import PersonaStore
 from .pool.base import build_pool
+from .pool.ollama_admin import OllamaAdmin
 from .registry.models_db import ModelRegistry
 from .registry.openrouter_ingest import poll_openrouter
 from .registry.research_agent import ResearchAgent
@@ -61,6 +62,7 @@ class Services:
             write=30.0, pool=5.0))
 
         self.pool = build_pool(cfg, self.http, db)
+        self.ollama_admin = OllamaAdmin(self.http, self.pool, db)
         self.registry = ModelRegistry(db)
         self.personas = PersonaStore(db)
         self.mcp = MCPManager(cfg.mcp_servers, db)
@@ -197,6 +199,7 @@ class Services:
         self.pool = build_pool(self.config_store.config, self.http, self.db)
         self.pool.add_state_listener(self._on_pool_change)
         self.agent.pool = self.pool
+        self.ollama_admin.pool = self.pool
         self.guardrails.pool_mode = self.config_store.config.backend_pool.mode
         await old.stop()
         if os.environ.get("FOUNDRY_DISABLE_BACKGROUND") != "1":
