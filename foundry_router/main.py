@@ -366,6 +366,12 @@ def create_app(config_path: Optional[Path] = None,
     app = FastAPI(title="Foundry Router", version=__version__,
                   docs_url=None, redoc_url=None, lifespan=lifespan)
     app.state.services = services
+    origins = config_store.config.server.cors_origins
+    if origins:
+        from fastapi.middleware.cors import CORSMiddleware
+        app.add_middleware(
+            CORSMiddleware, allow_origins=origins, allow_credentials=False,
+            allow_methods=["*"], allow_headers=["*"])
     app.include_router(facade_router)
     app.include_router(openai_router)
     app.include_router(ui_router)

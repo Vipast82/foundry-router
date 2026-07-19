@@ -62,6 +62,11 @@ class BackendPool:  # interface — see internal.InternalPool for the implementa
         (name/type/url) — guardrails use `type` to spot subscription backends."""
         raise NotImplementedError
 
+    async def loaded_models(self) -> set[str]:
+        """Models currently resident in VRAM across ollama backends (cached).
+        Empty for pools/backends that can't report it."""
+        return set()
+
     def add_state_listener(self, callback) -> None:
         """callback() is invoked (sync) whenever a backend changes health or
         its model list changes — Tool Sync subscribes for immediate re-sync."""

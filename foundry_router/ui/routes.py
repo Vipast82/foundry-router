@@ -599,10 +599,16 @@ async def ollama_backends(request: Request):
 @router.get("/admin/api/ollama/tags")
 async def ollama_tags(request: Request, backend: str):
     from ..errors import describe_exception
+    admin = _svc(request).ollama_admin
     try:
-        return {"ok": True, "models": await _svc(request).ollama_admin.tags(backend)}
+        models = await admin.tags(backend)
     except Exception as e:
-        return {"ok": False, "models": [], "error": describe_exception(e)}
+        return {"ok": False, "models": [], "loaded": [], "error": describe_exception(e)}
+    try:
+        loaded = await admin.loaded(backend)     # non-fatal — just a warm-status hint
+    except Exception:
+        loaded = []
+    return {"ok": True, "models": models, "loaded": loaded}
 
 
 @router.post("/admin/api/ollama/show")

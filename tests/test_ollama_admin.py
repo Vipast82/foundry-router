@@ -42,6 +42,8 @@ def _handler(request):
         body = json.loads(request.content)
         return httpx.Response(200, json={"details": {"family": "llama"},
                                          "modelfile": "FROM llama3", "model": body.get("model")})
+    if p == "/api/ps":
+        return httpx.Response(200, json={"models": [{"name": "llama3:8b"}]})
     if p in ("/api/copy", "/api/delete"):
         return httpx.Response(200)
     if p == "/api/pull":
@@ -72,6 +74,11 @@ async def test_tags_and_show(tmp_path):
     assert models[0]["name"] == "llama3:8b"
     info = await admin.show("truenas", "llama3:8b")
     assert info["details"]["family"] == "llama"
+
+
+async def test_loaded_reports_vram_resident(tmp_path):
+    admin, _ = _admin(tmp_path)
+    assert await admin.loaded("truenas") == ["llama3:8b"]
 
 
 async def test_copy_and_delete_refresh_pool_and_log(tmp_path):

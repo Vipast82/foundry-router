@@ -138,6 +138,15 @@ class OllamaProtocol(BaseProtocol):
         r.raise_for_status()
         return [m["name"] for m in r.json().get("models", [])]
 
+    async def loaded_models(self) -> list[str]:
+        """Models currently resident in VRAM (Ollama /api/ps) — lets routing
+        prefer an already-loaded model over one that would force an unload/
+        reload, and lets the UI show what's warm."""
+        r = await self.client.get(f"{self.url}/api/ps", timeout=10)
+        r.raise_for_status()
+        return [m.get("name") or m.get("model") for m in r.json().get("models", [])
+                if m.get("name") or m.get("model")]
+
     async def show_context_length(self, model: str) -> Optional[int]:
         """The model's real trained context window from its GGUF metadata —
         authoritative per-model ground truth Ollama already exposes (and which

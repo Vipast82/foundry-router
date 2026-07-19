@@ -152,6 +152,7 @@ class Database:
             ("personas", "outcome_judge", "TEXT"),
             ("personas", "required_tags", "TEXT"),
             ("personas", "prefer_permissive", "INTEGER DEFAULT 0"),
+            ("personas", "prefer_loaded", "INTEGER DEFAULT 0"),
             ("request_log", "tool_calls", "TEXT"),
             ("models", "eval_tps_avg", "REAL"),
             ("models", "eval_samples", "INTEGER DEFAULT 0"),

@@ -47,6 +47,11 @@ def _expand_env(value: Any) -> Any:
 class ServerConfig(BaseModel):
     host: str = "0.0.0.0"
     port: int = 11435
+    # Browser-based clients (e.g. PhishGuard) enforce CORS; without these headers
+    # a cross-origin fetch fails with a bare "NetworkError". Default "*" suits the
+    # internal, no-auth posture — restrict to specific origins if the endpoint is
+    # ever exposed. Empty list disables CORS entirely.
+    cors_origins: list[str] = Field(default_factory=lambda: ["*"])
 
 
 class AgentBrainConfig(BaseModel):
