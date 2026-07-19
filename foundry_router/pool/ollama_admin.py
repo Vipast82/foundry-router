@@ -77,6 +77,13 @@ class OllamaAdmin:
         r.raise_for_status()
         return r.json().get("models", []) or []
 
+    async def loaded(self, backend: str) -> list[str]:
+        """Model names currently resident in VRAM on this backend (/api/ps)."""
+        r = await self.client.get(f"{self._url(backend)}/api/ps", timeout=_QUICK_TIMEOUT)
+        r.raise_for_status()
+        return [m.get("name") or m.get("model") for m in r.json().get("models", [])
+                if m.get("name") or m.get("model")]
+
     async def show(self, backend: str, model: str) -> dict:
         r = await self.client.post(f"{self._url(backend)}/api/show",
                                    json={"model": model, "name": model},

@@ -163,6 +163,31 @@ def _apply_pins(ranked: list[dict], persona: Optional[dict]) -> list[dict]:
     return front + [r for r in ranked if r["id"] not in pinned_set]
 
 
+def _prefer_loaded(ranked: list[dict], loaded_ids: set[str]) -> list[dict]:
+    """Float already-in-VRAM candidates to the front (marked _loaded for the
+    prompt), preserving their relative order. Every candidate here is already an
+    ACCEPTABLE fit for the category (ranked_for_category produced it), so keeping
+    a warm one avoids a slow unload/reload without dropping below the bar. Pins
+    still lead — an explicit pin outranks "happens to be loaded". Opt-in via the
+    persona's prefer_loaded flag."""
+    if not loaded_ids:
+        return ranked
+    warm, cold = [], []
+    for r in ranked:
+        if r.get("id") in loaded_ids:
+            warm.append({**r, "_loaded": True})
+        else:
+            cold.append(r)
+    if not warm:
+        return ranked
+    # Keep any pinned rows ahead of merely-loaded ones.
+    pins = [r for r in warm + cold if r.get("_pinned")]
+    pin_ids = {r["id"] for r in pins}
+    warm = [r for r in warm if r["id"] not in pin_ids]
+    cold = [r for r in cold if r["id"] not in pin_ids]
+    return pins + warm + cold
+
+
 class AgentRunner:
     def __init__(self, brain: BrainClient, pool, tool_registry, model_registry,
                  guardrails: GuardrailEngine, meridian_usage: MeridianUsage,
@@ -352,6 +377,11 @@ class AgentRunner:
         ranked = _steer_vision_when_images(ranked, ctx.messages)
         ranked = _filter_required_tags(ranked, persona)
         ranked = _apply_pins(ranked, persona)
+        # Keep the VRAM warm: if the persona opts in, prefer a model already
+        # loaded on the backend over an equally-acceptable one that would force a
+        # reload. Marks _loaded so the brain sees which candidates are warm.
+        if (persona or {}).get("prefer_loaded"):
+            ranked = _prefer_loaded(ranked, await self.pool.loaded_models())
 
         # Client/workspace system messages can't ride along in the message list
         # (the brain template demands a single, first system message) — carry
@@ -1012,6 +1042,8 @@ class AgentRunner:
         ranked = _steer_vision_when_images(ranked, ctx.messages)
         ranked = _filter_required_tags(ranked, persona)
         ranked = _apply_pins(ranked, persona)
+        if persona.get("prefer_loaded"):
+            ranked = _prefer_loaded(ranked, await self.pool.loaded_models())
         for r in ranked:
             mid = r["id"]
             info = self.pool.backend_info(mid)

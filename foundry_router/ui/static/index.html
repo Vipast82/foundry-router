@@ -581,7 +581,9 @@ async function tabPersonas() {
       <div class="row"><label title="When any candidate carries one of these tags, candidates are FILTERED to matches (e.g. vision)">required_tags (JSON list)</label>
         <input id="pe-reqtags" size="40" value="[]" placeholder='["vision"]'>
         <label title="PREFER permissive/uncensored models (this persona is for content other models refuse). Off = the default AVOID: permissive models sink below standard ones for normal work.">prefer_permissive</label>
-        <input type="checkbox" id="pe-perm"></div>
+        <input type="checkbox" id="pe-perm">
+        <label title="Prefer a model already loaded in the backend's VRAM when it's an acceptable fit, over an equally-suitable one that would force a slow unload/reload. Keeps a large warm model in memory instead of thrashing.">prefer_loaded</label>
+        <input type="checkbox" id="pe-loaded"></div>
       <div class="row"><label title="Optional JSON overriding the multi-signal ranking weights for this persona. Signals: primary (requested category), tool_calling, adequacy (observed outcome-judge quality), latency (warm tokens/sec). e.g. a speed-sensitive persona: {&quot;latency&quot;: 0.5}. Empty = defaults.">selection_weights (JSON obj)</label>
         <input id="pe-weights" size="50" value="{}" placeholder='{"latency": 0.4, "adequacy": 0.8}'></div>
       <div class="row"><button class="act primary" id="pe-save">Save persona</button>
@@ -607,6 +609,7 @@ async function tabPersonas() {
     outcome_judge: $("#pe-judge").value || null,
     required_tags: JSON.parse($("#pe-reqtags").value || "[]"),
     prefer_permissive: $("#pe-perm").checked ? 1 : 0,
+    prefer_loaded: $("#pe-loaded").checked ? 1 : 0,
     selection_weights: JSON.parse($("#pe-weights").value || "{}")}}));
 window.clonePersona = async source => {
   const newName = prompt("New persona name (clone of " + source + "):",
@@ -698,6 +701,7 @@ window.editPersona = name => {
   $("#pe-judge").value = p.outcome_judge || "";
   $("#pe-reqtags").value = p.required_tags || "[]";
   $("#pe-perm").checked = !!p.prefer_permissive;
+  $("#pe-loaded").checked = !!p.prefer_loaded;
   $("#pe-weights").value = p.selection_weights || "{}";
 };
 
@@ -909,11 +913,12 @@ async function tabOllama() {
     window._ollamaBackend = bes[0].name;
   const be = window._ollamaBackend;
 
-  let models = [], tagErr = "";
+  let models = [], loaded = [], tagErr = "";
   try {
     const t = await api("ollama/tags?backend=" + encodeURIComponent(be));
-    if (t.ok) models = t.models || []; else tagErr = t.error;
+    if (t.ok) { models = t.models || []; loaded = t.loaded || []; } else tagErr = t.error;
   } catch (e) { tagErr = e.message; }
+  const isLoaded = nm => loaded.includes(nm);
 
   const beOpts = bes.map(b => `<option ${b.name === be ? "selected" : ""}>${esc(b.name)}</option>`).join("");
   const gb = n => n ? (n / 1e9).toFixed(2) + " GB" : "";
@@ -921,7 +926,7 @@ async function tabOllama() {
   const modelRows = models.map(m => {
     const nm = nameOf(m), det = m.details || {};
     return `<tr>
-      <td class="mono">${esc(nm)}</td>
+      <td class="mono">${esc(nm)}${isLoaded(nm) ? ' <span class="pill ok" title="resident in VRAM now">⚡ loaded</span>' : ""}</td>
       <td class="nw">${gb(m.size)}</td>
       <td class="nw">${esc(det.parameter_size || "")}</td>
       <td class="nw">${esc(det.quantization_level || "")}</td>

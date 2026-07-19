@@ -212,6 +212,8 @@ def _model_line(row: dict, tool_name: str) -> str:
     score = f"{row['score']:.0f}" if row.get("score") is not None else "?"
     stype = f" ({row['score_type']})" if row.get("score_type") else ""
     bits = [f"- {tool_name}: score {score}{stype}"]
+    if row.get("_loaded"):
+        bits.append("⚡ already loaded in VRAM")
     try:
         tags = json.loads(row.get("tags") or "[]")
     except (json.JSONDecodeError, TypeError):
@@ -315,7 +317,9 @@ candidate (a persona escalation trigger applies, or a local attempt already \
 failed) — and then use the CHEAPEST tier that suffices. Never reach for a \
 premium model when a cheap or local one would do.
 c. Within any tier, prefer a model whose tags match the task over a \
-higher-scored mismatch.
+higher-scored mismatch. Within that, if a candidate is marked "⚡ already \
+loaded in VRAM" and it suits the task, prefer it over an equally-suitable \
+one that isn't — it avoids a slow model reload on the backend.
 d. If the task specifically needs permissive/uncensored handling, prefer a \
 local model marked PERMISSIVE over any paid escalation — paid models' \
 behavior is fixed regardless of how you route.
