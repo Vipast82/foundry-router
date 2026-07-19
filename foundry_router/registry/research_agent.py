@@ -108,6 +108,17 @@ _QUERIES = [
 # don't crowd fetched PAGES (the richer material) out of the corpus cap.
 _SEARCH_SNIPPET_CHARS = 2500
 
+
+def _query_name(model_id: str) -> str:
+    """A search-friendly form of a model id. A raw id like
+    'satgeze/qwen36-35b-uncensored-1m:latest' contains '/' and ':' which some
+    SearXNG engines (Wikipedia's REST API) interpret as a page-title path and
+    reject with 400 Bad Request. Drop the ':tag' and turn '/' into a space so
+    the query is a clean set of words, never a broken path."""
+    core = model_id.split(":")[0]          # drop ollama :tag
+    core = core.replace("/", " ")          # 'org/model' -> 'org model'
+    return re.sub(r"\s+", " ", core).strip() or model_id
+
 # The fetch budget (max_pages_per_model) is small, so WHICH urls we spend it on
 # matters more than how many a search returned. These carry real, structured
 # benchmark numbers far more often than a random blog/news hit, so they're
@@ -409,10 +420,13 @@ class ResearchAgent:
         search_corpus: list[str] = []
         page_corpus: list[str] = []
         urls: list[str] = []
+        name = _query_name(model_id)                 # '/' and ':' stripped (Wikipedia 400 fix)
+        prefix = (self.cfg.search_prefix or "").strip()   # optional SearXNG engine bangs
         for q in _QUERIES:
+            query = f"{prefix} {q.format(name=name)}".strip() if prefix else q.format(name=name)
             try:
-                result = await self._search(q.format(name=model_id))
-                search_corpus.append(f"### search: {q.format(name=model_id)}\n"
+                result = await self._search(query)
+                search_corpus.append(f"### search: {query}\n"
                                      f"{result[:_SEARCH_SNIPPET_CHARS]}")
                 urls += re.findall(r"https?://[^\s\"'<>\)\]]+", result)
             except Exception as e:
