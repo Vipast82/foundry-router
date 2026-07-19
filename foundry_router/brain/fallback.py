@@ -56,6 +56,11 @@ def pick_fallback_model(pool, registry: ModelRegistry,
 
     local, remote = [], []
     for model_id in available:
+        # Embedding-only models can't serve /api/chat — skip them even in the
+        # blind fallback, so the last-resort group[0] never picks one.
+        meta = registry.get(model_id)
+        if meta and meta.get("embedding"):
+            continue
         info = pool.backend_info(model_id) or {}
         (local if info.get("type") == "ollama" else remote).append(model_id)
 

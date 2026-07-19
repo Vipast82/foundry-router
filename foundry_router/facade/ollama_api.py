@@ -393,6 +393,10 @@ async def _direct_dispatch_chat(svc, persona, model_name, messages, client_tools
     except AllBackendsFailed as e:
         if "invalid tool call" in str(e):
             svc.registry.record_tool_call(model_id, ok=False)
+        if "does not support chat" in str(e).lower():
+            # An embedding-only model got picked — flag it so it's dropped from
+            # candidacy (belt-and-braces with the name heuristic at discovery).
+            svc.registry.mark_embedding(model_id)
         binfo = svc.pool.backend_info(model_id)
         if (binfo and binfo.get("type") == "anthropic-compatible"
                 and looks_like_window_exhaustion(str(e))):

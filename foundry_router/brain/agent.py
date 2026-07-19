@@ -163,6 +163,18 @@ def _apply_pins(ranked: list[dict], persona: Optional[dict]) -> list[dict]:
     return front + [r for r in ranked if r["id"] not in pinned_set]
 
 
+def _flag_if_not_chat(registry, model_id: str, err: BaseException) -> bool:
+    """A backend replying "does not support chat" (an embedding model routed for
+    generation) is authoritative — flag it embedding-only so it's dropped from
+    chat candidacy from here on. Returns True the first time it flags a model."""
+    if "does not support chat" in str(err).lower():
+        try:
+            return registry.mark_embedding(model_id)
+        except Exception:
+            log.exception("failed to flag %s as embedding-only", model_id)
+    return False
+
+
 def _prefer_loaded(ranked: list[dict], loaded_ids: set[str]) -> list[dict]:
     """Float already-in-VRAM candidates to the front (marked _loaded for the
     prompt), preserving their relative order. Every candidate here is already an
@@ -1130,6 +1142,10 @@ class AgentRunner:
                 result, backend = await task
             except AllBackendsFailed as e:
                 self.model_registry.record_call_outcome(worker, ok=False)
+                if _flag_if_not_chat(self.model_registry, worker, e):
+                    yield AgentEvent("think", f"{worker} is an embedding-only model "
+                                     f"(no chat support) — flagged so it's no longer "
+                                     f"offered as a worker.")
                 async for ev in hand_to_brain(f"{worker} dispatch failed "
                                                f"({describe_exception(e)})"):
                     yield ev

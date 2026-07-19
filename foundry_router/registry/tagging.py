@@ -40,6 +40,22 @@ _PERMISSIVE_RE = re.compile(
     r"unfiltered|liberated|\bevil\b", re.I)
 
 
+# Embedding-only models expose /api/embeddings, NOT /api/chat — routing one for
+# a chat request earns an immediate "does not support chat" 400. Their names are
+# almost always explicit ("nomic-embed-text", "mxbai-embed", "bge-*", "*-e5-*").
+# This only ever FLAGS embedding; the authoritative check is Ollama's reported
+# capabilities (see OllamaProtocol.show_capabilities), with this as the offline
+# seed so a fresh discovery never routes one before the capability probe runs.
+_EMBEDDING_RE = re.compile(
+    r"embed|(?:^|[-_/])bge[-_]|(?:^|[-_/])gte[-_]|(?:^|[-_/])e5[-_]|"
+    r"all-minilm|minilm|mxbai|arctic-embed|sentence-transformer|\bnomic-embed\b",
+    re.I)
+
+
+def is_embedding_name(model_id: str) -> bool:
+    return bool(_EMBEDDING_RE.search(model_id))
+
+
 def tags_from_name(model_id: str) -> list[str]:
     return [tag for tag, pattern in _TAG_PATTERNS if pattern.search(model_id)]
 

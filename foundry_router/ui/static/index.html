@@ -314,7 +314,7 @@ async function tabModels() {
     ? `<button class="act" onclick='doResearch(${JSON.stringify(m.id)})'>research</button>`
     : `<button class="act" disabled title="${esc(d.research_reason)}">research</button>`;
   const rowHtml = m => `<tr${isEnabled(m) ? "" : ' style="opacity:.45"'}>
-    <td class="mono">${esc(m.id)} ${m.reachable ? '<span class="pill ok">live</span>' : ""}</td>
+    <td class="mono">${esc(m.id)} ${m.reachable ? '<span class="pill ok">live</span>' : ""}${m.embedding ? ' <span class="pill warn" title="embedding-only model — excluded from chat routing (can\'t serve /api/chat)">embedding</span>' : ""}</td>
     <td class="nw">${esc(m.relative_cost_tier ?? "")}</td>
     <td>${esc(parseTags(m.tags).join(", "))}${m.content_policy === "permissive" ? ' <span class="pill warn">permissive</span>' : ""}</td>
     <td>${esc(m.good_for ?? "")}</td>

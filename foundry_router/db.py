@@ -141,6 +141,10 @@ class Database:
         added = [
             ("models", "tags", "TEXT"),
             ("models", "content_policy", "TEXT"),
+            # 1 = embedding-only model (no /api/chat): excluded from chat routing
+            # candidacy. Set from a name heuristic + Ollama capabilities, and
+            # learned from a "does not support chat" dispatch error.
+            ("models", "embedding", "INTEGER DEFAULT 0"),
             ("models", "research_status", "TEXT"),
             ("models", "research_note", "TEXT"),
             ("models", "enabled", "INTEGER DEFAULT 1"),
