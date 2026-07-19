@@ -45,6 +45,11 @@ MODEL_FIELDS = [
     "display_name", "provider", "context_length", "cost_per_1k_input",
     "cost_per_1k_output", "relative_cost_tier", "reasoning_style", "good_for",
     "benefits_from_explicit_prompting", "tags", "content_policy",
+    # Embedding flag must be writable via upsert_auto or the discovery-time name
+    # heuristic is silently dropped (found live: nomic-embed-text kept being
+    # picked as a worker because the flag only ever got set reactively, after a
+    # "does not support chat" 400). upsert_auto still respects manual overrides.
+    "embedding",
 ]
 
 # Cost is the FIRST sort key of candidate ranking (design: "don't reach for

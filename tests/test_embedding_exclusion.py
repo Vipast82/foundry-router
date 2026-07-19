@@ -56,6 +56,28 @@ def test_flag_if_not_chat_only_on_that_error(tmp_path):
     assert not reg.get("qwen2.5:14b").get("embedding")
 
 
+def test_upsert_auto_persists_embedding_flag(tmp_path):
+    """Regression: the discovery-time flag was dropped because 'embedding' wasn't
+    in MODEL_FIELDS, so nomic-embed-text kept being picked as a worker until a
+    400 reactively flagged it. Discovery re-flagging must now stick — and must
+    not downgrade a researched row's provenance."""
+    reg = ModelRegistry(Database(tmp_path / "r.sqlite"))
+    reg.upsert_auto("nomic-embed-text:latest", source="research_agent",
+                    good_for="embeddings")
+    assert not reg.get("nomic-embed-text:latest").get("embedding")
+    reg.upsert_auto("nomic-embed-text:latest", source="discovery", embedding=1)
+    row = reg.get("nomic-embed-text:latest")
+    assert row["embedding"] == 1                     # flag persisted (was silently dropped)
+    assert row["source"] == "research_agent"         # provenance not downgraded
+
+
+def test_manual_embedding_override_respected(tmp_path):
+    reg = ModelRegistry(Database(tmp_path / "r.sqlite"))
+    reg.manual_update("odd-embed-name:latest", embedding=0)   # operator: "not embedding-only"
+    reg.upsert_auto("odd-embed-name:latest", source="discovery", embedding=1)
+    assert reg.get("odd-embed-name:latest")["embedding"] == 0  # manual wins over the heuristic
+
+
 def test_fallback_picker_skips_embedding(tmp_path):
     reg = _reg(tmp_path)
     reg.mark_embedding("nomic-embed-text:latest")
