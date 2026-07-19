@@ -119,7 +119,8 @@ class Services:
         never replaces a hand-set value)."""
         import json as _json
 
-        from .registry.tagging import content_policy_from_name, tags_from_name
+        from .registry.tagging import (content_policy_from_name,
+                                       is_embedding_name, tags_from_name)
         from .usage import CLAUDE_DEFAULT_CONTEXT, claude_cost_tier
 
         for s in getattr(self.pool, "backends", {}).values():
@@ -136,6 +137,12 @@ class Services:
                     refined = bool(existing and existing.get("source") in
                                    ("research_agent", "reference_seed", "manual_override"))
                     fields: dict = {"provider": s.config.name, "display_name": model_id}
+                    # Embedding-only models can't serve /api/chat — flag by name
+                    # so they're never a chat candidate (the capability probe in
+                    # populate_context_lengths confirms/corrects this). Only ever
+                    # set to 1; never un-flags a model.
+                    if is_embedding_name(model_id):
+                        fields["embedding"] = 1
                     if s.config.type == "ollama":
                         fields.update(relative_cost_tier="free",
                                       cost_per_1k_input=0.0, cost_per_1k_output=0.0)

@@ -10,4 +10,4 @@ usage-aware guardrails. Internal/private-network use only.
 # dynamically (tool.setuptools.dynamic), and main.py / ui.routes /
 # facade.ollama_api all import __version__ rather than repeating a literal,
 # so a bump is one edit here.
-__version__ = "0.28.0"
+__version__ = "0.28.1"

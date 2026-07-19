@@ -535,6 +535,11 @@ class ModelRegistry:
             # in `known` stops it being resurrected as an unknown filler.
             if m.get("enabled") is not None and not m.get("enabled"):
                 continue
+            # Embedding-only models (nomic-embed-text, bge, ...) can't serve
+            # /api/chat — never offer them as a chat candidate (they earned an
+            # immediate 400 and a wasteful brain fallback before this).
+            if m.get("embedding"):
+                continue
             m = dict(m)
             prim = best.get((mid, category))
             m["score"] = prim.get("score") if prim else None
@@ -592,6 +597,21 @@ class ModelRegistry:
             self.db.execute("INSERT INTO models (id) VALUES (?)", (model_id,))
         self.db.execute("UPDATE models SET enabled=? WHERE id=?",
                         (1 if enabled else 0, model_id))
+
+    def mark_embedding(self, model_id: str) -> bool:
+        """Flag a model as embedding-only (excluded from chat candidacy). Called
+        when a dispatch returns "does not support chat" — the backend's own
+        authoritative word — so a mis-tagged or oddly-named embedding model is
+        never routed for chat again after the first failure. Returns True if this
+        newly flagged it (so the caller can log the one-time transition)."""
+        row = self.get(model_id)
+        if row is None:
+            self.db.execute("INSERT INTO models (id, embedding) VALUES (?, 1)", (model_id,))
+            return True
+        if row.get("embedding"):
+            return False
+        self.db.execute("UPDATE models SET embedding=1 WHERE id=?", (model_id,))
+        return True
 
     def record_tool_call(self, model_id: str, ok: bool) -> None:
         """Empirical tool-calling reliability: updated from live traffic — the
