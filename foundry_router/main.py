@@ -29,7 +29,7 @@ from .brain.agent import AgentRunner
 from .brain.client import BrainClient
 from .config import ConfigStore, data_dir
 from .db import Database
-from .facade import router as facade_router
+from .facade import openai_router, router as facade_router
 from .guardrails import GuardrailEngine
 from .personas import PersonaStore
 from .pool.base import build_pool
@@ -367,5 +367,6 @@ def create_app(config_path: Optional[Path] = None,
                   docs_url=None, redoc_url=None, lifespan=lifespan)
     app.state.services = services
     app.include_router(facade_router)
+    app.include_router(openai_router)
     app.include_router(ui_router)
     return app
