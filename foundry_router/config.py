@@ -191,6 +191,12 @@ class ResearchConfig(BaseModel):
     # a higher cap lets the extra pages actually reach the extractor.
     corpus_char_limit: int = 24000
     model: Optional[str] = None  # None => reuse the agent_brain model
+    # Optional text prepended to every research search query. Its purpose is
+    # SearXNG "bang" engine selection: setting e.g. "!google !bing !startpage"
+    # restricts research searches to reliable engines and EXCLUDES the ones that
+    # wall automated scraping — Brave (429 suspensions) and DuckDuckGo (CAPTCHA),
+    # which no amount of client-side backoff clears. Empty = SearXNG's defaults.
+    search_prefix: str = ""
     search: ResearchToolRef = Field(default_factory=ResearchToolRef)
     fetch: ResearchToolRef = Field(default_factory=ResearchToolRef)
     # NOTE: SearXNG pacing / 429-backoff moved to the MCP server config

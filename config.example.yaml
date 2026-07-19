@@ -167,8 +167,12 @@ registry:
     enabled: true
     sweep_hours: 24                # scheduled staleness sweep cadence (§7 open question — daily default)
     stale_days: 14                 # registry rows older than this get re-researched
-    max_pages_per_model: 5         # Crawl4AI fetches per model — more real per-category material
+    max_pages_per_model: 8         # Crawl4AI fetch attempts per model (ranked best-first, early-stops at corpus cap)
     corpus_char_limit: 24000       # extraction-LLM context ceiling; raise only with a bigger research model
+    # Prepended to every research search. Its point is SearXNG "bang" engine
+    # selection: pin reliable engines and EXCLUDE ones that wall scraping —
+    # Brave (429 suspensions) and DuckDuckGo (CAPTCHA). Empty = SearXNG defaults.
+    search_prefix: ""              # e.g. "!google !bing !startpage"
     # Model used by the Research Agent. null = reuse the agent_brain model.
     # §7 open question: a larger off-hot-path model may extract scores better.
     model: null

@@ -846,7 +846,11 @@ async function tabMCP() {
       <label title="Per-server tool-call budget. Media generation (ComfyUI/TTS/music) can need 600-1800s; search tools should fail fast.">timeout (s)</label>
       <input id="mcp-to" type="number" size="6" value="300">
       <label title="Minimum gap between calls to this server, applied to EVERY caller (research sweep, worker tool loop, brain). SearXNG 429s a burst of queries — set 2-5s here to space them. 0 = off.">pace (s)</label>
-      <input id="mcp-pace" type="number" step="0.5" size="5" value="0" title="min seconds between calls (SearXNG: try 3)"></div>
+      <input id="mcp-pace" type="number" step="0.5" size="5" value="0" title="min seconds between calls (SearXNG: try 3)">
+      <label title="On a 429, how many extra attempts before giving up (default 3).">429 retries</label>
+      <input id="mcp-retries" type="number" size="4" value="3">
+      <label title="Base seconds to wait between 429 retries; escalates each attempt (attempt×base). Default 30.">429 backoff (s)</label>
+      <input id="mcp-backoff" type="number" step="1" size="5" value="30"></div>
       <div class="row">
       <label title="Auth token stored in the DB (NOT config.yaml — stored in plaintext, same as config). Sent as 'Authorization: Bearer <token>' by default, or as the raw value of the header you name. Leave blank when editing a server to keep its existing token.">auth token</label>
       <input id="mcp-token" type="password" size="26" placeholder="secret — saved to DB, leave blank to keep">
@@ -862,6 +866,8 @@ async function tabMCP() {
     $("#mcp-tr").value = s.transport;
     $("#mcp-to").value = s.timeout_seconds ?? 300;
     $("#mcp-pace").value = s.pace_seconds ?? 0;
+    $("#mcp-retries").value = s.rate_limit_retries ?? 3;
+    $("#mcp-backoff").value = s.rate_limit_backoff_seconds ?? 30;
     $("#mcp-hdr").value = s.token_header || "Authorization";
     $("#mcp-token").value = "";   // write-only — blank keeps the existing token
     $("#mcp-token").placeholder = s.has_token
@@ -873,6 +879,7 @@ async function tabMCP() {
   $("#mcp-clear").onclick = () => {
     for (const id of ["mcp-name", "mcp-url", "mcp-token"]) $("#" + id).value = "";
     $("#mcp-to").value = 300; $("#mcp-pace").value = 0; $("#mcp-hdr").value = "Authorization";
+    $("#mcp-retries").value = 3; $("#mcp-backoff").value = 30;
     $("#mcp-tr").value = "streamable-http";
   };
   $("#mcp-add").onclick = async () => {
@@ -882,7 +889,9 @@ async function tabMCP() {
       await api("mcp_servers", {method: "POST", body: {
         name, url, transport: $("#mcp-tr").value,
         timeout_seconds: +$("#mcp-to").value || 300,
-        pace_seconds: +$("#mcp-pace").value || 0}});
+        pace_seconds: +$("#mcp-pace").value || 0,
+        rate_limit_retries: +$("#mcp-retries").value || 3,
+        rate_limit_backoff_seconds: +$("#mcp-backoff").value || 30}});
       const tok = $("#mcp-token").value.trim();
       if (tok) await api("mcp_servers/token", {method: "POST", body: {
         server: name, token: tok, header: $("#mcp-hdr").value.trim() || "Authorization"}});
