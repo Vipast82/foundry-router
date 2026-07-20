@@ -569,6 +569,48 @@ async def event_log(request: Request, limit: int = 200):
 _LOGO_KEY = "ui_logo"
 
 
+_RESEARCH_NUM = ("sweep_hours", "stale_days", "max_pages_per_model", "corpus_char_limit")
+
+
+@router.post("/admin/api/config/research")
+async def set_research_config(request: Request):
+    """Persist research settings to config.yaml AND apply them to the running
+    Research Agent (it reads self.cfg per sweep), so no restart/SSH is needed."""
+    svc = _svc(request)
+    b = await request.json()
+
+    def mutate(raw):
+        r = raw.setdefault("registry", {}).setdefault("research", {})
+        if "enabled" in b:
+            r["enabled"] = bool(b["enabled"])
+        if "search_prefix" in b:
+            r["search_prefix"] = str(b["search_prefix"] or "")
+        for k in _RESEARCH_NUM:
+            if b.get(k) is not None:
+                r[k] = int(b[k])
+        for ref in ("search", "fetch"):
+            if isinstance(b.get(ref), dict):
+                r[ref] = {k: v for k, v in b[ref].items() if v not in (None, "")}
+    try:
+        cfg = svc.config_store.save(mutate)
+    except Exception as e:
+        from ..errors import describe_exception
+        return JSONResponse({"error": describe_exception(e)}, status_code=400)
+    svc.research.cfg = cfg.registry.research   # live apply
+    return {"ok": True}
+
+
+@router.post("/admin/api/research/test")
+async def test_research(request: Request):
+    """Live search+fetch probe through the configured MCP tools (the GUI button)."""
+    import asyncio
+    svc = _svc(request)
+    try:
+        return await asyncio.wait_for(svc.research.test_pipeline(), timeout=60)
+    except asyncio.TimeoutError:
+        return {"ok": False, "search_error": "timed out after 60s", "sample": ""}
+
+
 @router.get("/admin/api/branding")
 async def get_branding(request: Request):
     """The custom header logo (a data: URI stored in the DB), or null."""
