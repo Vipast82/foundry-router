@@ -291,10 +291,26 @@ async function tabBackends() {
       <td class="mono">${esc(b.url)}</td><td>${b.priority}</td>
       <td><span class="pill ${b.healthy ? "ok" : "bad"}">${b.healthy ? "healthy" : "down"}</span></td>
       <td class="mono">${(b.models || []).slice(0, 8).map(esc).join(", ")}${(b.models||[]).length > 8 ? "…" : ""}</td>
-      <td class="mono">${esc(b.last_error || "")}</td></tr>`).join("");
+      <td class="mono">${esc(b.last_error || "")}</td>
+      <td class="nw"><button class="act" onclick='testBackend(${JSON.stringify(b.name)})'>test</button>
+        <span class="bk-status" data-bk="${esc(b.name)}"></span></td></tr>`).join("");
+  window.testBackend = async name => {
+    const el = [...document.querySelectorAll(".bk-status")].find(x => x.dataset.bk === name);
+    if (el) el.textContent = "probing…";
+    try {
+      const r = await api("backends/test", {method: "POST", body: {name}});
+      if (!el) return;
+      el.innerHTML = r.ok
+        ? `<span class="pill ok" title="${esc((r.sample || []).join(", "))}">reachable · ${r.models} models · ${r.latency_ms}ms</span>`
+        : `<span class="pill bad" title="${esc(r.error)}">unreachable</span>`;
+      if (!r.ok) toast(name + ": " + r.error, true);
+    } catch (e) { if (el) el.innerHTML = '<span class="pill bad">error</span>'; toast(e.message, true); }
+  };
   $("#main").innerHTML = `
     <h2>Backend Pool — mode: ${esc(st.pool_mode)}</h2>
-    <table><tr><th>name</th><th>type</th><th>url</th><th>prio</th><th>health</th><th>models</th><th>last error</th></tr>${rows}</table>
+    <p class="hint">Health flips only after repeated failures (removal grace period). Use <b>test</b>
+      for an immediate free liveness probe (lists the backend's models — no generation).</p>
+    <table><tr><th>name</th><th>type</th><th>url</th><th>prio</th><th>health</th><th>models</th><th>last error</th><th></th></tr>${rows}</table>
     <div class="row"><button class="act" id="test-meridian"
       title="Free read-only probe of Meridian's quota endpoint — answers 'is the Claude subscription login still valid' without burning a real generation">Test Meridian Auth</button>
       <span id="meridian-health" class="hint"></span></div>

@@ -572,6 +572,33 @@ _LOGO_KEY = "ui_logo"
 _RESEARCH_NUM = ("sweep_hours", "stale_days", "max_pages_per_model", "corpus_char_limit")
 
 
+@router.post("/admin/api/backends/test")
+async def test_backend(request: Request):
+    """Cheap liveness probe of one backend: fetch its model list (free, no
+    generation), reporting reachability, model count, latency, and any error —
+    the same verify-in-place pattern as the MCP/Ollama/brain tests."""
+    import asyncio
+    import time
+
+    from ..errors import describe_exception
+    svc = _svc(request)
+    name = ((await request.json()).get("name") or "").strip()
+    if not name:
+        return JSONResponse({"error": "name required"}, status_code=400)
+    state = getattr(svc.pool, "backends", {}).get(name)
+    if state is None:
+        return JSONResponse({"error": f"no backend named {name!r}"}, status_code=404)
+    t0 = time.monotonic()
+    try:
+        models = await asyncio.wait_for(state.protocol.list_models(), timeout=15)
+        return {"ok": True, "models": len(models), "sample": models[:8],
+                "latency_ms": int((time.monotonic() - t0) * 1000), "error": ""}
+    except asyncio.TimeoutError:
+        return {"ok": False, "models": 0, "sample": [], "error": "timed out after 15s"}
+    except Exception as e:
+        return {"ok": False, "models": 0, "sample": [], "error": describe_exception(e)}
+
+
 @router.post("/admin/api/config/research")
 async def set_research_config(request: Request):
     """Persist research settings to config.yaml AND apply them to the running
