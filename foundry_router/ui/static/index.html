@@ -185,7 +185,7 @@ function clearLog(kind, label) {
 const TABS = {
   "Backends":  tabBackends,  "Models":   tabModels,   "Personas": tabPersonas,
   "Tools":     tabTools,     "Guardrails": tabGuardrails, "MCP":  tabMCP,
-  "Ollama":    tabOllama,
+  "Ollama":    tabOllama,   "Research": tabResearch,
   "Usage Log": tabUsage,     "Events":   tabEvents,
 };
 let current = "Backends";
@@ -1095,6 +1095,75 @@ SYSTEM You are a helpful assistant."></textarea></details>
   }
   renderJobs(d.jobs);
   if ((d.jobs || []).some(j => j.state === "running")) pollJobs();
+}
+
+/* -------------------------------------------------------------- research -- */
+const _ENGINES = ["google", "bing", "startpage", "duckduckgo", "brave", "wikipedia", "qwant", "mojeek"];
+async function tabResearch() {
+  const [cfg, mcp] = await Promise.all([api("config"), api("mcp_servers")]);
+  const r = ((cfg.registry || {}).research) || {};
+  const search = r.search || {}, fetch = r.fetch || {};
+  const srvOpts = sel => ['<option value=""></option>'].concat(
+    (mcp.servers || []).map(s => `<option ${s.name === sel ? "selected" : ""}>${esc(s.name)}</option>`)).join("");
+  const active = new Set(((r.search_prefix || "").match(/!(\w+)/g) || []).map(b => b.slice(1).toLowerCase()));
+  const engineBoxes = _ENGINES.map(e => `<label class="mcp-item" style="min-width:118px">
+      <input type="checkbox" class="eng" value="${e}" ${active.has(e) ? "checked" : ""}>
+      <span class="mono">${e}</span>${(e === "brave" || e === "duckduckgo")
+        ? ' <span class="pill warn" title="walls automated scraping — Brave 429s, DuckDuckGo CAPTCHAs">risky</span>' : ""}
+    </label>`).join("");
+  const numField = (id, val, min, step) =>
+    `<input id="${id}" type="number" min="${min}" ${step ? `step="${step}"` : ""} value="${val}" size="8">`;
+  $("#main").innerHTML = `
+    <h2>Research settings</h2>
+    <p class="hint">The background Research Agent that fills model benchmarks / tags / good-for.
+      Changes apply live — no restart. Use <b>Test search+fetch</b> to confirm your
+      SearXNG + Crawl4AI path works end-to-end.</p>
+    <div class="card">
+      <div class="row"><label>enabled</label><input type="checkbox" id="re-enabled" ${r.enabled ? "checked" : ""}></div>
+      <div class="row"><label title="Prepended to every research search. Checking engines here restricts SearXNG to them via bang syntax and excludes the rest.">search engines</label>
+        <div class="mcp-checklist" style="flex-direction:row;flex-wrap:wrap;max-height:none;min-width:0">${engineBoxes}</div></div>
+      <div class="row"><label title="What actually gets prepended. The checkboxes write this; you can also type your own bangs.">search_prefix (raw)</label>
+        <input id="re-prefix" size="46" value="${esc(r.search_prefix || "")}" placeholder="!google !bing !startpage">
+        <span class="hint">checkboxes edit this — or type directly</span></div>
+      <div class="row">
+        <label>sweep_hours</label>${numField("re-sweep", r.sweep_hours ?? 24, 1)}
+        <label>stale_days</label>${numField("re-stale", r.stale_days ?? 14, 1)}
+        <label title="Fetch attempts per model (ranked best-first)">max_pages</label>${numField("re-pages", r.max_pages_per_model ?? 8, 1)}
+        <label title="Chars of corpus fed to the extractor LLM">corpus_chars</label>${numField("re-corpus", r.corpus_char_limit ?? 24000, 1000, 1000)}</div>
+      <div class="row"><label>search tool</label>
+        <select id="re-s-srv">${srvOpts(search.server)}</select>
+        <input id="re-s-tool" size="20" placeholder="tool (searxng_web_search)" value="${esc(search.tool || "")}">
+        <input id="re-s-qp" size="10" placeholder="query param" value="${esc(search.query_param || "query")}"></div>
+      <div class="row"><label>fetch tool</label>
+        <select id="re-f-srv">${srvOpts(fetch.server)}</select>
+        <input id="re-f-tool" size="20" placeholder="tool (md)" value="${esc(fetch.tool || "")}">
+        <input id="re-f-up" size="10" placeholder="url param" value="${esc(fetch.url_param || "url")}"></div>
+      <div class="row">
+        <button class="act primary" id="re-save">Save research settings</button>
+        <button class="act" id="re-test">Test search+fetch ▶</button>
+        <span id="re-test-out" class="hint"></span></div>
+    </div>`;
+  const syncPrefix = () => {
+    $("#re-prefix").value = [...document.querySelectorAll(".eng:checked")].map(b => "!" + b.value).join(" ");
+  };
+  document.querySelectorAll(".eng").forEach(b => b.onchange = syncPrefix);
+  $("#re-save").onclick = () => run(api("config/research", {method: "POST", body: {
+    enabled: $("#re-enabled").checked,
+    search_prefix: $("#re-prefix").value,
+    sweep_hours: +$("#re-sweep").value, stale_days: +$("#re-stale").value,
+    max_pages_per_model: +$("#re-pages").value, corpus_char_limit: +$("#re-corpus").value,
+    search: {server: $("#re-s-srv").value, tool: $("#re-s-tool").value, query_param: $("#re-s-qp").value || "query"},
+    fetch: {server: $("#re-f-srv").value, tool: $("#re-f-tool").value, url_param: $("#re-f-up").value || "url"}}}));
+  $("#re-test").onclick = async () => {
+    const out = $("#re-test-out"); out.textContent = "testing… (up to 60s)";
+    try {
+      const t = await api("research/test", {method: "POST"});
+      const parts = [t.search_ok ? `✓ search — ${t.urls_found} URL(s)` : `✗ search: ${t.search_error}`];
+      if (t.search_ok) parts.push(t.fetch_ok ? "✓ fetch" : (t.urls_found ? `✗ fetch: ${t.fetch_error}` : "— no URLs to fetch"));
+      out.innerHTML = `<span class="pill ${t.ok ? "ok" : "bad"}">${t.ok ? "ok" : "issue"}</span> ${esc(parts.join(" · "))}`;
+      out.title = t.sample || "";
+    } catch (e) { out.innerHTML = `<span class="pill bad">error</span> ${esc(e.message)}`; }
+  };
 }
 
 /* ----------------------------------------------------------------- usage -- */

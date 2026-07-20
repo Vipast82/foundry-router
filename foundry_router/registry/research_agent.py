@@ -416,6 +416,35 @@ class ResearchAgent:
             raise RuntimeError("no fetch MCP tool configured")
         return await self.mcp.call_tool(ref.server, ref.tool, {ref.url_param: url})
 
+    async def test_pipeline(self) -> dict:
+        """One real search + one real fetch through the configured tools, for the
+        GUI 'Test search+fetch' button — so an operator can confirm the whole
+        SearXNG->Crawl4AI path works (and see engine 429s / config mismatches)
+        without waiting for a background sweep."""
+        prefix = (self.cfg.search_prefix or "").strip()
+        query = f"{prefix} large language model benchmark".strip()
+        out = {"ok": False, "query": query, "search_ok": False, "urls_found": 0,
+               "fetch_ok": False, "search_error": "", "fetch_error": "", "sample": ""}
+        try:
+            res = await self._search(query)
+            out["search_ok"] = True
+            urls = re.findall(r"https?://[^\s\"'<>\)\]]+", res)
+            out["urls_found"] = len(urls)
+            out["sample"] = res[:400]
+        except Exception as e:
+            out["search_error"] = describe_exception(e)
+            return out
+        urls = re.findall(r"https?://[^\s\"'<>\)\]]+", res)
+        if urls:
+            try:
+                page = await self._fetch(urls[0].split("#")[0])
+                out["fetch_ok"] = True
+                out["sample"] = page[:400]
+            except Exception as e:
+                out["fetch_error"] = describe_exception(e)
+        out["ok"] = out["search_ok"] and (out["fetch_ok"] or out["urls_found"] == 0)
+        return out
+
     async def research_model(self, model_id: str) -> None:
         search_corpus: list[str] = []
         page_corpus: list[str] = []
