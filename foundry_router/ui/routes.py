@@ -572,6 +572,28 @@ _LOGO_KEY = "ui_logo"
 _RESEARCH_NUM = ("sweep_hours", "stale_days", "max_pages_per_model", "corpus_char_limit")
 
 
+@router.get("/admin/api/devlog")
+async def devlog(request: Request, after: int = 0, level: str = "",
+                 q: str = "", limit: int = 500):
+    """App logs from the in-memory ring buffer (Dev-Log view). `after` enables
+    incremental live-tail; `level` is a minimum severity; `q` is free text.
+    `max_id` is the buffer's current head so a filtered poll still advances."""
+    buf = getattr(_svc(request), "logbuffer", None)
+    if buf is None:
+        return {"records": [], "max_id": 0}
+    recs = buf.snapshot(after=after, level=level or None, q=q or None,
+                        limit=min(limit, 1000))
+    return {"records": recs, "max_id": buf.max_id()}
+
+
+@router.post("/admin/api/devlog/clear")
+async def clear_devlog(request: Request):
+    buf = getattr(_svc(request), "logbuffer", None)
+    if buf is not None:
+        buf.clear()
+    return {"ok": True}
+
+
 @router.post("/admin/api/backends/test")
 async def test_backend(request: Request):
     """Cheap liveness probe of one backend: fetch its model list (free, no

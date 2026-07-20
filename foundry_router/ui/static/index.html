@@ -122,6 +122,14 @@
              -webkit-user-select:none; touch-action:none; }
   .step-btn:hover { background:var(--accent); color:#1a1206; }
   .step-btn:active { filter:brightness(.9); }
+  /* Dev-log rows: time / level / logger / message on one wrapping line, with an
+     expandable traceback spanning the full width below. */
+  .dev-rec { display:flex; flex-wrap:wrap; gap:8px; align-items:baseline;
+             padding:5px 2px; border-bottom:1px solid var(--line); font-size:13px; }
+  .dev-rec details, .dev-rec pre { flex-basis:100%; }
+  .dev-rec pre { background:var(--bg); border:1px solid var(--line); border-radius:5px;
+                 padding:8px; overflow:auto; max-height:340px; white-space:pre-wrap;
+                 word-break:break-word; margin:4px 0 2px; }
   /* -- Responsive: PC / tablet / phone ---------------------------------------- */
   @media (max-width: 900px) {
     header { flex-wrap:wrap; gap:4px 12px; padding:9px 12px; }
@@ -183,6 +191,7 @@ function toast(msg, isErr=false) {
   clearTimeout(t._h); t._h = setTimeout(() => t.style.display = "none", 3500);
 }
 const formatCtx = n => n >= 1000 ? Math.round(n / 1000) + 'K' : String(n);
+function debounce(fn, ms) { let t; return (...a) => { clearTimeout(t); t = setTimeout(() => fn(...a), ms); }; }
 const run = p => p.then(d => { toast("Saved"); render(); return d; })
                   .catch(e => toast(e.message, true));
 
@@ -199,7 +208,7 @@ const TABS = {
   "Backends":  tabBackends,  "Models":   tabModels,   "Personas": tabPersonas,
   "Tools":     tabTools,     "Guardrails": tabGuardrails, "MCP":  tabMCP,
   "Ollama":    tabOllama,   "Research": tabResearch,
-  "Usage Log": tabUsage,     "Events":   tabEvents,
+  "Usage Log": tabUsage,     "Events":   tabEvents,   "Dev Log": tabDevLog,
 };
 let current = "Backends";
 function render() {
@@ -1463,6 +1472,66 @@ async function initBranding() {
     try { await api("branding/logo", {method: "POST", body: {logo: null}}); setLogo(null); toast("Logo cleared"); }
     catch (e) { toast(e.message, true); }
   };
+}
+
+/* ----------------------------------------------------------------- devlog -- */
+async function tabDevLog() {
+  clearInterval(window._devTimer);
+  $("#main").innerHTML = `
+    <div class="row" style="justify-content:space-between;align-items:baseline">
+      <h2 style="margin-bottom:0">Dev log — application logs & tracebacks</h2>
+      <button class="act" id="dev-clear">Clear</button>
+    </div>
+    <p class="hint">Captured live from the app's logging (last ~800 records, in memory —
+      resets on restart). Errors include full tracebacks. Persistent routing/MCP history
+      is in the <b>Events</b> tab.</p>
+    <div class="row">
+      <label>min level</label>
+      <select id="dev-level"><option value="">all</option><option>INFO</option>
+        <option>WARNING</option><option>ERROR</option></select>
+      <input id="dev-q" size="30" placeholder="search message / logger / traceback…">
+      <label title="Auto-refresh every 2s, newest on top">live tail</label>
+      <input type="checkbox" id="dev-live">
+      <span id="dev-count" class="hint"></span>
+    </div>
+    <div id="dev-list"></div>`;
+  let after = 0;
+  const seen = new Map();                       // id -> record (accumulate + dedupe)
+  const list = $("#dev-list");
+  const levelCls = l => (l === "ERROR" || l === "CRITICAL") ? "bad" : l === "WARNING" ? "warn" : "ok";
+  const renderAll = () => {
+    const recs = [...seen.values()].sort((a, b) => b.id - a.id);   // newest first
+    list.innerHTML = recs.map(e => `<div class="dev-rec">
+      <span class="mono nw" style="color:var(--dim)">${esc(e.ts)}</span>
+      <span class="pill ${levelCls(e.level)}">${esc(e.level)}</span>
+      <span class="mono nw" style="color:var(--dim)">${esc(e.logger)}</span>
+      <span>${esc(e.message)}</span>
+      ${e.traceback ? `<details><summary>traceback</summary><pre class="mono">${esc(e.traceback)}</pre></details>` : ""}
+    </div>`).join("") || '<p class="hint">no matching log records</p>';
+    $("#dev-count").textContent = recs.length + " shown";
+  };
+  const poll = async reset => {
+    if (reset) { seen.clear(); after = 0; }
+    const level = $("#dev-level").value, q = $("#dev-q").value.trim();
+    const d = await api(`devlog?after=${after}&level=${encodeURIComponent(level)}&q=${encodeURIComponent(q)}`);
+    for (const e of d.records) seen.set(e.id, e);
+    after = Math.max(after, d.max_id || after);
+    renderAll();
+  };
+  $("#dev-level").onchange = () => poll(true).catch(e => toast(e.message, true));
+  $("#dev-q").oninput = debounce(() => poll(true).catch(() => {}), 300);
+  $("#dev-clear").onclick = async () => {
+    try { await api("devlog/clear", {method: "POST"}); poll(true); } catch (e) { toast(e.message, true); }
+  };
+  $("#dev-live").onchange = () => {
+    clearInterval(window._devTimer);
+    if ($("#dev-live").checked)
+      window._devTimer = setInterval(() => {
+        if (current !== "Dev Log") { clearInterval(window._devTimer); return; }
+        poll(false).catch(() => {});
+      }, 2000);
+  };
+  await poll(true);
 }
 
 initTheme();

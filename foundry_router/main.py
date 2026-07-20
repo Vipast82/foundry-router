@@ -33,6 +33,7 @@ from .facade import openai_router, router as facade_router
 from .guardrails import GuardrailEngine
 from .personas import PersonaStore
 from .pool.base import build_pool
+from .logbuffer import RingLogHandler
 from .pool.ollama_admin import OllamaAdmin
 from .registry.models_db import ModelRegistry
 from .registry.openrouter_ingest import poll_openrouter
@@ -53,6 +54,18 @@ class Services:
         self.config_store = config_store
         self.db = db
         cfg = config_store.config
+
+        # In-memory ring buffer of app logs (Dev-Log view). Attached to the root
+        # logger so it captures foundry + third-party tracebacks; uvicorn access
+        # spam is filtered out. Replace any prior instance so repeated app
+        # construction (tests) doesn't fan every record to stale handlers.
+        self.logbuffer = RingLogHandler(capacity=800)
+        self.logbuffer.setLevel(logging.INFO)
+        self.logbuffer.addFilter(lambda r: not r.name.startswith("uvicorn.access"))
+        root = logging.getLogger()
+        for h in [h for h in root.handlers if isinstance(h, RingLogHandler)]:
+            root.removeHandler(h)
+        root.addHandler(self.logbuffer)
 
         # One shared HTTP client: connection pooling for every backend, the
         # brain, telemetry, and OpenRouter. Long read timeout because local
