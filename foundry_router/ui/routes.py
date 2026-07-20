@@ -566,6 +566,33 @@ async def event_log(request: Request, limit: int = 200):
         "SELECT * FROM event_log ORDER BY id DESC LIMIT ?", (min(limit, 2000),))}
 
 
+_LOGO_KEY = "ui_logo"
+
+
+@router.get("/admin/api/branding")
+async def get_branding(request: Request):
+    """The custom header logo (a data: URI stored in the DB), or null."""
+    return {"logo": _svc(request).db.kv_get(_LOGO_KEY)}
+
+
+@router.post("/admin/api/branding/logo")
+async def set_branding_logo(request: Request):
+    """Store (data:image/... URI) or clear (logo=null) the header logo. Kept in
+    the DB kv so it survives restarts and needs no file mount. Size-guarded to
+    keep the row (and every /branding response) small."""
+    svc = _svc(request)
+    logo = (await request.json()).get("logo")
+    if logo is None:
+        svc.db.kv_del(_LOGO_KEY)
+        return {"ok": True, "logo": None}
+    if not isinstance(logo, str) or not logo.startswith("data:image/"):
+        return JSONResponse({"error": "logo must be a data:image/... URI"}, status_code=400)
+    if len(logo) > 900_000:   # ~640 KB image after base64 inflation
+        return JSONResponse({"error": "logo too large (max ~640 KB image)"}, status_code=400)
+    svc.db.kv_set(_LOGO_KEY, logo)
+    return {"ok": True}
+
+
 @router.post("/admin/api/usage/clear")
 async def clear_usage(request: Request):
     """Wipe the routed-request history. Records a single audit line in the
