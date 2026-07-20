@@ -109,6 +109,19 @@
   .tscroll { overflow-x:auto; -webkit-overflow-scrolling:touch; margin:6px 0 14px;
              max-width:100%; }
   .tscroll table { margin:0; }
+  /* Numeric steppers: every number input is wrapped (enhanceSteppers) into a
+     [-][value][+] control with hold-to-repeat, and still typeable. */
+  .stepper { display:inline-flex; align-items:stretch; border:1px solid var(--line);
+             border-radius:5px; overflow:hidden; background:var(--bg); vertical-align:middle; }
+  .stepper input[type="number"] { border:0; border-radius:0; text-align:center;
+             width:5.5em; background:transparent; -moz-appearance:textfield; margin:0; }
+  .stepper input[type="number"]::-webkit-outer-spin-button,
+  .stepper input[type="number"]::-webkit-inner-spin-button { -webkit-appearance:none; margin:0; }
+  .step-btn { border:0; background:var(--panel); color:var(--fg); cursor:pointer;
+             padding:0 11px; font-size:16px; line-height:1; user-select:none;
+             -webkit-user-select:none; touch-action:none; }
+  .step-btn:hover { background:var(--accent); color:#1a1206; }
+  .step-btn:active { filter:brightness(.9); }
   /* -- Responsive: PC / tablet / phone ---------------------------------------- */
   @media (max-width: 900px) {
     header { flex-wrap:wrap; gap:4px 12px; padding:9px 12px; }
@@ -198,7 +211,7 @@ function render() {
     nav.appendChild(b);
   }
   $("#main").innerHTML = "<p class='hint'>loading…</p>";
-  TABS[current]().then(wrapTables).catch(e => $("#main").innerHTML =
+  TABS[current]().then(postRender).catch(e => $("#main").innerHTML =
     `<p class="hint">failed to load: ${esc(e.message)}</p>`);
 }
 
@@ -214,6 +227,52 @@ function wrapTables() {
     w.appendChild(t);
   }
 }
+
+// Nudge a number input by one step within its min/max, firing input/change so
+// any live handler (e.g. a Save that reads .value) sees it.
+function stepValue(inp, dir) {
+  const step = parseFloat(inp.step) || 1;
+  const min = inp.min !== "" ? parseFloat(inp.min) : -Infinity;
+  const max = inp.max !== "" ? parseFloat(inp.max) : Infinity;
+  let v = parseFloat(inp.value);
+  if (isNaN(v)) v = 0;
+  v = Math.min(max, Math.max(min, +(v + dir * step).toFixed(6)));
+  inp.value = v;
+  inp.dispatchEvent(new Event("input", {bubbles: true}));
+  inp.dispatchEvent(new Event("change", {bubbles: true}));
+}
+// Press = one step; hold = ramp (after 400ms, every 80ms). Mouse + touch.
+function bindHold(btn, fn) {
+  let delay, repeat;
+  const start = e => {
+    e.preventDefault();
+    fn();
+    delay = setTimeout(() => { repeat = setInterval(fn, 80); }, 400);
+  };
+  const stop = () => { clearTimeout(delay); clearInterval(repeat); };
+  btn.addEventListener("mousedown", start);
+  btn.addEventListener("touchstart", start, {passive: false});
+  ["mouseup", "mouseleave", "touchend", "touchcancel"].forEach(ev => btn.addEventListener(ev, stop));
+}
+// One place, like wrapTables: turn every number input into a [-][value][+]
+// stepper. The input element (and its id) is preserved, so every existing
+// read-by-id save handler keeps working.
+function enhanceSteppers() {
+  for (const inp of $("#main").querySelectorAll('input[type="number"]')) {
+    if (inp.closest(".stepper")) continue;
+    const wrap = document.createElement("span");
+    wrap.className = "stepper";
+    inp.replaceWith(wrap);
+    const mk = (txt, dir) => {
+      const b = document.createElement("button");
+      b.type = "button"; b.className = "step-btn"; b.textContent = txt; b.tabIndex = -1;
+      bindHold(b, () => stepValue(inp, dir));
+      return b;
+    };
+    wrap.append(mk("−", -1), inp, mk("+", +1));
+  }
+}
+function postRender() { wrapTables(); enhanceSteppers(); }
 
 /* -------------------------------------------------------------- backends -- */
 async function tabBackends() {
