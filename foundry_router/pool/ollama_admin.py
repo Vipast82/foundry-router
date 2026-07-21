@@ -35,6 +35,78 @@ _STREAM_TIMEOUT = httpx.Timeout(connect=5.0, read=None, write=30.0, pool=5.0)
 _QUICK_TIMEOUT = httpx.Timeout(connect=5.0, read=60.0, write=30.0, pool=5.0)
 
 
+def _coerce(v: str):
+    v = v.strip().strip('"')
+    try:
+        return int(v)
+    except ValueError:
+        pass
+    try:
+        return float(v)
+    except ValueError:
+        return v
+
+
+def parse_modelfile(text: str) -> dict:
+    """Translate a Modelfile into the STRUCTURED fields modern Ollama's
+    /api/create wants (from / system / template / parameters / adapters).
+
+    Modern Ollama removed the legacy raw `modelfile` request field — a create
+    with only that now 400s with "neither 'from' or 'files' was specified". So
+    a pasted Modelfile has to be parsed. Handles FROM, PARAMETER (numeric
+    coercion; repeated keys -> list, e.g. stop), SYSTEM / TEMPLATE / LICENSE
+    (single line or triple-quoted multi-line), and ADAPTER; other directives
+    are ignored for pseudo-model creation.
+    """
+    out: dict = {}
+    params: dict = {}
+    lines = text.splitlines()
+    i, n = 0, len(lines)
+    while i < n:
+        line = lines[i].strip()
+        i += 1
+        if not line or line.startswith("#"):
+            continue
+        parts = line.split(None, 1)
+        directive = parts[0].upper()
+        rest = parts[1].strip() if len(parts) > 1 else ""
+        if directive == "FROM":
+            out["from"] = rest
+        elif directive == "PARAMETER":
+            kv = rest.split(None, 1)
+            if len(kv) == 2:
+                key, val = kv[0], _coerce(kv[1])
+                if key in params:
+                    cur = params[key]
+                    params[key] = cur + [val] if isinstance(cur, list) else [cur, val]
+                else:
+                    params[key] = val
+        elif directive in ("SYSTEM", "TEMPLATE", "LICENSE"):
+            if rest.startswith('"""'):
+                body = rest[3:]
+                if body.endswith('"""') and len(body) >= 3:
+                    value = body[:-3]
+                else:
+                    collected = [body]
+                    while i < n:
+                        ln = lines[i]
+                        i += 1
+                        if ln.rstrip().endswith('"""'):
+                            collected.append(ln.rstrip()[:-3])
+                            break
+                        collected.append(ln)
+                    value = "\n".join(collected)
+                value = value.strip("\n")
+            else:
+                value = rest.strip('"')
+            out[directive.lower()] = value
+        elif directive == "ADAPTER":
+            out.setdefault("adapters", []).append(rest)
+    if params:
+        out["parameters"] = params
+    return out
+
+
 class OllamaAdmin:
     def __init__(self, client: httpx.AsyncClient, pool: Any, db: Database):
         self.client = client
@@ -146,18 +218,24 @@ class OllamaAdmin:
                      system: str = "", parameters: Optional[dict] = None,
                      modelfile: str = "") -> str:
         """Create a model (a 'pseudo-model' with a baked-in system prompt /
-        params) from a base model, or from a raw Modelfile for power users."""
+        params) from a base model, or from a raw Modelfile. Always sends the
+        STRUCTURED create fields — a raw Modelfile is parsed into them, since
+        modern Ollama no longer accepts the legacy `modelfile` field."""
         self._url(backend)
-        payload: dict[str, Any] = {"model": model, "name": model, "stream": True}
         if modelfile.strip():
-            payload["modelfile"] = modelfile           # legacy/raw path
+            fields = parse_modelfile(modelfile)        # raw Modelfile -> structured
         else:
-            if from_model:
-                payload["from"] = from_model
+            fields = {}
+            if from_model.strip():
+                fields["from"] = from_model.strip()
             if system.strip():
-                payload["system"] = system
+                fields["system"] = system
             if parameters:
-                payload["parameters"] = parameters
+                fields["parameters"] = parameters
+        if not (fields.get("from") or fields.get("files") or fields.get("adapters")):
+            raise ValueError("create needs a base model — a FROM line in the "
+                             "Modelfile, or the 'from (base)' field")
+        payload: dict[str, Any] = {"model": model, "name": model, "stream": True, **fields}
         key = self._new_job(backend, "create", model)
         asyncio.ensure_future(self._stream(
             key, "POST", f"{self._url(backend)}/api/create", payload))

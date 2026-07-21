@@ -1094,7 +1094,7 @@ async function tabOllama() {
         <textarea id="oll-cr-file" rows="4" placeholder="FROM llama3.1:8b
 SYSTEM You are a helpful assistant."></textarea></details>
       <div class="row"><button class="act primary" id="oll-cr-btn">Create</button>
-        <span class="hint">Bakes a system prompt/params into a named model. Ollama's create API varies by version — if 'from' fails, use a raw Modelfile.</span></div>
+        <span class="hint">Bakes a system prompt/params into a named model. A raw Modelfile is parsed into Ollama's structured create fields (FROM → from, SYSTEM, PARAMETER…). Needs a FROM/base.</span></div>
     </div>`;
 
   $("#oll-be").onchange = e => { window._ollamaBackend = e.target.value; render(); };
