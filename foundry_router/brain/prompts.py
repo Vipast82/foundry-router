@@ -84,7 +84,21 @@ def find_pending_paid(db, messages: list[dict]) -> Optional[dict]:
         return None
 
 
-def build_worker_tool_prompt(client_system: Optional[str] = None) -> str:
+# Output-style steering (quality spec Phase 5): the one BEHAVIORAL piece of
+# client-aware profiles. plain_text serves messaging-platform bridges
+# (Hermes/OpenClaw) that can't render HTML at all — everything else is
+# documentation metadata (personas.client_compat), not formatting code.
+PLAIN_TEXT_STYLE = (
+    "OUTPUT STYLE — PLAIN TEXT: this persona serves clients (messaging-"
+    "platform bridges) that cannot render HTML or rich markup. Ensure every "
+    "answer — and every worker prompt you write — calls for clean plain text "
+    "or simple markdown: no HTML/SVG, no wide tables, code blocks only when "
+    "code itself is the answer. For rich or visual content, describe it "
+    "plainly or reference a generated file/URL instead of embedding markup.")
+
+
+def build_worker_tool_prompt(client_system: Optional[str] = None,
+                             output_style: Optional[str] = None) -> str:
     """System prompt for worker-side tool calling: the selected worker owns the
     tool loop for this request (search, read results, decide, repeat) and
     produces the final answer itself, instead of the brain doing that work and
@@ -109,6 +123,8 @@ def build_worker_tool_prompt(client_system: Optional[str] = None) -> str:
         "Be efficient: only call tools that genuinely help, and prefer to finish "
         "in as few tool calls as possible.",
     ]
+    if output_style == "plain_text":
+        parts.append(PLAIN_TEXT_STYLE)
     if client_system and client_system.strip():
         parts.append("The user's workspace provided these instructions; honor "
                      f"them:\n{client_system[:4000]}")
@@ -484,6 +500,9 @@ them. When search snippets aren't enough to answer accurately, dispatch a worker
 to OPEN the top result and read its full content — and for that, prefer a crawler \
 tool (crawl4ai markdown/crawl) over a plain URL fetch: crawlers render JavaScript \
 and are far less likely to be blocked (a bare fetch often 403s on bot detection)."""]
+
+    if p.get("output_style") == "plain_text":
+        parts.append("\n" + PLAIN_TEXT_STYLE)
 
     if client_system:
         # Workspace/client system instructions can't appear as a second

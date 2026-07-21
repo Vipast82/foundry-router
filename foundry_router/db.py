@@ -113,6 +113,60 @@ STARTER_PERSONAS = [
 ]
 
 
+# Baseline client-compatibility notes (quality spec Phase 5) — documentation
+# metadata, not behavior. One persona serves multiple clients; these record
+# HOW each client experiences it, so nobody forks a persona just to write
+# this down. Freely editable per persona in the web UI afterward.
+_ANYTHINGLLM_AGENT_NOTE = (
+    "no live HTML render (no canvas yet) — rich output shows as code blocks. "
+    "Built-in Document Generation (PDF/DOCX/XLSX/PPTX) and Filesystem agent "
+    "skills work in @agent mode, but depend on the routed model's tool-calling "
+    "reliability (see the Models tab counters). @agent mode also brings its own "
+    "web tools, bypassing Foundry's MCP servers (requests log as 'direct').")
+
+STARTER_CLIENT_COMPAT = {
+    "Foundry-Chat": {
+        "openwebui": "HTML/SVG/JS code blocks render as live Artifacts natively "
+                     "— no special prompting needed.",
+        "anythingllm": _ANYTHINGLLM_AGENT_NOTE,
+        "messaging-bridges": "for Hermes/OpenClaw-style bridges prefer a persona "
+                             "with output_style=plain_text — chat platforms "
+                             "can't render HTML.",
+    },
+    "Foundry-Coding": {
+        "openwebui": "generated HTML/SVG/JS previews live as Artifacts.",
+        "anythingllm": "code shows as standard code blocks; no live preview.",
+        "kilo-cline": "agent loops send their own tool definitions — requests "
+                      "direct-dispatch to one model per persona policy.",
+    },
+    "Foundry-Research": {
+        "openwebui": "works as a normal chat model; sources cited as links.",
+        "anythingllm": _ANYTHINGLLM_AGENT_NOTE,
+    },
+    "Foundry-RAG": {
+        "anythingllm": "designed for workspace RAG: AnythingLLM injects "
+                       "retrieved context into the system prompt; Foundry "
+                       "relays it to workers.",
+        "openwebui": "pairs with Open WebUI's knowledge collections the same way.",
+    },
+    "Foundry-Vision": {
+        "openwebui": "attach images in chat; routed to vision-tagged models.",
+        "anythingllm": "image attachments supported in chat mode.",
+    },
+    "Foundry-Creative": {
+        "openwebui": "plain prose output — renders everywhere.",
+        "messaging-bridges": "suitable as-is for plain-text bridges; set "
+                             "output_style=plain_text to enforce it.",
+    },
+    "Foundry-Agent": {
+        "anythingllm": _ANYTHINGLLM_AGENT_NOTE,
+        "messaging-bridges": "for Hermes/OpenClaw bridges set "
+                             "output_style=plain_text — tool results and "
+                             "answers arrive as clean text.",
+    },
+}
+
+
 class Database:
     def __init__(self, path: Path | str):
         self.path = str(path)
@@ -177,6 +231,16 @@ class Database:
             ("personas", "review_enabled", "INTEGER DEFAULT 0"),
             ("personas", "review_model", "TEXT"),
             ("personas", "review_prefilter", "INTEGER DEFAULT 1"),
+            # Client-aware output profiles (quality spec Phase 5): NOT a
+            # formatter — client_compat is documentation metadata (JSON object
+            # client -> note) surfaced in the GUI so it's visible which
+            # clients a persona is tuned for, instead of forking a persona
+            # per client. output_style is the one behavioral knob:
+            # "plain_text" steers workers to markdown/plain output for
+            # messaging-bridge clients (Hermes/OpenClaw) that can't render
+            # HTML at all.
+            ("personas", "client_compat", "TEXT"),
+            ("personas", "output_style", "TEXT"),
         ]
         with self._lock:
             for table, column, ddl in added:
@@ -209,6 +273,7 @@ class Database:
                 )
             self._conn.commit()
         self._seed_upgrades()
+        self._seed_client_compat()
 
     def _seed_upgrades(self) -> None:
         """One-time data upgrades for EXISTING deployments (INSERT OR IGNORE
@@ -231,6 +296,21 @@ class Database:
         self.kv_set("persona_seed_v2", utcnow())
         self.log_event("info", "main",
                        "persona seed v2 applied (pipeline mode, outcome-judged escalation)")
+
+    def _seed_client_compat(self) -> None:
+        """Baseline client-compat notes (Phase 5), once, and only into rows
+        that don't already carry notes — the field is the operator's to edit."""
+        if self.kv_get("persona_seed_v3_compat"):
+            return
+        now = utcnow()
+        for name, compat in STARTER_CLIENT_COMPAT.items():
+            self.execute(
+                "UPDATE personas SET client_compat=?, updated_at=? "
+                "WHERE virtual_name=? AND (client_compat IS NULL OR client_compat='')",
+                (json.dumps(compat), now, name))
+        self.kv_set("persona_seed_v3_compat", now)
+        self.log_event("info", "main",
+                       "persona seed v3 applied (baseline client-compat notes)")
 
     # -- generic helpers --------------------------------------------------------
 
