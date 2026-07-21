@@ -929,7 +929,10 @@ class AgentRunner:
             return result.content or "(model returned empty output)", False
 
         # tool.kind == "mcp"
-        emit("think", f"Calling MCP tool {tool.server}/{tool.mcp_tool}...")
+        ex_code = self.tool_registry.mcp.executes_code(tool.server)
+        emit("think", (f"⚠ Executing code via {tool.server}/{tool.mcp_tool} "
+                       f"(sandboxed)..." if ex_code
+                       else f"Calling MCP tool {tool.server}/{tool.mcp_tool}..."))
         t0 = time.monotonic()
         try:
             out = await self._with_heartbeat(
@@ -943,7 +946,8 @@ class AgentRunner:
             # MCP-server failures diagnosable separately from backend/model
             # failures — same layer that logs backend_pool warnings.
             ctx.logger.record_tool_call(tool.mcp_tool, tool.server, dur_ms,
-                                        ok=False, error=detail)
+                                        ok=False, error=detail, arguments=args,
+                                        executes_code=ex_code)
             self.model_registry.db.log_event(
                 "warning", "mcp",
                 f"tool {tool.server}/{tool.mcp_tool} failed after {dur_ms / 1000:.1f}s",
@@ -951,7 +955,8 @@ class AgentRunner:
             emit("think", f"MCP tool {name} failed after {dur_ms / 1000:.1f}s: {detail}")
             return f"ERROR: MCP tool {name} failed: {detail}", False
         dur_ms = int((time.monotonic() - t0) * 1000)
-        ctx.logger.record_tool_call(tool.mcp_tool, tool.server, dur_ms, ok=True)
+        ctx.logger.record_tool_call(tool.mcp_tool, tool.server, dur_ms, ok=True,
+                                    arguments=args, executes_code=ex_code)
         emit("think", f"MCP tool {tool.server}/{tool.mcp_tool} completed in "
                       f"{dur_ms / 1000:.1f}s ({len(out)} chars).")
         flags["last_tool_result"] = out  # media artifacts (URLs) forward via use_last_result
@@ -1524,7 +1529,11 @@ class AgentRunner:
                             f"({tc['name']!r})"):
                         yield ev
                     return
-                yield AgentEvent("think", f"{worker} → {tool.server}/{tool.mcp_tool}...")
+                ex_code = self.tool_registry.mcp.executes_code(tool.server)
+                yield AgentEvent("think",
+                                 (f"⚠ {worker} → {tool.server}/{tool.mcp_tool} "
+                                  f"(executing code, sandboxed)..." if ex_code
+                                  else f"{worker} → {tool.server}/{tool.mcp_tool}..."))
                 t0 = time.monotonic()
                 try:
                     out = await self.tool_registry.mcp.call_tool(
@@ -1533,7 +1542,8 @@ class AgentRunner:
                     dur = int((time.monotonic() - t0) * 1000)
                     ctx.logger.record_tool_call(tc["name"], tool.server, dur,
                                                 ok=False, error=describe_exception(e),
-                                                caller=worker)
+                                                caller=worker, arguments=tc["arguments"],
+                                                executes_code=ex_code)
                     self.model_registry.record_tool_call(worker, ok=False)
                     async for ev in hand_to_brain(
                             f"{worker}'s {tool.server} call failed "
@@ -1542,7 +1552,8 @@ class AgentRunner:
                     return
                 dur = int((time.monotonic() - t0) * 1000)
                 ctx.logger.record_tool_call(tc["name"], tool.server, dur, ok=True,
-                                            caller=worker)
+                                            caller=worker, arguments=tc["arguments"],
+                                            executes_code=ex_code)
                 self.model_registry.record_tool_call(worker, ok=True)
                 yield AgentEvent("think", f"{tool.server}/{tool.mcp_tool} returned "
                                           f"{len(out)} chars in {dur}ms.")

@@ -513,7 +513,13 @@ async def upsert_mcp(request: Request):
              "pace_seconds": float(body.get("pace_seconds") or 0.0),
              "rate_limit_retries": int(body.get("rate_limit_retries") or 3),
              "rate_limit_backoff_seconds": float(
-                 body.get("rate_limit_backoff_seconds") or 30.0)}
+                 body.get("rate_limit_backoff_seconds") or 30.0),
+             # Code-execution flag + force-merged call defaults (code-sandbox
+             # spec). Both operator-controlled; default to off/empty so a
+             # normal server is unchanged.
+             "executes_code": bool(body.get("executes_code")),
+             "call_defaults": body.get("call_defaults")
+                              if isinstance(body.get("call_defaults"), dict) else {}}
     if body.get("headers"):
         entry["headers"] = body["headers"]
 
@@ -732,6 +738,19 @@ async def insights(request: Request, days: int = 7):
     from ..insights import generate_digest, render_report
     digest = generate_digest(_svc(request).db, days=max(1, min(days, 90)))
     return {"digest": digest, "report": render_report(digest)}
+
+
+@router.get("/admin/api/tool_calls")
+async def tool_calls(request: Request, limit: int = 100, executed_code: int = 0):
+    """Durable per-event tool-call audit (tool_call_log). With executed_code=1,
+    only code-execution calls — each carrying the actual submitted code — the
+    strongest audit trail in the system, per the code-sandbox spec."""
+    svc = _svc(request)
+    where = "WHERE executed_code=1" if executed_code else ""
+    rows = svc.db.query(
+        f"SELECT * FROM tool_call_log {where} ORDER BY id DESC LIMIT ?",
+        (min(limit, 500),))
+    return {"tool_calls": rows}
 
 
 @router.get("/admin/api/events")

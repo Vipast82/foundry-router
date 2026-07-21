@@ -206,6 +206,35 @@ mcp_servers: []
 #    url: http://192.168.1.40:8972/mcp
 #    transport: streamable-http
 #
+#  Code execution sandbox (Code Sandbox MCP) — the ONLY tool that runs arbitrary
+#  code, so it is the highest-risk entry in this file. It registers exactly like
+#  any other server; the only extra switches are `executes_code` and
+#  `call_defaults`. Run it on the SAME host as your other MCP workloads
+#  (general-ai), never on a host holding live cloud credentials. Enable it
+#  per-persona via the persona editor's "preferred MCP servers" checkbox — it is
+#  OFF for every persona until you check it. Hard containment (fork-bomb kill,
+#  memory cap, filesystem + network isolation) is enforced by the sandbox
+#  CONTAINER on that host — keep the container's --memory/--cpus/--network limits
+#  aligned with the values here. See docs/CODE_SANDBOX.md for the containment
+#  verification tests to run against the live sandbox.
+#  - name: code-sandbox
+#    url: http://192.168.0.114:8975/mcp   # general-ai; NOT victor-ai (Meridian OAuth lives there)
+#    transport: streamable-http
+#    timeout_seconds: 30                  # wall-clock kill Foundry enforces (asyncio.wait_for)
+#    executes_code: true                  # full-code audit trail + persona ⚠ badge + these controls
+#    call_defaults:                       # force-merged OVER the model's args (config wins)
+#      network: false                     # a model cannot enable network itself
+#      cpus: 1
+#      memory_mb: 512
+#  A SECOND instance (e.g. one allowed network for a specific persona) is just
+#  another entry on a different port — no code change:
+#  - name: code-sandbox-net
+#    url: http://192.168.0.114:8976/mcp
+#    transport: streamable-http
+#    timeout_seconds: 60
+#    executes_code: true
+#    call_defaults: {network: true, cpus: 2, memory_mb: 1024}
+#
 #  Media generation (see contrib/mcp-wrappers/README.md) — set generous
 #  per-server timeouts; generation runs far longer than a text tool call:
 #  - name: comfyui                 # community server, e.g. joenorton/comfyui-mcp-server

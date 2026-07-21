@@ -123,6 +123,36 @@ class MCPManager:
     def set_servers(self, servers: list[MCPServerConfig]) -> None:
         self.servers = {s.name: s for s in servers}
 
+    def executes_code(self, server: str) -> bool:
+        """Whether this server is operator-declared as executing code — drives
+        the full-code audit trail and the persona/UI danger flag. Unknown
+        server => False (a call to a vanished server is handled elsewhere)."""
+        cfg = self.servers.get(server)
+        return bool(cfg and getattr(cfg, "executes_code", False))
+
+    def _apply_call_defaults(self, server: str, arguments: dict) -> dict:
+        """Force-merge a server's call_defaults OVER the model-provided
+        arguments — operator config is authoritative, so a model cannot flip a
+        safety setting (e.g. network) the operator locked. On an executes_code
+        server, any key the config actually overrode is logged as a security
+        event: a model trying to widen its own sandbox is exactly what the
+        audit trail exists to surface."""
+        cfg = self.servers.get(server)
+        defaults = dict(getattr(cfg, "call_defaults", None) or {})
+        if not defaults:
+            return arguments
+        overridden = {k: (arguments.get(k), v) for k, v in defaults.items()
+                      if k in arguments and arguments[k] != v}
+        if overridden and self.executes_code(server):
+            self.db.log_event(
+                "warning", "mcp",
+                f"sandbox policy enforced on {server}: config overrode "
+                f"model-requested argument(s) "
+                f"{', '.join(sorted(overridden))}",
+                json.dumps({k: {"requested": req, "forced": forced}
+                            for k, (req, forced) in overridden.items()})[:1000])
+        return {**arguments, **defaults}
+
     # -- per-server auth secret (DB-backed, UI-set) --------------------------------
 
     def set_secret(self, server: str, token: str, header: str = "Authorization") -> None:
@@ -241,9 +271,12 @@ class MCPManager:
         retries = max(1, getattr(cfg, "rate_limit_retries", 3) if cfg else 3)
         backoff = getattr(cfg, "rate_limit_backoff_seconds", 30.0) if cfg else 30.0
 
+        # Operator config wins over the model (safety gate for sandboxes).
+        effective_args = self._apply_call_defaults(server, arguments or {})
+
         async def _call() -> str:
             async with self._session(server) as session:
-                result = await session.call_tool(tool, arguments)
+                result = await session.call_tool(tool, effective_args)
                 texts = []
                 for block in getattr(result, "content", []) or []:
                     text = getattr(block, "text", None)

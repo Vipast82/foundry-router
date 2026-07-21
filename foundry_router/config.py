@@ -234,6 +234,21 @@ class MCPServerConfig(BaseModel):
     pace_seconds: float = 0.0                    # min gap between calls to this server (0 = off)
     rate_limit_retries: int = 3                  # extra attempts on a 429 before giving up
     rate_limit_backoff_seconds: float = 30.0     # escalating backoff between those retries
+    # Code-execution flag (code-sandbox spec). Purely operator-declared — there
+    # is NO name-based special-casing anywhere; any server the operator marks
+    # gets: the full-code audit trail (arguments captured in tool_call_log), a
+    # persona "code execution" badge, and the sandbox controls in the MCP
+    # editor. Default false keeps every existing/normal server unchanged.
+    executes_code: bool = False
+    # Arguments FORCE-MERGED into every tool call to this server, config winning
+    # over whatever the model passed. Generic by design — the operator supplies
+    # whatever keys THIS sandbox expects (cpus/memory/network/etc.), so no wire
+    # vocabulary is baked into Foundry, and a second sandbox instance is just
+    # another entry with different values. For a code sandbox this is the safety
+    # gate: a model literally cannot flip network on if the operator set it off
+    # here. The GUI's CPU/memory/network steppers are a convenience editor over
+    # these keys; anything else can be set as raw JSON.
+    call_defaults: dict[str, Any] = Field(default_factory=dict)
 
 
 class ToolSyncConfig(BaseModel):

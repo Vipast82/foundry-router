@@ -207,7 +207,12 @@ CREATE TABLE IF NOT EXISTS tool_call_log (
   tool TEXT,
   ok INTEGER,
   duration_ms INTEGER,
-  error TEXT
+  error TEXT,
+  arguments TEXT,                   -- JSON of the call's arguments. For a code-
+                                    -- execution server this captures the actual
+                                    -- submitted code — the best audit trail in
+                                    -- the system, per the code-sandbox spec.
+  executed_code INTEGER DEFAULT 0   -- 1 = this call ran on an executes_code server
 );
 
 CREATE INDEX IF NOT EXISTS idx_tool_call_log_ts ON tool_call_log(ts);

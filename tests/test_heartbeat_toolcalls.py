@@ -38,6 +38,9 @@ class FakeMCP:
     def __init__(self, fail=False):
         self.fail = fail
 
+    def executes_code(self, server):
+        return False
+
     async def call_tool(self, server, tool, arguments):
         if self.fail:
             raise RuntimeError("boom")
