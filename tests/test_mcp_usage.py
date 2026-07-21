@@ -49,3 +49,42 @@ def test_pace_seconds_survives_upsert(client):
                 json={"name": "searxng", "url": "http://x/mcp", "pace_seconds": 3})
     s = {x["name"]: x for x in client.get("/admin/api/mcp_servers").json()["servers"]}["searxng"]
     assert s["pace_seconds"] == 3.0                  # not dropped by the endpoint
+
+
+# -- benign SSE-teardown noise suppression ----------------------------------------
+
+def _sse_record(exc: BaseException):
+    """A log record shaped like the SDK's 'Error parsing SSE message' emit."""
+    import logging
+    return logging.LogRecord(
+        name="mcp.client.streamable_http", level=logging.ERROR,
+        pathname="streamable_http.py", lineno=158,
+        msg="Error parsing SSE message", args=(),
+        exc_info=(type(exc), exc, None))
+
+
+def test_sse_teardown_race_is_suppressed(tmp_path):
+    import logging
+    import anyio
+    _mgr(tmp_path)                                    # installs the filter
+    sdk_logger = logging.getLogger("mcp.client.streamable_http")
+    # the benign per-call teardown race is dropped (filter → falsy)...
+    assert not sdk_logger.filter(_sse_record(anyio.BrokenResourceError()))
+    assert not sdk_logger.filter(_sse_record(anyio.ClosedResourceError()))
+    # ...but a genuine parse/other error on the same logger still surfaces
+    # (Logger.filter returns the record itself on pass, which is truthy)
+    assert sdk_logger.filter(_sse_record(ValueError("bad json")))
+    # and a record with no exception (session-id info line) is untouched
+    plain = logging.LogRecord("mcp.client.streamable_http", logging.INFO,
+                              "x", 1, "Received session ID: abc", (), None)
+    assert sdk_logger.filter(plain)
+
+
+def test_sse_filter_installed_once(tmp_path):
+    import logging
+    from foundry_router.tools.mcp_client import _SSE_FILTER_MARK
+    _mgr(tmp_path)
+    _mgr(tmp_path)                                    # second construction
+    sdk_logger = logging.getLogger("mcp.client.streamable_http")
+    marked = [f for f in sdk_logger.filters if getattr(f, _SSE_FILTER_MARK, False)]
+    assert len(marked) == 1                           # idempotent, no pile-up
