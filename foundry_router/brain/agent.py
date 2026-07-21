@@ -1402,7 +1402,8 @@ class AgentRunner:
                 except Exception as e:
                     dur = int((time.monotonic() - t0) * 1000)
                     ctx.logger.record_tool_call(tc["name"], tool.server, dur,
-                                                ok=False, error=describe_exception(e))
+                                                ok=False, error=describe_exception(e),
+                                                caller=worker)
                     self.model_registry.record_tool_call(worker, ok=False)
                     async for ev in hand_to_brain(
                             f"{worker}'s {tool.server} call failed "
@@ -1410,7 +1411,8 @@ class AgentRunner:
                         yield ev
                     return
                 dur = int((time.monotonic() - t0) * 1000)
-                ctx.logger.record_tool_call(tc["name"], tool.server, dur, ok=True)
+                ctx.logger.record_tool_call(tc["name"], tool.server, dur, ok=True,
+                                            caller=worker)
                 self.model_registry.record_tool_call(worker, ok=True)
                 yield AgentEvent("think", f"{tool.server}/{tool.mcp_tool} returned "
                                           f"{len(out)} chars in {dur}ms.")

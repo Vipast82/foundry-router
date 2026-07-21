@@ -23,12 +23,37 @@ import uuid
 from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 
+from ..insights import normalize_rating, record_feedback
 from ..pool.base import AllBackendsFailed
 from . import translate as tr
 from .ollama_api import (_agent_events_to_chat_chunks, _build_ctx,
                         _canonical_messages, _last_user_text, _svc)
 
 router = APIRouter()
+
+
+@router.post("/v1/feedback")
+async def feedback(request: Request) -> JSONResponse:
+    """Generic response-feedback ingest (quality-tracking spec Phase 1).
+    Clients don't push thumbs to an Ollama/OpenAI-compatible backend natively,
+    so this is the wire-in point for anything that CAN call out (an Open WebUI
+    Function/filter, a script, curl). Body: {"rating": "up"|"down"|+1|-1,
+    "persona"?: str, "message"?: str (the user prompt, for request matching),
+    "comment"?: str}. Matching to a logged request is best-effort — unmatched
+    feedback still counts toward the persona's trend."""
+    body = await request.json()
+    rating = normalize_rating(body.get("rating"))
+    if rating is None:
+        return JSONResponse(
+            {"error": {"message": "rating must be up/down/+1/-1",
+                       "type": "invalid_request_error", "code": "bad_rating"}},
+            status_code=400)
+    out = record_feedback(
+        _svc(request).db, rating,
+        persona=(body.get("persona") or body.get("model") or None),
+        comment=str(body.get("comment") or ""),
+        message=body.get("message"), source="api")
+    return JSONResponse({"ok": True, **out})
 
 
 def _now() -> int:

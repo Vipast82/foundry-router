@@ -1389,6 +1389,13 @@ async function tabUsage() {
         t.error ? ` <span class="err">— ${esc(t.error)}</span>` : ""}</div>`).join("")}</div>
       </details>`;
   };
+  // Thumbs feedback (quality tracking Phase 1): rate any routed request from
+  // the router itself, regardless of which client served the conversation.
+  const fbCell = r => `<span class="nw">
+    <button class="act" style="padding:2px 6px${r.feedback === 1 ? ";outline:2px solid var(--ok, #3a4)" : ""}"
+      title="thumbs up" onclick="sendFeedback(${r.id}, 1)">👍</button>
+    <button class="act" style="padding:2px 6px${r.feedback === -1 ? ";outline:2px solid var(--bad, #a43)" : ""}"
+      title="thumbs down" onclick="sendFeedback(${r.id}, -1)">👎</button></span>`;
   const rows = reqs.map(r => `<tr>
     <td class="mono nw">${esc((r.ts || "").slice(0, 19))}</td>
     <td class="nw">${esc(r.persona || r.client_model)}</td>
@@ -1401,6 +1408,7 @@ async function tabUsage() {
     <td>${r.est_cost_usd ? "$" + r.est_cost_usd.toFixed(4) : ""}</td>
     <td>${(r.guardrail_events || []).length ? '<span class="pill warn">' + (r.guardrail_events || []).length + "</span>" : ""}</td>
     <td><span class="pill ${r.status === "ok" ? "ok" : r.status === "error" ? "bad" : "warn"}">${esc(r.status)}</span></td>
+    <td>${fbCell(r)}</td>
     </tr>`).join("");
   $("#main").innerHTML = `
     ${quotaCard(q)}
@@ -1414,7 +1422,17 @@ async function tabUsage() {
       Foundry's own MCP servers that request exercised — expand a badge for the per-call trail. A
       <b>direct · client tools</b> row bypassed Foundry's tools entirely.</p>
     <table><tr><th>time (UTC)</th><th>persona</th><th>mode</th><th>request</th>
-    <th>model(s)</th><th>tools (MCP)</th><th>steps</th><th>time</th><th>cost</th><th>guard</th><th>status</th></tr>${rows}</table>`;
+    <th>model(s)</th><th>tools (MCP)</th><th>steps</th><th>time</th><th>cost</th><th>guard</th><th>status</th><th title="Rate this response — feeds the insight digest and per-persona quality trends">rate</th></tr>${rows}</table>`;
+}
+
+// Thumbs feedback from the Usage tab (quality tracking Phase 1). Re-render so
+// the highlighted state reflects what the server now has on record.
+async function sendFeedback(requestLogId, rating) {
+  try {
+    await api("feedback", {method: "POST", body: {request_log_id: requestLogId, rating}});
+    toast(rating > 0 ? "Recorded 👍" : "Recorded 👎");
+    render();
+  } catch (e) { toast(e.message, true); }
 }
 
 /* ---------------------------------------------------------------- events -- */
@@ -1482,6 +1500,21 @@ async function initBranding() {
 async function tabDevLog() {
   clearInterval(window._devTimer);
   $("#main").innerHTML = `
+    <div class="card">
+      <div class="row" style="justify-content:space-between;align-items:baseline">
+        <h2 style="margin-top:0;margin-bottom:0">Insight digest — quality & reliability patterns</h2>
+        <span class="row" style="gap:6px">
+          <select id="ins-days"><option value="1">last 24h</option>
+            <option value="7" selected>last 7 days</option>
+            <option value="30">last 30 days</option></select>
+          <button class="act primary" id="ins-run">Generate</button>
+        </span>
+      </div>
+      <p class="hint">Statistical summary per persona: feedback trends, recurring guardrail/error
+        types, tool-call reliability by caller model, review-pass outcomes. Numbers only —
+        you decide what to act on; low-sample figures are flagged.</p>
+      <pre id="ins-report" class="mono" style="white-space:pre-wrap;display:none"></pre>
+    </div>
     <div class="row" style="justify-content:space-between;align-items:baseline">
       <h2 style="margin-bottom:0">Dev log — application logs & tracebacks</h2>
       <button class="act" id="dev-clear">Clear</button>
@@ -1521,6 +1554,14 @@ async function tabDevLog() {
     for (const e of d.records) seen.set(e.id, e);
     after = Math.max(after, d.max_id || after);
     renderAll();
+  };
+  $("#ins-run").onclick = async () => {
+    const pre = $("#ins-report");
+    pre.style.display = "block"; pre.textContent = "generating…";
+    try {
+      const d = await api(`insights?days=${$("#ins-days").value}`);
+      pre.textContent = d.report;
+    } catch (e) { pre.textContent = "digest failed: " + e.message; }
   };
   $("#dev-level").onchange = () => poll(true).catch(e => toast(e.message, true));
   $("#dev-q").oninput = debounce(() => poll(true).catch(() => {}), 300);
