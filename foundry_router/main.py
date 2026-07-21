@@ -37,6 +37,7 @@ from .logbuffer import RingLogHandler
 from .pool.ollama_admin import OllamaAdmin
 from .registry.models_db import ModelRegistry
 from .registry.openrouter_ingest import poll_openrouter
+from .evalharness import EvalHarness, ensure_seed as ensure_eval_seed
 from .registry.research_agent import ResearchAgent
 from .semcache import SemanticCache
 from .tools.mcp_client import MCPManager
@@ -92,6 +93,9 @@ class Services:
                                  self.registry, self.guardrails, self.meridian_usage,
                                  research=self.research)
         self.semcache = SemanticCache(cfg.semantic_cache, self.http, db)
+        ensure_eval_seed(db)
+        self.evals = EvalHarness(self)
+        self._eval_tasks: list[asyncio.Task] = []  # keep background runs alive
         self._bg_tasks: list[asyncio.Task] = []
         # Cached brain-health snapshot, refreshed by _brain_health_loop and on
         # demand via /admin/api/brain/health. Cached (not probed per status
