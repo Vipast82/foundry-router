@@ -182,6 +182,42 @@ REQUEST:
 ANSWER TO JUDGE:
 {answer}"""
 
+# ---- Tiered review pass (quality spec Phase 2) --------------------------------
+
+REVIEW_PREFILTER_PROMPT = """You are a fast pre-filter deciding whether an \
+answer needs a closer review by a stronger model. Reply ONLY with JSON: \
+{{"review": true/false, "reason": "<one sentence>"}}. review=true if the answer \
+might contain factual errors, unfulfilled parts of the request, broken code, or \
+internal contradictions; false if it plainly and completely serves the request.
+
+REQUEST:
+{request}
+
+ANSWER:
+{answer}"""
+
+REVIEW_PASS_PROMPT = """Review the following answer against the request. Look \
+for real problems only: incorrect facts, missing requirements, broken code, \
+contradictions — not style preferences. Reply ONLY with JSON. \
+If the answer is adequate: {{"adequate": true, "notes": "<one sentence>"}}. \
+If it has real problems: {{"adequate": false, "notes": "<the specific \
+problems>", "corrected_answer": "<the COMPLETE corrected answer, full text — \
+it replaces the original verbatim>"}}.
+
+REQUEST:
+{request}
+
+ANSWER TO REVIEW:
+{answer}"""
+
+
+def review_marker(model: str) -> str:
+    """Visible transparency marker appended to any answer the review pass
+    changed (same convention as the ⚡ loaded badge): a correction must never
+    be silent."""
+    return f"\n\n---\n🔎 *Corrected by review pass ({model})*"
+
+
 # ---- Coding pipeline (Prepare -> Execute -> Check) -----------------------------
 
 PIPELINE_PREPARE = """Turn the following raw coding request into a precise, \

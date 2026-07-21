@@ -724,6 +724,7 @@ class AgentRunner:
                     emit("think", f"Forwarding the worker's full output verbatim "
                                   f"({len(flags['last_tool_result'])} chars).")
                 answer = flags["last_tool_result"] or answer
+            answer = await self._maybe_review(ctx, emit, answer, effective)
             emit("answer", answer.strip() or "(empty answer)")
             flags["finalized"] = True
             return "", True
@@ -1171,6 +1172,126 @@ class AgentRunner:
                 return r["id"]
         return None
 
+    # ------------------------------------------------- tiered review pass --
+
+    # Answers longer than this skip review: a correction rewrites the WHOLE
+    # answer, so reviewing a truncated view risks losing content — worse than
+    # no review. Logged as skipped, never silent.
+    REVIEW_MAX_ANSWER_CHARS = 12000
+
+    async def _maybe_review(self, ctx: RequestContext, emit, answer: str,
+                            effective: dict) -> str:
+        """Optional per-persona review pass (quality spec Phase 2), default
+        OFF. When review_enabled and a review_model is explicitly selected:
+        an optional FREE brain pre-filter decides whether review is even
+        warranted, then the review model (local or paid — paid passes the
+        same guardrail ladder as any dispatch) checks the answer and may
+        return a corrected version, which is delivered with a visible
+        marker. Every path — skip, deny, adequate, corrected, failure —
+        lands one review_log row. Fails open: a broken reviewer must never
+        block an answer."""
+        persona = ctx.persona or {}
+        if not persona.get("review_enabled") or not answer.strip():
+            return answer
+        model = (persona.get("review_model") or "").strip()
+        db = self.model_registry.db
+        t0 = time.monotonic()
+
+        def log_review(corrected: bool, verdict: str, trigger: str) -> None:
+            try:
+                from ..db import utcnow
+                db.execute(
+                    "INSERT INTO review_log (ts, persona, trigger_reason, "
+                    "review_model, corrected, verdict, duration_ms) "
+                    "VALUES (?,?,?,?,?,?,?)",
+                    (utcnow(), persona.get("virtual_name"), trigger, model,
+                     int(corrected), verdict[:500],
+                     int((time.monotonic() - t0) * 1000)))
+            except Exception:
+                log.exception("failed to write review_log row")
+
+        if not model:
+            emit("think", "Review pass is enabled but no review_model is "
+                          "selected — skipping (pick one in the persona editor).")
+            log_review(False, "no review_model configured", "not_configured")
+            return answer
+        if len(answer) > self.REVIEW_MAX_ANSWER_CHARS:
+            emit("think", f"Review pass skipped — answer too long to review "
+                          f"safely ({len(answer)} chars).")
+            log_review(False, f"answer too long ({len(answer)} chars)",
+                       "skipped_too_long")
+            return answer
+
+        from ..registry.research_agent import extract_json
+        request = self._full_last_user_message(ctx)[:4000]
+        trigger = "review_enabled"
+
+        # Free pre-filter (opt-out): the local brain screens whether review
+        # is worth the (possibly paid) call. Optimizer only — any failure
+        # falls through to the review itself.
+        prefilter = persona.get("review_prefilter")
+        if prefilter is None or prefilter:
+            try:
+                raw = await self.brain.complete(
+                    prompts.REVIEW_PREFILTER_PROMPT.format(
+                        request=request, answer=answer[:6000]))
+                data = extract_json(raw) or {}
+                if data and not data.get("review", True):
+                    emit("think", f"Review pre-filter: answer looks solid — "
+                                  f"skipping the {model} review.")
+                    log_review(False, "prefilter passed: "
+                               + str(data.get("reason") or "")[:200],
+                               "prefilter_passed")
+                    return answer
+                if data:
+                    trigger = "prefilter_flagged"
+            except Exception:
+                pass
+
+        info = self.pool.backend_info(model)
+        if info is None:
+            emit("think", f"Review model {model} is not reachable — delivering "
+                          f"the unreviewed answer.")
+            log_review(False, "review model unreachable", "model_unreachable")
+            return answer
+        meta = self.model_registry.get(model)
+        verdict = await self.guardrails.check_paid_call(
+            model, info, meta, ctx.guard, effective)
+        if not verdict.allowed:
+            emit("think", f"Review pass skipped — guardrail: {verdict.reason}")
+            ctx.logger.record_guardrail(f"review denied {model}: {verdict.reason}")
+            log_review(False, f"guardrail: {verdict.reason}", "guardrail_denied")
+            return answer
+
+        emit("think", f"Review pass: {model} checking the answer...")
+        try:
+            result, backend = await self._with_heartbeat(
+                self._dispatch_worker(model, prompts.REVIEW_PASS_PROMPT.format(
+                    request=request, answer=answer)),
+                emit, f"review pass {model}")
+        except Exception as e:
+            emit("think", f"Review pass failed ({describe_exception(e)}) — "
+                          f"delivering the unreviewed answer.")
+            log_review(False, f"review call failed: {describe_exception(e)}",
+                       "review_failed")
+            return answer
+        cost = estimate_cost_usd(meta, result.prompt_tokens, result.completion_tokens)
+        ctx.logger.record_model_call(model, backend, result.prompt_tokens,
+                                     result.completion_tokens, cost)
+        if info.get("type") == "anthropic-compatible":
+            log_subscription_usage(db, model, backend,
+                                   result.prompt_tokens, result.completion_tokens)
+        data = extract_json(result.content) or {}
+        corrected = str(data.get("corrected_answer") or "").strip()
+        if data and not data.get("adequate", True) and corrected:
+            emit("think", f"Review pass: {model} corrected the answer — "
+                          f"delivering the corrected version (marked).")
+            log_review(True, str(data.get("notes") or "")[:500], trigger)
+            return corrected + prompts.review_marker(model)
+        emit("think", f"Review pass: {model} found the answer adequate.")
+        log_review(False, str(data.get("notes") or "adequate")[:500], trigger)
+        return answer
+
     # ------------------------------------------------------ outcome judge --
 
     async def _judge_outcome(self, ctx: RequestContext, emit, flags: dict,
@@ -1373,6 +1494,14 @@ class AgentRunner:
                                              result.completion_tokens, 0.0)
                 yield AgentEvent("think", f"{worker} finished after {step - 1} tool "
                                           f"call(s).")
+                # Review pass (async generators can't hand emit a live queue —
+                # narration is buffered and yielded before the answer).
+                buf: list[AgentEvent] = []
+                clean = await self._maybe_review(
+                    ctx, lambda kind, text="": buf.append(AgentEvent(kind, text)),
+                    clean, effective)
+                for ev in buf:
+                    yield ev
                 yield AgentEvent("answer", clean.strip() or "(worker returned empty output)")
                 return
 
