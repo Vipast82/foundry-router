@@ -9,7 +9,9 @@ import httpx
 import pytest
 
 from foundry_router.db import Database
-from foundry_router.pool.ollama_admin import OllamaAdmin
+from foundry_router.pool.ollama_admin import OllamaAdmin, parse_modelfile
+
+_CREATE_PAYLOADS = []   # captured /api/create request bodies
 
 
 class _Cfg:
@@ -52,6 +54,7 @@ def _handler(request):
               b'{"status":"success"}\n')
         return httpx.Response(200, content=nd)
     if p == "/api/create":
+        _CREATE_PAYLOADS.append(json.loads(request.content))
         return httpx.Response(200, content=b'{"status":"creating"}\n{"status":"success"}\n')
     return httpx.Response(404, text="not found")
 
@@ -101,6 +104,50 @@ def test_unknown_backend_raises(tmp_path):
     admin, _ = _admin(tmp_path)
     with pytest.raises(ValueError):
         admin.start_pull("nope", "x")      # validated before any task is scheduled
+
+
+# -- create: raw Modelfile -> structured fields (modern Ollama) --------------------
+
+def test_parse_modelfile_to_structured():
+    mf = ('FROM hf.co/unsloth/Qwen3.6-35B-A3B-GGUF:UD-Q4_K_XL\n'
+          'PARAMETER num_ctx 262144\n'
+          'PARAMETER temperature 0.6\n'
+          'PARAMETER repeat_penalty 1.05\n'
+          'SYSTEM """You are a senior software engineer.\n'
+          'Write good code."""\n')
+    out = parse_modelfile(mf)
+    assert out["from"] == "hf.co/unsloth/Qwen3.6-35B-A3B-GGUF:UD-Q4_K_XL"
+    assert out["parameters"]["num_ctx"] == 262144            # int-coerced
+    assert out["parameters"]["temperature"] == 0.6           # float-coerced
+    assert out["parameters"]["repeat_penalty"] == 1.05
+    assert out["system"].startswith("You are a senior software engineer.")
+    assert "Write good code." in out["system"] and '"""' not in out["system"]
+
+
+def test_parse_modelfile_repeated_param_is_list():
+    out = parse_modelfile("FROM x\nPARAMETER stop <a>\nPARAMETER stop <b>\n")
+    assert out["parameters"]["stop"] == ["<a>", "<b>"]
+
+
+def test_create_without_from_raises(tmp_path):
+    admin, _ = _admin(tmp_path)
+    with pytest.raises(ValueError):     # the exact 400 the user hit, caught early
+        admin.start_create("truenas", "x", modelfile="PARAMETER temperature 0.5")
+
+
+async def test_create_sends_structured_not_modelfile(tmp_path):
+    _CREATE_PAYLOADS.clear()
+    admin, _ = _admin(tmp_path)
+    key = admin.start_create("truenas", "claude-qwen36",
+        modelfile='FROM base:latest\nSYSTEM """hi there"""\nPARAMETER temperature 0.6')
+    for _ in range(200):
+        if admin.jobs[key]["state"] != "running":
+            break
+        await asyncio.sleep(0.01)
+    assert _CREATE_PAYLOADS, "create should have been called"
+    pl = _CREATE_PAYLOADS[-1]
+    assert pl["from"] == "base:latest" and "modelfile" not in pl   # structured, no legacy field
+    assert pl["system"] == "hi there" and pl["parameters"]["temperature"] == 0.6
 
 
 async def test_pull_streams_to_completion(tmp_path):
