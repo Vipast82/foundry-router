@@ -38,6 +38,47 @@ class MCPUnavailable(Exception):
     pass
 
 
+_SSE_FILTER_MARK = "_foundry_sse_teardown_filter"
+
+
+class _SSETeardownNoiseFilter(logging.Filter):
+    """Suppress the benign SSE-teardown race the streamable-http MCP client
+    logs at ERROR with a full traceback.
+
+    Our design opens a fresh MCP session per operation (see the module
+    docstring) and closes it on completion — the DELETE /mcp. On close, the
+    background GET-SSE reader task can lose its race with teardown and try to
+    push one final message into the already-closed read stream, raising
+    anyio.BrokenResourceError inside the SDK's _handle_sse_event. Its bare
+    `except Exception` then logs 'Error parsing SSE message' with a traceback
+    even though every HTTP request succeeded (200/202) and the tool result was
+    returned. It is pure teardown noise, and at any real call volume it floods
+    the Dev Log with identical, non-actionable tracebacks.
+
+    We drop ONLY that record: a BrokenResourceError/ClosedResourceError logged
+    by the streamable-http client. A genuine SSE parse failure is a different
+    exception type (JSON/validation) and still surfaces; a real mid-operation
+    stream break also fails the operation itself, which call_tool reports
+    separately via _record_usage and a re-raise."""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        exc = record.exc_info[1] if record.exc_info else None
+        return not (exc is not None and exc.__class__.__name__ in
+                    ("BrokenResourceError", "ClosedResourceError"))
+
+
+def _install_sse_noise_filter() -> None:
+    """Attach the teardown-noise filter to the SDK logger once. Idempotent:
+    a filter on the named logger stops the record before it propagates to any
+    handler (stderr AND the Dev-Log ring buffer), so one install covers both."""
+    sdk_logger = logging.getLogger("mcp.client.streamable_http")
+    if any(getattr(f, _SSE_FILTER_MARK, False) for f in sdk_logger.filters):
+        return
+    noise_filter = _SSETeardownNoiseFilter()
+    setattr(noise_filter, _SSE_FILTER_MARK, True)
+    sdk_logger.addFilter(noise_filter)
+
+
 def _is_rate_limited(exc: BaseException) -> bool:
     """A 429 anywhere in the exception chain (the MCP client wraps httpx errors,
     sometimes inside a TaskGroup) — the described text is the reliable signal."""
@@ -47,6 +88,7 @@ def _is_rate_limited(exc: BaseException) -> bool:
 
 class MCPManager:
     def __init__(self, servers: list[MCPServerConfig], db: Database):
+        _install_sse_noise_filter()  # quiet the SDK's benign teardown traceback
         self.servers = {s.name: s for s in servers}
         self.db = db
         self._last_call: dict[str, float] = {}   # server name -> monotonic ts, for pacing
