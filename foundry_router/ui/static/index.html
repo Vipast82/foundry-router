@@ -622,7 +622,14 @@ window.editModel = id => {
 
 /* -------------------------------------------------------------- personas -- */
 async function tabPersonas() {
-  const [d, td] = await Promise.all([api("personas"), api("tools")]);
+  const [d, td, md] = await Promise.all([api("personas"), api("tools"), api("models")]);
+  // Review-model choices: any reachable chat-capable model, local or paid —
+  // same selection pattern as elsewhere, never hardcoded to a specific model.
+  const reviewChoices = (md.models || [])
+    .filter(m => m.reachable && !m.embedding)
+    .map(m => m.id).sort();
+  const reviewOpts = ['<option value="">— choose a model —</option>']
+    .concat(reviewChoices.map(id => `<option>${esc(id)}</option>`)).join("");
   // Same discovered set the Tools tab reads — no second source, no drift.
   // Grouped by SERVER: the persona field is server-level (checking a server
   // prefers ALL its tools, matching sync's server-name rule) — not per-call.
@@ -649,7 +656,8 @@ async function tabPersonas() {
        Any existing entries on a persona are preserved.</span>`;
   const rows = d.personas.map(p => `<tr>
     <td class="nw"><b>${esc(p.virtual_name)}</b> ${p.enabled ? "" : '<span class="pill warn">disabled</span>'}
-      ${p.context_window ? '<span class="pill ok" title="admin-set context override">ctx: ' + esc(formatCtx(p.context_window)) + '</span>' : ''}</td>
+      ${p.context_window ? '<span class="pill ok" title="admin-set context override">ctx: ' + esc(formatCtx(p.context_window)) + '</span>' : ''}
+      ${p.review_enabled ? '<span class="pill ' + (p.review_model ? 'ok' : 'warn') + '" title="tiered review pass: ' + esc(p.review_model || 'NO MODEL SELECTED — review will be skipped') + '">🔎 review</span>' : ''}</td>
     <td class="nw">${esc(p.benchmark_category)}</td><td class="nw">${esc(p.local_bias_strength)}</td>
     <td class="mono">${esc(p.preferred_mcp_tools || "[]")}</td>
     <td>${esc(p.description || "")}</td>
@@ -704,6 +712,13 @@ async function tabPersonas() {
         <input type="checkbox" id="pe-loaded"></div>
       <div class="row"><label title="Optional JSON overriding the multi-signal ranking weights for this persona. Signals: primary (requested category), tool_calling, adequacy (observed outcome-judge quality), latency (warm tokens/sec). e.g. a speed-sensitive persona: {&quot;latency&quot;: 0.5}. Empty = defaults.">selection_weights (JSON obj)</label>
         <input id="pe-weights" size="50" value="{}" placeholder='{"latency": 0.4, "adequacy": 0.8}'></div>
+      <div class="row">
+        <label title="Tiered review pass (default OFF): after an answer is produced, the selected review model checks it and may return a corrected version — always delivered with a visible 🔎 marker, never a silent change. Paid review models pass the same guardrail/conservation ladder as any dispatch.">review_enabled</label>
+        <input type="checkbox" id="pe-review">
+        <label>review_model</label>
+        <select id="pe-review-model">${reviewOpts}</select>
+        <label title="Free pre-filter: the local routing brain screens whether the answer plausibly needs review before the (possibly paid) review model is invoked. Recommended ON — it saves review spend on obviously-fine answers.">review_prefilter</label>
+        <input type="checkbox" id="pe-prefilter" checked></div>
       <div class="row"><button class="act primary" id="pe-save">Save persona</button>
         <button class="act" id="pe-apply-ctx" title="Set a sensible default context_window on any persona that has none yet (never overwrites a value you've already set). Review the numbers against your workers' real windows afterward.">Apply default context windows</button></div>
     </div>`;
@@ -728,7 +743,10 @@ async function tabPersonas() {
     required_tags: JSON.parse($("#pe-reqtags").value || "[]"),
     prefer_permissive: $("#pe-perm").checked ? 1 : 0,
     prefer_loaded: $("#pe-loaded").checked ? 1 : 0,
-    selection_weights: JSON.parse($("#pe-weights").value || "{}")}}));
+    selection_weights: JSON.parse($("#pe-weights").value || "{}"),
+    review_enabled: $("#pe-review").checked ? 1 : 0,
+    review_model: $("#pe-review-model").value || null,
+    review_prefilter: $("#pe-prefilter").checked ? 1 : 0}}));
 window.clonePersona = async source => {
   const newName = prompt("New persona name (clone of " + source + "):",
                          source + "-copy");
@@ -821,6 +839,15 @@ window.editPersona = name => {
   $("#pe-perm").checked = !!p.prefer_permissive;
   $("#pe-loaded").checked = !!p.prefer_loaded;
   $("#pe-weights").value = p.selection_weights || "{}";
+  $("#pe-review").checked = !!p.review_enabled;
+  // A configured review model may be temporarily unreachable (not in the
+  // select's options) — inject it so editing doesn't silently drop it.
+  const rm = $("#pe-review-model");
+  if (p.review_model && ![...rm.options].some(o => o.value === p.review_model))
+    rm.add(new Option(p.review_model + " (unreachable)", p.review_model));
+  rm.value = p.review_model || "";
+  $("#pe-prefilter").checked = p.review_prefilter === null
+    || p.review_prefilter === undefined || !!p.review_prefilter;
 };
 
 /* ----------------------------------------------------------------- tools -- */

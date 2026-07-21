@@ -170,6 +170,13 @@ class Database:
             ("model_named_benchmarks", "source", "TEXT DEFAULT 'research'"),
             ("personas", "brain_handles_tools", "INTEGER DEFAULT 0"),
             ("personas", "context_window", "INTEGER"),
+            # Tiered review pass (quality spec Phase 2): OFF by default;
+            # enabling requires an explicit review_model selection. The
+            # prefilter is the free brain-based "is review even warranted"
+            # screen that runs before the (possibly paid) review model.
+            ("personas", "review_enabled", "INTEGER DEFAULT 0"),
+            ("personas", "review_model", "TEXT"),
+            ("personas", "review_prefilter", "INTEGER DEFAULT 1"),
         ]
         with self._lock:
             for table, column, ddl in added:
