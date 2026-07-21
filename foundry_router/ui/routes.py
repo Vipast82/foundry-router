@@ -587,6 +587,41 @@ async def gui_feedback(request: Request):
     return {"ok": True, **out}
 
 
+@router.get("/admin/api/semcache")
+async def semcache_stats(request: Request):
+    return _svc(request).semcache.stats()
+
+
+@router.post("/admin/api/semcache/clear")
+async def semcache_clear(request: Request):
+    svc = _svc(request)
+    n = svc.semcache.clear()
+    svc.db.log_event("info", "semcache", f"cache cleared ({n} entries removed)")
+    return {"ok": True, "removed": n}
+
+
+@router.post("/admin/api/config/semantic_cache")
+async def set_semantic_cache(request: Request):
+    """Persist semantic-cache settings AND apply them live (the cache object
+    reads self.cfg per call) — same live-edit pattern as MCP pacing."""
+    svc = _svc(request)
+    body = await request.json()
+    allowed = {"enabled", "embed_url", "embed_model", "embed_api_key",
+               "min_similarity", "default_ttl_seconds", "category_ttls",
+               "max_entries"}
+    updates = {k: v for k, v in body.items() if k in allowed}
+
+    def mutate(raw):
+        raw.setdefault("semantic_cache", {}).update(updates)
+    try:
+        cfg = svc.config_store.save(mutate)
+    except Exception as e:
+        from ..errors import describe_exception
+        return JSONResponse({"error": describe_exception(e)}, status_code=400)
+    svc.semcache.cfg = cfg.semantic_cache
+    return {"ok": True, "semantic_cache": cfg.semantic_cache.model_dump()}
+
+
 @router.get("/admin/api/insights")
 async def insights(request: Request, days: int = 7):
     """On-demand statistical digest (quality-tracking spec Phase 1): feedback

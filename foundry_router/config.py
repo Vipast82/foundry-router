@@ -244,6 +244,35 @@ class LoggingConfig(BaseModel):
     level: str = "INFO"
 
 
+class SemanticCacheConfig(BaseModel):
+    """Semantic response cache (quality spec Phase 3). OFF by default; the
+    embedding source is a config setting like an mcp_servers entry (name-less:
+    one embedder), never hardcoded — nomic-embed-text on TrueNAS today, a
+    different model on a different host tomorrow. All fields GUI-editable and
+    live (Guardrails tab card), per the MCP-pacing precedent."""
+    enabled: bool = False
+    embed_url: str = ""               # Ollama-compatible /api/embed endpoint, e.g. http://truenas:11434
+    embed_model: str = ""             # e.g. nomic-embed-text
+    embed_api_key: Optional[str] = None
+    # Cosine similarity a stored answer must clear to count as a hit. 0.92 is
+    # deliberately conservative — a wrong cached answer costs more trust than
+    # a cache miss costs latency.
+    min_similarity: float = 0.92
+    default_ttl_seconds: int = 7 * 24 * 3600
+    # Per-category TTL policy (persona benchmark_category). 0 = bypass the
+    # cache entirely for that category. agentic/tool_calling default to 0 —
+    # freshness and side effects matter more than latency there — and personas
+    # with MCP tools attached bypass regardless of category.
+    category_ttls: dict[str, int] = Field(default_factory=lambda: {
+        "agentic": 0,
+        "tool_calling": 0,
+        "coding": 7 * 24 * 3600,
+        "general_chat": 3 * 24 * 3600,
+        "reasoning": 3 * 24 * 3600,
+    })
+    max_entries: int = 2000
+
+
 class AppConfig(BaseModel):
     server: ServerConfig = Field(default_factory=ServerConfig)
     agent_brain: AgentBrainConfig = Field(default_factory=AgentBrainConfig)
@@ -253,6 +282,7 @@ class AppConfig(BaseModel):
     registry: RegistryConfig = Field(default_factory=RegistryConfig)
     mcp_servers: list[MCPServerConfig] = Field(default_factory=list)
     tool_sync: ToolSyncConfig = Field(default_factory=ToolSyncConfig)
+    semantic_cache: SemanticCacheConfig = Field(default_factory=SemanticCacheConfig)
     logging: LoggingConfig = Field(default_factory=LoggingConfig)
 
 

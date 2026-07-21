@@ -8,3 +8,6 @@ pydantic==2.10.4
 PyYAML==6.0.2
 langgraph==1.0.2
 mcp==1.9.4
+# Semantic cache vector search (optional acceleration): if the SQLite build
+# can't load extensions, the cache falls back to a pure-Python cosine scan.
+sqlite-vec==0.1.6

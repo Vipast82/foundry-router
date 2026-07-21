@@ -263,7 +263,39 @@ async def _agent_events_to_chat_chunks(svc, ctx: RequestContext, model_name: str
     raw text in every client (found live). The final answer is the only
     thing that ever lands in content."""
     t0 = time.monotonic_ns()
+
+    # Semantic cache (quality spec Phase 3): an eligible repeated question
+    # skips the whole routing loop — served with a visible ⚡ badge, logged as
+    # mode "cache". Eligibility is narrow (single-turn, non-agent persona);
+    # any cache failure degrades to a normal routed request.
+    from ..semcache import cache_badge
+    sem = getattr(svc, "semcache", None)
+    cacheable = False
+    if sem is not None and ctx.persona is not None:
+        cacheable, _why = sem.eligibility(ctx.persona, ctx.messages)
+    if cacheable:
+        try:
+            hit = await sem.lookup(ctx.persona, _last_user_text(ctx.messages))
+        except Exception:
+            log.exception("semantic cache lookup failed")
+            hit = None
+        if hit:
+            ctx.logger.mode = "cache"
+            yield tr.chat_chunk(
+                model_name, "",
+                thinking=f"Semantic cache hit (similarity "
+                         f"{hit['similarity']:.0%}) — serving the stored "
+                         f"answer, no model call.\n")
+            body = hit["answer"] + cache_badge(hit["similarity"], hit["age_seconds"])
+            for piece in tr.chunk_text(body):
+                yield tr.chat_chunk(model_name, piece)
+            ctx.logger.finish("ok")
+            yield tr.chat_chunk(model_name, "", done=True,
+                                stats={"total_duration_ns": time.monotonic_ns() - t0})
+            return
+
     status, error = "ok", ""
+    answers: list[str] = []
     try:
         async for ev in _run_events(svc, ctx):
             if ev.kind == "think":
@@ -276,6 +308,7 @@ async def _agent_events_to_chat_chunks(svc, ctx: RequestContext, model_name: str
                 reasoning, clean = prompts.split_think(ev.text)
                 if reasoning:
                     yield tr.chat_chunk(model_name, "", thinking=reasoning + "\n")
+                answers.append(clean)
                 for piece in tr.chunk_text(clean):
                     yield tr.chat_chunk(model_name, piece)
             elif ev.kind == "ask_user":
@@ -301,6 +334,14 @@ async def _agent_events_to_chat_chunks(svc, ctx: RequestContext, model_name: str
         yield tr.chat_chunk(model_name, f"\n[foundry-router] internal error: {e}")
     finally:
         ctx.logger.finish(status, error)
+    # Store a clean routed answer for future hits (only status ok — never an
+    # error apology or an ask_user question). Store failures are non-fatal.
+    if cacheable and status == "ok" and any(a.strip() for a in answers):
+        try:
+            await sem.store(ctx.persona, _last_user_text(ctx.messages),
+                            "\n\n".join(a for a in answers if a.strip()))
+        except Exception:
+            log.exception("semantic cache store failed")
     yield tr.chat_chunk(model_name, "", done=True,
                         stats={"total_duration_ns": time.monotonic_ns() - t0})
 

@@ -870,8 +870,9 @@ async function tabTools() {
 
 /* ------------------------------------------------------------ guardrails -- */
 async function tabGuardrails() {
-  const cfg = await api("config");
+  const [cfg, sc] = await Promise.all([api("config"), api("semcache")]);
   const g = cfg.guardrails;
+  const scCfg = cfg.semantic_cache || {};
   $("#main").innerHTML = `
     <h2>Guardrails (§4.7)</h2>
     <div class="card">
@@ -919,7 +920,46 @@ async function tabGuardrails() {
       <div class="row"><label title="Active oauth-staleness watch: poll the (free, read-only) quota endpoint this often so sources.oauth going null raises an Events alert + Usage Log banner within minutes. 0 disables.">quota_poll_seconds</label>
         <input id="m-poll" type="number" value="${cfg.meridian.quota_poll_seconds}"></div>
       <button class="act primary" id="m-save">Save window policy</button>
+    </div>
+    <div class="card">
+      <h2 style="margin-top:0">Semantic cache (repeated-question shortcut)</h2>
+      <p class="hint">A sufficiently-similar repeated question serves the stored answer — with a
+        visible ⚡ badge — instead of re-routing. Only fresh single-turn questions on non-agent
+        personas; agent/tool workloads always bypass. Live-applied, no restart.
+        <b>${sc.entries}</b> entries, <b>${sc.total_hits}</b> lifetime hits,
+        vector search: <b>${sc.sqlite_vec ? "sqlite-vec" : "python fallback"}</b>.</p>
+      <div class="row"><label>enabled</label>
+        <input type="checkbox" id="sc-on" ${scCfg.enabled ? "checked" : ""}>
+        <label title="Ollama-compatible /api/embed endpoint that serves the embedding model — any host (e.g. http://truenas:11434)">embed_url</label>
+        <input id="sc-url" size="28" value="${esc(scCfg.embed_url || "")}" placeholder="http://truenas:11434">
+        <label>embed_model</label>
+        <input id="sc-model" size="20" value="${esc(scCfg.embed_model || "")}" placeholder="nomic-embed-text"></div>
+      <div class="row"><label title="Cosine similarity a stored answer must clear to count as a hit. Higher = stricter (fewer, safer hits).">min_similarity</label>
+        <input id="sc-sim" type="number" step="0.01" min="0.5" max="1" value="${scCfg.min_similarity ?? 0.92}">
+        <label title="Fallback TTL for categories not listed in category_ttls">default_ttl_seconds</label>
+        <input id="sc-ttl" type="number" value="${scCfg.default_ttl_seconds ?? 604800}">
+        <label>max_entries</label>
+        <input id="sc-max" type="number" value="${scCfg.max_entries ?? 2000}"></div>
+      <div class="row"><label title="JSON: persona benchmark_category → TTL seconds. 0 = bypass the cache for that category (agentic/tool_calling default to 0 — freshness and side effects beat latency there).">category_ttls (JSON obj)</label>
+        <input id="sc-cats" size="70" value='${esc(JSON.stringify(scCfg.category_ttls || {}))}'></div>
+      <div class="row">
+        <button class="act primary" id="sc-save">Save cache settings</button>
+        <button class="act" id="sc-clear" ${sc.entries ? "" : "disabled"}>Clear cache (${sc.entries})</button>
+      </div>
     </div>`;
+  $("#sc-save").onclick = () => run(api("config/semantic_cache", {method: "POST", body: {
+    enabled: $("#sc-on").checked,
+    embed_url: $("#sc-url").value.trim(),
+    embed_model: $("#sc-model").value.trim(),
+    min_similarity: +$("#sc-sim").value,
+    default_ttl_seconds: +$("#sc-ttl").value,
+    max_entries: +$("#sc-max").value,
+    category_ttls: JSON.parse($("#sc-cats").value || "{}")}}));
+  $("#sc-clear").onclick = async () => {
+    if (!confirm("Clear all cached answers?")) return;
+    try { await api("semcache/clear", {method: "POST"}); toast("Cache cleared"); render(); }
+    catch (e) { toast(e.message, true); }
+  };
   $("#m-save").onclick = () => run(api("config/meridian", {method: "POST", body: {
     conserve_premium_at: +$("#m-prem").value,
     conserve_strong_at: +$("#m-strong").value,
