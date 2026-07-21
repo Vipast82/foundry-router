@@ -176,6 +176,57 @@ CREATE TABLE IF NOT EXISTS claude_usage_log (
 
 CREATE INDEX IF NOT EXISTS idx_claude_usage_ts ON claude_usage_log(ts);
 
+-- Output-quality tracking (feedback/quality spec, Phase 1) ---------------------
+-- Everything downstream (review pass, eval harness, insight digest) writes into
+-- or reads from these; they go first so the data accumulates from day one.
+
+CREATE TABLE IF NOT EXISTS response_feedback (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  ts TEXT,
+  request_log_id INTEGER,           -- best-effort link to request_log (nullable:
+                                    -- API feedback may not identify a request)
+  persona TEXT,
+  model TEXT,                       -- model that produced the answer, if known
+  rating INTEGER,                   -- +1 (thumbs up) / -1 (thumbs down)
+  comment TEXT,
+  source TEXT                       -- 'gui' (router UI) | 'api' (POST /v1/feedback)
+);
+
+CREATE INDEX IF NOT EXISTS idx_feedback_ts ON response_feedback(ts);
+
+-- Durable per-event MCP tool-call record. request_log.tool_calls (JSON per
+-- request) answers "what did THIS request do"; this table answers the
+-- aggregate questions — per-caller-model/per-tool reliability over time —
+-- that were previously only visible via fallback logging.
+CREATE TABLE IF NOT EXISTS tool_call_log (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  ts TEXT,
+  persona TEXT,
+  caller TEXT,                      -- 'brain' or the worker model id that issued the call
+  server TEXT,
+  tool TEXT,
+  ok INTEGER,
+  duration_ms INTEGER,
+  error TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_tool_call_log_ts ON tool_call_log(ts);
+CREATE INDEX IF NOT EXISTS idx_tool_call_log_caller ON tool_call_log(caller, tool);
+
+-- Review-pass outcomes (schema ready ahead of Phase 2's tiered review).
+CREATE TABLE IF NOT EXISTS review_log (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  ts TEXT,
+  persona TEXT,
+  trigger_reason TEXT,              -- 'review_enabled' | 'prefilter_flagged' | ...
+  review_model TEXT,
+  corrected INTEGER,                -- 1 = the delivered answer was changed by review
+  verdict TEXT,                     -- short judge verdict / reviewer notes
+  duration_ms INTEGER
+);
+
+CREATE INDEX IF NOT EXISTS idx_review_log_ts ON review_log(ts);
+
 -- Misc durable key/value state (last poll timestamps, etc.) --------------------
 
 CREATE TABLE IF NOT EXISTS kv (

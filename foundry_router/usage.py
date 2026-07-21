@@ -431,14 +431,27 @@ class RequestLogger:
         self.est_cost += est_cost_usd
 
     def record_tool_call(self, tool: str, server: str, duration_ms: int,
-                         ok: bool, error: str = "") -> None:
+                         ok: bool, error: str = "", caller: str = "brain") -> None:
         """One MCP/tool invocation this request made (visibility spec item 5):
         without this there is no way to see whether a request actually used
         searxng/crawl4ai/etc., how long the call took, or what it died of —
-        MCP-server failures were indistinguishable from backend failures."""
+        MCP-server failures were indistinguishable from backend failures.
+
+        Besides the per-request JSON trail, each event also lands in the
+        durable tool_call_log table (quality-tracking spec Phase 1) so
+        per-caller/per-tool reliability is queryable over time — `caller` is
+        'brain' or the worker model that owned the tool loop."""
         self.tool_calls.append({
             "tool": tool, "server": server, "duration_ms": duration_ms,
             "ok": ok, **({"error": error[:300]} if error else {})})
+        try:
+            self.db.execute(
+                "INSERT INTO tool_call_log (ts, persona, caller, server, tool, "
+                "ok, duration_ms, error) VALUES (?,?,?,?,?,?,?,?)",
+                (utcnow(), self.persona, caller, server, tool, int(ok),
+                 duration_ms, error[:300] if error else ""))
+        except Exception:
+            log.exception("failed to write tool_call_log row")
 
     def record_guardrail(self, event: str) -> None:
         self.guardrail_events.append(event)

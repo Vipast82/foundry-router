@@ -557,7 +557,44 @@ async def usage_log(request: Request, limit: int = 100):
                 r[k] = json.loads(r[k]) if r[k] else []
             except (json.JSONDecodeError, TypeError):
                 pass
+    # Latest feedback rating per listed request, so the GUI thumbs reflect
+    # what's already recorded (a re-click updates rather than surprises).
+    if rows:
+        ids = [r["id"] for r in rows]
+        marks = {f["request_log_id"]: f["rating"] for f in svc.db.query(
+            f"SELECT request_log_id, rating FROM response_feedback "
+            f"WHERE request_log_id IN ({','.join('?' * len(ids))}) "
+            f"ORDER BY id", ids)}
+        for r in rows:
+            r["feedback"] = marks.get(r["id"])
     return {"requests": rows}
+
+
+@router.post("/admin/api/feedback")
+async def gui_feedback(request: Request):
+    """Thumbs up/down from the router's own Usage tab — works regardless of
+    which client served the conversation (quality-tracking spec Phase 1)."""
+    from ..insights import normalize_rating, record_feedback
+    svc = _svc(request)
+    body = await request.json()
+    rating = normalize_rating(body.get("rating"))
+    if rating is None:
+        return JSONResponse({"error": "rating must be up/down/+1/-1"},
+                            status_code=400)
+    out = record_feedback(svc.db, rating,
+                          request_log_id=body.get("request_log_id"),
+                          comment=str(body.get("comment") or ""), source="gui")
+    return {"ok": True, **out}
+
+
+@router.get("/admin/api/insights")
+async def insights(request: Request, days: int = 7):
+    """On-demand statistical digest (quality-tracking spec Phase 1): feedback
+    trends, guardrail patterns, tool-call reliability, review outcomes — the
+    operator reads and decides; nothing here mutates prompts or config."""
+    from ..insights import generate_digest, render_report
+    digest = generate_digest(_svc(request).db, days=max(1, min(days, 90)))
+    return {"digest": digest, "report": render_report(digest)}
 
 
 @router.get("/admin/api/events")
