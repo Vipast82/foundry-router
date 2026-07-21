@@ -704,6 +704,26 @@ async def set_semantic_cache(request: Request):
     return {"ok": True, "semantic_cache": cfg.semantic_cache.model_dump()}
 
 
+@router.post("/admin/api/semcache/test")
+async def semcache_test(request: Request):
+    """Live embedding-endpoint probe (the 'Test embedding' button): a real
+    embed call reporting reachability, vector dimension, and latency. Tests the
+    values in the request body (what's in the form) so it works before Save;
+    omitted fields fall back to the saved config."""
+    import asyncio
+    svc = _svc(request)
+    b = await request.json()
+    try:
+        return await asyncio.wait_for(
+            svc.semcache.test_embed(url=b.get("embed_url"),
+                                    model=b.get("embed_model"),
+                                    api_key=b.get("embed_api_key")),
+            timeout=25)
+    except asyncio.TimeoutError:
+        return {"ok": False, "error": "timed out after 25s",
+                "sqlite_vec": svc.semcache._vec_loaded}
+
+
 @router.get("/admin/api/insights")
 async def insights(request: Request, days: int = 7):
     """On-demand statistical digest (quality-tracking spec Phase 1): feedback

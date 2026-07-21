@@ -118,6 +118,55 @@ class SemanticCache:
                     f"until it recovers ({self.cfg.embed_url})", str(e))
             return None
 
+    async def test_embed(self, url: Optional[str] = None,
+                         model: Optional[str] = None,
+                         api_key: Optional[str] = None) -> dict:
+        """Verify-in-place probe (the GUI 'Test embedding' button), same
+        pattern as the brain/backend/research tests. Unlike embed() — which
+        swallows failures to degrade to no-cache — this surfaces the real
+        error, the embedding dimension, and latency so misconfiguration is
+        diagnosable without watching the Events log. Tests the values PASSED
+        (what's in the form) so it works before Save; falls back to the saved
+        config when a field is omitted."""
+        import time
+
+        from .errors import describe_exception
+        url = ((url if url is not None else self.cfg.embed_url) or "").rstrip("/")
+        model = (model if model is not None else self.cfg.embed_model or "").strip()
+        api_key = api_key if api_key is not None else self.cfg.embed_api_key
+        if not url or not model:
+            return {"ok": False, "error": "embed_url and embed_model are both "
+                    "required", "sqlite_vec": self._vec_loaded}
+        headers = {}
+        if api_key:
+            headers["Authorization"] = f"Bearer {api_key}"
+        t0 = time.monotonic()
+        try:
+            r = await self.http.post(f"{url}/api/embed",
+                                     json={"model": model, "input": "health check"},
+                                     headers=headers, timeout=20)
+            endpoint = "/api/embed"
+            if r.status_code == 404:
+                r = await self.http.post(f"{url}/api/embeddings",
+                                         json={"model": model, "prompt": "health check"},
+                                         headers=headers, timeout=20)
+                endpoint = "/api/embeddings"
+            r.raise_for_status()
+            data = r.json()
+            vec = (data.get("embeddings") or [None])[0] or data.get("embedding")
+            if not isinstance(vec, list) or not vec:
+                return {"ok": False, "error": "endpoint reachable but returned no "
+                        "embedding (is the model name correct and pulled on the "
+                        "host?)", "latency_ms": int((time.monotonic() - t0) * 1000),
+                        "sqlite_vec": self._vec_loaded}
+            return {"ok": True, "dimension": len(vec), "endpoint": endpoint,
+                    "latency_ms": int((time.monotonic() - t0) * 1000),
+                    "sqlite_vec": self._vec_loaded, "error": ""}
+        except Exception as e:
+            return {"ok": False, "error": describe_exception(e),
+                    "latency_ms": int((time.monotonic() - t0) * 1000),
+                    "sqlite_vec": self._vec_loaded}
+
     # -- eligibility -----------------------------------------------------------
 
     def _category_ttl(self, category: str) -> int:
