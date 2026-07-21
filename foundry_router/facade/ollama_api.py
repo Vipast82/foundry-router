@@ -33,6 +33,7 @@ from .. import __version__
 from ..brain import prompts
 from ..brain.agent import RequestContext
 from ..brain.fallback import pick_fallback_model
+from ..brain.user_intent import parse_confirmation
 from ..guardrails import RequestGuardState
 from ..pool.base import AllBackendsFailed
 from ..usage import (RequestLogger, estimate_cost_usd,
@@ -203,7 +204,7 @@ async def chat(request: Request):
 def _build_ctx(svc, persona: dict, model_name: str, messages: list[dict],
                user_text: str, mode: str = "agent") -> RequestContext:
     pending = prompts.find_pending_question(svc.db, messages)
-    return RequestContext(
+    ctx = RequestContext(
         persona=persona,
         messages=prompts.sanitize_history(messages),
         guard=RequestGuardState(),
@@ -211,6 +212,29 @@ def _build_ctx(svc, persona: dict, model_name: str, messages: list[dict],
                              mode, user_text),
         pending_question=pending,
     )
+    # Paid-usage confirmation handshake: the previous turn paused a
+    # user-requested paid dispatch to ask "continue?" — restore the steering
+    # and read the reply. "yes" arms guard.user_approved_paid, which bypasses
+    # tier conservation (never the dollar caps) for THIS request only.
+    pending_paid = prompts.find_pending_paid(svc.db, messages)
+    if pending_paid:
+        decision = parse_confirmation(user_text)
+        target = pending_paid.get("target") or "the requested model"
+        ctx.user_model_request = {"target": target,
+                                  "model_ids": pending_paid.get("model_ids") or [],
+                                  "paid": True, "confirmed": decision}
+        ctx.paid_confirmation = decision
+        if decision is True:
+            ctx.guard.user_approved_paid = True
+            ctx.guard.credits_warned = True
+            svc.db.log_event("info", "guardrails",
+                             f"user CONFIRMED spending paid usage for {target}",
+                             user_text[:200])
+        elif decision is False:
+            svc.db.log_event("info", "guardrails",
+                             f"user DECLINED paid usage for {target} — "
+                             f"routing locally", user_text[:200])
+    return ctx
 
 
 def _run_events(svc, ctx: RequestContext):

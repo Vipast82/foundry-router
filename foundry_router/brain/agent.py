@@ -32,10 +32,11 @@ from langgraph.graph import END, START, StateGraph
 from ..errors import describe_exception
 from ..guardrails import GuardrailEngine, RequestGuardState
 from ..pool.base import AllBackendsFailed, ContextTooLarge
-from ..usage import (MeridianUsage, RequestLogger, estimate_cost_usd,
-                     log_subscription_usage)
+from ..usage import (MeridianUsage, RequestLogger, claude_premium_level,
+                     estimate_cost_usd, log_subscription_usage, spend_since)
 from . import prompts
 from .client import BrainClient, BrainUnreachable
+from .user_intent import detect_model_request
 
 log = logging.getLogger(__name__)
 
@@ -60,6 +61,13 @@ class RequestContext:
     guard: RequestGuardState
     logger: RequestLogger
     pending_question: Optional[str] = None
+    # User-directed steering: {"target": display str, "model_ids": [...],
+    # "confirmed": True/False/None} — set by detection on a fresh request, or
+    # restored from the pending_paid record on a confirmation-reply turn.
+    user_model_request: Optional[dict] = None
+    # The parsed yes/no from a confirmation reply (None = fresh request or an
+    # unclear reply). True also sets guard.user_approved_paid at ctx build.
+    paid_confirmation: Optional[bool] = None
 
 
 class AgentState(TypedDict, total=False):
@@ -200,6 +208,26 @@ def _prefer_loaded(ranked: list[dict], loaded_ids: set[str]) -> list[dict]:
     return pins + warm + cold
 
 
+def _mark_user_requested(ranked: list[dict], model_ids: list[str],
+                         registry) -> list[dict]:
+    """Float the user's explicitly-requested models to the very front (above
+    pins — the user's own words outrank persona defaults), marked
+    _user_requested for the prompt's [REQUESTED BY THE USER] group. A
+    requested model that ranking dropped (limit, vision steer, tag filter) is
+    recovered from the registry — an explicit request must not vanish because
+    a heuristic filtered it."""
+    wanted = [m for m in model_ids if m]
+    if not wanted:
+        return ranked
+    by_id = {r["id"]: r for r in ranked}
+    front = []
+    for mid in wanted:
+        row = by_id.get(mid) or {**(registry.get(mid) or {}), "id": mid}
+        front.append({**row, "_user_requested": True})
+    wanted_set = set(wanted)
+    return front + [r for r in ranked if r["id"] not in wanted_set]
+
+
 class AgentRunner:
     def __init__(self, brain: BrainClient, pool, tool_registry, model_registry,
                  guardrails: GuardrailEngine, meridian_usage: MeridianUsage,
@@ -235,6 +263,8 @@ class AgentRunner:
                 f"models." if attached else ""))
         for tb in info.get("tiebreaks", []):
             emit("think", f"Tiebreaker — {tb}.")
+        if info.get("user_request_note"):
+            emit("think", info["user_request_note"])
         graph, flags = self._build_graph(ctx, emit, system, specs)
 
         max_steps = self.guardrails.effective(ctx.persona)["max_steps_per_request"]
@@ -395,6 +425,35 @@ class AgentRunner:
         if (persona or {}).get("prefer_loaded"):
             ranked = _prefer_loaded(ranked, await self.pool.loaded_models())
 
+        # User-directed steering: an EXPLICIT "use claude/opus/<model>" in the
+        # user's message overrides the free-first default. Detection is
+        # deterministic (regex, not the brain — a small brain following prose
+        # rules proved unreliable for exactly this). A fresh directive replaces
+        # any restored one: the user may change their mind in a confirmation
+        # reply. Paid dispatch still passes the confirmation gate + guardrails.
+        detected = detect_model_request(self._full_last_user_message(ctx),
+                                        list(available.keys()))
+        if detected:
+            resolved = self._resolve_user_request(detected)
+            if resolved:
+                resolved["confirmed"] = ctx.paid_confirmation
+                ctx.user_model_request = resolved
+        if ctx.user_model_request:
+            ranked = _mark_user_requested(
+                ranked, ctx.user_model_request.get("model_ids") or [],
+                self.model_registry)
+
+        # Metered spend vs caps rides into the prompt too — without it the
+        # brain knows window pressure but not dollar pressure.
+        caps = self.guardrails.effective(persona)
+        spend_note = "; ".join(
+            f"${spend_since(self.model_registry.db, mod):.2f} of "
+            f"${cap:.2f} {label} cap used"
+            for cap, mod, label in (
+                (caps.get("daily_spend_cap_usd"), "-1 day", "daily"),
+                (caps.get("weekly_spend_cap_usd"), "-7 days", "weekly"))
+            if cap is not None) or None
+
         # Client/workspace system messages can't ride along in the message list
         # (the brain template demands a single, first system message) — carry
         # their content inside our system prompt instead so the brain can honor
@@ -404,7 +463,8 @@ class AgentRunner:
             if m.get("role") == "system" and (m.get("content") or "").strip())
         system = prompts.build_system_prompt(
             persona, ranked, tool_name_for, meridian_note, ctx.pending_question,
-            client_system=client_system or None)
+            client_system=client_system or None,
+            user_request=ctx.user_model_request, spend_note=spend_note)
         # Snapshot: core tools + this persona's view of the dynamic set. Tool
         # Sync may swap the registry mid-request; this request keeps its list.
         specs = prompts.CORE_TOOL_SPECS + self.tool_registry.specs_for_persona(persona)
@@ -416,8 +476,73 @@ class AgentRunner:
             "meridian_note": meridian_note,
             # Auditable named-benchmark tiebreaks (surfaced as narration).
             "tiebreaks": [r["_tiebreak"] for r in ranked if r.get("_tiebreak")],
+            "user_request_note": self._user_request_note(ctx),
         }
         return system, specs, info
+
+    @staticmethod
+    def _user_request_note(ctx: RequestContext) -> Optional[str]:
+        """One narration line for user-directed steering, per its state."""
+        if not ctx.user_model_request:
+            return None
+        target = ctx.user_model_request.get("target", "a specific model")
+        confirmed = ctx.user_model_request.get("confirmed")
+        if confirmed is True:
+            return (f"User confirmed spending paid usage — dispatching to "
+                    f"{target}.")
+        if confirmed is False:
+            return (f"User declined the paid-usage warning — staying on free "
+                    f"local models instead of {target}.")
+        return (f"User explicitly requested {target} — steering to it (paid "
+                f"usage will ask for confirmation first if the window is tight).")
+
+    def _resolve_user_request(self, req: dict) -> Optional[dict]:
+        """Map a detected request onto reachable models. Tier/claude requests
+        match subscription backends by the Claude ladder (cheapest first, so
+        'use claude' honors the request at the lowest adequate tier); 'paid'
+        matches anything non-free. Returns None only when the request names a
+        specific model that isn't reachable AND nothing else matches — an
+        unmatchable request is dropped rather than steering to a guess."""
+        available = list(self.pool.available_models().keys())
+
+        def is_sub(mid: str) -> bool:
+            return (self.pool.backend_info(mid) or {}).get(
+                "type") == "anthropic-compatible"
+
+        def is_paid(mid: str) -> bool:
+            if is_sub(mid):
+                return True
+            meta = self.model_registry.get(mid) or {}
+            return (meta.get("relative_cost_tier") not in (None, "free")
+                    or (meta.get("cost_per_1k_input") or 0) > 0
+                    or (meta.get("cost_per_1k_output") or 0) > 0)
+
+        kind = req.get("kind")
+        if kind == "model":
+            mid = req["target"]
+            if mid not in available:
+                return None
+            return {"target": mid, "model_ids": [mid],
+                    "paid": is_paid(mid), "confirmed": None}
+        if kind == "tier":
+            ids = sorted(m for m in available
+                         if is_sub(m) and claude_premium_level(m) == req["level"])
+            target = f"Claude {req['target'].capitalize()}"
+        elif kind == "claude":
+            ids = sorted((m for m in available if is_sub(m)),
+                         key=claude_premium_level)
+            target = "Claude"
+        else:  # generic paid
+            ids = sorted(m for m in available if is_paid(m))
+            target = "a paid model"
+        if not ids:
+            # Named a tier/paid model but none is reachable: still surface the
+            # request so the brain can SAY it can't be honored, rather than
+            # silently routing local as if the user never asked.
+            return {"target": target, "model_ids": [],
+                    "paid": True, "confirmed": None}
+        return {"target": target, "model_ids": ids, "paid": True,
+                "confirmed": None}
 
     # --------------------------------------------------------------- the graph --
 
@@ -648,6 +773,38 @@ class AgentRunner:
             model_id = tool.model_id
             meta = self.model_registry.get(model_id)
             backend_info = self.pool.backend_info(model_id)
+
+            # Paid-usage confirmation gate (user-directed requests only): the
+            # user explicitly asked for this model, so instead of a silent
+            # guardrail denial when the window is tight, PAUSE and ask them in
+            # chat — their informed "yes" then bypasses tier conservation for
+            # this request (never the dollar caps). Runs before check_paid_call
+            # so asking never burns the paid-call counter.
+            umr = ctx.user_model_request or {}
+            if (model_id in (umr.get("model_ids") or ())
+                    and ctx.paid_confirmation is None
+                    and not ctx.guard.user_approved_paid):
+                warn = await self._user_paid_warning(model_id, backend_info,
+                                                     meta, effective)
+                if warn:
+                    question = (
+                        f"You asked to use {umr.get('target', model_id)}, but "
+                        f"{warn} Continue with {model_id} anyway? Reply "
+                        f"\"yes\" to proceed or \"no\" to use a free local "
+                        f"model instead.")
+                    prompts.store_pending_paid(
+                        self.model_registry.db, ctx.messages,
+                        {"target": umr.get("target", model_id),
+                         "model_ids": umr.get("model_ids") or [model_id]})
+                    ctx.logger.record_guardrail(
+                        f"paid-usage confirmation requested for {model_id}")
+                    emit("think", f"{model_id} was explicitly requested but "
+                                  f"paid usage is tight — pausing to confirm "
+                                  f"with the user before spending.")
+                    emit("ask_user", question)
+                    flags["finalized"] = True
+                    return "", True
+
             verdict = await self.guardrails.check_paid_call(
                 model_id, backend_info, meta, ctx.guard, effective)
             if not verdict.allowed:
@@ -914,6 +1071,56 @@ class AgentRunner:
             result.thinking = (f"{result.thinking}\n{reasoning}".strip()
                                if result.thinking else reasoning)
         return result, backend
+
+    # ------------------------------------- paid-usage confirmation gate --
+
+    async def _user_paid_warning(self, model_id: str, backend_info: Optional[dict],
+                                 meta: Optional[dict],
+                                 effective: dict) -> Optional[str]:
+        """Why the user should confirm before their explicitly-requested paid
+        model is dispatched — or None to proceed without ceremony (plenty of
+        window left / a free model). Subscription models warn on window
+        pressure: at/above confirm_user_paid_at, anywhere tier conservation
+        would deny, or exhaustion (where continuing spends purchased credits).
+        Metered models warn when spend is within 80% of a configured cap.
+        Exhaustion under usage_credits="never" returns None: there is nothing
+        a "yes" could unlock, so the normal denial explains instead."""
+        btype = (backend_info or {}).get("type")
+        if btype == "anthropic-compatible" and (backend_info or {}).get("url"):
+            snap = await self.meridian_usage.snapshot(
+                backend_info["url"], backend_info.get("api_key"))
+            mcfg = self.meridian_usage.cfg
+            level = claude_premium_level(model_id)
+            worst, fable_used = snap.get("worst_used"), snap.get("fable_used")
+            if not snap["available"]:
+                if mcfg.usage_credits == "never":
+                    return None
+                return (f"the Claude usage window is exhausted "
+                        f"({snap['note']}) — continuing will spend PURCHASED "
+                        f"usage credits.")
+            if (level >= 4 and fable_used is not None
+                    and fable_used >= min(mcfg.confirm_user_paid_at,
+                                          mcfg.conserve_fable_at)):
+                return f"the Fable weekly budget is {fable_used:.0%} used."
+            if worst is not None and (
+                    worst >= mcfg.confirm_user_paid_at
+                    or (worst >= mcfg.conserve_strong_at and level >= 2)
+                    or (worst >= mcfg.conserve_premium_at and level >= 3)):
+                return (f"the Claude usage window is {worst:.0%} used "
+                        f"({snap['note']}).")
+            return None
+        if meta and ((meta.get("cost_per_1k_input") or 0) > 0
+                     or (meta.get("cost_per_1k_output") or 0) > 0):
+            for cap_key, modifier, label in (
+                    ("daily_spend_cap_usd", "-1 day", "daily"),
+                    ("weekly_spend_cap_usd", "-7 days", "weekly")):
+                cap = effective.get(cap_key)
+                if cap:
+                    spent = spend_since(self.model_registry.db, modifier)
+                    if spent >= 0.8 * cap:
+                        return (f"metered spend is already ${spent:.2f} of "
+                                f"the ${cap:.2f} {label} cap.")
+        return None
 
     # ------------------------------------------------------ model pickers --
 
