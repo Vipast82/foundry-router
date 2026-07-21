@@ -227,6 +227,27 @@ CREATE TABLE IF NOT EXISTS review_log (
 
 CREATE INDEX IF NOT EXISTS idx_review_log_ts ON review_log(ts);
 
+-- Semantic response cache (quality spec Phase 3) -------------------------------
+-- Embeddings are little-endian float32 BLOBs (the format sqlite-vec's
+-- vec_distance_cosine consumes directly when the extension loads; the Python
+-- fallback reads the same bytes). Vectors are L2-normalized at store time.
+
+CREATE TABLE IF NOT EXISTS semantic_cache (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  ts TEXT,
+  persona TEXT,
+  category TEXT,                    -- persona benchmark_category at store time (TTL policy key)
+  prompt TEXT,                      -- the user message that produced the answer
+  answer TEXT,
+  embedding BLOB,
+  dim INTEGER,
+  ttl_seconds INTEGER,
+  hits INTEGER DEFAULT 0,
+  last_hit TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_semcache_persona ON semantic_cache(persona, category);
+
 -- Misc durable key/value state (last poll timestamps, etc.) --------------------
 
 CREATE TABLE IF NOT EXISTS kv (

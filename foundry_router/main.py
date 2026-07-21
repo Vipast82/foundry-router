@@ -38,6 +38,7 @@ from .pool.ollama_admin import OllamaAdmin
 from .registry.models_db import ModelRegistry
 from .registry.openrouter_ingest import poll_openrouter
 from .registry.research_agent import ResearchAgent
+from .semcache import SemanticCache
 from .tools.mcp_client import MCPManager
 from .tools.sync import ToolRegistry
 from .ui import router as ui_router
@@ -90,6 +91,7 @@ class Services:
         self.agent = AgentRunner(self.brain, self.pool, self.tool_registry,
                                  self.registry, self.guardrails, self.meridian_usage,
                                  research=self.research)
+        self.semcache = SemanticCache(cfg.semantic_cache, self.http, db)
         self._bg_tasks: list[asyncio.Task] = []
         # Cached brain-health snapshot, refreshed by _brain_health_loop and on
         # demand via /admin/api/brain/health. Cached (not probed per status

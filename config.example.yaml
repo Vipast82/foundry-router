@@ -229,5 +229,24 @@ mcp_servers: []
 tool_sync:
   periodic_seconds: 300            # fallback sweep; health-change events also trigger immediate sync
 
+# --- Semantic cache (quality spec Phase 3) --------------------------------------
+# Repeated-question shortcut: a sufficiently-similar single-turn question serves
+# the stored answer (visibly ⚡-badged) instead of re-routing. The embedding
+# source is a setting, not hardcoded — point it at whichever host serves your
+# embedding model. Everything here is live-editable in the GUI (Guardrails tab).
+semantic_cache:
+  enabled: false
+  embed_url: ""                    # Ollama-compatible /api/embed host, e.g. http://192.168.1.40:11434
+  embed_model: ""                  # e.g. nomic-embed-text
+  min_similarity: 0.92             # cosine bar for a hit — higher = stricter
+  default_ttl_seconds: 604800      # 7 days, for categories not listed below
+  category_ttls:                   # persona benchmark_category -> TTL seconds; 0 = bypass
+    agentic: 0                     # agent/tool workloads: freshness + side effects beat latency
+    tool_calling: 0
+    coding: 604800                 # static code-help answers age slowly
+    general_chat: 259200
+    reasoning: 259200
+  max_entries: 2000
+
 logging:
   level: "INFO"
