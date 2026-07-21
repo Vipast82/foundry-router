@@ -25,6 +25,7 @@ from fastapi import APIRouter, Request
 from fastapi.responses import FileResponse, JSONResponse
 
 from .. import __version__
+from ..db import utcnow
 
 log = logging.getLogger(__name__)
 
@@ -585,6 +586,87 @@ async def gui_feedback(request: Request):
                           request_log_id=body.get("request_log_id"),
                           comment=str(body.get("comment") or ""), source="gui")
     return {"ok": True, **out}
+
+
+# --------------------------------------------------------------------------- #
+# Eval harness (quality spec Phase 4)                                         #
+# --------------------------------------------------------------------------- #
+
+@router.get("/admin/api/eval/prompts")
+async def eval_prompts(request: Request):
+    return {"prompts": _svc(request).db.query(
+        "SELECT * FROM eval_prompts ORDER BY category, id")}
+
+
+@router.post("/admin/api/eval/prompts")
+async def upsert_eval_prompt(request: Request):
+    svc = _svc(request)
+    b = await request.json()
+    category = str(b.get("category") or "chat")
+    prompt = str(b.get("prompt") or "").strip()
+    if not prompt:
+        return JSONResponse({"error": "prompt required"}, status_code=400)
+    checks = b.get("checks") or []
+    if isinstance(checks, str):
+        try:
+            checks = json.loads(checks)
+        except json.JSONDecodeError:
+            return JSONResponse({"error": "checks must be a JSON list"},
+                                status_code=400)
+    enabled = 1 if b.get("enabled", 1) else 0
+    if b.get("id"):
+        svc.db.execute(
+            "UPDATE eval_prompts SET category=?, prompt=?, checks=?, enabled=? "
+            "WHERE id=?", (category, prompt, json.dumps(checks), enabled, b["id"]))
+    else:
+        svc.db.execute(
+            "INSERT INTO eval_prompts (category, prompt, checks, enabled, "
+            "created_at) VALUES (?,?,?,?,?)",
+            (category, prompt, json.dumps(checks), enabled, utcnow()))
+    return {"ok": True}
+
+
+@router.post("/admin/api/eval/prompts/delete")
+async def delete_eval_prompt(request: Request):
+    svc = _svc(request)
+    pid = (await request.json()).get("id")
+    svc.db.execute("DELETE FROM eval_prompts WHERE id=?", (pid,))
+    return {"ok": True}
+
+
+@router.post("/admin/api/eval/run")
+async def eval_run(request: Request):
+    """Start a harness run for a persona. Default is fire-and-forget (the GUI
+    polls the runs list); wait=true runs synchronously and returns the scored
+    row — the shape scripts/the operator convention want."""
+    import asyncio
+    svc = _svc(request)
+    b = await request.json()
+    persona = str(b.get("persona") or "")
+    if svc.personas.get(persona) is None:
+        return JSONResponse({"error": f"no persona named {persona!r}"},
+                            status_code=404)
+    judge = str(b.get("judge_model") or "")
+    categories = b.get("categories") or None
+    if b.get("wait"):
+        run_id = await svc.evals.run(persona, judge, categories)
+        row = svc.db.query_one("SELECT * FROM eval_runs WHERE id=?", (run_id,))
+        return {"ok": True, "run": row,
+                "results": svc.evals.results(run_id)}
+    task = asyncio.get_running_loop().create_task(
+        svc.evals.run(persona, judge, categories))
+    svc._eval_tasks = [t for t in svc._eval_tasks if not t.done()] + [task]
+    return {"ok": True, "started": True}
+
+
+@router.get("/admin/api/eval/runs")
+async def eval_runs(request: Request, persona: str = ""):
+    return {"runs": _svc(request).evals.runs(persona or None)}
+
+
+@router.get("/admin/api/eval/results")
+async def eval_results(request: Request, run_id: int):
+    return {"results": _svc(request).evals.results(run_id)}
 
 
 @router.get("/admin/api/semcache")

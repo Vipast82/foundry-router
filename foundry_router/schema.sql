@@ -227,6 +227,51 @@ CREATE TABLE IF NOT EXISTS review_log (
 
 CREATE INDEX IF NOT EXISTS idx_review_log_ts ON review_log(ts);
 
+-- Eval harness (quality spec Phase 4) ------------------------------------------
+-- A fixed, EDITABLE set of representative prompts per category, shape-checked
+-- (not exact-match) and optionally LLM-judged; scores accumulate per persona
+-- over time so trend lines are visible, not just before/after snapshots.
+
+CREATE TABLE IF NOT EXISTS eval_prompts (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  category TEXT,                    -- "coding" | "chat" | "research" | "rag"
+  prompt TEXT,
+  checks TEXT,                      -- JSON list of shape checks, e.g.
+                                    -- ["code_block","no_refusal","min_length:100",
+                                    --  "cites_source","valid_json","mentions:1912"]
+  enabled INTEGER DEFAULT 1,
+  created_at TEXT
+);
+
+CREATE TABLE IF NOT EXISTS eval_runs (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  ts TEXT,
+  persona TEXT,
+  judge_model TEXT,                 -- '' = shape checks only (judge skipped/denied)
+  prompts_run INTEGER,
+  shape_pass_rate REAL,             -- 0-1
+  avg_judge_score REAL,             -- 0-10, NULL when no judge scored anything
+  note TEXT,
+  status TEXT                       -- "running" | "done" | "failed"
+);
+
+CREATE INDEX IF NOT EXISTS idx_eval_runs_persona ON eval_runs(persona, ts);
+
+CREATE TABLE IF NOT EXISTS eval_results (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  run_id INTEGER REFERENCES eval_runs(id),
+  prompt_id INTEGER,
+  prompt TEXT,                      -- copied so history survives prompt edits
+  response_chars INTEGER,
+  shape_pass INTEGER,
+  shape_detail TEXT,                -- per-check outcomes, human-readable
+  judge_score REAL,
+  judge_notes TEXT,
+  duration_ms INTEGER
+);
+
+CREATE INDEX IF NOT EXISTS idx_eval_results_run ON eval_results(run_id);
+
 -- Semantic response cache (quality spec Phase 3) -------------------------------
 -- Embeddings are little-endian float32 BLOBs (the format sqlite-vec's
 -- vec_distance_cosine consumes directly when the extension loads; the Python

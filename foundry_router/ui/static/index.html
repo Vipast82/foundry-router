@@ -207,7 +207,7 @@ function clearLog(kind, label) {
 const TABS = {
   "Backends":  tabBackends,  "Models":   tabModels,   "Personas": tabPersonas,
   "Tools":     tabTools,     "Guardrails": tabGuardrails, "MCP":  tabMCP,
-  "Ollama":    tabOllama,   "Research": tabResearch,
+  "Ollama":    tabOllama,   "Research": tabResearch,  "Evals": tabEvals,
   "Usage Log": tabUsage,     "Events":   tabEvents,   "Dev Log": tabDevLog,
 };
 let current = "Backends";
@@ -1392,6 +1392,106 @@ function modeBadge(m) {
   if (m === "passthrough")
     return `<span class="pill warn" title="A raw backend model was requested by name — no Foundry routing.">passthrough</span>`;
   return `<span class="nw">${esc(m || "")}</span>`;
+}
+
+/* ----------------------------------------------------------------- evals -- */
+async function tabEvals() {
+  const [pd, md, rd, ed] = await Promise.all([
+    api("personas"), api("models"), api("eval/runs"), api("eval/prompts")]);
+  const personaOpts = pd.personas.filter(p => p.enabled)
+    .map(p => `<option>${esc(p.virtual_name)}</option>`).join("");
+  const judgeOpts = ['<option value="">— shape checks only (no judge) —</option>']
+    .concat((md.models || []).filter(m => m.reachable && !m.embedding)
+      .map(m => `<option>${esc(m.id)}</option>`)).join("");
+  const pct = v => v == null ? "—" : Math.round(v * 100) + "%";
+  const delta = v => v == null ? "" :
+    ` <span class="pill ${v >= 0 ? "ok" : "bad"}">${v > 0 ? "+" : ""}${v}</span>`;
+  const runRows = rd.runs.map(r => `<tr>
+    <td class="mono nw">${esc((r.ts || "").slice(0, 19))}</td>
+    <td class="nw">${esc(r.persona)}</td>
+    <td class="mono nw">${esc(r.judge_model || "—")}</td>
+    <td>${r.prompts_run}</td>
+    <td class="nw">${pct(r.shape_pass_rate)}${delta(r.shape_delta == null ? null : Math.round(r.shape_delta * 100))}</td>
+    <td class="nw">${r.avg_judge_score == null ? "—" : r.avg_judge_score.toFixed(1) + "/10"}${delta(r.judge_delta)}</td>
+    <td><span class="pill ${r.status === "done" ? "ok" : r.status === "failed" ? "bad" : "warn"}">${esc(r.status)}</span></td>
+    <td><button class="act" onclick="showEvalResults(${r.id})">details</button></td>
+    </tr>`).join("");
+  const promptRows = ed.prompts.map(p => `<tr>
+    <td class="nw">${esc(p.category)} ${p.enabled ? "" : '<span class="pill warn">off</span>'}</td>
+    <td>${esc(p.prompt)}</td>
+    <td class="mono">${esc(p.checks || "[]")}</td>
+    <td class="nw"><button class="act" onclick="editEvalPrompt(${p.id})">edit</button>
+      <button class="act" onclick='run(api("eval/prompts/delete",{method:"POST",body:{id:${p.id}}}))'>delete</button></td>
+    </tr>`).join("");
+  $("#main").innerHTML = `
+    <h2>Eval harness — score a persona's real routing output</h2>
+    <p class="hint">Runs the category's test prompts through the persona's actual routing path.
+      Shape checks are deterministic pass/fail (code block present, source cited, valid JSON,
+      no refusal, length bounds — never exact match); the optional judge model scores 0-10.
+      <b>Convention:</b> run this after any persona/prompt change and report the Δ with the change
+      (see docs/CONVENTIONS.md). Paid judges pass the normal guardrail ladder.</p>
+    <div class="card">
+      <div class="row">
+        <label>persona</label><select id="ev-persona">${personaOpts}</select>
+        <label>judge_model</label><select id="ev-judge">${judgeOpts}</select>
+        <button class="act primary" id="ev-run">Run eval</button>
+        <span class="hint">runs in the background — the table below updates as it finishes</span>
+      </div>
+    </div>
+    <h2>Run history — trend per persona, newest first</h2>
+    <table><tr><th>time (UTC)</th><th>persona</th><th>judge</th><th>prompts</th>
+      <th>shape pass (Δ pts)</th><th>judge score (Δ)</th><th>status</th><th></th></tr>
+      ${runRows || '<tr><td colspan="8" class="hint">no runs yet</td></tr>'}</table>
+    <div id="ev-detail"></div>
+    <h2>Test prompts — fixed set, freely editable</h2>
+    <table><tr><th>category</th><th>prompt</th><th>checks</th><th></th></tr>${promptRows}</table>
+    <div class="card">
+      <h2 style="margin-top:0" id="ep-title">Add / edit test prompt</h2>
+      <input type="hidden" id="ep-id" value="">
+      <div class="row"><label>category</label>
+        <select id="ep-cat"><option>coding</option><option>chat</option>
+          <option>research</option><option>rag</option></select>
+        <label>enabled</label><input type="checkbox" id="ep-on" checked></div>
+      <div class="row"><label>prompt</label><input id="ep-prompt" size="90"></div>
+      <div class="row"><label title="JSON list. Available: code_block, cites_source, valid_json, no_refusal, min_length:N, max_length:N, mentions:word">checks (JSON list)</label>
+        <input id="ep-checks" size="60" value='["no_refusal"]'></div>
+      <div class="row"><button class="act primary" id="ep-save">Save prompt</button></div>
+    </div>`;
+  window._evalPrompts = Object.fromEntries(ed.prompts.map(p => [p.id, p]));
+  $("#ev-run").onclick = () => run(api("eval/run", {method: "POST", body: {
+    persona: $("#ev-persona").value, judge_model: $("#ev-judge").value}}));
+  $("#ep-save").onclick = () => run(api("eval/prompts", {method: "POST", body: {
+    id: $("#ep-id").value ? +$("#ep-id").value : null,
+    category: $("#ep-cat").value,
+    prompt: $("#ep-prompt").value,
+    checks: JSON.parse($("#ep-checks").value || "[]"),
+    enabled: $("#ep-on").checked ? 1 : 0}}));
+  window.editEvalPrompt = id => {
+    const p = window._evalPrompts[id]; if (!p) return;
+    $("#ep-title").textContent = "Edit prompt #" + id;
+    $("#ep-id").value = id;
+    $("#ep-cat").value = p.category;
+    $("#ep-on").checked = !!p.enabled;
+    $("#ep-prompt").value = p.prompt;
+    $("#ep-checks").value = p.checks || "[]";
+  };
+  window.showEvalResults = async id => {
+    const d = await api("eval/results?run_id=" + id);
+    $("#ev-detail").innerHTML = `<div class="card">
+      <h2 style="margin-top:0">Run #${id} — per-prompt results</h2>
+      <table><tr><th>prompt</th><th>chars</th><th>shape</th><th>checks</th>
+        <th>judge</th><th>notes</th><th>time</th></tr>
+      ${d.results.map(r => `<tr>
+        <td>${esc(r.prompt)}</td><td>${r.response_chars}</td>
+        <td><span class="pill ${r.shape_pass ? "ok" : "bad"}">${r.shape_pass ? "pass" : "fail"}</span></td>
+        <td class="mono">${esc(r.shape_detail || "")}</td>
+        <td>${r.judge_score == null ? "—" : r.judge_score.toFixed(1)}</td>
+        <td>${esc(r.judge_notes || "")}</td>
+        <td class="nw">${fmtDur(r.duration_ms)}</td></tr>`).join("")}</table></div>`;
+  };
+  // Live-ish: while a run is in flight, refresh so scores appear as they land.
+  if (rd.runs.some(r => r.status === "running"))
+    setTimeout(() => { if (current === "Evals") render(); }, 4000);
 }
 
 async function tabUsage() {
