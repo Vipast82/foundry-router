@@ -654,12 +654,24 @@ async function tabPersonas() {
       }).join("")
     : `<span class="hint">No MCP servers discovered yet — add one on the MCP tab.
        Any existing entries on a persona are preserved.</span>`;
+  // Client-compat badges (Phase 5): documentation metadata — which clients a
+  // persona is tuned for, and how each experiences it (hover for the note).
+  const compatCell = p => {
+    let compat = {};
+    try { compat = JSON.parse(p.client_compat || "{}") || {}; } catch (e) {}
+    const pills = Object.entries(compat).map(([c, note]) =>
+      `<span class="pill ok" title="${esc(String(note))}">${esc(c)}</span>`).join(" ");
+    const style = p.output_style === "plain_text"
+      ? ' <span class="pill warn" title="output steered to plain text/markdown — for messaging bridges that cannot render HTML">plain-text</span>' : "";
+    return (pills || '<span class="hint">—</span>') + style;
+  };
   const rows = d.personas.map(p => `<tr>
     <td class="nw"><b>${esc(p.virtual_name)}</b> ${p.enabled ? "" : '<span class="pill warn">disabled</span>'}
       ${p.context_window ? '<span class="pill ok" title="admin-set context override">ctx: ' + esc(formatCtx(p.context_window)) + '</span>' : ''}
       ${p.review_enabled ? '<span class="pill ' + (p.review_model ? 'ok' : 'warn') + '" title="tiered review pass: ' + esc(p.review_model || 'NO MODEL SELECTED — review will be skipped') + '">🔎 review</span>' : ''}</td>
     <td class="nw">${esc(p.benchmark_category)}</td><td class="nw">${esc(p.local_bias_strength)}</td>
     <td class="mono">${esc(p.preferred_mcp_tools || "[]")}</td>
+    <td>${compatCell(p)}</td>
     <td>${esc(p.description || "")}</td>
     <td class="nw"><button class="act" onclick='editPersona(${JSON.stringify(p.virtual_name)})'>edit</button>
         <button class="act" onclick='clonePersona(${JSON.stringify(p.virtual_name)})'>clone</button>
@@ -669,7 +681,7 @@ async function tabPersonas() {
     <h2>Personas — virtual models advertised via /api/tags</h2>
     <p class="hint">Each row is a routing policy. Adding a workload type (e.g. Foundry-Creative)
     is adding a row here — never a code change (§4.8).</p>
-    <table><tr><th>name</th><th>category</th><th>local bias</th><th>MCP tools</th><th>description</th><th></th></tr>${rows}</table>
+    <table><tr><th>name</th><th>category</th><th>local bias</th><th>MCP tools</th><th title="Which clients this persona is tuned for — hover a badge for the note. Documentation metadata: one persona serves multiple clients; only fork a client-specific persona when an existing one genuinely doesn't serve that client well.">clients</th><th>description</th><th></th></tr>${rows}</table>
     <div class="card">
       <h2 style="margin-top:0" id="pe-title">Add / edit persona</h2>
       <div class="row"><label>virtual_name</label><input id="pe-name" size="28"></div>
@@ -712,6 +724,10 @@ async function tabPersonas() {
         <input type="checkbox" id="pe-loaded"></div>
       <div class="row"><label title="Optional JSON overriding the multi-signal ranking weights for this persona. Signals: primary (requested category), tool_calling, adequacy (observed outcome-judge quality), latency (warm tokens/sec). e.g. a speed-sensitive persona: {&quot;latency&quot;: 0.5}. Empty = defaults.">selection_weights (JSON obj)</label>
         <input id="pe-weights" size="50" value="{}" placeholder='{"latency": 0.4, "adequacy": 0.8}'></div>
+      <div class="row"><label title="JSON object: client name → compatibility note (how that client experiences this persona). Documentation only — surfaced as badges in the list above. Don't fork a persona per client; note the differences here instead.">client_compat (JSON obj)</label>
+        <input id="pe-compat" size="90" value="{}" placeholder='{"openwebui": "HTML renders as Artifacts", "anythingllm": "code blocks only"}'>
+        <label title="plain_text: steer workers to clean plain text / simple markdown (no HTML/SVG) — for messaging-bridge clients (Hermes/OpenClaw) that can't render markup. Default: no steering.">output_style</label>
+        <select id="pe-style"><option value="">default</option><option>plain_text</option></select></div>
       <div class="row">
         <label title="Tiered review pass (default OFF): after an answer is produced, the selected review model checks it and may return a corrected version — always delivered with a visible 🔎 marker, never a silent change. Paid review models pass the same guardrail/conservation ladder as any dispatch.">review_enabled</label>
         <input type="checkbox" id="pe-review">
@@ -746,7 +762,9 @@ async function tabPersonas() {
     selection_weights: JSON.parse($("#pe-weights").value || "{}"),
     review_enabled: $("#pe-review").checked ? 1 : 0,
     review_model: $("#pe-review-model").value || null,
-    review_prefilter: $("#pe-prefilter").checked ? 1 : 0}}));
+    review_prefilter: $("#pe-prefilter").checked ? 1 : 0,
+    client_compat: JSON.parse($("#pe-compat").value || "{}"),
+    output_style: $("#pe-style").value || null}}));
 window.clonePersona = async source => {
   const newName = prompt("New persona name (clone of " + source + "):",
                          source + "-copy");
@@ -848,6 +866,8 @@ window.editPersona = name => {
   rm.value = p.review_model || "";
   $("#pe-prefilter").checked = p.review_prefilter === null
     || p.review_prefilter === undefined || !!p.review_prefilter;
+  $("#pe-compat").value = p.client_compat || "{}";
+  $("#pe-style").value = p.output_style || "";
 };
 
 /* ----------------------------------------------------------------- tools -- */

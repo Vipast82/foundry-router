@@ -1447,7 +1447,8 @@ class AgentRunner:
             if m.get("role") == "system" and (m.get("content") or "").strip())
         messages: list[dict] = [
             {"role": "system", "content": prompts.build_worker_tool_prompt(
-                client_system or None)}]
+                client_system or None,
+                output_style=(ctx.persona or {}).get("output_style"))}]
         messages += [m for m in prompts.sanitize_history(ctx.messages)
                      if m.get("role") != "system"]
         images = self._attached_images(ctx)
