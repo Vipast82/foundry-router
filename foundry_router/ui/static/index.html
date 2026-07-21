@@ -964,8 +964,10 @@ async function tabGuardrails() {
         <input id="sc-cats" size="70" value='${esc(JSON.stringify(scCfg.category_ttls || {}))}'></div>
       <div class="row">
         <button class="act primary" id="sc-save">Save cache settings</button>
+        <button class="act" id="sc-test">Test embedding ▶</button>
         <button class="act" id="sc-clear" ${sc.entries ? "" : "disabled"}>Clear cache (${sc.entries})</button>
       </div>
+      <div id="sc-test-out" class="hint" style="margin-top:8px"></div>
     </div>`;
   $("#sc-save").onclick = () => run(api("config/semantic_cache", {method: "POST", body: {
     enabled: $("#sc-on").checked,
@@ -975,6 +977,24 @@ async function tabGuardrails() {
     default_ttl_seconds: +$("#sc-ttl").value,
     max_entries: +$("#sc-max").value,
     category_ttls: JSON.parse($("#sc-cats").value || "{}")}}));
+  // Live probe of the endpoint currently typed in the form — verify before Save.
+  $("#sc-test").onclick = async () => {
+    const out = $("#sc-test-out"), btn = $("#sc-test");
+    btn.disabled = true; out.innerHTML = "testing embedding endpoint…";
+    try {
+      const r = await api("semcache/test", {method: "POST", body: {
+        embed_url: $("#sc-url").value.trim(),
+        embed_model: $("#sc-model").value.trim()}});
+      const vec = r.sqlite_vec ? "sqlite-vec" : "python fallback";
+      out.innerHTML = r.ok
+        ? `<span class="pill ok">OK</span> reachable via <span class="mono">${esc(r.endpoint)}</span>,
+           embedding dimension <b>${r.dimension}</b>, ${r.latency_ms}ms. Vector search: <b>${vec}</b>.`
+        : `<span class="pill bad">FAILED</span> ${esc(r.error)}
+           ${r.latency_ms ? `<span class="mono">(${r.latency_ms}ms)</span>` : ""}`;
+    } catch (e) {
+      out.innerHTML = `<span class="pill bad">FAILED</span> ${esc(e.message)}`;
+    } finally { btn.disabled = false; }
+  };
   $("#sc-clear").onclick = async () => {
     if (!confirm("Clear all cached answers?")) return;
     try { await api("semcache/clear", {method: "POST"}); toast("Cache cleared"); render(); }

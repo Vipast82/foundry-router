@@ -151,6 +151,48 @@ def test_badge_is_visible_and_readable():
     assert "⚡" in b and "97%" in b and "2h ago" in b
 
 
+# -- embedding health check / test probe ------------------------------------------
+
+async def test_test_embed_reports_success_and_dimension(tmp_path):
+    cache, _ = _cache(tmp_path)
+    out = await cache.test_embed()
+    assert out["ok"] is True
+    assert out["dimension"] == 3            # VECS default vector length
+    assert "sqlite_vec" in out and "latency_ms" in out
+
+
+async def test_test_embed_surfaces_the_real_error(tmp_path):
+    # unlike embed(), which swallows failures to degrade to no-cache, the probe
+    # must report what actually went wrong
+    cache, _ = _cache(tmp_path, http=FakeEmbedHTTP(fail=True))
+    out = await cache.test_embed()
+    assert out["ok"] is False and out["error"]
+
+
+async def test_test_embed_requires_both_fields(tmp_path):
+    cache, _ = _cache(tmp_path)
+    out = await cache.test_embed(url="", model="")
+    assert out["ok"] is False and "required" in out["error"]
+
+
+async def test_test_embed_uses_form_values_before_save(tmp_path):
+    # passing overrides tests what's in the form, not the saved (empty) config
+    cfg = SemanticCacheConfig(enabled=True, embed_url="", embed_model="")
+    cache = SemanticCache(cfg, FakeEmbedHTTP(), Database(tmp_path / "f.sqlite"))
+    out = await cache.test_embed(url="http://typed-in-form:11434",
+                                model="nomic-embed-text")
+    assert out["ok"] is True
+
+
+def test_test_embed_endpoint(client, app):
+    svc = app.state.services
+    svc.semcache.http = FakeEmbedHTTP()
+    r = client.post("/admin/api/semcache/test",
+                    json={"embed_url": "http://e:11434", "embed_model": "nomic"})
+    assert r.status_code == 200 and r.json()["ok"] is True
+    assert r.json()["dimension"] == 3
+
+
 # -- facade integration: a hit serves WITHOUT routing ------------------------------
 
 @pytest.mark.anyio
