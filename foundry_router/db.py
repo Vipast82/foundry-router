@@ -241,6 +241,10 @@ class Database:
             # HTML at all.
             ("personas", "client_compat", "TEXT"),
             ("personas", "output_style", "TEXT"),
+            # Code-sandbox audit trail: the submitted code (call arguments) and
+            # a flag marking calls that ran on an executes_code server.
+            ("tool_call_log", "arguments", "TEXT"),
+            ("tool_call_log", "executed_code", "INTEGER DEFAULT 0"),
         ]
         with self._lock:
             for table, column, ddl in added:

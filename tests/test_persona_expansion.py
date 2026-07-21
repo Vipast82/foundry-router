@@ -100,6 +100,8 @@ async def test_mcp_artifact_url_forwards_via_use_last_result(tmp_path):
 
     class FakeMCP:
         servers = {"comfyui": None}
+        def executes_code(self, server):
+            return False
         async def call_tool(self, server, tool, args):
             return f"Image generated: {URL}"
         async def list_all(self):

@@ -430,8 +430,16 @@ class RequestLogger:
             "est_cost_usd": round(est_cost_usd, 6)})
         self.est_cost += est_cost_usd
 
+    # Audit caps: a code-execution call captures the full submitted code (the
+    # best audit trail in the system); a read-only call's arguments (a search
+    # query, a URL) are small and capped tighter to keep rows lean.
+    _CODE_ARG_CAP = 20000
+    _ARG_CAP = 2000
+
     def record_tool_call(self, tool: str, server: str, duration_ms: int,
-                         ok: bool, error: str = "", caller: str = "brain") -> None:
+                         ok: bool, error: str = "", caller: str = "brain",
+                         arguments: Optional[dict] = None,
+                         executes_code: bool = False) -> None:
         """One MCP/tool invocation this request made (visibility spec item 5):
         without this there is no way to see whether a request actually used
         searxng/crawl4ai/etc., how long the call took, or what it died of —
@@ -440,16 +448,32 @@ class RequestLogger:
         Besides the per-request JSON trail, each event also lands in the
         durable tool_call_log table (quality-tracking spec Phase 1) so
         per-caller/per-tool reliability is queryable over time — `caller` is
-        'brain' or the worker model that owned the tool loop."""
+        'brain' or the worker model that owned the tool loop.
+
+        For a code-execution server (executes_code) the full `arguments` — the
+        submitted code — are captured verbatim: this tool gets the strongest
+        audit trail in the system, per the code-sandbox spec."""
         self.tool_calls.append({
             "tool": tool, "server": server, "duration_ms": duration_ms,
-            "ok": ok, **({"error": error[:300]} if error else {})})
+            "ok": ok, **({"error": error[:300]} if error else {}),
+            **({"executes_code": True} if executes_code else {})})
+        args_json = None
+        if arguments is not None:
+            try:
+                args_json = json.dumps(arguments, ensure_ascii=False, default=str)
+            except (TypeError, ValueError):
+                args_json = str(arguments)
+            cap = self._CODE_ARG_CAP if executes_code else self._ARG_CAP
+            if len(args_json) > cap:
+                args_json = args_json[:cap] + f"…[truncated at {cap} chars]"
         try:
             self.db.execute(
                 "INSERT INTO tool_call_log (ts, persona, caller, server, tool, "
-                "ok, duration_ms, error) VALUES (?,?,?,?,?,?,?,?)",
+                "ok, duration_ms, error, arguments, executed_code) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?)",
                 (utcnow(), self.persona, caller, server, tool, int(ok),
-                 duration_ms, error[:300] if error else ""))
+                 duration_ms, error[:300] if error else "", args_json,
+                 int(executes_code)))
         except Exception:
             log.exception("failed to write tool_call_log row")
 

@@ -61,6 +61,9 @@ class FakeMCP:
         self.fail = fail
         self.calls = []
 
+    def executes_code(self, server):
+        return False
+
     async def call_tool(self, server, tool, args):
         self.calls.append((server, tool, args))
         if self.fail:

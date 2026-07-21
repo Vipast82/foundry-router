@@ -622,7 +622,17 @@ window.editModel = id => {
 
 /* -------------------------------------------------------------- personas -- */
 async function tabPersonas() {
-  const [d, td, md] = await Promise.all([api("personas"), api("tools"), api("models")]);
+  const [d, td, md, sd] = await Promise.all([
+    api("personas"), api("tools"), api("models"), api("mcp_servers")]);
+  // Servers that execute code — a persona preferring any of them is
+  // code-execution-enabled and gets flagged distinctly from read-only personas.
+  const codeExecServers = new Set(
+    (sd.servers || []).filter(s => s.executes_code).map(s => s.name));
+  const personaExecutesCode = p => {
+    let pref = [];
+    try { pref = JSON.parse(p.preferred_mcp_tools || "[]"); } catch (e) {}
+    return pref.some(x => codeExecServers.has(x));
+  };
   // Review-model choices: any reachable chat-capable model, local or paid —
   // same selection pattern as elsewhere, never hardcoded to a specific model.
   const reviewChoices = (md.models || [])
@@ -668,7 +678,8 @@ async function tabPersonas() {
   const rows = d.personas.map(p => `<tr>
     <td class="nw"><b>${esc(p.virtual_name)}</b> ${p.enabled ? "" : '<span class="pill warn">disabled</span>'}
       ${p.context_window ? '<span class="pill ok" title="admin-set context override">ctx: ' + esc(formatCtx(p.context_window)) + '</span>' : ''}
-      ${p.review_enabled ? '<span class="pill ' + (p.review_model ? 'ok' : 'warn') + '" title="tiered review pass: ' + esc(p.review_model || 'NO MODEL SELECTED — review will be skipped') + '">🔎 review</span>' : ''}</td>
+      ${p.review_enabled ? '<span class="pill ' + (p.review_model ? 'ok' : 'warn') + '" title="tiered review pass: ' + esc(p.review_model || 'NO MODEL SELECTED — review will be skipped') + '">🔎 review</span>' : ''}
+      ${personaExecutesCode(p) ? '<span class="pill bad" title="This persona can EXECUTE CODE — it prefers a code-sandbox MCP server. Every execution is audited in tool_call_log.">⚠ code exec</span>' : ''}</td>
     <td class="nw">${esc(p.benchmark_category)}</td><td class="nw">${esc(p.local_bias_strength)}</td>
     <td class="mono">${esc(p.preferred_mcp_tools || "[]")}</td>
     <td>${compatCell(p)}</td>
@@ -1037,7 +1048,9 @@ function mcpActivityCell(u) {
 async function tabMCP() {
   const d = await api("mcp_servers");
   const rows = d.servers.map(s => `<tr>
-    <td>${esc(s.name)}</td><td class="mono">${esc(s.url)}</td><td>${esc(s.transport)}</td>
+    <td>${esc(s.name)}${s.executes_code
+      ? ' <span class="pill bad" title="This server EXECUTES CODE — full-code audit trail, network/limits enforced by config, per-persona opt-in only">⚠ code exec</span>' : ""}</td>
+    <td class="mono">${esc(s.url)}</td><td>${esc(s.transport)}</td>
     <td class="nw">${s.timeout_seconds ?? 300}s${(s.pace_seconds ?? 0) > 0 ? ` · ${s.pace_seconds}s gap` : ""}</td>
     <td class="nw">${s.has_token
         ? '<span class="pill ok" title="' + esc(s.token_header) + '">token set</span> <a href="#" data-cleartoken="' + esc(s.name) + '">clear</a>'
@@ -1084,10 +1097,31 @@ async function tabMCP() {
       <label title="Auth token stored in the DB (NOT config.yaml — stored in plaintext, same as config). Sent as 'Authorization: Bearer <token>' by default, or as the raw value of the header you name. Leave blank when editing a server to keep its existing token.">auth token</label>
       <input id="mcp-token" type="password" size="26" placeholder="secret — saved to DB, leave blank to keep">
       <label title="Header the token is sent in. 'Authorization' (default) sends 'Bearer <token>'; any other name (e.g. x-api-key) sends the raw token.">header</label>
-      <input id="mcp-hdr" size="16" value="Authorization">
+      <input id="mcp-hdr" size="16" value="Authorization"></div>
+      <div class="row" style="border-top:1px solid var(--border, #333);padding-top:8px">
+        <label title="Mark this server as one that EXECUTES CODE (e.g. a code sandbox). Enables the full-code audit trail, the per-persona ⚠ badge, and the sandbox controls below. Nothing is special-cased by name — this is the only switch.">⚠ executes code</label>
+        <input type="checkbox" id="mcp-exec">
+        <span class="hint">enables sandbox controls + full-code audit trail</span></div>
+      <div id="mcp-sandbox" class="row" style="display:none">
+        <label title="CPU cores passed to the sandbox as a call default (config wins over the model). Real enforcement is the sandbox container's cgroup limit — set it there too; a container restart may be needed.">CPU cores</label>
+        <input id="mcp-cpus" type="number" step="0.5" min="0" size="5" value="1">
+        <label title="Memory cap (MB) passed as a call default. Hard enforcement is the container's --memory limit on the sandbox host.">memory (MB)</label>
+        <input id="mcp-mem" type="number" step="128" min="0" size="7" value="512">
+        <label title="Network access. OFF (default) is force-applied over the model's request, so a model cannot enable network itself. The real block is the container's --network none — keep both aligned.">network access</label>
+        <input type="checkbox" id="mcp-net"></div>
+      <div id="mcp-sandbox2" class="row" style="display:none">
+        <label title="Advanced: extra call defaults as JSON, force-merged over the model's arguments (config wins). Use this to match the exact argument names YOUR sandbox expects — nothing is hardcoded. The CPU/memory/network fields above write into cpus/memory_mb/network keys; anything here is merged alongside.">extra call_defaults (JSON)</label>
+        <input id="mcp-defaults" size="60" value="{}" placeholder='{"language": "python"}'></div>
+      <div class="row">
       <button class="act primary" id="mcp-add">Save server</button>
       <button class="act" id="mcp-clear" title="Clear the form to add a new server">new</button></div>
     </div>`;
+  const syncSandboxVis = () => {
+    const on = $("#mcp-exec").checked;
+    $("#mcp-sandbox").style.display = on ? "" : "none";
+    $("#mcp-sandbox2").style.display = on ? "" : "none";
+  };
+  $("#mcp-exec").onchange = syncSandboxVis;
   window.editMcp = name => {
     const s = (window._mcpServers || {})[name]; if (!s) return;
     $("#mcp-name").value = s.name;
@@ -1102,6 +1136,16 @@ async function tabMCP() {
     $("#mcp-token").placeholder = s.has_token
       ? "token is set — leave blank to keep, or type to replace"
       : "secret — saved to DB, leave blank to keep";
+    // Sandbox controls: the CPU/mem/network steppers read the conventional
+    // keys out of call_defaults; anything else stays in the raw JSON field.
+    $("#mcp-exec").checked = !!s.executes_code;
+    const cd = {...(s.call_defaults || {})};
+    $("#mcp-cpus").value = cd.cpus ?? 1;
+    $("#mcp-mem").value = cd.memory_mb ?? 512;
+    $("#mcp-net").checked = !!cd.network;
+    delete cd.cpus; delete cd.memory_mb; delete cd.network;
+    $("#mcp-defaults").value = JSON.stringify(cd);
+    syncSandboxVis();
     document.querySelector("#mcp-name").closest(".card")
       .scrollIntoView({behavior: "smooth", block: "nearest"});
   };
@@ -1110,17 +1154,31 @@ async function tabMCP() {
     $("#mcp-to").value = 300; $("#mcp-pace").value = 0; $("#mcp-hdr").value = "Authorization";
     $("#mcp-retries").value = 3; $("#mcp-backoff").value = 30;
     $("#mcp-tr").value = "streamable-http";
+    $("#mcp-exec").checked = false; $("#mcp-cpus").value = 1; $("#mcp-mem").value = 512;
+    $("#mcp-net").checked = false; $("#mcp-defaults").value = "{}"; syncSandboxVis();
   };
   $("#mcp-add").onclick = async () => {
     const name = $("#mcp-name").value.trim(), url = $("#mcp-url").value.trim();
     if (!name || !url) { toast("name and url required", true); return; }
+    // Assemble call_defaults: extra JSON first, then the typed sandbox keys on
+    // top (so the steppers are authoritative for cpus/memory_mb/network).
+    let callDefaults = {};
+    if ($("#mcp-exec").checked) {
+      try { callDefaults = JSON.parse($("#mcp-defaults").value || "{}"); }
+      catch (e) { toast("extra call_defaults is not valid JSON", true); return; }
+      callDefaults.cpus = +$("#mcp-cpus").value || 0;
+      callDefaults.memory_mb = +$("#mcp-mem").value || 0;
+      callDefaults.network = $("#mcp-net").checked;
+    }
     try {
       await api("mcp_servers", {method: "POST", body: {
         name, url, transport: $("#mcp-tr").value,
         timeout_seconds: +$("#mcp-to").value || 300,
         pace_seconds: +$("#mcp-pace").value || 0,
         rate_limit_retries: +$("#mcp-retries").value || 3,
-        rate_limit_backoff_seconds: +$("#mcp-backoff").value || 30}});
+        rate_limit_backoff_seconds: +$("#mcp-backoff").value || 30,
+        executes_code: $("#mcp-exec").checked,
+        call_defaults: callDefaults}});
       const tok = $("#mcp-token").value.trim();
       if (tok) await api("mcp_servers/token", {method: "POST", body: {
         server: name, token: tok, header: $("#mcp-hdr").value.trim() || "Authorization"}});
@@ -1535,8 +1593,34 @@ async function tabEvals() {
 }
 
 async function tabUsage() {
-  const [d, q] = await Promise.all([api("usage?limit=100"), api("quota")]);
+  const [d, q, ce] = await Promise.all([
+    api("usage?limit=100"), api("quota"), api("tool_calls?executed_code=1&limit=50")]);
   const reqs = d.requests || [];
+
+  // ---- Code-execution audit (the sandbox's strongest audit trail) ---------------
+  const codeCalls = ce.tool_calls || [];
+  const codeCard = codeCalls.length ? `<div class="card" style="border-left:3px solid var(--bad, #a43)">
+    <h2 style="margin-top:0">⚠ Code-execution audit — last ${codeCalls.length} sandbox call(s)</h2>
+    <p class="hint">Every code execution is captured here with the exact submitted code. This is the
+      highest-risk tool in the stack; treat this log as the record of what actually ran.</p>
+    <table><tr><th>time (UTC)</th><th>persona</th><th>caller</th><th>server/tool</th>
+      <th>result</th><th>code</th></tr>
+    ${codeCalls.map(c => {
+      let code = "";
+      try { const a = JSON.parse(c.arguments || "{}");
+            code = a.code || a.source || a.script || c.arguments || ""; }
+      catch (e) { code = c.arguments || ""; }
+      return `<tr>
+        <td class="mono nw">${esc((c.ts || "").slice(0, 19))}</td>
+        <td class="nw">${esc(c.persona || "")}</td>
+        <td class="mono nw">${esc(c.caller || "")}</td>
+        <td class="mono nw">${esc(c.server)}/${esc(c.tool)}</td>
+        <td><span class="pill ${c.ok ? "ok" : "bad"}">${c.ok ? "ok" : "fail"}</span>
+          ${c.error ? `<span class="err" title="${esc(c.error)}">✗</span>` : ""}
+          <span class="mono" style="color:var(--dim)">${fmtDur(c.duration_ms || 0)}</span></td>
+        <td><details><summary>view</summary><pre class="mono" style="white-space:pre-wrap;max-width:640px">${esc(code)}</pre></details></td>
+      </tr>`;
+    }).join("")}</table></div>` : "";
 
   // ---- MCP usage, aggregated separately from "which model answered" -------------
   // This card answers "is the TrueNAS worker actually using Foundry's MCP servers,
@@ -1619,6 +1703,7 @@ async function tabUsage() {
     </tr>`).join("");
   $("#main").innerHTML = `
     ${quotaCard(q)}
+    ${codeCard}
     ${mcpCard}
     <div class="row" style="justify-content:space-between;align-items:baseline">
       <h2 style="margin-bottom:0">Usage log — every routed request</h2>
