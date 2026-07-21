@@ -60,6 +60,30 @@ def find_pending_question(db, messages: list[dict]) -> Optional[str]:
         return None
 
 
+def store_pending_paid(db, messages: list[dict], payload: dict) -> None:
+    """Server-side state for the paid-usage confirmation handshake (same
+    fingerprint mechanism as pending questions): payload carries the user's
+    requested target + matching model ids so the resuming request can restore
+    the steering and read the yes/no reply."""
+    db.kv_set(f"pending_paid:{_conversation_fingerprint(messages)}",
+              json.dumps(payload))
+
+
+def find_pending_paid(db, messages: list[dict]) -> Optional[dict]:
+    """Look up (and consume) a pending paid-usage confirmation for the
+    resuming conversation."""
+    key = f"pending_paid:{_conversation_fingerprint(messages, drop_last_user=True)}"
+    raw = db.kv_get(key)
+    if not raw:
+        return None
+    db.kv_del(key)  # consume — a confirmation is answered at most once
+    try:
+        out = json.loads(raw)
+        return out if isinstance(out, dict) else None
+    except json.JSONDecodeError:
+        return None
+
+
 def build_worker_tool_prompt(client_system: Optional[str] = None) -> str:
     """System prompt for worker-side tool calling: the selected worker owns the
     tool loop for this request (search, read results, decide, repeat) and
@@ -212,6 +236,8 @@ def _model_line(row: dict, tool_name: str) -> str:
     score = f"{row['score']:.0f}" if row.get("score") is not None else "?"
     stype = f" ({row['score_type']})" if row.get("score_type") else ""
     bits = [f"- {tool_name}: score {score}{stype}"]
+    if row.get("_user_requested"):
+        bits.append("REQUESTED BY THE USER this turn")
     if row.get("_loaded"):
         bits.append("⚡ already loaded in VRAM")
     try:
@@ -248,11 +274,15 @@ _TIER_DISPLAY = [
 
 
 def _models_block(ranked: list[dict], tool_name_for: dict[str, str]) -> str:
+    requested_lines: list[str] = []
     pinned_lines: list[str] = []
     groups: dict = {}
     for row in ranked:
         tool_name = tool_name_for.get(row["id"])
         if not tool_name:
+            continue
+        if row.get("_user_requested"):
+            requested_lines.append(_model_line(row, tool_name))
             continue
         if row.get("_pinned"):
             pinned_lines.append(_model_line(row, tool_name))
@@ -261,6 +291,9 @@ def _models_block(ranked: list[dict], tool_name_for: dict[str, str]) -> str:
         tier = tier if tier in dict(_TIER_DISPLAY) else None
         groups.setdefault(tier, []).append(_model_line(row, tool_name))
     blocks = []
+    if requested_lines:
+        blocks.append("[REQUESTED BY THE USER THIS TURN — honor the USER MODEL "
+                      "REQUEST below]\n" + "\n".join(requested_lines))
     if pinned_lines:
         blocks.append("[PINNED FOR THIS PERSONA — boosted defaults, in priority "
                       "order; not mandatory]\n" + "\n".join(pinned_lines))
@@ -269,10 +302,42 @@ def _models_block(ranked: list[dict], tool_name_for: dict[str, str]) -> str:
     return "\n".join(blocks) or "- (no models currently reachable)"
 
 
+def _user_request_block(user_request: Optional[dict]) -> str:
+    """The USER MODEL REQUEST override block: the user's own message named a
+    model/tier, so the free-first procedure yields to it. Rendered between the
+    window state and the selection procedure so a small brain reads it before
+    the rules it overrides."""
+    if not user_request:
+        return ""
+    target = user_request.get("target", "the requested model")
+    lines = [
+        f"\nUSER MODEL REQUEST: the user's message EXPLICITLY asks to use "
+        f"{target}. This OVERRIDES the free-first SELECTION PROCEDURE below: "
+        f"dispatch to a candidate marked \"REQUESTED BY THE USER\" (the cheapest "
+        f"matching tier if several match). Do not substitute a different model "
+        f"unless every requested candidate is unreachable or denied by a "
+        f"guardrail — in that case say so plainly and offer the best "
+        f"alternative. If spending paid usage requires the user's confirmation, "
+        f"the router pauses and asks them automatically — just dispatch."]
+    confirmed = user_request.get("confirmed")
+    if confirmed is True:
+        lines.append(
+            "The user has ALREADY CONFIRMED spending paid usage for this — "
+            "dispatch to the requested model now; do not ask again.")
+    elif confirmed is False:
+        lines.append(
+            "The user DECLINED the paid-usage warning — route to the best "
+            "FREE/LOCAL model instead, and say in your narration that you "
+            "stayed local at their request.")
+    return "\n".join(lines) + "\n"
+
+
 def build_system_prompt(persona: Optional[dict], ranked: list[dict],
                         tool_name_for: dict[str, str], meridian_note: str,
                         pending_question: Optional[str],
-                        client_system: Optional[str] = None) -> str:
+                        client_system: Optional[str] = None,
+                        user_request: Optional[dict] = None,
+                        spend_note: Optional[str] = None) -> str:
     p = persona or {}
     name = p.get("virtual_name", "Foundry-Chat")
     triggers = p.get("escalation_triggers") or "[]"
@@ -282,6 +347,8 @@ def build_system_prompt(persona: Optional[dict], ranked: list[dict],
         triggers_list = []
 
     models_block = _models_block(ranked, tool_name_for)
+    spend_line = f"\nMETERED SPEND: {spend_note}" if spend_note else ""
+    request_block = _user_request_block(user_request)
 
     parts = [f"""You are the routing brain (dispatcher) of Foundry Router. You are a \
 small local model with a training cutoff and no live knowledge. You NEVER answer the \
@@ -302,10 +369,11 @@ CANDIDATE MODELS grouped by cost tier (cheapest tier first; best score first \
 within a tier; scores 0-100, '?' = unknown):
 {models_block}
 
-CLAUDE USAGE WINDOW: {meridian_note}
-
+CLAUDE USAGE WINDOW: {meridian_note}{spend_line}
+{request_block}
 SELECTION PROCEDURE (apply in order — this is structural policy, follow it \
-even when a pricier model would also work):
+even when a pricier model would also work; a USER MODEL REQUEST above \
+overrides steps a-d):
 a0. If a [PINNED FOR THIS PERSONA] group is listed, try those first, in order \
 — they are boosted, not hard-required: if one is denied by a guardrail, \
 unavailable, or clearly unsuited, fall through to the next pin, then continue \

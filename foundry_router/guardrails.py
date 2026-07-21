@@ -36,6 +36,12 @@ class RequestGuardState:
     # flag remembers the denial so an insistent second attempt is permitted
     # (and logged as spending purchased credits).
     credits_warned: bool = False
+    # The user explicitly confirmed spending paid usage IN CHAT (the
+    # confirmation handshake for a user-directed model request). Bypasses
+    # adaptive tier conservation for this request — an informed human "yes"
+    # outranks the autonomous-overspend protection — but never the dollar
+    # spend caps or the max-paid-calls cap.
+    user_approved_paid: bool = False
 
 
 @dataclass
@@ -148,7 +154,12 @@ class GuardrailEngine:
             # progressively more expensive Claude tiers so remaining budget
             # goes to work that genuinely needs them. Fable (level 4) answers
             # to BOTH ladders: the general thresholds and its own bucket's.
-            worst = snap.get("worst_used")
+            # An explicit in-chat user confirmation (user_approved_paid)
+            # bypasses conservation — it protects against AUTONOMOUS
+            # overspending, and the user has just knowingly overridden it.
+            worst = None if state.user_approved_paid else snap.get("worst_used")
+            if state.user_approved_paid:
+                fable_used = None
             if (level >= 4 and fable_used is not None
                     and fable_used >= mcfg.conserve_fable_at):
                 msg = (f"Fable budget {fable_used:.0%} used — conserving Fable; "

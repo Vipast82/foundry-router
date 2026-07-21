@@ -182,6 +182,7 @@ async def quota(request: Request):
                 "conserve_strong_at": svc.meridian_usage.cfg.conserve_strong_at,
                 "conserve_fable_at": svc.meridian_usage.cfg.conserve_fable_at,
                 "usage_credits": svc.meridian_usage.cfg.usage_credits,
+                "confirm_user_paid_at": svc.meridian_usage.cfg.confirm_user_paid_at,
                 "min_window_fraction": svc.meridian_usage.cfg.min_window_fraction}}
 
 
@@ -216,7 +217,7 @@ async def set_meridian(request: Request):
     body = await request.json()
     allowed = {"quota_path", "min_window_fraction", "conserve_premium_at",
                "conserve_strong_at", "conserve_fable_at", "usage_credits",
-               "quota_poll_seconds"}
+               "confirm_user_paid_at", "quota_poll_seconds"}
     updates = {k: v for k, v in body.items() if k in allowed}
 
     def mutate(raw):

@@ -876,6 +876,9 @@ async function tabGuardrails() {
       <div class="row"><label title="Applies to Fable's OWN weekly bucket, not the general window">conserve_fable_at (deny Fable, use Opus)</label>
         <input id="m-fable" type="number" step="0.05" min="0" max="1"
           value="${cfg.meridian.conserve_fable_at}"></div>
+      <div class="row"><label title="When the user's own chat message explicitly requests a paid model ('use claude', 'route this to opus'), the request is honored — but at/above this window fraction the router first asks them in chat to confirm spending the usage. Their yes bypasses tier conservation for that request; dollar spend caps are never bypassed.">confirm_user_paid_at (user-requested paid)</label>
+        <input id="m-confirm" type="number" step="0.05" min="0" max="1"
+          value="${cfg.meridian.confirm_user_paid_at}"></div>
       <div class="row"><label title="last_resort: first Claude attempt after exhaustion is denied with 'try local first'; an insistent retry is permitted and logged as spending purchased credits. never: hard stop.">usage_credits policy</label>
         <select id="m-credits">
           <option ${cfg.meridian.usage_credits === "last_resort" ? "selected" : ""}>last_resort</option>
@@ -894,6 +897,7 @@ async function tabGuardrails() {
     conserve_premium_at: +$("#m-prem").value,
     conserve_strong_at: +$("#m-strong").value,
     conserve_fable_at: +$("#m-fable").value,
+    confirm_user_paid_at: +$("#m-confirm").value,
     usage_credits: $("#m-credits").value,
     min_window_fraction: +$("#m-min").value,
     quota_path: $("#m-path").value,
