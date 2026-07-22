@@ -35,6 +35,70 @@ MCP_FIND = "mcp-find"
 MCP_ADD = "mcp-add"
 MCP_REMOVE = "mcp-remove"
 
+# Inspect companion service (optional). mcp-find returns only a summary; the
+# richer per-server data (tool count, publisher, full config/secrets) comes from
+# `docker mcp catalog server inspect`, a HOST CLI with no MCP tool. When the
+# operator runs the contrib companion service on the gateway host and sets its
+# URL here, the panel's per-row Inspect button fetches that detail. Stored in kv
+# (like MCP auth tokens) so no config.yaml edit / restart is needed.
+INSPECT_URL_KEY = "gateway_inspect_url"
+INSPECT_TOKEN_KEY = "gateway_inspect_token"
+
+
+def inspect_settings(db) -> dict:
+    return {"url": db.kv_get(INSPECT_URL_KEY) or "",
+            "has_token": bool(db.kv_get(INSPECT_TOKEN_KEY))}
+
+
+def set_inspect_settings(db, url: str, token: Optional[str] = None) -> None:
+    """Persist the inspect companion URL (and optionally its bearer token —
+    write-only, blank keeps the existing one, empty string on an explicit clear)."""
+    url = (url or "").strip()
+    if url:
+        db.kv_set(INSPECT_URL_KEY, url)
+    else:
+        db.kv_del(INSPECT_URL_KEY)
+    if token is not None:
+        if token:
+            db.kv_set(INSPECT_TOKEN_KEY, token)
+        else:
+            db.kv_del(INSPECT_TOKEN_KEY)
+
+
+def parse_inspect(text: str) -> dict:
+    """Best-effort structured fields from an inspect payload, reusing the same
+    tolerant extractors as the catalog parser. Falls back to {} — the UI always
+    shows the raw inspect output too, so nothing is hidden if the shape differs."""
+    data = _loads(text)
+    if not isinstance(data, dict):
+        return {}
+    return {"tools": _tool_count(data),
+            "config_required": _config_required(data),
+            "requires_secrets": _requires_secrets(data),
+            "publisher": _publisher(data, "")}
+
+
+async def inspect_server(svc, server: str, catalog: Optional[str] = None) -> dict:
+    """Fetch richer detail for one catalog server via the inspect companion
+    service. Returns {configured: False} when no URL is set (the UI then hides
+    the Inspect affordance); otherwise {configured, ok, raw, parsed}."""
+    url = (svc.db.kv_get(INSPECT_URL_KEY) or "").rstrip("/")
+    if not url:
+        return {"configured": False}
+    headers = {}
+    token = svc.db.kv_get(INSPECT_TOKEN_KEY)
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+    payload = {"server": server}
+    if catalog:
+        payload["catalog"] = catalog
+    r = await svc.http.post(url + "/inspect", json=payload, headers=headers, timeout=35)
+    r.raise_for_status()
+    data = r.json()
+    raw = data.get("raw") or ""
+    return {"configured": True, "ok": bool(data.get("ok")),
+            "raw": raw, "parsed": parse_inspect(raw)}
+
 
 # --------------------------------------------------------------------------- #
 # Tolerant parsing of catalog results                                        #
