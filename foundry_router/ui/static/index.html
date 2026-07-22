@@ -1192,7 +1192,7 @@ function gatewaySection(gw) {
       <td class="mono nw">${esc(g.name)}</td>
       <td class="mono">${(g.tools || []).map(esc).join(", ")}</td>
       <td class="nw">${g.removable
-        ? `<button class="act" onclick="gwRemove(${JSON.stringify(g.name)}, ${JSON.stringify(a.gateway)})">Remove</button>`
+        ? `<button class="act" onclick='gwRemove(${JSON.stringify(g.name)}, ${JSON.stringify(a.gateway)})'>Remove</button>`
         : '<span class="hint">base / ungrouped</span>'}</td></tr>`).join("");
     return `<div style="margin-bottom:10px">
       <b class="mono">${esc(a.gateway)}</b> — <b>${a.tool_count}</b> attached tool(s)
@@ -1200,7 +1200,7 @@ function gatewaySection(gw) {
         ${groups || '<tr><td colspan="3" class="hint">no downstream tools attached</td></tr>'}</table>
       <div class="row"><label>remove by ref</label>
         <input class="gw-ref" data-gw="${esc(a.gateway)}" size="24" placeholder="exact server ref">
-        <button class="act" onclick="gwRemoveByRef(${JSON.stringify(a.gateway)})">Remove server</button></div>
+        <button class="act" onclick='gwRemoveByRef(${JSON.stringify(a.gateway)})'>Remove server</button></div>
     </div>`;
   }).join("");
   return `<div class="card">
@@ -1243,7 +1243,7 @@ function wireGateway(gw) {
         <td class="nw">${s.requires_secrets ? '<span class="pill bad">requires secrets</span>' : '<span class="pill ok">none</span>'}</td>
         <td class="nw">${s.requires_secrets
           ? '<button class="act" disabled title="This server needs secrets. Adding it requires a companion service on the gateway host to write secrets.env — not available yet. Attach it manually via SSH for now.">Add</button>'
-          : `<button class="act primary" onclick="gwAdd(${JSON.stringify(s.ref)}, ${JSON.stringify(primary)})">Add</button>`}</td>
+          : `<button class="act primary" onclick='gwAdd(${JSON.stringify(s.ref)}, ${JSON.stringify(primary)})'>Add</button>`}</td>
       </tr>`).join("")}</table>`;
   });
 }
