@@ -123,17 +123,25 @@ def is_gateway_management_tool(name: str) -> bool:
     return (name or "").lower() in GATEWAY_MANAGEMENT_TOOLS
 
 
+# The Docker MCP Gateway's tool-name-prefix feature uses '__' as the separator
+# in practice (memory__read_graph, SQLite__append_insight), NOT the ':' shown in
+# `docker mcp feature enable`'s own example text — confirmed across every routed
+# tool. ':' is kept as a fallback in case a future gateway build changes it.
+_TOOL_PREFIX_SEPS = ("__", ":")
+
+
 def split_tool_prefix(tool_name: str) -> tuple[Optional[str], str]:
-    """When the Docker MCP Gateway's `tool-name-prefix` feature is on, tools
-    it routes are named 'server:bare' (memory:read_graph, SQLite:read_query —
-    the prefix is the exact, case-sensitive server ref used at add time). Split
-    on the FIRST colon into (server, bare_name) for grouping; returns
+    """When the Docker MCP Gateway's `tool-name-prefix` feature is on, tools it
+    routes are named 'server<sep>bare' (memory__read_graph, SQLite__append_insight
+    — the prefix is the exact, case-sensitive server ref used at add time). Split
+    on the FIRST occurrence of the separator into (server, bare_name); returns
     (None, name) when there's no prefix, so standalone connections
     (crawl4ai/searxng) and an un-prefixed gateway are unaffected."""
     name = tool_name or ""
-    server, sep, bare = name.partition(":")
-    if sep and server and bare:
-        return server, bare
+    for sep in _TOOL_PREFIX_SEPS:
+        server, found, bare = name.partition(sep)
+        if found and server and bare:
+            return server, bare
     return None, name
 
 

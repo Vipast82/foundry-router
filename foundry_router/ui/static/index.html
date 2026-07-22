@@ -651,12 +651,17 @@ async function tabPersonas() {
     // Servers instead, and excluded from persona resolution in the backend too.
     if (t.is_admin) continue;
     const s = t.server || t.name;
-    // tool-name-prefix (server:bare) groups tools by originating server behind
-    // a gateway connection; keep the FULL name for grants, show the bare name.
+    // tool-name-prefix (server__bare, or server:bare on future builds) groups
+    // tools by originating server behind a gateway connection; keep the FULL
+    // name for grants, show the bare name.
     const full = t.mcp_tool || t.name;
-    const ci = full.indexOf(":");
-    const prefix = ci > 0 ? full.slice(0, ci) : "";
-    const bare = ci > 0 ? full.slice(ci + 1) : full;
+    let prefix = "", bare = full;
+    for (const sep of ["__", ":"]) {
+      const idx = full.indexOf(sep);
+      if (idx > 0 && idx + sep.length < full.length) {
+        prefix = full.slice(0, idx); bare = full.slice(idx + sep.length); break;
+      }
+    }
     (servers[s] ||= {tools: [], disabled: 0}).tools.push(
       {tool: full, prefix, bare, is_write: !!t.is_write,
        is_destructive: !!t.is_destructive, write_kind: t.write_kind,
