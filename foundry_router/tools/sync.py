@@ -76,6 +76,59 @@ def sanitize(model_id: str) -> str:
     return f"ask_{s}"
 
 
+# Write/execute-capable tool heuristic (per-tool-grant spec, stretch goal): a
+# naming signal so the UI can pre-highlight the dangerous tools an admin must
+# opt into deliberately. Exact word-part matching (split on non-alphanumerics)
+# avoids substring false positives like "put" inside "output". It is a HINT for
+# the operator, never an access decision — scoping is what actually gates a tool.
+_WRITE_PARTS = {"create", "delete", "remove", "add", "write", "exec", "update",
+                "put", "drop", "set", "activate", "deactivate", "install", "run"}
+
+
+def is_write_tool(name: str) -> bool:
+    n = (name or "").lower()
+    if "code-mode" in n or "code_mode" in n:   # gateway execute meta-tool
+        return True
+    return any(p in _WRITE_PARTS for p in re.split(r"[^a-z0-9]+", n))
+
+
+def parse_preferred_mcp(persona: Optional[dict]) -> tuple[set[str], dict[str, set[str]], set[str]]:
+    """Parse a persona's preferred_mcp_tools into the three grant shapes.
+
+    Entries are a mixed JSON list (per-tool-grant spec; strict superset of the
+    old bare-string-only format):
+      - a bare string  -> may name a whole SERVER or an individual TOOL; kept
+        permissive (matched against either) so every existing persona and the
+        legacy per-tool-name grant keep working unchanged;
+      - {"server": S, "tools": [...]}  -> only those tools on S;
+      - {"server": S}  (no "tools")    -> the whole server S.
+
+    Returns (whole_servers, scoped {server -> tool names}, bare_names).
+    Malformed entries are skipped, never fatal."""
+    import json
+    whole: set[str] = set()
+    scoped: dict[str, set[str]] = {}
+    bare: set[str] = set()
+    raw = (persona or {}).get("preferred_mcp_tools")
+    try:
+        entries = json.loads(raw) if raw else []
+    except (json.JSONDecodeError, TypeError):
+        entries = []
+    if not isinstance(entries, list):
+        entries = []
+    for e in entries:
+        if isinstance(e, str):
+            bare.add(e)
+        elif isinstance(e, dict) and e.get("server"):
+            srv = str(e["server"])
+            tools = e.get("tools")
+            if tools is None:
+                whole.add(srv)
+            elif isinstance(tools, list):
+                scoped.setdefault(srv, set()).update(str(t) for t in tools)
+    return whole, scoped, bare
+
+
 def _describe_model(model_id: str, backends: list[str], meta: Optional[dict]) -> str:
     import json as _json
     parts = [f"Send a prompt to the model '{model_id}' (served by: {', '.join(backends)})."]
@@ -113,6 +166,9 @@ class ToolRegistry:
         self.tools: dict[str, ToolDef] = {}
         self._sync_lock = asyncio.Lock()
         self.last_sync: Optional[str] = None
+        # (server, tool) scoped grants already reported missing — so the
+        # drop-and-log for a vanished scoped tool fires once, not per request.
+        self._logged_missing_scoped: set[tuple[str, str]] = set()
 
     # -- queries -------------------------------------------------------------------
 
@@ -123,29 +179,67 @@ class ToolRegistry:
     def enabled(self) -> list[ToolDef]:
         return [t for t in self.tools.values() if not t.disabled]
 
-    def specs_for_persona(self, persona: Optional[dict] = None) -> list[dict]:
-        """Model tools are always offered. MCP tools are offered only when the
-        persona lists their server in preferred_mcp_tools — that's the
-        'preferentially load for this persona's sessions' field from §4.8.
-        (The Research Agent bypasses this and calls MCPManager directly.)"""
-        import json
-        preferred: set[str] = set()
-        if persona and persona.get("preferred_mcp_tools"):
-            try:
-                preferred = set(json.loads(persona["preferred_mcp_tools"]))
-            except (json.JSONDecodeError, TypeError):
-                pass
-        out = []
+    def mcp_tools_for_persona(self, persona: Optional[dict] = None) -> list[ToolDef]:
+        """The enabled MCP ToolDefs this persona may call, honoring both grant
+        shapes (per-tool-grant spec): a whole-server grant exposes every tool
+        currently registered for that server (dynamic — grows/shrinks with Tool
+        Sync); a scoped grant exposes only the named tools.
+
+        A scoped tool that Tool Sync no longer registers (renamed/removed
+        upstream, or its server offline) is simply absent from the result —
+        dropped silently — and reported ONCE to the event log per (server,
+        tool), never erroring the persona out."""
+        whole, scoped, bare = parse_preferred_mcp(persona)
+        out: list[ToolDef] = []
+        registered: dict[str, set[str]] = {}   # server -> names actually present
         for t in self.enabled():
-            if t.kind == "mcp" and t.server not in preferred and t.name not in preferred:
+            if t.kind != "mcp":
                 continue
-            out.append(t.spec())
+            srv = t.server or ""
+            names = {n for n in (t.mcp_tool, t.name) if n}
+            if srv in scoped:
+                registered.setdefault(srv, set()).update(names)
+            if srv in whole or srv in bare or (names & bare) \
+                    or (srv in scoped and (names & scoped[srv])):
+                out.append(t)
+        self._report_missing_scoped(persona, scoped, registered)
+        return out
+
+    def _report_missing_scoped(self, persona: Optional[dict],
+                               scoped: dict[str, set[str]],
+                               registered: dict[str, set[str]]) -> None:
+        pname = (persona or {}).get("virtual_name", "?")
+        for srv, present in registered.items():
+            for tool in present:               # reappeared -> allow a future re-log
+                self._logged_missing_scoped.discard((srv, tool))
+        for srv, wanted in scoped.items():
+            for tool in sorted(wanted - registered.get(srv, set())):
+                if (srv, tool) in self._logged_missing_scoped:
+                    continue
+                self._logged_missing_scoped.add((srv, tool))
+                self.db.log_event(
+                    "info", "tool_sync",
+                    f"persona {pname}: scoped MCP tool {srv}/{tool} is not "
+                    f"currently registered — dropped from this persona's tools",
+                    "renamed/removed upstream, or the server is offline")
+
+    def specs_for_persona(self, persona: Optional[dict] = None) -> list[dict]:
+        """Model tools are always offered. MCP tools are offered only per the
+        persona's preferred_mcp_tools grants (whole-server or scoped-tool) —
+        the 'preferentially load for this persona's sessions' field from §4.8.
+        (The Research Agent bypasses this and calls MCPManager directly.)"""
+        out = [t.spec() for t in self.enabled() if t.kind != "mcp"]
+        out += [t.spec() for t in self.mcp_tools_for_persona(persona)]
         return out
 
     def status(self) -> list[dict]:
         return [{"name": t.name, "kind": t.kind, "model_id": t.model_id,
                  "server": t.server, "mcp_tool": t.mcp_tool,
-                 "description": t.description, "disabled": t.disabled}
+                 "description": t.description, "disabled": t.disabled,
+                 # write/execute heuristic (per-tool-grant spec stretch goal) —
+                 # a hint for the UI to pre-highlight dangerous tools.
+                 **({"is_write": is_write_tool(t.mcp_tool or t.name)}
+                    if t.kind == "mcp" else {})}
                 for t in sorted(self.tools.values(), key=lambda t: t.name)]
 
     # -- overrides ------------------------------------------------------------------

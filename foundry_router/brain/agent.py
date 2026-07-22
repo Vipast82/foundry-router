@@ -1421,9 +1421,10 @@ class AgentRunner:
                 yield ev
             return
 
-        preferred = set(_json_list(persona.get("preferred_mcp_tools")))
-        mcp_tools = [t for t in self.tool_registry.enabled()
-                     if t.kind == "mcp" and (t.server in preferred or t.name in preferred)]
+        # Same resolver the brain-mediated path uses — honors whole-server AND
+        # scoped per-tool grants, so a scoped persona's worker never sees a tool
+        # outside its grant (per-tool-grant spec: absent, not merely blocked).
+        mcp_tools = self.tool_registry.mcp_tools_for_persona(persona)
         if not mcp_tools:
             # Tools attached but none reachable right now — hand to the brain,
             # which will narrate the same and route without them.
