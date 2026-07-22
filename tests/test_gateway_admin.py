@@ -10,7 +10,10 @@ import pytest
 
 from foundry_router.db import Database
 from foundry_router.gateway_admin import (attached_view, add_server, find_servers,
-                                          parse_catalog, remove_server, _arg_name)
+                                          inspect_server, inspect_settings,
+                                          parse_catalog, parse_inspect,
+                                          remove_server, set_inspect_settings,
+                                          _arg_name)
 from foundry_router.registry.models_db import ModelRegistry
 from foundry_router.tools.mcp_client import MCPManager
 from foundry_router.tools.sync import (ToolDef, ToolRegistry, is_gateway_admin_tool,
@@ -225,6 +228,83 @@ async def test_remove_then_resyncs(tmp_path):
     await remove_server(svc, GATEWAY, "docker/playwright")
     assert svc.mcp.calls[0] == (GATEWAY, "mcp-remove", {"ref": "docker/playwright"})
     assert svc.synced == 1
+
+
+# -- inspect companion service ----------------------------------------------------
+
+def test_inspect_settings_roundtrip(tmp_path):
+    db = Database(tmp_path / "i.sqlite")
+    assert inspect_settings(db) == {"url": "", "has_token": False}
+    set_inspect_settings(db, "http://host:8899", token="sekret")
+    assert inspect_settings(db) == {"url": "http://host:8899", "has_token": True}
+    # blank token keeps the existing one; empty url clears
+    set_inspect_settings(db, "http://host:8899", token=None)
+    assert inspect_settings(db)["has_token"] is True
+    set_inspect_settings(db, "")
+    assert inspect_settings(db)["url"] == ""
+
+
+def test_parse_inspect_extracts_fields():
+    p = parse_inspect(json.dumps({"name": "playwright", "publisher": "microsoft",
+                                  "tools": ["a", "b", "c"], "secrets": ["TOKEN"]}))
+    assert p["tools"] == 3 and p["publisher"] == "microsoft"
+    assert p["requires_secrets"] is True
+    assert parse_inspect("not json") == {}
+
+
+class FakeHTTP:
+    def __init__(self, payload):
+        self.payload = payload
+        self.calls = []
+
+    async def post(self, url, json=None, headers=None, timeout=None):
+        self.calls.append({"url": url, "json": json, "headers": headers or {}})
+
+        class R:
+            def __init__(s, p): s._p = p
+            def raise_for_status(s): pass
+            def json(s): return s._p
+        return R(self.payload)
+
+
+async def test_inspect_server_unconfigured(tmp_path):
+    db = Database(tmp_path / "u.sqlite")
+
+    class S:
+        pass
+    s = S(); s.db = db; s.http = FakeHTTP({})
+    out = await inspect_server(s, "playwright")
+    assert out == {"configured": False}
+    assert s.http.calls == []                    # no call when no URL set
+
+
+async def test_inspect_server_calls_companion(tmp_path):
+    db = Database(tmp_path / "c.sqlite")
+    set_inspect_settings(db, "http://host:8899/", token="k")
+
+    class S:
+        pass
+    s = S(); s.db = db
+    s.http = FakeHTTP({"ok": True, "raw": json.dumps(
+        {"name": "playwright", "tools": ["navigate", "click"], "publisher": "docker"})})
+    out = await inspect_server(s, "playwright", catalog="docker-mcp")
+    call = s.http.calls[0]
+    assert call["url"] == "http://host:8899/inspect"
+    assert call["json"] == {"server": "playwright", "catalog": "docker-mcp"}
+    assert call["headers"]["Authorization"] == "Bearer k"
+    assert out["configured"] and out["ok"]
+    assert out["parsed"]["tools"] == 2 and out["parsed"]["publisher"] == "docker"
+
+
+def test_inspect_endpoints(client, app):
+    # not configured -> 400
+    assert client.post("/admin/api/gateway/inspect",
+                       json={"server": "playwright"}).status_code == 400
+    # configure via endpoint, then it's reported in /servers
+    r = client.post("/admin/api/gateway/inspect_config",
+                    json={"url": "http://host:8899", "token": "k"})
+    assert r.status_code == 200 and r.json()["has_token"] is True
+    assert client.get("/admin/api/gateway/servers").json()["inspect"]["url"] == "http://host:8899"
 
 
 # -- endpoints --------------------------------------------------------------------

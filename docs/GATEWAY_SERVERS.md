@@ -75,9 +75,33 @@ payload is always one click away, so you can confirm which fields the gateway
 actually returns before the parser is tuned.
 
 If a column shows `?` (tools) or `—` (config unknown), it means `mcp-find`
-didn't include that field for that server. `mcp-find` is a catalog *search* and
-may return a summary only; the richer per-server data comes from
-`docker mcp catalog server inspect <catalog> <server>` on the host. That is a
-host CLI call (no MCP tool exposes it), so wiring it into a per-row "details"
-fetch needs the same host-access path as the secrets companion service above —
-tracked as a follow-up, not part of the pure-MCP-tool scope.
+didn't include that field for that server — confirmed live: `mcp-find` returns
+only `name` / `description` / `long_lived` for most servers (config is sometimes
+present, tool count and publisher never are). The richer per-server data comes
+from `docker mcp catalog server inspect <catalog> <server>` on the host, a CLI
+with no MCP tool.
+
+## Inspect companion service (optional — enables tool count / publisher)
+
+To surface that richer detail, run the small companion in
+`contrib/gateway-admin-service/gateway_inspect_service.py` on the gateway host
+(`general-ai`). It exposes one endpoint that runs `docker mcp catalog server
+inspect` and returns its output. Stdlib only — no pip install.
+
+```bash
+# on general-ai, next to the gateway
+GATEWAY_INSPECT_TOKEN=$(openssl rand -hex 16) \
+  python3 gateway_inspect_service.py     # binds 127.0.0.1:8899
+```
+
+Bind it to localhost and firewall it to Foundry Router's host — it can run
+docker commands on the host, so treat it as privileged (same trust tier as the
+secrets companion). Then in **MCP > Gateway Servers → Inspect companion
+service**, set its URL (e.g. `http://192.168.0.114:8899`) and token. A per-row
+**Inspect ▾** button then fetches tool count, publisher, and full config/secrets
+for that server. Foundry parses what it can and always shows the raw inspect
+output too, so nothing is hidden if your gateway's output shape differs.
+
+The companion is deliberately inspect-only for now; it's the natural place to
+later add the `secrets.env` write endpoint that would let secret-requiring
+servers be added from the UI (currently out of scope, see above).

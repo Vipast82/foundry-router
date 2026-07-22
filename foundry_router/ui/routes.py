@@ -573,10 +573,52 @@ def _gateway_or_400(svc, body: dict):
 async def gateway_servers(request: Request):
     """Detected gateway connection(s) + a Tool-Sync-derived view of what's
     currently attached to each. No gateway call — pure local registry read."""
-    from ..gateway_admin import attached_view
+    from ..gateway_admin import attached_view, inspect_settings
     svc = _svc(request)
     return {"gateways": svc.tool_registry.gateway_servers(),
-            "attached": attached_view(svc)}
+            "attached": attached_view(svc),
+            "inspect": inspect_settings(svc.db)}
+
+
+@router.post("/admin/api/gateway/inspect_config")
+async def gateway_inspect_config(request: Request):
+    """Set the inspect companion service URL (+ optional bearer token — blank
+    keeps the existing token). Empty url clears it."""
+    from ..gateway_admin import inspect_settings, set_inspect_settings
+    svc = _svc(request)
+    body = await request.json()
+    set_inspect_settings(svc.db, str(body.get("url") or ""),
+                         token=body.get("token") if "token" in body else None)
+    return {"ok": True, **inspect_settings(svc.db)}
+
+
+@router.post("/admin/api/gateway/inspect")
+async def gateway_inspect(request: Request):
+    """Fetch richer per-server detail via the inspect companion service (host
+    CLI `docker mcp catalog server inspect`, exposed by contrib/
+    gateway-admin-service). 400 when the service isn't configured."""
+    import asyncio
+
+    from ..errors import describe_exception
+    from ..gateway_admin import inspect_server
+    svc = _svc(request)
+    body = await request.json()
+    server = str(body.get("server") or "").strip()
+    if not server:
+        return JSONResponse({"error": "server required"}, status_code=400)
+    try:
+        out = await asyncio.wait_for(
+            inspect_server(svc, server, body.get("catalog") or None), timeout=40)
+    except asyncio.TimeoutError:
+        return JSONResponse({"error": "inspect timed out"}, status_code=504)
+    except Exception as e:
+        return JSONResponse({"error": describe_exception(e)}, status_code=502)
+    if not out.get("configured"):
+        return JSONResponse(
+            {"error": "inspect companion service not configured — set its URL in "
+                      "MCP > Gateway Servers (see docs/GATEWAY_SERVERS.md)"},
+            status_code=400)
+    return out
 
 
 @router.post("/admin/api/gateway/find")

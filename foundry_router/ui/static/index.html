@@ -1215,6 +1215,21 @@ function gatewaySection(gw) {
       <span id="gw-status" class="hint"></span>
     </div>
     <div id="gw-results"></div>
+    <details style="margin-top:8px">
+      <summary class="hint" style="cursor:pointer">Inspect companion service ${(gw.inspect && gw.inspect.url)
+        ? '<span class="pill ok">configured</span>' : '<span class="pill warn">not set</span>'}</summary>
+      <p class="hint">mcp-find is a summary (name/description only — no tool count or publisher). The richer
+        per-server detail comes from <span class="mono">docker mcp catalog server inspect</span>, a host CLI with no
+        MCP tool. Run <span class="mono">contrib/gateway-admin-service/gateway_inspect_service.py</span> on the gateway
+        host and point Foundry at it to enable a per-row <b>Inspect</b> button. See docs/GATEWAY_SERVERS.md.</p>
+      <div class="row">
+        <label>inspect URL</label>
+        <input id="gw-insp-url" size="30" value="${esc((gw.inspect && gw.inspect.url) || "")}" placeholder="http://192.168.0.114:8899">
+        <label title="Bearer token if the companion service sets GATEWAY_INSPECT_TOKEN. Write-only — leave blank to keep the existing one.">token</label>
+        <input id="gw-insp-token" type="password" size="18" placeholder="${(gw.inspect && gw.inspect.has_token) ? "set — blank keeps it" : "optional"}">
+        <button class="act" id="gw-insp-save">Save</button>
+      </div>
+    </details>
     <h2 style="font-size:15px">Currently attached (from Tool Sync)</h2>
     ${attached || '<p class="hint">nothing attached</p>'}
   </div>`;
@@ -1223,7 +1238,16 @@ function gatewaySection(gw) {
 function wireGateway(gw) {
   if (!gw || !(gw.gateways || []).length) return;
   const primary = gw.gateways[0];
+  const inspectOn = !!(gw.inspect && gw.inspect.url);
   const run = async (fn) => { try { await fn(); } catch (e) { toast(e.message, true); } };
+  const saveBtn = $("#gw-insp-save");
+  if (saveBtn) saveBtn.onclick = () => run(async () => {
+    const body = {url: $("#gw-insp-url").value.trim()};
+    const tok = $("#gw-insp-token").value.trim();
+    if (tok) body.token = tok;
+    await api("gateway/inspect_config", {method: "POST", body});
+    toast("Inspect service saved"); render();
+  });
   $("#gw-search").onclick = () => run(async () => {
     const q = $("#gw-q").value.trim();
     const status = $("#gw-status"), out = $("#gw-results");
@@ -1249,8 +1273,10 @@ function wireGateway(gw) {
         <td class="mono nw">${esc(s.name)}${s.ref !== s.name ? `<br><span class="hint">${esc(s.ref)}</span>` : ""}</td>
         <td class="nw">${esc(s.publisher || "—")}</td>
         <td>${esc(s.description || "")}
-          <details><summary style="cursor:pointer;font-size:11px;color:var(--dim)">raw</summary><pre class="mono" style="white-space:pre-wrap;max-width:560px">${esc(JSON.stringify(s.raw, null, 2))}</pre></details></td>
-        <td class="nw">${s.tools == null ? '<span class="hint" title="mcp-find did not report a tool count — expand raw to see the payload">?</span>' : s.tools}</td>
+          ${inspectOn ? `<button class="act" style="padding:1px 6px;font-size:11px" onclick='gwInspect(${JSON.stringify(s.ref)})'>inspect ▾</button>` : ""}
+          <details><summary style="cursor:pointer;font-size:11px;color:var(--dim)">raw</summary><pre class="mono" style="white-space:pre-wrap;max-width:560px">${esc(JSON.stringify(s.raw, null, 2))}</pre></details>
+          <div class="gw-insp mono" data-ref="${esc(s.ref)}" style="white-space:pre-wrap;max-width:600px"></div></td>
+        <td class="nw">${s.tools == null ? '<span class="hint" title="mcp-find did not report a tool count — Inspect (if configured) or expand raw">?</span>' : s.tools}</td>
         <td class="nw">${cfgBadge(s)}</td>
         <td class="nw">${s.requires_secrets ? '<span class="pill bad">requires secrets</span>' : '<span class="pill ok">none</span>'}</td>
         <td class="nw">${s.requires_secrets
@@ -1285,6 +1311,22 @@ window.gwRemoveByRef = (gateway) => {
   const ref = inp && inp.value.trim();
   if (!ref) { toast("enter a server ref", true); return; }
   window.gwRemove(ref, gateway);
+};
+window.gwInspect = async (ref) => {
+  const box = [...document.querySelectorAll(".gw-insp")].find(b => b.dataset.ref === ref);
+  if (!box) return;
+  box.textContent = "inspecting…";
+  try {
+    const r = await api("gateway/inspect", {method: "POST", body: {server: ref}});
+    const p = r.parsed || {};
+    const bits = [];
+    if (p.tools != null) bits.push("tools: " + p.tools);
+    if (p.publisher) bits.push("publisher: " + p.publisher);
+    if (p.config_required != null) bits.push("config: " + (p.config_required ? "required" : "none"));
+    if (p.requires_secrets != null) bits.push("secrets: " + (p.requires_secrets ? "required" : "none"));
+    box.textContent = (bits.length ? bits.join("  ·  ") + "\n\n" : "")
+      + (r.raw || "(no output)");
+  } catch (e) { box.textContent = "inspect failed: " + e.message; }
 };
 
 async function tabMCP() {
