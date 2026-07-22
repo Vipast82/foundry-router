@@ -550,6 +550,105 @@ async def delete_mcp(request: Request):
 
 
 # --------------------------------------------------------------------------- #
+# Docker MCP Gateway admin (gateway-server admin spec) — operator-only,       #
+# backend-initiated MCP calls; NEVER routed through a persona/model tool-loop #
+# --------------------------------------------------------------------------- #
+
+def _gateway_or_400(svc, body: dict):
+    """Resolve the target gateway connection (explicit, or the sole detected
+    one). Returns (name, None) or (None, error-response)."""
+    gws = svc.tool_registry.gateway_servers()
+    gw = body.get("gateway") or (gws[0] if len(gws) == 1 else None)
+    if not gw:
+        return None, JSONResponse(
+            {"error": "no MCP gateway connection detected — a connection must "
+                      "expose the Docker MCP Gateway management tools "
+                      "(mcp-find/mcp-add)" if not gws else
+                      "multiple gateways detected; specify 'gateway'"},
+            status_code=404 if not gws else 400)
+    return gw, None
+
+
+@router.get("/admin/api/gateway/servers")
+async def gateway_servers(request: Request):
+    """Detected gateway connection(s) + a Tool-Sync-derived view of what's
+    currently attached to each. No gateway call — pure local registry read."""
+    from ..gateway_admin import attached_view
+    svc = _svc(request)
+    return {"gateways": svc.tool_registry.gateway_servers(),
+            "attached": attached_view(svc)}
+
+
+@router.post("/admin/api/gateway/find")
+async def gateway_find(request: Request):
+    """Search the Docker MCP Catalog via the gateway's mcp-find tool."""
+    import asyncio
+
+    from ..errors import describe_exception
+    from ..gateway_admin import find_servers
+    svc = _svc(request)
+    body = await request.json()
+    gw, err = _gateway_or_400(svc, body)
+    if err:
+        return err
+    try:
+        return await asyncio.wait_for(
+            find_servers(svc, gw, str(body.get("query") or "")), timeout=45)
+    except asyncio.TimeoutError:
+        return JSONResponse({"error": "mcp-find timed out after 45s"}, status_code=504)
+    except Exception as e:
+        return JSONResponse({"error": describe_exception(e)}, status_code=502)
+
+
+@router.post("/admin/api/gateway/add")
+async def gateway_add(request: Request):
+    """Attach a secret-free catalog server (mcp-add), then re-sync so the caller
+    can confirm the new tools appeared."""
+    import asyncio
+
+    from ..errors import describe_exception
+    from ..gateway_admin import add_server
+    svc = _svc(request)
+    body = await request.json()
+    ref = str(body.get("ref") or "").strip()
+    if not ref:
+        return JSONResponse({"error": "ref required"}, status_code=400)
+    gw, err = _gateway_or_400(svc, body)
+    if err:
+        return err
+    try:
+        return await asyncio.wait_for(add_server(svc, gw, ref), timeout=120)
+    except asyncio.TimeoutError:
+        return JSONResponse({"error": "mcp-add timed out after 120s"}, status_code=504)
+    except Exception as e:
+        return JSONResponse({"error": describe_exception(e)}, status_code=502)
+
+
+@router.post("/admin/api/gateway/remove")
+async def gateway_remove(request: Request):
+    """Detach a catalog server (mcp-remove), then re-sync. Disruptive — any
+    persona granted tools from that server loses them; the UI confirms first."""
+    import asyncio
+
+    from ..errors import describe_exception
+    from ..gateway_admin import remove_server
+    svc = _svc(request)
+    body = await request.json()
+    ref = str(body.get("ref") or "").strip()
+    if not ref:
+        return JSONResponse({"error": "ref required"}, status_code=400)
+    gw, err = _gateway_or_400(svc, body)
+    if err:
+        return err
+    try:
+        return await asyncio.wait_for(remove_server(svc, gw, ref), timeout=120)
+    except asyncio.TimeoutError:
+        return JSONResponse({"error": "mcp-remove timed out after 120s"}, status_code=504)
+    except Exception as e:
+        return JSONResponse({"error": describe_exception(e)}, status_code=502)
+
+
+# --------------------------------------------------------------------------- #
 # Logs (§4.9 items 6 & 7)                                                     #
 # --------------------------------------------------------------------------- #
 

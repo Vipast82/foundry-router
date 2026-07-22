@@ -92,6 +92,32 @@ def is_write_tool(name: str) -> bool:
     return any(p in _WRITE_PARTS for p in re.split(r"[^a-z0-9]+", n))
 
 
+# Docker MCP Gateway management tools (gateway-server admin spec). The Gateway
+# injects these into its own MCP connection when dynamic-tools is on. They are
+# the router-operator's control surface — Foundry's backend calls them directly
+# from the admin UI — and are identified by NAME (the Gateway's protocol), never
+# by a hardcoded connection name, so detection works for any gateway connection.
+#
+# GATEWAY_ADMIN_TOOLS are root-level write/reconfigure over the whole gateway
+# (choosing what code runs in a container). They must NEVER be exposed to a
+# model or persona — excluded from every persona's grantable set below and from
+# the persona editor — regardless of the admin page. mcp-find/mcp-discover are
+# read-only and used only to identify a gateway and browse the catalog.
+GATEWAY_ADMIN_TOOLS = {"mcp-add", "mcp-remove", "mcp-create-profile",
+                       "mcp-activate-profile", "mcp-config-set", "mcp-config-write",
+                       "mcp-exec", "code-mode"}   # exec-over-gateway: never grantable
+GATEWAY_MANAGEMENT_TOOLS = GATEWAY_ADMIN_TOOLS | {
+    "mcp-find", "mcp-discover", "mcp-config-get", "mcp-registry"}
+
+
+def is_gateway_admin_tool(name: str) -> bool:
+    return (name or "").lower() in GATEWAY_ADMIN_TOOLS
+
+
+def is_gateway_management_tool(name: str) -> bool:
+    return (name or "").lower() in GATEWAY_MANAGEMENT_TOOLS
+
+
 def parse_preferred_mcp(persona: Optional[dict]) -> tuple[set[str], dict[str, set[str]], set[str]]:
     """Parse a persona's preferred_mcp_tools into the three grant shapes.
 
@@ -195,6 +221,11 @@ class ToolRegistry:
         for t in self.enabled():
             if t.kind != "mcp":
                 continue
+            # Gateway root-admin tools are never grantable to a model/persona,
+            # even under a whole-server grant — they reconfigure the whole
+            # gateway (gateway-server admin spec security note).
+            if is_gateway_admin_tool(t.mcp_tool or t.name):
+                continue
             srv = t.server or ""
             names = {n for n in (t.mcp_tool, t.name) if n}
             if srv in scoped:
@@ -237,10 +268,43 @@ class ToolRegistry:
                  "server": t.server, "mcp_tool": t.mcp_tool,
                  "description": t.description, "disabled": t.disabled,
                  # write/execute heuristic (per-tool-grant spec stretch goal) —
-                 # a hint for the UI to pre-highlight dangerous tools.
-                 **({"is_write": is_write_tool(t.mcp_tool or t.name)}
+                 # a hint for the UI to pre-highlight dangerous tools. is_admin
+                 # marks gateway root-admin tools the UI hides from persona grants.
+                 **({"is_write": is_write_tool(t.mcp_tool or t.name),
+                     "is_admin": is_gateway_admin_tool(t.mcp_tool or t.name)}
                     if t.kind == "mcp" else {})}
                 for t in sorted(self.tools.values(), key=lambda t: t.name)]
+
+    # -- Docker MCP Gateway admin (gateway-server admin spec) -------------------
+
+    def gateway_servers(self) -> list[str]:
+        """MCP connections that expose the Docker MCP Gateway management tools —
+        detected by tool presence (mcp-find/mcp-add), never by a hardcoded
+        connection name, so it works for any gateway connection the operator
+        configured."""
+        found: dict[str, set[str]] = {}
+        for t in self.tools.values():
+            if t.kind == "mcp" and is_gateway_management_tool(t.mcp_tool or ""):
+                found.setdefault(t.server or "", set()).add((t.mcp_tool or "").lower())
+        return sorted(s for s, ms in found.items()
+                      if s and ({"mcp-find", "mcp-add"} & ms))
+
+    def mcp_tool_def(self, server: str, mcp_tool: str) -> Optional[ToolDef]:
+        """The registered ToolDef for a specific (server, original tool name),
+        so callers can read its input schema — used to pick the right argument
+        name for a gateway call instead of guessing a wire vocabulary."""
+        for t in self.tools.values():
+            if t.kind == "mcp" and t.server == server and (t.mcp_tool or "") == mcp_tool:
+                return t
+        return None
+
+    def gateway_downstream_tools(self, server: str) -> list[ToolDef]:
+        """Enabled tools on a gateway connection that are NOT its own management
+        tools — i.e. tools contributed by attached catalog servers. This is the
+        'what's currently attached' signal derived from Tool Sync data."""
+        return [t for t in self.enabled()
+                if t.kind == "mcp" and t.server == server
+                and not is_gateway_management_tool(t.mcp_tool or "")]
 
     # -- overrides ------------------------------------------------------------------
 

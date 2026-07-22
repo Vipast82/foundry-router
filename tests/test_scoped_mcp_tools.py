@@ -66,10 +66,14 @@ def test_parse_tolerates_garbage():
 # -- whole-server grant (back-compat) ---------------------------------------------
 
 def test_bare_server_grants_all_tools(tmp_path):
+    from foundry_router.tools.sync import is_gateway_admin_tool
     reg, _ = _registry(tmp_path)
     persona = {"preferred_mcp_tools": json.dumps(["general-mcp-gateway"])}
     got = _names(reg.mcp_tools_for_persona(persona))
-    assert got == set(GATEWAY_TOOLS)           # every tool, dynamic
+    # every tool EXCEPT the gateway root-admin tools, which are never grantable
+    expected = {t for t in GATEWAY_TOOLS if not is_gateway_admin_tool(t)}
+    assert got == expected
+    assert "read_graph" in got and "mcp-add" not in got
 
 
 def test_whole_server_grows_with_sync(tmp_path):

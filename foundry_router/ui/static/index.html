@@ -646,6 +646,10 @@ async function tabPersonas() {
   // grant a whole server (one click) OR scope to hand-picked tools within it.
   const servers = {};
   for (const t of (td.tools || []).filter(x => x.kind === "mcp")) {
+    // Gateway root-admin tools (mcp-add/mcp-remove/…) are never a selectable
+    // grant — they reconfigure the whole gateway. Managed on MCP > Gateway
+    // Servers instead, and excluded from persona resolution in the backend too.
+    if (t.is_admin) continue;
     const s = t.server || t.name;
     (servers[s] ||= {tools: [], disabled: 0}).tools.push(
       {tool: t.mcp_tool || t.name, is_write: !!t.is_write, disabled: !!t.disabled});
@@ -1173,8 +1177,104 @@ function mcpActivityCell(u) {
     </div></details>`;
 }
 
+/* MCP > Gateway Servers (gateway-server admin spec): browse the Docker MCP
+   Catalog and attach/detach servers on a live Docker MCP Gateway, no SSH.
+   Every action here is a BACKEND-initiated MCP call (operator control panel) —
+   never routed through a persona or model tool-loop. */
+function gatewaySection(gw) {
+  if (!gw || !(gw.gateways || []).length)
+    return `<div class="card"><h2 style="margin-top:0">Gateway Servers</h2>
+      <p class="hint">No Docker MCP Gateway connection detected. Add an MCP connection
+      whose server exposes the gateway management tools (mcp-find / mcp-add) above,
+      and this panel appears for browsing & attaching catalog servers.</p></div>`;
+  const attached = (gw.attached || []).map(a => {
+    const groups = (a.groups || []).map(g => `<tr>
+      <td class="mono nw">${esc(g.name)}</td>
+      <td class="mono">${(g.tools || []).map(esc).join(", ")}</td>
+      <td class="nw">${g.removable
+        ? `<button class="act" onclick="gwRemove(${JSON.stringify(g.name)}, ${JSON.stringify(a.gateway)})">Remove</button>`
+        : '<span class="hint">base / ungrouped</span>'}</td></tr>`).join("");
+    return `<div style="margin-bottom:10px">
+      <b class="mono">${esc(a.gateway)}</b> — <b>${a.tool_count}</b> attached tool(s)
+      <table><tr><th>server (namespace)</th><th>tools</th><th></th></tr>
+        ${groups || '<tr><td colspan="3" class="hint">no downstream tools attached</td></tr>'}</table>
+      <div class="row"><label>remove by ref</label>
+        <input class="gw-ref" data-gw="${esc(a.gateway)}" size="24" placeholder="exact server ref">
+        <button class="act" onclick="gwRemoveByRef(${JSON.stringify(a.gateway)})">Remove server</button></div>
+    </div>`;
+  }).join("");
+  return `<div class="card">
+    <h2 style="margin-top:0">Gateway Servers — Docker MCP Catalog <span class="pill warn" title="Operator-only. These are backend admin calls (mcp-add/mcp-remove) over the whole gateway — never exposed to any persona or model.">operator-only</span></h2>
+    <p class="hint">Browse the catalog and attach/detach servers on the live gateway without SSH.
+      Adding/removing runs the gateway's own management tools from Foundry's backend, then re-runs
+      Tool Sync so the change shows up. Servers that need <b>secrets</b> can't be added here yet
+      (no remote path to the gateway's secrets.env — see docs/GATEWAY_SERVERS.md).</p>
+    <div class="row">
+      <input id="gw-q" size="30" placeholder="search the catalog, e.g. playwright">
+      <button class="act primary" id="gw-search">Search catalog ▶</button>
+      <span id="gw-status" class="hint"></span>
+    </div>
+    <div id="gw-results"></div>
+    <h2 style="font-size:15px">Currently attached (from Tool Sync)</h2>
+    ${attached || '<p class="hint">nothing attached</p>'}
+  </div>`;
+}
+
+function wireGateway(gw) {
+  if (!gw || !(gw.gateways || []).length) return;
+  const primary = gw.gateways[0];
+  const run = async (fn) => { try { await fn(); } catch (e) { toast(e.message, true); } };
+  $("#gw-search").onclick = () => run(async () => {
+    const q = $("#gw-q").value.trim();
+    const status = $("#gw-status"), out = $("#gw-results");
+    status.textContent = "searching…"; out.innerHTML = "";
+    const r = await api("gateway/find", {method: "POST", body: {gateway: primary, query: q}});
+    status.textContent = `${(r.results || []).length} result(s)`;
+    if (!(r.results || []).length) {
+      out.innerHTML = `<p class="hint">No parsed results. Raw gateway output:</p>
+        <pre class="mono" style="white-space:pre-wrap;max-height:220px;overflow:auto">${esc(r.raw || "")}</pre>`;
+      return;
+    }
+    out.innerHTML = `<table><tr><th>server</th><th>description</th><th>tools</th><th>secrets</th><th></th></tr>
+      ${r.results.map(s => `<tr>
+        <td class="mono nw">${esc(s.name)}${s.ref !== s.name ? `<br><span class="hint">${esc(s.ref)}</span>` : ""}</td>
+        <td>${esc(s.description || "")}</td>
+        <td class="nw">${s.tools == null ? "?" : s.tools}</td>
+        <td class="nw">${s.requires_secrets ? '<span class="pill bad">requires secrets</span>' : '<span class="pill ok">none</span>'}</td>
+        <td class="nw">${s.requires_secrets
+          ? '<button class="act" disabled title="This server needs secrets. Adding it requires a companion service on the gateway host to write secrets.env — not available yet. Attach it manually via SSH for now.">Add</button>'
+          : `<button class="act primary" onclick="gwAdd(${JSON.stringify(s.ref)}, ${JSON.stringify(primary)})">Add</button>`}</td>
+      </tr>`).join("")}</table>`;
+  });
+}
+
+window.gwAdd = async (ref, gateway) => {
+  try {
+    $("#gw-status") && ($("#gw-status").textContent = `adding ${ref}…`);
+    const r = await api("gateway/add", {method: "POST", body: {gateway, ref}});
+    const added = (r.sync && r.sync.added || []).length;
+    toast(`Added ${ref} — Tool Sync picked up ${added} new tool(s)`);
+    render();
+  } catch (e) { toast(e.message, true); }
+};
+window.gwRemove = async (ref, gateway) => {
+  if (!confirm(`Remove "${ref}" from the gateway?\n\nAny persona granted its tools loses them, and it disappears from Tool Sync.`)) return;
+  try {
+    const r = await api("gateway/remove", {method: "POST", body: {gateway, ref}});
+    const removed = (r.sync && r.sync.removed || []).length;
+    toast(`Removed ${ref} — Tool Sync dropped ${removed} tool(s)`);
+    render();
+  } catch (e) { toast(e.message, true); }
+};
+window.gwRemoveByRef = (gateway) => {
+  const inp = [...document.querySelectorAll(".gw-ref")].find(i => i.dataset.gw === gateway);
+  const ref = inp && inp.value.trim();
+  if (!ref) { toast("enter a server ref", true); return; }
+  window.gwRemove(ref, gateway);
+};
+
 async function tabMCP() {
-  const d = await api("mcp_servers");
+  const [d, gw] = await Promise.all([api("mcp_servers"), api("gateway/servers")]);
   const rows = d.servers.map(s => `<tr>
     <td>${esc(s.name)}${s.executes_code
       ? ' <span class="pill bad" title="This server EXECUTES CODE — full-code audit trail, network/limits enforced by config, per-persona opt-in only">⚠ code exec</span>' : ""}</td>
@@ -1243,7 +1343,9 @@ async function tabMCP() {
       <div class="row">
       <button class="act primary" id="mcp-add">Save server</button>
       <button class="act" id="mcp-clear" title="Clear the form to add a new server">new</button></div>
-    </div>`;
+    </div>
+    ${gatewaySection(gw)}`;
+  wireGateway(gw);
   const syncSandboxVis = () => {
     const on = $("#mcp-exec").checked;
     $("#mcp-sandbox").style.display = on ? "" : "none";
