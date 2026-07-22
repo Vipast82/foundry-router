@@ -159,23 +159,36 @@ def test_arg_name_reads_schema_then_falls_back():
     assert _arg_name(None, ["query", "q"]) == "query"      # no schema -> preference
 
 
-# -- attached view ----------------------------------------------------------------
+# -- tool-name-prefix grouping ----------------------------------------------------
 
-def test_attached_view_groups_namespaced_tools(tmp_path):
-    reg, _ = _registry(tmp_path)
-    # simulate playwright attached with namespaced tools
-    for t in ["playwright.navigate", "playwright.click"]:
-        reg.tools[t] = ToolDef(name=t, kind="mcp", description="", parameters={},
-                               server=GATEWAY, mcp_tool=t)
+def test_split_tool_prefix():
+    from foundry_router.tools.sync import split_tool_prefix
+    assert split_tool_prefix("memory:read_graph") == ("memory", "read_graph")
+    assert split_tool_prefix("SQLite:read_query") == ("SQLite", "read_query")  # case kept
+    assert split_tool_prefix("sequentialthinking:sequentialthinking") == \
+        ("sequentialthinking", "sequentialthinking")
+    # no prefix -> standalone tool unaffected
+    assert split_tool_prefix("browser_click") == (None, "browser_click")
+    assert split_tool_prefix("") == (None, "")
+
+
+def test_attached_view_groups_by_prefix_shows_bare_names(tmp_path):
+    reg, _ = _registry(tmp_path, gateway_tools=["mcp-find", "mcp-add"])
+    # tool-name-prefix on: prefixed tools from several underlying servers
+    for full in ["memory:read_graph", "memory:create_entities",
+                 "playwright:browser_click", "SQLite:read_query"]:
+        reg.tools[full] = ToolDef(name=full, kind="mcp", description="",
+                                  parameters={}, server=GATEWAY, mcp_tool=full)
 
     class Svc:
         tool_registry = reg
     view = attached_view(Svc())[0]
-    assert view["gateway"] == GATEWAY
     groups = {g["name"]: g for g in view["groups"]}
-    assert groups["playwright"]["removable"] is True
-    assert set(groups["playwright"]["tools"]) == {"playwright.navigate", "playwright.click"}
-    assert groups["(ungrouped)"]["removable"] is False   # base memory tools
+    assert set(groups) == {"memory", "playwright", "SQLite"}   # 3 real groups
+    # bare tool names shown, not the prefixed ones
+    assert groups["memory"]["tools"] == ["create_entities", "read_graph"]
+    assert groups["memory"]["removable"] is True
+    assert view["tool_count"] == 4
 
 
 # -- orchestration: add/remove call the gateway then re-sync ----------------------
@@ -281,6 +294,40 @@ snapshot:
           data:
             type: string
 """
+
+
+INSPECT_YAML_REAL = """\
+type: image
+image: mcp/playwright@sha256:8771dc4666e7c11440bfc6a0c6b00480e9a15b8891b45f29a52
+snapshot:
+  server:
+    name: playwright
+    type: server
+    image: mcp/playwright@sha256:8771dc4666e7c11440bfc6a0c6b00480e9a15b8891b45f29a52
+    description: Playwright MCP server.
+    title: Playwright
+    icon: https://avatars.githubusercontent.com/u/6154722?v=4
+    longLived: true
+    remote: {}
+    tools:
+    - name: browser_click
+      description: Perform click on a web page
+      annotations:
+        readOnlyHint: false
+        destructiveHint: false
+"""
+
+
+def test_parse_inspect_real_yaml_with_empty_inner_map():
+    # regression: `remote: {}` made the JSON-scan return {} and skip YAML,
+    # yielding 'no structured summary parsed' for every server.
+    p = parse_inspect(INSPECT_YAML_REAL)
+    assert p["title"] == "Playwright"
+    assert p["image"].startswith("mcp/playwright@sha256:")
+    assert p["publisher"] == "mcp"
+    assert p["tool_count"] == 1
+    assert p["tools"][0]["name"] == "browser_click"
+    assert p["tools"][0]["kind"] == "write"          # readOnlyHint: false
 
 
 def test_parse_inspect_yaml_structured():

@@ -67,16 +67,22 @@ def set_inspect_settings(db, url: str, token: Optional[str] = None) -> None:
 
 
 def _loads_any(text: str) -> Any:
-    """JSON first (mcp-find), then YAML (`docker mcp catalog server inspect`
-    returns YAML). PyYAML is a project dependency."""
-    data = _loads(text)
-    if data is not None:
-        return data
+    """Parse an inspect payload. YAML FIRST: the inspect CLI returns YAML, and
+    the JSON balanced-scan in _loads would greedily match an inner empty map
+    like `remote: {}` and stop there, returning {} instead of the document
+    (the 'no structured summary parsed' bug). yaml.safe_load parses JSON too,
+    so this covers both shapes; the JSON scan is only a last resort for
+    prose-wrapped JSON that isn't valid YAML."""
+    if not text:
+        return None
     try:
         import yaml
-        return yaml.safe_load(text)
+        data = yaml.safe_load(text)
+        if isinstance(data, (dict, list)):
+            return data
     except Exception:
-        return None
+        pass
+    return _loads(text)
 
 
 def _server_block(data: dict) -> dict:
@@ -461,22 +467,19 @@ async def config_set(svc, gateway: str, server: str, values: dict) -> dict:
 
 def attached_view(svc) -> list[dict]:
     """Per-gateway 'what's attached' view derived from Tool Sync data: the
-    downstream (non-management) tools, grouped by an explicit namespace prefix
-    when the gateway namespaces them, so an operator gets per-server Remove
-    buttons. Ungrouped tools are shown together; the manual remove-by-ref box
-    covers anything the grouping can't name."""
+    downstream (non-management) tools, grouped by their originating server via
+    the Gateway's tool-name-prefix (server:bare). Each real group gets a Remove
+    button (mcp-remove keyed by the server ref = the prefix); bare tool names
+    are shown, not the prefixed ones. Tools with no prefix (the feature off, or
+    a standalone connection) fall under '(ungrouped)'."""
+    from .tools.sync import split_tool_prefix
     out = []
     for g in svc.tool_registry.gateway_servers():
         tools = svc.tool_registry.gateway_downstream_tools(g)
         groups: dict[str, list[str]] = {}
         for t in tools:
-            mt = t.mcp_tool or t.name
-            grp = None
-            for sep in (".", "__", ":", "/"):
-                if sep in mt:
-                    grp = mt.split(sep, 1)[0]
-                    break
-            groups.setdefault(grp or "(ungrouped)", []).append(mt)
+            server, bare = split_tool_prefix(t.mcp_tool or t.name)
+            groups.setdefault(server or "(ungrouped)", []).append(bare)
         out.append({
             "gateway": g,
             "tool_count": len(tools),
