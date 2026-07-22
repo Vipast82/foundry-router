@@ -45,6 +45,33 @@ container on `general-ai`. They are therefore:
   resolution in the backend, even under a whole-server grant. This holds
   regardless of this page.
 
+## Tool-name-prefix grouping
+
+The Docker MCP Gateway's `tool-name-prefix` feature names every routed tool
+`server:bare` (e.g. `memory:read_graph`, `playwright:browser_click`,
+`SQLite:read_query` — the prefix is the exact, case-sensitive server ref used
+at add time). Enable it on the host and restart the gateway:
+
+```bash
+docker mcp feature enable tool-name-prefix && systemctl restart mcp-gateway.service
+```
+
+Once tools carry prefixes, Foundry groups them by originating server: the
+**Currently attached** table shows one group per underlying server (Memory,
+Playwright, SQLite, Sequential Thinking, Context7 …) instead of one
+`(ungrouped)` blob, and the **persona editor's tool checklist** sub-groups the
+connection's tools the same way (collapsible per server, bare tool names shown,
+write/destructive badges preserved). Standalone connections (crawl4ai, searxng)
+have no prefix and are unaffected.
+
+**One-time re-check after enabling:** scoped persona grants store the exact tool
+name, so a grant made against the old bare names (e.g. `Foundry-Chat`'s
+`read_graph`/`search_nodes`/`open_nodes`) no longer matches once tools become
+`memory:read_graph` etc. The dropped tools are logged to Events on the next
+sync (not silently lost). Just re-check the three boxes under their new grouped
+location (Memory) and save — no migration tooling, since it's the only existing
+grant affected.
+
 ## Secrets — out of scope (needs a companion service)
 
 Servers that require secrets (GitHub PAT, Proxmox token, Obsidian/Grafana keys,

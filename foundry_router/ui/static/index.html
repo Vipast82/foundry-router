@@ -651,8 +651,14 @@ async function tabPersonas() {
     // Servers instead, and excluded from persona resolution in the backend too.
     if (t.is_admin) continue;
     const s = t.server || t.name;
+    // tool-name-prefix (server:bare) groups tools by originating server behind
+    // a gateway connection; keep the FULL name for grants, show the bare name.
+    const full = t.mcp_tool || t.name;
+    const ci = full.indexOf(":");
+    const prefix = ci > 0 ? full.slice(0, ci) : "";
+    const bare = ci > 0 ? full.slice(ci + 1) : full;
     (servers[s] ||= {tools: [], disabled: 0}).tools.push(
-      {tool: t.mcp_tool || t.name, is_write: !!t.is_write,
+      {tool: full, prefix, bare, is_write: !!t.is_write,
        is_destructive: !!t.is_destructive, write_kind: t.write_kind,
        badge_source: t.badge_source, disabled: !!t.disabled});
     if (t.disabled) servers[s].disabled++;
@@ -675,14 +681,27 @@ async function tabPersonas() {
     ? serverNames.map(s => {
         const info = servers[s];
         const allDisabled = info.disabled === info.tools.length;
-        const toolBoxes = info.tools.map(t => `
+        const toolBox = t => `
           <label class="mcp-tool-item${t.disabled ? " disabled" : ""}" style="display:block;margin-left:22px">
             <input type="checkbox" class="mcp-tool" data-server="${esc(s)}" data-tool="${esc(t.tool)}"
               data-write="${t.is_write ? 1 : 0}">
-            <span class="mono">${esc(t.tool)}</span>
+            <span class="mono">${esc(t.bare)}</span>
             ${toolAccessBadge(t)}
             ${t.disabled ? '<span class="pill warn">disabled on Tools tab</span>' : ""}
-          </label>`).join("");
+          </label>`;
+        // Sub-group by the tool-name-prefix (originating server behind a gateway
+        // connection). Prefixed groups become collapsible sections; un-prefixed
+        // tools (standalone connections) stay flat.
+        const byPrefix = {};
+        for (const t of info.tools) (byPrefix[t.prefix] ||= []).push(t);
+        const prefixes = Object.keys(byPrefix).sort();
+        const toolBoxes = (prefixes.length === 1 && prefixes[0] === "")
+          ? info.tools.map(toolBox).join("")
+          : prefixes.map(pfx => pfx === ""
+              ? byPrefix[pfx].map(toolBox).join("")
+              : `<details style="margin-left:22px" open><summary style="cursor:pointer">
+                   <b class="mono">${esc(pfx)}</b> <span class="hint">${byPrefix[pfx].length} tool${byPrefix[pfx].length === 1 ? "" : "s"}</span></summary>
+                 ${byPrefix[pfx].map(toolBox).join("")}</details>`).join("");
         return `<div class="mcp-item" data-server="${esc(s)}"${allDisabled
             ? ' title="Every tool on this server is disabled on the Tools tab"' : ""}>
           <label>

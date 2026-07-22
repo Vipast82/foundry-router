@@ -123,6 +123,20 @@ def is_gateway_management_tool(name: str) -> bool:
     return (name or "").lower() in GATEWAY_MANAGEMENT_TOOLS
 
 
+def split_tool_prefix(tool_name: str) -> tuple[Optional[str], str]:
+    """When the Docker MCP Gateway's `tool-name-prefix` feature is on, tools
+    it routes are named 'server:bare' (memory:read_graph, SQLite:read_query —
+    the prefix is the exact, case-sensitive server ref used at add time). Split
+    on the FIRST colon into (server, bare_name) for grouping; returns
+    (None, name) when there's no prefix, so standalone connections
+    (crawl4ai/searxng) and an un-prefixed gateway are unaffected."""
+    name = tool_name or ""
+    server, sep, bare = name.partition(":")
+    if sep and server and bare:
+        return server, bare
+    return None, name
+
+
 def tool_write_badge(name: str, read_only: Optional[bool] = None,
                      destructive: Optional[bool] = None) -> dict:
     """Normalized write/destructive classification for an MCP tool. Prefers the
