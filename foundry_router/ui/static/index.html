@@ -631,7 +631,8 @@ async function tabPersonas() {
   const personaExecutesCode = p => {
     let pref = [];
     try { pref = JSON.parse(p.preferred_mcp_tools || "[]"); } catch (e) {}
-    return pref.some(x => codeExecServers.has(x));
+    // entries are bare server strings OR {server, tools} objects — check both
+    return pref.some(x => codeExecServers.has(typeof x === "string" ? x : (x && x.server)));
   };
   // Review-model choices: any reachable chat-capable model, local or paid —
   // same selection pattern as elsewhere, never hardcoded to a specific model.
@@ -641,26 +642,47 @@ async function tabPersonas() {
   const reviewOpts = ['<option value="">— choose a model —</option>']
     .concat(reviewChoices.map(id => `<option>${esc(id)}</option>`)).join("");
   // Same discovered set the Tools tab reads — no second source, no drift.
-  // Grouped by SERVER: the persona field is server-level (checking a server
-  // prefers ALL its tools, matching sync's server-name rule) — not per-call.
+  // Grouped by SERVER, now with each server's individual tools so a persona can
+  // grant a whole server (one click) OR scope to hand-picked tools within it.
   const servers = {};
   for (const t of (td.tools || []).filter(x => x.kind === "mcp")) {
     const s = t.server || t.name;
-    (servers[s] ||= {tools: [], disabled: 0}).tools.push(t.name);
+    (servers[s] ||= {tools: [], disabled: 0}).tools.push(
+      {tool: t.mcp_tool || t.name, is_write: !!t.is_write, disabled: !!t.disabled});
     if (t.disabled) servers[s].disabled++;
   }
+  // total tool count per server — used by the Personas table's scoped badge.
+  window._mcpServerToolCounts = Object.fromEntries(
+    Object.entries(servers).map(([s, i]) => [s, i.tools.length]));
   const serverNames = Object.keys(servers).sort();
   const checklist = serverNames.length
     ? serverNames.map(s => {
         const info = servers[s];
         const allDisabled = info.disabled === info.tools.length;
-        return `<label class="mcp-item${allDisabled ? " disabled" : ""}"
-          title="${allDisabled ? "Every tool on this server is disabled on the Tools tab — a persona should not prefer it while disabled" : ""}">
-          <input type="checkbox" value="${esc(s)}" data-tools="${esc(info.tools.join(","))}">
-          <span class="mono">${esc(s)}</span>
-          <span class="hint">mcp · ${info.tools.length} tool${info.tools.length === 1 ? "" : "s"}${info.disabled ? ", " + info.disabled + " disabled" : ""}</span>
-          ${allDisabled ? '<span class="pill bad">disabled</span>' : ""}
-        </label>`;
+        const toolBoxes = info.tools.map(t => `
+          <label class="mcp-tool-item${t.disabled ? " disabled" : ""}" style="display:block;margin-left:22px">
+            <input type="checkbox" class="mcp-tool" data-server="${esc(s)}" data-tool="${esc(t.tool)}"
+              data-write="${t.is_write ? 1 : 0}">
+            <span class="mono">${esc(t.tool)}</span>
+            ${t.is_write ? '<span class="pill bad" title="write/execute-capable (naming heuristic) — grant deliberately">write</span>' : ""}
+            ${t.disabled ? '<span class="pill warn">disabled on Tools tab</span>' : ""}
+          </label>`).join("");
+        return `<div class="mcp-item" data-server="${esc(s)}"${allDisabled
+            ? ' title="Every tool on this server is disabled on the Tools tab"' : ""}>
+          <label>
+            <input type="checkbox" class="mcp-srv" value="${esc(s)}"
+              data-tools="${esc(info.tools.map(t => t.tool).join(","))}">
+            <span class="mono">${esc(s)}</span>
+            <span class="hint">mcp · ${info.tools.length} tool${info.tools.length === 1 ? "" : "s"} — select whole server${info.disabled ? ", " + info.disabled + " disabled" : ""}</span>
+            ${allDisabled ? '<span class="pill bad">disabled</span>' : ""}
+          </label>
+          <a href="#" class="mcp-expand" data-server="${esc(s)}" style="margin-left:22px;font-size:12px">customize tools ▸</a>
+          <div class="mcp-tools" data-server="${esc(s)}" style="display:none">
+            <div class="hint" style="margin-left:22px">Check individual tools to scope this persona to just those; leave the whole-server box for all current & future tools.
+              ${info.tools.some(t => t.is_write) ? '<a href="#" class="mcp-readonly" data-server="' + esc(s) + '">select read-only only</a>' : ""}</div>
+            ${toolBoxes}
+          </div>
+        </div>`;
       }).join("")
     : `<span class="hint">No MCP servers discovered yet — add one on the MCP tab.
        Any existing entries on a persona are preserved.</span>`;
@@ -675,13 +697,31 @@ async function tabPersonas() {
       ? ' <span class="pill warn" title="output steered to plain text/markdown — for messaging bridges that cannot render HTML">plain-text</span>' : "";
     return (pills || '<span class="hint">—</span>') + style;
   };
+  // MCP-grant badges: a bare server shows plain; a scoped grant shows
+  // "server (k/N tools)" so partial access is visible from the table alone.
+  const counts = window._mcpServerToolCounts || {};
+  const mcpGrantCell = p => {
+    let entries = [];
+    try { entries = JSON.parse(p.preferred_mcp_tools || "[]"); } catch (e) {}
+    if (!Array.isArray(entries) || !entries.length) return '<span class="hint">—</span>';
+    return entries.map(e => {
+      if (typeof e === "string")
+        return `<span class="pill ok" title="whole server — all current & future tools">${esc(e)}</span>`;
+      if (e && e.server) {
+        const total = counts[e.server];
+        const k = (e.tools || []).length;
+        return `<span class="pill warn" title="scoped — only ${esc((e.tools || []).join(", "))}">${esc(e.server)} (${k}${total ? "/" + total : ""} tools)</span>`;
+      }
+      return "";
+    }).join(" ");
+  };
   const rows = d.personas.map(p => `<tr>
     <td class="nw"><b>${esc(p.virtual_name)}</b> ${p.enabled ? "" : '<span class="pill warn">disabled</span>'}
       ${p.context_window ? '<span class="pill ok" title="admin-set context override">ctx: ' + esc(formatCtx(p.context_window)) + '</span>' : ''}
       ${p.review_enabled ? '<span class="pill ' + (p.review_model ? 'ok' : 'warn') + '" title="tiered review pass: ' + esc(p.review_model || 'NO MODEL SELECTED — review will be skipped') + '">🔎 review</span>' : ''}
       ${personaExecutesCode(p) ? '<span class="pill bad" title="This persona can EXECUTE CODE — it prefers a code-sandbox MCP server. Every execution is audited in tool_call_log.">⚠ code exec</span>' : ''}</td>
     <td class="nw">${esc(p.benchmark_category)}</td><td class="nw">${esc(p.local_bias_strength)}</td>
-    <td class="mono">${esc(p.preferred_mcp_tools || "[]")}</td>
+    <td>${mcpGrantCell(p)}</td>
     <td>${compatCell(p)}</td>
     <td>${esc(p.description || "")}</td>
     <td class="nw"><button class="act" onclick='editPersona(${JSON.stringify(p.virtual_name)})'>edit</button>
@@ -750,6 +790,7 @@ async function tabPersonas() {
         <button class="act" id="pe-apply-ctx" title="Set a sensible default context_window on any persona that has none yet (never overwrites a value you've already set). Review the numbers against your workers' real windows afterward.">Apply default context windows</button></div>
     </div>`;
   window._personas = Object.fromEntries(d.personas.map(p => [p.virtual_name, p]));
+  wireMcpChecklist();
   $("#pe-apply-ctx").onclick = () => window.applyDefaultContextWindows();
   $("#pe-save").onclick = () => run(api("personas", {method: "POST", body: {
     virtual_name: $("#pe-name").value.trim(),
@@ -787,21 +828,93 @@ window.clonePersona = async source => {
   } catch (e) { toast(e.message, true); }
 };
 }
-/* Read the MCP checklist back into a preferred_mcp_tools list. Writes the
-   checked SERVER names, and preserves any prior entries that map to no
-   currently-listed server or its tools (offline servers, unknown names) so
-   editing never silently drops config the UI can't currently show. Any prior
-   explicit tool-name entries collapse into their server name — behaviorally
-   identical to the sync matcher (a server entry attaches all its tools). */
+/* Read the MCP checklist back into a preferred_mcp_tools list (per-tool-grant
+   spec — mixed shapes). Per listed server: all tools checked => bare server
+   string (whole server, incl. future tools); some checked => {server, tools:[…]}
+   scoped grant; none => omitted. Prior entries for servers NOT currently shown
+   (offline) are preserved verbatim so editing never drops config the UI can't
+   display. */
 function readPreferredMcp(prevList) {
-  const boxes = [...document.querySelectorAll("#pe-mcp input[type=checkbox]")];
-  const checked = boxes.filter(b => b.checked).map(b => b.value);
-  const listedServers = new Set(boxes.map(b => b.value));
-  const listedTools = new Set(boxes.flatMap(
-    b => (b.dataset.tools || "").split(",").filter(Boolean)));
-  const preserved = (prevList || []).filter(
-    e => !listedServers.has(e) && !listedTools.has(e));
-  return [...new Set([...checked, ...preserved])];
+  const items = [...document.querySelectorAll("#pe-mcp .mcp-item")];
+  const listedServers = new Set(items.map(i => i.dataset.server));
+  const listedTools = new Set();
+  const out = [];
+  for (const item of items) {
+    const s = item.dataset.server;
+    const boxes = [...item.querySelectorAll(".mcp-tool")];
+    boxes.forEach(b => listedTools.add(b.dataset.tool));
+    const checked = boxes.filter(b => b.checked).map(b => b.dataset.tool);
+    if (!checked.length) continue;
+    if (checked.length === boxes.length) out.push(s);              // whole server
+    else out.push({server: s, tools: checked});                   // scoped
+  }
+  // Preserve entries whose server isn't shown right now (offline server, etc.).
+  for (const e of (prevList || [])) {
+    if (typeof e === "string") {
+      if (!listedServers.has(e) && !listedTools.has(e)) out.push(e);
+    } else if (e && e.server && !listedServers.has(e.server)) {
+      out.push(e);
+    }
+  }
+  return out;
+}
+
+/* Parse a stored preferred_mcp_tools value into grant sets (mirror of the
+   backend parse_preferred_mcp): {whole, bare, scoped{server->Set}}. */
+function parsePreferredMcp(raw) {
+  let entries = [];
+  try { entries = JSON.parse(raw || "[]"); } catch (e) {}
+  if (!Array.isArray(entries)) entries = [];
+  const whole = new Set(), bare = new Set(), scoped = {};
+  for (const e of entries) {
+    if (typeof e === "string") bare.add(e);
+    else if (e && e.server) {
+      if (e.tools == null) whole.add(e.server);
+      else (scoped[e.server] ||= new Set(), (e.tools || []).forEach(t => scoped[e.server].add(t)));
+    }
+  }
+  return {whole, bare, scoped};
+}
+
+/* Recompute a server-level checkbox from its individual tool boxes: all =>
+   checked, none => unchecked, some => indeterminate (the "mixed"/scoped look). */
+function refreshServerBox(item) {
+  const srv = item.querySelector(".mcp-srv");
+  const boxes = [...item.querySelectorAll(".mcp-tool")];
+  const n = boxes.filter(b => b.checked).length;
+  srv.indeterminate = n > 0 && n < boxes.length;
+  srv.checked = boxes.length > 0 && n === boxes.length;
+}
+
+/* Wire the checklist interactions once the form is rendered. */
+function wireMcpChecklist() {
+  document.querySelectorAll("#pe-mcp .mcp-item").forEach(item => {
+    const srv = item.querySelector(".mcp-srv");
+    const toolBoxes = [...item.querySelectorAll(".mcp-tool")];
+    // whole-server box drives all tool boxes (and collapses to the summary).
+    srv.addEventListener("change", () => {
+      toolBoxes.forEach(b => { b.checked = srv.checked; });
+      srv.indeterminate = false;
+    });
+    // any tool box flips the server box to checked / mixed / unchecked.
+    toolBoxes.forEach(b => b.addEventListener("change", () => refreshServerBox(item)));
+    const expand = item.querySelector(".mcp-expand");
+    const tools = item.querySelector(".mcp-tools");
+    if (expand) expand.onclick = ev => {
+      ev.preventDefault();
+      const open = tools.style.display === "none";
+      tools.style.display = open ? "" : "none";
+      expand.textContent = open ? "customize tools ▾" : "customize tools ▸";
+    };
+    const ro = item.querySelector(".mcp-readonly");
+    if (ro) ro.onclick = ev => {
+      ev.preventDefault();
+      toolBoxes.forEach(b => { b.checked = b.dataset.write !== "1"; });
+      refreshServerBox(item);
+      tools.style.display = "";
+      if (expand) expand.textContent = "customize tools ▾";
+    };
+  });
 }
 // Apply a sensible default context_window to personas that have none yet — an
 // explicit convenience wired to the "Apply default context windows" button,
@@ -850,12 +963,27 @@ window.editPersona = name => {
   $("#pe-bias").value = p.local_bias_strength || "moderate";
   $("#pe-enabled").checked = !!p.enabled;
   $("#pe-trig").value = p.escalation_triggers || "[]";
-  // Check a server if its name OR any of its tools is preferred — so both a
-  // server-name entry and a prior explicit tool-name list show as checked.
-  const pref = new Set(parseTags(p.preferred_mcp_tools));
-  document.querySelectorAll("#pe-mcp input[type=checkbox]").forEach(b => {
-    const tools = (b.dataset.tools || "").split(",").filter(Boolean);
-    b.checked = pref.has(b.value) || tools.some(t => pref.has(t));
+  // Restore grants (per-tool-grant spec): a whole-server grant checks every
+  // tool box; a scoped grant checks only the listed tools and leaves the
+  // server box in the mixed/indeterminate state (auto-expanded so it's visible).
+  const {whole, bare, scoped} = parsePreferredMcp(p.preferred_mcp_tools);
+  document.querySelectorAll("#pe-mcp .mcp-item").forEach(item => {
+    const s = item.dataset.server;
+    const allGranted = whole.has(s) || bare.has(s);
+    const scopedSet = scoped[s] || new Set();
+    let anyScoped = false;
+    item.querySelectorAll(".mcp-tool").forEach(b => {
+      const t = b.dataset.tool;
+      b.checked = allGranted || scopedSet.has(t) || bare.has(t);
+      if (!allGranted && b.checked) anyScoped = true;
+    });
+    refreshServerBox(item);
+    if (anyScoped) {   // expand so the admin sees exactly what's scoped
+      const tools = item.querySelector(".mcp-tools");
+      const expand = item.querySelector(".mcp-expand");
+      if (tools) tools.style.display = "";
+      if (expand) expand.textContent = "customize tools ▾";
+    }
   });
   $("#pe-guard").value = p.guardrail_overrides || "{}";
   $("#pe-pins").value = p.pinned_models || "[]";
