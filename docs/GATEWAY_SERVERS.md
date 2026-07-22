@@ -48,9 +48,12 @@ container on `general-ai`. They are therefore:
 ## Tool-name-prefix grouping
 
 The Docker MCP Gateway's `tool-name-prefix` feature names every routed tool
-`server:bare` (e.g. `memory:read_graph`, `playwright:browser_click`,
-`SQLite:read_query` — the prefix is the exact, case-sensitive server ref used
-at add time). Enable it on the host and restart the gateway:
+`server__bare` (e.g. `memory__read_graph`, `playwright__browser_click`,
+`SQLite__append_insight` — the prefix is the exact, case-sensitive server ref
+used at add time). Note the separator is `__` in practice, not the `:` shown in
+`docker mcp feature enable`'s own example text; Foundry splits on `__` first and
+falls back to `:` for future builds. Enable it on the host and restart the
+gateway:
 
 ```bash
 docker mcp feature enable tool-name-prefix && systemctl restart mcp-gateway.service
@@ -67,7 +70,7 @@ have no prefix and are unaffected.
 **One-time re-check after enabling:** scoped persona grants store the exact tool
 name, so a grant made against the old bare names (e.g. `Foundry-Chat`'s
 `read_graph`/`search_nodes`/`open_nodes`) no longer matches once tools become
-`memory:read_graph` etc. The dropped tools are logged to Events on the next
+`memory__read_graph` etc. The dropped tools are logged to Events on the next
 sync (not silently lost). Just re-check the three boxes under their new grouped
 location (Memory) and save — no migration tooling, since it's the only existing
 grant affected.

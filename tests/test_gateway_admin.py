@@ -163,20 +163,24 @@ def test_arg_name_reads_schema_then_falls_back():
 
 def test_split_tool_prefix():
     from foundry_router.tools.sync import split_tool_prefix
-    assert split_tool_prefix("memory:read_graph") == ("memory", "read_graph")
-    assert split_tool_prefix("SQLite:read_query") == ("SQLite", "read_query")  # case kept
-    assert split_tool_prefix("sequentialthinking:sequentialthinking") == \
+    # '__' is the real gateway separator (docs say ':', runtime uses '__')
+    assert split_tool_prefix("memory__read_graph") == ("memory", "read_graph")
+    assert split_tool_prefix("SQLite__append_insight") == ("SQLite", "append_insight")  # case kept
+    assert split_tool_prefix("context7__query-docs") == ("context7", "query-docs")
+    assert split_tool_prefix("sequentialthinking__sequentialthinking") == \
         ("sequentialthinking", "sequentialthinking")
-    # no prefix -> standalone tool unaffected
+    # bare name with single underscores is NOT split (only the first '__')
     assert split_tool_prefix("browser_click") == (None, "browser_click")
+    # ':' kept as a fallback for future gateway builds
+    assert split_tool_prefix("github:search") == ("github", "search")
     assert split_tool_prefix("") == (None, "")
 
 
 def test_attached_view_groups_by_prefix_shows_bare_names(tmp_path):
     reg, _ = _registry(tmp_path, gateway_tools=["mcp-find", "mcp-add"])
-    # tool-name-prefix on: prefixed tools from several underlying servers
-    for full in ["memory:read_graph", "memory:create_entities",
-                 "playwright:browser_click", "SQLite:read_query"]:
+    # tool-name-prefix on: '__'-prefixed tools from several underlying servers
+    for full in ["memory__read_graph", "memory__create_entities",
+                 "playwright__browser_click", "SQLite__read_query"]:
         reg.tools[full] = ToolDef(name=full, kind="mcp", description="",
                                   parameters={}, server=GATEWAY, mcp_tool=full)
 
