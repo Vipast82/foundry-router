@@ -116,6 +116,37 @@ def test_parse_catalog_garbage_is_empty():
     assert parse_catalog("") == []
 
 
+def test_parse_catalog_extracts_publisher_tools_config():
+    rows = parse_catalog(json.dumps([
+        {"name": "playwright-mcp-server", "publisher": "microsoft",
+         "toolCount": 21, "config": ["browser", "headless"]},
+        {"name": "playwright", "ref": "docker/playwright",
+         "tools": {"navigate": {}, "click": {}}},
+        {"name": "plain"},
+    ]))
+    # explicit publisher + alt tool-count key + non-empty config -> required
+    assert rows[0]["publisher"] == "microsoft"
+    assert rows[0]["tools"] == 21
+    assert rows[0]["config_required"] is True
+    assert rows[0]["requires_secrets"] is False   # config != secrets
+    # publisher derived from a namespaced ref; tools counted from a dict
+    assert rows[1]["publisher"] == "docker" and rows[1]["tools"] == 2
+    # nothing known -> unknown config (None), no publisher, no tool count
+    assert rows[2]["config_required"] is None
+    assert rows[2]["publisher"] == "" and rows[2]["tools"] is None
+
+
+def test_parse_catalog_keeps_raw_payload_per_row():
+    item = {"name": "x", "weird_field": {"nested": [1, 2]}}
+    row = parse_catalog(json.dumps([item]))[0]
+    assert row["raw"] == item                     # untouched, for the UI's raw view
+
+
+def test_config_present_but_empty_is_false_not_unknown():
+    row = parse_catalog(json.dumps([{"name": "x", "config": []}]))[0]
+    assert row["config_required"] is False        # field exists, empty -> 'none'
+
+
 def test_arg_name_reads_schema_then_falls_back():
     tool = ToolDef(name="mcp-find", kind="mcp", description="", server=GATEWAY,
                    mcp_tool="mcp-find",

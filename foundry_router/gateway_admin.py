@@ -116,24 +116,84 @@ def _requires_secrets(item: dict) -> bool:
 
 def _tool_count(item: dict) -> Optional[int]:
     v = item.get("tools")
-    if isinstance(v, list):
+    if isinstance(v, (list, dict)):
         return len(v)
-    for k in ("tools", "toolCount", "tool_count", "num_tools", "toolsCount"):
-        if isinstance(item.get(k), int):
-            return item[k]
+    for k in ("tools", "toolCount", "tool_count", "num_tools", "toolsCount",
+              "nTools", "tool_names", "toolNames"):
+        vv = item.get(k)
+        if isinstance(vv, int):
+            return vv
+        if isinstance(vv, (list, dict)):
+            return len(vv)
+    meta = item.get("metadata") or item.get("server")
+    if isinstance(meta, dict) and meta is not item:
+        return _tool_count(meta)
     return None
+
+
+def _publisher(item: dict, ref: str) -> str:
+    """Publisher/author of a catalog server, across likely key names; falls
+    back to the namespace of a slash-namespaced ref (e.g. 'docker/playwright'
+    -> 'docker') so near-duplicate entries are still distinguishable."""
+    for k in ("publisher", "author", "owner", "vendor", "maintainer",
+              "organization", "org", "namespace", "source", "provider"):
+        v = item.get(k)
+        if isinstance(v, str) and v.strip():
+            return v.strip()
+        if isinstance(v, dict):
+            for kk in ("name", "id", "login", "title"):
+                if v.get(kk):
+                    return str(v[kk])
+    meta = item.get("metadata")
+    if isinstance(meta, dict):
+        p = _publisher(meta, "")
+        if p:
+            return p
+    if ref and "/" in ref:
+        return ref.split("/", 1)[0]
+    return ""
+
+
+_CONFIG_KEYS = ("config", "configuration", "required_config", "requiredConfig",
+                "configSchema", "config_schema", "parameters", "settings")
+
+
+def _config_required(item: dict) -> Optional[bool]:
+    """Non-secret required config, SEPARATE from secrets (a server can need
+    config yet no secrets — the case that failed silently). Tri-state: True =
+    config present/required, False = a config field exists but is empty, None =
+    the payload says nothing about config (unknown, shown as '—')."""
+    seen = False
+    for k in _CONFIG_KEYS:
+        if k in item:
+            seen = True
+            v = item[k]
+            if isinstance(v, bool):
+                return v
+            if isinstance(v, (list, dict)) and len(v) > 0:
+                return True
+    meta = item.get("metadata")
+    if isinstance(meta, dict):
+        nested = _config_required(meta)
+        if nested is not None:
+            return nested
+    return False if seen else None
 
 
 def parse_catalog(text: str) -> list[dict]:
     """Normalize an mcp-find result into rows the UI can render. Tolerant of the
     exact gateway shape; unknown items degrade rather than crash. Each row:
-    {name, ref, description, tools (int|None), requires_secrets (bool)}."""
+    {name, ref, publisher, description, tools (int|None),
+     config_required (bool|None), requires_secrets (bool), raw (orig item)}.
+    `raw` is kept so the UI can show the untouched payload per row — the fastest
+    way to see what mcp-find actually returned when a field is missing."""
     items = _as_list(_loads(text))
     out = []
     for it in items:
         if isinstance(it, str):
-            out.append({"name": it, "ref": it, "description": "",
-                        "tools": None, "requires_secrets": False})
+            out.append({"name": it, "ref": it, "publisher": "", "description": "",
+                        "tools": None, "config_required": None,
+                        "requires_secrets": False, "raw": it})
             continue
         if not isinstance(it, dict):
             continue
@@ -142,9 +202,12 @@ def parse_catalog(text: str) -> list[dict]:
         out.append({
             "name": str(name),
             "ref": str(ref),
+            "publisher": _publisher(it, str(ref)),
             "description": str(_first(it, "description", "summary", "desc") or ""),
             "tools": _tool_count(it),
+            "config_required": _config_required(it),
             "requires_secrets": _requires_secrets(it),
+            "raw": it,
         })
     return out
 
