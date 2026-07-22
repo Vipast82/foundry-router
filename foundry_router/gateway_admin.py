@@ -34,6 +34,7 @@ log = logging.getLogger(__name__)
 MCP_FIND = "mcp-find"
 MCP_ADD = "mcp-add"
 MCP_REMOVE = "mcp-remove"
+MCP_CONFIG_SET = "mcp-config-set"
 
 # Inspect companion service (optional). mcp-find returns only a summary; the
 # richer per-server data (tool count, publisher, full config/secrets) comes from
@@ -65,17 +66,80 @@ def set_inspect_settings(db, url: str, token: Optional[str] = None) -> None:
             db.kv_del(INSPECT_TOKEN_KEY)
 
 
-def parse_inspect(text: str) -> dict:
-    """Best-effort structured fields from an inspect payload, reusing the same
-    tolerant extractors as the catalog parser. Falls back to {} — the UI always
-    shows the raw inspect output too, so nothing is hidden if the shape differs."""
+def _loads_any(text: str) -> Any:
+    """JSON first (mcp-find), then YAML (`docker mcp catalog server inspect`
+    returns YAML). PyYAML is a project dependency."""
     data = _loads(text)
+    if data is not None:
+        return data
+    try:
+        import yaml
+        return yaml.safe_load(text)
+    except Exception:
+        return None
+
+
+def _server_block(data: dict) -> dict:
+    """Locate the server-metadata block in an inspect payload, tolerant of
+    nesting: snapshot.server, then server, else the top level."""
     if not isinstance(data, dict):
         return {}
-    return {"tools": _tool_count(data),
-            "config_required": _config_required(data),
-            "requires_secrets": _requires_secrets(data),
-            "publisher": _publisher(data, "")}
+    snap = data.get("snapshot")
+    if isinstance(snap, dict) and isinstance(snap.get("server"), dict):
+        return snap["server"]
+    if isinstance(data.get("server"), dict):
+        return data["server"]
+    return data
+
+
+def _inspect_tools(block: dict, data: dict) -> list[dict]:
+    """Parsed tool table with ground-truth read/write from each tool's
+    annotations (readOnlyHint/destructiveHint), falling back to the name
+    heuristic (marked source='heuristic') only when a tool has no annotation."""
+    from .tools.sync import tool_write_badge
+    raw_tools = None
+    for src in (block, data):
+        if isinstance(src, dict) and isinstance(src.get("tools"), list):
+            raw_tools = src["tools"]
+            break
+    out = []
+    for t in raw_tools or []:
+        if not isinstance(t, dict):
+            continue
+        ann = t.get("annotations") if isinstance(t.get("annotations"), dict) else {}
+        ro, de = ann.get("readOnlyHint"), ann.get("destructiveHint")
+        badge = tool_write_badge(str(t.get("name") or ""), ro, de)
+        out.append({"name": str(t.get("name") or ""),
+                    "description": str(t.get("description") or ""),
+                    "read_only": ro, "destructive": de,
+                    "kind": badge["kind"], "source": badge["source"]})
+    return out
+
+
+def parse_inspect(text: str) -> dict:
+    """Structured summary of a `docker mcp catalog server inspect` payload (YAML
+    or JSON): title, image, publisher (image namespace), a tool table with
+    annotation-based read/write badges, config schema, and secrets. Falls back
+    to {} — the UI always shows the raw inspect output too, so nothing is hidden
+    if the shape differs."""
+    data = _loads_any(text)
+    if not isinstance(data, dict):
+        return {}
+    block = _server_block(data)
+    title = _first(block, "title", "displayName", "name") or ""
+    image = _first(block, "image", "dockerImage", "ref") or ""
+    publisher = (image.split("/", 1)[0] if image and "/" in image
+                 else _publisher(block, ""))
+    tools = _inspect_tools(block, data)
+    cfg_req = _config_required(block)
+    if cfg_req is None:
+        cfg_req = _config_required(data)
+    return {"title": str(title), "image": str(image), "publisher": publisher,
+            "tools": tools,
+            "tool_count": len(tools) or _tool_count(block) or _tool_count(data),
+            "config_required": cfg_req,
+            "config_schema": _config_schema(block) or _config_schema(data),
+            "requires_secrets": _requires_secrets(block) or _requires_secrets(data)}
 
 
 async def inspect_server(svc, server: str, catalog: Optional[str] = None) -> dict:
@@ -244,6 +308,40 @@ def _config_required(item: dict) -> Optional[bool]:
     return False if seen else None
 
 
+def _norm_cfg_block(b: Any) -> Optional[dict]:
+    if not isinstance(b, dict):
+        return None
+    props = b.get("properties")
+    return {"name": str(b.get("name") or ""),
+            "description": str(b.get("description") or ""),
+            "properties": props if isinstance(props, dict) else {}}
+
+
+def _config_schema(item: dict) -> list[dict]:
+    """Config schema blocks for the config-set FORM (structured-inspect spec):
+    a list of {name, description, properties (JSON-schema object)}. Handles a
+    list of blocks, a single block, or a bare {prop: {type}} map. Only blocks
+    with actual properties are returned."""
+    if not isinstance(item, dict):
+        return []
+    for k in ("config_schema", "configSchema", "config", "configuration"):
+        v = item.get(k)
+        if isinstance(v, list):
+            blocks = [_norm_cfg_block(b) for b in v]
+            return [b for b in blocks if b and b["properties"]]
+        if isinstance(v, dict):
+            if "properties" in v:
+                b = _norm_cfg_block(v)
+                return [b] if b and b["properties"] else []
+            # a bare {propname: {type: ...}} map
+            if v and all(isinstance(x, dict) for x in v.values()):
+                return [{"name": "", "description": "", "properties": v}]
+    meta = item.get("metadata")
+    if isinstance(meta, dict):
+        return _config_schema(meta)
+    return []
+
+
 def parse_catalog(text: str) -> list[dict]:
     """Normalize an mcp-find result into rows the UI can render. Tolerant of the
     exact gateway shape; unknown items degrade rather than crash. Each row:
@@ -256,7 +354,7 @@ def parse_catalog(text: str) -> list[dict]:
     for it in items:
         if isinstance(it, str):
             out.append({"name": it, "ref": it, "publisher": "", "description": "",
-                        "tools": None, "config_required": None,
+                        "tools": None, "config_required": None, "config_schema": [],
                         "requires_secrets": False, "raw": it})
             continue
         if not isinstance(it, dict):
@@ -270,6 +368,7 @@ def parse_catalog(text: str) -> list[dict]:
             "description": str(_first(it, "description", "summary", "desc") or ""),
             "tools": _tool_count(it),
             "config_required": _config_required(it),
+            "config_schema": _config_schema(it),
             "requires_secrets": _requires_secrets(it),
             "raw": it,
         })
@@ -324,6 +423,40 @@ async def remove_server(svc, gateway: str, ref: str) -> dict:
     svc.db.log_event("info", "gateway", f"operator removed gateway server {ref!r}", raw[:500])
     sync = await svc.tool_registry.sync(svc.pool)
     return {"raw": raw, "sync": sync}
+
+
+async def config_set(svc, gateway: str, server: str, values: dict) -> dict:
+    """Set non-secret config for a catalog server via the gateway's
+    mcp-config-set tool (backend admin call — same trust tier as mcp-add, never
+    persona-exposed). The tool's argument shape is unverified, so it's built
+    tolerantly: the server-name arg and the config-map arg are read from the
+    tool's discovered input schema (an object-typed property carries the map;
+    if none, the values are flattened as top-level args). The raw response is
+    always returned, so a shape mismatch surfaces as the gateway's own
+    (actionable) error rather than a silent failure."""
+    tool = svc.tool_registry.mcp_tool_def(gateway, MCP_CONFIG_SET)
+    server_arg = _arg_name(tool, ["server", "serverName", "name", "ref", "id"])
+    props = {}
+    if tool is not None and isinstance(getattr(tool, "parameters", None), dict):
+        props = tool.parameters.get("properties") or {}
+    obj_arg = None
+    for cand in ("config", "values", "settings", "configuration", "data"):
+        p = props.get(cand)
+        if isinstance(p, dict) and p.get("type") in ("object", None):
+            obj_arg = cand
+            break
+    if obj_arg is None:
+        for k, v in props.items():
+            if k != server_arg and isinstance(v, dict) and v.get("type") == "object":
+                obj_arg = k
+                break
+    args = ({server_arg: server, obj_arg: values} if obj_arg
+            else {server_arg: server, **values})
+    raw = await svc.mcp.call_tool(gateway, MCP_CONFIG_SET, args)
+    svc.db.log_event("info", "gateway",
+                     f"operator set config for gateway server {server!r}",
+                     json.dumps({"args": sorted(args)})[:500])
+    return {"raw": raw, "args_sent": sorted(args)}
 
 
 def attached_view(svc) -> list[dict]:

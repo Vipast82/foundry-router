@@ -652,9 +652,21 @@ async function tabPersonas() {
     if (t.is_admin) continue;
     const s = t.server || t.name;
     (servers[s] ||= {tools: [], disabled: 0}).tools.push(
-      {tool: t.mcp_tool || t.name, is_write: !!t.is_write, disabled: !!t.disabled});
+      {tool: t.mcp_tool || t.name, is_write: !!t.is_write,
+       is_destructive: !!t.is_destructive, write_kind: t.write_kind,
+       badge_source: t.badge_source, disabled: !!t.disabled});
     if (t.disabled) servers[s].disabled++;
   }
+  // Per-tool access badge: real when it comes from the server's MCP annotation
+  // (readOnlyHint/destructiveHint), a dashed guess when only the name heuristic
+  // is available (structured-inspect spec Part 1).
+  const toolAccessBadge = t => t.is_destructive
+    ? '<span class="pill bad" title="destructiveHint: true (tool annotation)">destructive</span>'
+    : (t.write_kind === "write" && t.badge_source === "annotation")
+      ? '<span class="pill warn" title="readOnlyHint: false (tool annotation)">write</span>'
+    : t.is_write
+      ? '<span class="pill warn" style="border:1px dashed;opacity:.8" title="guessed from the tool name — no read/write annotation from this server">write?</span>'
+      : "";
   // total tool count per server — used by the Personas table's scoped badge.
   window._mcpServerToolCounts = Object.fromEntries(
     Object.entries(servers).map(([s, i]) => [s, i.tools.length]));
@@ -668,7 +680,7 @@ async function tabPersonas() {
             <input type="checkbox" class="mcp-tool" data-server="${esc(s)}" data-tool="${esc(t.tool)}"
               data-write="${t.is_write ? 1 : 0}">
             <span class="mono">${esc(t.tool)}</span>
-            ${t.is_write ? '<span class="pill bad" title="write/execute-capable (naming heuristic) — grant deliberately">write</span>' : ""}
+            ${toolAccessBadge(t)}
             ${t.disabled ? '<span class="pill warn">disabled on Tools tab</span>' : ""}
           </label>`).join("");
         return `<div class="mcp-item" data-server="${esc(s)}"${allDisabled
@@ -1273,9 +1285,19 @@ function wireGateway(gw) {
         <td class="mono nw">${esc(s.name)}${s.ref !== s.name ? `<br><span class="hint">${esc(s.ref)}</span>` : ""}</td>
         <td class="nw">${esc(s.publisher || "—")}</td>
         <td>${esc(s.description || "")}
-          ${inspectOn ? `<button class="act" style="padding:1px 6px;font-size:11px" onclick='gwInspect(${JSON.stringify(s.ref)})'>inspect ▾</button>` : ""}
-          <details><summary style="cursor:pointer;font-size:11px;color:var(--dim)">raw</summary><pre class="mono" style="white-space:pre-wrap;max-width:560px">${esc(JSON.stringify(s.raw, null, 2))}</pre></details>
-          <div class="gw-insp mono" data-ref="${esc(s.ref)}" style="white-space:pre-wrap;max-width:600px"></div></td>
+          ${inspectOn ? `<button class="act gw-insp-btn" data-ref="${esc(s.ref)}" style="padding:1px 6px;font-size:11px" onclick='gwInspect(${JSON.stringify(s.ref)})'>inspect ▾</button>` : ""}
+          <details><summary style="cursor:pointer;font-size:11px;color:var(--dim)">raw find</summary><pre class="mono" style="white-space:pre-wrap;max-width:560px">${esc(JSON.stringify(s.raw, null, 2))}</pre></details>
+          <div class="gw-insp" data-ref="${esc(s.ref)}" style="max-width:640px;display:none"></div>
+          ${(s.config_required === true && (s.config_schema || []).length) ? `
+          <details class="gw-cfg" data-ref="${esc(s.ref)}"><summary style="cursor:pointer;font-size:11px;color:var(--warn,#c93)">set config ▾</summary>
+            <div style="margin:4px 0">
+              ${s.config_schema.flatMap(b => Object.entries(b.properties || {}).map(([prop, sch]) => `
+                <div class="row"><label title="${esc((b.description || "") + " · type " + ((sch && sch.type) || "string"))}">${esc(prop)}</label>
+                  <input class="gw-cfg-in" data-cfg-ref="${esc(s.ref)}" data-cfg-prop="${esc(prop)}" size="26"
+                    type="${(sch && (sch.type === "number" || sch.type === "integer")) ? "number" : (sch && sch.type === "boolean") ? "checkbox" : "text"}"></div>`)).join("")}
+              <button class="act" onclick='gwConfigSet(${JSON.stringify(s.ref)}, ${JSON.stringify(primary)})'>Save config</button>
+              <span class="gw-cfg-status hint" data-ref="${esc(s.ref)}"></span>
+            </div></details>` : ""}</td>
         <td class="nw">${s.tools == null ? '<span class="hint" title="mcp-find did not report a tool count — Inspect (if configured) or expand raw">?</span>' : s.tools}</td>
         <td class="nw">${cfgBadge(s)}</td>
         <td class="nw">${s.requires_secrets ? '<span class="pill bad">requires secrets</span>' : '<span class="pill ok">none</span>'}</td>
@@ -1312,21 +1334,73 @@ window.gwRemoveByRef = (gateway) => {
   if (!ref) { toast("enter a server ref", true); return; }
   window.gwRemove(ref, gateway);
 };
+// Structured render of an inspect response: title/image/publisher + a tool
+// table whose badges come from real readOnlyHint/destructiveHint annotations
+// (name-heuristic guesses are shown dashed + "?"), above the raw output.
+function gwInspectBadge(t) {
+  if (t.kind === "destructive")
+    return '<span class="pill bad" title="destructiveHint: true (tool annotation)">destructive</span>';
+  if (t.kind === "write")
+    return t.source === "annotation"
+      ? '<span class="pill warn" title="readOnlyHint: false (tool annotation)">write</span>'
+      : '<span class="pill warn" style="border:1px dashed;opacity:.8" title="guessed from the tool name — this tool has no read/write annotation">write?</span>';
+  if (t.kind === "read-only" && t.source === "annotation")
+    return '<span class="pill ok" title="readOnlyHint: true">read-only</span>';
+  return "";
+}
+function gwRenderInspect(r) {
+  const p = r.parsed || {};
+  const head = [];
+  if (p.title) head.push("<b>" + esc(p.title) + "</b>");
+  if (p.image) head.push('<span class="mono">' + esc(p.image) + "</span>");
+  if (p.publisher) head.push("publisher: <b>" + esc(p.publisher) + "</b>");
+  if (p.tool_count != null) head.push(p.tool_count + " tool(s)");
+  const toolRows = (p.tools || []).map(t => `<tr>
+    <td class="mono nw">${esc(t.name)}</td><td>${esc(t.description || "")}</td>
+    <td class="nw">${gwInspectBadge(t)}</td></tr>`).join("");
+  const table = (p.tools || []).length
+    ? `<table style="margin:6px 0"><tr><th>tool</th><th>description</th><th>access</th></tr>${toolRows}</table>`
+    : "";
+  const err = r.ok === false ? '<span class="pill bad">inspect exited non-zero</span> ' : "";
+  return `<div style="margin:6px 0">${err}${head.join(" · ") || '<span class="hint">(no structured summary parsed — see raw)</span>'}${table}</div>
+    <details><summary style="cursor:pointer;font-size:11px;color:var(--dim)">raw inspect output</summary>
+      <pre class="mono" style="white-space:pre-wrap;max-width:640px;max-height:360px;overflow:auto">${esc(r.raw || "")}</pre></details>`;
+}
 window.gwInspect = async (ref) => {
   const box = [...document.querySelectorAll(".gw-insp")].find(b => b.dataset.ref === ref);
+  const btn = [...document.querySelectorAll(".gw-insp-btn")].find(b => b.dataset.ref === ref);
   if (!box) return;
-  box.textContent = "inspecting…";
+  if (box.dataset.open === "1") {                 // collapse (Part 2 toggle fix)
+    box.style.display = "none"; box.dataset.open = "0";
+    if (btn) btn.textContent = "inspect ▾";
+    return;
+  }
+  box.style.display = ""; box.dataset.open = "1";
+  if (btn) btn.textContent = "inspect ▲";
+  if (box.dataset.loaded === "1") return;         // cached — just re-show
+  box.innerHTML = '<span class="hint">inspecting…</span>';
   try {
     const r = await api("gateway/inspect", {method: "POST", body: {server: ref}});
-    const p = r.parsed || {};
-    const bits = [];
-    if (p.tools != null) bits.push("tools: " + p.tools);
-    if (p.publisher) bits.push("publisher: " + p.publisher);
-    if (p.config_required != null) bits.push("config: " + (p.config_required ? "required" : "none"));
-    if (p.requires_secrets != null) bits.push("secrets: " + (p.requires_secrets ? "required" : "none"));
-    box.textContent = (bits.length ? bits.join("  ·  ") + "\n\n" : "")
-      + (r.raw || "(no output)");
-  } catch (e) { box.textContent = "inspect failed: " + e.message; }
+    box.innerHTML = gwRenderInspect(r);
+    box.dataset.loaded = "1";
+  } catch (e) { box.innerHTML = '<span class="pill bad">inspect failed</span> ' + esc(e.message); }
+};
+window.gwConfigSet = async (ref, gateway) => {
+  const values = {};
+  for (const i of [...document.querySelectorAll(".gw-cfg-in")].filter(i => i.dataset.cfgRef === ref)) {
+    let v = i.type === "checkbox" ? i.checked
+      : i.type === "number" ? (i.value === "" ? null : +i.value) : i.value.trim();
+    if (v !== "" && v !== null) values[i.dataset.cfgProp] = v;
+  }
+  const status = [...document.querySelectorAll(".gw-cfg-status")].find(s => s.dataset.ref === ref);
+  if (!Object.keys(values).length) { if (status) status.textContent = "enter at least one value"; return; }
+  if (status) status.textContent = "saving…";
+  try {
+    const r = await api("gateway/config_set", {method: "POST", body: {gateway, server: ref, values}});
+    if (status) status.innerHTML = '<span class="pill ok">config-set ok</span> <span class="mono">'
+      + esc((r.raw || "").slice(0, 300)) + "</span>";
+    toast(`Config saved for ${ref} — try Add now`);
+  } catch (e) { if (status) status.innerHTML = '<span class="pill bad">failed</span> ' + esc(e.message); }
 };
 
 async function tabMCP() {

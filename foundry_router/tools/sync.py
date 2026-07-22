@@ -40,6 +40,11 @@ class ToolDef:
     server: Optional[str] = None        # kind=mcp
     mcp_tool: Optional[str] = None      # kind=mcp (original, unsanitized name)
     disabled: bool = False
+    # MCP annotations (kind=mcp): ground-truth read/write from the manifest's
+    # readOnlyHint/destructiveHint. None = the server didn't annotate it, so the
+    # UI falls back to the name heuristic (marked as a guess).
+    read_only: Optional[bool] = None
+    destructive: Optional[bool] = None
 
     def spec(self) -> dict:
         return {"type": "function",
@@ -116,6 +121,27 @@ def is_gateway_admin_tool(name: str) -> bool:
 
 def is_gateway_management_tool(name: str) -> bool:
     return (name or "").lower() in GATEWAY_MANAGEMENT_TOOLS
+
+
+def tool_write_badge(name: str, read_only: Optional[bool] = None,
+                     destructive: Optional[bool] = None) -> dict:
+    """Normalized write/destructive classification for an MCP tool. Prefers the
+    server's MCP annotations (ground truth) over the name heuristic, marking
+    which source was used so the UI can show heuristic guesses distinctly
+    (per-tool-grant + structured-inspect specs).
+
+    Returns {kind: 'destructive'|'write'|'read-only', source: 'annotation'|
+    'heuristic', is_write: bool}. is_write means write OR destructive — the
+    thing an operator opts into deliberately."""
+    if destructive is True:
+        return {"kind": "destructive", "source": "annotation", "is_write": True}
+    if read_only is False:
+        return {"kind": "write", "source": "annotation", "is_write": True}
+    if read_only is True:
+        return {"kind": "read-only", "source": "annotation", "is_write": False}
+    guess = is_write_tool(name)
+    return {"kind": "write" if guess else "read-only",
+            "source": "heuristic", "is_write": guess}
 
 
 def parse_preferred_mcp(persona: Optional[dict]) -> tuple[set[str], dict[str, set[str]], set[str]]:
@@ -264,15 +290,17 @@ class ToolRegistry:
         return out
 
     def status(self) -> list[dict]:
+        def mcp_extra(t: ToolDef) -> dict:
+            badge = tool_write_badge(t.mcp_tool or t.name, t.read_only, t.destructive)
+            return {"is_write": badge["is_write"],
+                    "is_destructive": badge["kind"] == "destructive",
+                    "write_kind": badge["kind"],          # destructive|write|read-only
+                    "badge_source": badge["source"],       # annotation|heuristic
+                    "is_admin": is_gateway_admin_tool(t.mcp_tool or t.name)}
         return [{"name": t.name, "kind": t.kind, "model_id": t.model_id,
                  "server": t.server, "mcp_tool": t.mcp_tool,
                  "description": t.description, "disabled": t.disabled,
-                 # write/execute heuristic (per-tool-grant spec stretch goal) —
-                 # a hint for the UI to pre-highlight dangerous tools. is_admin
-                 # marks gateway root-admin tools the UI hides from persona grants.
-                 **({"is_write": is_write_tool(t.mcp_tool or t.name),
-                     "is_admin": is_gateway_admin_tool(t.mcp_tool or t.name)}
-                    if t.kind == "mcp" else {})}
+                 **(mcp_extra(t) if t.kind == "mcp" else {})}
                 for t in sorted(self.tools.values(), key=lambda t: t.name)]
 
     # -- Docker MCP Gateway admin (gateway-server admin spec) -------------------
@@ -373,7 +401,9 @@ class ToolRegistry:
                         description=f"[MCP:{server}] {t['description']}",
                         parameters=t["input_schema"],
                         server=server, mcp_tool=t["name"],
-                        disabled=name in disabled)
+                        disabled=name in disabled,
+                        read_only=t.get("read_only"),
+                        destructive=t.get("destructive"))
 
             # 4: diff for the log, then swap atomically
             added = sorted(set(new_tools) - set(self.tools))
