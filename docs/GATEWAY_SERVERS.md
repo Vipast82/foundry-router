@@ -97,10 +97,31 @@ GATEWAY_INSPECT_TOKEN=$(openssl rand -hex 16) \
 Bind it to localhost and firewall it to Foundry Router's host — it can run
 docker commands on the host, so treat it as privileged (same trust tier as the
 secrets companion). Then in **MCP > Gateway Servers → Inspect companion
-service**, set its URL (e.g. `http://192.168.0.114:8899`) and token. A per-row
-**Inspect ▾** button then fetches tool count, publisher, and full config/secrets
-for that server. Foundry parses what it can and always shows the raw inspect
-output too, so nothing is hidden if your gateway's output shape differs.
+service**, set its URL (e.g. `http://192.168.0.114:8899`) and token.
+
+A per-row **Inspect ▾** button (a real toggle — click again to collapse) shows a
+**structured summary** parsed from the inspect YAML: title, image, publisher
+(the image namespace), and a **tool table** whose access badges come from each
+tool's real MCP annotations — `destructiveHint: true` → red **destructive**,
+`readOnlyHint: false` → amber **write**, `readOnlyHint: true` → **read-only**. A
+tool with no annotation falls back to the name heuristic, shown as a dashed
+**write?** so guesses are visually distinct from ground truth. The raw inspect
+output stays available beneath the summary. These same annotation-based badges
+flow into the **persona editor's tool checklist** wherever the server provides
+them (via the MCP manifest), replacing the naming heuristic with real data.
+
+### Config-set (servers needing non-secret config)
+
+A server whose catalog metadata declares a **config schema** (e.g.
+`playwright-mcp-server` needs a `data` location) shows a **set config ▾** form
+generated from that schema — one input per property, typed per its JSON-schema
+`type`. **Save config** calls the gateway's `mcp-config-set` tool (a backend
+admin call, never persona-exposed) and shows the raw response, so a success or
+failure is explicit. The tool's argument shape is read from its discovered input
+schema; if it errors, the gateway's own message says what it expected. After a
+successful config-set, **Add** should then succeed. Config is distinct from
+secrets: a config-only server keeps **Add** enabled (it just fails until config
+is set), whereas a secrets-requiring server keeps **Add** disabled.
 
 The companion is deliberately inspect-only for now; it's the natural place to
 later add the `secrets.env` write endpoint that would let secret-requiring

@@ -228,17 +228,24 @@ class MCPManager:
                 yield session
 
     async def list_tools(self, name: str) -> list[dict]:
-        """[{name, description, input_schema}] for one server. Raises on failure
-        — the caller (Tool Sync) decides how to treat an unreachable server."""
+        """[{name, description, input_schema, read_only, destructive}] for one
+        server. read_only/destructive come from the tool's MCP `annotations`
+        (readOnlyHint/destructiveHint) when the server provides them — ground
+        truth for the write/destructive badges, replacing the name heuristic.
+        None means the server didn't annotate that tool. Raises on failure —
+        the caller (Tool Sync) decides how to treat an unreachable server."""
         async with self._session(name) as session:
             result = await session.list_tools()
             out = []
             for t in result.tools:
+                ann = getattr(t, "annotations", None)
                 out.append({
                     "name": t.name,
                     "description": t.description or "",
                     "input_schema": getattr(t, "inputSchema", None)
                                     or {"type": "object", "properties": {}},
+                    "read_only": getattr(ann, "readOnlyHint", None) if ann else None,
+                    "destructive": getattr(ann, "destructiveHint", None) if ann else None,
                 })
             return out
 

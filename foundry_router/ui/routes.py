@@ -592,6 +592,33 @@ async def gateway_inspect_config(request: Request):
     return {"ok": True, **inspect_settings(svc.db)}
 
 
+@router.post("/admin/api/gateway/config_set")
+async def gateway_config_set(request: Request):
+    """Set non-secret config for a catalog server via the gateway's
+    mcp-config-set tool (operator-only admin call). Values come from the
+    config-schema form the UI generated. Returns the raw gateway response."""
+    import asyncio
+
+    from ..errors import describe_exception
+    from ..gateway_admin import config_set
+    svc = _svc(request)
+    body = await request.json()
+    server = str(body.get("server") or "").strip()
+    values = body.get("values")
+    if not server or not isinstance(values, dict) or not values:
+        return JSONResponse({"error": "server and non-empty values required"},
+                            status_code=400)
+    gw, err = _gateway_or_400(svc, body)
+    if err:
+        return err
+    try:
+        return await asyncio.wait_for(config_set(svc, gw, server, values), timeout=60)
+    except asyncio.TimeoutError:
+        return JSONResponse({"error": "mcp-config-set timed out"}, status_code=504)
+    except Exception as e:
+        return JSONResponse({"error": describe_exception(e)}, status_code=502)
+
+
 @router.post("/admin/api/gateway/inspect")
 async def gateway_inspect(request: Request):
     """Fetch richer per-server detail via the inspect companion service (host

@@ -9,15 +9,16 @@ import json
 import pytest
 
 from foundry_router.db import Database
-from foundry_router.gateway_admin import (attached_view, add_server, find_servers,
-                                          inspect_server, inspect_settings,
-                                          parse_catalog, parse_inspect,
-                                          remove_server, set_inspect_settings,
-                                          _arg_name)
+from foundry_router.gateway_admin import (attached_view, add_server, config_set,
+                                          find_servers, inspect_server,
+                                          inspect_settings, parse_catalog,
+                                          parse_inspect, remove_server,
+                                          set_inspect_settings, _arg_name,
+                                          _config_schema)
 from foundry_router.registry.models_db import ModelRegistry
 from foundry_router.tools.mcp_client import MCPManager
 from foundry_router.tools.sync import (ToolDef, ToolRegistry, is_gateway_admin_tool,
-                                       is_gateway_management_tool)
+                                       is_gateway_management_tool, tool_write_badge)
 
 GATEWAY = "general-mcp-gateway"
 MGMT = ["mcp-find", "mcp-add", "mcp-remove", "mcp-create-profile",
@@ -244,12 +245,60 @@ def test_inspect_settings_roundtrip(tmp_path):
     assert inspect_settings(db)["url"] == ""
 
 
-def test_parse_inspect_extracts_fields():
+def test_parse_inspect_json_summary():
     p = parse_inspect(json.dumps({"name": "playwright", "publisher": "microsoft",
                                   "tools": ["a", "b", "c"], "secrets": ["TOKEN"]}))
-    assert p["tools"] == 3 and p["publisher"] == "microsoft"
+    assert p["tool_count"] == 3 and p["publisher"] == "microsoft"
     assert p["requires_secrets"] is True
     assert parse_inspect("not json") == {}
+
+
+INSPECT_YAML = """\
+snapshot:
+  server:
+    title: Playwright MCP
+    image: mcp/playwright
+    tools:
+      - name: browser_navigate
+        description: Navigate to a URL
+        annotations:
+          readOnlyHint: false
+          destructiveHint: false
+      - name: browser_snapshot
+        description: Read the page
+        annotations:
+          readOnlyHint: true
+      - name: browser_close
+        description: Close the browser
+        annotations:
+          destructiveHint: true
+      - name: mystery_tool
+        description: no annotations here
+    config:
+      - name: playwright
+        description: Data location
+        properties:
+          data:
+            type: string
+"""
+
+
+def test_parse_inspect_yaml_structured():
+    p = parse_inspect(INSPECT_YAML)
+    assert p["title"] == "Playwright MCP"
+    assert p["image"] == "mcp/playwright"
+    assert p["publisher"] == "mcp"                  # namespace of the image
+    assert p["tool_count"] == 4
+    by = {t["name"]: t for t in p["tools"]}
+    # ground-truth badges from annotations
+    assert by["browser_navigate"]["kind"] == "write" and by["browser_navigate"]["source"] == "annotation"
+    assert by["browser_snapshot"]["kind"] == "read-only" and by["browser_snapshot"]["source"] == "annotation"
+    assert by["browser_close"]["kind"] == "destructive"
+    # no annotation -> heuristic guess, marked as such
+    assert by["mystery_tool"]["source"] == "heuristic"
+    # config schema surfaced for the form
+    assert p["config_required"] is True
+    assert p["config_schema"][0]["properties"] == {"data": {"type": "string"}}
 
 
 class FakeHTTP:
@@ -293,7 +342,7 @@ async def test_inspect_server_calls_companion(tmp_path):
     assert call["json"] == {"server": "playwright", "catalog": "docker-mcp"}
     assert call["headers"]["Authorization"] == "Bearer k"
     assert out["configured"] and out["ok"]
-    assert out["parsed"]["tools"] == 2 and out["parsed"]["publisher"] == "docker"
+    assert out["parsed"]["tool_count"] == 2 and out["parsed"]["publisher"] == "docker"
 
 
 def test_inspect_endpoints(client, app):
@@ -340,3 +389,94 @@ def test_gateway_endpoints_with_injected_gateway(client, app):
     added = client.post("/admin/api/gateway/add",
                         json={"ref": "docker/playwright"}).json()
     assert added["sync"]["added"] == ["playwright.navigate"]
+
+
+# -- config schema + config-set (Part 3) ------------------------------------------
+
+def test_config_schema_extraction_shapes():
+    # list of blocks with properties
+    blocks = _config_schema({"config": [
+        {"name": "playwright-mcp-server", "description": "Data location",
+         "properties": {"data": {"type": "string"}}}]})
+    assert blocks[0]["properties"] == {"data": {"type": "string"}}
+    assert blocks[0]["name"] == "playwright-mcp-server"
+    # a single block
+    assert _config_schema({"config_schema": {"properties": {"x": {"type": "number"}}}})[0]["properties"] == {"x": {"type": "number"}}
+    # a bare {prop: {type}} map
+    assert _config_schema({"config": {"data": {"type": "string"}}})[0]["properties"] == {"data": {"type": "string"}}
+    # empty / absent -> []
+    assert _config_schema({"config": []}) == []
+    assert _config_schema({"name": "x"}) == []
+
+
+def test_parse_catalog_includes_config_schema():
+    row = parse_catalog(json.dumps([{
+        "name": "playwright-mcp-server",
+        "config": [{"name": "playwright-mcp-server", "description": "Data location",
+                    "properties": {"data": {"type": "string"}}}]}]))[0]
+    assert row["config_required"] is True
+    assert row["config_schema"][0]["properties"] == {"data": {"type": "string"}}
+
+
+async def test_config_set_uses_object_arg_from_schema(tmp_path):
+    # mcp-config-set schema advertises {server, config:object} -> map goes in config
+    reg, db = _registry(tmp_path, gateway_tools=["mcp-find", "mcp-add"])
+    reg.tools["mcp-config-set"] = ToolDef(
+        name="mcp-config-set", kind="mcp", description="", server=GATEWAY,
+        mcp_tool="mcp-config-set",
+        parameters={"type": "object", "properties": {
+            "server": {"type": "string"}, "config": {"type": "object"}}})
+    svc = Svc(reg, db)
+    out = await config_set(svc, GATEWAY, "playwright-mcp-server", {"data": "/tmp/pw"})
+    server, tool, args = svc.mcp.calls[0]
+    assert tool == "mcp-config-set"
+    assert args == {"server": "playwright-mcp-server", "config": {"data": "/tmp/pw"}}
+    assert "raw" in out
+    assert db.query_one("SELECT * FROM event_log WHERE source='gateway'")
+
+
+async def test_config_set_flattens_when_no_object_arg(tmp_path):
+    # no object-typed param -> values flattened as top-level args
+    reg, db = _registry(tmp_path, gateway_tools=["mcp-find", "mcp-add"])
+    reg.tools["mcp-config-set"] = ToolDef(
+        name="mcp-config-set", kind="mcp", description="", server=GATEWAY,
+        mcp_tool="mcp-config-set",
+        parameters={"type": "object", "properties": {"server": {"type": "string"}}})
+    svc = Svc(reg, db)
+    await config_set(svc, GATEWAY, "pw", {"data": "/x"})
+    _, _, args = svc.mcp.calls[0]
+    assert args == {"server": "pw", "data": "/x"}
+
+
+def test_config_set_endpoint_validates(client):
+    assert client.post("/admin/api/gateway/config_set",
+                       json={"server": "x", "values": {}}).status_code == 400
+    assert client.post("/admin/api/gateway/config_set",
+                       json={"values": {"a": 1}}).status_code == 400
+
+
+# -- annotation -> registry -> badge flow (Part 1) --------------------------------
+
+def test_tool_write_badge_prefers_annotation():
+    assert tool_write_badge("read_graph", destructive=True)["kind"] == "destructive"
+    w = tool_write_badge("read_graph", read_only=False)   # annotation says write
+    assert w == {"kind": "write", "source": "annotation", "is_write": True}
+    r = tool_write_badge("delete_everything", read_only=True)  # annotation overrides scary name
+    assert r["kind"] == "read-only" and r["is_write"] is False
+    # no annotation -> name heuristic, marked as guess
+    g = tool_write_badge("delete_entities")
+    assert g["source"] == "heuristic" and g["is_write"] is True
+
+
+def test_status_reports_annotation_badges(tmp_path):
+    reg, _ = _registry(tmp_path, gateway_tools=[])
+    reg.tools["nav"] = ToolDef(name="nav", kind="mcp", description="", parameters={},
+                               server="pw", mcp_tool="browser_navigate", read_only=False)
+    reg.tools["snap"] = ToolDef(name="snap", kind="mcp", description="", parameters={},
+                                server="pw", mcp_tool="browser_snapshot", read_only=True)
+    reg.tools["guess"] = ToolDef(name="guess", kind="mcp", description="", parameters={},
+                                 server="pw", mcp_tool="delete_entities")  # no annotation
+    by = {s["mcp_tool"]: s for s in reg.status()}
+    assert by["browser_navigate"]["is_write"] and by["browser_navigate"]["badge_source"] == "annotation"
+    assert not by["browser_snapshot"]["is_write"]
+    assert by["delete_entities"]["is_write"] and by["delete_entities"]["badge_source"] == "heuristic"
