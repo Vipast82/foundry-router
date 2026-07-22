@@ -64,7 +64,20 @@ SSH + `secrets.env` edit + `docker mcp profile server add` + service restart.
 
 The gateway's tool argument names and `mcp-find` result shape are the Gateway's,
 not Foundry's. Argument names are read from each tool's **discovered input
-schema** (not hardcoded), and the catalog parser is tolerant of shape and falls
-back to showing the raw gateway output. If your gateway build returns a shape
-the parser doesn't recognize, the raw output is still shown so nothing is
-hidden — paste a sample and the parser can be tuned.
+schema** (not hardcoded), and the catalog parser is tolerant of shape.
+
+Each result row exposes **publisher**, **tools** (count), **config** (non-secret
+required config, shown separately from secrets), and **secrets**. The parser
+reads these across many likely field names and derives publisher from a
+namespaced ref when needed. Every row has an inline **raw** disclosure, and the
+whole response has a **show raw mcp-find response** toggle — the untouched
+payload is always one click away, so you can confirm which fields the gateway
+actually returns before the parser is tuned.
+
+If a column shows `?` (tools) or `—` (config unknown), it means `mcp-find`
+didn't include that field for that server. `mcp-find` is a catalog *search* and
+may return a summary only; the richer per-server data comes from
+`docker mcp catalog server inspect <catalog> <server>` on the host. That is a
+host CLI call (no MCP tool exposes it), so wiring it into a per-row "details"
+fetch needs the same host-access path as the secrets companion service above —
+tracked as a follow-up, not part of the pure-MCP-tool scope.
