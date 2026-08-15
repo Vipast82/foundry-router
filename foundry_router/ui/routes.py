@@ -287,9 +287,18 @@ async def apply_seed(request: Request):
 
 @router.get("/admin/api/models/benchmarks")
 async def model_benchmarks(request: Request, model_id: str):
+    from ..registry.models_db import score_source
     svc = _svc(request)
-    return {"benchmarks": svc.registry.benchmarks(model_id),
-            "named": svc.registry.named_benchmarks(model_id)}
+    bench = svc.registry.benchmarks(model_id)
+    for b in bench:
+        # score_source (seed|researched|observed|conflation|manual_override) so
+        # the UI can flag a seed ESTIMATE instead of rendering it as observed data.
+        b["score_source"] = score_source(b)
+    # Cross-model duplicate flags: named benchmarks whose exact value also sits
+    # on an unrelated model (mis-attribution signature) — surfaced for review.
+    return {"benchmarks": bench,
+            "named": svc.registry.named_benchmarks(model_id),
+            "cross_model_flags": svc.registry.cross_model_named_flags(model_id)}
 
 
 @router.post("/admin/api/models/named_benchmark/add")
@@ -996,6 +1005,11 @@ async def set_research_config(request: Request):
             r["enabled"] = bool(b["enabled"])
         if "search_prefix" in b:
             r["search_prefix"] = str(b["search_prefix"] or "")
+        if "model" in b:
+            # Dedicated research/extraction model (empty => reuse the routing
+            # brain). A bad pick can't stall the sweep — _research_llm falls
+            # back to the brain on failure.
+            r["model"] = (str(b["model"]).strip() or None)
         for k in _RESEARCH_NUM:
             if b.get(k) is not None:
                 r[k] = int(b[k])

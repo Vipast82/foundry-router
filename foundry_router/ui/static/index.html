@@ -553,20 +553,33 @@ window.editModel = id => {
     $("#me-benchmarks").innerHTML = rows.map(b => {
       const sharing = (byScore[b.score] || []).filter(c => c !== b.category);
       const dup = sharing.length > 0;
-      let tip = `${b.source_type} · ${b.score_type} · conf ${b.confidence}`;
+      // seed = reference-seed ESTIMATE, not a measured/researched number: shown
+      // muted + tagged so it's never mistaken for observed data (spec #1).
+      const seed = b.score_source === "seed";
+      let tip = `source: ${b.score_source || b.source_type} · ${b.source_type} · ${b.score_type} · conf ${b.confidence}`;
       if (b.last_updated) tip += " · " + String(b.last_updated).slice(0, 19);
+      if (seed) tip += " — reference-seed ESTIMATE (knowledge-based placeholder, not a measured/researched score; run research to replace)";
       if (dup) tip += " — COLLISION with " + sharing.join(", ")
                       + "; same score across categories, demoted as synthetic";
-      return `<span class="pill${dup ? " bad" : ""}" style="border:1px solid var(--line)" title="${esc(tip)}">${esc(b.category)} ${b.score}${dup ? " ⚠" : ""}</span>`;
+      const cls = dup ? " bad" : (seed ? " warn" : "");
+      const style = seed ? "border:1px dashed var(--line);opacity:.75" : "border:1px solid var(--line)";
+      return `<span class="pill${cls}" style="${style}" title="${esc(tip)}">${esc(b.category)} ${b.score}${seed ? " ~seed" : ""}${dup ? " ⚠" : ""}</span>`;
     }).join(" ");
   };
+  let crossFlags = {};   // benchmark_name -> [unrelated model ids] (set on load)
   const renderNamed = rows => {
     if (!rows || !rows.length) { $("#me-named").textContent = "none"; return; }
     $("#me-named").innerHTML = rows.map(b => {
       const off = b.scale !== "percent";   // elo/count/score: shown, not tiebroken
       const manual = b.source === "manual";
-      const tip = `${b.category} · ${b.scale}${off ? " (not used in tiebreak — non-percent scale)" : ""}${manual ? " · manual (never auto-overwritten)" : ""}${b.source_url ? " · " + b.source_url : ""}`;
-      return `<span class="pill${off ? " warn" : ""}" style="border:1px solid var(--line)" title="${esc(tip)}">${esc(b.benchmark_name)} ${b.score}${off ? " " + esc(b.scale) : ""}${manual ? " ✎" : ""} <a href="#" data-nb="${esc(b.benchmark_name)}" title="remove" style="text-decoration:none">✕</a></span>`;
+      // cross-model duplicate: this exact (benchmark, score) also sits on an
+      // unrelated model — the mis-attribution signature (spec #2). Red ⚠ for
+      // review, NOT auto-removed.
+      const dupOn = crossFlags[b.benchmark_name];
+      const dup = Array.isArray(dupOn) && dupOn.length > 0;
+      let tip = `${b.category} · ${b.scale}${off ? " (not used in tiebreak — non-percent scale)" : ""}${manual ? " · manual (never auto-overwritten)" : ""}${b.source_url ? " · " + b.source_url : ""}`;
+      if (dup) tip += ` — ⚠ SAME value on unrelated model(s): ${dupOn.join(", ")}. Likely a leaderboard number scraped onto the wrong model — verify or remove.`;
+      return `<span class="pill${dup ? " bad" : off ? " warn" : ""}" style="border:1px solid var(--line)" title="${esc(tip)}">${esc(b.benchmark_name)} ${b.score}${off ? " " + esc(b.scale) : ""}${manual ? " ✎" : ""}${dup ? " ⚠" : ""} <a href="#" data-nb="${esc(b.benchmark_name)}" title="remove" style="text-decoration:none">✕</a></span>`;
     }).join(" ");
     $("#me-named").querySelectorAll("a[data-nb]").forEach(a => {
       a.onclick = async ev => {
@@ -594,7 +607,7 @@ window.editModel = id => {
   $("#me-benchmarks").textContent = "…";
   $("#me-named").textContent = "…";
   api("models/benchmarks?model_id=" + encodeURIComponent(id))
-    .then(r => { renderBench(r.benchmarks); renderNamed(r.named); })
+    .then(r => { crossFlags = r.cross_model_flags || {}; renderBench(r.benchmarks); renderNamed(r.named); })
     .catch(() => { $("#me-benchmarks").textContent = "—"; $("#me-named").textContent = "—"; });
   $("#me-reset-bench").onclick = async () => {
     if (!confirm("Reset " + id + "'s automatic benchmark rows to reference-seed "
@@ -1737,9 +1750,16 @@ SYSTEM You are a helpful assistant."></textarea></details>
 /* -------------------------------------------------------------- research -- */
 const _ENGINES = ["google", "bing", "startpage", "duckduckgo", "brave", "wikipedia", "qwant", "mojeek"];
 async function tabResearch() {
-  const [cfg, mcp] = await Promise.all([api("config"), api("mcp_servers")]);
+  const [cfg, mcp, md] = await Promise.all([api("config"), api("mcp_servers"), api("models")]);
   const r = ((cfg.registry || {}).research) || {};
   const search = r.search || {}, fetch = r.fetch || {};
+  // Research/extraction model picker: any reachable chat model, or the routing
+  // brain (empty). A stronger, larger-context model extracts benchmarks far
+  // better than the small brain — the #1 lever on research quality. A bad pick
+  // can't stall the sweep (the agent falls back to the brain on failure).
+  const modelOpts = ['<option value="">— use routing brain (default) —</option>']
+    .concat((md.models || []).filter(m => m.reachable && !m.embedding)
+      .map(m => `<option ${m.id === r.model ? "selected" : ""}>${esc(m.id)}</option>`)).join("");
   const srvOpts = sel => ['<option value=""></option>'].concat(
     (mcp.servers || []).map(s => `<option ${s.name === sel ? "selected" : ""}>${esc(s.name)}</option>`)).join("");
   const active = new Set(((r.search_prefix || "").match(/!(\w+)/g) || []).map(b => b.slice(1).toLowerCase()));
@@ -1757,6 +1777,9 @@ async function tabResearch() {
       SearXNG + Crawl4AI path works end-to-end.</p>
     <div class="card">
       <div class="row"><label>enabled</label><input type="checkbox" id="re-enabled" ${r.enabled ? "checked" : ""}></div>
+      <div class="row"><label title="Model that reads the fetched pages and extracts benchmarks/tags. The routing brain is small; pointing this at a larger, longer-context reachable model markedly improves extraction quality (and lets you raise corpus_chars). A failure/timeout on the picked model falls back to the brain automatically — it can't stall the sweep.">research model</label>
+        <select id="re-model" style="min-width:280px">${modelOpts}</select>
+        <span class="hint">the extractor — bigger = better research; falls back to brain on failure</span></div>
       <div class="row"><label title="Prepended to every research search. Checking engines here restricts SearXNG to them via bang syntax and excludes the rest.">search engines</label>
         <div class="mcp-checklist" style="flex-direction:row;flex-wrap:wrap;max-height:none;min-width:0">${engineBoxes}</div></div>
       <div class="row"><label title="What actually gets prepended. The checkboxes write this; you can also type your own bangs.">search_prefix (raw)</label>
@@ -1786,6 +1809,7 @@ async function tabResearch() {
   document.querySelectorAll(".eng").forEach(b => b.onchange = syncPrefix);
   $("#re-save").onclick = () => run(api("config/research", {method: "POST", body: {
     enabled: $("#re-enabled").checked,
+    model: $("#re-model").value,
     search_prefix: $("#re-prefix").value,
     sweep_hours: +$("#re-sweep").value, stale_days: +$("#re-stale").value,
     max_pages_per_model: +$("#re-pages").value, corpus_char_limit: +$("#re-corpus").value,

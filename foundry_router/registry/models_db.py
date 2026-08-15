@@ -13,12 +13,59 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from datetime import datetime, timezone
 from typing import Optional
 
 from ..db import Database, utcnow
 
 log = logging.getLogger(__name__)
+
+
+# Tokens dropped when deriving a model's LINEAGE fingerprint (used to tell
+# whether two models are variants of one base — which may legitimately share a
+# benchmark — vs unrelated, where a shared exact score is the mis-attribution
+# signature). Repackagers/quant/format/generic noise, so only the real family
+# name survives (qwen3, llama, ornith, ...).
+_LINEAGE_STOP = {
+    "gguf", "fp16", "bf16", "fp8", "awq", "gptq", "exl2", "mlx", "ggml",
+    "q2", "q3", "q4", "q5", "q6", "q8", "k", "km", "ks", "kl", "m", "s", "xs", "xl",
+    "latest", "instruct", "chat", "uncensored", "abliterated", "base", "it",
+    "hf", "co", "unsloth", "thebloke", "bartowski", "mradermacher", "lmstudio",
+    "huggingface", "ollama", "community", "model", "models", "the", "and", "ai", "llm",
+}
+
+
+def _lineage_tokens(model_id: str) -> set[str]:
+    """Distinctive family tokens for a model id, dropping size/quant/format/
+    repackager noise. Two ids that share any token are treated as related."""
+    out: set[str] = set()
+    for t in re.split(r"[^a-z0-9]+", (model_id or "").lower()):
+        if len(t) < 3 or t in _LINEAGE_STOP:
+            continue
+        if re.fullmatch(r"\d+[bmk]?", t):        # pure size/version: 27b, 8b, 1m
+            continue
+        out.add(t)
+    return out
+
+
+def score_source(bench_row: dict) -> str:
+    """Provenance of a model_benchmarks row, for UI honesty (registry-integrity
+    spec #1): 'manual_override', 'observed' (live telemetry), 'conflation'
+    (demoted duplicate), 'seed' (reference-seed ESTIMATE — never a measured
+    number), or 'researched'. A seed value must never be shown as if it were
+    observed data."""
+    st = bench_row.get("source_type")
+    url = bench_row.get("source_url") or ""
+    if st == "manual_override":
+        return "manual_override"
+    if st == "observed":
+        return "observed"
+    if url == CONFLATION_DEMOTED_URL:
+        return "conflation"
+    if url.startswith("reference-seed:"):
+        return "seed"
+    return "researched"
 
 
 # Provenance authority ladder. An automatic upsert must never DOWNGRADE a row's
@@ -320,6 +367,36 @@ class ModelRegistry:
             "VALUES (?,?,?,?,?,?,?,?,?)",
             (model_id, benchmark_name, category, score, scale, source_url,
              measured_date, source, utcnow()))
+
+    def cross_model_named_flags(self, model_id: str) -> dict:
+        """Named benchmarks of `model_id` whose exact (benchmark_name, score)
+        also appears on an UNRELATED model (no shared lineage token) — the
+        mis-attribution signature: a leaderboard/comparison number scraped onto
+        the wrong model (registry-integrity spec #2). The same measured value on
+        two unrelated models is almost never two independent results.
+
+        Returns {benchmark_name: [other_model_id, ...]} for review — surfaced as
+        the same red⚠ treatment as the cross-category guard, NOT auto-demoted; a
+        human decides. A shared score between variants of the same base model
+        (matching lineage tokens) is expected and never flagged."""
+        mine = self.named_benchmarks(model_id)
+        if not mine:
+            return {}
+        my_lineage = _lineage_tokens(model_id)
+        flags: dict = {}
+        for b in mine:
+            if b.get("score") is None:
+                continue
+            others = self.db.query(
+                "SELECT DISTINCT model_id FROM model_named_benchmarks "
+                "WHERE benchmark_name=? AND ROUND(score,1)=ROUND(?,1) "
+                "AND model_id != ?",
+                (b["benchmark_name"], float(b["score"]), model_id))
+            unrelated = [o["model_id"] for o in others
+                         if not (_lineage_tokens(o["model_id"]) & my_lineage)]
+            if unrelated:
+                flags[b["benchmark_name"]] = unrelated
+        return flags
 
     def reconcile_cross_category_collisions(self, model_id: str) -> int:
         """Cross-PASS conflation guard (extends the in-pass check): two

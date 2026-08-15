@@ -228,6 +228,15 @@ number exists, you may give an "estimated" score from the qualitative
 discussion, with confidence <= 0.5. Lower confidence when only a single source
 or vendor-published numbers exist.
 
+ATTRIBUTION — this is critical. A benchmark number counts for THIS model ONLY
+when the source explicitly attributes it to "{model}" (or its clear base-model
+name). Search results, leaderboards, and comparison TABLES list many different
+models' numbers side by side. Do NOT copy a number that sits next to a
+DIFFERENT model's name just because it appears in the text. If you cannot tell
+which model a number belongs to, OMIT it — a missing score is correct, a number
+borrowed from another model is a serious error. When a source compares this
+model against others, take ONLY the row/value labelled as this model.
+
 CRITICAL — never assign the SAME numeric score to two different categories.
 Each category's score must reflect evidence specific to THAT capability
 (coding != reasoning != agentic != tool_calling != general_chat). If you have
@@ -237,11 +246,17 @@ omitted category (no data) is ALWAYS better than duplicating one guess across
 categories — do not pad out the list to five entries.
 
 For "named_benchmarks": include a row ONLY when one of these well-known
-benchmark names appears in the text WITH a numeric result next to it, quoting
-the number exactly — SWE-Bench Verified, SWE-Bench Pro, SWE-Bench Multilingual,
-Terminal-Bench, HumanEval, HumanEval+, MBPP, LiveCodeBench, NL2Repo, ClawEval,
-MMLU, MMLU-Pro, GPQA Diamond, AIME, ARC-AGI, BFCL, Chatbot Arena, MT-Bench.
-Omit the array if none appear. Never invent a named-benchmark number.
+benchmark names appears in the text WITH a numeric result attributed to THIS
+model, quoting the number and using the benchmark's EXACT name — SWE-Bench
+Verified, SWE-Bench Pro, SWE-Bench Multilingual, Terminal-Bench, HumanEval,
+HumanEval+, MBPP, LiveCodeBench, NL2Repo, ClawEval, MMLU, MMLU-Pro, GPQA
+Diamond, AIME, ARC-AGI, BFCL, Chatbot Arena, MT-Bench. Keep the exact variant:
+"SWE-Bench Pro" and "SWE-Bench Verified" are DIFFERENT benchmarks — never
+relabel one as the other. Apply the ATTRIBUTION rule above especially here:
+these numbers most often live in comparison tables, so a value only counts if
+the row is this model's. Omit the array if none appear. Never invent a
+named-benchmark number, and never move a number from one benchmark name to
+another.
 
 If the text contains nothing useful, return {{"benchmarks": []}}."""
 
