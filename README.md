@@ -17,7 +17,9 @@ hand work back and forth between models within a single task.
 
 The full design rationale lives in
 [`docs/foundry-router-build-design.md`](docs/foundry-router-build-design.md) —
-this README is the operator's view.
+this README is the operator's view. **New here?**
+[`docs/OVERVIEW.md`](docs/OVERVIEW.md) maps every component, the web-UI tabs, and
+the optional companion services (with one-line installers).
 
 ## What you get
 

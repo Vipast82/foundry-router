@@ -182,6 +182,11 @@ _BENCHMARK_DOMAINS = (
     "github.io", "ollama.com", "ollama.ai", "lmarena.ai", "livebench.ai",
     "artificialanalysis.ai", "klu.ai", "openrouter.ai", "aider.chat",
     "vellum.ai", "scale.com", "llm-stats.com",
+    # Model-spec / release-tracker aggregators that carry structured benchmark
+    # tables per model (surfaced live for Qwen3.8-27B) — previously ranked as
+    # generic hits and crowded out of the small fetch budget.
+    "aireleasetracker.com", "yottalabs.ai", "dubesor.de", "livecodebench.github.io",
+    "epoch.ai", "swebench.com", "modelscope.cn", "deepinfra.com", "together.ai",
 )
 _PATH_HINTS = ("benchmark", "eval", "leaderboard", "model", "card", "score", "result")
 # Dropped when deriving "does this host belong to the model itself" tokens —
@@ -527,12 +532,17 @@ class ResearchAgent:
         urls: list[str] = []
         name = _query_name(model_id)                 # '/' and ':' stripped (Wikipedia 400 fix)
         prefix = (self.cfg.search_prefix or "").strip()   # optional SearXNG engine bangs
-        for q in _QUERIES:
-            query = f"{prefix} {q.format(name=name)}".strip() if prefix else q.format(name=name)
+        # Built-in queries + operator-added templates (Research tab). `.replace`
+        # (not `.format`) so a custom template with stray braces can't KeyError.
+        queries = _QUERIES + [q for q in (self.cfg.extra_queries or [])
+                              if isinstance(q, str) and q.strip()]
+        for q in queries:
+            filled = q.replace("{name}", name)
+            query = f"{prefix} {filled}".strip() if prefix else filled
             try:
                 result = await self._search(query)
                 search_corpus.append(f"### search: {query}\n"
-                                     f"{result[:_SEARCH_SNIPPET_CHARS]}")
+                                     f"{result[:self.cfg.search_snippet_chars]}")
                 urls += re.findall(r"https?://[^\s\"'<>\)\]]+", result)
             except Exception as e:
                 # Unwrap the real cause — TaskGroup/SSE/transport failures (e.g.
@@ -564,7 +574,7 @@ class ResearchAgent:
                     or page_chars >= self.cfg.corpus_char_limit):
                 break
             try:
-                chunk = (await self._fetch(base))[:8000]
+                chunk = (await self._fetch(base))[:self.cfg.page_char_cap]
                 page_corpus.append(f"### page: {base}\n{chunk}")
                 page_chars += len(chunk)
                 fetched += 1

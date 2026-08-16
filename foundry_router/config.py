@@ -198,6 +198,19 @@ class ResearchConfig(BaseModel):
     # point registry.research.model at a larger dedicated research model — then
     # a higher cap lets the extra pages actually reach the extractor.
     corpus_char_limit: int = 24000
+    # Per-PAGE chars kept from each fetched page. Long model cards (HuggingFace)
+    # and spec pages carry their benchmark tables well past 8000 chars; raise
+    # this (with corpus_char_limit) when the extractor keeps missing scores that
+    # are visibly on the page. Costs corpus budget per page.
+    page_char_cap: int = 8000
+    # Per-SEARCH chars kept from each search result blob (snippets). Pages carry
+    # the real tables, so this stays smaller than page_char_cap by default.
+    search_snippet_chars: int = 2500
+    # Extra search-query templates, appended to the 7 built-ins. Use {name} for
+    # the model name (e.g. "{name} specs hardware requirements",
+    # "{name} site:huggingface.co", "{name} LiveCodeBench AIME GPQA"). More
+    # queries surface more candidate pages before ranking spends the fetch budget.
+    extra_queries: list[str] = Field(default_factory=list)
     # Explicit context size (num_ctx) for the research model, in tokens. 0 = auto:
     # size num_ctx to just fit corpus_char_limit + the reply. Set this to match a
     # persona's context_window when the research model is SHARED with a worker

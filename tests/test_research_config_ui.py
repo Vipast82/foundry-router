@@ -34,6 +34,21 @@ def test_research_context_window_persists_and_applies(client):
     assert svc.research.cfg.context_window == 131072
 
 
+def test_research_depth_knobs_persist(client):
+    # page_char_cap / search_snippet_chars and the extra_queries textarea (a
+    # newline string from the UI) round-trip and apply live.
+    svc = client.app.state.services
+    r = client.post("/admin/api/config/research", json={
+        "page_char_cap": 16000, "search_snippet_chars": 3500,
+        "extra_queries": "{name} specs\n\n{name} LiveCodeBench results\n"})
+    assert r.status_code == 200 and r.json()["ok"] is True
+    got = client.get("/admin/api/config").json()["registry"]["research"]
+    assert got["page_char_cap"] == 16000 and got["search_snippet_chars"] == 3500
+    assert got["extra_queries"] == ["{name} specs", "{name} LiveCodeBench results"]
+    assert svc.research.cfg.page_char_cap == 16000
+    assert svc.research.cfg.extra_queries == ["{name} specs", "{name} LiveCodeBench results"]
+
+
 def test_research_config_rejects_bad_value(client):
     # a non-int where the schema wants one is a 400, not a 500
     r = client.post("/admin/api/config/research", json={"sweep_hours": "notanumber"})

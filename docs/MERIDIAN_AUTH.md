@@ -25,14 +25,16 @@ a small companion on the Meridian host does it.
 ### Install the companion (on the Meridian LXC/host)
 
 `meridian` is a host CLI (you run it after `pct enter`), so the companion runs on
-that host next to it — stdlib only, no pip install:
+that host next to it — stdlib only, no pip install. **One-line install** (as root,
+writes a systemd unit and starts it):
 
 ```bash
-MERIDIAN_AUTH_TOKEN=$(openssl rand -hex 16) \
-python3 contrib/meridian-auth-service/meridian_auth_service.py   # 127.0.0.1:8898
+curl -fsSL https://raw.githubusercontent.com/Vipast82/foundry-router/main/contrib/meridian-auth-service/install.sh | bash
 ```
 
-Note the token it prints. Same trust model as the gateway inspect companion: it
+It prints the **URL + token** to paste below. (Manual alternative — run it in the
+foreground to try it: `MERIDIAN_AUTH_TOKEN=$(openssl rand -hex 16)
+MERIDIAN_AUTH_BIND=0.0.0.0 python3 contrib/meridian-auth-service/meridian_auth_service.py`.) Same trust model as the gateway inspect companion: it
 runs host commands **and touches live Claude credentials**, so keep it
 localhost-bound and firewall it to Foundry Router's host only. Run it under a
 process manager (systemd/pm2) if you want it always available.

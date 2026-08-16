@@ -71,6 +71,23 @@ async def test_search_prefix_pins_engines(tmp_path):
     assert all("ornith" in q for q in mcp.queries)
 
 
+async def test_extra_queries_are_appended_with_name_substituted(tmp_path):
+    # operator-added templates run on top of the 7 built-ins, {name} filled in
+    agent, mcp = _agent(tmp_path, extra_queries=[
+        "{name} specs hardware requirements", "  ", "{name} site:huggingface.co"])
+    await agent.research_model("qwen3.8:27b")
+    assert len(mcp.queries) == 7 + 2                      # blanks dropped
+    assert any(q == "qwen3.8 specs hardware requirements" for q in mcp.queries)
+    assert any("site:huggingface.co" in q for q in mcp.queries)
+
+
+async def test_extra_query_with_stray_braces_does_not_crash(tmp_path):
+    # `.replace` not `.format`, so a template with other {tokens} is harmless
+    agent, mcp = _agent(tmp_path, extra_queries=["{name} {not_a_field} eval"])
+    await agent.research_model("ornith:35b")
+    assert any("{not_a_field}" in q for q in mcp.queries)   # left verbatim, no KeyError
+
+
 # -- Part 1: pacing fields round-trip through the MCP upsert endpoint --------------
 
 def test_mcp_pacing_fields_persist_via_endpoint(client):

@@ -1908,6 +1908,22 @@ async function tabResearch() {
         <label title="Chars of corpus fed to the extractor LLM">corpus_chars</label>${numField("re-corpus", r.corpus_char_limit ?? 24000, 1000, 1000)}
         <label title="num_ctx the research model is LOADED with (Ollama). 0 = auto: just enough to fit corpus_chars + the reply. Set it to match a persona's context_window when this model is SHARED with a worker persona, so the sweep doesn't reload it smaller and thrash. Capped at the model's trained max.">context_window</label>${numField("re-ctx", r.context_window ?? 0, 0, 1024)}
         <span class="hint">0 = auto (fit corpus)</span></div>
+      <div class="row">
+        <label title="Chars kept from EACH fetched page. Long HuggingFace model cards carry benchmark tables past the default 8000 — raise this (with corpus_chars) when scores are visibly on a page but not extracted.">page_chars</label>${numField("re-pagecap", r.page_char_cap ?? 8000, 1000, 1000)}
+        <label title="Chars kept from EACH search-result blob. Pages carry the real tables, so keep this smaller than page_chars.">snippet_chars</label>${numField("re-snip", r.search_snippet_chars ?? 2500, 500, 500)}
+        <span class="hint">deeper fetch = raise corpus_chars + max_pages together</span></div>
+      <div class="row" style="align-items:flex-start">
+        <label title="Extra search queries appended to the 7 built-ins. One per line. Use {name} for the model. More/targeted queries surface more candidate pages before ranking spends the fetch budget.">extra queries</label>
+        <textarea id="re-xq" rows="3" style="min-width:340px;font-family:var(--mono)" placeholder="{name} specs hardware requirements&#10;{name} LiveCodeBench AIME GPQA results&#10;{name} site:huggingface.co">${esc((r.extra_queries || []).join("\n"))}</textarea>
+        <span class="hint">one per line · {name} = model</span></div>
+      <details style="margin:2px 0 6px"><summary class="hint" style="cursor:pointer">tips for deeper research ▾</summary>
+        <ul class="hint" style="margin:4px 0 0 16px">
+          <li><b>Fetch more pages:</b> raise <span class="mono">corpus_chars</span> AND <span class="mono">max_pages</span> together — fetching stops early once the corpus fills, so a small corpus caps pages no matter how high max_pages is. With the research model loaded at a big <span class="mono">context_window</span>, corpus_chars of 60k–120k is fine.</li>
+          <li><b>Get the tables:</b> raise <span class="mono">page_chars</span> so long model cards aren't truncated before their benchmark section.</li>
+          <li><b>Widen sources:</b> add targeted <b>extra queries</b> (spec pages, specific benchmark names, <span class="mono">site:huggingface.co</span>). Known benchmark hosts (HuggingFace, aireleasetracker, yottalabs, livecodebench, swebench, artificialanalysis…) are fetched first automatically.</li>
+          <li><b>Search engines:</b> the checkboxes above restrict SearXNG to reliable engines (google/bing/startpage) and exclude scraping-walled ones (Brave/DDG). More engines = more candidate URLs.</li>
+          <li><b>Tools:</b> research uses your <b>search</b> + <b>fetch</b> MCP tools (SearXNG + Crawl4AI). Crawl4AI's <span class="mono">md</span> tool gives the cleanest tables; confirm the tool names below with <b>Test search+fetch</b>.</li>
+        </ul></details>
       <div class="row"><label>search tool</label>
         <select id="re-s-srv">${srvOpts(search.server)}</select>
         <input id="re-s-tool" size="20" placeholder="tool (searxng_web_search)" value="${esc(search.tool || "")}">
@@ -1932,6 +1948,8 @@ async function tabResearch() {
     sweep_hours: +$("#re-sweep").value, stale_days: +$("#re-stale").value,
     max_pages_per_model: +$("#re-pages").value, corpus_char_limit: +$("#re-corpus").value,
     context_window: +$("#re-ctx").value,
+    page_char_cap: +$("#re-pagecap").value, search_snippet_chars: +$("#re-snip").value,
+    extra_queries: $("#re-xq").value,
     search: {server: $("#re-s-srv").value, tool: $("#re-s-tool").value, query_param: $("#re-s-qp").value || "query"},
     fetch: {server: $("#re-f-srv").value, tool: $("#re-f-tool").value, url_param: $("#re-f-up").value || "url"}}}));
   $("#re-test").onclick = async () => {

@@ -1019,7 +1019,8 @@ _LOGO_KEY = "ui_logo"
 
 
 _RESEARCH_NUM = ("sweep_hours", "stale_days", "max_pages_per_model",
-                 "corpus_char_limit", "context_window")
+                 "corpus_char_limit", "context_window", "page_char_cap",
+                 "search_snippet_chars")
 
 
 @router.get("/admin/api/devlog")
@@ -1092,6 +1093,14 @@ async def set_research_config(request: Request):
         for k in _RESEARCH_NUM:
             if b.get(k) is not None:
                 r[k] = int(b[k])
+        if "extra_queries" in b:
+            # Operator-added search templates (one per line in the UI). Keep only
+            # non-blank strings; bound the count so a paste can't balloon a sweep.
+            raw_q = b["extra_queries"]
+            if isinstance(raw_q, str):
+                raw_q = raw_q.splitlines()
+            r["extra_queries"] = [str(q).strip() for q in (raw_q or [])
+                                  if str(q).strip()][:20]
         for ref in ("search", "fetch"):
             if isinstance(b.get(ref), dict):
                 r[ref] = {k: v for k, v in b[ref].items() if v not in (None, "")}
