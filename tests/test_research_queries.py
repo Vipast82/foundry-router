@@ -11,10 +11,22 @@ from foundry_router.registry.research_agent import ResearchAgent, _query_name
 
 
 def test_query_name_strips_slash_and_tag():
+    # tokenized into clean words (no '/', no ':tag', no '-'/'_' joiners)
     assert _query_name("satgeze/qwen36-35b-uncensored-1m:latest") \
-        == "satgeze qwen36-35b-uncensored-1m"
+        == "satgeze qwen36 35b uncensored 1m"
     assert _query_name("ornith:35b") == "ornith"
     assert _query_name("plainname") == "plainname"
+
+
+def test_query_name_normalizes_gguf_quant_repacks():
+    # hosting/repackager orgs + GGUF + quant tag stripped -> the BASE model name,
+    # so a GGUF repack finds the real benchmark pages (the Qwen3.8 problem)
+    assert _query_name("hf.co/unsloth/Qwen3.8-27B-GGUF:UD-Q5_K_XL") == "Qwen3.8 27B"
+    assert _query_name("hf.co/unsloth/Qwen3.6-35B-A3B-GGUF:UD-Q4_K_XL") == "Qwen3.6 35B A3B"
+    assert _query_name("bartowski/Meta-Llama-3.1-8B-Instruct-GGUF") == "Meta Llama 3.1 8B Instruct"
+    # size tokens (27B) are kept — useful in a query; only format/quant dropped
+    assert "GGUF" not in _query_name("TheBloke/Foo-13B-GGUF")
+    assert "13B" in _query_name("TheBloke/Foo-13B-GGUF")
 
 
 class _RecordingMCP:

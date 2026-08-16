@@ -188,6 +188,24 @@ def test_seed_estimate_not_overwritten_by_weaker_research(tmp_path):
     assert kept["score"] == 92.0 and score_source(kept) == "seed"   # seed held
 
 
+def test_fraction_scores_normalized_to_percent(tmp_path):
+    from foundry_router.registry.research_agent import _normalize_percent
+    assert _normalize_percent(0.9) == 90.0
+    assert _normalize_percent(0.78448) == 78.448
+    assert _normalize_percent(75.6) == 75.6          # already a percent, unchanged
+    assert _normalize_percent(1.0) == 1.0            # ambiguous — left alone
+    assert _normalize_percent(0.0) == 0.0
+
+    agent, reg, _ = _agent(tmp_path)
+    data = {"benchmarks": [{"category": "coding", "score": 0.9,
+                            "score_type": "measured", "source_type": "vendor",
+                            "confidence": 0.8}],
+            "named_benchmarks": [{"name": "SWE-Bench Verified", "score": 0.9}]}
+    agent._write_extraction("claude-fable-5", data, "coding 0.9 SWE-Bench 0.9")
+    assert reg.benchmarks("claude-fable-5")[0]["score"] == 90.0
+    assert reg.named_benchmarks("claude-fable-5")[0]["score"] == 90.0
+
+
 def test_measured_research_still_supersedes_seed(tmp_path):
     from foundry_router.registry.reference_seed import SEED_SOURCE_URL
     agent, reg, _ = _agent(tmp_path)

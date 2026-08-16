@@ -126,15 +126,50 @@ _QUERIES = [
 _SEARCH_SNIPPET_CHARS = 2500
 
 
+# Hosting-platform + repackager org segments to drop from a search query — they
+# quantize/rehost OTHER people's models, so they're noise that keeps a GGUF/quant
+# id from matching the BASE model's benchmark pages (found live: Qwen3.8-27B-GGUF
+# researched as "hf.co unsloth Qwen3.8-27B-GGUF" found nothing, while the plain
+# "Qwen3.8-27B" would hit the model card / review blogs).
+_QUERY_DROP_ORGS = {"hf.co", "huggingface.co", "hf", "unsloth", "bartowski",
+                    "mradermacher", "thebloke", "lmstudio", "lmstudio-community",
+                    "modelscope", "ollama"}
+# Format/quant tokens stripped from the tail so "...-GGUF:Q5_K_XL" collapses to
+# the base model name. UD- prefix and *_K_* variants covered.
+_QUANT_RE = re.compile(
+    r"^(gguf|ggml|awq|gptq|exl2|mlx|f16|bf16|fp16|fp8|"
+    r"(ud[-_])?i?q\d[a-z0-9_]*|[qk]\d[a-z0-9_]*|\d+bit|int\d)$", re.I)
+
+
 def _query_name(model_id: str) -> str:
-    """A search-friendly form of a model id. A raw id like
-    'satgeze/qwen36-35b-uncensored-1m:latest' contains '/' and ':' which some
-    SearXNG engines (Wikipedia's REST API) interpret as a page-title path and
-    reject with 400 Bad Request. Drop the ':tag' and turn '/' into a space so
-    the query is a clean set of words, never a broken path."""
-    core = model_id.split(":")[0]          # drop ollama :tag
-    core = core.replace("/", " ")          # 'org/model' -> 'org model'
-    return re.sub(r"\s+", " ", core).strip() or model_id
+    """A search-friendly form of a model id, normalized toward the BASE model so
+    a GGUF/quant repack still finds the real benchmark pages. Drops the ':tag'
+    /':quant', hosting+repackager org segments (hf.co/unsloth/...), and trailing
+    GGUF/quant tokens; turns the rest into clean words. Some SearXNG engines also
+    400 on raw '/' and ':' (Wikipedia path parsing) — this avoids that too."""
+    core = model_id.split(":")[0]                    # drop ollama :tag / :quant
+    segs = [s for s in core.split("/") if s]
+    while len(segs) > 1 and segs[0].lower() in _QUERY_DROP_ORGS:
+        segs.pop(0)                                  # drop leading hf.co / repackager org
+    words = []
+    for seg in segs:
+        for tok in re.split(r"[-_\s]+", seg):        # split model name into tokens
+            if tok and not _QUANT_RE.match(tok):     # drop GGUF/Q4_K_M/etc.
+                words.append(tok)
+    return re.sub(r"\s+", " ", " ".join(words)).strip() or _fallback_query(model_id)
+
+
+def _fallback_query(model_id: str) -> str:
+    return re.sub(r"\s+", " ", model_id.split(":")[0].replace("/", " ")).strip() or model_id
+
+
+def _normalize_percent(score: float) -> float:
+    """A percent-scale/category score reported as a FRACTION (0.9, 0.78448) is
+    scaled to 0-100 (90, 78.448) — sub-1.0 is essentially never a real value for
+    these benchmarks, so this is a unit conversion, not a guess (found live:
+    claude-fable-5 'coding 0.9' / 'SWE-Bench Verified 0.9'). Values >= 1 pass
+    through unchanged; the caller still clamps to 0-100."""
+    return score * 100.0 if 0.0 < score < 1.0 else score
 
 # The fetch budget (max_pages_per_model) is small, so WHICH urls we spend it on
 # matters more than how many a search returned. These carry real, structured
@@ -644,11 +679,18 @@ class ResearchAgent:
             except (TypeError, ValueError):
                 continue
             # same discipline as generic scores: trust it only if the number
-            # actually appears in the fetched sources.
+            # actually appears in the fetched sources (checked on the ORIGINAL
+            # value, before any unit normalization).
             if not measured_score_in_text(score, text):
                 continue
+            # A percent benchmark reported as a fraction (0.9) -> 90.
+            stored = _normalize_percent(score) if scale == "percent" else score
+            if stored != score:
+                self.db.log_event("info", "research",
+                                  f"normalized {model_id} {canonical} {score} -> "
+                                  f"{stored} (fraction reported as a percent)")
             self.registry.upsert_named_benchmark(
-                model_id, canonical, category, max(0.0, score), scale,
+                model_id, canonical, category, max(0.0, stored), scale,
                 source_url=str(nb.get("source_url") or "")[:500],
                 measured_date=(str(nb.get("measured_date"))[:32]
                                if nb.get("measured_date") else None))
@@ -754,8 +796,15 @@ class ResearchAgent:
                         f"research estimate ({score}) — measured data would still "
                         f"supersede it")
                     continue
+                # Category scores are always percent-like 0-100; a fraction
+                # (0.9) is scaled to 90 (found live: claude-fable-5 coding 0.9).
+                norm = _normalize_percent(score)
+                if norm != score:
+                    self.db.log_event("info", "research",
+                                      f"normalized {model_id}/{cat} {score} -> "
+                                      f"{norm} (fraction reported as a percent)")
                 self.registry.upsert_benchmark(
-                    model_id, cat, max(0.0, min(100.0, score)),
+                    model_id, cat, max(0.0, min(100.0, norm)),
                     score_type=score_type,
                     source_type=source_type,
                     source_url=source_url,
