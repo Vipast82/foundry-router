@@ -206,6 +206,43 @@ def test_fraction_scores_normalized_to_percent(tmp_path):
     assert reg.named_benchmarks("claude-fable-5")[0]["score"] == 90.0
 
 
+def test_named_to_category_leak_dropped_when_category_mismatches(tmp_path):
+    agent, reg, _ = _agent(tmp_path)
+    # Terminal-Bench (a CODING benchmark) 74.6 copied into tool_calling -> leak;
+    # SWE-Bench Pro (CODING) 80.3 copied into agentic -> leak;
+    # HumanEval (CODING) 85.2 into coding -> consistent, kept.
+    text = "Terminal-Bench 74.6 SWE-Bench Pro 80.3 HumanEval 85.2 general_chat 79"
+    data = {
+        "named_benchmarks": [
+            {"name": "Terminal-Bench", "score": 74.6},
+            {"name": "SWE-Bench Pro", "score": 80.3},
+            {"name": "HumanEval", "score": 85.2},
+        ],
+        "benchmarks": [
+            {"category": "tool_calling", "score": 74.6, "score_type": "measured"},
+            {"category": "agentic", "score": 80.3, "score_type": "measured"},
+            {"category": "coding", "score": 85.2, "score_type": "measured"},
+            {"category": "general_chat", "score": 79.0, "score_type": "measured"},
+        ],
+    }
+    agent._write_extraction("some-model", data, text)
+    cats = {b["category"]: b["score"] for b in reg.benchmarks("some-model")}
+    assert "tool_calling" not in cats          # Terminal-Bench leak dropped
+    assert "agentic" not in cats               # SWE-Bench Pro leak dropped
+    assert cats.get("coding") == 85.2          # HumanEval -> coding kept (consistent)
+    assert cats.get("general_chat") == 79.0    # unrelated category kept
+
+
+def test_category_consistent_named_match_is_kept(tmp_path):
+    agent, reg, _ = _agent(tmp_path)
+    # GPQA Diamond (REASONING) 89.2 and reasoning 89.2 -> same category, keep
+    data = {"named_benchmarks": [{"name": "GPQA Diamond", "score": 89.2}],
+            "benchmarks": [{"category": "reasoning", "score": 89.2,
+                            "score_type": "measured"}]}
+    agent._write_extraction("qwen3.8", data, "GPQA Diamond 89.2 reasoning 89.2")
+    assert reg.benchmarks("qwen3.8")[0]["score"] == 89.2
+
+
 def test_measured_research_still_supersedes_seed(tmp_path):
     from foundry_router.registry.reference_seed import SEED_SOURCE_URL
     agent, reg, _ = _agent(tmp_path)

@@ -297,6 +297,15 @@ the score for the single best-fitting category and OMIT the others entirely. An
 omitted category (no data) is ALWAYS better than duplicating one guess across
 categories — do not pad out the list to five entries.
 
+CRITICAL — a category score is a BROAD composite of overall capability, NOT a
+single named benchmark. Do NOT copy a named benchmark's number (HumanEval,
+SWE-Bench, Terminal-Bench, LiveCodeBench, GPQA, MMLU, BFCL, ...) into a category
+slot — and NEVER into a category the benchmark doesn't measure: SWE-Bench,
+Terminal-Bench and LiveCodeBench are CODING evals, so their numbers must not
+appear as agentic or tool_calling; GPQA/MMLU are REASONING evals; BFCL is
+tool_calling. If your only evidence for a category is one named benchmark,
+record it under named_benchmarks and OMIT that category score.
+
 For "named_benchmarks": include a row ONLY when one of these well-known
 benchmark names appears in the text WITH a numeric result attributed to THIS
 model, quoting the number and using the benchmark's EXACT name — SWE-Bench
@@ -667,6 +676,12 @@ class ResearchAgent:
         # model whose only real data IS a named SWE-Bench number).
         named_wrote = 0
         named_raw = data.get("named_benchmarks")
+        # {rounded stored score -> set of the benchmark's canonical categories}.
+        # Feeds the named->category leak guard below: a category score that just
+        # copies a named benchmark from a DIFFERENT category (Terminal-Bench, a
+        # CODING benchmark, appearing as tool_calling) is dropped, while a
+        # category-consistent match (HumanEval -> coding) is kept.
+        named_cats_by_score: dict = {}
         for nb in named_raw if isinstance(named_raw, list) else []:
             if not isinstance(nb, dict):
                 continue
@@ -694,6 +709,7 @@ class ResearchAgent:
                 source_url=str(nb.get("source_url") or "")[:500],
                 measured_date=(str(nb.get("measured_date"))[:32]
                                if nb.get("measured_date") else None))
+            named_cats_by_score.setdefault(round(max(0.0, stored), 1), set()).add(category)
             named_wrote += 1
         if named_wrote:
             self.db.log_event("info", "research",
@@ -803,6 +819,21 @@ class ResearchAgent:
                     self.db.log_event("info", "research",
                                       f"normalized {model_id}/{cat} {score} -> "
                                       f"{norm} (fraction reported as a percent)")
+                # Named->category leak guard: this category score just copies a
+                # named benchmark that measures a DIFFERENT category (found live:
+                # Terminal-Bench/SWE-Bench coding numbers appearing as tool_calling
+                # / agentic). The named benchmark is already recorded and feeds the
+                # tiebreaker; drop the mis-categorized copy rather than store it as
+                # a per-category measurement. A category-consistent match
+                # (HumanEval -> coding) is kept.
+                cats_for_val = named_cats_by_score.get(round(max(0.0, min(100.0, norm)), 1))
+                if cats_for_val and cat not in cats_for_val:
+                    self.db.log_event(
+                        "info", "research",
+                        f"dropped {model_id}/{cat} {norm} — copied from a named "
+                        f"benchmark measuring {', '.join(sorted(cats_for_val))}, "
+                        f"not {cat} (named->category leak)")
+                    continue
                 self.registry.upsert_benchmark(
                     model_id, cat, max(0.0, min(100.0, norm)),
                     score_type=score_type,
