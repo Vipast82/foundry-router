@@ -264,6 +264,13 @@ class Services:
             if fixed:
                 self.db.log_event("info", "registry",
                                   f"cross-pass conflation sweep demoted {fixed} row(s)")
+            # One-shot: clear chat/named benchmark rows wrongly stamped on
+            # embedding-only models (they can't serve chat).
+            cleared = self.registry.clear_embedding_benchmarks()
+            if cleared:
+                self.db.log_event("info", "registry",
+                                  f"cleared {cleared} benchmark row(s) from "
+                                  f"embedding-only models")
         except Exception:
             log.exception("cross-pass conflation sweep failed")
         await self.tool_registry.sync(self.pool)

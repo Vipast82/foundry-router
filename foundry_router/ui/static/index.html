@@ -563,7 +563,8 @@ window.editModel = id => {
                       + "; same score across categories, demoted as synthetic";
       const cls = dup ? " bad" : (seed ? " warn" : "");
       const style = seed ? "border:1px dashed var(--line);opacity:.75" : "border:1px solid var(--line)";
-      return `<span class="pill${cls}" style="${style}" title="${esc(tip)}">${esc(b.category)} ${b.score}${seed ? " ~seed" : ""}${dup ? " ⚠" : ""}</span>`;
+      const shown = b.score == null ? "?" : +(+b.score).toFixed(1);   // no 99.153092… floats
+      return `<span class="pill${cls}" style="${style}" title="${esc(tip)}">${esc(b.category)} ${shown}${seed ? " ~seed" : ""}${dup ? " ⚠" : ""}</span>`;
     }).join(" ");
   };
   let crossFlags = {};   // benchmark_name -> [unrelated model ids] (set on load)
@@ -579,7 +580,8 @@ window.editModel = id => {
       const dup = Array.isArray(dupOn) && dupOn.length > 0;
       let tip = `${b.category} · ${b.scale}${off ? " (not used in tiebreak — non-percent scale)" : ""}${manual ? " · manual (never auto-overwritten)" : ""}${b.source_url ? " · " + b.source_url : ""}`;
       if (dup) tip += ` — ⚠ SAME value on unrelated model(s): ${dupOn.join(", ")}. Likely a leaderboard number scraped onto the wrong model — verify or remove.`;
-      return `<span class="pill${dup ? " bad" : off ? " warn" : ""}" style="border:1px solid var(--line)" title="${esc(tip)}">${esc(b.benchmark_name)} ${b.score}${off ? " " + esc(b.scale) : ""}${manual ? " ✎" : ""}${dup ? " ⚠" : ""} <a href="#" data-nb="${esc(b.benchmark_name)}" title="remove" style="text-decoration:none">✕</a></span>`;
+      const shown = b.score == null ? "?" : +(+b.score).toFixed(1);
+      return `<span class="pill${dup ? " bad" : off ? " warn" : ""}" style="border:1px solid var(--line)" title="${esc(tip)}">${esc(b.benchmark_name)} ${shown}${off ? " " + esc(b.scale) : ""}${manual ? " ✎" : ""}${dup ? " ⚠" : ""} <a href="#" data-nb="${esc(b.benchmark_name)}" title="remove" style="text-decoration:none">✕</a></span>`;
     }).join(" ");
     $("#me-named").querySelectorAll("a[data-nb]").forEach(a => {
       a.onclick = async ev => {

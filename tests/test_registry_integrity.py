@@ -112,3 +112,92 @@ def test_research_config_accepts_model(client):
     client.post("/admin/api/config/research", json={"model": ""})
     cfg = client.get("/admin/api/config").json()
     assert cfg["registry"]["research"]["model"] is None
+
+
+# -- embedding-model scoring + cleanup --------------------------------------------
+
+def test_clear_embedding_benchmarks(tmp_path):
+    reg = ModelRegistry(Database(tmp_path / "e.sqlite"))
+    reg.upsert_auto("nomic-embed-text", source="discovery", embedding=1)
+    reg.upsert_benchmark("nomic-embed-text", "agentic", 0.78448,
+                         score_type="estimated", source_type="community_report",
+                         source_url="http://x", confidence=0.4)
+    _named(reg, "nomic-embed-text", "MMLU", 62.0)
+    # a chat model's rows are untouched
+    reg.upsert_benchmark("chatty", "coding", 80.0, score_type="measured",
+                         source_type="vendor", source_url="http://y", confidence=0.9)
+    removed = reg.clear_embedding_benchmarks()
+    assert removed == 1
+    assert reg.benchmarks("nomic-embed-text") == []
+    assert reg.named_benchmarks("nomic-embed-text") == []
+    assert len(reg.benchmarks("chatty")) == 1        # non-embedding untouched
+
+
+# -- research write path: embedding skip, no-info filter, seed guard --------------
+
+def _agent(tmp_path):
+    from foundry_router.config import ResearchConfig
+    from foundry_router.registry.research_agent import ResearchAgent
+    db = Database(tmp_path / "w.sqlite")
+    reg = ModelRegistry(db)
+
+    async def _llm(p):
+        return ""
+    return ResearchAgent(ResearchConfig(), db, reg, mcp_manager=None, llm=_llm,
+                         available_models=lambda: []), reg, db
+
+
+def test_research_skips_scoring_embedding_models(tmp_path):
+    agent, reg, _ = _agent(tmp_path)
+    reg.upsert_auto("nomic-embed-text", source="discovery", embedding=1)
+    data = {"reasoning_style": "dense vector embeddings", "good_for": "RAG",
+            "benchmarks": [{"category": "agentic", "score": 0.78448,
+                            "score_type": "estimated"}],
+            "named_benchmarks": [{"name": "MMLU", "score": 62.0}]}
+    wrote = agent._write_extraction("nomic-embed-text", data, "0.78448 62.0")
+    assert wrote == 0
+    assert reg.benchmarks("nomic-embed-text") == []       # no chat scores
+    assert reg.named_benchmarks("nomic-embed-text") == []
+    assert reg.get("nomic-embed-text")["good_for"] == "RAG"   # qualitative kept
+
+
+def test_no_info_reasoning_style_treated_as_blank(tmp_path):
+    agent, reg, _ = _agent(tmp_path)
+    data = {"reasoning_style": "No available information in the provided research "
+                              "text describes how hermes3 reasons.",
+            "good_for": "coding", "benchmarks": []}
+    agent._write_extraction("hermes3:8b", data, "")
+    # the narration is dropped (None) rather than stored
+    assert reg.get("hermes3:8b")["reasoning_style"] is None
+    assert reg.get("hermes3:8b")["good_for"] == "coding"
+
+
+def test_seed_estimate_not_overwritten_by_weaker_research(tmp_path):
+    from foundry_router.registry.reference_seed import SEED_SOURCE_URL
+    agent, reg, _ = _agent(tmp_path)
+    # a good curated seed estimate
+    reg.upsert_benchmark("claude-sonnet-4-6", "reasoning", 92.0,
+                         score_type="estimated", source_type="community_report",
+                         source_url=SEED_SOURCE_URL, confidence=0.6)
+    # a weak ESTIMATED research pass tries to clobber it with 15
+    data = {"benchmarks": [{"category": "reasoning", "score": 15.0,
+                            "score_type": "estimated", "source_type": "community_report",
+                            "confidence": 0.4}]}
+    agent._write_extraction("claude-sonnet-4-6", data, "reasoning 15")
+    kept = reg.benchmarks("claude-sonnet-4-6")[0]
+    assert kept["score"] == 92.0 and score_source(kept) == "seed"   # seed held
+
+
+def test_measured_research_still_supersedes_seed(tmp_path):
+    from foundry_router.registry.reference_seed import SEED_SOURCE_URL
+    agent, reg, _ = _agent(tmp_path)
+    reg.upsert_benchmark("qwen3.8", "coding", 70.0, score_type="estimated",
+                         source_type="community_report", source_url=SEED_SOURCE_URL,
+                         confidence=0.6)
+    # a MEASURED (verbatim) research number does replace the seed
+    data = {"benchmarks": [{"category": "coding", "score": 81.5,
+                            "score_type": "measured", "source_type": "vendor",
+                            "confidence": 0.8}]}
+    agent._write_extraction("qwen3.8", data, "coding score is 81.5 on the eval")
+    kept = reg.benchmarks("qwen3.8")[0]
+    assert kept["score"] == 81.5 and score_source(kept) == "researched"

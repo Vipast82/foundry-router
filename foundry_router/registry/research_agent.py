@@ -24,9 +24,26 @@ from typing import Awaitable, Callable, Optional
 from ..config import ResearchConfig
 from ..db import Database, utcnow
 from ..errors import describe_exception
-from .models_db import CONFLATION_DEMOTED_URL, ModelRegistry
+from .models_db import CONFLATION_DEMOTED_URL, ModelRegistry, score_source
 
 log = logging.getLogger(__name__)
+
+# Phrases a weak extractor emits INSTEAD of a real answer when the sources say
+# nothing (found live: hermes3:8b reasoning_style = "No available information in
+# the provided research text describes how hermes3..."). Treated as blank so the
+# reference seed supplements the gap rather than storing the narration verbatim.
+_NO_INFO_MARKERS = (
+    "no available information", "no information", "not enough information",
+    "no relevant information", "insufficient information", "no specific information",
+    "does not describe", "does not provide", "does not mention", "not described",
+    "not mentioned", "not specified", "cannot determine", "unable to determine",
+    "no data available", "not available", "n/a", "no details",
+)
+
+
+def _looks_like_no_info(text: str) -> bool:
+    t = (text or "").strip().lower()
+    return len(t) < 3 or any(m in t for m in _NO_INFO_MARKERS)
 
 CATEGORIES = ["coding", "reasoning", "general_chat", "tool_calling", "agentic"]
 
@@ -572,12 +589,22 @@ class ResearchAgent:
 
         def _nonblank(v):
             # A web-research pass on an obscure/alias name often returns an empty
-            # or whitespace good_for/reasoning_style. Treat those as "no data"
-            # (-> None, which upsert_auto filters) so they don't OVERWRITE a
-            # richer seed value with a blank — the reference seed then supplements
-            # the gap instead.
+            # or whitespace good_for/reasoning_style, or a "no available
+            # information..." non-answer. Treat both as "no data" (-> None, which
+            # upsert_auto filters) so they don't OVERWRITE a richer seed value —
+            # the reference seed then supplements the gap instead.
             v = v.strip() if isinstance(v, str) else v
+            if isinstance(v, str) and _looks_like_no_info(v):
+                return None
             return v or None
+
+        # Embedding-only models (nomic-embed-text, bge, ...) can't serve chat, so
+        # a research pass must never stamp them with coding/reasoning/agentic
+        # scores or named coding benchmarks (found live: nomic-embed-text carrying
+        # agentic/reasoning 0.78448). Qualitative fields describing the embedder
+        # are fine; benchmark rows are not.
+        model_row = self.registry.get(model_id)
+        is_embedding = bool(model_row and model_row.get("embedding"))
 
         self.registry.upsert_auto(
             model_id, source="research_agent",
@@ -587,6 +614,17 @@ class ResearchAgent:
             benefits_from_explicit_prompting=(
                 1 if data.get("benefits_from_explicit_prompting") else 0),
         )
+        if is_embedding:
+            self.db.log_event(
+                "info", "research",
+                f"{model_id} is embedding-only — kept qualitative fields, "
+                f"skipped all chat-category and named benchmark scores")
+            return 0
+        # Reference-seed rows already present for THIS model, keyed by category —
+        # used by the seed-protection guard below (don't let a weaker web
+        # estimate overwrite a curated seed estimate).
+        seeded_cats = {b["category"] for b in self.registry.benchmarks(model_id)
+                       if score_source(b) == "seed"}
         # Named benchmarks (real, verifiable) — processed FIRST and
         # independently of the generic-score path: they carry their own verbatim
         # check, and must be captured even when the insufficient-source gate
@@ -703,6 +741,19 @@ class ResearchAgent:
                         f"downgraded {model_id}/{cat} score {score} to estimated — "
                         f"number not found verbatim in sources")
                     score_type, confidence_scale = "estimated", 0.6
+                # Seed-protection guard: a weak ESTIMATED web score must not
+                # overwrite a curated reference-seed estimate for a well-known
+                # model (found live: claude-sonnet's good seed clobbered by
+                # 'reasoning 15'). A MEASURED/verbatim research value still wins —
+                # only unverified estimates are held off. Models with no seed for
+                # this category are unaffected (research is their only source).
+                if score_type == "estimated" and cat in seeded_cats:
+                    self.db.log_event(
+                        "info", "research",
+                        f"kept reference-seed {model_id}/{cat} over a weaker "
+                        f"research estimate ({score}) — measured data would still "
+                        f"supersede it")
+                    continue
                 self.registry.upsert_benchmark(
                     model_id, cat, max(0.0, min(100.0, score)),
                     score_type=score_type,

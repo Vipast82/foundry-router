@@ -473,6 +473,28 @@ class ModelRegistry:
                 best[r["model_id"]] = (r["score"], r["benchmark_name"])
         return best
 
+    def clear_embedding_benchmarks(self) -> int:
+        """Remove automatic chat-category + named benchmark rows from
+        embedding-only models — they can't serve chat, so any such score is
+        noise (found live: nomic-embed-text carrying agentic/reasoning 0.78448
+        from a research pass that shouldn't have scored it). Manual overrides
+        are preserved. Run once at startup; idempotent. Returns rows removed."""
+        removed = 0
+        for m in self.db.query("SELECT id FROM models WHERE embedding=1"):
+            row = self.db.query_one(
+                "SELECT COUNT(*) AS n FROM model_benchmarks WHERE model_id=? "
+                "AND source_type != 'manual_override'", (m["id"],))
+            n = row["n"] if row else 0
+            if n:
+                self.db.execute(
+                    "DELETE FROM model_benchmarks WHERE model_id=? "
+                    "AND source_type != 'manual_override'", (m["id"],))
+            self.db.execute(
+                "DELETE FROM model_named_benchmarks WHERE model_id=? "
+                "AND source != 'manual'", (m["id"],))
+            removed += n
+        return removed
+
     def reset_benchmarks(self, model_id: str) -> int:
         """Delete a model's AUTOMATIC benchmark rows (research/seed/observed),
         preserving any manual_override. Used to clear corrupted rows so the
