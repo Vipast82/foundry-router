@@ -230,6 +230,84 @@ async def set_meridian(request: Request):
 
 
 # --------------------------------------------------------------------------- #
+# Meridian re-authentication (do it from the UI, not by SSHing into the host)  #
+# --------------------------------------------------------------------------- #
+
+@router.get("/admin/api/meridian/auth")
+async def meridian_auth_settings(request: Request):
+    """Companion-service config for the re-auth panel (URL + whether a token is
+    set). The panel is always shown; without a companion URL only Refresh token
+    (the direct HTTP path) is available."""
+    from ..meridian_auth import auth_settings
+    return {**auth_settings(_svc(request).db)}
+
+
+@router.post("/admin/api/meridian/auth_config")
+async def set_meridian_auth_config(request: Request):
+    """Set the auth companion URL (+ optional bearer token — blank keeps the
+    existing one). Same kv-stored pattern as the gateway inspect companion."""
+    from ..meridian_auth import auth_settings, set_auth_settings
+    svc = _svc(request)
+    body = await request.json()
+    set_auth_settings(svc.db, str(body.get("url") or ""),
+                      body.get("token") if "token" in body else None)
+    return {"ok": True, **auth_settings(svc.db)}
+
+
+@router.post("/admin/api/meridian/refresh")
+async def meridian_refresh(request: Request):
+    """Refresh the Meridian access token — the common 'token expired' case. Tries
+    Meridian's own HTTP endpoint (POST /auth/refresh) on every anthropic-
+    compatible backend directly (no companion, no SSH); reports per-backend."""
+    from ..meridian_auth import refresh_token_direct
+    svc = _svc(request)
+    out = []
+    for s in getattr(svc.pool, "backends_of_type", lambda t: [])("anthropic-compatible"):
+        res = await refresh_token_direct(svc, s.config.url, s.config.api_key)
+        out.append({"backend": s.config.name, **res})
+    svc.meridian_usage.clear_cache()
+    return {"backends": out}
+
+
+@router.post("/admin/api/meridian/reauth/start")
+async def meridian_reauth_start(request: Request):
+    """Begin a full OAuth re-login via the companion service: returns the sign-in
+    URL to open plus a session_id to finish with. 400 if no companion is set."""
+    from ..meridian_auth import login_start
+    body = await request.json()
+    profile = str(body.get("profile") or "").strip()
+    if not profile:
+        return JSONResponse({"error": "profile is required (e.g. 'victor')"},
+                            status_code=400)
+    res = await login_start(_svc(request), profile)
+    if res.get("configured") is False:
+        return JSONResponse(
+            {"error": "auth companion service not configured — set its URL below "
+                      "(runs contrib/meridian-auth-service on the Meridian host)"},
+            status_code=400)
+    return res
+
+
+@router.post("/admin/api/meridian/reauth/complete")
+async def meridian_reauth_complete(request: Request):
+    """Finish the re-login: hand the pasted code back to the held login process."""
+    from ..meridian_auth import login_complete
+    svc = _svc(request)
+    body = await request.json()
+    session_id = str(body.get("session_id") or "")
+    code = str(body.get("code") or "").strip()
+    if not session_id or not code:
+        return JSONResponse({"error": "session_id and code are required"},
+                            status_code=400)
+    res = await login_complete(svc, session_id, code)
+    if res.get("configured") is False:
+        return JSONResponse({"error": "auth companion service not configured"},
+                            status_code=400)
+    svc.meridian_usage.clear_cache()
+    return res
+
+
+# --------------------------------------------------------------------------- #
 # Model registry (§4.9 item 2)                                                #
 # --------------------------------------------------------------------------- #
 
@@ -940,7 +1018,8 @@ async def event_log(request: Request, limit: int = 200):
 _LOGO_KEY = "ui_logo"
 
 
-_RESEARCH_NUM = ("sweep_hours", "stale_days", "max_pages_per_model", "corpus_char_limit")
+_RESEARCH_NUM = ("sweep_hours", "stale_days", "max_pages_per_model",
+                 "corpus_char_limit", "context_window")
 
 
 @router.get("/admin/api/devlog")

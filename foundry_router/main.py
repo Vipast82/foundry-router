@@ -122,7 +122,13 @@ class Services:
                 info = self.pool.backend_info(research_model)
                 options = None
                 if info and info.get("type") == "ollama":
-                    need = cfg.corpus_char_limit // 4 + 1024 + 4096
+                    # Explicit research context_window wins (source of truth, and
+                    # avoids reload-thrash when the research model is shared with a
+                    # persona worker); else auto-size to fit the corpus + reply.
+                    if cfg.context_window and cfg.context_window > 0:
+                        need = int(cfg.context_window)
+                    else:
+                        need = cfg.corpus_char_limit // 4 + 1024 + 4096
                     model_max = (self.registry.get(research_model) or {}).get("context_length")
                     options = {"num_ctx": min(need, int(model_max)) if model_max else need}
                 result, _ = await self.pool.chat(

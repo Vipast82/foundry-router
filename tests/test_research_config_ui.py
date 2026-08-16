@@ -22,6 +22,18 @@ def test_research_config_saves_and_applies_live(client):
     assert svc.research.cfg.search.query_param == "q"
 
 
+def test_research_context_window_persists_and_applies(client):
+    # context_window (num_ctx source of truth for the research model) is GUI-set,
+    # persisted, and applied live — so a shared model isn't reloaded small and
+    # thrashed against a persona's larger load.
+    svc = client.app.state.services
+    r = client.post("/admin/api/config/research", json={"context_window": 131072})
+    assert r.status_code == 200 and r.json()["ok"] is True
+    got = client.get("/admin/api/config").json()["registry"]["research"]
+    assert got["context_window"] == 131072
+    assert svc.research.cfg.context_window == 131072
+
+
 def test_research_config_rejects_bad_value(client):
     # a non-int where the schema wants one is a 400, not a 500
     r = client.post("/admin/api/config/research", json={"sweep_hours": "notanumber"})

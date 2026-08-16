@@ -198,6 +198,13 @@ class ResearchConfig(BaseModel):
     # point registry.research.model at a larger dedicated research model — then
     # a higher cap lets the extra pages actually reach the extractor.
     corpus_char_limit: int = 24000
+    # Explicit context size (num_ctx) for the research model, in tokens. 0 = auto:
+    # size num_ctx to just fit corpus_char_limit + the reply. Set this to match a
+    # persona's context_window when the research model is SHARED with a worker
+    # persona — otherwise the sweep reloads that model at this smaller size and
+    # thrashes with the persona's larger load (Foundry stays the single context
+    # source of truth). Capped at the model's trained window either way.
+    context_window: int = 0
     model: Optional[str] = None  # None => reuse the agent_brain model
     # Optional text prepended to every research search query. Its purpose is
     # SearXNG "bang" engine selection: setting e.g. "!google !bing !startpage"

@@ -54,3 +54,21 @@ Example: dual 16GB GPUs (32GB) hold `qwen3.8:27b` at ~150K context (~22GB). Set
 the persona `context_window` to 150000 and Foundry loads the worker there;
 the frontend is told 150000 too. Leave a small model's persona blank to inherit
 the 8192 default instead of wastefully loading it at 150K.
+
+## The background Research Agent sizes its own model
+
+The **model-registry Research Agent** (Research tab) is *not* a persona — it
+scrapes model cards and extracts benchmarks. It sizes its worker's `num_ctx` to
+just fit the corpus (`corpus_chars/4 + reply`), e.g. `corpus_chars=26000` →
+`num_ctx≈11620`. That's efficient for extraction, and it's what you'll see in
+`ollama ps` right after a sweep — **not** a persona load.
+
+The catch: if the research model is the **same** model a persona also uses,
+whichever ran last wins the load, and the two sizes thrash (each switch reloads
+the model cold). Two ways to keep it clean:
+
+- Point **Research → research model** at a *dedicated small* model, so the big
+  persona worker is never reloaded down; or
+- Set **Research → context_window** to match the persona's `context_window`
+  (0 = auto, the corpus formula above). Then both load at the same size — no
+  reload churn — and Foundry stays the single source of truth for that model too.

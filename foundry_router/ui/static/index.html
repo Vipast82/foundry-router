@@ -315,6 +315,7 @@ async function tabBackends() {
       if (!r.ok) toast(name + ": " + r.error, true);
     } catch (e) { if (el) el.innerHTML = '<span class="pill bad">error</span>'; toast(e.message, true); }
   };
+  const merAuth = await api("meridian/auth").catch(() => ({url: "", has_token: false}));
   $("#main").innerHTML = `
     <h2>Backend Pool — mode: ${esc(st.pool_mode)}</h2>
     <p class="hint">Health flips only after repeated failures (removal grace period). Use <b>test</b>
@@ -323,6 +324,50 @@ async function tabBackends() {
     <div class="row"><button class="act" id="test-meridian"
       title="Free read-only probe of Meridian's quota endpoint — answers 'is the Claude subscription login still valid' without burning a real generation">Test Meridian Auth</button>
       <span id="meridian-health" class="hint"></span></div>
+    <div class="card">
+      <h2 style="margin-top:0">Meridian re-authentication</h2>
+      <p class="hint">Fix a stale Meridian login without SSHing into the host.
+        <b>Refresh token</b> asks Meridian's own <span class="mono">/auth/refresh</span> to swap in a
+        new access token — enough when the token has just <i>expired</i> (~8h). When the OAuth session
+        has gone <b>NULL</b> (the "oauth source NULL" warning), that can't recover it: use
+        <b>Re-authenticate</b> for a full sign-in. That runs
+        <span class="mono">meridian profile login &lt;profile&gt; --headless</span> on the host via the
+        companion service below, hands you the sign-in URL, and takes the code Claude gives you back.</p>
+      <div class="row">
+        <label title="Meridian profile to re-auth (see 'meridian profile list' on the host)">profile</label>
+        <input id="mer-profile" size="14" placeholder="victor" value="victor">
+        <button class="act" id="mer-refresh"
+          title="POST /auth/refresh on each Meridian backend — non-interactive, fixes an expired token">Refresh token</button>
+        <button class="act primary" id="mer-reauth"
+          title="Full OAuth login via the companion service — for a dead/NULL oauth session">Re-authenticate ▸</button>
+        <span id="mer-auth-status" class="hint"></span>
+      </div>
+      <div id="mer-reauth-flow" style="display:none;margin-top:6px;padding:8px;border:1px solid var(--line,#444);border-radius:6px">
+        <p class="hint" style="margin-top:0"><b>1.</b> Open this URL, sign in, and copy the code Claude shows:</p>
+        <div style="margin:4px 0"><a id="mer-auth-url" target="_blank" rel="noopener noreferrer" class="mono" style="word-break:break-all"></a></div>
+        <div class="row"><label><b>2.</b> paste code</label>
+          <input id="mer-code" size="44" placeholder="the code from Claude">
+          <button class="act primary" id="mer-code-submit">Submit code</button>
+          <button class="act" id="mer-code-cancel">Cancel</button></div>
+        <span id="mer-code-status" class="hint"></span>
+      </div>
+      <details style="margin-top:8px">
+        <summary class="hint" style="cursor:pointer">Auth companion service ${merAuth.url
+          ? '<span class="pill ok">configured</span>' : '<span class="pill warn">not set</span>'}</summary>
+        <p class="hint">The full re-login is a host CLI with an interactive paste-back step, so it runs through a
+          small companion on the Meridian host. Run
+          <span class="mono">contrib/meridian-auth-service/meridian_auth_service.py</span> there
+          (localhost-bound, bearer token, firewalled to Foundry) and point Foundry at it. Refresh token doesn't
+          need it — that's a direct HTTP call to Meridian.</p>
+        <div class="row">
+          <label>companion URL</label>
+          <input id="mer-auth-url-cfg" size="30" value="${esc(merAuth.url || "")}" placeholder="http://192.168.0.114:8898">
+          <label title="Bearer token if the companion sets MERIDIAN_AUTH_TOKEN. Write-only — blank keeps the existing one.">token</label>
+          <input id="mer-auth-token-cfg" type="password" size="18" placeholder="${merAuth.has_token ? "set — blank keeps it" : "optional"}">
+          <button class="act" id="mer-auth-save">Save</button>
+        </div>
+      </details>
+    </div>
     <div class="card">
       <h2 style="margin-top:0">Edit backend list (internal mode)</h2>
       <p class="hint">JSON list. Use <code>\${MERIDIAN_API_KEY}</code>-style references for api_key —
@@ -405,6 +450,68 @@ async function tabBackends() {
           ? " — oauth source NULL; on the host run: meridian profile login &lt;profile&gt; --headless"
           : ""}</span>`).join("<br>");
     } catch (e) { el.textContent = e.message; }
+  };
+  let merSession = null;
+  $("#mer-refresh").onclick = async () => {
+    const el = $("#mer-auth-status");
+    el.textContent = "refreshing…";
+    try {
+      const r = await api("meridian/refresh", {method: "POST", body: {}});
+      if (!(r.backends || []).length) { el.textContent = "no anthropic-compatible backend configured"; return; }
+      el.innerHTML = r.backends.map(b =>
+        `${esc(b.backend)}: ` + (b.ok
+          ? '<span class="pill ok">refreshed</span>'
+          : `<span class="pill bad">failed</span> <span class="hint">${esc(b.detail || ("HTTP " + b.status))}</span>`)).join("<br>");
+    } catch (e) { el.textContent = e.message; }
+  };
+  $("#mer-reauth").onclick = async () => {
+    const el = $("#mer-auth-status"), flow = $("#mer-reauth-flow");
+    const profile = $("#mer-profile").value.trim();
+    if (!profile) { el.textContent = "enter a profile name"; return; }
+    el.textContent = "starting login on the host…"; flow.style.display = "none";
+    try {
+      const r = await api("meridian/reauth/start", {method: "POST", body: {profile}});
+      if (!r.ok || !r.url) {
+        el.innerHTML = '<span class="pill bad">no sign-in URL</span>';
+        toast(r.output || "the login command produced no URL", true);
+        return;
+      }
+      merSession = r.session_id;
+      const a = $("#mer-auth-url"); a.href = r.url; a.textContent = r.url;
+      $("#mer-code").value = ""; $("#mer-code-status").textContent = "";
+      flow.style.display = "block";
+      el.innerHTML = '<span class="pill warn">awaiting sign-in</span>';
+    } catch (e) { el.textContent = e.message; toast(e.message, true); }
+  };
+  $("#mer-code-submit").onclick = async () => {
+    const st2 = $("#mer-code-status"), code = $("#mer-code").value.trim();
+    if (!merSession) { st2.textContent = "start Re-authenticate first"; return; }
+    if (!code) { st2.textContent = "paste the code Claude gave you"; return; }
+    st2.textContent = "completing…";
+    try {
+      const r = await api("meridian/reauth/complete", {method: "POST", body: {session_id: merSession, code}});
+      if (r.ok) {
+        st2.innerHTML = '<span class="pill ok">authenticated</span>';
+        toast("Meridian re-authenticated"); merSession = null;
+        $("#mer-reauth-flow").style.display = "none";
+        $("#test-meridian").click();
+      } else {
+        st2.innerHTML = `<span class="pill bad">failed</span> <span class="hint">${esc((r.output || r.error || "").slice(-300))}</span>`;
+      }
+    } catch (e) { st2.textContent = e.message; toast(e.message, true); }
+  };
+  $("#mer-code-cancel").onclick = () => {
+    merSession = null; $("#mer-reauth-flow").style.display = "none";
+    $("#mer-auth-status").textContent = "cancelled";
+  };
+  $("#mer-auth-save").onclick = async () => {
+    try {
+      const body = {url: $("#mer-auth-url-cfg").value.trim()};
+      const tok = $("#mer-auth-token-cfg").value.trim();
+      if (tok) body.token = tok;
+      await api("meridian/auth_config", {method: "POST", body});
+      toast("Auth companion saved"); render();
+    } catch (e) { toast(e.message, true); }
   };
   $("#save-backends").onclick = () =>
     run(api("config/backends", {method: "POST", body: JSON.parse($("#backends-json").value)}));
@@ -1259,10 +1366,15 @@ function gatewaySection(gw) {
     <p class="hint">Browse the catalog and attach/detach servers on the live gateway without SSH.
       Adding/removing runs the gateway's own management tools from Foundry's backend, then re-runs
       Tool Sync so the change shows up. Servers that need <b>secrets</b> can't be added here yet
-      (no remote path to the gateway's secrets.env — see docs/GATEWAY_SERVERS.md).</p>
+      (no remote path to the gateway's secrets.env — see docs/GATEWAY_SERVERS.md).
+      To read full descriptions of everything available, browse the
+      <a href="https://hub.docker.com/mcp" target="_blank" rel="noopener noreferrer">Docker MCP Catalog ↗</a>
+      (the same catalog the search below queries).</p>
     <div class="row">
       <input id="gw-q" size="30" placeholder="search the catalog, e.g. playwright">
       <button class="act primary" id="gw-search">Search catalog ▶</button>
+      <button class="act" id="gw-listall"
+        title="List everything in the catalog (empty search). Large — some gateways cap the result set.">List all ▼</button>
       <span id="gw-status" class="hint"></span>
     </div>
     <div id="gw-results"></div>
@@ -1299,10 +1411,9 @@ function wireGateway(gw) {
     await api("gateway/inspect_config", {method: "POST", body});
     toast("Inspect service saved"); render();
   });
-  $("#gw-search").onclick = () => run(async () => {
-    const q = $("#gw-q").value.trim();
+  const gwFind = (q) => run(async () => {
     const status = $("#gw-status"), out = $("#gw-results");
-    status.textContent = "searching…"; out.innerHTML = "";
+    status.textContent = q ? "searching…" : "listing catalog…"; out.innerHTML = "";
     const r = await api("gateway/find", {method: "POST", body: {gateway: primary, query: q}});
     status.textContent = `${(r.results || []).length} result(s)`;
     if (!(r.results || []).length) {
@@ -1347,6 +1458,9 @@ function wireGateway(gw) {
       <details style="margin-top:6px"><summary class="hint" style="cursor:pointer">show raw mcp-find response (the untouched payload — use this to confirm which fields exist before we tune the parser)</summary>
         <pre class="mono" style="white-space:pre-wrap;max-height:320px;overflow:auto">${esc(r.raw || "")}</pre></details>`;
   });
+  $("#gw-search").onclick = () => gwFind($("#gw-q").value.trim());
+  const listAll = $("#gw-listall");
+  if (listAll) listAll.onclick = () => gwFind("");
 }
 
 window.gwAdd = async (ref, gateway) => {
@@ -1791,7 +1905,9 @@ async function tabResearch() {
         <label>sweep_hours</label>${numField("re-sweep", r.sweep_hours ?? 24, 1)}
         <label>stale_days</label>${numField("re-stale", r.stale_days ?? 14, 1)}
         <label title="Fetch attempts per model (ranked best-first)">max_pages</label>${numField("re-pages", r.max_pages_per_model ?? 8, 1)}
-        <label title="Chars of corpus fed to the extractor LLM">corpus_chars</label>${numField("re-corpus", r.corpus_char_limit ?? 24000, 1000, 1000)}</div>
+        <label title="Chars of corpus fed to the extractor LLM">corpus_chars</label>${numField("re-corpus", r.corpus_char_limit ?? 24000, 1000, 1000)}
+        <label title="num_ctx the research model is LOADED with (Ollama). 0 = auto: just enough to fit corpus_chars + the reply. Set it to match a persona's context_window when this model is SHARED with a worker persona, so the sweep doesn't reload it smaller and thrash. Capped at the model's trained max.">context_window</label>${numField("re-ctx", r.context_window ?? 0, 0, 1024)}
+        <span class="hint">0 = auto (fit corpus)</span></div>
       <div class="row"><label>search tool</label>
         <select id="re-s-srv">${srvOpts(search.server)}</select>
         <input id="re-s-tool" size="20" placeholder="tool (searxng_web_search)" value="${esc(search.tool || "")}">
@@ -1815,6 +1931,7 @@ async function tabResearch() {
     search_prefix: $("#re-prefix").value,
     sweep_hours: +$("#re-sweep").value, stale_days: +$("#re-stale").value,
     max_pages_per_model: +$("#re-pages").value, corpus_char_limit: +$("#re-corpus").value,
+    context_window: +$("#re-ctx").value,
     search: {server: $("#re-s-srv").value, tool: $("#re-s-tool").value, query_param: $("#re-s-qp").value || "query"},
     fetch: {server: $("#re-f-srv").value, tool: $("#re-f-tool").value, url_param: $("#re-f-up").value || "url"}}}));
   $("#re-test").onclick = async () => {
