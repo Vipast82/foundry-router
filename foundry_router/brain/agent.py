@@ -844,7 +844,8 @@ class AgentRunner:
             t0 = time.monotonic()
             try:
                 result, backend_name = await self._with_heartbeat(
-                    self._dispatch_worker(model_id, prompt, images=images),
+                    self._dispatch_worker(model_id, prompt, images=images,
+                                          persona=ctx.persona),
                     emit, model_id)
             except ContextTooLarge as e:
                 # Distinct from a backend failure: the request is too big for
@@ -890,7 +891,8 @@ class AgentRunner:
                                       f"models are kept for exactly this case...")
                         try:
                             alt_result, alt_backend = await self._with_heartbeat(
-                                self._dispatch_worker(alt, prompt, images=images),
+                                self._dispatch_worker(alt, prompt, images=images,
+                                                      persona=ctx.persona),
                                 emit, alt)
                             if _looks_like_refusal(alt_result.content):
                                 emit("think", f"{alt} also declined — delivering the "
@@ -1008,14 +1010,39 @@ class AgentRunner:
 
     # ------------------------------------------------- canonical dispatch --
 
+    def _num_ctx_for(self, persona: Optional[dict], model_id: str) -> Optional[int]:
+        """The num_ctx to request when loading an OLLAMA worker for this persona:
+        the persona's declared context_window, capped at the model's trained max.
+        None => inject nothing (persona set no context_window -> the backend's own
+        default, e.g. OLLAMA_CONTEXT_LENGTH). Foundry is the source of truth for
+        context — the operator sets context_window per persona and it flows to
+        BOTH the frontend (/api/show) and the Ollama backend (here)."""
+        cw = (persona or {}).get("context_window")
+        try:
+            cw = int(cw) if cw else 0
+        except (TypeError, ValueError):
+            cw = 0
+        if cw <= 0:
+            return None
+        model_max = (self.model_registry.get(model_id) or {}).get("context_length")
+        return min(cw, int(model_max)) if model_max else cw
+
     async def _dispatch_worker(self, model_id: str, prompt: str,
                                max_tokens: Optional[int] = None,
-                               images: Optional[list] = None):
+                               images: Optional[list] = None,
+                               persona: Optional[dict] = None):
         """THE single worker-dispatch path. Agent ask_* tools, every pipeline
         step, and outcome judges all call models through here, so timeout and
         dispatch behavior can never diverge between execution modes again
         (found live: the pipeline's Execute step failing on cold-load latency
         the ask_* path tolerated fine).
+
+        Context: for an Ollama worker, the persona's context_window is sent as
+        num_ctx so the model is LOADED with enough context to match what the
+        frontend was told — otherwise a large request silently truncates at the
+        backend's default (found live: 128K advertised, worker loaded at 8192).
+        Only Ollama supports a per-request context size; llama.cpp/OpenAI set it
+        at launch, Claude is fixed — so num_ctx is injected only for ollama.
 
         Also the observed-exhaustion hook (Bug 2 mitigation): Meridian's quota
         sources can be completely blind (oauth null, sdk count 0 — confirmed
@@ -1024,28 +1051,39 @@ class AgentRunner:
         from ..usage import looks_like_window_exhaustion
         info = self.pool.backend_info(model_id)
         is_subscription = bool(info and info.get("type") == "anthropic-compatible")
-        # Pre-dispatch context-fit guard (general, any backend): if the request
-        # plus the reserved reply wouldn't fit the target model's known context
-        # window, reject it HERE rather than send it to earn a raw API error.
-        # Critical for escalation — a request the brain assembled against a
-        # 262K-context local model may not fit Claude's 200K. context_length is
-        # None => unknown => don't gate (degrade gracefully, like the ranking
-        # gate). Raises ContextTooLarge (an AllBackendsFailed) so every existing
-        # degrade path reroutes to a model that fits.
+        num_ctx = self._num_ctx_for(persona, model_id)
+        # Pre-dispatch context-fit guard: reject a request that wouldn't fit the
+        # EFFECTIVE context the model will be loaded with — the persona's num_ctx
+        # when set (so we reject before truncating), else the model's trained max
+        # (the conservative reference; a persona with no context_window inherits
+        # the backend default we can't see). Raises ContextTooLarge (an
+        # AllBackendsFailed) so every existing degrade path reroutes to a model
+        # that fits, instead of the backend silently dropping tokens.
         reserve = max_tokens or self.brain.cfg.worker_max_tokens
         ctx_limit = (self.model_registry.get(model_id) or {}).get("context_length")
-        if ctx_limit:
+        effective_ctx = num_ctx or ctx_limit
+        if effective_ctx:
             est = estimate_tokens(prompt)
-            if est + reserve > ctx_limit:
+            # Cap the reply reserve at HALF the context so a small context_window
+            # (e.g. 8192, near the default worker output budget) still admits a
+            # reasonable input instead of the guard rejecting every request.
+            guard_reserve = min(reserve, max(256, effective_ctx // 2))
+            if est + guard_reserve > effective_ctx:
+                where = ("this persona's context_window" if num_ctx
+                         else f"{model_id}'s {ctx_limit}-token window")
                 raise ContextTooLarge(
-                    f"request (~{est} prompt tokens + {reserve} reserved for the "
-                    f"reply) exceeds {model_id}'s {ctx_limit}-token context window")
+                    f"request (~{est} prompt tokens + room for the reply) exceeds "
+                    f"the {effective_ctx}-token limit of {where}")
         message: dict = {"role": "user", "content": prompt}
         if images:
             message["images"] = images  # protocols translate per wire format
+        # num_ctx is Ollama-specific; other backends ignore it, but only inject
+        # where it's meaningful.
+        options = ({"num_ctx": num_ctx}
+                   if num_ctx and info and info.get("type") == "ollama" else None)
         try:
             result, backend = await self.pool.chat(
-                model_id, [message],
+                model_id, [message], options=options,
                 max_tokens=max_tokens or self.brain.cfg.worker_max_tokens)
         except AllBackendsFailed as e:
             # Reliability signal: a failed/timed-out dispatch marks the model
@@ -1272,7 +1310,7 @@ class AgentRunner:
         try:
             result, backend = await self._with_heartbeat(
                 self._dispatch_worker(model, prompts.REVIEW_PASS_PROMPT.format(
-                    request=request, answer=answer)),
+                    request=request, answer=answer), persona=ctx.persona),
                 emit, f"review pass {model}")
         except Exception as e:
             emit("think", f"Review pass failed ({describe_exception(e)}) — "
@@ -1331,7 +1369,8 @@ class AgentRunner:
         try:
             if judge_model:
                 result, backend = await self._with_heartbeat(
-                    self._dispatch_worker(judge_model, prompt, max_tokens=1024),
+                    self._dispatch_worker(judge_model, prompt, max_tokens=1024,
+                                          persona=ctx.persona),
                     emit, f"outcome judge {judge_model}")
                 text = result.content
                 desc = judge_model
@@ -1467,9 +1506,17 @@ class AgentRunner:
             async for ev in self.run(ctx):
                 yield ev
 
+        # Load the worker with the persona's context_window (num_ctx) when it's
+        # an Ollama backend — same source-of-truth rule as _dispatch_worker, so a
+        # tool-loop worker doesn't truncate a long conversation at the default.
+        wt_num_ctx = self._num_ctx_for(ctx.persona, worker)
+        wt_info = self.pool.backend_info(worker)
+        wt_options = ({"num_ctx": wt_num_ctx}
+                      if wt_num_ctx and wt_info and wt_info.get("type") == "ollama"
+                      else None)
         for step in range(1, cap + 1):
             task = asyncio.create_task(self.pool.chat(
-                worker, messages, tools=specs,
+                worker, messages, tools=specs, options=wt_options,
                 max_tokens=self.brain.cfg.worker_max_tokens))
             async for hb in self._heartbeat_events(task, f"{worker} (tool step {step}/{cap})"):
                 yield hb
@@ -1592,8 +1639,8 @@ class AgentRunner:
                 ctx.logger.record_guardrail(f"pipeline {purpose}: {verdict.reason}")
                 return None, f"{purpose} skipped — {verdict.reason}"
             t0 = time.monotonic()
-            result, backend = await self._dispatch_worker(model_id, prompt,
-                                                          max_tokens=4096)
+            result, backend = await self._dispatch_worker(
+                model_id, prompt, max_tokens=4096, persona=ctx.persona)
             ctx.logger.record_model_call(model_id, backend, result.prompt_tokens,
                                          result.completion_tokens, 0.0)
             log_subscription_usage(db, model_id, backend,
@@ -1662,7 +1709,8 @@ class AgentRunner:
                                       + (", retry" if attempt == 2 else "")
                                       + ") — waiting on generation...")
             t0 = time.monotonic()
-            task = asyncio.ensure_future(self._dispatch_worker(executor, exec_prompt))
+            task = asyncio.ensure_future(
+                self._dispatch_worker(executor, exec_prompt, persona=ctx.persona))
             async for hb_ev in self._heartbeat_events(task, f"Execute on {executor}"):
                 yield hb_ev
             try:
@@ -1714,7 +1762,7 @@ class AgentRunner:
                         retry, backend = await self._dispatch_worker(
                             executor, prompts.PIPELINE_REVISE.format(
                                 spec=spec[:6000], code=code[:12000],
-                                feedback=feedback[:4000]))
+                                feedback=feedback[:4000]), persona=ctx.persona)
                         ctx.logger.record_model_call(
                             executor, backend, retry.prompt_tokens,
                             retry.completion_tokens, 0.0)

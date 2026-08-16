@@ -97,14 +97,17 @@ async def test_populate_skips_non_ollama_backends(tmp_path):
 # -- item 2: pre-dispatch size guard ----------------------------------------------
 
 class RecordingPool:
-    def __init__(self):
+    def __init__(self, typ="ollama"):
         self.sent = False
+        self.last_options = None
+        self._type = typ
 
     def backend_info(self, m):
-        return {"name": "b", "type": "ollama", "url": "http://x", "api_key": None}
+        return {"name": "b", "type": self._type, "url": "http://x", "api_key": None}
 
     async def chat(self, model, messages, tools=None, options=None, max_tokens=4096):
         self.sent = True
+        self.last_options = options
         return ChatResult(content="ok"), "b"
 
 
@@ -151,3 +154,74 @@ async def test_unknown_context_length_is_not_gated(tmp_path):
 def test_estimate_tokens():
     assert estimate_tokens("x" * 400) == 100
     assert estimate_tokens("") == 1        # floor at 1
+
+
+# -- persona context_window -> Ollama num_ctx (source-of-truth) --------------------
+
+def test_num_ctx_for_helper(tmp_path):
+    runner, registry = _runner(tmp_path, RecordingPool())
+    registry.upsert_auto("m", source="discovery", context_length=131072)
+    assert runner._num_ctx_for({"context_window": 65536}, "m") == 65536
+    assert runner._num_ctx_for({"context_window": 999999}, "m") == 131072   # capped at model max
+    assert runner._num_ctx_for({}, "m") is None                             # unset -> nothing
+    assert runner._num_ctx_for({"context_window": 0}, "m") is None
+    registry.upsert_auto("nomax", source="discovery")
+    assert runner._num_ctx_for({"context_window": 40000}, "nomax") == 40000  # no model max -> as-is
+
+
+async def test_persona_context_window_becomes_num_ctx(tmp_path):
+    pool = RecordingPool()
+    runner, registry = _runner(tmp_path, pool)
+    registry.upsert_auto("local", source="discovery", context_length=262144)
+    await runner._dispatch_worker("local", "x" * 4000,
+                                  persona={"context_window": 131072})
+    assert pool.last_options == {"num_ctx": 131072}
+
+
+async def test_num_ctx_capped_at_model_trained_max(tmp_path):
+    pool = RecordingPool()
+    runner, registry = _runner(tmp_path, pool)
+    registry.upsert_auto("small", source="discovery", context_length=32768)
+    await runner._dispatch_worker("small", "x" * 4000,
+                                  persona={"context_window": 131072})
+    assert pool.last_options == {"num_ctx": 32768}
+
+
+async def test_no_context_window_injects_nothing(tmp_path):
+    pool = RecordingPool()
+    runner, registry = _runner(tmp_path, pool)
+    registry.upsert_auto("local", source="discovery", context_length=262144)
+    await runner._dispatch_worker("local", "x" * 4000, persona={})
+    assert pool.last_options is None       # inherits the backend default (8192)
+
+
+async def test_num_ctx_not_injected_for_non_ollama(tmp_path):
+    pool = RecordingPool(typ="anthropic-compatible")
+    runner, registry = _runner(tmp_path, pool)
+    registry.upsert_auto("claude", source="discovery", context_length=200000)
+    await runner._dispatch_worker("claude", "x" * 4000,
+                                  persona={"context_window": 131072})
+    assert pool.last_options is None       # num_ctx is Ollama-specific
+
+
+async def test_guard_uses_persona_context_window(tmp_path):
+    # model supports 262k, but the persona caps context at 8192 -> a ~20k-token
+    # request is rejected before dispatch (no silent backend truncation)
+    pool = RecordingPool()
+    runner, registry = _runner(tmp_path, pool)
+    registry.upsert_auto("local", source="discovery", context_length=262144)
+    with pytest.raises(ContextTooLarge):
+        await runner._dispatch_worker("local", "x" * (20000 * 4),
+                                      persona={"context_window": 8192})
+    assert pool.sent is False
+
+
+async def test_small_context_window_still_admits_normal_requests(tmp_path):
+    # regression: an 8192 context_window must not reject every request just
+    # because the default reply reserve is also 8192 (reserve is capped at half)
+    pool = RecordingPool()
+    runner, registry = _runner(tmp_path, pool)
+    registry.upsert_auto("local", source="discovery", context_length=262144)
+    result, _ = await runner._dispatch_worker(
+        "local", "x" * (2000 * 4), persona={"context_window": 8192})  # ~2k tokens
+    assert pool.sent and pool.last_options == {"num_ctx": 8192}

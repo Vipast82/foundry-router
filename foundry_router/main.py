@@ -112,8 +112,22 @@ class Services:
         research_model = self.config_store.config.registry.research.model
         if research_model:
             try:
+                # Size num_ctx to hold the whole research corpus + the JSON reply,
+                # so a large corpus_char_limit actually reaches the extractor
+                # instead of truncating at the backend default (Ollama only —
+                # llama.cpp/OpenAI set context at launch). ~4 chars/token, plus
+                # ~1024 for the prompt template and the 4096-token reply, capped
+                # at the model's trained window.
+                cfg = self.config_store.config.registry.research
+                info = self.pool.backend_info(research_model)
+                options = None
+                if info and info.get("type") == "ollama":
+                    need = cfg.corpus_char_limit // 4 + 1024 + 4096
+                    model_max = (self.registry.get(research_model) or {}).get("context_length")
+                    options = {"num_ctx": min(need, int(model_max)) if model_max else need}
                 result, _ = await self.pool.chat(
-                    research_model, [{"role": "user", "content": prompt}], max_tokens=4096)
+                    research_model, [{"role": "user", "content": prompt}],
+                    options=options, max_tokens=4096)
                 return result.content
             except Exception as e:
                 self.db.log_event("warning", "research",

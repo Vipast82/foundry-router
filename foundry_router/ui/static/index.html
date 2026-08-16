@@ -793,7 +793,7 @@ async function tabPersonas() {
       <div class="row"><label>virtual_name</label><input id="pe-name" size="28"></div>
       <div class="row"><label>description</label><input id="pe-desc" size="70"></div>
       <div class="row">
-        <label title="Token count reported to clients (AnythingLLM, Open WebUI) via /api/show. Pins the context length regardless of backend discovery state. Set this to your largest worker model's actual context window. 0 = auto-discover from backends.">context_window (tokens)</label>
+        <label title="THE source of truth for this persona's context. Two effects: (1) reported to clients (AnythingLLM, Open WebUI) via /api/show so they know how much they can send; (2) sent to an OLLAMA worker as num_ctx so the model is LOADED with this much context instead of the backend default — capped at the model's trained max, and a too-big request is rejected (rerouted) rather than silently truncated. llama.cpp/OpenAI set context at their own launch (-c); Claude is fixed. 0 = auto (advertise the max worker window; inject nothing → Ollama's own default).">context_window (tokens)</label>
         <input id="pe-ctx" type="number" min="0" step="1024" size="14" value="0" placeholder="e.g. 131072">
         <span class="hint">(0 = auto-discover from backends)</span>
       </div>
