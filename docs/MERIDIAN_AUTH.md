@@ -16,6 +16,27 @@ panel does it.
 
 There are two tiers, because a stale login has two causes.
 
+## Real usage window — including Claude **Pro** (the important one)
+
+Meridian's own `/v1/usage/quota` returns null usage for non-Max plans (it *skips*
+the OAuth usage fetch for non-claude-max profiles as of v1.57.1). But Anthropic's
+`GET /api/oauth/usage` **does** serve Pro accounts — it returns the real
+`five_hour` / `seven_day` utilization and Extra-Usage credits (the same numbers
+the Claude app shows). Foundry pulls it directly through the companion:
+
+1. Update the companion so it has the `/usage` endpoint — re-run the installer
+   (`contrib/meridian-auth-service/install.sh`) or re-copy the script, then
+   `systemctl restart meridian-auth`.
+2. In **Backend Pool → Meridian re-authentication → Auth companion service**, set
+   **usage profile** to your Meridian profile name (e.g. `victor`) and Save.
+
+Foundry then polls `POST {companion}/usage` (which reads the profile's current
+OAuth token from Meridian's credentials and calls `/api/oauth/usage`), and the
+real window drives everything: the **Test Meridian Auth** readout, the brain's
+usage-aware routing, and the **conservation guardrails** (`conserve_*_at`) — so
+"use Claude until the window fills, then fall back to local" works on Pro too.
+Companion env: `MERIDIAN_PROFILES_DIR` (default `/root/.config/meridian/profiles`).
+
 ## 1. Token expired → **Refresh token** (no companion, no SSH)
 
 Meridian access tokens live ~8 hours. When only the token has expired, Foundry

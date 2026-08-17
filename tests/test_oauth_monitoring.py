@@ -13,8 +13,9 @@ import pytest
 
 from foundry_router.config import MeridianConfig
 from foundry_router.db import Database
-from foundry_router.usage import (MeridianUsage, parse_extra_usage,
-                                  parse_sources)
+from foundry_router.meridian_auth import set_auth_settings
+from foundry_router.usage import (MeridianUsage, oauth_usage_to_quota,
+                                  parse_extra_usage, parse_quota, parse_sources)
 
 
 class FakeResponse:
@@ -186,6 +187,64 @@ async def test_telemetry_parses_token_usage(tmp_path):
     assert t["reachable"] is True
     assert t["input_tokens"] == 100 and t["output_tokens"] == 50
     assert t["total_requests"] == 2
+
+
+# -- REAL usage via the companion (Anthropic /api/oauth/usage — Pro included) ----
+
+# Confirmed live shape from api.anthropic.com/api/oauth/usage on a Pro account.
+REAL_OAUTH_USAGE = {
+    "five_hour": {"utilization": 18.0, "resets_at": "2026-08-18T01:00:00+00:00"},
+    "seven_day": {"utilization": 68.0, "resets_at": "2026-08-21T16:00:00+00:00"},
+    "extra_usage": {"used_credits": 1745.0, "utilization": 12.46},
+    "limits": [{"kind": "session", "percent": 18}, {"kind": "weekly_all", "percent": 68}],
+}
+
+
+def test_oauth_usage_to_quota_transform():
+    q = oauth_usage_to_quota(REAL_OAUTH_USAGE)
+    assert parse_sources(q) is True                    # oauth now present
+    used = {b["type"]: b["used"] for b in parse_quota(q)}
+    assert used["five_hour"] == pytest.approx(0.18)    # 18.0 -> 0.18
+    assert used["seven_day"] == pytest.approx(0.68)
+    assert parse_extra_usage(q) == pytest.approx(17.45)  # 1745 cents -> $17.45
+
+
+class CompanionHTTP:
+    """POST /usage returns the companion's {ok, raw} wrapper. A GET (the direct
+    Meridian quota path) would be a bug when the companion path is active."""
+    def __init__(self, usage_raw):
+        self.usage_raw, self.posts, self.gets = usage_raw, [], []
+
+    async def post(self, url, json=None, headers=None, timeout=None):
+        self.posts.append(url)
+        return FakeResponse({"ok": True, "status": 200, "raw": self.usage_raw})
+
+    async def get(self, url, headers=None, timeout=None):
+        self.gets.append(url)
+        return FakeResponse({})
+
+
+async def test_usage_via_companion_drives_real_window(tmp_path):
+    db = Database(tmp_path / "u.sqlite")
+    set_auth_settings(db, "http://companion:8898", token="k")
+    http = CompanionHTTP(REAL_OAUTH_USAGE)
+    usage = MeridianUsage(MeridianConfig(usage_profile="victor"), http, db)
+    snap = await usage.snapshot("http://m")
+    assert snap["oauth_ok"] is True
+    assert snap["worst_used"] == pytest.approx(0.68)    # weekly 68% drives conservation
+    assert snap["credits_used_usd"] == pytest.approx(17.45)
+    assert any("/usage" in u for u in http.posts)       # used the companion...
+    assert http.gets == []                              # ...not Meridian's quota
+
+
+async def test_usage_profile_unset_uses_direct_quota(tmp_path):
+    # no usage_profile -> the companion is not consulted; direct Meridian path
+    db = Database(tmp_path / "u2.sqlite")
+    set_auth_settings(db, "http://companion:8898", token="k")
+    http = CompanionHTTP(REAL_OAUTH_USAGE)
+    usage = MeridianUsage(MeridianConfig(), http, db)   # usage_profile None
+    await usage.snapshot("http://m")
+    assert http.posts == [] and http.gets              # GET direct, no companion POST
 
 
 def test_health_endpoint_shape(client):

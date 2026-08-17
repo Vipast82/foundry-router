@@ -220,7 +220,7 @@ async def set_meridian(request: Request):
     body = await request.json()
     allowed = {"quota_path", "min_window_fraction", "conserve_premium_at",
                "conserve_strong_at", "conserve_fable_at", "usage_credits",
-               "confirm_user_paid_at", "quota_poll_seconds"}
+               "confirm_user_paid_at", "quota_poll_seconds", "usage_profile"}
     updates = {k: v for k, v in body.items() if k in allowed}
 
     def mutate(raw):
@@ -241,7 +241,9 @@ async def meridian_auth_settings(request: Request):
     set). The panel is always shown; without a companion URL only Refresh token
     (the direct HTTP path) is available."""
     from ..meridian_auth import auth_settings
-    return {**auth_settings(_svc(request).db)}
+    svc = _svc(request)
+    return {**auth_settings(svc.db),
+            "usage_profile": svc.config_store.config.meridian.usage_profile or ""}
 
 
 @router.post("/admin/api/meridian/auth_config")

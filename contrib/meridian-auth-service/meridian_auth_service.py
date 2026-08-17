@@ -15,6 +15,10 @@ re-auth:
     POST /refresh         -> `meridian refresh-token` (non-interactive) — enough
                              when the token has merely EXPIRED
          body: {"profile": "victor"}  (profile optional)
+    POST /usage           -> Anthropic's /api/oauth/usage for the profile (real
+                             session/weekly utilization + credits; works on Pro,
+                             which Meridian's own /v1/usage/quota skips)
+         body: {"profile": "victor"}  -> {"ok", "status", "raw": {...}}
     POST /login/start     -> spawn `meridian profile login <profile> --headless`,
                              capture the sign-in URL, HOLD the process open
          body: {"profile": "victor"}
@@ -53,6 +57,8 @@ import secrets
 import subprocess
 import threading
 import time
+import urllib.error
+import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 BIND = os.environ.get("MERIDIAN_AUTH_BIND", "127.0.0.1")
@@ -61,6 +67,13 @@ TOKEN = os.environ.get("MERIDIAN_AUTH_TOKEN", "")
 MERIDIAN = os.environ.get("MERIDIAN_BIN", "meridian")
 URL_TIMEOUT = int(os.environ.get("MERIDIAN_URL_TIMEOUT", "60"))
 LOGIN_TTL = int(os.environ.get("MERIDIAN_LOGIN_TTL", "600"))
+# For POST /usage: read the profile's OAuth token from Meridian's credentials and
+# fetch Anthropic's real usage window (works on Pro — Meridian skips it for
+# non-Max). The credentials dir is the host path (this service runs on the host).
+PROFILES_DIR = os.environ.get("MERIDIAN_PROFILES_DIR",
+                              "/root/.config/meridian/profiles")
+OAUTH_USAGE_URL = "https://api.anthropic.com/api/oauth/usage"
+OAUTH_BETA = os.environ.get("MERIDIAN_OAUTH_BETA", "oauth-2025-04-20")
 
 # A profile name is operator-facing but goes on a command line — constrain it
 # hard so this can never become a shell-injection foothold (we never use a
@@ -173,6 +186,46 @@ def _complete_login(sid: str, code: str) -> dict:
     return {"ok": rc == 0, "exit_code": rc, "output": output}
 
 
+def _read_access_token(profile: str) -> str:
+    """The current OAuth access token from Meridian's per-profile credentials.
+    Meridian keeps this refreshed (~8h), so reading it live is enough."""
+    path = os.path.join(PROFILES_DIR, profile, ".credentials.json")
+    with open(path, encoding="utf-8") as f:
+        d = json.load(f)
+    return ((d.get("claudeAiOauth") or {}).get("accessToken")
+            or d.get("accessToken") or "")
+
+
+def _oauth_usage(profile: str) -> tuple[int, dict]:
+    """Fetch Anthropic's /api/oauth/usage for a profile (the real session/weekly
+    utilization + extra-usage credits — the data Meridian skips for non-Max)."""
+    try:
+        token = _read_access_token(profile)
+    except FileNotFoundError:
+        return 404, {"ok": False, "error": f"no credentials for profile {profile!r} "
+                                            f"under {PROFILES_DIR}"}
+    except Exception as e:  # bad JSON, perms
+        return 500, {"ok": False, "error": f"credential read failed: {e}"}
+    if not token:
+        return 500, {"ok": False, "error": "no accessToken in credentials"}
+    req = urllib.request.Request(OAUTH_USAGE_URL, headers={
+        "Authorization": f"Bearer {token}",
+        "anthropic-beta": OAUTH_BETA,
+        "Accept": "application/json"})
+    try:
+        with urllib.request.urlopen(req, timeout=12) as resp:
+            raw = json.loads(resp.read().decode("utf-8"))
+        return 200, {"ok": True, "status": 200, "raw": raw}
+    except urllib.error.HTTPError as e:
+        # 401 usually = a momentarily stale token; Meridian refreshes it on its
+        # next Claude call, so this self-heals — reported, not fatal.
+        return 200, {"ok": False, "status": e.code,
+                     "error": f"anthropic usage HTTP {e.code} "
+                              f"(token may be stale; retries after Meridian refreshes it)"}
+    except Exception as e:
+        return 200, {"ok": False, "status": None, "error": str(e)}
+
+
 def _refresh(profile: str) -> dict:
     cmd = [MERIDIAN, "refresh-token"]
     if profile:
@@ -226,6 +279,13 @@ class Handler(BaseHTTPRequestHandler):
             if profile and not _SAFE_PROFILE.match(profile):
                 return self._send(400, {"ok": False, "error": "bad profile name"})
             return self._send(200, _refresh(profile))
+
+        if path == "/usage":
+            profile = str(body.get("profile") or "").strip()
+            if not _SAFE_PROFILE.match(profile):
+                return self._send(400, {"ok": False,
+                                        "error": "profile must match [A-Za-z0-9._-]"})
+            return self._send(*_oauth_usage(profile))
 
         if path == "/login/start":
             profile = str(body.get("profile") or "").strip()

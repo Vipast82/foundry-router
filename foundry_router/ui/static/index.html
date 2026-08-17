@@ -366,6 +366,11 @@ async function tabBackends() {
           <input id="mer-auth-token-cfg" type="password" size="18" placeholder="${merAuth.has_token ? "set — blank keeps it" : "optional"}">
           <button class="act" id="mer-auth-save">Save</button>
         </div>
+        <div class="row">
+          <label title="Meridian profile to pull REAL usage for, via the companion's /usage endpoint (Anthropic's /api/oauth/usage — works on Pro, which Meridian's own quota skips). Set this to light up the true 5h/weekly window and quota-based conservation. Blank = use Meridian's quota endpoint directly.">usage profile</label>
+          <input id="mer-usage-profile" size="16" value="${esc(merAuth.usage_profile || "")}" placeholder="victor">
+          <span class="hint">enables the real 5h/weekly usage + conservation (Pro included)</span>
+        </div>
       </details>
     </div>
     <div class="card">
@@ -454,10 +459,10 @@ async function tabBackends() {
           ? '<span class="pill ok">logged in</span>'
           : '<span class="pill bad">not logged in</span>';
         const usage = b.usage_reported
-          ? '<span class="pill ok">usage reporting</span>'
+          ? `<span class="pill ok">usage</span> <span class="hint">${esc(b.note || "")}</span>`
           : '<span class="pill warn">usage figures unavailable</span> '
-            + '<span class="hint">Meridian isn\'t returning Anthropic\'s 5h/weekly window '
-            + '(sources.oauth null) — Claude still works; not an auth problem</span>';
+            + '<span class="hint">set a <b>usage profile</b> below to pull the real 5h/weekly window '
+            + '(Anthropic /api/oauth/usage — works on Pro); Meridian\'s own quota skips non-Max</span>';
         const t = b.telemetry || {};
         const tele = t.reachable
           ? `<span class="hint">telemetry (${Math.round((t.window_ms || 0) / 60000)}m window): `
@@ -528,6 +533,7 @@ async function tabBackends() {
       const tok = $("#mer-auth-token-cfg").value.trim();
       if (tok) body.token = tok;
       await api("meridian/auth_config", {method: "POST", body});
+      await api("config/meridian", {method: "POST", body: {usage_profile: $("#mer-usage-profile").value.trim()}});
       toast("Auth companion saved"); render();
     } catch (e) { toast(e.message, true); }
   };

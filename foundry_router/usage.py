@@ -172,6 +172,31 @@ def parse_quota(data: Any) -> Optional[list[dict]]:
     return out
 
 
+def oauth_usage_to_quota(data: Any) -> Optional[dict]:
+    """Transform Anthropic's real `/api/oauth/usage` response (fetched directly
+    via the host companion — this is the Pro-inclusive source Meridian skips for
+    non-Max) into the {buckets, sources, extraUsage} shape parse_quota /
+    parse_sources / parse_extra_usage already handle, so everything downstream is
+    unchanged. `utilization` there is 0-100; parse_quota normalizes it.
+
+    Confirmed live shape: {"five_hour":{"utilization":18.0,"resets_at":...},
+    "seven_day":{"utilization":68.0,...}, "extra_usage":{"used_credits":1745.0}}
+    (used_credits is in cents — 1745 == $17.45, same unit as extraUsage.usedCredits)."""
+    if not isinstance(data, dict):
+        return None
+    buckets = []
+    for key in ("five_hour", "seven_day", "seven_day_opus", "seven_day_sonnet"):
+        b = data.get(key)
+        if isinstance(b, dict) and b.get("utilization") is not None:
+            buckets.append({"type": key, "utilization": b.get("utilization"),
+                            "resets_at": b.get("resets_at")})
+    out: dict = {"buckets": buckets, "sources": {"oauth": {"live": True}}}
+    extra = data.get("extra_usage")
+    if isinstance(extra, dict) and extra.get("used_credits") is not None:
+        out["extraUsage"] = {"usedCredits": extra.get("used_credits")}
+    return out
+
+
 def parse_sources(data: Any) -> Optional[bool]:
     """Is Meridian's oauth USAGE source populated? Confirmed live on Meridian
     1.45.0: `sources.oauth` returns null (and `buckets[].utilization` null) while
@@ -366,7 +391,36 @@ class MeridianUsage:
         snap = await self.snapshot(base_url, api_key)
         return snap["available"], snap["note"]
 
-    async def _fetch(self, base_url: str, api_key: Optional[str]) -> dict:
+    async def _raw_quota(self, base_url: str,
+                         api_key: Optional[str]) -> tuple[Optional[dict], Optional[str]]:
+        """Get a quota-shaped payload. Prefers the REAL Anthropic
+        `/api/oauth/usage` via the host companion when `usage_profile` is set —
+        that endpoint serves Pro accounts (Meridian's own /v1/usage/quota skips
+        non-Max). Falls back to the direct Meridian quota endpoint. Returns
+        (data, error)."""
+        profile = (self.cfg.usage_profile or "").strip()
+        if profile:
+            from .meridian_auth import AUTH_TOKEN_KEY, AUTH_URL_KEY
+            curl = (self.db.kv_get(AUTH_URL_KEY) or "").rstrip("/")
+            if curl:
+                headers = {}
+                tok = self.db.kv_get(AUTH_TOKEN_KEY)
+                if tok:
+                    headers["Authorization"] = f"Bearer {tok}"
+                try:
+                    r = await self.client.post(curl + "/usage",
+                                               json={"profile": profile},
+                                               headers=headers, timeout=12)
+                    r.raise_for_status()
+                    body = r.json()
+                except Exception as e:
+                    return None, describe_exception(e)
+                if body.get("ok") and isinstance(body.get("raw"), dict):
+                    q = oauth_usage_to_quota(body["raw"])
+                    if q is not None:
+                        return q, None
+                return None, (body.get("error")
+                              or f"companion usage HTTP {body.get('status')}")
         url = base_url.rstrip("/") + self.cfg.quota_path
         headers = {}
         if api_key:
@@ -376,11 +430,17 @@ class MeridianUsage:
         try:
             r = await self.client.get(url, headers=headers, timeout=10)
             r.raise_for_status()
-            data = r.json()
+            return r.json(), None
         except Exception as e:
-            log.info("Meridian quota unreachable (%s) — assuming window available", e)
+            return None, describe_exception(e)
+
+    async def _fetch(self, base_url: str, api_key: Optional[str]) -> dict:
+        data, fetch_error = await self._raw_quota(base_url, api_key)
+        if data is None:
+            log.info("Meridian quota unreachable (%s) — assuming window available",
+                     fetch_error)
             return {"available": True, "buckets": [], "worst_used": None,
-                    "oauth_ok": None, "fetch_error": describe_exception(e),
+                    "oauth_ok": None, "fetch_error": fetch_error,
                     "note": "quota endpoint unreachable; assuming window available"}
 
         oauth_ok = parse_sources(data)

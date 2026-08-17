@@ -148,6 +148,12 @@ class MeridianConfig(BaseModel):
     # and could never work — deployed configs that still carry telemetry_path
     # are simply ignored (pydantic drops unknown keys) and get this default.
     quota_path: str = "/v1/usage/quota"
+    # Profile name to pull REAL usage for via the auth companion's /usage endpoint
+    # (Anthropic's /api/oauth/usage, which serves Pro accounts — Meridian's own
+    # /v1/usage/quota skips non-Max). When set AND the auth companion is
+    # configured, this becomes the usage source that drives conservation; blank =
+    # use Meridian's quota endpoint directly. See docs/MERIDIAN_AUTH.md.
+    usage_profile: Optional[str] = None
     min_window_fraction: float = 0.05
     # Active oauth-staleness watch: poll the quota endpoint on this interval
     # so `sources.oauth` going null is caught within minutes (Events alert +
