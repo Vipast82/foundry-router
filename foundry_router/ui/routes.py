@@ -208,7 +208,9 @@ async def meridian_health(request: Request):
     out = []
     for s in getattr(svc.pool, "backends_of_type", lambda t: [])("anthropic-compatible"):
         health = await svc.meridian_usage.auth_health(s.config.url, s.config.api_key)
-        out.append({"backend": s.config.name, "url": s.config.url, **health})
+        tele = await svc.meridian_usage.telemetry(s.config.url, s.config.api_key)
+        out.append({"backend": s.config.name, "url": s.config.url,
+                    **health, "telemetry": tele})
     return {"backends": out, "checked": utcnow()}
 
 

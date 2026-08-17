@@ -173,14 +173,14 @@ def parse_quota(data: Any) -> Optional[list[dict]]:
 
 
 def parse_sources(data: Any) -> Optional[bool]:
-    """Is Meridian's oauth quota source alive? Found live TWICE in one
-    session: `sources.oauth` silently goes null (credential staleness), the
-    five_hour bucket vanishes from the response, and seven_day serves a stale
-    cached read — usage figures drift (30% shown vs 43% real) with no error
-    anywhere. The fix is manual (`meridian profile login <profile>
-    --headless`) but the DETECTION must be automatic.
+    """Is Meridian's oauth USAGE source populated? Confirmed live on Meridian
+    1.45.0: `sources.oauth` returns null (and `buckets[].utilization` null) while
+    `/health.loggedIn` is true and inference works via the sdk source — i.e. this
+    is a usage-REPORTING gap, not auth. So a False here means 'can't show the
+    Anthropic 5h/weekly window', NOT 'login is broken', and re-auth does not fix
+    it (auth validity is read from /health, not from this).
 
-    Returns True (oauth present), False (explicitly null/absent — stale),
+    Returns True (oauth present), False (explicitly null/absent — no usage data),
     or None (payload carries no `sources` at all; older builds — no signal)."""
     if not isinstance(data, dict) or not isinstance(data.get("sources"), dict):
         return None
@@ -219,22 +219,25 @@ class MeridianUsage:
     # -- oauth staleness alert (edge-triggered) -------------------------------
 
     def _note_oauth_state(self, base_url: str, oauth_ok: Optional[bool]) -> None:
-        """One Events entry when oauth flips to null, one when it recovers —
-        not one per poll. None (no `sources` in the payload, or endpoint
-        unreachable) neither raises nor clears the alert: absence of signal
-        is not evidence of recovery."""
+        """Track the OAuth *usage* source (`sources.oauth`) flipping to null.
+        This is a USAGE-DATA signal, NOT an auth failure — `/health.loggedIn` is
+        the auth check now. When it's null Claude still works; we just can't show
+        Anthropic's 5h/weekly window (confirmed live on Meridian 1.45.0:
+        `sources.oauth` null and `utilization` null while `loggedIn` is true).
+        So this is informational, logged once, and NEVER a re-auth prompt —
+        re-login does not repopulate it (that was the wrong fix all along)."""
         if oauth_ok is False and base_url not in self._oauth_alert:
             self._oauth_alert[base_url] = utcnow()
             self.db.log_event(
-                "error", "usage",
-                "Meridian oauth quota source went NULL — usage figures are now "
-                "stale/partial (five_hour bucket vanishes, seven_day serves a "
-                "cached read). Fix on the host: meridian profile login <profile> "
-                "--headless", base_url)
+                "info", "usage",
+                "Meridian isn't reporting Anthropic usage figures (sources.oauth "
+                "is null) — Claude still works; the 5h/weekly window just can't be "
+                "shown. This is a Meridian/Anthropic usage-reporting gap, not an "
+                "auth or login problem.", base_url)
         elif oauth_ok is True and self._oauth_alert.pop(base_url, None):
             self.db.log_event("info", "usage",
-                              "Meridian oauth quota source restored — usage "
-                              "figures live again", base_url)
+                              "Meridian usage figures available again "
+                              "(sources.oauth populated)", base_url)
 
     # -- observed-exhaustion fallback (quota endpoint blind) -----------------
 
@@ -288,20 +291,75 @@ class MeridianUsage:
         alert_since = self._oauth_alert.get(base_url)
         return {**snap, "oauth_alert_since": alert_since} if alert_since else snap
 
+    async def health(self, base_url: str, api_key: Optional[str] = None) -> dict:
+        """Meridian `/health` — the authoritative auth/identity signal
+        (loggedIn / email / subscriptionType / mode / version). Separate from the
+        quota endpoint on purpose: `/health.loggedIn` stays true even when the
+        quota `sources.oauth` usage source is null, so a missing usage figure no
+        longer masquerades as 'auth invalid' (the bug behind the whole re-auth
+        detour)."""
+        url = base_url.rstrip("/") + "/health"
+        headers = {}
+        if api_key:
+            headers["Authorization"] = f"Bearer {api_key}"
+            headers["x-api-key"] = api_key
+        try:
+            r = await self.client.get(url, headers=headers, timeout=10)
+            r.raise_for_status()
+            data = r.json()
+        except Exception as e:
+            return {"reachable": False, "error": describe_exception(e)}
+        auth = data.get("auth") if isinstance(data.get("auth"), dict) else {}
+        return {"reachable": True, "logged_in": bool(auth.get("loggedIn")),
+                "email": auth.get("email"),
+                "subscription_type": auth.get("subscriptionType"),
+                "mode": data.get("mode"), "version": data.get("version"),
+                "error": None}
+
+    async def telemetry(self, base_url: str, api_key: Optional[str] = None) -> dict:
+        """Meridian `/telemetry/summary` — real token/request stats for traffic
+        THROUGH Meridian over its own rolling window. Not Anthropic's quota
+        window, but it's live consumption data the null oauth usage source can't
+        currently give us — so it backs the usage readout instead."""
+        url = base_url.rstrip("/") + "/telemetry/summary"
+        headers = {}
+        if api_key:
+            headers["Authorization"] = f"Bearer {api_key}"
+            headers["x-api-key"] = api_key
+        try:
+            r = await self.client.get(url, headers=headers, timeout=10)
+            r.raise_for_status()
+            data = r.json()
+        except Exception as e:
+            return {"reachable": False, "error": describe_exception(e)}
+        tu = data.get("tokenUsage") if isinstance(data.get("tokenUsage"), dict) else {}
+        return {"reachable": True, "window_ms": data.get("windowMs"),
+                "total_requests": data.get("totalRequests"),
+                "input_tokens": tu.get("totalInputTokens"),
+                "output_tokens": tu.get("totalOutputTokens"),
+                "cache_read_tokens": tu.get("totalCacheReadTokens"),
+                "cache_creation_tokens": tu.get("totalCacheCreationTokens"),
+                "error": None}
+
     async def auth_health(self, base_url: str, api_key: Optional[str] = None) -> dict:
-        """Fresh (uncached) quota probe doubling as the auth-validity check —
-        /v1/usage/quota is read-only and free, so it's the cheapest way to
-        answer 'is the Claude subscription login still valid' without waiting
-        for a real generation to fail. Shares all plumbing with the passive
-        poll loop: the same fetch drives both."""
+        """On-demand auth-validity probe. Validity now comes from
+        `/health.loggedIn` — NOT from the quota endpoint. A null quota oauth
+        usage source is surfaced separately as 'usage figures unavailable', never
+        as an auth failure (which is why re-auth never 'fixed' it: auth was fine)."""
+        h = await self.health(base_url, api_key)
+        if not h.get("reachable"):
+            return {"valid": False, "last_checked": utcnow(), "logged_in": None,
+                    "error": h.get("error"), "note": "Meridian /health unreachable"}
         self._cache.pop(base_url, None)
-        snap = await self.snapshot(base_url, api_key)
-        valid = (snap.get("fetch_error") is None
-                 and snap.get("oauth_ok") is not False)
-        return {"valid": valid, "last_checked": utcnow(),
+        snap = await self.snapshot(base_url, api_key)   # drives the usage note
+        return {"valid": bool(h["logged_in"]), "last_checked": utcnow(),
+                "logged_in": h["logged_in"], "email": h.get("email"),
+                "subscription_type": h.get("subscription_type"),
+                "mode": h.get("mode"), "version": h.get("version"),
+                "usage_reported": (snap.get("oauth_ok") is True
+                                   and snap.get("worst_used") is not None),
                 "oauth_ok": snap.get("oauth_ok"),
-                "note": snap.get("note", ""),
-                "error": snap.get("fetch_error")}
+                "note": snap.get("note", ""), "error": None}
 
     async def window_available(self, base_url: str,
                                api_key: Optional[str] = None) -> tuple[bool, str]:
@@ -354,8 +412,9 @@ class MeridianUsage:
         else:
             note = "no usage signal yet (fresh window)"
         if oauth_ok is False:
-            note += ("; WARNING: oauth quota source is NULL — these figures "
-                     "are stale/partial")
+            note += ("; note: Meridian isn't reporting Anthropic usage figures "
+                     "(sources.oauth null) — Claude still works, the window just "
+                     "can't be shown")
         return {"available": available, "buckets": buckets,
                 "worst_used": worst_used, "fable_used": fable_used,
                 "oauth_ok": oauth_ok, "credits_used_usd": credits_used,

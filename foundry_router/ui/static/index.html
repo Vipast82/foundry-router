@@ -442,13 +442,31 @@ async function tabBackends() {
         el.textContent = "no anthropic-compatible backend configured";
         return;
       }
-      el.innerHTML = r.backends.map(b =>
-        `${esc(b.backend)}: ` + (b.valid
-          ? '<span class="pill ok">auth valid</span>'
-          : '<span class="pill bad">auth stale/invalid</span>')
-        + ` <span class="hint">${esc(b.error || b.note || "")}${b.oauth_ok === false
-          ? " — oauth source NULL; on the host run: meridian profile login &lt;profile&gt; --headless"
-          : ""}</span>`).join("<br>");
+      el.innerHTML = r.backends.map(b => {
+        if (!b.logged_in && !b.valid && b.error) {
+          return `${esc(b.backend)}: <span class="pill bad">unreachable</span> <span class="hint">${esc(b.error)}</span>`;
+        }
+        const who = b.email ? esc(b.email) : "identity not reported by Meridian";
+        const meta = [b.subscription_type && esc(b.subscription_type),
+                      b.mode && "mode " + esc(b.mode),
+                      b.version && "Meridian " + esc(b.version)].filter(Boolean).join(" · ");
+        const authPill = b.logged_in
+          ? '<span class="pill ok">logged in</span>'
+          : '<span class="pill bad">not logged in</span>';
+        const usage = b.usage_reported
+          ? '<span class="pill ok">usage reporting</span>'
+          : '<span class="pill warn">usage figures unavailable</span> '
+            + '<span class="hint">Meridian isn\'t returning Anthropic\'s 5h/weekly window '
+            + '(sources.oauth null) — Claude still works; not an auth problem</span>';
+        const t = b.telemetry || {};
+        const tele = t.reachable
+          ? `<span class="hint">telemetry (${Math.round((t.window_ms || 0) / 60000)}m window): `
+            + `${t.total_requests || 0} req · ${(t.input_tokens || 0)} in / ${(t.output_tokens || 0)} out tok`
+            + `${t.cache_read_tokens ? " · " + t.cache_read_tokens + " cache-read" : ""}</span>`
+          : "";
+        return `${esc(b.backend)}: ${authPill} <span class="hint">${who}${meta ? " · " + meta : ""}</span>`
+          + `<br>${usage}${tele ? "<br>" + tele : ""}`;
+      }).join("<br><br>");
     } catch (e) { el.textContent = e.message; }
   };
   let merSession = null;

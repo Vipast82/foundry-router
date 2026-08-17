@@ -1,9 +1,18 @@
 # Re-authenticating Meridian from the UI (no SSH)
 
-When Meridian's Claude login goes stale, **Test Meridian Auth** reports it —
-`auth stale/invalid`, and when the OAuth source drops, `oauth source NULL`. The
-host fix is `meridian profile login <profile> --headless`. You no longer have to
-SSH in to run it: the **Backend Pool → Meridian re-authentication** panel does it.
+> **Important — read first.** `oauth source NULL` / "usage figures unavailable" is
+> **not** an auth failure and re-login will **not** fix it. Confirmed live on
+> Meridian 1.45.0: `/v1/usage/quota` returns 200 but `sources.oauth` and
+> `utilization` are null while `/health` shows `loggedIn: true` — Claude works,
+> Meridian just isn't reporting Anthropic's usage window. **Test Meridian Auth**
+> reads `/health.loggedIn` for the real auth state and shows the usage gap
+> separately. Only re-authenticate for a genuine **not logged in** / token-expiry
+> state, described below.
+
+When Meridian's Claude login genuinely expires (**not logged in** on the health
+check), the host fix is `meridian profile login <profile> --headless`. You no
+longer have to SSH in to run it: the **Backend Pool → Meridian re-authentication**
+panel does it.
 
 There are two tiers, because a stale login has two causes.
 
