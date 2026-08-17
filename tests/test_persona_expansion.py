@@ -5,7 +5,7 @@ import asyncio
 import json
 from contextlib import asynccontextmanager
 
-from foundry_router.brain.agent import _filter_required_tags
+from foundry_router.brain.agent import _filter_required_tags, _filter_model_allowlist
 from foundry_router.config import MCPServerConfig
 from foundry_router.db import Database
 from foundry_router.registry.models_db import ModelRegistry
@@ -62,6 +62,59 @@ def test_required_tags_degrades_to_full_list_when_nothing_matches():
     persona = {"required_tags": json.dumps(["vision"])}
     ranked = [_row("text-a"), _row("text-b")]
     assert _filter_required_tags(ranked, persona) == ranked
+
+
+# -- model_allowlist (Cline plan/act model restriction) ---------------------------
+
+def test_model_allowlist_empty_is_passthrough():
+    ranked = [_row("a"), _row("b")]
+    assert _filter_model_allowlist(ranked, {"model_allowlist": "[]"}) == ranked
+    assert _filter_model_allowlist(ranked, {}) == ranked        # unset too
+
+
+def test_model_allowlist_restricts_to_listed():
+    persona = {"model_allowlist": json.dumps(["claude-sonnet", "qwen3.8:27b"])}
+    ranked = [_row("qwen3.8:27b"), _row("llama:8b"), _row("claude-sonnet"),
+              _row("claude-opus")]
+    out = [r["id"] for r in _filter_model_allowlist(ranked, persona)]
+    assert out == ["qwen3.8:27b", "claude-sonnet"]              # opus + llama dropped
+
+
+def test_model_allowlist_single_id_locks():
+    persona = {"model_allowlist": json.dumps(["qwen3.8:27b"])}
+    ranked = [_row("qwen3.8:27b"), _row("llama:8b"), _row("claude-opus")]
+    assert [r["id"] for r in _filter_model_allowlist(ranked, persona)] == ["qwen3.8:27b"]
+
+
+def test_model_allowlist_matches_base_name_across_tag():
+    # 'qwen3.8' in the list admits 'qwen3.8:27b' and vice-versa
+    ranked = [_row("qwen3.8:27b"), _row("other:1b")]
+    assert [r["id"] for r in _filter_model_allowlist(
+        ranked, {"model_allowlist": json.dumps(["qwen3.8"])})] == ["qwen3.8:27b"]
+    ranked2 = [_row("qwen3.8"), _row("other")]
+    assert [r["id"] for r in _filter_model_allowlist(
+        ranked2, {"model_allowlist": json.dumps(["qwen3.8:27b"])})] == ["qwen3.8"]
+
+
+def test_model_allowlist_degrades_when_none_reachable():
+    # safety valve: all listed models unreachable -> full list survives (a
+    # Claude-only plan persona keeps working locally if Meridian is down)
+    persona = {"model_allowlist": json.dumps(["claude-opus"]), "virtual_name": "p"}
+    ranked = [_row("local-a"), _row("local-b")]
+    assert _filter_model_allowlist(ranked, persona) == ranked
+
+
+def test_cline_personas_seeded_and_advertised(client):
+    tags = {m["name"] for m in client.get("/api/tags").json()["models"]}
+    assert {"claude-cline-plan", "claude-cline-act"} <= tags
+    personas = {p["virtual_name"]: p
+                for p in client.get("/admin/api/personas").json()["personas"]}
+    # thin routers: agent mode, no MCP tools, no pipeline
+    assert personas["claude-cline-plan"]["local_bias_strength"] == "prefer_paid"
+    assert personas["claude-cline-act"]["local_bias_strength"] == "strong"
+    for n in ("claude-cline-plan", "claude-cline-act"):
+        assert (personas[n]["execution_mode"] or "agent") == "agent"
+        assert json.loads(personas[n]["preferred_mcp_tools"]) == []
 
 
 def test_permissive_not_penalized_in_ranking(tmp_path):

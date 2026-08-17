@@ -413,7 +413,10 @@ from a worker model, never from you.
 ACTIVE PERSONA: {name} — {p.get('description', '')}
 - Local bias: {p.get('local_bias_strength', 'cost_aware_default')} \
 (strong = stay local unless an escalation trigger clearly applies; \
-cost_aware_default = weigh quality gain against cost; moderate = in between)
+cost_aware_default = weigh quality gain against cost; moderate = in between; \
+prefer_paid = this persona's work is high-value reasoning/planning — start with \
+the best PAID model and only drop to local if the paid tier is unavailable or \
+quota-conserved)
 - Task category to optimize for: {p.get('benchmark_category', 'general_chat')}
 - Escalation triggers for this persona: {json.dumps(triggers_list)}
 
@@ -431,7 +434,10 @@ a0. If a [PINNED FOR THIS PERSONA] group is listed, try those first, in order \
 unavailable, or clearly unsuited, fall through to the next pin, then continue \
 below.
 a. Start in the FREE/LOCAL tier: pick the model whose tags match the task; \
-break ties by score.
+break ties by score. EXCEPTION: if this persona's Local bias is `prefer_paid`, \
+start in the PAID tier instead and pick the CHEAPEST tier that fits (per the \
+tier guide) — dropping to local only if no paid model is available or quota is \
+being conserved.
 b. Escalate to a paid tier ONLY when the task genuinely exceeds every local \
 candidate (a persona escalation trigger applies, or a local attempt already \
 failed) — and then use the CHEAPEST tier that suffices. Never reach for a \

@@ -98,6 +98,35 @@ def _filter_required_tags(ranked: list[dict], persona: Optional[dict]) -> list[d
     return matching or ranked
 
 
+def _filter_model_allowlist(ranked: list[dict], persona: Optional[dict]) -> list[dict]:
+    """Persona model_allowlist: a HARD restriction on which models this persona
+    may route to. Empty/unset => no restriction (the brain picks from all
+    candidates, the default). One id => effectively locks the persona to that
+    model. A few ids => the brain chooses among just those. Matches by exact id
+    OR by base name (id without the ':tag'), so 'qwen3.8:27b' in the list also
+    admits a 'qwen3.8' row and vice-versa.
+
+    Safety valve (consistent with required_tags/vision/pins): if NONE of the
+    allow-listed models are reachable, the full list survives rather than
+    hard-failing the request — degrade with options, log the miss. This also
+    means a Claude-only plan persona keeps working locally if Meridian is
+    down/exhausted instead of erroring."""
+    allow = _json_list((persona or {}).get("model_allowlist"))
+    if not allow:
+        return ranked
+    allowset = set(allow)
+    def permitted(row: dict) -> bool:
+        rid = row.get("id") or ""
+        return rid in allowset or rid.split(":")[0] in allowset or any(
+            a.split(":")[0] == rid.split(":")[0] for a in allowset)
+    matching = [r for r in ranked if permitted(r)]
+    if not matching:
+        log.warning("persona %s model_allowlist %s matched no reachable model — "
+                    "using the full candidate list", (persona or {}).get("virtual_name"),
+                    allow)
+    return matching or ranked
+
+
 def _steer_vision_when_images(ranked: list[dict], messages: list[dict]) -> list[dict]:
     """When the request actually carries an image, ANY persona's candidates
     are filtered to vision-tagged models (not just Foundry-Vision) — routing a
@@ -418,6 +447,7 @@ class AgentRunner:
         # inside ranked_for_category (within-tier) so it respects tier order.
         ranked = _steer_vision_when_images(ranked, ctx.messages)
         ranked = _filter_required_tags(ranked, persona)
+        ranked = _filter_model_allowlist(ranked, persona)
         ranked = _apply_pins(ranked, persona)
         # Keep the VRAM warm: if the persona opts in, prefer a model already
         # loaded on the backend over an equally-acceptable one that would force a
@@ -1425,6 +1455,7 @@ class AgentRunner:
             weights=overrides or None, permissive_mode=permissive_mode)
         ranked = _steer_vision_when_images(ranked, ctx.messages)
         ranked = _filter_required_tags(ranked, persona)
+        ranked = _filter_model_allowlist(ranked, persona)
         ranked = _apply_pins(ranked, persona)
         if persona.get("prefer_loaded"):
             ranked = _prefer_loaded(ranked, await self.pool.loaded_models())

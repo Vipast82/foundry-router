@@ -110,6 +110,46 @@ STARTER_PERSONAS = [
         "preferred_mcp_tools": json.dumps(["searxng", "crawl4ai"]),
         "guardrail_overrides": json.dumps({"max_steps_per_request": 20}),
     },
+    # --- Cline (VS Code) plan/act pair -------------------------------------
+    # Cline lets you assign a DIFFERENT model to Plan vs Act mode; select one of
+    # these per mode. Both carry "claude" in the name so Cline's model-name gate
+    # is satisfied. They are THIN ROUTERS (execution_mode=agent, no MCP tools, no
+    # pipeline): Cline runs its own agent loop, so Foundry just picks the model
+    # and relays — it must not wrap each Cline turn in its own pipeline. Cline's
+    # own tools/MCP stay in Cline. See docs/CLINE.md.
+    {
+        "virtual_name": "claude-cline-plan",
+        "description": "Cline PLAN mode — architecture, planning, and reasoning. Routes to "
+                       "Claude (Sonnet first, Opus for genuinely hard design). SET model_allowlist "
+                       "to your Claude model ids to guarantee Claude; see docs/CLINE.md.",
+        "benchmark_category": "coding",
+        "local_bias_strength": "prefer_paid",
+        "escalation_triggers": json.dumps([
+            "genuinely hard architecture or system-level design — prefer the strongest "
+            "available model (e.g. Opus) over the cheaper one",
+        ]),
+        "preferred_mcp_tools": json.dumps([]),
+        "guardrail_overrides": json.dumps({}),
+        "execution_mode": "agent",
+        "pipeline_check_enabled": 0,
+    },
+    {
+        "virtual_name": "claude-cline-act",
+        "description": "Cline ACT mode — writing code, edits, file ops, running commands. "
+                       "Local-first to save subscription tokens; escalates to Claude for "
+                       "debugging (auto-falls back to local as quota runs low). Optionally set "
+                       "model_allowlist to pin/limit which models it may use.",
+        "benchmark_category": "coding",
+        "local_bias_strength": "strong",
+        "escalation_triggers": json.dumps([
+            "debugging or root-causing a failure the local model cannot resolve",
+            "the same file edit / SEARCH-REPLACE diff fails repeatedly",
+        ]),
+        "preferred_mcp_tools": json.dumps([]),
+        "guardrail_overrides": json.dumps({"max_paid_calls_per_request": 2}),
+        "execution_mode": "agent",
+        "pipeline_check_enabled": 0,
+    },
 ]
 
 
@@ -241,6 +281,11 @@ class Database:
             # HTML at all.
             ("personas", "client_compat", "TEXT"),
             ("personas", "output_style", "TEXT"),
+            # Hard candidate restriction (JSON list of model ids). Empty/NULL =
+            # no restriction (brain picks from all). One id locks the persona to
+            # it; a few ids limit the brain's choice to that set. Filtered in
+            # agent._filter_model_allowlist with a degrade-to-full safety valve.
+            ("personas", "model_allowlist", "TEXT"),
             # Code-sandbox audit trail: the submitted code (call arguments) and
             # a flag marking calls that ran on an executes_code server.
             ("tool_call_log", "arguments", "TEXT"),

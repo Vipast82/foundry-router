@@ -127,6 +127,7 @@ You want `{"ok": true}`. Then firewall the port to Foundry's host/subnet only.
 
 | Topic | Doc |
 |---|---|
+| Cline (VS Code) plan/act routing | [CLINE.md](CLINE.md) |
 | Context sizing (num_ctx, advertise, thrash) | [CONTEXT_SIZING.md](CONTEXT_SIZING.md) |
 | Meridian re-auth (refresh + full login) | [MERIDIAN_AUTH.md](MERIDIAN_AUTH.md) |
 | Docker MCP Gateway admin | [GATEWAY_SERVERS.md](GATEWAY_SERVERS.md) |

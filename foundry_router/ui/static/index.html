@@ -763,6 +763,11 @@ async function tabPersonas() {
     .map(m => m.id).sort();
   const reviewOpts = ['<option value="">— choose a model —</option>']
     .concat(reviewChoices.map(id => `<option>${esc(id)}</option>`)).join("");
+  // model_allowlist datalist: every known model id (paid ones included even if
+  // momentarily unreachable, so Claude ids are always pickable). Just typing
+  // suggestions — the field stays a free JSON list.
+  const allowOpts = (md.models || []).map(m => m.id).sort()
+    .map(id => `<option value="${esc(id)}">`).join("");
   // Same discovered set the Tools tab reads — no second source, no drift.
   // Grouped by SERVER, now with each server's individual tools so a persona can
   // grant a whole server (one click) OR scope to hand-picked tools within it.
@@ -919,6 +924,10 @@ async function tabPersonas() {
         <input id="pe-guard" size="70" value="{}"></div>
       <div class="row"><label title="Ordered list of model ids boosted to the top of this persona's candidates. Not hard-required: guardrail/quota denial falls through to the next pin, then the normal pool.">pinned_models (JSON list, priority order)</label>
         <input id="pe-pins" size="70" value="[]" placeholder='["claude-sonnet-4-6", "glm-4.7-flash:latest"]'></div>
+      <div class="row"><label title="HARD restriction on which models this persona may route to. Empty = no restriction (brain picks from all — the default). ONE id locks the persona to it. A FEW ids limit the brain's choice to just those. Safety valve: if none are reachable, the full pool is used (logged) rather than failing. Use this to force a Cline-plan persona onto your Claude models, or lock/limit Cline-act to specific local coders.">model_allowlist (JSON list)</label>
+        <input id="pe-allow" size="70" value="[]" placeholder='["claude-sonnet-4-6", "claude-opus-4-6"]' list="pe-allow-models">
+        <datalist id="pe-allow-models">${allowOpts}</datalist>
+        <span class="hint">empty = brain picks · 1 = locked · few = limited choice</span></div>
       <div class="row">
         <label title="agent = generic brain loop; pipeline = Prepare (cheapest Claude) → Execute (best measured local coder) → Check (paid review)">execution_mode</label>
         <select id="pe-mode"><option value="">agent</option><option>pipeline</option></select>
@@ -966,6 +975,7 @@ async function tabPersonas() {
       parseTags((window._personas[$("#pe-name").value.trim()] || {}).preferred_mcp_tools)),
     guardrail_overrides: JSON.parse($("#pe-guard").value || "{}"),
     pinned_models: JSON.parse($("#pe-pins").value || "[]"),
+    model_allowlist: JSON.parse($("#pe-allow").value || "[]"),
     execution_mode: $("#pe-mode").value || null,
     brain_handles_tools: $("#pe-braintools").checked ? 1 : 0,
     pipeline_check_enabled: $("#pe-check").checked ? 1 : 0,
@@ -1149,6 +1159,7 @@ window.editPersona = name => {
   });
   $("#pe-guard").value = p.guardrail_overrides || "{}";
   $("#pe-pins").value = p.pinned_models || "[]";
+  $("#pe-allow").value = p.model_allowlist || "[]";
   $("#pe-mode").value = p.execution_mode || "";
   $("#pe-braintools").checked = !!p.brain_handles_tools;
   $("#pe-check").checked = p.pipeline_check_enabled === null
