@@ -2073,14 +2073,16 @@ function quotaCard(q) {
       return '<span class="pill warn">Opus+ conserved</span>';
     return "";
   };
-  // OAuth staleness (has silently corrupted usage figures twice): loudest
-  // thing on the card the moment sources.oauth goes null — don't make anyone
-  // discover it by comparing numbers with the Claude app again.
+  // sources.oauth null is NOT an auth failure — Meridian skips the usage fetch
+  // for non-Max plans. The real fix is to pull Anthropic's /api/oauth/usage
+  // directly (works on Pro) by setting a usage profile, NOT re-login.
   const alerts = q.backends.filter(b => b.oauth_ok === false).map(b =>
-    `<div class="row"><span class="pill bad">OAUTH STALE</span>
-     <span>${esc(b.backend)}: Meridian's oauth quota source is NULL — the figures
-     below are stale/partial${b.oauth_alert_since ? " (since " + esc(b.oauth_alert_since.slice(0, 19)) + " UTC)" : ""}.
-     Fix on the host: <code>meridian profile login &lt;profile&gt; --headless</code></span></div>`);
+    `<div class="row"><span class="pill warn">usage unavailable</span>
+     <span>${esc(b.backend)}: Meridian isn't reporting the Anthropic usage window
+     (it skips this for non-Max plans). Claude still works — this is not an auth
+     problem. To get the real 5h/weekly window (Pro included), set a
+     <b>usage profile</b> under Backends → Meridian re-authentication → Auth
+     companion service; Foundry then reads Anthropic's usage directly.</span></div>`);
   const credits = q.backends.filter(b => b.credits_used_usd !== null && b.credits_used_usd !== undefined)
     .map(b => `<div class="row"><label>${esc(b.backend)} · purchased credits</label>
      <b>$${b.credits_used_usd.toFixed(2)} used</b>
