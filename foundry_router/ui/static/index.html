@@ -768,6 +768,20 @@ async function tabPersonas() {
   // suggestions — the field stays a free JSON list.
   const allowOpts = (md.models || []).map(m => m.id).sort()
     .map(id => `<option value="${esc(id)}">`).join("");
+  // Quick-fill sets for the allow-list buttons: paid (Claude ladder, cheapest
+  // tier first so Sonnet leads Opus) and local (free). Detected from cost tier —
+  // never hardcoded to specific model names.
+  const tierRank = t => ({free: 0, low: 1, medium: 2, high: 3}[t] ?? 4);
+  window._allowFill = {
+    claude: (md.models || [])
+      .filter(m => m.reachable && m.relative_cost_tier && m.relative_cost_tier !== "free")
+      .sort((a, b) => tierRank(a.relative_cost_tier) - tierRank(b.relative_cost_tier)
+                      || a.id.localeCompare(b.id))
+      .map(m => m.id),
+    local: (md.models || [])
+      .filter(m => m.reachable && (!m.relative_cost_tier || m.relative_cost_tier === "free"))
+      .map(m => m.id).sort(),
+  };
   // Same discovered set the Tools tab reads — no second source, no drift.
   // Grouped by SERVER, now with each server's individual tools so a persona can
   // grant a whole server (one click) OR scope to hand-picked tools within it.
@@ -925,8 +939,11 @@ async function tabPersonas() {
       <div class="row"><label title="Ordered list of model ids boosted to the top of this persona's candidates. Not hard-required: guardrail/quota denial falls through to the next pin, then the normal pool.">pinned_models (JSON list, priority order)</label>
         <input id="pe-pins" size="70" value="[]" placeholder='["claude-sonnet-4-6", "glm-4.7-flash:latest"]'></div>
       <div class="row"><label title="HARD restriction on which models this persona may route to. Empty = no restriction (brain picks from all — the default). ONE id locks the persona to it. A FEW ids limit the brain's choice to just those. Safety valve: if none are reachable, the full pool is used (logged) rather than failing. Use this to force a Cline-plan persona onto your Claude models, or lock/limit Cline-act to specific local coders.">model_allowlist (JSON list)</label>
-        <input id="pe-allow" size="70" value="[]" placeholder='["claude-sonnet-4-6", "claude-opus-4-6"]' list="pe-allow-models">
+        <input id="pe-allow" size="58" value="[]" placeholder='["claude-sonnet-4-6", "claude-opus-4-6"]' list="pe-allow-models">
         <datalist id="pe-allow-models">${allowOpts}</datalist>
+        <button type="button" class="act" style="padding:1px 7px;font-size:11px" title="Fill with your paid/Claude models, cheapest tier first (Sonnet before Opus). One click for a Cline-plan persona." onclick="fillAllow('claude')">⊕ Claude</button>
+        <button type="button" class="act" style="padding:1px 7px;font-size:11px" title="Fill with your local (free) models — for locking/limiting a Cline-act persona." onclick="fillAllow('local')">⊕ Local</button>
+        <button type="button" class="act" style="padding:1px 7px;font-size:11px" title="Clear the restriction (brain picks from all)." onclick="fillAllow('clear')">✕</button>
         <span class="hint">empty = brain picks · 1 = locked · few = limited choice</span></div>
       <div class="row">
         <label title="agent = generic brain loop; pipeline = Prepare (cheapest Claude) → Execute (best measured local coder) → Check (paid review)">execution_mode</label>
@@ -1122,6 +1139,11 @@ window.applyDefaultContextWindows = async () => {
   if (updated.length) render();   // refresh so the new ctx pills appear
 };
 
+window.fillAllow = kind => {
+  const set = kind === "clear" ? [] : ((window._allowFill || {})[kind] || []);
+  if (kind !== "clear" && !set.length) { toast("no " + kind + " models detected", true); return; }
+  $("#pe-allow").value = JSON.stringify(set);
+};
 window.editPersona = name => {
   const p = window._personas[name]; if (!p) return;
   $("#pe-title").textContent = "Edit " + name;
