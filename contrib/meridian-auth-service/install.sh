@@ -56,7 +56,10 @@ WantedBy=multi-user.target
 EOF
 
 systemctl daemon-reload
-systemctl enable --now "$SERVICE"
+systemctl enable "$SERVICE" >/dev/null 2>&1 || true
+# restart (not just enable --now) so RE-RUNNING the installer picks up the updated
+# script — enable --now leaves an already-running old process in place.
+systemctl restart "$SERVICE"
 sleep 1
 systemctl --no-pager --full status "$SERVICE" | head -n 6 || true
 
