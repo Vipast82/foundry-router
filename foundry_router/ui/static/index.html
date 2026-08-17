@@ -1144,6 +1144,41 @@ window.fillAllow = kind => {
   if (kind !== "clear" && !set.length) { toast("no " + kind + " models detected", true); return; }
   $("#pe-allow").value = JSON.stringify(set);
 };
+// Research extra-query presets. {name} is filled with the model name at sweep
+// time. General = broad benchmark coverage; New drop = freshness/first-party
+// sources for models that just released. Append + dedupe so they compose.
+window._queryPresets = {
+  general: [
+    "{name} LiveCodeBench Aider polyglot coding benchmark",
+    "{name} SWE-bench Verified SWE-bench Pro score",
+    "{name} BFCL tool calling function calling accuracy",
+    "{name} MMLU-Pro GPQA Diamond AIME reasoning results",
+    "{name} Terminal-Bench agentic task completion",
+    "{name} Chatbot Arena Elo LMArena ranking",
+    "{name} artificialanalysis.ai intelligence index",
+    "{name} specs parameters context length quantization",
+    "{name} site:huggingface.co model card evaluation",
+    "{name} site:github.com README benchmarks",
+  ],
+  newdrop: [
+    "{name} release announcement blog benchmarks",
+    "{name} technical report pdf evaluation results",
+    "{name} official model card benchmark table",
+    "{name} vs comparison benchmark 2026",
+    "{name} aireleasetracker.com benchmarks",
+    "{name} artificialanalysis.ai",
+    "{name} llm-stats.com",
+    "{name} reddit LocalLLaMA benchmarks impressions",
+  ],
+};
+window.fillQueries = kind => {
+  const ta = $("#re-xq");
+  if (kind === "clear") { ta.value = ""; return; }
+  const have = ta.value.split("\n").map(s => s.trim()).filter(Boolean);
+  const seen = new Set(have);
+  for (const q of (window._queryPresets[kind] || [])) if (!seen.has(q)) { have.push(q); seen.add(q); }
+  ta.value = have.join("\n");
+};
 window.editPersona = name => {
   const p = window._personas[name]; if (!p) return;
   $("#pe-title").textContent = "Edit " + name;
@@ -1948,7 +1983,12 @@ async function tabResearch() {
       <div class="row" style="align-items:flex-start">
         <label title="Extra search queries appended to the 7 built-ins. One per line. Use {name} for the model. More/targeted queries surface more candidate pages before ranking spends the fetch budget.">extra queries</label>
         <textarea id="re-xq" rows="3" style="min-width:340px;font-family:var(--mono)" placeholder="{name} specs hardware requirements&#10;{name} LiveCodeBench AIME GPQA results&#10;{name} site:huggingface.co">${esc((r.extra_queries || []).join("\n"))}</textarea>
-        <span class="hint">one per line · {name} = model</span></div>
+        <div style="display:flex;flex-direction:column;gap:3px">
+          <button type="button" class="act" style="padding:1px 7px;font-size:11px" title="Append a solid general set: named benchmarks (LiveCodeBench, SWE-bench, BFCL, MMLU-Pro, GPQA, AIME, Arena), specs, and site:-targeted HF/GitHub queries." onclick="fillQueries('general')">⊕ General</button>
+          <button type="button" class="act" style="padding:1px 7px;font-size:11px" title="Append a freshness set for brand-new model drops: release announcement, technical report, official card, comparisons, fast aggregators, LocalLLaMA." onclick="fillQueries('newdrop')">⊕ New drop</button>
+          <button type="button" class="act" style="padding:1px 7px;font-size:11px" title="Clear the extra queries." onclick="fillQueries('clear')">✕</button>
+        </div>
+        <span class="hint">one per line · {name} = model<br>presets append (deduped)</span></div>
       <details style="margin:2px 0 6px"><summary class="hint" style="cursor:pointer">tips for deeper research ▾</summary>
         <ul class="hint" style="margin:4px 0 0 16px">
           <li><b>Fetch more pages:</b> raise <span class="mono">corpus_chars</span> AND <span class="mono">max_pages</span> together — fetching stops early once the corpus fills, so a small corpus caps pages no matter how high max_pages is. With the research model loaded at a big <span class="mono">context_window</span>, corpus_chars of 60k–120k is fine.</li>
