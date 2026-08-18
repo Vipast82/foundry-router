@@ -951,8 +951,8 @@ async function tabPersonas() {
         <select id="pe-cat"><option>coding</option><option>reasoning</option>
         <option>general_chat</option><option>tool_calling</option><option>agentic</option></select>
         <label>local_bias_strength</label>
-        <select id="pe-bias"><option>strong</option><option>moderate</option>
-        <option>cost_aware_default</option></select>
+        <select id="pe-bias" title="strong = stay local unless a trigger applies; cost_aware_default = weigh quality vs cost; moderate = between; prefer_paid = start in the PAID tier (for a Claude-first persona like Cline plan)"><option>strong</option><option>moderate</option>
+        <option>cost_aware_default</option><option>prefer_paid</option></select>
         <label>enabled</label><input type="checkbox" id="pe-enabled" checked></div>
       <div class="row"><label>escalation_triggers (JSON list)</label>
         <input id="pe-trig" size="70" value="[]"></div>
