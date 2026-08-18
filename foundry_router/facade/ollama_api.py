@@ -526,27 +526,31 @@ async def _direct_dispatch_chat(svc, persona, model_name, messages, client_tools
 
     async def gen():
         # KEEP-ALIVE: the worker call can run for MINUTES (cold-loading a large
-        # model + processing a big context). While it runs, emit a heartbeat in
-        # the NATIVE thinking field every `hb`s — this keeps the reverse proxy
-        # and the client (Cline) from idle-timing-out the connection into a 504,
-        # and shows a live "still working" signal without touching content.
+        # model + processing a big context). Poll it with asyncio.wait() (NOT
+        # wait_for/shield — that would re-raise the task's exception here and tear
+        # the stream, which Cline reports as "stream terminated"), emitting an
+        # empty keep-alive chunk every `hb`s so the reverse proxy and client don't
+        # idle-timeout the connection.
         task = asyncio.create_task(_run())
-        waited = 0.0
-        while hb and not task.done():
-            try:
-                await asyncio.wait_for(asyncio.shield(task), timeout=hb)
-            except asyncio.TimeoutError:
-                waited += hb
-                yield tr.chat_chunk(
-                    model_name, "", done=False,
-                    thinking=f"⏳ worker running ({int(waited)}s — a large model "
-                             f"cold-loading + a big context can take minutes)…\n")
+        while hb:
+            done, _ = await asyncio.wait({task}, timeout=hb)
+            if done:
+                break
+            yield tr.chat_chunk(model_name, "", done=False)   # keep-alive
+        # Retrieve the result (or the failure) OUTSIDE the poll loop, so any error
+        # becomes a clean in-band message + done, never a torn stream.
+        err = None
         try:
             result = await task
         except AllBackendsFailed as e:
             _on_error(e)
+            err = str(e)
+        except Exception as e:                                # noqa: BLE001
+            logger.finish("error", str(e))
+            err = str(e)
+        if err is not None:
             yield tr.chat_chunk(model_name,
-                                f"[router: worker call failed — {str(e)[:200]}]",
+                                f"[router: worker call failed — {err[:200]}]",
                                 done=False)
             yield tr.chat_chunk(model_name, "", done=True, stats={
                 "prompt_tokens": 0, "completion_tokens": 0,
