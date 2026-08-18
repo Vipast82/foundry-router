@@ -213,8 +213,13 @@ class OllamaProtocol(BaseProtocol):
             raw=data,
         )
 
-    async def chat_stream(self, model, messages, options=None) -> AsyncIterator[dict]:
-        payload = self._payload(model, messages, None, options, None, stream=True)
+    async def chat_stream(self, model, messages, tools=None, options=None,
+                          keep_alive=None) -> AsyncIterator[dict]:
+        """Token-level streaming. Now carries tools through and surfaces
+        tool_calls + thinking per chunk, so direct-dispatch can stream a coding
+        client's turn live — each chunk is real proof the backend is generating,
+        and it resets the read timeout (no total-time wall)."""
+        payload = self._payload(model, messages, tools, options, keep_alive, stream=True)
         async with self.client.stream("POST", f"{self.url}/api/chat", json=payload) as r:
             if r.status_code >= 400:
                 body = await r.aread()
@@ -226,13 +231,22 @@ class OllamaProtocol(BaseProtocol):
                     data = json.loads(line)
                 except json.JSONDecodeError:
                     continue
+                msg = data.get("message") or {}
+                tool_calls = [
+                    {"id": _new_id(), "name": tc["function"]["name"],
+                     "arguments": _parse_arguments(tc["function"].get("arguments"))}
+                    for tc in (msg.get("tool_calls") or [])
+                ] or None
                 if data.get("done"):
-                    yield {"content": "", "done": True,
+                    yield {"content": "", "done": True, "tool_calls": tool_calls,
                            "prompt_tokens": data.get("prompt_eval_count") or 0,
-                           "completion_tokens": data.get("eval_count") or 0}
+                           "completion_tokens": data.get("eval_count") or 0,
+                           "eval_duration_ns": data.get("eval_duration") or 0,
+                           "load_duration_ns": data.get("load_duration") or 0}
                 else:
-                    yield {"content": (data.get("message") or {}).get("content") or "",
-                           "done": False}
+                    yield {"content": msg.get("content") or "", "done": False,
+                           "tool_calls": tool_calls,
+                           "thinking": msg.get("thinking") or ""}
 
 
 # --------------------------------------------------------------------------- #

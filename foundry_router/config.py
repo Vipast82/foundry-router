@@ -81,6 +81,13 @@ class AgentBrainConfig(BaseModel):
     # proxy 504s) for coding clients like Cline. None = backend default (~5min);
     # "30m"/"24h"/"-1" keep it warm. Applies to direct-dispatch worker calls.
     worker_keep_alive: Optional[str] = None
+    # Direct-dispatch (Cline/coding clients) streams the worker's output live when
+    # ON: each token is real proof the backend is generating (keeps the connection
+    # alive, resets the read timeout per chunk — no total-time wall) and the
+    # client shows it typing in real time. OFF (default) = one blocking call, the
+    # full answer at the end. Streams only for Ollama backends; Claude and any
+    # non-streaming backend fall back to blocking automatically.
+    direct_stream: bool = False
     # Worker-side tool calling (opt-out default): when the selected worker owns
     # the MCP tool loop itself, this bounds its tool-call turns before the
     # request is handed to the brain to finish — mirrors the brain's own step

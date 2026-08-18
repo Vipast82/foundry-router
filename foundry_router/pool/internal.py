@@ -236,15 +236,20 @@ class InternalPool(BackendPool):
         raise AllBackendsFailed(f"all backends failed for {model!r}: " + " | ".join(errors))
 
     async def chat_stream(self, model: str, messages: list[dict],
-                          options: Optional[dict] = None) -> AsyncIterator[dict]:
+                          tools: Optional[list] = None,
+                          options: Optional[dict] = None,
+                          keep_alive: Any = None) -> AsyncIterator[dict]:
         """Streaming passthrough (no failover mid-stream — once bytes have gone
-        to the client we can't restart on another backend)."""
+        to the client we can't restart on another backend). Carries tools +
+        keep_alive so direct-dispatch can stream a coding client's turn live."""
         candidates = self._candidates(model)
         if not candidates:
             raise AllBackendsFailed(f"no backend serves model {model!r}")
         s = candidates[0]
         try:
-            async for chunk in s.protocol.chat_stream(model, messages, options=options):
+            async for chunk in s.protocol.chat_stream(model, messages, tools=tools,
+                                                      options=options,
+                                                      keep_alive=keep_alive):
                 yield chunk
             s.consecutive_failures = 0
         except (httpx.HTTPError, ProtocolError, OSError, ExceptionGroup) as e:

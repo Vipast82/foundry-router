@@ -510,6 +510,57 @@ async def _direct_dispatch_chat(svc, persona, model_name, messages, client_tools
                             "completion_tokens": res.completion_tokens,
                             "total_duration_ns": time.monotonic_ns() - t0}
 
+    # LIVE STREAMING (opt-in, Ollama backends only): forward the worker's tokens
+    # as they generate — each chunk is real proof the backend is working, resets
+    # the read timeout (no total-time wall), and shows the client typing live.
+    # Claude / non-streaming backends fall through to the blocking path below.
+    binfo0 = svc.pool.backend_info(model_id) or {}
+    if brain_cfg.direct_stream and stream and binfo0.get("type") == "ollama":
+        backend_name = binfo0.get("name") or model_id
+
+        async def sgen():
+            yield tr.chat_chunk(model_name, "", done=False,
+                                thinking=f"⚙️ local · {model_id} — streaming…\n")
+            acc_tools: list = []
+            try:
+                async for chunk in svc.pool.chat_stream(
+                        model_id, prompts.sanitize_history(messages),
+                        tools=client_tools, options=options, keep_alive=keep_alive):
+                    if chunk.get("done"):
+                        pt = chunk.get("prompt_tokens") or 0
+                        ct = chunk.get("completion_tokens") or 0
+                        finals = acc_tools or (chunk.get("tool_calls") or [])
+                        tcs_out = [{"function": {"name": t["name"], "arguments": t["arguments"]}}
+                                   for t in finals] or None
+                        svc.registry.record_tool_call(model_id, ok=True)
+                        svc.registry.note_inference(
+                            model_id, ct, chunk.get("eval_duration_ns") or 0,
+                            chunk.get("load_duration_ns") or 0)
+                        cost = estimate_cost_usd(svc.registry.get(model_id), pt, ct)
+                        logger.record_model_call(model_id, backend_name, pt, ct, cost)
+                        logger.finish("ok")
+                        yield tr.chat_chunk(
+                            model_name, "", done=True, tool_calls=tcs_out,
+                            stats={"prompt_tokens": pt, "completion_tokens": ct,
+                                   "total_duration_ns": time.monotonic_ns() - t0})
+                    else:
+                        if chunk.get("tool_calls"):
+                            acc_tools.extend(chunk["tool_calls"])   # deliver at done
+                        c = chunk.get("content") or ""
+                        th = chunk.get("thinking") or ""
+                        if c or th:
+                            yield tr.chat_chunk(model_name, c, done=False,
+                                                thinking=th or None)
+            except Exception as e:                                # noqa: BLE001
+                logger.finish("error", str(e))
+                yield tr.chat_chunk(model_name,
+                                    f"[router: stream failed — {str(e)[:200]}]",
+                                    done=False)
+                yield tr.chat_chunk(model_name, "", done=True, stats={
+                    "prompt_tokens": 0, "completion_tokens": 0,
+                    "total_duration_ns": time.monotonic_ns() - t0})
+        return StreamingResponse(sgen(), media_type="application/x-ndjson")
+
     if not stream:
         try:
             result = await _run()

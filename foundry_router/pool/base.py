@@ -46,7 +46,7 @@ class BackendPool:  # interface — see internal.InternalPool for the implementa
         """Returns (ChatResult, backend_name). Raises AllBackendsFailed."""
         raise NotImplementedError
 
-    def chat_stream(self, model, messages, options=None):
+    def chat_stream(self, model, messages, tools=None, options=None, keep_alive=None):
         raise NotImplementedError
 
     def available_models(self) -> dict[str, list[str]]:
