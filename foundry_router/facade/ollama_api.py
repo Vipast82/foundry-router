@@ -22,6 +22,7 @@ A request is served in one of four modes:
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import time
@@ -464,46 +465,58 @@ async def _direct_dispatch_chat(svc, persona, model_name, messages, client_tools
                                 status_code=503)
 
     t0 = time.monotonic_ns()
-    try:
-        result, backend = await svc.pool.chat(
+    brain_cfg = svc.config_store.config.agent_brain
+    keep_alive = brain_cfg.worker_keep_alive     # keep a heavy model warm between turns
+    hb = brain_cfg.heartbeat_seconds or 0
+
+    async def _run():
+        """The worker call + all post-call bookkeeping. Raises AllBackendsFailed."""
+        res, backend = await svc.pool.chat(
             model_id, prompts.sanitize_history(messages),
-            tools=client_tools, options=options,
-            max_tokens=svc.config_store.config.agent_brain.worker_max_tokens)
+            tools=client_tools, options=options, keep_alive=keep_alive,
+            max_tokens=brain_cfg.worker_max_tokens)
         # Empirical tool-calling reliability: direct dispatch is where worker
         # models actually exercise tool calling (client-supplied tools).
         svc.registry.record_tool_call(model_id, ok=True)
-        svc.registry.note_inference(model_id, result.completion_tokens,
-                                    result.eval_duration_ns, result.load_duration_ns)
+        svc.registry.note_inference(model_id, res.completion_tokens,
+                                    res.eval_duration_ns, res.load_duration_ns)
         binfo = svc.pool.backend_info(model_id)
         if binfo and binfo.get("type") == "anthropic-compatible":
             log_subscription_usage(svc.db, model_id, backend,
-                                   result.prompt_tokens, result.completion_tokens)
+                                   res.prompt_tokens, res.completion_tokens)
             svc.meridian_usage.note_successful_call(binfo["url"])
-    except AllBackendsFailed as e:
+        cost = estimate_cost_usd(svc.registry.get(model_id),
+                                 res.prompt_tokens, res.completion_tokens)
+        logger.record_model_call(model_id, backend, res.prompt_tokens,
+                                 res.completion_tokens, cost)
+        logger.finish("ok")
+        return res
+
+    def _on_error(e: BaseException) -> None:
         if "invalid tool call" in str(e):
             svc.registry.record_tool_call(model_id, ok=False)
         if "does not support chat" in str(e).lower():
-            # An embedding-only model got picked — flag it so it's dropped from
-            # candidacy (belt-and-braces with the name heuristic at discovery).
             svc.registry.mark_embedding(model_id)
         binfo = svc.pool.backend_info(model_id)
         if (binfo and binfo.get("type") == "anthropic-compatible"
                 and looks_like_window_exhaustion(str(e))):
             svc.meridian_usage.note_observed_exhaustion(binfo["url"])
         logger.finish("error", str(e))
-        return JSONResponse({"error": str(e)}, status_code=502)
-    cost = estimate_cost_usd(svc.registry.get(model_id),
-                             result.prompt_tokens, result.completion_tokens)
-    logger.record_model_call(model_id, backend, result.prompt_tokens,
-                             result.completion_tokens, cost)
-    logger.finish("ok")
 
-    tool_calls = [{"function": {"name": tc["name"], "arguments": tc["arguments"]}}
-                  for tc in result.tool_calls] or None
-    stats = {"prompt_tokens": result.prompt_tokens,
-             "completion_tokens": result.completion_tokens,
-             "total_duration_ns": time.monotonic_ns() - t0}
+    def _finalize(res):
+        tool_calls = [{"function": {"name": tc["name"], "arguments": tc["arguments"]}}
+                      for tc in res.tool_calls] or None
+        return tool_calls, {"prompt_tokens": res.prompt_tokens,
+                            "completion_tokens": res.completion_tokens,
+                            "total_duration_ns": time.monotonic_ns() - t0}
+
     if not stream:
+        try:
+            result = await _run()
+        except AllBackendsFailed as e:
+            _on_error(e)
+            return JSONResponse({"error": str(e)}, status_code=502)
+        tool_calls, stats = _finalize(result)
         msg: dict = {"role": "assistant", "content": result.content}
         if tool_calls:
             msg["tool_calls"] = tool_calls
@@ -512,6 +525,34 @@ async def _direct_dispatch_chat(svc, persona, model_name, messages, client_tools
                              **tr._stats(stats)})
 
     async def gen():
+        # KEEP-ALIVE: the worker call can run for MINUTES (cold-loading a large
+        # model + processing a big context). While it runs, emit a heartbeat in
+        # the NATIVE thinking field every `hb`s — this keeps the reverse proxy
+        # and the client (Cline) from idle-timing-out the connection into a 504,
+        # and shows a live "still working" signal without touching content.
+        task = asyncio.create_task(_run())
+        waited = 0.0
+        while hb and not task.done():
+            try:
+                await asyncio.wait_for(asyncio.shield(task), timeout=hb)
+            except asyncio.TimeoutError:
+                waited += hb
+                yield tr.chat_chunk(
+                    model_name, "", done=False,
+                    thinking=f"⏳ worker running ({int(waited)}s — a large model "
+                             f"cold-loading + a big context can take minutes)…\n")
+        try:
+            result = await task
+        except AllBackendsFailed as e:
+            _on_error(e)
+            yield tr.chat_chunk(model_name,
+                                f"[router: worker call failed — {str(e)[:200]}]",
+                                done=False)
+            yield tr.chat_chunk(model_name, "", done=True, stats={
+                "prompt_tokens": 0, "completion_tokens": 0,
+                "total_duration_ns": time.monotonic_ns() - t0})
+            return
+        tool_calls, stats = _finalize(result)
         yield tr.chat_chunk(model_name, result.content, tool_calls=tool_calls)
         yield tr.chat_chunk(model_name, "", done=True, stats=stats)
     return StreamingResponse(gen(), media_type="application/x-ndjson")

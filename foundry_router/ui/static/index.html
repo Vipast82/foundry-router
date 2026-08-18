@@ -408,6 +408,8 @@ async function tabBackends() {
         <input id="brain-uip" type="number" size="8">
         <label title="While a worker/brain/MCP call is in flight, emit a 'still working' narration line every N seconds so reverse proxies and clients never mistake a slow request (failover + cold model load) for a dead one. 0 disables.">heartbeat_seconds</label>
         <input id="brain-hb" type="number" size="6">
+        <label title="keep_alive sent to Ollama workers so a heavy model (e.g. a 27B at 131K ctx ≈ 22GB) stays RESIDENT between turns instead of cold-loading ~22GB every request — the main cause of multi-minute latency / proxy 504s for Cline. Blank = backend default (~5min). Try 30m, 24h, or -1 (never unload).">worker_keep_alive</label>
+        <input id="brain-ka" size="7" placeholder="30m">
         <button class="act primary" id="save-brain">Save brain</button></div>
     </div>`;
   const cfg = await api("config");
@@ -418,6 +420,7 @@ async function tabBackends() {
   $("#brain-wmt").value = cfg.agent_brain.worker_max_tokens;
   $("#brain-uip").value = cfg.agent_brain.user_input_preview_chars;
   $("#brain-hb").value = cfg.agent_brain.heartbeat_seconds;
+  $("#brain-ka").value = cfg.agent_brain.worker_keep_alive || "";
   const renderBrainHealth = h => {
     const el = $("#brain-health"); h = h || {};
     if (h.healthy === true) {
@@ -549,7 +552,8 @@ async function tabBackends() {
       mcp_result_limit_chars: +$("#brain-mrl").value,
       worker_max_tokens: +$("#brain-wmt").value,
       user_input_preview_chars: +$("#brain-uip").value,
-      heartbeat_seconds: +$("#brain-hb").value}}));
+      heartbeat_seconds: +$("#brain-hb").value,
+      worker_keep_alive: $("#brain-ka").value.trim() || null}}));
 }
 
 /* ---------------------------------------------------------------- models -- */

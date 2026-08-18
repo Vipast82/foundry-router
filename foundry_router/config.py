@@ -75,6 +75,12 @@ class AgentBrainConfig(BaseModel):
     tool_result_limit_chars: int = 2000   # per tool result fed back to the brain
     mcp_result_limit_chars: int = 2000    # same, for MCP tool results
     worker_max_tokens: int = 8192         # output budget for worker-model calls
+    # keep_alive passed to Ollama workers so a heavy model (e.g. a 27B at 131K
+    # context ≈ 22GB) stays RESIDENT between requests instead of cold-loading
+    # ~22GB every call — the main cause of multi-minute first-token latency (and
+    # proxy 504s) for coding clients like Cline. None = backend default (~5min);
+    # "30m"/"24h"/"-1" keep it warm. Applies to direct-dispatch worker calls.
+    worker_keep_alive: Optional[str] = None
     # Worker-side tool calling (opt-out default): when the selected worker owns
     # the MCP tool loop itself, this bounds its tool-call turns before the
     # request is handed to the brain to finish — mirrors the brain's own step
