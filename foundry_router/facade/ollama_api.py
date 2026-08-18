@@ -437,11 +437,23 @@ async def _direct_dispatch_chat(svc, persona, model_name, messages, client_tools
         model_id, svc.pool.backend_info(model_id), svc.registry.get(model_id),
         guard, svc.guardrails.effective(persona))
     if not verdict.allowed:
-        # Denied (window exhausted / spend cap): re-pick among local-only
-        # models; only error out if literally nothing local is reachable.
+        # Denied (window exhausted / conserved / spend cap): fall back to a LOCAL
+        # model — preferring the persona's allowlisted locals (so a Cline PLAN
+        # degrades to its chosen local coder, e.g. qwen3.8:27b), else any local.
+        # Only error if literally nothing local is reachable.
         logger.record_guardrail(f"denied {model_id}: {verdict.reason}")
+        import json as _json
+        try:
+            allow = set(_json.loads(persona.get("model_allowlist") or "[]"))
+        except (_json.JSONDecodeError, TypeError):
+            allow = set()
+        allow_bases = {str(a).split(":")[0] for a in allow}
         local = [m for m in svc.pool.available_models()
                  if (svc.pool.backend_info(m) or {}).get("type") == "ollama"]
+        if allow:
+            scoped = [m for m in local
+                      if m in allow or str(m).split(":")[0] in allow_bases]
+            local = scoped or local          # degrade to any local if none listed
         ranked = svc.registry.ranked_for_category(
             persona.get("benchmark_category") or "general_chat", local, limit=1)
         model_id = ranked[0]["id"] if ranked else (local[0] if local else None)
