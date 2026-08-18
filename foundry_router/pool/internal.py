@@ -13,7 +13,7 @@ import asyncio
 import logging
 import time
 from dataclasses import dataclass, field
-from typing import AsyncIterator, Callable, Optional
+from typing import Any, AsyncIterator, Callable, Optional
 
 import httpx
 
@@ -210,8 +210,8 @@ class InternalPool(BackendPool):
     # -- calls ------------------------------------------------------------------------
 
     async def chat(self, model: str, messages: list[dict], tools: Optional[list] = None,
-                   options: Optional[dict] = None, max_tokens: int = 4096
-                   ) -> tuple[ChatResult, str]:
+                   options: Optional[dict] = None, max_tokens: int = 4096,
+                   keep_alive: Any = None) -> tuple[ChatResult, str]:
         candidates = self._candidates(model)
         if not candidates:
             raise AllBackendsFailed(f"no backend serves model {model!r}")
@@ -219,7 +219,8 @@ class InternalPool(BackendPool):
         for s in candidates:
             try:
                 result = await s.protocol.chat(model, messages, tools=tools,
-                                               options=options, max_tokens=max_tokens)
+                                               options=options, max_tokens=max_tokens,
+                                               keep_alive=keep_alive)
                 s.consecutive_failures = 0
                 return result, s.config.name
             # ExceptionGroup: anyio TaskGroups can leak through httpcore on
