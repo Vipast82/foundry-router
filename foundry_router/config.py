@@ -134,7 +134,13 @@ class BackendPoolConfig(BaseModel):
     health_check_interval_seconds: int = 15
     failure_threshold: int = 3
     cooldown_seconds: int = 60
-    request_timeout_seconds: int = 300
+    # httpx READ timeout for a worker call (connect stays short at 5s for fast
+    # failover). A big single-shot local generation — a coding client asking a
+    # 27B to write a whole file — legitimately runs past 300s, tripping a
+    # ReadTimeout, so the default is generous. Set lower only if your models are
+    # small/fast. (The ultimate fix for unbounded generations is streaming, where
+    # the timeout resets per chunk.)
+    request_timeout_seconds: int = 900
     internal: InternalPoolConfig = Field(default_factory=InternalPoolConfig)
     olla: OllaConfig = Field(default_factory=OllaConfig)
     litellm: LiteLLMConfig = Field(default_factory=LiteLLMConfig)
