@@ -534,18 +534,21 @@ async def _direct_dispatch_chat(svc, persona, model_name, messages, client_tools
         task = asyncio.create_task(_run())
         btype = (svc.pool.backend_info(model_id) or {}).get("type") or ""
         where = "Claude" if btype == "anthropic-compatible" else "local"
+        # IMMEDIATE beat so the client shows activity from the first moment (not a
+        # silent "thinking…") — in the NATIVE thinking field, so content stays
+        # clean. Names WHICH model is answering (local vs Claude).
+        if hb:
+            yield tr.chat_chunk(model_name, "", done=False,
+                                thinking=f"⚙️ routing to {where} · {model_id} — working…\n")
         waited = 0.0
         while hb:
             done, _ = await asyncio.wait({task}, timeout=hb)
             if done:
                 break
             waited += hb
-            # Heartbeat in the NATIVE thinking field (content stays clean): shows
-            # WHICH model is answering (local vs Claude) and that it's alive, so a
-            # long cold-load/generation reads as "working", not hung.
             yield tr.chat_chunk(
                 model_name, "", done=False,
-                thinking=f"⚙️ {where} · {model_id} — working ({int(waited)}s)…\n")
+                thinking=f"⚙️ {where} · {model_id} — still working ({int(waited)}s)…\n")
         # Retrieve the result (or the failure) OUTSIDE the poll loop, so any error
         # becomes a clean in-band message + done, never a torn stream.
         err = None
