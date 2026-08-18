@@ -532,11 +532,20 @@ async def _direct_dispatch_chat(svc, persona, model_name, messages, client_tools
         # empty keep-alive chunk every `hb`s so the reverse proxy and client don't
         # idle-timeout the connection.
         task = asyncio.create_task(_run())
+        btype = (svc.pool.backend_info(model_id) or {}).get("type") or ""
+        where = "Claude" if btype == "anthropic-compatible" else "local"
+        waited = 0.0
         while hb:
             done, _ = await asyncio.wait({task}, timeout=hb)
             if done:
                 break
-            yield tr.chat_chunk(model_name, "", done=False)   # keep-alive
+            waited += hb
+            # Heartbeat in the NATIVE thinking field (content stays clean): shows
+            # WHICH model is answering (local vs Claude) and that it's alive, so a
+            # long cold-load/generation reads as "working", not hung.
+            yield tr.chat_chunk(
+                model_name, "", done=False,
+                thinking=f"⚙️ {where} · {model_id} — working ({int(waited)}s)…\n")
         # Retrieve the result (or the failure) OUTSIDE the poll loop, so any error
         # becomes a clean in-band message + done, never a torn stream.
         err = None
