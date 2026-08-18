@@ -185,14 +185,22 @@ async def chat(request: Request):
                                            options, stream, user_text)
         return _model_not_found(model_name)
 
-    if client_tools:
+    exec_mode = persona.get("execution_mode") or "agent"
+    # `direct` = thin proxy: pick ONE model per the persona's static policy and
+    # forward the client's request verbatim. Triggered by client-supplied tools
+    # (Kilo/Cline agent loops) OR by an explicit `direct` execution_mode — the
+    # latter is essential for agentic clients like Cline that DON'T attach a
+    # `tools` field on every turn (a plan-mode / no-tools turn would otherwise
+    # fall through to the brain loop and leak its internal ask_<model> delegation
+    # calls into the client, which Cline can't parse).
+    if client_tools or exec_mode == "direct":
         return await _direct_dispatch_chat(svc, persona, model_name, messages,
                                            client_tools, options, stream, user_text)
 
     # Pipeline personas (Foundry-Coding) run the Prepare->Execute->Check
     # mode instead of the generic brain loop — a distinct execution mode,
     # like direct-dispatch, bookended by the paid steps.
-    if (persona.get("execution_mode") or "agent") == "pipeline":
+    if exec_mode == "pipeline":
         return await _agent_chat(svc, persona, model_name, messages, stream,
                                  user_text, mode="pipeline")
 
@@ -415,7 +423,11 @@ async def _direct_dispatch_chat(svc, persona, model_name, messages, client_tools
     # answers. Revisit if per-turn re-routing inside coding sessions matters.
     logger = RequestLogger(svc.db, persona["virtual_name"], model_name,
                            "direct", user_text)
-    model_id = pick_fallback_model(svc.pool, svc.registry, persona, user_text)
+    # allow_paid_first: a prefer_paid persona (Cline PLAN) starts in the paid tier
+    # here; the guardrail below still enforces conservation, so this can't bypass
+    # usage limits. Local-bias personas (Cline ACT) stay local-first.
+    model_id = pick_fallback_model(svc.pool, svc.registry, persona, user_text,
+                                   allow_paid_first=True)
     if model_id is None:
         logger.finish("error", "no backends reachable")
         return _model_not_found(model_name)

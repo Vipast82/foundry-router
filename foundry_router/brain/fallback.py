@@ -33,24 +33,45 @@ def guess_category(text: str) -> str:
 
 
 def pick_fallback_model(pool, registry: ModelRegistry,
-                        persona: Optional[dict], user_text: str) -> Optional[str]:
-    """Conservative default = best-ranked *local* model for the task category
-    (free and always available offline, honoring §2's no-cloud-dependency);
-    a paid backend is used only if literally nothing local is reachable."""
+                        persona: Optional[dict], user_text: str,
+                        allow_paid_first: bool = False) -> Optional[str]:
+    """Policy-aware single-model pick (used by direct-dispatch for coding clients
+    like Cline, and by the blind brain-down fallback).
+
+    Honors the persona's `model_allowlist` (hard candidate restriction) and — when
+    `allow_paid_first` is set AND the persona's bias is `prefer_paid` (e.g. a Cline
+    PLAN persona) — starts in the PAID tier. Otherwise local-first (free, offline,
+    §2 no-cloud-dependency). `allow_paid_first` is passed ONLY by callers that run
+    the usage guardrail afterward (direct-dispatch), so the blind brain-down path
+    can't bypass conservation by reaching for paid."""
+    import json as _json
+
+    def _jl(v) -> list:
+        try:
+            out = _json.loads(v or "[]")
+            return out if isinstance(out, list) else []
+        except (_json.JSONDecodeError, TypeError):
+            return []
+
     category = (persona or {}).get("benchmark_category") or guess_category(user_text)
     available = pool.available_models()
     if not available:
         return None
 
-    # Persona pins are honored here too — but only LOCAL pins: the fallback
-    # runs blind (no brain, no quota check), so committing to a paid pin
-    # would bypass the usage-aware guardrails.
-    import json as _json
-    try:
-        pinned = _json.loads((persona or {}).get("pinned_models") or "[]")
-    except (_json.JSONDecodeError, TypeError):
-        pinned = []
-    for p in pinned:
+    # model_allowlist: hard-restrict candidates (base-name tolerant). Empty =
+    # all. If nothing in the allowlist is reachable, fall through to the full set
+    # (degrade with options, same philosophy as the ranking allowlist filter).
+    allow = _jl((persona or {}).get("model_allowlist"))
+    if allow:
+        allowset = set(allow) | {str(a).split(":")[0] for a in allow}
+        picked = [m for m in available
+                  if m in allowset or str(m).split(":")[0] in allowset]
+        if picked:
+            available = picked
+
+    # Local pins are honored here too (LOCAL only — a paid pin would dodge the
+    # guardrails on the blind path).
+    for p in _jl((persona or {}).get("pinned_models")):
         if p in available and (pool.backend_info(p) or {}).get("type") == "ollama":
             return p
 
@@ -64,7 +85,9 @@ def pick_fallback_model(pool, registry: ModelRegistry,
         info = pool.backend_info(model_id) or {}
         (local if info.get("type") == "ollama" else remote).append(model_id)
 
-    for group in (local, remote):
+    paid_first = (allow_paid_first
+                  and (persona or {}).get("local_bias_strength") == "prefer_paid")
+    for group in ((remote, local) if paid_first else (local, remote)):
         if not group:
             continue
         ranked = registry.ranked_for_category(category, group, limit=1)

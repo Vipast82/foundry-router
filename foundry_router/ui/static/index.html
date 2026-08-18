@@ -970,8 +970,8 @@ async function tabPersonas() {
         <button type="button" class="act" style="padding:1px 7px;font-size:11px" title="Clear the restriction (brain picks from all)." onclick="fillAllow('clear')">✕</button>
         <span class="hint">empty = brain picks · 1 = locked · few = limited choice</span></div>
       <div class="row">
-        <label title="agent = generic brain loop; pipeline = Prepare (cheapest Claude) → Execute (best measured local coder) → Check (paid review)">execution_mode</label>
-        <select id="pe-mode"><option value="">agent</option><option>pipeline</option></select>
+        <label title="agent = generic brain loop (uses ask_<model> delegation — do NOT use for agentic clients like Cline); direct = thin proxy: pick ONE model per policy (allowlist + bias + usage) and forward the client's request/tools verbatim (correct for Cline/Kilo); pipeline = Prepare (cheapest Claude) → Execute (local coder) → Check (paid review)">execution_mode</label>
+        <select id="pe-mode"><option value="">agent</option><option>direct</option><option>pipeline</option></select>
         <label title="pipeline mode only: paid review of the local output (one bounded retry)">pipeline_check</label>
         <input type="checkbox" id="pe-check" checked>
         <label title="After a LOCAL answer, this judge decides adequate/escalate. paid = cheapest Claude; local_large = best other local model (free); brain = routing brain itself">outcome_judge</label>

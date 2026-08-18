@@ -13,6 +13,27 @@ Both names contain `claude`, so Cline's model-name gate is satisfied. Neither ru
 Foundry's pipeline or injects Foundry MCP tools — Cline stays in control of its own
 tools and loop.
 
+## `execution_mode = direct` is required (not `agent`)
+
+Both personas must use **`execution_mode = direct`** (the seed sets this; existing
+installs auto-migrate). It's the thin-proxy path: Foundry picks **one** model per
+turn — honoring `model_allowlist`, the `prefer_paid`/`strong` bias, and the usage
+guardrails — then forwards Cline's request (and its tools) verbatim and returns the
+model's output unchanged.
+
+**Do NOT use `agent` mode for Cline.** `agent` runs Foundry's routing brain, which
+delegates to workers via internal `ask_<model>` tool calls. Cline is itself an
+agent and can't parse those — they leak into the chat as `<ask_claude_sonnet_5>…`
+and Cline reports repeated tool-call failures. `direct` avoids that entirely.
+
+### Consequence: escalation is by mode switch, not automatic
+
+In `direct` mode nothing does mid-task delegation, so the Act persona's
+`escalation_triggers` are informational only. You control Claude-vs-local by
+**switching Cline between Act and Plan**: Act runs local, Plan runs Claude. Write
+in Act (local/free), flip to Plan when you need Claude to reason through something
+hard — predictable and cheap.
+
 ## 1. Point Cline at Foundry
 
 In Cline's settings, add an API provider:

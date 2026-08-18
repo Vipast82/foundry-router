@@ -113,7 +113,8 @@ def test_cline_personas_seeded_and_advertised(client):
     assert personas["claude-cline-plan"]["local_bias_strength"] == "prefer_paid"
     assert personas["claude-cline-act"]["local_bias_strength"] == "strong"
     for n in ("claude-cline-plan", "claude-cline-act"):
-        assert (personas[n]["execution_mode"] or "agent") == "agent"
+        # direct = thin proxy (no ask_<model> brain loop that would leak into Cline)
+        assert personas[n]["execution_mode"] == "direct"
         assert json.loads(personas[n]["preferred_mcp_tools"]) == []
 
 

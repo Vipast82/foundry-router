@@ -130,7 +130,7 @@ STARTER_PERSONAS = [
         ]),
         "preferred_mcp_tools": json.dumps([]),
         "guardrail_overrides": json.dumps({}),
-        "execution_mode": "agent",
+        "execution_mode": "direct",
         "pipeline_check_enabled": 0,
     },
     {
@@ -147,7 +147,7 @@ STARTER_PERSONAS = [
         ]),
         "preferred_mcp_tools": json.dumps([]),
         "guardrail_overrides": json.dumps({"max_paid_calls_per_request": 2}),
-        "execution_mode": "agent",
+        "execution_mode": "direct",
         "pipeline_check_enabled": 0,
     },
 ]
@@ -323,6 +323,7 @@ class Database:
             self._conn.commit()
         self._seed_upgrades()
         self._seed_client_compat()
+        self._seed_cline_direct()
 
     def _seed_upgrades(self) -> None:
         """One-time data upgrades for EXISTING deployments (INSERT OR IGNORE
@@ -360,6 +361,20 @@ class Database:
         self.kv_set("persona_seed_v3_compat", now)
         self.log_event("info", "main",
                        "persona seed v3 applied (baseline client-compat notes)")
+
+    def _seed_cline_direct(self) -> None:
+        """Cline personas must run in `direct` (thin-proxy) mode — the earlier
+        seed shipped them as `agent`, whose brain loop leaks internal ask_<model>
+        delegation calls into Cline (which it can't parse). One-time flip of rows
+        STILL at 'agent' (a manual choice is preserved)."""
+        if self.kv_get("persona_seed_v4_cline_direct"):
+            return
+        self.execute(
+            "UPDATE personas SET execution_mode='direct', updated_at=? "
+            "WHERE virtual_name IN ('claude-cline-plan', 'claude-cline-act') "
+            "AND (execution_mode='agent' OR execution_mode IS NULL OR execution_mode='')",
+            (utcnow(),))
+        self.kv_set("persona_seed_v4_cline_direct", utcnow())
 
     # -- generic helpers --------------------------------------------------------
 

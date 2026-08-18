@@ -41,6 +41,35 @@ def test_fallback_prefers_local(tmp_path):
     assert picked == "local-model"
 
 
+def test_fallback_respects_model_allowlist(tmp_path):
+    registry = ModelRegistry(Database(tmp_path / "a.sqlite"))
+    pool = FakePool({"qwen3.8:27b": "ollama", "other-local": "ollama",
+                     "claude-sonnet-5": "anthropic-compatible"})
+    persona = {"benchmark_category": "coding",
+               "model_allowlist": json.dumps(["qwen3.8:27b", "claude-sonnet-5"])}
+    # other-local is excluded by the allowlist; local-first picks qwen
+    assert pick_fallback_model(pool, registry, persona, "code") == "qwen3.8:27b"
+
+
+def test_fallback_prefer_paid_picks_claude_only_with_flag(tmp_path):
+    # Cline PLAN: prefer_paid + allow_paid_first -> Claude first (the caller runs
+    # the usage guardrail after). The blind brain-down path (no flag) stays local.
+    registry = ModelRegistry(Database(tmp_path / "b.sqlite"))
+    pool = FakePool({"qwen3.8:27b": "ollama", "claude-sonnet-5": "anthropic-compatible"})
+    persona = {"benchmark_category": "coding", "local_bias_strength": "prefer_paid",
+               "model_allowlist": json.dumps(["claude-sonnet-5", "qwen3.8:27b"])}
+    assert pick_fallback_model(pool, registry, persona, "plan",
+                               allow_paid_first=True) == "claude-sonnet-5"
+    assert pick_fallback_model(pool, registry, persona, "plan") == "qwen3.8:27b"
+
+
+def test_fallback_allowlist_base_name_tolerant(tmp_path):
+    registry = ModelRegistry(Database(tmp_path / "c.sqlite"))
+    pool = FakePool({"qwen3.8:27b": "ollama", "claude-opus-5": "anthropic-compatible"})
+    persona = {"benchmark_category": "coding", "model_allowlist": json.dumps(["qwen3.8"])}
+    assert pick_fallback_model(pool, registry, persona, "code") == "qwen3.8:27b"
+
+
 def test_fallback_uses_remote_only_when_nothing_local(tmp_path):
     db = Database(tmp_path / "f2.sqlite")
     registry = ModelRegistry(db)
