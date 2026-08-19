@@ -217,18 +217,27 @@ class Services:
             probe = getattr(s.protocol, "show_context_length", None)
             if probe is None:
                 continue
+            cap_probe = getattr(s.protocol, "show_capabilities", None)
             for model_id in list(s.models):
-                meta = self.registry.get(model_id)
-                if meta and meta.get("context_length"):
-                    continue  # already known
-                try:
-                    ctx = await probe(model_id)
-                except Exception as e:  # a probe failure must never break sync
-                    log.debug("context-length probe failed for %s: %s", model_id, e)
-                    continue
-                if ctx:
-                    self.registry.upsert_auto(model_id, source="discovery",
-                                              context_length=int(ctx))
+                meta = self.registry.get(model_id) or {}
+                if not meta.get("context_length"):
+                    try:
+                        ctx = await probe(model_id)
+                        if ctx:
+                            self.registry.upsert_auto(model_id, source="discovery",
+                                                      context_length=int(ctx))
+                    except Exception as e:  # a probe failure must never break sync
+                        log.debug("context-length probe failed for %s: %s", model_id, e)
+                # Capability probe (vision/tools/thinking/insert): once, until the
+                # model reports some — auto-tags vision so image-steering + client
+                # capability advertising just work. Cheap; skip once populated.
+                if cap_probe and not meta.get("capabilities"):
+                    try:
+                        caps = await cap_probe(model_id)
+                        if caps and self.registry.set_capabilities(model_id, caps):
+                            log.info("model %s capabilities: %s", model_id, caps)
+                    except Exception as e:
+                        log.debug("capability probe failed for %s: %s", model_id, e)
 
     def _on_pool_change(self) -> None:
         """Pool health/model-list change -> immediate Tool Sync (§4.2 cadence:

@@ -235,6 +235,9 @@ class Database:
         added = [
             ("models", "tags", "TEXT"),
             ("models", "content_policy", "TEXT"),
+            # Backend-declared capabilities (Ollama /api/show): vision/tools/
+            # thinking/insert. Auto-probed; advertised to clients on /api/show.
+            ("models", "capabilities", "TEXT"),
             # 1 = embedding-only model (no /api/chat): excluded from chat routing
             # candidacy. Set from a name heuristic + Ollama capabilities, and
             # learned from a "does not support chat" dispatch error.

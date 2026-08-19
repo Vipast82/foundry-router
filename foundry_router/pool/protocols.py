@@ -158,6 +158,19 @@ class OllamaProtocol(BaseProtocol):
                 f"ollama {self.url} /api/show HTTP {r.status_code}: {r.text[:200]}")
         return context_length_from_model_info((r.json() or {}).get("model_info") or {})
 
+    async def show_capabilities(self, model: str) -> list[str]:
+        """The model's declared capabilities from /api/show — modern Ollama lists
+        e.g. 'completion', 'tools', 'vision', 'thinking', 'insert', 'embedding'.
+        Direct API ground truth, used to auto-tag vision and advertise real
+        capabilities to clients (AnythingLLM / Open WebUI gate features on them)."""
+        r = await self.client.post(f"{self.url}/api/show",
+                                   json={"model": model}, timeout=15)
+        if r.status_code >= 400:
+            raise ProtocolError(
+                f"ollama {self.url} /api/show HTTP {r.status_code}: {r.text[:200]}")
+        caps = (r.json() or {}).get("capabilities") or []
+        return [str(c) for c in caps] if isinstance(caps, list) else []
+
     def _payload(self, model, messages, tools, options, keep_alive, stream):
         # Strip canonical-format fields Ollama doesn't know; keep tool_calls
         # (it accepts them on assistant messages) but drop OpenAI-style ids.

@@ -151,29 +151,40 @@ def _persona_context_length(svc, persona: dict):
     return max(lengths) if lengths else None
 
 
-def _persona_has_vision(svc, persona: dict) -> bool:
-    """True if the persona can route to a vision-capable model — a reachable model
-    tagged 'vision', honoring the persona's model_allowlist. Foundry steers image
-    requests to vision models regardless of the persona (_steer_vision_when_
-    images), so advertising the capability lets clients (AnythingLLM / Open WebUI)
-    enable their image / 'On-Screen Awareness' features."""
+# Capabilities beyond the always-on baseline that clients gate features on, and
+# the order they're advertised in.
+_CAP_ORDER = ["completion", "chat", "tools", "vision", "thinking", "insert"]
+_EXTRA_CAPS = ("vision", "thinking", "insert")
+
+
+def _persona_capabilities(svc, persona: dict) -> list[str]:
+    """Capabilities to advertise on /api/show: the baseline (completion/chat/
+    tools) plus any of vision/thinking/insert that a REACHABLE model declares —
+    honoring the persona's model_allowlist. Foundry steers each request to a
+    capable worker (e.g. images -> a vision model), so the persona exposes the
+    union its fleet can reach. Vision is also honored from the legacy 'vision'
+    tag for models tagged before capability auto-probing existed."""
     import json as _json
-    try:
-        allow = set(_json.loads(persona.get("model_allowlist") or "[]"))
-    except (_json.JSONDecodeError, TypeError):
-        allow = set()
+
+    def _jl(v):
+        try:
+            out = _json.loads(v or "[]")
+            return out if isinstance(out, list) else []
+        except (_json.JSONDecodeError, TypeError):
+            return []
+
+    caps = {"completion", "chat", "tools"}
+    allow = set(_jl(persona.get("model_allowlist")))
     allow_bases = {str(a).split(":")[0] for a in allow}
     for mid in svc.pool.available_models():
         if allow and not (mid in allow or str(mid).split(":")[0] in allow_bases):
             continue
         meta = svc.registry.get(mid) or {}
-        try:
-            tags = _json.loads(meta.get("tags") or "[]")
-        except (_json.JSONDecodeError, TypeError):
-            tags = []
-        if isinstance(tags, list) and "vision" in tags:
-            return True
-    return False
+        mcaps = _jl(meta.get("capabilities"))
+        caps.update(c for c in _EXTRA_CAPS if c in mcaps)
+        if "vision" in _jl(meta.get("tags")):        # legacy / manual tag
+            caps.add("vision")
+    return [c for c in _CAP_ORDER if c in caps]
 
 
 @router.post("/api/show")
@@ -186,7 +197,7 @@ async def show(request: Request) -> JSONResponse:
         return _model_not_found(name)
     return JSONResponse(tr.show_response(
         persona, context_length=_persona_context_length(svc, persona),
-        vision=_persona_has_vision(svc, persona)))
+        capabilities=_persona_capabilities(svc, persona)))
 
 
 # --------------------------------------------------------------------------- #

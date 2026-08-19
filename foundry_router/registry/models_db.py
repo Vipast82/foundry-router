@@ -97,6 +97,10 @@ MODEL_FIELDS = [
     # picked as a worker because the flag only ever got set reactively, after a
     # "does not support chat" 400). upsert_auto still respects manual overrides.
     "embedding",
+    # Backend-declared capabilities from Ollama /api/show (JSON list: e.g.
+    # vision, tools, thinking, insert). Auto-probed at discovery; advertised to
+    # clients so they can enable image / reasoning features.
+    "capabilities",
 ]
 
 # Cost is the FIRST sort key of candidate ranking (design: "don't reach for
@@ -701,6 +705,34 @@ class ModelRegistry:
             self.db.execute("INSERT INTO models (id) VALUES (?)", (model_id,))
         self.db.execute("UPDATE models SET enabled=? WHERE id=?",
                         (1 if enabled else 0, model_id))
+
+    def set_capabilities(self, model_id: str, caps: list[str]) -> bool:
+        """Store the backend-declared capabilities (from /api/show) and, when they
+        include 'vision', MERGE a 'vision' tag into the model's tags — the tag is
+        what image-steering (_steer_vision_when_images) and persona required_tags
+        read. Returns True if anything changed (so the caller can log it once).
+        Never clobbers user tags; only adds 'vision'."""
+        row = self.get(model_id)
+        if row is None:
+            self.db.execute("INSERT INTO models (id) VALUES (?)", (model_id,))
+            row = {}
+        caps = sorted({str(c) for c in (caps or [])})
+        changed = json.dumps(caps) != (row.get("capabilities") or "")
+        if changed:
+            self.db.execute("UPDATE models SET capabilities=? WHERE id=?",
+                            (json.dumps(caps), model_id))
+        if "vision" in caps:
+            try:
+                tags = json.loads(row.get("tags") or "[]")
+                tags = tags if isinstance(tags, list) else []
+            except (json.JSONDecodeError, TypeError):
+                tags = []
+            if "vision" not in tags:
+                tags.append("vision")
+                self.db.execute("UPDATE models SET tags=? WHERE id=?",
+                                (json.dumps(tags), model_id))
+                changed = True
+        return changed
 
     def mark_embedding(self, model_id: str) -> bool:
         """Flag a model as embedding-only (excluded from chat candidacy). Called

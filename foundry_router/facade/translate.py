@@ -96,7 +96,7 @@ def persona_tag_entry(persona: dict) -> dict:
 
 
 def show_response(persona: dict, context_length: Optional[int] = None,
-                  vision: bool = False) -> dict:
+                  capabilities: Optional[list] = None) -> dict:
     """Minimal /api/show shape — some clients (Open WebUI, AnythingLLM) call it
     per model and read model_info.*.context_length to size their own token
     budget. A persona is virtual, so we surface a value derived from its real
@@ -115,10 +115,9 @@ def show_response(persona: dict, context_length: Optional[int] = None,
         "template": "{{ .Prompt }}",
         "details": persona_tag_entry(persona)["details"],
         "model_info": model_info,
-        # Advertising "tools" matters: coding clients (Kilo/Cline) check it
-        # before sending their own tool definitions. "vision" is added when the
-        # persona can route to a vision-capable worker — AnythingLLM / Open WebUI
-        # gate their image/"On-Screen Awareness" features on this capability.
-        "capabilities": (["completion", "chat", "tools", "vision"] if vision
-                         else ["completion", "chat", "tools"]),
+        # Advertising "tools" matters: coding clients (Kilo/Cline) check it before
+        # sending their own tool definitions; "vision"/"thinking"/"insert" are
+        # added when a routable worker declares them — AnythingLLM / Open WebUI
+        # gate their image / reasoning / fill-in-middle features on these.
+        "capabilities": capabilities or ["completion", "chat", "tools"],
     }

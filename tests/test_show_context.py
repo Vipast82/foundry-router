@@ -35,29 +35,47 @@ def test_api_show_returns_model_info(client):
     assert "tools" in body["capabilities"]
 
 
-def test_show_response_advertises_vision_when_available():
-    on = tr.show_response({"virtual_name": "V", "description": ""}, vision=True)
-    off = tr.show_response({"virtual_name": "V", "description": ""}, vision=False)
+def test_show_response_advertises_capabilities():
+    on = tr.show_response({"virtual_name": "V", "description": ""},
+                          capabilities=["completion", "chat", "tools", "vision"])
+    off = tr.show_response({"virtual_name": "V", "description": ""})
     assert "vision" in on["capabilities"]        # AnythingLLM gates image feats on this
-    assert "vision" not in off["capabilities"]
-    assert "tools" in off["capabilities"] and "completion" in off["capabilities"]
+    assert "vision" not in off["capabilities"]   # default baseline
+    assert {"completion", "chat", "tools"} <= set(off["capabilities"])
 
 
-def test_persona_has_vision_detects_tagged_reachable_model():
+def test_persona_capabilities_from_backend_and_tag():
     import json as _json
 
-    from foundry_router.facade.ollama_api import _persona_has_vision
+    from foundry_router.facade.ollama_api import _persona_capabilities
     reg = types.SimpleNamespace(get=lambda m: {
-        "llava:7b": {"tags": _json.dumps(["vision"])},
-        "text:7b": {"tags": _json.dumps([])},
+        # auto-probed capabilities
+        "llava:7b": {"capabilities": _json.dumps(["completion", "vision"])},
+        "reason:7b": {"capabilities": _json.dumps(["completion", "thinking"])},
+        # legacy manual vision tag (no capabilities column)
+        "old-vlm:7b": {"tags": _json.dumps(["vision"])},
+        "text:7b": {"capabilities": _json.dumps(["completion", "tools"])},
     }.get(m))
-    pool = types.SimpleNamespace(
-        available_models=lambda: {"text:7b": ["b"], "llava:7b": ["b"]})
+    pool = types.SimpleNamespace(available_models=lambda: {
+        "text:7b": ["b"], "llava:7b": ["b"], "reason:7b": ["b"]})
     svc = types.SimpleNamespace(pool=pool, registry=reg)
-    assert _persona_has_vision(svc, {}) is True
-    # allowlist excluding the vision model => can't route vision => not advertised
-    assert _persona_has_vision(
-        svc, {"model_allowlist": _json.dumps(["text:7b"])}) is False
+    caps = _persona_capabilities(svc, {})
+    assert "vision" in caps and "thinking" in caps      # union across the fleet
+    assert {"completion", "chat", "tools"} <= set(caps)  # baseline always present
+    # allowlist to a text-only model => no vision/thinking advertised
+    text_only = _persona_capabilities(svc, {"model_allowlist": _json.dumps(["text:7b"])})
+    assert "vision" not in text_only and "thinking" not in text_only
+
+
+def test_set_capabilities_stores_and_merges_vision_tag(tmp_path):
+    import json as _json
+    reg = ModelRegistry(Database(tmp_path / "cap.sqlite"))
+    reg.upsert_auto("llava:7b", source="discovery", relative_cost_tier="free")
+    assert reg.set_capabilities("llava:7b", ["completion", "vision"]) is True
+    row = reg.get("llava:7b")
+    assert set(_json.loads(row["capabilities"])) == {"completion", "vision"}
+    assert "vision" in _json.loads(row["tags"] or "[]")   # steering reads the tag
+    assert reg.set_capabilities("llava:7b", ["vision", "completion"]) is False  # idempotent
 
 
 def _svc(tmp_path):
