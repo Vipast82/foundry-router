@@ -151,6 +151,31 @@ def _persona_context_length(svc, persona: dict):
     return max(lengths) if lengths else None
 
 
+def _persona_has_vision(svc, persona: dict) -> bool:
+    """True if the persona can route to a vision-capable model — a reachable model
+    tagged 'vision', honoring the persona's model_allowlist. Foundry steers image
+    requests to vision models regardless of the persona (_steer_vision_when_
+    images), so advertising the capability lets clients (AnythingLLM / Open WebUI)
+    enable their image / 'On-Screen Awareness' features."""
+    import json as _json
+    try:
+        allow = set(_json.loads(persona.get("model_allowlist") or "[]"))
+    except (_json.JSONDecodeError, TypeError):
+        allow = set()
+    allow_bases = {str(a).split(":")[0] for a in allow}
+    for mid in svc.pool.available_models():
+        if allow and not (mid in allow or str(mid).split(":")[0] in allow_bases):
+            continue
+        meta = svc.registry.get(mid) or {}
+        try:
+            tags = _json.loads(meta.get("tags") or "[]")
+        except (_json.JSONDecodeError, TypeError):
+            tags = []
+        if isinstance(tags, list) and "vision" in tags:
+            return True
+    return False
+
+
 @router.post("/api/show")
 async def show(request: Request) -> JSONResponse:
     svc = _svc(request)
@@ -160,7 +185,8 @@ async def show(request: Request) -> JSONResponse:
     if persona is None:
         return _model_not_found(name)
     return JSONResponse(tr.show_response(
-        persona, context_length=_persona_context_length(svc, persona)))
+        persona, context_length=_persona_context_length(svc, persona),
+        vision=_persona_has_vision(svc, persona)))
 
 
 # --------------------------------------------------------------------------- #

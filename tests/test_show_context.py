@@ -35,6 +35,31 @@ def test_api_show_returns_model_info(client):
     assert "tools" in body["capabilities"]
 
 
+def test_show_response_advertises_vision_when_available():
+    on = tr.show_response({"virtual_name": "V", "description": ""}, vision=True)
+    off = tr.show_response({"virtual_name": "V", "description": ""}, vision=False)
+    assert "vision" in on["capabilities"]        # AnythingLLM gates image feats on this
+    assert "vision" not in off["capabilities"]
+    assert "tools" in off["capabilities"] and "completion" in off["capabilities"]
+
+
+def test_persona_has_vision_detects_tagged_reachable_model():
+    import json as _json
+
+    from foundry_router.facade.ollama_api import _persona_has_vision
+    reg = types.SimpleNamespace(get=lambda m: {
+        "llava:7b": {"tags": _json.dumps(["vision"])},
+        "text:7b": {"tags": _json.dumps([])},
+    }.get(m))
+    pool = types.SimpleNamespace(
+        available_models=lambda: {"text:7b": ["b"], "llava:7b": ["b"]})
+    svc = types.SimpleNamespace(pool=pool, registry=reg)
+    assert _persona_has_vision(svc, {}) is True
+    # allowlist excluding the vision model => can't route vision => not advertised
+    assert _persona_has_vision(
+        svc, {"model_allowlist": _json.dumps(["text:7b"])}) is False
+
+
 def _svc(tmp_path):
     registry = ModelRegistry(Database(tmp_path / "s.sqlite"))
     registry.upsert_auto("big", source="discovery", relative_cost_tier="free",
