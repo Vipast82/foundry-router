@@ -204,6 +204,40 @@ async def test_num_ctx_not_injected_for_non_ollama(tmp_path):
     assert pool.last_options is None       # num_ctx is Ollama-specific
 
 
+class StreamPool:
+    """Yields native thinking chunks, then content, then done — for the
+    stream-worker-reasoning path. chat() must never be called (that's the
+    blocking path)."""
+    def backend_info(self, m):
+        return {"name": "b", "type": "ollama", "url": "http://x", "api_key": None}
+
+    async def chat_stream(self, model, messages, tools=None, options=None, keep_alive=None):
+        for th in ("Let me think… ", "checking the facts… "):
+            yield {"thinking": th, "done": False}
+        for c in ("Hel", "lo"):
+            yield {"content": c, "done": False}
+        yield {"done": True, "prompt_tokens": 3, "completion_tokens": 2,
+               "eval_duration_ns": 1, "load_duration_ns": 2}
+
+    async def chat(self, *a, **k):
+        raise AssertionError("stream_worker_reasoning should stream, not block")
+
+
+async def test_dispatch_worker_streams_reasoning_buffers_answer(tmp_path):
+    pool = StreamPool()
+    runner, registry = _runner(tmp_path, pool)
+    runner.brain.cfg.stream_worker_reasoning = True
+    registry.upsert_auto("local", source="discovery", context_length=131072)
+    events: list = []
+    result, backend = await runner._dispatch_worker(
+        "local", "hi", persona={"context_window": 8192},
+        emit=lambda kind, text: events.append((kind, text)))
+    live = "".join(t for k, t in events if k == "think")
+    assert "Let me think" in live and "checking the facts" in live   # reasoning LIVE
+    assert result.content == "Hello"        # answer BUFFERED, returned whole for review
+    assert result.thinking == ""            # not re-surfaced (no double narration)
+
+
 async def test_guard_uses_persona_context_window(tmp_path):
     # model supports 262k, but the persona caps context at 8192 -> a ~20k-token
     # request is rejected before dispatch (no silent backend truncation)

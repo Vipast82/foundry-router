@@ -875,7 +875,7 @@ class AgentRunner:
             try:
                 result, backend_name = await self._with_heartbeat(
                     self._dispatch_worker(model_id, prompt, images=images,
-                                          persona=ctx.persona),
+                                          persona=ctx.persona, emit=emit),
                     emit, model_id)
             except ContextTooLarge as e:
                 # Distinct from a backend failure: the request is too big for
@@ -1060,7 +1060,8 @@ class AgentRunner:
     async def _dispatch_worker(self, model_id: str, prompt: str,
                                max_tokens: Optional[int] = None,
                                images: Optional[list] = None,
-                               persona: Optional[dict] = None):
+                               persona: Optional[dict] = None,
+                               emit=None):
         """THE single worker-dispatch path. Agent ask_* tools, every pipeline
         step, and outcome judges all call models through here, so timeout and
         dispatch behavior can never diverge between execution modes again
@@ -1111,10 +1112,44 @@ class AgentRunner:
         # where it's meaningful.
         options = ({"num_ctx": num_ctx}
                    if num_ctx and info and info.get("type") == "ollama" else None)
+        # Stream the worker's REASONING live (agent mode) while BUFFERING the
+        # answer: emit native thinking tokens as narration as they generate, but
+        # accumulate content and return it whole — so the brain still reviews the
+        # answer (refusal/permissive fallback, outcome-judge) before it's shown.
+        # Opt-in + Ollama only; everything else takes the blocking path.
+        stream_reason = (emit is not None
+                         and getattr(self.brain.cfg, "stream_worker_reasoning", False)
+                         and info and info.get("type") == "ollama")
         try:
-            result, backend = await self.pool.chat(
-                model_id, [message], options=options,
-                max_tokens=max_tokens or self.brain.cfg.worker_max_tokens)
+            if stream_reason:
+                from ..pool.protocols import ChatResult
+                content_parts, think_parts = [], []
+                pt = ct = eval_ns = load_ns = 0
+                async for chunk in self.pool.chat_stream(
+                        model_id, [message], options=options):
+                    th = chunk.get("thinking") or ""
+                    if th:
+                        think_parts.append(th)
+                        emit("think", th)                 # live reasoning to client
+                    if chunk.get("done"):
+                        pt = chunk.get("prompt_tokens") or 0
+                        ct = chunk.get("completion_tokens") or 0
+                        eval_ns = chunk.get("eval_duration_ns") or 0
+                        load_ns = chunk.get("load_duration_ns") or 0
+                    elif chunk.get("content"):
+                        content_parts.append(chunk["content"])   # BUFFERED, not shown
+                # thinking="" on purpose: the reasoning was ALREADY streamed live
+                # per-chunk above; leaving it here would make the caller re-emit
+                # the whole block (double narration).
+                result = ChatResult(
+                    content="".join(content_parts), thinking="",
+                    prompt_tokens=pt, completion_tokens=ct,
+                    eval_duration_ns=eval_ns, load_duration_ns=load_ns)
+                backend = (info.get("name") or model_id)
+            else:
+                result, backend = await self.pool.chat(
+                    model_id, [message], options=options,
+                    max_tokens=max_tokens or self.brain.cfg.worker_max_tokens)
         except AllBackendsFailed as e:
             # Reliability signal: a failed/timed-out dispatch marks the model
             # down as a within-tier score multiplier (observed, deployment-real).

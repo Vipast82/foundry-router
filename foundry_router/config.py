@@ -88,6 +88,12 @@ class AgentBrainConfig(BaseModel):
     # full answer at the end. Streams only for Ollama backends; Claude and any
     # non-streaming backend fall back to blocking automatically.
     direct_stream: bool = False
+    # AGENT mode: stream the worker's REASONING (its native thinking tokens) live
+    # as narration while it generates, WITHOUT streaming the answer — the brain
+    # still gets the full content and reviews it (refusal/permissive fallback,
+    # outcome-judge, escalation) before forwarding. So you watch the model reason
+    # in real time, but the final answer is still gated. Ollama workers only.
+    stream_worker_reasoning: bool = False
     # Worker-side tool calling (opt-out default): when the selected worker owns
     # the MCP tool loop itself, this bounds its tool-call turns before the
     # request is handed to the brain to finish — mirrors the brain's own step
