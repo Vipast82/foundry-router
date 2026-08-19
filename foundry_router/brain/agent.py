@@ -1614,7 +1614,9 @@ class AgentRunner:
                         prompt_tokens=pt, completion_tokens=ct,
                         eval_duration_ns=ev_ns, load_duration_ns=ld_ns)
                     backend = wt_info.get("name") or worker
-                except AllBackendsFailed as e:
+                except Exception as e:      # noqa: BLE001 — ANY stream failure
+                    # A mid-stream drop (timeout, socket close, transport error)
+                    # must fall back to the brain, not abort the response.
                     err = e
             else:
                 task = asyncio.create_task(self.pool.chat(
