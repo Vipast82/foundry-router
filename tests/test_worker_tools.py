@@ -133,6 +133,28 @@ def _make(tmp_path, worker_script, mcp_fail=False, brain_script=None):
     return runner, ctx, pool, mcp
 
 
+class StreamWorkerPool(WorkerPool):
+    """chat_stream yields native thinking, then content, then done (no tools) —
+    for the stream_worker_reasoning path in the worker tool loop."""
+    async def chat_stream(self, model, messages, tools=None, options=None, keep_alive=None):
+        self.tool_passes.append(tools is not None)
+        for th in ("reasoning A ", "reasoning B "):
+            yield {"thinking": th, "done": False}
+        yield {"content": "Final answer.", "done": False}
+        yield {"done": True, "prompt_tokens": 3, "completion_tokens": 2}
+
+
+async def test_worker_tool_loop_streams_reasoning_live(tmp_path):
+    runner, ctx, _pool, _mcp = _make(tmp_path, worker_script=[])
+    runner.pool = StreamWorkerPool([])          # streaming backend
+    runner.brain.cfg.stream_worker_reasoning = True
+    events = [ev async for ev in runner.run_worker_tools(ctx)]
+    thinks = "".join(ev.text for ev in events if ev.kind == "think")
+    assert "reasoning A" in thinks and "reasoning B" in thinks   # reasoning streamed LIVE
+    answers = [ev for ev in events if ev.kind == "answer"]
+    assert answers and answers[0].text == "Final answer."       # buffered answer forwarded
+
+
 async def test_worker_owns_the_tool_loop(tmp_path):
     runner, ctx, pool, mcp = _make(tmp_path, worker_script=[
         _tool("searxng_web_search", query="foundry router"),

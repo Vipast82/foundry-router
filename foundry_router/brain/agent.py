@@ -1580,22 +1580,60 @@ class AgentRunner:
         wt_options = ({"num_ctx": wt_num_ctx}
                       if wt_num_ctx and wt_info and wt_info.get("type") == "ollama"
                       else None)
+        # Stream the worker's REASONING live (opt-in, Ollama only): yield its
+        # native thinking tokens as they generate, buffering content + tool_calls
+        # so the loop still gets the whole turn to act on.
+        stream_reason = (getattr(self.brain.cfg, "stream_worker_reasoning", False)
+                         and wt_info and wt_info.get("type") == "ollama")
         for step in range(1, cap + 1):
-            task = asyncio.create_task(self.pool.chat(
-                worker, messages, tools=specs, options=wt_options,
-                max_tokens=self.brain.cfg.worker_max_tokens))
-            async for hb in self._heartbeat_events(task, f"{worker} (tool step {step}/{cap})"):
-                yield hb
-            try:
-                result, backend = await task
-            except AllBackendsFailed as e:
+            result = backend = None
+            err = None
+            if stream_reason:
+                from ..pool.protocols import ChatResult
+                parts, acc_tcs, done_tcs = [], [], []
+                pt = ct = ev_ns = ld_ns = 0
+                try:
+                    async for chunk in self.pool.chat_stream(
+                            worker, messages, tools=specs, options=wt_options):
+                        th = chunk.get("thinking") or ""
+                        if th:
+                            yield AgentEvent("think", th)      # LIVE reasoning
+                        if chunk.get("done"):
+                            done_tcs = chunk.get("tool_calls") or []
+                            pt = chunk.get("prompt_tokens") or 0
+                            ct = chunk.get("completion_tokens") or 0
+                            ev_ns = chunk.get("eval_duration_ns") or 0
+                            ld_ns = chunk.get("load_duration_ns") or 0
+                        else:
+                            if chunk.get("tool_calls"):
+                                acc_tcs.extend(chunk["tool_calls"])
+                            if chunk.get("content"):
+                                parts.append(chunk["content"])
+                    result = ChatResult(
+                        content="".join(parts), tool_calls=(acc_tcs or done_tcs),
+                        prompt_tokens=pt, completion_tokens=ct,
+                        eval_duration_ns=ev_ns, load_duration_ns=ld_ns)
+                    backend = wt_info.get("name") or worker
+                except AllBackendsFailed as e:
+                    err = e
+            else:
+                task = asyncio.create_task(self.pool.chat(
+                    worker, messages, tools=specs, options=wt_options,
+                    max_tokens=self.brain.cfg.worker_max_tokens))
+                async for hb in self._heartbeat_events(task, f"{worker} (tool step {step}/{cap})"):
+                    yield hb
+                try:
+                    result, backend = await task
+                except AllBackendsFailed as e:
+                    err = e
+            if err is not None:
                 self.model_registry.record_call_outcome(worker, ok=False)
-                if _flag_if_not_chat(self.model_registry, worker, e):
+                if _flag_if_not_chat(self.model_registry, worker, err):
                     yield AgentEvent("think", f"{worker} is an embedding-only model "
                                      f"(no chat support) — flagged so it's no longer "
                                      f"offered as a worker.")
                 async for ev in hand_to_brain(f"{worker} dispatch failed "
-                                               f"({describe_exception(e)})"):
+                                               f"({describe_exception(err)})"):
                     yield ev
                 return
             self.model_registry.record_call_outcome(
