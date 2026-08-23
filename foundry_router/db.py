@@ -289,6 +289,10 @@ class Database:
             # it; a few ids limit the brain's choice to that set. Filtered in
             # agent._filter_model_allowlist with a degrade-to-full safety valve.
             ("personas", "model_allowlist", "TEXT"),
+            # Per-persona reasoning effort (thinking level). Empty/NULL = fall
+            # through to the global agent_brain.reasoning_effort. One of
+            # off/low/medium/high/xhigh; gated per model in thinking.py.
+            ("personas", "reasoning_effort", "TEXT"),
             # Code-sandbox audit trail: the submitted code (call arguments) and
             # a flag marking calls that ran on an executes_code server.
             ("tool_call_log", "arguments", "TEXT"),
@@ -378,6 +382,22 @@ class Database:
             "AND (execution_mode='agent' OR execution_mode IS NULL OR execution_mode='')",
             (utcnow(),))
         self.kv_set("persona_seed_v4_cline_direct", utcnow())
+        self._seed_cline_effort()
+
+    def _seed_cline_effort(self) -> None:
+        """Default reasoning effort for the Cline pair (thinking-level spec):
+        PLAN gets deep Claude thinking ('high'), ACT stays light on its local
+        coder ('low'). One-time, and only where the operator hasn't already set
+        a value — the field is theirs to tune in the UI afterward."""
+        if self.kv_get("persona_seed_v5_cline_effort"):
+            return
+        now = utcnow()
+        for name, effort in (("claude-cline-plan", "high"), ("claude-cline-act", "low")):
+            self.execute(
+                "UPDATE personas SET reasoning_effort=?, updated_at=? "
+                "WHERE virtual_name=? AND (reasoning_effort IS NULL OR reasoning_effort='')",
+                (effort, now, name))
+        self.kv_set("persona_seed_v5_cline_effort", now)
 
     # -- generic helpers --------------------------------------------------------
 

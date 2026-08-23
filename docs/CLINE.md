@@ -102,7 +102,38 @@ personas:
 Keep the Foundry personas' `preferred_mcp_tools` **empty** — doubling tools between
 Cline and Foundry causes conflicts.
 
-## 6. Tuning notes
+## 6. Reasoning effort (thinking level)
+
+Each persona has a **`reasoning_effort`** field (in the persona editor, next to
+`output_style`). It sets how hard the worker thinks, and Foundry expresses it in
+whatever form the chosen backend wants:
+
+- **Local worker (Ollama):** sent as Ollama's top-level `think` level, but only
+  to models that report a `thinking` capability (auto-detected from `/api/show`).
+  Non-reasoning locals are left untouched. Most reasoning locals (Qwen3,
+  DeepSeek-R1) treat this as on/off; the gpt-oss family honors graded levels.
+- **Claude via Meridian:** mapped to a real extended-thinking budget —
+  `low≈2k`, `medium≈8k`, `high≈16k`, `xhigh≈32k` `budget_tokens`. Foundry raises
+  `max_tokens` above the budget and drops the temperature override (both required
+  by the API), and streams Claude's returned thinking summary into Cline's
+  reasoning pane.
+
+**Defaults shipped for the pair:** `claude-cline-plan` = **high** (deep Claude
+thinking for architecture/planning), `claude-cline-act` = **low** (light, fast
+thinking on the local coder). Both are one-time seeds — change them freely in the
+UI. Blank = fall through to the global **Agent Brain → reasoning_effort**.
+
+**Precedence:** a level the client sends on the request > the persona's
+`reasoning_effort` > the global Agent Brain default. So if Cline itself sends a
+`think`/`reasoning_effort` field, that wins; whatever arrives is logged (events
+log, source `facade`) so you can see exactly what Cline sends. If Cline sends
+nothing, the persona setting is your knob.
+
+**Which levels a model actually supports** is shown per model on the Models tab
+(`thinking_levels`) — a curated list, since no Ollama/Anthropic endpoint
+enumerates the valid set.
+
+## 7. Tuning notes
 
 - **Local coder quality matters in Act.** Cline's diff edits are strict; a weak
   model loops on failed edits. Prefer a strong instruction-follower (e.g.

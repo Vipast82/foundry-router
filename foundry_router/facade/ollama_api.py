@@ -214,6 +214,17 @@ async def chat(request: Request):
     messages = _canonical_messages(body.get("messages") or [])
     options = body.get("options") or None
     user_text = _last_user_text(messages)
+    # Client-set reasoning effort (Q2 passthrough): Ollama-native top-level
+    # `think`, or an OpenAI-style `reasoning_effort` (top-level or in options).
+    # Highest precedence when resolving the worker's think level. Logged so the
+    # operator can see exactly what a client like Cline actually sends.
+    client_think = body.get("think")
+    if client_think is None:
+        client_think = body.get("reasoning_effort") or (options or {}).get("reasoning_effort")
+    if client_think is not None:
+        svc.db.log_event("info", "facade",
+                         f"client set reasoning effort: think={client_think!r} "
+                         f"model={model_name}")
 
     persona = svc.personas.get(model_name)
 
@@ -233,7 +244,8 @@ async def chat(request: Request):
     # calls into the client, which Cline can't parse).
     if client_tools or exec_mode == "direct":
         return await _direct_dispatch_chat(svc, persona, model_name, messages,
-                                           client_tools, options, stream, user_text)
+                                           client_tools, options, stream, user_text,
+                                           client_think=client_think)
 
     # Pipeline personas (Foundry-Coding) run the Prepare->Execute->Check
     # mode instead of the generic brain loop — a distinct execution mode,
@@ -449,32 +461,26 @@ async def _agent_chat(svc, persona, model_name, messages, stream, user_text,
                          "done": True, "done_reason": "stop", **tr._stats(None)})
 
 
-def _think_for(svc, model_id: str):
-    """Ollama `think` value for a direct-dispatch worker: the configured
-    reasoning_effort, only for models that report a `thinking` capability."""
-    import json as _json
-    eff = getattr(svc.config_store.config.agent_brain, "reasoning_effort", None)
-    if not eff:
-        return None
+def _think_for(svc, model_id: str, persona=None, client_think=None):
+    """The `think` value for a direct-dispatch worker, resolved by precedence:
+    client request > persona.reasoning_effort > global agent_brain default —
+    then gated to models that support thinking (Ollama by capability, Claude
+    always). Ollama gets a bool/level; Anthropic turns it into a budget block."""
+    from .. import thinking
+    if client_think in (None, ""):
+        eff = ((persona or {}).get("reasoning_effort")
+               or getattr(svc.config_store.config.agent_brain, "reasoning_effort", None))
+    else:
+        eff = client_think
     meta = svc.registry.get(model_id) or {}
-    try:
-        caps = _json.loads(meta.get("capabilities") or "[]")
-    except (_json.JSONDecodeError, TypeError):
-        caps = []
-    if "thinking" not in (caps if isinstance(caps, list) else []):
-        return None
-    low = str(eff).strip().lower()
-    if low in ("off", "false", "none", "no", "0"):
-        return False
-    if low in ("on", "true", "yes", "1"):
-        return True
-    return str(eff).strip()
+    btype = (svc.pool.backend_info(model_id) or {}).get("type", "")
+    return thinking.think_value(eff, model_id, meta.get("capabilities"), btype)
 
 
 # ---- direct dispatch (client brought its own tools) ------------------------------
 
 async def _direct_dispatch_chat(svc, persona, model_name, messages, client_tools,
-                                options, stream, user_text):
+                                options, stream, user_text, client_think=None):
     # DESIGN DECISION: when a coding client sends its own tool definitions
     # (Kilo/Cline agent loops), the routing agent would have to interleave two
     # tool protocols in one conversation. Instead the persona's static policy
@@ -534,7 +540,7 @@ async def _direct_dispatch_chat(svc, persona, model_name, messages, client_tools
             model_id, prompts.sanitize_history(messages),
             tools=client_tools, options=options, keep_alive=keep_alive,
             max_tokens=brain_cfg.worker_max_tokens,
-            think=_think_for(svc, model_id))
+            think=_think_for(svc, model_id, persona, client_think))
         # Empirical tool-calling reliability: direct dispatch is where worker
         # models actually exercise tool calling (client-supplied tools).
         svc.registry.record_tool_call(model_id, ok=True)
@@ -586,7 +592,7 @@ async def _direct_dispatch_chat(svc, persona, model_name, messages, client_tools
                 async for chunk in svc.pool.chat_stream(
                         model_id, prompts.sanitize_history(messages),
                         tools=client_tools, options=options, keep_alive=keep_alive,
-                        think=_think_for(svc, model_id)):
+                        think=_think_for(svc, model_id, persona, client_think)):
                     if chunk.get("done"):
                         pt = chunk.get("prompt_tokens") or 0
                         ct = chunk.get("completion_tokens") or 0

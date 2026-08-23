@@ -1013,7 +1013,10 @@ async function tabPersonas() {
       <div class="row"><label title="JSON object: client name → compatibility note (how that client experiences this persona). Documentation only — surfaced as badges in the list above. Don't fork a persona per client; note the differences here instead.">client_compat (JSON obj)</label>
         <input id="pe-compat" size="90" value="{}" placeholder='{"openwebui": "HTML renders as Artifacts", "anythingllm": "code blocks only"}'>
         <label title="plain_text: steer workers to clean plain text / simple markdown (no HTML/SVG) — for messaging-bridge clients (Hermes/OpenClaw) that can't render markup. Default: no steering.">output_style</label>
-        <select id="pe-style"><option value="">default</option><option>plain_text</option></select></div>
+        <select id="pe-style"><option value="">default</option><option>plain_text</option></select>
+        <label title="Reasoning effort for THIS persona's worker, overriding the global agent_brain setting. Sent as Ollama's think level to thinking-capable locals, and as a Claude extended-thinking budget to Claude-via-Meridian. Applied only where the model supports it. Blank = use the global default. Great for a Cline-plan persona: set high/xhigh so plan-mode gets deep Claude thinking, while Cline-act stays low/off on a fast local.">reasoning_effort</label>
+        <select id="pe-effort"><option value="">(global default)</option><option>off</option>
+          <option>low</option><option>medium</option><option>high</option><option>xhigh</option></select></div>
       <div class="row">
         <label title="Tiered review pass (default OFF): after an answer is produced, the selected review model checks it and may return a corrected version — always delivered with a visible 🔎 marker, never a silent change. Paid review models pass the same guardrail/conservation ladder as any dispatch.">review_enabled</label>
         <input type="checkbox" id="pe-review">
@@ -1052,7 +1055,8 @@ async function tabPersonas() {
     review_model: $("#pe-review-model").value || null,
     review_prefilter: $("#pe-prefilter").checked ? 1 : 0,
     client_compat: JSON.parse($("#pe-compat").value || "{}"),
-    output_style: $("#pe-style").value || null}}));
+    output_style: $("#pe-style").value || null,
+    reasoning_effort: $("#pe-effort").value || null}}));
 window.clonePersona = async source => {
   const newName = prompt("New persona name (clone of " + source + "):",
                          source + "-copy");
@@ -1284,6 +1288,7 @@ window.editPersona = name => {
     || p.review_prefilter === undefined || !!p.review_prefilter;
   $("#pe-compat").value = p.client_compat || "{}";
   $("#pe-style").value = p.output_style || "";
+  $("#pe-effort").value = p.reasoning_effort || "";
 };
 
 /* ----------------------------------------------------------------- tools -- */

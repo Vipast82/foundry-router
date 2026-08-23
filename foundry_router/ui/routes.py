@@ -318,6 +318,7 @@ async def meridian_reauth_complete(request: Request):
 
 @router.get("/admin/api/models")
 async def list_models(request: Request):
+    from .. import thinking
     svc = _svc(request)
     reachable = set(svc.pool.available_models().keys())
     rows = svc.registry.list_models()
@@ -326,6 +327,12 @@ async def list_models(request: Request):
     # Reachable-but-unregistered models should be visible too
     for mid in sorted(reachable - {r["id"] for r in rows}):
         rows.append({"id": mid, "reachable": True, "source": None})
+    # Curated thinking-level menu per model (Q1): the effort levels that are
+    # actually meaningful for each — empty = model doesn't support thinking.
+    for r in rows:
+        btype = (svc.pool.backend_info(r["id"]) or {}).get("type", "")
+        r["thinking_levels"] = thinking.supported_levels(
+            r["id"], r.get("capabilities"), btype)
     # Research readiness rides along so the UI can grey out the button with a
     # real reason instead of reporting success for work that can't happen.
     ready, reason = (svc.research.prerequisites() if svc.research

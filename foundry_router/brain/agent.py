@@ -268,11 +268,15 @@ class AgentRunner:
         self.guardrails = guardrails
         self.meridian_usage = meridian_usage
         self.research = research
+        self._req_effort = None   # per-request reasoning_effort (persona override)
 
     # ------------------------------------------------------------------ run --
 
     async def run(self, ctx: RequestContext) -> AsyncIterator[AgentEvent]:
         queue: asyncio.Queue[Optional[AgentEvent]] = asyncio.Queue()
+        # Persona-level reasoning_effort overrides the global default for this
+        # request's workers (see _think_for). Raw string; None falls through.
+        self._req_effort = (ctx.persona or {}).get("reasoning_effort")
 
         def emit(kind: str, text: str = "") -> None:
             queue.put_nowait(AgentEvent(kind, text))
@@ -1058,22 +1062,24 @@ class AgentRunner:
         return min(cw, int(model_max)) if model_max else cw
 
     def _think_for(self, model_id: str):
-        """The Ollama `think` value for a worker call: the operator's configured
-        reasoning_effort, but ONLY for models that report a `thinking` capability
-        (a non-reasoning local never gets an unsupported field, which Ollama would
-        reject). None = don't set; a bool or a level string otherwise."""
-        eff = getattr(self.brain.cfg, "reasoning_effort", None)
-        if not eff:
-            return None
+        """The `think` value for a worker call, resolved as
+        persona.reasoning_effort > global agent_brain.reasoning_effort, and
+        applied ONLY to models that support thinking (Ollama models by their
+        discovered `thinking` capability, Claude-via-Meridian always). Ollama
+        gets a bool/level string; Anthropic turns it into a budget block. None
+        = don't set, so a non-reasoning local never sees an unsupported field."""
+        from .. import thinking
+        eff = getattr(self, "_req_effort", None)
+        if eff is None:
+            eff = getattr(self.brain.cfg, "reasoning_effort", None)
         meta = self.model_registry.get(model_id) or {}
-        if "thinking" not in _json_list(meta.get("capabilities")):
-            return None
-        low = str(eff).strip().lower()
-        if low in ("off", "false", "none", "no", "0"):
-            return False
-        if low in ("on", "true", "yes", "1"):
-            return True
-        return str(eff).strip()
+        btype = ""
+        try:
+            btype = (self.pool.backend_info(model_id) or {}).get("type", "") \
+                if self.pool else ""
+        except Exception:
+            btype = ""
+        return thinking.think_value(eff, model_id, meta.get("capabilities"), btype)
 
     async def _dispatch_worker(self, model_id: str, prompt: str,
                                max_tokens: Optional[int] = None,

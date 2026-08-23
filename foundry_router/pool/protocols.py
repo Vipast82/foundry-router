@@ -422,7 +422,16 @@ class AnthropicProtocol(BaseProtocol):
                  "input_schema": t["function"].get("parameters") or {"type": "object", "properties": {}}}
                 for t in tools
             ]
-        if options and "temperature" in options:
+        # Extended thinking (Claude via Meridian): a level -> budget_tokens block.
+        # Anthropic forbids a custom temperature while thinking is enabled and
+        # requires max_tokens > budget_tokens, so this both raises max_tokens and
+        # skips the temperature override below.
+        from .. import thinking as _thinking
+        think_block = _thinking.claude_thinking(think, max_tokens)
+        if think_block is not None:
+            block, payload["max_tokens"] = think_block
+            payload["thinking"] = block
+        elif options and "temperature" in options:
             payload["temperature"] = options["temperature"]
 
         r = await self.client.post(f"{self.url}/v1/messages",
@@ -431,10 +440,15 @@ class AnthropicProtocol(BaseProtocol):
             raise ProtocolError(f"anthropic-compat {self.url} HTTP {r.status_code}: {r.text[:300]}")
         data = r.json()
         content_text = ""
+        thinking_text = ""
         tool_calls = []
         for block in data.get("content") or []:
             if block.get("type") == "text":
                 content_text += block.get("text") or ""
+            elif block.get("type") == "thinking":
+                # Extended-thinking summary block: surface it as reasoning
+                # (kept OUT of content) so clients render it in their think pane.
+                thinking_text += block.get("thinking") or ""
             elif block.get("type") == "tool_use":
                 tool_calls.append({"id": block.get("id") or _new_id(),
                                    "name": block.get("name"),
@@ -442,6 +456,7 @@ class AnthropicProtocol(BaseProtocol):
         usage = data.get("usage") or {}
         return ChatResult(
             content=content_text,
+            thinking=thinking_text,
             tool_calls=tool_calls,
             prompt_tokens=usage.get("input_tokens") or 0,
             completion_tokens=usage.get("output_tokens") or 0,
