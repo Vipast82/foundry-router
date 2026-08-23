@@ -94,6 +94,13 @@ class AgentBrainConfig(BaseModel):
     # outcome-judge, escalation) before forwarding. So you watch the model reason
     # in real time, but the final answer is still gated. Ollama workers only.
     stream_worker_reasoning: bool = False
+    # Reasoning effort for local (Ollama) workers that support thinking: sent as
+    # the /api/chat `think` field. A level string ("low"/"medium"/"high"/"xhigh"
+    # — model-dependent, e.g. Qwen3.8 accepts low/medium/xhigh) requests that
+    # effort; "off" disables thinking (fastest); blank = the model's default.
+    # Applied ONLY to models whose /api/show reports a `thinking` capability, so
+    # it never breaks non-reasoning locals. One backend-wide knob for the fleet.
+    reasoning_effort: Optional[str] = None
     # Worker-side tool calling (opt-out default): when the selected worker owns
     # the MCP tool loop itself, this bounds its tool-call turns before the
     # request is handed to the brain to finish — mirrors the brain's own step

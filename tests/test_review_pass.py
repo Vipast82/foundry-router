@@ -34,7 +34,7 @@ class Pool:
         return {"name": "b", "type": self.types.get(m, "ollama"),
                 "url": "http://x", "api_key": "k"}
 
-    async def chat(self, model, messages, tools=None, options=None, max_tokens=4096):
+    async def chat(self, model, messages, tools=None, options=None, max_tokens=4096, think=None):
         self.calls.append(model)
         return ChatResult(content=self.responses[model]), "b"
 

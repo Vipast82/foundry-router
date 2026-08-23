@@ -219,7 +219,7 @@ class PaidPool:
             return {"name": "b", "type": "ollama", "url": "http://x", "api_key": None}
         return None
 
-    async def chat(self, model, messages, tools=None, options=None, max_tokens=4096):
+    async def chat(self, model, messages, tools=None, options=None, max_tokens=4096, think=None):
         self.calls.append(model)
         return ChatResult(content=GOOD), "meridian"
 

@@ -32,7 +32,7 @@ class ScriptedProtocol:
         self.calls: list[list[dict]] = []
 
     async def chat(self, model, messages, tools=None, options=None,
-                   keep_alive=None, max_tokens=4096):
+                   keep_alive=None, max_tokens=4096, think=None):
         self.calls.append(messages)
         step = self.script.pop(0)
         if isinstance(step, Exception):

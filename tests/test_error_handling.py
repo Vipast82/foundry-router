@@ -60,7 +60,7 @@ class EmptyFailProtocol:
         return ["m"]
 
     async def chat(self, model, messages, tools=None, options=None,
-                   keep_alive=None, max_tokens=4096):
+                   keep_alive=None, max_tokens=4096, think=None):
         raise EmptyMessageError()
 
 
@@ -154,7 +154,7 @@ async def test_dispatch_worker_records_exhaustion(tmp_path):
             return {"name": "meridian", "type": "anthropic-compatible",
                     "url": "http://m", "api_key": "k"}
         async def chat(self, model, messages, tools=None, options=None,
-                       max_tokens=4096):
+                       max_tokens=4096, think=None):
             raise AllBackendsFailed(
                 "all backends failed for 'claude-haiku-4-5': meridian: "
                 "ProtocolError: HTTP 401 authentication expired")

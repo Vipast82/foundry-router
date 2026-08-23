@@ -29,7 +29,7 @@ class SlowPool:
     def backend_info(self, m):
         return {"name": "b", "type": "ollama", "url": "http://x", "api_key": None}
 
-    async def chat(self, model, messages, tools=None, options=None, max_tokens=4096):
+    async def chat(self, model, messages, tools=None, options=None, max_tokens=4096, think=None):
         await asyncio.sleep(self.delay)
         return ChatResult(content="done"), "b"
 

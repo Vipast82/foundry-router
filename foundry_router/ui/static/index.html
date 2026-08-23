@@ -414,6 +414,15 @@ async function tabBackends() {
         <input type="checkbox" id="brain-ds">
         <label title="AGENT mode (Foundry-Chat etc.): stream the worker's REASONING (its thinking tokens) live as narration while it generates, but BUFFER the answer so the brain still reviews it (refusal/permissive fallback, outcome-judge) before showing it. Watch the model reason in real time; the final answer stays gated. Ollama workers only.">stream_worker_reasoning</label>
         <input type="checkbox" id="brain-swr">
+        <label title="Reasoning effort sent to every thinking-capable worker as Ollama's think field (e.g. Qwen3 low/medium/high). Applied ONLY to models that report a thinking capability — non-reasoning locals are untouched. Blank = leave each model at its own default; off = disable thinking where supported.">reasoning_effort</label>
+        <select id="brain-re">
+          <option value="">(model default)</option>
+          <option value="off">off</option>
+          <option value="low">low</option>
+          <option value="medium">medium</option>
+          <option value="high">high</option>
+          <option value="xhigh">xhigh</option>
+        </select>
         <button class="act primary" id="save-brain">Save brain</button></div>
     </div>`;
   const cfg = await api("config");
@@ -427,6 +436,7 @@ async function tabBackends() {
   $("#brain-ka").value = cfg.agent_brain.worker_keep_alive || "";
   $("#brain-ds").checked = !!cfg.agent_brain.direct_stream;
   $("#brain-swr").checked = !!cfg.agent_brain.stream_worker_reasoning;
+  $("#brain-re").value = cfg.agent_brain.reasoning_effort || "";
   const renderBrainHealth = h => {
     const el = $("#brain-health"); h = h || {};
     if (h.healthy === true) {
@@ -561,7 +571,8 @@ async function tabBackends() {
       heartbeat_seconds: +$("#brain-hb").value,
       worker_keep_alive: $("#brain-ka").value.trim() || null,
       direct_stream: $("#brain-ds").checked,
-      stream_worker_reasoning: $("#brain-swr").checked}}));
+      stream_worker_reasoning: $("#brain-swr").checked,
+      reasoning_effort: $("#brain-re").value.trim() || null}}));
 }
 
 /* ---------------------------------------------------------------- models -- */

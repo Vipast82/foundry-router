@@ -1057,6 +1057,24 @@ class AgentRunner:
         model_max = (self.model_registry.get(model_id) or {}).get("context_length")
         return min(cw, int(model_max)) if model_max else cw
 
+    def _think_for(self, model_id: str):
+        """The Ollama `think` value for a worker call: the operator's configured
+        reasoning_effort, but ONLY for models that report a `thinking` capability
+        (a non-reasoning local never gets an unsupported field, which Ollama would
+        reject). None = don't set; a bool or a level string otherwise."""
+        eff = getattr(self.brain.cfg, "reasoning_effort", None)
+        if not eff:
+            return None
+        meta = self.model_registry.get(model_id) or {}
+        if "thinking" not in _json_list(meta.get("capabilities")):
+            return None
+        low = str(eff).strip().lower()
+        if low in ("off", "false", "none", "no", "0"):
+            return False
+        if low in ("on", "true", "yes", "1"):
+            return True
+        return str(eff).strip()
+
     async def _dispatch_worker(self, model_id: str, prompt: str,
                                max_tokens: Optional[int] = None,
                                images: Optional[list] = None,
@@ -1126,7 +1144,8 @@ class AgentRunner:
                 content_parts, think_parts = [], []
                 pt = ct = eval_ns = load_ns = 0
                 async for chunk in self.pool.chat_stream(
-                        model_id, [message], options=options):
+                        model_id, [message], options=options,
+                        think=self._think_for(model_id)):
                     th = chunk.get("thinking") or ""
                     if th:
                         think_parts.append(th)
@@ -1149,7 +1168,8 @@ class AgentRunner:
             else:
                 result, backend = await self.pool.chat(
                     model_id, [message], options=options,
-                    max_tokens=max_tokens or self.brain.cfg.worker_max_tokens)
+                    max_tokens=max_tokens or self.brain.cfg.worker_max_tokens,
+                    think=self._think_for(model_id))
         except AllBackendsFailed as e:
             # Reliability signal: a failed/timed-out dispatch marks the model
             # down as a within-tier score multiplier (observed, deployment-real).
@@ -1594,7 +1614,8 @@ class AgentRunner:
                 pt = ct = ev_ns = ld_ns = 0
                 try:
                     async for chunk in self.pool.chat_stream(
-                            worker, messages, tools=specs, options=wt_options):
+                            worker, messages, tools=specs, options=wt_options,
+                            think=self._think_for(worker)):
                         th = chunk.get("thinking") or ""
                         if th:
                             yield AgentEvent("think", th)      # LIVE reasoning
@@ -1621,7 +1642,8 @@ class AgentRunner:
             else:
                 task = asyncio.create_task(self.pool.chat(
                     worker, messages, tools=specs, options=wt_options,
-                    max_tokens=self.brain.cfg.worker_max_tokens))
+                    max_tokens=self.brain.cfg.worker_max_tokens,
+                    think=self._think_for(worker)))
                 async for hb in self._heartbeat_events(task, f"{worker} (tool step {step}/{cap})"):
                     yield hb
                 try:

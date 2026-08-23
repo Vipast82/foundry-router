@@ -43,7 +43,7 @@ class OneModelPool:
     def backend_info(self, model):
         return {"name": "b", "type": "ollama", "url": "http://x"} if model == "m" else None
 
-    async def chat(self, model, messages, tools=None, options=None, max_tokens=4096):
+    async def chat(self, model, messages, tools=None, options=None, max_tokens=4096, think=None):
         return ChatResult(content="worker says hi", prompt_tokens=5, completion_tokens=5), "b"
 
 

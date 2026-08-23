@@ -449,6 +449,28 @@ async def _agent_chat(svc, persona, model_name, messages, stream, user_text,
                          "done": True, "done_reason": "stop", **tr._stats(None)})
 
 
+def _think_for(svc, model_id: str):
+    """Ollama `think` value for a direct-dispatch worker: the configured
+    reasoning_effort, only for models that report a `thinking` capability."""
+    import json as _json
+    eff = getattr(svc.config_store.config.agent_brain, "reasoning_effort", None)
+    if not eff:
+        return None
+    meta = svc.registry.get(model_id) or {}
+    try:
+        caps = _json.loads(meta.get("capabilities") or "[]")
+    except (_json.JSONDecodeError, TypeError):
+        caps = []
+    if "thinking" not in (caps if isinstance(caps, list) else []):
+        return None
+    low = str(eff).strip().lower()
+    if low in ("off", "false", "none", "no", "0"):
+        return False
+    if low in ("on", "true", "yes", "1"):
+        return True
+    return str(eff).strip()
+
+
 # ---- direct dispatch (client brought its own tools) ------------------------------
 
 async def _direct_dispatch_chat(svc, persona, model_name, messages, client_tools,
@@ -511,7 +533,8 @@ async def _direct_dispatch_chat(svc, persona, model_name, messages, client_tools
         res, backend = await svc.pool.chat(
             model_id, prompts.sanitize_history(messages),
             tools=client_tools, options=options, keep_alive=keep_alive,
-            max_tokens=brain_cfg.worker_max_tokens)
+            max_tokens=brain_cfg.worker_max_tokens,
+            think=_think_for(svc, model_id))
         # Empirical tool-calling reliability: direct dispatch is where worker
         # models actually exercise tool calling (client-supplied tools).
         svc.registry.record_tool_call(model_id, ok=True)
@@ -562,7 +585,8 @@ async def _direct_dispatch_chat(svc, persona, model_name, messages, client_tools
             try:
                 async for chunk in svc.pool.chat_stream(
                         model_id, prompts.sanitize_history(messages),
-                        tools=client_tools, options=options, keep_alive=keep_alive):
+                        tools=client_tools, options=options, keep_alive=keep_alive,
+                        think=_think_for(svc, model_id)):
                     if chunk.get("done"):
                         pt = chunk.get("prompt_tokens") or 0
                         ct = chunk.get("completion_tokens") or 0

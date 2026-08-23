@@ -42,11 +42,12 @@ class BackendPool:  # interface — see internal.InternalPool for the implementa
     async def stop(self) -> None: ...
 
     async def chat(self, model, messages, tools=None, options=None, max_tokens=4096,
-                   keep_alive=None):
+                   keep_alive=None, think=None):
         """Returns (ChatResult, backend_name). Raises AllBackendsFailed."""
         raise NotImplementedError
 
-    def chat_stream(self, model, messages, tools=None, options=None, keep_alive=None):
+    def chat_stream(self, model, messages, tools=None, options=None, keep_alive=None,
+                    think=None):
         raise NotImplementedError
 
     def available_models(self) -> dict[str, list[str]]:

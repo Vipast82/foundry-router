@@ -48,7 +48,7 @@ class PolicyPool:
         return {"name": "b", "type": "ollama", "url": "http://x", "api_key": None} \
             if m in self.responses else None
 
-    async def chat(self, model, messages, tools=None, options=None, max_tokens=4096):
+    async def chat(self, model, messages, tools=None, options=None, max_tokens=4096, think=None):
         self.calls.append(model)
         return ChatResult(content=self.responses[model]), "b"
 

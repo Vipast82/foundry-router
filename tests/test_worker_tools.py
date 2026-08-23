@@ -86,7 +86,7 @@ class WorkerPool:
         return {"name": "b", "type": "ollama", "url": "http://x", "api_key": None} \
             if m == "worker" else None
 
-    async def chat(self, model, messages, tools=None, options=None, max_tokens=4096):
+    async def chat(self, model, messages, tools=None, options=None, max_tokens=4096, think=None):
         self.tool_passes.append(tools is not None)     # worker gets tool schemas
         return self.script.pop(0), "b"
 
@@ -136,7 +136,7 @@ def _make(tmp_path, worker_script, mcp_fail=False, brain_script=None):
 class StreamWorkerPool(WorkerPool):
     """chat_stream yields native thinking, then content, then done (no tools) —
     for the stream_worker_reasoning path in the worker tool loop."""
-    async def chat_stream(self, model, messages, tools=None, options=None, keep_alive=None):
+    async def chat_stream(self, model, messages, tools=None, options=None, keep_alive=None, think=None):
         self.tool_passes.append(tools is not None)
         for th in ("reasoning A ", "reasoning B "):
             yield {"thinking": th, "done": False}
