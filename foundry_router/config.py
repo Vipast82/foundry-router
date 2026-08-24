@@ -346,6 +346,24 @@ class SemanticCacheConfig(BaseModel):
     max_entries: int = 2000
 
 
+class MCPAggregatorConfig(BaseModel):
+    """Foundry-MCP: re-expose Foundry's own connected MCP tools as a single
+    Streamable-HTTP MCP server that an MCP client (AnythingLLM, etc.) can point
+    at. Off by default. The client owns the tool loop — this just hands it the
+    tool manifest and executes calls through Foundry's existing MCP client, so a
+    client with no server-side tools gains all of Foundry's, alongside its own.
+    """
+    enabled: bool = False
+    # Shared secret the client must send. Empty = no auth (trusted LAN only).
+    token: Optional[str] = None
+    token_header: str = "X-API-KEY"
+    # Base path of the all-tools endpoint; profiles are served at {base}/p/{name}.
+    base_path: str = "/mcp"
+    # Named tool subsets ("MCP personas"): profile name -> list of MCP server
+    # names to expose on that endpoint. The base path always exposes them all.
+    profiles: dict[str, list[str]] = Field(default_factory=dict)
+
+
 class AppConfig(BaseModel):
     server: ServerConfig = Field(default_factory=ServerConfig)
     agent_brain: AgentBrainConfig = Field(default_factory=AgentBrainConfig)
@@ -356,6 +374,7 @@ class AppConfig(BaseModel):
     mcp_servers: list[MCPServerConfig] = Field(default_factory=list)
     tool_sync: ToolSyncConfig = Field(default_factory=ToolSyncConfig)
     semantic_cache: SemanticCacheConfig = Field(default_factory=SemanticCacheConfig)
+    mcp_aggregator: MCPAggregatorConfig = Field(default_factory=MCPAggregatorConfig)
     logging: LoggingConfig = Field(default_factory=LoggingConfig)
 
 

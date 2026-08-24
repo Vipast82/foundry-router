@@ -85,6 +85,8 @@ async def get_config(request: Request):
         cfg["agent_brain"]["api_key"] = _mask(cfg["agent_brain"]["api_key"])
     if cfg.get("backend_pool", {}).get("litellm", {}).get("api_key"):
         cfg["backend_pool"]["litellm"]["api_key"] = _mask(cfg["backend_pool"]["litellm"]["api_key"])
+    if cfg.get("mcp_aggregator", {}).get("token"):
+        cfg["mcp_aggregator"]["token"] = _mask(cfg["mcp_aggregator"]["token"])
     return cfg
 
 
@@ -142,6 +144,27 @@ async def set_brain(request: Request):
     svc.config_store.save(mutate)
     svc.rebuild_brain()
     return {"ok": True}
+
+
+@router.get("/admin/api/mcp-aggregator")
+async def mcp_aggregator_status(request: Request):
+    """Current Foundry-MCP endpoints + a paste-ready AnythingLLM config block."""
+    return _svc(request).mcp_aggregator.describe()
+
+
+@router.post("/admin/api/mcp-aggregator")
+async def set_mcp_aggregator(request: Request):
+    svc = _svc(request)
+    body = await request.json()
+    allowed = {"enabled", "token", "token_header", "base_path", "profiles"}
+    updates = {k: v for k, v in body.items() if k in allowed}
+
+    def mutate(raw):
+        raw.setdefault("mcp_aggregator", {}).update(updates)
+    svc.config_store.save(mutate)
+    # Mounting new endpoints requires re-running the app lifespan, so the
+    # aggregator's endpoint set only changes on restart. Report that back.
+    return {"ok": True, "restart_required": True}
 
 
 # --------------------------------------------------------------------------- #

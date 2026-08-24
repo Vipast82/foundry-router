@@ -41,6 +41,7 @@ from .evalharness import EvalHarness, ensure_seed as ensure_eval_seed
 from .registry.research_agent import ResearchAgent
 from .semcache import SemanticCache
 from .tools.mcp_client import MCPManager
+from .facade.mcp_aggregator import MCPAggregator
 from .tools.sync import ToolRegistry
 from .ui import router as ui_router
 from .usage import MeridianUsage
@@ -93,6 +94,7 @@ class Services:
                                  self.registry, self.guardrails, self.meridian_usage,
                                  research=self.research)
         self.semcache = SemanticCache(cfg.semantic_cache, self.http, db)
+        self.mcp_aggregator = MCPAggregator(self)
         ensure_eval_seed(db)
         self.evals = EvalHarness(self)
         self._eval_tasks: list[asyncio.Task] = []  # keep background runs alive
@@ -419,11 +421,19 @@ def create_app(config_path: Optional[Path] = None,
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
-        if os.environ.get("FOUNDRY_DISABLE_BACKGROUND") != "1":
-            await services.start_background()
-        db.log_event("info", "main", "foundry-router started")
-        yield
-        await services.shutdown()
+        from contextlib import AsyncExitStack
+        async with AsyncExitStack() as stack:
+            if os.environ.get("FOUNDRY_DISABLE_BACKGROUND") != "1":
+                await services.start_background()
+            # Foundry-MCP aggregator endpoints (opt-in): each session manager's
+            # task group lives on the stack for the app's lifetime.
+            try:
+                await services.mcp_aggregator.start(app, stack)
+            except Exception:
+                log.exception("mcp aggregator failed to start")
+            db.log_event("info", "main", "foundry-router started")
+            yield
+            await services.shutdown()
 
     app = FastAPI(title="Foundry Router", version=__version__,
                   docs_url=None, redoc_url=None, lifespan=lifespan)

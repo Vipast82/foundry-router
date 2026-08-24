@@ -424,6 +424,22 @@ async function tabBackends() {
           <option value="xhigh">xhigh</option>
         </select>
         <button class="act primary" id="save-brain">Save brain</button></div>
+    </div>
+    <div class="card">
+      <h2 style="margin-top:0" title="Foundry-MCP: re-expose Foundry's own connected MCP tools as a single Streamable-HTTP MCP server. Point AnythingLLM (or any MCP client) at it so it gains ALL of Foundry's tools alongside its own local MCP servers. The client owns the tool loop; Foundry executes the calls.">Foundry-MCP aggregator</h2>
+      <div class="hint">Expose Foundry's MCP tools to an external MCP client (AnythingLLM). Changing these requires a restart to (re)mount endpoints.</div>
+      <div class="row"><label>enabled</label><input type="checkbox" id="agg-en">
+        <label title="Shared secret the client must send in the header below. Empty = no auth (trusted LAN only).">token</label>
+        <input id="agg-token" size="24" placeholder="(unchanged)">
+        <label title="Header the client sends the token in. AnythingLLM supports custom headers.">header</label>
+        <input id="agg-hdr" size="14" value="X-API-KEY"></div>
+      <div class="row"><label title="Profiles = curated tool subsets ('MCP personas'), each served at {base}/p/{name}. JSON object: profile name -> list of MCP server names. The base /mcp endpoint always exposes them all.">profiles (JSON obj)</label>
+        <input id="agg-profiles" size="70" value="{}" placeholder='{"music": ["acestep-music"], "voice": ["kokoro-tts","chatterbox-tts"]}'></div>
+      <div class="row"><button class="act primary" id="save-agg">Save aggregator</button>
+        <span id="agg-restart" class="hint"></span></div>
+      <div id="agg-endpoints" class="hint" style="margin-top:8px"></div>
+      <div class="hint">AnythingLLM config (paste into <code>anythingllm_mcp_servers.json</code>, replace HOST:PORT + token):</div>
+      <pre id="agg-config" style="white-space:pre-wrap;font-size:11px;overflow-x:auto"></pre>
     </div>`;
   const cfg = await api("config");
   $("#backends-json").value =
@@ -437,6 +453,41 @@ async function tabBackends() {
   $("#brain-ds").checked = !!cfg.agent_brain.direct_stream;
   $("#brain-swr").checked = !!cfg.agent_brain.stream_worker_reasoning;
   $("#brain-re").value = cfg.agent_brain.reasoning_effort || "";
+  // Foundry-MCP aggregator
+  const agg = cfg.mcp_aggregator || {};
+  $("#agg-en").checked = !!agg.enabled;
+  $("#agg-hdr").value = agg.token_header || "X-API-KEY";
+  $("#agg-profiles").value = JSON.stringify(agg.profiles || {});
+  const renderAgg = async () => {
+    try {
+      const s = await api("mcp-aggregator");
+      $("#agg-endpoints").innerHTML = (s.endpoints || []).length
+        ? "Live endpoints: " + s.endpoints.map(e =>
+            `<code>${esc(e.path)}/</code> (${e.scope}${e.servers ? ": " + e.servers.join(", ") : ": all"})`).join(" · ")
+        : (s.enabled ? "enabled — no endpoints yet (restart?)" : "disabled");
+      $("#agg-config").textContent = s.anythingllm_config
+        ? JSON.stringify(s.anythingllm_config, null, 2) : "";
+    } catch (e) { $("#agg-endpoints").textContent = e.message; }
+  };
+  renderAgg();
+  $("#save-agg").onclick = async () => {
+    let profiles;
+    try { profiles = JSON.parse($("#agg-profiles").value || "{}"); }
+    catch (e) { return toast("profiles: invalid JSON", true); }
+    const body = {enabled: $("#agg-en").checked,
+                  token_header: $("#agg-hdr").value.trim() || "X-API-KEY",
+                  profiles};
+    const tok = $("#agg-token").value;                 // blank = leave unchanged
+    if (tok) body.token = tok;
+    try {
+      const r = await api("mcp-aggregator", {method: "POST", body});
+      toast("Saved");
+      $("#agg-token").value = "";
+      $("#agg-restart").textContent = r.restart_required
+        ? "saved — restart Foundry to (re)mount endpoints" : "saved";
+      renderAgg();
+    } catch (e) { toast(e.message, true); }
+  };
   const renderBrainHealth = h => {
     const el = $("#brain-health"); h = h || {};
     if (h.healthy === true) {
