@@ -427,19 +427,34 @@ async function tabBackends() {
     </div>
     <div class="card">
       <h2 style="margin-top:0" title="Foundry-MCP: re-expose Foundry's own connected MCP tools as a single Streamable-HTTP MCP server. Point AnythingLLM (or any MCP client) at it so it gains ALL of Foundry's tools alongside its own local MCP servers. The client owns the tool loop; Foundry executes the calls.">Foundry-MCP aggregator</h2>
-      <div class="hint">Expose Foundry's MCP tools to an external MCP client (AnythingLLM). Changing these requires a restart to (re)mount endpoints.</div>
+      <div class="hint">Expose Foundry's MCP tools to an external MCP client (AnythingLLM, Cline). The endpoints live on Foundry's own server port (path-based) — no separate port to open. Changing these requires a restart to (re)mount endpoints.</div>
       <div class="row"><label>enabled</label><input type="checkbox" id="agg-en">
         <label title="Shared secret the client must send in the header below. Empty = no auth (trusted LAN only).">token</label>
-        <input id="agg-token" size="24" placeholder="(unchanged)">
-        <label title="Header the client sends the token in. AnythingLLM supports custom headers.">header</label>
-        <input id="agg-hdr" size="14" value="X-API-KEY"></div>
-      <div class="row"><label title="Profiles = curated tool subsets ('MCP personas'), each served at {base}/p/{name}. JSON object: profile name -> list of MCP server names. The base /mcp endpoint always exposes them all.">profiles (JSON obj)</label>
+        <input id="agg-token" size="20" placeholder="(unchanged)">
+        <label title="Header the client sends the token in. AnythingLLM & Cline support custom headers.">header</label>
+        <input id="agg-hdr" size="12" value="X-API-KEY"></div>
+      <div class="row"><label title="Base path of the all-tools endpoint on Foundry's server port. Profiles are served under {base}/p/{name}. Default /mcp.">base_path</label>
+        <input id="agg-base" size="12" value="/mcp">
+        <label title="Externally reachable base URL of THIS Foundry, used to fill in the example client configs below (e.g. http://192.168.1.50:8080 or https://foundry.mydomain). Leave blank to use the configured server host:port.">public base URL</label>
+        <input id="agg-url" size="34" placeholder="http://192.168.1.50:8080 (blank = server host:port)"></div>
+      <div class="row"><label title="Profiles = curated tool subsets ('MCP personas'), each served at {base}/p/{name}. JSON object: profile name -> list of MCP server names. The base endpoint always exposes them all.">profiles (JSON obj)</label>
         <input id="agg-profiles" size="70" value="{}" placeholder='{"music": ["acestep-music"], "voice": ["kokoro-tts","chatterbox-tts"]}'></div>
       <div class="row"><button class="act primary" id="save-agg">Save aggregator</button>
+        <button class="act" id="restart-foundry" title="Terminate and restart Foundry so endpoint changes take effect. Requires a supervisor (Docker restart policy / systemd) to bring it back.">↻ Restart Foundry</button>
         <span id="agg-restart" class="hint"></span></div>
       <div id="agg-endpoints" class="hint" style="margin-top:8px"></div>
-      <div class="hint">AnythingLLM config (paste into <code>anythingllm_mcp_servers.json</code>, replace HOST:PORT + token):</div>
-      <pre id="agg-config" style="white-space:pre-wrap;font-size:11px;overflow-x:auto"></pre>
+      <div class="row" style="gap:16px;align-items:flex-start;margin-top:6px">
+        <div style="flex:1;min-width:0">
+          <div class="hint">AnythingLLM — paste into <code>anythingllm_mcp_servers.json</code> (storage <code>plugins/</code> dir):
+            <button class="act" style="padding:0 6px;font-size:11px" id="copy-allm">copy</button></div>
+          <pre id="agg-allm" style="white-space:pre-wrap;font-size:11px;overflow-x:auto"></pre>
+        </div>
+        <div style="flex:1;min-width:0">
+          <div class="hint">Cline — paste into <code>cline_mcp_settings.json</code> (or use "Add Remote Server"):
+            <button class="act" style="padding:0 6px;font-size:11px" id="copy-cline">copy</button></div>
+          <pre id="agg-cline" style="white-space:pre-wrap;font-size:11px;overflow-x:auto"></pre>
+        </div>
+      </div>
     </div>`;
   const cfg = await api("config");
   $("#backends-json").value =
@@ -457,25 +472,38 @@ async function tabBackends() {
   const agg = cfg.mcp_aggregator || {};
   $("#agg-en").checked = !!agg.enabled;
   $("#agg-hdr").value = agg.token_header || "X-API-KEY";
+  $("#agg-base").value = agg.base_path || "/mcp";
+  $("#agg-url").value = agg.advertise_url || "";
   $("#agg-profiles").value = JSON.stringify(agg.profiles || {});
   const renderAgg = async () => {
     try {
       const s = await api("mcp-aggregator");
-      $("#agg-endpoints").innerHTML = (s.endpoints || []).length
-        ? "Live endpoints: " + s.endpoints.map(e =>
-            `<code>${esc(e.path)}/</code> (${e.scope}${e.servers ? ": " + e.servers.join(", ") : ": all"})`).join(" · ")
-        : (s.enabled ? "enabled — no endpoints yet (restart?)" : "disabled");
-      $("#agg-config").textContent = s.anythingllm_config
-        ? JSON.stringify(s.anythingllm_config, null, 2) : "";
+      const live = (s.endpoints || []).map(e =>
+        `<code>${esc(e.path)}/</code> (${e.scope}${e.servers ? ": " + e.servers.join(", ") : ": all"})`);
+      const planned = (s.planned_endpoints || []).map(e =>
+        `<code>${esc(e.path)}/</code> (${e.scope})`);
+      $("#agg-endpoints").innerHTML =
+        `<b>Base URL:</b> <code>${esc(s.base_url || "")}</code><br>` +
+        (live.length ? "<b>Live now:</b> " + live.join(" · ")
+                     : (s.enabled ? "<b>Live now:</b> none yet — restart to mount" : "<i>disabled</i>")) +
+        (planned.length ? "<br><b>After restart:</b> " + planned.join(" · ") : "");
+      $("#agg-allm").textContent = s.anythingllm_config
+        ? JSON.stringify(s.anythingllm_config, null, 2) : "(enable + save first)";
+      $("#agg-cline").textContent = s.cline_config
+        ? JSON.stringify(s.cline_config, null, 2) : "(enable + save first)";
     } catch (e) { $("#agg-endpoints").textContent = e.message; }
   };
   renderAgg();
+  $("#copy-allm").onclick = () => { navigator.clipboard.writeText($("#agg-allm").textContent); toast("Copied AnythingLLM config"); };
+  $("#copy-cline").onclick = () => { navigator.clipboard.writeText($("#agg-cline").textContent); toast("Copied Cline config"); };
   $("#save-agg").onclick = async () => {
     let profiles;
     try { profiles = JSON.parse($("#agg-profiles").value || "{}"); }
     catch (e) { return toast("profiles: invalid JSON", true); }
     const body = {enabled: $("#agg-en").checked,
                   token_header: $("#agg-hdr").value.trim() || "X-API-KEY",
+                  base_path: $("#agg-base").value.trim() || "/mcp",
+                  advertise_url: $("#agg-url").value.trim() || null,
                   profiles};
     const tok = $("#agg-token").value;                 // blank = leave unchanged
     if (tok) body.token = tok;
@@ -484,8 +512,16 @@ async function tabBackends() {
       toast("Saved");
       $("#agg-token").value = "";
       $("#agg-restart").textContent = r.restart_required
-        ? "saved — restart Foundry to (re)mount endpoints" : "saved";
+        ? "saved — restart to (re)mount endpoints" : "saved";
       renderAgg();
+    } catch (e) { toast(e.message, true); }
+  };
+  $("#restart-foundry").onclick = async () => {
+    if (!confirm("Restart Foundry now? Active requests will drop. It comes back only if a supervisor (Docker restart policy / systemd) manages it.")) return;
+    try {
+      await api("restart", {method: "POST", body: {}});
+      $("#agg-restart").textContent = "restarting… reload the page in a few seconds";
+      toast("Restarting Foundry…");
     } catch (e) { toast(e.message, true); }
   };
   const renderBrainHealth = h => {

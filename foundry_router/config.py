@@ -358,7 +358,13 @@ class MCPAggregatorConfig(BaseModel):
     token: Optional[str] = None
     token_header: str = "X-API-KEY"
     # Base path of the all-tools endpoint; profiles are served at {base}/p/{name}.
+    # The endpoints live on Foundry's own server port (path-based) — there is no
+    # separate port to open.
     base_path: str = "/mcp"
+    # Externally reachable base URL of THIS Foundry (e.g. http://192.168.1.50:8080
+    # or https://foundry.mydomain) used only to render copy-paste client configs.
+    # Empty = fall back to the configured server host:port.
+    advertise_url: Optional[str] = None
     # Named tool subsets ("MCP personas"): profile name -> list of MCP server
     # names to expose on that endpoint. The base path always exposes them all.
     profiles: dict[str, list[str]] = Field(default_factory=dict)

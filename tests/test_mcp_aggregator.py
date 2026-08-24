@@ -38,12 +38,14 @@ class _FakeMCP:
         return f"ran {server}/{tool}"
 
 
-def _agg(tools, **cfg):
+def _agg(tools, server=None, **cfg):
+    server = server or types.SimpleNamespace(host="127.0.0.1", port=11435)
     svc = types.SimpleNamespace(
         tool_registry=_FakeReg(tools),
         mcp=_FakeMCP(),
         config_store=types.SimpleNamespace(
-            config=types.SimpleNamespace(mcp_aggregator=MCPAggregatorConfig(**cfg))),
+            config=types.SimpleNamespace(mcp_aggregator=MCPAggregatorConfig(**cfg),
+                                         server=server)),
         db=types.SimpleNamespace(log_event=lambda *a, **k: None),
     )
     return MCPAggregator(svc), svc
@@ -100,19 +102,32 @@ async def test_dispatch_scope_blocks_out_of_profile_tool():
         await agg._dispatch("kokoro-tts__say", {}, {"acestep-music"})
 
 
-def test_describe_builds_anythingllm_config():
+def test_describe_builds_client_configs():
     agg, _ = _agg([], enabled=True, token="secret",
+                  advertise_url="http://192.168.1.50:8080",
                   profiles={"music": ["acestep-music"]})
-    agg._endpoints = [{"scope": "all", "path": "/mcp", "servers": None},
-                      {"scope": "music", "path": "/mcp/p/music",
-                       "servers": ["acestep-music"]}]
     d = agg.describe()
-    cfg = d["anythingllm_config"]["mcpServers"]
-    assert cfg["foundry"]["type"] == "streamable"
-    assert cfg["foundry"]["url"].endswith("/mcp/")
-    assert cfg["foundry-music"]["url"].endswith("/mcp/p/music/")
-    assert d["token_set"] is True
-    assert cfg["foundry"]["headers"] == {"X-API-KEY": "<token>"}
+    assert d["base_url"] == "http://192.168.1.50:8080"
+    # planned endpoints come from config (all + each profile), pre-restart
+    paths = {e["path"] for e in d["planned_endpoints"]}
+    assert paths == {"/mcp", "/mcp/p/music"}
+    allm = d["anythingllm_config"]["mcpServers"]
+    assert allm["foundry"]["type"] == "streamable"
+    assert allm["foundry"]["url"] == "http://192.168.1.50:8080/mcp/"
+    assert allm["foundry-music"]["url"] == "http://192.168.1.50:8080/mcp/p/music/"
+    assert allm["foundry"]["headers"] == {"X-API-KEY": "secret"}
+    cln = d["cline_config"]["mcpServers"]
+    assert cln["foundry"]["type"] == "streamableHttp"
+    assert cln["foundry"]["url"] == "http://192.168.1.50:8080/mcp/"
+    assert cln["foundry"]["autoApprove"] == []
+    assert cln["foundry"]["headers"] == {"X-API-KEY": "secret"}
+
+
+def test_describe_base_url_falls_back_to_server():
+    agg, _ = _agg([], enabled=True,
+                  server=types.SimpleNamespace(host="0.0.0.0", port=8080))
+    d = agg.describe()
+    assert d["base_url"] == "http://HOST:8080"      # 0.0.0.0 -> HOST placeholder
 
 
 # -- mount + auth through the real app ---------------------------------------------

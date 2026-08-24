@@ -147,23 +147,57 @@ class MCPAggregator:
 
     # -- UI helper -------------------------------------------------------------
 
-    def describe(self) -> dict:
-        """Endpoints + a ready-to-paste AnythingLLM config block for the UI."""
+    def _base_url(self) -> str:
+        """Externally reachable base URL for client config examples: the operator
+        override if set, else the configured server host:port (0.0.0.0 shown as
+        HOST so the operator fills in the real address)."""
         cfg = self.svc.config_store.config.mcp_aggregator
-        servers_cfg = {}
-        for ep in self._endpoints:
+        if cfg.advertise_url:
+            return cfg.advertise_url.rstrip("/")
+        srv = self.svc.config_store.config.server
+        host = srv.host if srv.host not in ("0.0.0.0", "::", "") else "HOST"
+        return f"http://{host}:{srv.port}"
+
+    def _planned_endpoints(self) -> list[dict]:
+        """Endpoints as they WILL mount from current config (so the UI shows the
+        right examples before a restart), falling back to the live set."""
+        cfg = self.svc.config_store.config.mcp_aggregator
+        base = (cfg.base_path or "/mcp").rstrip("/") or "/mcp"
+        plan = [{"scope": "all", "path": base, "servers": None}]
+        for pname, servers in (cfg.profiles or {}).items():
+            plan.append({"scope": pname, "path": f"{base}/p/{pname}",
+                         "servers": sorted(servers)})
+        return plan
+
+    def describe(self) -> dict:
+        """Endpoints (live + planned) + ready-to-paste AnythingLLM and Cline
+        config blocks for the UI, using the resolved base URL and real token."""
+        cfg = self.svc.config_store.config.mcp_aggregator
+        base_url = self._base_url()
+        token = cfg.token or ""
+        header = cfg.token_header or "X-API-KEY"
+        planned = self._planned_endpoints()
+
+        anythingllm, cline = {}, {}
+        for ep in planned:
             key = "foundry" if ep["scope"] == "all" else f"foundry-{ep['scope']}"
-            # Trailing slash = the canonical, redirect-free URL (a bare mount
-            # path 307-redirects to it; stricter clients are happier without it).
-            url = f"http://HOST:PORT{ep['path'].rstrip('/')}/"
-            entry = {"type": "streamable", "url": url}
-            if cfg.token:
-                entry["headers"] = {cfg.token_header or "X-API-KEY": "<token>"}
-            servers_cfg[key] = entry
+            # Trailing slash = canonical, redirect-free URL.
+            url = f"{base_url}{ep['path'].rstrip('/')}/"
+            allm = {"type": "streamable", "url": url}
+            cln = {"type": "streamableHttp", "url": url,
+                   "disabled": False, "autoApprove": []}
+            if token:
+                allm["headers"] = {header: token}
+                cln["headers"] = {header: token}
+            anythingllm[key] = allm
+            cline[key] = cln
         return {
             "enabled": cfg.enabled,
-            "endpoints": self._endpoints,
+            "base_url": base_url,
+            "endpoints": self._endpoints,          # actually mounted this run
+            "planned_endpoints": planned,          # from current (possibly unsaved-restart) config
             "token_set": bool(cfg.token),
-            "token_header": cfg.token_header or "X-API-KEY",
-            "anythingllm_config": {"mcpServers": servers_cfg} if servers_cfg else None,
+            "token_header": header,
+            "anythingllm_config": {"mcpServers": anythingllm} if anythingllm else None,
+            "cline_config": {"mcpServers": cline} if cline else None,
         }

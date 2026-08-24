@@ -30,19 +30,28 @@ Who decides / runs what:
 
 ## Enable it
 
-1. **Foundry UI → Backends/Brain tab → Foundry-MCP aggregator.** Check
-   **enabled**, set a **token** (shared secret; leave the header as `X-API-KEY`),
-   and optionally define **profiles** — curated subsets ("MCP personas"):
+1. **Foundry UI → Backends tab → Foundry-MCP aggregator.** Check **enabled**,
+   set a **token** (shared secret; header defaults to `X-API-KEY`), set the
+   **public base URL** (how clients reach this Foundry, e.g.
+   `http://192.168.1.50:8080` — blank uses the configured server host:port), and
+   optionally define **profiles** — curated subsets ("MCP personas"):
    ```json
    { "music": ["acestep-music"], "voice": ["kokoro-tts", "chatterbox-tts"] }
    ```
-   Save, then **restart Foundry** (endpoints mount at startup).
+   Save, then click **↻ Restart Foundry** (endpoints mount at startup). The panel
+   shows the live endpoints and **paste-ready AnythingLLM *and* Cline configs**
+   (with a copy button each), already filled with your base URL and token.
 
-   Endpoints:
-   - `http://HOST:PORT/mcp/` — **all** enabled MCP servers' tools.
-   - `http://HOST:PORT/mcp/p/<profile>/` — just that profile's servers.
+   The endpoints live on **Foundry's own server port** (path-based) — there's no
+   separate port to open:
+   - `{base}/mcp/` — **all** enabled MCP servers' tools.
+   - `{base}/mcp/p/<profile>/` — just that profile's servers.
 
    (Use the trailing slash — the bare path 307-redirects to it.)
+
+   **Restart button:** it terminates the process; a supervisor (Docker
+   `restart: unless-stopped`, systemd, …) brings it back. If nothing supervises
+   the process, it just stops — restart it yourself.
 
 2. **AnythingLLM** — edit `anythingllm_mcp_servers.json` in your AnythingLLM
    storage `plugins` directory (the UI shows a ready-to-paste block):
@@ -64,6 +73,28 @@ Who decides / runs what:
    ```
    Keep any **local** MCP servers in the same file — they coexist. Then enable
    the tools you want in AnythingLLM's agent-skills UI, and use `@agent` in chat.
+
+## Cline
+
+Cline can consume the same endpoints as a **remote MCP server**. Paste into
+`cline_mcp_settings.json` (or use Cline's **MCP Servers → Add Remote Server**):
+```json
+{
+  "mcpServers": {
+    "foundry": {
+      "type": "streamableHttp",
+      "url": "http://HOST:PORT/mcp/",
+      "headers": { "X-API-KEY": "your-token" },
+      "disabled": false,
+      "autoApprove": []
+    }
+  }
+}
+```
+This gives Cline Foundry's server-side tools (music/TTS/etc.) in addition to its
+own. Note this is *separate* from the `claude-cline-plan`/`act` LLM personas —
+those choose the model; this adds tools. Add tool names to `autoApprove` to skip
+the per-call approval prompt for trusted ones.
 
 ## Notes & limits
 

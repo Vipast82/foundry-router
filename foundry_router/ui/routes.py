@@ -156,7 +156,8 @@ async def mcp_aggregator_status(request: Request):
 async def set_mcp_aggregator(request: Request):
     svc = _svc(request)
     body = await request.json()
-    allowed = {"enabled", "token", "token_header", "base_path", "profiles"}
+    allowed = {"enabled", "token", "token_header", "base_path", "advertise_url",
+               "profiles"}
     updates = {k: v for k, v in body.items() if k in allowed}
 
     def mutate(raw):
@@ -165,6 +166,26 @@ async def set_mcp_aggregator(request: Request):
     # Mounting new endpoints requires re-running the app lifespan, so the
     # aggregator's endpoint set only changes on restart. Report that back.
     return {"ok": True, "restart_required": True}
+
+
+@router.post("/admin/api/restart")
+async def restart_service(request: Request):
+    """Restart Foundry by terminating the process — a supervisor (Docker
+    `restart: unless-stopped`, systemd, etc.) brings it back. Used to (re)mount
+    Foundry-MCP endpoints after a config change. No-op-safe: if nothing
+    supervises the process it simply stops, so the UI warns about that."""
+    import asyncio
+    import os
+    import signal
+    svc = _svc(request)
+    svc.db.log_event("warning", "main", "service restart requested from admin UI")
+
+    async def _terminate():
+        await asyncio.sleep(0.4)          # let the HTTP response flush first
+        os.kill(os.getpid(), signal.SIGTERM)
+
+    asyncio.create_task(_terminate())
+    return {"ok": True, "restarting": True}
 
 
 # --------------------------------------------------------------------------- #
