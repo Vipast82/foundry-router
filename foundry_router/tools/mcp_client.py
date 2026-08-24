@@ -250,10 +250,13 @@ class MCPManager:
             return out
 
     async def list_all(self) -> dict[str, list[dict]]:
-        """Manifest per configured server; unreachable servers are logged and
+        """Manifest per ENABLED server; disabled servers are skipped (so Tool
+        Sync drops their tools this cycle) and unreachable ones are logged and
         omitted (their tools simply don't appear this sync cycle)."""
         out: dict[str, list[dict]] = {}
-        for name in list(self.servers):
+        for name, cfg in list(self.servers.items()):
+            if not getattr(cfg, "enabled", True):
+                continue                      # operator-disabled: exclude its tools
             try:
                 out[name] = await self.list_tools(name)
             except Exception as e:
@@ -274,6 +277,8 @@ class MCPManager:
 
     async def call_tool(self, server: str, tool: str, arguments: dict[str, Any]) -> str:
         cfg = self.servers.get(server)
+        if cfg is not None and not getattr(cfg, "enabled", True):
+            raise MCPUnavailable(f"MCP server {server!r} is disabled")
         timeout = getattr(cfg, "timeout_seconds", 300) if cfg else 300
         retries = max(1, getattr(cfg, "rate_limit_retries", 3) if cfg else 3)
         backoff = getattr(cfg, "rate_limit_backoff_seconds", 30.0) if cfg else 30.0

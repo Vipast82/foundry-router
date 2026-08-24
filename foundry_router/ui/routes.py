@@ -648,8 +648,17 @@ async def upsert_mcp(request: Request):
     body = await request.json()
     if not body.get("name") or not body.get("url"):
         return JSONResponse({"error": "name and url required"}, status_code=400)
+    # Preserve the on/off state across edits: the add/edit form doesn't carry it
+    # (that's the toggle's job), so an unspecified `enabled` keeps the current
+    # value rather than silently re-enabling a disabled server.
+    existing = next((s for s in svc.config_store.config.mcp_servers
+                     if s.name == body["name"]), None)
+    enabled = body.get("enabled")
+    if enabled is None:
+        enabled = existing.enabled if existing else True
     entry = {"name": body["name"], "url": body["url"],
              "transport": body.get("transport", "streamable-http"),
+             "enabled": bool(enabled),
              "timeout_seconds": int(body.get("timeout_seconds") or 300),
              # Pacing / 429 handling — persist so a UI edit doesn't silently
              # drop a throttle set in config.yaml (SearXNG needs a gap here).
@@ -674,6 +683,29 @@ async def upsert_mcp(request: Request):
     svc.mcp.set_servers(cfg.mcp_servers)
     result = await svc.tool_registry.sync(svc.pool)  # discover its tools now
     return {"ok": True, "tool_sync": result}
+
+
+@router.post("/admin/api/mcp_servers/toggle")
+async def toggle_mcp(request: Request):
+    """Flip a server's on/off switch and re-sync. Disabling drops its tools from
+    the registry immediately (workers, brain, and the Foundry-MCP aggregator
+    stop seeing them); enabling rediscovers them. The connection is untouched."""
+    svc = _svc(request)
+    body = await request.json()
+    name = (body.get("name") or "").strip()
+    if not name:
+        return JSONResponse({"error": "name required"}, status_code=400)
+    enabled = bool(body.get("enabled"))
+
+    def mutate(raw):
+        for s in raw.get("mcp_servers") or []:
+            if s.get("name") == name:
+                s["enabled"] = enabled
+
+    cfg = svc.config_store.save(mutate)
+    svc.mcp.set_servers(cfg.mcp_servers)
+    result = await svc.tool_registry.sync(svc.pool)   # add/drop its tools now
+    return {"ok": True, "name": name, "enabled": enabled, "tool_sync": result}
 
 
 @router.post("/admin/api/mcp_servers/delete")

@@ -280,6 +280,12 @@ class MCPServerConfig(BaseModel):
     name: str
     url: str
     transport: Literal["streamable-http", "sse"] = "streamable-http"
+    # Operator on/off switch. Disabled = the connection is kept but the server
+    # is skipped everywhere: no discovery/sync, no dialing, its tools drop from
+    # the registry (so workers, the brain, and the Foundry-MCP aggregator stop
+    # seeing them). Flip it back on to restore, no re-add needed. Default on so
+    # existing servers are unchanged.
+    enabled: bool = True
     headers: dict[str, str] = Field(default_factory=dict)
     # Media generation (ComfyUI, TTS, music) can take far longer than a text
     # tool call — per-server budget instead of one global assumption.

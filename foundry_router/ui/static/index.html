@@ -1765,22 +1765,28 @@ window.gwConfigSet = async (ref, gateway) => {
 
 async function tabMCP() {
   const [d, gw] = await Promise.all([api("mcp_servers"), api("gateway/servers")]);
-  const rows = d.servers.map(s => `<tr>
-    <td>${esc(s.name)}${s.executes_code
+  const rows = d.servers.map(s => {
+    const on = s.enabled !== false;
+    return `<tr${on ? "" : ' style="opacity:.5"'}>
+    <td>${esc(s.name)}${on ? "" : ' <span class="pill bad" title="Disabled — kept configured but its tools are dropped everywhere (workers, brain, aggregator). Click enable to restore.">off</span>'}${s.executes_code
       ? ' <span class="pill bad" title="This server EXECUTES CODE — full-code audit trail, network/limits enforced by config, per-persona opt-in only">⚠ code exec</span>' : ""}</td>
     <td class="mono">${esc(s.url)}</td><td>${esc(s.transport)}</td>
     <td class="nw">${s.timeout_seconds ?? 300}s${(s.pace_seconds ?? 0) > 0 ? ` · ${s.pace_seconds}s gap` : ""}</td>
     <td class="nw">${s.has_token
         ? '<span class="pill ok" title="' + esc(s.token_header) + '">token set</span> <a href="#" data-cleartoken="' + esc(s.name) + '">clear</a>'
         : '<span class="hint">none</span>'}</td>
-    <td class="nw"><span class="mcp-status" data-mcp="${esc(s.name)}">${s.tool_count
-        ? '<span class="pill ok">' + s.tool_count + ' tools</span>'
-        : '<span class="hint">no tools synced</span>'}</span></td>
+    <td class="nw"><span class="mcp-status" data-mcp="${esc(s.name)}">${!on
+        ? '<span class="hint">disabled</span>'
+        : (s.tool_count
+            ? '<span class="pill ok">' + s.tool_count + ' tools</span>'
+            : '<span class="hint">no tools synced</span>')}</span></td>
     <td>${mcpActivityCell(s.usage)}</td>
-    <td class="nw"><button class="act" onclick='testMcp(${JSON.stringify(s.name)})'>test</button>
+    <td class="nw"><button class="act${on ? "" : " primary"}" title="${on ? "Disable this server — drop all its tools everywhere, keep the connection" : "Enable this server — rediscover and expose its tools"}" onclick='run(api("mcp_servers/toggle",{method:"POST",body:{name:${JSON.stringify(s.name)},enabled:${!on}}}))'>${on ? "disable" : "enable"}</button>
+      <button class="act" onclick='testMcp(${JSON.stringify(s.name)})'>test</button>
       <button class="act" onclick='editMcp(${JSON.stringify(s.name)})'>edit</button>
       <button class="act" onclick='run(api("mcp_servers/delete",{method:"POST",body:{name:${JSON.stringify(s.name)}}}))'>remove</button></td>
-    </tr>`).join("");
+    </tr>`;
+  }).join("");
   window._mcpServers = Object.fromEntries(d.servers.map(s => [s.name, s]));
   window.testMcp = async name => {
     const el = [...document.querySelectorAll(".mcp-status")].find(x => x.dataset.mcp === name);
