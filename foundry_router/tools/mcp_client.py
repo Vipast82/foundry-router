@@ -233,6 +233,16 @@ class MCPManager:
         headers = {**(cfg.headers or {}), **self._secret_headers(name)}
         if headers:
             kwargs["headers"] = headers
+        # CRITICAL for long media jobs: both SSE and streamable-http clients
+        # default sse_read_timeout to 300s, so the stream to the server is torn
+        # down after 5 min of no events EVEN IF our per-call wait_for is higher —
+        # the result of a 9-minute music render then never arrives ("Connection
+        # closed"). Match the read timeout to this server's tool budget so the
+        # stream stays open as long as the job may legitimately run. Connect
+        # timeout stays short.
+        read_to = float(getattr(cfg, "timeout_seconds", 300) or 300)
+        kwargs["sse_read_timeout"] = read_to
+        kwargs["timeout"] = min(30.0, read_to)
         async with transport_client(cfg.url, **kwargs) as streams:
             # streamable-http yields (read, write, get_session_id); sse yields
             # (read, write) — take the first two either way.
