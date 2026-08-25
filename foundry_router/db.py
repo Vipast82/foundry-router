@@ -293,6 +293,11 @@ class Database:
             # through to the global agent_brain.reasoning_effort. One of
             # off/low/medium/high/xhigh; gated per model in thinking.py.
             ("personas", "reasoning_effort", "TEXT"),
+            # Load-aware escalation: when the chosen LOCAL worker is busy (a call
+            # in flight), try a PAID model instead — still gated by the usage/
+            # cost guardrail, so it only escalates while quota allows. Direct
+            # (Cline / AnythingLLM-agent) dispatch path.
+            ("personas", "escalate_when_local_busy", "INTEGER DEFAULT 0"),
             # Code-sandbox audit trail: the submitted code (call arguments) and
             # a flag marking calls that ran on an executes_code server.
             ("tool_call_log", "arguments", "TEXT"),

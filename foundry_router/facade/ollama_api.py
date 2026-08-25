@@ -33,7 +33,7 @@ from fastapi.responses import JSONResponse, PlainTextResponse, StreamingResponse
 from .. import __version__
 from ..brain import prompts
 from ..brain.agent import RequestContext
-from ..brain.fallback import pick_fallback_model
+from ..brain.fallback import guess_category, pick_fallback_model
 from ..brain.user_intent import parse_confirmation
 from ..guardrails import RequestGuardState
 from ..pool.base import AllBackendsFailed
@@ -477,6 +477,54 @@ def _think_for(svc, model_id: str, persona=None, client_think=None):
     return thinking.think_value(eff, model_id, meta.get("capabilities"), btype)
 
 
+def _available_paid(svc, persona) -> list:
+    """Reachable non-local (paid) chat models, honoring the persona allowlist."""
+    import json as _json
+    try:
+        allow = _json.loads((persona or {}).get("model_allowlist") or "[]")
+    except (_json.JSONDecodeError, TypeError):
+        allow = []
+    allowset = set(allow) | {str(a).split(":")[0] for a in allow}
+    out = []
+    for m in svc.pool.available_models():
+        if (svc.pool.backend_info(m) or {}).get("type") == "ollama":
+            continue
+        meta = svc.registry.get(m)
+        if meta and meta.get("embedding"):
+            continue
+        if allowset and not (m in allowset or str(m).split(":")[0] in allowset):
+            continue
+        out.append(m)
+    return out
+
+
+def _escalate_if_local_busy(svc, persona, model_id, user_text):
+    """Load-aware escalation (opt-in per persona): if the LOCAL model we're about
+    to use already has a call in flight, swap to the best available PAID model.
+    The usage guardrail runs immediately after and gates that swap on quota%/cost
+    — so a busy-local request goes to Claude only while the window/spend allows,
+    and otherwise falls through to a local model (queuing) via the normal deny
+    path. No-op when the persona hasn't opted in, the pick is already paid, the
+    model is idle, or no paid model is reachable."""
+    if not (persona or {}).get("escalate_when_local_busy"):
+        return model_id
+    if (svc.pool.backend_info(model_id) or {}).get("type") != "ollama":
+        return model_id
+    if not any(a["model"] == model_id and a["count"] >= 1
+               for a in svc.pool.active_calls()):
+        return model_id
+    paid = _available_paid(svc, persona)
+    if not paid:
+        return model_id
+    category = (persona or {}).get("benchmark_category") or guess_category(user_text)
+    ranked = svc.registry.ranked_for_category(category, paid, limit=1)
+    paid_id = ranked[0]["id"] if ranked else paid[0]
+    svc.db.log_event("info", "routing",
+                     f"local {model_id} busy → escalating to paid {paid_id} "
+                     f"(gated by usage/cost guardrail)")
+    return paid_id
+
+
 # ---- direct dispatch (client brought its own tools) ------------------------------
 
 async def _direct_dispatch_chat(svc, persona, model_name, messages, client_tools,
@@ -497,6 +545,8 @@ async def _direct_dispatch_chat(svc, persona, model_name, messages, client_tools
     if model_id is None:
         logger.finish("error", "no backends reachable")
         return _model_not_found(model_name)
+    # Load-aware: if the chosen local model is busy, try paid (guardrail gates it).
+    model_id = _escalate_if_local_busy(svc, persona, model_id, user_text)
 
     guard = RequestGuardState()
     verdict = await svc.guardrails.check_paid_call(

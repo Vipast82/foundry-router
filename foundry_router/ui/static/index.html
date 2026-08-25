@@ -1119,7 +1119,9 @@ async function tabPersonas() {
         <label title="PREFER permissive/uncensored models (this persona is for content other models refuse). Off = the default AVOID: permissive models sink below standard ones for normal work.">prefer_permissive</label>
         <input type="checkbox" id="pe-perm">
         <label title="Prefer a model already loaded in the backend's VRAM when it's an acceptable fit, over an equally-suitable one that would force a slow unload/reload. Keeps a large warm model in memory instead of thrashing.">prefer_loaded</label>
-        <input type="checkbox" id="pe-loaded"></div>
+        <input type="checkbox" id="pe-loaded">
+        <label title="Load-aware escalation (direct / Cline / AnythingLLM-agent path): when the local worker this persona would use is already busy (a call in flight), route to a PAID model instead — still gated by the usage/cost guardrail, so it only escalates while your quota/spend allows and otherwise queues on local. Great for keeping a busy local from bottlenecking while sparing Claude tokens when idle.">escalate when local busy</label>
+        <input type="checkbox" id="pe-escalate"></div>
       <div class="row"><label title="Optional JSON overriding the multi-signal ranking weights for this persona. Signals: primary (requested category), tool_calling, adequacy (observed outcome-judge quality), latency (warm tokens/sec). e.g. a speed-sensitive persona: {&quot;latency&quot;: 0.5}. Empty = defaults.">selection_weights (JSON obj)</label>
         <input id="pe-weights" size="50" value="{}" placeholder='{"latency": 0.4, "adequacy": 0.8}'></div>
       <div class="row"><label title="JSON object: client name → compatibility note (how that client experiences this persona). Documentation only — surfaced as badges in the list above. Don't fork a persona per client; note the differences here instead.">client_compat (JSON obj)</label>
@@ -1162,6 +1164,7 @@ async function tabPersonas() {
     required_tags: JSON.parse($("#pe-reqtags").value || "[]"),
     prefer_permissive: $("#pe-perm").checked ? 1 : 0,
     prefer_loaded: $("#pe-loaded").checked ? 1 : 0,
+    escalate_when_local_busy: $("#pe-escalate").checked ? 1 : 0,
     selection_weights: JSON.parse($("#pe-weights").value || "{}"),
     review_enabled: $("#pe-review").checked ? 1 : 0,
     review_model: $("#pe-review-model").value || null,
@@ -1401,6 +1404,7 @@ window.editPersona = name => {
   $("#pe-compat").value = p.client_compat || "{}";
   $("#pe-style").value = p.output_style || "";
   $("#pe-effort").value = p.reasoning_effort || "";
+  $("#pe-escalate").checked = !!p.escalate_when_local_busy;
 };
 
 /* ----------------------------------------------------------------- tools -- */
