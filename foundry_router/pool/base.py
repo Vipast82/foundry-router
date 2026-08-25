@@ -69,6 +69,11 @@ class BackendPool:  # interface — see internal.InternalPool for the implementa
         Empty for pools/backends that can't report it."""
         return set()
 
+    def active_calls(self) -> list[dict]:
+        """Models with a call in flight right now: [{model, count, seconds}].
+        Empty for pools that don't track it."""
+        return []
+
     def add_state_listener(self, callback) -> None:
         """callback() is invoked (sync) whenever a backend changes health or
         its model list changes — Tool Sync subscribes for immediate re-sync."""

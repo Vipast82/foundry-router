@@ -20,7 +20,9 @@ serves a curated subset at `{base}/p/{name}` — the "MCP personas" idea.
 
 from __future__ import annotations
 
+import asyncio
 import logging
+import time
 from typing import Optional
 
 from ..tools.sync import is_gateway_management_tool
@@ -86,10 +88,51 @@ class MCPAggregator:
 
         @server.call_tool()
         async def _call(name: str, arguments: Optional[dict]):
-            result = await self._dispatch(name, arguments, server_filter)
+            hb = self.svc.config_store.config.mcp_aggregator.progress_heartbeat_seconds or 0
+            if hb <= 0:
+                result = await self._dispatch(name, arguments, server_filter)
+                return [types.TextContent(type="text", text=result)]
+            result = await self._dispatch_with_heartbeat(
+                server, name, arguments, server_filter, hb)
             return [types.TextContent(type="text", text=result)]
 
         return server
+
+    async def _dispatch_with_heartbeat(self, server, name, arguments,
+                                       server_filter, hb: int) -> str:
+        """Run the tool as a task and, every `hb` seconds it hasn't finished,
+        emit an MCP progress notification ("still working… Ns") on the request's
+        SSE stream. Keeps the long-held connection warm and gives the client a
+        live heartbeat. Requires SSE mode (json_response off) and a client that
+        sent a progressToken; without a token we still log backend-side."""
+        task = asyncio.create_task(self._dispatch(name, arguments, server_filter))
+        ctx = server.request_context
+        token = getattr(getattr(ctx, "meta", None), "progressToken", None)
+        start = time.monotonic()
+        ticks = 0
+        try:
+            while True:
+                done, _pending = await asyncio.wait({task}, timeout=hb)
+                if task in done:
+                    break
+                ticks += 1
+                elapsed = int(time.monotonic() - start)
+                if token is not None:
+                    try:
+                        await ctx.session.send_progress_notification(
+                            token, float(ticks), None,
+                            message=f"{name}: still working… {elapsed}s")
+                    except Exception:      # notification path is best-effort
+                        pass
+        except asyncio.CancelledError:
+            task.cancel()
+            raise
+        if ticks:                          # only log calls that actually ran long
+            self.svc.db.log_event(
+                "info", "mcp_aggregator",
+                f"{name} finished after {int(time.monotonic() - start)}s "
+                f"({ticks} heartbeat(s))")
+        return await task                  # result, or re-raise the tool's error
 
     # -- transport / mounting --------------------------------------------------
 
@@ -130,10 +173,17 @@ class MCPAggregator:
         for pname, servers in (cfg.profiles or {}).items():
             plan.append((pname, set(servers), f"{base}/p/{pname}"))
 
+        # Heartbeat needs an open SSE stream AND a persistent session to route
+        # server->client progress notifications, so it flips the transport off
+        # single-JSON stateless mode. Off = the simpler stateless JSON mode.
+        hb_on = (cfg.progress_heartbeat_seconds or 0) > 0
+        json_response = not hb_on
+        stateless = not hb_on
+
         for scope_name, server_filter, path in plan:
             server = self._build_server(scope_name, server_filter)
             manager = StreamableHTTPSessionManager(
-                app=server, json_response=True, stateless=True)
+                app=server, json_response=json_response, stateless=stateless)
             await stack.enter_async_context(manager.run())
             app.router.routes.append(Mount(path, app=self._guarded(manager, cfg)))
             self._endpoints.append({

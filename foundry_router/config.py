@@ -374,6 +374,12 @@ class MCPAggregatorConfig(BaseModel):
     # Named tool subsets ("MCP personas"): profile name -> list of MCP server
     # names to expose on that endpoint. The base path always exposes them all.
     profiles: dict[str, list[str]] = Field(default_factory=dict)
+    # Keep-alive for long tool calls (media generation). 0 = off: single JSON
+    # reply (default). >0 = the endpoints run in SSE-streaming mode and emit an
+    # MCP progress notification every N seconds while a tool runs, so the client
+    # sees "still working…" and the held-open connection never idles out. Needs
+    # a client that sends a progressToken and accepts SSE responses.
+    progress_heartbeat_seconds: int = 0
 
 
 class AppConfig(BaseModel):

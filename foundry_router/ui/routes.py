@@ -152,12 +152,28 @@ async def mcp_aggregator_status(request: Request):
     return _svc(request).mcp_aggregator.describe()
 
 
+@router.get("/admin/api/activity")
+async def activity(request: Request):
+    """Live snapshot of what's running right now: models with a call in flight,
+    MCP tools mid-execution (e.g. a multi-minute music generation), and which
+    models are resident in VRAM. The basis for the operator activity view and
+    load-aware decisions."""
+    svc = _svc(request)
+    try:
+        loaded = sorted(await svc.pool.loaded_models())
+    except Exception:
+        loaded = []
+    return {"models": svc.pool.active_calls(),
+            "tools": svc.mcp.active_calls(),
+            "loaded": loaded}
+
+
 @router.post("/admin/api/mcp-aggregator")
 async def set_mcp_aggregator(request: Request):
     svc = _svc(request)
     body = await request.json()
     allowed = {"enabled", "token", "token_header", "base_path", "advertise_url",
-               "profiles"}
+               "profiles", "progress_heartbeat_seconds"}
     updates = {k: v for k, v in body.items() if k in allowed}
 
     def mutate(raw):

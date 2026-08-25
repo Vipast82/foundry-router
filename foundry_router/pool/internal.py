@@ -54,6 +54,11 @@ class InternalPool(BackendPool):
         self._loaded: set[str] = set()   # VRAM-resident models, cached (see loaded_models)
         self._loaded_ts: float = 0.0
         self._LOADED_TTL = 8.0
+        # Live in-flight model calls: model -> {count, since}. Incremented around
+        # every chat/chat_stream so Foundry knows which models are actively
+        # generating right now (vs merely loaded) — the basis for activity
+        # reporting and, later, load-aware routing.
+        self._inflight: dict[str, dict] = {}
 
     # -- lifecycle ----------------------------------------------------------------
 
@@ -207,6 +212,33 @@ class InternalPool(BackendPool):
             "models": s.models, "last_error": s.last_error,
         } for s in self.backends.values()]
 
+    # -- in-flight tracking ------------------------------------------------------------
+
+    def _inflight_enter(self, model: str) -> None:
+        e = self._inflight.get(model)
+        if e:
+            e["count"] += 1
+        else:
+            self._inflight[model] = {"count": 1, "since": time.monotonic()}
+
+    def _inflight_exit(self, model: str) -> None:
+        e = self._inflight.get(model)
+        if not e:
+            return
+        e["count"] -= 1
+        if e["count"] <= 0:
+            self._inflight.pop(model, None)
+
+    def active_calls(self) -> list[dict]:
+        """Models with a call in flight right now: [{model, count, seconds}],
+        longest-running first. Distinct from loaded_models() (resident in VRAM
+        but possibly idle) — this is who is actually generating."""
+        now = time.monotonic()
+        return sorted(
+            ({"model": m, "count": e["count"], "seconds": round(now - e["since"], 1)}
+             for m, e in self._inflight.items()),
+            key=lambda x: -x["seconds"])
+
     # -- calls ------------------------------------------------------------------------
 
     async def chat(self, model: str, messages: list[dict], tools: Optional[list] = None,
@@ -216,23 +248,27 @@ class InternalPool(BackendPool):
         if not candidates:
             raise AllBackendsFailed(f"no backend serves model {model!r}")
         errors = []
-        for s in candidates:
-            try:
-                result = await s.protocol.chat(model, messages, tools=tools,
-                                               options=options, max_tokens=max_tokens,
-                                               keep_alive=keep_alive, think=think)
-                s.consecutive_failures = 0
-                return result, s.config.name
-            # ExceptionGroup: anyio TaskGroups can leak through httpcore on
-            # transport failures (observed live as an empty error string).
-            except (httpx.HTTPError, ProtocolError, OSError, ExceptionGroup) as e:
-                detail = describe_exception(e)
-                errors.append(f"{s.config.name}: {detail}")
-                if self._record_failure(s, detail):
-                    self._notify()
-                self.db.log_event("warning", "backend_pool",
-                                  f"call to {s.config.name} for {model} failed, trying next",
-                                  detail)
+        self._inflight_enter(model)
+        try:
+            for s in candidates:
+                try:
+                    result = await s.protocol.chat(model, messages, tools=tools,
+                                                   options=options, max_tokens=max_tokens,
+                                                   keep_alive=keep_alive, think=think)
+                    s.consecutive_failures = 0
+                    return result, s.config.name
+                # ExceptionGroup: anyio TaskGroups can leak through httpcore on
+                # transport failures (observed live as an empty error string).
+                except (httpx.HTTPError, ProtocolError, OSError, ExceptionGroup) as e:
+                    detail = describe_exception(e)
+                    errors.append(f"{s.config.name}: {detail}")
+                    if self._record_failure(s, detail):
+                        self._notify()
+                    self.db.log_event("warning", "backend_pool",
+                                      f"call to {s.config.name} for {model} failed, trying next",
+                                      detail)
+        finally:
+            self._inflight_exit(model)
         raise AllBackendsFailed(f"all backends failed for {model!r}: " + " | ".join(errors))
 
     async def chat_stream(self, model: str, messages: list[dict],
@@ -246,6 +282,7 @@ class InternalPool(BackendPool):
         if not candidates:
             raise AllBackendsFailed(f"no backend serves model {model!r}")
         s = candidates[0]
+        self._inflight_enter(model)
         try:
             async for chunk in s.protocol.chat_stream(model, messages, tools=tools,
                                                       options=options,
@@ -258,6 +295,8 @@ class InternalPool(BackendPool):
             if self._record_failure(s, detail):
                 self._notify()
             raise AllBackendsFailed(f"stream from {s.config.name} failed: {detail}") from e
+        finally:
+            self._inflight_exit(model)
 
     # -- convenience -------------------------------------------------------------------
 

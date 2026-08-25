@@ -96,6 +96,27 @@ own. Note this is *separate* from the `claude-cline-plan`/`act` LLM personas —
 those choose the model; this adds tools. Add tool names to `autoApprove` to skip
 the per-call approval prompt for trusted ones.
 
+## Long tool calls: heartbeat + activity
+
+Media tools (acestep-music, stable-audio) run for **minutes**. Two things help:
+
+- **Raise the per-server timeout.** Edit the slow server's connection and set
+  **timeout (s)** high enough (e.g. `1800`). The default 300s kills a music
+  generation mid-render.
+- **Progress heartbeat (opt-in).** In the aggregator panel set **heartbeat (s)**
+  to e.g. `20`, save, and **restart**. The endpoints then run in SSE-streaming
+  mode and emit an MCP progress notification every N seconds while a tool runs
+  ("still working… 45s"), so the connection never idles out and a client that
+  supports progress shows a live status instead of appearing hung. Off by
+  default (single-JSON mode). The heartbeat only surfaces in clients that send a
+  progressToken and render progress — verified against the MCP SDK; AnythingLLM
+  support may vary.
+
+**Activity view.** The aggregator panel's **Active now** line shows, live, which
+models are generating, which MCP tools are mid-execution (e.g. `acestep-music/
+generate_music · 90s`), and what's loaded in VRAM — so you can see a long job is
+actually running. Same data at `GET /admin/api/activity`.
+
 ## Notes & limits
 
 - **Tools appear in `@agent` mode only** — that's how AnythingLLM's MCP works.

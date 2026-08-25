@@ -438,11 +438,15 @@ async function tabBackends() {
         <label title="Externally reachable base URL of THIS Foundry, used to fill in the example client configs below (e.g. http://192.168.1.50:8080 or https://foundry.mydomain). Leave blank to use the configured server host:port.">public base URL</label>
         <input id="agg-url" size="34" placeholder="http://192.168.1.50:8080 (blank = server host:port)"></div>
       <div class="row"><label title="Profiles = curated tool subsets ('MCP personas'), each served at {base}/p/{name}. JSON object: profile name -> list of MCP server names. The base endpoint always exposes them all.">profiles (JSON obj)</label>
-        <input id="agg-profiles" size="70" value="{}" placeholder='{"music": ["acestep-music"], "voice": ["kokoro-tts","chatterbox-tts"]}'></div>
+        <input id="agg-profiles" size="60" value="{}" placeholder='{"music": ["acestep-music"], "voice": ["kokoro-tts","chatterbox-tts"]}'>
+        <label title="Keep-alive for long tool calls (music/audio generation). 0 = off (single JSON reply). >0 = endpoints stream (SSE) and emit a progress notification every N seconds while a tool runs, so the client sees 'still working…' and the connection never idles out. Needs a client that sends a progressToken (e.g. 20). Changing this needs a restart.">heartbeat (s)</label>
+        <input id="agg-hb" type="number" min="0" step="5" size="6" value="0" style="width:70px"></div>
       <div class="row"><button class="act primary" id="save-agg">Save aggregator</button>
         <button class="act" id="restart-foundry" title="Terminate and restart Foundry so endpoint changes take effect. Requires a supervisor (Docker restart policy / systemd) to bring it back.">↻ Restart Foundry</button>
         <span id="agg-restart" class="hint"></span></div>
       <div id="agg-endpoints" class="hint" style="margin-top:8px"></div>
+      <div class="hint" style="margin-top:8px"><b>Active now</b> (models generating · tools running · loaded in VRAM):</div>
+      <div id="activity-now" class="hint">…</div>
       <div class="row" style="gap:16px;align-items:flex-start;margin-top:6px">
         <div style="flex:1;min-width:0">
           <div class="hint">AnythingLLM — paste into <code>anythingllm_mcp_servers.json</code> (storage <code>plugins/</code> dir):
@@ -474,7 +478,27 @@ async function tabBackends() {
   $("#agg-hdr").value = agg.token_header || "X-API-KEY";
   $("#agg-base").value = agg.base_path || "/mcp";
   $("#agg-url").value = agg.advertise_url || "";
+  $("#agg-hb").value = agg.progress_heartbeat_seconds || 0;
   $("#agg-profiles").value = JSON.stringify(agg.profiles || {});
+  // Live activity poller — self-cleans when the tab is gone (element removed).
+  if (window._actTimer) clearInterval(window._actTimer);
+  const renderActivity = async () => {
+    const el = $("#activity-now");
+    if (!el) { clearInterval(window._actTimer); return; }
+    try {
+      const a = await api("activity");
+      const parts = [];
+      (a.models || []).forEach(m => parts.push(
+        `<span class="pill ok" title="model generating">▶ ${esc(m.model)} · ${m.seconds}s${m.count > 1 ? " ×" + m.count : ""}</span>`));
+      (a.tools || []).forEach(t => parts.push(
+        `<span class="pill" title="MCP tool running">⚙ ${esc(t.server)}/${esc(t.tool)} · ${t.seconds}s</span>`));
+      const loaded = (a.loaded || []).map(m => esc(m)).join(", ");
+      el.innerHTML = (parts.length ? parts.join(" ") : '<span class="hint">idle — nothing running</span>')
+        + (loaded ? `<div class="hint" style="margin-top:4px">loaded: ${loaded}</div>` : "");
+    } catch (e) { /* tab changed or transient */ }
+  };
+  window._actTimer = setInterval(renderActivity, 3000);
+  renderActivity();
   const renderAgg = async () => {
     try {
       const s = await api("mcp-aggregator");
@@ -504,6 +528,7 @@ async function tabBackends() {
                   token_header: $("#agg-hdr").value.trim() || "X-API-KEY",
                   base_path: $("#agg-base").value.trim() || "/mcp",
                   advertise_url: $("#agg-url").value.trim() || null,
+                  progress_heartbeat_seconds: parseInt($("#agg-hb").value, 10) || 0,
                   profiles};
     const tok = $("#agg-token").value;                 // blank = leave unchanged
     if (tok) body.token = tok;

@@ -98,6 +98,11 @@ class MCPManager:
         # searxng/crawl4ai use was invisible there; this makes it visible in the
         # MCP tab regardless of who called. Resets on restart (in-memory).
         self._usage: dict[str, dict] = {}
+        # In-flight tool calls right now: id -> {server, tool, since}. Lets the
+        # operator see a long media generation (acestep/stable-audio) is actively
+        # running rather than hung.
+        self._inflight: dict[int, dict] = {}
+        self._inflight_seq = 0
 
     def _record_usage(self, server: str, tool: str, ok: bool,
                       rate_limited: bool = False, error: str = "") -> None:
@@ -119,6 +124,15 @@ class MCPManager:
     def usage(self) -> dict[str, dict]:
         """Snapshot of live per-server tool usage (all callers)."""
         return {k: {**v, "tools": dict(v["tools"])} for k, v in self._usage.items()}
+
+    def active_calls(self) -> list[dict]:
+        """Tool calls in flight right now: [{server, tool, seconds}], longest
+        first — so a multi-minute media generation is visibly *running*."""
+        now = time.monotonic()
+        return sorted(
+            ({"server": v["server"], "tool": v["tool"],
+              "seconds": round(now - v["since"], 1)} for v in self._inflight.values()),
+            key=lambda x: -x["seconds"])
 
     def set_servers(self, servers: list[MCPServerConfig]) -> None:
         self.servers = {s.name: s for s in servers}
@@ -286,6 +300,10 @@ class MCPManager:
         # Operator config wins over the model (safety gate for sandboxes).
         effective_args = self._apply_call_defaults(server, arguments or {})
 
+        tid = self._inflight_seq
+        self._inflight_seq += 1
+        self._inflight[tid] = {"server": server, "tool": tool, "since": time.monotonic()}
+
         async def _call() -> str:
             async with self._session(server) as session:
                 result = await session.call_tool(tool, effective_args)
@@ -305,34 +323,37 @@ class MCPManager:
         # tool calls hammered on unrecovered). A 429 means "slower", so wait an
         # escalating amount before retrying rather than immediately re-429ing.
         seen_429 = False
-        for attempt in range(1, retries + 1):
-            await self._pace(server, cfg) if cfg else None
-            try:
-                # Per-server budget: media generation (ComfyUI/TTS/music) can run
-                # many minutes; a search tool should fail fast. Configurable per
-                # connection instead of one global assumption.
-                out = await asyncio.wait_for(_call(), timeout=timeout)
-                self._record_usage(server, tool, ok=True, rate_limited=seen_429)
-                return out
-            except asyncio.TimeoutError:
-                self._record_usage(server, tool, ok=False, rate_limited=seen_429,
-                                   error=f"timed out after {timeout}s")
-                raise RuntimeError(
-                    f"MCP tool {server}/{tool} timed out after {timeout}s "
-                    f"(raise timeout_seconds on this server's connection if its "
-                    f"jobs legitimately run longer)") from None
-            except Exception as e:  # noqa: BLE001
-                if _is_rate_limited(e):
-                    seen_429 = True
-                if _is_rate_limited(e) and attempt < retries:
-                    wait = backoff * attempt
-                    self.db.log_event(
-                        "warning", "mcp",
-                        f"{server}/{tool} rate-limited (429) — backing off "
-                        f"{wait:.0f}s before retry {attempt + 1}/{retries}",
-                        describe_exception(e))
-                    await asyncio.sleep(wait)
-                    continue
-                self._record_usage(server, tool, ok=False, rate_limited=seen_429,
-                                   error=describe_exception(e))
-                raise
+        try:
+            for attempt in range(1, retries + 1):
+                await self._pace(server, cfg) if cfg else None
+                try:
+                    # Per-server budget: media generation (ComfyUI/TTS/music) can run
+                    # many minutes; a search tool should fail fast. Configurable per
+                    # connection instead of one global assumption.
+                    out = await asyncio.wait_for(_call(), timeout=timeout)
+                    self._record_usage(server, tool, ok=True, rate_limited=seen_429)
+                    return out
+                except asyncio.TimeoutError:
+                    self._record_usage(server, tool, ok=False, rate_limited=seen_429,
+                                       error=f"timed out after {timeout}s")
+                    raise RuntimeError(
+                        f"MCP tool {server}/{tool} timed out after {timeout}s "
+                        f"(raise timeout_seconds on this server's connection if its "
+                        f"jobs legitimately run longer)") from None
+                except Exception as e:  # noqa: BLE001
+                    if _is_rate_limited(e):
+                        seen_429 = True
+                    if _is_rate_limited(e) and attempt < retries:
+                        wait = backoff * attempt
+                        self.db.log_event(
+                            "warning", "mcp",
+                            f"{server}/{tool} rate-limited (429) — backing off "
+                            f"{wait:.0f}s before retry {attempt + 1}/{retries}",
+                            describe_exception(e))
+                        await asyncio.sleep(wait)
+                        continue
+                    self._record_usage(server, tool, ok=False, rate_limited=seen_429,
+                                       error=describe_exception(e))
+                    raise
+        finally:
+            self._inflight.pop(tid, None)
