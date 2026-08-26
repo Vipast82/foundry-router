@@ -131,3 +131,5 @@ def test_activity_endpoint_reports_inflight(act_client):
     assert any(m["model"] == "qwen3.8:27b" for m in d["models"])
     assert any(t["tool"] == "generate_music" for t in d["tools"])
     assert "loaded" in d
+    assert isinstance(d["backends"], list)          # backend health for the Live tab
+    assert isinstance(d["recent"], list)            # recent finished requests tail

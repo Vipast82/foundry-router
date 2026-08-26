@@ -205,6 +205,7 @@ function clearLog(kind, label) {
 
 /* ------------------------------------------------------------------ tabs -- */
 const TABS = {
+  "Live":      tabLive,
   "Backends":  tabBackends,  "Models":   tabModels,   "Personas": tabPersonas,
   "Tools":     tabTools,     "Guardrails": tabGuardrails, "MCP":  tabMCP,
   "Ollama":    tabOllama,   "Research": tabResearch,  "Evals": tabEvals,
@@ -284,6 +285,56 @@ function enhanceSteppers() {
 function postRender() { wrapTables(); enhanceSteppers(); }
 
 /* -------------------------------------------------------------- backends -- */
+/* -------------------------------------------------------------- live view -- */
+async function tabLive() {
+  $("#main").innerHTML = `
+    <h2 style="margin-top:0">Live activity <span class="hint" id="live-ts"></span></h2>
+    <p class="hint">Auto-refreshing every 2s — what's generating and running right now, VRAM residency, backend health, and the last few finished requests.</p>
+    <div class="card"><div style="font-weight:600;margin-bottom:6px">▶ Models generating now</div><div id="live-models" class="hint">…</div></div>
+    <div class="card"><div style="font-weight:600;margin-bottom:6px">⚙ Tool calls / jobs running</div><div id="live-tools" class="hint">…</div>
+      <div class="hint" style="margin-top:4px">A long one (e.g. <code>acestep-music/generate_music</code>) staying here for minutes means a media job is actively rendering — not hung.</div></div>
+    <div class="card"><div style="font-weight:600;margin-bottom:6px">Loaded in VRAM</div><div id="live-loaded" class="hint">…</div></div>
+    <div class="card"><div style="font-weight:600;margin-bottom:6px">Backends</div><div id="live-backends"></div></div>
+    <div class="card"><div style="font-weight:600;margin-bottom:6px">Recently finished</div><div id="live-recent"></div></div>`;
+  if (window._liveTimer) clearInterval(window._liveTimer);
+  const paint = async () => {
+    if (!$("#live-models")) { clearInterval(window._liveTimer); return; }  // tab changed → self-clean
+    let a;
+    try { a = await api("activity"); } catch (e) { return; }
+    if (!$("#live-models")) return;
+    $("#live-ts").textContent = "· updated " + new Date().toLocaleTimeString();
+    $("#live-models").innerHTML = (a.models || []).length
+      ? a.models.map(m => `<span class="pill ok">▶ ${esc(m.model)} · ${m.seconds}s${m.count > 1 ? " ×" + m.count : ""}</span>`).join(" ")
+      : '<span class="hint">idle — no model generating</span>';
+    $("#live-tools").innerHTML = (a.tools || []).length
+      ? a.tools.map(t => `<span class="pill warn">⚙ ${esc(t.server)}/${esc(t.tool)} · ${t.seconds}s</span>`).join(" ")
+      : '<span class="hint">idle — no tool/job running</span>';
+    $("#live-loaded").innerHTML = (a.loaded || []).length
+      ? a.loaded.map(m => `<span class="pill">${esc(m)}</span>`).join(" ")
+      : '<span class="hint">nothing loaded</span>';
+    $("#live-backends").innerHTML = `<table><tr><th>name</th><th>type</th><th>health</th><th>models</th></tr>` +
+      (a.backends || []).map(b => `<tr><td>${esc(b.name)}</td><td class="nw">${esc(b.type)}</td>
+        <td>${b.healthy ? '<span class="pill ok">healthy</span>'
+             : '<span class="pill bad" title="' + esc(b.last_error) + '">down</span>'}</td>
+        <td class="nw">${b.models}</td></tr>`).join("") + `</table>`;
+    $("#live-recent").innerHTML = `<table><tr><th>time (UTC)</th><th>persona</th><th>mode</th><th>model(s)</th><th>status</th><th>time</th></tr>` +
+      (a.recent || []).map(r => {
+        let models = "";
+        try { models = ((JSON.parse(r.models_used || "[]") || []).map(x => x.model)).join(", "); } catch (e) {}
+        const st = r.status === "ok" ? '<span class="pill ok">ok</span>'
+          : (r.status === "error" ? '<span class="pill bad">error</span>'
+             : '<span class="pill warn">' + esc(r.status || "") + '</span>');
+        return `<tr><td class="nw">${esc((r.ts || "").replace("T", " ").slice(0, 19))}</td>
+          <td>${esc(r.persona || "")}</td><td class="nw">${esc(r.mode || "")}</td>
+          <td>${esc(models || r.client_model || "")}</td><td>${st}</td>
+          <td class="nw">${r.duration_ms != null ? (r.duration_ms / 1000).toFixed(1) + "s" : ""}</td></tr>`;
+      }).join("") + `</table>`;
+    wrapTables();
+  };
+  window._liveTimer = setInterval(paint, 2000);
+  await paint();
+}
+
 async function tabBackends() {
   const st = await api("status");
   const bh = st.brain.health || {};

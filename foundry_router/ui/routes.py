@@ -163,9 +163,20 @@ async def activity(request: Request):
         loaded = sorted(await svc.pool.loaded_models())
     except Exception:
         loaded = []
+    backends = [{"name": b["name"], "type": b["type"], "healthy": b["healthy"],
+                 "models": len(b.get("models") or []),
+                 "last_error": b.get("last_error") or ""}
+                for b in svc.pool.backend_status()]
+    # Recent finished requests (a short tail) so the Live view shows what just
+    # completed alongside what's running.
+    recent = svc.db.query(
+        "SELECT ts, persona, client_model, mode, status, duration_ms, models_used "
+        "FROM request_log ORDER BY id DESC LIMIT 8")
     return {"models": svc.pool.active_calls(),
             "tools": svc.mcp.active_calls(),
-            "loaded": loaded}
+            "loaded": loaded,
+            "backends": backends,
+            "recent": recent}
 
 
 @router.post("/admin/api/mcp-aggregator")
