@@ -29,6 +29,8 @@ from ..tools.sync import is_gateway_management_tool
 
 log = logging.getLogger(__name__)
 
+_POLL_WINDOW = 120.0   # seconds: identical calls within this window count toward the poll guard
+
 
 class MCPAggregator:
     """Builds and mounts the Streamable-HTTP MCP endpoints. Created once per
@@ -38,6 +40,7 @@ class MCPAggregator:
     def __init__(self, svc):
         self.svc = svc
         self._endpoints: list[dict] = []   # {scope, path, servers} for the UI
+        self._recent: dict = {}            # tool_key -> {count, first, last} for the poll guard
 
     # -- tool exposure ---------------------------------------------------------
 
@@ -66,8 +69,69 @@ class MCPAggregator:
             raise ValueError(f"unknown MCP tool {name!r}")
         if server_filter is not None and td.server not in server_filter:
             raise ValueError(f"tool {name!r} is not exposed on this profile")
-        return await self.svc.mcp.call_tool(
+        guard = self._poll_guard(name, arguments)
+        if guard is not None:
+            return guard
+        result = await self.svc.mcp.call_tool(
             td.server, td.mcp_tool or td.name, arguments or {})
+        self._record_call(name, arguments, result)
+        return result
+
+    # -- poll guard ------------------------------------------------------------
+
+    def _poll_guard(self, name: str, arguments) -> Optional[str]:
+        """If this exact (tool + args) call has already run `threshold` times in
+        the last window, DON'T execute it again — return a firm 'stop polling'
+        message. Breaks a client agent tight-polling a status tool while a job is
+        still in progress (it can't sleep, so it spins to its own call limit)."""
+        import json as _json
+        threshold = getattr(self.svc.config_store.config.mcp_aggregator,
+                            "poll_guard_threshold", 0) or 0
+        if threshold <= 0:
+            return None
+        try:
+            key = name + "|" + _json.dumps(arguments or {}, sort_keys=True, default=str)
+        except (TypeError, ValueError):
+            key = name + "|" + str(arguments)
+        now = time.monotonic()
+        rec = self._recent.get(key)
+        if not rec or now - rec["first"] > _POLL_WINDOW:
+            return None
+        if rec["count"] >= threshold:
+            self.svc.db.log_event(
+                "info", "mcp_aggregator",
+                f"poll guard: {name} called {rec['count']}× in "
+                f"{int(now - rec['first'])}s — returning stop-polling to the client")
+            last = (rec.get("last") or "").strip()
+            return (f"POLL GUARD: you have already called `{name}` {rec['count']} times "
+                    f"with these arguments in the last {int(now - rec['first'])} seconds "
+                    f"and the job is still in progress. STOP polling now. Tell the user "
+                    f"it is still running and to ask again in a minute — do NOT call this "
+                    f"tool again this turn."
+                    + (f"\nLast status: {last[:300]}" if last else ""))
+        return None
+
+    def _record_call(self, name: str, arguments, result: str) -> None:
+        import json as _json
+        threshold = getattr(self.svc.config_store.config.mcp_aggregator,
+                            "poll_guard_threshold", 0) or 0
+        if threshold <= 0:
+            return
+        try:
+            key = name + "|" + _json.dumps(arguments or {}, sort_keys=True, default=str)
+        except (TypeError, ValueError):
+            key = name + "|" + str(arguments)
+        now = time.monotonic()
+        rec = self._recent.get(key)
+        if not rec or now - rec["first"] > _POLL_WINDOW:
+            rec = {"count": 0, "first": now, "last": ""}
+        rec["count"] += 1
+        rec["last"] = result
+        self._recent[key] = rec
+        # opportunistic prune so the map can't grow unbounded
+        if len(self._recent) > 256:
+            self._recent = {k: v for k, v in self._recent.items()
+                            if now - v["first"] <= _POLL_WINDOW}
 
     def _build_server(self, scope_name: str, server_filter: Optional[set]):
         from mcp.server.lowlevel import Server

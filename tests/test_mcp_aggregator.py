@@ -94,6 +94,39 @@ async def test_dispatch_unknown_tool_raises():
         await agg._dispatch("nope__x", {}, None)
 
 
+async def test_poll_guard_stops_identical_repeat():
+    tools = [_tool("acestep-music__check_music_job", "acestep-music", "check")]
+    agg, svc = _agg(tools, poll_guard_threshold=3)
+    args = {"job_id": "abc"}
+    # first 3 identical calls execute for real
+    for _ in range(3):
+        out = await agg._dispatch("acestep-music__check_music_job", args, None)
+        assert out == "ran acestep-music/check"
+    assert len(svc.mcp.calls) == 3
+    # the 4th is short-circuited by the guard — NOT executed
+    out = await agg._dispatch("acestep-music__check_music_job", args, None)
+    assert "POLL GUARD" in out and "STOP polling" in out
+    assert len(svc.mcp.calls) == 3                       # still 3 — no new server call
+
+
+async def test_poll_guard_distinct_args_not_blocked():
+    tools = [_tool("acestep-music__check_music_job", "acestep-music", "check")]
+    agg, svc = _agg(tools, poll_guard_threshold=2)
+    for i in range(4):
+        out = await agg._dispatch("acestep-music__check_music_job",
+                                  {"job_id": f"job{i}"}, None)   # different args each time
+        assert out == "ran acestep-music/check"
+    assert len(svc.mcp.calls) == 4                       # all executed, none guarded
+
+
+async def test_poll_guard_off_when_zero():
+    tools = [_tool("acestep-music__check_music_job", "acestep-music", "check")]
+    agg, svc = _agg(tools, poll_guard_threshold=0)
+    for _ in range(6):
+        await agg._dispatch("acestep-music__check_music_job", {"job_id": "abc"}, None)
+    assert len(svc.mcp.calls) == 6                       # guard disabled
+
+
 async def test_dispatch_scope_blocks_out_of_profile_tool():
     tools = [_tool("kokoro-tts__say", "kokoro-tts", "say")]
     agg, _ = _agg(tools)

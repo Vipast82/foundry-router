@@ -196,7 +196,7 @@ async def set_mcp_aggregator(request: Request):
     svc = _svc(request)
     body = await request.json()
     allowed = {"enabled", "token", "token_header", "base_path", "advertise_url",
-               "profiles", "progress_heartbeat_seconds"}
+               "profiles", "progress_heartbeat_seconds", "poll_guard_threshold"}
     updates = {k: v for k, v in body.items() if k in allowed}
 
     def mutate(raw):

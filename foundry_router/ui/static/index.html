@@ -513,7 +513,9 @@ async function tabBackends() {
       <div class="row"><label title="Profiles = curated tool subsets ('MCP personas'), each served at {base}/p/{name}. JSON object: profile name -> list of MCP server names. The base endpoint always exposes them all.">profiles (JSON obj)</label>
         <input id="agg-profiles" size="60" value="{}" placeholder='{"music": ["acestep-music"], "voice": ["kokoro-tts","chatterbox-tts"]}'>
         <label title="Keep-alive for long tool calls (music/audio generation). 0 = off (single JSON reply). >0 = endpoints stream (SSE) and emit a progress notification every N seconds while a tool runs, so the client sees 'still working…' and the connection never idles out. Needs a client that sends a progressToken (e.g. 20). Changing this needs a restart.">heartbeat (s)</label>
-        <input id="agg-hb" type="number" min="0" step="5" size="6" value="0" style="width:70px"></div>
+        <input id="agg-hb" type="number" min="0" step="5" size="6" value="0" style="width:70px">
+        <label title="Poll guard: after this many identical (same tool + same args) calls within ~2 minutes, the aggregator stops executing them and returns a 'stop polling' message to the client. Defends against a client agent (AnythingLLM/Cline) tight-polling a status tool (e.g. check_music_job) to its own tool-call limit while a job is still running. 0 = off. Applies immediately, no restart.">poll guard</label>
+        <input id="agg-pg" type="number" min="0" step="1" value="4" style="width:60px"></div>
       <div class="row"><button class="act primary" id="save-agg">Save aggregator</button>
         <button class="act" id="restart-foundry" title="Terminate and restart Foundry so endpoint changes take effect. Requires a supervisor (Docker restart policy / systemd) to bring it back.">↻ Restart Foundry</button>
         <span id="agg-restart" class="hint"></span></div>
@@ -552,6 +554,7 @@ async function tabBackends() {
   $("#agg-base").value = agg.base_path || "/mcp";
   $("#agg-url").value = agg.advertise_url || "";
   $("#agg-hb").value = agg.progress_heartbeat_seconds || 0;
+  $("#agg-pg").value = agg.poll_guard_threshold != null ? agg.poll_guard_threshold : 4;
   $("#agg-profiles").value = JSON.stringify(agg.profiles || {});
   // Live activity poller — self-cleans when the tab is gone (element removed).
   if (window._actTimer) clearInterval(window._actTimer);
@@ -602,6 +605,7 @@ async function tabBackends() {
                   base_path: $("#agg-base").value.trim() || "/mcp",
                   advertise_url: $("#agg-url").value.trim() || null,
                   progress_heartbeat_seconds: parseInt($("#agg-hb").value, 10) || 0,
+                  poll_guard_threshold: parseInt($("#agg-pg").value, 10) || 0,
                   profiles};
     const tok = $("#agg-token").value;                 // blank = leave unchanged
     if (tok) body.token = tok;

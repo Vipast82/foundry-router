@@ -380,6 +380,12 @@ class MCPAggregatorConfig(BaseModel):
     # sees "still working…" and the held-open connection never idles out. Needs
     # a client that sends a progressToken and accepts SSE responses.
     progress_heartbeat_seconds: int = 0
+    # Poll guard: how many identical (same tool + same args) calls within a
+    # ~2-minute window before the aggregator STOPS executing them and returns a
+    # "stop polling" message instead. Defends against a client agent (e.g.
+    # AnythingLLM) tight-polling a status tool to its own tool-call limit while a
+    # job is still running. 0 = off.
+    poll_guard_threshold: int = 4
 
 
 class AppConfig(BaseModel):
