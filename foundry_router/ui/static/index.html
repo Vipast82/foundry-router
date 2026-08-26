@@ -293,7 +293,8 @@ async function tabLive() {
     <div class="card"><div style="font-weight:600;margin-bottom:6px">▶ Models generating now</div><div id="live-models" class="hint">…</div></div>
     <div class="card"><div style="font-weight:600;margin-bottom:6px">⚙ Tool calls / jobs running</div><div id="live-tools" class="hint">…</div>
       <div class="hint" style="margin-top:4px">A long one (e.g. <code>acestep-music/generate_music</code>) staying here for minutes means a media job is actively rendering — not hung.</div></div>
-    <div class="card"><div style="font-weight:600;margin-bottom:6px">Loaded in VRAM</div><div id="live-loaded" class="hint">…</div></div>
+    <div class="card"><div style="font-weight:600;margin-bottom:6px">🧠 Routing brain</div><div id="live-brain" class="hint">…</div></div>
+    <div class="card"><div style="font-weight:600;margin-bottom:6px">Loaded in VRAM</div><div id="live-loaded"></div></div>
     <div class="card"><div style="font-weight:600;margin-bottom:6px">Backends</div><div id="live-backends"></div></div>
     <div class="card"><div style="font-weight:600;margin-bottom:6px">Recently finished</div><div id="live-recent"></div></div>`;
   if (window._liveTimer) clearInterval(window._liveTimer);
@@ -309,9 +310,30 @@ async function tabLive() {
     $("#live-tools").innerHTML = (a.tools || []).length
       ? a.tools.map(t => `<span class="pill warn">⚙ ${esc(t.server)}/${esc(t.tool)} · ${t.seconds}s</span>`).join(" ")
       : '<span class="hint">idle — no tool/job running</span>';
-    $("#live-loaded").innerHTML = (a.loaded || []).length
-      ? a.loaded.map(m => `<span class="pill">${esc(m)}</span>`).join(" ")
-      : '<span class="hint">nothing loaded</span>';
+    // brain
+    const gb = b => b ? (b / 1073741824).toFixed(1) + " GB" : "";
+    const br = a.brain || {}, bh = br.health || {};
+    const bHealth = bh.healthy === true ? '<span class="pill ok">reachable</span>'
+      : (bh.healthy === false ? '<span class="pill bad" title="' + esc(bh.error || "") + '">unreachable</span>'
+         : '<span class="pill warn">unknown</span>');
+    const bLoaded = br.loaded === true
+      ? `<span class="pill ok">loaded${br.size_vram ? " · " + gb(br.size_vram) : ""}</span>`
+      : (br.loaded === false ? '<span class="pill">not loaded</span>'
+         : '<span class="hint">(load state n/a)</span>');
+    const bPresent = bh.model_present === false
+      ? ' <span class="pill bad" title="endpoint up but model not pulled">model missing</span>' : "";
+    $("#live-brain").innerHTML =
+      `<code>${esc(br.model || "?")}</code> <span class="hint">(${esc(br.provider || "")})</span> `
+      + bHealth + " " + bLoaded + bPresent;
+    // loaded in VRAM (per-model size)
+    const ld = a.loaded_detail || [];
+    $("#live-loaded").innerHTML = ld.length
+      ? `<table><tr><th>model</th><th>VRAM</th><th>backend</th></tr>` +
+        ld.map(m => `<tr><td>${esc(m.model)}</td><td class="nw">${gb(m.size_vram) || "—"}</td>
+          <td class="nw">${esc(m.backend || "")}</td></tr>`).join("") + `</table>`
+      : (a.loaded || []).length
+        ? (a.loaded || []).map(m => `<span class="pill">${esc(m)}</span>`).join(" ")
+        : '<span class="hint">nothing loaded</span>';
     $("#live-backends").innerHTML = `<table><tr><th>name</th><th>type</th><th>health</th><th>models</th></tr>` +
       (a.backends || []).map(b => `<tr><td>${esc(b.name)}</td><td class="nw">${esc(b.type)}</td>
         <td>${b.healthy ? '<span class="pill ok">healthy</span>'

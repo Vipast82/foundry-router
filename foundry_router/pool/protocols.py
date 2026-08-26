@@ -148,6 +148,23 @@ class OllamaProtocol(BaseProtocol):
         return [m.get("name") or m.get("model") for m in r.json().get("models", [])
                 if m.get("name") or m.get("model")]
 
+    async def loaded_models_detail(self) -> list[dict]:
+        """Per-model VRAM residency from /api/ps: name + size_vram (bytes in
+        GPU memory), total size, and expiry. What the Live view needs to show
+        how much VRAM each warm model is holding."""
+        r = await self.client.get(f"{self.url}/api/ps", timeout=10)
+        r.raise_for_status()
+        out = []
+        for m in r.json().get("models", []):
+            name = m.get("name") or m.get("model")
+            if not name:
+                continue
+            out.append({"model": name,
+                        "size_vram": m.get("size_vram") or 0,
+                        "size": m.get("size") or 0,
+                        "expires_at": m.get("expires_at")})
+        return out
+
     async def show_context_length(self, model: str) -> Optional[int]:
         """The model's real trained context window from its GGUF metadata —
         authoritative per-model ground truth Ollama already exposes (and which

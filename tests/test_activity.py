@@ -133,3 +133,28 @@ def test_activity_endpoint_reports_inflight(act_client):
     assert "loaded" in d
     assert isinstance(d["backends"], list)          # backend health for the Live tab
     assert isinstance(d["recent"], list)            # recent finished requests tail
+    assert isinstance(d["loaded_detail"], list)     # per-model VRAM residency
+    assert d["brain"]["model"] == "b"               # routing-brain block (per ACT_CONFIG)
+    assert "loaded" in d["brain"] and "health" in d["brain"]
+
+
+async def test_ollama_loaded_detail_parses_vram():
+    from foundry_router.pool.protocols import OllamaProtocol
+
+    class _Resp:
+        def raise_for_status(self):
+            pass
+
+        def json(self):
+            return {"models": [
+                {"name": "qwen3.8:27b", "size_vram": 18_000_000_000, "size": 19_000_000_000},
+                {"model": "gemma:2b", "size_vram": 2_000_000_000}]}
+
+    class _Client:
+        async def get(self, url, timeout=10):
+            return _Resp()
+
+    proto = OllamaProtocol("http://x", None, _Client())
+    by = {d["model"]: d for d in await proto.loaded_models_detail()}
+    assert by["qwen3.8:27b"]["size_vram"] == 18_000_000_000
+    assert by["gemma:2b"]["size_vram"] == 2_000_000_000

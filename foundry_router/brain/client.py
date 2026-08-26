@@ -61,6 +61,23 @@ class BrainClient:
     def model(self) -> str:
         return self.cfg.model
 
+    async def loaded_detail(self) -> dict:
+        """Is the brain model warm on its endpoint, and how much VRAM is it
+        holding? Queries the brain endpoint's /api/ps when it's an Ollama
+        provider (best-effort). Returns {loaded, size_vram} — loaded=None when
+        the endpoint can't report (non-ollama, or unreachable)."""
+        fn = getattr(self.protocol, "loaded_models_detail", None)
+        if fn is None:
+            return {"loaded": None, "size_vram": 0}
+        try:
+            base = (self.cfg.model or "").split(":")[0]
+            for m in await fn():
+                if m["model"] == self.cfg.model or m["model"].split(":")[0] == base:
+                    return {"loaded": True, "size_vram": m.get("size_vram") or 0}
+            return {"loaded": False, "size_vram": 0}
+        except Exception:
+            return {"loaded": None, "size_vram": 0}
+
     async def chat(self, messages: list[dict], tools: Optional[list[dict]] = None,
                    on_retry=None) -> ChatResult:
         """`on_retry` (optional zero-arg callable) fires when the malformed-

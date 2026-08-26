@@ -74,6 +74,11 @@ class BackendPool:  # interface — see internal.InternalPool for the implementa
         Empty for pools that don't track it."""
         return []
 
+    async def loaded_models_detail(self) -> list[dict]:
+        """Per-model VRAM residency: [{model, size_vram, size, backend, …}].
+        Empty for pools/backends that can't report it."""
+        return []
+
     def add_state_listener(self, callback) -> None:
         """callback() is invoked (sync) whenever a backend changes health or
         its model list changes — Tool Sync subscribes for immediate re-sync."""

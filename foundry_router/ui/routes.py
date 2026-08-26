@@ -163,6 +163,16 @@ async def activity(request: Request):
         loaded = sorted(await svc.pool.loaded_models())
     except Exception:
         loaded = []
+    try:
+        loaded_detail = await svc.pool.loaded_models_detail()
+    except Exception:
+        loaded_detail = []
+    # Brain: its own model/endpoint, cached health, and (Ollama brains) whether
+    # it's warm + how much VRAM it holds.
+    bcfg = svc.config_store.config.agent_brain
+    brain = {"model": bcfg.model, "provider": bcfg.provider,
+             "health": getattr(svc, "_brain_health", None),
+             **(await svc.brain.loaded_detail())}
     backends = [{"name": b["name"], "type": b["type"], "healthy": b["healthy"],
                  "models": len(b.get("models") or []),
                  "last_error": b.get("last_error") or ""}
@@ -175,6 +185,8 @@ async def activity(request: Request):
     return {"models": svc.pool.active_calls(),
             "tools": svc.mcp.active_calls(),
             "loaded": loaded,
+            "loaded_detail": loaded_detail,
+            "brain": brain,
             "backends": backends,
             "recent": recent}
 
