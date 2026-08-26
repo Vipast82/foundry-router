@@ -298,6 +298,10 @@ class Database:
             # cost guardrail, so it only escalates while quota allows. Direct
             # (Cline / AnythingLLM-agent) dispatch path.
             ("personas", "escalate_when_local_busy", "INTEGER DEFAULT 0"),
+            # Surface the tool-call trail (tool -> result excerpt, incl. a job id)
+            # in the answer forwarded to the client, so a Foundry-owned tool loop
+            # shares what ran and the id survives to the next turn.
+            ("personas", "expose_tool_trail", "INTEGER DEFAULT 0"),
             # Code-sandbox audit trail: the submitted code (call arguments) and
             # a flag marking calls that ran on an executes_code server.
             ("tool_call_log", "arguments", "TEXT"),

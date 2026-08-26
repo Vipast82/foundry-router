@@ -201,3 +201,58 @@ async def test_unknown_tool_hands_off_to_brain(tmp_path):
         brain_script=[_tool("return_to_user", answer="brain fallback")])
     events = [ev async for ev in runner.run_worker_tools(ctx)]
     assert [ev for ev in events if ev.kind == "answer"][0].text == "brain fallback"
+
+
+# -- poll guard + tool trail (async-job continuity) -------------------------------
+
+async def test_poll_guard_stops_identical_recall(tmp_path):
+    # Worker calls the SAME tool with identical args twice (a tight status poll).
+    # The 2nd call must NOT execute — the guard returns the current result and
+    # stops, so the loop never hits the cap / hands to the brain.
+    runner, ctx, pool, mcp = _make(tmp_path, worker_script=[
+        _tool("searxng_web_search", query="x"),
+        _tool("searxng_web_search", query="x"),      # identical re-poll
+        ChatResult(content="should never be reached"),
+    ])
+    events = [ev async for ev in runner.run_worker_tools(ctx)]
+    answers = [ev for ev in events if ev.kind == "answer"]
+    assert len(mcp.calls) == 1                                    # executed once, not twice
+    assert "search result" in answers[0].text                    # current result returned
+    thinks = " ".join(ev.text for ev in events if ev.kind == "think").lower()
+    assert "stopping the in-loop poll" in thinks
+    assert "to the brain" not in thinks                          # did NOT fall to the brain
+
+
+async def test_distinct_args_not_guarded(tmp_path):
+    # Same tool, DIFFERENT args → both run (not a redundant poll).
+    runner, ctx, pool, mcp = _make(tmp_path, worker_script=[
+        _tool("searxng_web_search", query="x"),
+        _tool("searxng_web_search", query="y"),
+        ChatResult(content="done"),
+    ])
+    events = [ev async for ev in runner.run_worker_tools(ctx)]
+    assert len(mcp.calls) == 2
+    assert [ev for ev in events if ev.kind == "answer"][0].text == "done"
+
+
+async def test_tool_trail_appended_when_enabled(tmp_path):
+    runner, ctx, pool, mcp = _make(tmp_path, worker_script=[
+        _tool("searxng_web_search", query="x"),
+        ChatResult(content="Here is the answer."),
+    ])
+    ctx.persona["expose_tool_trail"] = 1
+    events = [ev async for ev in runner.run_worker_tools(ctx)]
+    ans = [ev for ev in events if ev.kind == "answer"][0].text
+    assert ans.startswith("Here is the answer.")
+    assert "Tool activity" in ans
+    assert "search result" in ans                                # the job id / result excerpt
+
+
+async def test_no_trail_when_disabled(tmp_path):
+    runner, ctx, pool, mcp = _make(tmp_path, worker_script=[
+        _tool("searxng_web_search", query="x"),
+        ChatResult(content="Clean answer."),
+    ])
+    events = [ev async for ev in runner.run_worker_tools(ctx)]
+    ans = [ev for ev in events if ev.kind == "answer"][0].text
+    assert ans == "Clean answer."                                # no footer by default

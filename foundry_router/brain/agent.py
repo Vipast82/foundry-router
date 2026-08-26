@@ -84,6 +84,33 @@ def _json_list(value) -> list:
         return []
 
 
+def _tool_call_key(name: str, args) -> str:
+    """Stable identity of a tool call for the poll guard: same name + same
+    arguments = a redundant re-poll (a model 'checking status' in a tight loop
+    because it can't sleep)."""
+    import json as _json
+    try:
+        return name + "|" + _json.dumps(args, sort_keys=True, default=str)
+    except (TypeError, ValueError):
+        return name + "|" + str(args)
+
+
+def _tool_trail_footer(trail: list) -> str:
+    """A compact, transcript-friendly summary of the tool calls + result
+    excerpts run this turn — appended to the answer (opt-in per persona) so the
+    frontend and the NEXT turn can see e.g. a job id the model would otherwise
+    drop from its prose."""
+    if not trail:
+        return ""
+    lines = ["", "---", "_Tool activity:_"]
+    for label, res in trail:
+        excerpt = " ".join((res or "").split())
+        if len(excerpt) > 240:
+            excerpt = excerpt[:240] + "…"
+        lines.append(f"- `{label}` → {excerpt}")
+    return "\n".join(lines)
+
+
 def _filter_required_tags(ranked: list[dict], persona: Optional[dict]) -> list[dict]:
     """Persona required_tags (Foundry-Vision): when any candidate carries one
     of the required tags, the list is FILTERED to matches — a vision persona
@@ -582,7 +609,7 @@ class AgentRunner:
 
     def _build_graph(self, ctx: RequestContext, emit, system: str, specs: list[dict]):
         flags: dict[str, Any] = {"finalized": False, "last_tool_result": "",
-                                 "nudged": False}
+                                 "nudged": False, "tool_trail": []}
         effective = self.guardrails.effective(ctx.persona)
 
         async def brain_node(state: AgentState) -> AgentState:
@@ -759,7 +786,10 @@ class AgentRunner:
                                   f"({len(flags['last_tool_result'])} chars).")
                 answer = flags["last_tool_result"] or answer
             answer = await self._maybe_review(ctx, emit, answer, effective)
-            emit("answer", answer.strip() or "(empty answer)")
+            final = answer.strip() or "(empty answer)"
+            if (ctx.persona or {}).get("expose_tool_trail"):
+                final += _tool_trail_footer(flags["tool_trail"])
+            emit("answer", final)
             flags["finalized"] = True
             return "", True
 
@@ -996,6 +1026,7 @@ class AgentRunner:
         emit("think", f"MCP tool {tool.server}/{tool.mcp_tool} completed in "
                       f"{dur_ms / 1000:.1f}s ({len(out)} chars).")
         flags["last_tool_result"] = out  # media artifacts (URLs) forward via use_last_result
+        flags["tool_trail"].append((tool.mcp_tool, out))   # answer footer (opt-in)
         flags["last_worker_local"] = False  # MCP results aren't judged
         return out[:self.brain.cfg.mcp_result_limit_chars] or "(empty MCP result)", False
 
@@ -1590,6 +1621,9 @@ class AgentRunner:
                      if m.get("role") != "system"]
         images = self._attached_images(ctx)
         cap = int(self.brain.cfg.worker_tool_max_steps or 6)
+        expose_trail = bool((ctx.persona or {}).get("expose_tool_trail"))
+        trail: list = []            # (label, result excerpt) for the answer footer
+        seen_calls: dict = {}       # tool_call_key -> result, for the poll guard
 
         async def hand_to_brain(reason: str):
             yield AgentEvent("think", f"{reason} — handing this request to the brain "
@@ -1690,7 +1724,10 @@ class AgentRunner:
                     clean, effective)
                 for ev in buf:
                     yield ev
-                yield AgentEvent("answer", clean.strip() or "(worker returned empty output)")
+                final = clean.strip() or "(worker returned empty output)"
+                if expose_trail:
+                    final += _tool_trail_footer(trail)
+                yield AgentEvent("answer", final)
                 return
 
             # The worker asked to call tools — execute each through the SAME MCP
@@ -1703,6 +1740,22 @@ class AgentRunner:
                                                "arguments": tc["arguments"]}}
                                  for tc in result.tool_calls]})
             for tc in result.tool_calls:
+                # Poll guard: an identical (name+args) re-call is a tight status
+                # poll the model is spinning on because it can't sleep. Stop the
+                # loop and return the current status to the user instead of
+                # burning steps toward the cap (which would hand off to the brain
+                # and risk a duplicate job). The user re-checks in a NEXT turn.
+                key = _tool_call_key(tc["name"], tc.get("arguments") or {})
+                if key in seen_calls:
+                    yield AgentEvent("think",
+                                     f"{worker} re-called {tc['name']} with identical "
+                                     f"arguments — stopping the in-loop poll and "
+                                     f"returning the current status to the user.")
+                    answer = seen_calls[key] or "(no new result yet — still running)"
+                    if expose_trail:
+                        answer += _tool_trail_footer(trail)
+                    yield AgentEvent("answer", answer.strip())
+                    return
                 tool = by_name.get(tc["name"])
                 if tool is None:
                     self.model_registry.record_tool_call(worker, ok=False)
@@ -1737,6 +1790,8 @@ class AgentRunner:
                                             caller=worker, arguments=tc["arguments"],
                                             executes_code=ex_code)
                 self.model_registry.record_tool_call(worker, ok=True)
+                seen_calls[key] = out                 # for the poll guard
+                trail.append((tool.mcp_tool, out))    # for the answer footer
                 yield AgentEvent("think", f"{tool.server}/{tool.mcp_tool} returned "
                                           f"{len(out)} chars in {dur}ms.")
                 messages.append({"role": "tool", "name": tc["name"],

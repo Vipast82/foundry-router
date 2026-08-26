@@ -20,7 +20,7 @@ PERSONA_FIELDS = ["description", "benchmark_category", "local_bias_strength",
                   "context_window", "prefer_loaded", "review_enabled",
                   "review_model", "review_prefilter", "client_compat",
                   "output_style", "model_allowlist", "reasoning_effort",
-                  "escalate_when_local_busy", "enabled"]
+                  "escalate_when_local_busy", "expose_tool_trail", "enabled"]
 
 
 class PersonaStore:
