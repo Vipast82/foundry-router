@@ -459,8 +459,10 @@ async function tabBackends() {
       <button class="act" id="save-mode">Switch pool mode</button></div>
     </div>
     <div class="card">
-      <h2 style="margin-top:0">Agent Brain</h2>
-      <p class="hint">The model that makes routing decisions on every request (design doc §4.2).</p>
+      <h2 style="margin-top:0">Agent Brain — routing model</h2>
+      <p class="hint">JUST the routing brain's own model/endpoint — the small LLM that makes routing
+      decisions on every request (design doc §4.2). Backend-specific. The global knobs that apply
+      to <b>every</b> request live in the next section.</p>
       <div class="row"><label>provider</label>
         <select id="brain-provider">${["ollama","meridian","openrouter"].map(p =>
           `<option ${p === st.brain.provider ? "selected" : ""}>${p}</option>`).join("")}</select>
@@ -468,28 +470,38 @@ async function tabBackends() {
         <label>model</label><input id="brain-model" size="24" value="${esc(st.brain.model)}"></div>
       <div class="row"><button class="act" id="test-brain"
         title="Free reachability probe of the brain endpoint (GET its model list — no generation). The brain runs on EVERY request; if it's down, routing silently degrades to the static fallback rule.">Test brain</button>
-        <span id="brain-health" class="hint"></span></div>
-      <p class="hint">Context budget — size these to the brain's real headroom (a 6GB local
-      brain with num_ctx ~6144 has ~1500 tokens free after system prompt + tool schemas;
-      a Claude-class brain can take far more). Tool-result limits only cap the preview the
-      brain sees — the full output still reaches the user via use_last_result. Applies live.</p>
+        <span id="brain-health" class="hint"></span>
+        <button class="act primary" id="save-brain-model">Save brain model</button></div>
+    </div>
+    <div class="card">
+      <h2 style="margin-top:0">Global settings <span class="hint" style="font-weight:normal">— apply to EVERY request, across all backends (not brain-specific)</span></h2>
+      <p class="hint">These govern worker dispatch, streaming, keep-alive and reasoning for all
+      requests regardless of which backend answers. Applies live. (Context/limit budgets: a 6GB
+      local brain with num_ctx ~6144 has ~1500 tokens free after system prompt + tool schemas;
+      tool-result limits only cap the preview the brain sees — the full output still reaches the
+      user via use_last_result.)</p>
+      <div class="hint" style="font-weight:600;margin:2px 0">Limits / budget</div>
       <div class="row">
         <label>tool_result_limit_chars</label><input id="brain-trl" type="number" size="8">
         <label>mcp_result_limit_chars</label><input id="brain-mrl" type="number" size="8">
-        <label>worker_max_tokens</label><input id="brain-wmt" type="number" size="8">
+        <label title="Ollama output cap (num_predict) + Claude/OpenAI max_tokens — the ceiling on a worker's generated tokens. Prevents a runaway (esp. with heavy reasoning).">worker_max_tokens</label><input id="brain-wmt" type="number" size="8">
         <label title="Caps what the brain sees of a large pasted user message before routing — the worker still receives the complete original (include_full_user_message)">user_input_preview_chars</label>
-        <input id="brain-uip" type="number" size="8">
-        <label title="While a worker/brain/MCP call is in flight, emit a 'still working' narration line every N seconds so reverse proxies and clients never mistake a slow request (failover + cold model load) for a dead one. 0 disables.">heartbeat_seconds</label>
+        <input id="brain-uip" type="number" size="8"></div>
+      <div class="hint" style="font-weight:600;margin:6px 0 2px">Keep-alive / streaming</div>
+      <div class="row">
+        <label title="While a worker/brain/MCP call is in flight, emit a 'still working' narration line every N seconds so reverse proxies and clients never mistake a slow request (failover + cold model load) for a dead one. 0 disables. (AGENT-mode narration.)">heartbeat_seconds (agent)</label>
         <input id="brain-hb" type="number" size="6">
         <label title="keep_alive sent to Ollama workers so a heavy model (e.g. a 27B at 131K ctx ≈ 22GB) stays RESIDENT between turns instead of cold-loading ~22GB every request — the main cause of multi-minute latency / proxy 504s for Cline. Blank = backend default (~5min). Try 30m, 24h, or -1 (never unload).">worker_keep_alive</label>
         <input id="brain-ka" size="7" placeholder="30m">
-        <label title="Stream direct-dispatch (Cline/coding clients) live: forward the worker's tokens as they generate — each chunk proves the backend is working, resets the read timeout (no total-time wall), and the client shows it typing in real time. Ollama backends only; Claude falls back to blocking. OFF = one blocking call, full answer at the end.">direct_stream</label>
+        <label title="Stream direct-dispatch (Cline/coding clients) live: forward the worker's tokens as they generate — each chunk proves the backend is working, resets the read timeout (no total-time wall), and the client shows it typing in real time. Ollama backends only; Claude falls back to blocking. OFF = one blocking call, full answer at the end. (DIRECT/Cline path.)">direct_stream</label>
         <input type="checkbox" id="brain-ds">
-        <label title="Direct-stream keep-alive (seconds). While streaming to Cline, if the backend sends no chunk for this long (silent prompt-eval, or a model buffering its reasoning), Foundry injects a small 'still working… Ns' thinking chunk — so the client shows live progress instead of a frozen 'Thinking…', and the bytes reset idle timers (client read timeout, proxy) so long generations aren't killed. 0 = off. Needs direct_stream on.">ds heartbeat (s)</label>
+        <label title="Direct-stream keep-alive (seconds). While streaming to Cline, if the backend sends no chunk for this long (silent prompt-eval, or a model buffering its reasoning), Foundry injects a small 'still working… Ns' thinking chunk — so the client shows live progress instead of a frozen 'Thinking…', and the bytes reset idle timers (client read timeout, proxy) so long generations aren't killed. 0 = off. Needs direct_stream on. (DIRECT/Cline path.)">ds heartbeat (s)</label>
         <input id="brain-dshb" type="number" min="0" step="5" value="0" style="width:70px">
-        <label title="AGENT mode (Foundry-Chat etc.): stream the worker's REASONING (its thinking tokens) live as narration while it generates, but BUFFER the answer so the brain still reviews it (refusal/permissive fallback, outcome-judge) before showing it. Watch the model reason in real time; the final answer stays gated. Ollama workers only.">stream_worker_reasoning</label>
-        <input type="checkbox" id="brain-swr">
-        <label title="Reasoning effort sent to every thinking-capable worker as Ollama's think field (e.g. Qwen3 low/medium/high). Applied ONLY to models that report a thinking capability — non-reasoning locals are untouched. Blank = leave each model at its own default; off = disable thinking where supported.">reasoning_effort</label>
+        <label title="AGENT mode (Foundry-Chat etc.): stream the worker's REASONING (its thinking tokens) live as narration while it generates, but BUFFER the answer so the brain still reviews it (refusal/permissive fallback, outcome-judge) before showing it. Watch the model reason in real time; the final answer stays gated. Ollama workers only. (AGENT path.)">stream_worker_reasoning</label>
+        <input type="checkbox" id="brain-swr"></div>
+      <div class="hint" style="font-weight:600;margin:6px 0 2px">Reasoning</div>
+      <div class="row">
+        <label title="Reasoning effort sent to every thinking-capable worker as Ollama's think field (low/medium/high/max). Applied ONLY to models that report a thinking capability — non-reasoning locals are untouched. Blank = leave each model at its own default; off = disable thinking where supported. Per-persona reasoning_effort overrides this.">reasoning_effort (default)</label>
         <select id="brain-re">
           <option value="">(model default)</option>
           <option value="off">off</option>
@@ -498,7 +510,7 @@ async function tabBackends() {
           <option value="high">high</option>
           <option value="max">max</option>
         </select>
-        <button class="act primary" id="save-brain">Save brain</button></div>
+        <button class="act primary" id="save-global">Save global settings</button></div>
     </div>
     <div class="card">
       <h2 style="margin-top:0" title="Foundry-MCP: re-expose Foundry's own connected MCP tools as a single Streamable-HTTP MCP server. Point AnythingLLM (or any MCP client) at it so it gains ALL of Foundry's tools alongside its own local MCP servers. The client owns the tool loop; Foundry executes the calls.">Foundry-MCP aggregator</h2>
@@ -753,10 +765,12 @@ async function tabBackends() {
     run(api("config/backends", {method: "POST", body: JSON.parse($("#backends-json").value)}));
   $("#save-mode").onclick = () =>
     run(api("config/pool_mode", {method: "POST", body: {mode: $("#pool-mode").value}}));
-  $("#save-brain").onclick = () =>
+  $("#save-brain-model").onclick = () =>
     run(api("config/brain", {method: "POST", body: {
       provider: $("#brain-provider").value, endpoint: $("#brain-endpoint").value,
-      model: $("#brain-model").value,
+      model: $("#brain-model").value}}));
+  $("#save-global").onclick = () =>
+    run(api("config/brain", {method: "POST", body: {
       tool_result_limit_chars: +$("#brain-trl").value,
       mcp_result_limit_chars: +$("#brain-mrl").value,
       worker_max_tokens: +$("#brain-wmt").value,
