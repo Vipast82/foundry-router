@@ -505,6 +505,11 @@ async function tabBackends() {
         <input id="brain-dshb" type="number" min="0" step="5" value="0" style="width:70px">
         <label title="AGENT mode (Foundry-Chat etc.): stream the worker's REASONING (its thinking tokens) live as narration while it generates, but BUFFER the answer so the brain still reviews it (refusal/permissive fallback, outcome-judge) before showing it. Watch the model reason in real time; the final answer stays gated. Ollama workers only. (AGENT path.)">stream_worker_reasoning</label>
         <input type="checkbox" id="brain-swr"></div>
+      <div class="row tight">
+        <label title="Backend read timeout (seconds): the MAX gap Foundry waits for the next streamed token from a backend (Ollama/Claude) before failing with ReadTimeout. Too low + heavy prompt-eval or reasoning = dropped streams. Old installs default to 300; try 1800. Baked into the HTTP client at startup, so a change needs a Restart (button below the aggregator).">backend read timeout (s)</label>
+        <input id="brain-rto" type="number" min="30" step="60" style="width:90px">
+        <button class="act" id="save-rto" title="Save the backend read timeout (requires a restart to apply)">Save timeout</button>
+        <span id="rto-note" class="hint"></span></div>
       <div class="hint" style="font-weight:600;margin:6px 0 2px">Reasoning</div>
       <div class="row tight">
         <label title="Reasoning effort sent to every thinking-capable worker as Ollama's think field (low/medium/high/max). Applied ONLY to models that report a thinking capability — non-reasoning locals are untouched. Blank = leave each model at its own default; off = disable thinking where supported. Per-persona reasoning_effort overrides this.">reasoning_effort (default)</label>
@@ -573,6 +578,7 @@ async function tabBackends() {
   $("#brain-re").value = (cfg.agent_brain.reasoning_effort === "xhigh" ? "max"
     : cfg.agent_brain.reasoning_effort) || "";
   $("#brain-samp").value = JSON.stringify(cfg.agent_brain.sampling_defaults || {});
+  $("#brain-rto").value = (cfg.backend_pool && cfg.backend_pool.request_timeout_seconds) || 900;
   // Foundry-MCP aggregator
   const agg = cfg.mcp_aggregator || {};
   $("#agg-en").checked = !!agg.enabled;
@@ -792,6 +798,15 @@ async function tabBackends() {
       stream_worker_reasoning: $("#brain-swr").checked,
       reasoning_effort: $("#brain-re").value.trim() || null,
       sampling_defaults: JSON.parse($("#brain-samp").value || "{}")}}));
+  $("#save-rto").onclick = async () => {
+    try {
+      const r = await api("config/backend-timeout", {method: "POST",
+        body: {request_timeout_seconds: parseInt($("#brain-rto").value, 10) || 900}});
+      toast("Saved");
+      $("#rto-note").textContent = r.restart_required
+        ? "saved — Restart Foundry to apply" : "saved";
+    } catch (e) { toast(e.message, true); }
+  };
 }
 
 /* ---------------------------------------------------------------- models -- */

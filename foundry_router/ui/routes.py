@@ -147,6 +147,28 @@ async def set_brain(request: Request):
     return {"ok": True}
 
 
+@router.post("/admin/api/config/backend-timeout")
+async def set_backend_timeout(request: Request):
+    """The httpx read timeout for backend (Ollama/Claude) calls — the max gap
+    Foundry waits for the next streamed token before giving up (ReadTimeout).
+    Baked into the shared client at startup, so a change needs a restart."""
+    svc = _svc(request)
+    body = await request.json()
+    try:
+        secs = int(body.get("request_timeout_seconds"))
+    except (TypeError, ValueError):
+        return JSONResponse({"error": "request_timeout_seconds must be an integer"},
+                            status_code=400)
+    if secs < 30:
+        return JSONResponse({"error": "request_timeout_seconds must be >= 30"},
+                            status_code=400)
+
+    def mutate(raw):
+        raw.setdefault("backend_pool", {})["request_timeout_seconds"] = secs
+    svc.config_store.save(mutate)
+    return {"ok": True, "restart_required": True}
+
+
 @router.get("/admin/api/mcp-aggregator")
 async def mcp_aggregator_status(request: Request):
     """Current Foundry-MCP endpoints + a paste-ready AnythingLLM config block."""
