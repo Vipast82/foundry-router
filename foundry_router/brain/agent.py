@@ -296,6 +296,8 @@ class AgentRunner:
         self.meridian_usage = meridian_usage
         self.research = research
         self._req_effort = None   # per-request reasoning_effort (persona override)
+        self._req_sampling = None  # per-request merged sampling options
+        self._req_format = None    # per-request structured-output format
 
     # ------------------------------------------------------------------ run --
 
@@ -304,6 +306,12 @@ class AgentRunner:
         # Persona-level reasoning_effort overrides the global default for this
         # request's workers (see _think_for). Raw string; None falls through.
         self._req_effort = (ctx.persona or {}).get("reasoning_effort")
+        # Merged sampling options (global < persona) + structured-output format
+        # for this request's workers.
+        from .. import sampling
+        self._req_sampling = sampling.resolve_options(
+            getattr(self.brain.cfg, "sampling_defaults", {}), ctx.persona, None)
+        self._req_format = sampling.resolve_format(ctx.persona)
 
         def emit(kind: str, text: str = "") -> None:
             queue.put_nowait(AgentEvent(kind, text))
@@ -1164,9 +1172,11 @@ class AgentRunner:
         if images:
             message["images"] = images  # protocols translate per wire format
         # num_ctx is Ollama-specific; other backends ignore it, but only inject
-        # where it's meaningful.
-        options = ({"num_ctx": num_ctx}
-                   if num_ctx and info and info.get("type") == "ollama" else None)
+        # where it's meaningful. Sampling defaults (global<persona) ride along.
+        options = dict(self._req_sampling or {})
+        if num_ctx and info and info.get("type") == "ollama":
+            options["num_ctx"] = num_ctx
+        options = options or None
         # Stream the worker's REASONING live (agent mode) while BUFFERING the
         # answer: emit native thinking tokens as narration as they generate, but
         # accumulate content and return it whole — so the brain still reviews the
@@ -1182,7 +1192,7 @@ class AgentRunner:
                 pt = ct = eval_ns = load_ns = 0
                 async for chunk in self.pool.chat_stream(
                         model_id, [message], options=options,
-                        think=self._think_for(model_id)):
+                        think=self._think_for(model_id), fmt=self._req_format):
                     th = chunk.get("thinking") or ""
                     if th:
                         think_parts.append(th)
@@ -1206,7 +1216,7 @@ class AgentRunner:
                 result, backend = await self.pool.chat(
                     model_id, [message], options=options,
                     max_tokens=max_tokens or self.brain.cfg.worker_max_tokens,
-                    think=self._think_for(model_id))
+                    think=self._think_for(model_id), fmt=self._req_format)
         except AllBackendsFailed as e:
             # Reliability signal: a failed/timed-out dispatch marks the model
             # down as a within-tier score multiplier (observed, deployment-real).
@@ -1637,9 +1647,13 @@ class AgentRunner:
         # tool-loop worker doesn't truncate a long conversation at the default.
         wt_num_ctx = self._num_ctx_for(ctx.persona, worker)
         wt_info = self.pool.backend_info(worker)
-        wt_options = ({"num_ctx": wt_num_ctx}
-                      if wt_num_ctx and wt_info and wt_info.get("type") == "ollama"
-                      else None)
+        # Sampling defaults ride along; num_ctx added for Ollama. No structured
+        # `format` here — this is a tool-calling loop, and forcing JSON output
+        # would break the worker's tool_calls.
+        wt_options = dict(self._req_sampling or {})
+        if wt_num_ctx and wt_info and wt_info.get("type") == "ollama":
+            wt_options["num_ctx"] = wt_num_ctx
+        wt_options = wt_options or None
         # Stream the worker's REASONING live (opt-in, Ollama only): yield its
         # native thinking tokens as they generate, buffering content + tool_calls
         # so the loop still gets the whole turn to act on.

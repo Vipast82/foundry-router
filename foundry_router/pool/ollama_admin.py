@@ -149,6 +149,17 @@ class OllamaAdmin:
         r.raise_for_status()
         return r.json().get("models", []) or []
 
+    async def version(self, backend: str) -> str:
+        """The Ollama server version (/api/version) — a diagnostic so the UI can
+        show which build each backend is running. Empty string on any failure."""
+        try:
+            r = await self.client.get(f"{self._url(backend)}/api/version",
+                                      timeout=_QUICK_TIMEOUT)
+            r.raise_for_status()
+            return (r.json() or {}).get("version") or ""
+        except Exception:
+            return ""
+
     async def loaded(self, backend: str) -> list[str]:
         """Model names currently resident in VRAM on this backend (/api/ps)."""
         r = await self.client.get(f"{self._url(backend)}/api/ps", timeout=_QUICK_TIMEOUT)

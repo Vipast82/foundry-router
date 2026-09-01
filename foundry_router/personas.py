@@ -20,7 +20,8 @@ PERSONA_FIELDS = ["description", "benchmark_category", "local_bias_strength",
                   "context_window", "prefer_loaded", "review_enabled",
                   "review_model", "review_prefilter", "client_compat",
                   "output_style", "model_allowlist", "reasoning_effort",
-                  "escalate_when_local_busy", "expose_tool_trail", "enabled"]
+                  "escalate_when_local_busy", "expose_tool_trail",
+                  "sampling_options", "output_format", "enabled"]
 
 
 class PersonaStore:
@@ -45,7 +46,7 @@ class PersonaStore:
         now = utcnow()
         for k in ("escalation_triggers", "preferred_mcp_tools", "guardrail_overrides",
                   "pinned_models", "required_tags", "selection_weights",
-                  "client_compat", "model_allowlist"):
+                  "client_compat", "model_allowlist", "sampling_options"):
             if k in fields and not isinstance(fields[k], (str, type(None))):
                 fields[k] = json.dumps(fields[k])
         fields = {k: v for k, v in fields.items() if k in PERSONA_FIELDS}

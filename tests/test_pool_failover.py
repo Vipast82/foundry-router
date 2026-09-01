@@ -23,7 +23,7 @@ class FakeProtocol:
         return self.models
 
     async def chat(self, model, messages, tools=None, options=None,
-                   keep_alive=None, max_tokens=4096, think=None):
+                   keep_alive=None, max_tokens=4096, think=None, fmt=None):
         self.calls += 1
         if self.fail:
             raise ProtocolError(f"{self.name} down")

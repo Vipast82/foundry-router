@@ -109,6 +109,12 @@ class AgentBrainConfig(BaseModel):
     # Applied ONLY to models whose /api/show reports a `thinking` capability, so
     # it never breaks non-reasoning locals. One backend-wide knob for the fleet.
     reasoning_effort: Optional[str] = None
+    # Global default sampling/generation options merged into every worker call
+    # (Ollama `options`: temperature, top_p, top_k, min_p, repeat_penalty, seed,
+    # stop, …). A persona's sampling_options override these, and a client's
+    # explicit options override both. Empty = send nothing (each model's own
+    # defaults). "Best default, then tweak per persona."
+    sampling_defaults: dict = Field(default_factory=dict)
     # Worker-side tool calling (opt-out default): when the selected worker owns
     # the MCP tool loop itself, this bounds its tool-call turns before the
     # request is handed to the brain to finish — mirrors the brain's own step

@@ -51,7 +51,7 @@ class RecordingPool:
     def backend_info(self, model):
         return {"name": "b", "type": "ollama", "url": "http://x"} if model == "m" else None
 
-    async def chat(self, model, messages, tools=None, options=None, max_tokens=4096, think=None):
+    async def chat(self, model, messages, tools=None, options=None, max_tokens=4096, think=None, fmt=None):
         self.prompts.append(messages[-1]["content"])
         return ChatResult(content=f"The marker is {MARKER}.",
                           prompt_tokens=10, completion_tokens=10), "b"

@@ -102,12 +102,12 @@ class BaseProtocol:
 
     async def chat(self, model: str, messages: list[dict], tools: Optional[list[dict]] = None,
                    options: Optional[dict] = None, keep_alive: Any = None,
-                   max_tokens: int = 4096, think: Any = None) -> ChatResult:
+                   max_tokens: int = 4096, think: Any = None, fmt: Any = None) -> ChatResult:
         raise NotImplementedError
 
     async def chat_stream(self, model: str, messages: list[dict], tools=None,
                           options: Optional[dict] = None, keep_alive=None,
-                          think=None, max_tokens=None) -> AsyncIterator[dict]:
+                          think=None, max_tokens=None, fmt=None) -> AsyncIterator[dict]:
         """Token-level streaming (no tools) — used only for the raw-model
         passthrough path. Default implementation degrades to one chunk."""
         result = await self.chat(model, messages, options=options)
@@ -190,7 +190,7 @@ class OllamaProtocol(BaseProtocol):
         return [str(c) for c in caps] if isinstance(caps, list) else []
 
     def _payload(self, model, messages, tools, options, keep_alive, stream,
-                 think=None, max_tokens=None):
+                 think=None, max_tokens=None, fmt=None):
         # Strip canonical-format fields Ollama doesn't know; keep tool_calls
         # (it accepts them on assistant messages) but drop OpenAI-style ids.
         msgs = []
@@ -226,12 +226,16 @@ class OllamaProtocol(BaseProtocol):
         # layer only passes it for models that support thinking.
         if think is not None:
             payload["think"] = think
+        # Structured output: Ollama's top-level `format` — "json" or a JSON
+        # schema object. Constrains the model to valid JSON (tool/data reliability).
+        if fmt is not None:
+            payload["format"] = fmt
         return payload
 
     async def chat(self, model, messages, tools=None, options=None,
-                   keep_alive=None, max_tokens=4096, think=None) -> ChatResult:
+                   keep_alive=None, max_tokens=4096, think=None, fmt=None) -> ChatResult:
         payload = self._payload(model, messages, tools, options, keep_alive,
-                                stream=False, think=think, max_tokens=max_tokens)
+                                stream=False, think=think, max_tokens=max_tokens, fmt=fmt)
         r = await self.client.post(f"{self.url}/api/chat", json=payload)
         if r.status_code >= 400:
             raise ProtocolError(f"ollama {self.url} HTTP {r.status_code}: {r.text[:300]}")
@@ -259,13 +263,14 @@ class OllamaProtocol(BaseProtocol):
         )
 
     async def chat_stream(self, model, messages, tools=None, options=None,
-                          keep_alive=None, think=None, max_tokens=None) -> AsyncIterator[dict]:
+                          keep_alive=None, think=None, max_tokens=None,
+                          fmt=None) -> AsyncIterator[dict]:
         """Token-level streaming. Now carries tools through and surfaces
         tool_calls + thinking per chunk, so direct-dispatch can stream a coding
         client's turn live — each chunk is real proof the backend is generating,
         and it resets the read timeout (no total-time wall)."""
         payload = self._payload(model, messages, tools, options, keep_alive,
-                                stream=True, think=think, max_tokens=max_tokens)
+                                stream=True, think=think, max_tokens=max_tokens, fmt=fmt)
         async with self.client.stream("POST", f"{self.url}/api/chat", json=payload) as r:
             if r.status_code >= 400:
                 body = await r.aread()
@@ -316,7 +321,7 @@ class OpenAIProtocol(BaseProtocol):
         return [m["id"] for m in r.json().get("data", [])]
 
     async def chat(self, model, messages, tools=None, options=None,
-                   keep_alive=None, max_tokens=4096, think=None) -> ChatResult:
+                   keep_alive=None, max_tokens=4096, think=None, fmt=None) -> ChatResult:
         msgs = []
         for m in messages:
             mm: dict = {"role": m["role"], "content": m.get("content") or ""}
@@ -346,6 +351,12 @@ class OpenAIProtocol(BaseProtocol):
         for k in ("temperature", "top_p"):
             if options and k in options:
                 payload[k] = options[k]
+        # Structured output → OpenAI response_format. "json" = json_object; a
+        # dict is treated as a json_schema; a string schema is passed through.
+        if fmt == "json":
+            payload["response_format"] = {"type": "json_object"}
+        elif isinstance(fmt, dict):
+            payload["response_format"] = {"type": "json_schema", "json_schema": fmt}
         r = await self.client.post(f"{self._base()}/chat/completions",
                                    json=payload, headers=self._headers())
         if r.status_code >= 400:
@@ -401,7 +412,7 @@ class AnthropicProtocol(BaseProtocol):
         return out
 
     async def chat(self, model, messages, tools=None, options=None,
-                   keep_alive=None, max_tokens=4096, think=None) -> ChatResult:
+                   keep_alive=None, max_tokens=4096, think=None, fmt=None) -> ChatResult:
         system_parts: list[str] = []
         out_msgs: list[dict] = []
         for m in messages:

@@ -98,7 +98,7 @@ class TaggedPool:
     def backend_info(self, m):
         return {"name": "b", "type": "ollama", "url": "http://x", "api_key": None}
 
-    async def chat(self, model, messages, tools=None, options=None, max_tokens=4096, think=None):
+    async def chat(self, model, messages, tools=None, options=None, max_tokens=4096, think=None, fmt=None):
         return ChatResult(
             content="internal reasoning, etc. </think>The plant is a fern."), "b"
 

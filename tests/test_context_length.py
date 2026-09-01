@@ -105,7 +105,7 @@ class RecordingPool:
     def backend_info(self, m):
         return {"name": "b", "type": self._type, "url": "http://x", "api_key": None}
 
-    async def chat(self, model, messages, tools=None, options=None, max_tokens=4096, think=None):
+    async def chat(self, model, messages, tools=None, options=None, max_tokens=4096, think=None, fmt=None):
         self.sent = True
         self.last_options = options
         return ChatResult(content="ok"), "b"
@@ -211,7 +211,7 @@ class StreamPool:
     def backend_info(self, m):
         return {"name": "b", "type": "ollama", "url": "http://x", "api_key": None}
 
-    async def chat_stream(self, model, messages, tools=None, options=None, keep_alive=None, think=None):
+    async def chat_stream(self, model, messages, tools=None, options=None, keep_alive=None, think=None, fmt=None):
         for th in ("Let me think… ", "checking the facts… "):
             yield {"thinking": th, "done": False}
         for c in ("Hel", "lo"):

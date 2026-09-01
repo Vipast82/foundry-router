@@ -607,6 +607,13 @@ async def _direct_dispatch_chat(svc, persona, model_name, messages, client_tools
     brain_cfg = svc.config_store.config.agent_brain
     keep_alive = brain_cfg.worker_keep_alive     # keep a heavy model warm between turns
     hb = brain_cfg.heartbeat_seconds or 0
+    # Merge sampling defaults (global < persona < client) + resolve the persona's
+    # structured-output format for this worker.
+    from .. import sampling
+    options = sampling.resolve_options(brain_cfg.sampling_defaults, persona, options)
+    # Structured output would force JSON and break a tool-calling turn, so only
+    # apply the persona's format when the client isn't driving its own tools.
+    fmt = None if client_tools else sampling.resolve_format(persona)
 
     async def _run():
         """The worker call + all post-call bookkeeping. Raises AllBackendsFailed."""
@@ -614,7 +621,7 @@ async def _direct_dispatch_chat(svc, persona, model_name, messages, client_tools
             model_id, prompts.sanitize_history(messages),
             tools=client_tools, options=options, keep_alive=keep_alive,
             max_tokens=brain_cfg.worker_max_tokens,
-            think=_think_for(svc, model_id, persona, client_think))
+            think=_think_for(svc, model_id, persona, client_think), fmt=fmt)
         # Empirical tool-calling reliability: direct dispatch is where worker
         # models actually exercise tool calling (client-supplied tools).
         svc.registry.record_tool_call(model_id, ok=True)
@@ -669,7 +676,7 @@ async def _direct_dispatch_chat(svc, persona, model_name, messages, client_tools
                     model_id, prompts.sanitize_history(messages),
                     tools=client_tools, options=options, keep_alive=keep_alive,
                     max_tokens=brain_cfg.worker_max_tokens,
-                    think=_think_for(svc, model_id, persona, client_think))
+                    think=_think_for(svc, model_id, persona, client_think), fmt=fmt)
                 async for _kind, _payload in _stream_with_heartbeat(_src, hb, hb_start):
                     if _kind == "beat":
                         yield tr.chat_chunk(

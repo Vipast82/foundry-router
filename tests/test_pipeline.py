@@ -33,7 +33,7 @@ class ScriptedPool:
         t = self.types.get(model)
         return {"name": "b", "type": t, "url": "http://x", "api_key": None} if t else None
 
-    async def chat(self, model, messages, tools=None, options=None, max_tokens=4096, think=None):
+    async def chat(self, model, messages, tools=None, options=None, max_tokens=4096, think=None, fmt=None):
         self.calls.append((model, messages[-1]["content"]))
         return ChatResult(content=self.responses[model].pop(0),
                           prompt_tokens=10, completion_tokens=10), "b"
@@ -149,7 +149,7 @@ class FlakyExecutePool(ScriptedPool):
         self.fail_times = fail_times
         self.fail_counts: dict = {}
 
-    async def chat(self, model, messages, tools=None, options=None, max_tokens=4096, think=None):
+    async def chat(self, model, messages, tools=None, options=None, max_tokens=4096, think=None, fmt=None):
         if model in self.fail_models:
             n = self.fail_counts.get(model, 0)
             if n < self.fail_times:

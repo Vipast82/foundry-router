@@ -302,6 +302,12 @@ class Database:
             # in the answer forwarded to the client, so a Foundry-owned tool loop
             # shares what ran and the id survives to the next turn.
             ("personas", "expose_tool_trail", "INTEGER DEFAULT 0"),
+            # Per-persona Ollama tuning: sampling_options (JSON obj of options like
+            # temperature/top_p — override the global sampling_defaults) and
+            # output_format ("json", or a JSON-schema string → Ollama `format` /
+            # OpenAI response_format, for structured/reliable output).
+            ("personas", "sampling_options", "TEXT"),
+            ("personas", "output_format", "TEXT"),
             # Code-sandbox audit trail: the submitted code (call arguments) and
             # a flag marking calls that ran on an executes_code server.
             ("tool_call_log", "arguments", "TEXT"),

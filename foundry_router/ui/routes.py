@@ -137,7 +137,7 @@ async def set_brain(request: Request):
                "tool_result_limit_chars", "mcp_result_limit_chars", "worker_max_tokens",
                "user_input_preview_chars", "heartbeat_seconds", "worker_keep_alive",
                "direct_stream", "direct_stream_heartbeat_seconds",
-               "stream_worker_reasoning", "reasoning_effort"}
+               "stream_worker_reasoning", "reasoning_effort", "sampling_defaults"}
     updates = {k: v for k, v in body.items() if k in allowed}
 
     def mutate(raw):
@@ -1314,9 +1314,13 @@ async def clear_events(request: Request):
 
 @router.get("/admin/api/ollama/backends")
 async def ollama_backends(request: Request):
-    """Ollama-type backends only — the targets these operations can act on."""
-    return {"backends": _svc(request).ollama_admin.backends(),
-            "jobs": _svc(request).ollama_admin.job_snapshot()}
+    """Ollama-type backends only — the targets these operations can act on.
+    Each carries the server's /api/version (diagnostic; empty if unreachable)."""
+    admin = _svc(request).ollama_admin
+    backends = admin.backends()
+    for b in backends:
+        b["version"] = await admin.version(b["name"])
+    return {"backends": backends, "jobs": admin.job_snapshot()}
 
 
 @router.get("/admin/api/ollama/tags")

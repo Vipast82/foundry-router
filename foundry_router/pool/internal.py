@@ -257,7 +257,8 @@ class InternalPool(BackendPool):
 
     async def chat(self, model: str, messages: list[dict], tools: Optional[list] = None,
                    options: Optional[dict] = None, max_tokens: int = 4096,
-                   keep_alive: Any = None, think: Any = None) -> tuple[ChatResult, str]:
+                   keep_alive: Any = None, think: Any = None,
+                   fmt: Any = None) -> tuple[ChatResult, str]:
         candidates = self._candidates(model)
         if not candidates:
             raise AllBackendsFailed(f"no backend serves model {model!r}")
@@ -268,7 +269,7 @@ class InternalPool(BackendPool):
                 try:
                     result = await s.protocol.chat(model, messages, tools=tools,
                                                    options=options, max_tokens=max_tokens,
-                                                   keep_alive=keep_alive, think=think)
+                                                   keep_alive=keep_alive, think=think, fmt=fmt)
                     s.consecutive_failures = 0
                     return result, s.config.name
                 # ExceptionGroup: anyio TaskGroups can leak through httpcore on
@@ -289,7 +290,7 @@ class InternalPool(BackendPool):
                           tools: Optional[list] = None,
                           options: Optional[dict] = None,
                           keep_alive: Any = None, think: Any = None,
-                          max_tokens: Any = None) -> AsyncIterator[dict]:
+                          max_tokens: Any = None, fmt: Any = None) -> AsyncIterator[dict]:
         """Streaming passthrough (no failover mid-stream — once bytes have gone
         to the client we can't restart on another backend). Carries tools +
         keep_alive + think + max_tokens so direct-dispatch can stream a coding
@@ -304,7 +305,8 @@ class InternalPool(BackendPool):
                                                       options=options,
                                                       keep_alive=keep_alive,
                                                       think=think,
-                                                      max_tokens=max_tokens):
+                                                      max_tokens=max_tokens,
+                                                      fmt=fmt):
                 yield chunk
             s.consecutive_failures = 0
         except (httpx.HTTPError, ProtocolError, OSError, ExceptionGroup) as e:
