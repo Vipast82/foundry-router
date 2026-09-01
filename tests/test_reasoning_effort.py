@@ -94,7 +94,8 @@ from foundry_router import thinking
 def test_supported_levels_curated_by_family():
     assert thinking.supported_levels("gpt-oss:20b", ["thinking"]) == \
         ["off", "low", "medium", "high"]
-    assert thinking.supported_levels("qwen3.8:27b", ["thinking"]) == ["off", "on"]
+    assert thinking.supported_levels("qwen3.8:27b", ["thinking"]) == \
+        ["off", "low", "medium", "high", "max"]
     # thinking-capable but unrecognized family -> boolean only
     assert thinking.supported_levels("mystery-r:8b", ["thinking"]) == ["off", "on"]
     # no thinking capability -> empty menu
@@ -105,7 +106,7 @@ def test_supported_levels_anthropic_always_full():
     # Claude via Meridian: full budgeted menu regardless of caps
     assert thinking.supported_levels("claude-opus-5", None,
                                      backend_type="anthropic-compatible") == \
-        ["off", "low", "medium", "high", "xhigh"]
+        ["off", "low", "medium", "high", "max"]
 
 
 def test_normalize_poles_and_levels():
@@ -115,6 +116,7 @@ def test_normalize_poles_and_levels():
     assert thinking.normalize("on") is True
     assert thinking.normalize(True) is True
     assert thinking.normalize("HIGH") == "high"
+    assert thinking.normalize("xhigh") == "max"       # old label aliased to Ollama's top level
 
 
 # -- Claude extended-thinking budget mapping (conservative) ------------------------
@@ -123,7 +125,7 @@ def test_claude_thinking_conservative_budgets():
     assert thinking.claude_thinking("low", 4096)[0]["budget_tokens"] == 2048
     assert thinking.claude_thinking("medium", 4096)[0]["budget_tokens"] == 8192
     assert thinking.claude_thinking("high", 4096)[0]["budget_tokens"] == 16384
-    assert thinking.claude_thinking("xhigh", 4096)[0]["budget_tokens"] == 32768
+    assert thinking.claude_thinking("max", 4096)[0]["budget_tokens"] == 32768
 
 
 def test_claude_thinking_raises_max_tokens_above_budget():
@@ -242,8 +244,8 @@ def test_facade_client_beats_persona_and_global():
 
 def test_facade_persona_beats_global():
     svc = _fake_svc("low", ["thinking"])
-    persona = {"reasoning_effort": "xhigh"}
-    assert ollama_api._think_for(svc, "qwen3.8", persona, client_think=None) == "xhigh"
+    persona = {"reasoning_effort": "xhigh"}       # old label -> aliased to "max"
+    assert ollama_api._think_for(svc, "qwen3.8", persona, client_think=None) == "max"
 
 
 def test_facade_global_when_no_persona_or_client():

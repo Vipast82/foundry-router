@@ -22,26 +22,31 @@ import json
 import re
 from typing import Optional
 
-# Canonical effort levels, weakest -> strongest. "off" and "on" are the
-# boolean poles; the middle four are graded effort.
-LEVELS = ["off", "low", "medium", "high", "xhigh"]
+# Canonical effort levels, weakest -> strongest. "off"/"on" are the boolean
+# poles; the graded levels match Ollama's accepted `think` strings
+# (low/medium/high/max) — NOT "xhigh", which Ollama rejects. "xhigh" from older
+# configs is aliased to "max" in normalize().
+LEVELS = ["off", "low", "medium", "high", "max"]
 
 _ON = {"on", "true", "yes", "1", "enabled"}
 _OFF = {"off", "false", "none", "no", "0", "disabled"}
 
 # Conservative Claude extended-thinking budgets (tokens). Anthropic requires
 # budget_tokens >= 1024 AND < max_tokens; the caller's output room is added on
-# top of the budget so both hold. (Q3 mapping: low/medium/high/xhigh.)
-CLAUDE_BUDGETS = {"low": 2048, "medium": 8192, "high": 16384, "xhigh": 32768}
+# top of the budget so both hold.
+CLAUDE_BUDGETS = {"low": 2048, "medium": 8192, "high": 16384, "max": 32768}
 
 # Curated per-family level menus. NOTHING in the Ollama/Anthropic APIs reports
 # the valid set, so this is a maintained table keyed by model-name pattern;
-# first match wins. Update it as new reasoning families land.
+# first match wins. Update it as new reasoning families land. (Qwen3/DeepSeek-R1
+# builds served by current Ollama accept the graded low/medium/high/max, not
+# just on/off.)
 _FAMILY_MENUS: list[tuple[re.Pattern, list[str]]] = [
     (re.compile(r"gpt-?oss", re.I), ["off", "low", "medium", "high"]),
-    (re.compile(r"qwen3|qwq|deepseek-?r1|magistral", re.I), ["off", "on"]),
+    (re.compile(r"qwen3|qwq|deepseek-?r1|magistral", re.I),
+     ["off", "low", "medium", "high", "max"]),
     (re.compile(r"claude|sonnet|opus|haiku", re.I),
-     ["off", "low", "medium", "high", "xhigh"]),
+     ["off", "low", "medium", "high", "max"]),
 ]
 
 
@@ -62,7 +67,7 @@ def normalize(effort) -> Optional[object]:
       None  -> leave the model's default (don't send `think` at all)
       False -> thinking OFF
       True  -> thinking ON, no specific level
-      str   -> a level ("low"/"medium"/"high"/"xhigh")."""
+      str   -> a level ("low"/"medium"/"high"/"max")."""
     if effort is None:
         return None
     if isinstance(effort, bool):
@@ -74,6 +79,8 @@ def normalize(effort) -> Optional[object]:
         return False
     if s in _ON:
         return True
+    if s == "xhigh":          # old label; Ollama's top graded level is "max"
+        return "max"
     return s
 
 
@@ -87,7 +94,7 @@ def supported_levels(model_id: str, caps=None, backend_type: str = "") -> list[s
     lookup (a thinking-capable but unrecognized family gets on/off only)."""
     name = model_id or ""
     if backend_type == "anthropic-compatible":
-        return ["off", "low", "medium", "high", "xhigh"]
+        return ["off", "low", "medium", "high", "max"]
     if "thinking" not in _as_list(caps):
         return []
     for pat, menu in _FAMILY_MENUS:

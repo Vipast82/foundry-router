@@ -494,7 +494,7 @@ async function tabBackends() {
           <option value="low">low</option>
           <option value="medium">medium</option>
           <option value="high">high</option>
-          <option value="xhigh">xhigh</option>
+          <option value="max">max</option>
         </select>
         <button class="act primary" id="save-brain">Save brain</button></div>
     </div>
@@ -546,7 +546,8 @@ async function tabBackends() {
   $("#brain-ka").value = cfg.agent_brain.worker_keep_alive || "";
   $("#brain-ds").checked = !!cfg.agent_brain.direct_stream;
   $("#brain-swr").checked = !!cfg.agent_brain.stream_worker_reasoning;
-  $("#brain-re").value = cfg.agent_brain.reasoning_effort || "";
+  $("#brain-re").value = (cfg.agent_brain.reasoning_effort === "xhigh" ? "max"
+    : cfg.agent_brain.reasoning_effort) || "";
   // Foundry-MCP aggregator
   const agg = cfg.mcp_aggregator || {};
   $("#agg-en").checked = !!agg.enabled;
@@ -1207,9 +1208,9 @@ async function tabPersonas() {
         <input id="pe-compat" size="90" value="{}" placeholder='{"openwebui": "HTML renders as Artifacts", "anythingllm": "code blocks only"}'>
         <label title="plain_text: steer workers to clean plain text / simple markdown (no HTML/SVG) — for messaging-bridge clients (Hermes/OpenClaw) that can't render markup. Default: no steering.">output_style</label>
         <select id="pe-style"><option value="">default</option><option>plain_text</option></select>
-        <label title="Reasoning effort for THIS persona's worker, overriding the global agent_brain setting. Sent as Ollama's think level to thinking-capable locals, and as a Claude extended-thinking budget to Claude-via-Meridian. Applied only where the model supports it. Blank = use the global default. Great for a Cline-plan persona: set high/xhigh so plan-mode gets deep Claude thinking, while Cline-act stays low/off on a fast local.">reasoning_effort</label>
+        <label title="Reasoning effort for THIS persona's worker, overriding the global agent_brain setting. Sent as Ollama's think level (low/medium/high/max) to thinking-capable locals, and as a Claude extended-thinking budget to Claude-via-Meridian. Applied only where the model supports it. Blank = use the global default. Great for a Cline-plan persona: set high/max so plan-mode gets deep Claude thinking, while Cline-act stays low/off on a fast local.">reasoning_effort</label>
         <select id="pe-effort"><option value="">(global default)</option><option>off</option>
-          <option>low</option><option>medium</option><option>high</option><option>xhigh</option></select></div>
+          <option>low</option><option>medium</option><option>high</option><option>max</option></select></div>
       <div class="row">
         <label title="Tiered review pass (default OFF): after an answer is produced, the selected review model checks it and may return a corrected version — always delivered with a visible 🔎 marker, never a silent change. Paid review models pass the same guardrail/conservation ladder as any dispatch.">review_enabled</label>
         <input type="checkbox" id="pe-review">
@@ -1483,7 +1484,7 @@ window.editPersona = name => {
     || p.review_prefilter === undefined || !!p.review_prefilter;
   $("#pe-compat").value = p.client_compat || "{}";
   $("#pe-style").value = p.output_style || "";
-  $("#pe-effort").value = p.reasoning_effort || "";
+  $("#pe-effort").value = (p.reasoning_effort === "xhigh" ? "max" : p.reasoning_effort) || "";
   $("#pe-escalate").checked = !!p.escalate_when_local_busy;
   $("#pe-trail").checked = !!p.expose_tool_trail;
 };
