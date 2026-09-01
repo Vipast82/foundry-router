@@ -310,7 +310,7 @@ async function tabLive() {
     if (!$("#live-models")) return;
     $("#live-ts").textContent = "· updated " + new Date().toLocaleTimeString();
     $("#live-models").innerHTML = (a.models || []).length
-      ? a.models.map(m => `<span class="pill ok">▶ ${esc(m.model)} · ${m.seconds}s${m.count > 1 ? " ×" + m.count : ""}</span>`).join(" ")
+      ? a.models.map(m => `<span class="pill ok">▶ ${esc(m.model)} · ${m.seconds}s${m.count > 1 ? " ×" + m.count : ""}${m.tps ? " · ~" + m.tps + " tok/s" : ""}</span>`).join(" ")
       : '<span class="hint">idle — no model generating</span>';
     $("#live-tools").innerHTML = (a.tools || []).length
       ? a.tools.map(t => `<span class="pill warn">⚙ ${esc(t.server)}/${esc(t.tool)} · ${t.seconds}s</span>`).join(" ")
@@ -333,8 +333,9 @@ async function tabLive() {
     // loaded in VRAM (per-model size)
     const ld = a.loaded_detail || [];
     $("#live-loaded").innerHTML = ld.length
-      ? `<table><tr><th>model</th><th>VRAM</th><th>backend</th></tr>` +
+      ? `<table><tr><th>model</th><th>VRAM</th><th>tok/s</th><th>backend</th></tr>` +
         ld.map(m => `<tr><td>${esc(m.model)}</td><td class="nw">${gb(m.size_vram) || "—"}</td>
+          <td class="nw">${m.tps ? "~" + m.tps : '<span class="hint">—</span>'}</td>
           <td class="nw">${esc(m.backend || "")}</td></tr>`).join("") + `</table>`
       : (a.loaded || []).length
         ? (a.loaded || []).map(m => `<span class="pill">${esc(m)}</span>`).join(" ")
@@ -798,9 +799,15 @@ async function tabModels() {
   const rBtn = m => d.research_ready
     ? `<button class="act" onclick='doResearch(${JSON.stringify(m.id)})'>research</button>`
     : `<button class="act" disabled title="${esc(d.research_reason)}">research</button>`;
+  const tpsCell = m => {
+    if (!m.eval_tps_avg) return '<span class="hint">—</span>';
+    const load = m.cold_load_ms_avg ? ` · ${(m.cold_load_ms_avg / 1000).toFixed(1)}s cold load` : "";
+    return `<span title="Rolling average warm generation speed (Ollama eval_count/eval_duration), ${m.eval_samples || 0} sample(s)${load}">${Math.round(m.eval_tps_avg)} tok/s</span>`;
+  };
   const rowHtml = m => `<tr${isEnabled(m) ? "" : ' style="opacity:.45"'}>
     <td class="mono">${esc(m.id)} ${m.reachable ? '<span class="pill ok">live</span>' : ""}${m.embedding ? ' <span class="pill warn" title="embedding-only model — excluded from chat routing (can\'t serve /api/chat)">embedding</span>' : ""}</td>
     <td class="nw">${esc(m.relative_cost_tier ?? "")}</td>
+    <td class="nw">${tpsCell(m)}</td>
     <td>${esc(parseTags(m.tags).join(", "))}${m.content_policy === "permissive" ? ' <span class="pill warn">permissive</span>' : ""}</td>
     <td>${esc(m.good_for ?? "")}</td>
     <td class="nw">${m.research_status
@@ -811,7 +818,7 @@ async function tabModels() {
         <button class="act" onclick='editModel(${JSON.stringify(m.id)})'>edit</button>
         ${rBtn(m)}</td>
     </tr>`;
-  const header = "<tr><th>model</th><th>tier</th><th>tags</th><th>good for</th><th>research</th><th>source</th><th></th></tr>";
+  const header = "<tr><th>model</th><th>tier</th><th title=\"Warm generation speed — rolling average tokens/sec measured from real calls (Ollama eval timing)\">tok/s</th><th>tags</th><th>good for</th><th>research</th><th>source</th><th></th></tr>";
   const renderTables = () => {
     const q = ($("#model-search")?.value || "").toLowerCase();
     const match = m => !q ||

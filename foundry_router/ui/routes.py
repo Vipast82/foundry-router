@@ -183,7 +183,20 @@ async def activity(request: Request):
     recent = svc.db.query(
         "SELECT ts, persona, client_model, mode, status, duration_ms, models_used "
         "FROM request_log ORDER BY id DESC LIMIT 8")
-    return {"models": svc.pool.active_calls(),
+
+    # Rolling warm tokens/sec (measured from real calls) per model, joined onto
+    # what's active/loaded so the Live view shows performance at a glance.
+    def _tps(model_id):
+        row = svc.registry.get(model_id) or {}
+        return round(row.get("eval_tps_avg") or 0.0, 1)
+
+    active_models = svc.pool.active_calls()
+    for m in active_models:
+        m["tps"] = _tps(m["model"])
+    for ld in loaded_detail:
+        ld["tps"] = _tps(ld["model"])
+
+    return {"models": active_models,
             "tools": svc.mcp.active_calls(),
             "loaded": loaded,
             "loaded_detail": loaded_detail,

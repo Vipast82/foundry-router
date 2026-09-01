@@ -125,9 +125,14 @@ def act_client(tmp_path):
 def test_activity_endpoint_reports_inflight(act_client):
     svc = act_client.app.state.services
     svc.pool._inflight_enter("qwen3.8:27b")
+    # give the model a measured warm speed: 100 tokens in 1s = 100 tok/s
+    svc.registry.upsert_auto("qwen3.8:27b", source="discovery")
+    svc.registry.note_inference("qwen3.8:27b", 100, 1_000_000_000)
     svc.mcp._inflight[1] = {"server": "acestep-music", "tool": "generate_music",
                             "since": time.monotonic()}
     d = act_client.get("/admin/api/activity").json()
+    m = next(x for x in d["models"] if x["model"] == "qwen3.8:27b")
+    assert m["tps"] == 100.0                          # rolling tok/s joined onto the live view
     assert any(m["model"] == "qwen3.8:27b" for m in d["models"])
     assert any(t["tool"] == "generate_music" for t in d["tools"])
     assert "loaded" in d
