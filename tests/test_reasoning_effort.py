@@ -253,6 +253,20 @@ def test_facade_global_when_no_persona_or_client():
     assert ollama_api._think_for(svc, "qwen3.8", {}, client_think=None) == "medium"
 
 
+def test_facade_client_think_wins_by_default():
+    # Cline sends think:false — without force, the client wins over the persona.
+    svc = _fake_svc("", ["thinking"])
+    persona = {"reasoning_effort": "medium"}
+    assert ollama_api._think_for(svc, "qwen3.8", persona, client_think=False) is False
+
+
+def test_facade_force_reasoning_overrides_client():
+    # With force_reasoning_effort, the persona wins over the client's think:false.
+    svc = _fake_svc("", ["thinking"])
+    persona = {"reasoning_effort": "low", "force_reasoning_effort": 1}
+    assert ollama_api._think_for(svc, "qwen3.8", persona, client_think=False) == "low"
+
+
 def test_facade_none_for_non_thinking_model():
     svc = _fake_svc("high", ["completion"])
     assert ollama_api._think_for(svc, "llama3", {}, client_think="high") is None

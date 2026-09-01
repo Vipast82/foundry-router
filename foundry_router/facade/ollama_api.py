@@ -462,16 +462,25 @@ async def _agent_chat(svc, persona, model_name, messages, stream, user_text,
 
 
 def _think_for(svc, model_id: str, persona=None, client_think=None):
-    """The `think` value for a direct-dispatch worker, resolved by precedence:
-    client request > persona.reasoning_effort > global agent_brain default —
-    then gated to models that support thinking (Ollama by capability, Claude
-    always). Ollama gets a bool/level; Anthropic turns it into a budget block."""
+    """The `think` value for a direct-dispatch worker. Precedence:
+    persona.reasoning_effort (when force_reasoning_effort is set) > client request
+    > persona.reasoning_effort > global agent_brain default. Then gated to models
+    that support thinking (Ollama by capability, Claude always). Ollama gets a
+    bool/level; Anthropic turns it into a budget block.
+
+    The force flag exists because some clients (e.g. Cline) send their own
+    `think` value — which would otherwise override the persona — and the operator
+    may want the persona to win so thinking is controlled entirely in Foundry."""
     from .. import thinking
-    if client_think in (None, ""):
-        eff = ((persona or {}).get("reasoning_effort")
-               or getattr(svc.config_store.config.agent_brain, "reasoning_effort", None))
+    p = persona or {}
+    p_eff = p.get("reasoning_effort")
+    if p.get("force_reasoning_effort") and p_eff:
+        eff = p_eff                                    # persona wins over the client
+    elif client_think not in (None, ""):
+        eff = client_think                             # client passthrough
     else:
-        eff = client_think
+        eff = p_eff or getattr(svc.config_store.config.agent_brain,
+                               "reasoning_effort", None)
     meta = svc.registry.get(model_id) or {}
     btype = (svc.pool.backend_info(model_id) or {}).get("type", "")
     return thinking.think_value(eff, model_id, meta.get("capabilities"), btype)

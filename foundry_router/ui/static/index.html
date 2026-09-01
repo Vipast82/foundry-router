@@ -1260,7 +1260,9 @@ async function tabPersonas() {
         <select id="pe-style"><option value="">default</option><option>plain_text</option></select>
         <label title="Reasoning effort for THIS persona's worker, overriding the global agent_brain setting. Sent as Ollama's think level (low/medium/high/max) to thinking-capable locals, and as a Claude extended-thinking budget to Claude-via-Meridian. Applied only where the model supports it. Blank = use the global default. Great for a Cline-plan persona: set high/max so plan-mode gets deep Claude thinking, while Cline-act stays low/off on a fast local.">reasoning_effort</label>
         <select id="pe-effort"><option value="">(global default)</option><option>off</option>
-          <option>low</option><option>medium</option><option>high</option><option>max</option></select></div>
+          <option>low</option><option>medium</option><option>high</option><option>max</option></select>
+        <label title="Make THIS reasoning_effort win over a think value the client sends. Cline (and some clients) send their own think on/off — normally the client wins (passthrough). Turn this on so Foundry's persona setting controls thinking instead. e.g. force claude-cline-act to 'off' or 'low' regardless of what Cline sends, and claude-cline-plan to 'high'.">force (override client)</label>
+        <input type="checkbox" id="pe-force-effort"></div>
       <div class="row tight">
         <label title="Per-persona sampling options (Ollama), overriding the global sampling_defaults. JSON obj, e.g. a coding persona {&quot;temperature&quot;:0.2}. Client-sent options still win. Empty {} = inherit the global defaults.">sampling_options (JSON obj)</label>
         <input id="pe-samp" size="46" value="{}" placeholder='{"temperature": 0.2, "top_p": 0.9}'>
@@ -1309,7 +1311,8 @@ async function tabPersonas() {
     output_style: $("#pe-style").value || null,
     reasoning_effort: $("#pe-effort").value || null,
     sampling_options: JSON.parse($("#pe-samp").value || "{}"),
-    output_format: $("#pe-fmt").value.trim() || null}}));
+    output_format: $("#pe-fmt").value.trim() || null,
+    force_reasoning_effort: $("#pe-force-effort").checked ? 1 : 0}}));
 window.clonePersona = async source => {
   const newName = prompt("New persona name (clone of " + source + "):",
                          source + "-copy");
@@ -1545,6 +1548,7 @@ window.editPersona = name => {
   $("#pe-samp").value = typeof p.sampling_options === "string"
     ? (p.sampling_options || "{}") : JSON.stringify(p.sampling_options || {});
   $("#pe-fmt").value = p.output_format || "";
+  $("#pe-force-effort").checked = !!p.force_reasoning_effort;
   $("#pe-escalate").checked = !!p.escalate_when_local_busy;
   $("#pe-trail").checked = !!p.expose_tool_trail;
 };

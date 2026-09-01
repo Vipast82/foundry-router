@@ -308,6 +308,10 @@ class Database:
             # OpenAI response_format, for structured/reliable output).
             ("personas", "sampling_options", "TEXT"),
             ("personas", "output_format", "TEXT"),
+            # When set, this persona's reasoning_effort OVERRIDES a think value the
+            # client sent (e.g. Cline's think:false), so thinking is controlled in
+            # Foundry rather than by the client. Off = client passthrough wins.
+            ("personas", "force_reasoning_effort", "INTEGER DEFAULT 0"),
             # Code-sandbox audit trail: the submitted code (call arguments) and
             # a flag marking calls that ran on an executes_code server.
             ("tool_call_log", "arguments", "TEXT"),
