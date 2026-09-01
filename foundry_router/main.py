@@ -73,9 +73,13 @@ class Services:
         # One shared HTTP client: connection pooling for every backend, the
         # brain, telemetry, and OpenRouter. Long read timeout because local
         # GPU generations are slow; short connect timeout so failover is fast.
+        # WRITE also uses the full budget: sending a large request body (big
+        # Cline context + tool schemas) to a COLD-loading model blocks until
+        # Ollama starts draining the socket (~an 18GB load at high context), so
+        # a 30s write cap would fire mid-send (observed as WriteTimeout).
+        _rt = float(cfg.backend_pool.request_timeout_seconds)
         self.http = httpx.AsyncClient(timeout=httpx.Timeout(
-            connect=5.0, read=float(cfg.backend_pool.request_timeout_seconds),
-            write=30.0, pool=5.0))
+            connect=5.0, read=_rt, write=_rt, pool=5.0))
 
         self.pool = build_pool(cfg, self.http, db)
         self.ollama_admin = OllamaAdmin(self.http, self.pool, db)
