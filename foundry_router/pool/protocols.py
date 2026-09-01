@@ -107,7 +107,7 @@ class BaseProtocol:
 
     async def chat_stream(self, model: str, messages: list[dict], tools=None,
                           options: Optional[dict] = None, keep_alive=None,
-                          think=None) -> AsyncIterator[dict]:
+                          think=None, max_tokens=None) -> AsyncIterator[dict]:
         """Token-level streaming (no tools) — used only for the raw-model
         passthrough path. Default implementation degrades to one chunk."""
         result = await self.chat(model, messages, options=options)
@@ -189,7 +189,8 @@ class OllamaProtocol(BaseProtocol):
         caps = (r.json() or {}).get("capabilities") or []
         return [str(c) for c in caps] if isinstance(caps, list) else []
 
-    def _payload(self, model, messages, tools, options, keep_alive, stream, think=None):
+    def _payload(self, model, messages, tools, options, keep_alive, stream,
+                 think=None, max_tokens=None):
         # Strip canonical-format fields Ollama doesn't know; keep tool_calls
         # (it accepts them on assistant messages) but drop OpenAI-style ids.
         msgs = []
@@ -209,8 +210,15 @@ class OllamaProtocol(BaseProtocol):
         payload: dict = {"model": model, "messages": msgs, "stream": stream}
         if tools:
             payload["tools"] = tools
-        if options:
-            payload["options"] = options
+        # Cap output tokens via Ollama's num_predict. Without this a generation
+        # runs until the context fills (or the model stops on its own) — a real
+        # runaway/timeout risk with heavy reasoning. Client-sent num_predict
+        # wins; otherwise the dispatch layer's max_tokens becomes the ceiling.
+        opts = dict(options or {})
+        if max_tokens and "num_predict" not in opts:
+            opts["num_predict"] = int(max_tokens)
+        if opts:
+            payload["options"] = opts
         if keep_alive is not None:
             payload["keep_alive"] = keep_alive
         # Reasoning effort: Ollama's top-level `think` field. A level string
@@ -223,7 +231,7 @@ class OllamaProtocol(BaseProtocol):
     async def chat(self, model, messages, tools=None, options=None,
                    keep_alive=None, max_tokens=4096, think=None) -> ChatResult:
         payload = self._payload(model, messages, tools, options, keep_alive,
-                                stream=False, think=think)
+                                stream=False, think=think, max_tokens=max_tokens)
         r = await self.client.post(f"{self.url}/api/chat", json=payload)
         if r.status_code >= 400:
             raise ProtocolError(f"ollama {self.url} HTTP {r.status_code}: {r.text[:300]}")
@@ -251,13 +259,13 @@ class OllamaProtocol(BaseProtocol):
         )
 
     async def chat_stream(self, model, messages, tools=None, options=None,
-                          keep_alive=None, think=None) -> AsyncIterator[dict]:
+                          keep_alive=None, think=None, max_tokens=None) -> AsyncIterator[dict]:
         """Token-level streaming. Now carries tools through and surfaces
         tool_calls + thinking per chunk, so direct-dispatch can stream a coding
         client's turn live — each chunk is real proof the backend is generating,
         and it resets the read timeout (no total-time wall)."""
         payload = self._payload(model, messages, tools, options, keep_alive,
-                                stream=True, think=think)
+                                stream=True, think=think, max_tokens=max_tokens)
         async with self.client.stream("POST", f"{self.url}/api/chat", json=payload) as r:
             if r.status_code >= 400:
                 body = await r.aread()

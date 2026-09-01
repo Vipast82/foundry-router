@@ -525,6 +525,30 @@ def _escalate_if_local_busy(svc, persona, model_id, user_text):
     return paid_id
 
 
+async def _stream_with_heartbeat(agen, hb: float, start: float):
+    """Wrap an async chunk stream: yield ("chunk", c) for each real upstream
+    chunk, and ("beat", elapsed_s) whenever none arrives within `hb` seconds —
+    so the caller can emit a keep-alive during a silent prompt-eval / buffered-
+    reasoning gap. hb <= 0 disables the beats (pure passthrough). The pending
+    read is shielded, so a beat doesn't drop the chunk that's still coming."""
+    it = agen.__aiter__()
+    while True:
+        fut = asyncio.ensure_future(it.__anext__())
+        while True:
+            try:
+                if hb and hb > 0:
+                    chunk = await asyncio.wait_for(asyncio.shield(fut), hb)
+                else:
+                    chunk = await fut
+            except asyncio.TimeoutError:
+                yield "beat", int(time.monotonic() - start)
+                continue
+            except StopAsyncIteration:
+                return
+            yield "chunk", chunk
+            break
+
+
 # ---- direct dispatch (client brought its own tools) ------------------------------
 
 async def _direct_dispatch_chat(svc, persona, model_name, messages, client_tools,
@@ -638,11 +662,21 @@ async def _direct_dispatch_chat(svc, persona, model_name, messages, client_tools
             yield tr.chat_chunk(model_name, "", done=False,
                                 thinking=f"⚙️ local · {model_id} — streaming…\n")
             acc_tools: list = []
+            hb = float(brain_cfg.direct_stream_heartbeat_seconds or 0)
+            hb_start = time.monotonic()
             try:
-                async for chunk in svc.pool.chat_stream(
-                        model_id, prompts.sanitize_history(messages),
-                        tools=client_tools, options=options, keep_alive=keep_alive,
-                        think=_think_for(svc, model_id, persona, client_think)):
+                _src = svc.pool.chat_stream(
+                    model_id, prompts.sanitize_history(messages),
+                    tools=client_tools, options=options, keep_alive=keep_alive,
+                    max_tokens=brain_cfg.worker_max_tokens,
+                    think=_think_for(svc, model_id, persona, client_think))
+                async for _kind, _payload in _stream_with_heartbeat(_src, hb, hb_start):
+                    if _kind == "beat":
+                        yield tr.chat_chunk(
+                            model_name, "", done=False,
+                            thinking=f"⚙️ {model_id} — still working… {_payload}s\n")
+                        continue
+                    chunk = _payload
                     if chunk.get("done"):
                         pt = chunk.get("prompt_tokens") or 0
                         ct = chunk.get("completion_tokens") or 0

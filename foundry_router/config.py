@@ -88,6 +88,14 @@ class AgentBrainConfig(BaseModel):
     # full answer at the end. Streams only for Ollama backends; Claude and any
     # non-streaming backend fall back to blocking automatically.
     direct_stream: bool = False
+    # Direct-stream keep-alive: while streaming to a coding client (Cline), if the
+    # backend sends no chunk for this many seconds (a silent prompt-eval or a
+    # model that buffers its reasoning), Foundry injects a small "still working…
+    # Ns" thinking chunk. Keeps the client showing progress instead of a frozen
+    # "Thinking…", and the bytes reset idle timers along the path (client read
+    # timeout, proxy) so long generations don't get killed. 0 = off. direct_stream
+    # only.
+    direct_stream_heartbeat_seconds: int = 0
     # AGENT mode: stream the worker's REASONING (its native thinking tokens) live
     # as narration while it generates, WITHOUT streaming the answer — the brain
     # still gets the full content and reviews it (refusal/permissive fallback,

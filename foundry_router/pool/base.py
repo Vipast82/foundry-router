@@ -47,7 +47,7 @@ class BackendPool:  # interface — see internal.InternalPool for the implementa
         raise NotImplementedError
 
     def chat_stream(self, model, messages, tools=None, options=None, keep_alive=None,
-                    think=None):
+                    think=None, max_tokens=None):
         raise NotImplementedError
 
     def available_models(self) -> dict[str, list[str]]:

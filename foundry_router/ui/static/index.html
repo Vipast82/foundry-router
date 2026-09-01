@@ -485,6 +485,8 @@ async function tabBackends() {
         <input id="brain-ka" size="7" placeholder="30m">
         <label title="Stream direct-dispatch (Cline/coding clients) live: forward the worker's tokens as they generate — each chunk proves the backend is working, resets the read timeout (no total-time wall), and the client shows it typing in real time. Ollama backends only; Claude falls back to blocking. OFF = one blocking call, full answer at the end.">direct_stream</label>
         <input type="checkbox" id="brain-ds">
+        <label title="Direct-stream keep-alive (seconds). While streaming to Cline, if the backend sends no chunk for this long (silent prompt-eval, or a model buffering its reasoning), Foundry injects a small 'still working… Ns' thinking chunk — so the client shows live progress instead of a frozen 'Thinking…', and the bytes reset idle timers (client read timeout, proxy) so long generations aren't killed. 0 = off. Needs direct_stream on.">ds heartbeat (s)</label>
+        <input id="brain-dshb" type="number" min="0" step="5" value="0" style="width:70px">
         <label title="AGENT mode (Foundry-Chat etc.): stream the worker's REASONING (its thinking tokens) live as narration while it generates, but BUFFER the answer so the brain still reviews it (refusal/permissive fallback, outcome-judge) before showing it. Watch the model reason in real time; the final answer stays gated. Ollama workers only.">stream_worker_reasoning</label>
         <input type="checkbox" id="brain-swr">
         <label title="Reasoning effort sent to every thinking-capable worker as Ollama's think field (e.g. Qwen3 low/medium/high). Applied ONLY to models that report a thinking capability — non-reasoning locals are untouched. Blank = leave each model at its own default; off = disable thinking where supported.">reasoning_effort</label>
@@ -545,6 +547,7 @@ async function tabBackends() {
   $("#brain-hb").value = cfg.agent_brain.heartbeat_seconds;
   $("#brain-ka").value = cfg.agent_brain.worker_keep_alive || "";
   $("#brain-ds").checked = !!cfg.agent_brain.direct_stream;
+  $("#brain-dshb").value = cfg.agent_brain.direct_stream_heartbeat_seconds || 0;
   $("#brain-swr").checked = !!cfg.agent_brain.stream_worker_reasoning;
   $("#brain-re").value = (cfg.agent_brain.reasoning_effort === "xhigh" ? "max"
     : cfg.agent_brain.reasoning_effort) || "";
@@ -761,6 +764,7 @@ async function tabBackends() {
       heartbeat_seconds: +$("#brain-hb").value,
       worker_keep_alive: $("#brain-ka").value.trim() || null,
       direct_stream: $("#brain-ds").checked,
+      direct_stream_heartbeat_seconds: parseInt($("#brain-dshb").value, 10) || 0,
       stream_worker_reasoning: $("#brain-swr").checked,
       reasoning_effort: $("#brain-re").value.trim() || null}}));
 }
