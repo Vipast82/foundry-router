@@ -2593,6 +2593,15 @@ async function tabUsage() {
       title="thumbs up" onclick="sendFeedback(${r.id}, 1)">👍</button>
     <button class="act" style="padding:2px 6px${r.feedback === -1 ? ";outline:2px solid var(--bad, #a43)" : ""}"
       title="thumbs down" onclick="sendFeedback(${r.id}, -1)">👎</button></span>`;
+  const statusCell = r => {
+    const cls = r.status === "ok" ? "ok" : r.status === "error" ? "bad" : "warn";
+    const pill = `<span class="pill ${cls}"${r.error ? ' title="' + esc(r.error) + '"' : ""}>${esc(r.status)}</span>`;
+    // Show the actual error inline so a failed request explains itself (e.g.
+    // "ReadTimeout" / "all backends failed …") without digging the Events log.
+    return r.error
+      ? `${pill}<div class="hint" style="max-width:320px;white-space:normal;color:var(--bad)">${esc(r.error)}</div>`
+      : pill;
+  };
   const rows = reqs.map(r => `<tr>
     <td class="mono nw">${esc((r.ts || "").slice(0, 19))}</td>
     <td class="nw">${esc(r.persona || r.client_model)}</td>
@@ -2604,7 +2613,7 @@ async function tabUsage() {
     <td class="nw">${fmtDur(r.duration_ms)}</td>
     <td>${r.est_cost_usd ? "$" + r.est_cost_usd.toFixed(4) : ""}</td>
     <td>${(r.guardrail_events || []).length ? '<span class="pill warn">' + (r.guardrail_events || []).length + "</span>" : ""}</td>
-    <td><span class="pill ${r.status === "ok" ? "ok" : r.status === "error" ? "bad" : "warn"}">${esc(r.status)}</span></td>
+    <td>${statusCell(r)}</td>
     <td>${fbCell(r)}</td>
     </tr>`).join("");
   $("#main").innerHTML = `
