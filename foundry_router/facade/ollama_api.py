@@ -558,6 +558,63 @@ async def _stream_with_heartbeat(agen, hb: float, start: float):
             break
 
 
+def _paid_pin_order(svc, persona) -> list:
+    """Reachable PAID models named in the persona's `pinned_models`, in pin order,
+    restricted to the model_allowlist — the manual priority list a prefer_paid
+    direct persona (Cline PLAN) cascades through (Opus 4.8 -> Sonnet 5 -> local).
+
+    Only prefer_paid personas start in the paid tier, so paid pins are meaningful
+    only there; for a local-first persona this returns [] and the existing local
+    pin handling (pick_fallback_model) stands. Local pins are excluded here — they
+    belong to the local fallback, not the paid cascade — and embedding models are
+    dropped (they can't serve /api/chat)."""
+    if (persona or {}).get("local_bias_strength") != "prefer_paid":
+        return []
+    allow = _jl_list((persona or {}).get("model_allowlist"))
+    allowset = set(allow) | {str(a).split(":")[0] for a in allow}
+    avail = set(svc.pool.available_models())
+    out = []
+    for p in _jl_list((persona or {}).get("pinned_models")):
+        if p not in avail:
+            continue
+        if (svc.pool.backend_info(p) or {}).get("type") == "ollama":
+            continue                                   # local pins -> local fallback
+        if allow and not (p in allowset or str(p).split(":")[0] in allowset):
+            continue
+        meta = svc.registry.get(p)
+        if meta and meta.get("embedding"):
+            continue
+        out.append(p)
+    return out
+
+
+def _local_fallback(svc, persona) -> "str | None":
+    """Best reachable LOCAL model for the persona: allowlisted locals ranked by the
+    persona's category, else any local. The guardrail-denied / usage-exhaustion
+    landing spot for direct dispatch — a Cline PLAN degrades to its chosen local
+    coder (e.g. qwen3.8:27b), else any local, else None if nothing local is up."""
+    allow = set(_jl_list((persona or {}).get("model_allowlist")))
+    allow_bases = {str(a).split(":")[0] for a in allow}
+    local = [m for m in svc.pool.available_models()
+             if (svc.pool.backend_info(m) or {}).get("type") == "ollama"]
+    if allow:
+        scoped = [m for m in local
+                  if m in allow or str(m).split(":")[0] in allow_bases]
+        local = scoped or local          # degrade to any local if none listed
+    ranked = svc.registry.ranked_for_category(
+        (persona or {}).get("benchmark_category") or "general_chat", local, limit=1)
+    return ranked[0]["id"] if ranked else (local[0] if local else None)
+
+
+def _jl_list(v) -> list:
+    """json.loads a persona JSON field, tolerating None / bad JSON, always a list."""
+    try:
+        out = json.loads(v or "[]")
+        return out if isinstance(out, list) else []
+    except (json.JSONDecodeError, TypeError):
+        return []
+
+
 # ---- direct dispatch (client brought its own tools) ------------------------------
 
 async def _direct_dispatch_chat(svc, persona, model_name, messages, client_tools,
@@ -570,47 +627,59 @@ async def _direct_dispatch_chat(svc, persona, model_name, messages, client_tools
     # answers. Revisit if per-turn re-routing inside coding sessions matters.
     logger = RequestLogger(svc.db, persona["virtual_name"], model_name,
                            "direct", user_text)
-    # allow_paid_first: a prefer_paid persona (Cline PLAN) starts in the paid tier
-    # here; the guardrail below still enforces conservation, so this can't bypass
-    # usage limits. Local-bias personas (Cline ACT) stay local-first.
-    model_id = pick_fallback_model(svc.pool, svc.registry, persona, user_text,
-                                   allow_paid_first=True)
-    if model_id is None:
-        logger.finish("error", "no backends reachable")
-        return _model_not_found(model_name)
-    # Load-aware: if the chosen local model is busy, try paid (guardrail gates it).
-    model_id = _escalate_if_local_busy(svc, persona, model_id, user_text)
-
-    guard = RequestGuardState()
-    verdict = await svc.guardrails.check_paid_call(
-        model_id, svc.pool.backend_info(model_id), svc.registry.get(model_id),
-        guard, svc.guardrails.effective(persona))
-    if not verdict.allowed:
-        # Denied (window exhausted / conserved / spend cap): fall back to a LOCAL
-        # model — preferring the persona's allowlisted locals (so a Cline PLAN
-        # degrades to its chosen local coder, e.g. qwen3.8:27b), else any local.
-        # Only error if literally nothing local is reachable.
-        logger.record_guardrail(f"denied {model_id}: {verdict.reason}")
-        import json as _json
-        try:
-            allow = set(_json.loads(persona.get("model_allowlist") or "[]"))
-        except (_json.JSONDecodeError, TypeError):
-            allow = set()
-        allow_bases = {str(a).split(":")[0] for a in allow}
-        local = [m for m in svc.pool.available_models()
-                 if (svc.pool.backend_info(m) or {}).get("type") == "ollama"]
-        if allow:
-            scoped = [m for m in local
-                      if m in allow or str(m).split(":")[0] in allow_bases]
-            local = scoped or local          # degrade to any local if none listed
-        ranked = svc.registry.ranked_for_category(
-            persona.get("benchmark_category") or "general_chat", local, limit=1)
-        model_id = ranked[0]["id"] if ranked else (local[0] if local else None)
+    eff = svc.guardrails.effective(persona)
+    model_id = None
+    pins = _paid_pin_order(svc, persona)
+    if pins:
+        # Paid-pin priority cascade (prefer_paid persona, e.g. Cline PLAN): try each
+        # pinned paid model in pin order — Opus 4.8 -> Sonnet 5 -> ... — each probed
+        # with its OWN guardrail state so no credits/paid-call bleed between them.
+        # The first one conservation allows wins; if every pinned paid is denied
+        # (window/spend exhaustion), degrade to the local fallback below. This is
+        # the manual priority order the operator asked for, still fully gated.
+        for cand in pins:
+            v = await svc.guardrails.check_paid_call(
+                cand, svc.pool.backend_info(cand), svc.registry.get(cand),
+                RequestGuardState(), eff)
+            if v.allowed:
+                model_id = cand
+                break
+            logger.record_guardrail(f"denied pinned {cand}: {v.reason}")
         if model_id is None:
-            logger.finish("error", verdict.reason)
-            return JSONResponse({"error": f"guardrail denied paid call and no "
-                                          f"local model is reachable: {verdict.reason}"},
-                                status_code=503)
+            model_id = _local_fallback(svc, persona)
+            if model_id is None:
+                logger.finish("error", "all pinned paid models denied and no "
+                                       "local model is reachable")
+                return JSONResponse(
+                    {"error": "all pinned paid models denied by the usage/cost "
+                              "guardrail and no local model is reachable"},
+                    status_code=503)
+    else:
+        # No paid pins: the original single-pick policy (unpinned / local-first
+        # personas, e.g. Cline ACT). allow_paid_first lets a prefer_paid persona
+        # start in the paid tier; the guardrail below still enforces conservation.
+        model_id = pick_fallback_model(svc.pool, svc.registry, persona, user_text,
+                                       allow_paid_first=True)
+        if model_id is None:
+            logger.finish("error", "no backends reachable")
+            return _model_not_found(model_name)
+        # Load-aware: if the chosen local model is busy, try paid (guardrail gates it).
+        model_id = _escalate_if_local_busy(svc, persona, model_id, user_text)
+
+        verdict = await svc.guardrails.check_paid_call(
+            model_id, svc.pool.backend_info(model_id), svc.registry.get(model_id),
+            RequestGuardState(), eff)
+        if not verdict.allowed:
+            # Denied (window exhausted / conserved / spend cap): fall back to a
+            # LOCAL model, preferring the persona's allowlisted locals. Only error
+            # if literally nothing local is reachable.
+            logger.record_guardrail(f"denied {model_id}: {verdict.reason}")
+            model_id = _local_fallback(svc, persona)
+            if model_id is None:
+                logger.finish("error", verdict.reason)
+                return JSONResponse({"error": f"guardrail denied paid call and no "
+                                              f"local model is reachable: {verdict.reason}"},
+                                    status_code=503)
 
     t0 = time.monotonic_ns()
     brain_cfg = svc.config_store.config.agent_brain

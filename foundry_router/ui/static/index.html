@@ -1223,8 +1223,8 @@ async function tabPersonas() {
         <div id="pe-mcp" class="mcp-checklist">${checklist}</div></div>
       <div class="row"><label>guardrail_overrides (JSON obj)</label>
         <input id="pe-guard" size="70" value="{}"></div>
-      <div class="row"><label title="Ordered list of model ids boosted to the top of this persona's candidates. Not hard-required: guardrail/quota denial falls through to the next pin, then the normal pool.">pinned_models (JSON list, priority order)</label>
-        <input id="pe-pins" size="70" value="[]" placeholder='["claude-sonnet-4-6", "glm-4.7-flash:latest"]'></div>
+      <div class="row"><label title="Ordered list of model ids tried in priority order. In brain (agent) mode: boosted to the top of candidates, guardrail/quota denial falls to the next pin, then the normal pool. In DIRECT mode (Cline) with local_bias_strength=prefer_paid: the paid pins are tried top-down as a cascade — each usage/cost-gated — before degrading to a local model on exhaustion (e.g. Opus 4.8 → Sonnet 5 → local). Local pins are honored as the local fallback, not the paid cascade.">pinned_models (JSON list, priority order)</label>
+        <input id="pe-pins" size="70" value="[]" placeholder='["claude-opus-4-8", "claude-sonnet-5", "qwen3.8:27b"]'></div>
       <div class="row"><label title="HARD restriction on which models this persona may route to. Empty = no restriction (brain picks from all — the default). ONE id locks the persona to it. A FEW ids limit the brain's choice to just those. Safety valve: if none are reachable, the full pool is used (logged) rather than failing. Use this to force a Cline-plan persona onto your Claude models, or lock/limit Cline-act to specific local coders.">model_allowlist (JSON list)</label>
         <input id="pe-allow" size="58" value="[]" placeholder='["claude-sonnet-4-6", "claude-opus-4-6"]' list="pe-allow-models">
         <datalist id="pe-allow-models">${allowOpts}</datalist>
