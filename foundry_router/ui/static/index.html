@@ -44,12 +44,17 @@
   #brand-logo { height:36px; width:auto; max-width:180px; border-radius:5px; }
   .hdr-tools { margin-left:auto; display:flex; gap:6px; align-items:center;
                flex-wrap:wrap; justify-content:flex-end; }
-  nav { display:flex; gap:2px; padding:0 clamp(6px, 1.8vw, 40px);
-        background:var(--panel); border-bottom:1px solid var(--line); flex-wrap:wrap; }
+  nav { display:flex; flex-direction:column; padding:0 clamp(6px, 1.8vw, 40px);
+        background:var(--panel); border-bottom:1px solid var(--line); }
+  nav .navgroups { display:flex; gap:2px; flex-wrap:wrap; }
+  nav .navsubs { display:flex; gap:2px; flex-wrap:wrap; padding:3px 0 1px;
+                 border-top:1px solid var(--line); }
   nav button { background:none; border:none; color:var(--dim); padding:9px 13px;
                cursor:pointer; font-size:13px; border-bottom:2px solid transparent; }
   nav button:hover { color:var(--fg); }
   nav button.active { color:var(--fg); border-bottom-color:var(--accent); }
+  nav .navsubs button { font-size:12px; padding:6px 11px; }
+  nav .navsubs button.active { color:var(--accent); border-bottom-color:var(--accent); }
   main { padding:18px clamp(12px, 1.8vw, 44px); width:100%; }
   h2 { font-size:14px; margin:18px 0 8px; color:var(--accent); }
   .hint { color:var(--dim); font-size:12px; margin:4px 0 10px; }
@@ -209,21 +214,64 @@ function clearLog(kind, label) {
 }
 
 /* ------------------------------------------------------------------ tabs -- */
+// Leaf tab label -> render function. The label is what `current` holds and what
+// self-cleaning timers compare against, so keep these stable.
 const TABS = {
-  "Live":      tabLive,
-  "Backends":  tabBackends,  "Models":   tabModels,   "Personas": tabPersonas,
-  "Tools":     tabTools,     "Guardrails": tabGuardrails, "MCP":  tabMCP,
-  "Ollama":    tabOllama,   "Research": tabResearch,  "Evals": tabEvals,
-  "Usage Log": tabUsage,     "Events":   tabEvents,   "Dev Log": tabDevLog,
+  "Live":           tabLive,
+  "Pool":           tabBackends,
+  "Model Registry": tabModels,
+  "Host Admin":     tabHostAdmin,
+  "Personas":       tabPersonas,
+  "Guardrails":     tabGuardrails,
+  "Tools":          tabTools,
+  "MCP Servers":    tabMCP,
+  "Research":       tabResearch,
+  "Evals":          tabEvals,
+  "Usage Log":      tabUsage,
+  "Events":         tabEvents,
+  "Dev Log":        tabDevLog,
 };
-let current = "Backends";
+// Primary nav groups -> their leaf tabs (the secondary row). Reorganizes the
+// former flat bar into logical sections without dropping anything.
+const GROUPS = [
+  ["Dashboard",   ["Live"]],
+  ["Backends",    ["Pool", "Model Registry", "Host Admin"]],
+  ["Routing",     ["Personas", "Guardrails"]],
+  ["Tools & MCP", ["Tools", "MCP Servers"]],
+  ["Labs",        ["Research", "Evals"]],
+  ["Logs",        ["Usage Log", "Events", "Dev Log"]],
+];
+const _groupOf = leaf => (GROUPS.find(g => g[1].includes(leaf)) || GROUPS[1])[0];
+const _lastLeaf = {};        // group name -> last leaf visited (remembered on switch)
+let current = "Pool";
 function render() {
   const nav = $("#nav"); nav.innerHTML = "";
-  for (const name of Object.keys(TABS)) {
+  const activeGroup = _groupOf(current);
+  _lastLeaf[activeGroup] = current;
+  // primary group row
+  const groupRow = document.createElement("div");
+  groupRow.className = "navgroups";
+  for (const [gname, leaves] of GROUPS) {
     const b = document.createElement("button");
-    b.textContent = name; b.className = name === current ? "active" : "";
-    b.onclick = () => { current = name; render(); };
-    nav.appendChild(b);
+    b.textContent = gname;
+    b.className = gname === activeGroup ? "active" : "";
+    b.onclick = () => { current = _lastLeaf[gname] || leaves[0]; render(); };
+    groupRow.appendChild(b);
+  }
+  nav.appendChild(groupRow);
+  // secondary sub-tab row (shown only when the active group has >1 leaf)
+  const leaves = (GROUPS.find(g => g[0] === activeGroup) || GROUPS[0])[1];
+  if (leaves.length > 1) {
+    const subRow = document.createElement("div");
+    subRow.className = "navsubs";
+    for (const leaf of leaves) {
+      const b = document.createElement("button");
+      b.textContent = leaf;
+      b.className = leaf === current ? "active" : "";
+      b.onclick = () => { current = leaf; render(); };
+      subRow.appendChild(b);
+    }
+    nav.appendChild(subRow);
   }
   $("#main").innerHTML = "<p class='hint'>loading…</p>";
   TABS[current]().then(postRender).catch(e => $("#main").innerHTML =
@@ -454,8 +502,16 @@ async function tabBackends() {
     </div>
     <div class="card">
       <h2 style="margin-top:0">Edit backend list (internal mode)</h2>
-      <p class="hint">JSON list. Use <code>\${MERIDIAN_API_KEY}</code>-style references for api_key —
+      <p class="hint">JSON list. Each backend needs <code>name</code>, <code>type</code>
+      (<code>ollama</code> / <code>openai-compatible</code> / <code>anthropic-compatible</code>),
+      and <code>url</code>. Use <code>\${MERIDIAN_API_KEY}</code>-style references for api_key —
       the value is written into config.yaml verbatim. Saving rebuilds the pool live.</p>
+      <p class="hint">Optional <code>flavor</code> on an <code>openai-compatible</code> backend names the
+      server software so <b>Host Admin</b> shows the right panel:
+      <code>llamacpp</code>, <code>unsloth</code>, <code>vllm</code>, or <code>openai</code>
+      (default). Ollama backends always get full model CRUD; the openai-dialect flavors get
+      read-only diagnostics. Example: <code>{"name":"llamacpp-1","type":"openai-compatible",
+      "url":"http://192.168.30.206:8080","flavor":"llamacpp"}</code>.</p>
       <textarea id="backends-json" rows="12"></textarea>
       <div class="row"><button class="act primary" id="save-backends">Save backends</button>
       <select id="pool-mode">
@@ -2096,20 +2152,125 @@ async function tabMCP() {
 }
 
 /* ---------------------------------------------------------------- ollama -- */
-async function tabOllama() {
+// Host Admin: one tab, a backend dropdown, and controls that adapt to the
+// selected backend's FLAVOR. Ollama flavors get full model CRUD; openai-dialect
+// flavors (llama.cpp / Unsloth / vLLM / OpenAI) get read-only diagnostics.
+const _FLAVOR_LABEL = {ollama: "Ollama", llamacpp: "llama.cpp",
+                       unsloth: "Unsloth", vllm: "vLLM", openai: "OpenAI"};
+async function tabHostAdmin() {
   clearInterval(window._ollamaPoll);
-  const d = await api("ollama/backends");
+  const d = await api("host/backends");
   const bes = d.backends || [];
   if (!bes.length) {
-    $("#main").innerHTML = `<h2>Ollama model management</h2>
-      <p class="hint">No Ollama-type backend is configured. Add one on the
-      <b>Backends</b> tab first, then manage its models here.</p>`;
+    $("#main").innerHTML = `<h2>Host Admin</h2>
+      <p class="hint">No manageable backend is configured. Add an Ollama or an
+      openai-compatible backend (llama.cpp / Unsloth / vLLM) on the
+      <b>Backends → Pool</b> tab — set its <code>flavor</code> — then manage or
+      inspect it here.</p>`;
     return;
   }
-  if (!window._ollamaBackend || !bes.find(b => b.name === window._ollamaBackend))
-    window._ollamaBackend = bes[0].name;
-  const be = window._ollamaBackend;
+  if (!window._hostBackend || !bes.find(b => b.name === window._hostBackend))
+    window._hostBackend = bes[0].name;
+  const be = window._hostBackend;
+  const cur = bes.find(b => b.name === be) || bes[0];
 
+  // Shared backend selector row (both panels render it, so the dropdown is
+  // always present for the onchange handler bound at the end).
+  const selector = hint => {
+    const beOpts = bes.map(b =>
+      `<option ${b.name === be ? "selected" : ""}>${esc(b.name)}</option>`).join("");
+    const flav = _FLAVOR_LABEL[cur.flavor] || cur.flavor;
+    return `<div class="row"><label>backend</label><select id="host-be">${beOpts}</select>
+      <span class="pill" title="server software behind the wire protocol — drives the admin surface">${esc(flav)}</span>
+      ${cur.flavor === "ollama"
+          ? (cur.version ? `<span class="pill ok" title="Ollama server version (/api/version)">Ollama v${esc(cur.version)}</span>`
+                         : '<span class="pill warn" title="/api/version unreachable">version ?</span>')
+          : `<span class="pill ${cur.healthy ? "ok" : "warn"}">${cur.healthy ? "healthy" : "unverified"}</span>`}
+      <span class="hint">${hint}</span></div>`;
+  };
+
+  if (cur.flavor === "ollama") await hostRenderOllama(be, d, selector);
+  else await hostRenderDiag(cur, selector);
+
+  $("#host-be").onchange = e => { window._hostBackend = e.target.value; render(); };
+}
+
+// -- read-only diagnostics panel (llama.cpp / Unsloth / vLLM / OpenAI) --------
+async function hostRenderDiag(cur, selector) {
+  const note = {
+    llamacpp: "Plain <span class='mono'>llama-server</span> is read-only over HTTP — one model per process. Model add/switch/delete needs the separate <b>llama-swap</b> proxy.",
+    unsloth: "Unsloth serves chat (OpenAI + Anthropic compatible). Loading a model is a host CLI, not a REST call, so there is nothing to add or delete over HTTP.",
+    vllm: "vLLM is read-only over HTTP — it serves the model(s) it was launched with.",
+    openai: "Generic OpenAI-compatible endpoint — read-only model listing.",
+  }[cur.flavor] || "";
+  $("#main").innerHTML = `
+    <h2>Host Admin — diagnostics</h2>
+    ${selector("Read-only — these servers expose no model CRUD over HTTP.")}
+    ${note ? `<p class="hint">${note}</p>` : ""}
+    ${cur.flavor === "unsloth" ? `<div class="card">
+      <h2 style="margin-top:0">Load a model (host CLI)</h2>
+      <p class="hint">There is no REST load endpoint — run this on the Unsloth host:</p>
+      <pre class="mono" style="white-space:pre-wrap;background:var(--panel);border:1px solid var(--line);border-radius:6px;padding:10px">unsloth run --model &lt;model-name&gt;:&lt;variant&gt;</pre></div>` : ""}
+    <div id="host-diag"><p class="hint">probing…</p></div>`;
+  try {
+    const r = await api("host/diag?backend=" + encodeURIComponent(cur.name));
+    $("#host-diag").innerHTML = r.ok ? renderDiagReport(r.report)
+      : `<p class="hint"><span class="pill bad">error</span> ${esc(r.error)}</p>`;
+  } catch (e) {
+    $("#host-diag").innerHTML = `<p class="hint"><span class="pill bad">error</span> ${esc(e.message)}</p>`;
+  }
+}
+
+function renderDiagReport(rep) {
+  const card = (title, inner) => `<div class="card"><h2 style="margin-top:0">${title}</h2>${inner}</div>`;
+  const errLine = e => `<p class="hint"><span class="pill bad">unreachable</span> ${esc(e || "no response")}</p>`;
+  let html = "";
+  if (rep.health) {
+    const h = rep.health;
+    html += card("Health", h.ok
+      ? `<span class="pill ok">ok</span> <span class="mono">${esc(typeof h.body === "string" ? h.body : JSON.stringify(h.body))}</span>`
+      : errLine(h.error || ("HTTP " + h.status_code)));
+  }
+  if (rep.props) {
+    const p = rep.props;
+    html += card("Loaded model — /props", p.ok
+      ? `<table>
+          <tr><th>model</th><td class="mono">${esc(p.model_path || "?")}</td></tr>
+          <tr><th>context (n_ctx)</th><td class="mono">${esc(p.n_ctx ?? "?")}</td></tr>
+          <tr><th>slots</th><td class="mono">${esc(p.total_slots ?? "?")}</td></tr>
+          <tr><th>chat template</th><td>${p.chat_template_present ? "present" : "—"}</td></tr>
+         </table>`
+      : errLine(p.error));
+  }
+  if (rep.slots) {
+    const s = rep.slots;
+    html += card("KV slots — /slots", s.ok
+      ? (s.count ? `<table><tr><th>id</th><th>state</th></tr>${s.slots.map(x =>
+          `<tr><td class="mono">${esc(x.id)}</td><td class="mono">${esc(x.state ?? "")}</td></tr>`).join("")}</table>`
+          : `<p class="hint">no active slots (or slots disabled with --no-slots)</p>`)
+      : errLine(s.error));
+  }
+  if (rep.models) {
+    const m = rep.models;
+    html += card(`Models — /v1/models${m.ok ? " (" + m.models.length + ")" : ""}`, m.ok
+      ? (m.models.length ? `<table><tr><th>id</th></tr>${m.models.map(x =>
+          `<tr><td class="mono">${esc(x)}</td></tr>`).join("")}</table>`
+          : `<p class="hint">no models reported</p>`)
+      : errLine(m.error));
+  }
+  if (rep.metrics) {
+    const mt = rep.metrics;
+    html += card("Metrics — /metrics", mt.ok
+      ? (Object.keys(mt.metrics || {}).length ? `<table>${Object.entries(mt.metrics).map(([k, v]) =>
+          `<tr><th class="mono">${esc(k)}</th><td class="mono">${esc(v)}</td></tr>`).join("")}</table>`
+          : `<p class="hint">no matching gauges exposed</p>`)
+      : errLine(mt.error));
+  }
+  return html || `<p class="hint">no diagnostics available for this flavor</p>`;
+}
+
+// -- full Ollama model-management panel (CRUD via the Ollama REST API) --------
+async function hostRenderOllama(be, d, selector) {
   let models = [], loaded = [], tagErr = "";
   try {
     const t = await api("ollama/tags?backend=" + encodeURIComponent(be));
@@ -2117,8 +2278,6 @@ async function tabOllama() {
   } catch (e) { tagErr = e.message; }
   const isLoaded = nm => loaded.includes(nm);
 
-  const beOpts = bes.map(b => `<option ${b.name === be ? "selected" : ""}>${esc(b.name)}</option>`).join("");
-  const beVersion = (bes.find(b => b.name === be) || {}).version || "";
   const gb = n => n ? (n / 1e9).toFixed(2) + " GB" : "";
   const nameOf = m => m.name || m.model || "";
   const modelRows = models.map(m => {
@@ -2138,10 +2297,8 @@ async function tabOllama() {
   }).join("");
 
   $("#main").innerHTML = `
-    <h2>Ollama model management</h2>
-    <div class="row"><label>backend</label><select id="oll-be">${beOpts}</select>
-      ${beVersion ? `<span class="pill ok" title="Ollama server version (/api/version)">Ollama v${esc(beVersion)}</span>` : '<span class="pill warn" title="/api/version unreachable">version ?</span>'}
-      <span class="hint">Add / pull / copy / rename / delete models directly on this Ollama host via its REST API.</span></div>
+    <h2>Host Admin — Ollama model management</h2>
+    ${selector("Add / pull / copy / rename / delete models directly on this Ollama host via its REST API.")}
     ${tagErr ? `<p class="hint"><span class="pill bad">unreachable</span> ${esc(tagErr)}</p>` : ""}
     <div id="oll-jobs"></div>
     <h2>Installed models (${models.length})</h2>
@@ -2168,8 +2325,6 @@ SYSTEM You are a helpful assistant."></textarea></details>
       <div class="row"><button class="act primary" id="oll-cr-btn">Create</button>
         <span class="hint">Bakes a system prompt/params into a named model. A raw Modelfile is parsed into Ollama's structured create fields (FROM → from, SYSTEM, PARAMETER…). Needs a FROM/base.</span></div>
     </div>`;
-
-  $("#oll-be").onchange = e => { window._ollamaBackend = e.target.value; render(); };
 
   window.ollShow = async name => {
     const el = $("#oll-detail");
@@ -2241,7 +2396,7 @@ SYSTEM You are a helpful assistant."></textarea></details>
   function pollJobs() {
     clearInterval(window._ollamaPoll);
     window._ollamaPoll = setInterval(async () => {
-      if (current !== "Ollama") { clearInterval(window._ollamaPoll); return; }
+      if (current !== "Host Admin") { clearInterval(window._ollamaPoll); return; }
       try {
         const j = await api("ollama/jobs");
         renderJobs(j.jobs);

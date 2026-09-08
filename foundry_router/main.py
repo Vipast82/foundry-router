@@ -35,6 +35,7 @@ from .personas import PersonaStore
 from .pool.base import build_pool
 from .logbuffer import RingLogHandler
 from .pool.ollama_admin import OllamaAdmin
+from .pool.openai_admin import OpenAIAdmin
 from .registry.models_db import ModelRegistry
 from .registry.openrouter_ingest import poll_openrouter
 from .evalharness import EvalHarness, ensure_seed as ensure_eval_seed
@@ -83,6 +84,7 @@ class Services:
 
         self.pool = build_pool(cfg, self.http, db)
         self.ollama_admin = OllamaAdmin(self.http, self.pool, db)
+        self.openai_admin = OpenAIAdmin(self.http, self.pool, db)
         self.registry = ModelRegistry(db)
         self.personas = PersonaStore(db)
         self.mcp = MCPManager(cfg.mcp_servers, db)
@@ -261,6 +263,7 @@ class Services:
         self.pool.add_state_listener(self._on_pool_change)
         self.agent.pool = self.pool
         self.ollama_admin.pool = self.pool
+        self.openai_admin.pool = self.pool
         self.guardrails.pool_mode = self.config_store.config.backend_pool.mode
         await old.stop()
         if os.environ.get("FOUNDRY_DISABLE_BACKGROUND") != "1":

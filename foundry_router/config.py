@@ -144,10 +144,29 @@ class BackendConfig(BaseModel):
     url: str
     api_key: Optional[str] = None
     priority: int = 100
+    # `flavor` names the SERVER SOFTWARE behind the wire protocol so the Host
+    # Admin UI can offer the right management surface. `type` is only the wire
+    # dialect (ollama / openai / anthropic); several very different servers speak
+    # the openai dialect (llama.cpp, Unsloth, vLLM, plain OpenAI) but expose
+    # different admin endpoints. Ollama has full model CRUD (pull/copy/rename/
+    # delete/create); the openai-dialect servers expose only READ-ONLY
+    # diagnostics (list models / props / health / slots). None = infer from
+    # `type` (ollama -> "ollama", else -> "openai").
+    flavor: Optional[Literal["ollama", "llamacpp", "unsloth",
+                             "vllm", "openai"]] = None
     # Optional discovery fallback ONLY — used if the backend exposes no
     # model-list endpoint (§4.3: "do not hardcode model lists for backends
     # that can be discovered").
     models: list[str] = Field(default_factory=list)
+
+    @property
+    def effective_flavor(self) -> str:
+        """The admin flavor to drive the Host Admin panel: the explicit `flavor`
+        if set, else inferred from the wire `type` (ollama -> ollama, anything
+        else -> a generic openai diagnostics surface)."""
+        if self.flavor:
+            return self.flavor
+        return "ollama" if self.type == "ollama" else "openai"
 
 
 class InternalPoolConfig(BaseModel):

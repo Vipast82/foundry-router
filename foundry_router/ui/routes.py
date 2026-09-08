@@ -1460,3 +1460,39 @@ async def ollama_create(request: Request):
 async def ollama_jobs(request: Request):
     """Progress of running/finished pull/create/push jobs — polled by the UI."""
     return {"jobs": _svc(request).ollama_admin.job_snapshot()}
+
+
+# --------------------------------------------------------------------------- #
+# Unified Host Admin (backend-type-aware): Ollama CRUD + openai-dialect       #
+# read-only diagnostics (llama.cpp / Unsloth / vLLM / OpenAI) behind one tab. #
+# --------------------------------------------------------------------------- #
+
+@router.get("/admin/api/host/backends")
+async def host_backends(request: Request):
+    """Every backend that has an admin surface, each tagged with its flavor so the
+    Host Admin panel picks the right controls: Ollama flavors get full model CRUD
+    (via the /admin/api/ollama/* routes); openai-dialect flavors (llamacpp /
+    unsloth / vllm / openai) get read-only diagnostics (/admin/api/host/diag)."""
+    svc = _svc(request)
+    out = []
+    for b in svc.ollama_admin.backends():
+        out.append({"name": b["name"], "url": b["url"], "flavor": "ollama",
+                    "healthy": b["healthy"], "crud": True,
+                    "version": await svc.ollama_admin.version(b["name"])})
+    for b in svc.openai_admin.backends():
+        out.append({"name": b["name"], "url": b["url"], "flavor": b["flavor"],
+                    "healthy": b["healthy"], "crud": False, "version": ""})
+    out.sort(key=lambda b: b["name"])
+    return {"backends": out, "jobs": svc.ollama_admin.job_snapshot()}
+
+
+@router.get("/admin/api/host/diag")
+async def host_diag(request: Request, backend: str):
+    """Read-only diagnostics for an openai-dialect backend (llama.cpp / Unsloth /
+    vLLM / OpenAI). Each probe is individually guarded, so a partial report comes
+    back even when some endpoints are unimplemented or the host is half-up."""
+    from ..errors import describe_exception
+    try:
+        return {"ok": True, "report": await _svc(request).openai_admin.diagnostics(backend)}
+    except Exception as e:
+        return {"ok": False, "error": describe_exception(e)}

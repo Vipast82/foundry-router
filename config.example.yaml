@@ -108,6 +108,25 @@ backend_pool:
       #   url: https://openrouter.ai/api/v1
       #   api_key: "${OPENROUTER_API_KEY}"
       #   priority: 100
+      #
+      # `flavor` (optional) names the SERVER SOFTWARE behind an openai-compatible
+      # backend so the admin UI's Host Admin tab shows the right panel. `type` is
+      # only the wire dialect; several very different servers speak openai. Ollama
+      # backends get full model CRUD (pull/copy/rename/delete/create); the
+      # openai-dialect flavors below get READ-ONLY diagnostics (list / props /
+      # health / slots), because that is all they expose over HTTP. Valid flavors:
+      # llamacpp | unsloth | vllm | openai (default when omitted).
+      # - name: llamacpp-1                    # llama.cpp `llama-server`
+      #   type: openai-compatible
+      #   url: http://192.168.1.55:8080       # ONE model per process; add/switch needs llama-swap
+      #   flavor: llamacpp
+      #   priority: 80
+      # - name: unsloth-1                     # Unsloth inference server
+      #   type: openai-compatible
+      #   url: http://192.168.1.56:8000       # loads models via the `unsloth run` CLI, not REST
+      #   api_key: "${UNSLOTH_API_KEY}"       # keys start with sk-unsloth-
+      #   flavor: unsloth
+      #   priority: 80
 
   # mode: olla — forward model resolution to an existing Olla instance
   olla:
