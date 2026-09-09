@@ -92,10 +92,16 @@ class BaseProtocol:
     """One instance per backend. Owns no connection state beyond the shared
     httpx client passed in (connection pooling lives there)."""
 
-    def __init__(self, url: str, api_key: Optional[str], client: httpx.AsyncClient):
+    def __init__(self, url: str, api_key: Optional[str], client: httpx.AsyncClient,
+                 flavor: Optional[str] = None):
         self.url = url.rstrip("/")
         self.api_key = api_key or None
         self.client = client
+        # Server-software flavor (ollama / llamacpp / unsloth / vllm / openai),
+        # from the backend config. Lets a protocol tailor the wire body to the
+        # actual server — e.g. only send non-standard sampling controls to the
+        # local runners that understand them, not to a strict OpenAI endpoint.
+        self.flavor = flavor or None
 
     async def list_models(self) -> list[str]:
         raise NotImplementedError
@@ -108,13 +114,22 @@ class BaseProtocol:
     async def chat_stream(self, model: str, messages: list[dict], tools=None,
                           options: Optional[dict] = None, keep_alive=None,
                           think=None, max_tokens=None, fmt=None) -> AsyncIterator[dict]:
-        """Token-level streaming (no tools) — used only for the raw-model
-        passthrough path. Default implementation degrades to one chunk."""
-        result = await self.chat(model, messages, options=options)
-        yield {"content": result.content, "done": False}
+        """Token-level streaming fallback. Concrete protocols override this with
+        real SSE streaming; this degraded default (one content chunk + a done
+        frame) forwards EVERY capability param to chat() so a fallback still
+        honors tools/think/max_tokens/fmt and surfaces tool calls + thinking."""
+        result = await self.chat(model, messages, tools=tools, options=options,
+                                 keep_alive=keep_alive,
+                                 max_tokens=max_tokens or 4096, think=think, fmt=fmt)
+        yield {"content": result.content, "done": False,
+               "thinking": result.thinking or ""}
         yield {"content": "", "done": True,
+               "tool_calls": [{"id": tc["id"], "name": tc["name"],
+                               "arguments": tc["arguments"]} for tc in result.tool_calls] or None,
                "prompt_tokens": result.prompt_tokens,
-               "completion_tokens": result.completion_tokens}
+               "completion_tokens": result.completion_tokens,
+               "eval_duration_ns": result.eval_duration_ns,
+               "load_duration_ns": result.load_duration_ns}
 
 
 # --------------------------------------------------------------------------- #
@@ -305,6 +320,19 @@ class OllamaProtocol(BaseProtocol):
 # --------------------------------------------------------------------------- #
 
 class OpenAIProtocol(BaseProtocol):
+    # Standard OpenAI sampling fields — safe to send to ANY openai-dialect
+    # endpoint (including strict OpenAI / OpenRouter).
+    _STD_SAMPLING = ("temperature", "top_p", "presence_penalty",
+                     "frequency_penalty", "seed", "stop")
+    # Non-standard sampling controls understood by the LOCAL runners
+    # (llama.cpp / Unsloth / vLLM) but rejected by a strict OpenAI endpoint —
+    # forwarded only for those flavors so a mixed fleet each gets its full knob
+    # set without 400ing the strict ones.
+    _EXTRA_SAMPLING = ("top_k", "min_p", "repeat_penalty", "repetition_penalty",
+                       "typical_p", "tfs_z", "mirostat", "mirostat_tau",
+                       "mirostat_eta")
+    _LOCAL_FLAVORS = {"llamacpp", "unsloth", "vllm"}
+
     def _headers(self) -> dict:
         h = {"Content-Type": "application/json"}
         if self.api_key:
@@ -320,8 +348,7 @@ class OpenAIProtocol(BaseProtocol):
         r.raise_for_status()
         return [m["id"] for m in r.json().get("data", [])]
 
-    async def chat(self, model, messages, tools=None, options=None,
-                   keep_alive=None, max_tokens=4096, think=None, fmt=None) -> ChatResult:
+    def _translate_messages(self, messages) -> list[dict]:
         msgs = []
         for m in messages:
             mm: dict = {"role": m["role"], "content": m.get("content") or ""}
@@ -345,18 +372,44 @@ class OpenAIProtocol(BaseProtocol):
                           for img in m["images"]]
                 mm["content"] = parts
             msgs.append(mm)
-        payload: dict = {"model": model, "messages": msgs, "max_tokens": max_tokens}
+        return msgs
+
+    def _payload(self, model, messages, tools, options, max_tokens, think, fmt) -> dict:
+        payload: dict = {"model": model, "messages": self._translate_messages(messages),
+                         "max_tokens": max_tokens}
         if tools:
             payload["tools"] = tools
-        for k in ("temperature", "top_p"):
-            if options and k in options:
-                payload[k] = options[k]
+        opts = options or {}
+        for k in self._STD_SAMPLING:
+            if k in opts:
+                payload[k] = opts[k]
+        # Client sent Ollama-style num_predict? Map it onto max_tokens (the
+        # OpenAI ceiling), so the same client options work across backends.
+        if opts.get("num_predict"):
+            payload["max_tokens"] = int(opts["num_predict"])
+        if (self.flavor or "openai") in self._LOCAL_FLAVORS:
+            for k in self._EXTRA_SAMPLING:
+                if k in opts:
+                    payload[k] = opts[k]
+        # Reasoning: OpenAI-standard `reasoning_effort` (low/medium/high). Only
+        # emitted when the dispatch layer resolved a real effort for a reasoning-
+        # capable model (see thinking.supported_levels for openai-compatible),
+        # so it never reaches a model that would reject it.
+        from .. import thinking as _thinking
+        eff = _thinking.openai_reasoning_effort(think)
+        if eff:
+            payload["reasoning_effort"] = eff
         # Structured output → OpenAI response_format. "json" = json_object; a
         # dict is treated as a json_schema; a string schema is passed through.
         if fmt == "json":
             payload["response_format"] = {"type": "json_object"}
         elif isinstance(fmt, dict):
             payload["response_format"] = {"type": "json_schema", "json_schema": fmt}
+        return payload
+
+    async def chat(self, model, messages, tools=None, options=None,
+                   keep_alive=None, max_tokens=4096, think=None, fmt=None) -> ChatResult:
+        payload = self._payload(model, messages, tools, options, max_tokens, think, fmt)
         r = await self.client.post(f"{self._base()}/chat/completions",
                                    json=payload, headers=self._headers())
         if r.status_code >= 400:
@@ -372,11 +425,72 @@ class OpenAIProtocol(BaseProtocol):
         usage = data.get("usage") or {}
         return ChatResult(
             content=msg.get("content") or "",
+            # Reasoning models on llama.cpp/vLLM separate their chain-of-thought
+            # into reasoning_content (or reasoning); carry it as .thinking so it
+            # reaches the client's think pane instead of being lost.
+            thinking=msg.get("reasoning_content") or msg.get("reasoning") or "",
             tool_calls=tool_calls,
             prompt_tokens=usage.get("prompt_tokens") or 0,
             completion_tokens=usage.get("completion_tokens") or 0,
             raw=data,
         )
+
+    async def chat_stream(self, model, messages, tools=None, options=None,
+                          keep_alive=None, think=None, max_tokens=None,
+                          fmt=None) -> AsyncIterator[dict]:
+        """Real SSE streaming for openai-dialect backends: forwards content and
+        reasoning deltas live (each chunk resets the read timeout), accumulates
+        index-keyed tool-call fragments, and emits tool_calls + usage on the
+        final done frame — so a mixed fleet streams to Cline exactly like Ollama."""
+        payload = self._payload(model, messages, tools, options,
+                                max_tokens or 4096, think, fmt)
+        payload["stream"] = True
+        payload["stream_options"] = {"include_usage": True}
+        async with self.client.stream("POST", f"{self._base()}/chat/completions",
+                                      json=payload, headers=self._headers()) as r:
+            if r.status_code >= 400:
+                body = await r.aread()
+                raise ProtocolError(f"openai-compat {self.url} HTTP {r.status_code}: {body[:300]!r}")
+            frags: dict = {}          # tool-call index -> {id,name,arguments(str)}
+            pt = ct = 0
+            async for line in r.aiter_lines():
+                line = line.strip()
+                if not line or not line.startswith("data:"):
+                    continue
+                body = line[5:].strip()
+                if body == "[DONE]":
+                    break
+                try:
+                    obj = json.loads(body)
+                except json.JSONDecodeError:
+                    continue
+                usage = obj.get("usage") or {}
+                if usage:
+                    pt = usage.get("prompt_tokens") or pt
+                    ct = usage.get("completion_tokens") or ct
+                choices = obj.get("choices") or []
+                if not choices:
+                    continue
+                delta = choices[0].get("delta") or {}
+                for tc in (delta.get("tool_calls") or []):
+                    idx = tc.get("index", 0)
+                    frag = frags.setdefault(idx, {"id": None, "name": "", "arguments": ""})
+                    if tc.get("id"):
+                        frag["id"] = tc["id"]
+                    fn = tc.get("function") or {}
+                    if fn.get("name"):
+                        frag["name"] = fn["name"]
+                    if fn.get("arguments"):
+                        frag["arguments"] += fn["arguments"]
+                content = delta.get("content") or ""
+                reasoning = delta.get("reasoning_content") or delta.get("reasoning") or ""
+                if content or reasoning:
+                    yield {"content": content, "done": False, "thinking": reasoning}
+            tool_calls = [{"id": f["id"] or _new_id(), "name": f["name"],
+                           "arguments": _parse_arguments(f["arguments"])}
+                          for f in frags.values() if f["name"]] or None
+            yield {"content": "", "done": True, "tool_calls": tool_calls,
+                   "prompt_tokens": pt, "completion_tokens": ct}
 
 
 # --------------------------------------------------------------------------- #
@@ -411,8 +525,7 @@ class AnthropicProtocol(BaseProtocol):
             raise ProtocolError("model list endpoint returned no usable entries")
         return out
 
-    async def chat(self, model, messages, tools=None, options=None,
-                   keep_alive=None, max_tokens=4096, think=None, fmt=None) -> ChatResult:
+    def _payload(self, model, messages, tools, options, max_tokens, think, fmt) -> dict:
         system_parts: list[str] = []
         out_msgs: list[dict] = []
         for m in messages:
@@ -448,6 +561,20 @@ class AnthropicProtocol(BaseProtocol):
             else:
                 out_msgs.append({"role": role, "content": content})
 
+        # Structured output: the Anthropic Messages API has no response_format,
+        # so honor `fmt` as a system instruction (best-effort parity with the
+        # Ollama/OpenAI JSON modes). A schema is included so Claude sees the shape.
+        if fmt:
+            if fmt == "json":
+                nudge = ("Respond with a single valid JSON value and nothing "
+                         "else — no prose, no markdown fences.")
+            else:
+                schema = fmt if isinstance(fmt, str) else json.dumps(fmt)
+                nudge = ("Respond with a single valid JSON value and nothing else "
+                         "(no prose, no markdown fences) that conforms to this "
+                         f"JSON schema:\n{schema}")
+            system_parts.append(nudge)
+
         payload: dict = {"model": model, "messages": out_msgs, "max_tokens": max_tokens}
         if system_parts:
             payload["system"] = "\n\n".join(system_parts)
@@ -469,7 +596,11 @@ class AnthropicProtocol(BaseProtocol):
             payload["thinking"] = block
         elif options and "temperature" in options:
             payload["temperature"] = options["temperature"]
+        return payload
 
+    async def chat(self, model, messages, tools=None, options=None,
+                   keep_alive=None, max_tokens=4096, think=None, fmt=None) -> ChatResult:
+        payload = self._payload(model, messages, tools, options, max_tokens, think, fmt)
         r = await self.client.post(f"{self.url}/v1/messages",
                                    json=payload, headers=self._headers())
         if r.status_code >= 400:
@@ -499,6 +630,62 @@ class AnthropicProtocol(BaseProtocol):
             raw=data,
         )
 
+    async def chat_stream(self, model, messages, tools=None, options=None,
+                          keep_alive=None, think=None, max_tokens=None,
+                          fmt=None) -> AsyncIterator[dict]:
+        """Real SSE streaming for Claude via Meridian: forwards text and
+        extended-thinking deltas live, accumulates tool_use input JSON by block
+        index, and emits tool_calls + usage on the done frame — so a Claude
+        backend streams to a client with the same fidelity as a local one."""
+        payload = self._payload(model, messages, tools, options,
+                                max_tokens or 4096, think, fmt)
+        payload["stream"] = True
+        blocks: dict = {}         # content-block index -> {type,name,id,json(str)}
+        pt = ct = 0
+        async with self.client.stream("POST", f"{self.url}/v1/messages",
+                                      json=payload, headers=self._headers()) as r:
+            if r.status_code >= 400:
+                body = await r.aread()
+                raise ProtocolError(f"anthropic-compat {self.url} HTTP {r.status_code}: {body[:300]!r}")
+            async for line in r.aiter_lines():
+                line = line.strip()
+                if not line.startswith("data:"):
+                    continue
+                try:
+                    ev = json.loads(line[5:].strip())
+                except json.JSONDecodeError:
+                    continue
+                etype = ev.get("type")
+                if etype == "message_start":
+                    pt = ((ev.get("message") or {}).get("usage") or {}).get("input_tokens") or pt
+                elif etype == "content_block_start":
+                    cb = ev.get("content_block") or {}
+                    blocks[ev.get("index")] = {"type": cb.get("type"),
+                                               "name": cb.get("name"),
+                                               "id": cb.get("id"), "json": ""}
+                elif etype == "content_block_delta":
+                    d = ev.get("delta") or {}
+                    dt = d.get("type")
+                    if dt == "text_delta":
+                        if d.get("text"):
+                            yield {"content": d["text"], "done": False}
+                    elif dt == "thinking_delta":
+                        if d.get("thinking"):
+                            yield {"content": "", "done": False, "thinking": d["thinking"]}
+                    elif dt == "input_json_delta":
+                        blk = blocks.get(ev.get("index"))
+                        if blk is not None:
+                            blk["json"] += d.get("partial_json") or ""
+                elif etype == "message_delta":
+                    ct = (ev.get("usage") or {}).get("output_tokens") or ct
+                elif etype == "message_stop":
+                    break
+        tool_calls = [{"id": b.get("id") or _new_id(), "name": b.get("name"),
+                       "arguments": _parse_arguments(b.get("json") or "{}")}
+                      for b in blocks.values() if b.get("type") == "tool_use"] or None
+        yield {"content": "", "done": True, "tool_calls": tool_calls,
+               "prompt_tokens": pt, "completion_tokens": ct}
+
 
 PROTOCOLS = {
     "ollama": OllamaProtocol,
@@ -508,9 +695,10 @@ PROTOCOLS = {
 
 
 def make_protocol(backend_type: str, url: str, api_key: Optional[str],
-                  client: httpx.AsyncClient) -> BaseProtocol:
+                  client: httpx.AsyncClient,
+                  flavor: Optional[str] = None) -> BaseProtocol:
     try:
         cls = PROTOCOLS[backend_type]
     except KeyError:
         raise ValueError(f"unknown backend type {backend_type!r}") from None
-    return cls(url, api_key, client)
+    return cls(url, api_key, client, flavor=flavor)

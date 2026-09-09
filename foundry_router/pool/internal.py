@@ -48,7 +48,8 @@ class InternalPool(BackendPool):
         self.backends: dict[str, BackendState] = {}
         for b in backends:
             self.backends[b.name] = BackendState(
-                config=b, protocol=make_protocol(b.type, b.url, b.api_key, client))
+                config=b, protocol=make_protocol(b.type, b.url, b.api_key, client,
+                                                 flavor=getattr(b, "effective_flavor", None)))
         self._listeners: list[Callable[[], None]] = []
         self._health_task: Optional[asyncio.Task] = None
         self._loaded: set[str] = set()   # VRAM-resident models, cached (see loaded_models)
@@ -185,7 +186,8 @@ class InternalPool(BackendPool):
         c = cands[0].config
         # api_key rides along for the guardrails' authenticated quota check —
         # backend_info is internal plumbing, never serialized to the UI.
-        return {"name": c.name, "type": c.type, "url": c.url, "api_key": c.api_key}
+        return {"name": c.name, "type": c.type, "url": c.url, "api_key": c.api_key,
+                "flavor": getattr(c, "effective_flavor", None)}
 
     async def loaded_models(self) -> set[str]:
         """Union of models resident in VRAM across healthy ollama backends,

@@ -42,7 +42,8 @@ CLAUDE_BUDGETS = {"low": 2048, "medium": 8192, "high": 16384, "max": 32768}
 # builds served by current Ollama accept the graded low/medium/high/max, not
 # just on/off.)
 _FAMILY_MENUS: list[tuple[re.Pattern, list[str]]] = [
-    (re.compile(r"gpt-?oss", re.I), ["off", "low", "medium", "high"]),
+    (re.compile(r"gpt-?oss|gpt-?5|\bo[134]\b", re.I),
+     ["off", "low", "medium", "high"]),
     (re.compile(r"qwen3|qwq|deepseek-?r1|magistral", re.I),
      ["off", "low", "medium", "high", "max"]),
     (re.compile(r"claude|sonnet|opus|haiku", re.I),
@@ -95,6 +96,18 @@ def supported_levels(model_id: str, caps=None, backend_type: str = "") -> list[s
     name = model_id or ""
     if backend_type == "anthropic-compatible":
         return ["off", "low", "medium", "high", "max"]
+    if backend_type == "openai-compatible":
+        # openai-dialect servers (llama.cpp / Unsloth / vLLM / OpenAI) don't
+        # advertise a `thinking` capability the way Ollama's /api/show does, so
+        # infer reasoning support from the model FAMILY NAME. Unknown families
+        # get no reasoning control — we must not send `reasoning_effort` to a
+        # model that would reject it (a strict OpenAI endpoint 400s).
+        for pat, menu in _FAMILY_MENUS:
+            if pat.search(name):
+                return menu
+        return []
+    # ollama / default: gate on the discovered `thinking` capability, then shape
+    # by family (a thinking-capable but unrecognized family gets on/off only).
     if "thinking" not in _as_list(caps):
         return []
     for pat, menu in _FAMILY_MENUS:
@@ -117,6 +130,24 @@ def think_value(effort, model_id: str, caps=None, backend_type: str = ""):
     if not supports_thinking(model_id, caps, backend_type):
         return None
     return norm
+
+
+def openai_reasoning_effort(think) -> Optional[str]:
+    """Map a normalized think value onto OpenAI's `reasoning_effort` field
+    ("low"/"medium"/"high") — the reasoning control understood by openai-dialect
+    servers (llama.cpp's gpt-oss/Qwen3 builds, Unsloth, vLLM, and OpenAI's own
+    o-series). Returns None when thinking should NOT be requested (off / unset),
+    so the caller omits the field entirely. Ollama's top level "max" has no
+    OpenAI equivalent, so it collapses to "high"; a bare on maps to "medium"."""
+    norm = normalize(think)
+    if norm is None or norm is False:
+        return None
+    if norm is True:
+        return "medium"
+    level = str(norm).strip().lower()
+    if level == "max":
+        return "high"
+    return level if level in ("low", "medium", "high") else None
 
 
 def claude_thinking(think, max_tokens: int):

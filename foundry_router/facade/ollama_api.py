@@ -735,17 +735,21 @@ async def _direct_dispatch_chat(svc, persona, model_name, messages, client_tools
                             "completion_tokens": res.completion_tokens,
                             "total_duration_ns": time.monotonic_ns() - t0}
 
-    # LIVE STREAMING (opt-in, Ollama backends only): forward the worker's tokens
-    # as they generate — each chunk is real proof the backend is working, resets
-    # the read timeout (no total-time wall), and shows the client typing live.
-    # Claude / non-streaming backends fall through to the blocking path below.
+    # LIVE STREAMING (opt-in): forward the worker's tokens as they generate — each
+    # chunk is real proof the backend is working, resets the read timeout (no
+    # total-time wall), and shows the client typing live. Enabled for local Ollama
+    # AND openai-dialect backends (llama.cpp / Unsloth / vLLM / OpenRouter), which
+    # now stream with full tool + reasoning fidelity. Claude/anthropic stays on the
+    # blocking path below so subscription-usage accounting runs on every call.
     binfo0 = svc.pool.backend_info(model_id) or {}
-    if brain_cfg.direct_stream and stream and binfo0.get("type") == "ollama":
+    _btype = binfo0.get("type")
+    if brain_cfg.direct_stream and stream and _btype in ("ollama", "openai-compatible"):
         backend_name = binfo0.get("name") or model_id
+        _tag = "local" if _btype == "ollama" else (binfo0.get("flavor") or "openai")
 
         async def sgen():
             yield tr.chat_chunk(model_name, "", done=False,
-                                thinking=f"⚙️ local · {model_id} — streaming…\n")
+                                thinking=f"⚙️ {_tag} · {model_id} — streaming…\n")
             acc_tools: list = []
             hb = float(brain_cfg.direct_stream_heartbeat_seconds or 0)
             hb_start = time.monotonic()
