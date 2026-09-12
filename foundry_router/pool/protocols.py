@@ -391,14 +391,24 @@ class OpenAIProtocol(BaseProtocol):
             for k in self._EXTRA_SAMPLING:
                 if k in opts:
                     payload[k] = opts[k]
-        # Reasoning: OpenAI-standard `reasoning_effort` (low/medium/high). Only
-        # emitted when the dispatch layer resolved a real effort for a reasoning-
-        # capable model (see thinking.supported_levels for openai-compatible),
-        # so it never reaches a model that would reject it.
+        # Reasoning. Two shapes, because openai-dialect servers disagree:
+        #  * A level (low/medium/high) -> OpenAI-standard `reasoning_effort`.
+        #  * Explicit OFF -> there is NO reasoning_effort="off". Qwen3/DeepSeek-R1
+        #    on llama.cpp / vLLM think BY DEFAULT, so to actually disable thinking
+        #    (the ACT-speed path) we send the chat-template kwarg those runners
+        #    honor. It's gated to local flavors — a strict OpenAI endpoint would
+        #    reject it — and is harmlessly ignored by models whose template
+        #    doesn't read `enable_thinking`. This gives Ollama/llama.cpp parity:
+        #    `think:false` on Ollama and this here both mean "no reasoning".
         from .. import thinking as _thinking
-        eff = _thinking.openai_reasoning_effort(think)
-        if eff:
-            payload["reasoning_effort"] = eff
+        norm = _thinking.normalize(think)
+        local = (self.flavor or "openai") in self._LOCAL_FLAVORS
+        if norm is False and local:
+            payload["chat_template_kwargs"] = {"enable_thinking": False}
+        else:
+            eff = _thinking.openai_reasoning_effort(think)
+            if eff:
+                payload["reasoning_effort"] = eff
         # Structured output → OpenAI response_format. "json" = json_object; a
         # dict is treated as a json_schema; a string schema is passed through.
         if fmt == "json":

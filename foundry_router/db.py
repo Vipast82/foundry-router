@@ -417,6 +417,35 @@ class Database:
                 "WHERE virtual_name=? AND (reasoning_effort IS NULL OR reasoning_effort='')",
                 (effort, now, name))
         self.kv_set("persona_seed_v5_cline_effort", now)
+        self._seed_cline_effort_v2()
+
+    def _seed_cline_effort_v2(self) -> None:
+        """Speed/quality upgrade for the Cline pair (v6):
+          PLAN keeps deep thinking but now FORCES it, so a client-sent think:false
+          can't silently disable the planner's reasoning (you route PLAN to Claude
+          precisely FOR that reasoning).
+          ACT switches to thinking OFF and forces it — a local coder writing
+          SEARCH/REPLACE edits doesn't need a reasoning trace, and on a 27B that
+          trace is the bulk of the latency. OFF is dramatically faster, and the
+          persona still escalates to Claude for genuine debugging.
+        Only rows STILL at the prior auto-seed (plan='high', act='low') with force
+        untouched are upgraded — any manual choice is preserved."""
+        if self.kv_get("persona_seed_v6_cline_effort_force"):
+            return
+        now = utcnow()
+        self.execute(
+            "UPDATE personas SET reasoning_effort='high', force_reasoning_effort=1, "
+            "updated_at=? WHERE virtual_name='claude-cline-plan' "
+            "AND reasoning_effort='high' "
+            "AND (force_reasoning_effort IS NULL OR force_reasoning_effort=0)", (now,))
+        self.execute(
+            "UPDATE personas SET reasoning_effort='off', force_reasoning_effort=1, "
+            "updated_at=? WHERE virtual_name='claude-cline-act' "
+            "AND reasoning_effort='low' "
+            "AND (force_reasoning_effort IS NULL OR force_reasoning_effort=0)", (now,))
+        self.kv_set("persona_seed_v6_cline_effort_force", now)
+        self.log_event("info", "main",
+                       "persona seed v6 applied (PLAN high+force, ACT off+force)")
 
     # -- generic helpers --------------------------------------------------------
 

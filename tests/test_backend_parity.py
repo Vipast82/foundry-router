@@ -121,6 +121,35 @@ async def test_openai_strict_flavor_drops_nonstandard_sampling():
     assert "top_k" not in p and "min_p" not in p and "repeat_penalty" not in p
 
 
+async def test_openai_off_disables_thinking_via_template_kwarg_local():
+    # Qwen3/DeepSeek on llama.cpp think by default; reasoning_effort has no "off",
+    # so OFF must go out as the chat-template kwarg the local runners honor. This
+    # is what makes ACT-on-llama.cpp actually fast (parity with Ollama think:false).
+    _SEEN.clear()
+    proto = OpenAIProtocol("http://x", None, _collect(_openai_json), flavor="llamacpp")
+    await proto.chat("qwen3.8:27b", [{"role": "user", "content": "hi"}], think=False)
+    assert _SEEN[-1]["chat_template_kwargs"] == {"enable_thinking": False}
+    assert "reasoning_effort" not in _SEEN[-1]
+
+
+async def test_openai_off_not_sent_to_strict_openai():
+    # A strict OpenAI endpoint would 400 on chat_template_kwargs, so OFF sends
+    # nothing there.
+    _SEEN.clear()
+    proto = OpenAIProtocol("http://x", None, _collect(_openai_json), flavor="openai")
+    await proto.chat("gpt-4o", [{"role": "user", "content": "hi"}], think=False)
+    assert "chat_template_kwargs" not in _SEEN[-1]
+    assert "reasoning_effort" not in _SEEN[-1]
+
+
+async def test_openai_level_uses_reasoning_effort_not_kwarg():
+    _SEEN.clear()
+    proto = OpenAIProtocol("http://x", None, _collect(_openai_json), flavor="llamacpp")
+    await proto.chat("qwen3.8:27b", [{"role": "user", "content": "hi"}], think="high")
+    assert _SEEN[-1]["reasoning_effort"] == "high"
+    assert "chat_template_kwargs" not in _SEEN[-1]
+
+
 async def test_openai_structured_output_response_format():
     _SEEN.clear()
     proto = OpenAIProtocol("http://x", None, _collect(_openai_json))
