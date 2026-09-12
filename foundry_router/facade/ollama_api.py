@@ -588,6 +588,27 @@ def _paid_pin_order(svc, persona) -> list:
     return out
 
 
+def _direct_num_ctx(svc, persona, model_id) -> "int | None":
+    """The num_ctx to load an OLLAMA worker with on the DIRECT path — the persona's
+    context_window, capped at the model's trained max. Mirrors the agent path's
+    _num_ctx_for so the operator's context_window BOUNDS what Cline actually loads,
+    not just what /api/show advertises. Without this a client sending a huge prompt
+    makes Ollama cold-load a giant KV cache and time out (e.g. a model with a 262K
+    unpinned context). None => inject nothing (persona set no context_window)."""
+    cw = (persona or {}).get("context_window")
+    try:
+        cw = int(cw) if cw else 0
+    except (TypeError, ValueError):
+        cw = 0
+    if cw <= 0:
+        return None
+    model_max = (svc.registry.get(model_id) or {}).get("context_length")
+    try:
+        return min(cw, int(model_max)) if model_max else cw
+    except (TypeError, ValueError):
+        return cw
+
+
 def _local_fallback(svc, persona) -> "str | None":
     """Best reachable LOCAL model for the persona: allowlisted locals ranked by the
     persona's category, else any local. The guardrail-denied / usage-exhaustion
@@ -692,6 +713,22 @@ async def _direct_dispatch_chat(svc, persona, model_name, messages, client_tools
     # Structured output would force JSON and break a tool-calling turn, so only
     # apply the persona's format when the client isn't driving its own tools.
     fmt = None if client_tools else sampling.resolve_format(persona)
+    # Bound the Ollama worker's loaded context to the persona's context_window
+    # (capped at the model's trained max). The agent path already did this; the
+    # DIRECT path did not, so a client like Cline sending a huge prompt made
+    # Ollama cold-load a giant KV cache and time out. The persona bound wins over
+    # a larger client-sent num_ctx (prevents client-driven blowups) but yields to
+    # a smaller one (never forces MORE context than the client asked for).
+    if (svc.pool.backend_info(model_id) or {}).get("type") == "ollama":
+        nctx = _direct_num_ctx(svc, persona, model_id)
+        if nctx:
+            options = dict(options or {})
+            client_ctx = options.get("num_ctx")
+            try:
+                client_ctx = int(client_ctx) if client_ctx else 0
+            except (TypeError, ValueError):
+                client_ctx = 0
+            options["num_ctx"] = min(nctx, client_ctx) if client_ctx else nctx
 
     async def _run():
         """The worker call + all post-call bookkeeping. Raises AllBackendsFailed."""
