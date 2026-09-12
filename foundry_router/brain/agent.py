@@ -1235,7 +1235,9 @@ class AgentRunner:
         # for non-Ollama backends (they report no timing).
         self.model_registry.note_inference(
             model_id, result.completion_tokens,
-            result.eval_duration_ns, result.load_duration_ns)
+            result.eval_duration_ns, result.load_duration_ns,
+            prompt_count=result.prompt_tokens,
+            prompt_eval_duration_ns=result.prompt_eval_duration_ns)
         # Scrub literal <think> tags out of the answer text — they ride to the
         # user verbatim via use_last_result otherwise (found live: a stray
         # ", etc. </think>" rendered as visible content in AnythingLLM). The
@@ -1718,7 +1720,9 @@ class AgentRunner:
                 worker, ok=bool(result.content and result.content.strip()))
             self.model_registry.note_inference(
                 worker, result.completion_tokens,
-                result.eval_duration_ns, result.load_duration_ns)
+                result.eval_duration_ns, result.load_duration_ns,
+                prompt_count=result.prompt_tokens,
+                prompt_eval_duration_ns=result.prompt_eval_duration_ns)
 
             if not result.tool_calls:
                 # No tool call => the worker produced its final answer.

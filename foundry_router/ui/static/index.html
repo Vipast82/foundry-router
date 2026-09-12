@@ -380,11 +380,23 @@ async function tabLive() {
       + bHealth + " " + bLoaded + bPresent;
     // loaded in VRAM (per-model size)
     const ld = a.loaded_detail || [];
+    const perfCell = (avg, last, unit) => {
+      if (!avg && !last) return '<span class="hint">—</span>';
+      const a2 = avg ? "~" + avg + (unit || "") : "—";
+      const l2 = last ? `<span class="hint" title="most recent call">· last ${last}${unit || ""}</span>` : "";
+      return `${a2} ${l2}`;
+    };
     $("#live-loaded").innerHTML = ld.length
-      ? `<table><tr><th>model</th><th>VRAM</th><th>tok/s</th><th>backend</th></tr>` +
-        ld.map(m => `<tr><td>${esc(m.model)}</td><td class="nw">${gb(m.size_vram) || "—"}</td>
-          <td class="nw">${m.tps ? "~" + m.tps : '<span class="hint">—</span>'}</td>
-          <td class="nw">${esc(m.backend || "")}</td></tr>`).join("") + `</table>`
+      ? `<table><tr><th>model</th><th>VRAM</th>
+          <th title="Decode speed — output tokens/sec (avg · last call)">decode tok/s</th>
+          <th title="Prefill speed — prompt tokens/sec processing the context (avg · last call)">prefill tok/s</th>
+          <th title="Typical cold-load time (avg)">load</th><th>backend</th></tr>` +
+        ld.map(m => { const p = m.perf || {}; return `<tr><td>${esc(m.model)}</td>
+          <td class="nw">${gb(m.size_vram) || "—"}</td>
+          <td class="nw">${perfCell(p.decode_tps, p.last_decode_tps, "")}</td>
+          <td class="nw">${perfCell(p.prompt_tps, p.last_prompt_tps, "")}</td>
+          <td class="nw">${p.cold_load_ms ? Math.round(p.cold_load_ms) + " ms" : '<span class="hint">warm</span>'}</td>
+          <td class="nw">${esc(m.backend || "")}</td></tr>`; }).join("") + `</table>`
       : (a.loaded || []).length
         ? (a.loaded || []).map(m => `<span class="pill">${esc(m)}</span>`).join(" ")
         : '<span class="hint">nothing loaded</span>';
@@ -875,15 +887,22 @@ async function tabModels() {
   const rBtn = m => d.research_ready
     ? `<button class="act" onclick='doResearch(${JSON.stringify(m.id)})'>research</button>`
     : `<button class="act" disabled title="${esc(d.research_reason)}">research</button>`;
-  const tpsCell = m => {
-    if (!m.eval_tps_avg) return '<span class="hint">—</span>';
-    const load = m.cold_load_ms_avg ? ` · ${(m.cold_load_ms_avg / 1000).toFixed(1)}s cold load` : "";
-    return `<span title="Rolling average warm generation speed (Ollama eval_count/eval_duration), ${m.eval_samples || 0} sample(s)${load}">${Math.round(m.eval_tps_avg)} tok/s</span>`;
+  const perfCell = m => {
+    const dt = m.eval_tps_avg ? Math.round(m.eval_tps_avg) : 0;
+    const pt = m.prompt_tps_avg ? Math.round(m.prompt_tps_avg) : 0;
+    if (!dt && !pt) return '<span class="hint">—</span>';
+    const load = m.cold_load_ms_avg ? ` · ${(m.cold_load_ms_avg / 1000).toFixed(1)}s cold-load` : "";
+    const last = m.last_eval_tps
+      ? ` · last call ${Math.round(m.last_eval_tps)}/${Math.round(m.last_prompt_tps || 0)}` : "";
+    const tip = `decode ${dt || "?"} · prefill ${pt || "?"} tok/s `
+      + `(rolling avg, ${m.eval_samples || 0} sample(s))${load}${last}`
+      + ` — measured from Ollama eval timing OR llama.cpp timings`;
+    return `<span title="${tip}">${dt || "—"}<span class="hint"> / ${pt || "—"}</span></span>`;
   };
   const rowHtml = m => `<tr${isEnabled(m) ? "" : ' style="opacity:.45"'}>
     <td class="mono">${esc(m.id)} ${m.reachable ? '<span class="pill ok">live</span>' : ""}${m.embedding ? ' <span class="pill warn" title="embedding-only model — excluded from chat routing (can\'t serve /api/chat)">embedding</span>' : ""}</td>
     <td class="nw">${esc(m.relative_cost_tier ?? "")}</td>
-    <td class="nw">${tpsCell(m)}</td>
+    <td class="nw">${perfCell(m)}</td>
     <td>${esc(parseTags(m.tags).join(", "))}${m.content_policy === "permissive" ? ' <span class="pill warn">permissive</span>' : ""}</td>
     <td>${esc(m.good_for ?? "")}</td>
     <td class="nw">${m.research_status
@@ -894,7 +913,7 @@ async function tabModels() {
         <button class="act" onclick='editModel(${JSON.stringify(m.id)})'>edit</button>
         ${rBtn(m)}</td>
     </tr>`;
-  const header = "<tr><th>model</th><th>tier</th><th title=\"Warm generation speed — rolling average tokens/sec measured from real calls (Ollama eval timing)\">tok/s</th><th>tags</th><th>good for</th><th>research</th><th>source</th><th></th></tr>";
+  const header = "<tr><th>model</th><th>tier</th><th title=\"decode / prefill tokens per second — rolling average measured from real calls, backend-agnostic (Ollama eval timing OR llama.cpp timings)\">tok/s (dec/pre)</th><th>tags</th><th>good for</th><th>research</th><th>source</th><th></th></tr>";
   const renderTables = () => {
     const q = ($("#model-search")?.value || "").toLowerCase();
     const match = m => !q ||

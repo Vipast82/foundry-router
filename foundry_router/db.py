@@ -259,6 +259,18 @@ class Database:
             ("models", "eval_samples", "INTEGER DEFAULT 0"),
             ("models", "cold_load_ms_avg", "REAL"),
             ("models", "cold_load_samples", "INTEGER DEFAULT 0"),
+            # Prefill (prompt-eval) speed + last-call snapshot — richer perf
+            # metrics, populated identically from Ollama ns timings and llama.cpp
+            # `timings`. prompt_tps = prefill throughput; last_* is the most
+            # recent single call (for a live view), avg is the rolling mean.
+            ("models", "prompt_tps_avg", "REAL"),
+            ("models", "prompt_samples", "INTEGER DEFAULT 0"),
+            ("models", "last_eval_tps", "REAL"),
+            ("models", "last_prompt_tps", "REAL"),
+            ("models", "last_cold_load_ms", "REAL"),
+            ("models", "last_prompt_tokens", "INTEGER"),
+            ("models", "last_eval_tokens", "INTEGER"),
+            ("models", "last_inference_at", "TEXT"),
             ("models", "adequacy_ok", "INTEGER DEFAULT 0"),
             ("models", "adequacy_failed", "INTEGER DEFAULT 0"),
             ("models", "calls_ok", "INTEGER DEFAULT 0"),

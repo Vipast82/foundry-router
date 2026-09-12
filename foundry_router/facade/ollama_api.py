@@ -741,7 +741,9 @@ async def _direct_dispatch_chat(svc, persona, model_name, messages, client_tools
         # models actually exercise tool calling (client-supplied tools).
         svc.registry.record_tool_call(model_id, ok=True)
         svc.registry.note_inference(model_id, res.completion_tokens,
-                                    res.eval_duration_ns, res.load_duration_ns)
+                                    res.eval_duration_ns, res.load_duration_ns,
+                                    prompt_count=res.prompt_tokens,
+                                    prompt_eval_duration_ns=res.prompt_eval_duration_ns)
         binfo = svc.pool.backend_info(model_id)
         if binfo and binfo.get("type") == "anthropic-compatible":
             log_subscription_usage(svc.db, model_id, backend,
@@ -812,7 +814,9 @@ async def _direct_dispatch_chat(svc, persona, model_name, messages, client_tools
                         svc.registry.record_tool_call(model_id, ok=True)
                         svc.registry.note_inference(
                             model_id, ct, chunk.get("eval_duration_ns") or 0,
-                            chunk.get("load_duration_ns") or 0)
+                            chunk.get("load_duration_ns") or 0,
+                            prompt_count=pt,
+                            prompt_eval_duration_ns=chunk.get("prompt_eval_duration_ns") or 0)
                         cost = estimate_cost_usd(svc.registry.get(model_id), pt, ct)
                         logger.record_model_call(model_id, backend_name, pt, ct, cost)
                         logger.finish("ok")
@@ -918,7 +922,9 @@ async def _passthrough_chat(svc, model_name, messages, client_tools, options,
                                                        result.prompt_tokens,
                                                        result.completion_tokens))
             svc.registry.note_inference(model_name, result.completion_tokens,
-                                        result.eval_duration_ns, result.load_duration_ns)
+                                        result.eval_duration_ns, result.load_duration_ns,
+                                        prompt_count=result.prompt_tokens,
+                                        prompt_eval_duration_ns=result.prompt_eval_duration_ns)
             logger.finish("ok")
             tool_calls = [{"function": {"name": tc["name"], "arguments": tc["arguments"]}}
                           for tc in result.tool_calls] or None

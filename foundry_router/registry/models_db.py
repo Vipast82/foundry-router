@@ -816,18 +816,30 @@ class ModelRegistry:
             (model_id,))
 
     def note_inference(self, model_id: str, eval_count: int,
-                       eval_duration_ns: int, load_duration_ns: int = 0) -> None:
+                       eval_duration_ns: int, load_duration_ns: int = 0,
+                       prompt_count: int = 0,
+                       prompt_eval_duration_ns: int = 0) -> None:
         """Fold one model response's timing into observed telemetry.
 
         WARM inference (eval_count / eval_duration) becomes a running mean of
-        tokens/sec and a `latency` benchmark. COLD load (load_duration) is
-        tracked in a SEPARATE informational field and never scored — on a
-        shared pool most workers aren't resident, so raw latency would punish
-        a model for not happening to be warm, not for being slow. Non-Ollama
-        backends report zeros here and are skipped."""
+        DECODE tokens/sec and a `latency` benchmark. PREFILL speed (prompt_count
+        / prompt_eval_duration) becomes its own running mean — how fast the model
+        chews through a big prompt, which is what dominates latency on large
+        coding contexts. COLD load (load_duration) is tracked separately and never
+        scored — on a shared pool most workers aren't resident, so raw latency
+        would punish a model for not being warm, not for being slow. Every field
+        is populated identically from Ollama's ns timings and llama.cpp's
+        `timings`, so the numbers are comparable no matter which backend answered;
+        backends that report nothing (vLLM/OpenAI/Anthropic) just skip the parts
+        they can't measure. A per-model last-call snapshot is also stored for the
+        live view."""
         updated = False
+        now = utcnow()
+        last_eval_tps = None
+        last_prompt_tps = None
         if eval_count > 0 and eval_duration_ns > 0:
             tps = eval_count / (eval_duration_ns / 1e9)
+            last_eval_tps = tps
             if self.get(model_id) is None:
                 self.db.execute("INSERT INTO models (id) VALUES (?)", (model_id,))
             # exact incremental mean: mean' = (mean*n + x) / (n+1)
@@ -838,9 +850,24 @@ class ModelRegistry:
                 "eval_samples = COALESCE(eval_samples,0) + 1 WHERE id=?",
                 (tps, model_id))
             updated = True
+        # Prefill throughput (prompt tokens / prompt-eval time) — the big-context
+        # signal. Same incremental-mean treatment as decode.
+        if prompt_count > 0 and prompt_eval_duration_ns > 0:
+            ptps = prompt_count / (prompt_eval_duration_ns / 1e9)
+            last_prompt_tps = ptps
+            if self.get(model_id) is None:
+                self.db.execute("INSERT INTO models (id) VALUES (?)", (model_id,))
+            self.db.execute(
+                "UPDATE models SET "
+                "prompt_tps_avg = (COALESCE(prompt_tps_avg,0)*COALESCE(prompt_samples,0) + ?) "
+                "                 / (COALESCE(prompt_samples,0) + 1), "
+                "prompt_samples = COALESCE(prompt_samples,0) + 1 WHERE id=?",
+                (ptps, model_id))
         # load_duration is 0 when the model was already warm — only cold loads
         # contribute, giving a "typical cold-load time" stat that stays honest.
+        last_cold_load_ms = None
         if load_duration_ns > 0:
+            last_cold_load_ms = load_duration_ns / 1e6
             if self.get(model_id) is None:
                 self.db.execute("INSERT INTO models (id) VALUES (?)", (model_id,))
             self.db.execute(
@@ -849,6 +876,20 @@ class ModelRegistry:
                 "                   / (COALESCE(cold_load_samples,0) + 1), "
                 "cold_load_samples = COALESCE(cold_load_samples,0) + 1 WHERE id=?",
                 (load_duration_ns / 1e6, model_id))
+        # Last-call snapshot (for the live view) — only overwrite the fields this
+        # call actually measured, so a warm turn doesn't wipe the last cold-load.
+        if last_eval_tps is not None or last_prompt_tps is not None:
+            if self.get(model_id) is None:
+                self.db.execute("INSERT INTO models (id) VALUES (?)", (model_id,))
+            self.db.execute(
+                "UPDATE models SET last_inference_at=?, "
+                "last_eval_tps=COALESCE(?, last_eval_tps), "
+                "last_prompt_tps=COALESCE(?, last_prompt_tps), "
+                "last_cold_load_ms=COALESCE(?, last_cold_load_ms), "
+                "last_prompt_tokens=COALESCE(?, last_prompt_tokens), "
+                "last_eval_tokens=COALESCE(?, last_eval_tokens) WHERE id=?",
+                (now, last_eval_tps, last_prompt_tps, last_cold_load_ms,
+                 prompt_count or None, eval_count or None, model_id))
         if updated:
             row = self.get(model_id)
             n = (row.get("eval_samples") or 0) if row else 0

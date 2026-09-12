@@ -206,17 +206,35 @@ async def activity(request: Request):
         "SELECT ts, persona, client_model, mode, status, duration_ms, models_used "
         "FROM request_log ORDER BY id DESC LIMIT 8")
 
-    # Rolling warm tokens/sec (measured from real calls) per model, joined onto
-    # what's active/loaded so the Live view shows performance at a glance.
-    def _tps(model_id):
+    # Measured performance per model (decode + prefill tok/s, cold-load, and the
+    # last-call snapshot), joined onto what's active/loaded so the Live view shows
+    # it at a glance. Backend-agnostic: identical numbers whether the call was
+    # served by Ollama or llama.cpp.
+    def _perf(model_id):
         row = svc.registry.get(model_id) or {}
-        return round(row.get("eval_tps_avg") or 0.0, 1)
+
+        def r1(k):
+            return round(row.get(k) or 0.0, 1)
+        return {
+            "decode_tps": r1("eval_tps_avg"),
+            "prompt_tps": r1("prompt_tps_avg"),
+            "cold_load_ms": round(row.get("cold_load_ms_avg") or 0.0),
+            "last_decode_tps": r1("last_eval_tps"),
+            "last_prompt_tps": r1("last_prompt_tps"),
+            "last_cold_load_ms": round(row.get("last_cold_load_ms") or 0.0),
+            "last_prompt_tokens": row.get("last_prompt_tokens") or 0,
+            "last_eval_tokens": row.get("last_eval_tokens") or 0,
+            "samples": row.get("eval_samples") or 0,
+            "last_at": row.get("last_inference_at") or "",
+        }
 
     active_models = svc.pool.active_calls()
     for m in active_models:
-        m["tps"] = _tps(m["model"])
+        m["perf"] = _perf(m["model"])
+        m["tps"] = m["perf"]["decode_tps"]            # back-compat
     for ld in loaded_detail:
-        ld["tps"] = _tps(ld["model"])
+        ld["perf"] = _perf(ld["model"])
+        ld["tps"] = ld["perf"]["decode_tps"]
 
     return {"models": active_models,
             "tools": svc.mcp.active_calls(),

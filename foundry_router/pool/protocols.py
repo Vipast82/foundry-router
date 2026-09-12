@@ -88,6 +88,24 @@ def _image_media_type(b64: str) -> str:
     return "image/jpeg"  # most common fallback; backends tolerate mismatches
 
 
+def _llamacpp_timings(timings: Any) -> dict:
+    """Normalize llama.cpp's `timings` object into the same ns fields Ollama
+    reports, so decode/prefill tok/s come out backend-agnostic. llama.cpp gives
+    prompt_ms/predicted_ms (+ *_n token counts) on its OpenAI-compat responses
+    and stream tails; anything missing stays 0. vLLM/OpenAI send no timings ->
+    all zeros (those backends simply have no per-request speed telemetry)."""
+    t = timings if isinstance(timings, dict) else {}
+
+    def _ms_ns(key):
+        v = t.get(key)
+        return int(float(v) * 1e6) if isinstance(v, (int, float)) else 0
+
+    return {"prompt_eval_duration_ns": _ms_ns("prompt_ms"),
+            "eval_duration_ns": _ms_ns("predicted_ms"),
+            "prompt_n": int(t.get("prompt_n") or 0),
+            "predicted_n": int(t.get("predicted_n") or 0)}
+
+
 class BaseProtocol:
     """One instance per backend. Owns no connection state beyond the shared
     httpx client passed in (connection pooling lives there)."""
@@ -129,7 +147,8 @@ class BaseProtocol:
                "prompt_tokens": result.prompt_tokens,
                "completion_tokens": result.completion_tokens,
                "eval_duration_ns": result.eval_duration_ns,
-               "load_duration_ns": result.load_duration_ns}
+               "load_duration_ns": result.load_duration_ns,
+               "prompt_eval_duration_ns": result.prompt_eval_duration_ns}
 
 
 # --------------------------------------------------------------------------- #
@@ -308,7 +327,8 @@ class OllamaProtocol(BaseProtocol):
                            "prompt_tokens": data.get("prompt_eval_count") or 0,
                            "completion_tokens": data.get("eval_count") or 0,
                            "eval_duration_ns": data.get("eval_duration") or 0,
-                           "load_duration_ns": data.get("load_duration") or 0}
+                           "load_duration_ns": data.get("load_duration") or 0,
+                           "prompt_eval_duration_ns": data.get("prompt_eval_duration") or 0}
                 else:
                     yield {"content": msg.get("content") or "", "done": False,
                            "tool_calls": tool_calls,
@@ -433,6 +453,7 @@ class OpenAIProtocol(BaseProtocol):
             for tc in (msg.get("tool_calls") or [])
         ]
         usage = data.get("usage") or {}
+        tm = _llamacpp_timings(data.get("timings"))
         return ChatResult(
             content=msg.get("content") or "",
             # Reasoning models on llama.cpp/vLLM separate their chain-of-thought
@@ -440,8 +461,12 @@ class OpenAIProtocol(BaseProtocol):
             # reaches the client's think pane instead of being lost.
             thinking=msg.get("reasoning_content") or msg.get("reasoning") or "",
             tool_calls=tool_calls,
-            prompt_tokens=usage.get("prompt_tokens") or 0,
-            completion_tokens=usage.get("completion_tokens") or 0,
+            prompt_tokens=usage.get("prompt_tokens") or tm["prompt_n"] or 0,
+            completion_tokens=usage.get("completion_tokens") or tm["predicted_n"] or 0,
+            # llama.cpp reports per-request timings; map them onto the same ns
+            # fields Ollama uses so decode/prefill tok/s are computed identically.
+            eval_duration_ns=tm["eval_duration_ns"],
+            prompt_eval_duration_ns=tm["prompt_eval_duration_ns"],
             raw=data,
         )
 
@@ -463,6 +488,8 @@ class OpenAIProtocol(BaseProtocol):
                 raise ProtocolError(f"openai-compat {self.url} HTTP {r.status_code}: {body[:300]!r}")
             frags: dict = {}          # tool-call index -> {id,name,arguments(str)}
             pt = ct = 0
+            tm = {"eval_duration_ns": 0, "prompt_eval_duration_ns": 0,
+                  "prompt_n": 0, "predicted_n": 0}
             async for line in r.aiter_lines():
                 line = line.strip()
                 if not line or not line.startswith("data:"):
@@ -474,6 +501,10 @@ class OpenAIProtocol(BaseProtocol):
                     obj = json.loads(body)
                 except json.JSONDecodeError:
                     continue
+                # llama.cpp attaches its `timings` to the stream tail — keep the
+                # last one seen so decode/prefill tok/s work when streaming too.
+                if obj.get("timings"):
+                    tm = _llamacpp_timings(obj.get("timings"))
                 usage = obj.get("usage") or {}
                 if usage:
                     pt = usage.get("prompt_tokens") or pt
@@ -500,7 +531,10 @@ class OpenAIProtocol(BaseProtocol):
                            "arguments": _parse_arguments(f["arguments"])}
                           for f in frags.values() if f["name"]] or None
             yield {"content": "", "done": True, "tool_calls": tool_calls,
-                   "prompt_tokens": pt, "completion_tokens": ct}
+                   "prompt_tokens": pt or tm["prompt_n"],
+                   "completion_tokens": ct or tm["predicted_n"],
+                   "eval_duration_ns": tm["eval_duration_ns"],
+                   "prompt_eval_duration_ns": tm["prompt_eval_duration_ns"]}
 
 
 # --------------------------------------------------------------------------- #
