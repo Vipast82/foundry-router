@@ -823,11 +823,15 @@ async function tabBackends() {
       const r = await api("meridian/reauth/complete", {method: "POST", body: {session_id: merSession, code}});
       if (r.ok) {
         st2.innerHTML = '<span class="pill ok">authenticated</span>';
+        // Clear the outer "awaiting sign-in" pill — the sign-in is DONE. Leaving
+        // it stale made a successful re-auth look like it never finished.
+        $("#mer-auth-status").innerHTML = '<span class="pill ok">re-authenticated</span>';
         toast("Meridian re-authenticated"); merSession = null;
         $("#mer-reauth-flow").style.display = "none";
         $("#test-meridian").click();
       } else {
         st2.innerHTML = `<span class="pill bad">failed</span> <span class="hint">${esc((r.output || r.error || "").slice(-300))}</span>`;
+        $("#mer-auth-status").innerHTML = '<span class="pill bad">sign-in failed</span>';
       }
     } catch (e) { st2.textContent = e.message; toast(e.message, true); }
   };
