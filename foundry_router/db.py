@@ -271,6 +271,16 @@ class Database:
             ("models", "last_prompt_tokens", "INTEGER"),
             ("models", "last_eval_tokens", "INTEGER"),
             ("models", "last_inference_at", "TEXT"),
+            # Time-to-first-token (streaming): wall time from request to the
+            # first content token — the latency the user feels, dominated by
+            # prefill on big contexts. Plus a truncation counter: replies cut off
+            # at the max-token cap (finish_reason=length) — the direct cause of a
+            # client having to say "continue".
+            ("models", "ttft_ms_avg", "REAL"),
+            ("models", "ttft_samples", "INTEGER DEFAULT 0"),
+            ("models", "last_ttft_ms", "REAL"),
+            ("models", "truncations", "INTEGER DEFAULT 0"),
+            ("models", "last_finish_reason", "TEXT"),
             ("models", "adequacy_ok", "INTEGER DEFAULT 0"),
             ("models", "adequacy_failed", "INTEGER DEFAULT 0"),
             ("models", "calls_ok", "INTEGER DEFAULT 0"),

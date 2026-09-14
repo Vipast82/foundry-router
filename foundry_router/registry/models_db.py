@@ -900,6 +900,40 @@ class ModelRegistry:
                 source_type="observed", source_url="observed:warm-eval",
                 confidence=observed_confidence(n))
 
+    def note_ttft(self, model_id: str, ttft_ms: float) -> None:
+        """Record one time-to-first-token sample (streaming): wall time from the
+        request to the first CONTENT token. Rolling mean + last value. This is the
+        latency the operator actually feels waiting for output — on big contexts
+        it's dominated by prefill, so a high TTFT points straight at a prefill
+        bottleneck (context too large / not cached / cold)."""
+        if not ttft_ms or ttft_ms <= 0:
+            return
+        if self.get(model_id) is None:
+            self.db.execute("INSERT INTO models (id) VALUES (?)", (model_id,))
+        self.db.execute(
+            "UPDATE models SET "
+            "ttft_ms_avg = (COALESCE(ttft_ms_avg,0)*COALESCE(ttft_samples,0) + ?) "
+            "             / (COALESCE(ttft_samples,0) + 1), "
+            "ttft_samples = COALESCE(ttft_samples,0) + 1, "
+            "last_ttft_ms = ? WHERE id=?",
+            (ttft_ms, ttft_ms, model_id))
+
+    def note_finish(self, model_id: str, finish_reason: str) -> None:
+        """Record why generation stopped. A 'length' finish means the reply was
+        TRUNCATED at the max-token cap — the direct cause of a client asking to
+        'continue' — so those are counted separately for visibility."""
+        if not finish_reason:
+            return
+        if self.get(model_id) is None:
+            self.db.execute("INSERT INTO models (id) VALUES (?)", (model_id,))
+        if finish_reason == "length":
+            self.db.execute(
+                "UPDATE models SET truncations = COALESCE(truncations,0) + 1, "
+                "last_finish_reason=? WHERE id=?", (finish_reason, model_id))
+        else:
+            self.db.execute("UPDATE models SET last_finish_reason=? WHERE id=?",
+                            (finish_reason, model_id))
+
     @staticmethod
     def tool_reliability(row: Optional[dict]) -> Optional[float]:
         """ok/(ok+failed), or None below a minimum sample size."""

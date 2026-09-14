@@ -744,6 +744,14 @@ async def _direct_dispatch_chat(svc, persona, model_name, messages, client_tools
                                     res.eval_duration_ns, res.load_duration_ns,
                                     prompt_count=res.prompt_tokens,
                                     prompt_eval_duration_ns=res.prompt_eval_duration_ns)
+        svc.registry.note_finish(model_id, res.finish_reason)
+        if res.finish_reason == "length":
+            svc.db.log_event(
+                "warning", "facade",
+                f"{model_id} reply TRUNCATED at max_tokens "
+                f"({res.completion_tokens} tokens, worker_max_tokens="
+                f"{brain_cfg.worker_max_tokens}) — the client will need to "
+                f"continue; raise worker_max_tokens or fix looping (sampling)")
         binfo = svc.pool.backend_info(model_id)
         if binfo and binfo.get("type") == "anthropic-compatible":
             log_subscription_usage(svc.db, model_id, backend,
@@ -790,6 +798,7 @@ async def _direct_dispatch_chat(svc, persona, model_name, messages, client_tools
             yield tr.chat_chunk(model_name, "", done=False,
                                 thinking=f"⚙️ {_tag} · {model_id} — streaming…\n")
             acc_tools: list = []
+            ttft_recorded = False        # time-to-first-token, measured once
             hb = float(brain_cfg.direct_stream_heartbeat_seconds or 0)
             hb_start = time.monotonic()
             try:
@@ -817,6 +826,19 @@ async def _direct_dispatch_chat(svc, persona, model_name, messages, client_tools
                             chunk.get("load_duration_ns") or 0,
                             prompt_count=pt,
                             prompt_eval_duration_ns=chunk.get("prompt_eval_duration_ns") or 0)
+                        # Truncation visibility: a "length" finish means the reply
+                        # was cut at the max-token cap — the exact reason a client
+                        # then asks to "continue". Count it and flag it loudly.
+                        fr = chunk.get("finish_reason") or ""
+                        svc.registry.note_finish(model_id, fr)
+                        if fr == "length":
+                            svc.db.log_event(
+                                "warning", "facade",
+                                f"{model_id} reply TRUNCATED at max_tokens "
+                                f"({ct} tokens, worker_max_tokens="
+                                f"{brain_cfg.worker_max_tokens}) — the client will "
+                                f"need to continue; raise worker_max_tokens or fix "
+                                f"looping (sampling)")
                         cost = estimate_cost_usd(svc.registry.get(model_id), pt, ct)
                         logger.record_model_call(model_id, backend_name, pt, ct, cost)
                         logger.finish("ok")
@@ -829,6 +851,12 @@ async def _direct_dispatch_chat(svc, persona, model_name, messages, client_tools
                             acc_tools.extend(chunk["tool_calls"])   # deliver at done
                         c = chunk.get("content") or ""
                         th = chunk.get("thinking") or ""
+                        if c and not ttft_recorded:
+                            # First real content token — wall time since dispatch
+                            # is the time-to-first-token (prefill-dominated).
+                            ttft_recorded = True
+                            svc.registry.note_ttft(model_id,
+                                                   (time.monotonic_ns() - t0) / 1e6)
                         if c or th:
                             yield tr.chat_chunk(model_name, c, done=False,
                                                 thinking=th or None)

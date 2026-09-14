@@ -47,6 +47,11 @@ class ChatResult:
     eval_duration_ns: int = 0
     load_duration_ns: int = 0
     prompt_eval_duration_ns: int = 0
+    # Why generation stopped: "stop" (natural end / stop token), "length" (hit
+    # the max-token cap — a TRUNCATED reply, which is why a client like Cline
+    # then asks to "continue"), "tool_calls", etc. Normalized across backends
+    # (Ollama done_reason / OpenAI finish_reason / Anthropic stop_reason).
+    finish_reason: str = ""
     raw: Any = None
 
 
@@ -148,7 +153,8 @@ class BaseProtocol:
                "completion_tokens": result.completion_tokens,
                "eval_duration_ns": result.eval_duration_ns,
                "load_duration_ns": result.load_duration_ns,
-               "prompt_eval_duration_ns": result.prompt_eval_duration_ns}
+               "prompt_eval_duration_ns": result.prompt_eval_duration_ns,
+               "finish_reason": result.finish_reason}
 
 
 # --------------------------------------------------------------------------- #
@@ -293,6 +299,7 @@ class OllamaProtocol(BaseProtocol):
             eval_duration_ns=data.get("eval_duration") or 0,
             load_duration_ns=data.get("load_duration") or 0,
             prompt_eval_duration_ns=data.get("prompt_eval_duration") or 0,
+            finish_reason=data.get("done_reason") or "",
             raw=data,
         )
 
@@ -328,7 +335,8 @@ class OllamaProtocol(BaseProtocol):
                            "completion_tokens": data.get("eval_count") or 0,
                            "eval_duration_ns": data.get("eval_duration") or 0,
                            "load_duration_ns": data.get("load_duration") or 0,
-                           "prompt_eval_duration_ns": data.get("prompt_eval_duration") or 0}
+                           "prompt_eval_duration_ns": data.get("prompt_eval_duration") or 0,
+                           "finish_reason": data.get("done_reason") or ""}
                 else:
                     yield {"content": msg.get("content") or "", "done": False,
                            "tool_calls": tool_calls,
@@ -467,6 +475,7 @@ class OpenAIProtocol(BaseProtocol):
             # fields Ollama uses so decode/prefill tok/s are computed identically.
             eval_duration_ns=tm["eval_duration_ns"],
             prompt_eval_duration_ns=tm["prompt_eval_duration_ns"],
+            finish_reason=choice.get("finish_reason") or "",
             raw=data,
         )
 
@@ -488,6 +497,7 @@ class OpenAIProtocol(BaseProtocol):
                 raise ProtocolError(f"openai-compat {self.url} HTTP {r.status_code}: {body[:300]!r}")
             frags: dict = {}          # tool-call index -> {id,name,arguments(str)}
             pt = ct = 0
+            finish = ""
             tm = {"eval_duration_ns": 0, "prompt_eval_duration_ns": 0,
                   "prompt_n": 0, "predicted_n": 0}
             async for line in r.aiter_lines():
@@ -512,6 +522,8 @@ class OpenAIProtocol(BaseProtocol):
                 choices = obj.get("choices") or []
                 if not choices:
                     continue
+                if choices[0].get("finish_reason"):
+                    finish = choices[0]["finish_reason"]
                 delta = choices[0].get("delta") or {}
                 for tc in (delta.get("tool_calls") or []):
                     idx = tc.get("index", 0)
@@ -534,7 +546,8 @@ class OpenAIProtocol(BaseProtocol):
                    "prompt_tokens": pt or tm["prompt_n"],
                    "completion_tokens": ct or tm["predicted_n"],
                    "eval_duration_ns": tm["eval_duration_ns"],
-                   "prompt_eval_duration_ns": tm["prompt_eval_duration_ns"]}
+                   "prompt_eval_duration_ns": tm["prompt_eval_duration_ns"],
+                   "finish_reason": finish}
 
 
 # --------------------------------------------------------------------------- #
@@ -671,6 +684,10 @@ class AnthropicProtocol(BaseProtocol):
             tool_calls=tool_calls,
             prompt_tokens=usage.get("input_tokens") or 0,
             completion_tokens=usage.get("output_tokens") or 0,
+            # Normalize Anthropic's "max_tokens" onto "length" so a truncated
+            # reply reads the same across every backend.
+            finish_reason=("length" if data.get("stop_reason") == "max_tokens"
+                           else data.get("stop_reason") or ""),
             raw=data,
         )
 
@@ -686,6 +703,7 @@ class AnthropicProtocol(BaseProtocol):
         payload["stream"] = True
         blocks: dict = {}         # content-block index -> {type,name,id,json(str)}
         pt = ct = 0
+        finish = ""
         async with self.client.stream("POST", f"{self.url}/v1/messages",
                                       json=payload, headers=self._headers()) as r:
             if r.status_code >= 400:
@@ -722,13 +740,16 @@ class AnthropicProtocol(BaseProtocol):
                             blk["json"] += d.get("partial_json") or ""
                 elif etype == "message_delta":
                     ct = (ev.get("usage") or {}).get("output_tokens") or ct
+                    sr = (ev.get("delta") or {}).get("stop_reason")
+                    if sr:
+                        finish = "length" if sr == "max_tokens" else sr
                 elif etype == "message_stop":
                     break
         tool_calls = [{"id": b.get("id") or _new_id(), "name": b.get("name"),
                        "arguments": _parse_arguments(b.get("json") or "{}")}
                       for b in blocks.values() if b.get("type") == "tool_use"] or None
         yield {"content": "", "done": True, "tool_calls": tool_calls,
-               "prompt_tokens": pt, "completion_tokens": ct}
+               "prompt_tokens": pt, "completion_tokens": ct, "finish_reason": finish}
 
 
 PROTOCOLS = {

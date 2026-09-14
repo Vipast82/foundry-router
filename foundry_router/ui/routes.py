@@ -219,12 +219,16 @@ async def activity(request: Request):
             "decode_tps": r1("eval_tps_avg"),
             "prompt_tps": r1("prompt_tps_avg"),
             "cold_load_ms": round(row.get("cold_load_ms_avg") or 0.0),
+            "ttft_ms": round(row.get("ttft_ms_avg") or 0.0),
+            "last_ttft_ms": round(row.get("last_ttft_ms") or 0.0),
             "last_decode_tps": r1("last_eval_tps"),
             "last_prompt_tps": r1("last_prompt_tps"),
             "last_cold_load_ms": round(row.get("last_cold_load_ms") or 0.0),
             "last_prompt_tokens": row.get("last_prompt_tokens") or 0,
             "last_eval_tokens": row.get("last_eval_tokens") or 0,
             "samples": row.get("eval_samples") or 0,
+            "truncations": row.get("truncations") or 0,
+            "last_finish": row.get("last_finish_reason") or "",
             "last_at": row.get("last_inference_at") or "",
         }
 
