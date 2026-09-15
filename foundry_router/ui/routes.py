@@ -240,13 +240,64 @@ async def activity(request: Request):
         ld["perf"] = _perf(ld["model"])
         ld["tps"] = ld["perf"]["decode_tps"]
 
+    # Rolling recent-performance summary + per-tool aggregate over a short window,
+    # so the dashboard shows throughput and where time/failures go without opening
+    # the logs. One small query; JSON is parsed here, not in the browser.
+    import json as _json
+    window = svc.db.query(
+        "SELECT status, duration_ms, models_used, tool_calls FROM request_log "
+        "ORDER BY id DESC LIMIT 40")
+    tok_total = dur_total = ok = err = 0
+    tools_agg: dict = {}
+    for r in window:
+        if r.get("status") == "ok":
+            ok += 1
+        elif r.get("status") == "error":
+            err += 1
+        dur_total += int(r.get("duration_ms") or 0)
+        try:
+            for m in _json.loads(r.get("models_used") or "[]"):
+                tok_total += int(m.get("completion_tokens") or 0)
+        except (ValueError, TypeError):
+            pass
+        try:
+            for tc in _json.loads(r.get("tool_calls") or "[]"):
+                key = f"{tc.get('server', '')}/{tc.get('tool', '')}"
+                agg = tools_agg.setdefault(key, {"tool": key, "count": 0,
+                                                 "ms_total": 0, "fails": 0})
+                agg["count"] += 1
+                agg["ms_total"] += int(tc.get("duration_ms") or 0)
+                if tc.get("ok") is False:
+                    agg["fails"] += 1
+        except (ValueError, TypeError):
+            pass
+    tool_stats = sorted(
+        ({"tool": v["tool"], "count": v["count"], "fails": v["fails"],
+          "avg_ms": round(v["ms_total"] / v["count"]) if v["count"] else 0}
+         for v in tools_agg.values()),
+        key=lambda t: t["count"], reverse=True)[:8]
+    trunc_total = (svc.db.query_one(
+        "SELECT COALESCE(SUM(truncations),0) AS t FROM models") or {}).get("t") or 0
+    summary = {
+        "window": len(window),
+        # Effective throughput = output tokens / wall time across the window
+        # (includes prefill + queue, so it reads lower than pure decode tok/s —
+        # it's the real end-to-end rate the operator experiences).
+        "eff_tps": round(tok_total / (dur_total / 1000), 1) if dur_total else 0,
+        "avg_s": round(dur_total / 1000 / len(window), 1) if window else 0,
+        "ok": ok, "err": err, "out_tokens": tok_total,
+        "truncations_total": int(trunc_total),
+    }
+
     return {"models": active_models,
             "tools": svc.mcp.active_calls(),
             "loaded": loaded,
             "loaded_detail": loaded_detail,
             "brain": brain,
             "backends": backends,
-            "recent": recent}
+            "recent": recent,
+            "summary": summary,
+            "tool_stats": tool_stats}
 
 
 @router.post("/admin/api/mcp-aggregator")

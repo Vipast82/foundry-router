@@ -344,8 +344,10 @@ async function tabLive() {
     <h2 style="margin-top:0">Live activity <span class="hint" id="live-ts"></span></h2>
     <p class="hint">Auto-refreshing every 2s — what's generating and running right now, VRAM residency, backend health, and the last few finished requests.</p>
     <div class="card"><div style="font-weight:600;margin-bottom:6px">▶ Models generating now</div><div id="live-models" class="hint">…</div></div>
+    <div class="card"><div style="font-weight:600;margin-bottom:6px">📊 Performance <span class="hint" style="font-weight:normal">— last N finished requests</span></div><div id="live-perf" class="hint">…</div></div>
     <div class="card"><div style="font-weight:600;margin-bottom:6px">⚙ Tool calls / jobs running</div><div id="live-tools" class="hint">…</div>
       <div class="hint" style="margin-top:4px">A long one (e.g. <code>acestep-music/generate_music</code>) staying here for minutes means a media job is actively rendering — not hung.</div></div>
+    <div class="card"><div style="font-weight:600;margin-bottom:6px">🔧 Tool activity <span class="hint" style="font-weight:normal">— recent, by call count</span></div><div id="live-toolstats"></div></div>
     <div class="card"><div style="font-weight:600;margin-bottom:6px">🧠 Routing brain</div><div id="live-brain" class="hint">…</div></div>
     <div class="card"><div style="font-weight:600;margin-bottom:6px">Loaded in VRAM</div><div id="live-loaded"></div></div>
     <div class="card"><div style="font-weight:600;margin-bottom:6px">Backends</div><div id="live-backends"></div></div>
@@ -363,6 +365,32 @@ async function tabLive() {
     $("#live-tools").innerHTML = (a.tools || []).length
       ? a.tools.map(t => `<span class="pill warn">⚙ ${esc(t.server)}/${esc(t.tool)} · ${t.seconds}s</span>`).join(" ")
       : '<span class="hint">idle — no tool/job running</span>';
+    // recent-performance summary strip
+    const sm = a.summary || {};
+    if (sm.window) {
+      const errPill = sm.err
+        ? `<span class="pill bad">${sm.err} error${sm.err === 1 ? "" : "s"}</span>`
+        : '<span class="pill ok">0 errors</span>';
+      const truncPill = sm.truncations_total
+        ? `<span class="pill warn" title="Total replies ever cut off at max_tokens (each = a turn a client had to 'continue'). Rising = looping or cap too low.">⤾ ${sm.truncations_total} truncations</span>`
+        : '<span class="pill ok">⤾ 0 truncations</span>';
+      $("#live-perf").innerHTML =
+        `<span class="pill" title="Output tokens ÷ wall time across the window — end-to-end rate incl. prefill/queue, so lower than raw decode tok/s">≈ ${sm.eff_tps} tok/s effective</span> `
+        + `<span class="pill" title="Mean wall time per finished request">Ø ${sm.avg_s}s / req</span> `
+        + `<span class="pill ok">${sm.ok} ok</span> ${errPill} ${truncPill} `
+        + `<span class="hint">over last ${sm.window} · ${sm.out_tokens.toLocaleString()} out-tok</span>`;
+    } else {
+      $("#live-perf").innerHTML = '<span class="hint">no finished requests yet</span>';
+    }
+    // recent tool aggregate (where tool time / failures go)
+    const ts = a.tool_stats || [];
+    $("#live-toolstats").innerHTML = ts.length
+      ? `<table><tr><th>tool</th><th>calls</th><th title="average duration per call">avg</th><th>fails</th></tr>`
+        + ts.map(t => `<tr><td class="mono">${esc(t.tool)}</td><td class="nw">${t.count}</td>
+            <td class="nw">${t.avg_ms >= 1000 ? (t.avg_ms / 1000).toFixed(1) + "s" : t.avg_ms + "ms"}</td>
+            <td class="nw">${t.fails ? `<span class="pill bad">${t.fails}</span>` : '<span class="hint">0</span>'}</td></tr>`).join("")
+        + `</table>`
+      : '<span class="hint">no tool calls in the recent window</span>';
     // brain
     const gb = b => b ? (b / 1073741824).toFixed(1) + " GB" : "";
     const br = a.brain || {}, bh = br.health || {};
@@ -416,17 +444,29 @@ async function tabLive() {
         <td>${b.healthy ? '<span class="pill ok">healthy</span>'
              : '<span class="pill bad" title="' + esc(b.last_error) + '">down</span>'}</td>
         <td class="nw">${b.models}</td></tr>`).join("") + `</table>`;
-    $("#live-recent").innerHTML = `<table><tr><th>time (UTC)</th><th>persona</th><th>mode</th><th>model(s)</th><th>status</th><th>time</th></tr>` +
+    $("#live-recent").innerHTML = `<table><tr><th>time (UTC)</th><th>persona</th><th>mode</th><th>model(s)</th>
+        <th title="prompt → output tokens for this turn">tokens</th>
+        <th title="output tokens ÷ this turn's wall time (end-to-end, incl. prefill)">tok/s</th>
+        <th>status</th><th>time</th></tr>` +
       (a.recent || []).map(r => {
-        let models = "";
-        try { models = ((JSON.parse(r.models_used || "[]") || []).map(x => x.model)).join(", "); } catch (e) {}
+        let models = "", inTok = 0, outTok = 0;
+        try {
+          const mu = JSON.parse(r.models_used || "[]") || [];
+          models = mu.map(x => x.model).join(", ");
+          for (const x of mu) { inTok += x.prompt_tokens || 0; outTok += x.completion_tokens || 0; }
+        } catch (e) {}
+        const secs = r.duration_ms != null ? r.duration_ms / 1000 : 0;
+        const tps = (outTok && secs) ? (outTok / secs).toFixed(1) : "";
         const st = r.status === "ok" ? '<span class="pill ok">ok</span>'
           : (r.status === "error" ? '<span class="pill bad">error</span>'
              : '<span class="pill warn">' + esc(r.status || "") + '</span>');
         return `<tr><td class="nw">${esc((r.ts || "").replace("T", " ").slice(0, 19))}</td>
           <td>${esc(r.persona || "")}</td><td class="nw">${esc(r.mode || "")}</td>
-          <td>${esc(models || r.client_model || "")}</td><td>${st}</td>
-          <td class="nw">${r.duration_ms != null ? (r.duration_ms / 1000).toFixed(1) + "s" : ""}</td></tr>`;
+          <td>${esc(models || r.client_model || "")}</td>
+          <td class="nw">${(inTok || outTok) ? inTok.toLocaleString() + " → " + outTok.toLocaleString() : '<span class="hint">—</span>'}</td>
+          <td class="nw">${tps ? "~" + tps : '<span class="hint">—</span>'}</td>
+          <td>${st}</td>
+          <td class="nw">${r.duration_ms != null ? secs.toFixed(1) + "s" : ""}</td></tr>`;
       }).join("") + `</table>`;
     wrapTables();
   };

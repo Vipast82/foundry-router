@@ -141,6 +141,39 @@ def test_activity_endpoint_reports_inflight(act_client):
     assert isinstance(d["loaded_detail"], list)     # per-model VRAM residency
     assert d["brain"]["model"] == "b"               # routing-brain block (per ACT_CONFIG)
     assert "loaded" in d["brain"] and "health" in d["brain"]
+    assert "summary" in d and "tool_stats" in d     # dashboard perf blocks
+
+
+def test_activity_summary_and_tool_stats(act_client):
+    """The dashboard perf strip: effective throughput + truncations from the
+    request_log window and the registry, and a per-tool aggregate."""
+    import json
+    from foundry_router.db import utcnow
+    svc = act_client.app.state.services
+    # one finished request: 200 output tokens in 4s, and two tool calls (one slow,
+    # one failed).
+    svc.db.execute(
+        "INSERT INTO request_log (ts, persona, mode, models_used, tool_calls, "
+        "duration_ms, status) VALUES (?,?,?,?,?,?,?)",
+        (utcnow(), "claude-cline-act", "direct",
+         json.dumps([{"model": "qwen3.8:27b", "prompt_tokens": 5000,
+                      "completion_tokens": 200}]),
+         json.dumps([{"server": "searxng", "tool": "search", "duration_ms": 800, "ok": True},
+                     {"server": "crawl4ai", "tool": "md", "duration_ms": 1500, "ok": False}]),
+         4000, "ok"))
+    # a truncation on the model registry (a turn that hit the cap)
+    svc.registry.upsert_auto("qwen3.8:27b", source="discovery")
+    svc.registry.note_finish("qwen3.8:27b", "length")
+
+    d = act_client.get("/admin/api/activity").json()
+    sm = d["summary"]
+    assert sm["window"] >= 1
+    assert sm["out_tokens"] >= 200
+    assert sm["eff_tps"] == 50.0                     # 200 tok / 4.0s
+    assert sm["truncations_total"] >= 1              # from note_finish("length")
+    tools = {t["tool"]: t for t in d["tool_stats"]}
+    assert tools["searxng/search"]["avg_ms"] == 800
+    assert tools["crawl4ai/md"]["fails"] == 1
 
 
 async def test_ollama_loaded_detail_parses_vram():
