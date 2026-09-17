@@ -413,26 +413,41 @@ class OpenAIProtocol(BaseProtocol):
     async def loaded_models_detail(self) -> list[dict]:
         """What this llama.cpp process is serving, for the Live VRAM table.
         llama.cpp runs ONE model per process and does NOT report VRAM bytes over
-        HTTP — but /props gives the model and the SERVING context size (n_ctx),
-        which is what actually determines the KV-cache footprint. So we report
-        size_vram=0 (unknown, shown as "—") and carry `context` = n_ctx. Only
-        local flavors expose /props; a strict OpenAI endpoint has no such thing."""
+        HTTP — but /props gives the SERVING context size (n_ctx), which is what
+        actually determines the KV-cache footprint. So we report size_vram=0
+        (unknown, shown as "—") and carry `context` = n_ctx. Only local flavors
+        expose /props; a strict OpenAI endpoint has no such thing.
+
+        The model NAME must be the /v1/models id — the exact string this server
+        advertises and that requests (and therefore the perf registry) are keyed
+        on. Deriving a prettier name from model_path instead breaks the join, so
+        the whole perf row reads null even though the numbers were recorded."""
         if (self.flavor or "openai") not in self._LOCAL_FLAVORS:
             return []
+        # Authoritative id — matches the registry/dispatch key.
+        model_id = ""
+        try:
+            ids = await self.list_models()
+            model_id = ids[0] if ids else ""
+        except Exception:
+            pass
+        # Serving context (and a fallback name if /v1/models was unavailable).
         root = self.url[:-3].rstrip("/") if self.url.endswith("/v1") else self.url
+        n_ctx = 0
         try:
             r = await self.client.get(f"{root}/props", headers=self._headers(), timeout=10)
             r.raise_for_status()
             data = r.json() or {}
+            gen = data.get("default_generation_settings") or {}
+            n_ctx = gen.get("n_ctx") or data.get("n_ctx") or 0
+            if not model_id:
+                path = data.get("model_path") or gen.get("model") or data.get("model") or ""
+                model_id = path.rsplit("/", 1)[-1].rsplit("\\", 1)[-1]
         except Exception:
+            pass
+        if not model_id:
             return []
-        gen = data.get("default_generation_settings") or {}
-        n_ctx = gen.get("n_ctx") or data.get("n_ctx") or 0
-        path = data.get("model_path") or gen.get("model") or data.get("model") or ""
-        name = path.rsplit("/", 1)[-1].rsplit("\\", 1)[-1] or "(loaded model)"
-        if name.endswith(".gguf"):
-            name = name[:-5]
-        return [{"model": name, "size_vram": 0, "size": 0,
+        return [{"model": model_id, "size_vram": 0, "size": 0,
                  "context": int(n_ctx) or 0}]
 
     def _translate_messages(self, messages) -> list[dict]:

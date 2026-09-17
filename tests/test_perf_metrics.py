@@ -117,9 +117,30 @@ def test_note_inference_records_decode_and_prefill_time(tmp_path):
     assert round(row["last_prefill_ms"]) == 500
 
 
-async def test_openai_loaded_detail_from_llamacpp_props():
+async def test_openai_loaded_detail_uses_v1_models_id():
+    # The model name MUST be the /v1/models id (the registry/dispatch key), so
+    # the Live perf row joins — NOT a prettified basename of model_path.
+    served = "/cache/Qwen3.8-27B-UD-Q4_K_M-fixed-template.gguf"
+
     def handler(request):
+        if request.url.path.endswith("/models"):
+            return httpx.Response(200, json={"data": [{"id": served}]})
         assert request.url.path == "/props"
+        return httpx.Response(200, json={
+            "default_generation_settings": {"n_ctx": 262144}})
+    proto = OpenAIProtocol("http://x", None,
+                           httpx.AsyncClient(transport=httpx.MockTransport(handler)),
+                           flavor="llamacpp")
+    detail = await proto.loaded_models_detail()
+    assert detail == [{"model": served, "size_vram": 0, "size": 0, "context": 262144}]
+
+
+async def test_openai_loaded_detail_falls_back_to_model_path():
+    # If /v1/models is unavailable, fall back to the model_path basename so the
+    # row still appears (perf may not join, but VRAM/ctx is still shown).
+    def handler(request):
+        if request.url.path.endswith("/models"):
+            return httpx.Response(500)
         return httpx.Response(200, json={
             "model_path": "/cache/Qwen3.8-27B-UD-Q4_K_M-fixed-template.gguf",
             "default_generation_settings": {"n_ctx": 262144}})
@@ -127,7 +148,7 @@ async def test_openai_loaded_detail_from_llamacpp_props():
                            httpx.AsyncClient(transport=httpx.MockTransport(handler)),
                            flavor="llamacpp")
     detail = await proto.loaded_models_detail()
-    assert detail == [{"model": "Qwen3.8-27B-UD-Q4_K_M-fixed-template",
+    assert detail == [{"model": "Qwen3.8-27B-UD-Q4_K_M-fixed-template.gguf",
                        "size_vram": 0, "size": 0, "context": 262144}]
 
 
