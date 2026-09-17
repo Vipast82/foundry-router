@@ -541,6 +541,11 @@ class RequestLogger:
         self.est_cost = 0.0
         self._t0 = time.monotonic()
 
+    @property
+    def elapsed_ms(self) -> float:
+        """Wall time since the request started — for perf-history rows."""
+        return (time.monotonic() - self._t0) * 1000.0
+
     def record_model_call(self, model: str, backend: str, prompt_tokens: int,
                           completion_tokens: int, est_cost_usd: float) -> None:
         self.models_used.append({

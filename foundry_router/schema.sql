@@ -147,6 +147,40 @@ CREATE TABLE IF NOT EXISTS request_log (
 
 CREATE INDEX IF NOT EXISTS idx_request_log_ts ON request_log(ts);
 
+-- Per-model-call PERFORMANCE HISTORY -------------------------------------------
+-- One row per completed model call, capturing every response metric we can pull
+-- from llama.cpp/Ollama, so the dashboard can chart throughput / speculative
+-- acceptance / KV-cache reuse over a multi-day run and correlate them against
+-- context fill (prompt_tokens). This is the time-series behind the Performance
+-- tab; the `models` table keeps only rolling averages, which can't show WHEN
+-- something started degrading. Pruned to a retention window (see perf_history).
+CREATE TABLE IF NOT EXISTS perf_samples (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  ts TEXT,                          -- ISO8601 UTC of completion
+  model TEXT,
+  backend TEXT,
+  persona TEXT,
+  mode TEXT,                        -- "agent" | "direct" | "passthrough" | ...
+  prompt_tokens INTEGER,            -- context fill at this turn (KV occupancy proxy)
+  completion_tokens INTEGER,
+  cached_tokens INTEGER,            -- prompt tokens served from the KV prefix cache
+  draft_n INTEGER,                  -- speculative-decoding tokens proposed
+  draft_n_accepted INTEGER,         -- ...and verified/kept by the target
+  decode_tps REAL,                  -- output tokens / decode time
+  prefill_tps REAL,                 -- prompt tokens / prefill time
+  decode_ms REAL,                   -- decode wall time
+  prefill_ms REAL,                  -- prefill wall time (~TTFT warm)
+  ttft_ms REAL,                     -- measured time-to-first-token (streaming only)
+  eff_tps REAL,                     -- output tokens / end-to-end wall time
+  wall_ms INTEGER,                  -- total request wall time
+  cache_hit_pct REAL,               -- cached_tokens / prompt_tokens * 100
+  spec_accept_pct REAL,             -- draft_n_accepted / draft_n * 100
+  finish_reason TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_perf_samples_ts ON perf_samples(ts);
+CREATE INDEX IF NOT EXISTS idx_perf_samples_model_ts ON perf_samples(model, ts);
+
 -- §4.9 Troubleshooting/error log (item 7) ---------------------------------------
 
 CREATE TABLE IF NOT EXISTS event_log (

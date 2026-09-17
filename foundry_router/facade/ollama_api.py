@@ -31,6 +31,7 @@ from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse, PlainTextResponse, StreamingResponse
 
 from .. import __version__
+from .. import perf_history
 from ..brain import prompts
 from ..brain.agent import RequestContext
 from ..brain.fallback import guess_category, pick_fallback_model
@@ -765,6 +766,14 @@ async def _direct_dispatch_chat(svc, persona, model_name, messages, client_tools
         logger.record_model_call(model_id, backend, res.prompt_tokens,
                                  res.completion_tokens, cost)
         logger.finish("ok")
+        perf_history.record_sample(
+            svc.db, model=model_id, backend=backend, persona=logger.persona,
+            mode=logger.mode, prompt_tokens=res.prompt_tokens,
+            completion_tokens=res.completion_tokens, cached_tokens=res.cached_tokens,
+            draft_n=res.draft_n, draft_n_accepted=res.draft_n_accepted,
+            eval_duration_ns=res.eval_duration_ns,
+            prompt_eval_duration_ns=res.prompt_eval_duration_ns,
+            wall_ms=(time.monotonic_ns() - t0) / 1e6, finish_reason=res.finish_reason)
         return res
 
     def _on_error(e: BaseException) -> None:
@@ -802,6 +811,7 @@ async def _direct_dispatch_chat(svc, persona, model_name, messages, client_tools
                                 thinking=f"⚙️ {_tag} · {model_id} — streaming…\n")
             acc_tools: list = []
             ttft_recorded = False        # time-to-first-token, measured once
+            ttft_ms = None               # captured value, for the perf-history row
             hb = float(brain_cfg.direct_stream_heartbeat_seconds or 0)
             hb_start = time.monotonic()
             try:
@@ -848,6 +858,17 @@ async def _direct_dispatch_chat(svc, persona, model_name, messages, client_tools
                         cost = estimate_cost_usd(svc.registry.get(model_id), pt, ct)
                         logger.record_model_call(model_id, backend_name, pt, ct, cost)
                         logger.finish("ok")
+                        perf_history.record_sample(
+                            svc.db, model=model_id, backend=backend_name,
+                            persona=logger.persona, mode=logger.mode,
+                            prompt_tokens=pt, completion_tokens=ct,
+                            cached_tokens=chunk.get("cached_tokens") or 0,
+                            draft_n=chunk.get("draft_n") or 0,
+                            draft_n_accepted=chunk.get("draft_n_accepted") or 0,
+                            eval_duration_ns=chunk.get("eval_duration_ns") or 0,
+                            prompt_eval_duration_ns=chunk.get("prompt_eval_duration_ns") or 0,
+                            ttft_ms=ttft_ms, wall_ms=(time.monotonic_ns() - t0) / 1e6,
+                            finish_reason=fr)
                         yield tr.chat_chunk(
                             model_name, "", done=True, tool_calls=tcs_out,
                             stats={"prompt_tokens": pt, "completion_tokens": ct,
@@ -861,8 +882,8 @@ async def _direct_dispatch_chat(svc, persona, model_name, messages, client_tools
                             # First real content token — wall time since dispatch
                             # is the time-to-first-token (prefill-dominated).
                             ttft_recorded = True
-                            svc.registry.note_ttft(model_id,
-                                                   (time.monotonic_ns() - t0) / 1e6)
+                            ttft_ms = (time.monotonic_ns() - t0) / 1e6
+                            svc.registry.note_ttft(model_id, ttft_ms)
                         if c or th:
                             yield tr.chat_chunk(model_name, c, done=False,
                                                 thinking=th or None)
@@ -962,6 +983,15 @@ async def _passthrough_chat(svc, model_name, messages, client_tools, options,
                                         draft_n=result.draft_n,
                                         draft_n_accepted=result.draft_n_accepted,
                                         cached_tokens=result.cached_tokens)
+            perf_history.record_sample(
+                svc.db, model=model_name, backend=backend, persona=logger.persona,
+                mode=logger.mode, prompt_tokens=result.prompt_tokens,
+                completion_tokens=result.completion_tokens,
+                cached_tokens=result.cached_tokens, draft_n=result.draft_n,
+                draft_n_accepted=result.draft_n_accepted,
+                eval_duration_ns=result.eval_duration_ns,
+                prompt_eval_duration_ns=result.prompt_eval_duration_ns,
+                wall_ms=logger.elapsed_ms, finish_reason=result.finish_reason)
             logger.finish("ok")
             tool_calls = [{"function": {"name": tc["name"], "arguments": tc["arguments"]}}
                           for tc in result.tool_calls] or None
@@ -1002,6 +1032,18 @@ async def _passthrough_chat(svc, model_name, messages, client_tools, options,
                             draft_n=chunk.get("draft_n") or 0,
                             draft_n_accepted=chunk.get("draft_n_accepted") or 0,
                             cached_tokens=chunk.get("cached_tokens") or 0)
+                        perf_history.record_sample(
+                            svc.db, model=model_name, backend="stream",
+                            persona=logger.persona, mode=logger.mode,
+                            prompt_tokens=chunk.get("prompt_tokens") or 0,
+                            completion_tokens=chunk.get("completion_tokens") or 0,
+                            cached_tokens=chunk.get("cached_tokens") or 0,
+                            draft_n=chunk.get("draft_n") or 0,
+                            draft_n_accepted=chunk.get("draft_n_accepted") or 0,
+                            eval_duration_ns=chunk.get("eval_duration_ns") or 0,
+                            prompt_eval_duration_ns=chunk.get("prompt_eval_duration_ns") or 0,
+                            wall_ms=logger.elapsed_ms,
+                            finish_reason=chunk.get("finish_reason") or "")
                     elif chunk.get("content"):
                         yield tr.chat_chunk(model_name, chunk["content"])
             except AllBackendsFailed as e:

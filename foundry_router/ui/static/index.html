@@ -218,6 +218,7 @@ function clearLog(kind, label) {
 // self-cleaning timers compare against, so keep these stable.
 const TABS = {
   "Live":           tabLive,
+  "Performance":    tabPerformance,
   "Pool":           tabBackends,
   "Model Registry": tabModels,
   "Host Admin":     tabHostAdmin,
@@ -234,7 +235,7 @@ const TABS = {
 // Primary nav groups -> their leaf tabs (the secondary row). Reorganizes the
 // former flat bar into logical sections without dropping anything.
 const GROUPS = [
-  ["Dashboard",   ["Live"]],
+  ["Dashboard",   ["Live", "Performance"]],
   ["Backends",    ["Pool", "Model Registry", "Host Admin"]],
   ["Routing",     ["Personas", "Guardrails"]],
   ["Tools & MCP", ["Tools", "MCP Servers"]],
@@ -378,6 +379,214 @@ function sparkRow(series) {
     + cell("latency s/req", sparkline(sec, c2, "s"), sec[sec.length - 1] + "s", c2)
     + `</div>`;
 }
+// =========================================================================
+// Performance tab — historical charts + rich per-call table from perf_samples
+// =========================================================================
+const _PERF = { hours: 72, model: "" };   // window + model filter (persisted)
+try { Object.assign(_PERF, JSON.parse(localStorage.getItem("perfCtl") || "{}")); } catch (e) {}
+
+function _css(name, fallback) {
+  return (getComputedStyle(document.body).getPropertyValue(name).trim() || fallback);
+}
+function _tsLabel(ts) {
+  let s = ts || ""; if (s.indexOf("T") < 0) s = s.replace(" ", "T");
+  if (!/(Z|[+-]\d\d:?\d\d)$/.test(s)) s += "Z";
+  const d = new Date(s); if (isNaN(d)) return ts || "";
+  const p = n => ("" + n).padStart(2, "0");
+  return `${p(d.getMonth() + 1)}/${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`;
+}
+function _num(v, unit) {
+  if (v == null) return "—";
+  if (unit === "k") return v >= 1000 ? (v / 1000).toFixed(v >= 10000 ? 0 : 1) + "k" : "" + Math.round(v);
+  if (unit === "ms") return v >= 1000 ? (v / 1000).toFixed(1) + "s" : Math.round(v) + "ms";
+  if (unit === "%") return (Math.round(v * 10) / 10) + "%";
+  return "" + (Math.round(v * 10) / 10);
+}
+// Multi-series time-series line chart (SVG, responsive via viewBox). `rows` are
+// chronological; each series reads one numeric key and breaks its line on nulls
+// so a metric a backend didn't report shows a gap, not a fake dip.
+function lineChart(rows, seriesDefs, opts) {
+  opts = opts || {};
+  const W = 780, H = 210, padL = 46, padR = 12, padT = 12, padB = 26;
+  if (!rows || rows.length < 2)
+    return '<div class="hint" style="padding:18px 0">Not enough data in this window yet.</div>';
+  let vals = [];
+  seriesDefs.forEach(s => rows.forEach(r => { if (r[s.key] != null) vals.push(r[s.key]); }));
+  if (!vals.length) return '<div class="hint" style="padding:18px 0">No data for this metric.</div>';
+  let lo = opts.yMin != null ? opts.yMin : Math.min(0, ...vals);
+  let hi = opts.yMax != null ? opts.yMax : Math.max(...vals);
+  if (hi <= lo) hi = lo + 1;
+  const n = rows.length;
+  const x = i => padL + i * (W - padL - padR) / (n - 1);
+  const y = v => H - padB - (v - lo) / (hi - lo) * (H - padT - padB);
+  const grid = _css("--line", "#333"), dim = _css("--dim", "#999");
+  // horizontal gridlines + y labels
+  let g = "";
+  for (let k = 0; k <= 4; k++) {
+    const v = lo + (hi - lo) * k / 4, yy = y(v);
+    g += `<line x1="${padL}" y1="${yy.toFixed(1)}" x2="${W - padR}" y2="${yy.toFixed(1)}" stroke="${grid}" stroke-width="0.5"/>`;
+    g += `<text x="${padL - 5}" y="${(yy + 3).toFixed(1)}" text-anchor="end" font-size="9" fill="${dim}">${_num(v, opts.yUnit)}</text>`;
+  }
+  // x labels: first / middle / last timestamps
+  const xl = [0, Math.floor((n - 1) / 2), n - 1].map(i =>
+    `<text x="${x(i).toFixed(1)}" y="${H - 8}" text-anchor="${i === 0 ? "start" : i === n - 1 ? "end" : "middle"}" font-size="9" fill="${dim}">${_tsLabel(rows[i].ts)}</text>`).join("");
+  // one polyline per series, split on null gaps
+  let paths = "";
+  seriesDefs.forEach(s => {
+    let seg = [];
+    const flush = () => { if (seg.length > 1) paths += `<polyline points="${seg.join(" ")}" fill="none" stroke="${s.color}" stroke-width="1.6" stroke-linejoin="round"/>`; seg = []; };
+    rows.forEach((r, i) => { if (r[s.key] == null) { flush(); } else { seg.push(`${x(i).toFixed(1)},${y(r[s.key]).toFixed(1)}`); } });
+    flush();
+  });
+  const legend = seriesDefs.map(s =>
+    `<span style="margin-right:14px;white-space:nowrap"><span style="display:inline-block;width:10px;height:10px;background:${s.color};border-radius:2px;vertical-align:middle;margin-right:4px"></span>${esc(s.label)}</span>`).join("");
+  return `<div class="hint" style="margin:2px 0 4px">${legend}</div>`
+    + `<svg viewBox="0 0 ${W} ${H}" style="width:100%;height:auto;display:block"><rect x="${padL}" y="${padT}" width="${W - padL - padR}" height="${H - padT - padB}" fill="none" stroke="${grid}" stroke-width="0.5"/>${g}${xl}${paths}</svg>`;
+}
+// Scatter — correlate a metric (y) against context fill / any x. Reveals e.g.
+// "acceptance falls as prompt tokens climb toward the context cap".
+function scatterChart(rows, xKey, yKey, opts) {
+  opts = opts || {};
+  const W = 780, H = 220, padL = 46, padR = 12, padT = 12, padB = 30;
+  const pts = (rows || []).filter(r => r[xKey] != null && r[yKey] != null);
+  if (pts.length < 2) return '<div class="hint" style="padding:18px 0">Not enough paired data yet.</div>';
+  const xs = pts.map(r => r[xKey]), ys = pts.map(r => r[yKey]);
+  const xlo = 0, xhi = Math.max(...xs) * 1.02 || 1;
+  const ylo = opts.yMin != null ? opts.yMin : Math.min(0, ...ys);
+  let yhi = opts.yMax != null ? opts.yMax : Math.max(...ys); if (yhi <= ylo) yhi = ylo + 1;
+  const x = v => padL + (v - xlo) / (xhi - xlo) * (W - padL - padR);
+  const y = v => H - padB - (v - ylo) / (yhi - ylo) * (H - padT - padB);
+  const grid = _css("--line", "#333"), dim = _css("--dim", "#999"), col = opts.color || _css("--accent", "#e8833a");
+  let g = "";
+  for (let k = 0; k <= 4; k++) {
+    const v = ylo + (yhi - ylo) * k / 4, yy = y(v);
+    g += `<line x1="${padL}" y1="${yy.toFixed(1)}" x2="${W - padR}" y2="${yy.toFixed(1)}" stroke="${grid}" stroke-width="0.5"/>`;
+    g += `<text x="${padL - 5}" y="${(yy + 3).toFixed(1)}" text-anchor="end" font-size="9" fill="${dim}">${_num(v, opts.yUnit)}</text>`;
+  }
+  let xl = "";
+  for (let k = 0; k <= 4; k++) {
+    const v = xlo + (xhi - xlo) * k / 4, xx = x(v);
+    xl += `<text x="${xx.toFixed(1)}" y="${H - 10}" text-anchor="middle" font-size="9" fill="${dim}">${_num(v, opts.xUnit)}</text>`;
+  }
+  // colour by recency: older points dimmer, newest brightest — so a drift over
+  // the run reads as a direction, not just a cloud.
+  const dots = pts.map((r, i) => {
+    const op = 0.28 + 0.72 * i / (pts.length - 1);
+    return `<circle cx="${x(r[xKey]).toFixed(1)}" cy="${y(r[yKey]).toFixed(1)}" r="2.4" fill="${col}" opacity="${op.toFixed(2)}"/>`;
+  }).join("");
+  return `<div class="hint" style="margin:2px 0 4px">${esc(opts.xlabel || xKey)} → ${esc(opts.ylabel || yKey)} <span style="opacity:.6">· ${pts.length} calls · brighter = more recent</span></div>`
+    + `<svg viewBox="0 0 ${W} ${H}" style="width:100%;height:auto;display:block"><rect x="${padL}" y="${padT}" width="${W - padL - padR}" height="${H - padT - padB}" fill="none" stroke="${grid}" stroke-width="0.5"/>${g}${xl}${dots}</svg>`;
+}
+
+async function tabPerformance() {
+  const winOpts = [[6, "6h"], [24, "24h"], [72, "3d"], [168, "7d"], [336, "14d"]];
+  $("#main").innerHTML = `
+    <h2 style="margin-top:0">Performance history <span class="hint" id="perf-ts"></span></h2>
+    <p class="hint">Per-call metrics over time — pinpoint <b>when</b> throughput, speculative acceptance or KV-cache reuse start to degrade across a long run, and correlate them against context fill.</p>
+    <div class="card" style="display:flex;gap:14px;align-items:center;flex-wrap:wrap">
+      <label>Window
+        <select id="perf-win">${winOpts.map(([h, l]) => `<option value="${h}"${h === _PERF.hours ? " selected" : ""}>${l}</option>`).join("")}</select></label>
+      <label>Model <select id="perf-model"><option value="">all models</option></select></label>
+      <button class="act" id="perf-refresh">Refresh</button>
+      <button class="act" id="perf-csv">Export CSV</button>
+      <span class="hint" id="perf-count"></span>
+    </div>
+    <div id="perf-summary"></div>
+    <div class="card"><div style="font-weight:600;margin-bottom:6px">Throughput — decode vs effective tok/s</div><div id="perf-c-tps"></div></div>
+    <div class="card"><div style="font-weight:600;margin-bottom:6px">Prefill speed (tok/s)</div><div id="perf-c-prefill"></div></div>
+    <div class="card"><div style="font-weight:600;margin-bottom:6px">Speculative acceptance & KV-cache hit (%)</div><div id="perf-c-pct"></div></div>
+    <div class="card"><div style="font-weight:600;margin-bottom:6px">Context fill — prompt tokens per call <span class="hint" style="font-weight:normal">— watch it climb toward the cap, then drop on compaction</span></div><div id="perf-c-ctx"></div></div>
+    <div class="card"><div style="font-weight:600;margin-bottom:6px">Correlation — does acceptance fall as context fills?</div>
+      <div id="perf-c-scatter1"></div><div style="height:8px"></div><div id="perf-c-scatter2"></div></div>
+    <div class="card"><div style="font-weight:600;margin-bottom:6px">Recent calls <span class="hint" style="font-weight:normal">— every metric, newest first</span></div><div id="perf-table"></div></div>`;
+  let last = { series: [] };
+  const load = async () => {
+    _PERF.hours = +$("#perf-win").value;
+    _PERF.model = $("#perf-model").value;
+    try { localStorage.setItem("perfCtl", JSON.stringify(_PERF)); } catch (e) {}
+    let d;
+    try { d = await api(`perf-history?hours=${_PERF.hours}&model=${encodeURIComponent(_PERF.model)}`); }
+    catch (e) { $("#perf-summary").innerHTML = '<div class="card hint">Could not load history.</div>'; return; }
+    last = d;
+    const rows = d.series || [];
+    $("#perf-ts").textContent = "· " + new Date().toLocaleTimeString();
+    $("#perf-count").textContent = `${d.summary.samples} calls in window`;
+    // model filter options (preserve current)
+    const sel = $("#perf-model"), cur = sel.value;
+    sel.innerHTML = '<option value="">all models</option>' +
+      (d.models || []).map(m => `<option value="${esc(m.model)}">${esc(m.model)} (${m.n})</option>`).join("");
+    sel.value = cur;
+    // summary tiles
+    const s = d.summary, tile = (label, v, unit, hint) =>
+      `<div style="min-width:120px" title="${hint || ""}"><div class="hint" style="margin:0">${label}</div><div style="font-size:18px;font-weight:600">${_num(v, unit)}</div></div>`;
+    $("#perf-summary").innerHTML = `<div class="card" style="display:flex;gap:22px;flex-wrap:wrap">`
+      + tile("decode tok/s", s.decode_tps, "", "avg pure generation rate")
+      + tile("effective tok/s", s.eff_tps, "", "avg end-to-end rate incl. prefill/queue")
+      + tile("prefill tok/s", s.prefill_tps, "", "avg prompt-processing rate")
+      + tile("TTFT", s.ttft_ms, "ms", "avg time to first token")
+      + tile("spec accept", s.spec_accept_pct, "%", "avg speculative-decoding acceptance")
+      + tile("cache hit", s.cache_hit_pct, "%", "avg KV prefix-cache reuse")
+      + tile("avg context", s.prompt_tokens, "k", "avg prompt tokens per call")
+      + tile("truncations", s.truncations, "", "replies cut at max_tokens")
+      + `</div>`;
+    const cDec = _css("--ok", "#3fb950"), cEff = _css("--accent", "#e8833a"),
+          cSpec = _css("--accent-2", "#ffb347"), cCache = _css("--ok", "#3fb950"),
+          cCtx = _css("--accent", "#e8833a"), cPre = _css("--accent-2", "#ffb347");
+    $("#perf-c-tps").innerHTML = lineChart(rows,
+      [{ key: "decode_tps", color: cDec, label: "decode tok/s" },
+       { key: "eff_tps", color: cEff, label: "effective tok/s" }], {});
+    $("#perf-c-prefill").innerHTML = lineChart(rows, [{ key: "prefill_tps", color: cPre, label: "prefill tok/s" }], {});
+    $("#perf-c-pct").innerHTML = lineChart(rows,
+      [{ key: "spec_accept_pct", color: cSpec, label: "spec accept %" },
+       { key: "cache_hit_pct", color: cCache, label: "cache hit %" }], { yMin: 0, yMax: 100, yUnit: "%" });
+    $("#perf-c-ctx").innerHTML = lineChart(rows, [{ key: "prompt_tokens", color: cCtx, label: "prompt tokens" }], { yUnit: "k" });
+    $("#perf-c-scatter1").innerHTML = scatterChart(rows, "prompt_tokens", "spec_accept_pct",
+      { xUnit: "k", yUnit: "%", yMin: 0, yMax: 100, color: cSpec, xlabel: "context (prompt tokens)", ylabel: "spec accept %" });
+    $("#perf-c-scatter2").innerHTML = scatterChart(rows, "prompt_tokens", "cache_hit_pct",
+      { xUnit: "k", yUnit: "%", yMin: 0, yMax: 100, color: cCache, xlabel: "context (prompt tokens)", ylabel: "cache hit %" });
+    // rich recent table (newest first)
+    const rev = rows.slice().reverse().slice(0, 60);
+    $("#perf-table").innerHTML = rev.length
+      ? `<table><tr><th>time</th><th>model</th><th title="prompt tokens (context fill)">ctx</th><th>out</th>
+          <th>cache hit</th><th>spec</th><th>decode tok/s</th><th>prefill tok/s</th><th>TTFT</th>
+          <th>eff tok/s</th><th title="end-to-end wall time">wall</th><th>finish</th></tr>`
+        + rev.map(r => `<tr>
+            <td class="nw">${_tsLabel(r.ts)}</td>
+            <td class="nw" style="max-width:170px;overflow:hidden;text-overflow:ellipsis" title="${esc(r.model)}">${esc(r.model)}</td>
+            <td class="nw">${_num(r.prompt_tokens, "k")}</td>
+            <td class="nw">${r.completion_tokens ?? "—"}</td>
+            <td class="nw">${r.cache_hit_pct == null ? '<span class="hint">—</span>' : _num(r.cache_hit_pct, "%")}</td>
+            <td class="nw">${r.spec_accept_pct == null ? '<span class="hint">—</span>' : _num(r.spec_accept_pct, "%")}</td>
+            <td class="nw">${r.decode_tps == null ? '<span class="hint">—</span>' : _num(r.decode_tps)}</td>
+            <td class="nw">${r.prefill_tps == null ? '<span class="hint">—</span>' : _num(r.prefill_tps)}</td>
+            <td class="nw">${r.ttft_ms == null ? '<span class="hint">—</span>' : _num(r.ttft_ms, "ms")}</td>
+            <td class="nw">${r.eff_tps == null ? '<span class="hint">—</span>' : _num(r.eff_tps)}</td>
+            <td class="nw">${r.wall_ms == null ? '<span class="hint">—</span>' : _num(r.wall_ms, "ms")}</td>
+            <td class="nw">${r.finish_reason === "length" ? '<span class="pill warn">length</span>' : '<span class="hint">' + esc(r.finish_reason || "stop") + '</span>'}</td>
+          </tr>`).join("") + `</table>`
+      : '<span class="hint">No calls recorded in this window yet.</span>';
+    wrapTables();
+  };
+  $("#perf-win").onchange = load;
+  $("#perf-model").onchange = load;
+  $("#perf-refresh").onclick = load;
+  $("#perf-csv").onclick = () => {
+    const rows = last.series || []; if (!rows.length) return toast("No data to export");
+    const cols = ["ts", "model", "backend", "mode", "prompt_tokens", "completion_tokens",
+      "cached_tokens", "draft_n", "draft_n_accepted", "decode_tps", "prefill_tps",
+      "decode_ms", "prefill_ms", "ttft_ms", "eff_tps", "wall_ms", "cache_hit_pct",
+      "spec_accept_pct", "finish_reason"];
+    const csv = [cols.join(",")].concat(rows.map(r => cols.map(c => {
+      const v = r[c]; return v == null ? "" : (/[",\n]/.test("" + v) ? `"${("" + v).replace(/"/g, '""')}"` : v);
+    }).join(","))).join("\n");
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(new Blob([csv], { type: "text/csv" }));
+    a.download = `foundry-perf-${_PERF.hours}h.csv`; a.click();
+  };
+  $("#perf-win").value = _PERF.hours;
+  await load();
+}
+
 async function tabLive() {
   $("#main").innerHTML = `
     <h2 style="margin-top:0">Live activity <span class="hint" id="live-ts"></span></h2>

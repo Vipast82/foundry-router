@@ -384,6 +384,22 @@ async def activity(request: Request):
             "tool_stats": tool_stats}
 
 
+@router.get("/admin/api/perf-history")
+async def perf_history_api(request: Request):
+    """Time-series performance samples for the Performance tab: raw per-call
+    points within a window (for charting) plus window-wide summary averages.
+    `hours` sets the window; `model` narrows to one model (omit for the fleet)."""
+    svc = _svc(request)
+    from .. import perf_history as ph
+    try:
+        hours = float(request.query_params.get("hours") or 72)
+    except (TypeError, ValueError):
+        hours = 72
+    hours = max(0.5, min(hours, 24 * 30))          # clamp: 30 min … 30 days
+    model = request.query_params.get("model") or None
+    return ph.query_history(svc.db, hours=hours, model=model)
+
+
 @router.post("/admin/api/mcp-aggregator")
 async def set_mcp_aggregator(request: Request):
     svc = _svc(request)
