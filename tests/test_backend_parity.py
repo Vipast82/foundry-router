@@ -98,6 +98,47 @@ async def test_openai_response_surfaces_reasoning_and_tools():
     assert res.prompt_tokens == 11 and res.completion_tokens == 7
 
 
+def _llamacpp_spec_json(request):
+    """A llama.cpp response with speculative-decoding timings and a KV
+    prefix-cache hit reported in usage.prompt_tokens_details."""
+    return httpx.Response(200, json={
+        "choices": [{"message": {"content": "hi"}, "finish_reason": "stop"}],
+        "usage": {"prompt_tokens": 100, "completion_tokens": 8,
+                  "prompt_tokens_details": {"cached_tokens": 90}},
+        "timings": {"prompt_n": 100, "prompt_ms": 50.0,
+                    "predicted_n": 8, "predicted_ms": 40.0,
+                    "draft_n": 7, "draft_n_accepted": 5}})
+
+
+async def test_openai_surfaces_spec_decode_and_cache():
+    proto = OpenAIProtocol("http://x", None, _collect(_llamacpp_spec_json),
+                           flavor="llamacpp")
+    res = await proto.chat("m", [{"role": "user", "content": "hi"}])
+    assert res.draft_n == 7 and res.draft_n_accepted == 5   # spec acceptance
+    assert res.cached_tokens == 90                           # KV prefix-cache hit
+
+
+_SPEC_STREAM = (
+    'data: {"choices":[{"delta":{"content":"hi"}}]}\n'
+    'data: {"choices":[{"delta":{},"finish_reason":"stop"}],'
+    '"usage":{"prompt_tokens":100,"completion_tokens":8,'
+    '"prompt_tokens_details":{"cached_tokens":90}},'
+    '"timings":{"prompt_n":100,"prompt_ms":50.0,"predicted_n":8,'
+    '"predicted_ms":40.0,"draft_n":7,"draft_n_accepted":5}}\n'
+    'data: [DONE]\n')
+
+
+async def test_openai_stream_carries_spec_and_cache_on_done():
+    proto = OpenAIProtocol("http://x", None,
+                           _collect(lambda req: httpx.Response(200, text=_SPEC_STREAM)),
+                           flavor="llamacpp")
+    chunks = await _drain(proto.chat_stream("m", [{"role": "user", "content": "hi"}]))
+    done = chunks[-1]
+    assert done["done"] is True
+    assert done["draft_n"] == 7 and done["draft_n_accepted"] == 5
+    assert done["cached_tokens"] == 90
+
+
 async def test_openai_local_flavor_forwards_full_sampling():
     _SEEN.clear()
     proto = OpenAIProtocol("http://x", None, _collect(_openai_json), flavor="llamacpp")

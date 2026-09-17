@@ -1190,6 +1190,7 @@ class AgentRunner:
                 from ..pool.protocols import ChatResult
                 content_parts, think_parts = [], []
                 pt = ct = eval_ns = load_ns = 0
+                draft_n = draft_acc = cached_tok = 0
                 async for chunk in self.pool.chat_stream(
                         model_id, [message], options=options,
                         think=self._think_for(model_id), fmt=self._req_format):
@@ -1202,6 +1203,9 @@ class AgentRunner:
                         ct = chunk.get("completion_tokens") or 0
                         eval_ns = chunk.get("eval_duration_ns") or 0
                         load_ns = chunk.get("load_duration_ns") or 0
+                        draft_n = chunk.get("draft_n") or 0
+                        draft_acc = chunk.get("draft_n_accepted") or 0
+                        cached_tok = chunk.get("cached_tokens") or 0
                     elif chunk.get("content"):
                         content_parts.append(chunk["content"])   # BUFFERED, not shown
                 # thinking="" on purpose: the reasoning was ALREADY streamed live
@@ -1210,7 +1214,9 @@ class AgentRunner:
                 result = ChatResult(
                     content="".join(content_parts), thinking="",
                     prompt_tokens=pt, completion_tokens=ct,
-                    eval_duration_ns=eval_ns, load_duration_ns=load_ns)
+                    eval_duration_ns=eval_ns, load_duration_ns=load_ns,
+                    draft_n=draft_n, draft_n_accepted=draft_acc,
+                    cached_tokens=cached_tok)
                 backend = (info.get("name") or model_id)
             else:
                 result, backend = await self.pool.chat(
@@ -1237,7 +1243,9 @@ class AgentRunner:
             model_id, result.completion_tokens,
             result.eval_duration_ns, result.load_duration_ns,
             prompt_count=result.prompt_tokens,
-            prompt_eval_duration_ns=result.prompt_eval_duration_ns)
+            prompt_eval_duration_ns=result.prompt_eval_duration_ns,
+            draft_n=result.draft_n, draft_n_accepted=result.draft_n_accepted,
+            cached_tokens=result.cached_tokens)
         # Scrub literal <think> tags out of the answer text — they ride to the
         # user verbatim via use_last_result otherwise (found live: a stray
         # ", etc. </think>" rendered as visible content in AnythingLLM). The
@@ -1668,6 +1676,7 @@ class AgentRunner:
                 from ..pool.protocols import ChatResult
                 parts, acc_tcs, done_tcs = [], [], []
                 pt = ct = ev_ns = ld_ns = 0
+                dn = dna = cachetok = 0
                 try:
                     async for chunk in self.pool.chat_stream(
                             worker, messages, tools=specs, options=wt_options,
@@ -1681,6 +1690,9 @@ class AgentRunner:
                             ct = chunk.get("completion_tokens") or 0
                             ev_ns = chunk.get("eval_duration_ns") or 0
                             ld_ns = chunk.get("load_duration_ns") or 0
+                            dn = chunk.get("draft_n") or 0
+                            dna = chunk.get("draft_n_accepted") or 0
+                            cachetok = chunk.get("cached_tokens") or 0
                         else:
                             if chunk.get("tool_calls"):
                                 acc_tcs.extend(chunk["tool_calls"])
@@ -1689,7 +1701,8 @@ class AgentRunner:
                     result = ChatResult(
                         content="".join(parts), tool_calls=(acc_tcs or done_tcs),
                         prompt_tokens=pt, completion_tokens=ct,
-                        eval_duration_ns=ev_ns, load_duration_ns=ld_ns)
+                        eval_duration_ns=ev_ns, load_duration_ns=ld_ns,
+                        draft_n=dn, draft_n_accepted=dna, cached_tokens=cachetok)
                     backend = wt_info.get("name") or worker
                 except Exception as e:      # noqa: BLE001 — ANY stream failure
                     # A mid-stream drop (timeout, socket close, transport error)
@@ -1722,7 +1735,9 @@ class AgentRunner:
                 worker, result.completion_tokens,
                 result.eval_duration_ns, result.load_duration_ns,
                 prompt_count=result.prompt_tokens,
-                prompt_eval_duration_ns=result.prompt_eval_duration_ns)
+                prompt_eval_duration_ns=result.prompt_eval_duration_ns,
+                draft_n=result.draft_n, draft_n_accepted=result.draft_n_accepted,
+                cached_tokens=result.cached_tokens)
 
             if not result.tool_calls:
                 # No tool call => the worker produced its final answer.

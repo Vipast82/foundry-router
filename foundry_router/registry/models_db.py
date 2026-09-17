@@ -818,7 +818,9 @@ class ModelRegistry:
     def note_inference(self, model_id: str, eval_count: int,
                        eval_duration_ns: int, load_duration_ns: int = 0,
                        prompt_count: int = 0,
-                       prompt_eval_duration_ns: int = 0) -> None:
+                       prompt_eval_duration_ns: int = 0,
+                       draft_n: int = 0, draft_n_accepted: int = 0,
+                       cached_tokens: int = 0) -> None:
         """Fold one model response's timing into observed telemetry.
 
         WARM inference (eval_count / eval_duration) becomes a running mean of
@@ -837,32 +839,43 @@ class ModelRegistry:
         now = utcnow()
         last_eval_tps = None
         last_prompt_tps = None
+        last_decode_ms = None
+        last_prefill_ms = None
         if eval_count > 0 and eval_duration_ns > 0:
             tps = eval_count / (eval_duration_ns / 1e9)
             last_eval_tps = tps
+            last_decode_ms = eval_duration_ns / 1e6      # decode wall time this call
             if self.get(model_id) is None:
                 self.db.execute("INSERT INTO models (id) VALUES (?)", (model_id,))
-            # exact incremental mean: mean' = (mean*n + x) / (n+1)
+            # exact incremental mean: mean' = (mean*n + x) / (n+1). decode_ms_avg
+            # rides the same sample counter as the rate (both measured together).
             self.db.execute(
                 "UPDATE models SET "
                 "eval_tps_avg = (COALESCE(eval_tps_avg,0)*COALESCE(eval_samples,0) + ?) "
                 "               / (COALESCE(eval_samples,0) + 1), "
+                "decode_ms_avg = (COALESCE(decode_ms_avg,0)*COALESCE(eval_samples,0) + ?) "
+                "               / (COALESCE(eval_samples,0) + 1), "
                 "eval_samples = COALESCE(eval_samples,0) + 1 WHERE id=?",
-                (tps, model_id))
+                (tps, last_decode_ms, model_id))
             updated = True
         # Prefill throughput (prompt tokens / prompt-eval time) — the big-context
-        # signal. Same incremental-mean treatment as decode.
+        # signal. Same incremental-mean treatment as decode, and the prefill wall
+        # time (prompt_eval_duration) is tracked alongside the rate: it's the
+        # latency of chewing through the context, ~= TTFT on a warm model.
         if prompt_count > 0 and prompt_eval_duration_ns > 0:
             ptps = prompt_count / (prompt_eval_duration_ns / 1e9)
             last_prompt_tps = ptps
+            last_prefill_ms = prompt_eval_duration_ns / 1e6
             if self.get(model_id) is None:
                 self.db.execute("INSERT INTO models (id) VALUES (?)", (model_id,))
             self.db.execute(
                 "UPDATE models SET "
                 "prompt_tps_avg = (COALESCE(prompt_tps_avg,0)*COALESCE(prompt_samples,0) + ?) "
                 "                 / (COALESCE(prompt_samples,0) + 1), "
+                "prefill_ms_avg = (COALESCE(prefill_ms_avg,0)*COALESCE(prompt_samples,0) + ?) "
+                "                 / (COALESCE(prompt_samples,0) + 1), "
                 "prompt_samples = COALESCE(prompt_samples,0) + 1 WHERE id=?",
-                (ptps, model_id))
+                (ptps, last_prefill_ms, model_id))
         # load_duration is 0 when the model was already warm — only cold loads
         # contribute, giving a "typical cold-load time" stat that stays honest.
         last_cold_load_ms = None
@@ -885,11 +898,45 @@ class ModelRegistry:
                 "UPDATE models SET last_inference_at=?, "
                 "last_eval_tps=COALESCE(?, last_eval_tps), "
                 "last_prompt_tps=COALESCE(?, last_prompt_tps), "
+                "last_decode_ms=COALESCE(?, last_decode_ms), "
+                "last_prefill_ms=COALESCE(?, last_prefill_ms), "
                 "last_cold_load_ms=COALESCE(?, last_cold_load_ms), "
                 "last_prompt_tokens=COALESCE(?, last_prompt_tokens), "
                 "last_eval_tokens=COALESCE(?, last_eval_tokens) WHERE id=?",
-                (now, last_eval_tps, last_prompt_tps, last_cold_load_ms,
-                 prompt_count or None, eval_count or None, model_id))
+                (now, last_eval_tps, last_prompt_tps, last_decode_ms, last_prefill_ms,
+                 last_cold_load_ms, prompt_count or None, eval_count or None, model_id))
+        # Speculative-decoding acceptance (llama.cpp draft model). Accumulate the
+        # RAW token totals and derive the rate token-weighted — an honest fleet
+        # acceptance rate, not a mean-of-per-call-ratios that small calls would
+        # skew. Only calls that actually ran speculation (draft_n>0) count, so a
+        # backend without a draft model never dilutes the stat. Rate tunes
+        # --spec-draft-n-max: low acceptance = draft too deep / model mismatched.
+        if draft_n > 0:
+            if self.get(model_id) is None:
+                self.db.execute("INSERT INTO models (id) VALUES (?)", (model_id,))
+            last_pct = 100.0 * draft_n_accepted / draft_n
+            self.db.execute(
+                "UPDATE models SET "
+                "spec_draft_total = COALESCE(spec_draft_total,0) + ?, "
+                "spec_accept_total = COALESCE(spec_accept_total,0) + ?, "
+                "spec_samples = COALESCE(spec_samples,0) + 1, "
+                "last_spec_accept_pct = ? WHERE id=?",
+                (draft_n, draft_n_accepted, last_pct, model_id))
+        # KV prefix-cache reuse. Same token-weighted treatment: cached vs prompt
+        # tokens across calls that reported it. Rate is the direct read on whether
+        # the chat template keeps the prefix cache warm turn-to-turn — a falling
+        # hit rate on a long session points at a template/cache regression.
+        if cached_tokens > 0 and prompt_count > 0:
+            if self.get(model_id) is None:
+                self.db.execute("INSERT INTO models (id) VALUES (?)", (model_id,))
+            last_hit = 100.0 * min(cached_tokens, prompt_count) / prompt_count
+            self.db.execute(
+                "UPDATE models SET "
+                "cache_hit_total = COALESCE(cache_hit_total,0) + ?, "
+                "cache_prompt_total = COALESCE(cache_prompt_total,0) + ?, "
+                "cache_samples = COALESCE(cache_samples,0) + 1, "
+                "last_cache_hit_pct = ? WHERE id=?",
+                (min(cached_tokens, prompt_count), prompt_count, last_hit, model_id))
         if updated:
             row = self.get(model_id)
             n = (row.get("eval_samples") or 0) if row else 0

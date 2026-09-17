@@ -743,7 +743,10 @@ async def _direct_dispatch_chat(svc, persona, model_name, messages, client_tools
         svc.registry.note_inference(model_id, res.completion_tokens,
                                     res.eval_duration_ns, res.load_duration_ns,
                                     prompt_count=res.prompt_tokens,
-                                    prompt_eval_duration_ns=res.prompt_eval_duration_ns)
+                                    prompt_eval_duration_ns=res.prompt_eval_duration_ns,
+                                    draft_n=res.draft_n,
+                                    draft_n_accepted=res.draft_n_accepted,
+                                    cached_tokens=res.cached_tokens)
         svc.registry.note_finish(model_id, res.finish_reason)
         if res.finish_reason == "length":
             svc.db.log_event(
@@ -825,7 +828,10 @@ async def _direct_dispatch_chat(svc, persona, model_name, messages, client_tools
                             model_id, ct, chunk.get("eval_duration_ns") or 0,
                             chunk.get("load_duration_ns") or 0,
                             prompt_count=pt,
-                            prompt_eval_duration_ns=chunk.get("prompt_eval_duration_ns") or 0)
+                            prompt_eval_duration_ns=chunk.get("prompt_eval_duration_ns") or 0,
+                            draft_n=chunk.get("draft_n") or 0,
+                            draft_n_accepted=chunk.get("draft_n_accepted") or 0,
+                            cached_tokens=chunk.get("cached_tokens") or 0)
                         # Truncation visibility: a "length" finish means the reply
                         # was cut at the max-token cap — the exact reason a client
                         # then asks to "continue". Count it and flag it loudly.
@@ -952,7 +958,10 @@ async def _passthrough_chat(svc, model_name, messages, client_tools, options,
             svc.registry.note_inference(model_name, result.completion_tokens,
                                         result.eval_duration_ns, result.load_duration_ns,
                                         prompt_count=result.prompt_tokens,
-                                        prompt_eval_duration_ns=result.prompt_eval_duration_ns)
+                                        prompt_eval_duration_ns=result.prompt_eval_duration_ns,
+                                        draft_n=result.draft_n,
+                                        draft_n_accepted=result.draft_n_accepted,
+                                        cached_tokens=result.cached_tokens)
             logger.finish("ok")
             tool_calls = [{"function": {"name": tc["name"], "arguments": tc["arguments"]}}
                           for tc in result.tool_calls] or None
@@ -980,6 +989,19 @@ async def _passthrough_chat(svc, model_name, messages, client_tools, options,
                         logger.record_model_call(model_name, "stream",
                                                  chunk.get("prompt_tokens", 0),
                                                  chunk.get("completion_tokens", 0), 0.0)
+                        # Perf + spec/cache telemetry on the raw-passthrough path
+                        # too, so a model driven by name (not via a persona) still
+                        # shows decode/prefill tok/s, draft acceptance and cache
+                        # hit in the live view.
+                        svc.registry.note_inference(
+                            model_name, chunk.get("completion_tokens") or 0,
+                            chunk.get("eval_duration_ns") or 0,
+                            chunk.get("load_duration_ns") or 0,
+                            prompt_count=chunk.get("prompt_tokens") or 0,
+                            prompt_eval_duration_ns=chunk.get("prompt_eval_duration_ns") or 0,
+                            draft_n=chunk.get("draft_n") or 0,
+                            draft_n_accepted=chunk.get("draft_n_accepted") or 0,
+                            cached_tokens=chunk.get("cached_tokens") or 0)
                     elif chunk.get("content"):
                         yield tr.chat_chunk(model_name, chunk["content"])
             except AllBackendsFailed as e:

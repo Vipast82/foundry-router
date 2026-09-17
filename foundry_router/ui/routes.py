@@ -210,6 +210,32 @@ async def activity(request: Request):
     # last-call snapshot), joined onto what's active/loaded so the Live view shows
     # it at a glance. Backend-agnostic: identical numbers whether the call was
     # served by Ollama or llama.cpp.
+    # Per-model EFFECTIVE tok/s over a recent window: output tokens ÷ wall time
+    # of the requests that used the model (end-to-end, incl. prefill + queue).
+    # This is the rate the operator actually experiences, shown next to the pure
+    # decode rate so the gap between them (prefill/queue overhead) is visible.
+    import json as _json0
+    eff_rows = svc.db.query(
+        "SELECT duration_ms, models_used FROM request_log "
+        "WHERE status='ok' ORDER BY id DESC LIMIT 60")
+    _eff: dict = {}
+    for r in eff_rows:
+        try:
+            used = _json0.loads(r.get("models_used") or "[]")
+        except (ValueError, TypeError):
+            continue
+        for m in used:
+            mid = m.get("model")
+            if not mid:
+                continue
+            agg = _eff.setdefault(mid, {"tok": 0, "ms": 0})
+            agg["tok"] += int(m.get("completion_tokens") or 0)
+            agg["ms"] += int(r.get("duration_ms") or 0)
+
+    def _eff_tps(model_id):
+        a = _eff.get(model_id)
+        return round(a["tok"] / (a["ms"] / 1000), 1) if a and a["ms"] else 0.0
+
     def _perf(model_id):
         row = svc.registry.get(model_id) or {}
 
@@ -218,6 +244,14 @@ async def activity(request: Request):
         return {
             "decode_tps": r1("eval_tps_avg"),
             "prompt_tps": r1("prompt_tps_avg"),
+            # end-to-end effective rate for this model over the recent window
+            "eff_tps": _eff_tps(model_id),
+            # wall time (ms): decode = generation time, prefill = context-processing
+            # time (~TTFT on a warm model). "how long" next to "how fast".
+            "decode_ms": round(row.get("decode_ms_avg") or 0.0),
+            "prefill_ms": round(row.get("prefill_ms_avg") or 0.0),
+            "last_decode_ms": round(row.get("last_decode_ms") or 0.0),
+            "last_prefill_ms": round(row.get("last_prefill_ms") or 0.0),
             "cold_load_ms": round(row.get("cold_load_ms_avg") or 0.0),
             "ttft_ms": round(row.get("ttft_ms_avg") or 0.0),
             "last_ttft_ms": round(row.get("last_ttft_ms") or 0.0),
@@ -226,10 +260,35 @@ async def activity(request: Request):
             "last_cold_load_ms": round(row.get("last_cold_load_ms") or 0.0),
             "last_prompt_tokens": row.get("last_prompt_tokens") or 0,
             "last_eval_tokens": row.get("last_eval_tokens") or 0,
+            # trained context window (tokens) — used in the VRAM/context cell.
+            "context_length": row.get("context_length") or 0,
             "samples": row.get("eval_samples") or 0,
             "truncations": row.get("truncations") or 0,
             "last_finish": row.get("last_finish_reason") or "",
             "last_at": row.get("last_inference_at") or "",
+            # Speculative-decoding acceptance (llama.cpp draft model). Rate is
+            # token-weighted across the accumulated totals; None when this model
+            # has never run speculation (no draft model / backend can't report),
+            # so the UI can hide the stat instead of showing a misleading 0%.
+            "spec_accept_pct": (
+                round(100.0 * (row.get("spec_accept_total") or 0)
+                      / row["spec_draft_total"], 1)
+                if row.get("spec_draft_total") else None),
+            "last_spec_accept_pct": (round(row["last_spec_accept_pct"], 1)
+                                     if row.get("last_spec_accept_pct") is not None
+                                     else None),
+            "spec_samples": row.get("spec_samples") or 0,
+            "spec_draft_total": row.get("spec_draft_total") or 0,
+            # KV prefix-cache hit rate — cached prompt tokens / prompt tokens,
+            # token-weighted. None until a call reports cache telemetry.
+            "cache_hit_pct": (
+                round(100.0 * (row.get("cache_hit_total") or 0)
+                      / row["cache_prompt_total"], 1)
+                if row.get("cache_prompt_total") else None),
+            "last_cache_hit_pct": (round(row["last_cache_hit_pct"], 1)
+                                   if row.get("last_cache_hit_pct") is not None
+                                   else None),
+            "cache_samples": row.get("cache_samples") or 0,
         }
 
     active_models = svc.pool.active_calls()
@@ -249,17 +308,27 @@ async def activity(request: Request):
         "ORDER BY id DESC LIMIT 40")
     tok_total = dur_total = ok = err = 0
     tools_agg: dict = {}
+    series: list = []          # chronological per-request points for the sparklines
     for r in window:
         if r.get("status") == "ok":
             ok += 1
         elif r.get("status") == "error":
             err += 1
-        dur_total += int(r.get("duration_ms") or 0)
+        rdur = int(r.get("duration_ms") or 0)
+        dur_total += rdur
+        rtok = 0
         try:
             for m in _json.loads(r.get("models_used") or "[]"):
-                tok_total += int(m.get("completion_tokens") or 0)
+                ct = int(m.get("completion_tokens") or 0)
+                tok_total += ct
+                rtok += ct
         except (ValueError, TypeError):
             pass
+        # one point per request: effective tok/s and wall seconds (only ok rows
+        # with real numbers, so the sparkline traces genuine throughput/latency).
+        if r.get("status") == "ok" and rdur > 0:
+            series.append({"eff": round(rtok / (rdur / 1000), 1),
+                           "s": round(rdur / 1000, 2)})
         try:
             for tc in _json.loads(r.get("tool_calls") or "[]"):
                 key = f"{tc.get('server', '')}/{tc.get('tool', '')}"
@@ -278,15 +347,30 @@ async def activity(request: Request):
         key=lambda t: t["count"], reverse=True)[:8]
     trunc_total = (svc.db.query_one(
         "SELECT COALESCE(SUM(truncations),0) AS t FROM models") or {}).get("t") or 0
+    # Session DECODE rate, shown beside the effective rate so the gap between them
+    # (all the prefill + queue + tool time that decode tok/s hides) is legible.
+    # Token-weighted across the models that ran in the window, using each model's
+    # measured decode rate; models with no rate yet just don't contribute.
+    dec_tok = dec_time = 0.0
+    for mid, agg in _eff.items():
+        dtps = (svc.registry.get(mid) or {}).get("eval_tps_avg") or 0
+        if dtps and agg["tok"]:
+            dec_tok += agg["tok"]
+            dec_time += agg["tok"] / dtps
     summary = {
         "window": len(window),
         # Effective throughput = output tokens / wall time across the window
         # (includes prefill + queue, so it reads lower than pure decode tok/s —
         # it's the real end-to-end rate the operator experiences).
         "eff_tps": round(tok_total / (dur_total / 1000), 1) if dur_total else 0,
+        # Pure decode rate over the same traffic — what the GPU sustains once
+        # generating, with prefill/queue removed. eff_tps < decode_tps always.
+        "decode_tps": round(dec_tok / dec_time, 1) if dec_time else 0,
         "avg_s": round(dur_total / 1000 / len(window), 1) if window else 0,
         "ok": ok, "err": err, "out_tokens": tok_total,
         "truncations_total": int(trunc_total),
+        # Oldest→newest per-request points for the inline sparklines.
+        "series": list(reversed(series)),
     }
 
     return {"models": active_models,

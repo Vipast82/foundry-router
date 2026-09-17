@@ -339,6 +339,45 @@ function postRender() { wrapTables(); enhanceSteppers(); }
 
 /* -------------------------------------------------------------- backends -- */
 /* -------------------------------------------------------------- live view -- */
+// --- inline SVG sparklines (no external chart lib — the admin UI stays a single
+// self-contained file that works offline). `vals` is oldest→newest numbers. ---
+function sparkline(vals, color, unit, w = 150, h = 34) {
+  vals = (vals || []).filter(v => typeof v === "number" && isFinite(v));
+  if (vals.length < 2) return '<span class="hint">— not enough data —</span>';
+  const pad = 3, lo = Math.min(...vals), hi = Math.max(...vals), span = (hi - lo) || 1;
+  const x = i => pad + i * (w - 2 * pad) / (vals.length - 1);
+  const y = v => h - pad - (v - lo) / span * (h - 2 * pad);
+  const pts = vals.map((v, i) => `${x(i).toFixed(1)},${y(v).toFixed(1)}`).join(" ");
+  const last = vals[vals.length - 1];
+  const lastX = x(vals.length - 1), lastY = y(last);
+  const area = `${pad},${h - pad} ${pts} ${lastX.toFixed(1)},${h - pad}`;
+  const gid = "g" + Math.random().toString(36).slice(2, 8);
+  return `<svg width="${w}" height="${h}" viewBox="0 0 ${w} ${h}" style="vertical-align:middle">
+    <defs><linearGradient id="${gid}" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="${color}" stop-opacity="0.35"/>
+      <stop offset="1" stop-color="${color}" stop-opacity="0"/></linearGradient></defs>
+    <polygon points="${area}" fill="url(#${gid})"/>
+    <polyline points="${pts}" fill="none" stroke="${color}" stroke-width="1.5"
+      stroke-linejoin="round" stroke-linecap="round"/>
+    <circle cx="${lastX.toFixed(1)}" cy="${lastY.toFixed(1)}" r="2.2" fill="${color}"/>
+  </svg>`;
+}
+// A labelled pair of sparklines (throughput + latency) for the Performance card.
+function sparkRow(series) {
+  if (!series || series.length < 2)
+    return '<div class="hint" style="margin-top:8px">Trend charts appear once a few requests have finished.</div>';
+  const eff = series.map(p => p.eff), sec = series.map(p => p.s);
+  const cell = (label, svg, lastTxt, color) =>
+    `<div style="display:inline-block;margin:8px 18px 0 0;vertical-align:top">
+       <div class="hint" style="margin-bottom:2px">${label} <span style="color:${color};font-weight:600">${lastTxt}</span>
+         <span style="opacity:.6">· last ${series.length}</span></div>${svg}</div>`;
+  const c1 = getComputedStyle(document.body).getPropertyValue("--ok").trim() || "#3fb950";
+  const c2 = getComputedStyle(document.body).getPropertyValue("--accent").trim() || "#e8833a";
+  return `<div style="margin-top:6px;border-top:1px solid var(--line,#333);padding-top:4px">`
+    + cell("effective tok/s", sparkline(eff, c1, "tok/s"), eff[eff.length - 1] + "", c1)
+    + cell("latency s/req", sparkline(sec, c2, "s"), sec[sec.length - 1] + "s", c2)
+    + `</div>`;
+}
 async function tabLive() {
   $("#main").innerHTML = `
     <h2 style="margin-top:0">Live activity <span class="hint" id="live-ts"></span></h2>
@@ -374,11 +413,15 @@ async function tabLive() {
       const truncPill = sm.truncations_total
         ? `<span class="pill warn" title="Total replies ever cut off at max_tokens (each = a turn a client had to 'continue'). Rising = looping or cap too low.">⤾ ${sm.truncations_total} truncations</span>`
         : '<span class="pill ok">⤾ 0 truncations</span>';
+      const decodePill = sm.decode_tps
+        ? `<span class="pill" title="Pure decode rate over the same traffic — what the GPU sustains once generating, prefill/queue removed. Always ≥ effective; a big gap means prefill/queue/tool time dominates.">⚡ ${sm.decode_tps} tok/s decode</span> ` : "";
       $("#live-perf").innerHTML =
         `<span class="pill" title="Output tokens ÷ wall time across the window — end-to-end rate incl. prefill/queue, so lower than raw decode tok/s">≈ ${sm.eff_tps} tok/s effective</span> `
+        + decodePill
         + `<span class="pill" title="Mean wall time per finished request">Ø ${sm.avg_s}s / req</span> `
         + `<span class="pill ok">${sm.ok} ok</span> ${errPill} ${truncPill} `
-        + `<span class="hint">over last ${sm.window} · ${sm.out_tokens.toLocaleString()} out-tok</span>`;
+        + `<span class="hint">over last ${sm.window} · ${sm.out_tokens.toLocaleString()} out-tok</span>`
+        + sparkRow(sm.series || []);
     } else {
       $("#live-perf").innerHTML = '<span class="hint">no finished requests yet</span>';
     }
@@ -420,20 +463,61 @@ async function tabLive() {
       const last = p.last_ttft_ms ? `<span class="hint" title="most recent">· last ${s(p.last_ttft_ms)}</span>` : "";
       return `${p.ttft_ms ? "~" + s(p.ttft_ms) : "—"} ${last}`;
     };
+    // A percentage stat (spec acceptance / cache hit): avg · last call, dashed
+    // when the backend never reported it. `good` picks the pill colour so a low
+    // acceptance or cache-hit reads red at a glance. `n` = samples (for hover).
+    const pctCell = (avg, last, n, good, hint) => {
+      if (avg === null || avg === undefined) return '<span class="hint">—</span>';
+      const cls = good(avg) ? "ok" : "warn";
+      const lastTxt = (last !== null && last !== undefined)
+        ? ` <span class="hint" title="most recent call">· last ${last}%</span>` : "";
+      return `<span class="pill ${cls}" title="${hint} (${n || 0} sample${n === 1 ? "" : "s"})">${avg}%</span>${lastTxt}`;
+    };
+    const ms = v => v >= 1000 ? (v / 1000).toFixed(1) + "s" : Math.round(v) + "ms";
+    // duration cell: avg · last, in ms/s (the "how long" beside the "how fast").
+    const msCell = (avg, last) => {
+      if (!avg && !last) return '<span class="hint">—</span>';
+      const a2 = avg ? "~" + ms(avg) : "—";
+      const l2 = last ? `<span class="hint" title="most recent call">· last ${ms(last)}</span>` : "";
+      return `${a2} ${l2}`;
+    };
+    // single-value rate cell (per-model effective tok/s — no last snapshot).
+    const oneCell = (v, unit) => v ? "~" + v + (unit || "") : '<span class="hint">—</span>';
+    // VRAM + serving context. Ollama reports VRAM bytes (incl. the KV cache for
+    // its loaded context); llama.cpp reports no VRAM over HTTP but does report
+    // n_ctx, so that column shows "—" for VRAM and the context beneath. Context
+    // falls back to the model's trained window when the serving n_ctx is unknown.
+    const kctx = n => n >= 1000 ? Math.round(n / 1000) + "k" : ("" + n);
+    const vramCell = (m, p) => {
+      const v = gb(m.size_vram);
+      const ctx = m.context || p.context_length || 0;
+      const ctxTxt = ctx ? `<div class="hint" title="serving/trained context window">${kctx(ctx)} ctx</div>` : "";
+      return (v || '<span class="hint" title="llama.cpp does not report VRAM over HTTP">—</span>') + ctxTxt;
+    };
     $("#live-loaded").innerHTML = ld.length
-      ? `<table><tr><th>model</th><th>VRAM</th>
-          <th title="Time to first token — wall time from request to first output token, prefill-dominated (avg · last call). High = prefill bottleneck.">TTFT</th>
-          <th title="Decode speed — output tokens/sec (avg · last call)">decode tok/s</th>
+      ? `<table><tr><th>model</th><th title="GPU memory held (Ollama /api/ps). llama.cpp reports context, not VRAM. Second line = serving/trained context window.">VRAM · ctx</th>
+          <th title="Time to first token — wall time from request to first output token, incl. any queue wait (avg · last). High vs prefill time = queuing.">TTFT</th>
+          <th title="Decode speed — output tokens/sec once generating (avg · last call)">decode tok/s</th>
+          <th title="Decode wall time — how long generation took (avg · last call)">decode time</th>
           <th title="Prefill speed — prompt tokens/sec processing the context (avg · last call)">prefill tok/s</th>
+          <th title="Prefill wall time — how long processing the prompt took, ~= TTFT on a warm model (avg · last call)">prefill time</th>
+          <th title="Effective tok/s for this model over the recent window — output tokens ÷ end-to-end wall time (incl. prefill/queue). The rate you actually feel; gap to decode tok/s = overhead.">eff tok/s</th>
+          <th title="Speculative-decoding acceptance — draft tokens the target model kept, ÷ proposed (avg · last call). Low = draft model mismatched or --spec-draft-n-max too deep, so speculation is wasting compute. Blank = no draft model.">spec accept</th>
+          <th title="KV prefix-cache hit rate — prompt tokens served from cache instead of re-prefilled (avg · last call). A falling rate across a session points at a chat-template/cache regression. Blank = backend doesn't report it.">cache hit</th>
           <th title="Typical cold-load time (avg)">load</th>
           <th title="Replies cut off at the max-token cap (finish_reason=length) — each one is a turn the client had to 'continue'">trunc</th>
           <th>backend</th></tr>` +
-        ld.map(m => { const p = m.perf || {}; return `<tr><td>${esc(m.model)}</td>
-          <td class="nw">${gb(m.size_vram) || "—"}</td>
+        ld.map(m => { const p = m.perf || {}; return `<tr><td class="nw" style="max-width:180px;overflow:hidden;text-overflow:ellipsis" title="${esc(m.model)}">${esc(m.model)}</td>
+          <td class="nw">${vramCell(m, p)}</td>
           <td class="nw">${ttftCell(p)}</td>
           <td class="nw">${perfCell(p.decode_tps, p.last_decode_tps, "")}</td>
+          <td class="nw">${msCell(p.decode_ms, p.last_decode_ms)}</td>
           <td class="nw">${perfCell(p.prompt_tps, p.last_prompt_tps, "")}</td>
-          <td class="nw">${p.cold_load_ms ? Math.round(p.cold_load_ms) + " ms" : '<span class="hint">warm</span>'}</td>
+          <td class="nw">${msCell(p.prefill_ms, p.last_prefill_ms)}</td>
+          <td class="nw">${oneCell(p.eff_tps, "")}</td>
+          <td class="nw">${pctCell(p.spec_accept_pct, p.last_spec_accept_pct, p.spec_samples, v => v >= 60, "Draft acceptance — accepted ÷ proposed draft tokens")}</td>
+          <td class="nw">${pctCell(p.cache_hit_pct, p.last_cache_hit_pct, p.cache_samples, v => v >= 50, "KV prefix-cache hit — cached ÷ prompt tokens")}</td>
+          <td class="nw">${p.cold_load_ms ? ms(p.cold_load_ms) : '<span class="hint">warm</span>'}</td>
           <td class="nw">${p.truncations ? `<span class="pill warn" title="${p.truncations} truncated repl${p.truncations === 1 ? "y" : "ies"} — last finish: ${esc(p.last_finish || "")}">${p.truncations}</span>` : '<span class="hint">0</span>'}</td>
           <td class="nw">${esc(m.backend || "")}</td></tr>`; }).join("") + `</table>`
       : (a.loaded || []).length

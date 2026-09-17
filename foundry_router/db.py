@@ -265,6 +265,13 @@ class Database:
             # recent single call (for a live view), avg is the rolling mean.
             ("models", "prompt_tps_avg", "REAL"),
             ("models", "prompt_samples", "INTEGER DEFAULT 0"),
+            # Decode + prefill WALL TIME (ms) alongside the rates — "how fast"
+            # (tok/s) and "how long" (ms) shown as separate live columns. decode_ms
+            # rides eval_samples, prefill_ms rides prompt_samples (measured together).
+            ("models", "decode_ms_avg", "REAL"),
+            ("models", "prefill_ms_avg", "REAL"),
+            ("models", "last_decode_ms", "REAL"),
+            ("models", "last_prefill_ms", "REAL"),
             ("models", "last_eval_tps", "REAL"),
             ("models", "last_prompt_tps", "REAL"),
             ("models", "last_cold_load_ms", "REAL"),
@@ -281,6 +288,18 @@ class Database:
             ("models", "last_ttft_ms", "REAL"),
             ("models", "truncations", "INTEGER DEFAULT 0"),
             ("models", "last_finish_reason", "TEXT"),
+            # Speculative-decoding acceptance (llama.cpp draft model) + KV
+            # prefix-cache reuse. Raw token totals accumulate so the rate is
+            # token-weighted; last_* is the most recent single call. All 0/NULL
+            # for backends that don't report them (Ollama, plain OpenAI, vLLM).
+            ("models", "spec_draft_total", "INTEGER DEFAULT 0"),
+            ("models", "spec_accept_total", "INTEGER DEFAULT 0"),
+            ("models", "spec_samples", "INTEGER DEFAULT 0"),
+            ("models", "last_spec_accept_pct", "REAL"),
+            ("models", "cache_hit_total", "INTEGER DEFAULT 0"),
+            ("models", "cache_prompt_total", "INTEGER DEFAULT 0"),
+            ("models", "cache_samples", "INTEGER DEFAULT 0"),
+            ("models", "last_cache_hit_pct", "REAL"),
             ("models", "adequacy_ok", "INTEGER DEFAULT 0"),
             ("models", "adequacy_failed", "INTEGER DEFAULT 0"),
             ("models", "calls_ok", "INTEGER DEFAULT 0"),

@@ -207,16 +207,23 @@ class InternalPool(BackendPool):
         return loaded
 
     async def loaded_models_detail(self) -> list[dict]:
-        """Per-model VRAM residency across healthy ollama backends (uncached —
-        the Live view wants a fresh number). Each entry carries its backend."""
+        """Per-model residency across healthy backends (uncached — the Live view
+        wants a fresh number). Each entry carries its backend. Ollama reports
+        VRAM bytes via /api/ps; local openai-dialect servers (llama.cpp/unsloth/
+        vLLM) report the served model + context via /props but no VRAM bytes."""
         out: list[dict] = []
         for s in self.backends.values():
-            if s.config.type == "ollama" and s.healthy:
-                try:
-                    for d in await s.protocol.loaded_models_detail():
-                        out.append({**d, "backend": s.config.name})
-                except Exception:
-                    pass          # /api/ps missing/unreachable — just skip it
+            if not s.healthy:
+                continue
+            probe = (s.config.type == "ollama"
+                     or hasattr(s.protocol, "loaded_models_detail"))
+            if not probe:
+                continue
+            try:
+                for d in await s.protocol.loaded_models_detail():
+                    out.append({**d, "backend": s.config.name})
+            except Exception:
+                pass          # /api/ps or /props missing/unreachable — just skip it
         out.sort(key=lambda d: -(d.get("size_vram") or 0))
         return out
 

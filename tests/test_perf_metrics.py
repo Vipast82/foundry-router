@@ -24,7 +24,8 @@ def test_llamacpp_timings_to_ns():
 def test_llamacpp_timings_missing_is_zero():
     tm = _llamacpp_timings(None)
     assert tm == {"prompt_eval_duration_ns": 0, "eval_duration_ns": 0,
-                  "prompt_n": 0, "predicted_n": 0}
+                  "prompt_n": 0, "predicted_n": 0,
+                  "draft_n": 0, "draft_n_accepted": 0}
 
 
 async def test_openai_chat_captures_llamacpp_timings():
@@ -102,3 +103,73 @@ def test_note_inference_warm_call_keeps_prior_cold_load(tmp_path):
                        prompt_eval_duration_ns=250_000_000)
     row = reg.get("m")
     assert round(row["last_cold_load_ms"]) == 6000    # preserved via COALESCE
+
+
+def test_note_inference_records_decode_and_prefill_time(tmp_path):
+    db = Database(tmp_path / "m.sqlite")
+    reg = ModelRegistry(db)
+    reg.note_inference("q", eval_count=200, eval_duration_ns=4_000_000_000,
+                       prompt_count=1000, prompt_eval_duration_ns=500_000_000)
+    row = reg.get("q")
+    assert round(row["decode_ms_avg"]) == 4000        # 4.0s decode wall time
+    assert round(row["prefill_ms_avg"]) == 500        # 0.5s prefill wall time
+    assert round(row["last_decode_ms"]) == 4000
+    assert round(row["last_prefill_ms"]) == 500
+
+
+async def test_openai_loaded_detail_from_llamacpp_props():
+    def handler(request):
+        assert request.url.path == "/props"
+        return httpx.Response(200, json={
+            "model_path": "/cache/Qwen3.8-27B-UD-Q4_K_M-fixed-template.gguf",
+            "default_generation_settings": {"n_ctx": 262144}})
+    proto = OpenAIProtocol("http://x", None,
+                           httpx.AsyncClient(transport=httpx.MockTransport(handler)),
+                           flavor="llamacpp")
+    detail = await proto.loaded_models_detail()
+    assert detail == [{"model": "Qwen3.8-27B-UD-Q4_K_M-fixed-template",
+                       "size_vram": 0, "size": 0, "context": 262144}]
+
+
+async def test_openai_loaded_detail_empty_for_strict_openai():
+    # A non-local flavor has no /props — must not probe, returns nothing.
+    proto = OpenAIProtocol("http://x", None,
+                           httpx.AsyncClient(transport=httpx.MockTransport(
+                               lambda r: httpx.Response(404))),
+                           flavor="openai")
+    assert await proto.loaded_models_detail() == []
+
+
+def test_note_inference_accumulates_spec_and_cache_token_weighted(tmp_path):
+    db = Database(tmp_path / "m.sqlite")
+    reg = ModelRegistry(db)
+    # Two calls with different acceptance/hit — the fleet rate must be TOKEN
+    # weighted (totals), not a mean of the two per-call ratios.
+    reg.note_inference("q", 10, 1_000_000_000, prompt_count=100,
+                       prompt_eval_duration_ns=100_000_000,
+                       draft_n=10, draft_n_accepted=8, cached_tokens=90)   # 80% / 90%
+    reg.note_inference("q", 10, 1_000_000_000, prompt_count=300,
+                       prompt_eval_duration_ns=100_000_000,
+                       draft_n=30, draft_n_accepted=15, cached_tokens=150)  # 50% / 50%
+    row = reg.get("q")
+    # spec: 23 accepted / 40 proposed = 57.5%   (NOT (80+50)/2 = 65)
+    assert row["spec_accept_total"] == 23 and row["spec_draft_total"] == 40
+    assert row["spec_samples"] == 2
+    assert round(row["last_spec_accept_pct"], 1) == 50.0     # most recent call
+    # cache: 240 cached / 400 prompt = 60%      (NOT (90+50)/2 = 70)
+    assert row["cache_hit_total"] == 240 and row["cache_prompt_total"] == 400
+    assert row["cache_samples"] == 2
+
+
+def test_note_inference_no_spec_leaves_stats_null(tmp_path):
+    # An Ollama / plain-OpenAI call (no draft model, no cache telemetry) must not
+    # create a misleading 0% — the aggregates stay untouched.
+    db = Database(tmp_path / "m.sqlite")
+    reg = ModelRegistry(db)
+    reg.note_inference("m", 100, 2_000_000_000, prompt_count=500,
+                       prompt_eval_duration_ns=250_000_000)
+    row = reg.get("m")
+    assert (row["spec_samples"] or 0) == 0
+    assert row["last_spec_accept_pct"] is None
+    assert (row["cache_samples"] or 0) == 0
+    assert row["last_cache_hit_pct"] is None

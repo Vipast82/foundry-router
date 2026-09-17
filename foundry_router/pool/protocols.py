@@ -52,6 +52,20 @@ class ChatResult:
     # then asks to "continue"), "tool_calls", etc. Normalized across backends
     # (Ollama done_reason / OpenAI finish_reason / Anthropic stop_reason).
     finish_reason: str = ""
+    # Speculative-decoding acceptance (llama.cpp with a draft model): draft_n
+    # tokens were proposed by the draft model, draft_n_accepted were verified
+    # and kept by the target. accepted/proposed is the acceptance rate — THE
+    # signal for tuning --spec-draft-n-max (a low rate means the draft depth is
+    # too deep or the draft model mismatched, so speculation is wasting compute).
+    # 0 when speculative decoding is off or the backend can't report it.
+    draft_n: int = 0
+    draft_n_accepted: int = 0
+    # KV prefix-cache reuse: how many of this request's prompt tokens the server
+    # served from cache instead of re-prefilling (OpenAI usage
+    # prompt_tokens_details.cached_tokens; llama.cpp reports it too). cached /
+    # prompt_tokens is the cache-hit rate — a direct read on whether the chat
+    # template is keeping the prefix cache warm across turns. 0 when unavailable.
+    cached_tokens: int = 0
     raw: Any = None
 
 
@@ -108,7 +122,24 @@ def _llamacpp_timings(timings: Any) -> dict:
     return {"prompt_eval_duration_ns": _ms_ns("prompt_ms"),
             "eval_duration_ns": _ms_ns("predicted_ms"),
             "prompt_n": int(t.get("prompt_n") or 0),
-            "predicted_n": int(t.get("predicted_n") or 0)}
+            "predicted_n": int(t.get("predicted_n") or 0),
+            # Speculative-decoding counters — present only when a draft model is
+            # loaded; absent (0) otherwise. draft_n = tokens proposed by the
+            # draft, draft_n_accepted = tokens the target verified and kept.
+            "draft_n": int(t.get("draft_n") or 0),
+            "draft_n_accepted": int(t.get("draft_n_accepted") or 0)}
+
+
+def _cached_tokens(usage: Any) -> int:
+    """Prompt tokens the server served from its KV prefix cache instead of
+    re-prefilling — OpenAI's usage.prompt_tokens_details.cached_tokens, which
+    llama.cpp populates too. 0 when the backend doesn't report it."""
+    u = usage if isinstance(usage, dict) else {}
+    details = u.get("prompt_tokens_details")
+    if isinstance(details, dict) and details.get("cached_tokens") is not None:
+        return int(details.get("cached_tokens") or 0)
+    # Some builds surface it flat rather than nested.
+    return int(u.get("cached_tokens") or 0)
 
 
 class BaseProtocol:
@@ -154,6 +185,9 @@ class BaseProtocol:
                "eval_duration_ns": result.eval_duration_ns,
                "load_duration_ns": result.load_duration_ns,
                "prompt_eval_duration_ns": result.prompt_eval_duration_ns,
+               "draft_n": result.draft_n,
+               "draft_n_accepted": result.draft_n_accepted,
+               "cached_tokens": result.cached_tokens,
                "finish_reason": result.finish_reason}
 
 
@@ -376,6 +410,31 @@ class OpenAIProtocol(BaseProtocol):
         r.raise_for_status()
         return [m["id"] for m in r.json().get("data", [])]
 
+    async def loaded_models_detail(self) -> list[dict]:
+        """What this llama.cpp process is serving, for the Live VRAM table.
+        llama.cpp runs ONE model per process and does NOT report VRAM bytes over
+        HTTP — but /props gives the model and the SERVING context size (n_ctx),
+        which is what actually determines the KV-cache footprint. So we report
+        size_vram=0 (unknown, shown as "—") and carry `context` = n_ctx. Only
+        local flavors expose /props; a strict OpenAI endpoint has no such thing."""
+        if (self.flavor or "openai") not in self._LOCAL_FLAVORS:
+            return []
+        root = self.url[:-3].rstrip("/") if self.url.endswith("/v1") else self.url
+        try:
+            r = await self.client.get(f"{root}/props", headers=self._headers(), timeout=10)
+            r.raise_for_status()
+            data = r.json() or {}
+        except Exception:
+            return []
+        gen = data.get("default_generation_settings") or {}
+        n_ctx = gen.get("n_ctx") or data.get("n_ctx") or 0
+        path = data.get("model_path") or gen.get("model") or data.get("model") or ""
+        name = path.rsplit("/", 1)[-1].rsplit("\\", 1)[-1] or "(loaded model)"
+        if name.endswith(".gguf"):
+            name = name[:-5]
+        return [{"model": name, "size_vram": 0, "size": 0,
+                 "context": int(n_ctx) or 0}]
+
     def _translate_messages(self, messages) -> list[dict]:
         msgs = []
         for m in messages:
@@ -476,6 +535,9 @@ class OpenAIProtocol(BaseProtocol):
             eval_duration_ns=tm["eval_duration_ns"],
             prompt_eval_duration_ns=tm["prompt_eval_duration_ns"],
             finish_reason=choice.get("finish_reason") or "",
+            draft_n=tm["draft_n"],
+            draft_n_accepted=tm["draft_n_accepted"],
+            cached_tokens=_cached_tokens(usage),
             raw=data,
         )
 
@@ -497,9 +559,11 @@ class OpenAIProtocol(BaseProtocol):
                 raise ProtocolError(f"openai-compat {self.url} HTTP {r.status_code}: {body[:300]!r}")
             frags: dict = {}          # tool-call index -> {id,name,arguments(str)}
             pt = ct = 0
+            cached = 0
             finish = ""
             tm = {"eval_duration_ns": 0, "prompt_eval_duration_ns": 0,
-                  "prompt_n": 0, "predicted_n": 0}
+                  "prompt_n": 0, "predicted_n": 0,
+                  "draft_n": 0, "draft_n_accepted": 0}
             async for line in r.aiter_lines():
                 line = line.strip()
                 if not line or not line.startswith("data:"):
@@ -519,6 +583,7 @@ class OpenAIProtocol(BaseProtocol):
                 if usage:
                     pt = usage.get("prompt_tokens") or pt
                     ct = usage.get("completion_tokens") or ct
+                    cached = _cached_tokens(usage) or cached
                 choices = obj.get("choices") or []
                 if not choices:
                     continue
@@ -547,6 +612,9 @@ class OpenAIProtocol(BaseProtocol):
                    "completion_tokens": ct or tm["predicted_n"],
                    "eval_duration_ns": tm["eval_duration_ns"],
                    "prompt_eval_duration_ns": tm["prompt_eval_duration_ns"],
+                   "draft_n": tm["draft_n"],
+                   "draft_n_accepted": tm["draft_n_accepted"],
+                   "cached_tokens": cached,
                    "finish_reason": finish}
 
 
