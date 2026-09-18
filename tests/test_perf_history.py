@@ -60,9 +60,14 @@ def test_query_history_filters_and_summarizes(tmp_path):
 
 
 def test_query_history_window_excludes_old(tmp_path):
+    import datetime as _dt
     db = _db(tmp_path)
     ph.record_sample(db, model="m", prompt_tokens=10, completion_tokens=1, wall_ms=100)
-    # backdate it beyond the window
-    db.execute("UPDATE perf_samples SET ts = datetime('now','-5 days')")
-    assert ph.query_history(db, hours=24)["summary"]["samples"] == 0
-    assert ph.query_history(db, hours=24 * 7)["summary"]["samples"] == 1
+    # Backdate 3h using the REAL stored format (ISO8601 with a 'T' separator, as
+    # utcnow() writes) — NOT SQLite's space-separated datetime(). A naive
+    # `ts >= datetime('now',?)` string compare would wrongly KEEP this row in a
+    # 1h window because 'T' > ' ', so this guards the same-day window boundary.
+    old = (_dt.datetime.now(_dt.timezone.utc) - _dt.timedelta(hours=3)).isoformat()
+    db.execute("UPDATE perf_samples SET ts=?", (old,))
+    assert ph.query_history(db, hours=1)["summary"]["samples"] == 0    # 3h > 1h window
+    assert ph.query_history(db, hours=6)["summary"]["samples"] == 1    # within 6h

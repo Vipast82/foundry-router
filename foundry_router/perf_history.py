@@ -77,8 +77,9 @@ def record_sample(db: Database, *, model: str, backend: str = "", persona: str =
     # DELETE on the hot path of every single request.
     if random.random() < 0.02:
         try:
+            # datetime(ts) for the same format-mismatch reason as query_history.
             db.execute(
-                "DELETE FROM perf_samples WHERE ts < datetime('now', ?)",
+                "DELETE FROM perf_samples WHERE datetime(ts) < datetime('now', ?)",
                 (f"-{RETENTION_DAYS} days",))
         except Exception:
             pass
@@ -97,7 +98,12 @@ def query_history(db: Database, hours: float = 72, model: Optional[str] = None,
     """Raw samples within the window (newest first, capped) plus window-wide
     summary averages, for the Performance tab's charts and headline numbers.
     `model=None` spans the whole fleet; a value narrows to one model."""
-    where = ["ts >= datetime('now', ?)"]
+    # datetime(ts) on BOTH sides: samples are stored as ISO8601 with a 'T'
+    # separator (utcnow()), but datetime('now',...) yields a space-separated
+    # string — a raw `ts >= datetime(...)` string compare is WRONG ('T' > ' ',
+    # so same-day rows always pass and the window silently widens). datetime()
+    # normalizes both to the same UTC form so the comparison is real.
+    where = ["datetime(ts) >= datetime('now', ?)"]
     params: list[Any] = [f"-{hours} hours"]
     if model:
         where.append("model = ?")
