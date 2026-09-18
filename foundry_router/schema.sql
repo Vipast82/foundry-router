@@ -181,6 +181,21 @@ CREATE TABLE IF NOT EXISTS perf_samples (
 CREATE INDEX IF NOT EXISTS idx_perf_samples_ts ON perf_samples(ts);
 CREATE INDEX IF NOT EXISTS idx_perf_samples_model_ts ON perf_samples(model, ts);
 
+-- Paid-service token pricing, for the "what would this run have cost on a paid
+-- API?" calculator. Editable in the UI (seeded with current public rates); the
+-- point is a semi-close local-vs-cloud comparison, not billing-grade accuracy.
+-- Rates are USD per 1,000,000 tokens.
+CREATE TABLE IF NOT EXISTS service_pricing (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  name TEXT UNIQUE,                 -- "Claude Opus 4.8", "GPT-5.6", ...
+  input_per_1m REAL,                -- USD / 1M input (prompt) tokens
+  output_per_1m REAL,               -- USD / 1M output (completion) tokens
+  cached_input_per_1m REAL,         -- USD / 1M cached (prompt-cache hit) input tokens; NULL = no cache discount
+  enabled INTEGER DEFAULT 1,        -- include in the comparison
+  notes TEXT,
+  updated_at TEXT
+);
+
 -- §4.9 Troubleshooting/error log (item 7) ---------------------------------------
 
 CREATE TABLE IF NOT EXISTS event_log (

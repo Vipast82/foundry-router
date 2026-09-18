@@ -400,6 +400,66 @@ async def perf_history_api(request: Request):
     return ph.query_history(svc.db, hours=hours, model=model)
 
 
+@router.get("/admin/api/pricing")
+async def pricing_list(request: Request):
+    """Editable paid-service token rates for the cost calculator."""
+    svc = _svc(request)
+    from .. import pricing
+    return {"services": pricing.list_services(svc.db)}
+
+
+@router.post("/admin/api/pricing")
+async def pricing_upsert(request: Request):
+    """Add or edit one service's rates (USD per 1M tokens)."""
+    svc = _svc(request)
+    from .. import pricing
+    b = await request.json()
+    name = (b.get("name") or "").strip()
+    if not name:
+        return JSONResponse({"error": "name required"}, status_code=400)
+    try:
+        pricing.upsert_service(
+            svc.db, id=b.get("id"), name=name,
+            input_per_1m=float(b.get("input_per_1m") or 0),
+            output_per_1m=float(b.get("output_per_1m") or 0),
+            cached_input_per_1m=(None if b.get("cached_input_per_1m") in (None, "")
+                                 else float(b["cached_input_per_1m"])),
+            enabled=bool(b.get("enabled", True)), notes=b.get("notes") or "")
+    except (TypeError, ValueError):
+        return JSONResponse({"error": "rates must be numbers"}, status_code=400)
+    return {"ok": True}
+
+
+@router.post("/admin/api/pricing/delete")
+async def pricing_delete(request: Request):
+    svc = _svc(request)
+    from .. import pricing
+    b = await request.json()
+    if b.get("id"):
+        pricing.delete_service(svc.db, int(b["id"]))
+    return {"ok": True}
+
+
+@router.get("/admin/api/cost-compare")
+async def cost_compare(request: Request):
+    """Price the selected window's tokens against every enabled service, plus a
+    rough self-hosting electricity estimate, for a local-vs-cloud comparison."""
+    svc = _svc(request)
+    from .. import pricing
+    q = request.query_params
+
+    def _f(key, default):
+        try:
+            return float(q.get(key) or default)
+        except (TypeError, ValueError):
+            return default
+    hours = max(0.5, min(_f("hours", 72), 24 * 30))
+    return pricing.compute_costs(
+        svc.db, hours=hours, model=(q.get("model") or None),
+        watts=max(0.0, _f("watts", pricing.DEFAULT_WATTS)),
+        kwh_rate=max(0.0, _f("kwh", pricing.DEFAULT_KWH_RATE)))
+
+
 @router.post("/admin/api/mcp-aggregator")
 async def set_mcp_aggregator(request: Request):
     svc = _svc(request)

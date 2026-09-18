@@ -219,6 +219,7 @@ function clearLog(kind, label) {
 const TABS = {
   "Live":           tabLive,
   "Performance":    tabPerformance,
+  "Cost":           tabCost,
   "Pool":           tabBackends,
   "Model Registry": tabModels,
   "Host Admin":     tabHostAdmin,
@@ -235,7 +236,7 @@ const TABS = {
 // Primary nav groups -> their leaf tabs (the secondary row). Reorganizes the
 // former flat bar into logical sections without dropping anything.
 const GROUPS = [
-  ["Dashboard",   ["Live", "Performance"]],
+  ["Dashboard",   ["Live", "Performance", "Cost"]],
   ["Backends",    ["Pool", "Model Registry", "Host Admin"]],
   ["Routing",     ["Personas", "Guardrails"]],
   ["Tools & MCP", ["Tools", "MCP Servers"]],
@@ -585,6 +586,161 @@ async function tabPerformance() {
   };
   $("#perf-win").value = _PERF.hours;
   await load();
+}
+
+// =========================================================================
+// Cost tab — what this run's tokens would have cost on paid APIs vs self-host
+// =========================================================================
+const _COST = { hours: 72, model: "", watts: 400, kwh: 0.15 };
+try { Object.assign(_COST, JSON.parse(localStorage.getItem("costCtl") || "{}")); } catch (e) {}
+const _money = v => v == null ? "—"
+  : "$" + (v >= 1000 ? v.toLocaleString(undefined, { maximumFractionDigits: 0 })
+    : v >= 1 ? v.toFixed(2) : v >= 0.01 ? v.toFixed(3) : v.toFixed(4));
+
+async function tabCost() {
+  const winOpts = [[6, "6h"], [24, "24h"], [72, "3d"], [168, "7d"], [336, "14d"]];
+  $("#main").innerHTML = `
+    <h2 style="margin-top:0">Cost calculator <span class="hint" id="cost-ts"></span></h2>
+    <p class="hint">What the tokens in this window would have cost on a paid API vs self-hosting. Token counts are real (measured per call); service rates are editable list prices — a semi-close decision aid, not a bill. Paid-API cost assumes you re-send context each turn (that's how they bill); the “with cache” column applies your measured cache-hit tokens at each vendor's cached-input rate.</p>
+    <div class="card" style="display:flex;gap:16px;align-items:center;flex-wrap:wrap">
+      <label>Window <select id="cost-win">${winOpts.map(([h, l]) => `<option value="${h}"${h === _COST.hours ? " selected" : ""}>${l}</option>`).join("")}</select></label>
+      <label>Model <select id="cost-model"><option value="">all models</option></select></label>
+      <label title="Approx. power draw of your inference box under load">self-host watts <input id="cost-watts" type="number" min="0" style="width:70px" value="${_COST.watts}"></label>
+      <label title="Your electricity price"> $/kWh <input id="cost-kwh" type="number" min="0" step="0.01" style="width:70px" value="${_COST.kwh}"></label>
+      <button class="act" id="cost-refresh">Refresh</button>
+      <span class="hint" id="cost-count"></span>
+    </div>
+    <div id="cost-summary"></div>
+    <div id="cost-verdict"></div>
+    <div class="card"><div style="font-weight:600;margin-bottom:6px">Cost for this window <span class="hint" style="font-weight:normal">— cheapest first; self-host = electricity estimate</span></div><div id="cost-table"></div></div>
+    <div class="card"><div style="font-weight:600;margin-bottom:6px">Visual comparison</div><div id="cost-bars"></div></div>
+    <div class="card"><div style="font-weight:600;margin-bottom:6px">Service rates <span class="hint" style="font-weight:normal">— USD per 1M tokens · editable</span></div>
+      <div id="cost-rates"></div></div>`;
+
+  const loadRates = async () => {
+    let d; try { d = await api("pricing"); } catch (e) { return; }
+    const rows = d.services || [];
+    const cell = (id, val, w) => `<input data-k="${id}" type="${id === "name" || id === "notes" ? "text" : "number"}" step="0.01" style="width:${w}" value="${val == null ? "" : esc("" + val)}">`;
+    $("#cost-rates").innerHTML =
+      `<table><tr><th>on</th><th>service</th><th>in $/1M</th><th>out $/1M</th><th title="cached-input rate (prompt-cache hit)">cached $/1M</th><th>notes</th><th></th></tr>`
+      + rows.map(s => `<tr data-id="${s.id}">
+          <td class="nw"><input data-k="enabled" type="checkbox" ${s.enabled ? "checked" : ""}></td>
+          <td>${cell("name", s.name, "150px")}</td>
+          <td class="nw">${cell("input_per_1m", s.input_per_1m, "70px")}</td>
+          <td class="nw">${cell("output_per_1m", s.output_per_1m, "70px")}</td>
+          <td class="nw">${cell("cached_input_per_1m", s.cached_input_per_1m, "70px")}</td>
+          <td>${cell("notes", s.notes || "", "160px")}</td>
+          <td class="nw"><button class="act" data-act="save">Save</button> <button class="act" data-act="del" title="delete">✕</button></td>
+        </tr>`).join("")
+      + `<tr data-id="">
+          <td class="nw"><input data-k="enabled" type="checkbox" checked></td>
+          <td>${cell("name", "", "150px")}</td>
+          <td class="nw">${cell("input_per_1m", "", "70px")}</td>
+          <td class="nw">${cell("output_per_1m", "", "70px")}</td>
+          <td class="nw">${cell("cached_input_per_1m", "", "70px")}</td>
+          <td>${cell("notes", "", "160px")}</td>
+          <td class="nw"><button class="act" data-act="save">Add</button></td>
+        </tr></table>`;
+    $("#cost-rates").querySelectorAll("button[data-act]").forEach(btn => {
+      btn.onclick = async () => {
+        const tr = btn.closest("tr"), id = tr.getAttribute("data-id");
+        if (btn.getAttribute("data-act") === "del") {
+          if (!confirm("Delete this service?")) return;
+          await api("pricing/delete", { method: "POST", body: { id: +id } });
+        } else {
+          const g = k => tr.querySelector(`[data-k="${k}"]`);
+          const body = {
+            id: id ? +id : null, name: g("name").value.trim(),
+            input_per_1m: g("input_per_1m").value, output_per_1m: g("output_per_1m").value,
+            cached_input_per_1m: g("cached_input_per_1m").value,
+            enabled: g("enabled").checked, notes: g("notes").value,
+          };
+          if (!body.name) return toast("Name required");
+          try { await api("pricing", { method: "POST", body }); }
+          catch (e) { return toast(e.message || "Save failed", true); }
+        }
+        toast("Saved"); await loadRates(); await loadCosts();
+      };
+    });
+    wrapTables();
+  };
+
+  const loadCosts = async () => {
+    _COST.hours = +$("#cost-win").value; _COST.model = $("#cost-model").value;
+    _COST.watts = +$("#cost-watts").value || 0; _COST.kwh = +$("#cost-kwh").value || 0;
+    try { localStorage.setItem("costCtl", JSON.stringify(_COST)); } catch (e) {}
+    let d;
+    try { d = await api(`cost-compare?hours=${_COST.hours}&model=${encodeURIComponent(_COST.model)}&watts=${_COST.watts}&kwh=${_COST.kwh}`); }
+    catch (e) { $("#cost-summary").innerHTML = '<div class="card hint">Could not load.</div>'; return; }
+    $("#cost-ts").textContent = "· " + new Date().toLocaleTimeString();
+    // model filter options (from perf history)
+    let hist; try { hist = await api(`perf-history?hours=${_COST.hours}`); } catch (e) { hist = { models: [] }; }
+    const sel = $("#cost-model"), cur = sel.value;
+    sel.innerHTML = '<option value="">all models</option>' +
+      (hist.models || []).map(m => `<option value="${esc(m.model)}">${esc(m.model)} (${m.n})</option>`).join("");
+    sel.value = cur;
+    const t = d.tokens, L = d.local;
+    $("#cost-count").textContent = `${t.calls} calls · span ${d.span_hours}h`;
+    const tile = (label, v, hint) => `<div style="min-width:110px" title="${hint || ""}"><div class="hint" style="margin:0">${label}</div><div style="font-size:18px;font-weight:600">${v}</div></div>`;
+    const K = n => n >= 1e6 ? (n / 1e6).toFixed(2) + "M" : n >= 1e3 ? (n / 1e3).toFixed(0) + "k" : "" + n;
+    $("#cost-summary").innerHTML = `<div class="card" style="display:flex;gap:22px;flex-wrap:wrap">`
+      + tile("input tokens", K(t.input), "prompt tokens sent (context re-sent each turn)")
+      + tile("output tokens", K(t.output), "generated tokens")
+      + tile("cached (KV hit)", K(t.cached), "prompt tokens served from cache locally")
+      + tile("calls", t.calls, "model calls in window")
+      + tile("self-host est.", _money(L.cost), `${L.watts}W × ${L.active_hours}h active × $${L.kwh}/kWh`)
+      + `</div>`;
+    // verdict
+    const svcs = d.services || [];
+    if (svcs.length) {
+      const cheapest = svcs[0], dearest = svcs[svcs.length - 1];
+      const save = cheapest.cost - L.cost;
+      const banner = save > 0
+        ? `<span class="pill ok">self-hosting saved ~${_money(save)}</span> vs the cheapest cloud option (${esc(cheapest.name)} ${_money(cheapest.cost)}) over this window.`
+        : `<span class="pill warn">cloud would have been ~${_money(-save)} cheaper</span> — ${esc(cheapest.name)} at ${_money(cheapest.cost)} vs your ${_money(L.cost)} self-host estimate.`;
+      $("#cost-verdict").innerHTML = `<div class="card">${banner}
+        <div class="hint" style="margin-top:4px">Most expensive: ${esc(dearest.name)} at ${_money(dearest.cost)}${dearest.per_month != null ? ` (~${_money(dearest.per_month)}/mo at this rate)` : ""}. Self-host ≈ ${_money(L.per_month)}/mo.</div></div>`;
+    } else { $("#cost-verdict").innerHTML = ""; }
+    // table
+    const localRow = `<tr style="font-weight:600">
+        <td>🖥️ Self-hosted (electricity)</td><td class="nw">—</td><td class="nw">—</td><td class="nw">—</td>
+        <td class="nw">${_money(L.cost)}</td><td class="nw">${_money(L.cost)}</td>
+        <td class="nw">${_money(L.per_day)}</td><td class="nw">${_money(L.per_month)}</td></tr>`;
+    $("#cost-table").innerHTML = svcs.length
+      ? `<table><tr><th>service</th><th>in $/1M</th><th>out $/1M</th><th>cached $/1M</th>
+          <th>est. cost</th><th title="applying your measured cache-hit tokens at the vendor's cached rate">with cache</th>
+          <th>/day</th><th>/month</th></tr>`
+        + localRow
+        + svcs.map(s => `<tr>
+            <td class="nw">${esc(s.name)}</td>
+            <td class="nw">${_money(s.input_per_1m)}</td><td class="nw">${_money(s.output_per_1m)}</td>
+            <td class="nw">${s.cached_input_per_1m == null ? '<span class="hint">—</span>' : _money(s.cached_input_per_1m)}</td>
+            <td class="nw">${_money(s.cost)}</td>
+            <td class="nw">${_money(s.cost_cached)}</td>
+            <td class="nw">${_money(s.per_day)}</td><td class="nw">${_money(s.per_month)}</td></tr>`).join("")
+        + `</table>`
+      : '<span class="hint">No token usage recorded in this window yet.</span>';
+    // bars (naive cost per service + local), scaled to the max
+    const items = [{ name: "🖥️ Self-hosted", cost: L.cost, me: true }]
+      .concat(svcs.map(s => ({ name: s.name, cost: s.cost })));
+    const max = Math.max(...items.map(i => i.cost), 0.0001);
+    const cAcc = _css("--accent", "#e8833a"), cOk = _css("--ok", "#3fb950");
+    $("#cost-bars").innerHTML = items.map(i =>
+      `<div style="display:flex;align-items:center;gap:8px;margin:3px 0">
+        <div style="width:190px;flex:none;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${esc(i.name)}">${esc(i.name)}</div>
+        <div style="flex:1;background:var(--line);border-radius:3px;height:16px">
+          <div style="width:${Math.max(1, i.cost / max * 100).toFixed(1)}%;height:100%;background:${i.me ? cOk : cAcc};border-radius:3px"></div></div>
+        <div style="width:90px;flex:none;text-align:right">${_money(i.cost)}</div>
+      </div>`).join("");
+    wrapTables();
+  };
+
+  ["cost-win", "cost-model", "cost-watts", "cost-kwh"].forEach(id => {
+    const el = $("#" + id); el.onchange = loadCosts;
+  });
+  $("#cost-refresh").onclick = loadCosts;
+  await loadRates();
+  await loadCosts();
 }
 
 async function tabLive() {
