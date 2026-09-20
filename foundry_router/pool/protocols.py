@@ -761,12 +761,21 @@ class AnthropicProtocol(BaseProtocol):
                                    "name": block.get("name"),
                                    "arguments": block.get("input") or {}})
         usage = data.get("usage") or {}
+        # Anthropic splits prompt tokens three ways and `input_tokens` is ONLY the
+        # fresh, uncached portion — with prompt caching on (as Meridian uses), that
+        # can be a couple of tokens while the real context sits in cache_read. Sum
+        # all three for the true context size, and surface cache_read as the KV
+        # cache hit so the cache-hit % lights up for Claude the same as for local.
+        cache_read = usage.get("cache_read_input_tokens") or 0
+        cache_create = usage.get("cache_creation_input_tokens") or 0
+        prompt_tokens = (usage.get("input_tokens") or 0) + cache_read + cache_create
         return ChatResult(
             content=content_text,
             thinking=thinking_text,
             tool_calls=tool_calls,
-            prompt_tokens=usage.get("input_tokens") or 0,
+            prompt_tokens=prompt_tokens,
             completion_tokens=usage.get("output_tokens") or 0,
+            cached_tokens=cache_read,
             # Normalize Anthropic's "max_tokens" onto "length" so a truncated
             # reply reads the same across every backend.
             finish_reason=("length" if data.get("stop_reason") == "max_tokens"
@@ -785,7 +794,7 @@ class AnthropicProtocol(BaseProtocol):
                                 max_tokens or 4096, think, fmt)
         payload["stream"] = True
         blocks: dict = {}         # content-block index -> {type,name,id,json(str)}
-        pt = ct = 0
+        pt = ct = cached = 0
         finish = ""
         async with self.client.stream("POST", f"{self.url}/v1/messages",
                                       json=payload, headers=self._headers()) as r:
@@ -802,7 +811,11 @@ class AnthropicProtocol(BaseProtocol):
                     continue
                 etype = ev.get("type")
                 if etype == "message_start":
-                    pt = ((ev.get("message") or {}).get("usage") or {}).get("input_tokens") or pt
+                    u = ((ev.get("message") or {}).get("usage") or {})
+                    cr = u.get("cache_read_input_tokens") or 0
+                    cc = u.get("cache_creation_input_tokens") or 0
+                    pt = (u.get("input_tokens") or 0) + cr + cc or pt
+                    cached = cr or cached
                 elif etype == "content_block_start":
                     cb = ev.get("content_block") or {}
                     blocks[ev.get("index")] = {"type": cb.get("type"),
@@ -832,7 +845,8 @@ class AnthropicProtocol(BaseProtocol):
                        "arguments": _parse_arguments(b.get("json") or "{}")}
                       for b in blocks.values() if b.get("type") == "tool_use"] or None
         yield {"content": "", "done": True, "tool_calls": tool_calls,
-               "prompt_tokens": pt, "completion_tokens": ct, "finish_reason": finish}
+               "prompt_tokens": pt, "completion_tokens": ct,
+               "cached_tokens": cached, "finish_reason": finish}
 
 
 PROTOCOLS = {

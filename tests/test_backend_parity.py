@@ -252,6 +252,39 @@ def _anthropic_json(request):
         "usage": {"input_tokens": 3, "output_tokens": 2}})
 
 
+async def test_anthropic_counts_cache_tokens_as_context_and_hit():
+    # Anthropic's input_tokens is ONLY the uncached delta; the real context lives
+    # in cache_read/creation. prompt_tokens must sum all three (so context isn't
+    # reported as ~2), and cache_read must surface as cached_tokens (cache hit %).
+    def handler(request):
+        return httpx.Response(200, json={
+            "content": [{"type": "text", "text": "ok"}],
+            "stop_reason": "end_turn",
+            "usage": {"input_tokens": 2, "output_tokens": 40,
+                      "cache_read_input_tokens": 90000,
+                      "cache_creation_input_tokens": 8000}})
+    proto = AnthropicProtocol("http://m", "k", _collect(handler))
+    res = await proto.chat("claude-sonnet-5", [{"role": "user", "content": "hi"}])
+    assert res.prompt_tokens == 98002          # 2 + 90000 + 8000, the true context
+    assert res.cached_tokens == 90000          # cache_read → KV cache hit
+    assert res.completion_tokens == 40
+
+
+async def test_anthropic_stream_counts_cache_tokens():
+    stream = (
+        'data: {"type":"message_start","message":{"usage":{"input_tokens":2,'
+        '"cache_read_input_tokens":90000,"cache_creation_input_tokens":8000}}}\n'
+        'data: {"type":"content_block_start","index":0,"content_block":{"type":"text"}}\n'
+        'data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"ok"}}\n'
+        'data: {"type":"message_delta","usage":{"output_tokens":40}}\n'
+        'data: {"type":"message_stop"}\n')
+    proto = AnthropicProtocol("http://m", "k",
+                              _collect(lambda req: httpx.Response(200, text=stream)))
+    done = (await _drain(proto.chat_stream("claude-sonnet-5",
+                                           [{"role": "user", "content": "hi"}])))[-1]
+    assert done["prompt_tokens"] == 98002 and done["cached_tokens"] == 90000
+
+
 async def test_anthropic_fmt_json_adds_system_nudge():
     _SEEN.clear()
     proto = AnthropicProtocol("http://m", "k", _collect(_anthropic_json))
