@@ -147,7 +147,7 @@ class BaseProtocol:
     httpx client passed in (connection pooling lives there)."""
 
     def __init__(self, url: str, api_key: Optional[str], client: httpx.AsyncClient,
-                 flavor: Optional[str] = None):
+                 flavor: Optional[str] = None, meridian_profile: Optional[str] = None):
         self.url = url.rstrip("/")
         self.api_key = api_key or None
         self.client = client
@@ -156,6 +156,9 @@ class BaseProtocol:
         # actual server — e.g. only send non-standard sampling controls to the
         # local runners that understand them, not to a strict OpenAI endpoint.
         self.flavor = flavor or None
+        # Meridian routing profile — sent as x-meridian-profile so a backend can
+        # pin its calls to a specific Claude account (anthropic path only).
+        self.meridian_profile = meridian_profile or None
 
     async def list_models(self) -> list[str]:
         raise NotImplementedError
@@ -645,6 +648,9 @@ class AnthropicProtocol(BaseProtocol):
             # Some Meridian builds expect a bearer token instead; sending both
             # is harmless and saves a config knob.
             h["Authorization"] = f"Bearer {self.api_key}"
+        # Pin this backend's calls to a named Meridian profile/account when set.
+        if self.meridian_profile:
+            h["x-meridian-profile"] = self.meridian_profile
         return h
 
     async def list_models(self) -> list[str]:
@@ -858,9 +864,10 @@ PROTOCOLS = {
 
 def make_protocol(backend_type: str, url: str, api_key: Optional[str],
                   client: httpx.AsyncClient,
-                  flavor: Optional[str] = None) -> BaseProtocol:
+                  flavor: Optional[str] = None,
+                  meridian_profile: Optional[str] = None) -> BaseProtocol:
     try:
         cls = PROTOCOLS[backend_type]
     except KeyError:
         raise ValueError(f"unknown backend type {backend_type!r}") from None
-    return cls(url, api_key, client, flavor=flavor)
+    return cls(url, api_key, client, flavor=flavor, meridian_profile=meridian_profile)

@@ -49,7 +49,8 @@ class InternalPool(BackendPool):
         for b in backends:
             self.backends[b.name] = BackendState(
                 config=b, protocol=make_protocol(b.type, b.url, b.api_key, client,
-                                                 flavor=getattr(b, "effective_flavor", None)))
+                                                 flavor=getattr(b, "effective_flavor", None),
+                                                 meridian_profile=getattr(b, "meridian_profile", None)))
         self._listeners: list[Callable[[], None]] = []
         self._health_task: Optional[asyncio.Task] = None
         self._loaded: set[str] = set()   # VRAM-resident models, cached (see loaded_models)

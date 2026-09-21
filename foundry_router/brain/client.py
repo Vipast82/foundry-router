@@ -55,7 +55,8 @@ class BrainClient:
         self.cfg = cfg
         self.db = db  # optional — retry events land in the troubleshooting log
         self.protocol = make_protocol(
-            _PROVIDER_TO_PROTOCOL[cfg.provider], cfg.endpoint, cfg.api_key, client)
+            _PROVIDER_TO_PROTOCOL[cfg.provider], cfg.endpoint, cfg.api_key, client,
+            meridian_profile=getattr(cfg, "meridian_profile", None))
 
     @property
     def model(self) -> str:

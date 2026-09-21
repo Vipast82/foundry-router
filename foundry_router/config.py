@@ -59,6 +59,9 @@ class AgentBrainConfig(BaseModel):
     endpoint: str = "http://localhost:11434"
     model: str = ""
     api_key: Optional[str] = None
+    # Meridian routing profile for the brain when provider=meridian (sent as
+    # x-meridian-profile). None = Meridian's own active/sticky routing.
+    meridian_profile: Optional[str] = None
     keep_alive: int | str = -1
     max_tokens: int = 4096
     options: dict = Field(default_factory=dict)
@@ -158,6 +161,12 @@ class BackendConfig(BaseModel):
     # model-list endpoint (§4.3: "do not hardcode model lists for backends
     # that can be discovered").
     models: list[str] = Field(default_factory=list)
+    # Meridian routing profile (anthropic-compatible backends only). Meridian
+    # picks the Claude account/profile per request from the `x-meridian-profile`
+    # header; set this to pin every call from THIS backend to a named profile
+    # (e.g. run two Foundry backends, one per Claude account). None = let
+    # Meridian use its active/sticky routing.
+    meridian_profile: Optional[str] = None
 
     @property
     def effective_flavor(self) -> str:

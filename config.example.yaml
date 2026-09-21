@@ -97,6 +97,12 @@ backend_pool:
         url: http://192.168.1.40:3456       # EDIT: Meridian bridge
         api_key: "${MERIDIAN_API_KEY}"
         priority: 100
+        # meridian_profile: victor          # optional: pin this backend to a
+        #                                   # Meridian profile/account (sent as
+        #                                   # x-meridian-profile). Omit to let
+        #                                   # Meridian use its active/sticky
+        #                                   # routing. Add a 2nd backend with a
+        #                                   # different profile to run 2 accounts.
         # Discovery is attempted first for EVERY backend (§4.3). Only if
         # Meridian exposes no model-list endpoint does this fallback list get
         # used. Do not add it unless discovery genuinely returns nothing.

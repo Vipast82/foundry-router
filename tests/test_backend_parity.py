@@ -285,6 +285,32 @@ async def test_anthropic_stream_counts_cache_tokens():
     assert done["prompt_tokens"] == 98002 and done["cached_tokens"] == 90000
 
 
+async def test_anthropic_sends_meridian_profile_header():
+    # A backend pinned to a Meridian profile must send x-meridian-profile so
+    # Meridian routes the call to that Claude account; unset = no header.
+    seen = {}
+
+    def _cap(request):
+        seen["h"] = dict(request.headers)
+        return httpx.Response(200, json={"content": [{"type": "text", "text": "ok"}],
+                                         "usage": {"input_tokens": 1, "output_tokens": 1}})
+    client = httpx.AsyncClient(transport=httpx.MockTransport(_cap))
+    proto = AnthropicProtocol("http://m", "k", client, meridian_profile="victor")
+    await proto.chat("claude-sonnet-5", [{"role": "user", "content": "hi"}])
+    assert seen["h"].get("x-meridian-profile") == "victor"
+
+    proto2 = AnthropicProtocol("http://m", "k", client)   # no profile
+    await proto2.chat("claude-sonnet-5", [{"role": "user", "content": "hi"}])
+    assert "x-meridian-profile" not in seen["h"]
+
+
+def test_make_protocol_threads_meridian_profile():
+    client = httpx.AsyncClient(transport=httpx.MockTransport(lambda r: httpx.Response(200)))
+    p = make_protocol("anthropic-compatible", "http://m", "k", client,
+                      meridian_profile="acct2")
+    assert p.meridian_profile == "acct2"
+
+
 async def test_anthropic_fmt_json_adds_system_nudge():
     _SEEN.clear()
     proto = AnthropicProtocol("http://m", "k", _collect(_anthropic_json))
