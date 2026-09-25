@@ -2041,6 +2041,8 @@ async function tabBackends() {
         <input id="brain-dshb" type="number" min="0" step="5" value="0" style="width:70px">
         <label title="Stall watchdog (direct_stream): if a model sends NO output — no token, thinking or tool call — for this many seconds, Foundry abandons the call (closing the upstream request so it stops using the GPU / Claude session) and, if nothing reached the client yet, hands the turn to the next model the persona allows. Heartbeats and backend keep-alive pings don't count as output. Set it above your slowest real prefill (a 27B model reading a 150k-token Cline context can take minutes). 0 = off.">stall timeout s</label>
         <input id="brain-dstall" type="number" min="0" step="30" value="600" style="width:70px">
+        <label title="How often a VISIBLE '⏳ … still working · 2m 05s' line appears while a model is busy. Every heartbeat still sends invisible keep-alive bytes (so proxies and clients never time out), but each visible line is a new line in the client's thinking panel — so they're shown only at ~30s, ~60s, then every N seconds. 0 = never show, keep-alive bytes only.">status line every s</label>
+        <input id="brain-hbvis" type="number" min="0" step="15" value="60" style="width:70px">
         <label title="AGENT mode (Foundry-Chat etc.): stream the worker's REASONING (its thinking tokens) live as narration while it generates, but BUFFER the answer so the brain still reviews it (refusal/permissive fallback, outcome-judge) before showing it. Watch the model reason in real time; the final answer stays gated. Ollama workers only. (AGENT path.)">stream_worker_reasoning</label>
         <input type="checkbox" id="brain-swr"></div>
       <div class="row tight">
@@ -2113,6 +2115,7 @@ async function tabBackends() {
   $("#brain-ds").checked = !!cfg.agent_brain.direct_stream;
   $("#brain-dshb").value = cfg.agent_brain.direct_stream_heartbeat_seconds || 0;
   $("#brain-dstall").value = cfg.agent_brain.direct_stream_stall_seconds ?? 600;
+  $("#brain-hbvis").value = cfg.agent_brain.heartbeat_visible_seconds ?? 60;
   $("#brain-swr").checked = !!cfg.agent_brain.stream_worker_reasoning;
   $("#brain-re").value = (cfg.agent_brain.reasoning_effort === "xhigh" ? "max"
     : cfg.agent_brain.reasoning_effort) || "";
@@ -2341,6 +2344,7 @@ async function tabBackends() {
       direct_stream: $("#brain-ds").checked,
       direct_stream_heartbeat_seconds: parseInt($("#brain-dshb").value, 10) || 0,
       direct_stream_stall_seconds: parseInt($("#brain-dstall").value, 10) || 0,
+      heartbeat_visible_seconds: parseInt($("#brain-hbvis").value, 10) || 0,
       stream_worker_reasoning: $("#brain-swr").checked,
       reasoning_effort: $("#brain-re").value.trim() || null,
       sampling_defaults: JSON.parse($("#brain-samp").value || "{}")}}));

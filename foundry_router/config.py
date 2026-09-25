@@ -116,6 +116,11 @@ class AgentBrainConfig(BaseModel):
     # timeout, proxy) so long generations don't get killed. 0 = off. direct_stream
     # only.
     direct_stream_heartbeat_seconds: int = 0
+    # Visible status cadence for ALL keep-alives: every heartbeat sends
+    # invisible keep-alive bytes, but a "⏳ … still working · 2m 05s" line is
+    # shown only at ~30s, ~60s, then every N seconds (each visible line is a new
+    # line in the client's thinking panel). 0 = never show, bytes only.
+    heartbeat_visible_seconds: int = 60
     # Stall watchdog (direct_stream): if a backend sends NO output (no token,
     # thinking or tool call) for this long, the call is abandoned (the upstream
     # request is closed so it stops using the GPU / Claude session) and — if

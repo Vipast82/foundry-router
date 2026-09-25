@@ -506,6 +506,8 @@ def create_app(config_path: Optional[Path] = None,
         app.add_middleware(
             CORSMiddleware, allow_origins=origins, allow_credentials=False,
             allow_methods=["*"], allow_headers=["*"])
+    from .request_context import RequestIdMiddleware
+    app.add_middleware(RequestIdMiddleware)
     app.include_router(facade_router)
     app.include_router(openai_router)
     app.include_router(ui_router)

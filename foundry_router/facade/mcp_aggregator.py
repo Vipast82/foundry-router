@@ -243,6 +243,12 @@ class MCPAggregator:
                 # server): agent tools are hidden from / refused for them.
                 request_context.set_agent_caller(
                     request_context.agent_caller_from(req.headers) or "")
+                # correlate mcp_call_log rows with the client's request id
+                try:
+                    request_context._request_id.set(
+                        (req.headers.get("x-request-id") or "")[:100])
+                except Exception:
+                    pass
             if not persona_mode:
                 return scope_name, None, client
             name = ""
@@ -299,6 +305,7 @@ class MCPAggregator:
             progress_callback=relay if token is not None else None))
         if hb <= 0:
             return await task
+        from ..keepalive import fmt_elapsed
         start = time.monotonic()
         ticks = 0
         try:
@@ -312,7 +319,7 @@ class MCPAggregator:
                     try:
                         await ctx.session.send_progress_notification(
                             token, float(ticks + relayed["n"]), None,
-                            message=f"{name}: still working… {elapsed}s")
+                            message=f"{name}: still working · {fmt_elapsed(elapsed)}")
                     except Exception:      # notification path is best-effort
                         pass
         except asyncio.CancelledError:

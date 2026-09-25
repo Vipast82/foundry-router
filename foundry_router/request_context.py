@@ -120,3 +120,36 @@ async def mcp_attributed(coro, source: str, caller: str = "", client: str = ""):
         return await coro
     finally:
         reset_mcp_attribution(tok)
+
+
+class RequestIdMiddleware:
+    """One id per request, end to end: the client's X-Request-Id when it sends
+    one, else a fresh one. It's put on the request (so capture() / the logs
+    use it), forwarded to Meridian and vLLM, written to request_log and
+    mcp_call_log, and returned to the client as the X-Request-Id response
+    header — so a client-side report can be matched to Foundry's logs and the
+    backend's."""
+
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if scope.get("type") != "http":
+            return await self.app(scope, receive, send)
+        import uuid
+        headers = list(scope.get("headers") or [])
+        rid = next((v.decode("latin-1") for k, v in headers if k == b"x-request-id"), "")
+        rid = rid.strip()[:100]
+        if not rid:
+            rid = uuid.uuid4().hex
+            headers.append((b"x-request-id", rid.encode("latin-1")))
+            scope = dict(scope, headers=headers)
+        rid_b = rid.encode("latin-1", "replace")
+
+        async def send_with_id(message):
+            if message.get("type") == "http.response.start":
+                h = [(k, v) for k, v in (message.get("headers") or []) if k != b"x-request-id"]
+                h.append((b"x-request-id", rid_b))
+                message = dict(message, headers=h)
+            await send(message)
+        await self.app(scope, receive, send_with_id)

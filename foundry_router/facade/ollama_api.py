@@ -31,7 +31,7 @@ from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse, PlainTextResponse, StreamingResponse
 
 from .. import __version__
-from .. import request_context, telemetry
+from .. import keepalive, request_context, telemetry
 from ..brain import prompts
 from ..brain.agent import RequestContext
 from ..brain.fallback import guess_category, pick_fallback_model
@@ -407,13 +407,15 @@ async def _chat_dispatch(svc, body: dict):
                                            client_tools, options, stream, user_text,
                                            client_think=client_think,
                                            client_format=client_format,
-                                           log_mode="passthrough", note=brain_skip)
+                                           log_mode="passthrough", note=brain_skip,
+                                           client_keep_alive=body.get("keep_alive"))
 
     if client_tools or exec_mode == "direct":
         return await _direct_dispatch_chat(svc, persona, model_name, messages,
                                            client_tools, options, stream, user_text,
                                            client_think=client_think,
-                                           client_format=client_format)
+                                           client_format=client_format,
+                                           client_keep_alive=body.get("keep_alive"))
 
     # Pipeline personas (Foundry-Coding) run the Prepare->Execute->Check
     # mode instead of the generic brain loop — a distinct execution mode,
@@ -508,11 +510,13 @@ async def _agent_backend_chat(svc, persona, agent_name, model_name, messages, st
         done: dict = {}
         status, error = "ok", ""
         start = time.monotonic()
+        pacer = keepalive.Pacer(keepalive.visible_every(svc.config_store.config.agent_brain))
         try:
             async for kind, ev in _stream_with_heartbeat(stream_iter, hb, start):
                 if kind == "beat":
+                    # invisible keep-alive, with a visible status only at milestones
                     yield tr.chat_chunk(model_name, "",
-                                        thinking=f"⏳ {agent_name} still working… {ev}s\n")
+                                        thinking=pacer.line(f"agent {agent_name}", ev))
                     continue
                 if ev.get("done"):
                     done = ev
@@ -682,7 +686,13 @@ async def _agent_events_to_chat_chunks(svc, ctx: RequestContext, model_name: str
     answers: list[str] = []
     try:
         async for ev in _run_events(svc, ctx):
-            if ev.kind == "think":
+            if ev.kind == "keepalive":
+                yield tr.chat_chunk(model_name, "")      # bytes only, nothing rendered
+            elif ev.kind == "think_raw":
+                # A model's own reasoning streamed token by token — verbatim.
+                # (Appending "\n" per event put one token per line.)
+                yield tr.chat_chunk(model_name, "", thinking=ev.text)
+            elif ev.kind == "think":
                 yield tr.chat_chunk(model_name, "", thinking=ev.text + "\n")
             elif ev.kind == "answer":
                 # Safety net for literal <think> tags in answer text: worker
@@ -775,10 +785,17 @@ async def _fallback_chunks(svc, ctx: RequestContext, model_name: str):
         ttft_ms = None
         produced = False
         try:
-            async for chunk in svc.pool.chat_stream(
-                    fb_model, ctx.messages, options=options,
-                    think=_think_for(svc, fb_model, ctx.persona),
-                    max_tokens=brain_cfg.worker_max_tokens):
+            hb = float(brain_cfg.heartbeat_seconds or 0)
+            pacer = keepalive.Pacer(keepalive.visible_every(brain_cfg))
+            src = svc.pool.chat_stream(
+                fb_model, ctx.messages, options=options,
+                think=_think_for(svc, fb_model, ctx.persona),
+                max_tokens=brain_cfg.worker_max_tokens)
+            async for kind, chunk in _stream_with_heartbeat(src, hb, t_fb):
+                if kind == "beat":
+                    yield tr.chat_chunk(model_name, "",
+                                        thinking=pacer.line(fb_model, chunk))
+                    continue
                 if chunk.get("done"):
                     res = ChatResult.from_done_frame(chunk)
                     ctx.logger.record_model_call(fb_model, backend, res.prompt_tokens,
@@ -909,78 +926,9 @@ def _escalate_if_local_busy(svc, persona, model_id, user_text):
     return paid_id
 
 
-class StreamStalled(Exception):
-    """A backend produced no output for the stall window."""
-    def __init__(self, seconds: int):
-        super().__init__(f"no output for {seconds}s")
-        self.seconds = seconds
-
-
-def _is_output(chunk) -> bool:
-    return isinstance(chunk, dict) and bool(
-        chunk.get("content") or chunk.get("thinking") or chunk.get("tool_calls")
-        or chunk.get("done"))
-
-
-async def _stream_with_heartbeat(agen, hb: float, start: float, stall: float = 0):
-    """Wrap an async chunk stream: yield ("chunk", c) for each real upstream
-    chunk, and ("beat", elapsed_s) whenever none arrives within `hb` seconds —
-    so the caller can emit a keep-alive during a silent prompt-eval / buffered-
-    reasoning gap. hb <= 0 disables the beats (pure passthrough). The pending
-    read is shielded, so a beat doesn't drop the chunk that's still coming.
-
-    stall > 0: raise StreamStalled once no OUTPUT chunk (content / thinking /
-    tool call / done) has arrived for that many seconds.
-
-    Always closes the upstream on exit — client disconnect, stall, or error —
-    by cancelling the pending read and aclose()-ing the source, so an abandoned
-    request stops occupying the llama.cpp slot / Claude session instead of
-    running on unseen (and making the backend look busy or dead)."""
-    it = agen.__aiter__()
-    fut = None
-    last_out = time.monotonic()
-    try:
-        while True:
-            fut = asyncio.ensure_future(it.__anext__())
-            while True:
-                wait = hb if hb and hb > 0 else None
-                if stall and stall > 0:
-                    remaining = stall - (time.monotonic() - last_out)
-                    if remaining <= 0:
-                        raise StreamStalled(int(time.monotonic() - last_out))
-                    wait = min(wait, remaining) if wait else remaining
-                try:
-                    if wait:
-                        chunk = await asyncio.wait_for(asyncio.shield(fut), wait)
-                    else:
-                        chunk = await fut
-                except asyncio.TimeoutError:
-                    if stall and stall > 0 and time.monotonic() - last_out >= stall:
-                        raise StreamStalled(int(time.monotonic() - last_out))
-                    if hb and hb > 0:
-                        yield "beat", int(time.monotonic() - start)
-                    continue
-                except StopAsyncIteration:
-                    fut = None
-                    return
-                fut = None
-                if _is_output(chunk):
-                    last_out = time.monotonic()
-                yield "chunk", chunk
-                break
-    finally:
-        if fut is not None and not fut.done():
-            fut.cancel()
-            try:
-                await fut
-            except BaseException:                                 # noqa: BLE001
-                pass
-        aclose = getattr(it, "aclose", None)
-        if aclose is not None:
-            try:
-                await aclose()
-            except BaseException:                                 # noqa: BLE001
-                pass
+# Stream wrapper (heartbeat beats, stall watchdog, upstream close) lives in
+# keepalive so the agent / worker loops share it.
+from ..keepalive import StreamStalled, _is_output, stream_with_heartbeat as _stream_with_heartbeat  # noqa: E402,F401
 
 
 def _paid_pin_order(svc, persona) -> list:
@@ -1082,7 +1030,7 @@ def _local_down_notes(svc, model_id: str) -> list[str]:
 async def _direct_dispatch_chat(svc, persona, model_name, messages, client_tools,
                                 options, stream, user_text, client_think=None,
                                 client_format=None, log_mode: str = "direct",
-                                note: str = ""):
+                                note: str = "", client_keep_alive=None):
     # DESIGN DECISION: when a coding client sends its own tool definitions
     # (Kilo/Cline agent loops), the routing agent would have to interleave two
     # tool protocols in one conversation. Instead the persona's static policy
@@ -1156,7 +1104,9 @@ async def _direct_dispatch_chat(svc, persona, model_name, messages, client_tools
         logger.record_guardrail(n)
     t0 = time.monotonic_ns()
     brain_cfg = svc.config_store.config.agent_brain
-    keep_alive = brain_cfg.worker_keep_alive     # keep a heavy model warm between turns
+    # keep a heavy model warm between turns; a client-sent keep_alive wins
+    keep_alive = (client_keep_alive if client_keep_alive is not None
+                  else brain_cfg.worker_keep_alive)
     hb = brain_cfg.heartbeat_seconds or 0
     # Merge sampling defaults (global < persona < client) + resolve the persona's
     # structured-output format for this worker.
@@ -1373,6 +1323,8 @@ async def _direct_dispatch_chat(svc, persona, model_name, messages, client_tools
                                              f"alongside {len(client_tools or [])} client tool(s)\n")
             hb = float(brain_cfg.direct_stream_heartbeat_seconds or 0)
             stall = float(getattr(brain_cfg, "direct_stream_stall_seconds", 0) or 0)
+            req_started = time.monotonic()
+            pacer = keepalive.Pacer(keepalive.visible_every(brain_cfg))   # one per request
             for attempt, mid in enumerate(failover):
                 if attempt:
                     logger.record_guardrail(f"failover: {model_id} failed -> {mid}")
@@ -1391,18 +1343,28 @@ async def _direct_dispatch_chat(svc, persona, model_name, messages, client_tools
                         final = None
                         ttft_ms = None
                         t_round = time.monotonic_ns()
-                        hb_start = time.monotonic()
+                        # status counts from the REQUEST start (not per tool
+                        # round), so it tracks the real time Cline is waiting
+                        hb_start = req_started
                         _src = svc.pool.chat_stream(
                             model_id, convo,
                             tools=all_tools, options=options, keep_alive=keep_alive,
                             max_tokens=brain_cfg.worker_max_tokens,
                             think=_think_for(svc, model_id, persona, client_think), fmt=fmt)
+                        prog: dict = {}
                         async for _kind, _payload in _stream_with_heartbeat(_src, hb, hb_start,
-                                                                            stall):
+                                                                            stall, prog):
                             if _kind == "beat":
+                                # Keep-alive bytes every beat; a visible status
+                                # line only at milestones (30s, 60s, then every
+                                # heartbeat_visible_seconds) — not a new line
+                                # in the client's thinking panel every 5s.
                                 yield tr.chat_chunk(
                                     model_name, "", done=False,
-                                    thinking=f"⚙️ {model_id} — still working… {_payload}s\n")
+                                    thinking=pacer.line(
+                                        f"{_tag} · {model_id}", _payload,
+                                        keepalive.progress_detail(prog)
+                                        or ("reading the prompt" if ttft_ms is None else "")))
                                 continue
                             chunk = _payload
                             if chunk.get("done"):
@@ -1529,17 +1491,17 @@ async def _direct_dispatch_chat(svc, persona, model_name, messages, client_tools
         if hb:
             yield tr.chat_chunk(model_name, "", done=False,
                                 thinking=f"⚙️ routing to {where} · {model_id} — working…\n")
-        waited = 0.0
+        started = time.monotonic()
+        pacer = keepalive.Pacer(keepalive.visible_every(brain_cfg))
         while hb:
             done, _ = await asyncio.wait({task}, timeout=hb)
             if done:
                 break
-            waited += hb
             while notes:
                 yield tr.chat_chunk(model_name, "", done=False, thinking=notes.pop(0))
             yield tr.chat_chunk(
                 model_name, "", done=False,
-                thinking=f"⚙️ {where} · {model_id} — still working ({int(waited)}s)…\n")
+                thinking=pacer.line(f"{where} · {model_id}", time.monotonic() - started))
         # Retrieve the result (or the failure) OUTSIDE the poll loop, so any error
         # becomes a clean in-band message + done, never a torn stream.
         err = None
@@ -1633,11 +1595,27 @@ async def _passthrough_chat(svc, model_name, messages, client_tools, options,
         ttft_ms = None
         acc_tools: list = []
         final = None
+        brain_cfg = svc.config_store.config.agent_brain
+        hb = float(brain_cfg.direct_stream_heartbeat_seconds or brain_cfg.heartbeat_seconds or 0)
+        pacer = keepalive.Pacer(keepalive.visible_every(brain_cfg))
+        start = time.monotonic()
         try:
-            async for chunk in svc.pool.chat_stream(model_name, messages,
-                                                    tools=client_tools, options=options,
-                                                    keep_alive=keep_alive, think=think,
-                                                    max_tokens=max_tokens, fmt=fmt):
+            src = svc.pool.chat_stream(model_name, messages,
+                                       tools=client_tools, options=options,
+                                       keep_alive=keep_alive, think=think,
+                                       max_tokens=max_tokens, fmt=fmt)
+            prog: dict = {}
+            async for kind, chunk in _stream_with_heartbeat(src, hb, start, 0, prog):
+                if kind == "beat":
+                    # A raw model reading a long prompt (or writing a long tool
+                    # call) sends nothing visible: keep the connection alive.
+                    yield tr.chat_chunk(model_name, "",
+                                        thinking=pacer.line(
+                                            model_name, chunk,
+                                            keepalive.progress_detail(prog)
+                                            or ("reading the prompt" if ttft_ms is None
+                                                else "")))
+                    continue
                 if chunk.get("done"):
                     tools = acc_tools or (chunk.get("tool_calls") or [])
                     final = ChatResult.from_done_frame(chunk, tool_calls=tools)

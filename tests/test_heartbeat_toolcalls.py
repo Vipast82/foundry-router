@@ -60,7 +60,7 @@ class ScriptedBrain:
 
 
 def _make(tmp_path, brain_responses, pool, heartbeat=0.0, mcp_fail=False,
-          persona=None):
+          persona=None, visible=0.03):
     db = Database(tmp_path / "h.sqlite")
     registry = ModelRegistry(db)
     registry.upsert_auto("slow-model", source="discovery", relative_cost_tier="free")
@@ -75,6 +75,7 @@ def _make(tmp_path, brain_responses, pool, heartbeat=0.0, mcp_fail=False,
     meridian = MeridianUsage(MeridianConfig(), client=None, db=db)
     brain = ScriptedBrain(brain_responses)
     brain.cfg.heartbeat_seconds = heartbeat
+    brain.cfg.heartbeat_visible_seconds = visible
     runner = AgentRunner(brain, pool, tool_registry, registry,
                          GuardrailEngine(GuardrailsConfig(), db, meridian), meridian)
     ctx = RequestContext(
@@ -100,9 +101,11 @@ async def test_heartbeat_narration_during_slow_worker(tmp_path):
     runner, ctx, _ = _make(tmp_path, ASK_THEN_RETURN(), SlowPool(0.08),
                            heartbeat=0.02)
     events = [ev async for ev in runner.run(ctx)]
-    beats = [ev for ev in events if "Still working" in ev.text]
+    beats = [ev for ev in events if "still working" in ev.text]
     assert beats and all(ev.kind == "think" for ev in beats)
     assert "slow-model" in beats[0].text  # says WHAT it's waiting on
+    # most ticks are invisible keep-alives (bytes, no new thinking line)
+    assert any(ev.kind == "keepalive" for ev in events)
     answers = [ev for ev in events if ev.kind == "answer"]
     assert answers[0].text == "done"      # result unaffected by the wrapper
 
@@ -111,8 +114,17 @@ async def test_heartbeat_zero_disables(tmp_path):
     runner, ctx, _ = _make(tmp_path, ASK_THEN_RETURN(), SlowPool(0.05),
                            heartbeat=0)
     events = [ev async for ev in runner.run(ctx)]
-    assert not any("Still working" in ev.text for ev in events)
+    assert not any("still working" in ev.text for ev in events)
+    assert not any(ev.kind == "keepalive" for ev in events)
     assert [ev for ev in events if ev.kind == "answer"][0].text == "done"
+
+
+async def test_invisible_keepalive_only_when_visible_off(tmp_path):
+    runner, ctx, _ = _make(tmp_path, ASK_THEN_RETURN(), SlowPool(0.08),
+                           heartbeat=0.02, visible=0)
+    events = [ev async for ev in runner.run(ctx)]
+    assert any(ev.kind == "keepalive" for ev in events)
+    assert not any("still working" in ev.text for ev in events)
 
 
 async def test_pipeline_execute_heartbeat(tmp_path):
@@ -123,7 +135,7 @@ async def test_pipeline_execute_heartbeat(tmp_path):
                                     "benchmark_category": "coding",
                                     "execution_mode": "pipeline"})
     events = [ev async for ev in runner.run_pipeline(ctx)]
-    assert any("Still working" in ev.text for ev in events)
+    assert any("still working" in ev.text for ev in events)
     assert [ev for ev in events if ev.kind == "answer"][0].text == "done"
 
 

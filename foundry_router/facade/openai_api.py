@@ -325,6 +325,7 @@ async def chat_completions(request: Request):
     if stream:
         async def gen():
             yield _sse(_chunk(cid, created, model_name, delta={"role": "assistant"}))
+            pending_tools: list = []
             async for obj in source:
                 msg = obj.get("message") or {}
                 if msg.get("thinking"):
@@ -334,8 +335,15 @@ async def chat_completions(request: Request):
                     yield _sse(_chunk(cid, created, model_name,
                                       delta={"content": msg["content"]}))
                 if not obj.get("done"):
+                    if msg.get("tool_calls"):
+                        pending_tools.extend(msg["tool_calls"])
+                    elif not msg.get("thinking") and not msg.get("content"):
+                        # Foundry's invisible keep-alive: an SSE comment line —
+                        # bytes for proxies / idle timers, ignored by every
+                        # OpenAI client (SSE spec: lines starting ':' are comments).
+                        yield ": keep-alive\n\n"
                     continue
-                tcs = _openai_tool_calls(msg.get("tool_calls"))
+                tcs = _openai_tool_calls(msg.get("tool_calls") or pending_tools)
                 if tcs:
                     yield _sse(_chunk(cid, created, model_name, delta={"tool_calls": tcs}))
                 u = _usage_from(obj)
@@ -361,7 +369,10 @@ async def chat_completions(request: Request):
         if msg.get("content"):
             content.append(msg["content"])
         if msg.get("tool_calls"):
-            tools.extend(msg["tool_calls"])
+            if obj.get("done") and tools:
+                pass                   # already collected mid-stream; don't duplicate
+            else:
+                tools.extend(msg["tool_calls"])
         if obj.get("done"):
             final = obj
     tcs = _openai_tool_calls(tools)

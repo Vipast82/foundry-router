@@ -149,7 +149,7 @@ async def test_worker_tool_loop_streams_reasoning_live(tmp_path):
     runner.pool = StreamWorkerPool([])          # streaming backend
     runner.brain.cfg.stream_worker_reasoning = True
     events = [ev async for ev in runner.run_worker_tools(ctx)]
-    thinks = "".join(ev.text for ev in events if ev.kind == "think")
+    thinks = "".join(ev.text for ev in events if ev.kind in ("think", "think_raw"))
     assert "reasoning A" in thinks and "reasoning B" in thinks   # reasoning streamed LIVE
     answers = [ev for ev in events if ev.kind == "answer"]
     assert answers and answers[0].text == "Final answer."       # buffered answer forwarded

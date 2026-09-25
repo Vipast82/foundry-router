@@ -475,6 +475,7 @@ class OllamaProtocol(BaseProtocol):
         and it resets the read timeout (no total-time wall)."""
         payload = self._payload(model, messages, tools, options, keep_alive,
                                 stream=True, think=think, max_tokens=max_tokens, fmt=fmt)
+        n_empty = 0
         async with self.client.stream("POST", f"{self.url}/api/chat", json=payload) as r:
             if r.status_code >= 400:
                 body = await r.aread()
@@ -502,9 +503,16 @@ class OllamaProtocol(BaseProtocol):
                            "timing_source": "server" if data.get("eval_duration") else "",
                            "finish_reason": data.get("done_reason") or ""}
                 else:
-                    yield {"content": msg.get("content") or "", "done": False,
-                           "tool_calls": tool_calls,
-                           "thinking": msg.get("thinking") or ""}
+                    c, th = msg.get("content") or "", msg.get("thinking") or ""
+                    if not (c or th or tool_calls):
+                        # Ollama is generating something it doesn't show yet
+                        # (a tool call being parsed): progress, not silence.
+                        n_empty += 1
+                        yield {"content": "", "done": False,
+                               "progress": {"tokens": n_empty}}
+                        continue
+                    yield {"content": c, "done": False, "tool_calls": tool_calls,
+                           "thinking": th}
 
 
 # --------------------------------------------------------------------------- #
@@ -601,9 +609,17 @@ class OpenAIProtocol(BaseProtocol):
         self._swap_ts = 0.0
 
     def _headers(self) -> dict:
+        from .. import request_context
         h = {"Content-Type": "application/json"}
         if self.api_key:
             h["Authorization"] = f"Bearer {self.api_key}"
+        # Same request id Foundry logs (request_log / mcp_call_log): vLLM adopts
+        # X-Request-Id as its own request id, so one id traces a call across
+        # the client, Foundry and the engine's logs. Servers that don't know
+        # it (llama.cpp) ignore it.
+        rid = request_context.request_id()
+        if rid:
+            h["X-Request-Id"] = rid
         return h
 
     def _base(self) -> str:
@@ -1074,6 +1090,14 @@ class OpenAIProtocol(BaseProtocol):
                         t_last = now
                     if content or reasoning:
                         yield {"content": content, "done": False, "thinking": reasoning}
+                    elif delta.get("tool_calls"):
+                        # Tool-call arguments stream token by token but are only
+                        # delivered whole at done. Report the progress (nothing
+                        # rendered) so the router knows the model IS generating —
+                        # a long write_to_file isn't a stall.
+                        yield {"content": "", "done": False, "progress": {
+                            "tool_chars": sum(len(f["arguments"]) for f in frags.values()),
+                            "tool": next((f["name"] for f in frags.values() if f["name"]), "")}}
                 break
         tool_calls = [_tool_call(f["id"], f["name"], f["arguments"])
                       for f in frags.values() if f["name"]] or None
@@ -1290,6 +1314,15 @@ class AnthropicProtocol(BaseProtocol):
                          f"JSON schema:\n{schema}")
             system_parts.append(nudge)
 
+        # A client-set output cap (OpenAI max_tokens / Ollama num_predict, carried
+        # as options.num_predict) wins over the router default — same as the
+        # openai-compatible adapter; it was silently ignored for Claude.
+        try:
+            client_cap = int((options or {}).get("num_predict") or 0)
+        except (TypeError, ValueError):
+            client_cap = 0
+        if client_cap > 0:
+            max_tokens = client_cap
         payload: dict = {"model": model, "messages": out_msgs, "max_tokens": max_tokens}
         if system_parts:
             payload["system"] = "\n\n".join(system_parts)
@@ -1443,6 +1476,12 @@ class AnthropicProtocol(BaseProtocol):
                         blk = blocks.get(ev.get("index"))
                         if blk is not None:
                             blk["json"] += d.get("partial_json") or ""
+                            # Tool input is delivered whole at the end; report
+                            # progress so a long tool call isn't seen as a stall.
+                            yield {"content": "", "done": False, "progress": {
+                                "tool_chars": sum(len(b.get("json") or "")
+                                                  for b in blocks.values()),
+                                "tool": blk.get("name") or ""}}
                 elif etype == "message_delta":
                     u = ev.get("usage") or {}
                     ct = u.get("output_tokens") or ct

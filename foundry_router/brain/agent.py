@@ -51,7 +51,7 @@ log = logging.getLogger(__name__)
 
 @dataclass
 class AgentEvent:
-    kind: str          # "think" | "answer" | "ask_user" | "brain_down" | "error"
+    kind: str          # "think" | "think_raw" | "answer" | "ask_user" | "brain_down" | "error" | "keepalive"
     text: str = ""
 
 
@@ -1066,19 +1066,24 @@ class AgentRunner:
         keep up with worst-case chains; flowing bytes can — every heartbeat
         resets NPM's and the client's idle clocks. heartbeat_seconds=0
         disables (UI brain card)."""
+        from .. import keepalive
         hb = float(self.brain.cfg.heartbeat_seconds or 0)
         task = asyncio.ensure_future(coro)
         if hb <= 0:
             return await task
         t0 = time.monotonic()
+        pacer = keepalive.Pacer(keepalive.visible_every(self.brain.cfg))
         try:
             while True:
                 done, _ = await asyncio.wait({task}, timeout=hb)
                 if done:
                     return task.result()
-                emit("think", f"Still working — {label} has been running "
-                              f"{time.monotonic() - t0:.0f}s (cold model loads "
-                              f"and long generations can take several minutes)...")
+                # keep-alive bytes every beat; a visible line only at milestones
+                line = pacer.line(label, time.monotonic() - t0)
+                if line:
+                    emit("think", line.rstrip("\n"))
+                else:
+                    emit("keepalive", "")
         except asyncio.CancelledError:
             task.cancel()
             raise
@@ -1087,16 +1092,17 @@ class AgentRunner:
         """Pipeline flavor of _with_heartbeat: async generators can't emit
         into the queue, so keep-alives are YIELDED as events until `task`
         settles — the caller then awaits the task for its result/exception."""
+        from .. import keepalive
         hb = float(self.brain.cfg.heartbeat_seconds or 0)
         t0 = time.monotonic()
+        pacer = keepalive.Pacer(keepalive.visible_every(self.brain.cfg))
         while True:
             done, _ = await asyncio.wait({task}, timeout=hb if hb > 0 else None)
             if done:
                 return
-            yield AgentEvent("think", f"Still working — {label} has been running "
-                                      f"{time.monotonic() - t0:.0f}s (cold model "
-                                      f"loads and long generations can take "
-                                      f"several minutes)...")
+            line = pacer.line(label, time.monotonic() - t0)
+            yield (AgentEvent("think", line.rstrip("\n")) if line
+                   else AgentEvent("keepalive", ""))
 
     # ------------------------------------------------- canonical dispatch --
 
@@ -1215,7 +1221,7 @@ class AgentRunner:
                     th = chunk.get("thinking") or ""
                     if th:
                         think_parts.append(th)
-                        emit("think", th)                 # live reasoning to client
+                        emit("think_raw", th)             # live reasoning, verbatim
                         if ttft_ms is None:
                             ttft_ms = (time.monotonic() - t_call) * 1000.0
                     if chunk.get("done"):
@@ -1690,12 +1696,22 @@ class AgentRunner:
                 parts, acc_tcs, done_tcs = [], [], []
                 done_frame: dict = {}
                 try:
-                    async for chunk in self.pool.chat_stream(
-                            worker, messages, tools=specs, options=wt_options,
-                            think=self._think_for(worker)):
+                    from .. import keepalive
+                    hb = float(self.brain.cfg.heartbeat_seconds or 0)
+                    pacer = keepalive.Pacer(keepalive.visible_every(self.brain.cfg))
+                    t_hb = time.monotonic()
+                    src = self.pool.chat_stream(
+                        worker, messages, tools=specs, options=wt_options,
+                        think=self._think_for(worker))
+                    async for kind, chunk in keepalive.stream_with_heartbeat(src, hb, t_hb):
+                        if kind == "beat":     # silent prefill: keep the stream alive
+                            line = pacer.line(f"{worker} (tool step {step}/{cap})", chunk)
+                            yield (AgentEvent("think", line.rstrip("\n")) if line
+                                   else AgentEvent("keepalive", ""))
+                            continue
                         th = chunk.get("thinking") or ""
                         if th:
-                            yield AgentEvent("think", th)      # LIVE reasoning
+                            yield AgentEvent("think_raw", th)  # LIVE reasoning, verbatim
                         if chunk.get("done"):
                             done_tcs = chunk.get("tool_calls") or []
                             done_frame = chunk

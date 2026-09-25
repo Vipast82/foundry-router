@@ -724,18 +724,19 @@ class RequestLogger:
         self.guardrail_events.append(event)
 
     def finish(self, status: str, error: str = "") -> None:
+        from . import request_context
         try:
             self.db.execute(
                 """INSERT INTO request_log
                    (ts, persona, client_model, mode, summary, models_used,
                     tool_calls, steps, duration_ms, guardrail_events,
-                    est_cost_usd, status, error)
-                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                    est_cost_usd, status, error, request_id)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                 (utcnow(), self.persona, self.client_model, self.mode, self.summary,
                  json.dumps(self.models_used), json.dumps(self.tool_calls),
                  self.steps, int((time.monotonic() - self._t0) * 1000),
                  json.dumps(self.guardrail_events), round(self.est_cost, 6),
-                 status, error[:1000]))
+                 status, error[:1000], request_context.request_id() or ""))
         except Exception:
             log.exception("failed to write request_log row")
 

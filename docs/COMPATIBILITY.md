@@ -66,6 +66,44 @@ Settings that live on the Meridian side (its Settings page, per adapter):
   tool calls come back to Foundry / your client instead of running inside
   Meridian.
 
+## Keep-alive, status lines and stalls
+
+Long turns (a 27B model reading a 150k-token Cline context, a model writing a
+big file as a tool call, a busy Claude session) send nothing visible for
+minutes. Foundry handles that the same way on every path (direct / Cline,
+agent, pipeline, raw model, Hermes backend, brain-down fallback):
+
+* **Keep-alive bytes every heartbeat** (`direct_stream_heartbeat_seconds` for
+  direct streaming, `heartbeat_seconds` elsewhere): an empty message for
+  Ollama clients, an SSE comment line (`: keep-alive`) for OpenAI clients.
+  Proxies (Cloudflare tunnel, NPM) and idle timers see traffic; nothing is
+  rendered.
+* **A visible status line only at milestones** — ~30s, ~60s, then every
+  `heartbeat_visible_seconds` (default 60; 0 = never):
+  `⏳ local · qwen-27b — still working · 3m 30s (writing write_to_file · 14.2k chars so far)`.
+  The time is real wall time since the request started, and the detail says
+  what the model is doing: `reading the prompt` (before the first token) or
+  the tool call it is writing.
+* **Tool calls count as output.** Tool-call arguments stream token by token
+  but are delivered whole at the end; the llama.cpp / vLLM, Ollama and Claude
+  adapters report that progress, so a long `write_to_file` is never mistaken
+  for a stall.
+* **Stall watchdog** (`direct_stream_stall_seconds`, default 600): no token,
+  reasoning or tool-call progress for that long → the call is abandoned (its
+  upstream request closed) and, if the client hasn't seen output yet, the next
+  model the persona allows takes over. Set it above your slowest real prefill.
+* **Abandoned requests are closed upstream.** When a client cancels or
+  disconnects, the backend request is closed too — llama.cpp frees the slot,
+  Meridian the session.
+
+## Request ids
+
+Every request has one id: the client's `X-Request-Id` if it sends one,
+otherwise a new one. It is returned as the `X-Request-Id` response header,
+forwarded to Meridian and vLLM (which adopts it as its own request id), and
+stored in `request_log` and `mcp_call_log` — so a client report, Foundry's
+Usage Log and the engine log can be matched line for line.
+
 ## MCP tools
 
 Every MCP tool call goes through one place in Foundry, whatever triggered it,

@@ -232,7 +232,7 @@ async def test_dispatch_worker_streams_reasoning_buffers_answer(tmp_path):
     result, backend = await runner._dispatch_worker(
         "local", "hi", persona={"context_window": 8192},
         emit=lambda kind, text: events.append((kind, text)))
-    live = "".join(t for k, t in events if k == "think")
+    live = "".join(t for k, t in events if k in ("think", "think_raw"))
     assert "Let me think" in live and "checking the facts" in live   # reasoning LIVE
     assert result.content == "Hello"        # answer BUFFERED, returned whole for review
     assert result.thinking == ""            # not re-surfaced (no double narration)
