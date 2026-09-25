@@ -57,6 +57,11 @@ the optional companion services (with one-line installers).
 - **Degrades, never dies** — brain down? Requests skip it immediately and fail
   over between the models a persona allows. Internet down? Local-only operation
   keeps working end to end.
+- **External agents (Hermes Agent)** — use an agent as a tool
+  (`hermes_run` / `_status` / `_stop`, grantable per persona or via the MCP
+  aggregator for Cline / AnythingLLM) or as a persona backend (streamed
+  answer, agent tool progress as thinking, per-chat sessions), with loop
+  protection and run metrics. See [docs/AGENTS.md](docs/AGENTS.md).
 - **Cost calculator with automatic prices** — local-vs-cloud cost of your real
   traffic; service prices refresh from OpenRouter's public catalog on a
   schedule (brain-matched, lockable per row).

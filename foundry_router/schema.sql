@@ -392,3 +392,28 @@ CREATE TABLE IF NOT EXISTS mcp_call_log (
 );
 CREATE INDEX IF NOT EXISTS idx_mcp_call_log_ts ON mcp_call_log(ts);
 CREATE INDEX IF NOT EXISTS idx_mcp_call_log_tool ON mcp_call_log(server, tool, ts);
+
+-- External agent runs (Hermes Agent): one row per task, whether the agent was
+-- used as a tool (<agent>_run) or as a persona's backend.
+CREATE TABLE IF NOT EXISTS agent_runs (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  ts TEXT,
+  agent TEXT,
+  mode TEXT,                -- tool | backend
+  caller TEXT,              -- persona / aggregator scope / client
+  run_id TEXT,              -- the agent's own run id, when it has one
+  session_id TEXT,
+  status TEXT,              -- running | completed | failed | cancelled | timeout | handed_off
+  duration_ms INTEGER,
+  ttft_ms INTEGER,
+  tool_calls INTEGER,       -- tools the AGENT ran inside this task
+  tools_used TEXT,          -- comma list of those tool names
+  prompt_tokens INTEGER,
+  completion_tokens INTEGER,
+  cache_read_tokens INTEGER,
+  model TEXT,               -- the model the agent itself ran on
+  input_chars INTEGER,
+  output_chars INTEGER,
+  error TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_agent_runs_ts ON agent_runs(ts);

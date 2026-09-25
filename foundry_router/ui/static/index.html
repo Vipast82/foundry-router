@@ -489,6 +489,28 @@ const HELP = {
     <p>Latency includes pacing waits and 429 retries. <b>Session reuse</b> is how often a pooled MCP session
     skipped the connect + initialize handshake. <b>Result tokens</b> is what a tool's output adds to the
     model's context — a tool that routinely returns 20k tokens is worth trimming.</p>`],
+  agents: ["External agents (Hermes Agent)", `
+    <p>An <b>agent</b> is not a model: it runs its own multi-step loop with its own tools (terminal, files, web,
+      browser), skills and memory. Foundry talks to <b>Hermes Agent</b> (Nous Research) through its API server
+      (<code>API_SERVER_ENABLED=true</code> in <code>~/.hermes/.env</code>, default port 8642).</p>
+    <dl>
+    <dt>As a tool</dt><dd><code>&lt;name&gt;_run</code> / <code>_status</code> / <code>_stop</code> appear under the MCP
+      server <code>agent-&lt;name&gt;</code>. Grant it to a persona like any MCP server, or load it from the
+      Foundry-MCP aggregator (e.g. <code>/mcp/p/hermes/</code> with a profile containing <code>agent-hermes</code>) so
+      Cline / AnythingLLM can hand off a long task. Costs only ~3 small tool definitions of context.</dd>
+    <dt>As a backend</dt><dd>set a persona's <b>served by agent</b> field: the whole conversation goes to the
+      agent, its answer streams back, its tool activity shows as thinking, and each chat maps to one agent
+      session so it remembers the conversation.</dd>
+    <dt>caller token</dt><dd>the API key Hermes uses when it calls <i>Foundry</i> as its model provider or MCP
+      server. Requests with it are never routed back into an agent (no loops) — an agent-backed persona is then
+      served by a normal model instead.</dd>
+    <dt>tool wait</dt><dd>how long <code>_run</code> blocks for the answer; longer tasks return a run_id to check
+      with <code>_status</code>.</dd>
+    </dl>`],
+  agentruns: ["Agent runs", `
+    <p>One row per agent task, as a tool or as a persona backend: status, duration, time to first output, the
+      tools the <b>agent</b> ran inside the task, tokens and the model the agent itself used.
+      <b>handed_off</b> = the tool call returned a run_id before the task finished.</p>`],
   mcpcontext: ["Context budget", `
     <p>Every tool a model is offered is sent as a JSON schema on <b>every</b> request, before any conversation.
     This table estimates that cost (≈ characters ÷ 4) per tool set:</p>
@@ -647,6 +669,7 @@ const TABS = {
   "Tools":          tabTools,
   "MCP Servers":    tabMCP,
   "MCP Metrics":    tabMcpMetrics,
+  "Agents":         tabAgents,
   "Research":       tabResearch,
   "Evals":          tabEvals,
   "Usage Log":      tabUsage,
@@ -659,7 +682,7 @@ const GROUPS = [
   ["Dashboard",   ["Live", "Performance", "Cost"]],
   ["Backends",    ["Pool", "Model Registry", "Host Admin"]],
   ["Routing",     ["Personas", "Guardrails"]],
-  ["Tools & MCP", ["Tools", "MCP Servers", "MCP Metrics"]],
+  ["Tools & MCP", ["Tools", "MCP Servers", "MCP Metrics", "Agents"]],
   ["Labs",        ["Research", "Evals"]],
   ["Logs",        ["Usage Log", "Events", "Dev Log"]],
 ];
@@ -1307,6 +1330,109 @@ async function tabMcpMetrics() {
     catch (e) { toast(e.message, true); }
   };
   await load();
+}
+
+// =========================================================================
+// Agents tab — external agents (Hermes) as tools and as persona backends
+// =========================================================================
+async function tabAgents() {
+  const [d, runs] = await Promise.all([api("agents"), api("agent-runs?hours=168&limit=60")]);
+  const dash = '<span class="hint">—</span>';
+  const n = (v, u) => v == null ? dash : _num(v, u);
+  const list = d.agents || [];
+  const healthPill = h => !h || h.healthy == null ? '<span class="hint">not probed</span>'
+    : h.healthy ? `<span class="pill ok" title="${esc(JSON.stringify(h.health || {}))}">up${h.latency_ms != null ? " · " + h.latency_ms + "ms" : ""}</span>`
+    : `<span class="pill bad" title="${esc(h.error || "")}">down</span> <span class="hint">${esc((h.error || "").slice(0, 60))}</span>`;
+  const names = v => Array.isArray(v) ? v.map(x => typeof x === "string" ? x : (x.name || x.id || "")).filter(Boolean) : [];
+  const rows = list.map(a => {
+    const h = a.health || {};
+    const skills = names(h.skills), toolsets = names(h.toolsets);
+    return `<tr${a.enabled ? "" : ' style="opacity:.5"'}>
+      <td class="nw"><b>${esc(a.name)}</b> <span class="hint">${esc(a.kind)}</span></td>
+      <td class="mono">${esc(a.url)}</td>
+      <td class="nw">${healthPill(h)}</td>
+      <td class="nw">${esc(h.model || a.model || "")}</td>
+      <td class="nw">${a.expose_as_tool ? `<span class="pill ok" title="Tools ${esc(a.name)}_run / _status / _stop on MCP server ${esc(a.server)}">tool: ${esc(a.server)}</span>` : '<span class="hint">not a tool</span>'}</td>
+      <td>${(a.personas || []).map(p => `<span class="pill">${esc(p)}</span>`).join(" ") || '<span class="hint">no persona</span>'}</td>
+      <td class="hint" title="${esc(skills.join(", "))}">${skills.length ? skills.length + " skills" : ""}${toolsets.length ? " · " + toolsets.length + " toolsets" : ""}</td>
+      <td class="nw">${a.caller_token ? '<span class="pill ok" title="Loop protection armed">caller token</span>' : '<span class="pill warn" title="No caller token: if this agent uses Foundry as its model provider, set one so its requests are never routed back into an agent">no caller token</span>'}</td>
+      <td class="nw"><button class="act" onclick='probeAgent(${JSON.stringify(a.name)})'>test</button>
+        <button class="act" onclick='editAgent(${JSON.stringify(a.name)})'>edit</button>
+        <button class="act" onclick='if(confirm("Remove agent ${esc(a.name)}?"))run(api("agents/delete",{method:"POST",body:{name:${JSON.stringify(a.name)}}}))'>remove</button></td></tr>`;
+  }).join("");
+  const g = runs.groups || [];
+  const active = runs.active || d.active || [];
+  const rc = runs.recent || [];
+  const stPill = s => `<span class="pill ${s === "completed" ? "ok" : s === "running" || s === "handed_off" ? "" : "bad"}">${esc(s)}</span>`;
+  $("#main").innerHTML = `
+    <h2 style="margin-top:0;display:flex;align-items:center">Agents ${help("agents")}</h2>
+    <p class="hint">External agents Foundry can hand work to — as a <b>tool</b> (grant <code>agent-&lt;name&gt;</code> to a persona or load it from the MCP aggregator in Cline / AnythingLLM) or as a persona <b>backend</b> (Personas → <i>served by agent</i>).</p>
+    <div class="card"><div class="card-h">Configured agents</div>
+      ${list.length ? `<table><tr><th>agent</th><th>url</th><th>health</th><th title="The model name the agent advertises">model</th><th>as tool</th><th title="Personas served by this agent">personas</th><th>skills</th><th title="Loop protection">loops</th><th></th></tr>${rows}</table>`
+        : '<p class="hint">No agents yet. Enable Hermes\' API server (<code>API_SERVER_ENABLED=true</code>, <code>API_SERVER_KEY=…</code> in <code>~/.hermes/.env</code>, then <code>hermes gateway</code>) and add it below.</p>'}
+    </div>
+    <div class="card"><div class="card-h">Add / edit agent</div>
+      <div class="row"><label>name</label><input id="ag-name" size="14" placeholder="hermes">
+        <label title="Hermes API server base URL (default port 8642). For a multi-profile Hermes, include the /p/<profile> prefix.">url</label><input id="ag-url" size="26" value="http://localhost:8642">
+        <label title="Hermes API_SERVER_KEY (sent as Bearer). Leave blank to keep the stored one; '-' clears it.">api key</label><input id="ag-key" type="password" size="16" placeholder="(unchanged)">
+        <label title="Model name sent to the agent. Blank = what its /v1/models lists (usually the profile name, e.g. hermes-agent).">model</label><input id="ag-model" size="14" placeholder="auto"></div>
+      <div class="row"><label title="Offer <name>_run/_status/_stop as tools (MCP server agent-<name>)">expose as tool</label><input type="checkbox" id="ag-tool" checked>
+        <label title="One agent session per client conversation, so the agent remembers earlier turns of that chat">session continuity</label><input type="checkbox" id="ag-sess" checked>
+        <label title="Budget for one agent task">timeout s</label><input id="ag-timeout" type="number" min="30" style="width:80px" value="1800">
+        <label title="How long <name>_run waits for the answer before returning a run_id to poll with <name>_status. Keep it under your MCP client's own tool timeout.">tool wait s</label><input id="ag-wait" type="number" min="5" style="width:70px" value="600">
+        <label title="The API key the agent uses when IT calls Foundry (as its model provider / MCP server). Requests carrying it are never routed back into an agent. Blank = keep; '-' clears.">caller token</label><input id="ag-caller" type="password" size="14" placeholder="(unchanged)">
+        <label>enabled</label><input type="checkbox" id="ag-enabled" checked></div>
+      <div class="row"><button class="act primary" id="ag-save">Save agent</button></div>
+    </div>
+    <div class="card"><div class="card-h">Agent runs ${help("agentruns")}<span class="hint">— last 7 days</span>
+        <button class="act" style="margin-left:auto" id="ag-clear">Clear runs…</button></div>
+      ${active.length ? `<p><b>Running now:</b> ${active.map(x => `${esc(x.agent)} <span class="mono">${esc(x.run_id)}</span> ${x.seconds}s ${esc((x.tools || []).join(", "))}`).join(" · ")}</p>` : ""}
+      ${g.length ? `<table><tr><th>agent</th><th>mode</th><th>runs</th><th>completed</th><th>failed</th><th>cancelled</th><th title="Tool calls handed off / still running">running</th><th>p50</th><th>p95</th><th title="Tools the agent ran per task, on average">avg agent tools</th><th>tokens in / out</th><th>top agent tools</th></tr>`
+        + g.map(x => `<tr><td class="nw"><b>${esc(x.agent)}</b></td><td class="nw">${esc(x.mode)}</td><td>${x.runs}</td><td>${x.completed}</td>
+          <td>${x.failed ? `<span class="pill bad">${x.failed}</span>` : "0"}</td><td>${x.cancelled}</td><td>${x.running}</td>
+          <td class="nw">${n(x.p50_ms, "ms")}</td><td class="nw">${n(x.p95_ms, "ms")}</td><td>${x.avg_tool_calls}</td>
+          <td class="nw">${x.prompt_tokens} / ${x.completion_tokens}</td>
+          <td class="hint">${(x.top_tools || []).map(([t, c]) => `${esc(t)} ×${c}`).join(", ")}</td></tr>`).join("") + `</table>`
+        : '<p class="hint">No agent runs yet.</p>'}
+      ${rc.length ? `<div class="card-h" style="margin-top:12px">Recent</div><table><tr><th>time</th><th>agent</th><th>mode</th><th>caller</th><th>status</th><th>duration</th><th title="time to first output">first output</th><th>agent tools</th><th>tokens</th><th title="The model the agent itself ran on">agent model</th><th>run / session</th></tr>`
+        + rc.map(x => `<tr><td class="nw">${_tsLabel(x.ts)}</td><td class="nw">${esc(x.agent)}</td><td class="nw">${esc(x.mode)}</td>
+          <td class="nw hint">${esc(x.caller || "")}</td><td class="nw">${stPill(x.status)}${x.error ? ` <span class="hint" title="${esc(x.error)}">${esc(x.error.slice(0, 60))}</span>` : ""}</td>
+          <td class="nw">${n(x.duration_ms, "ms")}</td><td class="nw">${n(x.ttft_ms, "ms")}</td>
+          <td class="hint" title="${esc(x.tools_used || "")}">${x.tool_calls || 0}${x.tools_used ? " · " + esc(x.tools_used.split(",").slice(0, 4).join(", ")) : ""}</td>
+          <td class="nw">${x.prompt_tokens ?? "—"} / ${x.completion_tokens ?? "—"}</td><td class="nw">${esc(x.model || "")}</td>
+          <td class="mono hint">${esc(x.run_id || "")}${x.session_id ? " · " + esc(x.session_id.slice(0, 24)) : ""}</td></tr>`).join("") + `</table>` : ""}
+    </div>`;
+  window._agents = Object.fromEntries(list.map(a => [a.name, a]));
+  window.editAgent = name => {
+    const a = window._agents[name]; if (!a) return;
+    $("#ag-name").value = a.name; $("#ag-url").value = a.url; $("#ag-model").value = a.model || "";
+    $("#ag-tool").checked = !!a.expose_as_tool; $("#ag-sess").checked = !!a.session_continuity;
+    $("#ag-timeout").value = a.timeout_seconds; $("#ag-wait").value = a.tool_wait_seconds;
+    $("#ag-enabled").checked = !!a.enabled;
+    $("#ag-key").placeholder = a.api_key ? "(set — blank keeps it)" : "(none)";
+    $("#ag-caller").placeholder = a.caller_token ? "(set — blank keeps it)" : "(none)";
+    $("#ag-name").scrollIntoView({behavior: "smooth", block: "center"});
+  };
+  window.probeAgent = async name => {
+    try {
+      const r = await api("agents/probe", {method: "POST", body: {name}});
+      const h = (r.agents || [])[0] || {};
+      toast(h.healthy ? `${name}: up (${h.latency_ms}ms)${h.model ? " · " + h.model : ""}` : `${name}: down — ${h.error || "?"}`, !h.healthy);
+      render();
+    } catch (e) { toast(e.message, true); }
+  };
+  $("#ag-save").onclick = () => run(api("agents", {method: "POST", body: {
+    name: $("#ag-name").value.trim(), url: $("#ag-url").value.trim(),
+    api_key: $("#ag-key").value, caller_token: $("#ag-caller").value,
+    model: $("#ag-model").value.trim(), expose_as_tool: $("#ag-tool").checked,
+    session_continuity: $("#ag-sess").checked, enabled: $("#ag-enabled").checked,
+    timeout_seconds: +$("#ag-timeout").value || 1800, tool_wait_seconds: +$("#ag-wait").value || 600}}));
+  $("#ag-clear").onclick = async () => {
+    if (!confirm("Delete all recorded agent runs?")) return;
+    try { const r = await api("agent-runs/clear", {method: "POST", body: {}}); toast(`Cleared ${r.deleted} run(s)`); render(); }
+    catch (e) { toast(e.message, true); }
+  };
+  wrapTables();
 }
 
 // =========================================================================
@@ -2683,6 +2809,9 @@ async function tabPersonas() {
         <input type="checkbox" id="pe-trail">
         <label title="Direct mode = a client that sends its OWN tools (Cline, OpenCode, Kilo). When ON and this persona has MCP tools attached above, those tools are offered to the model ALONGSIDE the client's tools: Foundry runs its own tool calls and keeps going; the client's tool calls go back to the client as usual. Leave the persona's tool list empty (or turn this off) to keep direct mode client-tools-only — e.g. a Cline persona that uses Cline's own MCP servers and wants minimum context.">persona tools in direct mode</label>
         <input type="checkbox" id="pe-mcp-direct"></div>
+      <div class="row"><label title="Serve this persona with an external AGENT (Hermes) instead of a model: the whole conversation is forwarded to it, its answer streams back and its tool activity shows as thinking. Model-routing fields above then only apply as the fallback when the agent is down or the request came from an agent (loop protection). Client tools are not forwarded — the agent uses its own. Configure agents in Tools &amp; MCP → Agents.">served by agent</label>
+        <select id="pe-agent"><option value="">— none (route to models) —</option></select>
+        <span class="hint">e.g. a <b>Foundry-Agent</b> persona served by Hermes ${help("agents")}</span></div>
       <div class="row"><label title="Optional JSON overriding the multi-signal ranking weights for this persona. Signals: primary (requested category), tool_calling, adequacy (observed outcome-judge quality), latency (warm tokens/sec). e.g. a speed-sensitive persona: {&quot;latency&quot;: 0.5}. Empty = defaults.">selection_weights (JSON obj)</label>
         <input id="pe-weights" size="50" value="{}" placeholder='{"latency": 0.4, "adequacy": 0.8}'></div>
       <div class="row"><label title="JSON object: client name → compatibility note (how that client experiences this persona). Documentation only — surfaced as badges in the list above. Don't fork a persona per client; note the differences here instead.">client_compat (JSON obj)</label>
@@ -2711,6 +2840,16 @@ async function tabPersonas() {
     </div>`;
   window._personas = Object.fromEntries(d.personas.map(p => [p.virtual_name, p]));
   wireMcpChecklist();
+  api("agents").then(r => {
+    const sel = $("#pe-agent");
+    if (!sel) return;
+    const want = sel.dataset.want || sel.value;
+    (r.agents || []).forEach(a => {
+      if (![...sel.options].some(o => o.value === a.name))
+        sel.add(new Option(a.name + (a.enabled ? "" : " (disabled)") + (a.health && a.health.healthy === false ? " — down" : ""), a.name));
+    });
+    _setAgentSelect(want);
+  }).catch(() => {});
   $("#pe-apply-ctx").onclick = () => window.applyDefaultContextWindows();
   $("#pe-save").onclick = () => run(api("personas", {method: "POST", body: {
     virtual_name: $("#pe-name").value.trim(),
@@ -2735,6 +2874,7 @@ async function tabPersonas() {
     escalate_when_local_busy: $("#pe-escalate").checked ? 1 : 0,
     expose_tool_trail: $("#pe-trail").checked ? 1 : 0,
     mcp_tools_in_direct: $("#pe-mcp-direct").checked ? 1 : 0,
+    agent_backend: $("#pe-agent").value || null,
     selection_weights: JSON.parse($("#pe-weights").value || "{}"),
     review_enabled: $("#pe-review").checked ? 1 : 0,
     review_model: $("#pe-review-model").value || null,
@@ -2984,7 +3124,15 @@ window.editPersona = name => {
   $("#pe-escalate").checked = !!p.escalate_when_local_busy;
   $("#pe-trail").checked = !!p.expose_tool_trail;
   $("#pe-mcp-direct").checked = p.mcp_tools_in_direct == null ? true : !!p.mcp_tools_in_direct;
+  _setAgentSelect(p.agent_backend || "");
 };
+function _setAgentSelect(v) {
+  const sel = $("#pe-agent");
+  if (!sel) return;
+  sel.dataset.want = v;
+  if (v && ![...sel.options].some(o => o.value === v)) sel.add(new Option(v + " (not configured)", v));
+  sel.value = v;
+}
 
 /* ----------------------------------------------------------------- tools -- */
 async function tabTools() {

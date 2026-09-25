@@ -374,6 +374,19 @@ async def _chat_dispatch(svc, body: dict):
                                            keep_alive=body.get("keep_alive"))
         return _model_not_found(model_name)
 
+    # AGENT-BACKED persona: an external agent (Hermes) answers the whole turn.
+    agent_name = (persona.get("agent_backend") or "").strip()
+    if agent_name and getattr(svc, "agents", None) is not None:
+        refusal = _agent_backend_refusal(svc, agent_name)
+        if refusal is None:
+            return await _agent_backend_chat(svc, persona, agent_name, model_name,
+                                             messages, stream, user_text, client_tools)
+        # Loop protection / agent down: serve the persona with its normal model
+        # policy instead, and say why in the event log.
+        svc.db.log_event("warning", "agents",
+                         f"persona {persona['virtual_name']}: agent {agent_name!r} "
+                         f"not used — {refusal}; routing to a model instead")
+
     exec_mode = persona.get("execution_mode") or "agent"
     # `direct` = thin proxy: pick ONE model per the persona's static policy and
     # forward the client's request verbatim. Triggered by client-supplied tools
@@ -410,6 +423,110 @@ async def _chat_dispatch(svc, body: dict):
                                  user_text, mode="pipeline")
 
     return await _agent_chat(svc, persona, model_name, messages, stream, user_text)
+
+
+# ---- agent-backed personas (Hermes) ---------------------------------------------
+
+def _agent_backend_refusal(svc, agent_name: str):
+    """Why an agent-backed persona can't use its agent right now, or None."""
+    caller = request_context.agent_caller()
+    if caller:
+        return (f"request came from agent {caller!r} (loop protection — an agent "
+                f"can't be served by an agent)")
+    if svc.agents.get(agent_name) is None:
+        return "agent is not configured or disabled"
+    if svc.agents.healthy(agent_name) is False:
+        return "agent is unreachable (health check failed)"
+    return None
+
+
+async def _agent_backend_chat(svc, persona, agent_name, model_name, messages, stream,
+                              user_text, client_tools=None):
+    """Forward the conversation to an external agent and relay its answer:
+    content streams as content, the agent's tool activity as thinking lines,
+    and one Hermes session per client conversation so it keeps its memory.
+    Client tools are not forwarded — the agent runs its own tools."""
+    agents = svc.agents
+    logger = RequestLogger(svc.db, persona["virtual_name"], model_name, "agent", user_text)
+    if client_tools:
+        svc.db.log_event("info", "agents",
+                         f"persona {persona['virtual_name']}: {len(client_tools)} client "
+                         f"tool(s) not forwarded — agent {agent_name} uses its own tools")
+    session_key = ""
+    a = agents.get(agent_name)
+    if a is not None and a.session_continuity:
+        from ..agents import conversation_key
+        hdrs = request_context.client_headers()
+        client_session = next((hdrs[k] for k in request_context.SESSION_HEADERS
+                               if hdrs.get(k)), "")
+        session_key = persona["virtual_name"] + ":" + conversation_key(messages, client_session)
+    hb = float(getattr(svc.config_store.config.agent_brain, "heartbeat_seconds", 25) or 25)
+    t0 = time.monotonic_ns()
+    backend_label = f"agent:{agent_name}"
+
+    def _stats(done: dict) -> dict:
+        return {"prompt_tokens": done.get("prompt_tokens") or 0,
+                "completion_tokens": done.get("completion_tokens") or 0,
+                "cached_tokens": done.get("cached_tokens") or 0,
+                "total_duration_ns": time.monotonic_ns() - t0,
+                "done_reason": done.get("finish_reason") or "stop",
+                "timing_source": "wall",
+                "served_by": done.get("agent_model") or agent_name,
+                "backend": backend_label, "agent": agent_name,
+                "agent_tools": len(done.get("tools") or []),
+                "agent_session": done.get("session_id") or ""}
+
+    def _finish_log(done: dict, status: str, error: str = "") -> None:
+        logger.record_model_call(done.get("agent_model") or agent_name, backend_label,
+                                 done.get("prompt_tokens") or 0,
+                                 done.get("completion_tokens") or 0, 0.0)
+        logger.finish(status, error)
+
+    stream_iter = agents.chat_stream(agent_name, messages, session_key=session_key,
+                                     caller=persona["virtual_name"])
+    if not stream:
+        content, thinking, done = [], [], {}
+        try:
+            async for ev in stream_iter:
+                if ev.get("done"):
+                    done = ev
+                elif ev.get("content"):
+                    content.append(ev["content"])
+                elif ev.get("thinking"):
+                    thinking.append(ev["thinking"])
+        except Exception as e:                                     # noqa: BLE001
+            _finish_log(done, "error", str(e))
+            return JSONResponse({"error": f"agent {agent_name}: {e}"}, status_code=502)
+        _finish_log(done, "ok")
+        msg = {"role": "assistant", "content": "".join(content)}
+        if thinking:
+            msg["thinking"] = "".join(thinking)
+        return JSONResponse({"model": model_name, "created_at": tr.now_iso(),
+                             "message": msg, "done": True, **tr._stats(_stats(done))})
+
+    async def gen():
+        done: dict = {}
+        status, error = "ok", ""
+        start = time.monotonic()
+        try:
+            async for kind, ev in _stream_with_heartbeat(stream_iter, hb, start):
+                if kind == "beat":
+                    yield tr.chat_chunk(model_name, "",
+                                        thinking=f"⏳ {agent_name} still working… {ev}s\n")
+                    continue
+                if ev.get("done"):
+                    done = ev
+                    continue
+                if ev.get("content") or ev.get("thinking"):
+                    yield tr.chat_chunk(model_name, ev.get("content") or "",
+                                        thinking=ev.get("thinking") or None)
+        except Exception as e:                                     # noqa: BLE001
+            status, error = "error", str(e)
+            yield tr.chat_chunk(model_name, f"\n[foundry-router] agent {agent_name}: {e}")
+        finally:
+            _finish_log(done, status, error)
+        yield tr.chat_chunk(model_name, "", done=True, stats=_stats(done))
+    return StreamingResponse(gen(), media_type="application/x-ndjson")
 
 
 # ---- agent mode ---------------------------------------------------------------

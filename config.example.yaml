@@ -303,6 +303,21 @@ mcp_servers: []
 #    transport: streamable-http
 #    timeout_seconds: 300
 
+# --- External agents (Hermes Agent) — see docs/AGENTS.md ------------------------
+# An agent runs its own multi-step loop (tools, skills, memory). Foundry can use
+# it as a TOOL (hermes_run/_status/_stop under MCP server "agent-hermes": grant it
+# to a persona or load it from the MCP aggregator) and as a persona BACKEND
+# (Personas -> "served by agent"). Or add it from the web UI: Tools & MCP -> Agents.
+agents: []
+#  - name: hermes
+#    url: http://192.168.1.50:8642       # Hermes API server (API_SERVER_ENABLED=true)
+#    api_key: ${HERMES_API_KEY}          # Hermes API_SERVER_KEY
+#    caller_token: ${HERMES_CALLER_TOKEN} # the key Hermes uses when IT calls Foundry
+#    expose_as_tool: true
+#    tool_wait_seconds: 600              # longer tasks hand back a run_id
+#    timeout_seconds: 1800
+#    session_continuity: true
+
 # --- Tool Sync (§4.2) ----------------------------------------------------------
 tool_sync:
   periodic_seconds: 300            # fallback sweep; health-change events also trigger immediate sync

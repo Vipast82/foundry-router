@@ -72,6 +72,9 @@ Worker model (± MCP tools, ± tiered review) → response streamed back to the 
   (context_window, MCP tool grants, review, escalation triggers…).
 - **MCP** — connected MCP servers, Tool Sync, and **Gateway Servers** (browse the
   Docker MCP Catalog, attach/detach without SSH).
+- **Tools & MCP → Agents** — external agents (Hermes): health, skills, the
+  agent as a tool or persona backend, and per-task run metrics
+  ([AGENTS.md](AGENTS.md)).
 - **Research** — the background Research Agent's knobs: model, engines, sweep
   cadence, corpus/page/snippet sizes, extra queries, context_window. "Test
   search+fetch" verifies the pipeline end to end.
@@ -133,6 +136,7 @@ You want `{"ok": true}`. Then firewall the port to Foundry's host/subnet only.
 | Topic | Doc |
 |---|---|
 | Cline (VS Code) plan/act routing | [CLINE.md](CLINE.md) |
+| Hermes Agent as a tool / backend | [AGENTS.md](AGENTS.md) |
 | Context sizing (num_ctx, advertise, thrash) | [CONTEXT_SIZING.md](CONTEXT_SIZING.md) |
 | Meridian re-auth (refresh + full login) | [MERIDIAN_AUTH.md](MERIDIAN_AUTH.md) |
 | Docker MCP Gateway admin | [GATEWAY_SERVERS.md](GATEWAY_SERVERS.md) |

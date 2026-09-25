@@ -58,6 +58,8 @@ class MCPAggregator:
         """Enabled MCP ToolDefs, minus gateway-management control tools, scoped
         to `server_filter` (None = all). The registry already namespaces names
         as `server<sep>bare`, so the client sees stable, collision-free ids."""
+        from .. import request_context
+        from_agent = bool(request_context.agent_caller())
         out = []
         for td in self.svc.tool_registry.enabled():
             if td.kind != "mcp" or td.disabled:
@@ -68,6 +70,8 @@ class MCPAggregator:
                 continue
             if name_filter is not None and td.name not in name_filter:
                 continue
+            if from_agent and (td.server or "").startswith("agent-"):
+                continue                                  # agent loop protection
             out.append(td)
         return out
 
@@ -229,11 +233,16 @@ class MCPAggregator:
             ctx = server.request_context
             req = getattr(ctx, "request", None)
             client = ""
+            from .. import request_context
             if req is not None:
                 try:
                     client = (req.headers.get("user-agent") or "")[:120]
                 except Exception:
                     client = ""
+                # Mark agent-originated calls (Hermes using Foundry as its MCP
+                # server): agent tools are hidden from / refused for them.
+                request_context.set_agent_caller(
+                    request_context.agent_caller_from(req.headers) or "")
             if not persona_mode:
                 return scope_name, None, client
             name = ""

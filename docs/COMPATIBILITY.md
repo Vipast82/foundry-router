@@ -76,6 +76,7 @@ so behaviour and metrics are identical on every route:
 | Agent mode, persona with MCP tools | the worker model (or the brain) | the persona's tools |
 | **Direct mode** (Cline / OpenCode send their own tools) | the client, plus Foundry for persona tools | client tools **+** the persona's attached MCP tools (if `persona tools in direct mode` is on). Foundry runs its own tool calls and continues; client tool calls go back to the client. A persona with no tools attached is unchanged. |
 | Foundry-MCP aggregator (`/mcp/`, `/mcp/p/<profile>/`, `/mcp/persona/<Persona>/`) | the external client (AnythingLLM, Cline, …) | exactly that endpoint's tools |
+| Agent tools (`agent-<name>`: `hermes_run` / `_status` / `_stop`) | whichever loop above holds the grant | three tools that hand a task to an external agent ([AGENTS.md](AGENTS.md)) |
 
 * **Results keep every content type** — text, images, audio, embedded
   resources; structured results are rendered as JSON. The aggregator returns

@@ -189,6 +189,9 @@ class MCPManager:
         # Persistent (pooled) MCP sessions, one per server: the handshake
         # (connect + initialize) is paid once, not on every tool call.
         self._holders: dict[str, "_SessionHolder"] = {}
+        # External agents (Hermes) exposed as pseudo MCP servers "agent-<name>"
+        # — set by Services; None = no agents.
+        self.agents = None
 
     def _record_usage(self, server: str, tool: str, ok: bool,
                       rate_limited: bool = False, error: str = "") -> None:
@@ -384,6 +387,9 @@ class MCPManager:
             except Exception as e:
                 self.db.log_event("warning", "tool_sync",
                                   f"MCP server {name} unreachable during sync", str(e))
+        if self.agents is not None:
+            for name, tools in self.agents.tool_manifests().items():
+                out.setdefault(name, tools)
         return out
 
     async def _pace(self, server: str, cfg: MCPServerConfig) -> None:
@@ -415,6 +421,9 @@ class MCPManager:
         and one mcp_call_log metrics row (source/caller from the attribution
         context the caller set)."""
         from .. import request_context
+        if self.agents is not None and self.agents.is_agent_server(server) \
+                and server not in self.servers:
+            return await self._call_agent_tool(server, tool, arguments, progress_callback)
         cfg = self.servers.get(server)
         if cfg is not None and not getattr(cfg, "enabled", True):
             raise MCPUnavailable(f"MCP server {server!r} is disabled")
@@ -523,6 +532,44 @@ class MCPManager:
                 duration_ms=int((time.monotonic() - t_start) * 1000),
                 rate_limited=seen_429, timed_out=timed_out, error=err,
                 args=effective_args, result=result, attr=attr, **m)
+
+    async def _call_agent_tool(self, server: str, tool: str, arguments: dict,
+                               progress_callback=None) -> "ToolResult":
+        """An agent tool (Hermes <name>_run/_status/_stop): same in-flight
+        tracking, usage counters and mcp_call_log row as a real MCP call, so
+        grants, the aggregator, metrics and the tool loops treat it the same."""
+        from .. import request_context
+        tid = self._inflight_seq
+        self._inflight_seq += 1
+        self._inflight[tid] = {"server": server, "tool": tool, "since": time.monotonic()}
+        t_start = time.monotonic()
+        result: Optional[ToolResult] = None
+        err = ""
+        timed_out = False
+        timeout = self.agents.timeout_for(server)
+        try:
+            result = await asyncio.wait_for(
+                self.agents.call_tool(server, tool, arguments or {}, progress_callback),
+                timeout=timeout)
+            self._record_usage(server, tool, ok=True)
+            return result
+        except asyncio.TimeoutError:
+            timed_out = True
+            err = f"timed out after {timeout}s"
+            self._record_usage(server, tool, ok=False, error=err)
+            raise RuntimeError(f"agent tool {server}/{tool} timed out after {timeout}s") from None
+        except Exception as e:                                   # noqa: BLE001
+            err = describe_exception(e)
+            self._record_usage(server, tool, ok=False, error=err)
+            raise
+        finally:
+            self._inflight.pop(tid, None)
+            self._log_call(server=server, tool=tool, ok=(result is not None and not err),
+                           duration_ms=int((time.monotonic() - t_start) * 1000),
+                           rate_limited=False, timed_out=timed_out, error=err,
+                           args=arguments or {}, result=result,
+                           attr=request_context.mcp_attribution(), connect_ms=0, pace_ms=0,
+                           attempts=1, session="agent")
 
     def _log_call(self, *, server, tool, ok, duration_ms, rate_limited, timed_out,
                   error, args, result, attr, connect_ms, pace_ms, attempts, session) -> None:

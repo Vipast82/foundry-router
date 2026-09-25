@@ -38,6 +38,47 @@ def capture(headers) -> None:
         rid = ""
     _client_headers.set(picked)
     _request_id.set(str(rid)[:100] or uuid.uuid4().hex)
+    _agent_caller.set(agent_caller_from(headers) or "")
+
+
+# -- agent loop protection --------------------------------------------------------
+# An external agent (Hermes) may use Foundry as its own model provider / MCP
+# server. Requests carrying the agent's configured caller_token are marked
+# agent-originated so they are never routed back INTO an agent (an agent-backed
+# persona or an agent tool) — no agent -> Foundry -> agent loops.
+_agent_tokens: dict[str, str] = {}          # token -> agent name
+_agent_caller: contextvars.ContextVar[str] = contextvars.ContextVar(
+    "foundry_agent_caller", default="")
+
+
+def set_agent_tokens(tokens: dict[str, str]) -> None:
+    global _agent_tokens
+    _agent_tokens = {k: v for k, v in (tokens or {}).items() if k}
+
+
+def agent_caller_from(headers) -> Optional[str]:
+    """The agent a request came from (by its caller_token), or None."""
+    if not _agent_tokens or headers is None:
+        return None
+    try:
+        cands = [headers.get("x-api-key") or "", headers.get("x-foundry-agent-token") or ""]
+        auth = headers.get("authorization") or ""
+        if auth.lower().startswith("bearer "):
+            cands.append(auth[7:].strip())
+    except Exception:
+        return None
+    for c in cands:
+        if c and c in _agent_tokens:
+            return _agent_tokens[c]
+    return None
+
+
+def agent_caller() -> Optional[str]:
+    return _agent_caller.get() or None
+
+
+def set_agent_caller(name: str):
+    return _agent_caller.set(name or "")
 
 
 def client_headers() -> dict:

@@ -1230,6 +1230,101 @@ async def delete_mcp(request: Request):
 
 
 # --------------------------------------------------------------------------- #
+# External agents (Hermes Agent) — as tools and as persona backends           #
+# --------------------------------------------------------------------------- #
+
+def _agent_public(svc, a) -> dict:
+    d = a.model_dump()
+    d["api_key"] = bool(a.api_key)          # never echo secrets back
+    d["caller_token"] = bool(a.caller_token)
+    d["health"] = svc.agents.health(a.name)
+    d["server"] = "agent-" + a.name
+    d["personas"] = [p["virtual_name"] for p in svc.personas.list()
+                     if (p.get("agent_backend") or "") == a.name]
+    return d
+
+
+@router.get("/admin/api/agents")
+async def list_agents(request: Request):
+    svc = _svc(request)
+    return {"agents": [_agent_public(svc, a) for a in svc.config_store.config.agents],
+            "active": svc.agents.active()}
+
+
+@router.post("/admin/api/agents")
+async def upsert_agent(request: Request):
+    """Add / edit an agent. Empty api_key / caller_token keep the stored value;
+    send "-" to clear one."""
+    import re
+    svc = _svc(request)
+    b = await request.json()
+    name = (b.get("name") or "").strip()
+    if not name or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,40}", name):
+        return JSONResponse({"error": "name required (letters, digits, - _ .)"},
+                            status_code=400)
+    existing = next((a for a in svc.config_store.config.agents if a.name == name), None)
+
+    def secret(key):
+        v = (b.get(key) or "").strip()
+        if v == "-":
+            return None
+        return v or (getattr(existing, key) if existing else None)
+    entry = {"name": name, "kind": "hermes",
+             "url": (b.get("url") or "http://localhost:8642").strip(),
+             "api_key": secret("api_key"), "caller_token": secret("caller_token"),
+             "enabled": bool(b.get("enabled", existing.enabled if existing else True)),
+             "model": (b.get("model") or "").strip(),
+             "timeout_seconds": max(30, int(b.get("timeout_seconds") or 1800)),
+             "tool_wait_seconds": max(5, int(b.get("tool_wait_seconds") or 600)),
+             "expose_as_tool": bool(b.get("expose_as_tool", True)),
+             "session_continuity": bool(b.get("session_continuity", True))}
+
+    def mutate(raw):
+        lst = raw.setdefault("agents", []) or []
+        lst[:] = [x for x in lst if x.get("name") != name] + [entry]
+        raw["agents"] = lst
+    cfg = svc.config_store.save(mutate)
+    svc.agents.set_agents(cfg.agents)
+    health = await svc.agents.probe(name)
+    result = await svc.tool_registry.sync(svc.pool)       # add/drop its tools now
+    return {"ok": True, "health": health, "tool_sync": result}
+
+
+@router.post("/admin/api/agents/delete")
+async def delete_agent(request: Request):
+    svc = _svc(request)
+    name = ((await request.json()).get("name") or "").strip()
+
+    def mutate(raw):
+        raw["agents"] = [x for x in (raw.get("agents") or []) if x.get("name") != name]
+    cfg = svc.config_store.save(mutate)
+    svc.agents.set_agents(cfg.agents)
+    await svc.tool_registry.sync(svc.pool)
+    return {"ok": True}
+
+
+@router.post("/admin/api/agents/probe")
+async def probe_agent(request: Request):
+    svc = _svc(request)
+    name = ((await request.json()).get("name") or "").strip()
+    if name:
+        return {"agents": [await svc.agents.probe(name)]}
+    return {"agents": await svc.agents.probe_all()}
+
+
+@router.get("/admin/api/agent-runs")
+async def agent_runs(request: Request, hours: float = 24, limit: int = 50):
+    svc = _svc(request)
+    return {**svc.agents.summary(hours), "recent": svc.agents.recent(limit)}
+
+
+@router.post("/admin/api/agent-runs/clear")
+async def clear_agent_runs(request: Request):
+    svc = _svc(request)
+    return {"ok": True, "deleted": svc.agents.clear()}
+
+
+# --------------------------------------------------------------------------- #
 # Docker MCP Gateway admin (gateway-server admin spec) — operator-only,       #
 # backend-initiated MCP calls; NEVER routed through a persona/model tool-loop #
 # --------------------------------------------------------------------------- #

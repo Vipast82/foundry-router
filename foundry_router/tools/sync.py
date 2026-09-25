@@ -267,11 +267,16 @@ class ToolRegistry:
         upstream, or its server offline) is simply absent from the result —
         dropped silently — and reported ONCE to the event log per (server,
         tool), never erroring the persona out."""
+        from .. import request_context
         whole, scoped, bare = parse_preferred_mcp(persona)
         out: list[ToolDef] = []
         registered: dict[str, set[str]] = {}   # server -> names actually present
+        # Loop protection: a request that came FROM an agent never gets agent tools.
+        from_agent = bool(request_context.agent_caller())
         for t in self.enabled():
             if t.kind != "mcp":
+                continue
+            if from_agent and (t.server or "").startswith("agent-"):
                 continue
             # Gateway root-admin tools are never grantable to a model/persona,
             # even under a whole-server grant — they reconfigure the whole

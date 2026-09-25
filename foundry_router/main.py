@@ -42,6 +42,7 @@ from .evalharness import EvalHarness, ensure_seed as ensure_eval_seed
 from .registry.research_agent import ResearchAgent
 from .semcache import SemanticCache
 from .tools.mcp_client import MCPManager
+from .agents import AgentManager
 from .facade.mcp_aggregator import MCPAggregator
 from .tools.sync import ToolRegistry
 from .ui import router as ui_router
@@ -88,6 +89,8 @@ class Services:
         self.registry = ModelRegistry(db)
         self.personas = PersonaStore(db)
         self.mcp = MCPManager(cfg.mcp_servers, db)
+        self.agents = AgentManager(cfg.agents, self.http, db)
+        self.mcp.agents = self.agents
         self.tool_registry = ToolRegistry(db, self.registry, self.mcp)
         self.meridian_usage = MeridianUsage(cfg.meridian, self.http, db)
         self.guardrails = GuardrailEngine(cfg.guardrails, db, self.meridian_usage,
@@ -316,6 +319,10 @@ class Services:
                                   f"embedding-only models")
         except Exception:
             log.exception("cross-pass conflation sweep failed")
+        try:
+            await self.agents.probe_all()   # agent health / skills before the first sync
+        except Exception:
+            log.exception("agent probe failed")
         await self.tool_registry.sync(self.pool)
         await self.populate_context_lengths()
         await self.refresh_brain_health()   # populate the indicator immediately
@@ -326,6 +333,7 @@ class Services:
             asyncio.create_task(self._quota_poll_loop()),
             asyncio.create_task(self._brain_health_loop()),
             asyncio.create_task(self._pricing_loop()),
+            asyncio.create_task(self._agent_health_loop()),
         ]
 
     async def refresh_brain_health(self) -> dict:
@@ -403,6 +411,18 @@ class Services:
                 log.exception("openrouter poll loop error")
             await asyncio.sleep(3600)  # due-ness is checked inside via kv timestamp
 
+    async def _agent_health_loop(self) -> None:
+        """Re-probe external agents (Hermes) so the Agents card and the
+        agent-backed personas see health / skills without a page action."""
+        while True:
+            await asyncio.sleep(60)
+            if not self.agents.agents:
+                continue
+            try:
+                await self.agents.probe_all()
+            except Exception:
+                log.exception("agent health loop error")
+
     async def _tool_sync_loop(self) -> None:
         while True:
             await asyncio.sleep(self.config_store.config.tool_sync.periodic_seconds)
@@ -439,6 +459,10 @@ class Services:
         await self.research.stop()
         try:
             await self.mcp.close_sessions()
+        except Exception:
+            pass
+        try:
+            await self.agents.close()
         except Exception:
             pass
         await self.pool.stop()

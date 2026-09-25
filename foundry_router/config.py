@@ -467,6 +467,48 @@ class MCPAggregatorConfig(BaseModel):
     poll_guard_threshold: int = 4
 
 
+class AgentConfig(BaseModel):
+    """An external AGENT Foundry can route to (Hermes Agent by Nous Research,
+    via its OpenAI-compatible API server — `API_SERVER_ENABLED=true`, port
+    8642). An agent is not a model: it runs its own multi-step loop with its
+    own tools, skills and memory, so Foundry treats it two ways:
+
+      * as a TOOL (`expose_as_tool`): `<name>_run` / `<name>_status` /
+        `<name>_stop` appear under the MCP server "agent-<name>" — grant them
+        to a persona like any MCP server, or load them from the aggregator
+        (Cline / AnythingLLM) to delegate a long task;
+      * as a BACKEND: a persona whose "served by agent" field names this agent
+        forwards the whole conversation to it and streams the answer back, with
+        the agent's tool progress shown as thinking.
+
+    Agents are never picked by automatic model ranking."""
+    name: str
+    kind: Literal["hermes"] = "hermes"
+    url: str = "http://localhost:8642"
+    # Bearer token = the agent's API_SERVER_KEY. Empty = no auth.
+    api_key: Optional[str] = None
+    enabled: bool = True
+    # Model name sent to the agent (Hermes advertises its profile name, e.g.
+    # "hermes-agent"); empty = whatever /v1/models lists first.
+    model: str = ""
+    # Budget for one agent task — agents run long (minutes, not seconds).
+    timeout_seconds: int = 1800
+    # Offer <name>_run/_status/_stop as tools (MCP server "agent-<name>").
+    expose_as_tool: bool = True
+    # How long <name>_run blocks for the answer before handing back a run_id
+    # the caller polls with <name>_status (keeps MCP clients from timing out).
+    tool_wait_seconds: int = 600
+    # Loop protection: the API key THIS agent uses when it calls Foundry as its
+    # own model provider / MCP server. Requests carrying it are marked
+    # agent-originated: they can never be routed back into an agent (no
+    # agent-backed personas, no agent tools) — an agent can't call itself.
+    caller_token: Optional[str] = None
+    # Keep one agent session per client conversation (X-Hermes-Session-Id), so
+    # the agent keeps its own memory of earlier turns. Off = stateless: the
+    # full history is sent on every turn.
+    session_continuity: bool = True
+
+
 class AppConfig(BaseModel):
     server: ServerConfig = Field(default_factory=ServerConfig)
     agent_brain: AgentBrainConfig = Field(default_factory=AgentBrainConfig)
@@ -478,6 +520,7 @@ class AppConfig(BaseModel):
     tool_sync: ToolSyncConfig = Field(default_factory=ToolSyncConfig)
     semantic_cache: SemanticCacheConfig = Field(default_factory=SemanticCacheConfig)
     mcp_aggregator: MCPAggregatorConfig = Field(default_factory=MCPAggregatorConfig)
+    agents: list[AgentConfig] = Field(default_factory=list)
     logging: LoggingConfig = Field(default_factory=LoggingConfig)
 
 
