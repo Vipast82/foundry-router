@@ -5,6 +5,8 @@ persona model pinning."""
 
 from datetime import datetime, timezone
 
+import pytest
+
 import json
 
 from foundry_router.brain.agent import _apply_pins
@@ -272,3 +274,45 @@ def test_pinned_models_endpoint_roundtrip(client):
     coding = next(p for p in d["personas"] if p["virtual_name"] == "Foundry-Coding")
     assert json.loads(coding["pinned_models"]) == ["claude-sonnet-4-6",
                                                    "glm-4.7-flash:latest"]
+
+
+# -- limits[] preferred over legacy windows; stale readings contradicted -------------
+
+def test_oauth_one_percent_is_one_percent_not_100():
+    # Fresh week at exactly 1% used: Anthropic sends utilization 1.0 (0-100
+    # scale). That must read as 1%, never as a 1.0 fraction (= 100%).
+    from foundry_router.usage import oauth_usage_to_quota
+    raw = {"five_hour": {"utilization": 7.0, "resets_at": "2100-01-01T01:09:00+00:00"},
+           "seven_day": {"utilization": 1.0, "resets_at": "2100-01-07T15:59:00+00:00"},
+           "limits": [{"kind": "session", "percent": 7},
+                      {"kind": "weekly_all", "percent": 1},
+                      {"kind": "weekly_scoped", "percent": 40,
+                       "scope": {"model": {"display_name": "Claude Fable"}}}]}
+    b = {x["type"]: x for x in parse_quota(oauth_usage_to_quota(raw))}
+    assert b["seven_day"]["used"] == pytest.approx(0.01)
+    assert b["five_hour"]["used"] == pytest.approx(0.07)
+    assert b["seven_day_fable"]["used"] == pytest.approx(0.40)       # filled from limits
+    assert b["seven_day_fable"]["fable_scoped"] is True
+    half = parse_quota(oauth_usage_to_quota({"seven_day": {"utilization": 0.5}}))
+    assert half[0]["used"] == pytest.approx(0.005)                     # 0.5%, not 50%
+
+
+async def test_successful_call_contradicts_stale_exhausted_reading(tmp_path):
+    stale = {"buckets": [{"type": "seven_day", "utilization": 1.0, "resetsAt": 4102444800},
+                         {"type": "five_hour", "utilization": 0.07, "resetsAt": 4102444800}]}
+    http = FakeHTTP(stale)
+    db = Database(tmp_path / "c.sqlite")
+    usage = MeridianUsage(MeridianConfig(), http, db)
+    snap = await usage.snapshot("http://m")
+    assert snap["available"] is False                    # blocks Claude...
+    assert usage.last_raw("http://m")["data"] == stale
+    usage.note_successful_call("http://m")               # ...but a Claude call worked
+    snap = await usage.snapshot("http://m")
+    assert snap["available"] is True and snap["worst_used"] == 0.07
+    assert "IGNORED" in snap["note"]
+    assert [b for b in snap["buckets"] if b["type"] == "seven_day"][0]["contradicted"]
+    # the source reports something NEW -> trusted again
+    http.data = {"buckets": [{"type": "seven_day", "utilization": 0.99, "resetsAt": 4102444800}]}
+    usage.clear_cache()
+    snap = await usage.snapshot("http://m")
+    assert snap["available"] is False and "IGNORED" not in snap["note"]

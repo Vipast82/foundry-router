@@ -725,7 +725,8 @@ async def quota(request: Request):
     backends = []
     for s in getattr(svc.pool, "backends_of_type", lambda t: [])("anthropic-compatible"):
         snap = await svc.meridian_usage.snapshot(s.config.url, s.config.api_key)
-        backends.append({"backend": s.config.name, "healthy": s.healthy, **snap})
+        backends.append({"backend": s.config.name, "healthy": s.healthy, **snap,
+                         "raw": svc.meridian_usage.last_raw(s.config.url)})
     return {"backends": backends,
             "observed": observed_subscription_usage(svc.db),
             "thresholds": {

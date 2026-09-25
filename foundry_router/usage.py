@@ -179,7 +179,10 @@ def parse_quota(data: Any, now: Optional[datetime] = None) -> Optional[list[dict
             "fable_scoped": _is_fable_bucket(btype),
             "used": used,
             "resets_at": reset_dt.isoformat() if reset_dt else None,
-            "resets_hhmm": reset_dt.strftime("%H:%M UTC") if reset_dt else None,
+            # Weekday included: "15:59 UTC" alone can't tell today's reset
+            # from next week's.
+            "resets_hhmm": reset_dt.strftime("%a %H:%M UTC") if reset_dt else None,
+            "source": b.get("source") or "",
             "rolled_over": rolled,
         })
     return out
@@ -197,17 +200,60 @@ def oauth_usage_to_quota(data: Any) -> Optional[dict]:
     (used_credits is in cents — 1745 == $17.45, same unit as extraUsage.usedCredits)."""
     if not isinstance(data, dict):
         return None
-    buckets = []
+    def frac(pct):
+        # Anthropic's values are ALWAYS 0-100 here. Convert explicitly: the
+        # generic normalizer guesses the scale from the magnitude, so a real
+        # "1%" (1.0) would be misread as a 1.0 fraction = 100% — exactly what
+        # happened right after a weekly reset.
+        try:
+            return max(0.0, float(pct)) / 100.0
+        except (TypeError, ValueError):
+            return None
+
+    buckets: list[dict] = []
+    seen: set[str] = set()
     for key in ("five_hour", "seven_day", "seven_day_opus", "seven_day_sonnet"):
         b = data.get(key)
-        if isinstance(b, dict) and b.get("utilization") is not None:
-            buckets.append({"type": key, "utilization": b.get("utilization"),
-                            "resets_at": b.get("resets_at")})
+        if isinstance(b, dict) and frac(b.get("utilization")) is not None:
+            buckets.append({"type": key, "utilization": frac(b.get("utilization")),
+                            "resets_at": b.get("resets_at"), "source": "legacy"})
+            seen.add(key)
+    # The newer `limits` list (what the Claude app's usage page is built from)
+    # fills in anything the per-window keys don't carry — model-scoped weekly
+    # budgets (e.g. Fable) in particular.
+    for lim in data.get("limits") or []:
+        if not isinstance(lim, dict) or frac(lim.get("percent")) is None:
+            continue
+        btype = _limit_bucket_type(lim)
+        if not btype or btype in seen:
+            continue
+        buckets.append({"type": btype, "utilization": frac(lim.get("percent")),
+                        "resets_at": lim.get("resets_at"), "source": "limits"})
+        seen.add(btype)
     out: dict = {"buckets": buckets, "sources": {"oauth": {"live": True}}}
     extra = data.get("extra_usage")
     if isinstance(extra, dict) and extra.get("used_credits") is not None:
         out["extraUsage"] = {"usedCredits": extra.get("used_credits")}
     return out
+
+
+def _limit_bucket_type(lim: dict) -> Optional[str]:
+    """Map an Anthropic `limits[]` entry onto Foundry's bucket types:
+    session -> five_hour, weekly_all -> seven_day, weekly_scoped (a model
+    family, e.g. Fable) -> seven_day_<model>. Unknown kinds are skipped."""
+    import re
+    kind = str(lim.get("kind") or "").lower()
+    if kind in ("session", "five_hour", "5h"):
+        return "five_hour"
+    if kind in ("weekly_all", "weekly", "seven_day"):
+        return "seven_day"
+    if kind == "weekly_scoped":
+        model = ((lim.get("scope") or {}).get("model") or {})
+        name = str(model.get("display_name") or model.get("id") or "").strip().lower()
+        name = re.sub(r"^claude[\s_-]+", "", name)
+        slug = re.sub(r"[^a-z0-9]+", "_", name).strip("_")
+        return f"seven_day_{slug}" if slug else None
+    return None
 
 
 def parse_sources(data: Any) -> Optional[bool]:
@@ -250,6 +296,12 @@ class MeridianUsage:
         self._cache: dict[str, tuple[float, dict]] = {}
         self._observed_exhausted: dict[str, float] = {}  # base_url -> monotonic deadline
         self._oauth_alert: dict[str, str] = {}           # base_url -> iso since
+        # Last raw usage payload per backend (shown in the UI for verification)
+        self._last_raw: dict[str, dict] = {}
+        # A reading a live Claude call has CONTRADICTED: base_url -> signature
+        # of the exhausted buckets. While the source keeps serving that exact
+        # reading, it's ignored (the window evidently isn't exhausted).
+        self._contradicted: dict[str, tuple] = {}
 
     def clear_cache(self) -> None:
         self._cache.clear()
@@ -294,7 +346,32 @@ class MeridianUsage:
             "reports no signal; treating window as exhausted (auto-clears on the "
             "next successful Claude call or after the backoff)", base_url)
 
+    @staticmethod
+    def _exhausted_signature(snap: dict, min_fraction: float) -> tuple:
+        return tuple(sorted(
+            (b["type"], round(b["used"], 4), b.get("resets_at") or "")
+            for b in snap.get("buckets") or []
+            if b.get("used") is not None and not b.get("fable_scoped")
+            and (1.0 - b["used"]) < min_fraction))
+
+    def last_raw(self, base_url: str) -> Optional[dict]:
+        return self._last_raw.get(base_url)
+
     def note_successful_call(self, base_url: str) -> None:
+        # A Claude call just WORKED. If the usage source says the window is
+        # exhausted, that reading is wrong (stale / lagging) — stop trusting
+        # it until the source reports something different.
+        cached = self._cache.get(base_url)
+        if cached and cached[1].get("available") is False:
+            sig = self._exhausted_signature(cached[1], self.cfg.min_window_fraction)
+            if sig and self._contradicted.get(base_url) != sig:
+                self._contradicted[base_url] = sig
+                self._cache.pop(base_url, None)
+                self.db.log_event(
+                    "warning", "usage",
+                    "usage source says the Claude window is exhausted, but a Claude "
+                    "call just succeeded — ignoring that reading until it changes",
+                    f"{base_url}: {sig}")
         if self._observed_exhausted.pop(base_url, None) is not None:
             self._cache.pop(base_url, None)
             self.db.log_event("info", "usage",
@@ -324,7 +401,27 @@ class MeridianUsage:
         self._cache[base_url] = (time.monotonic(), snap)
         return self._decorate(base_url, snap)
 
+    def _apply_contradiction(self, base_url: str, snap: dict) -> dict:
+        sig = self._contradicted.get(base_url)
+        if not sig:
+            return snap
+        if self._exhausted_signature(snap, self.cfg.min_window_fraction) != sig:
+            if snap.get("buckets"):          # a NEW reading: trust it again
+                self._contradicted.pop(base_url, None)
+            return snap
+        bad = {t for t, _u, _r in sig}
+        buckets = [{**b, "contradicted": True} if b["type"] in bad else b
+                   for b in snap["buckets"]]
+        rest = [b["used"] for b in buckets if b.get("used") is not None
+                and not b.get("fable_scoped") and not b.get("contradicted")]
+        worst = max(rest, default=None)
+        return {**snap, "buckets": buckets, "worst_used": worst,
+                "available": worst is None or (1.0 - worst) >= self.cfg.min_window_fraction,
+                "note": snap["note"] + "; exhausted reading IGNORED — Claude calls are "
+                                       "succeeding, so the reported figure is stale"}
+
     def _decorate(self, base_url: str, snap: dict) -> dict:
+        snap = self._apply_contradiction(base_url, snap)
         snap = self._apply_observed(base_url, snap)
         alert_since = self._oauth_alert.get(base_url)
         return {**snap, "oauth_alert_since": alert_since} if alert_since else snap
@@ -431,6 +528,7 @@ class MeridianUsage:
                 if body.get("ok") and isinstance(body.get("raw"), dict):
                     q = oauth_usage_to_quota(body["raw"])
                     if q is not None:
+                        q["_anthropic_raw"] = body["raw"]   # for the UI's raw view
                         return q, None
                 return None, (body.get("error")
                               or f"companion usage HTTP {body.get('status')}")
@@ -449,6 +547,12 @@ class MeridianUsage:
 
     async def _fetch(self, base_url: str, api_key: Optional[str]) -> dict:
         data, fetch_error = await self._raw_quota(base_url, api_key)
+        if data is not None:
+            self._last_raw[base_url] = {
+                "at": utcnow(), "data": data,
+                "source": ("companion (Anthropic /api/oauth/usage)"
+                           if (self.cfg.usage_profile or "").strip() else
+                           f"Meridian {self.cfg.quota_path}")}
         if data is None:
             log.info("Meridian quota unreachable (%s) — assuming window available",
                      fetch_error)

@@ -4093,13 +4093,17 @@ function quotaCard(q) {
      <b>$${b.credits_used_usd.toFixed(2)} used</b>
      <span class="hint">extra usage beyond the plan windows (last-resort policy)</span></div>`);
   const lines = q.backends.flatMap(b => {
+    const when = k => { try { return k.resets_at ? new Date(k.resets_at).toLocaleString(undefined, {weekday: "short", month: "short", day: "numeric", hour: "numeric", minute: "2-digit"}) : ""; } catch (e) { return k.resets_hhmm || ""; } };
     const out = (b.buckets || []).filter(k => k.used !== null && k.used !== undefined).map(k =>
       `<div class="row"><label>${esc(b.backend)} · ${esc(k.label)} window</label>
-       <b>${Math.round(k.used * 100)}% used</b>
-       ${k.rolled_over ? `<span class="hint" title="The last usage report is from before this window reset; it refreshes on the next Claude call.">reset at ${esc(k.resets_hhmm)} — fresh window</span>`
-         : k.resets_hhmm ? `<span class="hint">resets ${esc(k.resets_hhmm)}</span>` : ""}
-       ${pill(k)}
+       <b${k.contradicted ? ' style="text-decoration:line-through"' : ""}>${Math.round(k.used * 100)}% used</b>
+       ${k.rolled_over ? `<span class="hint" title="The last usage report is from before this window reset; it refreshes on the next Claude call.">reset ${esc(when(k))} — fresh window</span>`
+         : k.resets_at ? `<span class="hint" title="${esc(k.resets_at)}">resets ${esc(when(k))}</span>` : ""}
+       ${k.contradicted ? '<span class="pill warn" title="The usage source says this window is exhausted, but a Claude call just succeeded — Foundry ignores this reading until the source reports a new value.">stale — ignored</span>' : pill(k)}
+       ${k.source ? `<span class="hint" title="legacy = Anthropic's per-window fields; limits = the newer limits list the Claude app shows">${esc(k.source)}</span>` : ""}
       </div>`);
+    if (b.raw) out.push(`<details class="row"><summary class="hint">raw usage payload — ${esc(b.raw.source)} · ${esc(_tsLabel(b.raw.at))}</summary>
+      <pre class="mono" style="max-height:260px;overflow:auto;font-size:11px">${esc(JSON.stringify(b.raw.data, null, 2))}</pre></details>`);
     // Observed-exhaustion / hard-unavailable state must be visible even when
     // the quota endpoint reports no buckets (the blind-sources case).
     if (b.available === false) {
