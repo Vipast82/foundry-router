@@ -164,7 +164,7 @@ enumerates the valid set.
   Cline's: the model's reply was cut at its output-token cap before the tool
   call (usually a `write_to_file` / `replace_in_file`) was complete, so Cline
   asks for a more concise answer (up to 3 attempts). The cap is the persona's
-  **max output tokens** (blank = `worker_max_tokens`, default 8192) and the
+  **max output tokens** (blank = `worker_max_tokens`, default 32768) and the
   model's **reasoning counts toward it** — a thinking model writing a large
   edit easily passes 8k. Set **max output tokens** on your Cline personas
   (32768 is a good start); Foundry also says so in the thinking panel when a

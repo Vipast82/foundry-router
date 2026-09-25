@@ -89,7 +89,10 @@ class AgentBrainConfig(BaseModel):
     # brain itself sees when deciding what to do next.
     tool_result_limit_chars: int = 2000   # per tool result fed back to the brain
     mcp_result_limit_chars: int = 2000    # same, for MCP tool results
-    worker_max_tokens: int = 8192         # output budget for worker-model calls
+    # Output budget for worker-model calls. Reasoning counts toward it, so a
+    # thinking model writing a large file edit needs room (8192 cut Cline's
+    # tool calls short). Per-persona override: max_output_tokens.
+    worker_max_tokens: int = 32768
     # How much of an MCP tool result a WORKER model sees (its own tool loop and
     # direct-mode persona tools). Separate from mcp_result_limit_chars, which
     # protects the small brain's context: a worker with a large context should
@@ -100,14 +103,14 @@ class AgentBrainConfig(BaseModel):
     # ~22GB every call — the main cause of multi-minute first-token latency (and
     # proxy 504s) for coding clients like Cline. None = backend default (~5min);
     # "30m"/"24h"/"-1" keep it warm. Applies to direct-dispatch worker calls.
-    worker_keep_alive: Optional[str] = None
+    worker_keep_alive: Optional[str] = "30m"
     # Direct-dispatch (Cline/coding clients) streams the worker's output live when
     # ON: each token is real proof the backend is generating (keeps the connection
     # alive, resets the read timeout per chunk — no total-time wall) and the
     # client shows it typing in real time. OFF (default) = one blocking call, the
     # full answer at the end. Streams for Ollama, openai-dialect (llama.cpp /
     # vLLM / Unsloth / OpenRouter) and Claude-via-Meridian backends.
-    direct_stream: bool = False
+    direct_stream: bool = True
     # Direct-stream keep-alive: while streaming to a coding client (Cline), if the
     # backend sends no chunk for this many seconds (a silent prompt-eval or a
     # model that buffers its reasoning), Foundry injects a small "still working…
@@ -115,7 +118,7 @@ class AgentBrainConfig(BaseModel):
     # "Thinking…", and the bytes reset idle timers along the path (client read
     # timeout, proxy) so long generations don't get killed. 0 = off. direct_stream
     # only.
-    direct_stream_heartbeat_seconds: int = 0
+    direct_stream_heartbeat_seconds: int = 10
     # Visible status cadence for ALL keep-alives: every heartbeat sends
     # invisible keep-alive bytes, but a "⏳ … still working · 2m 05s" line is
     # shown only at ~30s, ~60s, then every N seconds (each visible line is a new
@@ -137,7 +140,7 @@ class AgentBrainConfig(BaseModel):
     # over. Keep-alive pings from the backend don't count as output. Set it
     # above your slowest legitimate prefill (a 27B model reading a 150k-token
     # Cline context can take several minutes). 0 = off.
-    direct_stream_stall_seconds: int = 600
+    direct_stream_stall_seconds: int = 900
     # AGENT mode: stream the worker's REASONING (its native thinking tokens) live
     # as narration while it generates, WITHOUT streaming the answer — the brain
     # still gets the full content and reviews it (refusal/permissive fallback,
@@ -175,7 +178,7 @@ class AgentBrainConfig(BaseModel):
     # real answer, but the client's connection had already been closed —
     # raising the proxy timeout can't keep up with worst-case chains; flowing
     # bytes can). 0 disables.
-    heartbeat_seconds: float = 25.0
+    heartbeat_seconds: float = 10.0
 
 
 class BackendConfig(BaseModel):
@@ -252,7 +255,7 @@ class BackendPoolConfig(BaseModel):
     # ReadTimeout, so the default is generous. Set lower only if your models are
     # small/fast. (The ultimate fix for unbounded generations is streaming, where
     # the timeout resets per chunk.)
-    request_timeout_seconds: int = 900
+    request_timeout_seconds: int = 1200
     internal: InternalPoolConfig = Field(default_factory=InternalPoolConfig)
     olla: OllaConfig = Field(default_factory=OllaConfig)
     litellm: LiteLLMConfig = Field(default_factory=LiteLLMConfig)

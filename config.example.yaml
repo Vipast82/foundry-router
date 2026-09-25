@@ -52,7 +52,7 @@ agent_brain:
   # A Claude-class brain (provider: meridian/openrouter) can take 20000+.
   tool_result_limit_chars: 2000    # per tool result fed back into the brain
   mcp_result_limit_chars: 2000     # same, for MCP tool results
-  worker_max_tokens: 8192          # output budget for worker-model calls
+  worker_max_tokens: 32768         # output budget per worker call (reasoning counts toward it)
   # Input-side twin of tool_result_limit_chars: what the brain sees of a large
   # pasted user message (file/code) before routing. The dispatched worker
   # still receives the COMPLETE original (ask_* include_full_user_message).
@@ -62,7 +62,20 @@ agent_brain:
   # and clients close idle connections long before a failover-then-cold-load
   # chain finishes (seen live: 422s to a real answer, client gone at ~300s);
   # flowing bytes reset their idle clocks. 0 disables.
-  heartbeat_seconds: 25
+  heartbeat_seconds: 10
+  # Coding clients (Cline/OpenCode): stream tokens live, keep-alive bytes every
+  # 10s, a visible "⏳ still working · 2m 05s" line at 30s, 60s, then every 60s,
+  # and abandon a call (failing over) after 900s with no output at all.
+  direct_stream: true
+  direct_stream_heartbeat_seconds: 10
+  heartbeat_visible_seconds: 60
+  direct_stream_stall_seconds: 900
+  stream_worker_reasoning: false   # agent mode, Ollama workers only: stream reasoning live
+  worker_keep_alive: "30m"         # Ollama backends: keep the worker loaded between turns
+  # Trim what's sent to a model that would overflow its context window
+  # (Cline's own auto-compact can lag); the client keeps its full history.
+  context_guard: trim
+  context_guard_reserve_tokens: 0  # 0 = auto (the request's output cap, ≤ 1/4 window)
 
   # -- provider: meridian example --
   # provider: "meridian"
@@ -87,7 +100,7 @@ backend_pool:
   health_check_interval_seconds: 15
   failure_threshold: 3
   cooldown_seconds: 60
-  request_timeout_seconds: 300     # generation calls can be slow on local GPUs
+  request_timeout_seconds: 1200    # max gap between streamed chunks (keep above the stall timeout)
 
   internal:
     backends:
