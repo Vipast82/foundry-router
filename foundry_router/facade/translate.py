@@ -102,7 +102,8 @@ def _stats(stats: Optional[dict]) -> dict:
     # unknown keys; the OpenAI facade maps these onto usage details.
     extra = {k: s[k] for k in ("served_by", "backend", "cached_tokens",
                                "reasoning_tokens", "timing_source", "agent",
-                               "agent_tools", "agent_session") if s.get(k)}
+                               "agent_tools", "agent_session", "prompt_evaluated",
+                               "think") if s.get(k)}
     if s.get("done_reason") and _done_reason(s["done_reason"]) != str(s["done_reason"]).lower():
         extra["finish_reason"] = s["done_reason"]      # e.g. tool_calls, refusal
     if extra:

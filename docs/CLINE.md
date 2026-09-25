@@ -129,6 +129,24 @@ UI. Blank = fall through to the global **Agent Brain → reasoning_effort**.
 log, source `facade`) so you can see exactly what Cline sends. If Cline sends
 nothing, the persona setting is your knob.
 
+**Seeing the model's actual thought process.** Whatever reasoning a backend
+returns is streamed into Cline's thinking panel live: llama.cpp / vLLM
+`reasoning_content`, Ollama `thinking`, Claude's thinking summary. If a server
+leaves reasoning inline as `<think>…</think>` text (llama.cpp run with
+`--reasoning-format none`, some templates), Foundry splits it out so it lands in
+the panel instead of the reply. The first thinking line of every turn shows what
+Foundry asked for and who decided — `[think: low by persona · …]`,
+`[think: off by persona (forced) · …]`, `[think: model default · …]`. No
+reasoning in the panel usually means one of:
+
+- the persona (or Cline) turned thinking **off** — the label says so; raise the
+  persona's `reasoning_effort`;
+- the model doesn't reason (not a thinking model), or llama.cpp was started with
+  `--reasoning-budget 0`;
+- for llama.cpp, use `--jinja` with the default `--reasoning-format` (auto /
+  deepseek) so reasoning comes back as `reasoning_content`;
+- Claude only thinks when a level is set (it then returns a summary).
+
 **Which levels a model actually supports** is shown per model on the Models tab
 (`thinking_levels`) — a curated list, since no Ollama/Anthropic endpoint
 enumerates the valid set.
@@ -142,5 +160,21 @@ enumerates the valid set.
 - **Context window.** Cline sends large contexts. Set each persona's
   `context_window` to what your hardware loads (see [CONTEXT_SIZING.md](CONTEXT_SIZING.md));
   Claude is fixed at 200K.
+- **Never overflowing the window.** Cline auto-compacts when its last request
+  gets close to the context size it *thinks* the model has, so:
+  1. In Cline's provider settings set the **context window** to the persona's
+     `context_window` (Foundry also reports it in `/api/show`).
+  2. Foundry reports the **total** prompt size back to Cline. Ollama's own
+     count excludes cached tokens, which made Cline think the context was
+     small and skip compaction. Foundry now corrects that (the real re-processed
+     count stays visible as `foundry.prompt_evaluated`).
+  3. **Context guard** (Backends → Pool, on by default): if a request would
+     still overflow — one huge file read can jump past Cline's threshold in a
+     single turn — Foundry trims the copy it sends to the model: oversized old
+     tool results first, then the oldest turns after your task. The system
+     prompt and the task are always kept, and tool calls stay paired with their
+     results. Cline keeps its full history, and the turn shows
+     `⚠️ context guard: ~251k tokens would overflow the 262k window — dropped
+     14 older message(s) …`. The Usage Log and Events record it too.
 - **Only use these personas for Cline.** They're purpose-built thin routers; your
   other clients keep using `Foundry-Chat`/`Foundry-Coding`/etc.

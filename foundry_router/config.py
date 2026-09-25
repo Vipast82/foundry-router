@@ -121,6 +121,15 @@ class AgentBrainConfig(BaseModel):
     # shown only at ~30s, ~60s, then every N seconds (each visible line is a new
     # line in the client's thinking panel). 0 = never show, bytes only.
     heartbeat_visible_seconds: int = 60
+    # Context guard (direct / raw-model paths): before dispatch, estimate the
+    # prompt (messages + tool definitions) and, if it would overflow the model's
+    # window minus the output reserve, trim the copy sent to the model — oldest
+    # tool results cut first, then the oldest turns after the task. The client
+    # keeps its full history; the turn says what was cut. "off" = send as-is.
+    context_guard: Literal["trim", "off"] = "trim"
+    # Output tokens kept free for the answer. 0 = the request's max tokens
+    # (client num_predict, else worker_max_tokens), capped at 1/4 of the window.
+    context_guard_reserve_tokens: int = 0
     # Stall watchdog (direct_stream): if a backend sends NO output (no token,
     # thinking or tool call) for this long, the call is abandoned (the upstream
     # request is closed so it stops using the GPU / Claude session) and — if

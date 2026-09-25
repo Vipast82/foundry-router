@@ -176,6 +176,70 @@ def _new_id() -> str:
     return "call_" + uuid.uuid4().hex[:12]
 
 
+class ThinkSplitter:
+    """Route a model's literal <think>…</think> block at the START of its reply
+    to the thinking channel, while streaming.
+
+    Servers that don't separate reasoning themselves (llama.cpp run with
+    --reasoning-format none, some chat templates, Ollama with think off on a
+    model that reasons anyway) put the chain of thought inline in `content`.
+    Clients then show it as raw "<think>" text in the answer instead of their
+    thinking panel. Only a block that OPENS the reply is treated as reasoning
+    (a literal "<think>" later in an answer — e.g. in code — is left alone),
+    and tags split across chunks are handled."""
+    OPEN, CLOSE = "<think>", "</think>"
+
+    def __init__(self):
+        self.state = "start"            # start | think | content
+        self.buf = ""
+
+    def feed(self, text: str) -> tuple[str, str]:
+        """-> (content, thinking) to emit now."""
+        if not text:
+            return "", ""
+        if self.state == "content":
+            return text, ""
+        self.buf += text
+        if self.state == "start":
+            s = self.buf.lstrip()
+            if not s or (len(s) < len(self.OPEN) and self.OPEN.startswith(s)):
+                return "", ""               # whitespace or a partial "<thi": wait
+            if s.startswith(self.OPEN):
+                self.buf, self.state = s[len(self.OPEN):], "think"
+            else:
+                out, self.buf, self.state = self.buf, "", "content"
+                return out, ""
+        # state == think
+        i = self.buf.find(self.CLOSE)
+        if i >= 0:
+            thinking = self.buf[:i]
+            rest = self.buf[i + len(self.CLOSE):].lstrip("\n")
+            self.buf, self.state = "", "content"
+            return rest, thinking
+        keep = next((k for k in range(min(len(self.CLOSE) - 1, len(self.buf)), 0, -1)
+                     if self.CLOSE.startswith(self.buf[-k:])), 0)
+        thinking = self.buf[:len(self.buf) - keep]
+        self.buf = self.buf[len(self.buf) - keep:]
+        return "", thinking
+
+    def flush(self) -> tuple[str, str]:
+        buf, self.buf = self.buf, ""
+        if self.state == "think":
+            return "", buf
+        return buf, ""
+
+    @classmethod
+    def split(cls, content: str, thinking: str = "") -> tuple[str, str]:
+        """Non-streaming form: -> (content, thinking)."""
+        if not content or "<think>" not in content:
+            return content, thinking
+        sp = cls()
+        c1, t1 = sp.feed(content)
+        c2, t2 = sp.flush()
+        t = (t1 + t2).strip()
+        return (c1 + c2), ((thinking + "\n" + t).strip() if thinking else t)
+
+
 def pair_tool_call_ids(messages: list[dict]) -> list[dict]:
     """Give every assistant tool call an id and every tool result the id of
     the call it answers — deterministically.
@@ -495,15 +559,17 @@ class OllamaProtocol(BaseProtocol):
              "arguments": _parse_arguments(tc["function"].get("arguments"))}
             for tc in (msg.get("tool_calls") or [])
         ]
+        _c, _t = ThinkSplitter.split(msg.get("content") or "", msg.get("thinking") or "")
         return ChatResult(
-            content=msg.get("content") or "",
+            content=_c,
             tool_calls=tool_calls,
             prompt_tokens=data.get("prompt_eval_count") or 0,
             completion_tokens=data.get("eval_count") or 0,
             # Reasoning models served with think-parsing enabled put their
             # reasoning here, not in content — dropping it silently is fine
             # for correctness but wasteful for narration; carry it along.
-            thinking=msg.get("thinking") or "",
+            # Inline <think> blocks (think-parsing off) are split out too.
+            thinking=_t,
             # Warm-inference vs cold-load timing, kept apart for scoring.
             eval_duration_ns=data.get("eval_duration") or 0,
             load_duration_ns=data.get("load_duration") or 0,
@@ -523,6 +589,7 @@ class OllamaProtocol(BaseProtocol):
         payload = self._payload(model, messages, tools, options, keep_alive,
                                 stream=True, think=think, max_tokens=max_tokens, fmt=fmt)
         n_empty = 0
+        splitter = ThinkSplitter()
         async with self.client.stream("POST", f"{self.url}/api/chat", json=payload) as r:
             if r.status_code >= 400:
                 body = await r.aread()
@@ -541,6 +608,9 @@ class OllamaProtocol(BaseProtocol):
                     for tc in (msg.get("tool_calls") or [])
                 ] or None
                 if data.get("done"):
+                    fc, ft = splitter.flush()
+                    if fc or ft:
+                        yield {"content": fc, "done": False, "thinking": ft}
                     yield {"content": "", "done": True, "tool_calls": tool_calls,
                            "prompt_tokens": data.get("prompt_eval_count") or 0,
                            "completion_tokens": data.get("eval_count") or 0,
@@ -551,6 +621,9 @@ class OllamaProtocol(BaseProtocol):
                            "finish_reason": data.get("done_reason") or ""}
                 else:
                     c, th = msg.get("content") or "", msg.get("thinking") or ""
+                    if c:
+                        c, th2 = splitter.feed(c)
+                        th = th + th2
                     if not (c or th or tool_calls):
                         # Ollama is generating something it doesn't show yet
                         # (a tool call being parsed): progress, not silence.
@@ -1031,12 +1104,15 @@ class OpenAIProtocol(BaseProtocol):
                       for tc in (msg.get("tool_calls") or [])]
         usage = data.get("usage") or {}
         tm = _llamacpp_timings(data.get("timings"))
+        _c, _t = ThinkSplitter.split(msg.get("content") or "",
+                                     msg.get("reasoning_content") or msg.get("reasoning") or "")
         return ChatResult(
-            content=msg.get("content") or "",
+            content=_c,
             # Reasoning models on llama.cpp/vLLM separate their chain-of-thought
             # into reasoning_content (or reasoning); carry it as .thinking so it
-            # reaches the client's think pane instead of being lost.
-            thinking=msg.get("reasoning_content") or msg.get("reasoning") or "",
+            # reaches the client's think pane instead of being lost. An inline
+            # <think> block (--reasoning-format none) is split out as well.
+            thinking=_t,
             tool_calls=tool_calls,
             prompt_tokens=(usage.get("prompt_tokens")
                            or (tm["prompt_n"] + tm["cache_n"]) or 0),
@@ -1088,6 +1164,7 @@ class OpenAIProtocol(BaseProtocol):
                         continue
                     raise ProtocolError(f"openai-compat {self.url} HTTP {r.status_code}: {body[:300]!r}")
                 frags: dict = {}          # tool-call index -> {id,name,arguments(str)}
+                splitter = ThinkSplitter()
                 pt = ct = 0
                 cached = reasoning_tok = 0
                 finish = ""
@@ -1131,6 +1208,9 @@ class OpenAIProtocol(BaseProtocol):
                             frag["arguments"] += fn["arguments"]
                     content = delta.get("content") or ""
                     reasoning = delta.get("reasoning_content") or delta.get("reasoning") or ""
+                    if content:
+                        content, inline = splitter.feed(content)
+                        reasoning = reasoning + inline
                     if content or reasoning or delta.get("tool_calls"):
                         now = time.monotonic_ns()
                         t_first = t_first or now
@@ -1146,6 +1226,9 @@ class OpenAIProtocol(BaseProtocol):
                             "tool_chars": sum(len(f["arguments"]) for f in frags.values()),
                             "tool": next((f["name"] for f in frags.values() if f["name"]), "")}}
                 break
+        fc, ft = splitter.flush()
+        if fc or ft:
+            yield {"content": fc, "done": False, "thinking": ft}
         tool_calls = [_tool_call(f["id"], f["name"], f["arguments"])
                       for f in frags.values() if f["name"]] or None
         pt = pt or (tm["prompt_n"] + tm["cache_n"])

@@ -31,7 +31,7 @@ from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse, PlainTextResponse, StreamingResponse
 
 from .. import __version__
-from .. import keepalive, request_context, telemetry
+from .. import context_guard, keepalive, request_context, telemetry
 from ..brain import prompts
 from ..brain.agent import RequestContext
 from ..brain.fallback import guess_category, pick_fallback_model
@@ -881,6 +881,30 @@ def _think_for(svc, model_id: str, persona=None, client_think=None):
     return thinking.think_value(eff, model_id, meta.get("capabilities"), btype)
 
 
+def _think_label(svc, model_id: str, persona=None, client_think=None) -> str:
+    """What reasoning setting this call sends, and who decided it — so a turn
+    with no thinking says why (persona forces off, client sent think:false,
+    model has no thinking capability)."""
+    try:
+        v = _think_for(svc, model_id, persona, client_think)
+    except Exception:                                             # noqa: BLE001
+        return "think ?"
+    p = persona or {}
+    if p.get("force_reasoning_effort") and p.get("reasoning_effort"):
+        who = "persona (forced)"
+    elif client_think not in (None, ""):
+        who = "client"
+    elif p.get("reasoning_effort"):
+        who = "persona"
+    else:
+        who = "default"
+    if v is None:
+        return "think: model default"
+    if v is False or str(v).lower() in ("off", "false", "none"):
+        return f"think: off by {who}"
+    return f"think: {'on' if v is True else v} by {who}"
+
+
 def _available_paid(svc, persona) -> list:
     """Reachable non-local (paid) chat models, honoring the persona allowlist."""
     import json as _json
@@ -1013,6 +1037,69 @@ def _jl_list(v) -> list:
 
 
 # ---- direct dispatch (client brought its own tools) ------------------------------
+
+def _guard_window(svc, persona, model_id: str) -> int:
+    """The context window the chosen model will actually be served with: the
+    persona's context_window and the model's known window (llama.cpp n_ctx /
+    vLLM max_model_len / Ollama GGUF / registry), whichever is smaller."""
+    vals = []
+    for v in ((persona or {}).get("context_window"),
+              (svc.registry.get(model_id) or {}).get("context_length")):
+        try:
+            if v and int(v) > 0:
+                vals.append(int(v))
+        except (TypeError, ValueError):
+            pass
+    return min(vals) if vals else 0
+
+
+def _apply_context_guard(svc, persona, model_id, messages, tools, options, logger=None):
+    """Trim what's sent to the model so it fits its window. Returns
+    (messages, note or '')."""
+    cfg = svc.config_store.config.agent_brain
+    if getattr(cfg, "context_guard", "trim") == "off":
+        return messages, ""
+    window = _guard_window(svc, persona, model_id)
+    if not window:
+        return messages, ""
+    reserve = int(getattr(cfg, "context_guard_reserve_tokens", 0) or 0)
+    if not reserve:
+        try:
+            reserve = int((options or {}).get("num_predict") or 0)
+        except (TypeError, ValueError):
+            reserve = 0
+        reserve = reserve or int(cfg.worker_max_tokens or 8192)
+        reserve = min(reserve, window // 4)
+    out, rep = context_guard.fit(messages, tools, window, reserve, model_id)
+    if not rep:
+        return messages, ""
+    note = context_guard.describe(rep)
+    svc.db.log_event("warning", "context", f"{model_id}: {note}",
+                     json.dumps(rep))
+    if logger is not None:
+        logger.record_guardrail(note)
+    return out, note
+
+
+def _prompt_accounting(svc, model_id, res, convo, tools, stats: dict) -> dict:
+    """Make the prompt size the client sees the TOTAL it sent. Clients (Cline)
+    decide when to auto-compact from this number; Ollama's prompt_eval_count
+    counts only tokens it re-processed (cached ones excluded), so after the
+    first turn it can be a fraction of the real context — and the client
+    never compacts. Totals from other backends calibrate the estimator."""
+    try:
+        btype = (svc.pool.backend_info(model_id) or {}).get("type")
+        if btype == "ollama":
+            est = context_guard.estimate(convo, tools, model_id)
+            if res.prompt_tokens and res.prompt_tokens < est * 0.6:
+                stats["prompt_evaluated"] = res.prompt_tokens
+                stats["prompt_tokens"] = est
+        elif res.prompt_tokens:
+            context_guard.learn(model_id, convo, tools, res.prompt_tokens)
+    except Exception:                                             # noqa: BLE001
+        pass
+    return stats
+
 
 def _local_down_notes(svc, model_id: str) -> list[str]:
     """When a request lands on Claude because the local backend(s) are marked
@@ -1157,6 +1244,11 @@ async def _direct_dispatch_chat(svc, persona, model_name, messages, client_tools
         fmt = None                        # structured output would break tool calls
     tool_cap = int(getattr(brain_cfg, "worker_tool_max_steps", 6) or 6)
     base_convo = prompts.sanitize_history(messages)
+    # Never send more than the model's window (Cline's auto-compact can lag).
+    base_convo, _guard_note = _apply_context_guard(svc, persona, model_id, base_convo,
+                                                   all_tools, options, logger)
+    if _guard_note:
+        route_notes.append(_guard_note)
 
     async def _exec_foundry_tools(calls: list, narrate=None) -> list:
         """Run the Foundry-owned tool calls of one model turn; returns the tool
@@ -1311,8 +1403,10 @@ async def _direct_dispatch_chat(svc, persona, model_name, messages, client_tools
         tool_calls = [{**({"id": tc["id"]} if tc.get("id") else {}),
                        "function": {"name": tc["name"], "arguments": tc["arguments"]}}
                       for tc in res.tool_calls] or None
-        return tool_calls, tr.result_stats(res, time.monotonic_ns() - t0, model=model_id,
-                                           backend=last_backend)
+        return tool_calls, _prompt_accounting(
+            svc, model_id, res, base_convo, all_tools,
+            tr.result_stats(res, time.monotonic_ns() - t0, model=model_id,
+                            backend=last_backend))
 
     # LIVE STREAMING (opt-in): forward the worker's tokens as they generate — each
     # chunk is real proof the backend is working, resets the read timeout (no
@@ -1340,7 +1434,8 @@ async def _direct_dispatch_chat(svc, persona, model_name, messages, client_tools
             _rid = (request_context.request_id() or "")[:8]
             yield tr.chat_chunk(model_name, "", done=False,
                                 thinking=f"⚙️ {_tag} · {model_id} — streaming… "
-                                         f"[Foundry {__version__} · req {_rid}]\n")
+                                         f"[{_think_label(svc, model_id, persona, client_think)} · "
+                                         f"Foundry {__version__} · req {_rid}]\n")
             if mcp_defs:
                 yield tr.chat_chunk(model_name, "", done=False,
                                     thinking=f"🔧 {len(mcp_defs)} persona MCP tool(s) available "
@@ -1445,8 +1540,10 @@ async def _direct_dispatch_chat(svc, persona, model_name, messages, client_tools
                         res.tool_calls = rest
                         yield tr.chat_chunk(
                             model_name, "", done=True, tool_calls=tcs_out,
-                            stats=tr.result_stats(res, time.monotonic_ns() - t0,
-                                                  model=model_id, backend=backend_name))
+                            stats=_prompt_accounting(
+                                svc, model_id, res, convo, all_tools,
+                                tr.result_stats(res, time.monotonic_ns() - t0,
+                                                model=model_id, backend=backend_name)))
                         return
                 except StreamStalled as e:
                     # The backend went silent (a hung / queued Claude session,
@@ -1514,10 +1611,13 @@ async def _direct_dispatch_chat(svc, persona, model_name, messages, client_tools
             yield tr.chat_chunk(model_name, "", done=False,
                                 thinking=f"⚙️ passthrough ({note}) — {persona['virtual_name']} "
                                          f"policy picked {model_id}\n")
+        for n in route_notes:
+            yield tr.chat_chunk(model_name, "", done=False, thinking=f"⚠️ {n}\n")
         if hb:
             yield tr.chat_chunk(model_name, "", done=False,
                                 thinking=f"⚙️ routing to {where} · {model_id} — working… "
-                                         f"[Foundry {__version__} · req "
+                                         f"[{_think_label(svc, model_id, persona, client_think)} · "
+                                         f"Foundry {__version__} · req "
                                          f"{(request_context.request_id() or '')[:8]}]\n")
         started = time.monotonic()
         pacer = keepalive.Pacer(keepalive.visible_every(brain_cfg))
@@ -1583,6 +1683,8 @@ async def _passthrough_chat(svc, model_name, messages, client_tools, options,
     logger = RequestLogger(svc.db, "", model_name, "passthrough", user_text)
     max_tokens = svc.config_store.config.agent_brain.worker_max_tokens
     t0 = time.monotonic_ns()
+    messages, guard_note = _apply_context_guard(svc, None, model_name, messages,
+                                                client_tools, options, logger)
     if not stream:
         try:
             result, backend = await svc.pool.chat(
@@ -1612,8 +1714,10 @@ async def _passthrough_chat(svc, model_name, messages, client_tools, options,
             msg["tool_calls"] = tool_calls
         return JSONResponse({"model": model_name, "created_at": tr.now_iso(),
                              "message": msg, "done": True,
-                             **tr._stats(tr.result_stats(result, time.monotonic_ns() - t0,
-                                                         model=model_name, backend=backend))})
+                             **tr._stats(_prompt_accounting(
+                                 svc, model_name, result, messages, client_tools,
+                                 tr.result_stats(result, time.monotonic_ns() - t0,
+                                                 model=model_name, backend=backend)))})
 
     async def gen():
         status, error = "ok", ""
@@ -1627,6 +1731,8 @@ async def _passthrough_chat(svc, model_name, messages, client_tools, options,
         hb = float(brain_cfg.direct_stream_heartbeat_seconds or brain_cfg.heartbeat_seconds or 0)
         pacer = keepalive.Pacer(keepalive.visible_every(brain_cfg))
         start = time.monotonic()
+        if guard_note:
+            yield tr.chat_chunk(model_name, "", thinking=f"⚠️ {guard_note}\n")
         try:
             src = svc.pool.chat_stream(model_name, messages,
                                        tools=client_tools, options=options,
@@ -1679,8 +1785,10 @@ async def _passthrough_chat(svc, model_name, messages, client_tools, options,
                                     "function": {"name": t["name"], "arguments": t["arguments"]}}
                    for t in final.tool_calls] or None
             yield tr.chat_chunk(model_name, "", done=True, tool_calls=tcs,
-                                stats=tr.result_stats(final, time.monotonic_ns() - t0,
-                                                      model=model_name, backend=backend_name))
+                                stats=_prompt_accounting(
+                                    svc, model_name, final, messages, client_tools,
+                                    tr.result_stats(final, time.monotonic_ns() - t0,
+                                                    model=model_name, backend=backend_name)))
         else:
             yield tr.chat_chunk(model_name, "", done=True,
                                 stats={"total_duration_ns": time.monotonic_ns() - t0})

@@ -139,6 +139,7 @@ async def set_brain(request: Request):
                "user_input_preview_chars", "heartbeat_seconds", "worker_keep_alive",
                "direct_stream", "direct_stream_heartbeat_seconds",
                "direct_stream_stall_seconds", "heartbeat_visible_seconds",
+               "context_guard", "context_guard_reserve_tokens",
                "stream_worker_reasoning", "reasoning_effort", "sampling_defaults",
                "routing_mode", "worker_tool_result_chars"}
     updates = {k: v for k, v in body.items() if k in allowed}
