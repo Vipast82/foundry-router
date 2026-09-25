@@ -220,7 +220,12 @@ class Services:
         value; once set it persists (upsert_auto fills NULLs, never clobbers a
         manual override)."""
         for s in getattr(self.pool, "backends", {}).values():
-            if not s.healthy or s.config.type != "ollama":
+            # Ollama: GGUF metadata via /api/show. llama.cpp / vLLM: the
+            # serving context (per-slot n_ctx / max_model_len) and llama.cpp's
+            # declared modalities — what bounds a request on those servers.
+            local_openai = (s.config.type == "openai-compatible"
+                            and getattr(s.config, "effective_flavor", "") in ("llamacpp", "vllm"))
+            if not s.healthy or not (s.config.type == "ollama" or local_openai):
                 continue
             probe = getattr(s.protocol, "show_context_length", None)
             if probe is None:

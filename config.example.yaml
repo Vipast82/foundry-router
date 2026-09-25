@@ -127,6 +127,19 @@ backend_pool:
       #   url: http://192.168.1.55:8080       # ONE model per process; add/switch needs llama-swap
       #   flavor: llamacpp
       #   priority: 80
+      #   # llama-server flags Foundry uses: --jinja (tool calling), --metrics
+      #   # (engine KV/queue/throughput on the Live tab), -np N (parallel slots).
+      #   # llama-swap in front is auto-detected (GET /running).
+      # - name: vllm-1                        # vLLM OpenAI server
+      #   type: openai-compatible
+      #   url: http://192.168.1.57:8000
+      #   flavor: vllm
+      #   priority: 80
+      #   # Suggested launch: vllm serve <model> --tensor-parallel-size 2
+      #   #   --enable-auto-tool-choice --tool-call-parser <parser>
+      #   #   --reasoning-parser <parser> --enable-prefix-caching
+      #   #   --enable-prompt-tokens-details --served-model-name <friendly-id>
+      #   # See docs/LLAMACPP_VLLM.md.
       # - name: unsloth-1                     # Unsloth inference server
       #   type: openai-compatible
       #   url: http://192.168.1.56:8000       # loads models via the `unsloth run` CLI, not REST

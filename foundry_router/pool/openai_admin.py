@@ -6,13 +6,16 @@ delete/create) that `ollama_admin.py` proxies — these servers expose only
 READ-ONLY introspection, and each a different subset:
 
   llama.cpp (llama-server)  GET /health, /props (loaded model + sampling
-                            defaults + n_ctx), /slots (KV-cache slot state),
-                            /v1/models. ONE model per process; model CRUD needs
-                            the separate `llama-swap` proxy.
+                            defaults + n_ctx + build + modalities), /slots
+                            (KV-cache slot state), /metrics (Prometheus, needs
+                            --metrics), /v1/models. ONE model per process; model
+                            CRUD needs the separate `llama-swap` proxy, whose
+                            GET /running is probed too.
   Unsloth                   GET /v1/models (loaded). Model loading is a host CLI
                             (`unsloth run --model <name>`), NOT a REST call, so
                             there is nothing to add/delete over HTTP.
-  vLLM                      GET /v1/models, /health, /metrics (Prometheus text).
+  vLLM                      GET /v1/models (incl. max_model_len), /health,
+                            /version, /metrics (Prometheus text).
   openai (generic)          GET /v1/models.
 
 So this module deliberately offers no mutation — the Host Admin panel renders
@@ -39,9 +42,9 @@ _QUICK_TIMEOUT = httpx.Timeout(connect=5.0, read=15.0, write=15.0, pool=5.0)
 # UI renders a card per present probe; a flavor asks only for endpoints its
 # server actually implements, so we don't spam 404s.
 _PROBES: dict[str, list[str]] = {
-    "llamacpp": ["health", "props", "slots", "models"],
+    "llamacpp": ["health", "swap", "props", "slots", "models", "metrics"],
     "unsloth":  ["models"],
-    "vllm":     ["health", "models", "metrics"],
+    "vllm":     ["health", "version", "models", "metrics"],
     "openai":   ["models"],
 }
 
@@ -115,60 +118,116 @@ class OpenAIAdmin:
             return {"ok": False, "error": describe_exception(e)}
 
     async def _probe_props(self, root: str, headers: dict) -> dict:
-        """llama.cpp /props — loaded model path + generation defaults + n_ctx."""
+        """llama.cpp /props — loaded model path + generation defaults + n_ctx,
+        build, modalities (vision/audio) and the chat template's declared caps."""
         try:
             data = await self._get_json(f"{root}/props", headers)
             gen = data.get("default_generation_settings") or {}
+            params = gen.get("params") if isinstance(gen.get("params"), dict) else {}
+            keep = ("temperature", "top_k", "top_p", "min_p", "typical_p",
+                    "repeat_penalty", "repeat_last_n", "presence_penalty",
+                    "frequency_penalty", "dry_multiplier", "xtc_probability",
+                    "top_n_sigma", "n_predict", "samplers", "reasoning_format",
+                    "speculative.n_max", "speculative.n_min", "speculative.p_min")
+            sampling = {k: params[k] for k in keep if k in params}
             return {"ok": True,
                     "model_path": data.get("model_path") or gen.get("model")
                     or data.get("model") or "",
                     "n_ctx": gen.get("n_ctx") or data.get("n_ctx"),
                     "total_slots": data.get("total_slots"),
+                    "build_info": data.get("build_info") or "",
+                    "modalities": data.get("modalities") or {},
+                    "chat_template_caps": data.get("chat_template_caps") or {},
                     "chat_template_present": bool(data.get("chat_template")),
+                    "sampling_defaults": sampling,
                     "generation_settings": gen}
         except Exception as e:
             return {"ok": False, "error": describe_exception(e)}
 
     async def _probe_slots(self, root: str, headers: dict) -> dict:
-        """llama.cpp /slots — KV-cache slot occupancy (may be disabled)."""
+        """llama.cpp /slots — per-slot busy state + context (may be disabled
+        with --no-slots)."""
+        from .prom import summarize_slots
         try:
             data = await self._get_json(f"{root}/slots", headers)
             slots = data if isinstance(data, list) else data.get("slots") or []
-            return {"ok": True, "count": len(slots),
-                    "slots": [{"id": s.get("id"), "state": s.get("state"),
-                               "prompt_tokens": s.get("n_ctx") or s.get("n_prompt_tokens")}
-                              for s in slots][:16]}
+            summ = summarize_slots(slots)
+            return {"ok": True, "count": summ.get("slots_total", 0),
+                    "busy": summ.get("slots_busy", 0),
+                    "slots": summ.get("slots", [])}
+        except Exception as e:
+            return {"ok": False, "error": describe_exception(e)}
+
+    async def _probe_swap(self, root: str, headers: dict) -> dict:
+        """llama-swap GET /running — which configured models are resident.
+        Absent (404) on a plain llama-server: reported as not-a-swap, not an
+        error."""
+        try:
+            r = await self.client.get(f"{root}/running", headers=headers,
+                                      timeout=_QUICK_TIMEOUT)
+            data = r.json() if r.status_code < 400 else None
+        except Exception:
+            data = None
+        if isinstance(data, dict) and isinstance(data.get("running"), list):
+            return {"ok": True, "is_swap": True,
+                    "running": [{"model": x.get("model"), "state": x.get("state")}
+                                for x in data["running"] if isinstance(x, dict)]}
+        return {"ok": True, "is_swap": False, "running": []}
+
+    async def _probe_version(self, root: str, headers: dict) -> dict:
+        try:
+            data = await self._get_json(f"{root}/version", headers)
+            return {"ok": True, "version": str((data or {}).get("version") or "")}
         except Exception as e:
             return {"ok": False, "error": describe_exception(e)}
 
     async def _probe_models(self, v1: str, headers: dict) -> dict:
+        """/v1/models — ids plus whatever per-model metadata the server adds
+        (vLLM max_model_len; llama.cpp meta: trained ctx, params, file size;
+        router-mode status)."""
         try:
             data = await self._get_json(f"{v1}/models", headers)
-            ids = [m.get("id") for m in (data.get("data") or []) if m.get("id")]
-            return {"ok": True, "models": ids}
+            entries = [m for m in (data.get("data") or []) if isinstance(m, dict)]
+            details = []
+            for m in entries:
+                if not m.get("id"):
+                    continue
+                meta = m.get("meta") if isinstance(m.get("meta"), dict) else {}
+                st = m.get("status")
+                details.append({
+                    "id": m["id"],
+                    "max_model_len": m.get("max_model_len"),
+                    "n_ctx_train": meta.get("n_ctx_train"),
+                    "n_params": meta.get("n_params"),
+                    "size": meta.get("size"),
+                    "status": (st.get("value") if isinstance(st, dict) else st) or "",
+                    "parent": m.get("parent") or ""})
+            return {"ok": True, "models": [d["id"] for d in details],
+                    "details": details}
         except Exception as e:
             return {"ok": False, "error": describe_exception(e)}
 
-    async def _probe_metrics(self, root: str, headers: dict) -> dict:
-        """vLLM /metrics — Prometheus text; we surface only a couple of gauges."""
+    async def _probe_metrics(self, root: str, headers: dict, flavor: str) -> dict:
+        """Prometheus /metrics (vLLM always; llama.cpp with --metrics) — parsed
+        and normalized (pool/prom.py) plus the raw engine series for reference."""
+        from . import prom
         try:
             r = await self.client.get(f"{root}/metrics", headers=headers,
                                       timeout=_QUICK_TIMEOUT)
             if r.status_code >= 400:
-                return {"ok": False, "error": f"HTTP {r.status_code}"}
-            wanted = ("num_requests_running", "num_requests_waiting",
-                      "gpu_cache_usage_perc")
-            picks = {}
-            for line in (r.text or "").splitlines():
-                if line.startswith("#") or ":" not in line and " " not in line:
+                hint = (" — start llama-server with --metrics to enable"
+                        if flavor == "llamacpp" else "")
+                return {"ok": False, "error": f"HTTP {r.status_code}{hint}"}
+            parsed = prom.parse(r.text or "")
+            prefix = "llamacpp:" if flavor == "llamacpp" else "vllm:"
+            raw = {}
+            for name, samples in parsed.items():
+                if not name.startswith(prefix) or name.endswith("_bucket") \
+                        or name.endswith("_created"):
                     continue
-                key = line.split("{")[0].split(" ")[0]
-                if any(w in key for w in wanted):
-                    try:
-                        picks[key] = float(line.rsplit(" ", 1)[1])
-                    except (ValueError, IndexError):
-                        pass
-            return {"ok": True, "metrics": picks}
+                raw[name] = round(sum(v for _, v in samples), 4)
+            return {"ok": True, "summary": prom.summarize(flavor, parsed),
+                    "metrics": dict(sorted(raw.items()))}
         except Exception as e:
             return {"ok": False, "error": describe_exception(e)}
 
@@ -195,5 +254,9 @@ class OpenAIAdmin:
             elif probe == "models":
                 report["models"] = await self._probe_models(v1, headers)
             elif probe == "metrics":
-                report["metrics"] = await self._probe_metrics(root, headers)
+                report["metrics"] = await self._probe_metrics(root, headers, flavor)
+            elif probe == "swap":
+                report["swap"] = await self._probe_swap(root, headers)
+            elif probe == "version":
+                report["version"] = await self._probe_version(root, headers)
         return report

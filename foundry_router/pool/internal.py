@@ -61,6 +61,9 @@ class InternalPool(BackendPool):
         # generating right now (vs merely loaded) — the basis for activity
         # reporting and, later, load-aware routing.
         self._inflight: dict[str, dict] = {}
+        self._metrics: list[dict] = []   # engine /metrics snapshot (see server_metrics)
+        self._metrics_ts: float = 0.0
+        self._METRICS_TTL = 2.0
 
     # -- lifecycle ----------------------------------------------------------------
 
@@ -228,9 +231,34 @@ class InternalPool(BackendPool):
         out.sort(key=lambda d: -(d.get("size_vram") or 0))
         return out
 
+    async def server_metrics(self) -> list[dict]:
+        """Engine-level telemetry (KV-cache fill, queue depth, busy slots,
+        preemptions, lifetime throughput…) from every healthy llama.cpp / vLLM
+        backend, probed concurrently. Cached ~2s: the Live view polls every 2s
+        per open tab, and each probe is one or two tiny GETs."""
+        now = time.monotonic()
+        if now - self._metrics_ts < self._METRICS_TTL:
+            return self._metrics
+        targets = [s for s in self.backends.values()
+                   if s.healthy and hasattr(s.protocol, "server_metrics")]
+
+        async def one(s: BackendState) -> Optional[dict]:
+            try:
+                m = await s.protocol.server_metrics()
+            except Exception as e:
+                return {"backend": s.config.name, "flavor": getattr(s.config, "effective_flavor", None),
+                        "metrics_ok": False, "metrics_error": describe_exception(e)}
+            return {**m, "backend": s.config.name} if m else None
+
+        res = await asyncio.gather(*(one(s) for s in targets))
+        self._metrics = sorted((r for r in res if r), key=lambda r: r["backend"])
+        self._metrics_ts = now
+        return self._metrics
+
     def backend_status(self) -> list[dict]:
         return [{
             "name": s.config.name, "type": s.config.type, "url": s.config.url,
+            "flavor": getattr(s.config, "effective_flavor", None),
             "priority": s.config.priority, "healthy": s.healthy,
             "consecutive_failures": s.consecutive_failures,
             "models": s.models, "last_error": s.last_error,

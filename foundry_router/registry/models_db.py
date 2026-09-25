@@ -820,7 +820,7 @@ class ModelRegistry:
                        prompt_count: int = 0,
                        prompt_eval_duration_ns: int = 0,
                        draft_n: int = 0, draft_n_accepted: int = 0,
-                       cached_tokens: int = 0) -> None:
+                       cached_tokens: int = 0, prefill_count: int = 0) -> None:
         """Fold one model response's timing into observed telemetry.
 
         WARM inference (eval_count / eval_duration) becomes a running mean of
@@ -862,8 +862,12 @@ class ModelRegistry:
         # signal. Same incremental-mean treatment as decode, and the prefill wall
         # time (prompt_eval_duration) is tracked alongside the rate: it's the
         # latency of chewing through the context, ~= TTFT on a warm model.
-        if prompt_count > 0 and prompt_eval_duration_ns > 0:
-            ptps = prompt_count / (prompt_eval_duration_ns / 1e9)
+        # prefill_count = tokens actually prefilled (llama.cpp excludes KV-cache
+        # hits); dividing the FULL prompt by prefill time would inflate the rate
+        # by the cache-hit ratio. 0 -> the backend reports them as one number.
+        prefill_n = prefill_count or prompt_count
+        if prefill_n > 0 and prompt_eval_duration_ns > 0:
+            ptps = prefill_n / (prompt_eval_duration_ns / 1e9)
             last_prompt_tps = ptps
             last_prefill_ms = prompt_eval_duration_ns / 1e6
             if self.get(model_id) is None:
@@ -946,6 +950,57 @@ class ModelRegistry:
                 model_id, "latency", score, score_type="measured",
                 source_type="observed", source_url="observed:warm-eval",
                 confidence=observed_confidence(n))
+
+    # Every observed-performance column, grouped by what a reset targets. Speed
+    # = the rolling tok/s / ms / TTFT / cold-load averages and the last-call
+    # snapshot; truncations = the "reply hit max_tokens" counter.
+    _PERF_SPEED_COLS = (
+        "eval_tps_avg", "eval_samples", "cold_load_ms_avg", "cold_load_samples",
+        "prompt_tps_avg", "prompt_samples", "decode_ms_avg", "prefill_ms_avg",
+        "last_decode_ms", "last_prefill_ms", "last_eval_tps", "last_prompt_tps",
+        "last_cold_load_ms", "last_prompt_tokens", "last_eval_tokens",
+        "last_inference_at", "ttft_ms_avg", "ttft_samples", "last_ttft_ms",
+        "spec_draft_total", "spec_accept_total", "spec_samples",
+        "last_spec_accept_pct", "cache_hit_total", "cache_prompt_total",
+        "cache_samples", "last_cache_hit_pct")
+    _PERF_TRUNC_COLS = ("truncations", "last_finish_reason")
+
+    def reset_perf_stats(self, model_id: Optional[str] = None, speed: bool = True,
+                         truncations: bool = True,
+                         latency_benchmark: bool = False) -> int:
+        """Zero a model's (or every model's) observed performance telemetry so
+        the Live view starts clean — e.g. after a GPU swap, where the old
+        averages would otherwise blend into the new hardware's numbers for
+        hundreds of calls. Counters go to 0, averages/last-call to NULL (shown
+        as "—"). latency_benchmark also drops the observed warm-eval `latency`
+        score derived from the old tok/s, so routing re-learns it. Returns the
+        number of model rows touched. Registry metadata is never touched."""
+        cols: list[str] = []
+        if speed:
+            cols += self._PERF_SPEED_COLS
+        if truncations:
+            cols += self._PERF_TRUNC_COLS
+        n = 0
+        if cols:
+            counters = {"eval_samples", "cold_load_samples", "prompt_samples",
+                        "ttft_samples", "spec_draft_total", "spec_accept_total",
+                        "spec_samples", "cache_hit_total", "cache_prompt_total",
+                        "cache_samples", "truncations"}
+            sets = ", ".join(f"{c} = {'0' if c in counters else 'NULL'}" for c in cols)
+            where, params = ("WHERE id=?", (model_id,)) if model_id else ("", ())
+            row = self.db.query_one(f"SELECT COUNT(*) AS n FROM models {where}", params)
+            n = int((row or {}).get("n") or 0)
+            self.db.execute(f"UPDATE models SET {sets} {where}", params)
+        if latency_benchmark:
+            if model_id:
+                self.db.execute(
+                    "DELETE FROM model_benchmarks WHERE model_id=? AND category='latency' "
+                    "AND source_url='observed:warm-eval'", (model_id,))
+            else:
+                self.db.execute(
+                    "DELETE FROM model_benchmarks WHERE category='latency' "
+                    "AND source_url='observed:warm-eval'")
+        return n
 
     def note_ttft(self, model_id: str, ttft_ms: float) -> None:
         """Record one time-to-first-token sample (streaming): wall time from the

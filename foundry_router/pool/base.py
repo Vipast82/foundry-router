@@ -79,6 +79,11 @@ class BackendPool:  # interface — see internal.InternalPool for the implementa
         Empty for pools/backends that can't report it."""
         return []
 
+    async def server_metrics(self) -> list[dict]:
+        """Engine-level telemetry from llama.cpp / vLLM backends (/metrics,
+        /slots). Empty for pools/backends that can't report it."""
+        return []
+
     def add_state_listener(self, callback) -> None:
         """callback() is invoked (sync) whenever a backend changes health or
         its model list changes — Tool Sync subscribes for immediate re-sync."""

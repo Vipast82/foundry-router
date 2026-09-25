@@ -31,13 +31,14 @@ from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse, PlainTextResponse, StreamingResponse
 
 from .. import __version__
-from .. import perf_history
+from .. import telemetry
 from ..brain import prompts
 from ..brain.agent import RequestContext
 from ..brain.fallback import guess_category, pick_fallback_model
 from ..brain.user_intent import parse_confirmation
 from ..guardrails import RequestGuardState
 from ..pool.base import AllBackendsFailed
+from ..pool.protocols import ChatResult
 from ..usage import (RequestLogger, estimate_cost_usd,
                      log_subscription_usage, looks_like_window_exhaustion)
 from . import translate as tr
@@ -741,21 +742,6 @@ async def _direct_dispatch_chat(svc, persona, model_name, messages, client_tools
         # Empirical tool-calling reliability: direct dispatch is where worker
         # models actually exercise tool calling (client-supplied tools).
         svc.registry.record_tool_call(model_id, ok=True)
-        svc.registry.note_inference(model_id, res.completion_tokens,
-                                    res.eval_duration_ns, res.load_duration_ns,
-                                    prompt_count=res.prompt_tokens,
-                                    prompt_eval_duration_ns=res.prompt_eval_duration_ns,
-                                    draft_n=res.draft_n,
-                                    draft_n_accepted=res.draft_n_accepted,
-                                    cached_tokens=res.cached_tokens)
-        svc.registry.note_finish(model_id, res.finish_reason)
-        if res.finish_reason == "length":
-            svc.db.log_event(
-                "warning", "facade",
-                f"{model_id} reply TRUNCATED at max_tokens "
-                f"({res.completion_tokens} tokens, worker_max_tokens="
-                f"{brain_cfg.worker_max_tokens}) — the client will need to "
-                f"continue; raise worker_max_tokens or fix looping (sampling)")
         binfo = svc.pool.backend_info(model_id)
         if binfo and binfo.get("type") == "anthropic-compatible":
             log_subscription_usage(svc.db, model_id, backend,
@@ -766,14 +752,11 @@ async def _direct_dispatch_chat(svc, persona, model_name, messages, client_tools
         logger.record_model_call(model_id, backend, res.prompt_tokens,
                                  res.completion_tokens, cost)
         logger.finish("ok")
-        perf_history.record_sample(
-            svc.db, model=model_id, backend=backend, persona=logger.persona,
-            mode=logger.mode, prompt_tokens=res.prompt_tokens,
-            completion_tokens=res.completion_tokens, cached_tokens=res.cached_tokens,
-            draft_n=res.draft_n, draft_n_accepted=res.draft_n_accepted,
-            eval_duration_ns=res.eval_duration_ns,
-            prompt_eval_duration_ns=res.prompt_eval_duration_ns,
-            wall_ms=(time.monotonic_ns() - t0) / 1e6, finish_reason=res.finish_reason)
+        telemetry.record_call(
+            svc.db, svc.registry, model=model_id, backend=backend, result=res,
+            persona=logger.persona, mode=logger.mode,
+            wall_ms=(time.monotonic_ns() - t0) / 1e6,
+            max_tokens=brain_cfg.worker_max_tokens)
         return res
 
     def _on_error(e: BaseException) -> None:
@@ -834,41 +817,18 @@ async def _direct_dispatch_chat(svc, persona, model_name, messages, client_tools
                         tcs_out = [{"function": {"name": t["name"], "arguments": t["arguments"]}}
                                    for t in finals] or None
                         svc.registry.record_tool_call(model_id, ok=True)
-                        svc.registry.note_inference(
-                            model_id, ct, chunk.get("eval_duration_ns") or 0,
-                            chunk.get("load_duration_ns") or 0,
-                            prompt_count=pt,
-                            prompt_eval_duration_ns=chunk.get("prompt_eval_duration_ns") or 0,
-                            draft_n=chunk.get("draft_n") or 0,
-                            draft_n_accepted=chunk.get("draft_n_accepted") or 0,
-                            cached_tokens=chunk.get("cached_tokens") or 0)
-                        # Truncation visibility: a "length" finish means the reply
-                        # was cut at the max-token cap — the exact reason a client
-                        # then asks to "continue". Count it and flag it loudly.
-                        fr = chunk.get("finish_reason") or ""
-                        svc.registry.note_finish(model_id, fr)
-                        if fr == "length":
-                            svc.db.log_event(
-                                "warning", "facade",
-                                f"{model_id} reply TRUNCATED at max_tokens "
-                                f"({ct} tokens, worker_max_tokens="
-                                f"{brain_cfg.worker_max_tokens}) — the client will "
-                                f"need to continue; raise worker_max_tokens or fix "
-                                f"looping (sampling)")
                         cost = estimate_cost_usd(svc.registry.get(model_id), pt, ct)
                         logger.record_model_call(model_id, backend_name, pt, ct, cost)
                         logger.finish("ok")
-                        perf_history.record_sample(
-                            svc.db, model=model_id, backend=backend_name,
-                            persona=logger.persona, mode=logger.mode,
-                            prompt_tokens=pt, completion_tokens=ct,
-                            cached_tokens=chunk.get("cached_tokens") or 0,
-                            draft_n=chunk.get("draft_n") or 0,
-                            draft_n_accepted=chunk.get("draft_n_accepted") or 0,
-                            eval_duration_ns=chunk.get("eval_duration_ns") or 0,
-                            prompt_eval_duration_ns=chunk.get("prompt_eval_duration_ns") or 0,
-                            ttft_ms=ttft_ms, wall_ms=(time.monotonic_ns() - t0) / 1e6,
-                            finish_reason=fr)
+                        # Perf + truncation telemetry (a "length" finish = the
+                        # reply was cut at the max-token cap — the exact reason a
+                        # client then asks to "continue"; flagged in Events).
+                        telemetry.record_call(
+                            svc.db, svc.registry, model=model_id, backend=backend_name,
+                            result=ChatResult.from_done_frame(chunk, tool_calls=finals),
+                            persona=logger.persona, mode=logger.mode, ttft_ms=ttft_ms,
+                            wall_ms=(time.monotonic_ns() - t0) / 1e6,
+                            max_tokens=brain_cfg.worker_max_tokens)
                         yield tr.chat_chunk(
                             model_name, "", done=True, tool_calls=tcs_out,
                             stats={"prompt_tokens": pt, "completion_tokens": ct,
@@ -878,12 +838,14 @@ async def _direct_dispatch_chat(svc, persona, model_name, messages, client_tools
                             acc_tools.extend(chunk["tool_calls"])   # deliver at done
                         c = chunk.get("content") or ""
                         th = chunk.get("thinking") or ""
-                        if c and not ttft_recorded:
-                            # First real content token — wall time since dispatch
-                            # is the time-to-first-token (prefill-dominated).
+                        if (c or th or chunk.get("tool_calls")) and not ttft_recorded:
+                            # First generated token of ANY kind (answer, reasoning
+                            # or tool call) — wall time since dispatch is the
+                            # time-to-first-token, prefill-dominated. Counting only
+                            # answer text folded a thinking model's whole reasoning
+                            # phase into "TTFT". Recorded with the call's telemetry.
                             ttft_recorded = True
                             ttft_ms = (time.monotonic_ns() - t0) / 1e6
-                            svc.registry.note_ttft(model_id, ttft_ms)
                         if c or th:
                             yield tr.chat_chunk(model_name, c, done=False,
                                                 thinking=th or None)
@@ -976,22 +938,10 @@ async def _passthrough_chat(svc, model_name, messages, client_tools, options,
                                      estimate_cost_usd(svc.registry.get(model_name),
                                                        result.prompt_tokens,
                                                        result.completion_tokens))
-            svc.registry.note_inference(model_name, result.completion_tokens,
-                                        result.eval_duration_ns, result.load_duration_ns,
-                                        prompt_count=result.prompt_tokens,
-                                        prompt_eval_duration_ns=result.prompt_eval_duration_ns,
-                                        draft_n=result.draft_n,
-                                        draft_n_accepted=result.draft_n_accepted,
-                                        cached_tokens=result.cached_tokens)
-            perf_history.record_sample(
-                svc.db, model=model_name, backend=backend, persona=logger.persona,
-                mode=logger.mode, prompt_tokens=result.prompt_tokens,
-                completion_tokens=result.completion_tokens,
-                cached_tokens=result.cached_tokens, draft_n=result.draft_n,
-                draft_n_accepted=result.draft_n_accepted,
-                eval_duration_ns=result.eval_duration_ns,
-                prompt_eval_duration_ns=result.prompt_eval_duration_ns,
-                wall_ms=logger.elapsed_ms, finish_reason=result.finish_reason)
+            telemetry.record_call(
+                svc.db, svc.registry, model=model_name, backend=backend, result=result,
+                persona=logger.persona, mode=logger.mode, wall_ms=logger.elapsed_ms,
+                max_tokens=svc.config_store.config.agent_brain.worker_max_tokens)
             logger.finish("ok")
             tool_calls = [{"function": {"name": tc["name"], "arguments": tc["arguments"]}}
                           for tc in result.tool_calls] or None
@@ -1012,39 +962,30 @@ async def _passthrough_chat(svc, model_name, messages, client_tools, options,
 
         async def gen():
             status, error = "ok", ""
+            # The backend that will actually serve the stream (first candidate) —
+            # logged instead of a placeholder so per-backend perf splits work.
+            backend_name = (svc.pool.backend_info(model_name) or {}).get("name") or ""
+            ttft_ms = None
             try:
                 async for chunk in svc.pool.chat_stream(model_name, messages,
                                                         options=options):
                     if chunk.get("done"):
-                        logger.record_model_call(model_name, "stream",
+                        logger.record_model_call(model_name, backend_name,
                                                  chunk.get("prompt_tokens", 0),
                                                  chunk.get("completion_tokens", 0), 0.0)
                         # Perf + spec/cache telemetry on the raw-passthrough path
                         # too, so a model driven by name (not via a persona) still
                         # shows decode/prefill tok/s, draft acceptance and cache
                         # hit in the live view.
-                        svc.registry.note_inference(
-                            model_name, chunk.get("completion_tokens") or 0,
-                            chunk.get("eval_duration_ns") or 0,
-                            chunk.get("load_duration_ns") or 0,
-                            prompt_count=chunk.get("prompt_tokens") or 0,
-                            prompt_eval_duration_ns=chunk.get("prompt_eval_duration_ns") or 0,
-                            draft_n=chunk.get("draft_n") or 0,
-                            draft_n_accepted=chunk.get("draft_n_accepted") or 0,
-                            cached_tokens=chunk.get("cached_tokens") or 0)
-                        perf_history.record_sample(
-                            svc.db, model=model_name, backend="stream",
+                        telemetry.record_call(
+                            svc.db, svc.registry, model=model_name,
+                            backend=backend_name,
+                            result=ChatResult.from_done_frame(chunk),
                             persona=logger.persona, mode=logger.mode,
-                            prompt_tokens=chunk.get("prompt_tokens") or 0,
-                            completion_tokens=chunk.get("completion_tokens") or 0,
-                            cached_tokens=chunk.get("cached_tokens") or 0,
-                            draft_n=chunk.get("draft_n") or 0,
-                            draft_n_accepted=chunk.get("draft_n_accepted") or 0,
-                            eval_duration_ns=chunk.get("eval_duration_ns") or 0,
-                            prompt_eval_duration_ns=chunk.get("prompt_eval_duration_ns") or 0,
-                            wall_ms=logger.elapsed_ms,
-                            finish_reason=chunk.get("finish_reason") or "")
+                            ttft_ms=ttft_ms, wall_ms=logger.elapsed_ms)
                     elif chunk.get("content"):
+                        if ttft_ms is None:
+                            ttft_ms = logger.elapsed_ms
                         yield tr.chat_chunk(model_name, chunk["content"])
             except AllBackendsFailed as e:
                 status, error = "error", str(e)

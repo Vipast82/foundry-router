@@ -20,6 +20,8 @@ from __future__ import annotations
 
 import json
 import logging
+import re
+import time
 import uuid
 from dataclasses import dataclass, field
 from typing import Any, AsyncIterator, Optional
@@ -66,7 +68,66 @@ class ChatResult:
     # prompt_tokens is the cache-hit rate — a direct read on whether the chat
     # template is keeping the prefix cache warm across turns. 0 when unavailable.
     cached_tokens: int = 0
+    # Prompt tokens the server actually PREFILLED this call (i.e. excluding the
+    # ones served from the KV prefix cache). llama.cpp reports this separately
+    # as timings.prompt_n; usage.prompt_tokens is the FULL prompt. Prefill tok/s
+    # must divide the processed count by prefill time — dividing the full prompt
+    # would inflate the rate by the cache-hit ratio (a 90%-cached turn read 10x
+    # too fast). 0 = unknown -> callers fall back to prompt_tokens.
+    prefill_tokens: int = 0
+    # Hidden reasoning tokens inside completion_tokens (OpenAI-style
+    # usage.completion_tokens_details.reasoning_tokens — vLLM/OpenRouter report
+    # it). Shows how much of the output budget thinking is eating. 0 = unknown.
+    reasoning_tokens: int = 0
+    # Where the duration fields came from: "server" (the backend measured them —
+    # Ollama ns timings, llama.cpp `timings`), "estimated" (the router timed the
+    # stream itself because the server reports nothing — vLLM/OpenRouter; the
+    # prefill figure then includes network + queue time), or "" (no timing).
+    timing_source: str = ""
     raw: Any = None
+
+    def done_frame(self) -> dict:
+        """The canonical streaming done-frame for this result — every telemetry
+        key a protocol can report, in one place so fallbacks never drop one."""
+        return {"content": "", "done": True,
+                "tool_calls": [{"id": tc["id"], "name": tc["name"],
+                                "arguments": tc["arguments"]}
+                               for tc in self.tool_calls] or None,
+                "prompt_tokens": self.prompt_tokens,
+                "completion_tokens": self.completion_tokens,
+                "eval_duration_ns": self.eval_duration_ns,
+                "load_duration_ns": self.load_duration_ns,
+                "prompt_eval_duration_ns": self.prompt_eval_duration_ns,
+                "draft_n": self.draft_n,
+                "draft_n_accepted": self.draft_n_accepted,
+                "cached_tokens": self.cached_tokens,
+                "prefill_tokens": self.prefill_tokens,
+                "reasoning_tokens": self.reasoning_tokens,
+                "timing_source": self.timing_source,
+                "finish_reason": self.finish_reason}
+
+    @classmethod
+    def from_done_frame(cls, chunk: dict, content: str = "",
+                        tool_calls: Optional[list] = None) -> "ChatResult":
+        """Inverse of done_frame(): rebuild a result from a stream's done frame
+        (plus the content/tool calls the caller accumulated), so streamed and
+        blocking calls feed telemetry through the exact same path."""
+        c = chunk or {}
+        return cls(content=content,
+                   tool_calls=list(tool_calls if tool_calls is not None
+                                   else (c.get("tool_calls") or [])),
+                   prompt_tokens=int(c.get("prompt_tokens") or 0),
+                   completion_tokens=int(c.get("completion_tokens") or 0),
+                   eval_duration_ns=int(c.get("eval_duration_ns") or 0),
+                   load_duration_ns=int(c.get("load_duration_ns") or 0),
+                   prompt_eval_duration_ns=int(c.get("prompt_eval_duration_ns") or 0),
+                   finish_reason=c.get("finish_reason") or "",
+                   draft_n=int(c.get("draft_n") or 0),
+                   draft_n_accepted=int(c.get("draft_n_accepted") or 0),
+                   cached_tokens=int(c.get("cached_tokens") or 0),
+                   prefill_tokens=int(c.get("prefill_tokens") or 0),
+                   reasoning_tokens=int(c.get("reasoning_tokens") or 0),
+                   timing_source=c.get("timing_source") or "")
 
 
 class ProtocolError(Exception):
@@ -127,7 +188,21 @@ def _llamacpp_timings(timings: Any) -> dict:
             # loaded; absent (0) otherwise. draft_n = tokens proposed by the
             # draft, draft_n_accepted = tokens the target verified and kept.
             "draft_n": int(t.get("draft_n") or 0),
-            "draft_n_accepted": int(t.get("draft_n_accepted") or 0)}
+            "draft_n_accepted": int(t.get("draft_n_accepted") or 0),
+            # Prompt tokens reused from the KV cache (not re-prefilled). Newer
+            # llama-server builds report it here even when usage carries no
+            # prompt_tokens_details, so it's the cache-hit fallback.
+            "cache_n": int(t.get("cache_n") or 0)}
+
+
+def _reasoning_tokens(usage: Any) -> int:
+    """Hidden reasoning tokens counted inside completion_tokens — OpenAI-style
+    usage.completion_tokens_details.reasoning_tokens (vLLM, OpenRouter)."""
+    u = usage if isinstance(usage, dict) else {}
+    d = u.get("completion_tokens_details")
+    if isinstance(d, dict):
+        return int(d.get("reasoning_tokens") or 0)
+    return 0
 
 
 def _cached_tokens(usage: Any) -> int:
@@ -180,18 +255,7 @@ class BaseProtocol:
                                  max_tokens=max_tokens or 4096, think=think, fmt=fmt)
         yield {"content": result.content, "done": False,
                "thinking": result.thinking or ""}
-        yield {"content": "", "done": True,
-               "tool_calls": [{"id": tc["id"], "name": tc["name"],
-                               "arguments": tc["arguments"]} for tc in result.tool_calls] or None,
-               "prompt_tokens": result.prompt_tokens,
-               "completion_tokens": result.completion_tokens,
-               "eval_duration_ns": result.eval_duration_ns,
-               "load_duration_ns": result.load_duration_ns,
-               "prompt_eval_duration_ns": result.prompt_eval_duration_ns,
-               "draft_n": result.draft_n,
-               "draft_n_accepted": result.draft_n_accepted,
-               "cached_tokens": result.cached_tokens,
-               "finish_reason": result.finish_reason}
+        yield result.done_frame()
 
 
 # --------------------------------------------------------------------------- #
@@ -337,6 +401,7 @@ class OllamaProtocol(BaseProtocol):
             load_duration_ns=data.get("load_duration") or 0,
             prompt_eval_duration_ns=data.get("prompt_eval_duration") or 0,
             finish_reason=data.get("done_reason") or "",
+            timing_source="server" if data.get("eval_duration") else "",
             raw=data,
         )
 
@@ -373,6 +438,7 @@ class OllamaProtocol(BaseProtocol):
                            "eval_duration_ns": data.get("eval_duration") or 0,
                            "load_duration_ns": data.get("load_duration") or 0,
                            "prompt_eval_duration_ns": data.get("prompt_eval_duration") or 0,
+                           "timing_source": "server" if data.get("eval_duration") else "",
                            "finish_reason": data.get("done_reason") or ""}
                 else:
                     yield {"content": msg.get("content") or "", "done": False,
@@ -381,22 +447,97 @@ class OllamaProtocol(BaseProtocol):
 
 
 # --------------------------------------------------------------------------- #
-# OpenAI-compatible (OpenRouter, LiteLLM)                                     #
+# OpenAI-compatible (llama.cpp, vLLM, Unsloth, OpenRouter, LiteLLM)           #
 # --------------------------------------------------------------------------- #
+
+# Output-budget fitting. vLLM (and strict OpenAI) REJECT a request whose prompt
+# + max_tokens exceeds the model's context instead of truncating the reply, so a
+# long conversation plus the router's worker_max_tokens (8192) 400s even though
+# the prompt itself fits. The error states both numbers; parse them and retry
+# once with the output budget that actually fits.
+_CTX_MAX_RE = re.compile(r"maximum context length is (\d+)")
+_CTX_INPUT_RES = (re.compile(r"\((\d+) in the messages"),
+                  re.compile(r"has (\d+) input tokens"),
+                  re.compile(r"resulted in (\d+) tokens"))
+
+
+def _fit_max_tokens(error_text: str, requested: int) -> Optional[int]:
+    """A smaller max_tokens that fits the context the backend just told us
+    about, or None when the error isn't an output-budget overflow (or the
+    prompt alone doesn't fit — shrinking the reply can't fix that)."""
+    m = _CTX_MAX_RE.search(error_text or "")
+    if not m:
+        return None
+    ctx = int(m.group(1))
+    for rx in _CTX_INPUT_RES:
+        mi = rx.search(error_text)
+        if mi:
+            room = ctx - int(mi.group(1)) - 16      # small safety margin
+            return room if 64 <= room < int(requested or 0) else None
+    return None
+
+
+def _entry_loaded(entry: dict) -> bool:
+    """llama-server "router mode" (multi-model) tags each /v1/models entry with
+    a status; only loaded ones are resident."""
+    st = entry.get("status")
+    if isinstance(st, dict):
+        st = st.get("value")
+    return str(st or "").lower() in ("loaded", "ready", "running")
+
 
 class OpenAIProtocol(BaseProtocol):
     # Standard OpenAI sampling fields — safe to send to ANY openai-dialect
     # endpoint (including strict OpenAI / OpenRouter).
     _STD_SAMPLING = ("temperature", "top_p", "presence_penalty",
-                     "frequency_penalty", "seed", "stop")
-    # Non-standard sampling controls understood by the LOCAL runners
-    # (llama.cpp / Unsloth / vLLM) but rejected by a strict OpenAI endpoint —
-    # forwarded only for those flavors so a mixed fleet each gets its full knob
-    # set without 400ing the strict ones.
+                     "frequency_penalty", "seed", "stop", "logit_bias")
+    # Non-standard sampling controls understood by the LOCAL runners but
+    # rejected by a strict OpenAI endpoint. Each flavor gets the set its server
+    # actually implements, so a mixed fleet each gets its full knob set without
+    # 400ing the strict ones. Generic set (Unsloth / unknown local runner):
     _EXTRA_SAMPLING = ("top_k", "min_p", "repeat_penalty", "repetition_penalty",
                        "typical_p", "tfs_z", "mirostat", "mirostat_tau",
                        "mirostat_eta")
+    # llama-server's full /v1/chat/completions extension set (tools/server
+    # README): DRY + XTC anti-repetition samplers, top-n-sigma, dynamic
+    # temperature, sampler ordering, grammar / json_schema constraints, slot
+    # pinning, prompt caching and per-request timings.
+    _LLAMACPP_SAMPLING = (
+        "top_k", "min_p", "typical_p", "repeat_penalty", "repeat_last_n",
+        "tfs_z", "mirostat", "mirostat_tau", "mirostat_eta",
+        "dry_multiplier", "dry_base", "dry_allowed_length", "dry_penalty_last_n",
+        "dry_sequence_breakers", "xtc_probability", "xtc_threshold",
+        "top_n_sigma", "dynatemp_range", "dynatemp_exponent", "min_keep",
+        "n_keep", "n_probs", "samplers", "cache_prompt", "id_slot", "ignore_eos",
+        "t_max_predict_ms", "grammar", "json_schema", "reasoning_format",
+        "post_sampling_probs", "n_indent", "timings_per_token", "lora")
+    # vLLM's extra sampling / generation params (OpenAI server "extra
+    # parameters"): repetition controls, min_tokens, stop-token ids, guided
+    # (structured) decoding, scheduling priority, prompt truncation.
+    _VLLM_SAMPLING = (
+        "top_k", "min_p", "repetition_penalty", "length_penalty", "min_tokens",
+        "stop_token_ids", "ignore_eos", "skip_special_tokens",
+        "spaces_between_special_tokens", "include_stop_str_in_output",
+        "truncate_prompt_tokens", "bad_words", "allowed_token_ids", "priority",
+        "prompt_logprobs", "guided_json", "guided_regex", "guided_choice",
+        "guided_grammar", "guided_decoding_backend", "structured_outputs")
+    _FLAVOR_SAMPLING = {"llamacpp": _LLAMACPP_SAMPLING, "vllm": _VLLM_SAMPLING,
+                        "unsloth": _EXTRA_SAMPLING}
+    # Same knob, different spelling per server — clients (and persona sampling
+    # defaults) speak Ollama, so translate rather than silently drop.
+    _SAMPLING_ALIASES = {"llamacpp": {"repetition_penalty": "repeat_penalty",
+                                      "num_keep": "n_keep"},
+                         "vllm": {"repeat_penalty": "repetition_penalty"}}
     _LOCAL_FLAVORS = {"llamacpp", "unsloth", "vllm"}
+    _ENTRIES_TTL = 5.0          # /v1/models metadata cache (seconds)
+    _SWAP_RECHECK = 60.0        # how long a "not llama-swap" verdict is trusted
+
+    def __init__(self, *a, **kw):
+        super().__init__(*a, **kw)
+        self._entries: list[dict] = []
+        self._entries_ts = 0.0
+        self._swap_verdict: Optional[bool] = None
+        self._swap_ts = 0.0
 
     def _headers(self) -> dict:
         h = {"Content-Type": "application/json"}
@@ -408,50 +549,221 @@ class OpenAIProtocol(BaseProtocol):
         # Accept both ".../v1" and bare host urls.
         return self.url if self.url.endswith("/v1") else f"{self.url}/v1"
 
+    def _root(self) -> str:
+        """Server root (no /v1) — where llama.cpp's /props, /slots, /metrics and
+        vLLM's /metrics, /version live."""
+        return self.url[:-3].rstrip("/") if self.url.endswith("/v1") else self.url
+
+    @property
+    def _local(self) -> bool:
+        return (self.flavor or "openai") in self._LOCAL_FLAVORS
+
     async def list_models(self) -> list[str]:
         r = await self.client.get(f"{self._base()}/models", headers=self._headers(), timeout=15)
         r.raise_for_status()
-        return [m["id"] for m in r.json().get("data", [])]
+        data = [m for m in (r.json().get("data") or []) if isinstance(m, dict)]
+        # Keep the full entries: vLLM carries max_model_len, llama.cpp carries
+        # meta (n_ctx_train, n_params, size) — context + size for free.
+        self._entries, self._entries_ts = data, time.monotonic()
+        return [m["id"] for m in data if m.get("id")]
+
+    async def _models_entries(self) -> list[dict]:
+        if time.monotonic() - self._entries_ts > self._ENTRIES_TTL or not self._entries:
+            await self.list_models()
+        return self._entries
+
+    async def _get_json(self, path: str, timeout: float = 10) -> Any:
+        r = await self.client.get(f"{self._root()}{path}", headers=self._headers(),
+                                  timeout=timeout)
+        r.raise_for_status()
+        return r.json()
+
+    async def _props(self, model: Optional[str] = None) -> dict:
+        path = "/props" + (f"?model={model}" if model else "")
+        data = await self._get_json(path)
+        return data if isinstance(data, dict) else {}
+
+    async def swap_running(self) -> Optional[list[dict]]:
+        """llama-swap (the model-swapping proxy in front of llama-server) lists
+        resident models at GET /running. Returns that list, or None when this
+        isn't llama-swap. A negative verdict is cached so plain llama-server
+        isn't probed for a 404 on every Live refresh."""
+        if (self.flavor or "") != "llamacpp":
+            return None
+        now = time.monotonic()
+        if self._swap_verdict is False and now - self._swap_ts < self._SWAP_RECHECK:
+            return None
+        try:
+            data = await self._get_json("/running", timeout=5)
+        except Exception:
+            data = None
+        if isinstance(data, dict) and isinstance(data.get("running"), list):
+            self._swap_verdict, self._swap_ts = True, now
+            return [r for r in data["running"] if isinstance(r, dict)]
+        self._swap_verdict, self._swap_ts = False, now
+        return None
 
     async def loaded_models_detail(self) -> list[dict]:
-        """What this llama.cpp process is serving, for the Live VRAM table.
-        llama.cpp runs ONE model per process and does NOT report VRAM bytes over
-        HTTP — but /props gives the SERVING context size (n_ctx), which is what
-        actually determines the KV-cache footprint. So we report size_vram=0
-        (unknown, shown as "—") and carry `context` = n_ctx. Only local flavors
-        expose /props; a strict OpenAI endpoint has no such thing.
+        """What this server is serving, for the Live VRAM table.
+
+        * vLLM — every /v1/models entry, context = its max_model_len.
+        * llama-swap — the models /running says are resident.
+        * llama-server router mode — /v1/models entries whose status is loaded.
+        * plain llama-server — ONE model; /props gives the SERVING context
+          (per-slot n_ctx, what actually bounds a request) and slot count.
+        None of these report VRAM bytes over HTTP, so size_vram=0 ("—");
+        llama.cpp's /v1/models meta.size (weights file bytes) rides as `size`.
 
         The model NAME must be the /v1/models id — the exact string this server
         advertises and that requests (and therefore the perf registry) are keyed
         on. Deriving a prettier name from model_path instead breaks the join, so
         the whole perf row reads null even though the numbers were recorded."""
-        if (self.flavor or "openai") not in self._LOCAL_FLAVORS:
+        if not self._local:
             return []
-        # Authoritative id — matches the registry/dispatch key.
-        model_id = ""
+        flavor = self.flavor or "openai"
+        entries: list[dict] = []
         try:
-            ids = await self.list_models()
-            model_id = ids[0] if ids else ""
+            entries = await self._models_entries()
         except Exception:
             pass
-        # Serving context (and a fallback name if /v1/models was unavailable).
-        root = self.url[:-3].rstrip("/") if self.url.endswith("/v1") else self.url
+        if flavor == "vllm":
+            return [{"model": e["id"], "size_vram": 0, "size": 0,
+                     "context": int(e.get("max_model_len") or 0)}
+                    for e in entries if e.get("id")]
+
+        def _row(e: dict, context: int = 0, **extra) -> dict:
+            meta = e.get("meta") if isinstance(e.get("meta"), dict) else {}
+            return {"model": e.get("id"), "size_vram": 0,
+                    "size": int(meta.get("size") or 0), "context": int(context or 0),
+                    **extra}
+
+        running = await self.swap_running()
+        if running is not None:
+            by_id = {e.get("id"): e for e in entries}
+            return [_row(by_id.get(r.get("model")) or {"id": r.get("model")},
+                         state=r.get("state") or "")
+                    for r in running if r.get("model")]
+        if any("status" in e for e in entries):
+            loaded = [e for e in entries if _entry_loaded(e)]
+            if len(loaded) != 1:
+                return [_row(e) for e in loaded]
+            entries = loaded
+        # Plain llama-server (or a single loaded router model).
+        model_entry = entries[0] if entries else {}
         n_ctx = 0
+        slots = None
         try:
-            r = await self.client.get(f"{root}/props", headers=self._headers(), timeout=10)
-            r.raise_for_status()
-            data = r.json() or {}
+            data = await self._props()
             gen = data.get("default_generation_settings") or {}
             n_ctx = gen.get("n_ctx") or data.get("n_ctx") or 0
-            if not model_id:
+            slots = data.get("total_slots")
+            if not model_entry.get("id"):
                 path = data.get("model_path") or gen.get("model") or data.get("model") or ""
-                model_id = path.rsplit("/", 1)[-1].rsplit("\\", 1)[-1]
+                model_entry = {"id": path.rsplit("/", 1)[-1].rsplit("\\", 1)[-1]}
         except Exception:
             pass
-        if not model_id:
+        if not model_entry.get("id"):
             return []
-        return [{"model": model_id, "size_vram": 0, "size": 0,
-                 "context": int(n_ctx) or 0}]
+        extra = {"slots": int(slots)} if isinstance(slots, int) and slots > 0 else {}
+        return [_row(model_entry, n_ctx, **extra)]
+
+    async def show_context_length(self, model: str) -> Optional[int]:
+        """The context a request to `model` can actually use. vLLM: the entry's
+        max_model_len. llama.cpp: the SERVING per-slot n_ctx from /props when this
+        process serves just that model, else the trained window from
+        /v1/models meta.n_ctx_train (never /props on llama-swap — that would
+        trigger a model load)."""
+        if not self._local:
+            return None
+        entries = await self._models_entries()
+        e = next((x for x in entries if x.get("id") == model), None)
+        if (self.flavor or "") == "vllm":
+            v = (e or {}).get("max_model_len")
+            return int(v) if v else None
+        if (self.flavor or "") == "llamacpp" and len(entries) <= 1 \
+                and await self.swap_running() is None:
+            try:
+                gen = (await self._props()).get("default_generation_settings") or {}
+                if gen.get("n_ctx"):
+                    return int(gen["n_ctx"])
+            except Exception:
+                pass
+        meta = (e or {}).get("meta") if isinstance((e or {}).get("meta"), dict) else {}
+        return int(meta["n_ctx_train"]) if meta.get("n_ctx_train") else None
+
+    async def show_capabilities(self, model: str) -> list[str]:
+        """llama.cpp /props capabilities for a single-model server: vision/audio
+        from `modalities`, tools from the chat template's declared caps (needs
+        --jinja). [] when unknown — never guessed."""
+        if (self.flavor or "") != "llamacpp":
+            return []
+        entries = await self._models_entries()
+        if len(entries) > 1 or await self.swap_running() is not None:
+            return []
+        data = await self._props()
+        caps = ["completion"]
+        mods = data.get("modalities") or {}
+        if mods.get("vision"):
+            caps.append("vision")
+        if mods.get("audio"):
+            caps.append("audio")
+        tcaps = data.get("chat_template_caps") or {}
+        if tcaps.get("supports_tools") or tcaps.get("supports_tool_calls"):
+            caps.append("tools")
+        return caps
+
+    async def server_version(self) -> str:
+        """vLLM GET /version; llama.cpp /props build_info. "" when unknown."""
+        try:
+            if (self.flavor or "") == "vllm":
+                return str((await self._get_json("/version", timeout=5) or {}).get("version") or "")
+            if (self.flavor or "") == "llamacpp" and await self.swap_running() is None:
+                return str((await self._props()).get("build_info") or "")
+        except Exception:
+            pass
+        return ""
+
+    async def server_metrics(self) -> Optional[dict]:
+        """Server-wide live telemetry from the inference engine itself — KV-cache
+        fill, queue depth, busy slots, lifetime throughput, preemptions, prefix
+        cache and speculative acceptance — normalized across llama.cpp and vLLM
+        (see pool/prom.py). llama.cpp needs `--metrics` for /metrics; its /slots
+        is read too (busy/total), so something useful shows even without it.
+        None for flavors with no such surface."""
+        from . import prom
+        flavor = self.flavor or "openai"
+        if flavor not in ("llamacpp", "vllm"):
+            return None
+        out: dict = {"flavor": flavor}
+        paths = ["/metrics"]
+        running = await self.swap_running() if flavor == "llamacpp" else None
+        if running:
+            # llama-swap proxies each resident llama-server under /upstream/<id>.
+            paths.append(f"/upstream/{running[0].get('model')}/metrics")
+        out["metrics_ok"] = False
+        for path in paths:
+            try:
+                r = await self.client.get(f"{self._root()}{path}",
+                                          headers=self._headers(), timeout=4)
+                if r.status_code < 400 and "#" in (r.text or ""):
+                    out.update(prom.summarize(flavor, prom.parse(r.text)))
+                    out["metrics_ok"] = True
+                    out.pop("metrics_error", None)
+                    break
+                out["metrics_error"] = f"HTTP {r.status_code}"
+            except Exception as e:
+                out["metrics_error"] = str(e)[:120] or type(e).__name__
+        if flavor == "llamacpp" and running is None:
+            try:
+                data = await self._get_json("/slots", timeout=4)
+                slots = data if isinstance(data, list) else (data or {}).get("slots") or []
+                out.update(prom.summarize_slots(slots))
+            except Exception:
+                pass
+        if running is not None:
+            out["swap_running"] = [{"model": r.get("model"), "state": r.get("state")}
+                                   for r in running]
+        return out
 
     def _translate_messages(self, messages) -> list[dict]:
         msgs = []
@@ -492,10 +804,14 @@ class OpenAIProtocol(BaseProtocol):
         # OpenAI ceiling), so the same client options work across backends.
         if opts.get("num_predict"):
             payload["max_tokens"] = int(opts["num_predict"])
-        if (self.flavor or "openai") in self._LOCAL_FLAVORS:
-            for k in self._EXTRA_SAMPLING:
-                if k in opts:
-                    payload[k] = opts[k]
+        flavor = self.flavor or "openai"
+        allowed = self._FLAVOR_SAMPLING.get(flavor, ())
+        for k in allowed:
+            if k in opts:
+                payload[k] = opts[k]
+        for src, dst in self._SAMPLING_ALIASES.get(flavor, {}).items():
+            if src in opts and dst in allowed and dst not in payload:
+                payload[dst] = opts[src]
         # Reasoning. Two shapes, because openai-dialect servers disagree:
         #  * A level (low/medium/high) -> OpenAI-standard `reasoning_effort`.
         #  * Explicit OFF -> there is NO reasoning_effort="off". Qwen3/DeepSeek-R1
@@ -505,28 +821,54 @@ class OpenAIProtocol(BaseProtocol):
         #    reject it — and is harmlessly ignored by models whose template
         #    doesn't read `enable_thinking`. This gives Ollama/llama.cpp parity:
         #    `think:false` on Ollama and this here both mean "no reasoning".
+        # Operator/client chat_template_kwargs (local flavors) merge underneath.
         from .. import thinking as _thinking
         norm = _thinking.normalize(think)
-        local = (self.flavor or "openai") in self._LOCAL_FLAVORS
+        local = flavor in self._LOCAL_FLAVORS
+        tkw = dict(opts.get("chat_template_kwargs") or {}) \
+            if local and isinstance(opts.get("chat_template_kwargs"), dict) else {}
         if norm is False and local:
-            payload["chat_template_kwargs"] = {"enable_thinking": False}
+            tkw["enable_thinking"] = False
         else:
             eff = _thinking.openai_reasoning_effort(think)
             if eff:
                 payload["reasoning_effort"] = eff
+        if tkw:
+            payload["chat_template_kwargs"] = tkw
         # Structured output → OpenAI response_format. "json" = json_object; a
-        # dict is treated as a json_schema; a string schema is passed through.
+        # dict is a JSON schema. The OpenAI shape is json_schema: {name, schema}
+        # — llama.cpp and vLLM both read the schema from json_schema.schema, so
+        # a BARE schema placed there constrained nothing (silently free-form).
+        # Wrap a bare schema; pass an already-wrapped {name, schema} through.
         if fmt == "json":
             payload["response_format"] = {"type": "json_object"}
         elif isinstance(fmt, dict):
-            payload["response_format"] = {"type": "json_schema", "json_schema": fmt}
+            if isinstance(fmt.get("schema"), dict):
+                js = fmt
+            else:
+                js = {"name": "response", "schema": fmt}
+            payload["response_format"] = {"type": "json_schema", "json_schema": js}
         return payload
+
+    async def _post_chat(self, payload: dict) -> httpx.Response:
+        """POST /chat/completions, retrying ONCE with a fitted max_tokens when the
+        server rejects the output budget as overflowing its context (vLLM)."""
+        r = await self.client.post(f"{self._base()}/chat/completions",
+                                   json=payload, headers=self._headers())
+        if r.status_code == 400:
+            fitted = _fit_max_tokens(r.text, payload.get("max_tokens") or 0)
+            if fitted:
+                log.info("openai-compat %s: max_tokens %s overflows context — "
+                         "retrying with %s", self.url, payload.get("max_tokens"), fitted)
+                payload["max_tokens"] = fitted
+                r = await self.client.post(f"{self._base()}/chat/completions",
+                                           json=payload, headers=self._headers())
+        return r
 
     async def chat(self, model, messages, tools=None, options=None,
                    keep_alive=None, max_tokens=4096, think=None, fmt=None) -> ChatResult:
         payload = self._payload(model, messages, tools, options, max_tokens, think, fmt)
-        r = await self.client.post(f"{self._base()}/chat/completions",
-                                   json=payload, headers=self._headers())
+        r = await self._post_chat(payload)
         if r.status_code >= 400:
             raise ProtocolError(f"openai-compat {self.url} HTTP {r.status_code}: {r.text[:300]}")
         data = r.json()
@@ -546,7 +888,8 @@ class OpenAIProtocol(BaseProtocol):
             # reaches the client's think pane instead of being lost.
             thinking=msg.get("reasoning_content") or msg.get("reasoning") or "",
             tool_calls=tool_calls,
-            prompt_tokens=usage.get("prompt_tokens") or tm["prompt_n"] or 0,
+            prompt_tokens=(usage.get("prompt_tokens")
+                           or (tm["prompt_n"] + tm["cache_n"]) or 0),
             completion_tokens=usage.get("completion_tokens") or tm["predicted_n"] or 0,
             # llama.cpp reports per-request timings; map them onto the same ns
             # fields Ollama uses so decode/prefill tok/s are computed identically.
@@ -555,7 +898,10 @@ class OpenAIProtocol(BaseProtocol):
             finish_reason=choice.get("finish_reason") or "",
             draft_n=tm["draft_n"],
             draft_n_accepted=tm["draft_n_accepted"],
-            cached_tokens=_cached_tokens(usage),
+            cached_tokens=_cached_tokens(usage) or tm["cache_n"],
+            prefill_tokens=tm["prompt_n"],
+            reasoning_tokens=_reasoning_tokens(usage),
+            timing_source="server" if tm["eval_duration_ns"] else "",
             raw=data,
         )
 
@@ -565,75 +911,111 @@ class OpenAIProtocol(BaseProtocol):
         """Real SSE streaming for openai-dialect backends: forwards content and
         reasoning deltas live (each chunk resets the read timeout), accumulates
         index-keyed tool-call fragments, and emits tool_calls + usage on the
-        final done frame — so a mixed fleet streams to Cline exactly like Ollama."""
+        final done frame — so a mixed fleet streams to Cline exactly like Ollama.
+
+        Servers that report no per-request timings (vLLM, OpenRouter) get them
+        ESTIMATED from the stream itself: prefill ≈ time to the first delta,
+        decode ≈ first delta → last. Flagged timing_source="estimated" (the
+        prefill part includes network + queue) so the dashboard can say so."""
         payload = self._payload(model, messages, tools, options,
                                 max_tokens or 4096, think, fmt)
         payload["stream"] = True
         payload["stream_options"] = {"include_usage": True}
-        async with self.client.stream("POST", f"{self._base()}/chat/completions",
-                                      json=payload, headers=self._headers()) as r:
-            if r.status_code >= 400:
-                body = await r.aread()
-                raise ProtocolError(f"openai-compat {self.url} HTTP {r.status_code}: {body[:300]!r}")
-            frags: dict = {}          # tool-call index -> {id,name,arguments(str)}
-            pt = ct = 0
-            cached = 0
-            finish = ""
-            tm = {"eval_duration_ns": 0, "prompt_eval_duration_ns": 0,
-                  "prompt_n": 0, "predicted_n": 0,
-                  "draft_n": 0, "draft_n_accepted": 0}
-            async for line in r.aiter_lines():
-                line = line.strip()
-                if not line or not line.startswith("data:"):
-                    continue
-                body = line[5:].strip()
-                if body == "[DONE]":
-                    break
-                try:
-                    obj = json.loads(body)
-                except json.JSONDecodeError:
-                    continue
-                # llama.cpp attaches its `timings` to the stream tail — keep the
-                # last one seen so decode/prefill tok/s work when streaming too.
-                if obj.get("timings"):
-                    tm = _llamacpp_timings(obj.get("timings"))
-                usage = obj.get("usage") or {}
-                if usage:
-                    pt = usage.get("prompt_tokens") or pt
-                    ct = usage.get("completion_tokens") or ct
-                    cached = _cached_tokens(usage) or cached
-                choices = obj.get("choices") or []
-                if not choices:
-                    continue
-                if choices[0].get("finish_reason"):
-                    finish = choices[0]["finish_reason"]
-                delta = choices[0].get("delta") or {}
-                for tc in (delta.get("tool_calls") or []):
-                    idx = tc.get("index", 0)
-                    frag = frags.setdefault(idx, {"id": None, "name": "", "arguments": ""})
-                    if tc.get("id"):
-                        frag["id"] = tc["id"]
-                    fn = tc.get("function") or {}
-                    if fn.get("name"):
-                        frag["name"] = fn["name"]
-                    if fn.get("arguments"):
-                        frag["arguments"] += fn["arguments"]
-                content = delta.get("content") or ""
-                reasoning = delta.get("reasoning_content") or delta.get("reasoning") or ""
-                if content or reasoning:
-                    yield {"content": content, "done": False, "thinking": reasoning}
-            tool_calls = [{"id": f["id"] or _new_id(), "name": f["name"],
-                           "arguments": _parse_arguments(f["arguments"])}
-                          for f in frags.values() if f["name"]] or None
-            yield {"content": "", "done": True, "tool_calls": tool_calls,
-                   "prompt_tokens": pt or tm["prompt_n"],
-                   "completion_tokens": ct or tm["predicted_n"],
-                   "eval_duration_ns": tm["eval_duration_ns"],
-                   "prompt_eval_duration_ns": tm["prompt_eval_duration_ns"],
-                   "draft_n": tm["draft_n"],
-                   "draft_n_accepted": tm["draft_n_accepted"],
-                   "cached_tokens": cached,
-                   "finish_reason": finish}
+        t_start = time.monotonic_ns()
+        t_first = t_last = 0
+        for attempt in (0, 1):
+            async with self.client.stream("POST", f"{self._base()}/chat/completions",
+                                          json=payload, headers=self._headers()) as r:
+                if r.status_code >= 400:
+                    body = (await r.aread()).decode("utf-8", "replace")
+                    fitted = (_fit_max_tokens(body, payload.get("max_tokens") or 0)
+                              if r.status_code == 400 and attempt == 0 else None)
+                    if fitted:
+                        log.info("openai-compat %s: max_tokens %s overflows context "
+                                 "— retrying stream with %s", self.url,
+                                 payload.get("max_tokens"), fitted)
+                        payload["max_tokens"] = fitted
+                        continue
+                    raise ProtocolError(f"openai-compat {self.url} HTTP {r.status_code}: {body[:300]!r}")
+                frags: dict = {}          # tool-call index -> {id,name,arguments(str)}
+                pt = ct = 0
+                cached = reasoning_tok = 0
+                finish = ""
+                tm = _llamacpp_timings(None)
+                async for line in r.aiter_lines():
+                    line = line.strip()
+                    if not line or not line.startswith("data:"):
+                        continue
+                    body = line[5:].strip()
+                    if body == "[DONE]":
+                        break
+                    try:
+                        obj = json.loads(body)
+                    except json.JSONDecodeError:
+                        continue
+                    # llama.cpp attaches its `timings` to the stream tail — keep
+                    # the last one seen so decode/prefill tok/s work streaming too.
+                    if obj.get("timings"):
+                        tm = _llamacpp_timings(obj.get("timings"))
+                    usage = obj.get("usage") or {}
+                    if usage:
+                        pt = usage.get("prompt_tokens") or pt
+                        ct = usage.get("completion_tokens") or ct
+                        cached = _cached_tokens(usage) or cached
+                        reasoning_tok = _reasoning_tokens(usage) or reasoning_tok
+                    choices = obj.get("choices") or []
+                    if not choices:
+                        continue
+                    if choices[0].get("finish_reason"):
+                        finish = choices[0]["finish_reason"]
+                    delta = choices[0].get("delta") or {}
+                    for tc in (delta.get("tool_calls") or []):
+                        idx = tc.get("index", 0)
+                        frag = frags.setdefault(idx, {"id": None, "name": "", "arguments": ""})
+                        if tc.get("id"):
+                            frag["id"] = tc["id"]
+                        fn = tc.get("function") or {}
+                        if fn.get("name"):
+                            frag["name"] = fn["name"]
+                        if fn.get("arguments"):
+                            frag["arguments"] += fn["arguments"]
+                    content = delta.get("content") or ""
+                    reasoning = delta.get("reasoning_content") or delta.get("reasoning") or ""
+                    if content or reasoning or delta.get("tool_calls"):
+                        now = time.monotonic_ns()
+                        t_first = t_first or now
+                        t_last = now
+                    if content or reasoning:
+                        yield {"content": content, "done": False, "thinking": reasoning}
+                break
+        tool_calls = [{"id": f["id"] or _new_id(), "name": f["name"],
+                       "arguments": _parse_arguments(f["arguments"])}
+                      for f in frags.values() if f["name"]] or None
+        pt = pt or (tm["prompt_n"] + tm["cache_n"])
+        ct = ct or tm["predicted_n"]
+        cached = cached or tm["cache_n"]
+        eval_ns, prompt_ns = tm["eval_duration_ns"], tm["prompt_eval_duration_ns"]
+        prefill_n = tm["prompt_n"]
+        source = "server" if eval_ns else ""
+        if not eval_ns and t_first and ct > 1 and t_last > t_first:
+            # First delta → last delta spans ct-1 inter-token gaps; scale so
+            # ct / eval_ns equals the true (ct-1)/span decode rate.
+            eval_ns = int((t_last - t_first) * ct / (ct - 1))
+            prompt_ns = t_first - t_start
+            prefill_n = max(0, pt - cached)
+            source = "estimated"
+        yield {"content": "", "done": True, "tool_calls": tool_calls,
+               "prompt_tokens": pt,
+               "completion_tokens": ct,
+               "eval_duration_ns": eval_ns,
+               "prompt_eval_duration_ns": prompt_ns,
+               "draft_n": tm["draft_n"],
+               "draft_n_accepted": tm["draft_n_accepted"],
+               "cached_tokens": cached,
+               "prefill_tokens": prefill_n,
+               "reasoning_tokens": reasoning_tok,
+               "timing_source": source,
+               "finish_reason": finish}
 
 
 # --------------------------------------------------------------------------- #

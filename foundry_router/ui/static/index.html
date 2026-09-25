@@ -140,6 +140,60 @@
   .dev-rec pre { background:var(--bg); border:1px solid var(--line); border-radius:5px;
                  padding:8px; overflow:auto; max-height:340px; white-space:pre-wrap;
                  word-break:break-word; margin:4px 0 2px; }
+  /* -- Tooltips + help ------------------------------------------------------------
+     Every title="" in the app is upgraded on hover into a styled, wrapping
+     tooltip (#tip) — readable multi-line help instead of the tiny native one.
+     Anything carrying help gets a dotted underline + help cursor so it's
+     discoverable. The small round "?" buttons open a longer explanation. */
+  #tip { position:fixed; z-index:30; max-width:min(380px, 92vw); display:none;
+         background:var(--panel); color:var(--fg); border:1px solid var(--accent);
+         border-radius:6px; padding:7px 10px; font-size:12px; line-height:1.45;
+         box-shadow:0 6px 22px rgba(0,0,0,.35); pointer-events:none;
+         white-space:pre-line; }
+  th[title], th[data-tip], .tile[title] .t-lbl, .tile[data-tip] .t-lbl, .has-tip {
+         text-decoration:underline dotted var(--dim); text-underline-offset:3px;
+         cursor:help; }
+  button.help { display:inline-flex; align-items:center; justify-content:center;
+         width:17px; height:17px; padding:0; margin-left:5px; border-radius:50%;
+         border:1px solid var(--dim); background:transparent; color:var(--dim);
+         font-size:11px; font-weight:700; line-height:1; cursor:pointer;
+         vertical-align:middle; flex:none; }
+  button.help:hover { border-color:var(--accent); color:var(--accent); }
+  .modal { position:fixed; inset:0; z-index:25; background:rgba(0,0,0,.55);
+         display:flex; align-items:flex-start; justify-content:center;
+         padding:6vh 14px; overflow-y:auto; }
+  .modal[hidden] { display:none; }
+  .modal-box { background:var(--panel); border:1px solid var(--line);
+         border-radius:9px; padding:16px 18px; width:min(640px, 100%);
+         position:relative; box-shadow:0 12px 40px rgba(0,0,0,.45); }
+  .modal-box h3 { margin:0 26px 10px 0; color:var(--accent); font-size:15px; }
+  .modal-box .modal-x { position:absolute; top:10px; right:10px; }
+  .modal-body p { margin:6px 0; }
+  .modal-body dt { font-weight:600; margin-top:8px; }
+  .modal-body dd { margin:2px 0 0 14px; color:var(--dim); }
+  .modal-body code { background:var(--bg); padding:0 4px; border-radius:3px; }
+  /* Headline stat tiles (Performance / Live) */
+  .tiles { display:flex; gap:10px; flex-wrap:wrap; }
+  .tile { min-width:118px; flex:1 1 118px; background:var(--bg);
+          border:1px solid var(--line); border-radius:7px; padding:7px 10px; }
+  .tile .t-lbl { color:var(--dim); font-size:11.5px; }
+  .tile .t-val { font-size:19px; font-weight:600; }
+  .tile .t-sub { color:var(--dim); font-size:11px; }
+  .card-h { display:flex; align-items:center; gap:6px; font-weight:600;
+            margin-bottom:6px; flex-wrap:wrap; }
+  .card-h .hint { font-weight:normal; margin:0; }
+  .card-h .grow { flex:1; }
+  /* Horizontal meter (KV-cache fill, slot occupancy) */
+  .meter { display:inline-block; width:110px; height:9px; border-radius:5px;
+           background:var(--line); overflow:hidden; vertical-align:middle; }
+  .meter > span { display:block; height:100%; background:var(--ok); }
+  .meter.warn > span { background:var(--warn); }
+  .meter.bad > span { background:var(--bad); }
+  .srv { display:grid; grid-template-columns:repeat(auto-fill, minmax(190px, 1fr));
+         gap:8px 18px; margin-top:4px; }
+  .srv .k { color:var(--dim); font-size:11.5px; }
+  .srv .v { font-weight:600; }
+  .est { color:var(--warn); font-weight:700; margin-left:2px; }
   /* -- Responsive: PC / tablet / phone ---------------------------------------- */
   @media (max-width: 900px) {
     header { flex-wrap:wrap; gap:4px 12px; padding:9px 12px; }
@@ -211,6 +265,299 @@ function clearLog(kind, label) {
   api(kind + "/clear", { method: "POST" })
     .then(r => { toast(`Cleared ${r.removed} row(s)`); render(); })
     .catch(e => toast(e.message, true));
+}
+
+/* ------------------------------------------------------------ tooltips -- */
+// One global handler upgrades every title="" into the styled #tip tooltip on
+// hover (the attribute moves to data-tip so the tiny native one never doubles
+// up). Works for markup rendered later too — no per-tab wiring.
+const _tip = document.createElement("div");
+_tip.id = "tip";
+document.body.appendChild(_tip);
+let _tipEl = null;
+function _placeTip(el) {
+  const r = el.getBoundingClientRect(), tw = _tip.offsetWidth, th = _tip.offsetHeight;
+  let x = Math.min(Math.max(8, r.left), window.innerWidth - tw - 8);
+  let y = r.bottom + 6;
+  if (y + th > window.innerHeight - 8) y = Math.max(8, r.top - th - 6);
+  _tip.style.left = x + "px"; _tip.style.top = y + "px";
+}
+document.addEventListener("mouseover", e => {
+  const el = e.target.closest && e.target.closest("[title],[data-tip]");
+  if (!el || el === _tipEl) return;
+  if (el.hasAttribute("title")) {
+    const t = el.getAttribute("title");
+    el.removeAttribute("title");
+    if (t) el.setAttribute("data-tip", t);
+  }
+  const txt = el.getAttribute("data-tip");
+  if (!txt) return;
+  _tipEl = el;
+  _tip.textContent = txt;
+  _tip.style.display = "block";
+  _placeTip(el);
+});
+document.addEventListener("mouseout", e => {
+  if (_tipEl && !_tipEl.contains(e.relatedTarget)) { _tip.style.display = "none"; _tipEl = null; }
+});
+["scroll", "mousedown", "keydown"].forEach(ev => document.addEventListener(ev, () => {
+  _tip.style.display = "none"; _tipEl = null; }, true));
+
+/* --------------------------------------------------------------- modal -- */
+const _modal = document.createElement("div");
+_modal.className = "modal"; _modal.hidden = true;
+_modal.innerHTML = `<div class="modal-box" role="dialog" aria-modal="true">
+  <button class="act modal-x" title="Close (Esc)">✕</button><h3></h3><div class="modal-body"></div></div>`;
+document.body.appendChild(_modal);
+function closeModal() { _modal.hidden = true; $(".modal-body", _modal).innerHTML = ""; }
+function openModal(title, html) {
+  $("h3", _modal).textContent = title;
+  $(".modal-body", _modal).innerHTML = html;
+  _modal.hidden = false;
+  return $(".modal-body", _modal);
+}
+$(".modal-x", _modal).onclick = closeModal;
+_modal.addEventListener("click", e => { if (e.target === _modal) closeModal(); });
+document.addEventListener("keydown", e => { if (e.key === "Escape" && !_modal.hidden) closeModal(); });
+
+/* ---------------------------------------------------------------- help -- */
+// Longer explanations behind the small "?" buttons. Short hover text lives in
+// title="" on the element itself; this is the "what does this mean and what
+// should I do about it" layer.
+const HELP = {
+  live: ["Live activity", `
+    <p>A 2-second heartbeat of the router: which models are generating right now, how fast
+    they've been running, what's loaded on each GPU host, and what just finished.</p>
+    <p>Rates marked <b>avg · last</b> show the rolling average over every recorded call and the most
+    recent single call. Hover any column header or pill for a one-line definition.</p>
+    <p>Starting fresh (e.g. after a GPU swap)? Use <b>Clear stats…</b> — and set a
+    <b>run label</b> on the Performance tab so old and new numbers stay separable.</p>`],
+  generating: ["Models generating now", `
+    <p>Every model with a call in flight at this instant, how long it has been running, and
+    <b>×N</b> when several requests share it. The ~tok/s is that model's average decode speed.</p>
+    <p>A model sitting here far longer than usual usually means a cold load (weights being read
+    into VRAM) or a very large prompt being prefilled.</p>`],
+  perfstrip: ["Recent performance", `
+    <dl>
+    <dt>effective tok/s</dt><dd>Output tokens ÷ total wall time over the last N requests — includes
+      prefill, queueing and tool time. This is the speed you actually feel.</dd>
+    <dt>decode tok/s</dt><dd>Pure generation speed once the model is producing tokens. Always ≥ effective;
+      a big gap means prefill/queue/tool time dominates.</dd>
+    <dt>Ø s / req</dt><dd>Average end-to-end time per finished request.</dd>
+    <dt>truncations</dt><dd>Replies cut off because they hit the output-token cap
+      (<code>worker_max_tokens</code>). Each one is a turn where Cline/Kilo has to say “continue”.
+      A rising count means the cap is too low or the model is looping — try a repeat/DRY penalty.</dd>
+    </dl>`],
+  servers: ["Inference servers (engine metrics)", `
+    <p>Numbers reported by the inference <b>engine itself</b> — not per request, but server-wide.
+    They answer “is the box saturated?” rather than “how fast was that call?”.</p>
+    <dl>
+    <dt>KV cache</dt><dd>How full the key/value cache is. Near 100% the server must queue, evict or
+      (vLLM) preempt requests. More VRAM (e.g. 22 GB cards) or a smaller context / quantized
+      cache (<code>-ctk q8_0 -ctv q8_0</code> on llama.cpp) buys headroom.</dd>
+    <dt>running / queued</dt><dd>Requests being processed vs waiting for a free slot.
+      A persistent queue means more parallel slots (<code>-np</code>) or a second GPU host would help.</dd>
+    <dt>slots busy</dt><dd>llama.cpp parallel slots in use (from <code>/slots</code>).</dd>
+    <dt>engine prefill / decode tok/s</dt><dd>The engine's own throughput averages (lifetime of the
+      server process) — a cross-check for the per-call numbers below.</dd>
+    <dt>mean TTFT / TPOT / queue</dt><dd>vLLM histogram means: time to first token, time per output
+      token (1000 ÷ TPOT = decode tok/s), and time spent queued.</dd>
+    <dt>prefix cache</dt><dd>Share of prompt tokens served from cache (vLLM automatic prefix caching).</dd>
+    <dt>preemptions</dt><dd>vLLM paused a request because the KV cache ran out. Any non-zero, growing
+      value = VRAM pressure; lower <code>--max-num-seqs</code> or <code>--max-model-len</code>.</dd>
+    </dl>
+    <p><b>Enable it:</b> llama.cpp needs <code>--metrics</code> (and <code>/slots</code> not disabled);
+    vLLM exposes <code>/metrics</code> by default.</p>`],
+  loaded: ["Loaded models — per-model performance", `
+    <p>One row per model resident on a backend, with everything the router has measured for it.
+    <b>avg</b> = rolling average across all recorded calls; <b>last</b> = the most recent call.</p>
+    <dl>
+    <dt>VRAM · ctx</dt><dd>GPU memory held (Ollama reports it; llama.cpp/vLLM don't over HTTP, so “—”)
+      and the serving context window below it.</dd>
+    <dt>TTFT</dt><dd>Time to first token — how long you wait before anything appears. Dominated by prefill on
+      big prompts; much higher than “prefill time” means the request was queued.</dd>
+    <dt>decode tok/s · decode time</dt><dd>Generation speed and how long generation took.</dd>
+    <dt>prefill tok/s · prefill time</dt><dd>Prompt-processing speed and duration. Only tokens actually
+      processed count — prompt tokens served from the KV cache are excluded, so a cache hit doesn't
+      inflate the rate.</dd>
+    <dt>eff tok/s</dt><dd>Output ÷ total wall time of each call (incl. prefill + queue).</dd>
+    <dt>spec accept</dt><dd>Speculative decoding: share of draft-model tokens the main model kept.
+      ≥60% is healthy; low means the draft model is mismatched or <code>--draft-max</code> is too deep.</dd>
+    <dt>cache hit</dt><dd>Share of the prompt reused from the KV prefix cache. High on multi-turn chats is
+      good; a sudden drop points at a chat-template change breaking the cache.</dd>
+    <dt>load</dt><dd>Typical cold-load time (reading weights into VRAM); “warm” if never observed.</dd>
+    <dt>trunc</dt><dd>Replies cut off at the output-token cap.</dd>
+    <dt><span class="est">≈</span> marker</dt><dd>Timing <b>estimated</b> by the router from the stream
+      (vLLM/OpenRouter report no per-request timings). Decode is accurate; prefill includes network +
+      queue time.</dd>
+    </dl>`],
+  toolstats: ["Tool activity", `<p>MCP tool calls in the recent request window, grouped by tool: how
+    often each ran, its average duration and failures. A tool with many failures is usually a
+    misconfigured or rate-limited MCP server (see the MCP Servers tab).</p>`],
+  brain: ["Routing brain", `<p>The small model that decides, for every request, which worker model
+    answers. <b>reachable</b> = its endpoint answers; <b>loaded</b> = it's resident in VRAM (a cold brain
+    adds seconds to every routing decision).</p>`],
+  recent: ["Recently finished", `<p>The last few completed requests: which persona/mode handled them,
+    the models used, prompt → output tokens and the end-to-end rate. Full history lives in
+    <b>Logs → Usage Log</b>.</p>`],
+  perf: ["Performance history", `
+    <p>Every completed model call is recorded as a sample (kept ${14} days), so you can see <b>when</b>
+    speed or cache reuse changed — not just the long-run average.</p>
+    <p><b>Filters</b> narrow everything on the page: time window, model, backend (e.g. compare the same
+    model on llama.cpp vs vLLM) and run label.</p>
+    <p><b>Per-model breakdown</b> is the table to read first: one row per model × backend × run.</p>
+    <p>Gaps in a chart mean the backend didn't report that metric for those calls — never a fake zero.</p>`],
+  runlabel: ["Run labels — compare before / after", `
+    <p>A run label is stamped on every new sample until you change it. Use it to keep hardware or
+    config experiments apart instead of blending them into one average.</p>
+    <p><b>Suggested GPU-swap workflow:</b></p>
+    <ol style="margin:4px 0 4px 18px;padding:0">
+      <li>Set the label to your current setup, e.g. <code>2x4060ti-16gb</code>, and run your usual workload.</li>
+      <li>Swap the cards. Set the label to <code>2x2080ti-22gb</code>.</li>
+      <li>Optionally <b>Clear data…</b> → Live averages only, so the Live view shows just the new hardware.</li>
+      <li>Read the <b>Per-model breakdown</b> — each model gets one row per run label, side by side.</li>
+    </ol>
+    <p>Filter by <b>Run</b> to chart a single run. Samples recorded before any label was set show as
+    <i>(unlabelled)</i>.</p>`],
+  clear: ["Clearing performance data", `
+    <dl>
+    <dt>Performance history samples</dt><dd>The per-call rows behind this tab's charts and tables.
+      Can be narrowed to one model, backend and/or run label.</dd>
+    <dt>Live averages</dt><dd>The rolling tok/s, TTFT, prefill, cold-load, speculative-acceptance and
+      cache-hit stats shown on the Live tab (per model, or all).</dd>
+    <dt>Truncation counters</dt><dd>The “replies hit max_tokens” counts, plus their warnings in the
+      Events log.</dd>
+    <dt>Usage Log</dt><dd>The request history (Logs → Usage Log), which also drives Live's
+      “recent performance” strip and “recently finished”. All-models scope only.</dd>
+    <dt>Observed latency scores</dt><dd>The routing score derived from each model's old tok/s. Clear it
+      after a hardware change so routing re-learns speeds.</dd>
+    </dl>
+    <p>Model registry entries, personas and configuration are never touched.</p>`],
+  bymodel: ["Per-model breakdown", `
+    <p>One row per <b>model × backend × run label</b> in the selected window — the direct way to compare
+    the same model across GPUs, backends (llama.cpp vs vLLM) or configurations.</p>
+    <dl>
+    <dt>median decode</dt><dd>Typical generation speed (median is robust to one-off outliers).</dd>
+    <dt>TTFT avg / p95</dt><dd>Average and 95th-percentile time to first token — p95 is the “bad day” wait.</dd>
+    <dt>max ctx</dt><dd>Largest prompt seen — speeds usually drop as the context grows.</dd>
+    <dt>trunc</dt><dd>Replies that hit the output-token cap.</dd>
+    </dl>`],
+  charts: ["Reading the charts", `
+    <dl>
+    <dt>Throughput</dt><dd>Decode (pure generation) vs effective (end-to-end) tok/s per call.</dd>
+    <dt>Prefill speed</dt><dd>Prompt tokens processed per second — the big-context bottleneck.</dd>
+    <dt>TTFT</dt><dd>Wait before the first token, per call (streamed calls only).</dd>
+    <dt>Spec accept / cache hit</dt><dd>Speculative-decoding acceptance and KV prefix-cache reuse, 0–100%.</dd>
+    <dt>Context fill</dt><dd>Prompt size per call — watch it climb toward the context cap and drop when the
+      client compacts the conversation.</dd>
+    <dt>Correlation</dt><dd>Each dot is a call; brighter = more recent. A downward slope means the metric
+      degrades as the context fills.</dd>
+    </dl>`],
+  cost: ["Cost calculator", `<p>Prices the tokens actually processed in the window against paid-API list
+    prices (editable below), and estimates what self-hosting cost in electricity. A decision aid, not a
+    bill: cloud APIs charge for the full context every turn, which is why long agentic sessions are
+    where local hardware pays off.</p>`],
+  host_llamacpp: ["llama.cpp diagnostics", `
+    <p>Read straight from <code>llama-server</code>:</p>
+    <dl>
+    <dt>/props</dt><dd>Loaded model, per-slot context, slot count, build, modalities (vision/audio),
+      chat-template capabilities and the server's default sampling.</dd>
+    <dt>/slots</dt><dd>Which parallel slots are busy and how much each has decoded.</dd>
+    <dt>/metrics</dt><dd>Prometheus counters — start the server with <code>--metrics</code>.</dd>
+    <dt>/running</dt><dd>Present when <b>llama-swap</b> fronts several llama-server configs.</dd>
+    </dl>
+    <p>Useful launch flags: <code>--jinja</code> (tool calling), <code>--metrics</code>,
+    <code>-np N</code> (parallel slots), <code>-fa on</code> (flash attention),
+    <code>-ctk/-ctv q8_0</code> (smaller KV cache), <code>-md draft.gguf --draft-max N</code>
+    (speculative decoding). Per-request samplers (DRY, XTC, top-n-sigma, min_p…) set in a persona's
+    sampling options are forwarded automatically.</p>`],
+  host_vllm: ["vLLM diagnostics", `
+    <p>Read from vLLM's OpenAI server: <code>/health</code>, <code>/version</code>,
+    <code>/v1/models</code> (with <code>max_model_len</code>) and <code>/metrics</code>.</p>
+    <p>Recommended launch flags for Foundry: <code>--enable-auto-tool-choice --tool-call-parser &lt;parser&gt;</code>
+    (tool calling for Cline/Kilo), <code>--reasoning-parser &lt;parser&gt;</code> (thinking models →
+    think pane), <code>--enable-prefix-caching</code>, <code>--enable-prompt-tokens-details</code>
+    (cache-hit % per call), <code>--tensor-parallel-size 2</code> for a GPU pair, and
+    <code>--served-model-name</code> to give the model a friendly id.</p>
+    <p>vLLM reports no per-request timings, so Foundry times streamed calls itself (marked
+    <span class="est">≈</span>). When a long conversation + output budget would overflow
+    <code>max_model_len</code>, Foundry retries once with an output budget that fits.</p>`],
+};
+// A "?" button opening HELP[key] in the modal. Use inside headings/cards.
+function help(key) {
+  const h = HELP[key];
+  return h ? `<button type="button" class="help" data-help="${key}" title="What is this? — ${esc(h[0])}">?</button>` : "";
+}
+document.addEventListener("click", e => {
+  const b = e.target.closest && e.target.closest("button.help[data-help]");
+  if (!b) return;
+  const h = HELP[b.getAttribute("data-help")];
+  if (h) openModal(h[0], h[1]);
+});
+
+/* ------------------------------------------------- clear perf data dialog -- */
+// Shared by the Live and Performance tabs. `pre` preselects {model, backend,
+// run_label} from the current filters.
+async function openClearDialog(pre) {
+  pre = pre || {};
+  let hist = {models: [], backends: [], run_labels: []};
+  try { hist = await api("perf-history?hours=720"); } catch (e) {}
+  const opt = (v, l, sel) => `<option value="${esc(v)}"${sel ? " selected" : ""}>${esc(l)}</option>`;
+  const body = openModal("Clear performance data", `
+    <p class="hint" style="margin-top:0">Start with clean numbers — e.g. after changing GPUs, a
+      model, or launch flags.</p>
+    <details style="margin:0 0 8px"><summary>What does each option clear?</summary>${HELP.clear[1]}</details>
+    <div class="row"><label title="Everything, or just one model">Scope</label>
+      <select id="clr-model">${opt("", "All models", !pre.model)}${(hist.models || []).map(m =>
+        opt(m.model, m.model + " (" + m.n + " calls)", m.model === pre.model)).join("")}</select></div>
+    <div class="row"><label title="History samples only: limit to one backend">Backend (history)</label>
+      <select id="clr-backend">${opt("", "any", !pre.backend)}${(hist.backends || []).map(b =>
+        opt(b.backend, (b.backend || "(none)") + " (" + b.n + ")", b.backend === pre.backend)).join("")}</select></div>
+    <div class="row"><label title="History samples only: limit to one run label">Run (history)</label>
+      <select id="clr-run">${opt("__all__", "any run", pre.run_label == null)}${(hist.run_labels || []).map(r =>
+        opt(r.run_label, (r.run_label || "(unlabelled)") + " (" + r.n + ")", r.run_label === pre.run_label)).join("")}</select></div>
+    <div style="margin:10px 0 4px;font-weight:600">What to clear</div>
+    <label class="row" style="margin:3px 0"><input type="checkbox" id="clr-samples" checked>
+      Performance history samples <span class="hint" style="margin:0">(charts + tables on the Performance tab)</span></label>
+    <label class="row" style="margin:3px 0"><input type="checkbox" id="clr-live" checked>
+      Live averages <span class="hint" style="margin:0">(tok/s, TTFT, prefill, load, spec, cache)</span></label>
+    <label class="row" style="margin:3px 0"><input type="checkbox" id="clr-trunc" checked>
+      Truncation counters <span class="hint" style="margin:0">(+ their Events warnings)</span></label>
+    <label class="row" style="margin:3px 0"><input type="checkbox" id="clr-bench">
+      Observed latency scores <span class="hint" style="margin:0">(routing re-learns speed)</span></label>
+    <label class="row" style="margin:3px 0"><input type="checkbox" id="clr-req">
+      Usage Log <span class="hint" style="margin:0">(request history — all models only)</span></label>
+    <div class="row" style="margin-top:12px">
+      <button class="act primary" id="clr-go">Clear selected</button>
+      <button class="act" id="clr-cancel">Cancel</button>
+      <span class="hint" id="clr-note"></span></div>`);
+  const sync = () => {
+    const all = !$("#clr-model", body).value;
+    const req = $("#clr-req", body);
+    req.disabled = !all; if (!all) req.checked = false;
+    $("#clr-note", body).textContent = all ? "" : "Usage Log can only be cleared for all models.";
+  };
+  $("#clr-model", body).onchange = sync; sync();
+  $("#clr-cancel", body).onclick = closeModal;
+  $("#clr-go", body).onclick = async () => {
+    const model = $("#clr-model", body).value, run = $("#clr-run", body).value;
+    const payload = {model, backend: $("#clr-backend", body).value,
+      samples: $("#clr-samples", body).checked, live: $("#clr-live", body).checked,
+      truncations: $("#clr-trunc", body).checked, benchmarks: $("#clr-bench", body).checked,
+      requests: $("#clr-req", body).checked};
+    if (run !== "__all__") payload.run_label = run;
+    if (!Object.keys(payload).some(k => payload[k] === true)) return toast("Nothing selected", true);
+    if (!confirm(`Permanently clear the selected data for ${model || "ALL models"}? This cannot be undone.`)) return;
+    try {
+      const r = await api("perf/clear", {method: "POST", body: payload});
+      const bits = [];
+      if (r.samples != null) bits.push(`${r.samples} samples`);
+      if (r.models_reset != null) bits.push(`${r.models_reset} model stat rows reset`);
+      if (r.requests != null) bits.push(`${r.requests} requests`);
+      toast("Cleared: " + (bits.join(", ") || "done"));
+      closeModal(); render();
+    } catch (e) { toast(e.message, true); }
+  };
 }
 
 /* ------------------------------------------------------------------ tabs -- */
@@ -380,10 +727,55 @@ function sparkRow(series) {
     + cell("latency s/req", sparkline(sec, c2, "s"), sec[sec.length - 1] + "s", c2)
     + `</div>`;
 }
+// "Inference servers" card: engine-level telemetry per llama.cpp / vLLM backend
+// (normalized server-side by pool/prom.py). Every stat is optional — a build
+// that doesn't export it simply doesn't show it.
+function renderServers(servers) {
+  if (!servers.length)
+    return '<span class="hint">No llama.cpp or vLLM backends (engine metrics come from their <code>/metrics</code> and <code>/slots</code> endpoints; Ollama exposes none).</span>';
+  const meter = (pct, tip) => {
+    const cls = pct >= 90 ? "bad" : pct >= 70 ? "warn" : "";
+    return `<span class="meter ${cls}" title="${esc(tip)}"><span style="width:${Math.max(0, Math.min(100, pct)).toFixed(0)}%"></span></span> ${_num(pct, "%")}`;
+  };
+  const K = n => n == null ? "—" : n >= 1e9 ? (n / 1e9).toFixed(2) + "B" : n >= 1e6 ? (n / 1e6).toFixed(1) + "M" : n >= 1e3 ? (n / 1e3).toFixed(1) + "k" : "" + Math.round(n);
+  return servers.map(sv => {
+    const items = [];
+    const it = (k, v, tip) => items.push(`<div title="${esc(tip)}"><div class="k has-tip">${k}</div><div class="v">${v}</div></div>`);
+    if (sv.kv_cache_usage_pct != null)
+      it("KV cache", meter(sv.kv_cache_usage_pct, "KV cache fill"), "How full the key/value cache is. Near 100% the engine must queue or preempt requests.");
+    if (sv.kv_cache_tokens != null) it("KV tokens", K(sv.kv_cache_tokens), "Tokens currently held in the KV cache.");
+    if (sv.slots_total != null)
+      it("slots busy", meter(100 * (sv.slots_busy || 0) / sv.slots_total, "slot occupancy").replace(/[\d.]+%$/, `${sv.slots_busy}/${sv.slots_total}`),
+         "llama.cpp parallel slots processing a request right now (from /slots). All busy = new requests wait.");
+    if (sv.requests_running != null || sv.requests_waiting != null)
+      it("running / queued", `${sv.requests_running ?? "—"} / ${sv.requests_waiting ?? 0}${sv.requests_waiting ? ' <span class="pill warn">queue</span>' : ""}`,
+         "Requests being processed vs waiting for capacity. A persistent queue = add slots (-np) or another GPU host.");
+    if (sv.avg_decode_tps != null) it("engine decode", _num(sv.avg_decode_tps) + " tok/s", "The engine's own average generation speed (vLLM: 1000 ÷ mean time-per-output-token).");
+    if (sv.avg_prompt_tps != null) it("engine prefill", _num(sv.avg_prompt_tps) + " tok/s", "The engine's own average prompt-processing speed.");
+    if (sv.mean_ttft_ms != null) it("mean TTFT", _num(sv.mean_ttft_ms, "ms"), "vLLM: mean time to first token since the server started.");
+    if (sv.mean_tpot_ms != null) it("mean TPOT", _num(sv.mean_tpot_ms, "ms"), "vLLM: mean time per output token (inter-token latency).");
+    if (sv.mean_queue_ms != null) it("mean queue", _num(sv.mean_queue_ms, "ms"), "vLLM: mean time a request waited before being scheduled.");
+    if (sv.mean_e2e_ms != null) it("mean request", _num(sv.mean_e2e_ms, "ms"), "vLLM: mean end-to-end request latency.");
+    if (sv.prefix_cache_hit_pct != null) it("prefix cache", _num(sv.prefix_cache_hit_pct, "%"), "Share of prompt tokens served from the prefix cache (lifetime).");
+    if (sv.spec_accept_pct != null) it("spec accept", _num(sv.spec_accept_pct, "%"), "Engine-wide speculative-decoding acceptance (lifetime).");
+    if (sv.preemptions_total != null)
+      it("preemptions", sv.preemptions_total ? `<span class="pill warn">${K(sv.preemptions_total)}</span>` : "0",
+         "vLLM paused a request because the KV cache ran out. Growing = VRAM pressure: lower --max-num-seqs / --max-model-len.");
+    if (sv.truncated_total != null) it("hit max_tokens", K(sv.truncated_total), "vLLM: requests that finished because they reached their output-token limit (lifetime).");
+    if (sv.busy_slots_per_decode != null) it("slots / decode", _num(sv.busy_slots_per_decode), "llama.cpp: average busy slots per decode step — batching efficiency.");
+    if (sv.prompt_tokens_total != null) it("prompt tokens", K(sv.prompt_tokens_total), "Lifetime prompt tokens processed by this server process.");
+    if (sv.generation_tokens_total != null) it("generated", K(sv.generation_tokens_total), "Lifetime tokens generated by this server process.");
+    const swap = (sv.swap_running || []).length
+      ? `<div class="hint" style="margin:4px 0 0">llama-swap resident: ${sv.swap_running.map(r => `<span class="pill">${esc(r.model)}${r.state ? " · " + esc(r.state) : ""}</span>`).join(" ")}</div>` : "";
+    const note = sv.metrics_ok ? "" : `<div class="hint" style="margin:4px 0 0">/metrics unavailable${sv.metrics_error ? " (" + esc(sv.metrics_error) + ")" : ""}${sv.flavor === "llamacpp" ? " — start llama-server with <code>--metrics</code> for KV-cache, queue and throughput counters." : "."}</div>`;
+    return `<div style="margin:4px 0 12px"><div><b>${esc(sv.backend)}</b> <span class="pill">${esc(_FLAVOR_LABEL[sv.flavor] || sv.flavor || "")}</span></div>
+      ${items.length ? `<div class="srv">${items.join("")}</div>` : ""}${swap}${note}</div>`;
+  }).join("");
+}
 // =========================================================================
 // Performance tab — historical charts + rich per-call table from perf_samples
 // =========================================================================
-const _PERF = { hours: 72, model: "" };   // window + model filter (persisted)
+const _PERF = { hours: 72, model: "", backend: "", run: "__all__" };   // filters (persisted)
 try { Object.assign(_PERF, JSON.parse(localStorage.getItem("perfCtl") || "{}")); } catch (e) {}
 
 function _css(name, fallback) {
@@ -480,111 +872,224 @@ function scatterChart(rows, xKey, yKey, opts) {
 }
 
 async function tabPerformance() {
-  const winOpts = [[6, "6h"], [24, "24h"], [72, "3d"], [168, "7d"], [336, "14d"]];
+  const winOpts = [[1, "1h"], [6, "6h"], [24, "24h"], [72, "3d"], [168, "7d"], [336, "14d"]];
+  const cardH = (title, key, sub) =>
+    `<div class="card-h">${title}${key ? help(key) : ""}${sub ? `<span class="hint">— ${sub}</span>` : ""}</div>`;
   $("#main").innerHTML = `
-    <h2 style="margin-top:0">Performance history <span class="hint" id="perf-ts"></span></h2>
-    <p class="hint">Per-call metrics over time — pinpoint <b>when</b> throughput, speculative acceptance or KV-cache reuse start to degrade across a long run, and correlate them against context fill.</p>
-    <div class="card" style="display:flex;gap:14px;align-items:center;flex-wrap:wrap">
-      <label>Window
+    <h2 style="margin-top:0;display:flex;align-items:center">Performance history ${help("perf")}
+      <span class="hint" id="perf-ts" style="margin:0 0 0 8px"></span></h2>
+    <p class="hint">Every model call over time — see <b>when</b> throughput, TTFT, speculative acceptance or
+      KV-cache reuse changed, compare models and hardware runs side by side, and correlate against context fill.</p>
+    <div class="card" style="display:flex;gap:10px 16px;align-items:center;flex-wrap:wrap">
+      <label title="How far back to look">Window
         <select id="perf-win">${winOpts.map(([h, l]) => `<option value="${h}"${h === _PERF.hours ? " selected" : ""}>${l}</option>`).join("")}</select></label>
-      <label>Model <select id="perf-model"><option value="">all models</option></select></label>
-      <button class="act" id="perf-refresh">Refresh</button>
-      <button class="act" id="perf-csv">Export CSV</button>
-      <span class="hint" id="perf-count"></span>
+      <label title="Show one model, or every model">Model <select id="perf-model"><option value="">all models</option></select></label>
+      <label title="Show calls served by one backend (e.g. the same model on llama.cpp vs vLLM)">Backend <select id="perf-backend"><option value="">all backends</option></select></label>
+      <label title="Show one run label (hardware/config experiment), or all of them">Run <select id="perf-run"><option value="__all__">all runs</option></select></label>
+      <button class="act" id="perf-refresh" title="Reload the data now">Refresh</button>
+      <button class="act" id="perf-csv" title="Download every sample in the current view as a CSV file">Export CSV</button>
+      <button class="act" id="perf-clear" title="Delete performance data (all, or the current model/backend/run) to start clean">Clear data…</button>
+      <span class="hint" id="perf-count" style="margin:0"></span>
+    </div>
+    <div class="card">
+      ${cardH("🏷 Run label", "runlabel", "stamped on every new sample so hardware/config changes stay comparable")}
+      <div class="row" style="margin:0">
+        <input id="perf-label" size="26" maxlength="64" placeholder="e.g. 2x2080ti-22gb"
+          title="Label for the samples recorded from now on. Blank = unlabelled.">
+        <button class="act primary" id="perf-label-set">Set label</button>
+        <span class="hint" id="perf-label-cur" style="margin:0"></span>
+      </div>
     </div>
     <div id="perf-summary"></div>
-    <div class="card"><div style="font-weight:600;margin-bottom:6px">Throughput — decode vs effective tok/s</div><div id="perf-c-tps"></div></div>
-    <div class="card"><div style="font-weight:600;margin-bottom:6px">Prefill speed (tok/s)</div><div id="perf-c-prefill"></div></div>
-    <div class="card"><div style="font-weight:600;margin-bottom:6px">Speculative acceptance & KV-cache hit (%)</div><div id="perf-c-pct"></div></div>
-    <div class="card"><div style="font-weight:600;margin-bottom:6px">Context fill — prompt tokens per call <span class="hint" style="font-weight:normal">— watch it climb toward the cap, then drop on compaction</span></div><div id="perf-c-ctx"></div></div>
-    <div class="card"><div style="font-weight:600;margin-bottom:6px">Correlation — does acceptance fall as context fills?</div>
-      <div id="perf-c-scatter1"></div><div style="height:8px"></div><div id="perf-c-scatter2"></div></div>
-    <div class="card"><div style="font-weight:600;margin-bottom:6px">Recent calls <span class="hint" style="font-weight:normal">— every metric, newest first</span></div><div id="perf-table"></div></div>`;
+    <div class="card">${cardH("Per-model breakdown", "bymodel", "model × backend × run, every call in the window")}<div id="perf-bymodel"></div></div>
+    <div class="card">${cardH("Throughput — decode vs effective tok/s", "charts")}<div id="perf-c-tps"></div></div>
+    <div class="card">${cardH("Prefill speed (tok/s)", "charts")}<div id="perf-c-prefill"></div></div>
+    <div class="card">${cardH("Time to first token", "charts", "streamed calls")}<div id="perf-c-ttft"></div></div>
+    <div class="card">${cardH("Speculative acceptance & KV-cache hit (%)", "charts")}<div id="perf-c-pct"></div></div>
+    <div class="card">${cardH("Context fill — prompt tokens per call", "charts", "watch it climb toward the cap, then drop on compaction")}<div id="perf-c-ctx"></div></div>
+    <div class="card">${cardH("Correlation — does it degrade as context fills?", "charts")}
+      <div id="perf-c-scatter1"></div><div style="height:8px"></div><div id="perf-c-scatter2"></div><div style="height:8px"></div><div id="perf-c-scatter3"></div></div>
+    <div class="card">${cardH("Recent calls", null, "every metric, newest first (60 shown)")}<div id="perf-table"></div></div>`;
   let last = { series: [] };
+  const dash = '<span class="hint">—</span>';
+  const cell = (v, unit) => v == null ? dash : _num(v, unit);
   const load = async () => {
     _PERF.hours = +$("#perf-win").value;
     _PERF.model = $("#perf-model").value;
+    _PERF.backend = $("#perf-backend").value;
+    _PERF.run = $("#perf-run").value;
     try { localStorage.setItem("perfCtl", JSON.stringify(_PERF)); } catch (e) {}
+    let q = `perf-history?hours=${_PERF.hours}&model=${encodeURIComponent(_PERF.model || "")}`
+      + `&backend=${encodeURIComponent(_PERF.backend || "")}`;
+    if (_PERF.run && _PERF.run !== "__all__") q += `&run_label=${encodeURIComponent(_PERF.run === "__none__" ? "" : _PERF.run)}`;
     let d;
-    try { d = await api(`perf-history?hours=${_PERF.hours}&model=${encodeURIComponent(_PERF.model)}`); }
+    try { d = await api(q); }
     catch (e) { $("#perf-summary").innerHTML = '<div class="card hint">Could not load history.</div>'; return; }
     last = d;
     const rows = d.series || [];
     $("#perf-ts").textContent = "· " + new Date().toLocaleTimeString();
-    $("#perf-count").textContent = `${d.summary.samples} calls in window`;
-    // model filter options (preserve current)
-    const sel = $("#perf-model"), cur = sel.value;
-    sel.innerHTML = '<option value="">all models</option>' +
-      (d.models || []).map(m => `<option value="${esc(m.model)}">${esc(m.model)} (${m.n})</option>`).join("");
-    sel.value = cur;
+    const s = d.summary || {};
+    $("#perf-count").textContent = `${s.samples} calls in view${rows.length < s.samples ? ` (charts show newest ${rows.length})` : ""}`;
+    // filter dropdowns (preserve selection even if it has no rows right now)
+    const fill = (id, first, items, val, lab) => {
+      const sel = $(id), cur = sel.value || val || "";
+      sel.innerHTML = first + items.map(it => `<option value="${esc(it.v)}">${esc(lab(it))}</option>`).join("");
+      if (![...sel.options].some(o => o.value === cur) && cur)
+        sel.insertAdjacentHTML("beforeend", `<option value="${esc(cur)}">${esc(cur === "__none__" ? "(unlabelled)" : cur)}</option>`);
+      sel.value = cur;
+    };
+    fill("#perf-model", '<option value="">all models</option>',
+      (d.models || []).map(m => ({v: m.model, n: m.n})), _PERF.model, it => `${it.v} (${it.n})`);
+    fill("#perf-backend", '<option value="">all backends</option>',
+      (d.backends || []).map(b => ({v: b.backend, n: b.n})), _PERF.backend, it => `${it.v || "(none)"} (${it.n})`);
+    fill("#perf-run", '<option value="__all__">all runs</option>',
+      (d.run_labels || []).map(r => ({v: r.run_label || "__none__", n: r.n})), _PERF.run || "__all__",
+      it => `${it.v === "__none__" ? "(unlabelled)" : it.v} (${it.n})`);
+    // current run label
+    const curLbl = d.current_run_label || "";
+    if (document.activeElement !== $("#perf-label")) $("#perf-label").value = curLbl;
+    $("#perf-label-cur").innerHTML = curLbl
+      ? `recording as <span class="pill ok">${esc(curLbl)}</span>`
+      : `new samples are <b>unlabelled</b> — set a label before a hardware/config change`;
     // summary tiles
-    const s = d.summary, tile = (label, v, unit, hint) =>
-      `<div style="min-width:120px" title="${hint || ""}"><div class="hint" style="margin:0">${label}</div><div style="font-size:18px;font-weight:600">${_num(v, unit)}</div></div>`;
-    $("#perf-summary").innerHTML = `<div class="card" style="display:flex;gap:22px;flex-wrap:wrap">`
-      + tile("decode tok/s", s.decode_tps, "", "avg pure generation rate")
-      + tile("effective tok/s", s.eff_tps, "", "avg end-to-end rate incl. prefill/queue")
-      + tile("prefill tok/s", s.prefill_tps, "", "avg prompt-processing rate")
-      + tile("TTFT", s.ttft_ms, "ms", "avg time to first token")
-      + tile("spec accept", s.spec_accept_pct, "%", "avg speculative-decoding acceptance")
-      + tile("cache hit", s.cache_hit_pct, "%", "avg KV prefix-cache reuse")
-      + tile("avg context", s.prompt_tokens, "k", "avg prompt tokens per call")
-      + tile("truncations", s.truncations, "", "replies cut at max_tokens")
-      + `</div>`;
+    const tile = (label, v, unit, hint, sub) =>
+      `<div class="tile" title="${esc(hint || "")}"><div class="t-lbl">${label}</div><div class="t-val">${_num(v, unit)}</div>${sub ? `<div class="t-sub">${sub}</div>` : ""}</div>`;
+    $("#perf-summary").innerHTML = `<div class="card"><div class="tiles">`
+      + tile("decode tok/s", s.decode_tps, "", "Average pure generation speed once the model is producing tokens.")
+      + tile("effective tok/s", s.eff_tps, "", "Average output tokens ÷ total call time (includes prefill and queueing) — the speed you feel.")
+      + tile("prefill tok/s", s.prefill_tps, "", "Average prompt-processing speed (cache hits excluded).")
+      + tile("TTFT", s.ttft_ms, "ms", "Average time to first token (streamed calls).")
+      + tile("spec accept", s.spec_accept_pct, "%", "Average speculative-decoding acceptance — share of draft tokens kept.")
+      + tile("cache hit", s.cache_hit_pct, "%", "Average share of the prompt reused from the KV prefix cache.")
+      + tile("avg context", s.prompt_tokens, "k", "Average prompt size (tokens) per call.")
+      + tile("cold load", s.load_ms, "ms", "Average model-load time on calls that had to load the model (warm calls excluded).")
+      + tile("truncations", s.truncations, "", "Replies cut off at the output-token cap in this view — each is a turn the client had to 'continue'.",
+             s.samples ? `${Math.round(100 * (s.truncations || 0) / s.samples)}% of calls` : "")
+      + tile("tokens", s.out_tokens, "k", "Output tokens generated in this view (input tokens below).",
+             `in ${_num(s.in_tokens, "k")}`)
+      + `</div>${s.estimated ? `<div class="hint" style="margin:8px 0 0">${s.estimated} of these calls have router-<b>estimated</b> timings <span class="est">≈</span> (backend reports none, e.g. vLLM) ${help("loaded")}</div>` : ""}</div>`;
+    // per-model breakdown
+    const bm = d.by_model || [];
+    $("#perf-bymodel").innerHTML = bm.length
+      ? `<table><tr><th>model</th><th title="Backend that served the calls">backend</th><th title="Run label the samples were recorded under">run</th>
+          <th title="Number of calls">calls</th>
+          <th title="Median decode speed — typical generation tok/s">median decode</th>
+          <th title="Average decode speed">avg decode</th>
+          <th title="Average prompt-processing speed">prefill</th>
+          <th title="Average time to first token">TTFT</th>
+          <th title="95th-percentile time to first token — the slow-case wait">TTFT p95</th>
+          <th title="Average output ÷ total call time">eff tok/s</th>
+          <th title="Average KV prefix-cache reuse">cache</th>
+          <th title="Average speculative-decoding acceptance">spec</th>
+          <th title="Average prompt size">avg ctx</th>
+          <th title="Largest prompt seen">max ctx</th>
+          <th title="Average cold-load time when a load happened">load</th>
+          <th title="Replies cut off at the output-token cap">trunc</th>
+          <th title="Most recent call">last</th></tr>`
+        + bm.map(g => `<tr>
+            <td class="nw" style="max-width:220px;overflow:hidden;text-overflow:ellipsis" title="${esc(g.model)}">${esc(g.model)}</td>
+            <td class="nw">${esc(g.backend || "—")}</td>
+            <td class="nw">${g.run_label ? `<span class="pill">${esc(g.run_label)}</span>` : '<span class="hint">(unlabelled)</span>'}</td>
+            <td class="nw">${g.n}</td>
+            <td class="nw"><b>${cell(g.p50_decode_tps)}</b>${g.estimated ? ` <span class="est" title="${g.estimated} call(s) with router-estimated timing">≈</span>` : ""}</td>
+            <td class="nw">${cell(g.decode_tps)}</td>
+            <td class="nw">${cell(g.prefill_tps)}</td>
+            <td class="nw">${cell(g.ttft_ms, "ms")}</td>
+            <td class="nw">${cell(g.p95_ttft_ms, "ms")}</td>
+            <td class="nw">${cell(g.eff_tps)}</td>
+            <td class="nw">${cell(g.cache_hit_pct, "%")}</td>
+            <td class="nw">${cell(g.spec_accept_pct, "%")}</td>
+            <td class="nw">${cell(g.prompt_tokens, "k")}</td>
+            <td class="nw">${cell(g.max_prompt_tokens, "k")}</td>
+            <td class="nw">${cell(g.load_ms, "ms")}</td>
+            <td class="nw">${g.truncations ? `<span class="pill warn">${g.truncations}</span>` : '<span class="hint">0</span>'}</td>
+            <td class="nw">${_tsLabel(g.last_ts)}</td></tr>`).join("") + `</table>`
+      : '<span class="hint">No calls recorded in this view yet.</span>';
     const cDec = _css("--ok", "#3fb950"), cEff = _css("--accent", "#e8833a"),
           cSpec = _css("--accent-2", "#ffb347"), cCache = _css("--ok", "#3fb950"),
-          cCtx = _css("--accent", "#e8833a"), cPre = _css("--accent-2", "#ffb347");
+          cCtx = _css("--accent", "#e8833a"), cPre = _css("--accent-2", "#ffb347"),
+          cTt = _css("--warn", "#e0a441");
     $("#perf-c-tps").innerHTML = lineChart(rows,
       [{ key: "decode_tps", color: cDec, label: "decode tok/s" },
        { key: "eff_tps", color: cEff, label: "effective tok/s" }], {});
     $("#perf-c-prefill").innerHTML = lineChart(rows, [{ key: "prefill_tps", color: cPre, label: "prefill tok/s" }], {});
+    $("#perf-c-ttft").innerHTML = lineChart(rows, [{ key: "ttft_ms", color: cTt, label: "TTFT" }], { yUnit: "ms" });
     $("#perf-c-pct").innerHTML = lineChart(rows,
       [{ key: "spec_accept_pct", color: cSpec, label: "spec accept %" },
        { key: "cache_hit_pct", color: cCache, label: "cache hit %" }], { yMin: 0, yMax: 100, yUnit: "%" });
     $("#perf-c-ctx").innerHTML = lineChart(rows, [{ key: "prompt_tokens", color: cCtx, label: "prompt tokens" }], { yUnit: "k" });
-    $("#perf-c-scatter1").innerHTML = scatterChart(rows, "prompt_tokens", "spec_accept_pct",
+    $("#perf-c-scatter1").innerHTML = scatterChart(rows, "prompt_tokens", "decode_tps",
+      { xUnit: "k", color: cDec, xlabel: "context (prompt tokens)", ylabel: "decode tok/s" });
+    $("#perf-c-scatter2").innerHTML = scatterChart(rows, "prompt_tokens", "spec_accept_pct",
       { xUnit: "k", yUnit: "%", yMin: 0, yMax: 100, color: cSpec, xlabel: "context (prompt tokens)", ylabel: "spec accept %" });
-    $("#perf-c-scatter2").innerHTML = scatterChart(rows, "prompt_tokens", "cache_hit_pct",
+    $("#perf-c-scatter3").innerHTML = scatterChart(rows, "prompt_tokens", "cache_hit_pct",
       { xUnit: "k", yUnit: "%", yMin: 0, yMax: 100, color: cCache, xlabel: "context (prompt tokens)", ylabel: "cache hit %" });
     // rich recent table (newest first)
     const rev = rows.slice().reverse().slice(0, 60);
+    const est = r => r.timing_src === "estimated" ? ' <span class="est" title="Estimated by the router from the stream — the backend reports no timings">≈</span>' : "";
     $("#perf-table").innerHTML = rev.length
-      ? `<table><tr><th>time</th><th>model</th><th title="prompt tokens (context fill)">ctx</th><th>out</th>
-          <th>cache hit</th><th>spec</th><th>decode tok/s</th><th>prefill tok/s</th><th>TTFT</th>
-          <th>eff tok/s</th><th title="end-to-end wall time">wall</th><th>finish</th></tr>`
+      ? `<table><tr><th>time</th><th>model</th><th title="Backend that served the call">backend</th>
+          <th title="How the request was dispatched: direct (client tools, e.g. Cline), agent (routing brain), passthrough (raw model name), worker-tools">mode</th>
+          <th title="Prompt tokens (context fill)">ctx</th><th title="Output tokens (reasoning tokens in brackets when reported)">out</th>
+          <th title="Share of the prompt served from the KV prefix cache">cache hit</th><th title="Speculative-decoding acceptance">spec</th>
+          <th title="Generation speed">decode tok/s</th><th title="Prompt-processing speed">prefill tok/s</th><th title="Time to first token">TTFT</th>
+          <th title="Output ÷ total call time">eff tok/s</th><th title="End-to-end wall time">wall</th>
+          <th title="Cold model-load time (blank = model was already warm)">load</th><th title="Why generation stopped — 'length' = cut off at the token cap">finish</th></tr>`
         + rev.map(r => `<tr>
             <td class="nw">${_tsLabel(r.ts)}</td>
-            <td class="nw" style="max-width:170px;overflow:hidden;text-overflow:ellipsis" title="${esc(r.model)}">${esc(r.model)}</td>
+            <td class="nw" style="max-width:170px;overflow:hidden;text-overflow:ellipsis" title="${esc(r.model)}${r.run_label ? " · run " + esc(r.run_label) : ""}">${esc(r.model)}</td>
+            <td class="nw">${esc(r.backend || "")}</td>
+            <td class="nw hint">${esc(r.mode || "")}</td>
             <td class="nw">${_num(r.prompt_tokens, "k")}</td>
-            <td class="nw">${r.completion_tokens ?? "—"}</td>
-            <td class="nw">${r.cache_hit_pct == null ? '<span class="hint">—</span>' : _num(r.cache_hit_pct, "%")}</td>
-            <td class="nw">${r.spec_accept_pct == null ? '<span class="hint">—</span>' : _num(r.spec_accept_pct, "%")}</td>
-            <td class="nw">${r.decode_tps == null ? '<span class="hint">—</span>' : _num(r.decode_tps)}</td>
-            <td class="nw">${r.prefill_tps == null ? '<span class="hint">—</span>' : _num(r.prefill_tps)}</td>
-            <td class="nw">${r.ttft_ms == null ? '<span class="hint">—</span>' : _num(r.ttft_ms, "ms")}</td>
-            <td class="nw">${r.eff_tps == null ? '<span class="hint">—</span>' : _num(r.eff_tps)}</td>
-            <td class="nw">${r.wall_ms == null ? '<span class="hint">—</span>' : _num(r.wall_ms, "ms")}</td>
-            <td class="nw">${r.finish_reason === "length" ? '<span class="pill warn">length</span>' : '<span class="hint">' + esc(r.finish_reason || "stop") + '</span>'}</td>
+            <td class="nw">${r.completion_tokens ?? "—"}${r.reasoning_tokens ? ` <span class="hint" title="of which reasoning">(${r.reasoning_tokens})</span>` : ""}</td>
+            <td class="nw">${cell(r.cache_hit_pct, "%")}</td>
+            <td class="nw">${cell(r.spec_accept_pct, "%")}</td>
+            <td class="nw">${cell(r.decode_tps)}${r.decode_tps != null ? est(r) : ""}</td>
+            <td class="nw">${cell(r.prefill_tps)}${r.prefill_tps != null ? est(r) : ""}</td>
+            <td class="nw">${cell(r.ttft_ms, "ms")}</td>
+            <td class="nw">${cell(r.eff_tps)}</td>
+            <td class="nw">${cell(r.wall_ms, "ms")}</td>
+            <td class="nw">${r.load_ms == null ? '<span class="hint">warm</span>' : _num(r.load_ms, "ms")}</td>
+            <td class="nw">${r.finish_reason === "length" ? '<span class="pill warn" title="Cut off at the output-token cap">length</span>' : '<span class="hint">' + esc(r.finish_reason || "stop") + '</span>'}</td>
           </tr>`).join("") + `</table>`
-      : '<span class="hint">No calls recorded in this window yet.</span>';
+      : '<span class="hint">No calls recorded in this view yet.</span>';
     wrapTables();
   };
-  $("#perf-win").onchange = load;
-  $("#perf-model").onchange = load;
+  ["#perf-win", "#perf-model", "#perf-backend", "#perf-run"].forEach(id => $(id).onchange = load);
   $("#perf-refresh").onclick = load;
+  $("#perf-clear").onclick = () => openClearDialog({
+    model: _PERF.model || "", backend: _PERF.backend || "",
+    run_label: (!_PERF.run || _PERF.run === "__all__") ? null : (_PERF.run === "__none__" ? "" : _PERF.run)});
+  $("#perf-label-set").onclick = async () => {
+    try {
+      const r = await api("perf/run-label", {method: "POST", body: {run_label: $("#perf-label").value}});
+      toast(r.run_label ? `Recording new samples as “${r.run_label}”` : "Run label cleared");
+      await load();
+    } catch (e) { toast(e.message, true); }
+  };
+  $("#perf-label").onkeydown = e => { if (e.key === "Enter") $("#perf-label-set").click(); };
   $("#perf-csv").onclick = () => {
     const rows = last.series || []; if (!rows.length) return toast("No data to export");
-    const cols = ["ts", "model", "backend", "mode", "prompt_tokens", "completion_tokens",
-      "cached_tokens", "draft_n", "draft_n_accepted", "decode_tps", "prefill_tps",
-      "decode_ms", "prefill_ms", "ttft_ms", "eff_tps", "wall_ms", "cache_hit_pct",
-      "spec_accept_pct", "finish_reason"];
+    const cols = ["ts", "model", "backend", "persona", "mode", "run_label", "prompt_tokens",
+      "prefill_tokens", "completion_tokens", "reasoning_tokens", "cached_tokens", "draft_n",
+      "draft_n_accepted", "decode_tps", "prefill_tps", "decode_ms", "prefill_ms", "ttft_ms",
+      "eff_tps", "wall_ms", "load_ms", "cache_hit_pct", "spec_accept_pct", "finish_reason",
+      "timing_src"];
     const csv = [cols.join(",")].concat(rows.map(r => cols.map(c => {
       const v = r[c]; return v == null ? "" : (/[",\n]/.test("" + v) ? `"${("" + v).replace(/"/g, '""')}"` : v);
     }).join(","))).join("\n");
     const a = document.createElement("a");
     a.href = URL.createObjectURL(new Blob([csv], { type: "text/csv" }));
-    a.download = `foundry-perf-${_PERF.hours}h.csv`; a.click();
+    a.download = `foundry-perf-${_PERF.hours}h${_PERF.model ? "-" + _PERF.model.replace(/[^\w.-]+/g, "_") : ""}.csv`; a.click();
   };
   $("#perf-win").value = _PERF.hours;
+  // Restore persisted filters before the first fetch (the dropdowns only hold
+  // their default option until data arrives).
+  [["#perf-model", _PERF.model], ["#perf-backend", _PERF.backend], ["#perf-run", _PERF.run]].forEach(([id, v]) => {
+    if (!v || v === "__all__") return;
+    $(id).insertAdjacentHTML("beforeend", `<option value="${esc(v)}">${esc(v === "__none__" ? "(unlabelled)" : v)}</option>`);
+    $(id).value = v;
+  });
   await load();
 }
 
@@ -600,7 +1105,7 @@ const _money = v => v == null ? "—"
 async function tabCost() {
   const winOpts = [[6, "6h"], [24, "24h"], [72, "3d"], [168, "7d"], [336, "14d"]];
   $("#main").innerHTML = `
-    <h2 style="margin-top:0">Cost calculator <span class="hint" id="cost-ts"></span></h2>
+    <h2 style="margin-top:0;display:flex;align-items:center">Cost calculator ${help("cost")} <span class="hint" id="cost-ts" style="margin:0 0 0 8px"></span></h2>
     <p class="hint">What the tokens in this window would have cost on a paid API vs self-hosting. Token counts are real (measured per call); service rates are editable list prices — a semi-close decision aid, not a bill. Paid-API cost assumes you re-send context each turn (that's how they bill); the “with cache” column applies your measured cache-hit tokens at each vendor's cached-input rate.</p>
     <div class="card" style="display:flex;gap:16px;align-items:center;flex-wrap:wrap">
       <label>Window <select id="cost-win">${winOpts.map(([h, l]) => `<option value="${h}"${h === _COST.hours ? " selected" : ""}>${l}</option>`).join("")}</select></label>
@@ -744,18 +1249,26 @@ async function tabCost() {
 }
 
 async function tabLive() {
+  const ch = (title, key, sub) =>
+    `<div class="card-h">${title}${key ? help(key) : ""}${sub ? `<span class="hint">— ${sub}</span>` : ""}</div>`;
   $("#main").innerHTML = `
-    <h2 style="margin-top:0">Live activity <span class="hint" id="live-ts"></span></h2>
-    <p class="hint">Auto-refreshing every 2s — what's generating and running right now, VRAM residency, backend health, and the last few finished requests.</p>
-    <div class="card"><div style="font-weight:600;margin-bottom:6px">▶ Models generating now</div><div id="live-models" class="hint">…</div></div>
-    <div class="card"><div style="font-weight:600;margin-bottom:6px">📊 Performance <span class="hint" style="font-weight:normal">— last N finished requests</span></div><div id="live-perf" class="hint">…</div></div>
-    <div class="card"><div style="font-weight:600;margin-bottom:6px">⚙ Tool calls / jobs running</div><div id="live-tools" class="hint">…</div>
+    <h2 style="margin-top:0;display:flex;align-items:center;flex-wrap:wrap;gap:6px">Live activity ${help("live")}
+      <span class="hint" id="live-ts" style="margin:0"></span>
+      <span style="flex:1"></span>
+      <span id="live-run"></span>
+      <button class="act" id="live-clear" title="Reset performance stats (all models or one) — e.g. after a GPU or config change">Clear stats…</button></h2>
+    <p class="hint">Auto-refreshing every 2s — what's generating right now, measured speed per model, engine load on each inference server, and the last few finished requests. Hover anything underlined for a definition; <b>?</b> opens a longer explanation.</p>
+    <div class="card">${ch("▶ Models generating now", "generating")}<div id="live-models" class="hint">…</div></div>
+    <div class="card">${ch("📊 Recent performance", "perfstrip", "last N finished requests")}<div id="live-perf" class="hint">…</div></div>
+    <div class="card">${ch("🖥 Inference servers", "servers", "engine-level load from llama.cpp / vLLM")}<div id="live-servers" class="hint">…</div></div>
+    <div class="card">${ch("Loaded models — per-model performance", "loaded")}<div id="live-loaded"></div></div>
+    <div class="card">${ch("⚙ Tool calls / jobs running", null)}<div id="live-tools" class="hint">…</div>
       <div class="hint" style="margin-top:4px">A long one (e.g. <code>acestep-music/generate_music</code>) staying here for minutes means a media job is actively rendering — not hung.</div></div>
-    <div class="card"><div style="font-weight:600;margin-bottom:6px">🔧 Tool activity <span class="hint" style="font-weight:normal">— recent, by call count</span></div><div id="live-toolstats"></div></div>
-    <div class="card"><div style="font-weight:600;margin-bottom:6px">🧠 Routing brain</div><div id="live-brain" class="hint">…</div></div>
-    <div class="card"><div style="font-weight:600;margin-bottom:6px">Loaded in VRAM</div><div id="live-loaded"></div></div>
-    <div class="card"><div style="font-weight:600;margin-bottom:6px">Backends</div><div id="live-backends"></div></div>
-    <div class="card"><div style="font-weight:600;margin-bottom:6px">Recently finished</div><div id="live-recent"></div></div>`;
+    <div class="card">${ch("🔧 Tool activity", "toolstats", "recent, by call count")}<div id="live-toolstats"></div></div>
+    <div class="card">${ch("🧠 Routing brain", "brain")}<div id="live-brain" class="hint">…</div></div>
+    <div class="card">${ch("Backends", null)}<div id="live-backends"></div></div>
+    <div class="card">${ch("Recently finished", "recent")}<div id="live-recent"></div></div>`;
+  $("#live-clear").onclick = () => openClearDialog({});
   if (window._liveTimer) clearInterval(window._liveTimer);
   const paint = async () => {
     if (!$("#live-models")) { clearInterval(window._liveTimer); return; }  // tab changed → self-clean
@@ -763,6 +1276,9 @@ async function tabLive() {
     try { a = await api("activity"); } catch (e) { return; }
     if (!$("#live-models")) return;
     $("#live-ts").textContent = "· updated " + new Date().toLocaleTimeString();
+    $("#live-run").innerHTML = a.run_label
+      ? `<span class="pill ok" title="New samples are recorded under this run label (set on the Performance tab)">🏷 ${esc(a.run_label)}</span>` : "";
+    $("#live-servers").innerHTML = renderServers(a.servers || []);
     $("#live-models").innerHTML = (a.models || []).length
       ? a.models.map(m => `<span class="pill ok">▶ ${esc(m.model)} · ${m.seconds}s${m.count > 1 ? " ×" + m.count : ""}${m.tps ? " · ~" + m.tps + " tok/s" : ""}</span>`).join(" ")
       : '<span class="hint">idle — no model generating</span>';
@@ -816,17 +1332,18 @@ async function tabLive() {
       + bHealth + " " + bLoaded + bPresent;
     // loaded in VRAM (per-model size)
     const ld = a.loaded_detail || [];
-    const perfCell = (avg, last, unit) => {
+    const perfCell = (avg, last, unit, est) => {
       if (!avg && !last) return '<span class="hint">—</span>';
       const a2 = avg ? "~" + avg + (unit || "") : "—";
-      const l2 = last ? `<span class="hint" title="most recent call">· last ${last}${unit || ""}</span>` : "";
-      return `${a2} ${l2}`;
+      const l2 = last ? `<div class="hint" style="margin:0" title="most recent call">last ${last}${unit || ""}</div>` : "";
+      const e2 = est ? ' <span class="est" title="Estimated by the router from the stream — this backend reports no per-request timings (prefill includes network/queue time)">≈</span>' : "";
+      return `${a2}${e2}${l2}`;
     };
     const ttftCell = p => {
       if (!p.ttft_ms && !p.last_ttft_ms) return '<span class="hint">—</span>';
       const s = v => v >= 1000 ? (v / 1000).toFixed(1) + "s" : Math.round(v) + "ms";
-      const last = p.last_ttft_ms ? `<span class="hint" title="most recent">· last ${s(p.last_ttft_ms)}</span>` : "";
-      return `${p.ttft_ms ? "~" + s(p.ttft_ms) : "—"} ${last}`;
+      const last = p.last_ttft_ms ? `<div class="hint" style="margin:0" title="most recent call">last ${s(p.last_ttft_ms)}</div>` : "";
+      return `${p.ttft_ms ? "~" + s(p.ttft_ms) : "—"}${last}`;
     };
     // A percentage stat (spec acceptance / cache hit): avg · last call, dashed
     // when the backend never reported it. `good` picks the pill colour so a low
@@ -835,7 +1352,7 @@ async function tabLive() {
       if (avg === null || avg === undefined) return '<span class="hint">—</span>';
       const cls = good(avg) ? "ok" : "warn";
       const lastTxt = (last !== null && last !== undefined)
-        ? ` <span class="hint" title="most recent call">· last ${last}%</span>` : "";
+        ? `<div class="hint" style="margin:0" title="most recent call">last ${last}%</div>` : "";
       return `<span class="pill ${cls}" title="${hint} (${n || 0} sample${n === 1 ? "" : "s"})">${avg}%</span>${lastTxt}`;
     };
     const ms = v => v >= 1000 ? (v / 1000).toFixed(1) + "s" : Math.round(v) + "ms";
@@ -843,8 +1360,8 @@ async function tabLive() {
     const msCell = (avg, last) => {
       if (!avg && !last) return '<span class="hint">—</span>';
       const a2 = avg ? "~" + ms(avg) : "—";
-      const l2 = last ? `<span class="hint" title="most recent call">· last ${ms(last)}</span>` : "";
-      return `${a2} ${l2}`;
+      const l2 = last ? `<div class="hint" style="margin:0" title="most recent call">last ${ms(last)}</div>` : "";
+      return `${a2}${l2}`;
     };
     // single-value rate cell (per-model effective tok/s — no last snapshot).
     const oneCell = (v, unit) => v ? "~" + v + (unit || "") : '<span class="hint">—</span>';
@@ -856,8 +1373,11 @@ async function tabLive() {
     const vramCell = (m, p) => {
       const v = gb(m.size_vram);
       const ctx = m.context || p.context_length || 0;
-      const ctxTxt = ctx ? `<div class="hint" title="serving/trained context window">${kctx(ctx)} ctx</div>` : "";
-      return (v || '<span class="hint" title="llama.cpp does not report VRAM over HTTP">—</span>') + ctxTxt;
+      const ctxTxt = ctx ? `<div class="hint" style="margin:0" title="Serving context window (per slot on llama.cpp; max_model_len on vLLM), else the trained window">${kctx(ctx)} ctx</div>` : "";
+      const w = m.size ? `<div class="hint" style="margin:0" title="Model weights file size (llama.cpp /v1/models meta) — VRAM use is this plus the KV cache">${gb(m.size)} weights</div>` : "";
+      const sl = m.slots ? `<div class="hint" style="margin:0" title="Parallel slots (-np); the context is per slot">${m.slots} slots</div>` : "";
+      const st = m.state ? `<div class="hint" style="margin:0" title="llama-swap state">${esc(m.state)}</div>` : "";
+      return (v || '<span class="hint" title="llama.cpp / vLLM do not report VRAM over HTTP">—</span>') + ctxTxt + w + sl + st;
     };
     $("#live-loaded").innerHTML = ld.length
       ? `<table><tr><th>model</th><th title="GPU memory held (Ollama /api/ps). llama.cpp reports context, not VRAM. Second line = serving/trained context window.">VRAM · ctx</th>
@@ -875,9 +1395,9 @@ async function tabLive() {
         ld.map(m => { const p = m.perf || {}; return `<tr><td class="nw" style="max-width:180px;overflow:hidden;text-overflow:ellipsis" title="${esc(m.model)}">${esc(m.model)}</td>
           <td class="nw">${vramCell(m, p)}</td>
           <td class="nw">${ttftCell(p)}</td>
-          <td class="nw">${perfCell(p.decode_tps, p.last_decode_tps, "")}</td>
+          <td class="nw">${perfCell(p.decode_tps, p.last_decode_tps, "", p.timing_src === "estimated")}</td>
           <td class="nw">${msCell(p.decode_ms, p.last_decode_ms)}</td>
-          <td class="nw">${perfCell(p.prompt_tps, p.last_prompt_tps, "")}</td>
+          <td class="nw">${perfCell(p.prompt_tps, p.last_prompt_tps, "", p.timing_src === "estimated")}</td>
           <td class="nw">${msCell(p.prefill_ms, p.last_prefill_ms)}</td>
           <td class="nw">${oneCell(p.eff_tps, "")}</td>
           <td class="nw">${pctCell(p.spec_accept_pct, p.last_spec_accept_pct, p.spec_samples, v => v >= 60, "Draft acceptance — accepted ÷ proposed draft tokens")}</td>
@@ -888,8 +1408,8 @@ async function tabLive() {
       : (a.loaded || []).length
         ? (a.loaded || []).map(m => `<span class="pill">${esc(m)}</span>`).join(" ")
         : '<span class="hint">nothing loaded</span>';
-    $("#live-backends").innerHTML = `<table><tr><th>name</th><th>type</th><th>health</th><th>models</th></tr>` +
-      (a.backends || []).map(b => `<tr><td>${esc(b.name)}</td><td class="nw">${esc(b.type)}</td>
+    $("#live-backends").innerHTML = `<table><tr><th>name</th><th title="Wire protocol · server software (flavor)">type</th><th title="Healthy after a successful model-list probe; down after repeated failures (hover for the last error)">health</th><th title="Models this backend advertises">models</th></tr>` +
+      (a.backends || []).map(b => `<tr><td>${esc(b.name)}</td><td class="nw">${esc(b.type)}${b.flavor && b.flavor !== "openai" && b.flavor !== "ollama" ? ` <span class="pill">${esc(_FLAVOR_LABEL[b.flavor] || b.flavor)}</span>` : ""}</td>
         <td>${b.healthy ? '<span class="pill ok">healthy</span>'
              : '<span class="pill bad" title="' + esc(b.last_error) + '">down</span>'}</td>
         <td class="nw">${b.models}</td></tr>`).join("") + `</table>`;
@@ -1022,8 +1542,13 @@ async function tabBackends() {
       server software so <b>Host Admin</b> shows the right panel:
       <code>llamacpp</code>, <code>unsloth</code>, <code>vllm</code>, or <code>openai</code>
       (default). Ollama backends always get full model CRUD; the openai-dialect flavors get
-      read-only diagnostics. Example: <code>{"name":"llamacpp-1","type":"openai-compatible",
-      "url":"http://192.168.30.206:8080","flavor":"llamacpp"}</code>.</p>
+      read-only diagnostics. The flavor also unlocks that server's extra sampling knobs
+      (llama.cpp DRY/XTC/top-n-sigma…, vLLM repetition_penalty/min_tokens/guided decoding…),
+      thinking on/off, engine metrics on the Live tab and context auto-detection.
+      Examples: <code>{"name":"llamacpp-1","type":"openai-compatible",
+      "url":"http://192.168.30.206:8080","flavor":"llamacpp"}</code> ·
+      <code>{"name":"vllm-1","type":"openai-compatible","url":"http://192.168.30.207:8000",
+      "flavor":"vllm"}</code>.</p>
       <textarea id="backends-json" rows="12"></textarea>
       <div class="row"><button class="act primary" id="save-backends">Save backends</button>
       <select id="pool-mode">
@@ -2714,7 +3239,7 @@ async function tabHostAdmin() {
       ${cur.flavor === "ollama"
           ? (cur.version ? `<span class="pill ok" title="Ollama server version (/api/version)">Ollama v${esc(cur.version)}</span>`
                          : '<span class="pill warn" title="/api/version unreachable">version ?</span>')
-          : `<span class="pill ${cur.healthy ? "ok" : "warn"}">${cur.healthy ? "healthy" : "unverified"}</span>`}
+          : `<span class="pill ${cur.healthy ? "ok" : "warn"}">${cur.healthy ? "healthy" : "unverified"}</span>${cur.version ? ` <span class="pill ok" title="Server version / build">${esc(cur.version)}</span>` : ""}`}
       <span class="hint">${hint}</span></div>`;
   };
 
@@ -2727,13 +3252,13 @@ async function tabHostAdmin() {
 // -- read-only diagnostics panel (llama.cpp / Unsloth / vLLM / OpenAI) --------
 async function hostRenderDiag(cur, selector) {
   const note = {
-    llamacpp: "Plain <span class='mono'>llama-server</span> is read-only over HTTP — one model per process. Model add/switch/delete needs the separate <b>llama-swap</b> proxy.",
+    llamacpp: "Plain <span class='mono'>llama-server</span> is read-only over HTTP — one model per process. Model add/switch/delete needs the separate <b>llama-swap</b> proxy (auto-detected: its resident models are shown below and on the Live tab).",
     unsloth: "Unsloth serves chat (OpenAI + Anthropic compatible). Loading a model is a host CLI, not a REST call, so there is nothing to add or delete over HTTP.",
-    vllm: "vLLM is read-only over HTTP — it serves the model(s) it was launched with.",
+    vllm: "vLLM is read-only over HTTP — it serves the model(s) it was launched with. Engine metrics (KV cache, queue, preemptions, TTFT/TPOT) also appear live on Dashboard → Live.",
     openai: "Generic OpenAI-compatible endpoint — read-only model listing.",
   }[cur.flavor] || "";
   $("#main").innerHTML = `
-    <h2>Host Admin — diagnostics</h2>
+    <h2 style="display:flex;align-items:center">Host Admin — diagnostics ${help(cur.flavor === "vllm" ? "host_vllm" : cur.flavor === "llamacpp" ? "host_llamacpp" : "")}</h2>
     ${selector("Read-only — these servers expose no model CRUD over HTTP.")}
     ${note ? `<p class="hint">${note}</p>` : ""}
     ${cur.flavor === "unsloth" ? `<div class="card">
@@ -2751,48 +3276,75 @@ async function hostRenderDiag(cur, selector) {
 }
 
 function renderDiagReport(rep) {
-  const card = (title, inner) => `<div class="card"><h2 style="margin-top:0">${title}</h2>${inner}</div>`;
+  const card = (title, inner, tip) => `<div class="card"><h2 style="margin-top:0"${tip ? ` title="${esc(tip)}"` : ""}>${title}</h2>${inner}</div>`;
   const errLine = e => `<p class="hint"><span class="pill bad">unreachable</span> ${esc(e || "no response")}</p>`;
+  const gb = b => b ? (b / 1073741824).toFixed(1) + " GB" : "—";
+  const bn = n => n ? (n >= 1e9 ? (n / 1e9).toFixed(1) + "B" : (n / 1e6).toFixed(0) + "M") : "—";
+  const yes = v => v ? '<span class="pill ok">yes</span>' : '<span class="hint">no</span>';
   let html = "";
   if (rep.health) {
     const h = rep.health;
     html += card("Health", h.ok
       ? `<span class="pill ok">ok</span> <span class="mono">${esc(typeof h.body === "string" ? h.body : JSON.stringify(h.body))}</span>`
-      : errLine(h.error || ("HTTP " + h.status_code)));
+      : errLine(h.error || ("HTTP " + h.status_code)), "GET /health — the server is up and the model is loaded");
+  }
+  if (rep.version) {
+    const v = rep.version;
+    html += card("Version", v.ok ? `<span class="pill ok">vLLM ${esc(v.version || "?")}</span>` : errLine(v.error), "GET /version");
+  }
+  if (rep.swap && rep.swap.is_swap) {
+    html += card("llama-swap — resident models (/running)", rep.swap.running.length
+      ? `<table><tr><th>model</th><th title="llama-swap process state">state</th></tr>${rep.swap.running.map(r =>
+          `<tr><td class="mono">${esc(r.model)}</td><td>${esc(r.state || "")}</td></tr>`).join("")}</table>`
+      : '<p class="hint">nothing loaded — the next request for a configured model will start it</p>',
+      "llama-swap starts/stops llama-server processes per model on demand");
   }
   if (rep.props) {
     const p = rep.props;
+    const mods = p.modalities || {}, caps = p.chat_template_caps || {};
+    const samp = p.sampling_defaults || {};
     html += card("Loaded model — /props", p.ok
       ? `<table>
           <tr><th>model</th><td class="mono">${esc(p.model_path || "?")}</td></tr>
-          <tr><th>context (n_ctx)</th><td class="mono">${esc(p.n_ctx ?? "?")}</td></tr>
-          <tr><th>slots</th><td class="mono">${esc(p.total_slots ?? "?")}</td></tr>
+          <tr><th title="Context per slot — the most one request can use">context (n_ctx / slot)</th><td class="mono">${esc(p.n_ctx ?? "?")}</td></tr>
+          <tr><th title="Parallel request slots (-np)">slots</th><td class="mono">${esc(p.total_slots ?? "?")}</td></tr>
+          ${p.build_info ? `<tr><th>build</th><td class="mono">${esc(p.build_info)}</td></tr>` : ""}
+          <tr><th title="Multimodal projector loaded (--mmproj)">vision / audio</th><td>${yes(mods.vision)} / ${yes(mods.audio)}</td></tr>
+          <tr><th title="The chat template declares tool support — needs --jinja">tool calling</th><td>${Object.keys(caps).length ? yes(caps.supports_tools || caps.supports_tool_calls) : '<span class="hint">unknown (older build)</span>'}</td></tr>
           <tr><th>chat template</th><td>${p.chat_template_present ? "present" : "—"}</td></tr>
+          ${Object.keys(samp).length ? `<tr><th title="Server-side defaults; per-request values from personas / clients override them">default sampling</th><td class="mono">${Object.entries(samp).map(([k, v]) => `${esc(k)}=${esc(Array.isArray(v) ? v.join(";") : v)}`).join(" · ")}</td></tr>` : ""}
          </table>`
       : errLine(p.error));
   }
   if (rep.slots) {
     const s = rep.slots;
-    html += card("KV slots — /slots", s.ok
-      ? (s.count ? `<table><tr><th>id</th><th>state</th></tr>${s.slots.map(x =>
-          `<tr><td class="mono">${esc(x.id)}</td><td class="mono">${esc(x.state ?? "")}</td></tr>`).join("")}</table>`
-          : `<p class="hint">no active slots (or slots disabled with --no-slots)</p>`)
-      : errLine(s.error));
+    html += card(`KV slots — /slots${s.ok && s.count ? ` (${s.busy}/${s.count} busy)` : ""}`, s.ok
+      ? (s.count ? `<table><tr><th>id</th><th>state</th><th title="Context size of this slot">n_ctx</th><th title="Tokens decoded so far for the current request">decoded</th><th title="Speculative decoding active on this slot">spec</th></tr>${s.slots.map(x =>
+          `<tr><td class="mono">${esc(x.id)}</td><td>${x.busy ? '<span class="pill warn">busy</span>' : '<span class="pill ok">idle</span>'}</td>
+            <td class="mono">${esc(x.n_ctx || "")}</td><td class="mono">${esc(x.n_decoded || 0)}</td><td>${x.speculative ? "yes" : ""}</td></tr>`).join("")}</table>`
+          : `<p class="hint">no slots reported</p>`)
+      : errLine((s.error || "") + " — /slots may be disabled (--no-slots)"));
   }
   if (rep.models) {
-    const m = rep.models;
+    const m = rep.models, det = m.details || (m.models || []).map(id => ({id}));
+    const hasCtx = det.some(d => d.max_model_len || d.n_ctx_train), hasSize = det.some(d => d.size || d.n_params),
+          hasStatus = det.some(d => d.status);
     html += card(`Models — /v1/models${m.ok ? " (" + m.models.length + ")" : ""}`, m.ok
-      ? (m.models.length ? `<table><tr><th>id</th></tr>${m.models.map(x =>
-          `<tr><td class="mono">${esc(x)}</td></tr>`).join("")}</table>`
+      ? (det.length ? `<table><tr><th>id</th>${hasCtx ? '<th title="vLLM max_model_len, or llama.cpp trained context (n_ctx_train)">context</th>' : ""}${hasSize ? '<th>params</th><th title="Weights file size">size</th>' : ""}${hasStatus ? "<th>status</th>" : ""}</tr>${det.map(x =>
+          `<tr><td class="mono">${esc(x.id)}${x.parent ? ` <span class="hint">(LoRA of ${esc(x.parent)})</span>` : ""}</td>
+            ${hasCtx ? `<td class="mono">${esc(x.max_model_len || x.n_ctx_train || "—")}</td>` : ""}
+            ${hasSize ? `<td class="mono">${bn(x.n_params)}</td><td class="mono">${gb(x.size)}</td>` : ""}
+            ${hasStatus ? `<td>${esc(x.status || "")}</td>` : ""}</tr>`).join("")}</table>`
           : `<p class="hint">no models reported</p>`)
       : errLine(m.error));
   }
   if (rep.metrics) {
     const mt = rep.metrics;
     html += card("Metrics — /metrics", mt.ok
-      ? (Object.keys(mt.metrics || {}).length ? `<table>${Object.entries(mt.metrics).map(([k, v]) =>
-          `<tr><th class="mono">${esc(k)}</th><td class="mono">${esc(v)}</td></tr>`).join("")}</table>`
-          : `<p class="hint">no matching gauges exposed</p>`)
+      ? `${renderServers([{...(mt.summary || {}), backend: rep.backend, flavor: rep.flavor, metrics_ok: true}])}
+         <details><summary>raw engine series (${Object.keys(mt.metrics || {}).length})</summary>
+         ${Object.keys(mt.metrics || {}).length ? `<table>${Object.entries(mt.metrics).map(([k, v]) =>
+          `<tr><th class="mono">${esc(k)}</th><td class="mono">${esc(v)}</td></tr>`).join("")}</table>` : '<p class="hint">none</p>'}</details>`
       : errLine(mt.error));
   }
   return html || `<p class="hint">no diagnostics available for this flavor</p>`;

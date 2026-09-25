@@ -196,7 +196,8 @@ async def activity(request: Request):
     brain = {"model": bcfg.model, "provider": bcfg.provider,
              "health": getattr(svc, "_brain_health", None),
              **(await svc.brain.loaded_detail())}
-    backends = [{"name": b["name"], "type": b["type"], "healthy": b["healthy"],
+    backends = [{"name": b["name"], "type": b["type"], "flavor": b.get("flavor") or "",
+                 "healthy": b["healthy"],
                  "models": len(b.get("models") or []),
                  "last_error": b.get("last_error") or ""}
                 for b in svc.pool.backend_status()]
@@ -214,23 +215,21 @@ async def activity(request: Request):
     # of the requests that used the model (end-to-end, incl. prefill + queue).
     # This is the rate the operator actually experiences, shown next to the pure
     # decode rate so the gap between them (prefill/queue overhead) is visible.
-    import json as _json0
+    # Sourced from perf_samples (one row per MODEL call, with its own wall time)
+    # rather than request_log, so an agent-mode request's brain/tool time isn't
+    # charged to the worker model — and so clearing perf data resets it too.
     eff_rows = svc.db.query(
-        "SELECT duration_ms, models_used FROM request_log "
-        "WHERE status='ok' ORDER BY id DESC LIMIT 60")
-    _eff: dict = {}
-    for r in eff_rows:
-        try:
-            used = _json0.loads(r.get("models_used") or "[]")
-        except (ValueError, TypeError):
-            continue
-        for m in used:
-            mid = m.get("model")
-            if not mid:
-                continue
-            agg = _eff.setdefault(mid, {"tok": 0, "ms": 0})
-            agg["tok"] += int(m.get("completion_tokens") or 0)
-            agg["ms"] += int(r.get("duration_ms") or 0)
+        "SELECT model, SUM(completion_tokens) AS tok, SUM(wall_ms) AS ms FROM "
+        "(SELECT model, completion_tokens, wall_ms FROM perf_samples "
+        " WHERE wall_ms IS NOT NULL ORDER BY id DESC LIMIT 300) GROUP BY model")
+    _eff: dict = {r["model"]: {"tok": int(r["tok"] or 0), "ms": int(r["ms"] or 0)}
+                  for r in eff_rows if r.get("model")}
+    # Where each model's latest timing came from — "estimated" (router-timed
+    # stream: vLLM/OpenRouter report no per-request timings) is flagged in the UI.
+    _tsrc = {r["model"]: r.get("timing_src") or "" for r in svc.db.query(
+        "SELECT model, timing_src FROM perf_samples WHERE id IN "
+        "(SELECT MAX(id) FROM perf_samples WHERE decode_tps IS NOT NULL "
+        " GROUP BY model)")}
 
     def _eff_tps(model_id):
         a = _eff.get(model_id)
@@ -289,6 +288,7 @@ async def activity(request: Request):
                                    if row.get("last_cache_hit_pct") is not None
                                    else None),
             "cache_samples": row.get("cache_samples") or 0,
+            "timing_src": _tsrc.get(model_id, ""),
         }
 
     active_models = svc.pool.active_calls()
@@ -373,7 +373,16 @@ async def activity(request: Request):
         "series": list(reversed(series)),
     }
 
+    # Engine-level telemetry straight from llama.cpp / vLLM (/metrics, /slots):
+    # KV-cache fill, queue depth, busy slots, preemptions, lifetime throughput.
+    try:
+        servers = await svc.pool.server_metrics()
+    except Exception:
+        servers = []
+    from .. import perf_history as _ph
     return {"models": active_models,
+            "servers": servers,
+            "run_label": _ph.get_run_label(svc.db),
             "tools": svc.mcp.active_calls(),
             "loaded": loaded,
             "loaded_detail": loaded_detail,
@@ -396,8 +405,87 @@ async def perf_history_api(request: Request):
     except (TypeError, ValueError):
         hours = 72
     hours = max(0.5, min(hours, 24 * 30))          # clamp: 30 min … 30 days
-    model = request.query_params.get("model") or None
-    return ph.query_history(svc.db, hours=hours, model=model)
+    q = request.query_params
+    model = q.get("model") or None
+    backend = q.get("backend") or None
+    # run_label absent = every run; present (even "") = that run only ("" is
+    # the unlabelled samples recorded before a label was set).
+    run_label = q.get("run_label") if "run_label" in q else None
+    return ph.query_history(svc.db, hours=hours, model=model, backend=backend,
+                            run_label=run_label)
+
+
+@router.get("/admin/api/perf/run-label")
+async def perf_run_label_get(request: Request):
+    from .. import perf_history as ph
+    return {"run_label": ph.get_run_label(_svc(request).db)}
+
+
+@router.post("/admin/api/perf/run-label")
+async def perf_run_label_set(request: Request):
+    """Set the label stamped on every new perf sample (e.g. "2x2080ti-22gb"),
+    so before/after a hardware or config change can be compared per model.
+    Blank clears it. Existing samples keep the label they were recorded with."""
+    svc = _svc(request)
+    from .. import perf_history as ph
+    body = await request.json()
+    label = ph.set_run_label(svc.db, str(body.get("run_label") or ""))
+    svc.db.log_event("info", "admin",
+                     f"performance run label set to {label!r}" if label
+                     else "performance run label cleared")
+    return {"ok": True, "run_label": label}
+
+
+@router.post("/admin/api/perf/clear")
+async def perf_clear(request: Request):
+    """Wipe performance data so the dashboards start clean (e.g. after a GPU
+    swap). Scope: every model, or one `model`; perf-history samples can also be
+    narrowed to a `backend` / `run_label`. Targets (booleans, defaults shown):
+      samples=true       Performance-tab history (perf_samples)
+      live=true          Live-view rolling averages (tok/s, TTFT, load, spec, cache)
+      truncations=true   truncation counters (+ their Events warnings)
+      requests=false     the Usage Log (request_log) — feeds Live's effective
+                         tok/s and "recently finished"; all-models scope only
+      benchmarks=false   the observed `latency` score derived from old tok/s
+    Registry metadata, personas and config are never touched."""
+    svc = _svc(request)
+    from .. import perf_history as ph
+    b = await request.json()
+    model = (b.get("model") or "").strip() or None
+    backend = (b.get("backend") or "").strip() or None
+    run_label = b.get("run_label") if "run_label" in b else None
+    want = {k: bool(b.get(k, d)) for k, d in (("samples", True), ("live", True),
+                                              ("truncations", True),
+                                              ("requests", False),
+                                              ("benchmarks", False))}
+    out: dict = {"ok": True}
+    if want["samples"]:
+        out["samples"] = ph.clear_samples(svc.db, model=model, backend=backend,
+                                          run_label=run_label)
+    if want["live"] or want["truncations"] or want["benchmarks"]:
+        out["models_reset"] = svc.registry.reset_perf_stats(
+            model, speed=want["live"], truncations=want["truncations"],
+            latency_benchmark=want["benchmarks"])
+    if want["truncations"]:
+        if model:
+            out["events"] = svc.db.execute(
+                "DELETE FROM event_log WHERE source='facade' AND "
+                "message LIKE ? AND message LIKE '%TRUNCATED%'", (f"{model} %",))
+        else:
+            out["events"] = svc.db.execute(
+                "DELETE FROM event_log WHERE source='facade' "
+                "AND message LIKE '%TRUNCATED%'")
+    if want["requests"] and not model:
+        out["requests"] = svc.db.execute("DELETE FROM request_log")
+    scope = f"model {model}" if model else "all models"
+    if backend:
+        scope += f", backend {backend}"
+    if run_label is not None:
+        scope += f", run {run_label or '(unlabelled)'}"
+    targets = ", ".join(k for k, v in want.items() if v) or "nothing"
+    svc.db.log_event("info", "admin", f"performance data cleared ({scope}: {targets})",
+                     str({k: v for k, v in out.items() if k != "ok"}))
+    return out
 
 
 @router.get("/admin/api/pricing")
@@ -1713,8 +1801,16 @@ async def host_backends(request: Request):
                     "healthy": b["healthy"], "crud": True,
                     "version": await svc.ollama_admin.version(b["name"])})
     for b in svc.openai_admin.backends():
+        version = ""
+        st = getattr(svc.pool, "backends", {}).get(b["name"])
+        probe = getattr(getattr(st, "protocol", None), "server_version", None)
+        if probe and b["healthy"]:
+            try:
+                version = await probe()
+            except Exception:
+                version = ""
         out.append({"name": b["name"], "url": b["url"], "flavor": b["flavor"],
-                    "healthy": b["healthy"], "crud": False, "version": ""})
+                    "healthy": b["healthy"], "crud": False, "version": version})
     out.sort(key=lambda b: b["name"])
     return {"backends": out, "jobs": svc.ollama_admin.job_snapshot()}
 

@@ -60,13 +60,25 @@ def _now() -> int:
     return int(time.time())
 
 
+_PASSTHROUGH_SAMPLING = (
+    "temperature", "top_p", "seed", "stop", "presence_penalty", "frequency_penalty",
+    "logit_bias", "top_k", "min_p", "typical_p", "repeat_penalty",
+    "repetition_penalty", "repeat_last_n", "min_tokens", "dry_multiplier",
+    "dry_base", "dry_allowed_length", "dry_penalty_last_n", "xtc_probability",
+    "xtc_threshold", "top_n_sigma", "mirostat", "mirostat_tau", "mirostat_eta",
+    "chat_template_kwargs")
+
+
 def _options(body: dict) -> dict | None:
     """Map the OpenAI sampling fields clients commonly send onto Ollama options."""
     opts: dict = {}
-    if body.get("temperature") is not None:
-        opts["temperature"] = body["temperature"]
-    if body.get("top_p") is not None:
-        opts["top_p"] = body["top_p"]
+    # Standard + the common local-runner extensions (llama.cpp / vLLM). Each
+    # backend protocol forwards only what its server understands, so passing
+    # them all through here is safe — previously everything but temperature /
+    # top_p was silently dropped on this facade.
+    for k in _PASSTHROUGH_SAMPLING:
+        if body.get(k) is not None:
+            opts[k] = body[k]
     # OpenAI's token cap is on completion length -> Ollama's num_predict.
     cap = body.get("max_completion_tokens") or body.get("max_tokens")
     if cap:
@@ -82,9 +94,9 @@ def _chunk(cid: str, created: int, model: str, *, delta: dict | None = None,
 
 
 def _completion(cid: str, created: int, model: str, content: str,
-               ptoks: int = 0, ctoks: int = 0) -> dict:
+               ptoks: int = 0, ctoks: int = 0, finish: str = "stop") -> dict:
     return {"id": cid, "object": "chat.completion", "created": created, "model": model,
-            "choices": [{"index": 0, "finish_reason": "stop",
+            "choices": [{"index": 0, "finish_reason": finish or "stop",
                          "message": {"role": "assistant", "content": content}}],
             "usage": {"prompt_tokens": ptoks, "completion_tokens": ctoks,
                       "total_tokens": ptoks + ctoks}}
@@ -174,26 +186,62 @@ async def chat_completions(request: Request):
 
 
 async def _passthrough(svc, model, messages, options, stream, cid, created):
-    """A raw backend model requested by name — forwarded untouched, OpenAI shape."""
+    """A raw backend model requested by name — forwarded untouched, OpenAI shape.
+    Telemetry (Live + Performance tabs, Usage Log) is recorded exactly like the
+    Ollama facade's passthrough, and the backend's real finish_reason is passed
+    on so a client can see a truncated ("length") reply."""
+    from .. import telemetry
+    from ..pool.protocols import ChatResult
+    from ..usage import RequestLogger, estimate_cost_usd
+    user_text = _last_user_text(messages)
+    logger = RequestLogger(svc.db, "", model, "passthrough", user_text)
+    backend_name = (svc.pool.backend_info(model) or {}).get("name") or ""
+    max_tokens = svc.config_store.config.agent_brain.worker_max_tokens
     if stream:
         async def gen():
             yield _sse(_chunk(cid, created, model, delta={"role": "assistant"}))
+            finish, status, error, ttft_ms = "stop", "ok", "", None
             try:
-                async for chunk in svc.pool.chat_stream(model, messages, options=options):
+                async for chunk in svc.pool.chat_stream(model, messages, options=options,
+                                                        max_tokens=max_tokens):
+                    if chunk.get("done"):
+                        finish = chunk.get("finish_reason") or "stop"
+                        pt, ct = chunk.get("prompt_tokens") or 0, chunk.get("completion_tokens") or 0
+                        logger.record_model_call(model, backend_name, pt, ct,
+                                                 estimate_cost_usd(svc.registry.get(model), pt, ct))
+                        telemetry.record_call(
+                            svc.db, svc.registry, model=model, backend=backend_name,
+                            result=ChatResult.from_done_frame(chunk), mode="passthrough",
+                            ttft_ms=ttft_ms, wall_ms=logger.elapsed_ms, max_tokens=max_tokens)
+                        continue
+                    if (chunk.get("content") or chunk.get("thinking")) and ttft_ms is None:
+                        ttft_ms = logger.elapsed_ms
                     if chunk.get("content"):
                         yield _sse(_chunk(cid, created, model,
                                           delta={"content": chunk["content"]}))
             except AllBackendsFailed as e:
+                status, error = "error", str(e)
                 yield _sse(_chunk(cid, created, model,
                                   delta={"content": f"[foundry-router] {e}"}))
-            yield _sse(_chunk(cid, created, model, finish="stop"))
+            finally:
+                logger.finish(status, error)
+            yield _sse(_chunk(cid, created, model, finish=finish))
             yield "data: [DONE]\n\n"
         return StreamingResponse(gen(), media_type="text/event-stream")
     try:
-        result, _ = await svc.pool.chat(model, messages, options=options)
+        result, backend = await svc.pool.chat(model, messages, options=options,
+                                              max_tokens=max_tokens)
     except AllBackendsFailed as e:
+        logger.finish("error", str(e))
         return JSONResponse(
             {"error": {"message": str(e), "type": "api_error", "code": "backend_error"}},
             status_code=502)
+    logger.record_model_call(model, backend, result.prompt_tokens, result.completion_tokens,
+                             estimate_cost_usd(svc.registry.get(model), result.prompt_tokens,
+                                               result.completion_tokens))
+    logger.finish("ok")
+    telemetry.record_call(svc.db, svc.registry, model=model, backend=backend, result=result,
+                          mode="passthrough", wall_ms=logger.elapsed_ms, max_tokens=max_tokens)
     return JSONResponse(_completion(cid, created, model, result.content,
-                                    result.prompt_tokens, result.completion_tokens))
+                                    result.prompt_tokens, result.completion_tokens,
+                                    finish=result.finish_reason or "stop"))

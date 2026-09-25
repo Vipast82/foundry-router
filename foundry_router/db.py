@@ -300,6 +300,15 @@ class Database:
             ("models", "cache_prompt_total", "INTEGER DEFAULT 0"),
             ("models", "cache_samples", "INTEGER DEFAULT 0"),
             ("models", "last_cache_hit_pct", "REAL"),
+            # Perf-history extensions: a run label (compare hardware/config
+            # changes side by side), where the timing came from (server vs
+            # router-estimated), the truly-prefilled token count, hidden reasoning
+            # tokens, and cold-load time per call.
+            ("perf_samples", "run_label", "TEXT"),
+            ("perf_samples", "timing_src", "TEXT"),
+            ("perf_samples", "prefill_tokens", "INTEGER"),
+            ("perf_samples", "reasoning_tokens", "INTEGER"),
+            ("perf_samples", "load_ms", "REAL"),
             ("models", "adequacy_ok", "INTEGER DEFAULT 0"),
             ("models", "adequacy_failed", "INTEGER DEFAULT 0"),
             ("models", "calls_ok", "INTEGER DEFAULT 0"),

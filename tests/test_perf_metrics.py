@@ -25,7 +25,7 @@ def test_llamacpp_timings_missing_is_zero():
     tm = _llamacpp_timings(None)
     assert tm == {"prompt_eval_duration_ns": 0, "eval_duration_ns": 0,
                   "prompt_n": 0, "predicted_n": 0,
-                  "draft_n": 0, "draft_n_accepted": 0}
+                  "draft_n": 0, "draft_n_accepted": 0, "cache_n": 0}
 
 
 async def test_openai_chat_captures_llamacpp_timings():

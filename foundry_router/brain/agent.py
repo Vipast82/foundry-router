@@ -29,6 +29,7 @@ from typing import Any, AsyncIterator, Optional, TypedDict
 
 from langgraph.graph import END, START, StateGraph
 
+from .. import telemetry
 from ..errors import describe_exception
 from ..guardrails import GuardrailEngine, RequestGuardState
 from ..pool.base import AllBackendsFailed, ContextTooLarge
@@ -1185,12 +1186,13 @@ class AgentRunner:
         stream_reason = (emit is not None
                          and getattr(self.brain.cfg, "stream_worker_reasoning", False)
                          and info and info.get("type") == "ollama")
+        t_call = time.monotonic()
+        ttft_ms: Optional[float] = None
         try:
             if stream_reason:
                 from ..pool.protocols import ChatResult
                 content_parts, think_parts = [], []
-                pt = ct = eval_ns = load_ns = 0
-                draft_n = draft_acc = cached_tok = 0
+                done_frame: dict = {}
                 async for chunk in self.pool.chat_stream(
                         model_id, [message], options=options,
                         think=self._think_for(model_id), fmt=self._req_format):
@@ -1198,25 +1200,20 @@ class AgentRunner:
                     if th:
                         think_parts.append(th)
                         emit("think", th)                 # live reasoning to client
+                        if ttft_ms is None:
+                            ttft_ms = (time.monotonic() - t_call) * 1000.0
                     if chunk.get("done"):
-                        pt = chunk.get("prompt_tokens") or 0
-                        ct = chunk.get("completion_tokens") or 0
-                        eval_ns = chunk.get("eval_duration_ns") or 0
-                        load_ns = chunk.get("load_duration_ns") or 0
-                        draft_n = chunk.get("draft_n") or 0
-                        draft_acc = chunk.get("draft_n_accepted") or 0
-                        cached_tok = chunk.get("cached_tokens") or 0
+                        done_frame = chunk
                     elif chunk.get("content"):
+                        if ttft_ms is None:
+                            ttft_ms = (time.monotonic() - t_call) * 1000.0
                         content_parts.append(chunk["content"])   # BUFFERED, not shown
                 # thinking="" on purpose: the reasoning was ALREADY streamed live
                 # per-chunk above; leaving it here would make the caller re-emit
-                # the whole block (double narration).
-                result = ChatResult(
-                    content="".join(content_parts), thinking="",
-                    prompt_tokens=pt, completion_tokens=ct,
-                    eval_duration_ns=eval_ns, load_duration_ns=load_ns,
-                    draft_n=draft_n, draft_n_accepted=draft_acc,
-                    cached_tokens=cached_tok)
+                # the whole block (double narration). Every telemetry field of the
+                # done frame (incl. prefill time + finish reason) carries over.
+                result = ChatResult.from_done_frame(
+                    done_frame, content="".join(content_parts))
                 backend = (info.get("name") or model_id)
             else:
                 result, backend = await self.pool.chat(
@@ -1236,16 +1233,15 @@ class AgentRunner:
         # nothing usable), everything else counts as a good call.
         self.model_registry.record_call_outcome(
             model_id, ok=bool(result.content and result.content.strip()))
-        # Observed telemetry: warm tokens/sec (and cold-load time, separately)
-        # roll into the registry as measured/observed benchmark signal. No-ops
-        # for non-Ollama backends (they report no timing).
-        self.model_registry.note_inference(
-            model_id, result.completion_tokens,
-            result.eval_duration_ns, result.load_duration_ns,
-            prompt_count=result.prompt_tokens,
-            prompt_eval_duration_ns=result.prompt_eval_duration_ns,
-            draft_n=result.draft_n, draft_n_accepted=result.draft_n_accepted,
-            cached_tokens=result.cached_tokens)
+        # Observed telemetry: decode/prefill tok/s, cold-load, spec/cache, TTFT
+        # and truncations roll into the registry (Live view) AND a perf-history
+        # sample (Performance tab) — the same recorder every dispatch path uses.
+        telemetry.record_call(
+            getattr(self.model_registry, "db", None), self.model_registry, model=model_id,
+            backend=backend, result=result,
+            persona=(persona or {}).get("name") or "", mode="agent",
+            ttft_ms=ttft_ms, wall_ms=(time.monotonic() - t_call) * 1000.0,
+            max_tokens=max_tokens or self.brain.cfg.worker_max_tokens)
         # Scrub literal <think> tags out of the answer text — they ride to the
         # user verbatim via use_last_result otherwise (found live: a stray
         # ", etc. </think>" rendered as visible content in AnythingLLM). The
@@ -1672,11 +1668,11 @@ class AgentRunner:
         for step in range(1, cap + 1):
             result = backend = None
             err = None
+            t_step = time.monotonic()
             if stream_reason:
                 from ..pool.protocols import ChatResult
                 parts, acc_tcs, done_tcs = [], [], []
-                pt = ct = ev_ns = ld_ns = 0
-                dn = dna = cachetok = 0
+                done_frame: dict = {}
                 try:
                     async for chunk in self.pool.chat_stream(
                             worker, messages, tools=specs, options=wt_options,
@@ -1686,23 +1682,15 @@ class AgentRunner:
                             yield AgentEvent("think", th)      # LIVE reasoning
                         if chunk.get("done"):
                             done_tcs = chunk.get("tool_calls") or []
-                            pt = chunk.get("prompt_tokens") or 0
-                            ct = chunk.get("completion_tokens") or 0
-                            ev_ns = chunk.get("eval_duration_ns") or 0
-                            ld_ns = chunk.get("load_duration_ns") or 0
-                            dn = chunk.get("draft_n") or 0
-                            dna = chunk.get("draft_n_accepted") or 0
-                            cachetok = chunk.get("cached_tokens") or 0
+                            done_frame = chunk
                         else:
                             if chunk.get("tool_calls"):
                                 acc_tcs.extend(chunk["tool_calls"])
                             if chunk.get("content"):
                                 parts.append(chunk["content"])
-                    result = ChatResult(
-                        content="".join(parts), tool_calls=(acc_tcs or done_tcs),
-                        prompt_tokens=pt, completion_tokens=ct,
-                        eval_duration_ns=ev_ns, load_duration_ns=ld_ns,
-                        draft_n=dn, draft_n_accepted=dna, cached_tokens=cachetok)
+                    result = ChatResult.from_done_frame(
+                        done_frame, content="".join(parts),
+                        tool_calls=(acc_tcs or done_tcs))
                     backend = wt_info.get("name") or worker
                 except Exception as e:      # noqa: BLE001 — ANY stream failure
                     # A mid-stream drop (timeout, socket close, transport error)
@@ -1731,13 +1719,12 @@ class AgentRunner:
                 return
             self.model_registry.record_call_outcome(
                 worker, ok=bool(result.content and result.content.strip()))
-            self.model_registry.note_inference(
-                worker, result.completion_tokens,
-                result.eval_duration_ns, result.load_duration_ns,
-                prompt_count=result.prompt_tokens,
-                prompt_eval_duration_ns=result.prompt_eval_duration_ns,
-                draft_n=result.draft_n, draft_n_accepted=result.draft_n_accepted,
-                cached_tokens=result.cached_tokens)
+            telemetry.record_call(
+                getattr(self.model_registry, "db", None), self.model_registry, model=worker,
+                backend=backend or "", result=result,
+                persona=(ctx.persona or {}).get("name") or "", mode="worker-tools",
+                wall_ms=(time.monotonic() - t_step) * 1000.0,
+                max_tokens=self.brain.cfg.worker_max_tokens)
 
             if not result.tool_calls:
                 # No tool call => the worker produced its final answer.
