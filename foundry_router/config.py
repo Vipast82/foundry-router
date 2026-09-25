@@ -116,6 +116,14 @@ class AgentBrainConfig(BaseModel):
     # timeout, proxy) so long generations don't get killed. 0 = off. direct_stream
     # only.
     direct_stream_heartbeat_seconds: int = 0
+    # Stall watchdog (direct_stream): if a backend sends NO output (no token,
+    # thinking or tool call) for this long, the call is abandoned (the upstream
+    # request is closed so it stops using the GPU / Claude session) and — if
+    # nothing reached the client yet — the next model the persona allows takes
+    # over. Keep-alive pings from the backend don't count as output. Set it
+    # above your slowest legitimate prefill (a 27B model reading a 150k-token
+    # Cline context can take several minutes). 0 = off.
+    direct_stream_stall_seconds: int = 600
     # AGENT mode: stream the worker's REASONING (its native thinking tokens) live
     # as narration while it generates, WITHOUT streaming the answer — the brain
     # still gets the full content and reviews it (refusal/permissive fallback,

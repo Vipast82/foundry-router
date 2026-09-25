@@ -138,7 +138,7 @@ async def set_brain(request: Request):
                "tool_result_limit_chars", "mcp_result_limit_chars", "worker_max_tokens",
                "user_input_preview_chars", "heartbeat_seconds", "worker_keep_alive",
                "direct_stream", "direct_stream_heartbeat_seconds",
-               "stream_worker_reasoning", "reasoning_effort", "sampling_defaults",
+               "direct_stream_stall_seconds", "stream_worker_reasoning", "reasoning_effort", "sampling_defaults",
                "routing_mode", "worker_tool_result_chars"}
     updates = {k: v for k, v in body.items() if k in allowed}
     if updates.get("routing_mode") not in (None, "auto", "brain", "passthrough"):

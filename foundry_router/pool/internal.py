@@ -37,6 +37,7 @@ class BackendState:
     models: list[str] = field(default_factory=list)
     last_error: str = ""
     last_ok: float = 0.0
+    busy: int = 0                      # calls in flight on THIS backend right now
 
 
 class InternalPool(BackendPool):
@@ -104,6 +105,15 @@ class InternalPool(BackendPool):
         try:
             models = await s.protocol.list_models()
         except Exception as e:
+            # Busy is not down: a server grinding through a huge prompt (llama.cpp
+            # prefilling 100k+ tokens) can be too busy to answer a model-list
+            # probe in time. While it has calls in flight, a probe TIMEOUT is not
+            # counted — only a refused/reset connection (the process really gone)
+            # is. Otherwise the next request is routed away mid-task.
+            if s.busy > 0 and isinstance(e, (httpx.TimeoutException, asyncio.TimeoutError)):
+                s.last_error = (f"health probe timed out while busy with {s.busy} "
+                                f"call(s) — not counted as a failure")
+                return False
             # No discoverable list. For a backend with a configured fallback
             # `models:` list, a failed *list* call is not by itself proof the
             # backend is down — but we have no cheaper liveness probe that
@@ -264,7 +274,7 @@ class InternalPool(BackendPool):
             "flavor": getattr(s.config, "effective_flavor", None),
             "priority": s.config.priority, "healthy": s.healthy,
             "consecutive_failures": s.consecutive_failures,
-            "models": s.models, "last_error": s.last_error,
+            "models": s.models, "last_error": s.last_error, "busy": s.busy,
         } for s in self.backends.values()]
 
     # -- in-flight tracking ------------------------------------------------------------
@@ -307,6 +317,7 @@ class InternalPool(BackendPool):
         self._inflight_enter(model)
         try:
             for s in candidates:
+                s.busy += 1
                 try:
                     result = await s.protocol.chat(model, messages, tools=tools,
                                                    options=options, max_tokens=max_tokens,
@@ -323,6 +334,8 @@ class InternalPool(BackendPool):
                     self.db.log_event("warning", "backend_pool",
                                       f"call to {s.config.name} for {model} failed, trying next",
                                       detail)
+                finally:
+                    s.busy = max(0, s.busy - 1)
         finally:
             self._inflight_exit(model)
         raise AllBackendsFailed(f"all backends failed for {model!r}: " + " | ".join(errors))
@@ -341,6 +354,7 @@ class InternalPool(BackendPool):
             raise AllBackendsFailed(f"no backend serves model {model!r}")
         s = candidates[0]
         self._inflight_enter(model)
+        s.busy += 1
         try:
             async for chunk in s.protocol.chat_stream(model, messages, tools=tools,
                                                       options=options,
@@ -356,6 +370,7 @@ class InternalPool(BackendPool):
                 self._notify()
             raise AllBackendsFailed(f"stream from {s.config.name} failed: {detail}") from e
         finally:
+            s.busy = max(0, s.busy - 1)
             self._inflight_exit(model)
 
     async def embed(self, model: str, inputs: list[str], **kw) -> tuple[dict, str]:

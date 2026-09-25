@@ -909,28 +909,78 @@ def _escalate_if_local_busy(svc, persona, model_id, user_text):
     return paid_id
 
 
-async def _stream_with_heartbeat(agen, hb: float, start: float):
+class StreamStalled(Exception):
+    """A backend produced no output for the stall window."""
+    def __init__(self, seconds: int):
+        super().__init__(f"no output for {seconds}s")
+        self.seconds = seconds
+
+
+def _is_output(chunk) -> bool:
+    return isinstance(chunk, dict) and bool(
+        chunk.get("content") or chunk.get("thinking") or chunk.get("tool_calls")
+        or chunk.get("done"))
+
+
+async def _stream_with_heartbeat(agen, hb: float, start: float, stall: float = 0):
     """Wrap an async chunk stream: yield ("chunk", c) for each real upstream
     chunk, and ("beat", elapsed_s) whenever none arrives within `hb` seconds —
     so the caller can emit a keep-alive during a silent prompt-eval / buffered-
     reasoning gap. hb <= 0 disables the beats (pure passthrough). The pending
-    read is shielded, so a beat doesn't drop the chunk that's still coming."""
+    read is shielded, so a beat doesn't drop the chunk that's still coming.
+
+    stall > 0: raise StreamStalled once no OUTPUT chunk (content / thinking /
+    tool call / done) has arrived for that many seconds.
+
+    Always closes the upstream on exit — client disconnect, stall, or error —
+    by cancelling the pending read and aclose()-ing the source, so an abandoned
+    request stops occupying the llama.cpp slot / Claude session instead of
+    running on unseen (and making the backend look busy or dead)."""
     it = agen.__aiter__()
-    while True:
-        fut = asyncio.ensure_future(it.__anext__())
+    fut = None
+    last_out = time.monotonic()
+    try:
         while True:
+            fut = asyncio.ensure_future(it.__anext__())
+            while True:
+                wait = hb if hb and hb > 0 else None
+                if stall and stall > 0:
+                    remaining = stall - (time.monotonic() - last_out)
+                    if remaining <= 0:
+                        raise StreamStalled(int(time.monotonic() - last_out))
+                    wait = min(wait, remaining) if wait else remaining
+                try:
+                    if wait:
+                        chunk = await asyncio.wait_for(asyncio.shield(fut), wait)
+                    else:
+                        chunk = await fut
+                except asyncio.TimeoutError:
+                    if stall and stall > 0 and time.monotonic() - last_out >= stall:
+                        raise StreamStalled(int(time.monotonic() - last_out))
+                    if hb and hb > 0:
+                        yield "beat", int(time.monotonic() - start)
+                    continue
+                except StopAsyncIteration:
+                    fut = None
+                    return
+                fut = None
+                if _is_output(chunk):
+                    last_out = time.monotonic()
+                yield "chunk", chunk
+                break
+    finally:
+        if fut is not None and not fut.done():
+            fut.cancel()
             try:
-                if hb and hb > 0:
-                    chunk = await asyncio.wait_for(asyncio.shield(fut), hb)
-                else:
-                    chunk = await fut
-            except asyncio.TimeoutError:
-                yield "beat", int(time.monotonic() - start)
-                continue
-            except StopAsyncIteration:
-                return
-            yield "chunk", chunk
-            break
+                await fut
+            except BaseException:                                 # noqa: BLE001
+                pass
+        aclose = getattr(it, "aclose", None)
+        if aclose is not None:
+            try:
+                await aclose()
+            except BaseException:                                 # noqa: BLE001
+                pass
 
 
 def _paid_pin_order(svc, persona) -> list:
@@ -1013,6 +1063,22 @@ def _jl_list(v) -> list:
 
 # ---- direct dispatch (client brought its own tools) ------------------------------
 
+def _local_down_notes(svc, model_id: str) -> list[str]:
+    """When a request lands on Claude because the local backend(s) are marked
+    down, say so — otherwise a mid-session switch from local to Sonnet looks
+    random."""
+    info = svc.pool.backend_info(model_id) or {}
+    if info.get("type") != "anthropic-compatible":
+        return []
+    out = []
+    for b in getattr(svc.pool, "backend_status", lambda: [])():
+        if b.get("type") == "anthropic-compatible" or b.get("healthy"):
+            continue
+        err = (b.get("last_error") or "health checks failing")[:140]
+        out.append(f"local backend {b['name']} is marked down ({err}) → using {model_id}")
+    return out[:2]
+
+
 async def _direct_dispatch_chat(svc, persona, model_name, messages, client_tools,
                                 options, stream, user_text, client_think=None,
                                 client_format=None, log_mode: str = "direct",
@@ -1027,6 +1093,7 @@ async def _direct_dispatch_chat(svc, persona, model_name, messages, client_tools
                            log_mode, user_text)
     eff = svc.guardrails.effective(persona)
     model_id = None
+    route_notes: list[str] = []      # why this model (shown as thinking)
     pins = _paid_pin_order(svc, persona)
     if pins:
         # Paid-pin priority cascade (prefer_paid persona, e.g. Cline PLAN): try each
@@ -1062,7 +1129,11 @@ async def _direct_dispatch_chat(svc, persona, model_name, messages, client_tools
             logger.finish("error", "no backends reachable")
             return _model_not_found(model_name)
         # Load-aware: if the chosen local model is busy, try paid (guardrail gates it).
+        _picked = model_id
         model_id = _escalate_if_local_busy(svc, persona, model_id, user_text)
+        if model_id != _picked:
+            route_notes.append(f"local {_picked} is busy with another request → "
+                               f"escalated to {model_id} (escalate when local busy)")
 
         verdict = await svc.guardrails.check_paid_call(
             model_id, svc.pool.backend_info(model_id), svc.registry.get(model_id),
@@ -1079,6 +1150,10 @@ async def _direct_dispatch_chat(svc, persona, model_name, messages, client_tools
                                               f"local model is reachable: {verdict.reason}"},
                                     status_code=503)
 
+    if not route_notes:
+        route_notes.extend(_local_down_notes(svc, model_id))
+    for n in route_notes:
+        logger.record_guardrail(n)
     t0 = time.monotonic_ns()
     brain_cfg = svc.config_store.config.agent_brain
     keep_alive = brain_cfg.worker_keep_alive     # keep a heavy model warm between turns
@@ -1288,6 +1363,8 @@ async def _direct_dispatch_chat(svc, persona, model_name, messages, client_tools
                 yield tr.chat_chunk(model_name, "", done=False,
                                     thinking=f"⚙️ passthrough ({note}) — {persona['virtual_name']} "
                                              f"policy picked {model_id}\n")
+            for n in route_notes:
+                yield tr.chat_chunk(model_name, "", done=False, thinking=f"⚠️ {n}\n")
             yield tr.chat_chunk(model_name, "", done=False,
                                 thinking=f"⚙️ {_tag} · {model_id} — streaming…\n")
             if mcp_defs:
@@ -1295,6 +1372,7 @@ async def _direct_dispatch_chat(svc, persona, model_name, messages, client_tools
                                     thinking=f"🔧 {len(mcp_defs)} persona MCP tool(s) available "
                                              f"alongside {len(client_tools or [])} client tool(s)\n")
             hb = float(brain_cfg.direct_stream_heartbeat_seconds or 0)
+            stall = float(getattr(brain_cfg, "direct_stream_stall_seconds", 0) or 0)
             for attempt, mid in enumerate(failover):
                 if attempt:
                     logger.record_guardrail(f"failover: {model_id} failed -> {mid}")
@@ -1319,7 +1397,8 @@ async def _direct_dispatch_chat(svc, persona, model_name, messages, client_tools
                             tools=all_tools, options=options, keep_alive=keep_alive,
                             max_tokens=brain_cfg.worker_max_tokens,
                             think=_think_for(svc, model_id, persona, client_think), fmt=fmt)
-                        async for _kind, _payload in _stream_with_heartbeat(_src, hb, hb_start):
+                        async for _kind, _payload in _stream_with_heartbeat(_src, hb, hb_start,
+                                                                            stall):
                             if _kind == "beat":
                                 yield tr.chat_chunk(
                                     model_name, "", done=False,
@@ -1381,6 +1460,21 @@ async def _direct_dispatch_chat(svc, persona, model_name, messages, client_tools
                             stats=tr.result_stats(res, time.monotonic_ns() - t0,
                                                   model=model_id, backend=backend_name))
                         return
+                except StreamStalled as e:
+                    # The backend went silent (a hung / queued Claude session,
+                    # a wedged llama.cpp slot). The upstream request is already
+                    # closed; hand the turn to the next allowed model if the
+                    # client hasn't seen any output yet.
+                    msg = (f"{model_id} produced no output for {e.seconds}s "
+                           f"(direct_stream_stall_seconds={int(stall)}) — abandoned")
+                    svc.db.log_event("warning", "routing", msg, backend_name)
+                    logger.record_guardrail(msg)
+                    if not produced and attempt + 1 < len(failover):
+                        yield tr.chat_chunk(model_name, "", done=False,
+                                            thinking=f"⚠️ {msg}\n")
+                        continue
+                    logger.finish("error", msg)
+                    err = RuntimeError(msg)
                 except AllBackendsFailed as e:
                     if not produced and attempt + 1 < len(failover):
                         _on_error(e, finish=False)
