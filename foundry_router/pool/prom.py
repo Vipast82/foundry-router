@@ -144,6 +144,22 @@ def summarize(flavor: str, m: dict) -> dict:
         out["truncated_total"] = _sum(m, "vllm:request_success_total",
                                       where={"finished_reason": "length"})
         out["requests_finished_total"] = _sum(m, "vllm:request_success_total")
+    elif flavor == "meridian":
+        # Meridian proxy telemetry: requests by status + latency by phase
+        # (histogram means over its recent-request window).
+        out["requests_total"] = _sum(m, "meridian_requests_total")
+        # status is the HTTP code the client got; anything outside 2xx failed.
+        samples = m.get("meridian_requests_total") or []
+        if samples:
+            out["requests_failed"] = sum(v for labels, v in samples
+                                         if not str(labels.get("status", "")).startswith("2"))
+        for phase, key in (("queue_wait", "mean_queue_ms"), ("ttfb", "mean_ttft_ms"),
+                           ("upstream", "mean_upstream_ms"), ("total", "mean_e2e_ms"),
+                           ("proxy_overhead", "mean_overhead_ms")):
+            s = _sum(m, "meridian_request_duration_ms_sum", where={"phase": phase})
+            c = _sum(m, "meridian_request_duration_ms_count", where={"phase": phase})
+            if s is not None and c:
+                out[key] = round(s / c, 1)
     return {k: v for k, v in out.items() if v is not None}
 
 

@@ -62,6 +62,8 @@ Worker model (± MCP tools, ± tiered review) → response streamed back to the 
 - **Dashboard → Live / Performance / Cost** — live per-model speed, engine
   load from llama.cpp/vLLM, per-call history with run labels (compare
   hardware runs) and a clear-data tool; see [LLAMACPP_VLLM.md](LLAMACPP_VLLM.md).
+  What each backend reports and how it reaches each client:
+  [COMPATIBILITY.md](COMPATIBILITY.md).
 - **Backend Pool** — backends, health, the routing brain, and **Meridian
   re-authentication** (refresh token / full re-login — [MERIDIAN_AUTH.md](MERIDIAN_AUTH.md)).
 - **Models** — the registry: score badges, `~seed` vs researched, cross-model

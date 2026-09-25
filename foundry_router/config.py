@@ -88,8 +88,8 @@ class AgentBrainConfig(BaseModel):
     # ON: each token is real proof the backend is generating (keeps the connection
     # alive, resets the read timeout per chunk — no total-time wall) and the
     # client shows it typing in real time. OFF (default) = one blocking call, the
-    # full answer at the end. Streams only for Ollama backends; Claude and any
-    # non-streaming backend fall back to blocking automatically.
+    # full answer at the end. Streams for Ollama, openai-dialect (llama.cpp /
+    # vLLM / Unsloth / OpenRouter) and Claude-via-Meridian backends.
     direct_stream: bool = False
     # Direct-stream keep-alive: while streaming to a coding client (Cline), if the
     # backend sends no chunk for this many seconds (a silent prompt-eval or a
@@ -167,6 +167,17 @@ class BackendConfig(BaseModel):
     # (e.g. run two Foundry backends, one per Claude account). None = let
     # Meridian use its active/sticky routing.
     meridian_profile: Optional[str] = None
+    # Meridian adapter to use (sent as x-meridian-agent), e.g. "opencode" or
+    # "passthrough". None = Meridian's own default for an unrecognised client
+    # (its MERIDIAN_DEFAULT_AGENT, else the OpenCode adapter — which forwards
+    # thinking blocks and returns tool_use to the caller, what Foundry needs).
+    meridian_agent: Optional[str] = None
+    # Send a stable x-session-affinity derived from the conversation when the
+    # client didn't send its own session header, so Meridian resumes the same
+    # Claude session turn to turn (warm prompt cache, model sees its own prior
+    # turns). Off by default: two concurrent conversations that open with the
+    # identical system prompt + first message would share a session.
+    meridian_session_affinity: bool = False
 
     @property
     def effective_flavor(self) -> str:

@@ -97,6 +97,9 @@ backend_pool:
         url: http://192.168.1.40:3456       # EDIT: Meridian bridge
         api_key: "${MERIDIAN_API_KEY}"
         priority: 100
+        # meridian_agent: opencode          # optional: Meridian adapter (x-meridian-agent)
+        # meridian_session_affinity: true   # optional: stable per-conversation session
+        #                                   # key -> warm prompt cache (docs/COMPATIBILITY.md)
         # meridian_profile: victor          # optional: pin this backend to a
         #                                   # Meridian profile/account (sent as
         #                                   # x-meridian-profile). Omit to let

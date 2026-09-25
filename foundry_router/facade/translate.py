@@ -47,7 +47,8 @@ def generate_chunk(model: str, response: str = "", done: bool = False,
     return _line(obj)
 
 
-def result_stats(res, total_duration_ns: int) -> dict:
+def result_stats(res, total_duration_ns: int, model: str = "",
+                 backend: str = "") -> dict:
     """The _stats() input for a finished backend call (a ChatResult): real
     token counts, the backend's own load / prefill / decode durations and why
     generation stopped — so an Ollama client computes the same tok/s the
@@ -58,7 +59,11 @@ def result_stats(res, total_duration_ns: int) -> dict:
             "load_duration_ns": res.load_duration_ns,
             "prompt_eval_duration_ns": res.prompt_eval_duration_ns,
             "eval_duration_ns": res.eval_duration_ns,
-            "done_reason": res.finish_reason}
+            "done_reason": res.finish_reason,
+            "cached_tokens": getattr(res, "cached_tokens", 0) or 0,
+            "reasoning_tokens": getattr(res, "reasoning_tokens", 0) or 0,
+            "timing_source": getattr(res, "timing_source", "") or "",
+            "served_by": model, "backend": backend}
 
 
 def _done_reason(reason: Optional[str]) -> str:
@@ -82,7 +87,7 @@ def _stats(stats: Optional[dict]) -> dict:
     s = stats or {}
     total = int(s.get("total_duration_ns") or 0)
     eval_ns = int(s.get("eval_duration_ns") or 0)
-    return {
+    out = {
         "done_reason": _done_reason(s.get("done_reason")),
         "total_duration": total,
         "load_duration": int(s.get("load_duration_ns") or 0),
@@ -91,6 +96,17 @@ def _stats(stats: Optional[dict]) -> dict:
         "eval_count": int(s.get("completion_tokens") or 0),
         "eval_duration": eval_ns or total,
     }
+    # Extra detail no Ollama field carries — which real model / backend
+    # answered a persona, KV-cache hits, hidden reasoning tokens, whether the
+    # timings were measured by the server or estimated. Ollama clients ignore
+    # unknown keys; the OpenAI facade maps these onto usage details.
+    extra = {k: s[k] for k in ("served_by", "backend", "cached_tokens",
+                               "reasoning_tokens", "timing_source") if s.get(k)}
+    if s.get("done_reason") and _done_reason(s["done_reason"]) != str(s["done_reason"]).lower():
+        extra["finish_reason"] = s["done_reason"]      # e.g. tool_calls, refusal
+    if extra:
+        out["foundry"] = extra
+    return out
 
 
 def chunk_text(text: str, size: int = 400) -> Iterator[str]:

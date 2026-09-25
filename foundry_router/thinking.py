@@ -165,3 +165,16 @@ def claude_thinking(think, max_tokens: int):
         return None
     max_tokens = max(int(max_tokens or 0), 1024) + budget   # keep output room on top
     return {"type": "enabled", "budget_tokens": budget}, max_tokens
+
+
+def claude_effort(think) -> Optional[str]:
+    """The Claude `output_config.effort` level for a normalized think value
+    (Meridian passes it to the SDK's --effort: low/medium/high/xhigh/max).
+    None = leave the model default (thinking off / unset)."""
+    norm = normalize(think)
+    if norm is None or norm is False:
+        return None
+    if norm is True:
+        return "medium"
+    level = str(norm).strip().lower()
+    return level if level in ("low", "medium", "high", "max") else None

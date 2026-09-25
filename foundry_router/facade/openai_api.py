@@ -8,10 +8,13 @@ personas, guardrails, and request logging as the Ollama facade: a persona name
 is the OpenAI `model`, and generation is produced by the identical agent event
 stream, just re-dressed in OpenAI's response shape.
 
-Scope note: the routing agent owns tool calling, so a `tools` array in an
-OpenAI request is not forwarded to the model here (same reason Ollama-side
-direct-dispatch exists) — the agent decides tools itself. Simple completion
-clients (the common case) are unaffected.
+Every request is translated into an Ollama /api/chat body and dispatched
+through the SAME function as the Ollama facade (_chat_dispatch), so OpenAI-
+protocol clients (OpenCode, Open WebUI's OpenAI connections, AnythingLLM's
+generic-OpenAI provider, SDKs) get identical behaviour: client `tools` switch a
+persona to direct dispatch and tool_calls come back; reasoning streams as
+`reasoning_content`; a truncated reply reports finish_reason "length"; usage
+carries cached / reasoning token details plus llama.cpp-style `timings`.
 """
 
 from __future__ import annotations
@@ -24,10 +27,7 @@ from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 
 from ..insights import normalize_rating, record_feedback
-from ..pool.base import AllBackendsFailed
-from . import translate as tr
-from .ollama_api import (_agent_events_to_chat_chunks, _build_ctx,
-                        _canonical_messages, _last_user_text, _svc)
+from .ollama_api import _svc
 
 router = APIRouter()
 
@@ -134,114 +134,241 @@ async def retrieve_model(request: Request, model: str):
             "owned_by": "foundry-router"}
 
 
+def _to_ollama_messages(raw: list) -> list[dict]:
+    """OpenAI chat messages -> the Ollama-shaped messages _chat_dispatch takes.
+    Text parts are joined, base64 data-URI images become Ollama `images`,
+    assistant tool_calls keep their ids (so tool results still pair up on a
+    Claude backend), `developer` is a system message."""
+    out = []
+    for m in raw or []:
+        role = m.get("role") or "user"
+        if role == "developer":
+            role = "system"
+        content = m.get("content")
+        images: list[str] = []
+        if isinstance(content, list):
+            texts = []
+            for part in content:
+                if not isinstance(part, dict):
+                    continue
+                if part.get("type") in ("text", "input_text"):
+                    texts.append(part.get("text") or "")
+                elif part.get("type") in ("image_url", "input_image"):
+                    url = part.get("image_url")
+                    url = url.get("url") if isinstance(url, dict) else url
+                    if isinstance(url, str) and url.startswith("data:") and "," in url:
+                        images.append(url.split(",", 1)[1])
+            content = "\n".join(t for t in texts if t)
+        mm: dict = {"role": role, "content": content or ""}
+        if images:
+            mm["images"] = images
+        if m.get("tool_calls"):
+            mm["tool_calls"] = [
+                {"id": tc.get("id"), "type": "function",
+                 "function": {"name": (tc.get("function") or {}).get("name"),
+                              "arguments": (tc.get("function") or {}).get("arguments") or "{}"}}
+                for tc in m["tool_calls"] if isinstance(tc, dict)]
+        if role == "tool":
+            if m.get("tool_call_id"):
+                mm["tool_call_id"] = m["tool_call_id"]
+            if m.get("name"):
+                mm["tool_name"] = m["name"]
+        if m.get("reasoning_content") and role == "assistant":
+            mm["thinking"] = m["reasoning_content"]
+        out.append(mm)
+    return out
+
+
+def _think_from(body: dict):
+    """OpenAI-family reasoning controls -> Foundry's think value."""
+    if body.get("reasoning_effort") is not None:
+        return body["reasoning_effort"]
+    r = body.get("reasoning")
+    if isinstance(r, dict) and r.get("effort") is not None:
+        return r["effort"]
+    t = body.get("thinking")
+    if isinstance(t, dict) and t.get("type") in ("enabled", "disabled"):
+        return t["type"] == "enabled"
+    ctk = body.get("chat_template_kwargs")
+    if isinstance(ctk, dict) and ctk.get("enable_thinking") is not None:
+        return bool(ctk["enable_thinking"])
+    return None
+
+
+def _to_ollama_body(body: dict) -> dict:
+    ob: dict = {"model": body.get("model") or "", "stream": bool(body.get("stream", False)),
+                "messages": _to_ollama_messages(body.get("messages") or [])}
+    tools = body.get("tools") or None
+    if tools and body.get("tool_choice") != "none":
+        ob["tools"] = tools
+    opts = _options(body)
+    if opts:
+        ob["options"] = opts
+    rf = body.get("response_format")
+    if isinstance(rf, dict):
+        if rf.get("type") == "json_object":
+            ob["format"] = "json"
+        elif rf.get("type") == "json_schema":
+            js = rf.get("json_schema") or {}
+            ob["format"] = js.get("schema") if isinstance(js.get("schema"), dict) else js or "json"
+    think = _think_from(body)
+    if think is not None:
+        ob["think"] = think
+    return ob
+
+
+def _openai_tool_calls(tcs) -> list[dict]:
+    out = []
+    for i, tc in enumerate(tcs or []):
+        fn = tc.get("function") or {}
+        args = fn.get("arguments")
+        out.append({"index": i, "id": tc.get("id") or "call_" + uuid.uuid4().hex[:24],
+                    "type": "function",
+                    "function": {"name": fn.get("name") or "",
+                                 "arguments": args if isinstance(args, str)
+                                 else json.dumps(args or {})}})
+    return out
+
+
+def _finish_from(done: dict, had_tools: bool) -> str:
+    extra = (done.get("foundry") or {}).get("finish_reason")
+    if had_tools:
+        return "tool_calls"
+    if done.get("done_reason") == "length":
+        return "length"
+    if extra in ("refusal", "content_filter"):
+        return "content_filter"
+    return "stop"
+
+
+def _usage_from(done: dict) -> dict:
+    """OpenAI usage (+ cached / reasoning details) and llama.cpp-style
+    `timings` from an Ollama final chunk. Clients that don't know `timings`
+    ignore it; Open WebUI and others show it in their usage details."""
+    extra = done.get("foundry") or {}
+    pt, ct = int(done.get("prompt_eval_count") or 0), int(done.get("eval_count") or 0)
+    usage: dict = {"prompt_tokens": pt, "completion_tokens": ct, "total_tokens": pt + ct}
+    if extra.get("cached_tokens"):
+        usage["prompt_tokens_details"] = {"cached_tokens": int(extra["cached_tokens"])}
+    if extra.get("reasoning_tokens"):
+        usage["completion_tokens_details"] = {"reasoning_tokens": int(extra["reasoning_tokens"])}
+    pe, ev = int(done.get("prompt_eval_duration") or 0), int(done.get("eval_duration") or 0)
+    timings = {"prompt_n": pt, "prompt_ms": round(pe / 1e6, 1),
+               "predicted_n": ct, "predicted_ms": round(ev / 1e6, 1)}
+    if pe:
+        timings["prompt_per_second"] = round(pt / (pe / 1e9), 2)
+    if ev and ct:
+        timings["predicted_per_second"] = round(ct / (ev / 1e9), 2)
+    if done.get("load_duration"):
+        timings["load_ms"] = round(int(done["load_duration"]) / 1e6, 1)
+    if done.get("total_duration"):
+        timings["total_ms"] = round(int(done["total_duration"]) / 1e6, 1)
+    return {"usage": usage, "timings": timings,
+            **({"served_by": extra["served_by"]} if extra.get("served_by") else {})}
+
+
+async def _ndjson_objects(resp):
+    buf = b""
+    async for piece in resp.body_iterator:
+        buf += piece if isinstance(piece, bytes) else piece.encode("utf-8")
+        while b"\n" in buf:
+            line, buf = buf.split(b"\n", 1)
+            if line.strip():
+                yield json.loads(line)
+    if buf.strip():
+        yield json.loads(buf)
+
+
+def _error_envelope(resp) -> JSONResponse:
+    try:
+        err = json.loads(resp.body).get("error")
+    except Exception:
+        err = None
+    msg = err if isinstance(err, str) else (err or {}).get("message") if isinstance(err, dict) else "error"
+    code = "model_not_found" if resp.status_code == 404 else "backend_error"
+    return JSONResponse({"error": {"message": msg or "error", "type": "invalid_request_error"
+                                   if resp.status_code < 500 else "api_error", "code": code}},
+                        status_code=resp.status_code)
+
+
 @router.post("/v1/chat/completions")
 async def chat_completions(request: Request):
     svc = _svc(request)
+    from .. import request_context
+    from .ollama_api import _chat_dispatch
+    request_context.capture(request.headers)
     body = await request.json()
     model_name = body.get("model") or ""
     stream = bool(body.get("stream", False))
-    messages = _canonical_messages(body.get("messages") or [])
-    user_text = _last_user_text(messages)
-    options = _options(body)
+    include_usage = bool((body.get("stream_options") or {}).get("include_usage"))
     cid = "chatcmpl-" + uuid.uuid4().hex
     created = _now()
+    resp = await _chat_dispatch(svc, _to_ollama_body(body))
+    if not isinstance(resp, StreamingResponse):
+        if resp.status_code != 200:
+            return _error_envelope(resp)
+        objs = [json.loads(resp.body)]
 
-    persona = svc.personas.get(model_name)
-    if persona is None:
-        if svc.pool.backend_info(model_name) is not None:
-            return await _passthrough(svc, model_name, messages, options, stream,
-                                      cid, created)
-        return _not_found(model_name)
-
-    # Persona path: reuse the exact Ollama agent event stream (agent / worker-
-    # tools / pipeline / brain-down fallback are all selected inside), then
-    # re-dress each chunk as OpenAI. `thinking` narration has no standard OpenAI
-    # field, so only the answer content crosses over.
-    mode = "pipeline" if (persona.get("execution_mode") or "agent") == "pipeline" else "agent"
-    ctx = _build_ctx(svc, persona, model_name, messages, user_text, mode=mode)
+        async def _one():
+            for o in objs:
+                yield o
+        source = _one()
+    else:
+        source = _ndjson_objects(resp)
 
     if stream:
         async def gen():
             yield _sse(_chunk(cid, created, model_name, delta={"role": "assistant"}))
-            async for raw in _agent_events_to_chat_chunks(svc, ctx, model_name):
-                obj = json.loads(raw)
-                if obj.get("done"):
+            async for obj in source:
+                msg = obj.get("message") or {}
+                if msg.get("thinking"):
+                    yield _sse(_chunk(cid, created, model_name,
+                                      delta={"reasoning_content": msg["thinking"]}))
+                if msg.get("content"):
+                    yield _sse(_chunk(cid, created, model_name,
+                                      delta={"content": msg["content"]}))
+                if not obj.get("done"):
                     continue
-                content = (obj.get("message") or {}).get("content")
-                if content:
-                    yield _sse(_chunk(cid, created, model_name, delta={"content": content}))
-            yield _sse(_chunk(cid, created, model_name, finish="stop"))
+                tcs = _openai_tool_calls(msg.get("tool_calls"))
+                if tcs:
+                    yield _sse(_chunk(cid, created, model_name, delta={"tool_calls": tcs}))
+                u = _usage_from(obj)
+                fin = _chunk(cid, created, model_name, finish=_finish_from(obj, bool(tcs)))
+                fin["timings"] = u["timings"]
+                if u.get("served_by"):
+                    fin["served_by"] = u["served_by"]
+                if not include_usage:
+                    fin["usage"] = u["usage"]
+                yield _sse(fin)
+                if include_usage:
+                    yield _sse({"id": cid, "object": "chat.completion.chunk",
+                                "created": created, "model": model_name,
+                                "choices": [], "usage": u["usage"]})
             yield "data: [DONE]\n\n"
         return StreamingResponse(gen(), media_type="text/event-stream")
 
-    parts: list[str] = []
-    async for raw in _agent_events_to_chat_chunks(svc, ctx, model_name):
-        obj = json.loads(raw)
+    content, reasoning, final, tools = [], [], {}, []
+    async for obj in source:
+        msg = obj.get("message") or {}
+        if msg.get("thinking"):
+            reasoning.append(msg["thinking"])
+        if msg.get("content"):
+            content.append(msg["content"])
+        if msg.get("tool_calls"):
+            tools.extend(msg["tool_calls"])
         if obj.get("done"):
-            continue
-        content = (obj.get("message") or {}).get("content")
-        if content:
-            parts.append(content)
-    return JSONResponse(_completion(cid, created, model_name, "".join(parts)))
-
-
-async def _passthrough(svc, model, messages, options, stream, cid, created):
-    """A raw backend model requested by name — forwarded untouched, OpenAI shape.
-    Telemetry (Live + Performance tabs, Usage Log) is recorded exactly like the
-    Ollama facade's passthrough, and the backend's real finish_reason is passed
-    on so a client can see a truncated ("length") reply."""
-    from .. import telemetry
-    from ..pool.protocols import ChatResult
-    from ..usage import RequestLogger, estimate_cost_usd
-    user_text = _last_user_text(messages)
-    logger = RequestLogger(svc.db, "", model, "passthrough", user_text)
-    backend_name = (svc.pool.backend_info(model) or {}).get("name") or ""
-    max_tokens = svc.config_store.config.agent_brain.worker_max_tokens
-    if stream:
-        async def gen():
-            yield _sse(_chunk(cid, created, model, delta={"role": "assistant"}))
-            finish, status, error, ttft_ms = "stop", "ok", "", None
-            try:
-                async for chunk in svc.pool.chat_stream(model, messages, options=options,
-                                                        max_tokens=max_tokens):
-                    if chunk.get("done"):
-                        finish = chunk.get("finish_reason") or "stop"
-                        pt, ct = chunk.get("prompt_tokens") or 0, chunk.get("completion_tokens") or 0
-                        logger.record_model_call(model, backend_name, pt, ct,
-                                                 estimate_cost_usd(svc.registry.get(model), pt, ct))
-                        telemetry.record_call(
-                            svc.db, svc.registry, model=model, backend=backend_name,
-                            result=ChatResult.from_done_frame(chunk), mode="passthrough",
-                            ttft_ms=ttft_ms, wall_ms=logger.elapsed_ms, max_tokens=max_tokens)
-                        continue
-                    if (chunk.get("content") or chunk.get("thinking")) and ttft_ms is None:
-                        ttft_ms = logger.elapsed_ms
-                    if chunk.get("content"):
-                        yield _sse(_chunk(cid, created, model,
-                                          delta={"content": chunk["content"]}))
-            except AllBackendsFailed as e:
-                status, error = "error", str(e)
-                yield _sse(_chunk(cid, created, model,
-                                  delta={"content": f"[foundry-router] {e}"}))
-            finally:
-                logger.finish(status, error)
-            yield _sse(_chunk(cid, created, model, finish=finish))
-            yield "data: [DONE]\n\n"
-        return StreamingResponse(gen(), media_type="text/event-stream")
-    try:
-        result, backend = await svc.pool.chat(model, messages, options=options,
-                                              max_tokens=max_tokens)
-    except AllBackendsFailed as e:
-        logger.finish("error", str(e))
-        return JSONResponse(
-            {"error": {"message": str(e), "type": "api_error", "code": "backend_error"}},
-            status_code=502)
-    logger.record_model_call(model, backend, result.prompt_tokens, result.completion_tokens,
-                             estimate_cost_usd(svc.registry.get(model), result.prompt_tokens,
-                                               result.completion_tokens))
-    logger.finish("ok")
-    telemetry.record_call(svc.db, svc.registry, model=model, backend=backend, result=result,
-                          mode="passthrough", wall_ms=logger.elapsed_ms, max_tokens=max_tokens)
-    return JSONResponse(_completion(cid, created, model, result.content,
-                                    result.prompt_tokens, result.completion_tokens,
-                                    finish=result.finish_reason or "stop"))
+            final = obj
+    tcs = _openai_tool_calls(tools)
+    message: dict = {"role": "assistant", "content": "".join(content) or (None if tcs else "")}
+    if reasoning:
+        message["reasoning_content"] = "".join(reasoning)
+    if tcs:
+        message["tool_calls"] = [{k: v for k, v in t.items() if k != "index"} for t in tcs]
+    u = _usage_from(final)
+    out = {"id": cid, "object": "chat.completion", "created": created, "model": model_name,
+           "choices": [{"index": 0, "finish_reason": _finish_from(final, bool(tcs)),
+                        "message": message}],
+           "usage": u["usage"], "timings": u["timings"]}
+    if u.get("served_by"):
+        out["served_by"] = u["served_by"]
+    return JSONResponse(out)

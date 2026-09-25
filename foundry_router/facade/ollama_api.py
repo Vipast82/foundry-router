@@ -64,6 +64,8 @@ def _canonical_messages(raw: list[dict]) -> list[dict]:
                     # field here silently blinded the whole app (found live).
                     **({"images": m["images"]} if m.get("images") else {}),
                     **({"tool_calls": m["tool_calls"]} if m.get("tool_calls") else {}),
+                    **({"thinking": m["thinking"]}
+                       if role == "assistant" and m.get("thinking") else {}),
                     **({"tool_call_id": m["tool_call_id"]} if m.get("tool_call_id") else {}),
                     # Ollama names the tool a result belongs to with `tool_name`
                     # (canonical `name`, which the Ollama adapter maps back).
@@ -333,6 +335,8 @@ async def show(request: Request) -> JSONResponse:
 @router.post("/api/chat")
 async def chat(request: Request):
     svc = _svc(request)
+    from .. import request_context
+    request_context.capture(request.headers)
     return await _chat_dispatch(svc, await request.json())
 
 
@@ -549,7 +553,10 @@ def _logger_stats(logger, total_ns: int) -> dict:
     used = getattr(logger, "models_used", None) or []
     return {"prompt_tokens": sum(int(m.get("prompt_tokens") or 0) for m in used),
             "completion_tokens": sum(int(m.get("completion_tokens") or 0) for m in used),
-            "total_duration_ns": total_ns}
+            "total_duration_ns": total_ns,
+            # which real model(s) answered this persona turn, in call order
+            "served_by": ", ".join(dict.fromkeys(m.get("model") for m in used
+                                                 if m.get("model")))}
 
 
 async def _fallback_chunks(svc, ctx: RequestContext, model_name: str):
@@ -933,21 +940,25 @@ async def _direct_dispatch_chat(svc, persona, model_name, messages, client_tools
         logger.finish("error", str(e))
 
     def _finalize(res):
-        tool_calls = [{"function": {"name": tc["name"], "arguments": tc["arguments"]}}
+        tool_calls = [{**({"id": tc["id"]} if tc.get("id") else {}),
+                       "function": {"name": tc["name"], "arguments": tc["arguments"]}}
                       for tc in res.tool_calls] or None
-        return tool_calls, tr.result_stats(res, time.monotonic_ns() - t0)
+        return tool_calls, tr.result_stats(res, time.monotonic_ns() - t0, model=model_id)
 
     # LIVE STREAMING (opt-in): forward the worker's tokens as they generate — each
     # chunk is real proof the backend is working, resets the read timeout (no
     # total-time wall), and shows the client typing live. Enabled for local Ollama
-    # AND openai-dialect backends (llama.cpp / Unsloth / vLLM / OpenRouter), which
-    # now stream with full tool + reasoning fidelity. Claude/anthropic stays on the
-    # blocking path below so subscription-usage accounting runs on every call.
+    # AND openai-dialect backends (llama.cpp / Unsloth / vLLM / OpenRouter) AND
+    # Claude via Meridian — each streams with full tool + reasoning fidelity, and
+    # the Claude subscription accounting runs on the stream's done frame.
     binfo0 = svc.pool.backend_info(model_id) or {}
     _btype = binfo0.get("type")
-    if brain_cfg.direct_stream and stream and _btype in ("ollama", "openai-compatible"):
+    if brain_cfg.direct_stream and stream and _btype in ("ollama", "openai-compatible",
+                                                           "anthropic-compatible"):
         backend_name = binfo0.get("name") or model_id
-        _tag = "local" if _btype == "ollama" else (binfo0.get("flavor") or "openai")
+        _tag = ("local" if _btype == "ollama" else
+                "Claude" if _btype == "anthropic-compatible" else
+                (binfo0.get("flavor") or "openai"))
 
         async def sgen():
             yield tr.chat_chunk(model_name, "", done=False,
@@ -974,9 +985,13 @@ async def _direct_dispatch_chat(svc, persona, model_name, messages, client_tools
                         pt = chunk.get("prompt_tokens") or 0
                         ct = chunk.get("completion_tokens") or 0
                         finals = acc_tools or (chunk.get("tool_calls") or [])
-                        tcs_out = [{"function": {"name": t["name"], "arguments": t["arguments"]}}
+                        tcs_out = [{**({"id": t["id"]} if t.get("id") else {}),
+                                    "function": {"name": t["name"], "arguments": t["arguments"]}}
                                    for t in finals] or None
                         svc.registry.record_tool_call(model_id, ok=True)
+                        if _btype == "anthropic-compatible":
+                            log_subscription_usage(svc.db, model_id, backend_name, pt, ct)
+                            svc.meridian_usage.note_successful_call(binfo0.get("url"))
                         cost = estimate_cost_usd(svc.registry.get(model_id), pt, ct)
                         logger.record_model_call(model_id, backend_name, pt, ct, cost)
                         logger.finish("ok")
@@ -992,7 +1007,8 @@ async def _direct_dispatch_chat(svc, persona, model_name, messages, client_tools
                         yield tr.chat_chunk(
                             model_name, "", done=True, tool_calls=tcs_out,
                             stats=tr.result_stats(ChatResult.from_done_frame(chunk),
-                                                  time.monotonic_ns() - t0))
+                                                  time.monotonic_ns() - t0,
+                                                  model=model_id, backend=backend_name))
                     else:
                         if chunk.get("tool_calls"):
                             acc_tools.extend(chunk["tool_calls"])   # deliver at done
@@ -1010,7 +1026,10 @@ async def _direct_dispatch_chat(svc, persona, model_name, messages, client_tools
                             yield tr.chat_chunk(model_name, c, done=False,
                                                 thinking=th or None)
             except Exception as e:                                # noqa: BLE001
-                logger.finish("error", str(e))
+                if isinstance(e, AllBackendsFailed):
+                    _on_error(e)      # exhaustion detection, embedding flag, log
+                else:
+                    logger.finish("error", str(e))
                 yield tr.chat_chunk(model_name,
                                     f"[router: stream failed — {str(e)[:200]}]",
                                     done=False)
@@ -1027,6 +1046,8 @@ async def _direct_dispatch_chat(svc, persona, model_name, messages, client_tools
             return JSONResponse({"error": str(e)}, status_code=502)
         tool_calls, stats = _finalize(result)
         msg: dict = {"role": "assistant", "content": result.content}
+        if result.thinking:
+            msg["thinking"] = result.thinking
         if tool_calls:
             msg["tool_calls"] = tool_calls
         return JSONResponse({"model": model_name, "created_at": tr.now_iso(),
@@ -1077,12 +1098,27 @@ async def _direct_dispatch_chat(svc, persona, model_name, messages, client_tools
                 "total_duration_ns": time.monotonic_ns() - t0})
             return
         tool_calls, stats = _finalize(result)
+        if result.thinking:
+            # The model's own reasoning (Claude extended thinking, a local
+            # model's think block) — to the native thinking pane, not content.
+            yield tr.chat_chunk(model_name, "", thinking=result.thinking)
         yield tr.chat_chunk(model_name, result.content, tool_calls=tool_calls)
         yield tr.chat_chunk(model_name, "", done=True, stats=stats)
     return StreamingResponse(gen(), media_type="application/x-ndjson")
 
 
 # ---- passthrough (raw backend model requested by name) ----------------------------
+
+def _note_exhaustion(svc, model: str, err: BaseException) -> None:
+    """A Claude-window-exhaustion-shaped failure from Meridian is real usage
+    signal (its quota sources can be blind) — record it on every path."""
+    binfo = svc.pool.backend_info(model) or {}
+    if binfo.get("type") == "anthropic-compatible" and looks_like_window_exhaustion(str(err)):
+        try:
+            svc.meridian_usage.note_observed_exhaustion(binfo["url"])
+        except Exception:
+            pass
+
 
 async def _passthrough_chat(svc, model_name, messages, client_tools, options,
                             stream, user_text, think=None, fmt=None, keep_alive=None):
@@ -1099,6 +1135,7 @@ async def _passthrough_chat(svc, model_name, messages, client_tools, options,
                 model_name, messages, tools=client_tools, options=options,
                 max_tokens=max_tokens, keep_alive=keep_alive, think=think, fmt=fmt)
         except AllBackendsFailed as e:
+            _note_exhaustion(svc, model_name, e)
             logger.finish("error", str(e))
             return JSONResponse({"error": str(e)}, status_code=502)
         logger.record_model_call(model_name, backend, result.prompt_tokens,
@@ -1114,13 +1151,15 @@ async def _passthrough_chat(svc, model_name, messages, client_tools, options,
         msg: dict = {"role": "assistant", "content": result.content}
         if result.thinking:
             msg["thinking"] = result.thinking
-        tool_calls = [{"function": {"name": tc["name"], "arguments": tc["arguments"]}}
+        tool_calls = [{**({"id": tc["id"]} if tc.get("id") else {}),
+                       "function": {"name": tc["name"], "arguments": tc["arguments"]}}
                       for tc in result.tool_calls]
         if tool_calls:
             msg["tool_calls"] = tool_calls
         return JSONResponse({"model": model_name, "created_at": tr.now_iso(),
                              "message": msg, "done": True,
-                             **tr._stats(tr.result_stats(result, time.monotonic_ns() - t0))})
+                             **tr._stats(tr.result_stats(result, time.monotonic_ns() - t0,
+                                                         model=model_name, backend=backend))})
 
     async def gen():
         status, error = "ok", ""
@@ -1160,15 +1199,18 @@ async def _passthrough_chat(svc, model_name, messages, client_tools, options,
                 if c or th:
                     yield tr.chat_chunk(model_name, c, thinking=th or None)
         except AllBackendsFailed as e:
+            _note_exhaustion(svc, model_name, e)
             status, error = "error", str(e)
             yield tr.chat_chunk(model_name, f"\n[foundry-router] {e}")
         finally:
             logger.finish(status, error)
         if final is not None:
-            tcs = [{"function": {"name": t["name"], "arguments": t["arguments"]}}
+            tcs = [{**({"id": t["id"]} if t.get("id") else {}),
+                                    "function": {"name": t["name"], "arguments": t["arguments"]}}
                    for t in final.tool_calls] or None
             yield tr.chat_chunk(model_name, "", done=True, tool_calls=tcs,
-                                stats=tr.result_stats(final, time.monotonic_ns() - t0))
+                                stats=tr.result_stats(final, time.monotonic_ns() - t0,
+                                                      model=model_name, backend=backend_name))
         else:
             yield tr.chat_chunk(model_name, "", done=True,
                                 stats={"total_duration_ns": time.monotonic_ns() - t0})
@@ -1191,6 +1233,8 @@ async def generate(request: Request):
     prompt means "load the model" (done_reason "load"), and with keep_alive 0
     "unload" — clients such as Open WebUI use it to warm/evict models."""
     svc = _svc(request)
+    from .. import request_context
+    request_context.capture(request.headers)
     body = await request.json()
     model_name = body.get("model") or ""
     stream = body.get("stream", True)

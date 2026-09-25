@@ -365,9 +365,12 @@ const HELP = {
     <dt>prefix cache</dt><dd>Share of prompt tokens served from cache (vLLM automatic prefix caching).</dd>
     <dt>preemptions</dt><dd>vLLM paused a request because the KV cache ran out. Any non-zero, growing
       value = VRAM pressure; lower <code>--max-num-seqs</code> or <code>--max-model-len</code>.</dd>
+    <dt>Meridian</dt><dd>Sign-in status and plan from <code>/health</code>, plus request counts and
+      queue / time-to-first-token / upstream / total latency from its <code>/metrics</code> —
+      covering every client using that Meridian, not just Foundry.</dd>
     </dl>
     <p><b>Enable it:</b> llama.cpp needs <code>--metrics</code> (and <code>/slots</code> not disabled);
-    vLLM exposes <code>/metrics</code> by default.</p>`],
+    vLLM and Meridian expose <code>/metrics</code> by default.</p>`],
   loaded: ["Loaded models — per-model performance", `
     <p>One row per model resident on a backend, with everything the router has measured for it.
     <b>avg</b> = rolling average across all recorded calls; <b>last</b> = the most recent call.</p>
@@ -732,7 +735,7 @@ function sparkRow(series) {
 // that doesn't export it simply doesn't show it.
 function renderServers(servers) {
   if (!servers.length)
-    return '<span class="hint">No llama.cpp or vLLM backends (engine metrics come from their <code>/metrics</code> and <code>/slots</code> endpoints; Ollama exposes none).</span>';
+    return '<span class="hint">No llama.cpp, vLLM or Meridian backends reporting (engine metrics come from their <code>/metrics</code>, <code>/slots</code> and <code>/health</code> endpoints; Ollama exposes none).</span>';
   const meter = (pct, tip) => {
     const cls = pct >= 90 ? "bad" : pct >= 70 ? "warn" : "";
     return `<span class="meter ${cls}" title="${esc(tip)}"><span style="width:${Math.max(0, Math.min(100, pct)).toFixed(0)}%"></span></span> ${_num(pct, "%")}`;
@@ -741,6 +744,17 @@ function renderServers(servers) {
   return servers.map(sv => {
     const items = [];
     const it = (k, v, tip) => items.push(`<div title="${esc(tip)}"><div class="k has-tip">${k}</div><div class="v">${v}</div></div>`);
+    if (sv.status)
+      it("status", `<span class="pill ${sv.status === "healthy" ? "ok" : sv.status === "degraded" ? "warn" : "bad"}">${esc(sv.status)}</span>`,
+         "Meridian /health: healthy = signed in and serving; degraded = auth status unknown; unhealthy = not logged in or cannot serve." + (sv.health_error ? "\n" + sv.health_error : ""));
+    if (sv.subscription) it("plan", esc(sv.subscription), "Claude subscription type of Meridian's active profile.");
+    if (sv.version) it("version", esc(sv.version), "Meridian version.");
+    if (sv.mode) it("tool mode", esc(sv.mode), "passthrough = tool calls are returned to Foundry / your client to run (what Foundry expects); internal = Meridian runs tools itself.");
+    if (sv.requests_total != null)
+      it("requests", `${K(sv.requests_total)}${sv.requests_failed ? ` <span class="pill warn">${K(sv.requests_failed)} failed</span>` : ""}`,
+         "Requests in Meridian's recent telemetry window (all clients, not just Foundry); failed = non-2xx responses.");
+    if (sv.mean_upstream_ms != null) it("mean upstream", _num(sv.mean_upstream_ms, "ms"), "Meridian: mean time spent in the Claude SDK / API per request.");
+    if (sv.mean_overhead_ms != null) it("proxy overhead", _num(sv.mean_overhead_ms, "ms"), "Meridian: mean time its own proxy layer added per request.");
     if (sv.kv_cache_usage_pct != null)
       it("KV cache", meter(sv.kv_cache_usage_pct, "KV cache fill"), "How full the key/value cache is. Near 100% the engine must queue or preempt requests.");
     if (sv.kv_cache_tokens != null) it("KV tokens", K(sv.kv_cache_tokens), "Tokens currently held in the KV cache.");
@@ -752,10 +766,10 @@ function renderServers(servers) {
          "Requests being processed vs waiting for capacity. A persistent queue = add slots (-np) or another GPU host.");
     if (sv.avg_decode_tps != null) it("engine decode", _num(sv.avg_decode_tps) + " tok/s", "The engine's own average generation speed (vLLM: 1000 ÷ mean time-per-output-token).");
     if (sv.avg_prompt_tps != null) it("engine prefill", _num(sv.avg_prompt_tps) + " tok/s", "The engine's own average prompt-processing speed.");
-    if (sv.mean_ttft_ms != null) it("mean TTFT", _num(sv.mean_ttft_ms, "ms"), "vLLM: mean time to first token since the server started.");
+    if (sv.mean_ttft_ms != null) it("mean TTFT", _num(sv.mean_ttft_ms, "ms"), "Mean time to first token (vLLM since server start; Meridian over its recent window).");
     if (sv.mean_tpot_ms != null) it("mean TPOT", _num(sv.mean_tpot_ms, "ms"), "vLLM: mean time per output token (inter-token latency).");
-    if (sv.mean_queue_ms != null) it("mean queue", _num(sv.mean_queue_ms, "ms"), "vLLM: mean time a request waited before being scheduled.");
-    if (sv.mean_e2e_ms != null) it("mean request", _num(sv.mean_e2e_ms, "ms"), "vLLM: mean end-to-end request latency.");
+    if (sv.mean_queue_ms != null) it("mean queue", _num(sv.mean_queue_ms, "ms"), "Mean time a request waited before being processed (vLLM scheduler / Meridian concurrency queue).");
+    if (sv.mean_e2e_ms != null) it("mean request", _num(sv.mean_e2e_ms, "ms"), "Mean end-to-end request latency.");
     if (sv.prefix_cache_hit_pct != null) it("prefix cache", _num(sv.prefix_cache_hit_pct, "%"), "Share of prompt tokens served from the prefix cache (lifetime).");
     if (sv.spec_accept_pct != null) it("spec accept", _num(sv.spec_accept_pct, "%"), "Engine-wide speculative-decoding acceptance (lifetime).");
     if (sv.preemptions_total != null)
@@ -767,7 +781,7 @@ function renderServers(servers) {
     if (sv.generation_tokens_total != null) it("generated", K(sv.generation_tokens_total), "Lifetime tokens generated by this server process.");
     const swap = (sv.swap_running || []).length
       ? `<div class="hint" style="margin:4px 0 0">llama-swap resident: ${sv.swap_running.map(r => `<span class="pill">${esc(r.model)}${r.state ? " · " + esc(r.state) : ""}</span>`).join(" ")}</div>` : "";
-    const note = sv.metrics_ok ? "" : `<div class="hint" style="margin:4px 0 0">/metrics unavailable${sv.metrics_error ? " (" + esc(sv.metrics_error) + ")" : ""}${sv.flavor === "llamacpp" ? " — start llama-server with <code>--metrics</code> for KV-cache, queue and throughput counters." : "."}</div>`;
+    const note = sv.metrics_ok ? "" : `<div class="hint" style="margin:4px 0 0">/metrics unavailable${sv.metrics_error ? " (" + esc(sv.metrics_error) + ")" : ""}${sv.flavor === "llamacpp" ? " — start llama-server with <code>--metrics</code> for KV-cache, queue and throughput counters." : sv.flavor === "meridian" ? " — Meridian telemetry may be disabled in its settings." : "."}</div>`;
     return `<div style="margin:4px 0 12px"><div><b>${esc(sv.backend)}</b> <span class="pill">${esc(_FLAVOR_LABEL[sv.flavor] || sv.flavor || "")}</span></div>
       ${items.length ? `<div class="srv">${items.join("")}</div>` : ""}${swap}${note}</div>`;
   }).join("");
@@ -3209,7 +3223,7 @@ async function tabMCP() {
 // Host Admin: one tab, a backend dropdown, and controls that adapt to the
 // selected backend's FLAVOR. Ollama flavors get full model CRUD; openai-dialect
 // flavors (llama.cpp / Unsloth / vLLM / OpenAI) get read-only diagnostics.
-const _FLAVOR_LABEL = {ollama: "Ollama", llamacpp: "llama.cpp",
+const _FLAVOR_LABEL = {ollama: "Ollama", llamacpp: "llama.cpp", meridian: "Meridian",
                        unsloth: "Unsloth", vllm: "vLLM", openai: "OpenAI"};
 async function tabHostAdmin() {
   clearInterval(window._ollamaPoll);

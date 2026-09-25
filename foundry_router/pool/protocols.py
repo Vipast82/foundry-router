@@ -222,7 +222,9 @@ class BaseProtocol:
     httpx client passed in (connection pooling lives there)."""
 
     def __init__(self, url: str, api_key: Optional[str], client: httpx.AsyncClient,
-                 flavor: Optional[str] = None, meridian_profile: Optional[str] = None):
+                 flavor: Optional[str] = None, meridian_profile: Optional[str] = None,
+                 meridian_agent: Optional[str] = None,
+                 meridian_session_affinity: bool = False):
         self.url = url.rstrip("/")
         self.api_key = api_key or None
         self.client = client
@@ -234,6 +236,8 @@ class BaseProtocol:
         # Meridian routing profile — sent as x-meridian-profile so a backend can
         # pin its calls to a specific Claude account (anthropic path only).
         self.meridian_profile = meridian_profile or None
+        self.meridian_agent = meridian_agent or None
+        self.meridian_session_affinity = bool(meridian_session_affinity)
 
     async def list_models(self) -> list[str]:
         raise NotImplementedError
@@ -372,7 +376,8 @@ class OllamaProtocol(BaseProtocol):
             mm = {"role": m["role"], "content": m.get("content") or ""}
             if m.get("tool_calls"):
                 mm["tool_calls"] = [
-                    {"function": {"name": tc["function"]["name"],
+                    {**({"id": tc["id"]} if tc.get("id") else {}),
+                     "function": {"name": tc["function"]["name"],
                                   "arguments": _parse_arguments(tc["function"].get("arguments"))}}
                     for tc in m["tool_calls"]
                 ]
@@ -380,6 +385,8 @@ class OllamaProtocol(BaseProtocol):
                 mm["tool_name"] = m["name"]
             if m.get("images"):  # Ollama-native multimodal field, passthrough
                 mm["images"] = m["images"]
+            if m["role"] == "assistant" and m.get("thinking"):
+                mm["thinking"] = m["thinking"]     # prior-turn reasoning (Ollama field)
             msgs.append(mm)
         payload: dict = {"model": model, "messages": msgs, "stream": stream}
         if tools:
@@ -416,7 +423,7 @@ class OllamaProtocol(BaseProtocol):
         data = r.json()
         msg = data.get("message", {}) or {}
         tool_calls = [
-            {"id": _new_id(), "name": tc["function"]["name"],
+            {"id": tc.get("id") or _new_id(), "name": tc["function"]["name"],
              "arguments": _parse_arguments(tc["function"].get("arguments"))}
             for tc in (msg.get("tool_calls") or [])
         ]
@@ -460,7 +467,7 @@ class OllamaProtocol(BaseProtocol):
                     continue
                 msg = data.get("message") or {}
                 tool_calls = [
-                    {"id": _new_id(), "name": tc["function"]["name"],
+                    {"id": tc.get("id") or _new_id(), "name": tc["function"]["name"],
                      "arguments": _parse_arguments(tc["function"].get("arguments"))}
                     for tc in (msg.get("tool_calls") or [])
                 ] or None
@@ -831,6 +838,10 @@ class OpenAIProtocol(BaseProtocol):
                 ]
             if m["role"] == "tool":
                 mm["tool_call_id"] = m.get("tool_call_id") or _new_id()
+            if m["role"] == "assistant" and m.get("thinking") and self._local:
+                # llama.cpp / vLLM read prior reasoning back as reasoning_content
+                # (strict OpenAI would reject the field, so local flavors only).
+                mm["reasoning_content"] = m["thinking"]
             if m.get("images"):
                 # OpenAI-style multimodal: content becomes typed parts with
                 # data-URI image_url blocks.
@@ -1075,8 +1086,44 @@ class OpenAIProtocol(BaseProtocol):
 # Anthropic-compatible (Meridian)                                             #
 # --------------------------------------------------------------------------- #
 
+def _anthropic_error_text(obj: Any) -> str:
+    """Message from an Anthropic error envelope {"type":"error","error":{…}}."""
+    err = (obj or {}).get("error") if isinstance(obj, dict) else None
+    if isinstance(err, dict):
+        return f"{err.get('type') or 'error'}: {err.get('message') or ''}".strip()
+    return str(err or obj)[:300]
+
+
+def _anthropic_usage(u: Any) -> tuple[int, int, int]:
+    """(true prompt tokens, cache-read tokens, output tokens) from an Anthropic
+    usage object. input_tokens is ONLY the fresh, uncached portion — with prompt
+    caching on (Meridian always) the real context sits in cache_read +
+    cache_creation, so all three are summed for the true context size."""
+    u = u if isinstance(u, dict) else {}
+    cr = int(u.get("cache_read_input_tokens") or 0)
+    cc = int(u.get("cache_creation_input_tokens") or 0)
+    return int(u.get("input_tokens") or 0) + cr + cc, cr, int(u.get("output_tokens") or 0)
+
+
 class AnthropicProtocol(BaseProtocol):
-    def _headers(self) -> dict:
+    """Anthropic Messages API — Claude via Meridian (or any Messages endpoint).
+
+    Meridian specifics honoured here (github.com/rynfar/meridian):
+      * x-meridian-profile pins an account; x-meridian-agent picks its adapter.
+      * x-meridian-source + x-request-id attribute every call to Foundry in
+        Meridian's own request log / dashboard.
+      * Session identity: a client's own session header is forwarded, or (opt-
+        in) a derived x-session-affinity, so Meridian resumes the same Claude
+        session — warm prompt cache and the model's own previous turns.
+      * Effort goes out as output_config.effort (Meridian maps it onto the
+        SDK's --effort), next to the budgeted `thinking` block.
+      * Refusals / exhausted accounts arrive as an `event: error` frame INSIDE
+        an HTTP-200 stream — raised as ProtocolError so failover, exhaustion
+        detection and the client all see it instead of an empty reply.
+    """
+
+    def _headers(self, messages: Optional[list] = None, model: str = "") -> dict:
+        from .. import request_context
         h = {"Content-Type": "application/json", "anthropic-version": "2023-06-01"}
         if self.api_key:
             h["x-api-key"] = self.api_key
@@ -1086,6 +1133,19 @@ class AnthropicProtocol(BaseProtocol):
         # Pin this backend's calls to a named Meridian profile/account when set.
         if self.meridian_profile:
             h["x-meridian-profile"] = self.meridian_profile
+        if self.meridian_agent:
+            h["x-meridian-agent"] = self.meridian_agent
+        h["x-meridian-source"] = "foundry-router"
+        rid = request_context.request_id()
+        if rid:
+            h["x-request-id"] = rid
+        fwd = request_context.client_headers()
+        h.update(fwd)
+        if (self.meridian_session_affinity and messages is not None
+                and not any(k in fwd for k in ("x-session-affinity", "x-opencode-session"))):
+            key = _conversation_key(model, messages)
+            if key:
+                h["x-session-affinity"] = key
         return h
 
     async def list_models(self) -> list[str]:
@@ -1104,6 +1164,37 @@ class AnthropicProtocol(BaseProtocol):
                 out.append(m["id"])
         if not out:
             raise ProtocolError("model list endpoint returned no usable entries")
+        return out
+
+    async def server_metrics(self) -> Optional[dict]:
+        """Meridian's own view: /health (auth, plan, version, mode) and its
+        /metrics (request counts by status, queue / TTFB / upstream / total
+        latency means). Plain Anthropic endpoints have neither -> None."""
+        from . import prom
+        out: dict = {"flavor": "meridian", "metrics_ok": False}
+        try:
+            r = await self.client.get(f"{self.url}/health", headers=self._headers(), timeout=5)
+            h = r.json() if r.headers.get("content-type", "").startswith("application/json") else {}
+        except Exception:
+            h = {}
+        if isinstance(h, dict) and h.get("status"):
+            auth = h.get("auth") or {}
+            out.update({"status": h.get("status"), "version": h.get("version") or "",
+                        "mode": h.get("mode") or "",
+                        "subscription": auth.get("subscriptionType") or "",
+                        "logged_in": auth.get("loggedIn"),
+                        "health_error": h.get("error") or ""})
+        try:
+            r = await self.client.get(f"{self.url}/metrics", headers=self._headers(), timeout=5)
+            if r.status_code < 400 and "meridian_" in (r.text or ""):
+                out.update(prom.summarize("meridian", prom.parse(r.text)))
+                out["metrics_ok"] = True
+            else:
+                out["metrics_error"] = f"HTTP {r.status_code}"
+        except Exception as e:
+            out["metrics_error"] = str(e)[:120] or type(e).__name__
+        if not out.get("status") and not out["metrics_ok"]:
+            return None
         return out
 
     def _payload(self, model, messages, tools, options, max_tokens, think, fmt) -> dict:
@@ -1166,27 +1257,42 @@ class AnthropicProtocol(BaseProtocol):
                  "input_schema": t["function"].get("parameters") or {"type": "object", "properties": {}}}
                 for t in tools
             ]
+        opts = options or {}
+        if opts.get("stop"):
+            stops = opts["stop"] if isinstance(opts["stop"], list) else [opts["stop"]]
+            payload["stop_sequences"] = [str(x) for x in stops][:4]
         # Extended thinking (Claude via Meridian): a level -> budget_tokens block.
-        # Anthropic forbids a custom temperature while thinking is enabled and
-        # requires max_tokens > budget_tokens, so this both raises max_tokens and
-        # skips the temperature override below.
+        # Anthropic forbids a custom temperature/top_k while thinking is enabled
+        # and requires max_tokens > budget_tokens, so this both raises max_tokens
+        # and skips the sampling overrides below. The same level also goes out
+        # as output_config.effort — the control current Claude models (and
+        # Meridian's SDK --effort) actually use.
         from .. import thinking as _thinking
         think_block = _thinking.claude_thinking(think, max_tokens)
+        effort = _thinking.claude_effort(think)
+        if effort:
+            payload["output_config"] = {"effort": effort}
         if think_block is not None:
             block, payload["max_tokens"] = think_block
             payload["thinking"] = block
-        elif options and "temperature" in options:
-            payload["temperature"] = options["temperature"]
+        else:
+            for k in ("temperature", "top_p", "top_k"):
+                if k in opts:
+                    payload[k] = opts[k]
+            if "temperature" in payload and "top_p" in payload:
+                payload.pop("top_p")     # current Claude models accept only one
         return payload
 
     async def chat(self, model, messages, tools=None, options=None,
                    keep_alive=None, max_tokens=4096, think=None, fmt=None) -> ChatResult:
         payload = self._payload(model, messages, tools, options, max_tokens, think, fmt)
-        r = await self.client.post(f"{self.url}/v1/messages",
-                                   json=payload, headers=self._headers())
+        r = await self.client.post(f"{self.url}/v1/messages", json=payload,
+                                   headers=self._headers(messages, model))
         if r.status_code >= 400:
             raise ProtocolError(f"anthropic-compat {self.url} HTTP {r.status_code}: {r.text[:300]}")
         data = r.json()
+        if isinstance(data, dict) and data.get("type") == "error":
+            raise ProtocolError(f"anthropic-compat {self.url} error: {_anthropic_error_text(data)}")
         content_text = ""
         thinking_text = ""
         tool_calls = []
@@ -1197,25 +1303,19 @@ class AnthropicProtocol(BaseProtocol):
                 # Extended-thinking summary block: surface it as reasoning
                 # (kept OUT of content) so clients render it in their think pane.
                 thinking_text += block.get("thinking") or ""
+            elif block.get("type") == "redacted_thinking":
+                thinking_text += "[reasoning redacted by the provider]\n"
             elif block.get("type") == "tool_use":
                 tool_calls.append({"id": block.get("id") or _new_id(),
                                    "name": block.get("name"),
                                    "arguments": block.get("input") or {}})
-        usage = data.get("usage") or {}
-        # Anthropic splits prompt tokens three ways and `input_tokens` is ONLY the
-        # fresh, uncached portion — with prompt caching on (as Meridian uses), that
-        # can be a couple of tokens while the real context sits in cache_read. Sum
-        # all three for the true context size, and surface cache_read as the KV
-        # cache hit so the cache-hit % lights up for Claude the same as for local.
-        cache_read = usage.get("cache_read_input_tokens") or 0
-        cache_create = usage.get("cache_creation_input_tokens") or 0
-        prompt_tokens = (usage.get("input_tokens") or 0) + cache_read + cache_create
+        pt, cache_read, ct = _anthropic_usage(data.get("usage"))
         return ChatResult(
             content=content_text,
             thinking=thinking_text,
             tool_calls=tool_calls,
-            prompt_tokens=prompt_tokens,
-            completion_tokens=usage.get("output_tokens") or 0,
+            prompt_tokens=pt,
+            completion_tokens=ct,
             cached_tokens=cache_read,
             # Normalize Anthropic's "max_tokens" onto "length" so a truncated
             # reply reads the same across every backend.
@@ -1230,15 +1330,19 @@ class AnthropicProtocol(BaseProtocol):
         """Real SSE streaming for Claude via Meridian: forwards text and
         extended-thinking deltas live, accumulates tool_use input JSON by block
         index, and emits tool_calls + usage on the done frame — so a Claude
-        backend streams to a client with the same fidelity as a local one."""
+        backend streams to a client with the same fidelity as a local one.
+        Decode/prefill timing is estimated from the stream (Anthropic reports
+        none), flagged timing_source="estimated"."""
         payload = self._payload(model, messages, tools, options,
                                 max_tokens or 4096, think, fmt)
         payload["stream"] = True
         blocks: dict = {}         # content-block index -> {type,name,id,json(str)}
         pt = ct = cached = 0
         finish = ""
-        async with self.client.stream("POST", f"{self.url}/v1/messages",
-                                      json=payload, headers=self._headers()) as r:
+        t_start = time.monotonic_ns()
+        t_first = t_last = 0
+        async with self.client.stream("POST", f"{self.url}/v1/messages", json=payload,
+                                      headers=self._headers(messages, model)) as r:
             if r.status_code >= 400:
                 body = await r.aread()
                 raise ProtocolError(f"anthropic-compat {self.url} HTTP {r.status_code}: {body[:300]!r}")
@@ -1251,20 +1355,31 @@ class AnthropicProtocol(BaseProtocol):
                 except json.JSONDecodeError:
                     continue
                 etype = ev.get("type")
+                if etype == "error":
+                    # Meridian: refusal / exhausted account / upstream failure,
+                    # sent after the 200 was committed. Surface it — silently
+                    # ending the stream looked like an empty "successful" reply.
+                    raise ProtocolError(
+                        f"anthropic-compat {self.url} stream error: {_anthropic_error_text(ev)}")
                 if etype == "message_start":
-                    u = ((ev.get("message") or {}).get("usage") or {})
-                    cr = u.get("cache_read_input_tokens") or 0
-                    cc = u.get("cache_creation_input_tokens") or 0
-                    pt = (u.get("input_tokens") or 0) + cr + cc or pt
+                    p, cr, _ = _anthropic_usage((ev.get("message") or {}).get("usage"))
+                    pt = p or pt
                     cached = cr or cached
                 elif etype == "content_block_start":
                     cb = ev.get("content_block") or {}
                     blocks[ev.get("index")] = {"type": cb.get("type"),
                                                "name": cb.get("name"),
                                                "id": cb.get("id"), "json": ""}
+                    if cb.get("type") == "redacted_thinking":
+                        yield {"content": "", "done": False,
+                               "thinking": "[reasoning redacted by the provider]\n"}
                 elif etype == "content_block_delta":
                     d = ev.get("delta") or {}
                     dt = d.get("type")
+                    now = time.monotonic_ns()
+                    if dt in ("text_delta", "thinking_delta", "input_json_delta"):
+                        t_first = t_first or now
+                        t_last = now
                     if dt == "text_delta":
                         if d.get("text"):
                             yield {"content": d["text"], "done": False}
@@ -1276,7 +1391,12 @@ class AnthropicProtocol(BaseProtocol):
                         if blk is not None:
                             blk["json"] += d.get("partial_json") or ""
                 elif etype == "message_delta":
-                    ct = (ev.get("usage") or {}).get("output_tokens") or ct
+                    u = ev.get("usage") or {}
+                    ct = u.get("output_tokens") or ct
+                    # Newer servers repeat the (final) input usage here.
+                    p, cr, _ = _anthropic_usage(u)
+                    if p:
+                        pt, cached = p, cr or cached
                     sr = (ev.get("delta") or {}).get("stop_reason")
                     if sr:
                         finish = "length" if sr == "max_tokens" else sr
@@ -1285,9 +1405,31 @@ class AnthropicProtocol(BaseProtocol):
         tool_calls = [{"id": b.get("id") or _new_id(), "name": b.get("name"),
                        "arguments": _parse_arguments(b.get("json") or "{}")}
                       for b in blocks.values() if b.get("type") == "tool_use"] or None
+        eval_ns = prompt_ns = 0
+        source = ""
+        if t_first and ct > 1 and t_last > t_first:
+            eval_ns = int((t_last - t_first) * ct / (ct - 1))
+            prompt_ns = t_first - t_start
+            source = "estimated"
         yield {"content": "", "done": True, "tool_calls": tool_calls,
                "prompt_tokens": pt, "completion_tokens": ct,
-               "cached_tokens": cached, "finish_reason": finish}
+               "cached_tokens": cached, "prefill_tokens": max(0, pt - cached),
+               "eval_duration_ns": eval_ns, "prompt_eval_duration_ns": prompt_ns,
+               "timing_source": source, "finish_reason": finish}
+
+
+def _conversation_key(model: str, messages: list) -> str:
+    """Stable per-conversation key for Meridian session affinity: the model +
+    system prompt + FIRST user message. Unchanged across the turns of one
+    conversation, different across conversations (unless two start with the
+    byte-identical system prompt and opening message)."""
+    import hashlib
+    system = next((m.get("content") or "" for m in messages if m.get("role") == "system"), "")
+    first = next((m.get("content") or "" for m in messages if m.get("role") == "user"), "")
+    if not first:
+        return ""
+    h = hashlib.sha256(f"{model}\0{system}\0{first}".encode("utf-8", "replace")).hexdigest()
+    return f"foundry-{h[:32]}"
 
 
 PROTOCOLS = {
@@ -1300,9 +1442,13 @@ PROTOCOLS = {
 def make_protocol(backend_type: str, url: str, api_key: Optional[str],
                   client: httpx.AsyncClient,
                   flavor: Optional[str] = None,
-                  meridian_profile: Optional[str] = None) -> BaseProtocol:
+                  meridian_profile: Optional[str] = None,
+                  meridian_agent: Optional[str] = None,
+                  meridian_session_affinity: bool = False) -> BaseProtocol:
     try:
         cls = PROTOCOLS[backend_type]
     except KeyError:
         raise ValueError(f"unknown backend type {backend_type!r}") from None
-    return cls(url, api_key, client, flavor=flavor, meridian_profile=meridian_profile)
+    return cls(url, api_key, client, flavor=flavor, meridian_profile=meridian_profile,
+               meridian_agent=meridian_agent,
+               meridian_session_affinity=meridian_session_affinity)
