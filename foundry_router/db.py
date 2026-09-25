@@ -316,6 +316,8 @@ class Database:
             ("personas", "mcp_tools_in_direct", "INTEGER DEFAULT 1"),
             # Persona served by an external agent (Hermes) instead of a model.
             ("personas", "agent_backend", "TEXT"),
+            # Per-persona output cap (blank = agent_brain.worker_max_tokens).
+            ("personas", "max_output_tokens", "INTEGER"),
             ("perf_samples", "run_label", "TEXT"),
             ("perf_samples", "timing_src", "TEXT"),
             ("perf_samples", "prefill_tokens", "INTEGER"),

@@ -162,3 +162,44 @@ def test_think_label_says_who_decided(app):
     lbl = _think_label(svc, "claude-sonnet-5", {"reasoning_effort": "off",
                                                 "force_reasoning_effort": 1}, "high")
     assert lbl.startswith("think") and ("off" in lbl or "default" in lbl)
+
+
+class TruncPool(CapturePool):
+    def __init__(self):
+        super().__init__("openai-compatible")
+        self.kw = []
+
+    async def chat(self, model, messages, **kw):
+        from foundry_router.pool.protocols import ChatResult
+        self.kw.append(kw)
+        return ChatResult(content="partial edit", prompt_tokens=50, completion_tokens=8192,
+                          finish_reason="length"), "b1"
+
+    async def chat_stream(self, model, messages, **kw):
+        from foundry_router.pool.protocols import ChatResult
+        self.kw.append(kw)
+        yield {"content": "partial edit", "done": False}
+        yield ChatResult(prompt_tokens=50, completion_tokens=8192, finish_reason="length").done_frame()
+
+
+def test_persona_output_cap_reaches_backend_and_truncation_is_explained(app, client):
+    svc = app.state.services
+    pool = TruncPool()
+    real, svc.pool = svc.pool, pool
+    svc.personas.upsert("Act", execution_mode="direct", model_allowlist=["qwen"],
+                        pinned_models=[], max_output_tokens=32768)
+    cfg = svc.config_store.config.agent_brain
+    try:
+        for ds in (True, False):
+            cfg.direct_stream = ds
+            r = client.post("/api/chat", json={"model": "Act", "tools": [
+                {"type": "function", "function": {"name": "write_to_file"}}],
+                "messages": [{"role": "user", "content": "write it"}]})
+            lines = [json.loads(x) for x in r.text.splitlines() if x.strip()]
+            thinking = "".join(l["message"].get("thinking") or "" for l in lines)
+            assert "cut at the 32,768-token output limit" in thinking
+            assert "tool call was incomplete" in thinking
+            assert lines[-1]["done_reason"] == "length"
+    finally:
+        svc.pool = real
+    assert all(k["max_tokens"] == 32768 for k in pool.kw)

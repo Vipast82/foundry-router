@@ -1038,6 +1038,31 @@ def _jl_list(v) -> list:
 
 # ---- direct dispatch (client brought its own tools) ------------------------------
 
+def _output_cap(svc, persona) -> int:
+    """Max output tokens for a worker call: the persona's max_output_tokens
+    when set, else agent_brain.worker_max_tokens. Reasoning tokens count
+    against it — a coding turn that thinks AND writes a big file edit needs
+    room, or the reply is cut before its tool call completes (Cline then says
+    'output-token limit reached before a tool call')."""
+    try:
+        v = int((persona or {}).get("max_output_tokens") or 0)
+    except (TypeError, ValueError):
+        v = 0
+    return v if v > 0 else int(svc.config_store.config.agent_brain.worker_max_tokens or 8192)
+
+
+def _truncation_note(res, cap: int, persona) -> str:
+    """Thinking line for a reply cut at the output cap."""
+    if (getattr(res, "finish_reason", "") or "").lower() not in ("length", "max_tokens"):
+        return ""
+    where = ("the persona's max_output_tokens" if (persona or {}).get("max_output_tokens")
+             else "agent_brain.worker_max_tokens")
+    return (f"⚠️ reply cut at the {cap:,}-token output limit ({where}) before it finished"
+            + (" — the tool call was incomplete" if not getattr(res, "tool_calls", None) else "")
+            + ". Reasoning counts toward this limit; raise it (Personas → max output "
+              "tokens) if this repeats.\n")
+
+
 def _guard_window(svc, persona, model_id: str) -> int:
     """The context window the chosen model will actually be served with: the
     persona's context_window and the model's known window (llama.cpp n_ctx /
@@ -1053,7 +1078,8 @@ def _guard_window(svc, persona, model_id: str) -> int:
     return min(vals) if vals else 0
 
 
-def _apply_context_guard(svc, persona, model_id, messages, tools, options, logger=None):
+def _apply_context_guard(svc, persona, model_id, messages, tools, options, logger=None,
+                         out_cap: int = 0):
     """Trim what's sent to the model so it fits its window. Returns
     (messages, note or '')."""
     cfg = svc.config_store.config.agent_brain
@@ -1068,7 +1094,7 @@ def _apply_context_guard(svc, persona, model_id, messages, tools, options, logge
             reserve = int((options or {}).get("num_predict") or 0)
         except (TypeError, ValueError):
             reserve = 0
-        reserve = reserve or int(cfg.worker_max_tokens or 8192)
+        reserve = reserve or out_cap or int(cfg.worker_max_tokens or 8192)
         reserve = min(reserve, window // 4)
     out, rep = context_guard.fit(messages, tools, window, reserve, model_id)
     if not rep:
@@ -1244,9 +1270,10 @@ async def _direct_dispatch_chat(svc, persona, model_name, messages, client_tools
         fmt = None                        # structured output would break tool calls
     tool_cap = int(getattr(brain_cfg, "worker_tool_max_steps", 6) or 6)
     base_convo = prompts.sanitize_history(messages)
+    out_cap = _output_cap(svc, persona)
     # Never send more than the model's window (Cline's auto-compact can lag).
     base_convo, _guard_note = _apply_context_guard(svc, persona, model_id, base_convo,
-                                                   all_tools, options, logger)
+                                                   all_tools, options, logger, out_cap)
     if _guard_note:
         route_notes.append(_guard_note)
 
@@ -1325,7 +1352,7 @@ async def _direct_dispatch_chat(svc, persona, model_name, messages, client_tools
             res, backend = await svc.pool.chat(
                 model_id, convo,
                 tools=all_tools, options=options, keep_alive=keep_alive,
-                max_tokens=brain_cfg.worker_max_tokens,
+                max_tokens=out_cap,
                 think=_think_for(svc, model_id, persona, client_think), fmt=fmt)
             # Empirical tool-calling reliability: direct dispatch is where worker
             # models actually exercise tool calling (client-supplied tools).
@@ -1343,7 +1370,7 @@ async def _direct_dispatch_chat(svc, persona, model_name, messages, client_tools
                 svc.db, svc.registry, model=model_id, backend=backend, result=res,
                 persona=logger.persona, mode=logger.mode,
                 wall_ms=(time.monotonic_ns() - t_call) / 1e6,
-                max_tokens=brain_cfg.worker_max_tokens)
+                max_tokens=out_cap)
             last_backend = backend
             own, rest = _split_calls(res)
             if not own or rnd >= tool_cap:
@@ -1470,7 +1497,7 @@ async def _direct_dispatch_chat(svc, persona, model_name, messages, client_tools
                         _src = svc.pool.chat_stream(
                             model_id, convo,
                             tools=all_tools, options=options, keep_alive=keep_alive,
-                            max_tokens=brain_cfg.worker_max_tokens,
+                            max_tokens=out_cap,
                             think=_think_for(svc, model_id, persona, client_think), fmt=fmt)
                         prog: dict = {}
                         async for _kind, _payload in _stream_with_heartbeat(_src, hb, hb_start,
@@ -1518,7 +1545,7 @@ async def _direct_dispatch_chat(svc, persona, model_name, messages, client_tools
                             svc.db, svc.registry, model=model_id, backend=backend_name,
                             result=res, persona=logger.persona, mode=logger.mode,
                             ttft_ms=ttft_ms, wall_ms=(time.monotonic_ns() - t_round) / 1e6,
-                            max_tokens=brain_cfg.worker_max_tokens)
+                            max_tokens=out_cap)
                         own, rest = _split_calls(res)
                         if own and rnd < tool_cap:
                             # Foundry-owned tools: run them, feed the results
@@ -1538,6 +1565,9 @@ async def _direct_dispatch_chat(svc, persona, model_name, messages, client_tools
                                     "function": {"name": t["name"], "arguments": t["arguments"]}}
                                    for t in rest] or None
                         res.tool_calls = rest
+                        _tn = _truncation_note(res, out_cap, persona)
+                        if _tn:
+                            yield tr.chat_chunk(model_name, "", done=False, thinking=_tn)
                         yield tr.chat_chunk(
                             model_name, "", done=True, tool_calls=tcs_out,
                             stats=_prompt_accounting(
@@ -1652,6 +1682,9 @@ async def _direct_dispatch_chat(svc, persona, model_name, messages, client_tools
                 "total_duration_ns": time.monotonic_ns() - t0})
             return
         tool_calls, stats = _finalize(result)
+        _tn = _truncation_note(result, out_cap, persona)
+        if _tn:
+            yield tr.chat_chunk(model_name, "", thinking=_tn)
         if result.thinking:
             # The model's own reasoning (Claude extended thinking, a local
             # model's think block) — to the native thinking pane, not content.

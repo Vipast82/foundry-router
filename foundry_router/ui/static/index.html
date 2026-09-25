@@ -2832,6 +2832,8 @@ async function tabPersonas() {
         <input type="checkbox" id="pe-mcp-direct"></div>
       <div class="row"><label title="Serve this persona with an external AGENT (Hermes) instead of a model: the whole conversation is forwarded to it, its answer streams back and its tool activity shows as thinking. Model-routing fields above then only apply as the fallback when the agent is down or the request came from an agent (loop protection). Client tools are not forwarded — the agent uses its own. Configure agents in Tools &amp; MCP → Agents.">served by agent</label>
         <select id="pe-agent"><option value="">— none (route to models) —</option></select>
+        <label title="Maximum OUTPUT tokens per model call for this persona (blank = the global worker_max_tokens, default 8192). The model's reasoning counts toward it, so a coding persona that thinks AND writes large file edits needs more — otherwise the reply is cut before its tool call finishes and Cline reports 'output-token limit reached before a tool call' and asks for a more concise response. 32768 is a good start for a Cline Act/Plan persona (the answer reserve of the context guard follows it).">max output tokens</label>
+        <input id="pe-maxout" type="number" min="256" step="1024" style="width:90px" placeholder="(global)">
         <span class="hint">e.g. a <b>Foundry-Agent</b> persona served by Hermes ${help("agents")}</span></div>
       <div class="row"><label title="Optional JSON overriding the multi-signal ranking weights for this persona. Signals: primary (requested category), tool_calling, adequacy (observed outcome-judge quality), latency (warm tokens/sec). e.g. a speed-sensitive persona: {&quot;latency&quot;: 0.5}. Empty = defaults.">selection_weights (JSON obj)</label>
         <input id="pe-weights" size="50" value="{}" placeholder='{"latency": 0.4, "adequacy": 0.8}'></div>
@@ -2896,6 +2898,7 @@ async function tabPersonas() {
     expose_tool_trail: $("#pe-trail").checked ? 1 : 0,
     mcp_tools_in_direct: $("#pe-mcp-direct").checked ? 1 : 0,
     agent_backend: $("#pe-agent").value || null,
+    max_output_tokens: $("#pe-maxout").value ? parseInt($("#pe-maxout").value, 10) : null,
     selection_weights: JSON.parse($("#pe-weights").value || "{}"),
     review_enabled: $("#pe-review").checked ? 1 : 0,
     review_model: $("#pe-review-model").value || null,
@@ -3146,6 +3149,7 @@ window.editPersona = name => {
   $("#pe-trail").checked = !!p.expose_tool_trail;
   $("#pe-mcp-direct").checked = p.mcp_tools_in_direct == null ? true : !!p.mcp_tools_in_direct;
   _setAgentSelect(p.agent_backend || "");
+  $("#pe-maxout").value = p.max_output_tokens || "";
 };
 function _setAgentSelect(v) {
   const sel = $("#pe-agent");

@@ -160,6 +160,16 @@ enumerates the valid set.
 - **Context window.** Cline sends large contexts. Set each persona's
   `context_window` to what your hardware loads (see [CONTEXT_SIZING.md](CONTEXT_SIZING.md));
   Claude is fixed at 200K.
+- **"Output-token limit reached before a tool call".** That message is
+  Cline's: the model's reply was cut at its output-token cap before the tool
+  call (usually a `write_to_file` / `replace_in_file`) was complete, so Cline
+  asks for a more concise answer (up to 3 attempts). The cap is the persona's
+  **max output tokens** (blank = `worker_max_tokens`, default 8192) and the
+  model's **reasoning counts toward it** — a thinking model writing a large
+  edit easily passes 8k. Set **max output tokens** on your Cline personas
+  (32768 is a good start); Foundry also says so in the thinking panel when a
+  reply is cut (`⚠️ reply cut at the 8,192-token output limit … the tool
+  call was incomplete`).
 - **Never overflowing the window.** Cline auto-compacts when its last request
   gets close to the context size it *thinks* the model has, so:
   1. In Cline's provider settings set the **context window** to the persona's
