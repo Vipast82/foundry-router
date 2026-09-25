@@ -304,6 +304,11 @@ class Database:
             # changes side by side), where the timing came from (server vs
             # router-estimated), the truly-prefilled token count, hidden reasoning
             # tokens, and cold-load time per call.
+            # Automatic price updates for the cost calculator.
+            ("service_pricing", "locked", "INTEGER DEFAULT 0"),
+            ("service_pricing", "source", "TEXT"),
+            ("service_pricing", "source_id", "TEXT"),
+            ("service_pricing", "last_checked", "TEXT"),
             ("perf_samples", "run_label", "TEXT"),
             ("perf_samples", "timing_src", "TEXT"),
             ("perf_samples", "prefill_tokens", "INTEGER"),

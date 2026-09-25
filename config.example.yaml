@@ -24,6 +24,14 @@ server:
 # routing stays free. Choosing provider meridian/openrouter makes every routing
 # decision a paid call (see design doc §4.2 for why that inversion matters).
 agent_brain:
+  # auto        — brain routing while it's configured + healthy; instant
+  #               passthrough when it's down or unconfigured (no timeouts).
+  # brain       — always route through the brain (per-request fallback).
+  # passthrough — never call the brain for routing: each persona picks a model
+  #               by its policy, forwards the request as-is, fails over between
+  #               models; MCP servers still managed. (Background jobs such as
+  #               model research / price matching still use a healthy brain.)
+  routing_mode: "auto"
   provider: "ollama"               # "ollama" | "meridian" | "openrouter"
   endpoint: "http://192.168.1.60:11434"   # EDIT: the 3050 mini-PC's Ollama
   model: "ornith:9b-q4_K_M"

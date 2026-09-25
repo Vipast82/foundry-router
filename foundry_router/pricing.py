@@ -51,8 +51,8 @@ def ensure_seed(db: Database) -> None:
     for name, i, o, c in DEFAULT_SERVICES:
         db.execute(
             "INSERT OR IGNORE INTO service_pricing "
-            "(name, input_per_1m, output_per_1m, cached_input_per_1m, enabled, updated_at) "
-            "VALUES (?,?,?,?,1,?)", (name, i, o, c, now))
+            "(name, input_per_1m, output_per_1m, cached_input_per_1m, enabled, updated_at, "
+            "source) VALUES (?,?,?,?,1,?,'seed')", (name, i, o, c, now))
 
 
 def list_services(db: Database) -> list[dict]:
@@ -63,24 +63,39 @@ def list_services(db: Database) -> list[dict]:
 def upsert_service(db: Database, *, id: Optional[int] = None, name: str,
                    input_per_1m: float, output_per_1m: float,
                    cached_input_per_1m: Optional[float] = None,
-                   enabled: bool = True, notes: str = "") -> None:
+                   enabled: bool = True, notes: str = "",
+                   locked: Optional[bool] = None) -> None:
+    """Manual add/edit. A hand edit marks the row source='manual'; `locked`
+    keeps the automatic price update away from it (None = leave as is). A
+    renamed service forgets its remembered OpenRouter match."""
     now = utcnow()
     if id:
+        prev = db.query_one("SELECT name, input_per_1m, output_per_1m, cached_input_per_1m "
+                            "FROM service_pricing WHERE id=?", (id,)) or {}
+        price_changed = any(prev.get(k) != v for k, v in (
+            ("input_per_1m", input_per_1m), ("output_per_1m", output_per_1m),
+            ("cached_input_per_1m", cached_input_per_1m)))
         db.execute(
             "UPDATE service_pricing SET name=?, input_per_1m=?, output_per_1m=?, "
-            "cached_input_per_1m=?, enabled=?, notes=?, updated_at=? WHERE id=?",
+            "cached_input_per_1m=?, enabled=?, notes=?, updated_at=?"
+            + (", source='manual'" if price_changed else "")
+            + (", source_id=NULL" if prev.get("name") not in (None, name) else "")
+            + (", locked=?" if locked is not None else "") + " WHERE id=?",
             (name, input_per_1m, output_per_1m, cached_input_per_1m,
-             1 if enabled else 0, notes, now, id))
+             1 if enabled else 0, notes, now,
+             *((1 if locked else 0,) if locked is not None else ()), id))
     else:
         db.execute(
             "INSERT INTO service_pricing (name, input_per_1m, output_per_1m, "
-            "cached_input_per_1m, enabled, notes, updated_at) VALUES (?,?,?,?,?,?,?) "
+            "cached_input_per_1m, enabled, notes, updated_at, source, locked) "
+            "VALUES (?,?,?,?,?,?,?,'manual',?) "
             "ON CONFLICT(name) DO UPDATE SET input_per_1m=excluded.input_per_1m, "
             "output_per_1m=excluded.output_per_1m, "
             "cached_input_per_1m=excluded.cached_input_per_1m, "
-            "enabled=excluded.enabled, notes=excluded.notes, updated_at=excluded.updated_at",
+            "enabled=excluded.enabled, notes=excluded.notes, updated_at=excluded.updated_at, "
+            "source='manual', locked=excluded.locked",
             (name, input_per_1m, output_per_1m, cached_input_per_1m,
-             1 if enabled else 0, notes, now))
+             1 if enabled else 0, notes, now, 1 if locked else 0))
 
 
 def delete_service(db: Database, id: int) -> None:
@@ -89,7 +104,10 @@ def delete_service(db: Database, id: int) -> None:
 
 def compute_costs(db: Database, *, hours: float = 72, model: Optional[str] = None,
                   watts: float = DEFAULT_WATTS,
-                  kwh_rate: float = DEFAULT_KWH_RATE) -> dict:
+                  kwh_rate: float = DEFAULT_KWH_RATE,
+                  backend: Optional[str] = None,
+                  run_label: Optional[str] = None,
+                  backend_type=None) -> dict:
     """Total the window's tokens and price them against every enabled service,
     plus a rough self-hosting electricity cost, so the two are directly
     comparable. `model=None` spans the whole fleet."""
@@ -99,6 +117,12 @@ def compute_costs(db: Database, *, hours: float = 72, model: Optional[str] = Non
     if model:
         where.append("model = ?")
         params.append(model)
+    if backend:
+        where.append("backend = ?")
+        params.append(backend)
+    if run_label is not None:
+        where.append("COALESCE(run_label,'') = ?")
+        params.append(run_label)
     clause = " AND ".join(where)
     agg = db.query_one(
         "SELECT COUNT(*) AS calls, "
@@ -144,8 +168,26 @@ def compute_costs(db: Database, *, hours: float = 72, model: Optional[str] = Non
     active_hours = (agg.get("wall_ms") or 0) / 3.6e6      # sum of per-call wall time
     local_cost = round(watts / 1000.0 * active_hours * kwh_rate, 4)
 
+    # Where the window's tokens actually went, per model: local (free, costs
+    # electricity), Claude subscription (Meridian — counts against the plan
+    # window, not dollars) or metered API. The comparison above prices ALL of
+    # them as if sent to each paid service.
+    by_model = db.query(
+        "SELECT model, backend, COUNT(*) AS calls, "
+        "COALESCE(SUM(prompt_tokens),0) AS input, COALESCE(SUM(completion_tokens),0) AS output, "
+        "COALESCE(SUM(cached_tokens),0) AS cached, COALESCE(SUM(wall_ms),0) AS wall_ms "
+        f"FROM perf_samples WHERE {clause} GROUP BY model, backend "
+        "ORDER BY input + output DESC", tuple(params))
+    for r in by_model:
+        t = backend_type(r["model"]) if backend_type else ""
+        r["kind"] = ("subscription" if t == "anthropic-compatible"
+                     else "local" if t in ("ollama", "openai-compatible-local")
+                     else "metered" if t == "openai-compatible" else (t or "unknown"))
+        r["share_pct"] = round(100.0 * (r["input"] + r["output"]) / (inp + out), 1) if inp + out else 0
+
     return {
         "hours": hours, "model": model or "", "span_hours": round(span_hours, 2),
+        "by_model": by_model,
         "tokens": {"input": inp, "output": out, "cached": cached,
                    "uncached": uncached, "calls": calls},
         "local": {"watts": watts, "kwh_rate": kwh_rate,

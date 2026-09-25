@@ -382,6 +382,20 @@ async def _chat_dispatch(svc, body: dict):
     # `tools` field on every turn (a plan-mode / no-tools turn would otherwise
     # fall through to the brain loop and leak its internal ask_<model> delegation
     # calls into the client, which Cline can't parse).
+    # PASSTHROUGH routing: the brain is off (routing_mode=passthrough), not
+    # configured, or known-down (auto mode). Don't wait on it — a persona
+    # without MCP tools is served by direct dispatch (static policy pick +
+    # guardrails + failover, request forwarded as-is); one WITH MCP tools
+    # still runs the worker-owned tool loop, which never needed the brain.
+    brain_skip = svc.brain.skip_reason() if hasattr(svc.brain, "skip_reason") else None
+    if brain_skip and not client_tools and exec_mode == "agent" \
+            and not _persona_has_mcp_tools(persona):
+        return await _direct_dispatch_chat(svc, persona, model_name, messages,
+                                           client_tools, options, stream, user_text,
+                                           client_think=client_think,
+                                           client_format=client_format,
+                                           log_mode="passthrough", note=brain_skip)
+
     if client_tools or exec_mode == "direct":
         return await _direct_dispatch_chat(svc, persona, model_name, messages,
                                            client_tools, options, stream, user_text,
@@ -434,6 +448,42 @@ def _build_ctx(svc, persona: dict, model_name: str, messages: list[dict],
                              f"user DECLINED paid usage for {target} — "
                              f"routing locally", user_text[:200])
     return ctx
+
+
+async def _failover_list(svc, persona, first: str, user_text: str, eff,
+                         limit: int = 3) -> list[str]:
+    """`first` plus the next models this persona's policy allows, for
+    model-level failover in direct / passthrough dispatch. Local alternatives
+    are free; a paid alternative is included only if the usage/cost guardrail
+    clears it right now."""
+    from ..brain.fallback import fallback_candidates
+    out = [first]
+    try:
+        cands = fallback_candidates(svc.pool, svc.registry, persona, user_text, limit=6)
+    except Exception:
+        cands = []
+    for mid in cands:
+        if mid in out:
+            continue
+        info = svc.pool.backend_info(mid) or {}
+        if info.get("type") == "anthropic-compatible" or (
+                info.get("type") == "openai-compatible"
+                and info.get("flavor") not in ("llamacpp", "vllm", "unsloth")):
+            v = await svc.guardrails.check_paid_call(mid, info, svc.registry.get(mid),
+                                                     RequestGuardState(), eff)
+            if not v.allowed:
+                continue
+        out.append(mid)
+        if len(out) >= limit:
+            break
+    return out
+
+
+def _persona_has_mcp_tools(persona: dict) -> bool:
+    try:
+        return bool(json.loads(persona.get("preferred_mcp_tools") or "[]"))
+    except (json.JSONDecodeError, TypeError):
+        return False
 
 
 def _run_events(svc, ctx: RequestContext):
@@ -560,42 +610,64 @@ def _logger_stats(logger, total_ns: int) -> dict:
 
 
 async def _fallback_chunks(svc, ctx: RequestContext, model_name: str):
-    """§4.2 brain-unreachable path: static rule picks a conservative default,
-    conversation forwarded directly, real token streaming where the backend
-    supports it."""
-    fb_model = pick_fallback_model(svc.pool, svc.registry, ctx.persona,
-                                   _last_user_text(ctx.messages))
-    if fb_model is None:
+    """§4.2 brain-unreachable path: the persona's static policy ranks candidate
+    models (local first — the blind path never reaches for paid) and the
+    conversation is forwarded directly with the persona's sampling + thinking,
+    streaming. A candidate that fails BEFORE producing output is skipped for
+    the next one — so a dead brain plus a dead backend still gets an answer
+    from whatever is up."""
+    from .. import sampling
+    from ..brain.fallback import fallback_candidates
+    cands = fallback_candidates(svc.pool, svc.registry, ctx.persona,
+                                _last_user_text(ctx.messages))
+    if not cands:
         yield tr.chat_chunk(model_name, "",
                             thinking="Routing brain unreachable and no backend is "
                                      "reachable either — cannot serve this request.\n")
         yield tr.chat_chunk(model_name,
                             "[foundry-router] No models are currently reachable.")
         return
-    yield tr.chat_chunk(model_name, "",
-                        thinking=f"Routing brain unreachable — static fallback rule "
-                                 f"selected {fb_model} (no model call needed).\n")
-    backend = (svc.pool.backend_info(fb_model) or {}).get("name") or "fallback"
-    t_fb = time.monotonic()
-    ttft_ms = None
-    try:
-        async for chunk in svc.pool.chat_stream(fb_model, ctx.messages):
-            if chunk.get("done"):
-                res = ChatResult.from_done_frame(chunk)
-                ctx.logger.record_model_call(fb_model, backend, res.prompt_tokens,
-                                             res.completion_tokens, 0.0)
-                telemetry.record_call(
-                    svc.db, svc.registry, model=fb_model, backend=backend, result=res,
-                    persona=ctx.logger.persona, mode="fallback", ttft_ms=ttft_ms,
-                    wall_ms=(time.monotonic() - t_fb) * 1000.0)
-                continue
-            if (chunk.get("content") or chunk.get("thinking")) and ttft_ms is None:
-                ttft_ms = (time.monotonic() - t_fb) * 1000.0
-            if chunk.get("content") or chunk.get("thinking"):
-                yield tr.chat_chunk(model_name, chunk.get("content") or "",
-                                    thinking=chunk.get("thinking") or None)
-    except AllBackendsFailed as e:
-        yield tr.chat_chunk(model_name, f"\n[foundry-router] fallback failed too: {e}")
+    brain_cfg = svc.config_store.config.agent_brain
+    options = sampling.resolve_options(brain_cfg.sampling_defaults, ctx.persona, None)
+    errors: list[str] = []
+    for i, fb_model in enumerate(cands):
+        yield tr.chat_chunk(model_name, "",
+                            thinking=(f"Routing brain unavailable — static policy selected "
+                                      f"{fb_model} (no brain call needed).\n" if i == 0 else
+                                      f"{cands[i - 1]} failed — failing over to {fb_model}.\n"))
+        backend = (svc.pool.backend_info(fb_model) or {}).get("name") or "fallback"
+        t_fb = time.monotonic()
+        ttft_ms = None
+        produced = False
+        try:
+            async for chunk in svc.pool.chat_stream(
+                    fb_model, ctx.messages, options=options,
+                    think=_think_for(svc, fb_model, ctx.persona),
+                    max_tokens=brain_cfg.worker_max_tokens):
+                if chunk.get("done"):
+                    res = ChatResult.from_done_frame(chunk)
+                    ctx.logger.record_model_call(fb_model, backend, res.prompt_tokens,
+                                                 res.completion_tokens, 0.0)
+                    telemetry.record_call(
+                        svc.db, svc.registry, model=fb_model, backend=backend, result=res,
+                        persona=ctx.logger.persona, mode="fallback", ttft_ms=ttft_ms,
+                        wall_ms=(time.monotonic() - t_fb) * 1000.0,
+                        max_tokens=brain_cfg.worker_max_tokens)
+                    continue
+                c, th = chunk.get("content") or "", chunk.get("thinking") or ""
+                if (c or th) and ttft_ms is None:
+                    ttft_ms = (time.monotonic() - t_fb) * 1000.0
+                if c or th:
+                    produced = True
+                    yield tr.chat_chunk(model_name, c, thinking=th or None)
+            return
+        except AllBackendsFailed as e:
+            errors.append(f"{fb_model}: {e}")
+            if produced:
+                yield tr.chat_chunk(model_name, f"\n[foundry-router] fallback stream broke: {e}")
+                return
+    yield tr.chat_chunk(model_name, "\n[foundry-router] every fallback model failed: "
+                                    + " | ".join(errors)[:600])
 
 
 async def _agent_chat(svc, persona, model_name, messages, stream, user_text,
@@ -808,7 +880,8 @@ def _jl_list(v) -> list:
 
 async def _direct_dispatch_chat(svc, persona, model_name, messages, client_tools,
                                 options, stream, user_text, client_think=None,
-                                client_format=None):
+                                client_format=None, log_mode: str = "direct",
+                                note: str = ""):
     # DESIGN DECISION: when a coding client sends its own tool definitions
     # (Kilo/Cline agent loops), the routing agent would have to interleave two
     # tool protocols in one conversation. Instead the persona's static policy
@@ -816,7 +889,7 @@ async def _direct_dispatch_chat(svc, persona, model_name, messages, client_tools
     # client stays in charge of its own agent loop, the router just picks who
     # answers. Revisit if per-turn re-routing inside coding sessions matters.
     logger = RequestLogger(svc.db, persona["virtual_name"], model_name,
-                           "direct", user_text)
+                           log_mode, user_text)
     eff = svc.guardrails.effective(persona)
     model_id = None
     pins = _paid_pin_order(svc, persona)
@@ -890,16 +963,26 @@ async def _direct_dispatch_chat(svc, persona, model_name, messages, client_tools
     # Ollama cold-load a giant KV cache and time out. The persona bound wins over
     # a larger client-sent num_ctx (prevents client-driven blowups) but yields to
     # a smaller one (never forces MORE context than the client asked for).
-    if (svc.pool.backend_info(model_id) or {}).get("type") == "ollama":
-        nctx = _direct_num_ctx(svc, persona, model_id)
-        if nctx:
-            options = dict(options or {})
-            client_ctx = options.get("num_ctx")
-            try:
-                client_ctx = int(client_ctx) if client_ctx else 0
-            except (TypeError, ValueError):
-                client_ctx = 0
-            options["num_ctx"] = min(nctx, client_ctx) if client_ctx else nctx
+    base_options = options
+
+    def _opts_for(mid):
+        opts = base_options
+        if (svc.pool.backend_info(mid) or {}).get("type") == "ollama":
+            nctx = _direct_num_ctx(svc, persona, mid)
+            if nctx:
+                opts = dict(opts or {})
+                client_ctx = opts.get("num_ctx")
+                try:
+                    client_ctx = int(client_ctx) if client_ctx else 0
+                except (TypeError, ValueError):
+                    client_ctx = 0
+                opts["num_ctx"] = min(nctx, client_ctx) if client_ctx else nctx
+        return opts
+    options = _opts_for(model_id)
+    # Model failover: if the chosen model's backend(s) fail before answering,
+    # try the next model this persona's policy allows (paid ones only if the
+    # guardrail clears them) instead of returning an error.
+    failover = await _failover_list(svc, persona, model_id, user_text, eff)
 
     async def _run():
         """The worker call + all post-call bookkeeping. Raises AllBackendsFailed."""
@@ -928,7 +1011,7 @@ async def _direct_dispatch_chat(svc, persona, model_name, messages, client_tools
             max_tokens=brain_cfg.worker_max_tokens)
         return res
 
-    def _on_error(e: BaseException) -> None:
+    def _on_error(e: BaseException, finish: bool = True) -> None:
         if "invalid tool call" in str(e):
             svc.registry.record_tool_call(model_id, ok=False)
         if "does not support chat" in str(e).lower():
@@ -937,7 +1020,28 @@ async def _direct_dispatch_chat(svc, persona, model_name, messages, client_tools
         if (binfo and binfo.get("type") == "anthropic-compatible"
                 and looks_like_window_exhaustion(str(e))):
             svc.meridian_usage.note_observed_exhaustion(binfo["url"])
-        logger.finish("error", str(e))
+        if finish:
+            logger.finish("error", str(e))
+
+    async def _run_with_failover(narrate=None):
+        """_run() over the failover list: a model whose backends all fail is
+        recorded and the next allowed model is tried. Re-raises the last error
+        when every candidate failed."""
+        nonlocal model_id, options
+        last = None
+        for i, mid in enumerate(failover):
+            if i:
+                logger.record_guardrail(f"failover: {failover[i - 1]} failed ({str(last)[:120]}) "
+                                        f"-> {mid}")
+                if narrate:
+                    narrate(f"⚙️ {failover[i - 1]} failed — failing over to {mid}\n")
+            model_id, options = mid, _opts_for(mid)
+            try:
+                return await _run()
+            except AllBackendsFailed as e:
+                last = e
+                _on_error(e, finish=False)
+        raise last if last else AllBackendsFailed("no candidate model")
 
     def _finalize(res):
         tool_calls = [{**({"id": tc["id"]} if tc.get("id") else {}),
@@ -961,86 +1065,109 @@ async def _direct_dispatch_chat(svc, persona, model_name, messages, client_tools
                 (binfo0.get("flavor") or "openai"))
 
         async def sgen():
+            nonlocal model_id, options, binfo0, _btype, backend_name
+            if note:
+                yield tr.chat_chunk(model_name, "", done=False,
+                                    thinking=f"⚙️ passthrough ({note}) — {persona['virtual_name']} "
+                                             f"policy picked {model_id}\n")
             yield tr.chat_chunk(model_name, "", done=False,
                                 thinking=f"⚙️ {_tag} · {model_id} — streaming…\n")
-            acc_tools: list = []
-            ttft_recorded = False        # time-to-first-token, measured once
-            ttft_ms = None               # captured value, for the perf-history row
             hb = float(brain_cfg.direct_stream_heartbeat_seconds or 0)
             hb_start = time.monotonic()
-            try:
-                _src = svc.pool.chat_stream(
-                    model_id, prompts.sanitize_history(messages),
-                    tools=client_tools, options=options, keep_alive=keep_alive,
-                    max_tokens=brain_cfg.worker_max_tokens,
-                    think=_think_for(svc, model_id, persona, client_think), fmt=fmt)
-                async for _kind, _payload in _stream_with_heartbeat(_src, hb, hb_start):
-                    if _kind == "beat":
-                        yield tr.chat_chunk(
-                            model_name, "", done=False,
-                            thinking=f"⚙️ {model_id} — still working… {_payload}s\n")
+            for attempt, mid in enumerate(failover):
+                if attempt:
+                    logger.record_guardrail(f"failover: {model_id} failed -> {mid}")
+                    model_id, options = mid, _opts_for(mid)
+                    binfo0 = svc.pool.backend_info(mid) or {}
+                    _btype = binfo0.get("type")
+                    backend_name = binfo0.get("name") or mid
+                    yield tr.chat_chunk(model_name, "", done=False,
+                                        thinking=f"⚙️ failing over to {mid}\n")
+                acc_tools: list = []
+                ttft_recorded = False    # time-to-first-token, measured once
+                ttft_ms = None           # captured value, for the perf-history row
+                produced = False         # any output sent -> no failover possible
+                try:
+                    _src = svc.pool.chat_stream(
+                        model_id, prompts.sanitize_history(messages),
+                        tools=client_tools, options=options, keep_alive=keep_alive,
+                        max_tokens=brain_cfg.worker_max_tokens,
+                        think=_think_for(svc, model_id, persona, client_think), fmt=fmt)
+                    async for _kind, _payload in _stream_with_heartbeat(_src, hb, hb_start):
+                        if _kind == "beat":
+                            yield tr.chat_chunk(
+                                model_name, "", done=False,
+                                thinking=f"⚙️ {model_id} — still working… {_payload}s\n")
+                            continue
+                        chunk = _payload
+                        if chunk.get("done"):
+                            pt = chunk.get("prompt_tokens") or 0
+                            ct = chunk.get("completion_tokens") or 0
+                            finals = acc_tools or (chunk.get("tool_calls") or [])
+                            tcs_out = [{**({"id": t["id"]} if t.get("id") else {}),
+                                        "function": {"name": t["name"], "arguments": t["arguments"]}}
+                                       for t in finals] or None
+                            svc.registry.record_tool_call(model_id, ok=True)
+                            if _btype == "anthropic-compatible":
+                                log_subscription_usage(svc.db, model_id, backend_name, pt, ct)
+                                svc.meridian_usage.note_successful_call(binfo0.get("url"))
+                            cost = estimate_cost_usd(svc.registry.get(model_id), pt, ct)
+                            logger.record_model_call(model_id, backend_name, pt, ct, cost)
+                            logger.finish("ok")
+                            # Perf + truncation telemetry (a "length" finish = the
+                            # reply was cut at the max-token cap — the exact reason a
+                            # client then asks to "continue"; flagged in Events).
+                            telemetry.record_call(
+                                svc.db, svc.registry, model=model_id, backend=backend_name,
+                                result=ChatResult.from_done_frame(chunk, tool_calls=finals),
+                                persona=logger.persona, mode=logger.mode, ttft_ms=ttft_ms,
+                                wall_ms=(time.monotonic_ns() - t0) / 1e6,
+                                max_tokens=brain_cfg.worker_max_tokens)
+                            produced = True
+                            yield tr.chat_chunk(
+                                model_name, "", done=True, tool_calls=tcs_out,
+                                stats=tr.result_stats(ChatResult.from_done_frame(chunk),
+                                                      time.monotonic_ns() - t0,
+                                                      model=model_id, backend=backend_name))
+                        else:
+                            if chunk.get("tool_calls"):
+                                acc_tools.extend(chunk["tool_calls"])   # deliver at done
+                            c = chunk.get("content") or ""
+                            th = chunk.get("thinking") or ""
+                            if (c or th or chunk.get("tool_calls")) and not ttft_recorded:
+                                # First generated token of ANY kind (answer, reasoning
+                                # or tool call) — wall time since dispatch is the
+                                # time-to-first-token, prefill-dominated. Counting only
+                                # answer text folded a thinking model's whole reasoning
+                                # phase into "TTFT". Recorded with the call's telemetry.
+                                ttft_recorded = True
+                                ttft_ms = (time.monotonic_ns() - t0) / 1e6
+                            if c or th:
+                                produced = True
+                                yield tr.chat_chunk(model_name, c, done=False,
+                                                    thinking=th or None)
+                    return
+                except AllBackendsFailed as e:
+                    if not produced and attempt + 1 < len(failover):
+                        _on_error(e, finish=False)
                         continue
-                    chunk = _payload
-                    if chunk.get("done"):
-                        pt = chunk.get("prompt_tokens") or 0
-                        ct = chunk.get("completion_tokens") or 0
-                        finals = acc_tools or (chunk.get("tool_calls") or [])
-                        tcs_out = [{**({"id": t["id"]} if t.get("id") else {}),
-                                    "function": {"name": t["name"], "arguments": t["arguments"]}}
-                                   for t in finals] or None
-                        svc.registry.record_tool_call(model_id, ok=True)
-                        if _btype == "anthropic-compatible":
-                            log_subscription_usage(svc.db, model_id, backend_name, pt, ct)
-                            svc.meridian_usage.note_successful_call(binfo0.get("url"))
-                        cost = estimate_cost_usd(svc.registry.get(model_id), pt, ct)
-                        logger.record_model_call(model_id, backend_name, pt, ct, cost)
-                        logger.finish("ok")
-                        # Perf + truncation telemetry (a "length" finish = the
-                        # reply was cut at the max-token cap — the exact reason a
-                        # client then asks to "continue"; flagged in Events).
-                        telemetry.record_call(
-                            svc.db, svc.registry, model=model_id, backend=backend_name,
-                            result=ChatResult.from_done_frame(chunk, tool_calls=finals),
-                            persona=logger.persona, mode=logger.mode, ttft_ms=ttft_ms,
-                            wall_ms=(time.monotonic_ns() - t0) / 1e6,
-                            max_tokens=brain_cfg.worker_max_tokens)
-                        yield tr.chat_chunk(
-                            model_name, "", done=True, tool_calls=tcs_out,
-                            stats=tr.result_stats(ChatResult.from_done_frame(chunk),
-                                                  time.monotonic_ns() - t0,
-                                                  model=model_id, backend=backend_name))
-                    else:
-                        if chunk.get("tool_calls"):
-                            acc_tools.extend(chunk["tool_calls"])   # deliver at done
-                        c = chunk.get("content") or ""
-                        th = chunk.get("thinking") or ""
-                        if (c or th or chunk.get("tool_calls")) and not ttft_recorded:
-                            # First generated token of ANY kind (answer, reasoning
-                            # or tool call) — wall time since dispatch is the
-                            # time-to-first-token, prefill-dominated. Counting only
-                            # answer text folded a thinking model's whole reasoning
-                            # phase into "TTFT". Recorded with the call's telemetry.
-                            ttft_recorded = True
-                            ttft_ms = (time.monotonic_ns() - t0) / 1e6
-                        if c or th:
-                            yield tr.chat_chunk(model_name, c, done=False,
-                                                thinking=th or None)
-            except Exception as e:                                # noqa: BLE001
-                if isinstance(e, AllBackendsFailed):
                     _on_error(e)      # exhaustion detection, embedding flag, log
-                else:
+                    err = e
+                except Exception as e:                            # noqa: BLE001
                     logger.finish("error", str(e))
+                    err = e
                 yield tr.chat_chunk(model_name,
-                                    f"[router: stream failed — {str(e)[:200]}]",
+                                    f"[router: stream failed — {str(err)[:200]}]",
                                     done=False)
                 yield tr.chat_chunk(model_name, "", done=True, stats={
                     "prompt_tokens": 0, "completion_tokens": 0,
                     "total_duration_ns": time.monotonic_ns() - t0})
+                return
         return StreamingResponse(sgen(), media_type="application/x-ndjson")
 
     if not stream:
         try:
-            result = await _run()
+            result = await _run_with_failover()
         except AllBackendsFailed as e:
             _on_error(e)
             return JSONResponse({"error": str(e)}, status_code=502)
@@ -1060,12 +1187,17 @@ async def _direct_dispatch_chat(svc, persona, model_name, messages, client_tools
         # the stream, which Cline reports as "stream terminated"), emitting an
         # empty keep-alive chunk every `hb`s so the reverse proxy and client don't
         # idle-timeout the connection.
-        task = asyncio.create_task(_run())
+        notes: list[str] = []
+        task = asyncio.create_task(_run_with_failover(narrate=notes.append))
         btype = (svc.pool.backend_info(model_id) or {}).get("type") or ""
         where = "Claude" if btype == "anthropic-compatible" else "local"
         # IMMEDIATE beat so the client shows activity from the first moment (not a
         # silent "thinking…") — in the NATIVE thinking field, so content stays
         # clean. Names WHICH model is answering (local vs Claude).
+        if note:
+            yield tr.chat_chunk(model_name, "", done=False,
+                                thinking=f"⚙️ passthrough ({note}) — {persona['virtual_name']} "
+                                         f"policy picked {model_id}\n")
         if hb:
             yield tr.chat_chunk(model_name, "", done=False,
                                 thinking=f"⚙️ routing to {where} · {model_id} — working…\n")
@@ -1075,6 +1207,8 @@ async def _direct_dispatch_chat(svc, persona, model_name, messages, client_tools
             if done:
                 break
             waited += hb
+            while notes:
+                yield tr.chat_chunk(model_name, "", done=False, thinking=notes.pop(0))
             yield tr.chat_chunk(
                 model_name, "", done=False,
                 thinking=f"⚙️ {where} · {model_id} — still working ({int(waited)}s)…\n")
@@ -1089,6 +1223,8 @@ async def _direct_dispatch_chat(svc, persona, model_name, messages, client_tools
         except Exception as e:                                # noqa: BLE001
             logger.finish("error", str(e))
             err = str(e)
+        while notes:
+            yield tr.chat_chunk(model_name, "", done=False, thinking=notes.pop(0))
         if err is not None:
             yield tr.chat_chunk(model_name,
                                 f"[router: worker call failed — {err[:200]}]",

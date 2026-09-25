@@ -62,6 +62,37 @@ class BrainClient:
     def model(self) -> str:
         return self.cfg.model
 
+    # -- routing-mode gate -------------------------------------------------------
+    # Set by the service from the periodic health probe; a real call failure
+    # also opens the breaker for FAILURE_COOLDOWN seconds (auto mode), so a dead
+    # brain costs one timeout, not one per request.
+    health_down: Optional[str] = None
+    _failed_at: float = 0.0
+    FAILURE_COOLDOWN = 30.0
+
+    def skip_reason(self, aux: bool = False) -> Optional[str]:
+        """Why the brain must NOT be called right now (None = call it).
+        aux=True is a background job (model research, price matching): those
+        still use a configured, healthy brain in passthrough mode — passthrough
+        only takes the brain out of request ROUTING."""
+        import time
+        mode = getattr(self.cfg, "routing_mode", "auto") or "auto"
+        if mode == "passthrough" and not aux:
+            return "routing mode is passthrough"
+        if not (self.cfg.model or "").strip() or not (self.cfg.endpoint or "").strip():
+            return "no brain configured"
+        if mode == "auto":
+            if self.health_down:
+                return f"brain unhealthy ({self.health_down})"
+            if self._failed_at and time.monotonic() - self._failed_at < self.FAILURE_COOLDOWN:
+                return "brain failed moments ago"
+        return None
+
+    def mode_status(self) -> dict:
+        reason = self.skip_reason()
+        return {"routing_mode": getattr(self.cfg, "routing_mode", "auto") or "auto",
+                "active": reason is None, "reason": reason or ""}
+
     async def loaded_detail(self) -> dict:
         """Is the brain model warm on its endpoint, and how much VRAM is it
         holding? Queries the brain endpoint's /api/ps when it's an Ollama
@@ -80,10 +111,14 @@ class BrainClient:
             return {"loaded": None, "size_vram": 0}
 
     async def chat(self, messages: list[dict], tools: Optional[list[dict]] = None,
-                   on_retry=None) -> ChatResult:
+                   on_retry=None, aux: bool = False) -> ChatResult:
         """`on_retry` (optional zero-arg callable) fires when the malformed-
         tool-call retry engages — the agent passes an emitter so the retry is
         narrated to the client, not just written to the Events log."""
+        reason = self.skip_reason(aux=aux)
+        if reason:
+            # Instant degrade — every caller already handles BrainUnreachable.
+            raise BrainUnreachable(f"brain skipped: {reason}")
         msgs = messages
         for attempt in (1, 2):
             try:
@@ -118,15 +153,17 @@ class BrainClient:
                 # degrade path. The brain host rebooting must never take the
                 # whole service down.
                 from ..errors import describe_exception
+                import time
+                self._failed_at = time.monotonic()
                 raise BrainUnreachable(
                     f"agent brain ({self.cfg.provider} {self.cfg.model} @ "
                     f"{self.cfg.endpoint}): {describe_exception(e)}") from e
         raise AssertionError("unreachable")  # loop always returns or raises
 
-    async def complete(self, prompt: str) -> str:
+    async def complete(self, prompt: str, aux: bool = False) -> str:
         """Single-shot completion for auxiliary jobs (refine_prompt, research
-        extraction). Same degrade semantics."""
-        result = await self.chat([{"role": "user", "content": prompt}])
+        extraction). Same degrade semantics; aux=True for background jobs."""
+        result = await self.chat([{"role": "user", "content": prompt}], aux=aux)
         return result.content
 
     async def health(self) -> dict:

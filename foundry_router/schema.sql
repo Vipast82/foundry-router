@@ -198,7 +198,11 @@ CREATE TABLE IF NOT EXISTS service_pricing (
   cached_input_per_1m REAL,         -- USD / 1M cached (prompt-cache hit) input tokens; NULL = no cache discount
   enabled INTEGER DEFAULT 1,        -- include in the comparison
   notes TEXT,
-  updated_at TEXT
+  updated_at TEXT,
+  locked INTEGER DEFAULT 0,         -- 1 = never touched by the automatic price update
+  source TEXT,                      -- "seed" | "manual" | "openrouter"
+  source_id TEXT,                   -- matched OpenRouter model id (remembered for next update)
+  last_checked TEXT                 -- last automatic price check
 );
 
 -- §4.9 Troubleshooting/error log (item 7) ---------------------------------------

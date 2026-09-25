@@ -55,6 +55,18 @@ class ServerConfig(BaseModel):
 
 
 class AgentBrainConfig(BaseModel):
+    # How persona requests are routed:
+    #   auto        — use the brain while it's configured and healthy; the
+    #                 moment it's down / unconfigured, skip it instantly and
+    #                 serve requests in passthrough (no waiting on timeouts).
+    #   brain       — always route through the brain; a failed call degrades
+    #                 per request to the static fallback (the original design).
+    #   passthrough — never call the brain: each persona picks a worker by its
+    #                 static policy (pins / allowlist / ranking / guardrails)
+    #                 and the request — client tools, thinking, sampling — is
+    #                 forwarded directly. Foundry then acts as a smart proxy +
+    #                 MCP / backend manager with failover.
+    routing_mode: Literal["auto", "brain", "passthrough"] = "auto"
     provider: Literal["ollama", "meridian", "openrouter"] = "ollama"
     endpoint: str = "http://localhost:11434"
     model: str = ""

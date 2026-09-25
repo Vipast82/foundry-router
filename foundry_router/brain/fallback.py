@@ -95,3 +95,34 @@ def pick_fallback_model(pool, registry: ModelRegistry,
             return ranked[0]["id"]
         return group[0]
     return None
+
+
+def fallback_candidates(pool, registry: ModelRegistry, persona: Optional[dict],
+                        user_text: str, limit: int = 4) -> list[str]:
+    """Ordered failover list for the brain-down path: the policy pick first,
+    then the rest of the same tier by ranking, then the other tier (local
+    before remote — the blind path stays local-first). Embedding-only models
+    are never candidates."""
+    first = pick_fallback_model(pool, registry, persona, user_text)
+    if first is None:
+        return []
+    category = (persona or {}).get("benchmark_category") or guess_category(user_text)
+    local, remote = [], []
+    for model_id in pool.available_models():
+        meta = registry.get(model_id)
+        if model_id == first or (meta and meta.get("embedding")):
+            continue
+        info = pool.backend_info(model_id) or {}
+        (local if info.get("type") == "ollama" or (info.get("type") == "openai-compatible"
+                                                  and info.get("flavor") in ("llamacpp", "vllm", "unsloth"))
+         else remote).append(model_id)
+    out = [first]
+    for group in (local, remote):
+        ranked = [r["id"] for r in registry.ranked_for_category(category, group, limit=limit)]
+        out += ranked + [m for m in group if m not in ranked]
+    seen, uniq = set(), []
+    for m in out:
+        if m not in seen:
+            seen.add(m)
+            uniq.append(m)
+    return uniq[:limit]

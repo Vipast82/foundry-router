@@ -50,8 +50,16 @@ the optional companion services (with one-line installers).
   max steps/paid-calls per request, optional spend caps, per-persona overrides.
 - **Web UI** at `/ui` — backends, registry, personas, tools, guardrails, MCP
   connections, usage log, troubleshooting log.
-- **Degrades, never dies** — brain host down? A static rule routes to the best
-  local model. Internet down? Local-only operation keeps working end to end.
+- **Three routing modes** — `brain` (the routing brain decides every request),
+  `passthrough` (no brain: each persona picks a model by policy and forwards the
+  request as-is — a smart proxy + MCP/backend manager), or `auto` (brain while
+  it's healthy, instant passthrough when it isn't). Set under Backends → Pool.
+- **Degrades, never dies** — brain down? Requests skip it immediately and fail
+  over between the models a persona allows. Internet down? Local-only operation
+  keeps working end to end.
+- **Cost calculator with automatic prices** — local-vs-cloud cost of your real
+  traffic; service prices refresh from OpenRouter's public catalog on a
+  schedule (brain-matched, lockable per row).
 
 ## Quick start
 

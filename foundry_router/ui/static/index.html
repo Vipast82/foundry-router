@@ -399,7 +399,9 @@ const HELP = {
     misconfigured or rate-limited MCP server (see the MCP Servers tab).</p>`],
   brain: ["Routing brain", `<p>The small model that decides, for every request, which worker model
     answers. <b>reachable</b> = its endpoint answers; <b>loaded</b> = it's resident in VRAM (a cold brain
-    adds seconds to every routing decision).</p>`],
+    adds seconds to every routing decision). <b>passthrough</b> = the brain is being skipped (routing mode,
+    not configured, or down) and personas are served directly by policy. Change it under
+    Backends → Pool → Routing mode.</p>`],
   recent: ["Recently finished", `<p>The last few completed requests: which persona/mode handled them,
     the models used, prompt → output tokens and the end-to-end rate. Full history lives in
     <b>Logs → Usage Log</b>.</p>`],
@@ -456,6 +458,40 @@ const HELP = {
     <dt>Correlation</dt><dd>Each dot is a call; brighter = more recent. A downward slope means the metric
       degrades as the context fills.</dd>
     </dl>`],
+  priceupdate: ["Automatic price updates", `
+    <p>Current list prices are fetched from <b>OpenRouter's public model catalog</b> (no API key), which
+    publishes input, output and cache-read prices for Anthropic, OpenAI, Google, DeepSeek, xAI and more.</p>
+    <p>Each of your services is matched to a catalog model: a match remembered from last time first, then the
+    <b>routing brain</b> (it picks from a short list of real candidates, so it can't invent one), then a
+    word-by-word matcher if the brain is unavailable. The matched model shows under <i>source</i>.</p>
+    <dl>
+    <dt>🔒 Lock</dt><dd>Locked rows are never touched — for negotiated or custom prices.</dd>
+    <dt>Preview</dt><dd>Shows every old → new price without saving anything.</dd>
+    <dt>Safety</dt><dd>Prices must be positive and under $1000 / 1M; a change bigger than 10× is reported and
+      not applied. Every applied change is logged in Events.</dd>
+    <dt>Not found</dt><dd>A service OpenRouter doesn't list keeps its current price — rename it to match the
+      vendor's model name, or edit it by hand.</dd>
+    </dl>`],
+  costsplit: ["Where the tokens went", `<p>The window's real traffic per model, and what kind of cost it is
+    for you today: <b>local</b> (self-hosted, electricity only), <b>subscription</b> (Claude via Meridian —
+    it uses plan window, not dollars) or <b>metered</b> (pay-per-token API). The comparison table above
+    prices <i>all</i> of these tokens as if they had been sent to each paid service.</p>`],
+  routing: ["Routing modes", `
+    <dl>
+    <dt>auto (default)</dt><dd>Brain routing while the brain is configured and healthy. When the health probe
+      sees it down — or a call just failed — requests skip it instantly and run in passthrough, then return
+      to brain routing when it recovers. Background jobs (model research, price matching) keep using the brain
+      whenever it's available.</dd>
+    <dt>brain</dt><dd>Always route through the brain. If a call fails, that request degrades to the static
+      fallback (the original design).</dd>
+    <dt>passthrough</dt><dd>Never call the brain for routing. Each persona picks one model by its own policy
+      — pinned models, allowlist, category ranking, local/paid bias — with the usage/cost guardrails applied,
+      and the request (client tools, thinking, sampling, structured output) is forwarded as-is, streaming.
+      Personas with MCP tools still run the worker-owned tool loop, so Foundry keeps managing MCP servers.
+      Raw model names always pass straight through in every mode.</dd>
+    </dl>
+    <p>If the chosen backend fails before answering, the fallback path fails over to the next model the
+    persona's policy allows.</p>`],
   cost: ["Cost calculator", `<p>Prices the tokens actually processed in the window against paid-API list
     prices (editable below), and estimates what self-hosting cost in electricity. A decision aid, not a
     bill: cloud APIs charge for the full context every turn, which is why long agentic sessions are
@@ -1110,7 +1146,7 @@ async function tabPerformance() {
 // =========================================================================
 // Cost tab — what this run's tokens would have cost on paid APIs vs self-host
 // =========================================================================
-const _COST = { hours: 72, model: "", watts: 400, kwh: 0.15 };
+const _COST = { hours: 72, model: "", backend: "", run: "__all__", watts: 400, kwh: 0.15 };
 try { Object.assign(_COST, JSON.parse(localStorage.getItem("costCtl") || "{}")); } catch (e) {}
 const _money = v => v == null ? "—"
   : "$" + (v >= 1000 ? v.toLocaleString(undefined, { maximumFractionDigits: 0 })
@@ -1124,6 +1160,8 @@ async function tabCost() {
     <div class="card" style="display:flex;gap:16px;align-items:center;flex-wrap:wrap">
       <label>Window <select id="cost-win">${winOpts.map(([h, l]) => `<option value="${h}"${h === _COST.hours ? " selected" : ""}>${l}</option>`).join("")}</select></label>
       <label>Model <select id="cost-model"><option value="">all models</option></select></label>
+      <label title="Only calls served by one backend">Backend <select id="cost-backend"><option value="">all backends</option></select></label>
+      <label title="Only one run label (hardware / config experiment)">Run <select id="cost-run"><option value="__all__">all runs</option></select></label>
       <label title="Approx. power draw of your inference box under load">self-host watts <input id="cost-watts" type="number" min="0" style="width:70px" value="${_COST.watts}"></label>
       <label title="Your electricity price"> $/kWh <input id="cost-kwh" type="number" min="0" step="0.01" style="width:70px" value="${_COST.kwh}"></label>
       <button class="act" id="cost-refresh">Refresh</button>
@@ -1133,7 +1171,18 @@ async function tabCost() {
     <div id="cost-verdict"></div>
     <div class="card"><div style="font-weight:600;margin-bottom:6px">Cost for this window <span class="hint" style="font-weight:normal">— cheapest first; self-host = electricity estimate</span></div><div id="cost-table"></div></div>
     <div class="card"><div style="font-weight:600;margin-bottom:6px">Visual comparison</div><div id="cost-bars"></div></div>
-    <div class="card"><div style="font-weight:600;margin-bottom:6px">Service rates <span class="hint" style="font-weight:normal">— USD per 1M tokens · editable</span></div>
+    <div class="card"><div class="card-h">Where the tokens went ${help("costsplit")}<span class="hint">— per model in this window</span></div><div id="cost-split"></div></div>
+    <div class="card"><div class="card-h">Automatic price updates ${help("priceupdate")}</div>
+      <div class="row" style="margin:0">
+        <label style="min-width:0" title="Refresh unlocked prices from OpenRouter on a schedule"><input type="checkbox" id="pu-auto"> update automatically every</label>
+        <input id="pu-days" type="number" min="1" max="90" style="width:60px"> <span class="hint" style="margin:0">days</span>
+        <button class="act" id="pu-save">Save schedule</button>
+        <button class="act" id="pu-preview" title="Show what would change without saving anything">Preview</button>
+        <button class="act primary" id="pu-run" title="Fetch current prices now and apply them to every unlocked service">Update prices now</button>
+      </div>
+      <div id="pu-status" class="hint" style="margin:8px 0 0"></div>
+      <div id="pu-report"></div></div>
+    <div class="card"><div class="card-h">Service rates <span class="hint">— USD per 1M tokens · editable · 🔒 = never auto-updated</span></div>
       <div id="cost-rates"></div></div>`;
 
   const loadRates = async () => {
@@ -1141,23 +1190,27 @@ async function tabCost() {
     const rows = d.services || [];
     const cell = (id, val, w) => `<input data-k="${id}" type="${id === "name" || id === "notes" ? "text" : "number"}" step="0.01" style="width:${w}" value="${val == null ? "" : esc("" + val)}">`;
     $("#cost-rates").innerHTML =
-      `<table><tr><th>on</th><th>service</th><th>in $/1M</th><th>out $/1M</th><th title="cached-input rate (prompt-cache hit)">cached $/1M</th><th>notes</th><th></th></tr>`
+      `<table><tr><th title="Include in the comparison">on</th><th title="Locked rows are never changed by the automatic price update">🔒</th><th>service</th><th>in $/1M</th><th>out $/1M</th><th title="cached-input rate (prompt-cache hit)">cached $/1M</th><th>notes</th><th title="Where the current price came from, and when">source · updated</th><th></th></tr>`
       + rows.map(s => `<tr data-id="${s.id}">
           <td class="nw"><input data-k="enabled" type="checkbox" ${s.enabled ? "checked" : ""}></td>
+          <td class="nw"><input data-k="locked" type="checkbox" ${s.locked ? "checked" : ""} title="Lock: keep your manual price"></td>
           <td>${cell("name", s.name, "150px")}</td>
           <td class="nw">${cell("input_per_1m", s.input_per_1m, "70px")}</td>
           <td class="nw">${cell("output_per_1m", s.output_per_1m, "70px")}</td>
           <td class="nw">${cell("cached_input_per_1m", s.cached_input_per_1m, "70px")}</td>
           <td>${cell("notes", s.notes || "", "160px")}</td>
+          <td class="nw hint" title="${esc(s.source_id ? "matched OpenRouter model: " + s.source_id : "")}${s.last_checked ? "\nlast checked " + esc(s.last_checked) : ""}">${esc(s.source || "seed")}${s.source_id ? " · " + esc(s.source_id) : ""}<br>${esc((s.updated_at || "").slice(0, 10))}</td>
           <td class="nw"><button class="act" data-act="save">Save</button> <button class="act" data-act="del" title="delete">✕</button></td>
         </tr>`).join("")
       + `<tr data-id="">
           <td class="nw"><input data-k="enabled" type="checkbox" checked></td>
+          <td class="nw"><input data-k="locked" type="checkbox"></td>
           <td>${cell("name", "", "150px")}</td>
           <td class="nw">${cell("input_per_1m", "", "70px")}</td>
           <td class="nw">${cell("output_per_1m", "", "70px")}</td>
           <td class="nw">${cell("cached_input_per_1m", "", "70px")}</td>
           <td>${cell("notes", "", "160px")}</td>
+          <td></td>
           <td class="nw"><button class="act" data-act="save">Add</button></td>
         </tr></table>`;
     $("#cost-rates").querySelectorAll("button[data-act]").forEach(btn => {
@@ -1173,6 +1226,7 @@ async function tabCost() {
             input_per_1m: g("input_per_1m").value, output_per_1m: g("output_per_1m").value,
             cached_input_per_1m: g("cached_input_per_1m").value,
             enabled: g("enabled").checked, notes: g("notes").value,
+            locked: g("locked").checked,
           };
           if (!body.name) return toast("Name required");
           try { await api("pricing", { method: "POST", body }); }
@@ -1186,18 +1240,30 @@ async function tabCost() {
 
   const loadCosts = async () => {
     _COST.hours = +$("#cost-win").value; _COST.model = $("#cost-model").value;
+    _COST.backend = $("#cost-backend").value; _COST.run = $("#cost-run").value;
     _COST.watts = +$("#cost-watts").value || 0; _COST.kwh = +$("#cost-kwh").value || 0;
     try { localStorage.setItem("costCtl", JSON.stringify(_COST)); } catch (e) {}
     let d;
-    try { d = await api(`cost-compare?hours=${_COST.hours}&model=${encodeURIComponent(_COST.model)}&watts=${_COST.watts}&kwh=${_COST.kwh}`); }
+    let cq = `cost-compare?hours=${_COST.hours}&model=${encodeURIComponent(_COST.model)}&backend=${encodeURIComponent(_COST.backend || "")}&watts=${_COST.watts}&kwh=${_COST.kwh}`;
+    if (_COST.run && _COST.run !== "__all__") cq += `&run_label=${encodeURIComponent(_COST.run === "__none__" ? "" : _COST.run)}`;
+    try { d = await api(cq); }
     catch (e) { $("#cost-summary").innerHTML = '<div class="card hint">Could not load.</div>'; return; }
     $("#cost-ts").textContent = "· " + new Date().toLocaleTimeString();
     // model filter options (from perf history)
     let hist; try { hist = await api(`perf-history?hours=${_COST.hours}`); } catch (e) { hist = { models: [] }; }
-    const sel = $("#cost-model"), cur = sel.value;
-    sel.innerHTML = '<option value="">all models</option>' +
-      (hist.models || []).map(m => `<option value="${esc(m.model)}">${esc(m.model)} (${m.n})</option>`).join("");
-    sel.value = cur;
+    const fillSel = (id, first, items, cur) => {
+      const el = $(id);
+      el.innerHTML = first + items.join("");
+      if (cur && ![...el.options].some(o => o.value === cur))
+        el.insertAdjacentHTML("beforeend", `<option value="${esc(cur)}">${esc(cur === "__none__" ? "(unlabelled)" : cur)}</option>`);
+      el.value = cur || el.options[0].value;
+    };
+    fillSel("#cost-model", '<option value="">all models</option>',
+      (hist.models || []).map(m => `<option value="${esc(m.model)}">${esc(m.model)} (${m.n})</option>`), _COST.model);
+    fillSel("#cost-backend", '<option value="">all backends</option>',
+      (hist.backends || []).map(b => `<option value="${esc(b.backend)}">${esc(b.backend || "(none)")} (${b.n})</option>`), _COST.backend);
+    fillSel("#cost-run", '<option value="__all__">all runs</option>',
+      (hist.run_labels || []).map(r => `<option value="${esc(r.run_label || "__none__")}">${esc(r.run_label || "(unlabelled)")} (${r.n})</option>`), _COST.run);
     const t = d.tokens, L = d.local;
     $("#cost-count").textContent = `${t.calls} calls · span ${d.span_hours}h`;
     const tile = (label, v, hint) => `<div style="min-width:110px" title="${hint || ""}"><div class="hint" style="margin:0">${label}</div><div style="font-size:18px;font-weight:600">${v}</div></div>`;
@@ -1251,15 +1317,65 @@ async function tabCost() {
           <div style="width:${Math.max(1, i.cost / max * 100).toFixed(1)}%;height:100%;background:${i.me ? cOk : cAcc};border-radius:3px"></div></div>
         <div style="width:90px;flex:none;text-align:right">${_money(i.cost)}</div>
       </div>`).join("");
+    const kindPill = k => ({local: '<span class="pill ok" title="Self-hosted — costs electricity only">local</span>',
+      subscription: '<span class="pill" title="Claude via Meridian — counts against your plan window, not dollars">subscription</span>',
+      metered: '<span class="pill warn" title="Pay-per-token API">metered</span>'}[k] || `<span class="hint">${esc(k)}</span>`);
+    const K2 = n => n >= 1e6 ? (n / 1e6).toFixed(2) + "M" : n >= 1e3 ? (n / 1e3).toFixed(0) + "k" : "" + n;
+    const split = d.by_model || [];
+    $("#cost-split").innerHTML = split.length
+      ? `<table><tr><th>model</th><th>backend</th><th title="local = self-hosted; subscription = Claude plan via Meridian; metered = pay-per-token API">kind</th><th>calls</th><th>input</th><th>output</th><th title="Prompt tokens served from cache">cached</th><th title="Share of all tokens in this window">share</th></tr>`
+        + split.map(r => `<tr><td class="nw" style="max-width:220px;overflow:hidden;text-overflow:ellipsis" title="${esc(r.model)}">${esc(r.model)}</td>
+            <td class="nw">${esc(r.backend || "")}</td><td class="nw">${kindPill(r.kind)}</td><td class="nw">${r.calls}</td>
+            <td class="nw">${K2(r.input)}</td><td class="nw">${K2(r.output)}</td><td class="nw">${K2(r.cached)}</td>
+            <td class="nw"><span class="meter"><span style="width:${Math.min(100, r.share_pct)}%"></span></span> ${r.share_pct}%</td></tr>`).join("") + `</table>`
+      : '<span class="hint">No calls in this window.</span>';
     wrapTables();
   };
 
-  ["cost-win", "cost-model", "cost-watts", "cost-kwh"].forEach(id => {
+  const renderReport = r => {
+    if (!r) return "";
+    if (r.error) return `<p class="hint"><span class="pill bad">failed</span> ${esc(r.error)}</p>`;
+    const money = v => v == null ? "—" : "$" + (+v).toFixed(v < 1 ? 3 : 2);
+    const rows = [...(r.updated || []).map(u => ({...u, st: '<span class="pill ok">updated</span>'})),
+                  ...(r.suspicious || []).map(u => ({...u, st: `<span class="pill warn" title="Not applied — use force from the API if it's genuine">skipped: ${esc(u.why)}</span>`}))];
+    return `<p class="hint" style="margin:8px 0 4px">${r.dry_run ? "<b>Preview</b> — nothing saved. " : ""}${(r.updated || []).length} changed · ${(r.unchanged || []).length} already current · ${(r.locked || []).length} locked · matched by ${esc(r.matcher || "—")}${(r.unmatched || []).length ? ` · <span title="${esc(r.unmatched.join(", "))}">${r.unmatched.length} not found on OpenRouter</span>` : ""}</p>`
+      + (rows.length ? `<table><tr><th>service</th><th>matched</th><th>input</th><th>output</th><th>cached</th><th></th></tr>`
+        + rows.map(u => `<tr><td class="nw">${esc(u.name)}</td><td class="mono nw">${esc(u.id)}</td>
+            <td class="nw">${money(u.old.input_per_1m)} → <b>${money(u.new.input_per_1m)}</b></td>
+            <td class="nw">${money(u.old.output_per_1m)} → <b>${money(u.new.output_per_1m)}</b></td>
+            <td class="nw">${money(u.old.cached_input_per_1m)} → ${money(u.new.cached_input_per_1m)}</td><td>${u.st}</td></tr>`).join("") + `</table>` : "");
+  };
+  const loadPriceSettings = async () => {
+    let st; try { st = await api("pricing/settings"); } catch (e) { return; }
+    $("#pu-auto").checked = !!st.auto; $("#pu-days").value = st.days || 7;
+    const lr = st.last_report;
+    $("#pu-status").innerHTML = st.last_update
+      ? `Last update ${esc(st.last_update.replace("T", " ").slice(0, 16))} UTC${lr ? ` — ${lr.updated} changed, ${lr.unmatched} not found, matched by ${esc(lr.matcher || "")}${lr.error ? ` · <span class="pill bad">${esc(lr.error)}</span>` : ""}` : ""}`
+      : "Prices have never been updated automatically.";
+  };
+  const runUpdate = async dry => {
+    $("#pu-report").innerHTML = '<p class="hint">Fetching current prices from OpenRouter…</p>';
+    try {
+      const r = await api("pricing/update", {method: "POST", body: {dry_run: dry}});
+      $("#pu-report").innerHTML = renderReport(r);
+      if (!dry) { await loadRates(); await loadCosts(); await loadPriceSettings(); }
+      wrapTables();
+    } catch (e) { $("#pu-report").innerHTML = `<p class="hint"><span class="pill bad">error</span> ${esc(e.message)}</p>`; }
+  };
+  $("#pu-save").onclick = async () => {
+    try { await api("pricing/settings", {method: "POST", body: {auto: $("#pu-auto").checked, days: +$("#pu-days").value}});
+          toast("Schedule saved"); await loadPriceSettings(); } catch (e) { toast(e.message, true); }
+  };
+  $("#pu-run").onclick = () => runUpdate(false);
+  $("#pu-preview").onclick = () => runUpdate(true);
+
+  ["cost-win", "cost-model", "cost-backend", "cost-run", "cost-watts", "cost-kwh"].forEach(id => {
     const el = $("#" + id); el.onchange = loadCosts;
   });
   $("#cost-refresh").onclick = loadCosts;
   await loadRates();
   await loadCosts();
+  await loadPriceSettings();
 }
 
 async function tabLive() {
@@ -1341,9 +1457,12 @@ async function tabLive() {
          : '<span class="hint">(load state n/a)</span>');
     const bPresent = bh.model_present === false
       ? ' <span class="pill bad" title="endpoint up but model not pulled">model missing</span>' : "";
+    const bMode = br.active === false
+      ? ` <span class="pill warn" title="Persona requests are served directly by policy (brain skipped)">passthrough · ${esc(br.reason || "")}</span>`
+      : (br.active ? ' <span class="pill ok" title="Persona requests are routed by the brain">routing via brain</span>' : "");
     $("#live-brain").innerHTML =
-      `<code>${esc(br.model || "?")}</code> <span class="hint">(${esc(br.provider || "")})</span> `
-      + bHealth + " " + bLoaded + bPresent;
+      `<code>${esc(br.model || "(not configured)")}</code> <span class="hint">(${esc(br.provider || "")} · mode ${esc(br.routing_mode || "auto")})</span> `
+      + bHealth + " " + bLoaded + bPresent + bMode;
     // loaded in VRAM (per-model size)
     const ld = a.loaded_detail || [];
     const perfCell = (avg, last, unit, est) => {
@@ -1467,6 +1586,7 @@ async function tabBackends() {
   $("#hdr-info").innerHTML =
     `v${esc(st.version)} · pool: ${esc(st.pool_mode)} · brain: ${esc(st.brain.model)} `
     + `(${esc(st.brain.provider)}) <span class="pill ${bhCls}" title="${esc(bh.error || "")}">brain: ${bhTxt}</span>`
+    + ` <span class="pill ${st.brain.active ? "" : "warn"}" title="${esc(st.brain.active ? "Persona requests are routed by the brain" : "Brain skipped: " + (st.brain.reason || ""))}">routing: ${st.brain.active ? "brain" : "passthrough"}${st.brain.routing_mode && st.brain.routing_mode !== "auto" ? "" : " (auto)"}</span>`
     + ` · ${st.tool_count} tools`;
   const rows = st.backends.map(b => `<tr>
       <td class="nw">${esc(b.name)}</td><td class="mono nw">${esc(b.type)}</td>
@@ -1570,6 +1690,23 @@ async function tabBackends() {
           `<option ${m === st.pool_mode ? "selected" : ""}>${m}</option>`).join("")}
       </select>
       <button class="act" id="save-mode">Switch pool mode</button></div>
+    </div>
+    <div class="card">
+      <h2 style="margin-top:0;display:flex;align-items:center">Routing mode ${help("routing")}
+        <span style="margin-left:10px">${st.brain.active
+          ? '<span class="pill ok" title="Persona requests are routed by the brain">brain routing active</span>'
+          : `<span class="pill warn" title="${esc(st.brain.reason || "")}">passthrough — ${esc(st.brain.reason || "")}</span>`}</span></h2>
+      <p class="hint">How persona requests are served. <b>Auto</b> uses the brain while it's configured and
+        healthy and switches to passthrough the moment it isn't — no waiting on timeouts. <b>Passthrough</b>
+        never calls the brain: Foundry becomes a smart proxy that picks a model per persona policy, forwards the
+        request as-is, fails over between backends and still manages MCP servers. <b>Brain</b> always routes
+        through the brain (per-request fallback if it fails).</p>
+      <div class="row"><label>routing mode</label>
+        <select id="brain-routing">${[["auto", "auto — brain when available, else passthrough"],
+            ["brain", "brain — always route through the brain"],
+            ["passthrough", "passthrough — no brain, direct routing"]].map(([v, l]) =>
+          `<option value="${v}" ${v === (st.brain.routing_mode || "auto") ? "selected" : ""}>${l}</option>`).join("")}</select>
+        <button class="act primary" id="save-routing">Save routing mode</button></div>
     </div>
     <div class="card">
       <h2 style="margin-top:0">Agent Brain — routing model</h2>
@@ -1892,6 +2029,8 @@ async function tabBackends() {
     run(api("config/backends", {method: "POST", body: JSON.parse($("#backends-json").value)}));
   $("#save-mode").onclick = () =>
     run(api("config/pool_mode", {method: "POST", body: {mode: $("#pool-mode").value}}));
+  $("#save-routing").onclick = () =>
+    run(api("config/brain", {method: "POST", body: {routing_mode: $("#brain-routing").value}}));
   $("#save-brain-model").onclick = () =>
     run(api("config/brain", {method: "POST", body: {
       provider: $("#brain-provider").value, endpoint: $("#brain-endpoint").value,

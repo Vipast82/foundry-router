@@ -147,7 +147,7 @@ class Services:
                 self.db.log_event("warning", "research",
                                   f"dedicated research model {research_model} failed, "
                                   f"falling back to brain", str(e))
-        return await self.brain.complete(prompt)
+        return await self.brain.complete(prompt, aux=True)   # background job
 
     # -- discovery -> registry bridge ------------------------------------------
 
@@ -325,6 +325,7 @@ class Services:
             asyncio.create_task(self._tool_sync_loop()),
             asyncio.create_task(self._quota_poll_loop()),
             asyncio.create_task(self._brain_health_loop()),
+            asyncio.create_task(self._pricing_loop()),
         ]
 
     async def refresh_brain_health(self) -> dict:
@@ -334,6 +335,15 @@ class Services:
         health = await self.brain.health()
         prev = self._brain_health.get("healthy")
         self._brain_health = {**health, "checked_at": utcnow()}
+        # Feed the routing-mode gate: in auto mode an unreachable brain (or one
+        # whose model isn't on its endpoint) is skipped instantly per request.
+        if health.get("healthy") is False:
+            self.brain.health_down = health.get("error") or "unreachable"
+        elif health.get("model_present") is False:
+            self.brain.health_down = f"model {health.get('model')} not on endpoint"
+        else:
+            self.brain.health_down = None
+            self.brain._failed_at = 0.0
         # Edge-triggered Events entry so an outage is logged the moment it's
         # seen, not only when a request happens to hit the fallback path.
         if prev is not False and health.get("healthy") is False:
@@ -343,6 +353,18 @@ class Services:
         elif prev is False and health.get("healthy") is True:
             self.db.log_event("info", "brain", "brain recovered — health check OK")
         return self._brain_health
+
+    async def _pricing_loop(self) -> None:
+        """Scheduled automatic price refresh for the cost calculator (opt-in,
+        interval set in the Cost tab). Checked hourly; runs when due."""
+        from . import pricing_update
+        while True:
+            await asyncio.sleep(3600)
+            try:
+                if pricing_update.due(self.db):
+                    await pricing_update.update_prices(self.db, self.http, brain=self.brain)
+            except Exception:
+                log.exception("pricing update loop error")
 
     async def _brain_health_loop(self) -> None:
         """Periodic brain reachability check — the brain has no pool-style health

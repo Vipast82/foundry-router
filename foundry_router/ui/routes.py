@@ -66,7 +66,8 @@ async def status(request: Request):
         "guardrail_authority": cfg.guardrails.authority,
         "brain": {"provider": cfg.agent_brain.provider, "model": cfg.agent_brain.model,
                   "endpoint": cfg.agent_brain.endpoint,
-                  "health": getattr(svc, "_brain_health", None)},
+                  "health": getattr(svc, "_brain_health", None),
+                  **svc.brain.mode_status()},
         "backends": svc.pool.backend_status(),
         "tool_count": len(svc.tool_registry.enabled()),
         "last_tool_sync": svc.tool_registry.last_sync,
@@ -137,13 +138,19 @@ async def set_brain(request: Request):
                "tool_result_limit_chars", "mcp_result_limit_chars", "worker_max_tokens",
                "user_input_preview_chars", "heartbeat_seconds", "worker_keep_alive",
                "direct_stream", "direct_stream_heartbeat_seconds",
-               "stream_worker_reasoning", "reasoning_effort", "sampling_defaults"}
+               "stream_worker_reasoning", "reasoning_effort", "sampling_defaults",
+               "routing_mode"}
     updates = {k: v for k, v in body.items() if k in allowed}
+    if updates.get("routing_mode") not in (None, "auto", "brain", "passthrough"):
+        return JSONResponse({"error": "routing_mode must be auto, brain or passthrough"},
+                            status_code=400)
 
     def mutate(raw):
         raw.setdefault("agent_brain", {}).update(updates)
     svc.config_store.save(mutate)
     svc.rebuild_brain()
+    if "routing_mode" in updates:
+        svc.db.log_event("info", "admin", f"routing mode set to {updates['routing_mode']}")
     return {"ok": True}
 
 
@@ -195,6 +202,7 @@ async def activity(request: Request):
     bcfg = svc.config_store.config.agent_brain
     brain = {"model": bcfg.model, "provider": bcfg.provider,
              "health": getattr(svc, "_brain_health", None),
+             **svc.brain.mode_status(),
              **(await svc.brain.loaded_detail())}
     backends = [{"name": b["name"], "type": b["type"], "flavor": b.get("flavor") or "",
                  "healthy": b["healthy"],
@@ -512,10 +520,41 @@ async def pricing_upsert(request: Request):
             output_per_1m=float(b.get("output_per_1m") or 0),
             cached_input_per_1m=(None if b.get("cached_input_per_1m") in (None, "")
                                  else float(b["cached_input_per_1m"])),
-            enabled=bool(b.get("enabled", True)), notes=b.get("notes") or "")
+            enabled=bool(b.get("enabled", True)), notes=b.get("notes") or "",
+            locked=(None if b.get("locked") is None else bool(b.get("locked"))))
     except (TypeError, ValueError):
         return JSONResponse({"error": "rates must be numbers"}, status_code=400)
     return {"ok": True}
+
+
+@router.post("/admin/api/pricing/update")
+async def pricing_update(request: Request):
+    """Refresh unlocked service prices from OpenRouter now (brain-matched, with
+    a heuristic fallback). Body: {dry_run?: bool, force?: bool}."""
+    svc = _svc(request)
+    from .. import pricing_update
+    b = await request.json() if (await request.body()) else {}
+    return await pricing_update.update_prices(
+        svc.db, svc.http, brain=svc.brain, force=bool(b.get("force")),
+        dry_run=bool(b.get("dry_run")))
+
+
+@router.get("/admin/api/pricing/settings")
+async def pricing_settings(request: Request):
+    from .. import pricing_update
+    return pricing_update.settings(_svc(request).db)
+
+
+@router.post("/admin/api/pricing/settings")
+async def pricing_settings_set(request: Request):
+    from .. import pricing_update
+    b = await request.json()
+    try:
+        return pricing_update.save_settings(
+            _svc(request).db, auto=b.get("auto"),
+            days=(int(b["days"]) if b.get("days") not in (None, "") else None))
+    except (TypeError, ValueError):
+        return JSONResponse({"error": "days must be a number"}, status_code=400)
 
 
 @router.post("/admin/api/pricing/delete")
@@ -542,10 +581,20 @@ async def cost_compare(request: Request):
         except (TypeError, ValueError):
             return default
     hours = max(0.5, min(_f("hours", 72), 24 * 30))
+
+    def _kind(model_id):
+        info = svc.pool.backend_info(model_id) or {}
+        t = info.get("type") or ""
+        if t == "openai-compatible" and info.get("flavor") in ("llamacpp", "vllm", "unsloth"):
+            return "openai-compatible-local"
+        return t
     return pricing.compute_costs(
         svc.db, hours=hours, model=(q.get("model") or None),
         watts=max(0.0, _f("watts", pricing.DEFAULT_WATTS)),
-        kwh_rate=max(0.0, _f("kwh", pricing.DEFAULT_KWH_RATE)))
+        kwh_rate=max(0.0, _f("kwh", pricing.DEFAULT_KWH_RATE)),
+        backend=(q.get("backend") or None),
+        run_label=(q.get("run_label") if "run_label" in q else None),
+        backend_type=_kind)
 
 
 @router.post("/admin/api/mcp-aggregator")
