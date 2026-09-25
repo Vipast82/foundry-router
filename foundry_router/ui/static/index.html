@@ -4096,7 +4096,8 @@ function quotaCard(q) {
     const out = (b.buckets || []).filter(k => k.used !== null && k.used !== undefined).map(k =>
       `<div class="row"><label>${esc(b.backend)} · ${esc(k.label)} window</label>
        <b>${Math.round(k.used * 100)}% used</b>
-       ${k.resets_hhmm ? `<span class="hint">resets ${esc(k.resets_hhmm)}</span>` : ""}
+       ${k.rolled_over ? `<span class="hint" title="The last usage report is from before this window reset; it refreshes on the next Claude call.">reset at ${esc(k.resets_hhmm)} — fresh window</span>`
+         : k.resets_hhmm ? `<span class="hint">resets ${esc(k.resets_hhmm)}</span>` : ""}
        ${pill(k)}
       </div>`);
     // Observed-exhaustion / hard-unavailable state must be visible even when

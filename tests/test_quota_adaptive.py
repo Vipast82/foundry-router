@@ -3,6 +3,8 @@ quota parsing (nullable utilization, sec-vs-ms resetsAt), authenticated
 fetch, usage-aware guardrail conservation, subscription token logging, and
 persona model pinning."""
 
+from datetime import datetime, timezone
+
 import json
 
 from foundry_router.brain.agent import _apply_pins
@@ -17,12 +19,31 @@ from foundry_router.usage import (MeridianUsage, claude_premium_level,
 
 # -- parsing --------------------------------------------------------------------
 
+def test_rolled_over_window_reads_fresh_not_stale():
+    # Weekly reset at 15:59 UTC; Meridian still reports the pre-reset 100%.
+    now = datetime(2026, 9, 25, 20, 30, tzinfo=timezone.utc)
+    b = {x["type"]: x for x in parse_quota({"buckets": [
+        {"type": "seven_day", "utilization": 1.0, "resetsAt": "2026-09-25T15:59:00Z"},
+        {"type": "five_hour", "utilization": 0.07, "resetsAt": "2026-09-26T01:09:00Z"},
+    ]}, now=now)}
+    assert b["seven_day"]["used"] == 0.0 and b["seven_day"]["rolled_over"] is True
+    assert b["five_hour"]["used"] == 0.07 and b["five_hour"]["rolled_over"] is False
+
+
+async def test_rolled_over_window_does_not_block_claude(tmp_path):
+    http = FakeHTTP({"buckets": [{"type": "seven_day", "utilization": 1.0,
+                                  "resetsAt": 1700000000}]})       # 2023: long past
+    usage = MeridianUsage(MeridianConfig(), http, Database(tmp_path / "r.sqlite"))
+    snap = await usage.snapshot("http://m")
+    assert snap["available"] is True and snap["worst_used"] == 0.0
+    assert "fresh" in snap["note"] and "100%" not in snap["note"]
+
 def test_parse_quota_real_shape():
     buckets = parse_quota({"buckets": [
         {"type": "five_hour", "utilization": 0.42, "resetsAt": 1780000000},      # seconds
         {"type": "seven_day", "utilization": 65, "resetsAt": 1780000000000},     # ms, percent
         {"type": "five_hour", "utilization": None, "resetsAt": None},            # no signal yet
-    ]})
+    ]}, now=datetime(2026, 1, 1, tzinfo=timezone.utc))
     assert buckets[0]["used"] == 0.42
     assert buckets[0]["label"] == "5-hour"
     assert buckets[1]["used"] == 0.65                     # percent normalized
@@ -80,7 +101,7 @@ class FakeHTTP:
 
 async def test_snapshot_hits_quota_endpoint_with_auth(tmp_path):
     http = FakeHTTP({"buckets": [{"type": "five_hour", "utilization": 0.3,
-                                  "resetsAt": 1780000000}]})
+                                  "resetsAt": 4102444800}]})      # 2100: still ahead
     usage = MeridianUsage(MeridianConfig(), http, Database(tmp_path / "q.sqlite"))
     snap = await usage.snapshot("http://meridian:3456", api_key="sekret")
     call = http.calls[0]

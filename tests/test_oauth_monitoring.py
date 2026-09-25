@@ -9,6 +9,8 @@ auth validity now comes from `/health.loggedIn`, and re-auth is NOT the fix
 (re-login doesn't repopulate it). The quota parser still handles the shape (null
 utilization => no signal => window assumed available)."""
 
+from datetime import datetime, timezone
+
 import pytest
 
 from foundry_router.config import MeridianConfig
@@ -203,7 +205,8 @@ REAL_OAUTH_USAGE = {
 def test_oauth_usage_to_quota_transform():
     q = oauth_usage_to_quota(REAL_OAUTH_USAGE)
     assert parse_sources(q) is True                    # oauth now present
-    used = {b["type"]: b["used"] for b in parse_quota(q)}
+    used = {b["type"]: b["used"] for b in parse_quota(
+        q, now=datetime(2026, 8, 17, tzinfo=timezone.utc))}
     assert used["five_hour"] == pytest.approx(0.18)    # 18.0 -> 0.18
     assert used["seven_day"] == pytest.approx(0.68)
     assert parse_extra_usage(q) == pytest.approx(17.45)  # 1745 cents -> $17.45
@@ -227,7 +230,10 @@ class CompanionHTTP:
 async def test_usage_via_companion_drives_real_window(tmp_path):
     db = Database(tmp_path / "u.sqlite")
     set_auth_settings(db, "http://companion:8898", token="k")
-    http = CompanionHTTP(REAL_OAUTH_USAGE)
+    live = {**REAL_OAUTH_USAGE,       # windows still open (resets in the future)
+            "five_hour": {**REAL_OAUTH_USAGE["five_hour"], "resets_at": "2100-01-01T01:00:00+00:00"},
+            "seven_day": {**REAL_OAUTH_USAGE["seven_day"], "resets_at": "2100-01-04T16:00:00+00:00"}}
+    http = CompanionHTTP(live)
     usage = MeridianUsage(MeridianConfig(usage_profile="victor"), http, db)
     snap = await usage.snapshot("http://m")
     assert snap["oauth_ok"] is True

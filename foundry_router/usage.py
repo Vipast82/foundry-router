@@ -150,24 +150,37 @@ def _normalize_utilization(value: Any) -> Optional[float]:
     return max(0.0, min(1.0, f))
 
 
-def parse_quota(data: Any) -> Optional[list[dict]]:
+def parse_quota(data: Any, now: Optional[datetime] = None) -> Optional[list[dict]]:
     """[{type, label, used (0-1 or None), resets_at (iso or None),
-    resets_hhmm}] — or None if the payload has no recognizable buckets."""
+    resets_hhmm, rolled_over}] — or None if the payload has no recognizable
+    buckets.
+
+    A bucket whose reset time is already in the PAST has rolled over: the
+    figure is from the previous window (Meridian reports the last utilization
+    it saw, which stays stale until the next Claude call refreshes it). Such a
+    bucket reads as a fresh window — used 0 — with rolled_over=True, instead of
+    e.g. "weekly 100% used" right after the weekly reset."""
     if not isinstance(data, dict) or not isinstance(data.get("buckets"), list):
         return None
+    now = now or datetime.now(timezone.utc)
     out = []
     for b in data["buckets"]:
         if not isinstance(b, dict):
             continue
         btype = str(b.get("type") or "window")
         reset_dt = _normalize_reset(b.get("resetsAt") or b.get("resets_at"))
+        used = _normalize_utilization(b.get("utilization"))
+        rolled = bool(reset_dt is not None and reset_dt <= now)
+        if rolled and used is not None:
+            used = 0.0
         out.append({
             "type": btype,
             "label": _bucket_label(btype),
             "fable_scoped": _is_fable_bucket(btype),
-            "used": _normalize_utilization(b.get("utilization")),
+            "used": used,
             "resets_at": reset_dt.isoformat() if reset_dt else None,
             "resets_hhmm": reset_dt.strftime("%H:%M UTC") if reset_dt else None,
+            "rolled_over": rolled,
         })
     return out
 
@@ -466,8 +479,10 @@ class MeridianUsage:
         available = worst_used is None or (1.0 - worst_used) >= self.cfg.min_window_fraction
         if signaled:
             note = "; ".join(
-                f"{b['label']} window {b['used']:.0%} used"
-                + (f", resets {b['resets_hhmm']}" if b["resets_hhmm"] else "")
+                (f"{b['label']} window reset at {b['resets_hhmm']} (fresh — last "
+                 f"report predates the reset)") if b.get("rolled_over") else
+                (f"{b['label']} window {b['used']:.0%} used"
+                 + (f", resets {b['resets_hhmm']}" if b["resets_hhmm"] else ""))
                 for b in signaled)
         else:
             note = "no usage signal yet (fresh window)"
