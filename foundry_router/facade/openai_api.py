@@ -201,7 +201,13 @@ def _to_ollama_body(body: dict) -> dict:
     tools = body.get("tools") or None
     if tools and body.get("tool_choice") != "none":
         ob["tools"] = tools
-    opts = _options(body)
+    opts = _options(body) or {}
+    # Tool-use controls ride in options (the one channel every dispatch path
+    # forwards); each backend protocol translates or drops them.
+    if tools and body.get("tool_choice") not in (None, "none"):
+        opts["tool_choice"] = body["tool_choice"]
+    if tools and body.get("parallel_tool_calls") is not None:
+        opts["parallel_tool_calls"] = bool(body["parallel_tool_calls"])
     if opts:
         ob["options"] = opts
     rf = body.get("response_format")

@@ -46,3 +46,36 @@ def client_headers() -> dict:
 
 def request_id() -> Optional[str]:
     return _request_id.get() or None
+
+
+# -- MCP call attribution --------------------------------------------------------
+# Who is making an MCP tool call right now — set by each caller (brain, worker
+# loop, direct mode, aggregator, research, gateway) so the single MCP funnel
+# (MCPManager.call_tool) can log source / caller / client per call.
+_mcp_attr: contextvars.ContextVar[dict] = contextvars.ContextVar(
+    "foundry_mcp_attr", default={})
+
+
+def set_mcp_attribution(source: str, caller: str = "", client: str = "") -> contextvars.Token:
+    return _mcp_attr.set({"source": source, "caller": caller, "client": client})
+
+
+def reset_mcp_attribution(token) -> None:
+    try:
+        _mcp_attr.reset(token)
+    except Exception:
+        pass
+
+
+def mcp_attribution() -> dict:
+    return dict(_mcp_attr.get())
+
+
+async def mcp_attributed(coro, source: str, caller: str = "", client: str = ""):
+    """Await an MCP call with its attribution set (works whether the caller
+    awaits it directly or wraps it in a task)."""
+    tok = set_mcp_attribution(source, caller, client)
+    try:
+        return await coro
+    finally:
+        reset_mcp_attribution(tok)

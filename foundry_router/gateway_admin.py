@@ -405,14 +405,18 @@ def _arg_name(tooldef, prefer: list[str]) -> str:
 async def find_servers(svc, gateway: str, query: str) -> dict:
     tool = svc.tool_registry.mcp_tool_def(gateway, MCP_FIND)
     qp = _arg_name(tool, ["query", "q", "search", "keyword", "name", "term"])
-    raw = await svc.mcp.call_tool(gateway, MCP_FIND, {qp: query})
+    from . import request_context
+    raw = await request_context.mcp_attributed(
+        svc.mcp.call_tool(gateway, MCP_FIND, {qp: query}), "gateway", "admin")
     return {"raw": raw, "results": parse_catalog(raw)}
 
 
 async def _ref_call(svc, gateway: str, tool_name: str, ref: str) -> str:
     tool = svc.tool_registry.mcp_tool_def(gateway, tool_name)
     rp = _arg_name(tool, ["ref", "server", "serverName", "name", "id", "fullName"])
-    return await svc.mcp.call_tool(gateway, tool_name, {rp: ref})
+    from . import request_context
+    return await request_context.mcp_attributed(
+        svc.mcp.call_tool(gateway, tool_name, {rp: ref}), "gateway", "admin")
 
 
 async def add_server(svc, gateway: str, ref: str) -> dict:
@@ -458,7 +462,9 @@ async def config_set(svc, gateway: str, server: str, values: dict) -> dict:
                 break
     args = ({server_arg: server, obj_arg: values} if obj_arg
             else {server_arg: server, **values})
-    raw = await svc.mcp.call_tool(gateway, MCP_CONFIG_SET, args)
+    from . import request_context
+    raw = await request_context.mcp_attributed(
+        svc.mcp.call_tool(gateway, MCP_CONFIG_SET, args), "gateway", "admin")
     svc.db.log_event("info", "gateway",
                      f"operator set config for gateway server {server!r}",
                      json.dumps({"args": sorted(args)})[:500])

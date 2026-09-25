@@ -437,6 +437,10 @@ class Services:
         for t in self._bg_tasks:
             t.cancel()
         await self.research.stop()
+        try:
+            await self.mcp.close_sessions()
+        except Exception:
+            pass
         await self.pool.stop()
         await self.http.aclose()
         self.db.close()

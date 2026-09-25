@@ -139,7 +139,7 @@ async def set_brain(request: Request):
                "user_input_preview_chars", "heartbeat_seconds", "worker_keep_alive",
                "direct_stream", "direct_stream_heartbeat_seconds",
                "stream_worker_reasoning", "reasoning_effort", "sampling_defaults",
-               "routing_mode"}
+               "routing_mode", "worker_tool_result_chars"}
     updates = {k: v for k, v in body.items() if k in allowed}
     if updates.get("routing_mode") not in (None, "auto", "brain", "passthrough"):
         return JSONResponse({"error": "routing_mode must be auto, brain or passthrough"},
@@ -496,6 +496,65 @@ async def perf_clear(request: Request):
     return out
 
 
+@router.get("/admin/api/mcp-metrics")
+async def mcp_metrics_api(request: Request):
+    """Aggregated MCP tool usage (every call through Foundry, any caller):
+    totals, per tool / server / source, hourly series. Filters: hours, source,
+    server."""
+    svc = _svc(request)
+    from .. import mcp_metrics
+    q = request.query_params
+    try:
+        hours = max(0.5, min(float(q.get("hours") or 24), 24 * 30))
+    except (TypeError, ValueError):
+        hours = 24
+    out = mcp_metrics.summary(svc.db, hours=hours, source=q.get("source") or None,
+                              server=q.get("server") or None)
+    out["live"] = {"in_flight": svc.mcp.active_calls(),
+                   "sessions": svc.mcp.session_status() if hasattr(svc.mcp, "session_status") else {}}
+    return out
+
+
+@router.get("/admin/api/mcp-metrics/recent")
+async def mcp_metrics_recent(request: Request):
+    svc = _svc(request)
+    from .. import mcp_metrics
+    q = request.query_params
+    try:
+        hours = float(q.get("hours")) if q.get("hours") else None
+        limit = int(q.get("limit") or 100)
+    except (TypeError, ValueError):
+        hours, limit = None, 100
+    return {"calls": mcp_metrics.recent(
+        svc.db, limit=limit, hours=hours, source=q.get("source") or None,
+        server=q.get("server") or None, tool=q.get("tool") or None,
+        errors_only=q.get("errors") in ("1", "true"))}
+
+
+@router.post("/admin/api/mcp-metrics/clear")
+async def mcp_metrics_clear(request: Request):
+    svc = _svc(request)
+    from .. import mcp_metrics
+    b = await request.json() if (await request.body()) else {}
+    n = mcp_metrics.clear(svc.db, server=(b.get("server") or None))
+    svc.db.log_event("info", "admin", f"MCP metrics cleared ({n} call(s)"
+                     + (f", server {b['server']}" if b.get("server") else "") + ")")
+    return {"ok": True, "removed": n}
+
+
+@router.get("/admin/api/mcp-context")
+async def mcp_context_api(request: Request):
+    """Context cost of MCP tool definitions per persona / aggregator endpoint.
+    `ctx` = the backend context window (tokens) to express costs as a %."""
+    svc = _svc(request)
+    from .. import mcp_metrics
+    try:
+        ctx = int(request.query_params.get("ctx") or 0) or None
+    except (TypeError, ValueError):
+        ctx = None
+    return mcp_metrics.context_budget(svc, ctx)
+
+
 @router.get("/admin/api/pricing")
 async def pricing_list(request: Request):
     """Editable paid-service token rates for the cost calculator."""
@@ -602,7 +661,8 @@ async def set_mcp_aggregator(request: Request):
     svc = _svc(request)
     body = await request.json()
     allowed = {"enabled", "token", "token_header", "base_path", "advertise_url",
-               "profiles", "progress_heartbeat_seconds", "poll_guard_threshold"}
+               "profiles", "progress_heartbeat_seconds", "poll_guard_threshold",
+               "persona_endpoints"}
     updates = {k: v for k, v in body.items() if k in allowed}
 
     def mutate(raw):

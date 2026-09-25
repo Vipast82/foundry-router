@@ -362,3 +362,33 @@ CREATE TABLE IF NOT EXISTS kv (
   key TEXT PRIMARY KEY,
   value TEXT
 );
+
+-- Every MCP tool call that passes through Foundry, whoever made it: the brain,
+-- a worker's tool loop, direct-mode (client + persona tools), the Foundry-MCP
+-- aggregator (external clients like AnythingLLM), the research agent, the
+-- gateway admin. One row per call — the data behind the MCP Metrics tab.
+CREATE TABLE IF NOT EXISTS mcp_call_log (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  ts TEXT,
+  source TEXT,              -- brain | worker | direct | aggregator | research | gateway | other
+  caller TEXT,              -- persona / aggregator scope / model that owned the loop
+  client TEXT,              -- external client (User-Agent) when known
+  server TEXT,
+  tool TEXT,
+  ok INTEGER,
+  duration_ms INTEGER,      -- total, incl. pacing + retries
+  connect_ms INTEGER,       -- session setup (0 when a pooled session was reused)
+  pace_ms INTEGER,          -- time spent waiting on the server's pace_seconds
+  attempts INTEGER,         -- 1 + 429 retries
+  rate_limited INTEGER,
+  timed_out INTEGER,
+  session TEXT,             -- "reused" | "new" | "per-call"
+  error TEXT,
+  args_chars INTEGER,
+  result_chars INTEGER,
+  result_tokens INTEGER,    -- ~chars/4: what the result costs in model context
+  content_types TEXT,       -- e.g. "text,image"
+  request_id TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_mcp_call_log_ts ON mcp_call_log(ts);
+CREATE INDEX IF NOT EXISTS idx_mcp_call_log_tool ON mcp_call_log(server, tool, ts);

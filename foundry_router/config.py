@@ -90,6 +90,11 @@ class AgentBrainConfig(BaseModel):
     tool_result_limit_chars: int = 2000   # per tool result fed back to the brain
     mcp_result_limit_chars: int = 2000    # same, for MCP tool results
     worker_max_tokens: int = 8192         # output budget for worker-model calls
+    # How much of an MCP tool result a WORKER model sees (its own tool loop and
+    # direct-mode persona tools). Separate from mcp_result_limit_chars, which
+    # protects the small brain's context: a worker with a large context should
+    # get the whole page / search result, not a 2k-char preview.
+    worker_tool_result_chars: int = 24000
     # keep_alive passed to Ollama workers so a heavy model (e.g. a 27B at 131K
     # context ≈ 22GB) stays RESIDENT between requests instead of cold-loading
     # ~22GB every call — the main cause of multi-minute first-token latency (and
@@ -378,6 +383,10 @@ class MCPServerConfig(BaseModel):
     # here. The GUI's CPU/memory/network steppers are a convenience editor over
     # these keys; anything else can be set as raw JSON.
     call_defaults: dict[str, Any] = Field(default_factory=dict)
+    # Keep one MCP session open per server and reuse it (no connect +
+    # initialize handshake per tool call). A broken session is reopened
+    # automatically; turn off for a server that misbehaves with long sessions.
+    persistent_session: bool = True
 
 
 class ToolSyncConfig(BaseModel):
@@ -439,6 +448,11 @@ class MCPAggregatorConfig(BaseModel):
     # Named tool subsets ("MCP personas"): profile name -> list of MCP server
     # names to expose on that endpoint. The base path always exposes them all.
     profiles: dict[str, list[str]] = Field(default_factory=dict)
+    # Serve {base}/persona/<persona-name>: exactly the MCP tools attached to
+    # that persona (whole servers or scoped per-tool grants), resolved live on
+    # every call. Lets an external client (AnythingLLM) load a persona's small
+    # tool set instead of every tool Foundry knows — context stays low.
+    persona_endpoints: bool = True
     # Keep-alive for long tool calls (media generation). 0 = off: single JSON
     # reply (default). >0 = the endpoints run in SSE-streaming mode and emit an
     # MCP progress notification every N seconds while a tool runs, so the client

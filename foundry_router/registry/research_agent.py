@@ -489,13 +489,17 @@ class ResearchAgent:
         # SearXNG pacing + 429-backoff now live in MCPManager, so they cover
         # this sweep AND the worker/brain tool paths uniformly (set them on the
         # search server's MCP config: pace_seconds / rate_limit_*).
-        return await self.mcp.call_tool(ref.server, ref.tool, {ref.query_param: query})
+        from .. import request_context
+        return await request_context.mcp_attributed(
+            self.mcp.call_tool(ref.server, ref.tool, {ref.query_param: query}), "research")
 
     async def _fetch(self, url: str) -> str:
         ref = self.cfg.fetch
         if not ref.server or not ref.tool:
             raise RuntimeError("no fetch MCP tool configured")
-        return await self.mcp.call_tool(ref.server, ref.tool, {ref.url_param: url})
+        from .. import request_context
+        return await request_context.mcp_attributed(
+            self.mcp.call_tool(ref.server, ref.tool, {ref.url_param: url}), "research")
 
     async def test_pipeline(self) -> dict:
         """One real search + one real fetch through the configured tools, for the

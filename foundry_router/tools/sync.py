@@ -45,6 +45,10 @@ class ToolDef:
     # UI falls back to the name heuristic (marked as a guess).
     read_only: Optional[bool] = None
     destructive: Optional[bool] = None
+    # Full MCP annotations as the server declared them (title, readOnlyHint,
+    # destructiveHint, idempotentHint, openWorldHint) — relayed verbatim by the
+    # Foundry-MCP aggregator so clients can decide when to ask for approval.
+    annotations: Optional[dict] = None
 
     def spec(self) -> dict:
         return {"type": "function",
@@ -425,7 +429,8 @@ class ToolRegistry:
                         server=server, mcp_tool=t["name"],
                         disabled=name in disabled,
                         read_only=t.get("read_only"),
-                        destructive=t.get("destructive"))
+                        destructive=t.get("destructive"),
+                        annotations=t.get("annotations"))
 
             # 4: diff for the log, then swap atomically
             added = sorted(set(new_tools) - set(self.tools))

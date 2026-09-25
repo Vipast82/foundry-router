@@ -65,3 +65,41 @@ Settings that live on the Meridian side (its Settings page, per adapter):
 * Meridian's tool mode should be passthrough (the default for these adapters):
   tool calls come back to Foundry / your client instead of running inside
   Meridian.
+
+## MCP tools
+
+Every MCP tool call goes through one place in Foundry, whatever triggered it,
+so behaviour and metrics are identical on every route:
+
+| Route | Who owns the loop | What the model sees |
+|---|---|---|
+| Agent mode, persona with MCP tools | the worker model (or the brain) | the persona's tools |
+| **Direct mode** (Cline / OpenCode send their own tools) | the client, plus Foundry for persona tools | client tools **+** the persona's attached MCP tools (if `persona tools in direct mode` is on). Foundry runs its own tool calls and continues; client tool calls go back to the client. A persona with no tools attached is unchanged. |
+| Foundry-MCP aggregator (`/mcp/`, `/mcp/p/<profile>/`, `/mcp/persona/<Persona>/`) | the external client (AnythingLLM, Cline, …) | exactly that endpoint's tools |
+
+* **Results keep every content type** — text, images, audio, embedded
+  resources; structured results are rendered as JSON. The aggregator returns
+  them natively; worker / direct loops pass images to vision-capable models.
+* **Tool annotations** (title, readOnly, destructive, idempotent, openWorld)
+  are relayed to aggregator clients, so they can ask before a destructive call.
+* **Progress** reported by a downstream server (e.g. "step 12/30") is relayed
+  to aggregator clients; `progress_heartbeat_seconds` adds "still working…".
+* **Persona endpoints** `/mcp/persona/<Persona>/` serve only that persona's
+  tools (live — no restart when grants change): point AnythingLLM there to
+  load 3 tools instead of 57.
+* **Pooled sessions**: one MCP session per server is kept open and reused
+  (auto-reconnect; `persistent_session: false` per server to disable).
+* **Result size**: workers get `worker_tool_result_chars` (default 24000) of a
+  tool result; `mcp_result_limit_chars` only limits what the small brain sees.
+* **tool_choice / parallel_tool_calls** from OpenAI clients reach llama.cpp,
+  vLLM and Claude (translated to Claude's form; a forced choice is relaxed to
+  auto while extended thinking is on). Ollama has no equivalent.
+* **Malformed tool arguments**: in Foundry-run loops the model gets an error
+  asking it to resend valid JSON, instead of the tool running with `{}`.
+
+**MCP Metrics tab** (Tools & MCP): calls, failure / timeout / 429 rates, p50 /
+p95 / max latency, session-reuse rate and connect time, result size in tokens,
+content types — per tool, per server, and per source (brain / worker / direct /
+aggregator / research / gateway, with persona or endpoint and the external
+client's User-Agent). The **context budget** shows how many tokens each tool
+set's definitions add to every request, as a % of your context window.

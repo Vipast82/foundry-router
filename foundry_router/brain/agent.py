@@ -29,7 +29,7 @@ from typing import Any, AsyncIterator, Optional, TypedDict
 
 from langgraph.graph import END, START, StateGraph
 
-from .. import telemetry
+from .. import request_context, telemetry
 from ..errors import describe_exception
 from ..guardrails import GuardrailEngine, RequestGuardState
 from ..pool.base import AllBackendsFailed, ContextTooLarge
@@ -74,6 +74,20 @@ class RequestContext:
 class AgentState(TypedDict, total=False):
     messages: list
     done: bool
+
+
+async def call_tool_rich(mcp, server: str, tool: str, args: dict, **kw):
+    """ToolResult from any MCP manager (falls back to the text-only call)."""
+    fn = getattr(mcp, "call_tool_rich", None)
+    if fn is not None:
+        return await fn(server, tool, args, **kw)
+    from ..tools.mcp_client import ToolResult
+    return ToolResult([{"type": "text", "text": await mcp.call_tool(server, tool, args)}])
+
+
+def _model_has_vision(registry, model_id: str) -> bool:
+    meta = registry.get(model_id) or {}
+    return "vision" in _json_list(meta.get("capabilities")) or "vision" in _json_list(meta.get("tags"))
 
 
 def _json_list(value) -> list:
@@ -1011,7 +1025,9 @@ class AgentRunner:
         t0 = time.monotonic()
         try:
             out = await self._with_heartbeat(
-                self.tool_registry.mcp.call_tool(tool.server, tool.mcp_tool, args),
+                request_context.mcp_attributed(
+                    self.tool_registry.mcp.call_tool(tool.server, tool.mcp_tool, args),
+                    "brain", (ctx.persona or {}).get("virtual_name") or ""),
                 emit, f"MCP tool {tool.server}/{tool.mcp_tool}")
         except Exception as e:
             detail = describe_exception(e)
@@ -1776,6 +1792,17 @@ class AgentRunner:
                         answer += _tool_trail_footer(trail)
                     yield AgentEvent("answer", answer.strip())
                     return
+                if tc.get("arguments_error") and by_name.get(tc["name"]) is not None:
+                    # Malformed JSON arguments: tell the worker instead of
+                    # running the tool with nothing.
+                    self.model_registry.record_tool_call(worker, ok=False)
+                    messages.append({"role": "tool", "name": tc["name"],
+                                     "tool_call_id": tc.get("id"),
+                                     "content": "ERROR: the arguments were not valid JSON "
+                                                f"({tc['arguments_error'][:200]}). Call the "
+                                                "tool again with a JSON object matching its "
+                                                "schema."})
+                    continue
                 tool = by_name.get(tc["name"])
                 if tool is None:
                     self.model_registry.record_tool_call(worker, ok=False)
@@ -1791,8 +1818,11 @@ class AgentRunner:
                                   else f"{worker} → {tool.server}/{tool.mcp_tool}..."))
                 t0 = time.monotonic()
                 try:
-                    out = await self.tool_registry.mcp.call_tool(
-                        tool.server, tool.mcp_tool, tc["arguments"])
+                    rich = await request_context.mcp_attributed(
+                        call_tool_rich(self.tool_registry.mcp,
+                                       tool.server, tool.mcp_tool, tc["arguments"]),
+                        "worker", f"{(ctx.persona or {}).get('virtual_name') or ''} · {worker}")
+                    out = rich.text
                 except Exception as e:
                     dur = int((time.monotonic() - t0) * 1000)
                     ctx.logger.record_tool_call(tc["name"], tool.server, dur,
@@ -1814,10 +1844,18 @@ class AgentRunner:
                 trail.append((tool.mcp_tool, out))    # for the answer footer
                 yield AgentEvent("think", f"{tool.server}/{tool.mcp_tool} returned "
                                           f"{len(out)} chars in {dur}ms.")
-                messages.append({"role": "tool", "name": tc["name"],
-                                 "tool_call_id": tc.get("id"),
-                                 "content": out[:self.brain.cfg.mcp_result_limit_chars]
-                                            or "(empty tool result)"})
+                limit = int(getattr(self.brain.cfg, "worker_tool_result_chars", 0)
+                            or self.brain.cfg.mcp_result_limit_chars)
+                tool_msg = {"role": "tool", "name": tc["name"],
+                            "tool_call_id": tc.get("id"),
+                            "content": (out[:limit] + (f"\n…[truncated: {len(out) - limit} more chars]"
+                                                       if len(out) > limit else ""))
+                                       or "(empty tool result)"}
+                # Image results (screenshots, generated images) reach a vision
+                # worker as real images, not just a "[image: …]" note.
+                if rich.images() and _model_has_vision(self.model_registry, worker):
+                    tool_msg["images"] = rich.images()[:4]
+                messages.append(tool_msg)
 
         # Step cap hit without a final answer.
         async for ev in hand_to_brain(f"{worker} hit the {cap}-step tool cap"):

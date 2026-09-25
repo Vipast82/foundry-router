@@ -44,7 +44,17 @@ class MCPAggregator:
 
     # -- tool exposure ---------------------------------------------------------
 
-    def _visible_tools(self, server_filter: Optional[set]):
+    def _persona_scope(self, persona_name: str):
+        """(persona, tool name set) for a persona endpoint — exactly the MCP
+        tools attached to that persona (whole servers or scoped per-tool
+        grants), so an external client loads that set and nothing more."""
+        persona = self.svc.personas.get(persona_name) if persona_name else None
+        if persona is None:
+            return None, set()
+        tools = self.svc.tool_registry.mcp_tools_for_persona(persona)
+        return persona, {t.name for t in tools}
+
+    def _visible_tools(self, server_filter: Optional[set], name_filter: Optional[set] = None):
         """Enabled MCP ToolDefs, minus gateway-management control tools, scoped
         to `server_filter` (None = all). The registry already namespaces names
         as `server<sep>bare`, so the client sees stable, collision-free ids."""
@@ -56,11 +66,21 @@ class MCPAggregator:
                 continue
             if server_filter is not None and td.server not in server_filter:
                 continue
+            if name_filter is not None and td.name not in name_filter:
+                continue
             out.append(td)
         return out
 
     async def _dispatch(self, name: str, arguments: Optional[dict],
-                        server_filter: Optional[set]) -> str:
+                        server_filter: Optional[set], name_filter: Optional[set] = None,
+                        scope: str = "all", client: str = "") -> str:
+        """Text view of _dispatch_rich (kept for callers that want a string)."""
+        return (await self._dispatch_rich(name, arguments, server_filter, name_filter,
+                                          scope, client)).text
+
+    async def _dispatch_rich(self, name: str, arguments: Optional[dict],
+                             server_filter: Optional[set], name_filter: Optional[set] = None,
+                             scope: str = "all", client: str = "", progress_callback=None):
         """Resolve a namespaced tool id back to (server, original name) and run
         it through Foundry's MCP client. Scope-checked so a profile endpoint
         can't be used to reach a server it doesn't expose."""
@@ -69,12 +89,21 @@ class MCPAggregator:
             raise ValueError(f"unknown MCP tool {name!r}")
         if server_filter is not None and td.server not in server_filter:
             raise ValueError(f"tool {name!r} is not exposed on this profile")
+        if name_filter is not None and name not in name_filter:
+            raise ValueError(f"tool {name!r} is not attached to this persona")
         guard = self._poll_guard(name, arguments)
         if guard is not None:
-            return guard
-        result = await self.svc.mcp.call_tool(
-            td.server, td.mcp_tool or td.name, arguments or {})
-        self._record_call(name, arguments, result)
+            from ..tools.mcp_client import ToolResult
+            return ToolResult([{"type": "text", "text": guard}])
+        from .. import request_context
+        from ..brain.agent import call_tool_rich
+        result = await request_context.mcp_attributed(
+            call_tool_rich(self.svc.mcp, td.server, td.mcp_tool or td.name,
+                           arguments or {},
+                           **({"progress_callback": progress_callback}
+                              if progress_callback else {})),
+            "aggregator", scope, client)
+        self._record_call(name, arguments, result.text)
         return result
 
     # -- poll guard ------------------------------------------------------------
@@ -133,45 +162,134 @@ class MCPAggregator:
             self._recent = {k: v for k, v in self._recent.items()
                             if now - v["first"] <= _POLL_WINDOW}
 
-    def _build_server(self, scope_name: str, server_filter: Optional[set]):
-        from mcp.server.lowlevel import Server
+    @staticmethod
+    def _to_mcp_content(result) -> list:
+        """ToolResult -> MCP content blocks, keeping images, audio and embedded
+        resources intact (a text-only relay used to drop them)."""
         import mcp.types as types
+        out = []
+        for b in result.blocks:
+            t = b.get("type")
+            try:
+                if t == "image":
+                    out.append(types.ImageContent(type="image", data=b["data"],
+                                                  mimeType=b.get("mimeType") or "image/png"))
+                    continue
+                if t == "audio" and hasattr(types, "AudioContent"):
+                    out.append(types.AudioContent(type="audio", data=b["data"],
+                                                  mimeType=b.get("mimeType") or "audio/wav"))
+                    continue
+                if t == "resource" and (b.get("text") is not None or b.get("blob")):
+                    res = (types.TextResourceContents(uri=b["uri"], mimeType=b.get("mimeType"),
+                                                      text=b["text"])
+                           if b.get("text") is not None else
+                           types.BlobResourceContents(uri=b["uri"], mimeType=b.get("mimeType"),
+                                                      blob=b["blob"]))
+                    out.append(types.EmbeddedResource(type="resource", resource=res))
+                    continue
+            except Exception:                                   # noqa: BLE001
+                pass
+            if t == "text":
+                out.append(types.TextContent(type="text", text=b.get("text") or ""))
+        rendered = len(out)
+        lost = result.structured is not None or rendered < len(result.blocks)
+        if lost and not any(getattr(c, "type", "") == "text" for c in out) and result.text:
+            # structuredContent / resource links / unrenderable blocks: keep
+            # their text rendering so nothing is silently lost.
+            out = [types.TextContent(type="text", text=result.text)] + out
+        return out or [types.TextContent(type="text", text="")]
+
+    def _tool_meta(self, td):
+        import mcp.types as types
+        ann = dict(td.annotations or {})
+        if td.read_only is not None:
+            ann.setdefault("readOnlyHint", td.read_only)
+        if td.destructive is not None:
+            ann.setdefault("destructiveHint", td.destructive)
+        kw = {}
+        if ann:
+            try:
+                kw["annotations"] = types.ToolAnnotations(**ann)
+            except Exception:                                   # noqa: BLE001
+                pass
+        return types.Tool(name=td.name, description=td.description or "",
+                          inputSchema=td.parameters or {"type": "object", "properties": {}},
+                          **kw)
+
+    def _build_server(self, scope_name: str, server_filter: Optional[set],
+                      persona_mode: bool = False):
+        """One MCP server per endpoint. persona_mode: a single server mounted
+        at {base}/persona that resolves the persona from the request path on
+        every call, so new personas / changed tool grants apply live."""
+        from mcp.server.lowlevel import Server
 
         server = Server(f"foundry-mcp:{scope_name}")
 
+        def _scope():
+            ctx = server.request_context
+            req = getattr(ctx, "request", None)
+            client = ""
+            if req is not None:
+                try:
+                    client = (req.headers.get("user-agent") or "")[:120]
+                except Exception:
+                    client = ""
+            if not persona_mode:
+                return scope_name, None, client
+            name = ""
+            if req is not None:
+                path = str(req.url.path)
+                marker = "/persona/"
+                if marker in path:
+                    name = path.split(marker, 1)[1].strip("/").split("/")[0]
+            from urllib.parse import unquote
+            name = unquote(name)
+            persona, names = self._persona_scope(name)
+            if persona is None:
+                raise ValueError(f"no persona named {name!r}")
+            return f"persona:{name}", names, client
+
         @server.list_tools()
         async def _list():
-            return [
-                types.Tool(
-                    name=td.name,
-                    description=td.description or "",
-                    inputSchema=td.parameters or {"type": "object", "properties": {}},
-                )
-                for td in self._visible_tools(server_filter)
-            ]
+            scope, names, _client = _scope()
+            return [self._tool_meta(td) for td in self._visible_tools(server_filter, names)]
 
         @server.call_tool()
         async def _call(name: str, arguments: Optional[dict]):
+            scope, names, client = _scope()
             hb = self.svc.config_store.config.mcp_aggregator.progress_heartbeat_seconds or 0
-            if hb <= 0:
-                result = await self._dispatch(name, arguments, server_filter)
-                return [types.TextContent(type="text", text=result)]
             result = await self._dispatch_with_heartbeat(
-                server, name, arguments, server_filter, hb)
-            return [types.TextContent(type="text", text=result)]
+                server, name, arguments, server_filter, hb, names, scope, client)
+            return self._to_mcp_content(result)
 
         return server
 
     async def _dispatch_with_heartbeat(self, server, name, arguments,
-                                       server_filter, hb: int) -> str:
-        """Run the tool as a task and, every `hb` seconds it hasn't finished,
-        emit an MCP progress notification ("still working… Ns") on the request's
-        SSE stream. Keeps the long-held connection warm and gives the client a
-        live heartbeat. Requires SSE mode (json_response off) and a client that
-        sent a progressToken; without a token we still log backend-side."""
-        task = asyncio.create_task(self._dispatch(name, arguments, server_filter))
+                                       server_filter, hb: int, name_filter=None,
+                                       scope: str = "all", client: str = ""):
+        """Run the tool; relay the DOWNSTREAM server's own progress
+        notifications (e.g. "step 12/30") to the client, and — when hb > 0 —
+        emit a "still working… Ns" notification every hb seconds a tool is
+        silent. Both need the client's progressToken (and SSE mode)."""
         ctx = server.request_context
         token = getattr(getattr(ctx, "meta", None), "progressToken", None)
+        relayed = {"n": 0}
+
+        async def relay(progress, total, message):
+            if token is None:
+                return
+            relayed["n"] += 1
+            try:
+                await ctx.session.send_progress_notification(
+                    token, float(progress), total, message=message)
+            except Exception:              # notification path is best-effort
+                pass
+
+        task = asyncio.create_task(self._dispatch_rich(
+            name, arguments, server_filter, name_filter, scope, client,
+            progress_callback=relay if token is not None else None))
+        if hb <= 0:
+            return await task
         start = time.monotonic()
         ticks = 0
         try:
@@ -184,7 +302,7 @@ class MCPAggregator:
                 if token is not None:
                     try:
                         await ctx.session.send_progress_notification(
-                            token, float(ticks), None,
+                            token, float(ticks + relayed["n"]), None,
                             message=f"{name}: still working… {elapsed}s")
                     except Exception:      # notification path is best-effort
                         pass
@@ -244,12 +362,25 @@ class MCPAggregator:
         json_response = not hb_on
         stateless = not hb_on
 
+        if getattr(cfg, "persona_endpoints", True):
+            plan.append(("persona", None, f"{base}/persona"))
+        # Mount the SPECIFIC endpoints (profiles, personas) before the base:
+        # Starlette Mounts match by path prefix, so a base "/mcp" mounted first
+        # swallowed "/mcp/p/<name>" and "/mcp/persona/<name>" and served every
+        # tool on them (profile scoping silently did nothing).
+        plan = plan[1:] + plan[:1]
         for scope_name, server_filter, path in plan:
-            server = self._build_server(scope_name, server_filter)
+            server = self._build_server(scope_name, server_filter,
+                                        persona_mode=(scope_name == "persona"))
             manager = StreamableHTTPSessionManager(
                 app=server, json_response=json_response, stateless=stateless)
             await stack.enter_async_context(manager.run())
             app.router.routes.append(Mount(path, app=self._guarded(manager, cfg)))
+            if scope_name == "persona":
+                self._endpoints.append({"scope": "persona", "path": path + "/<persona>",
+                                        "servers": None})
+                log.info("foundry-mcp persona endpoints mounted: %s/<persona>", path)
+                continue
             self._endpoints.append({
                 "scope": scope_name, "path": path,
                 "servers": sorted(server_filter) if server_filter is not None else None,
@@ -281,6 +412,15 @@ class MCPAggregator:
         for pname, servers in (cfg.profiles or {}).items():
             plan.append({"scope": pname, "path": f"{base}/p/{pname}",
                          "servers": sorted(servers)})
+        if getattr(cfg, "persona_endpoints", True) and getattr(self.svc, "personas", None):
+            from urllib.parse import quote
+            for p in self.svc.personas.list(enabled_only=True):
+                tools = self.svc.tool_registry.mcp_tools_for_persona(p)
+                if tools:
+                    plan.append({"scope": f"persona-{p['virtual_name']}",
+                                 "path": f"{base}/persona/{quote(p['virtual_name'])}",
+                                 "servers": sorted({t.server for t in tools}),
+                                 "tools": len(tools)})
         return plan
 
     def describe(self) -> dict:

@@ -31,7 +31,7 @@ from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse, PlainTextResponse, StreamingResponse
 
 from .. import __version__
-from .. import telemetry
+from .. import request_context, telemetry
 from ..brain import prompts
 from ..brain.agent import RequestContext
 from ..brain.fallback import guess_category, pick_fallback_model
@@ -448,6 +448,24 @@ def _build_ctx(svc, persona: dict, model_name: str, messages: list[dict],
                              f"user DECLINED paid usage for {target} — "
                              f"routing locally", user_text[:200])
     return ctx
+
+
+def _direct_mcp_tools(svc, persona: dict, client_tools) -> dict:
+    """name -> ToolDef of the persona's attached MCP tools to offer in direct
+    mode (merged with the client's tools). Empty when the persona has none
+    attached or turned mcp_tools_in_direct off. A client tool with the same
+    name wins — the client's own toolbox is never shadowed."""
+    if not persona or not _persona_has_mcp_tools(persona):
+        return {}
+    flag = persona.get("mcp_tools_in_direct")
+    if flag is not None and not int(flag):
+        return {}
+    try:
+        tools = svc.tool_registry.mcp_tools_for_persona(persona)
+    except Exception:
+        return {}
+    client_names = {((t or {}).get("function") or {}).get("name") for t in (client_tools or [])}
+    return {t.name: t for t in tools if t.name not in client_names}
 
 
 async def _failover_list(svc, persona, first: str, user_text: str, eff,
@@ -983,33 +1001,116 @@ async def _direct_dispatch_chat(svc, persona, model_name, messages, client_tools
     # try the next model this persona's policy allows (paid ones only if the
     # guardrail clears them) instead of returning an error.
     failover = await _failover_list(svc, persona, model_id, user_text, eff)
+    # Persona MCP tools in direct mode (opt-in per persona by attaching tools):
+    # merged with the client's own tools. Calls to a Foundry-owned tool are run
+    # here and the model continues; calls to a client tool go back to the
+    # client exactly as before. A persona with no MCP tools (e.g. a Cline
+    # persona that relies on Cline's own MCP servers) is completely unchanged.
+    mcp_defs = _direct_mcp_tools(svc, persona, client_tools)
+    all_tools = (list(client_tools or []) + [td.spec() for td in mcp_defs.values()]) or None
+    if mcp_defs:
+        fmt = None                        # structured output would break tool calls
+    tool_cap = int(getattr(brain_cfg, "worker_tool_max_steps", 6) or 6)
+    base_convo = prompts.sanitize_history(messages)
 
-    async def _run():
-        """The worker call + all post-call bookkeeping. Raises AllBackendsFailed."""
-        res, backend = await svc.pool.chat(
-            model_id, prompts.sanitize_history(messages),
-            tools=client_tools, options=options, keep_alive=keep_alive,
-            max_tokens=brain_cfg.worker_max_tokens,
-            think=_think_for(svc, model_id, persona, client_think), fmt=fmt)
-        # Empirical tool-calling reliability: direct dispatch is where worker
-        # models actually exercise tool calling (client-supplied tools).
-        svc.registry.record_tool_call(model_id, ok=True)
-        binfo = svc.pool.backend_info(model_id)
-        if binfo and binfo.get("type") == "anthropic-compatible":
-            log_subscription_usage(svc.db, model_id, backend,
-                                   res.prompt_tokens, res.completion_tokens)
-            svc.meridian_usage.note_successful_call(binfo["url"])
-        cost = estimate_cost_usd(svc.registry.get(model_id),
-                                 res.prompt_tokens, res.completion_tokens)
-        logger.record_model_call(model_id, backend, res.prompt_tokens,
-                                 res.completion_tokens, cost)
-        logger.finish("ok")
-        telemetry.record_call(
-            svc.db, svc.registry, model=model_id, backend=backend, result=res,
-            persona=logger.persona, mode=logger.mode,
-            wall_ms=(time.monotonic_ns() - t0) / 1e6,
-            max_tokens=brain_cfg.worker_max_tokens)
-        return res
+    async def _exec_foundry_tools(calls: list, narrate=None) -> list:
+        """Run the Foundry-owned tool calls of one model turn; returns the tool
+        messages to append. Failures come back to the model as tool errors
+        (it can recover or answer without the tool) instead of aborting."""
+        from ..brain.agent import call_tool_rich, _model_has_vision
+        limit = int(getattr(brain_cfg, "worker_tool_result_chars", 0) or 24000)
+        out = []
+        for tc in calls:
+            td = mcp_defs[tc["name"]]
+            if tc.get("arguments_error"):
+                out.append({"role": "tool", "name": tc["name"], "tool_call_id": tc.get("id"),
+                            "content": f"ERROR: the arguments were not valid JSON "
+                                       f"({tc['arguments_error'][:200]}). Call the tool again "
+                                       f"with a JSON object matching its schema."})
+                continue
+            if narrate:
+                narrate(f"🔧 {td.server}/{td.mcp_tool}…\n")
+            t_call = time.monotonic()
+            try:
+                rich = await request_context.mcp_attributed(
+                    call_tool_rich(svc.mcp, td.server, td.mcp_tool, tc.get("arguments") or {}),
+                    "direct", f"{persona['virtual_name']} · {model_id}")
+                dur = int((time.monotonic() - t_call) * 1000)
+                logger.record_tool_call(tc["name"], td.server, dur, ok=True, caller=model_id,
+                                        arguments=tc.get("arguments"),
+                                        executes_code=svc.mcp.executes_code(td.server))
+                text = rich.text or "(empty tool result)"
+                msg = {"role": "tool", "name": tc["name"], "tool_call_id": tc.get("id"),
+                       "content": text[:limit] + (f"\n…[truncated: {len(text) - limit} more chars]"
+                                                  if len(text) > limit else "")}
+                if rich.images() and _model_has_vision(svc.registry, model_id):
+                    msg["images"] = rich.images()[:4]
+                if narrate:
+                    narrate(f"🔧 {td.server}/{td.mcp_tool} → {len(text)} chars in {dur}ms\n")
+            except Exception as e:                            # noqa: BLE001
+                dur = int((time.monotonic() - t_call) * 1000)
+                from ..errors import describe_exception
+                detail = describe_exception(e)
+                logger.record_tool_call(tc["name"], td.server, dur, ok=False, error=detail,
+                                        caller=model_id, arguments=tc.get("arguments"))
+                msg = {"role": "tool", "name": tc["name"], "tool_call_id": tc.get("id"),
+                       "content": f"ERROR: tool {td.server}/{td.mcp_tool} failed: {detail[:400]}"}
+                if narrate:
+                    narrate(f"🔧 {td.server}/{td.mcp_tool} failed: {detail[:120]}\n")
+            out.append(msg)
+        return out
+
+    def _split_calls(res):
+        """(foundry-owned calls, client calls) of one model turn."""
+        own = [tc for tc in (res.tool_calls or []) if tc.get("name") in mcp_defs]
+        rest = [tc for tc in (res.tool_calls or []) if tc.get("name") not in mcp_defs]
+        return own, rest
+
+    def _assistant_turn(res, own):
+        return {"role": "assistant", "content": res.content or "",
+                "tool_calls": [{"id": tc.get("id"), "type": "function",
+                                "function": {"name": tc["name"],
+                                             "arguments": tc.get("arguments") or {}}}
+                               for tc in own]}
+
+    async def _run(narrate=None):
+        """The worker call(s) + all post-call bookkeeping: one call, or — with
+        persona MCP tools — a bounded loop that runs Foundry-owned tool calls
+        and re-asks the model. Raises AllBackendsFailed."""
+        convo = list(base_convo)
+        for rnd in range(tool_cap + 1):
+            t_call = time.monotonic_ns()
+            res, backend = await svc.pool.chat(
+                model_id, convo,
+                tools=all_tools, options=options, keep_alive=keep_alive,
+                max_tokens=brain_cfg.worker_max_tokens,
+                think=_think_for(svc, model_id, persona, client_think), fmt=fmt)
+            # Empirical tool-calling reliability: direct dispatch is where worker
+            # models actually exercise tool calling (client-supplied tools).
+            svc.registry.record_tool_call(model_id, ok=True)
+            binfo = svc.pool.backend_info(model_id)
+            if binfo and binfo.get("type") == "anthropic-compatible":
+                log_subscription_usage(svc.db, model_id, backend,
+                                       res.prompt_tokens, res.completion_tokens)
+                svc.meridian_usage.note_successful_call(binfo["url"])
+            cost = estimate_cost_usd(svc.registry.get(model_id),
+                                     res.prompt_tokens, res.completion_tokens)
+            logger.record_model_call(model_id, backend, res.prompt_tokens,
+                                     res.completion_tokens, cost)
+            telemetry.record_call(
+                svc.db, svc.registry, model=model_id, backend=backend, result=res,
+                persona=logger.persona, mode=logger.mode,
+                wall_ms=(time.monotonic_ns() - t_call) / 1e6,
+                max_tokens=brain_cfg.worker_max_tokens)
+            own, rest = _split_calls(res)
+            if not own or rnd >= tool_cap:
+                if own:
+                    logger.record_guardrail(f"persona tool loop hit the {tool_cap}-round cap")
+                res.tool_calls = rest          # never hand Foundry-owned calls to the client
+                logger.finish("ok")
+                return res
+            convo = convo + [_assistant_turn(res, own)] + await _exec_foundry_tools(own, narrate)
+        raise AllBackendsFailed("persona tool loop ended unexpectedly")
 
     def _on_error(e: BaseException, finish: bool = True) -> None:
         if "invalid tool call" in str(e):
@@ -1037,7 +1138,7 @@ async def _direct_dispatch_chat(svc, persona, model_name, messages, client_tools
                     narrate(f"⚙️ {failover[i - 1]} failed — failing over to {mid}\n")
             model_id, options = mid, _opts_for(mid)
             try:
-                return await _run()
+                return await _run(narrate)
             except AllBackendsFailed as e:
                 last = e
                 _on_error(e, finish=False)
@@ -1072,8 +1173,11 @@ async def _direct_dispatch_chat(svc, persona, model_name, messages, client_tools
                                              f"policy picked {model_id}\n")
             yield tr.chat_chunk(model_name, "", done=False,
                                 thinking=f"⚙️ {_tag} · {model_id} — streaming…\n")
+            if mcp_defs:
+                yield tr.chat_chunk(model_name, "", done=False,
+                                    thinking=f"🔧 {len(mcp_defs)} persona MCP tool(s) available "
+                                             f"alongside {len(client_tools or [])} client tool(s)\n")
             hb = float(brain_cfg.direct_stream_heartbeat_seconds or 0)
-            hb_start = time.monotonic()
             for attempt, mid in enumerate(failover):
                 if attempt:
                     logger.record_guardrail(f"failover: {model_id} failed -> {mid}")
@@ -1083,70 +1187,83 @@ async def _direct_dispatch_chat(svc, persona, model_name, messages, client_tools
                     backend_name = binfo0.get("name") or mid
                     yield tr.chat_chunk(model_name, "", done=False,
                                         thinking=f"⚙️ failing over to {mid}\n")
-                acc_tools: list = []
-                ttft_recorded = False    # time-to-first-token, measured once
-                ttft_ms = None           # captured value, for the perf-history row
                 produced = False         # any output sent -> no failover possible
+                convo = list(base_convo)
+                err = None
                 try:
-                    _src = svc.pool.chat_stream(
-                        model_id, prompts.sanitize_history(messages),
-                        tools=client_tools, options=options, keep_alive=keep_alive,
-                        max_tokens=brain_cfg.worker_max_tokens,
-                        think=_think_for(svc, model_id, persona, client_think), fmt=fmt)
-                    async for _kind, _payload in _stream_with_heartbeat(_src, hb, hb_start):
-                        if _kind == "beat":
-                            yield tr.chat_chunk(
-                                model_name, "", done=False,
-                                thinking=f"⚙️ {model_id} — still working… {_payload}s\n")
-                            continue
-                        chunk = _payload
-                        if chunk.get("done"):
-                            pt = chunk.get("prompt_tokens") or 0
-                            ct = chunk.get("completion_tokens") or 0
-                            finals = acc_tools or (chunk.get("tool_calls") or [])
-                            tcs_out = [{**({"id": t["id"]} if t.get("id") else {}),
-                                        "function": {"name": t["name"], "arguments": t["arguments"]}}
-                                       for t in finals] or None
-                            svc.registry.record_tool_call(model_id, ok=True)
-                            if _btype == "anthropic-compatible":
-                                log_subscription_usage(svc.db, model_id, backend_name, pt, ct)
-                                svc.meridian_usage.note_successful_call(binfo0.get("url"))
-                            cost = estimate_cost_usd(svc.registry.get(model_id), pt, ct)
-                            logger.record_model_call(model_id, backend_name, pt, ct, cost)
-                            logger.finish("ok")
-                            # Perf + truncation telemetry (a "length" finish = the
-                            # reply was cut at the max-token cap — the exact reason a
-                            # client then asks to "continue"; flagged in Events).
-                            telemetry.record_call(
-                                svc.db, svc.registry, model=model_id, backend=backend_name,
-                                result=ChatResult.from_done_frame(chunk, tool_calls=finals),
-                                persona=logger.persona, mode=logger.mode, ttft_ms=ttft_ms,
-                                wall_ms=(time.monotonic_ns() - t0) / 1e6,
-                                max_tokens=brain_cfg.worker_max_tokens)
-                            produced = True
-                            yield tr.chat_chunk(
-                                model_name, "", done=True, tool_calls=tcs_out,
-                                stats=tr.result_stats(ChatResult.from_done_frame(chunk),
-                                                      time.monotonic_ns() - t0,
-                                                      model=model_id, backend=backend_name))
-                        else:
+                    for rnd in range(tool_cap + 1):
+                        acc_tools: list = []
+                        final = None
+                        ttft_ms = None
+                        t_round = time.monotonic_ns()
+                        hb_start = time.monotonic()
+                        _src = svc.pool.chat_stream(
+                            model_id, convo,
+                            tools=all_tools, options=options, keep_alive=keep_alive,
+                            max_tokens=brain_cfg.worker_max_tokens,
+                            think=_think_for(svc, model_id, persona, client_think), fmt=fmt)
+                        async for _kind, _payload in _stream_with_heartbeat(_src, hb, hb_start):
+                            if _kind == "beat":
+                                yield tr.chat_chunk(
+                                    model_name, "", done=False,
+                                    thinking=f"⚙️ {model_id} — still working… {_payload}s\n")
+                                continue
+                            chunk = _payload
+                            if chunk.get("done"):
+                                final = chunk
+                                continue
                             if chunk.get("tool_calls"):
                                 acc_tools.extend(chunk["tool_calls"])   # deliver at done
                             c = chunk.get("content") or ""
                             th = chunk.get("thinking") or ""
-                            if (c or th or chunk.get("tool_calls")) and not ttft_recorded:
-                                # First generated token of ANY kind (answer, reasoning
-                                # or tool call) — wall time since dispatch is the
-                                # time-to-first-token, prefill-dominated. Counting only
-                                # answer text folded a thinking model's whole reasoning
-                                # phase into "TTFT". Recorded with the call's telemetry.
-                                ttft_recorded = True
-                                ttft_ms = (time.monotonic_ns() - t0) / 1e6
+                            if (c or th or chunk.get("tool_calls")) and ttft_ms is None:
+                                # First generated token of ANY kind — the
+                                # time-to-first-token, prefill-dominated.
+                                ttft_ms = (time.monotonic_ns() - t_round) / 1e6
                             if c or th:
                                 produced = True
                                 yield tr.chat_chunk(model_name, c, done=False,
                                                     thinking=th or None)
-                    return
+                        final = final or {}
+                        finals = acc_tools or (final.get("tool_calls") or [])
+                        res = ChatResult.from_done_frame(final, tool_calls=finals)
+                        pt, ct = res.prompt_tokens, res.completion_tokens
+                        svc.registry.record_tool_call(model_id, ok=True)
+                        if _btype == "anthropic-compatible":
+                            log_subscription_usage(svc.db, model_id, backend_name, pt, ct)
+                            svc.meridian_usage.note_successful_call(binfo0.get("url"))
+                        cost = estimate_cost_usd(svc.registry.get(model_id), pt, ct)
+                        logger.record_model_call(model_id, backend_name, pt, ct, cost)
+                        # Perf + truncation telemetry, per model call.
+                        telemetry.record_call(
+                            svc.db, svc.registry, model=model_id, backend=backend_name,
+                            result=res, persona=logger.persona, mode=logger.mode,
+                            ttft_ms=ttft_ms, wall_ms=(time.monotonic_ns() - t_round) / 1e6,
+                            max_tokens=brain_cfg.worker_max_tokens)
+                        own, rest = _split_calls(res)
+                        if own and rnd < tool_cap:
+                            # Foundry-owned tools: run them, feed the results
+                            # back, and keep streaming the model's next turn.
+                            produced = True
+                            notes: list[str] = []
+                            convo = convo + [_assistant_turn(res, own)] \
+                                + await _exec_foundry_tools(own, notes.append)
+                            for n in notes:
+                                yield tr.chat_chunk(model_name, "", done=False, thinking=n)
+                            continue
+                        if own:
+                            logger.record_guardrail(
+                                f"persona tool loop hit the {tool_cap}-round cap")
+                        logger.finish("ok")
+                        tcs_out = [{**({"id": t["id"]} if t.get("id") else {}),
+                                    "function": {"name": t["name"], "arguments": t["arguments"]}}
+                                   for t in rest] or None
+                        res.tool_calls = rest
+                        yield tr.chat_chunk(
+                            model_name, "", done=True, tool_calls=tcs_out,
+                            stats=tr.result_stats(res, time.monotonic_ns() - t0,
+                                                  model=model_id, backend=backend_name))
+                        return
                 except AllBackendsFailed as e:
                     if not produced and attempt + 1 < len(failover):
                         _on_error(e, finish=False)

@@ -130,6 +130,12 @@ class ChatResult:
                    timing_source=c.get("timing_source") or "")
 
 
+# Request controls that ride in `options` for the openai / anthropic dialects
+# but aren't Ollama options — stripped before an Ollama call.
+_NON_OLLAMA_OPTIONS = {"tool_choice", "parallel_tool_calls", "chat_template_kwargs",
+                       "logit_bias", "reasoning_effort"}
+
+
 class ProtocolError(Exception):
     """A backend answered but the exchange failed (HTTP error, bad payload)."""
 
@@ -149,6 +155,21 @@ def _parse_arguments(args: Any) -> dict:
             log.warning("unparseable tool arguments: %.200s", args)
             return {}
     return {}
+
+
+def _tool_call(id_: Any, name: str, raw: Any) -> dict:
+    """A parsed tool call. When the model's arguments aren't valid JSON the
+    call still goes through with {} — but `arguments_error` keeps the raw text,
+    so a Foundry-run tool loop can tell the model to fix its arguments instead
+    of silently running the tool with nothing."""
+    args = _parse_arguments(raw)
+    tc = {"id": id_ or _new_id(), "name": name, "arguments": args}
+    if isinstance(raw, str) and raw.strip() and not args:
+        try:
+            json.loads(raw)
+        except (json.JSONDecodeError, ValueError):
+            tc["arguments_error"] = raw[:500]
+    return tc
 
 
 def _new_id() -> str:
@@ -395,7 +416,7 @@ class OllamaProtocol(BaseProtocol):
         # runs until the context fills (or the model stops on its own) — a real
         # runaway/timeout risk with heavy reasoning. Client-sent num_predict
         # wins; otherwise the dispatch layer's max_tokens becomes the ceiling.
-        opts = dict(options or {})
+        opts = {k: v for k, v in (options or {}).items() if k not in _NON_OLLAMA_OPTIONS}
         if max_tokens and "num_predict" not in opts:
             opts["num_predict"] = int(max_tokens)
         if opts:
@@ -861,6 +882,10 @@ class OpenAIProtocol(BaseProtocol):
         if tools:
             payload["tools"] = tools
         opts = options or {}
+        if tools and opts.get("tool_choice") is not None:
+            payload["tool_choice"] = opts["tool_choice"]
+        if tools and opts.get("parallel_tool_calls") is not None:
+            payload["parallel_tool_calls"] = bool(opts["parallel_tool_calls"])
         for k in self._STD_SAMPLING:
             if k in opts:
                 payload[k] = opts[k]
@@ -938,11 +963,9 @@ class OpenAIProtocol(BaseProtocol):
         data = r.json()
         choice = (data.get("choices") or [{}])[0]
         msg = choice.get("message", {}) or {}
-        tool_calls = [
-            {"id": tc.get("id") or _new_id(), "name": tc["function"]["name"],
-             "arguments": _parse_arguments(tc["function"].get("arguments"))}
-            for tc in (msg.get("tool_calls") or [])
-        ]
+        tool_calls = [_tool_call(tc.get("id"), tc["function"]["name"],
+                                 tc["function"].get("arguments"))
+                      for tc in (msg.get("tool_calls") or [])]
         usage = data.get("usage") or {}
         tm = _llamacpp_timings(data.get("timings"))
         return ChatResult(
@@ -1052,8 +1075,7 @@ class OpenAIProtocol(BaseProtocol):
                     if content or reasoning:
                         yield {"content": content, "done": False, "thinking": reasoning}
                 break
-        tool_calls = [{"id": f["id"] or _new_id(), "name": f["name"],
-                       "arguments": _parse_arguments(f["arguments"])}
+        tool_calls = [_tool_call(f["id"], f["name"], f["arguments"])
                       for f in frags.values() if f["name"]] or None
         pt = pt or (tm["prompt_n"] + tm["cache_n"])
         ct = ct or tm["predicted_n"]
@@ -1085,6 +1107,27 @@ class OpenAIProtocol(BaseProtocol):
 # --------------------------------------------------------------------------- #
 # Anthropic-compatible (Meridian)                                             #
 # --------------------------------------------------------------------------- #
+
+def _anthropic_tool_choice(choice: Any, parallel: Any) -> Optional[dict]:
+    """OpenAI tool_choice / parallel_tool_calls -> Anthropic tool_choice."""
+    out: Optional[dict] = None
+    if choice in ("auto", None) and parallel is None:
+        return None
+    if choice in (None, "auto"):
+        out = {"type": "auto"}
+    elif choice == "required":
+        out = {"type": "any"}
+    elif choice == "none":
+        out = {"type": "none"}
+    elif isinstance(choice, dict):
+        name = (choice.get("function") or {}).get("name") or choice.get("name")
+        out = {"type": "tool", "name": name} if name else {"type": "auto"}
+    else:
+        out = {"type": "auto"}
+    if parallel is False and out["type"] != "none":
+        out["disable_parallel_tool_use"] = True
+    return out
+
 
 def _anthropic_error_text(obj: Any) -> str:
     """Message from an Anthropic error envelope {"type":"error","error":{…}}."""
@@ -1258,6 +1301,10 @@ class AnthropicProtocol(BaseProtocol):
                 for t in tools
             ]
         opts = options or {}
+        if tools:
+            choice = _anthropic_tool_choice(opts.get("tool_choice"), opts.get("parallel_tool_calls"))
+            if choice:
+                payload["tool_choice"] = choice
         if opts.get("stop"):
             stops = opts["stop"] if isinstance(opts["stop"], list) else [opts["stop"]]
             payload["stop_sequences"] = [str(x) for x in stops][:4]
@@ -1275,6 +1322,12 @@ class AnthropicProtocol(BaseProtocol):
         if think_block is not None:
             block, payload["max_tokens"] = think_block
             payload["thinking"] = block
+            # Claude rejects a FORCED tool choice (any / a named tool) while
+            # extended thinking is on — degrade it to auto rather than 400.
+            tc = payload.get("tool_choice")
+            if tc and tc.get("type") in ("any", "tool"):
+                payload["tool_choice"] = {k: v for k, v in tc.items()
+                                          if k == "disable_parallel_tool_use"} | {"type": "auto"}
         else:
             for k in ("temperature", "top_p", "top_k"):
                 if k in opts:
@@ -1402,8 +1455,7 @@ class AnthropicProtocol(BaseProtocol):
                         finish = "length" if sr == "max_tokens" else sr
                 elif etype == "message_stop":
                     break
-        tool_calls = [{"id": b.get("id") or _new_id(), "name": b.get("name"),
-                       "arguments": _parse_arguments(b.get("json") or "{}")}
+        tool_calls = [_tool_call(b.get("id"), b.get("name"), b.get("json") or "{}")
                       for b in blocks.values() if b.get("type") == "tool_use"] or None
         eval_ns = prompt_ns = 0
         source = ""

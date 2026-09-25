@@ -19,7 +19,7 @@ import json
 import logging
 import time
 from contextlib import asynccontextmanager
-from typing import Any
+from typing import Any, Optional
 
 from ..config import MCPServerConfig
 from ..db import Database, utcnow
@@ -36,6 +36,89 @@ _SECRET_KEY = "mcp_secret:"
 
 class MCPUnavailable(Exception):
     pass
+
+
+class ToolCallError(RuntimeError):
+    """The tool ran and reported isError — carries the (partial) result."""
+    def __init__(self, msg: str, result: "ToolResult"):
+        super().__init__(msg)
+        self.result = result
+
+
+class ToolResult:
+    """Everything an MCP tool returned, protocol-neutral.
+
+    blocks: [{"type": "text", "text"} | {"type": "image"|"audio", "data" (b64),
+              "mimeType"} | {"type": "resource", "uri", "mimeType", "text"?,
+              "blob"?} | {"type": "resource_link", "uri", "name", "mimeType"?}]
+    structured: the tool's structuredContent (MCP 2025-06) or None.
+    text: a model-ready text rendering — text blocks verbatim, other blocks
+    described in place, structuredContent as JSON when there's no text.
+    """
+
+    def __init__(self, blocks: list[dict], structured: Any = None, is_error: bool = False):
+        self.blocks = blocks
+        self.structured = structured
+        self.is_error = is_error
+        parts = []
+        for b in blocks:
+            t = b.get("type")
+            if t == "text":
+                parts.append(b.get("text") or "")
+            elif t in ("image", "audio"):
+                size = len(b.get("data") or "") * 3 // 4
+                parts.append(f"[{t}: {b.get('mimeType') or 'unknown'}, {size // 1024} KB]")
+            elif t == "resource":
+                if b.get("text"):
+                    parts.append(f"[resource {b.get('uri')}]\n{b['text']}")
+                else:
+                    parts.append(f"[resource {b.get('uri')} ({b.get('mimeType') or 'binary'})]")
+            elif t == "resource_link":
+                parts.append(f"[link: {b.get('name') or ''} {b.get('uri')}]".replace("  ", " "))
+        if structured is not None and not any(b.get("type") == "text" for b in blocks):
+            try:
+                parts.append(json.dumps(structured, ensure_ascii=False, default=str))
+            except (TypeError, ValueError):
+                parts.append(str(structured))
+        self.text = "\n".join(p for p in parts if p)
+
+    @property
+    def content_types(self) -> list[str]:
+        out = list(dict.fromkeys(b.get("type") for b in self.blocks if b.get("type")))
+        if self.structured is not None:
+            out.append("structured")
+        return out
+
+    def images(self) -> list[str]:
+        """Base64 image payloads (for vision-capable model context)."""
+        return [b["data"] for b in self.blocks if b.get("type") == "image" and b.get("data")]
+
+    @classmethod
+    def from_mcp(cls, result) -> "ToolResult":
+        blocks: list[dict] = []
+        for c in getattr(result, "content", None) or []:
+            t = getattr(c, "type", None)
+            if t == "text":
+                blocks.append({"type": "text", "text": getattr(c, "text", "") or ""})
+            elif t in ("image", "audio"):
+                blocks.append({"type": t, "data": getattr(c, "data", "") or "",
+                               "mimeType": getattr(c, "mimeType", "") or ""})
+            elif t == "resource":
+                r = getattr(c, "resource", None)
+                blocks.append({"type": "resource", "uri": str(getattr(r, "uri", "") or ""),
+                               "mimeType": getattr(r, "mimeType", None),
+                               "text": getattr(r, "text", None),
+                               "blob": getattr(r, "blob", None)})
+            elif t == "resource_link":
+                blocks.append({"type": "resource_link", "uri": str(getattr(c, "uri", "") or ""),
+                               "name": getattr(c, "name", "") or "",
+                               "mimeType": getattr(c, "mimeType", None)})
+            else:
+                txt = getattr(c, "text", None)
+                if txt:
+                    blocks.append({"type": "text", "text": txt})
+        return cls(blocks, getattr(result, "structuredContent", None),
+                   bool(getattr(result, "isError", False)))
 
 
 _SSE_FILTER_MARK = "_foundry_sse_teardown_filter"
@@ -103,6 +186,9 @@ class MCPManager:
         # running rather than hung.
         self._inflight: dict[int, dict] = {}
         self._inflight_seq = 0
+        # Persistent (pooled) MCP sessions, one per server: the handshake
+        # (connect + initialize) is paid once, not on every tool call.
+        self._holders: dict[str, "_SessionHolder"] = {}
 
     def _record_usage(self, server: str, tool: str, ok: bool,
                       rate_limited: bool = False, error: str = "") -> None:
@@ -134,8 +220,18 @@ class MCPManager:
               "seconds": round(now - v["since"], 1)} for v in self._inflight.values()),
             key=lambda x: -x["seconds"])
 
+    IDLE_CLOSE = 600.0     # seconds before an unused pooled session is closed
+
     def set_servers(self, servers: list[MCPServerConfig]) -> None:
         self.servers = {s.name: s for s in servers}
+        # Connection details may have changed — drop pooled sessions so the next
+        # call reconnects with the new URL / headers / auth.
+        holders, self._holders = self._holders, {}
+        for h in holders.values():
+            try:
+                asyncio.get_event_loop().create_task(h.reset())
+            except RuntimeError:
+                pass
 
     def executes_code(self, server: str) -> bool:
         """Whether this server is operator-declared as executing code — drives
@@ -270,6 +366,8 @@ class MCPManager:
                                     or {"type": "object", "properties": {}},
                     "read_only": getattr(ann, "readOnlyHint", None) if ann else None,
                     "destructive": getattr(ann, "destructiveHint", None) if ann else None,
+                    "annotations": ({k: v for k, v in ann.model_dump().items() if v is not None}
+                                    if ann is not None and hasattr(ann, "model_dump") else None),
                 })
             return out
 
@@ -299,7 +397,24 @@ class MCPManager:
                 await asyncio.sleep(wait)
         self._last_call[server] = time.monotonic()
 
-    async def call_tool(self, server: str, tool: str, arguments: dict[str, Any]) -> str:
+    async def call_tool(self, server: str, tool: str, arguments: dict[str, Any],
+                        progress_callback=None) -> str:
+        """Text view of a tool call (what model prompts consume). Non-text
+        content is described in place ("[image: image/png, 84 KB]") instead of
+        silently dropped; call_tool_rich() returns every block intact."""
+        return (await self.call_tool_rich(server, tool, arguments,
+                                          progress_callback=progress_callback)).text
+
+    async def call_tool_rich(self, server: str, tool: str, arguments: dict[str, Any],
+                             progress_callback=None) -> "ToolResult":
+        """Run one MCP tool call and return EVERYTHING it produced: text, images,
+        audio, embedded resources / resource links and structuredContent.
+
+        Every call, from every caller, funnels through here — pacing, 429
+        backoff, per-server timeout, persistent-session reuse, progress relay
+        and one mcp_call_log metrics row (source/caller from the attribution
+        context the caller set)."""
+        from .. import request_context
         cfg = self.servers.get(server)
         if cfg is not None and not getattr(cfg, "enabled", True):
             raise MCPUnavailable(f"MCP server {server!r} is disabled")
@@ -313,39 +428,71 @@ class MCPManager:
         tid = self._inflight_seq
         self._inflight_seq += 1
         self._inflight[tid] = {"server": server, "tool": tool, "since": time.monotonic()}
+        m = {"connect_ms": 0, "pace_ms": 0, "attempts": 0, "session": "per-call"}
+        t_start = time.monotonic()
 
-        async def _call() -> str:
+        async def _invoke(session) -> "ToolResult":
+            kw = {"progress_callback": progress_callback} if progress_callback else {}
+            result = await session.call_tool(tool, effective_args, **kw)
+            tr = ToolResult.from_mcp(result)
+            if tr.is_error:
+                raise ToolCallError(f"MCP tool {server}/{tool} returned error: {tr.text[:500]}", tr)
+            return tr
+
+        async def _call() -> "ToolResult":
+            # Pooled session first (no handshake); a transport failure on a
+            # pooled session retries ONCE on a fresh per-call session, so a
+            # server restart never costs the operator a failed call.
+            holder = self._holder(server) if cfg is not None and getattr(
+                cfg, "persistent_session", True) else None
+            if holder is not None:
+                t0 = time.monotonic()
+                session, fresh = await holder.ensure()
+                m["connect_ms"] = int((time.monotonic() - t0) * 1000) if fresh else 0
+                m["session"] = "new" if fresh else "reused"
+                try:
+                    return await _invoke(session)
+                except ToolCallError:
+                    raise
+                except Exception as e:                            # noqa: BLE001
+                    # Only a REUSED session may have gone stale (server
+                    # restarted, idle stream closed) — retry that once on a
+                    # fresh connection. A just-opened session failing is a
+                    # real error and is reported as such.
+                    await holder.reset()
+                    if fresh or _is_rate_limited(e):
+                        raise
+                    log.info("MCP %s: pooled session failed (%s) — retrying per-call",
+                             server, describe_exception(e))
+            t0 = time.monotonic()
             async with self._session(server) as session:
-                result = await session.call_tool(tool, effective_args)
-                texts = []
-                for block in getattr(result, "content", []) or []:
-                    text = getattr(block, "text", None)
-                    if text:
-                        texts.append(text)
-                joined = "\n".join(texts) if texts else str(result)
-                if getattr(result, "isError", False):
-                    raise RuntimeError(
-                        f"MCP tool {server}/{tool} returned error: {joined[:500]}")
-                return joined
+                m["connect_ms"] = int((time.monotonic() - t0) * 1000)
+                m["session"] = "per-call"
+                return await _invoke(session)
 
         # 429-backoff around every attempt (SearXNG's external engines rate-limit
-        # bursts; this used to live only in the research agent, so worker/brain
-        # tool calls hammered on unrecovered). A 429 means "slower", so wait an
-        # escalating amount before retrying rather than immediately re-429ing.
-        seen_429 = False
+        # bursts). A 429 means "slower", so wait an escalating amount before
+        # retrying rather than immediately re-429ing.
+        seen_429 = timed_out = False
+        result: Optional[ToolResult] = None
+        err = ""
         try:
             for attempt in range(1, retries + 1):
-                await self._pace(server, cfg) if cfg else None
+                m["attempts"] = attempt
+                if cfg:
+                    tp = time.monotonic()
+                    await self._pace(server, cfg)
+                    m["pace_ms"] += int((time.monotonic() - tp) * 1000)
                 try:
-                    # Per-server budget: media generation (ComfyUI/TTS/music) can run
-                    # many minutes; a search tool should fail fast. Configurable per
-                    # connection instead of one global assumption.
-                    out = await asyncio.wait_for(_call(), timeout=timeout)
+                    # Per-server budget: media generation (ComfyUI/TTS/music) can
+                    # run many minutes; a search tool should fail fast.
+                    result = await asyncio.wait_for(_call(), timeout=timeout)
                     self._record_usage(server, tool, ok=True, rate_limited=seen_429)
-                    return out
+                    return result
                 except asyncio.TimeoutError:
-                    self._record_usage(server, tool, ok=False, rate_limited=seen_429,
-                                       error=f"timed out after {timeout}s")
+                    timed_out = True
+                    err = f"timed out after {timeout}s"
+                    self._record_usage(server, tool, ok=False, rate_limited=seen_429, error=err)
                     raise RuntimeError(
                         f"MCP tool {server}/{tool} timed out after {timeout}s "
                         f"(raise timeout_seconds on this server's connection if its "
@@ -362,8 +509,126 @@ class MCPManager:
                             describe_exception(e))
                         await asyncio.sleep(wait)
                         continue
+                    err = describe_exception(e)
+                    if isinstance(e, ToolCallError):
+                        result = e.result
                     self._record_usage(server, tool, ok=False, rate_limited=seen_429,
-                                       error=describe_exception(e))
+                                       error=err)
                     raise
         finally:
             self._inflight.pop(tid, None)
+            attr = request_context.mcp_attribution()
+            self._log_call(
+                server=server, tool=tool, ok=(result is not None and not err),
+                duration_ms=int((time.monotonic() - t_start) * 1000),
+                rate_limited=seen_429, timed_out=timed_out, error=err,
+                args=effective_args, result=result, attr=attr, **m)
+
+    def _log_call(self, *, server, tool, ok, duration_ms, rate_limited, timed_out,
+                  error, args, result, attr, connect_ms, pace_ms, attempts, session) -> None:
+        """One mcp_call_log row. Best-effort: metrics never break a call."""
+        from .. import request_context
+        try:
+            args_chars = len(json.dumps(args, ensure_ascii=False, default=str))
+        except Exception:
+            args_chars = 0
+        rc = len(result.text) if result is not None else 0
+        try:
+            self.db.execute(
+                "INSERT INTO mcp_call_log (ts, source, caller, client, server, tool, ok, "
+                "duration_ms, connect_ms, pace_ms, attempts, rate_limited, timed_out, "
+                "session, error, args_chars, result_chars, result_tokens, content_types, "
+                "request_id) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (utcnow(), attr.get("source") or "other", (attr.get("caller") or "")[:120],
+                 (attr.get("client") or "")[:120], server, tool, 1 if ok else 0,
+                 duration_ms, connect_ms, pace_ms, attempts, 1 if rate_limited else 0,
+                 1 if timed_out else 0, session, (error or "")[:500], args_chars, rc,
+                 (rc + 3) // 4, ",".join(result.content_types) if result is not None else "",
+                 request_context.request_id() or ""))
+        except Exception:
+            log.debug("mcp_call_log write failed", exc_info=True)
+
+    # -- persistent sessions -----------------------------------------------------------
+
+    def _holder(self, server: str) -> "_SessionHolder":
+        h = self._holders.get(server)
+        if h is None:
+            h = self._holders[server] = _SessionHolder(self, server)
+        self._reap_idle()
+        return h
+
+    def _reap_idle(self) -> None:
+        """Close pooled sessions idle for over IDLE_CLOSE seconds (a homelab MCP
+        server shouldn't hold a connection for a tool nobody is using)."""
+        now = time.monotonic()
+        for name, h in list(self._holders.items()):
+            if h.session is not None and now - h.last_used > self.IDLE_CLOSE:
+                asyncio.get_event_loop().create_task(h.reset())
+
+    async def close_sessions(self) -> None:
+        for h in list(self._holders.values()):
+            await h.reset()
+        self._holders.clear()
+
+    def session_status(self) -> dict:
+        now = time.monotonic()
+        return {name: {"open": h.session is not None,
+                       "idle_s": round(now - h.last_used, 1) if h.last_used else None,
+                       "connects": h.connects}
+                for name, h in self._holders.items()}
+
+
+class _SessionHolder:
+    """Keeps one MCP ClientSession open in a background task (anyio cancel
+    scopes must be entered and exited in the same task, so the session lives in
+    its own task and callers borrow it). ClientSession multiplexes requests, so
+    concurrent calls share it safely. A broken or closed session is detected on
+    the next ensure() and transparently reopened."""
+
+    def __init__(self, mgr: "MCPManager", name: str):
+        self.mgr, self.name = mgr, name
+        self.session = None
+        self.task: Optional[asyncio.Task] = None
+        self._stop: Optional[asyncio.Event] = None
+        self._lock = asyncio.Lock()
+        self.last_used = 0.0
+        self.connects = 0
+
+    async def ensure(self):
+        """(session, fresh) — fresh=True when a new session had to be opened."""
+        self.last_used = time.monotonic()
+        if self.session is not None and self.task is not None and not self.task.done():
+            return self.session, False
+        async with self._lock:
+            if self.session is not None and self.task is not None and not self.task.done():
+                return self.session, False
+            ready: asyncio.Future = asyncio.get_running_loop().create_future()
+            self._stop = asyncio.Event()
+            self.task = asyncio.create_task(self._run(ready, self._stop))
+            session = await asyncio.wait_for(ready, timeout=30)
+            self.connects += 1
+            return session, True
+
+    async def _run(self, ready: asyncio.Future, stop: asyncio.Event) -> None:
+        try:
+            async with self.mgr._session(self.name) as session:
+                self.session = session
+                if not ready.done():
+                    ready.set_result(session)
+                await stop.wait()
+        except BaseException as e:                     # noqa: BLE001
+            if not ready.done():
+                ready.set_exception(e if isinstance(e, Exception) else RuntimeError(str(e)))
+        finally:
+            self.session = None
+
+    async def reset(self) -> None:
+        self.session = None
+        if self._stop is not None:
+            self._stop.set()
+        t, self.task = self.task, None
+        if t is not None:
+            try:
+                await asyncio.wait_for(t, timeout=5)
+            except BaseException:                      # noqa: BLE001
+                t.cancel()

@@ -476,6 +476,39 @@ const HELP = {
     for you today: <b>local</b> (self-hosted, electricity only), <b>subscription</b> (Claude via Meridian —
     it uses plan window, not dollars) or <b>metered</b> (pay-per-token API). The comparison table above
     prices <i>all</i> of these tokens as if they had been sent to each paid service.</p>`],
+  mcpmetrics: ["MCP metrics", `
+    <p>One row per MCP tool call, whoever made it — the <b>source</b>:</p>
+    <dl>
+    <dt>brain</dt><dd>the routing brain called a tool while deciding.</dd>
+    <dt>worker</dt><dd>a worker model's own tool loop (personas with MCP tools in agent mode).</dd>
+    <dt>direct</dt><dd>persona tools merged into a client's direct-mode request (Cline, OpenCode).</dd>
+    <dt>aggregator</dt><dd>an external client through the Foundry-MCP endpoint (AnythingLLM …), with the
+      endpoint scope and the client's User-Agent.</dd>
+    <dt>research / gateway</dt><dd>the background Research Agent / gateway admin.</dd>
+    </dl>
+    <p>Latency includes pacing waits and 429 retries. <b>Session reuse</b> is how often a pooled MCP session
+    skipped the connect + initialize handshake. <b>Result tokens</b> is what a tool's output adds to the
+    model's context — a tool that routinely returns 20k tokens is worth trimming.</p>`],
+  mcpcontext: ["Context budget", `
+    <p>Every tool a model is offered is sent as a JSON schema on <b>every</b> request, before any conversation.
+    This table estimates that cost (≈ characters ÷ 4) per tool set:</p>
+    <dl>
+    <dt>all Foundry MCP tools</dt><dd>what the aggregator's base endpoint (<code>/mcp/</code>) exposes — the
+      "57 tools enabled" AnythingLLM warns about.</dd>
+    <dt>profile</dt><dd>an aggregator profile endpoint (<code>/mcp/p/&lt;name&gt;/</code>) — a server subset.</dd>
+    <dt>persona</dt><dd>the tools attached to a persona — used by its worker / brain, merged into direct mode
+      (if enabled), and served at <code>/mcp/persona/&lt;Persona&gt;/</code> so an external client can load
+      exactly that set.</dd>
+    </dl>
+    <p>To keep context low, point AnythingLLM at a persona or profile endpoint instead of the base one, and
+    attach only the tools a persona really needs. <b>Heaviest tools</b> shows which schemas cost the most.</p>`],
+  mcptools: ["Per tool", `<p>Calls, failure rate (hover for the last error), latency percentiles, result size
+    in tokens, the content types it returns and who used it. Sort your attention by p95 and errors.</p>`],
+  mcpservers: ["Per server", `<p>Server-level health: failures, latency, how long opening a new session takes,
+    and how often a pooled session was reused. A low reuse % with a high new-session time means the server is
+    dropping connections — check its logs, or turn off <code>persistent_session</code> for it.</p>`],
+  mcpsources: ["Who is calling", `<p>Calls grouped by source, caller (persona · model, or aggregator scope) and
+    external client. Shows e.g. how much of SearXNG's load comes from AnythingLLM vs the research sweep.</p>`],
   routing: ["Routing modes", `
     <dl>
     <dt>auto (default)</dt><dd>Brain routing while the brain is configured and healthy. When the health probe
@@ -613,6 +646,7 @@ const TABS = {
   "Guardrails":     tabGuardrails,
   "Tools":          tabTools,
   "MCP Servers":    tabMCP,
+  "MCP Metrics":    tabMcpMetrics,
   "Research":       tabResearch,
   "Evals":          tabEvals,
   "Usage Log":      tabUsage,
@@ -625,7 +659,7 @@ const GROUPS = [
   ["Dashboard",   ["Live", "Performance", "Cost"]],
   ["Backends",    ["Pool", "Model Registry", "Host Admin"]],
   ["Routing",     ["Personas", "Guardrails"]],
-  ["Tools & MCP", ["Tools", "MCP Servers"]],
+  ["Tools & MCP", ["Tools", "MCP Servers", "MCP Metrics"]],
   ["Labs",        ["Research", "Evals"]],
   ["Logs",        ["Usage Log", "Events", "Dev Log"]],
 ];
@@ -1140,6 +1174,138 @@ async function tabPerformance() {
     $(id).insertAdjacentHTML("beforeend", `<option value="${esc(v)}">${esc(v === "__none__" ? "(unlabelled)" : v)}</option>`);
     $(id).value = v;
   });
+  await load();
+}
+
+// =========================================================================
+// MCP Metrics tab — every MCP call through Foundry + tool-definition context cost
+// =========================================================================
+const _MCPM = { hours: 24, source: "", server: "", ctx: 262144 };
+try { Object.assign(_MCPM, JSON.parse(localStorage.getItem("mcpmCtl") || "{}")); } catch (e) {}
+
+async function tabMcpMetrics() {
+  const winOpts = [[1, "1h"], [6, "6h"], [24, "24h"], [72, "3d"], [168, "7d"], [720, "30d"]];
+  const ch = (title, key, sub) =>
+    `<div class="card-h">${title}${key ? help(key) : ""}${sub ? `<span class="hint">— ${sub}</span>` : ""}</div>`;
+  $("#main").innerHTML = `
+    <h2 style="margin-top:0;display:flex;align-items:center">MCP metrics ${help("mcpmetrics")}
+      <span class="hint" id="mcpm-ts" style="margin:0 0 0 8px"></span></h2>
+    <p class="hint">Every MCP tool call that passes through Foundry — from the routing brain, worker tool loops,
+      persona tools in direct mode, the Foundry-MCP aggregator (AnythingLLM and other external clients), the research agent
+      and gateway admin — plus how much context each set of tool definitions costs.</p>
+    <div class="card" style="display:flex;gap:10px 16px;align-items:center;flex-wrap:wrap">
+      <label>Window <select id="mcpm-win">${winOpts.map(([h, l]) => `<option value="${h}"${h === _MCPM.hours ? " selected" : ""}>${l}</option>`).join("")}</select></label>
+      <label title="Who made the call">Source <select id="mcpm-src"><option value="">all sources</option></select></label>
+      <label>Server <select id="mcpm-srv"><option value="">all servers</option></select></label>
+      <label title="Your backend's context window, to show tool-definition cost as a % of it">context window
+        <input id="mcpm-ctx" type="number" min="1024" step="1024" style="width:90px" value="${_MCPM.ctx}"></label>
+      <button class="act" id="mcpm-refresh">Refresh</button>
+      <button class="act" id="mcpm-clear" title="Delete the recorded MCP call metrics (all, or the selected server)">Clear metrics…</button>
+    </div>
+    <div id="mcpm-tiles"></div>
+    <div class="card">${ch("Context budget — tool definitions", "mcpcontext", "tokens every request pays just to list the tools")}<div id="mcpm-ctxt"></div></div>
+    <div class="card">${ch("Per tool", "mcptools", "slowest / most-failing tools stand out here")}<div id="mcpm-tools"></div></div>
+    <div class="card">${ch("Per server", "mcpservers")}<div id="mcpm-servers"></div></div>
+    <div class="card">${ch("Who is calling", "mcpsources")}<div id="mcpm-sources"></div></div>
+    <div class="card">${ch("Calls over time")}<div id="mcpm-chart"></div></div>
+    <div class="card">${ch("Recent calls", null, "newest first")}
+      <label class="hint" style="margin:0"><input type="checkbox" id="mcpm-errs"> errors only</label>
+      <div id="mcpm-recent"></div></div>`;
+  const dash = '<span class="hint">—</span>';
+  const n = (v, u) => v == null ? dash : _num(v, u);
+  const K = v => v == null ? dash : (v >= 1000 ? (v / 1000).toFixed(1) + "k" : "" + v);
+  const srcPill = s => `<span class="pill" title="${esc({brain: "The routing brain called it while routing", worker: "A worker model's own tool loop", direct: "Persona tools merged into a client's direct-mode request (Cline/OpenCode)", aggregator: "An external client through the Foundry-MCP endpoint (e.g. AnythingLLM)", research: "The background Research Agent", gateway: "Gateway admin (Host → MCP)", other: "Other"}[s] || s)}">${esc(s)}</span>`;
+  const load = async () => {
+    _MCPM.hours = +$("#mcpm-win").value; _MCPM.source = $("#mcpm-src").value;
+    _MCPM.server = $("#mcpm-srv").value; _MCPM.ctx = +$("#mcpm-ctx").value || 262144;
+    try { localStorage.setItem("mcpmCtl", JSON.stringify(_MCPM)); } catch (e) {}
+    let d, c, r;
+    try {
+      [d, c, r] = await Promise.all([
+        api(`mcp-metrics?hours=${_MCPM.hours}&source=${encodeURIComponent(_MCPM.source)}&server=${encodeURIComponent(_MCPM.server)}`),
+        api(`mcp-context?ctx=${_MCPM.ctx}`),
+        api(`mcp-metrics/recent?limit=80&hours=${_MCPM.hours}&source=${encodeURIComponent(_MCPM.source)}&server=${encodeURIComponent(_MCPM.server)}&errors=${$("#mcpm-errs").checked ? 1 : 0}`)]);
+    } catch (e) { $("#mcpm-tiles").innerHTML = `<div class="card hint">Could not load: ${esc(e.message)}</div>`; return; }
+    $("#mcpm-ts").textContent = "· " + new Date().toLocaleTimeString();
+    const fill = (id, first, vals, cur) => { const el = $(id); el.innerHTML = first + vals.map(v => `<option value="${esc(v)}">${esc(v)}</option>`).join(""); if (cur && !vals.includes(cur)) el.insertAdjacentHTML("beforeend", `<option value="${esc(cur)}">${esc(cur)}</option>`); el.value = cur || ""; };
+    fill("#mcpm-src", '<option value="">all sources</option>', d.sources || [], _MCPM.source);
+    fill("#mcpm-srv", '<option value="">all servers</option>', d.servers || [], _MCPM.server);
+    const t = d.totals || {};
+    const tile = (label, v, hint, sub) => `<div class="tile" title="${esc(hint)}"><div class="t-lbl">${label}</div><div class="t-val">${v}</div>${sub ? `<div class="t-sub">${sub}</div>` : ""}</div>`;
+    const live = (d.live || {}).in_flight || [];
+    $("#mcpm-tiles").innerHTML = `<div class="card"><div class="tiles">`
+      + tile("calls", t.calls ?? 0, "MCP tool calls in the window")
+      + tile("errors", t.errors ? `<span style="color:var(--bad)">${t.errors}</span>` : "0", "Failed calls (tool error, transport failure, timeout)", `${t.error_pct ?? 0}%`)
+      + tile("p50 latency", n(t.p50_ms, "ms"), "Median end-to-end call time (incl. pacing and retries)")
+      + tile("p95 latency", n(t.p95_ms, "ms"), "95th percentile — the slow-case call time", t.max_ms != null ? `max ${_num(t.max_ms, "ms")}` : "")
+      + tile("timeouts", t.timeouts ?? 0, "Calls that hit the server's timeout_seconds")
+      + tile("429s", t.rate_limited ?? 0, "Calls that were rate-limited at least once (backoff applied)")
+      + tile("session reuse", n(t.reuse_pct, "%"), "Share of calls that reused a pooled MCP session (no connect + initialize handshake)", t.avg_connect_ms != null ? `new session ~${_num(t.avg_connect_ms, "ms")}` : "")
+      + tile("avg result", t.avg_result_tokens != null ? K(t.avg_result_tokens) + " tok" : dash, "Average size of a tool result in tokens — what each call adds to the model's context", t.total_result_tokens ? `${K(t.total_result_tokens)} tok total` : "")
+      + tile("running now", live.length, "Tool calls in flight right now", live.slice(0, 2).map(x => esc(x.server + "/" + x.tool) + " " + x.seconds + "s").join("<br>"))
+      + `</div></div>`;
+    // context budget
+    const sc = c.scopes || [];
+    $("#mcpm-ctxt").innerHTML = sc.length
+      ? `<table><tr><th>scope</th><th title="Where this tool set is used">used by</th><th>tools</th><th title="Tokens the tool definitions add to every request">definition tokens</th><th title="Share of your context window">of context</th><th title="The biggest tool definitions in this scope">heaviest tools</th></tr>`
+        + sc.map(x => `<tr><td class="nw"><b>${esc(x.name)}</b> <span class="hint">${esc(x.kind)}</span></td>
+            <td class="hint">${esc(x.where)}</td><td class="nw">${x.tools}</td><td class="nw">${K(x.tokens)}</td>
+            <td class="nw">${x.pct == null ? dash : `<span class="meter ${x.pct > 10 ? "bad" : x.pct > 4 ? "warn" : ""}"><span style="width:${Math.min(100, x.pct * 5)}%"></span></span> ${x.pct}%`}</td>
+            <td class="hint">${(x.heaviest || []).slice(0, 3).map(h => `${esc(h.tool)} (${K(h.tokens)})`).join(", ")}</td></tr>`).join("") + `</table>`
+      : '<span class="hint">No MCP tools synced yet.</span>';
+    // per tool
+    const bt = d.by_tool || [];
+    const errCell = x => x.errors ? `<span class="pill bad" title="${esc(x.last_error || "")}">${x.errors} · ${x.error_pct}%</span>` : '<span class="hint">0</span>';
+    $("#mcpm-tools").innerHTML = bt.length
+      ? `<table><tr><th>tool</th><th>server</th><th>calls</th><th title="Failures · failure rate (hover for the last error)">errors</th><th>p50</th><th>p95</th><th>max</th><th title="Average / largest result, in tokens of model context">result tok</th><th title="Content returned (text, image, audio, resource, structured)">content</th><th>timeouts</th><th>429</th><th title="Who called it">sources</th><th>last used</th></tr>`
+        + bt.map(x => `<tr><td class="nw mono">${esc(x.tool)}</td><td class="nw">${esc(x.server)}</td><td class="nw">${x.calls}</td><td class="nw">${errCell(x)}</td>
+            <td class="nw">${n(x.p50_ms, "ms")}</td><td class="nw">${n(x.p95_ms, "ms")}</td><td class="nw">${n(x.max_ms, "ms")}</td>
+            <td class="nw">${K(x.avg_result_tokens)} <span class="hint">/ ${K(x.max_result_tokens)}</span></td>
+            <td class="nw hint">${esc((x.content_types || []).join(", "))}</td>
+            <td class="nw">${x.timeouts || '<span class="hint">0</span>'}</td><td class="nw">${x.rate_limited || '<span class="hint">0</span>'}</td>
+            <td class="nw">${(x.sources || []).map(srcPill).join(" ")}</td><td class="nw">${_tsLabel(x.last_used)}</td></tr>`).join("") + `</table>`
+      : '<span class="hint">No MCP calls in this window.</span>';
+    const bs = d.by_server || [];
+    $("#mcpm-servers").innerHTML = bs.length
+      ? `<table><tr><th>server</th><th>calls</th><th>errors</th><th>p50</th><th>p95</th><th>tools used</th><th title="Average time to open a new MCP session">new session</th><th title="Share of calls that reused a pooled session">reuse</th><th>timeouts</th><th>429</th></tr>`
+        + bs.map(x => `<tr><td class="nw"><b>${esc(x.server)}</b></td><td class="nw">${x.calls}</td><td class="nw">${errCell(x)}</td>
+            <td class="nw">${n(x.p50_ms, "ms")}</td><td class="nw">${n(x.p95_ms, "ms")}</td><td class="nw">${x.tools_used}</td>
+            <td class="nw">${n(x.avg_connect_ms, "ms")}</td><td class="nw">${n(x.reuse_pct, "%")}</td>
+            <td class="nw">${x.timeouts || '<span class="hint">0</span>'}</td><td class="nw">${x.rate_limited || '<span class="hint">0</span>'}</td></tr>`).join("") + `</table>`
+      : '<span class="hint">—</span>';
+    const bo = d.by_source || [];
+    $("#mcpm-sources").innerHTML = bo.length
+      ? `<table><tr><th>source</th><th title="Persona / aggregator scope / model that owned the loop">caller</th><th title="External client (User-Agent), for aggregator calls">client</th><th>calls</th><th>errors</th><th>p50</th><th>p95</th><th>avg result tok</th><th>last</th></tr>`
+        + bo.map(x => `<tr><td class="nw">${srcPill(x.source)}</td><td class="nw">${esc(x.caller || "")}</td><td class="hint" style="max-width:220px;overflow:hidden;text-overflow:ellipsis" title="${esc(x.client || "")}">${esc(x.client || "")}</td>
+            <td class="nw">${x.calls}</td><td class="nw">${errCell(x)}</td><td class="nw">${n(x.p50_ms, "ms")}</td><td class="nw">${n(x.p95_ms, "ms")}</td>
+            <td class="nw">${K(x.avg_result_tokens)}</td><td class="nw">${_tsLabel(x.last_used)}</td></tr>`).join("") + `</table>`
+      : '<span class="hint">—</span>';
+    $("#mcpm-chart").innerHTML = lineChart(d.series || [],
+      [{ key: "calls", color: _css("--accent", "#e8833a"), label: "calls / hour" },
+       { key: "errors", color: _css("--bad", "#e0574f"), label: "errors / hour" }], {})
+      + lineChart(d.series || [], [{ key: "p50_ms", color: _css("--ok", "#3fb950"), label: "p50 ms" },
+                                   { key: "p95_ms", color: _css("--warn", "#e0a441"), label: "p95 ms" }], { yUnit: "ms" });
+    const rc = r.calls || [];
+    $("#mcpm-recent").innerHTML = rc.length
+      ? `<table><tr><th>time</th><th>source</th><th>caller</th><th>tool</th><th>result</th><th>duration</th><th title="connect ms (new session) · pacing wait">conn · pace</th><th title="session: reused / new / per-call">session</th><th>tokens</th><th>content</th></tr>`
+        + rc.map(x => `<tr><td class="nw">${_tsLabel(x.ts)}</td><td class="nw">${srcPill(x.source)}</td>
+            <td class="nw hint" style="max-width:180px;overflow:hidden;text-overflow:ellipsis" title="${esc((x.caller || "") + (x.client ? " · " + x.client : ""))}">${esc(x.caller || "")}</td>
+            <td class="nw mono">${esc(x.server)}/${esc(x.tool)}</td>
+            <td>${x.ok ? '<span class="pill ok">ok</span>' : `<span class="pill bad" title="${esc(x.error || "")}">${x.timed_out ? "timeout" : "error"}</span> <span class="hint">${esc((x.error || "").slice(0, 90))}</span>`}${x.attempts > 1 ? ` <span class="hint" title="429 retries">×${x.attempts}</span>` : ""}</td>
+            <td class="nw">${_num(x.duration_ms, "ms")}</td>
+            <td class="nw hint">${x.connect_ms ? _num(x.connect_ms, "ms") : "0"} · ${x.pace_ms ? _num(x.pace_ms, "ms") : "0"}</td>
+            <td class="nw hint">${esc(x.session || "")}</td><td class="nw">${K(x.result_tokens)}</td><td class="nw hint">${esc(x.content_types || "")}</td></tr>`).join("") + `</table>`
+      : '<span class="hint">No calls.</span>';
+    wrapTables();
+  };
+  ["#mcpm-win", "#mcpm-src", "#mcpm-srv", "#mcpm-ctx", "#mcpm-errs"].forEach(id => $(id).onchange = load);
+  $("#mcpm-refresh").onclick = load;
+  $("#mcpm-clear").onclick = async () => {
+    const srv = $("#mcpm-srv").value;
+    if (!confirm(`Delete recorded MCP call metrics for ${srv || "ALL servers"}?`)) return;
+    try { const r = await api("mcp-metrics/clear", {method: "POST", body: {server: srv}}); toast(`Cleared ${r.removed} call(s)`); load(); }
+    catch (e) { toast(e.message, true); }
+  };
   await load();
 }
 
@@ -2514,7 +2680,9 @@ async function tabPersonas() {
         <label title="Load-aware escalation (direct / Cline / AnythingLLM-agent path): when the local worker this persona would use is already busy (a call in flight), route to a PAID model instead — still gated by the usage/cost guardrail, so it only escalates while your quota/spend allows and otherwise queues on local. Great for keeping a busy local from bottlenecking while sparing Claude tokens when idle.">escalate when local busy</label>
         <input type="checkbox" id="pe-escalate">
         <label title="When Foundry runs the tool loop (agent / worker-owns-tools), append a compact 'Tool activity' trail (each tool → result excerpt) to the answer sent to the client. Makes the backend's tool work visible to the frontend and, crucially, keeps values like an async job id in the transcript so a follow-up turn ('is it done?') can use it. Also enables a poll-guard: a repeated identical status check stops looping and returns the current status instead of burning steps.">expose tool trail</label>
-        <input type="checkbox" id="pe-trail"></div>
+        <input type="checkbox" id="pe-trail">
+        <label title="Direct mode = a client that sends its OWN tools (Cline, OpenCode, Kilo). When ON and this persona has MCP tools attached above, those tools are offered to the model ALONGSIDE the client's tools: Foundry runs its own tool calls and keeps going; the client's tool calls go back to the client as usual. Leave the persona's tool list empty (or turn this off) to keep direct mode client-tools-only — e.g. a Cline persona that uses Cline's own MCP servers and wants minimum context.">persona tools in direct mode</label>
+        <input type="checkbox" id="pe-mcp-direct"></div>
       <div class="row"><label title="Optional JSON overriding the multi-signal ranking weights for this persona. Signals: primary (requested category), tool_calling, adequacy (observed outcome-judge quality), latency (warm tokens/sec). e.g. a speed-sensitive persona: {&quot;latency&quot;: 0.5}. Empty = defaults.">selection_weights (JSON obj)</label>
         <input id="pe-weights" size="50" value="{}" placeholder='{"latency": 0.4, "adequacy": 0.8}'></div>
       <div class="row"><label title="JSON object: client name → compatibility note (how that client experiences this persona). Documentation only — surfaced as badges in the list above. Don't fork a persona per client; note the differences here instead.">client_compat (JSON obj)</label>
@@ -2566,6 +2734,7 @@ async function tabPersonas() {
     prefer_loaded: $("#pe-loaded").checked ? 1 : 0,
     escalate_when_local_busy: $("#pe-escalate").checked ? 1 : 0,
     expose_tool_trail: $("#pe-trail").checked ? 1 : 0,
+    mcp_tools_in_direct: $("#pe-mcp-direct").checked ? 1 : 0,
     selection_weights: JSON.parse($("#pe-weights").value || "{}"),
     review_enabled: $("#pe-review").checked ? 1 : 0,
     review_model: $("#pe-review-model").value || null,
@@ -2814,6 +2983,7 @@ window.editPersona = name => {
   $("#pe-force-effort").checked = !!p.force_reasoning_effort;
   $("#pe-escalate").checked = !!p.escalate_when_local_busy;
   $("#pe-trail").checked = !!p.expose_tool_trail;
+  $("#pe-mcp-direct").checked = p.mcp_tools_in_direct == null ? true : !!p.mcp_tools_in_direct;
 };
 
 /* ----------------------------------------------------------------- tools -- */

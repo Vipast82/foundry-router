@@ -309,6 +309,10 @@ class Database:
             ("service_pricing", "source", "TEXT"),
             ("service_pricing", "source_id", "TEXT"),
             ("service_pricing", "last_checked", "TEXT"),
+            # Direct mode (client tools, e.g. Cline/OpenCode): also offer the
+            # persona's attached MCP tools, run by Foundry. Only matters when
+            # tools are attached; 0 = keep direct mode client-tools-only.
+            ("personas", "mcp_tools_in_direct", "INTEGER DEFAULT 1"),
             ("perf_samples", "run_label", "TEXT"),
             ("perf_samples", "timing_src", "TEXT"),
             ("perf_samples", "prefill_tokens", "INTEGER"),

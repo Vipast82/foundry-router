@@ -85,7 +85,7 @@ async def test_heartbeat_emits_progress_with_token():
     agg = _hb_agg(1)
     srv, sess = _fake_server("tok-1")
     out = await agg._dispatch_with_heartbeat(srv, "slow__gen", {}, None, 0.05)
-    assert out == "URL"
+    assert out.text == "URL"          # full ToolResult (blocks kept for the client)
     assert len(sess.notes) >= 2                    # ~4 ticks over 0.25s at 0.05
     assert all(n[0] == "tok-1" for n in sess.notes)
     assert "still working" in sess.notes[0][2]
@@ -95,7 +95,7 @@ async def test_heartbeat_no_token_still_completes():
     agg = _hb_agg(1)
     srv, sess = _fake_server(None)                 # client sent no progressToken
     out = await agg._dispatch_with_heartbeat(srv, "slow__gen", {}, None, 0.05)
-    assert out == "URL"
+    assert out.text == "URL"          # full ToolResult (blocks kept for the client)
     assert sess.notes == []                        # nothing sent, but no crash
 
 
