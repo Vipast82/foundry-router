@@ -355,6 +355,19 @@ class InternalPool(BackendPool):
         finally:
             self._inflight_exit(model)
 
+    async def embed(self, model: str, inputs: list[str], **kw) -> tuple[dict, str]:
+        """Embeddings with the same priority-ordered failover as chat()."""
+        candidates = self._candidates(model)
+        if not candidates:
+            raise AllBackendsFailed(f"no backend serves model {model!r}")
+        errors = []
+        for s in candidates:
+            try:
+                return await s.protocol.embed(model, inputs, **kw), s.config.name
+            except (httpx.HTTPError, ProtocolError, OSError, ExceptionGroup) as e:
+                errors.append(f"{s.config.name}: {describe_exception(e)}")
+        raise AllBackendsFailed(f"embedding failed for {model!r}: " + " | ".join(errors))
+
     # -- convenience -------------------------------------------------------------------
 
     def backends_of_type(self, backend_type: str) -> list[BackendState]:

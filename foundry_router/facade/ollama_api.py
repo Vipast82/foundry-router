@@ -64,7 +64,11 @@ def _canonical_messages(raw: list[dict]) -> list[dict]:
                     # field here silently blinded the whole app (found live).
                     **({"images": m["images"]} if m.get("images") else {}),
                     **({"tool_calls": m["tool_calls"]} if m.get("tool_calls") else {}),
-                    **({"tool_call_id": m["tool_call_id"]} if m.get("tool_call_id") else {})})
+                    **({"tool_call_id": m["tool_call_id"]} if m.get("tool_call_id") else {}),
+                    # Ollama names the tool a result belongs to with `tool_name`
+                    # (canonical `name`, which the Ollama adapter maps back).
+                    **({"name": m.get("tool_name") or m.get("name")}
+                       if role == "tool" and (m.get("tool_name") or m.get("name")) else {})})
     return out
 
 
@@ -83,7 +87,7 @@ def _model_not_found(name: str) -> JSONResponse:
 # Health / discovery endpoints                                                #
 # --------------------------------------------------------------------------- #
 
-@router.get("/")
+@router.api_route("/", methods=["GET", "HEAD"])
 async def root() -> PlainTextResponse:
     # Byte-for-byte what a real Ollama answers — several clients string-match it.
     return PlainTextResponse("Ollama is running")
@@ -108,8 +112,92 @@ async def tags(request: Request) -> dict:
 
 
 @router.get("/api/ps")
-async def ps() -> dict:
-    return {"models": []}
+async def ps(request: Request) -> dict:
+    """Models resident on the backends right now, in Ollama's /api/ps shape
+    (name/model/size/size_vram/expires_at/context_length/details). These are
+    the RAW backend models — the thing actually occupying VRAM — so clients
+    that show "running models" (Open WebUI) see the real fleet state. Backends
+    that report no VRAM bytes (llama.cpp / vLLM) show size_vram 0."""
+    svc = _svc(request)
+    try:
+        detail = await svc.pool.loaded_models_detail()
+    except Exception:
+        detail = []
+    out = []
+    for d in detail:
+        name = d.get("model")
+        if not name:
+            continue
+        out.append({"name": name, "model": name,
+                    "size": int(d.get("size") or d.get("size_vram") or 0),
+                    "digest": d.get("digest") or "",
+                    "details": d.get("details") or {},
+                    "expires_at": d.get("expires_at") or "",
+                    "size_vram": int(d.get("size_vram") or 0),
+                    "context_length": int(d.get("context") or 0),
+                    "backend": d.get("backend") or ""})
+    return {"models": out}
+
+
+def _embed_inputs(v) -> list[str]:
+    if isinstance(v, str):
+        return [v]
+    if isinstance(v, list):
+        return [x if isinstance(x, str) else json.dumps(x) for x in v]
+    return []
+
+
+async def _do_embed(svc, body: dict, inputs: list[str]):
+    """Shared by /api/embed and /api/embeddings: route to the backend serving
+    the (raw) embedding model with the same failover as chat. Personas are
+    chat policies, not embedders, so only real backend model names resolve."""
+    from ..usage import RequestLogger
+    model = body.get("model") or ""
+    if svc.pool.backend_info(model) is None:
+        return None, _model_not_found(model)
+    logger = RequestLogger(svc.db, "", model, "embed",
+                           (inputs[0] if inputs else "")[:200])
+    t0 = time.monotonic_ns()
+    try:
+        res, backend = await svc.pool.embed(
+            model, inputs, options=body.get("options") or None,
+            keep_alive=body.get("keep_alive"), truncate=body.get("truncate"),
+            dimensions=body.get("dimensions"))
+    except AllBackendsFailed as e:
+        logger.finish("error", str(e))
+        return None, JSONResponse({"error": str(e)}, status_code=502)
+    logger.record_model_call(model, backend, res.get("prompt_eval_count") or 0, 0, 0.0)
+    logger.finish("ok")
+    res["total_duration"] = res.get("total_duration") or (time.monotonic_ns() - t0)
+    return res, None
+
+
+@router.post("/api/embed")
+async def embed(request: Request):
+    """Ollama /api/embed — `input` is a string or a list; returns
+    {"model", "embeddings", "total_duration", "load_duration", "prompt_eval_count"}.
+    Works against Ollama, llama.cpp (--embeddings) and vLLM embedding models."""
+    svc = _svc(request)
+    body = await request.json()
+    res, err = await _do_embed(svc, body, _embed_inputs(body.get("input")))
+    if err is not None:
+        return err
+    return {"model": body.get("model"), "embeddings": res["embeddings"],
+            "total_duration": res["total_duration"],
+            "load_duration": res.get("load_duration") or 0,
+            "prompt_eval_count": res.get("prompt_eval_count") or 0}
+
+
+@router.post("/api/embeddings")
+async def embeddings_legacy(request: Request):
+    """Ollama's legacy single-prompt endpoint: {"prompt"} -> {"embedding"}."""
+    svc = _svc(request)
+    body = await request.json()
+    res, err = await _do_embed(svc, body, _embed_inputs(body.get("prompt") or ""))
+    if err is not None:
+        return err
+    embs = res["embeddings"]
+    return {"embedding": embs[0] if embs else []}
 
 
 def _persona_context_length(svc, persona: dict):
@@ -189,6 +277,41 @@ def _persona_capabilities(svc, persona: dict) -> list[str]:
     return [c for c in _CAP_ORDER if c in caps]
 
 
+async def _raw_show(svc, name: str):
+    """/api/show for a RAW backend model (passthrough by name): an Ollama
+    backend's own /api/show is proxied verbatim; for llama.cpp / vLLM /
+    Claude a minimal Ollama-shaped answer is built from the registry (context
+    length + capabilities), so clients sizing their token budget still work."""
+    info = svc.pool.backend_info(name)
+    if info is None:
+        return None
+    if info.get("type") == "ollama":
+        try:
+            r = await svc.http.post(f"{info['url'].rstrip('/')}/api/show",
+                                    json={"model": name}, timeout=15)
+            if r.status_code < 400:
+                return r.json()
+        except Exception:
+            pass
+    meta = svc.registry.get(name) or {}
+    try:
+        caps = json.loads(meta.get("capabilities") or "[]") or []
+    except (TypeError, ValueError):
+        caps = []
+    arch = info.get("flavor") or info.get("type") or "remote"
+    model_info: dict = {"general.architecture": arch}
+    if meta.get("context_length"):
+        model_info["general.context_length"] = int(meta["context_length"])
+        model_info[f"{arch}.context_length"] = int(meta["context_length"])
+    return {"modelfile": f"# served by backend {info.get('name')} ({arch})\n",
+            "parameters": "", "template": "{{ .Prompt }}",
+            "details": {"parent_model": "", "format": "", "family": arch,
+                        "families": [arch], "parameter_size": "",
+                        "quantization_level": ""},
+            "model_info": model_info,
+            "capabilities": sorted(set(caps) | {"completion", "tools"})}
+
+
 @router.post("/api/show")
 async def show(request: Request) -> JSONResponse:
     svc = _svc(request)
@@ -196,7 +319,8 @@ async def show(request: Request) -> JSONResponse:
     name = body.get("model") or body.get("name") or ""
     persona = svc.personas.get(name)
     if persona is None:
-        return _model_not_found(name)
+        raw = await _raw_show(svc, name)
+        return JSONResponse(raw) if raw is not None else _model_not_found(name)
     return JSONResponse(tr.show_response(
         persona, context_length=_persona_context_length(svc, persona),
         capabilities=_persona_capabilities(svc, persona)))
@@ -209,13 +333,21 @@ async def show(request: Request) -> JSONResponse:
 @router.post("/api/chat")
 async def chat(request: Request):
     svc = _svc(request)
-    body = await request.json()
+    return await _chat_dispatch(svc, await request.json())
+
+
+async def _chat_dispatch(svc, body: dict):
+    """/api/chat semantics for an already-parsed body — shared with
+    /api/generate, which adapts its prompt into a chat so it gets the exact
+    same routing, telemetry and response stats."""
     model_name = body.get("model") or ""
     stream = body.get("stream", True)
     client_tools = body.get("tools") or None
     messages = _canonical_messages(body.get("messages") or [])
     options = body.get("options") or None
     user_text = _last_user_text(messages)
+    # Ollama structured output: "json" or a JSON schema object.
+    client_format = body.get("format") or None
     # Client-set reasoning effort (Q2 passthrough): Ollama-native top-level
     # `think`, or an OpenAI-style `reasoning_effort` (top-level or in options).
     # Highest precedence when resolving the worker's think level. Logged so the
@@ -233,7 +365,9 @@ async def chat(request: Request):
     if persona is None:
         if svc.pool.backend_info(model_name) is not None:
             return await _passthrough_chat(svc, model_name, messages, client_tools,
-                                           options, stream, user_text)
+                                           options, stream, user_text,
+                                           think=client_think, fmt=client_format,
+                                           keep_alive=body.get("keep_alive"))
         return _model_not_found(model_name)
 
     exec_mode = persona.get("execution_mode") or "agent"
@@ -247,7 +381,8 @@ async def chat(request: Request):
     if client_tools or exec_mode == "direct":
         return await _direct_dispatch_chat(svc, persona, model_name, messages,
                                            client_tools, options, stream, user_text,
-                                           client_think=client_think)
+                                           client_think=client_think,
+                                           client_format=client_format)
 
     # Pipeline personas (Foundry-Coding) run the Prepare->Execute->Check
     # mode instead of the generic brain loop — a distinct execution mode,
@@ -403,7 +538,18 @@ async def _agent_events_to_chat_chunks(svc, ctx: RequestContext, model_name: str
         except Exception:
             log.exception("semantic cache store failed")
     yield tr.chat_chunk(model_name, "", done=True,
-                        stats={"total_duration_ns": time.monotonic_ns() - t0})
+                        stats=_logger_stats(ctx.logger, time.monotonic_ns() - t0))
+
+
+def _logger_stats(logger, total_ns: int) -> dict:
+    """Final-chunk stats for a routed (agent / pipeline / fallback) request:
+    the tokens of every model call it made. A routed turn can span several
+    models (brain + worker + review), so there's no single decode duration —
+    eval_duration falls back to wall time, i.e. an honest end-to-end rate."""
+    used = getattr(logger, "models_used", None) or []
+    return {"prompt_tokens": sum(int(m.get("prompt_tokens") or 0) for m in used),
+            "completion_tokens": sum(int(m.get("completion_tokens") or 0) for m in used),
+            "total_duration_ns": total_ns}
 
 
 async def _fallback_chunks(svc, ctx: RequestContext, model_name: str):
@@ -422,15 +568,25 @@ async def _fallback_chunks(svc, ctx: RequestContext, model_name: str):
     yield tr.chat_chunk(model_name, "",
                         thinking=f"Routing brain unreachable — static fallback rule "
                                  f"selected {fb_model} (no model call needed).\n")
+    backend = (svc.pool.backend_info(fb_model) or {}).get("name") or "fallback"
+    t_fb = time.monotonic()
+    ttft_ms = None
     try:
-        ptoks = ctoks = 0
         async for chunk in svc.pool.chat_stream(fb_model, ctx.messages):
             if chunk.get("done"):
-                ptoks = chunk.get("prompt_tokens", 0)
-                ctoks = chunk.get("completion_tokens", 0)
-            elif chunk.get("content"):
-                yield tr.chat_chunk(model_name, chunk["content"])
-        ctx.logger.record_model_call(fb_model, "fallback", ptoks, ctoks, 0.0)
+                res = ChatResult.from_done_frame(chunk)
+                ctx.logger.record_model_call(fb_model, backend, res.prompt_tokens,
+                                             res.completion_tokens, 0.0)
+                telemetry.record_call(
+                    svc.db, svc.registry, model=fb_model, backend=backend, result=res,
+                    persona=ctx.logger.persona, mode="fallback", ttft_ms=ttft_ms,
+                    wall_ms=(time.monotonic() - t_fb) * 1000.0)
+                continue
+            if (chunk.get("content") or chunk.get("thinking")) and ttft_ms is None:
+                ttft_ms = (time.monotonic() - t_fb) * 1000.0
+            if chunk.get("content") or chunk.get("thinking"):
+                yield tr.chat_chunk(model_name, chunk.get("content") or "",
+                                    thinking=chunk.get("thinking") or None)
     except AllBackendsFailed as e:
         yield tr.chat_chunk(model_name, f"\n[foundry-router] fallback failed too: {e}")
 
@@ -446,9 +602,11 @@ async def _agent_chat(svc, persona, model_name, messages, stream, user_text,
     # lands in `content`.
     parts: list[str] = []
     thinking_parts: list[str] = []
+    final: dict = {}
     async for raw in _agent_events_to_chat_chunks(svc, ctx, model_name):
         obj = json.loads(raw)
         if obj.get("done"):
+            final = obj
             continue
         msg = obj["message"]
         if msg.get("thinking"):
@@ -458,9 +616,10 @@ async def _agent_chat(svc, persona, model_name, messages, stream, user_text,
     message: dict = {"role": "assistant", "content": "".join(parts)}
     if thinking_parts:
         message["thinking"] = "".join(thinking_parts)
-    return JSONResponse({"model": model_name, "created_at": tr.now_iso(),
-                         "message": message,
-                         "done": True, "done_reason": "stop", **tr._stats(None)})
+    body = {"model": model_name, "created_at": tr.now_iso(), "message": message}
+    body.update({k: v for k, v in final.items() if k not in body})
+    body["done"] = True
+    return JSONResponse(body)
 
 
 def _think_for(svc, model_id: str, persona=None, client_think=None):
@@ -641,7 +800,8 @@ def _jl_list(v) -> list:
 # ---- direct dispatch (client brought its own tools) ------------------------------
 
 async def _direct_dispatch_chat(svc, persona, model_name, messages, client_tools,
-                                options, stream, user_text, client_think=None):
+                                options, stream, user_text, client_think=None,
+                                client_format=None):
     # DESIGN DECISION: when a coding client sends its own tool definitions
     # (Kilo/Cline agent loops), the routing agent would have to interleave two
     # tool protocols in one conversation. Instead the persona's static policy
@@ -714,7 +874,9 @@ async def _direct_dispatch_chat(svc, persona, model_name, messages, client_tools
     options = sampling.resolve_options(brain_cfg.sampling_defaults, persona, options)
     # Structured output would force JSON and break a tool-calling turn, so only
     # apply the persona's format when the client isn't driving its own tools.
-    fmt = None if client_tools else sampling.resolve_format(persona)
+    # A client-sent Ollama `format` (json / JSON schema) wins over the persona's.
+    fmt = None if client_tools else (client_format if client_format is not None
+                                     else sampling.resolve_format(persona))
     # Bound the Ollama worker's loaded context to the persona's context_window
     # (capped at the model's trained max). The agent path already did this; the
     # DIRECT path did not, so a client like Cline sending a huge prompt made
@@ -773,9 +935,7 @@ async def _direct_dispatch_chat(svc, persona, model_name, messages, client_tools
     def _finalize(res):
         tool_calls = [{"function": {"name": tc["name"], "arguments": tc["arguments"]}}
                       for tc in res.tool_calls] or None
-        return tool_calls, {"prompt_tokens": res.prompt_tokens,
-                            "completion_tokens": res.completion_tokens,
-                            "total_duration_ns": time.monotonic_ns() - t0}
+        return tool_calls, tr.result_stats(res, time.monotonic_ns() - t0)
 
     # LIVE STREAMING (opt-in): forward the worker's tokens as they generate — each
     # chunk is real proof the backend is working, resets the read timeout (no
@@ -831,8 +991,8 @@ async def _direct_dispatch_chat(svc, persona, model_name, messages, client_tools
                             max_tokens=brain_cfg.worker_max_tokens)
                         yield tr.chat_chunk(
                             model_name, "", done=True, tool_calls=tcs_out,
-                            stats={"prompt_tokens": pt, "completion_tokens": ct,
-                                   "total_duration_ns": time.monotonic_ns() - t0})
+                            stats=tr.result_stats(ChatResult.from_done_frame(chunk),
+                                                  time.monotonic_ns() - t0))
                     else:
                         if chunk.get("tool_calls"):
                             acc_tools.extend(chunk["tool_calls"])   # deliver at done
@@ -870,8 +1030,7 @@ async def _direct_dispatch_chat(svc, persona, model_name, messages, client_tools
         if tool_calls:
             msg["tool_calls"] = tool_calls
         return JSONResponse({"model": model_name, "created_at": tr.now_iso(),
-                             "message": msg, "done": True, "done_reason": "stop",
-                             **tr._stats(stats)})
+                             "message": msg, "done": True, **tr._stats(stats)})
 
     async def gen():
         # KEEP-ALIVE: the worker call can run for MINUTES (cold-loading a large
@@ -926,77 +1085,94 @@ async def _direct_dispatch_chat(svc, persona, model_name, messages, client_tools
 # ---- passthrough (raw backend model requested by name) ----------------------------
 
 async def _passthrough_chat(svc, model_name, messages, client_tools, options,
-                            stream, user_text):
+                            stream, user_text, think=None, fmt=None, keep_alive=None):
+    """A raw backend model requested by name: no routing, the client's request
+    forwarded as-is — tools, options, think, format and keep_alive included —
+    with the backend's real stats (durations, done_reason) handed back and the
+    call recorded in the Live / Performance telemetry."""
     logger = RequestLogger(svc.db, "", model_name, "passthrough", user_text)
-    try:
-        if client_tools or not stream:
+    max_tokens = svc.config_store.config.agent_brain.worker_max_tokens
+    t0 = time.monotonic_ns()
+    if not stream:
+        try:
             result, backend = await svc.pool.chat(
                 model_name, messages, tools=client_tools, options=options,
-                max_tokens=svc.config_store.config.agent_brain.worker_max_tokens)
-            logger.record_model_call(model_name, backend, result.prompt_tokens,
-                                     result.completion_tokens,
-                                     estimate_cost_usd(svc.registry.get(model_name),
-                                                       result.prompt_tokens,
-                                                       result.completion_tokens))
-            telemetry.record_call(
-                svc.db, svc.registry, model=model_name, backend=backend, result=result,
-                persona=logger.persona, mode=logger.mode, wall_ms=logger.elapsed_ms,
-                max_tokens=svc.config_store.config.agent_brain.worker_max_tokens)
-            logger.finish("ok")
-            tool_calls = [{"function": {"name": tc["name"], "arguments": tc["arguments"]}}
-                          for tc in result.tool_calls] or None
-            stats = {"prompt_tokens": result.prompt_tokens,
-                     "completion_tokens": result.completion_tokens}
-            if not stream:
-                msg: dict = {"role": "assistant", "content": result.content}
-                if tool_calls:
-                    msg["tool_calls"] = tool_calls
-                return JSONResponse({"model": model_name, "created_at": tr.now_iso(),
-                                     "message": msg, "done": True,
-                                     "done_reason": "stop", **tr._stats(stats)})
+                max_tokens=max_tokens, keep_alive=keep_alive, think=think, fmt=fmt)
+        except AllBackendsFailed as e:
+            logger.finish("error", str(e))
+            return JSONResponse({"error": str(e)}, status_code=502)
+        logger.record_model_call(model_name, backend, result.prompt_tokens,
+                                 result.completion_tokens,
+                                 estimate_cost_usd(svc.registry.get(model_name),
+                                                   result.prompt_tokens,
+                                                   result.completion_tokens))
+        telemetry.record_call(
+            svc.db, svc.registry, model=model_name, backend=backend, result=result,
+            persona=logger.persona, mode=logger.mode, wall_ms=logger.elapsed_ms,
+            max_tokens=max_tokens)
+        logger.finish("ok")
+        msg: dict = {"role": "assistant", "content": result.content}
+        if result.thinking:
+            msg["thinking"] = result.thinking
+        tool_calls = [{"function": {"name": tc["name"], "arguments": tc["arguments"]}}
+                      for tc in result.tool_calls]
+        if tool_calls:
+            msg["tool_calls"] = tool_calls
+        return JSONResponse({"model": model_name, "created_at": tr.now_iso(),
+                             "message": msg, "done": True,
+                             **tr._stats(tr.result_stats(result, time.monotonic_ns() - t0))})
 
-            async def gen_one():
-                yield tr.chat_chunk(model_name, result.content, tool_calls=tool_calls)
-                yield tr.chat_chunk(model_name, "", done=True, stats=stats)
-            return StreamingResponse(gen_one(), media_type="application/x-ndjson")
-
-        async def gen():
-            status, error = "ok", ""
-            # The backend that will actually serve the stream (first candidate) —
-            # logged instead of a placeholder so per-backend perf splits work.
-            backend_name = (svc.pool.backend_info(model_name) or {}).get("name") or ""
-            ttft_ms = None
-            try:
-                async for chunk in svc.pool.chat_stream(model_name, messages,
-                                                        options=options):
-                    if chunk.get("done"):
-                        logger.record_model_call(model_name, backend_name,
-                                                 chunk.get("prompt_tokens", 0),
-                                                 chunk.get("completion_tokens", 0), 0.0)
-                        # Perf + spec/cache telemetry on the raw-passthrough path
-                        # too, so a model driven by name (not via a persona) still
-                        # shows decode/prefill tok/s, draft acceptance and cache
-                        # hit in the live view.
-                        telemetry.record_call(
-                            svc.db, svc.registry, model=model_name,
-                            backend=backend_name,
-                            result=ChatResult.from_done_frame(chunk),
-                            persona=logger.persona, mode=logger.mode,
-                            ttft_ms=ttft_ms, wall_ms=logger.elapsed_ms)
-                    elif chunk.get("content"):
-                        if ttft_ms is None:
-                            ttft_ms = logger.elapsed_ms
-                        yield tr.chat_chunk(model_name, chunk["content"])
-            except AllBackendsFailed as e:
-                status, error = "error", str(e)
-                yield tr.chat_chunk(model_name, f"\n[foundry-router] {e}")
-            finally:
-                logger.finish(status, error)
-            yield tr.chat_chunk(model_name, "", done=True)
-        return StreamingResponse(gen(), media_type="application/x-ndjson")
-    except AllBackendsFailed as e:
-        logger.finish("error", str(e))
-        return JSONResponse({"error": str(e)}, status_code=502)
+    async def gen():
+        status, error = "ok", ""
+        # The backend that will actually serve the stream (first candidate) —
+        # logged instead of a placeholder so per-backend perf splits work.
+        backend_name = (svc.pool.backend_info(model_name) or {}).get("name") or ""
+        ttft_ms = None
+        acc_tools: list = []
+        final = None
+        try:
+            async for chunk in svc.pool.chat_stream(model_name, messages,
+                                                    tools=client_tools, options=options,
+                                                    keep_alive=keep_alive, think=think,
+                                                    max_tokens=max_tokens, fmt=fmt):
+                if chunk.get("done"):
+                    tools = acc_tools or (chunk.get("tool_calls") or [])
+                    final = ChatResult.from_done_frame(chunk, tool_calls=tools)
+                    logger.record_model_call(model_name, backend_name,
+                                             final.prompt_tokens, final.completion_tokens,
+                                             estimate_cost_usd(svc.registry.get(model_name),
+                                                               final.prompt_tokens,
+                                                               final.completion_tokens))
+                    # Perf + spec/cache telemetry on the raw-passthrough path
+                    # too, so a model driven by name (not via a persona) still
+                    # shows decode/prefill tok/s, draft acceptance and cache
+                    # hit in the live view.
+                    telemetry.record_call(
+                        svc.db, svc.registry, model=model_name, backend=backend_name,
+                        result=final, persona=logger.persona, mode=logger.mode,
+                        ttft_ms=ttft_ms, wall_ms=logger.elapsed_ms, max_tokens=max_tokens)
+                    continue
+                if chunk.get("tool_calls"):
+                    acc_tools.extend(chunk["tool_calls"])       # delivered at done
+                c, th = chunk.get("content") or "", chunk.get("thinking") or ""
+                if (c or th or chunk.get("tool_calls")) and ttft_ms is None:
+                    ttft_ms = logger.elapsed_ms
+                if c or th:
+                    yield tr.chat_chunk(model_name, c, thinking=th or None)
+        except AllBackendsFailed as e:
+            status, error = "error", str(e)
+            yield tr.chat_chunk(model_name, f"\n[foundry-router] {e}")
+        finally:
+            logger.finish(status, error)
+        if final is not None:
+            tcs = [{"function": {"name": t["name"], "arguments": t["arguments"]}}
+                   for t in final.tool_calls] or None
+            yield tr.chat_chunk(model_name, "", done=True, tool_calls=tcs,
+                                stats=tr.result_stats(final, time.monotonic_ns() - t0))
+        else:
+            yield tr.chat_chunk(model_name, "", done=True,
+                                stats={"total_duration_ns": time.monotonic_ns() - t0})
+    return StreamingResponse(gen(), media_type="application/x-ndjson")
 
 
 # --------------------------------------------------------------------------- #
@@ -1005,67 +1181,79 @@ async def _passthrough_chat(svc, model_name, messages, client_tools, options,
 
 @router.post("/api/generate")
 async def generate(request: Request):
-    """Legacy completion endpoint: adapt to a one-message chat, then re-shape
-    chat chunks into generate chunks ("response" instead of "message")."""
+    """Legacy completion endpoint, adapted onto /api/chat: the prompt (+system,
+    images) becomes a one-turn chat dispatched through _chat_dispatch — so it
+    gets identical routing, options / think / format / keep_alive handling,
+    telemetry and real response stats — and each chat chunk is re-shaped into
+    a generate chunk ("response" instead of "message").
+
+    Ollama's empty-prompt convention is honoured without a model call: an empty
+    prompt means "load the model" (done_reason "load"), and with keep_alive 0
+    "unload" — clients such as Open WebUI use it to warm/evict models."""
     svc = _svc(request)
     body = await request.json()
     model_name = body.get("model") or ""
     stream = body.get("stream", True)
     prompt = body.get("prompt") or ""
+    persona = svc.personas.get(model_name)
+    if persona is None and svc.pool.backend_info(model_name) is None:
+        return _model_not_found(model_name)
+    if not prompt and not body.get("images"):
+        ka = body.get("keep_alive")
+        reason = "unload" if ka in (0, "0", "0s", "0m") else "load"
+        return JSONResponse({"model": model_name, "created_at": tr.now_iso(),
+                             "response": "", "done": True, "done_reason": reason})
     messages = [{"role": "user", "content": prompt}]
     if body.get("images"):  # /api/generate carries images at the top level
         messages[0]["images"] = body["images"]
     if body.get("system"):
         messages.insert(0, {"role": "system", "content": body["system"]})
+    chat_body = {"model": model_name, "messages": messages, "stream": bool(stream)}
+    for k in ("options", "format", "think", "keep_alive"):
+        if body.get(k) is not None:
+            chat_body[k] = body[k]
+    resp = await _chat_dispatch(svc, chat_body)
 
-    persona = svc.personas.get(model_name)
-    if persona is None and svc.pool.backend_info(model_name) is None:
-        return _model_not_found(model_name)
-
-    async def chat_source():
-        if persona is not None:
-            ctx = _build_ctx(svc, persona, model_name, messages, prompt)
-            async for raw in _agent_events_to_chat_chunks(svc, ctx, model_name):
-                yield raw
-        else:
-            t0 = time.monotonic_ns()
-            try:
-                async for chunk in svc.pool.chat_stream(model_name, messages):
-                    if not chunk.get("done") and chunk.get("content"):
-                        yield tr.chat_chunk(model_name, chunk["content"])
-            except AllBackendsFailed as e:
-                yield tr.chat_chunk(model_name, f"[foundry-router] {e}")
-            yield tr.chat_chunk(model_name, "", done=True,
-                                stats={"total_duration_ns": time.monotonic_ns() - t0})
-
-    if stream:
-        async def gen():
-            async for raw in chat_source():
-                obj = json.loads(raw)
-                if obj.get("done"):
-                    yield tr.generate_chunk(model_name, "", done=True)
-                    continue
-                msg = obj["message"]
-                if msg.get("thinking"):
-                    yield tr.generate_chunk(model_name, "", thinking=msg["thinking"])
-                if msg.get("content"):
-                    yield tr.generate_chunk(model_name, msg["content"])
-        return StreamingResponse(gen(), media_type="application/x-ndjson")
-
-    parts: list[str] = []
-    thinking_parts: list[str] = []
-    async for raw in chat_source():
-        obj = json.loads(raw)
-        if obj.get("done"):
-            continue
-        msg = obj["message"]
+    def _reshape(obj: dict) -> dict:
+        msg = obj.get("message") or {}
+        out = {"model": model_name, "created_at": obj.get("created_at") or tr.now_iso(),
+               "response": msg.get("content") or "", "done": bool(obj.get("done"))}
         if msg.get("thinking"):
-            thinking_parts.append(msg["thinking"])
-        if msg.get("content"):
-            parts.append(msg["content"])
-    body: dict = {"model": model_name, "created_at": tr.now_iso(),
-                  "response": "".join(parts), "done": True,
-                  "done_reason": "stop", **tr._stats(None)}
-    if thinking_parts:
-        body["thinking"] = "".join(thinking_parts)
-    return JSONResponse(body)
+            out["thinking"] = msg["thinking"]
+        if obj.get("done"):
+            for k, v in obj.items():
+                if k not in ("message", "model", "created_at", "done"):
+                    out[k] = v
+        return out
+
+    if isinstance(resp, StreamingResponse):
+        async def gen():
+            buf = b""
+            async for piece in resp.body_iterator:
+                buf += piece if isinstance(piece, bytes) else piece.encode("utf-8")
+                while b"\n" in buf:
+                    line, buf = buf.split(b"\n", 1)
+                    if line.strip():
+                        yield (json.dumps(_reshape(json.loads(line)), ensure_ascii=False)
+                               + "\n").encode("utf-8")
+            if buf.strip():
+                yield (json.dumps(_reshape(json.loads(buf)), ensure_ascii=False)
+                       + "\n").encode("utf-8")
+        if stream:
+            return StreamingResponse(gen(), media_type="application/x-ndjson")
+        # stream:false but the path streamed anyway — collapse it.
+        parts, thinking, final = [], [], {}
+        async for line in gen():
+            o = json.loads(line)
+            parts.append(o.get("response") or "")
+            if o.get("thinking"):
+                thinking.append(o["thinking"])
+            if o.get("done"):
+                final = o
+        out = {**final, "response": "".join(parts), "done": True}
+        if thinking:
+            out["thinking"] = "".join(thinking)
+        return JSONResponse(out)
+    if resp.status_code != 200:
+        return resp
+    return JSONResponse(_reshape(json.loads(resp.body)))

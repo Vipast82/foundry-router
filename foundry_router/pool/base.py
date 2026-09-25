@@ -79,6 +79,11 @@ class BackendPool:  # interface — see internal.InternalPool for the implementa
         Empty for pools/backends that can't report it."""
         return []
 
+    async def embed(self, model, inputs, **kw):
+        """Returns ({"embeddings": [...], "prompt_eval_count", …}, backend_name).
+        Raises AllBackendsFailed."""
+        raise NotImplementedError
+
     async def server_metrics(self) -> list[dict]:
         """Engine-level telemetry from llama.cpp / vLLM backends (/metrics,
         /slots). Empty for pools/backends that can't report it."""

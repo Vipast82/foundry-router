@@ -243,6 +243,14 @@ class BaseProtocol:
                    max_tokens: int = 4096, think: Any = None, fmt: Any = None) -> ChatResult:
         raise NotImplementedError
 
+    async def embed(self, model: str, inputs: list[str],
+                    options: Optional[dict] = None, keep_alive: Any = None,
+                    truncate: Optional[bool] = None,
+                    dimensions: Optional[int] = None) -> dict:
+        """Embeddings: {"embeddings": [[float…]…], "prompt_eval_count": int,
+        "total_duration"/"load_duration": ns (Ollama only)}."""
+        raise ProtocolError("this backend type does not serve embeddings")
+
     async def chat_stream(self, model: str, messages: list[dict], tools=None,
                           options: Optional[dict] = None, keep_alive=None,
                           think=None, max_tokens=None, fmt=None) -> AsyncIterator[dict]:
@@ -303,8 +311,33 @@ class OllamaProtocol(BaseProtocol):
             out.append({"model": name,
                         "size_vram": m.get("size_vram") or 0,
                         "size": m.get("size") or 0,
-                        "expires_at": m.get("expires_at")})
+                        "expires_at": m.get("expires_at"),
+                        # Newer Ollama reports the context the model is loaded
+                        # with — the real KV-cache size, not the trained max.
+                        "context": int(m.get("context_length") or 0),
+                        "digest": m.get("digest") or "",
+                        "details": m.get("details") or {}})
         return out
+
+    async def embed(self, model, inputs, options=None, keep_alive=None,
+                    truncate=None, dimensions=None) -> dict:
+        body: dict = {"model": model, "input": inputs}
+        if options:
+            body["options"] = options
+        if keep_alive is not None:
+            body["keep_alive"] = keep_alive
+        if truncate is not None:
+            body["truncate"] = truncate
+        if dimensions:
+            body["dimensions"] = int(dimensions)
+        r = await self.client.post(f"{self.url}/api/embed", json=body)
+        if r.status_code >= 400:
+            raise ProtocolError(f"ollama {self.url} /api/embed HTTP {r.status_code}: {r.text[:300]}")
+        d = r.json() or {}
+        return {"embeddings": d.get("embeddings") or [],
+                "prompt_eval_count": int(d.get("prompt_eval_count") or 0),
+                "total_duration": int(d.get("total_duration") or 0),
+                "load_duration": int(d.get("load_duration") or 0)}
 
     async def show_context_length(self, model: str) -> Optional[int]:
         """The model's real trained context window from its GGUF metadata —
@@ -764,6 +797,26 @@ class OpenAIProtocol(BaseProtocol):
             out["swap_running"] = [{"model": r.get("model"), "state": r.get("state")}
                                    for r in running]
         return out
+
+    async def embed(self, model, inputs, options=None, keep_alive=None,
+                    truncate=None, dimensions=None) -> dict:
+        """OpenAI /v1/embeddings (llama.cpp needs --embeddings; vLLM an
+        embedding model / --task embed)."""
+        body: dict = {"model": model, "input": inputs}
+        if dimensions:
+            body["dimensions"] = int(dimensions)
+        if truncate and (self.flavor or "") == "vllm":
+            body["truncate_prompt_tokens"] = -1     # vLLM: truncate to max_model_len
+        r = await self.client.post(f"{self._base()}/embeddings", json=body,
+                                   headers=self._headers())
+        if r.status_code >= 400:
+            raise ProtocolError(f"openai-compat {self.url} /embeddings HTTP {r.status_code}: {r.text[:300]}")
+        d = r.json() or {}
+        rows = sorted((x for x in d.get("data") or [] if isinstance(x, dict)),
+                      key=lambda x: x.get("index", 0))
+        return {"embeddings": [x.get("embedding") or [] for x in rows],
+                "prompt_eval_count": int((d.get("usage") or {}).get("prompt_tokens") or 0),
+                "total_duration": 0, "load_duration": 0}
 
     def _translate_messages(self, messages) -> list[dict]:
         msgs = []

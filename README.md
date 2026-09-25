@@ -23,8 +23,12 @@ the optional companion services (with one-line installers).
 
 ## What you get
 
-- **Ollama-compatible facade** — `/api/chat`, `/api/tags`, `/api/generate`,
-  `/api/show`, `/api/version`. Clients need only a base-URL change.
+- **Ollama-compatible facade** — `/api/chat`, `/api/generate`, `/api/tags`,
+  `/api/show`, `/api/ps`, `/api/embed`, `/api/embeddings`, `/api/version`
+  (+ an OpenAI-compatible `/v1/chat/completions`). Clients need only a
+  base-URL change; the backend's real load / prefill / decode timings and
+  `done_reason` are passed through, so client tok/s badges and truncation
+  handling are accurate.
 - **Personas as virtual models** — `/api/tags` advertises routing *policies*
   (`Foundry-Coding`, `Foundry-Chat`, `Foundry-Research`, `Foundry-RAG`), not
   raw models. Picking one in any model dropdown selects the policy. Add your

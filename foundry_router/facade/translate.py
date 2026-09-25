@@ -32,7 +32,6 @@ def chat_chunk(model: str, content: str = "", done: bool = False,
         msg["tool_calls"] = tool_calls
     obj: dict = {"model": model, "created_at": now_iso(), "message": msg, "done": done}
     if done:
-        obj["done_reason"] = "stop"
         obj.update(_stats(stats))
     return _line(obj)
 
@@ -44,22 +43,53 @@ def generate_chunk(model: str, response: str = "", done: bool = False,
     if thinking:
         obj["thinking"] = thinking
     if done:
-        obj["done_reason"] = "stop"
         obj.update(_stats(stats))
     return _line(obj)
 
 
+def result_stats(res, total_duration_ns: int) -> dict:
+    """The _stats() input for a finished backend call (a ChatResult): real
+    token counts, the backend's own load / prefill / decode durations and why
+    generation stopped — so an Ollama client computes the same tok/s the
+    backend measured and sees a truncated ("length") reply as truncated."""
+    return {"prompt_tokens": res.prompt_tokens,
+            "completion_tokens": res.completion_tokens,
+            "total_duration_ns": total_duration_ns,
+            "load_duration_ns": res.load_duration_ns,
+            "prompt_eval_duration_ns": res.prompt_eval_duration_ns,
+            "eval_duration_ns": res.eval_duration_ns,
+            "done_reason": res.finish_reason}
+
+
+def _done_reason(reason: Optional[str]) -> str:
+    """Ollama spells its stop reasons stop / length / load / unload. OpenAI-
+    style reasons from other backends map onto them (a tool-call turn is a
+    normal "stop" to an Ollama client)."""
+    r = (reason or "").lower()
+    if r in ("length", "max_tokens"):
+        return "length"
+    if r in ("load", "unload"):
+        return r
+    return "stop"
+
+
 def _stats(stats: Optional[dict]) -> dict:
-    """Ollama clients read these timing/count fields off the final chunk; some
-    compute tokens/sec from them, so zeros are safer than absence."""
+    """The final-chunk fields Ollama clients read (Open WebUI computes its
+    tokens/sec badge as eval_count / eval_duration). Real backend durations are
+    passed through when known; when a backend reported no decode time, the wall
+    time stands in for eval_duration (the old behaviour — a conservative
+    end-to-end rate, and zeros would make clients divide by zero)."""
     s = stats or {}
+    total = int(s.get("total_duration_ns") or 0)
+    eval_ns = int(s.get("eval_duration_ns") or 0)
     return {
-        "total_duration": int(s.get("total_duration_ns", 0)),
-        "load_duration": 0,
-        "prompt_eval_count": int(s.get("prompt_tokens", 0)),
-        "prompt_eval_duration": 0,
-        "eval_count": int(s.get("completion_tokens", 0)),
-        "eval_duration": int(s.get("total_duration_ns", 0)),
+        "done_reason": _done_reason(s.get("done_reason")),
+        "total_duration": total,
+        "load_duration": int(s.get("load_duration_ns") or 0),
+        "prompt_eval_count": int(s.get("prompt_tokens") or 0),
+        "prompt_eval_duration": int(s.get("prompt_eval_duration_ns") or 0),
+        "eval_count": int(s.get("completion_tokens") or 0),
+        "eval_duration": eval_ns or total,
     }
 
 
