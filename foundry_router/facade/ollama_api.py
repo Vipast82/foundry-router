@@ -71,7 +71,10 @@ def _canonical_messages(raw: list[dict]) -> list[dict]:
                     # (canonical `name`, which the Ollama adapter maps back).
                     **({"name": m.get("tool_name") or m.get("name")}
                        if role == "tool" and (m.get("tool_name") or m.get("name")) else {})})
-    return out
+    # Pair tool calls with their results (stable ids) once, at the door, so
+    # every backend format sees a consistent history.
+    from ..pool.protocols import pair_tool_call_ids
+    return pair_tool_call_ids(out)
 
 
 def _last_user_text(messages: list[dict]) -> str:
@@ -1215,11 +1218,16 @@ async def _direct_dispatch_chat(svc, persona, model_name, messages, client_tools
                                              "arguments": tc.get("arguments") or {}}}
                                for tc in own]}
 
+    last_backend = ""
+
     async def _run(narrate=None):
         """The worker call(s) + all post-call bookkeeping: one call, or — with
         persona MCP tools — a bounded loop that runs Foundry-owned tool calls
         and re-asks the model. Raises AllBackendsFailed."""
+        nonlocal last_backend
         convo = list(base_convo)
+        said: list[str] = []          # text / reasoning from earlier tool rounds
+        thought: list[str] = []
         for rnd in range(tool_cap + 1):
             t_call = time.monotonic_ns()
             res, backend = await svc.pool.chat(
@@ -1244,13 +1252,24 @@ async def _direct_dispatch_chat(svc, persona, model_name, messages, client_tools
                 persona=logger.persona, mode=logger.mode,
                 wall_ms=(time.monotonic_ns() - t_call) / 1e6,
                 max_tokens=brain_cfg.worker_max_tokens)
+            last_backend = backend
             own, rest = _split_calls(res)
             if not own or rnd >= tool_cap:
                 if own:
                     logger.record_guardrail(f"persona tool loop hit the {tool_cap}-round cap")
                 res.tool_calls = rest          # never hand Foundry-owned calls to the client
+                # Keep what the model said / reasoned in earlier tool rounds
+                # (live streaming shows it as it happens; buffered must too).
+                if said:
+                    res.content = "\n\n".join(said + [res.content or ""]).strip()
+                if thought:
+                    res.thinking = "\n".join(thought + [res.thinking or ""]).strip()
                 logger.finish("ok")
                 return res
+            if (res.content or "").strip():
+                said.append(res.content.strip())
+            if (res.thinking or "").strip():
+                thought.append(res.thinking.strip())
             convo = convo + [_assistant_turn(res, own)] + await _exec_foundry_tools(own, narrate)
         raise AllBackendsFailed("persona tool loop ended unexpectedly")
 
@@ -1277,7 +1296,9 @@ async def _direct_dispatch_chat(svc, persona, model_name, messages, client_tools
                 logger.record_guardrail(f"failover: {failover[i - 1]} failed ({str(last)[:120]}) "
                                         f"-> {mid}")
                 if narrate:
-                    narrate(f"⚙️ {failover[i - 1]} failed — failing over to {mid}\n")
+                    why = str(last).split(": ", 1)[-1][:160] if last else ""
+                    narrate(f"⚠️ {failover[i - 1]} failed" + (f" ({why})" if why else "")
+                            + f" — failing over to {mid}\n")
             model_id, options = mid, _opts_for(mid)
             try:
                 return await _run(narrate)
@@ -1290,7 +1311,8 @@ async def _direct_dispatch_chat(svc, persona, model_name, messages, client_tools
         tool_calls = [{**({"id": tc["id"]} if tc.get("id") else {}),
                        "function": {"name": tc["name"], "arguments": tc["arguments"]}}
                       for tc in res.tool_calls] or None
-        return tool_calls, tr.result_stats(res, time.monotonic_ns() - t0, model=model_id)
+        return tool_calls, tr.result_stats(res, time.monotonic_ns() - t0, model=model_id,
+                                           backend=last_backend)
 
     # LIVE STREAMING (opt-in): forward the worker's tokens as they generate — each
     # chunk is real proof the backend is working, resets the read timeout (no
@@ -1315,25 +1337,29 @@ async def _direct_dispatch_chat(svc, persona, model_name, messages, client_tools
                                              f"policy picked {model_id}\n")
             for n in route_notes:
                 yield tr.chat_chunk(model_name, "", done=False, thinking=f"⚠️ {n}\n")
+            _rid = (request_context.request_id() or "")[:8]
             yield tr.chat_chunk(model_name, "", done=False,
-                                thinking=f"⚙️ {_tag} · {model_id} — streaming…\n")
+                                thinking=f"⚙️ {_tag} · {model_id} — streaming… "
+                                         f"[Foundry {__version__} · req {_rid}]\n")
             if mcp_defs:
                 yield tr.chat_chunk(model_name, "", done=False,
                                     thinking=f"🔧 {len(mcp_defs)} persona MCP tool(s) available "
                                              f"alongside {len(client_tools or [])} client tool(s)\n")
             hb = float(brain_cfg.direct_stream_heartbeat_seconds or 0)
             stall = float(getattr(brain_cfg, "direct_stream_stall_seconds", 0) or 0)
-            req_started = time.monotonic()
             pacer = keepalive.Pacer(keepalive.visible_every(brain_cfg))   # one per request
+            fail_reason = ""
             for attempt, mid in enumerate(failover):
                 if attempt:
-                    logger.record_guardrail(f"failover: {model_id} failed -> {mid}")
+                    logger.record_guardrail(f"failover: {model_id} failed ({fail_reason}) -> {mid}")
+                    yield tr.chat_chunk(model_name, "", done=False,
+                                        thinking=f"⚠️ {model_id} failed"
+                                                 + (f" ({fail_reason})" if fail_reason else "")
+                                                 + f" — failing over to {mid}\n")
                     model_id, options = mid, _opts_for(mid)
                     binfo0 = svc.pool.backend_info(mid) or {}
                     _btype = binfo0.get("type")
                     backend_name = binfo0.get("name") or mid
-                    yield tr.chat_chunk(model_name, "", done=False,
-                                        thinking=f"⚙️ failing over to {mid}\n")
                 produced = False         # any output sent -> no failover possible
                 convo = list(base_convo)
                 err = None
@@ -1343,9 +1369,9 @@ async def _direct_dispatch_chat(svc, persona, model_name, messages, client_tools
                         final = None
                         ttft_ms = None
                         t_round = time.monotonic_ns()
-                        # status counts from the REQUEST start (not per tool
-                        # round), so it tracks the real time Cline is waiting
-                        hb_start = req_started
+                        # status clock = this backend call's start — the same
+                        # clock Live's "Models generating now" shows for it
+                        hb_start = time.monotonic()
                         _src = svc.pool.chat_stream(
                             model_id, convo,
                             tools=all_tools, options=options, keep_alive=keep_alive,
@@ -1432,14 +1458,14 @@ async def _direct_dispatch_chat(svc, persona, model_name, messages, client_tools
                     svc.db.log_event("warning", "routing", msg, backend_name)
                     logger.record_guardrail(msg)
                     if not produced and attempt + 1 < len(failover):
-                        yield tr.chat_chunk(model_name, "", done=False,
-                                            thinking=f"⚠️ {msg}\n")
+                        fail_reason = f"no output for {e.seconds}s"
                         continue
                     logger.finish("error", msg)
                     err = RuntimeError(msg)
                 except AllBackendsFailed as e:
                     if not produced and attempt + 1 < len(failover):
                         _on_error(e, finish=False)
+                        fail_reason = str(e).split(": ", 1)[-1][:160]
                         continue
                     _on_error(e)      # exhaustion detection, embedding flag, log
                     err = e
@@ -1490,7 +1516,9 @@ async def _direct_dispatch_chat(svc, persona, model_name, messages, client_tools
                                          f"policy picked {model_id}\n")
         if hb:
             yield tr.chat_chunk(model_name, "", done=False,
-                                thinking=f"⚙️ routing to {where} · {model_id} — working…\n")
+                                thinking=f"⚙️ routing to {where} · {model_id} — working… "
+                                         f"[Foundry {__version__} · req "
+                                         f"{(request_context.request_id() or '')[:8]}]\n")
         started = time.monotonic()
         pacer = keepalive.Pacer(keepalive.visible_every(brain_cfg))
         while hb:

@@ -200,7 +200,8 @@ class ToolLoopPool:
         self.seen_tools.append([t["function"]["name"] for t in tools or []])
         self.convos.append(messages)
         if not any(m.get("role") == "tool" for m in messages):
-            return ChatResult(content="", tool_calls=[
+            return ChatResult(content="Let me search first.", thinking="need fresh data",
+                              tool_calls=[
                 {"id": "c1", "name": "searxng__search", "arguments": {"q": "x"}}],
                 prompt_tokens=5, completion_tokens=2), "o1"
         return ChatResult(content="done", tool_calls=[
@@ -240,7 +241,10 @@ def test_direct_mode_merges_persona_tools_and_runs_them(app, client):
                for m in pool.convos[1])                                    # result fed back
     tcs = r["message"]["tool_calls"]
     assert [t["function"]["name"] for t in tcs] == ["write_to_file"]       # client's call only
-    assert r["message"]["content"] == "done"
+    # what the model said / reasoned in the Foundry-tool round isn't lost
+    assert r["message"]["content"] == "Let me search first.\n\ndone"
+    assert "need fresh data" in r["message"]["thinking"]
+    assert r["foundry"]["backend"] == "o1"
 
 
 def test_persona_without_tools_keeps_client_tools_only(app, client):

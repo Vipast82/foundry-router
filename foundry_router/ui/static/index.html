@@ -1701,8 +1701,13 @@ async function tabLive() {
     $("#live-run").innerHTML = a.run_label
       ? `<span class="pill ok" title="New samples are recorded under this run label (set on the Performance tab)">🏷 ${esc(a.run_label)}</span>` : "";
     $("#live-servers").innerHTML = renderServers(a.servers || []);
-    $("#live-models").innerHTML = (a.models || []).length
-      ? a.models.map(m => `<span class="pill ok">▶ ${esc(m.model)} · ${m.seconds}s${m.count > 1 ? " ×" + m.count : ""}${m.tps ? " · ~" + m.tps + " tok/s" : ""}</span>`).join(" ")
+    const _el = s => { s = Math.floor(s || 0); return s < 60 ? s + "s" : Math.floor(s / 60) + "m " + String(s % 60).padStart(2, "0") + "s"; };
+    const _tps = Object.fromEntries((a.models || []).map(m => [m.model, m.tps]));
+    const calls = a.calls || [];
+    $("#live-models").innerHTML = calls.length
+      ? calls.map(c => `<span class="pill ok" title="request ${esc(c.request_id || "?")} on backend ${esc(c.backend || "?")} — the client's '⏳ … still working' line shows the same id (first thinking line) and the same clock">▶ ${esc(c.model)} · ${_el(c.seconds)}${_tps[c.model] ? " · ~" + _tps[c.model] + " tok/s" : ""} <span class="mono" style="opacity:.75">req ${esc((c.request_id || "").slice(0, 8))}</span></span>`).join(" ")
+      : (a.models || []).length
+      ? a.models.map(m => `<span class="pill ok">▶ ${esc(m.model)} · ${_el(m.seconds)}${m.count > 1 ? " ×" + m.count : ""}${m.tps ? " · ~" + m.tps + " tok/s" : ""}</span>`).join(" ")
       : '<span class="hint">idle — no model generating</span>';
     $("#live-tools").innerHTML = (a.tools || []).length
       ? a.tools.map(t => `<span class="pill warn">⚙ ${esc(t.server)}/${esc(t.tool)} · ${t.seconds}s</span>`).join(" ")

@@ -96,13 +96,35 @@ agent, pipeline, raw model, Hermes backend, brain-down fallback):
   disconnects, the backend request is closed too — llama.cpp frees the slot,
   Meridian the session.
 
+## Tool-call history (ids)
+
+Ollama-API clients (Cline, Open WebUI) send earlier tool calls and their
+results back **without ids** — Ollama pairs them by order and `tool_name`.
+The OpenAI (llama.cpp / vLLM / OpenRouter) and Anthropic (Meridian) formats
+need every result tied to its call (`tool_call_id` / `tool_use_id`). Foundry
+pairs them once, when the request arrives: each call gets a stable id
+(derived from its position, so the same history gives the same ids every
+turn — prompt caches stay warm), each result gets its call's id and tool
+name. For Claude, all results of one parallel call go into the single user
+turn that follows it, and empty text blocks are dropped.
+
+The test suite exercises every combination — Ollama and OpenAI clients,
+streaming and not, raw model / direct streaming / direct buffered, against
+Ollama, llama.cpp and Meridian backends — checking that thinking, text, tool
+calls (name, arguments, id), finish reason, token counts and the serving
+backend reach the client, and that backend errors arrive as a readable
+message (with the reason on the failover line when another model takes over).
+
 ## Request ids
 
 Every request has one id: the client's `X-Request-Id` if it sends one,
 otherwise a new one. It is returned as the `X-Request-Id` response header,
 forwarded to Meridian and vLLM (which adopts it as its own request id), and
 stored in `request_log` and `mcp_call_log` — so a client report, Foundry's
-Usage Log and the engine log can be matched line for line.
+Usage Log and the engine log can be matched line for line. The first thinking
+line of a streamed turn shows it (`[Foundry 0.89.1 · req 3f9a…]`) and the Live
+view lists every in-flight call with the same id and clock — if they don't
+match, the client is talking to a different Foundry instance.
 
 ## MCP tools
 

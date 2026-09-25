@@ -390,6 +390,10 @@ async def activity(request: Request):
         servers = []
     from .. import perf_history as _ph
     return {"models": active_models,
+            # each in-flight call with its request id — the same id + clock
+            # the client's "still working" line shows
+            "calls": getattr(svc.pool, "active_requests", lambda: [])(),
+            "version": __import__("foundry_router").__version__,
             "servers": servers,
             "run_label": _ph.get_run_label(svc.db),
             "tools": svc.mcp.active_calls(),

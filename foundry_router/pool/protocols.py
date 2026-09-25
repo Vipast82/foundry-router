@@ -176,6 +176,53 @@ def _new_id() -> str:
     return "call_" + uuid.uuid4().hex[:12]
 
 
+def pair_tool_call_ids(messages: list[dict]) -> list[dict]:
+    """Give every assistant tool call an id and every tool result the id of
+    the call it answers — deterministically.
+
+    Ollama-API clients (Cline, Open WebUI) send earlier tool calls and their
+    results back WITHOUT ids (Ollama pairs them by order / tool_name). The
+    OpenAI and Anthropic wire formats need them paired (tool_call_id /
+    tool_use_id): minting a random id on each side separately produced an
+    unpaired call + orphan result, which vLLM / OpenRouter / Claude reject and
+    llama.cpp templates misattribute. Ids are derived from the message
+    position + call, so the same history yields the same ids every turn
+    (prompt-cache friendly). Missing tool-result names are filled from the
+    call too (Ollama's tool_name)."""
+    import hashlib
+    out: list[dict] = []
+    pending: list[dict] = []            # calls of the last assistant turn not yet answered
+    for i, m in enumerate(messages or []):
+        m = dict(m)
+        if m.get("role") == "assistant" and m.get("tool_calls"):
+            calls = []
+            for j, tc in enumerate(m["tool_calls"]):
+                tc = dict(tc)
+                fn = tc.get("function") or {}
+                if not tc.get("id"):
+                    raw = f"{i}:{j}:{fn.get('name')}:{json.dumps(fn.get('arguments'), sort_keys=True, default=str)}"
+                    tc["id"] = "call_" + hashlib.sha1(raw.encode()).hexdigest()[:16]
+                calls.append(tc)
+            m["tool_calls"] = calls
+            pending = [{"id": c["id"], "name": (c.get("function") or {}).get("name")}
+                       for c in calls]
+        elif m.get("role") == "tool":
+            if m.get("tool_call_id"):
+                match = next((p for p in pending if p["id"] == m["tool_call_id"]), None)
+            else:
+                name = m.get("name") or m.get("tool_name")
+                match = (next((p for p in pending if name and p["name"] == name), None)
+                         or (pending[0] if pending else None))
+                if match:
+                    m["tool_call_id"] = match["id"]
+            if match:
+                if not (m.get("name") or m.get("tool_name")) and match.get("name"):
+                    m["name"] = match["name"]
+                pending = [p for p in pending if p is not match]
+        out.append(m)
+    return out
+
+
 # Base64 magic prefixes — clients send bare base64 with no media type, but
 # Anthropic/OpenAI image blocks require one. Sniff it from the first bytes.
 _IMAGE_MAGIC = (("iVBOR", "image/png"), ("/9j/", "image/jpeg"),
@@ -864,7 +911,7 @@ class OpenAIProtocol(BaseProtocol):
 
     def _translate_messages(self, messages) -> list[dict]:
         msgs = []
-        for m in messages:
+        for m in pair_tool_call_ids(messages):
             mm: dict = {"role": m["role"], "content": m.get("content") or ""}
             if m.get("tool_calls"):
                 mm["tool_calls"] = [
@@ -1172,6 +1219,24 @@ def _anthropic_usage(u: Any) -> tuple[int, int, int]:
     return int(u.get("input_tokens") or 0) + cr + cc, cr, int(u.get("output_tokens") or 0)
 
 
+def _merge_turns(msgs: list[dict]) -> list[dict]:
+    """Anthropic wants alternating turns, and every tool_result for one
+    assistant turn in the SINGLE user message that follows it. Merge
+    consecutive same-role messages into one block list (tool results of a
+    parallel call + a following user note become one user turn)."""
+    def blocks(c):
+        if isinstance(c, list):
+            return list(c)
+        return [{"type": "text", "text": c}] if str(c or "").strip() else []
+    out: list[dict] = []
+    for m in msgs:
+        if out and out[-1]["role"] == m["role"]:
+            out[-1] = {"role": m["role"], "content": blocks(out[-1]["content"]) + blocks(m["content"])}
+        else:
+            out.append(dict(m))
+    return out
+
+
 class AnthropicProtocol(BaseProtocol):
     """Anthropic Messages API — Claude via Meridian (or any Messages endpoint).
 
@@ -1267,7 +1332,7 @@ class AnthropicProtocol(BaseProtocol):
     def _payload(self, model, messages, tools, options, max_tokens, think, fmt) -> dict:
         system_parts: list[str] = []
         out_msgs: list[dict] = []
-        for m in messages:
+        for m in pair_tool_call_ids(messages):
             role, content = m["role"], m.get("content") or ""
             if role == "system":
                 system_parts.append(content)
@@ -1298,7 +1363,10 @@ class AnthropicProtocol(BaseProtocol):
                     blocks.append({"type": "text", "text": content})
                 out_msgs.append({"role": role, "content": blocks})
             else:
+                if not content.strip():
+                    continue            # Claude rejects empty text content
                 out_msgs.append({"role": role, "content": content})
+        out_msgs = _merge_turns(out_msgs)
 
         # Structured output: the Anthropic Messages API has no response_format,
         # so honor `fmt` as a system instruction (best-effort parity with the

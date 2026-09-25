@@ -279,14 +279,37 @@ class InternalPool(BackendPool):
 
     # -- in-flight tracking ------------------------------------------------------------
 
-    def _inflight_enter(self, model: str) -> None:
+    def _inflight_enter(self, model: str, backend: str = "") -> int:
         e = self._inflight.get(model)
         if e:
             e["count"] += 1
         else:
             self._inflight[model] = {"count": 1, "since": time.monotonic()}
+        # Per-call record (request id + start), so the Live view can list each
+        # call with the same id and clock the client's status line uses.
+        from .. import request_context
+        self._call_seq = getattr(self, "_call_seq", 0) + 1
+        calls = getattr(self, "_calls", None)
+        if calls is None:
+            calls = self._calls = {}
+        calls[self._call_seq] = {"model": model, "backend": backend,
+                                 "since": time.monotonic(),
+                                 "request_id": request_context.request_id() or ""}
+        return self._call_seq
 
-    def _inflight_exit(self, model: str) -> None:
+    def active_requests(self) -> list[dict]:
+        """Every backend call in flight: [{model, backend, seconds, request_id}],
+        longest first."""
+        now = time.monotonic()
+        return sorted(({"model": c["model"], "backend": c["backend"],
+                        "seconds": round(now - c["since"], 1),
+                        "request_id": c["request_id"]}
+                       for c in (getattr(self, "_calls", None) or {}).values()),
+                      key=lambda x: -x["seconds"])
+
+    def _inflight_exit(self, model: str, call_id: int = 0) -> None:
+        if call_id:
+            (getattr(self, "_calls", None) or {}).pop(call_id, None)
         e = self._inflight.get(model)
         if not e:
             return
@@ -314,7 +337,7 @@ class InternalPool(BackendPool):
         if not candidates:
             raise AllBackendsFailed(f"no backend serves model {model!r}")
         errors = []
-        self._inflight_enter(model)
+        call_id = self._inflight_enter(model, candidates[0].config.name)
         try:
             for s in candidates:
                 s.busy += 1
@@ -337,7 +360,7 @@ class InternalPool(BackendPool):
                 finally:
                     s.busy = max(0, s.busy - 1)
         finally:
-            self._inflight_exit(model)
+            self._inflight_exit(model, call_id)
         raise AllBackendsFailed(f"all backends failed for {model!r}: " + " | ".join(errors))
 
     async def chat_stream(self, model: str, messages: list[dict],
@@ -353,7 +376,7 @@ class InternalPool(BackendPool):
         if not candidates:
             raise AllBackendsFailed(f"no backend serves model {model!r}")
         s = candidates[0]
-        self._inflight_enter(model)
+        call_id = self._inflight_enter(model, s.config.name)
         s.busy += 1
         try:
             async for chunk in s.protocol.chat_stream(model, messages, tools=tools,
@@ -371,7 +394,7 @@ class InternalPool(BackendPool):
             raise AllBackendsFailed(f"stream from {s.config.name} failed: {detail}") from e
         finally:
             s.busy = max(0, s.busy - 1)
-            self._inflight_exit(model)
+            self._inflight_exit(model, call_id)
 
     async def embed(self, model: str, inputs: list[str], **kw) -> tuple[dict, str]:
         """Embeddings with the same priority-ordered failover as chat()."""
