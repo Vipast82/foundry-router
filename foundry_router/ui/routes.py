@@ -450,6 +450,14 @@ async def perf_run_label_set(request: Request):
     return {"ok": True, "run_label": label}
 
 
+@router.get("/admin/api/perf/advisor")
+async def perf_advisor(request: Request, hours: float = 24):
+    """Plain-English performance findings (severity, what, why, how to fix,
+    evidence) from history, live engine metrics, events, health and config."""
+    from .. import perf_advisor as _pa
+    return await _pa.advise(_svc(request), hours=max(1.0, min(float(hours), 720.0)))
+
+
 @router.post("/admin/api/perf/clear")
 async def perf_clear(request: Request):
     """Wipe performance data so the dashboards start clean (e.g. after a GPU

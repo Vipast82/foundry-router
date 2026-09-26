@@ -90,3 +90,27 @@ already provides the hits, so try `--cache-ram 0` and compare the wait column
 
 Other causes of a high wait: another client (or an abandoned request) holding
 the only slot on `-np 1`, and model swaps under llama-swap.
+
+
+## Performance advisor
+
+**Dashboard → Live** (top card, refreshed every 30 s) and **Performance** (for
+the selected window) show the **🩺 Performance advisor**: every sign of a
+performance problem Foundry can see, in plain language. Click a finding for
+*why it matters*, *what to do* (numbered steps) and the *evidence* numbers.
+Severity: 🔴 critical (costing a lot now / something is down), 🟠 warning,
+🔵 tip.
+
+What it checks:
+
+| Area | Findings |
+|---|---|
+| Request history | server wait before prefill · prompt cache not reused · slow prompt reading · very slow or highly variable generation · low speculative acceptance · replies cut at the output limit · reasoning-heavy output · conversations near the context window · frequent cold model loads · spiky first-token times · estimated (not measured) timings |
+| Live engine metrics | queued requests · KV cache almost full · vLLM preemptions · low vLLM prefix-cache hits · Meridian queueing and failing requests · engine metrics unavailable |
+| Events | backends going offline (and flapping) · stalled calls · requests failing over · the server cutting replies shorter than Foundry allows · context trimming |
+| Backends | backend offline right now |
+| Settings | read timeout ≤ stall timeout · streaming off for coding clients · keep-alive off · small output limit · a persona claiming more context than its model serves |
+| MCP tools | tools that fail often or are slow |
+
+Rules need a minimum number of samples and use generous thresholds, so a
+finding is worth acting on. API: `GET /admin/api/perf/advisor?hours=24`.

@@ -489,6 +489,22 @@ const HELP = {
     <p>Latency includes pacing waits and 429 retries. <b>Session reuse</b> is how often a pooled MCP session
     skipped the connect + initialize handshake. <b>Result tokens</b> is what a tool's output adds to the
     model's context — a tool that routinely returns 20k tokens is worth trimming.</p>`],
+  advisor: ["Performance advisor", `
+    <p>Foundry checks everything it measures for signs of a performance problem and explains each one in
+      plain language — no expertise needed. Click a finding to see <b>why it matters</b>, <b>what to do</b>,
+      and the <b>evidence</b> (the numbers that triggered it).</p>
+    <dl>
+    <dt>🔴 Critical</dt><dd>costing a lot of time right now, or something is down — fix first.</dd>
+    <dt>🟠 Warning</dt><dd>a clear slowdown or waste worth fixing.</dd>
+    <dt>🔵 Tip</dt><dd>an improvement or something to be aware of.</dd>
+    </dl>
+    <p>It looks at: time requests wait at the server before work starts, prompt-cache reuse, prompt-reading
+      and generation speed (and how much they vary), speculative-decoding acceptance, replies cut off at the
+      output limit (by Foundry or by the server), reasoning share, conversations near the context window,
+      cold model loads, spiky first-token times, queued requests, KV-cache fill, vLLM preemptions and prefix
+      cache, Meridian queueing and errors, backends going offline, stalled and failed-over requests, context
+      trimming, slow or failing MCP tools, and settings that work against each other.</p>
+    <p>Tip: set a <b>run label</b> on the Performance tab before changing something, then compare.</p>`],
   agents: ["External agents (Hermes Agent)", `
     <p>An <b>agent</b> is not a model: it runs its own multi-step loop with its own tools (terminal, files, web,
       browser), skills and memory. Foundry talks to <b>Hermes Agent</b> (Nous Research) through its API server
@@ -1008,6 +1024,7 @@ async function tabPerformance() {
       </div>
     </div>
     <div id="perf-summary"></div>
+    <div class="card">${cardH("🩺 Performance advisor", "advisor", "possible problems in this window — click one for what to do")}<div id="perf-advisor" class="hint">…</div></div>
     <div class="card">${cardH("Per-model breakdown", "bymodel", "model × backend × run, every call in the window")}<div id="perf-bymodel"></div></div>
     <div class="card">${cardH("Throughput — decode vs effective tok/s", "charts")}<div id="perf-c-tps"></div></div>
     <div class="card">${cardH("Prefill speed (tok/s)", "charts")}<div id="perf-c-prefill"></div></div>
@@ -1077,10 +1094,8 @@ async function tabPerformance() {
       + `</div>${s.estimated ? `<div class="hint" style="margin:8px 0 0">${s.estimated} of these calls have router-<b>estimated</b> timings <span class="est">≈</span> (backend reports none, e.g. vLLM) ${help("loaded")}</div>` : ""}</div>`;
     // per-model breakdown
     const bm = d.by_model || [];
-    const diag = (d.diagnoses || []).map(x => `<div class="card" style="border-left:3px solid var(--warn);margin:0 0 10px">
-      <b>⚠ ${esc(x.model)}</b> <span class="hint">${esc(x.backend || "")}${x.run_label ? " · " + esc(x.run_label) : ""}</span>
-      <div style="margin-top:4px">${esc(x.message)}</div></div>`).join("");
-    $("#perf-bymodel").innerHTML = diag + (bm.length
+    api(`perf/advisor?hours=${_PERF.hours}`).then(a => $("#perf-advisor") && renderAdvisor($("#perf-advisor"), a)).catch(() => {});
+    $("#perf-bymodel").innerHTML = (bm.length
       ? `<table><tr><th>model</th><th title="Backend that served the calls">backend</th><th title="Run label the samples were recorded under">run</th>
           <th title="Number of calls">calls</th>
           <th title="Median decode speed — typical generation tok/s">median decode</th>
@@ -1210,6 +1225,34 @@ async function tabPerformance() {
 // =========================================================================
 const _MCPM = { hours: 24, source: "", server: "", ctx: 262144 };
 try { Object.assign(_MCPM, JSON.parse(localStorage.getItem("mcpmCtl") || "{}")); } catch (e) {}
+
+// Performance advisor findings -> collapsible, plain-English cards.
+function renderAdvisor(el, a) {
+  const f = (a && a.findings) || [];
+  const sevStyle = {critical: ["bad", "🔴", "Critical"], warning: ["warn", "🟠", "Warning"], info: ["", "🔵", "Tip"]};
+  if (!f.length) {
+    el.innerHTML = `<span class="pill ok">✓ no problems found</span> <span class="hint">${a ? a.requests_analysed : 0} request(s) analysed over ${a ? a.hours : 24}h — nothing points to a performance issue.</span>`;
+    return;
+  }
+  const c = a.counts || {};
+  const open = window._advOpen || (window._advOpen = new Set());
+  el.innerHTML = `<div class="hint" style="margin-bottom:6px">${c.critical ? `<span class="pill bad">${c.critical} critical</span> ` : ""}${c.warning ? `<span class="pill warn">${c.warning} warning</span> ` : ""}${c.info ? `<span class="pill">${c.info} tip</span> ` : ""}· ${a.requests_analysed} request(s) over ${a.hours}h</div>`
+    + f.map((x, i) => {
+      const [cls, icon, label] = sevStyle[x.severity] || sevStyle.info;
+      const key = x.id + "|" + (x.scope || "");
+      const ev = Object.entries(x.evidence || {}).map(([k, v]) => `<span class="pill" title="${esc(k)}">${esc(k)}: <b>${esc(String(v))}</b></span>`).join(" ");
+      return `<details class="adv" data-k="${esc(key)}" ${open.has(key) ? "open" : ""} style="border-left:3px solid var(--${cls || "accent"});padding:4px 10px;margin:6px 0">
+        <summary style="cursor:pointer"><span class="pill ${cls}">${icon} ${label}</span> <b>${esc(x.title)}</b>
+          ${x.scope ? `<span class="hint">— ${esc(x.scope)}</span>` : ""}<div class="hint" style="margin:2px 0 0 4px">${esc(x.summary)}</div></summary>
+        <div style="margin:6px 0 4px"><b>Why it matters:</b> ${esc(x.why)}</div>
+        <div><b>What to do:</b><ol style="margin:4px 0 4px 18px">${(x.fix || []).map(s => `<li>${esc(s)}</li>`).join("")}</ol></div>
+        ${ev ? `<div class="hint">Evidence: ${ev}</div>` : ""}
+      </details>`;
+    }).join("");
+  el.querySelectorAll("details.adv").forEach(d => d.addEventListener("toggle", () => {
+    d.open ? open.add(d.dataset.k) : open.delete(d.dataset.k);
+  }));
+}
 
 async function tabMcpMetrics() {
   const winOpts = [[1, "1h"], [6, "6h"], [24, "24h"], [72, "3d"], [168, "7d"], [720, "30d"]];
@@ -1685,6 +1728,7 @@ async function tabLive() {
       <span id="live-run"></span>
       <button class="act" id="live-clear" title="Reset performance stats (all models or one) — e.g. after a GPU or config change">Clear stats…</button></h2>
     <p class="hint">Auto-refreshing every 2s — what's generating right now, measured speed per model, engine load on each inference server, and the last few finished requests. Hover anything underlined for a definition; <b>?</b> opens a longer explanation.</p>
+    <div class="card">${ch("🩺 Performance advisor", "advisor", "possible problems found in the last 24h — click one for what to do")}<div id="live-advisor" class="hint">…</div></div>
     <div class="card">${ch("▶ Models generating now", "generating")}<div id="live-models" class="hint">…</div></div>
     <div class="card">${ch("📊 Recent performance", "perfstrip", "last N finished requests")}<div id="live-perf" class="hint">…</div></div>
     <div class="card">${ch("🖥 Inference servers", "servers", "engine-level load from llama.cpp / vLLM")}<div id="live-servers" class="hint">…</div></div>
@@ -1875,6 +1919,14 @@ async function tabLive() {
     wrapTables();
   };
   window._liveTimer = setInterval(paint, 2000);
+  // Advisor: heavier (reads the history) — every 30s, self-cleaning on tab change.
+  if (window._advTimer) clearInterval(window._advTimer);
+  const paintAdv = async () => {
+    if (!$("#live-advisor")) { clearInterval(window._advTimer); return; }
+    try { renderAdvisor($("#live-advisor"), await api("perf/advisor?hours=24")); } catch (e) {}
+  };
+  paintAdv();
+  window._advTimer = setInterval(paintAdv, 30000);
   await paint();
 }
 
