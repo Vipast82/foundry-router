@@ -203,3 +203,31 @@ def test_persona_output_cap_reaches_backend_and_truncation_is_explained(app, cli
     finally:
         svc.pool = real
     assert all(k["max_tokens"] == 32768 for k in pool.kw)
+
+
+def test_router_status_lines_never_reach_the_model(app, client):
+    """Cline stores Foundry's status lines as the turn's thinking and sends
+    them back; fed to the model as prior reasoning they were imitated (fake
+    'still working… 5s/10s' clocks generated as reasoning)."""
+    svc = app.state.services
+    pool = CapturePool("openai-compatible")
+    real, svc.pool = svc.pool, pool
+    svc.personas.upsert("Act", execution_mode="direct", model_allowlist=["qwen"],
+                        pinned_models=[])
+    echoed = ("⚙️ llamacpp · qwen — streaming… [think: model default · Foundry 0.90.1 · req d6]\n"
+              "⚙️ /cache/q.gguf — still working… 5s\n"
+              "/cache/q.gguf — still working… 10s\n"
+              "⏳ llamacpp · qwen — still working · 1m 00s (reading the prompt)\n"
+              "The file needs one more bullet after line 45.")
+    try:
+        client.post("/api/chat", json={"model": "Act", "stream": False, "messages": [
+            {"role": "user", "content": "edit it"},
+            {"role": "assistant", "content": "[router: stream failed — boom]\nOK, editing.",
+             "thinking": echoed},
+            {"role": "user", "content": "go on"}]})
+    finally:
+        svc.pool = real
+    a = next(m for m in pool.sent[0] if m["role"] == "assistant")
+    assert a["thinking"] == "The file needs one more bullet after line 45."
+    assert a["content"] == "OK, editing."
+    assert "still working" not in json.dumps(pool.sent[0])

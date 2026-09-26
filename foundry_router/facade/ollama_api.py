@@ -58,6 +58,15 @@ def _canonical_messages(raw: list[dict]) -> list[dict]:
         role = m.get("role") or "user"
         if role not in ("system", "user", "assistant", "tool"):
             role = "user"
+        if role == "assistant":
+            # Foundry's own status lines (keep-alive, routing notes) come back
+            # as the turn's thinking / text — never feed them to a model, it
+            # imitates them (fake "still working" clocks as its reasoning).
+            m = dict(m)
+            if m.get("thinking"):
+                m["thinking"] = prompts.scrub_router_lines(m["thinking"])
+            if isinstance(m.get("content"), str) and m["content"]:
+                m["content"] = prompts.scrub_router_lines(m["content"])
         out.append({"role": role, "content": m.get("content") or "",
                     # Ollama multimodal convention: images: ["<base64>", ...].
                     # This function is the universal entry point — dropping the

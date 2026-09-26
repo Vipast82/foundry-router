@@ -147,6 +147,13 @@ reasoning in the panel usually means one of:
   deepseek) so reasoning comes back as `reasoning_content`;
 - Claude only thinks when a level is set (it then returns a summary).
 
+Foundry's own status lines (`⚙️ … streaming…`, `⏳ … still working · …`,
+routing notes) are shown in the thinking panel, and Cline saves them with the
+turn. Foundry strips them from the history before it reaches any model — a
+model that saw them as its own past reasoning started generating fake
+"still working… 5s / 10s" lines itself (faster than real time, using up its
+output budget).
+
 **Which levels a model actually supports** is shown per model on the Models tab
 (`thinking_levels`) — a curated list, since no Ollama/Anthropic endpoint
 enumerates the valid set.

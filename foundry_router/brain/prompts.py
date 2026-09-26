@@ -170,6 +170,29 @@ def split_think(text: str) -> tuple[str, str]:
     return reasoning, rest
 
 
+# Foundry's own status / narration lines that clients store as the turn's
+# "thinking" and echo back in history. Fed to a model as its prior reasoning,
+# they get IMITATED: seen live, Qwen continued "⚙️ … still working… 5s / 10s /
+# 15s" as its own reasoning at 59 tok/s — a fake clock running faster than real
+# time, output budget burned, tool calls cut off. They must never reach a model.
+_ROUTER_LINE_RE = re.compile(
+    r"^\s*(?:"
+    r"(?:⚙️|⚙|⏳|⚠️|⚠|🔧|✂️|🔎|⚡|↳)\s.*"                    # status / narration glyphs
+    r"|.*\bstill working\b.*"                               # keep-alive lines, any version
+    r"|.*\[Foundry [0-9][^\]]*·\s*req\b.*"                  # turn header
+    r"|\[router: .*|\[foundry-router\].*"                   # in-band router errors
+    r"|Still working —.*"
+    r")\s*$", re.MULTILINE)
+
+
+def scrub_router_lines(text: str) -> str:
+    """Remove Foundry-generated status lines from text a client echoed back."""
+    if not text:
+        return text
+    out = _ROUTER_LINE_RE.sub("", text)
+    return re.sub(r"\n{3,}", "\n\n", out).strip() if out != text else text
+
+
 def sanitize_history(messages: list[dict]) -> list[dict]:
     """Strip <think> narration and hidden markers from history before feeding
     it back to the brain — clients echo our own output back to us, and routing
