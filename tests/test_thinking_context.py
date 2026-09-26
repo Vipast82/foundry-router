@@ -165,21 +165,22 @@ def test_think_label_says_who_decided(app):
 
 
 class TruncPool(CapturePool):
-    def __init__(self):
+    def __init__(self, ct=32768):
         super().__init__("openai-compatible")
         self.kw = []
+        self.ct = ct
 
     async def chat(self, model, messages, **kw):
         from foundry_router.pool.protocols import ChatResult
         self.kw.append(kw)
-        return ChatResult(content="partial edit", prompt_tokens=50, completion_tokens=8192,
+        return ChatResult(content="partial edit", prompt_tokens=50, completion_tokens=self.ct,
                           finish_reason="length"), "b1"
 
     async def chat_stream(self, model, messages, **kw):
         from foundry_router.pool.protocols import ChatResult
         self.kw.append(kw)
         yield {"content": "partial edit", "done": False}
-        yield ChatResult(prompt_tokens=50, completion_tokens=8192, finish_reason="length").done_frame()
+        yield ChatResult(prompt_tokens=50, completion_tokens=self.ct, finish_reason="length").done_frame()
 
 
 def test_persona_output_cap_reaches_backend_and_truncation_is_explained(app, client):
@@ -231,3 +232,30 @@ def test_router_status_lines_never_reach_the_model(app, client):
     assert a["thinking"] == "The file needs one more bullet after line 45."
     assert a["content"] == "OK, editing."
     assert "still working" not in json.dumps(pool.sent[0])
+
+
+
+def test_backend_side_cap_is_diagnosed(app, client):
+    svc = app.state.services
+    pool = TruncPool(ct=8192)            # server stopped at 8192 though 32768 was sent
+    real, svc.pool = svc.pool, pool
+    svc.personas.upsert("Act", execution_mode="direct", model_allowlist=["qwen"],
+                        pinned_models=[], max_output_tokens=32768)
+    try:
+        r = client.post("/api/chat", json={"model": "Act", "messages": [
+            {"role": "user", "content": "write it"}]})
+    finally:
+        svc.pool = real
+    thinking = "".join(json.loads(x)["message"].get("thinking") or ""
+                       for x in r.text.splitlines() if x.strip())
+    assert "cut at 8,192 output tokens" in thinking and "BACKEND stopped it" in thinking
+    assert "--n-predict" in thinking
+    ev = svc.db.query("SELECT message FROM event_log WHERE source='truncation'")
+    assert ev and "8192" in ev[0]["message"]
+
+
+def test_cline_personas_seeded_with_32k_output(app):
+    svc = app.state.services
+    for name in ("claude-cline-act", "claude-cline-plan"):
+        p = svc.personas.get(name)
+        assert p and int(p["max_output_tokens"]) == 32768

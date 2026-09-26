@@ -174,9 +174,14 @@ enumerates the valid set.
   **max output tokens** (blank = `worker_max_tokens`, default 32768) and the
   model's **reasoning counts toward it** — a thinking model writing a large
   edit easily passes 8k. Set **max output tokens** on your Cline personas
-  (32768 is a good start); Foundry also says so in the thinking panel when a
-  reply is cut (`⚠️ reply cut at the 8,192-token output limit … the tool
-  call was incomplete`).
+  (32768 is a good start; the Cline personas ship with it). Foundry says so
+  in the thinking panel when a reply is cut (`⚠️ reply cut at the
+  32,768-token output limit … the tool call was incomplete`). If the reply
+  stopped well SHORT of the limit Foundry sent (`⚠️ reply cut at 8,192 output
+  tokens, but Foundry allowed 32,768 — the BACKEND stopped it`), the cap is on
+  the server: check llama.cpp's `-n` / `--n-predict` (also in llama-swap
+  `cmd:` lines), Ollama's `num_predict`, or whether the context filled up.
+  Every cut is also logged in Events (source `truncation`).
 - **Never overflowing the window.** Cline auto-compacts when its last request
   gets close to the context size it *thinks* the model has, so:
   1. In Cline's provider settings set the **context window** to the persona's

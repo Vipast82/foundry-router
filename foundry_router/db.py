@@ -132,6 +132,7 @@ STARTER_PERSONAS = [
         "guardrail_overrides": json.dumps({}),
         "execution_mode": "direct",
         "pipeline_check_enabled": 0,
+        "max_output_tokens": 32768,
     },
     {
         "virtual_name": "claude-cline-act",
@@ -149,6 +150,7 @@ STARTER_PERSONAS = [
         "guardrail_overrides": json.dumps({"max_paid_calls_per_request": 2}),
         "execution_mode": "direct",
         "pipeline_check_enabled": 0,
+        "max_output_tokens": 32768,
     },
 ]
 
@@ -414,6 +416,7 @@ class Database:
         self._seed_upgrades()
         self._seed_client_compat()
         self._seed_cline_direct()
+        self._seed_cline_max_output()
 
     def _seed_upgrades(self) -> None:
         """One-time data upgrades for EXISTING deployments (INSERT OR IGNORE
@@ -466,6 +469,19 @@ class Database:
             (utcnow(),))
         self.kv_set("persona_seed_v4_cline_direct", utcnow())
         self._seed_cline_effort()
+
+    def _seed_cline_max_output(self) -> None:
+        """Cline personas get a 32768-token output cap (v7): reasoning plus a
+        large file edit overflowed 8192, cutting the tool call short ('output
+        token limit reached before a tool call'). Only rows with no value set;
+        runs on its own (not chained behind older seeds)."""
+        if self.kv_get("persona_seed_v7_cline_max_output"):
+            return
+        self.execute(
+            "UPDATE personas SET max_output_tokens=32768, updated_at=? "
+            "WHERE virtual_name IN ('claude-cline-plan', 'claude-cline-act') "
+            "AND (max_output_tokens IS NULL OR max_output_tokens=0)", (utcnow(),))
+        self.kv_set("persona_seed_v7_cline_max_output", utcnow())
 
     def _seed_cline_effort(self) -> None:
         """Default reasoning effort for the Cline pair (thinking-level spec):

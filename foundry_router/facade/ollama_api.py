@@ -1060,16 +1060,36 @@ def _output_cap(svc, persona) -> int:
     return v if v > 0 else int(svc.config_store.config.agent_brain.worker_max_tokens or 8192)
 
 
-def _truncation_note(res, cap: int, persona) -> str:
-    """Thinking line for a reply cut at the output cap."""
+def _truncation_note(res, cap: int, persona, svc=None, model_id: str = "") -> str:
+    """Thinking line (and Events entry) for a reply cut at an output limit.
+
+    Compares what the reply actually got with the cap Foundry sent: if the
+    backend stopped it well SHORT of that, the limit is on the server
+    (llama.cpp -n/--n-predict, a llama-swap default, Ollama num_predict, or
+    the context filling up) — raising Foundry's cap then changes nothing."""
     if (getattr(res, "finish_reason", "") or "").lower() not in ("length", "max_tokens"):
         return ""
-    where = ("the persona's max_output_tokens" if (persona or {}).get("max_output_tokens")
-             else "agent_brain.worker_max_tokens")
-    return (f"⚠️ reply cut at the {cap:,}-token output limit ({where}) before it finished"
-            + (" — the tool call was incomplete" if not getattr(res, "tool_calls", None) else "")
-            + ". Reasoning counts toward this limit; raise it (Personas → max output "
-              "tokens) if this repeats.\n")
+    got = int(getattr(res, "completion_tokens", 0) or 0)
+    where = ("this persona's max output tokens" if (persona or {}).get("max_output_tokens")
+             else "Global settings → worker_max_tokens")
+    incomplete = " — the tool call was incomplete" if not getattr(res, "tool_calls", None) else ""
+    if got and cap and got < cap * 0.9:
+        note = (f"⚠️ reply cut at {got:,} output tokens{incomplete}, but Foundry allowed "
+                f"{cap:,} — the BACKEND stopped it. Check the server's own limit "
+                f"(llama.cpp -n / --n-predict, llama-swap cmd, Ollama num_predict) or "
+                f"whether the context window filled up.\n")
+    else:
+        note = (f"⚠️ reply cut at the {cap:,}-token output limit ({where}){incomplete}. "
+                f"Reasoning counts toward this limit; raise it if this repeats.\n")
+    if svc is not None:
+        try:
+            svc.db.log_event("warning", "truncation",
+                             f"{model_id or '?'}: reply cut at {got or '?'} output tokens "
+                             f"(cap sent {cap}){incomplete}",
+                             f"persona={(persona or {}).get('virtual_name', '')}")
+        except Exception:                                         # noqa: BLE001
+            pass
+    return note
 
 
 def _guard_window(svc, persona, model_id: str) -> int:
@@ -1574,7 +1594,7 @@ async def _direct_dispatch_chat(svc, persona, model_name, messages, client_tools
                                     "function": {"name": t["name"], "arguments": t["arguments"]}}
                                    for t in rest] or None
                         res.tool_calls = rest
-                        _tn = _truncation_note(res, out_cap, persona)
+                        _tn = _truncation_note(res, out_cap, persona, svc, model_id)
                         if _tn:
                             yield tr.chat_chunk(model_name, "", done=False, thinking=_tn)
                         yield tr.chat_chunk(
@@ -1691,7 +1711,7 @@ async def _direct_dispatch_chat(svc, persona, model_name, messages, client_tools
                 "total_duration_ns": time.monotonic_ns() - t0})
             return
         tool_calls, stats = _finalize(result)
-        _tn = _truncation_note(result, out_cap, persona)
+        _tn = _truncation_note(result, out_cap, persona, svc, model_id)
         if _tn:
             yield tr.chat_chunk(model_name, "", thinking=_tn)
         if result.thinking:
