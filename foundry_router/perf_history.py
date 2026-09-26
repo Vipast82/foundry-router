@@ -166,6 +166,13 @@ def _percentile(vals: list[float], q: float) -> Optional[float]:
     return round(vals[idx], 1)
 
 
+# Server wait: time to first token minus the server-measured prompt time —
+# how long the backend held the request BEFORE (or around) prompt processing:
+# queueing behind another request, host-RAM prompt-cache saves/loads (llama.cpp
+# --cache-ram), slot restores, model swaps. Only meaningful with server timings.
+_WAIT_SQL = ("CASE WHEN timing_src='server' AND ttft_ms IS NOT NULL AND prefill_ms IS NOT NULL "
+             "THEN MAX(0, ttft_ms - prefill_ms) END")
+
 _AVG_KEYS = ("decode_tps", "prefill_tps", "eff_tps", "ttft_ms", "spec_accept_pct",
              "cache_hit_pct", "prompt_tokens", "completion_tokens", "wall_ms",
              "load_ms", "decode_ms", "prefill_ms")
@@ -184,11 +191,14 @@ def query_history(db: Database, hours: float = 72, model: Optional[str] = None,
     clause, params = _filters(hours, model, backend, run_label)
     cols = ", ".join(SERIES_COLUMNS)
     rows = db.query(
-        f"SELECT {cols} FROM perf_samples WHERE {clause} "
+        f"SELECT {cols}, {_WAIT_SQL} AS wait_ms FROM perf_samples WHERE {clause} "
         f"ORDER BY id DESC LIMIT ?", (*params, int(limit)))
     rows.reverse()   # chronological for charting
 
-    avg_sql = ", ".join(f"ROUND(AVG({k}), 2) AS {k}" for k in _AVG_KEYS)
+    avg_sql = ", ".join(f"ROUND(AVG({k}), 2) AS {k}" for k in _AVG_KEYS) \
+        + f", ROUND(AVG({_WAIT_SQL}), 1) AS wait_ms" \
+        + f", ROUND(SUM({_WAIT_SQL}) / 1000.0, 1) AS wait_s_total" \
+        + ", ROUND(SUM(wall_ms) / 1000.0, 1) AS wall_s_total"
     agg = db.query_one(
         f"SELECT COUNT(*) AS samples, {avg_sql}, "
         f"SUM(CASE WHEN finish_reason='length' THEN 1 ELSE 0 END) AS truncations, "
@@ -197,7 +207,8 @@ def query_history(db: Database, hours: float = 72, model: Optional[str] = None,
         f"SUM(CASE WHEN timing_src='estimated' THEN 1 ELSE 0 END) AS estimated "
         f"FROM perf_samples WHERE {clause}", tuple(params)) or {}
     summary = {k: agg.get(k) for k in ("samples", *_AVG_KEYS, "truncations",
-                                       "out_tokens", "in_tokens", "estimated")}
+                                       "out_tokens", "in_tokens", "estimated",
+                                       "wait_ms", "wait_s_total", "wall_s_total")}
     summary["samples"] = summary.get("samples") or 0
     summary["truncations"] = summary.get("truncations") or 0
     summary["estimated"] = summary.get("estimated") or 0
@@ -218,18 +229,26 @@ def query_history(db: Database, hours: float = 72, model: Optional[str] = None,
         f"ORDER BY model, last_ts DESC", tuple(params))
     pct_rows = db.query(
         f"SELECT model, backend, COALESCE(run_label,'') AS run_label, "
-        f"decode_tps, ttft_ms FROM perf_samples WHERE {clause}", tuple(params))
+        f"decode_tps, ttft_ms, {_WAIT_SQL} AS wait_ms FROM perf_samples WHERE {clause}",
+        tuple(params))
     dist: dict = {}
     for r in pct_rows:
-        d = dist.setdefault((r["model"], r["backend"], r["run_label"]), ([], []))
+        d = dist.setdefault((r["model"], r["backend"], r["run_label"]), ([], [], []))
         if r["decode_tps"] is not None:
             d[0].append(r["decode_tps"])
         if r["ttft_ms"] is not None:
             d[1].append(r["ttft_ms"])
+        if r["wait_ms"] is not None:
+            d[2].append(r["wait_ms"])
+    diagnoses: list[dict] = []
     for g in groups:
-        dec, tt = dist.get((g["model"], g["backend"], g["run_label"]), ([], []))
+        dec, tt, wt = dist.get((g["model"], g["backend"], g["run_label"]), ([], [], []))
         g["p50_decode_tps"] = _percentile(dec, 0.5)
         g["p95_ttft_ms"] = _percentile(tt, 0.95)
+        g["p50_wait_ms"] = _percentile(wt, 0.5)
+        d = diagnose_group(g)
+        if d:
+            diagnoses.append(d)
 
     # Filter option lists span the window (not the other filters), so picking a
     # model doesn't make the other models vanish from the dropdown.
@@ -252,7 +271,34 @@ def query_history(db: Database, hours: float = 72, model: Optional[str] = None,
             "run_labels": label_rows,
             "current_run_label": get_run_label(db),
             "by_model": groups,
+            "diagnoses": diagnoses,
             "summary": summary}
+
+
+def diagnose_group(g: dict) -> Optional[dict]:
+    """Flag a model whose requests sit idle at the server before prompt
+    processing — invisible in decode/prefill tok/s, but often the biggest cost
+    (found live: a constant ~53s per Cline turn = 61% of all wall time)."""
+    wait, n = g.get("p50_wait_ms"), g.get("n") or 0
+    if wait is None or n < 5 or wait < 10000:
+        return None
+    share = None
+    if g.get("wall_s_total"):
+        share = round(100.0 * (g.get("wait_s_total") or 0) / g["wall_s_total"])
+    return {
+        "model": g["model"], "backend": g["backend"], "run_label": g["run_label"],
+        "p50_wait_ms": wait, "share_pct": share,
+        "message": (
+            f"Requests wait a median {wait / 1000:.1f}s at the server before the prompt is "
+            f"processed (TTFT minus prefill time)"
+            + (f" — {share}% of all wall time" if share is not None else "") + ". "
+            "Not prefill and not decode: the backend is doing something else first. "
+            "On llama.cpp the usual causes are: the host-RAM prompt cache (--cache-ram) "
+            "saving/restoring the slot's KV state over PCIe on every request (try "
+            "--cache-ram 0 with a single conversation per slot — the in-GPU slot "
+            "cache already gives the cache hits), a busy slot (another client or an "
+            "abandoned request on -np 1), or a model swap (llama-swap)."),
+    }
 
 
 def clear_samples(db: Database, model: Optional[str] = None,

@@ -69,3 +69,24 @@ and again after (`2x2080ti-22gb`); the per-model breakdown then shows one row
 per model × backend × run. **Clear data…** (Performance) / **Clear stats…**
 (Live) wipe history samples, Live averages, truncation counters, observed
 latency scores and optionally the Usage Log — for all models or one.
+
+
+## Finding hidden server time: the "wait" column
+
+Performance → per-model table has a **wait** column: the median time to first
+token *minus* the server's own prompt-processing time. It is time the backend
+held the request before (or around) working on it, and it should be near 0.
+When it is consistently above 10 s, the Performance tab shows a warning card
+with the share of wall time it costs.
+
+Seen live on 2× RTX 2080 Ti (PCIe Gen3 x4 OcuLink), Qwen3.8-27B, `-c 262144`,
+`-np 1`, `--cache-ram 32768`: a near-constant **~53 s wait on 469 of 643 Cline
+turns — 61% of all wall time** — independent of context size, while prefill
+was only ~2 s thanks to 99% slot-cache hits. That signature matches the
+host-RAM prompt cache saving/restoring the slot state over the narrow PCIe
+links on each request. With one conversation per slot the in-GPU slot cache
+already provides the hits, so try `--cache-ram 0` and compare the wait column
+(set a new run label first so before/after are separate).
+
+Other causes of a high wait: another client (or an abandoned request) holding
+the only slot on `-np 1`, and model swaps under llama-swap.

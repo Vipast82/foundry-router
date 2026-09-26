@@ -1077,7 +1077,10 @@ async function tabPerformance() {
       + `</div>${s.estimated ? `<div class="hint" style="margin:8px 0 0">${s.estimated} of these calls have router-<b>estimated</b> timings <span class="est">≈</span> (backend reports none, e.g. vLLM) ${help("loaded")}</div>` : ""}</div>`;
     // per-model breakdown
     const bm = d.by_model || [];
-    $("#perf-bymodel").innerHTML = bm.length
+    const diag = (d.diagnoses || []).map(x => `<div class="card" style="border-left:3px solid var(--warn);margin:0 0 10px">
+      <b>⚠ ${esc(x.model)}</b> <span class="hint">${esc(x.backend || "")}${x.run_label ? " · " + esc(x.run_label) : ""}</span>
+      <div style="margin-top:4px">${esc(x.message)}</div></div>`).join("");
+    $("#perf-bymodel").innerHTML = diag + (bm.length
       ? `<table><tr><th>model</th><th title="Backend that served the calls">backend</th><th title="Run label the samples were recorded under">run</th>
           <th title="Number of calls">calls</th>
           <th title="Median decode speed — typical generation tok/s">median decode</th>
@@ -1085,6 +1088,7 @@ async function tabPerformance() {
           <th title="Average prompt-processing speed">prefill</th>
           <th title="Average time to first token">TTFT</th>
           <th title="95th-percentile time to first token — the slow-case wait">TTFT p95</th>
+          <th title="Median server wait: time to first token minus the server's own prompt-processing time — how long the backend held the request before working on it (queueing, host-RAM prompt-cache saves/loads, model swaps). Should be near 0.">wait</th>
           <th title="Average output ÷ total call time">eff tok/s</th>
           <th title="Average KV prefix-cache reuse">cache</th>
           <th title="Average speculative-decoding acceptance">spec</th>
@@ -1103,6 +1107,7 @@ async function tabPerformance() {
             <td class="nw">${cell(g.prefill_tps)}</td>
             <td class="nw">${cell(g.ttft_ms, "ms")}</td>
             <td class="nw">${cell(g.p95_ttft_ms, "ms")}</td>
+            <td class="nw">${g.p50_wait_ms != null && g.p50_wait_ms >= 10000 ? `<span class="pill warn">${cell(g.p50_wait_ms, "ms")}</span>` : cell(g.p50_wait_ms, "ms")}</td>
             <td class="nw">${cell(g.eff_tps)}</td>
             <td class="nw">${cell(g.cache_hit_pct, "%")}</td>
             <td class="nw">${cell(g.spec_accept_pct, "%")}</td>
@@ -1111,7 +1116,7 @@ async function tabPerformance() {
             <td class="nw">${cell(g.load_ms, "ms")}</td>
             <td class="nw">${g.truncations ? `<span class="pill warn">${g.truncations}</span>` : '<span class="hint">0</span>'}</td>
             <td class="nw">${_tsLabel(g.last_ts)}</td></tr>`).join("") + `</table>`
-      : '<span class="hint">No calls recorded in this view yet.</span>';
+      : '<span class="hint">No calls recorded in this view yet.</span>');
     const cDec = _css("--ok", "#3fb950"), cEff = _css("--accent", "#e8833a"),
           cSpec = _css("--accent-2", "#ffb347"), cCache = _css("--ok", "#3fb950"),
           cCtx = _css("--accent", "#e8833a"), cPre = _css("--accent-2", "#ffb347"),
@@ -1181,7 +1186,7 @@ async function tabPerformance() {
       "prefill_tokens", "completion_tokens", "reasoning_tokens", "cached_tokens", "draft_n",
       "draft_n_accepted", "decode_tps", "prefill_tps", "decode_ms", "prefill_ms", "ttft_ms",
       "eff_tps", "wall_ms", "load_ms", "cache_hit_pct", "spec_accept_pct", "finish_reason",
-      "timing_src"];
+      "timing_src", "wait_ms"];
     const csv = [cols.join(",")].concat(rows.map(r => cols.map(c => {
       const v = r[c]; return v == null ? "" : (/[",\n]/.test("" + v) ? `"${("" + v).replace(/"/g, '""')}"` : v);
     }).join(","))).join("\n");

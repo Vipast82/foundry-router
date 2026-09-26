@@ -601,6 +601,26 @@ def _direct_mcp_tools(svc, persona: dict, client_tools) -> dict:
     return {t.name: t for t in tools if t.name not in client_names}
 
 
+class _LazyFailover:
+    """The failover candidate list, built on first need (see _failover_list)."""
+
+    def __init__(self, first: str, factory):
+        self.items = [first]
+        self._factory = factory
+        self._built = False
+
+    async def get(self, i: int):
+        if i >= len(self.items) and not self._built:
+            self._built = True
+            try:
+                full = await self._factory()
+                if full and full[0] == self.items[0]:
+                    self.items = list(full)
+            except Exception:                                     # noqa: BLE001
+                log.exception("failover candidate lookup failed")
+        return self.items[i] if i < len(self.items) else None
+
+
 async def _failover_list(svc, persona, first: str, user_text: str, eff,
                          limit: int = 3) -> list[str]:
     """`first` plus the next models this persona's policy allows, for
@@ -1287,7 +1307,11 @@ async def _direct_dispatch_chat(svc, persona, model_name, messages, client_tools
     # Model failover: if the chosen model's backend(s) fail before answering,
     # try the next model this persona's policy allows (paid ones only if the
     # guardrail clears them) instead of returning an error.
-    failover = await _failover_list(svc, persona, model_id, user_text, eff)
+    # Computed lazily — only when the first model actually fails. Building it
+    # runs guardrail checks for paid alternatives (which can call the Meridian
+    # usage endpoint), so doing it up front added latency to EVERY request.
+    failover = _LazyFailover(model_id, lambda: _failover_list(svc, persona, model_id,
+                                                              user_text, eff))
     # Persona MCP tools in direct mode (opt-in per persona by attaching tools):
     # merged with the client's own tools. Calls to a Foundry-owned tool are run
     # here and the model continues; calls to a client tool go back to the
@@ -1439,14 +1463,20 @@ async def _direct_dispatch_chat(svc, persona, model_name, messages, client_tools
         when every candidate failed."""
         nonlocal model_id, options
         last = None
-        for i, mid in enumerate(failover):
+        i, prev = -1, None
+        while True:
+            i += 1
+            mid = await failover.get(i)
+            if mid is None:
+                break
             if i:
-                logger.record_guardrail(f"failover: {failover[i - 1]} failed ({str(last)[:120]}) "
+                logger.record_guardrail(f"failover: {prev} failed ({str(last)[:120]}) "
                                         f"-> {mid}")
                 if narrate:
                     why = str(last).split(": ", 1)[-1][:160] if last else ""
-                    narrate(f"⚠️ {failover[i - 1]} failed" + (f" ({why})" if why else "")
+                    narrate(f"⚠️ {prev} failed" + (f" ({why})" if why else "")
                             + f" — failing over to {mid}\n")
+            prev = mid
             model_id, options = mid, _opts_for(mid)
             try:
                 return await _run(narrate)
@@ -1500,7 +1530,12 @@ async def _direct_dispatch_chat(svc, persona, model_name, messages, client_tools
             stall = float(getattr(brain_cfg, "direct_stream_stall_seconds", 0) or 0)
             pacer = keepalive.Pacer(keepalive.visible_every(brain_cfg))   # one per request
             fail_reason = ""
-            for attempt, mid in enumerate(failover):
+            attempt = -1
+            while True:
+                attempt += 1
+                mid = await failover.get(attempt)
+                if mid is None:
+                    break
                 if attempt:
                     logger.record_guardrail(f"failover: {model_id} failed ({fail_reason}) -> {mid}")
                     yield tr.chat_chunk(model_name, "", done=False,
@@ -1613,13 +1648,13 @@ async def _direct_dispatch_chat(svc, persona, model_name, messages, client_tools
                            f"(direct_stream_stall_seconds={int(stall)}) — abandoned")
                     svc.db.log_event("warning", "routing", msg, backend_name)
                     logger.record_guardrail(msg)
-                    if not produced and attempt + 1 < len(failover):
+                    if not produced and await failover.get(attempt + 1):
                         fail_reason = f"no output for {e.seconds}s"
                         continue
                     logger.finish("error", msg)
                     err = RuntimeError(msg)
                 except AllBackendsFailed as e:
-                    if not produced and attempt + 1 < len(failover):
+                    if not produced and await failover.get(attempt + 1):
                         _on_error(e, finish=False)
                         fail_reason = str(e).split(": ", 1)[-1][:160]
                         continue
