@@ -1201,7 +1201,7 @@ async function tabPerformance() {
       "prefill_tokens", "completion_tokens", "reasoning_tokens", "cached_tokens", "draft_n",
       "draft_n_accepted", "decode_tps", "prefill_tps", "decode_ms", "prefill_ms", "ttft_ms",
       "eff_tps", "wall_ms", "load_ms", "cache_hit_pct", "spec_accept_pct", "finish_reason",
-      "timing_src", "wait_ms", "headers_ms", "start_ms"];
+      "timing_src", "wait_ms", "headers_ms", "start_ms", "tcp_retrans", "tcp_rwnd_ms"];
     const csv = [cols.join(",")].concat(rows.map(r => cols.map(c => {
       const v = r[c]; return v == null ? "" : (/[",\n]/.test("" + v) ? `"${("" + v).replace(/"/g, '""')}"` : v);
     }).join(","))).join("\n");

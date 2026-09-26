@@ -111,7 +111,65 @@ def _model_rules(model: str, backend: str, rows: list[dict], ctx_len: Optional[i
             ev["sent → server starts work (median)"] = _s(s50)
         if ladder:
             ev["waits on the doubling steps"] = f"{ladder['share']}% ({', '.join(ladder['steps'])})"
-        if w50 >= 10000 and ladder:
+        # Kernel TCP counters (pool/tcpinfo.py) on the SLOW requests settle
+        # whether the wait was on the wire: resends = packet loss; upload
+        # stalled on a full receive window = the server not reading; neither
+        # = the request arrived promptly and the wait is inside the server.
+        slow = [r for r in server if r.get("tcp_retrans") is not None
+                and r.get("ttft_ms") is not None and r.get("prefill_ms") is not None
+                and r["ttft_ms"] - r["prefill_ms"] >= 5000]
+        tcp = None
+        if len(slow) >= MIN_N:
+            # a 26-53s backoff ladder needs 7-8 resends; 1-2 are normal noise
+            lossy = sum(1 for r in slow if (r["tcp_retrans"] or 0) >= 3) / len(slow)
+            rwnd50 = _med([r.get("tcp_rwnd_ms") or 0 for r in slow]) or 0
+            tcp = ("loss" if lossy >= 0.5 else
+                   "not_reading" if rwnd50 >= 0.5 * w50 else "clean")
+            ev["slow requests with 3+ TCP resends"] = f"{round(100 * lossy)}%"
+            ev["upload stalled on server's receive window (median)"] = _s(rwnd50)
+        if w50 >= 10000 and tcp == "clean":
+            out.append(_f(
+                "critical" if share >= 30 else "warning", "server_intake",
+                "llama.cpp takes a long time to pick up each request",
+                f"Median {_s(w50)} per request passes before the prompt is processed "
+                f"({share}% of all time). The network is clean — no resent packets and "
+                f"no stalled upload — so the time is spent inside llama.cpp between "
+                f"receiving the request and starting on it.",
+                "Before llama.cpp logs 'get_available slot' it parses the JSON, renders "
+                "the chat template over the whole conversation (--jinja), tokenizes it "
+                "and queues the task. With a long Cline history, a slow custom chat "
+                "template, or a busy HTTP thread this can take far longer than the "
+                "actual prompt processing.",
+                ["Raise llama.cpp's log level for one turn (-lv 4) and compare the "
+                 "timestamp of the request's first debug line (chat format / params) "
+                 "with 'get_available slot' — that shows whether template+tokenize or "
+                 "the task queue is slow.",
+                 "Try the model's stock chat template (drop the custom "
+                 "'fixed-template' GGUF or --chat-template-file) for one run.",
+                 "Try without --reasoning-preserve (keeps every past thinking block in "
+                 "the template input) and without --mmproj (routes text through the "
+                 "multimodal tokenizer).",
+                 "Give the HTTP server more threads (--threads-http 4).",
+                 "Set a run label before each change so the Performance tab compares them."],
+                ev, scope))
+        elif w50 >= 10000 and tcp == "not_reading":
+            out.append(_f(
+                "critical" if share >= 30 else "warning", "server_not_reading",
+                "llama.cpp is not reading the request while Foundry sends it",
+                f"Median {_s(w50)} per request passes before the prompt is processed; "
+                f"most of it the upload is stalled because llama.cpp's receive buffer "
+                f"is full — the server isn't reading its socket.",
+                "The request (the whole conversation) can't be delivered until the "
+                "server reads it. TCP then probes with a doubling timer (0.2s, 0.4s, …), "
+                "which is why the waits come in doubling steps.",
+                ["Give llama.cpp's HTTP server more threads (--threads-http 4).",
+                 "Check the llama.cpp container isn't CPU-starved (docker stats, CPU "
+                 "limits/pinning) — the HTTP thread needs a core while the GPUs work.",
+                 "Make sure no other client holds llama.cpp's HTTP threads with open "
+                 "streams.",
+                 "Set a run label before each change so the Performance tab compares them."],
+                ev, scope))
+        elif w50 >= 10000 and (tcp == "loss" or (tcp is None and ladder)):
             out.append(_f(
                 "critical" if share >= 30 else "warning", "network_retransmit",
                 "Requests are delayed on the network before the server gets them",
@@ -608,7 +666,7 @@ async def advise(svc, hours: float = 24) -> dict:
         "SELECT model, backend, prompt_tokens, prefill_tokens, completion_tokens, "
         "reasoning_tokens, cached_tokens, draft_n, decode_tps, prefill_tps, prefill_ms, "
         "ttft_ms, wall_ms, load_ms, cache_hit_pct, spec_accept_pct, finish_reason, timing_src, "
-        "headers_ms, start_ms FROM perf_samples WHERE datetime(ts) >= datetime('now', ?)", (f"-{hours} hours",))
+        "headers_ms, start_ms, tcp_retrans, tcp_rwnd_ms FROM perf_samples WHERE datetime(ts) >= datetime('now', ?)", (f"-{hours} hours",))
     groups: dict = {}
     for r in rows:
         groups.setdefault((r["model"], r["backend"] or ""), []).append(r)

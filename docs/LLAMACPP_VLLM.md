@@ -96,22 +96,30 @@ To say *where* it goes, each streamed llama.cpp request also records (CSV:
 A large `start_ms` means the delay is before the engine touched the request
 (network, queue, request setup).
 
+It also reads the kernel's TCP counters for the connection (Linux TCP_INFO;
+CSV `tcp_retrans`, `tcp_rwnd_ms`), so no tcpdump is needed:
+
+- **tcp_retrans** — segments the kernel had to resend (packet loss);
+- **tcp_rwnd_ms** — how long the upload stalled because llama.cpp's receive
+  buffer was full (the server wasn't reading its socket).
+
+The advisor combines them on the slow requests:
+
+| TCP counters on slow requests | Finding | Meaning |
+|---|---|---|
+| 3+ resends | *Requests are delayed on the network* | packet loss between the hosts |
+| upload stalled ≥ half the wait | *llama.cpp is not reading the request* | HTTP thread busy / CPU-starved |
+| neither | *llama.cpp takes a long time to pick up each request* | template + tokenize / queue inside llama.cpp |
+
 Seen live on 2× RTX 2080 Ti (PCIe Gen3 x4 OcuLink), Qwen3.8-27B, `-np 1`: a
 **~53 s wait on most Cline turns, 61–66% of all wall time**, independent of
-context size, and unchanged by `--cache-ram 0`. 94% of the waits land almost
-exactly on **0.2, 6.6, 13.2, 26.4 or 52.8 s** — each step double the last.
-That is TCP's retransmission-timeout ladder (resend after ~0.2 s, doubling on
-every further loss): packets of the large request are being lost between
-Foundry and llama.cpp. The llama.cpp log confirms it: after each
-`slot release` the server sits idle for ~53 s before the next
-`get_available slot` line. That line comes after llama.cpp has received and
-parsed the request, so the time goes to the request *reaching* llama.cpp,
-before any slot, cache, checkpoint or speculative-decoding work. The advisor
-flags this pattern as *"Requests are delayed on the network"*. Check, in order: path MTU
-(`ping -M do -s 1472 <llama-host>` must work; jumbo frames on one side or a
-VPN/tunnel/Docker network with a smaller MTU cause exactly this), the
-retransmit counters (`nstat -az TcpRetransSegs TcpExtTCPTimeouts` while Cline
-runs), a curl from the llama.cpp host itself, NIC offloads, and the cable/link.
+context size, and unchanged by `--cache-ram 0`. The llama.cpp log shows the
+slot idle for ~53 s between `slot release` and the next `get_available slot`,
+so the time is spent before llama.cpp starts on the request. 94% of the waits
+land on 0.2 / 6.6 / 13.2 / 26.4 / 52.8 s, a doubling pattern that TCP
+produces both on packet loss and when the receiver stops reading. MTU was
+checked and matches on every hop, and the TCP counters above decide which
+case it is.
 
 Other causes of a high wait: another client (or an abandoned request) holding
 the only slot on `-np 1`, and model swaps under llama-swap.

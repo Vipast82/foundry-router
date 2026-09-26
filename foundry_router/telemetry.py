@@ -66,4 +66,6 @@ def record_call(db: Any, registry: Any, *, model: str, backend: str, result: Any
         load_duration_ns=r.load_duration_ns,
         timing_source=getattr(r, "timing_source", "") or "",
         headers_ms=getattr(r, "headers_ms", 0) or 0,
-        start_ms=getattr(r, "start_ms", 0) or 0)
+        start_ms=getattr(r, "start_ms", 0) or 0,
+        tcp_retrans=getattr(r, "tcp_retrans", None),
+        tcp_rwnd_ms=getattr(r, "tcp_rwnd_ms", None))

@@ -83,3 +83,21 @@ def test_send_and_start_timings_are_stored(app):
     row = db.query("SELECT headers_ms, start_ms FROM perf_samples WHERE model='m'")[0]
     assert (row["headers_ms"], row["start_ms"]) == (52900.0, 52850.0)
     assert {"headers_ms", "start_ms"} <= set(perf_history.SERIES_COLUMNS)
+
+
+def test_tcp_info_reads_a_real_socket():
+    import socket, sys
+    import pytest
+    from foundry_router.pool import tcpinfo
+    if not sys.platform.startswith("linux"):
+        pytest.skip("TCP_INFO is Linux-only")
+    srv = socket.socket(); srv.bind(("127.0.0.1", 0)); srv.listen(1)
+    c = socket.create_connection(srv.getsockname()); a, _ = srv.accept()
+    try:
+        c.sendall(b"x" * 1000); a.recv(1000)
+        d = tcpinfo.request_delta(c)
+        assert d["retrans"] == 0 and d["rwnd_ms"] >= 0
+        assert tcpinfo.request_delta(c)["retrans"] == 0     # delta vs previous
+        assert tcpinfo.request_delta(None) == {}
+    finally:
+        c.close(); a.close(); srv.close()

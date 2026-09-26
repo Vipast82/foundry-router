@@ -252,4 +252,5 @@ with Cline's patch, and its error classifier). What Cline reads from Foundry:
 - No `-n` / `--n-predict` cap (it silently cuts replies below Foundry's limit).
 - A long, constant wait before the first token (Performance → wait column):
   see LLAMACPP_VLLM.md "Finding hidden server time" — waits in doubling steps
-  (6.6 / 13.2 / 26.4 / 52.8 s) are packet loss on the network, not llama.cpp.
+  (6.6 / 13.2 / 26.4 / 52.8 s) come from the TCP layer; the advisor uses the
+  per-request TCP counters to say whether it's the network or llama.cpp.

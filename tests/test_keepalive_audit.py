@@ -158,6 +158,7 @@ async def test_llamacpp_prompt_progress_reaches_status_and_counts_as_output():
     assert seen[0]["return_progress"] is True                  # asked for progress
     done = chunks[-1]
     assert done["done"] and done["headers_ms"] > 0 and done["start_ms"] > 0
+    assert "tcp_retrans" in done           # None on a mock transport (no socket)
     prog = [c["progress"]["prefill"] for c in chunks if c.get("progress")]
     assert prog[-1]["processed"] == 120000 and prog[-1]["cache"] == 100000
     detail = keepalive.progress_detail({"prefill": prog[2]})

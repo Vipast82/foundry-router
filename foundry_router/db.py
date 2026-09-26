@@ -327,6 +327,8 @@ class Database:
             ("perf_samples", "load_ms", "REAL"),
             ("perf_samples", "headers_ms", "REAL"),
             ("perf_samples", "start_ms", "REAL"),
+            ("perf_samples", "tcp_retrans", "INTEGER"),
+            ("perf_samples", "tcp_rwnd_ms", "REAL"),
             ("models", "adequacy_ok", "INTEGER DEFAULT 0"),
             ("models", "adequacy_failed", "INTEGER DEFAULT 0"),
             ("models", "calls_ok", "INTEGER DEFAULT 0"),

@@ -112,3 +112,30 @@ def test_backoff_ladder_ignores_spread_waits():
     assert perf_advisor.backoff_ladder(spread) is None
     ladder = perf_advisor.backoff_ladder([52800, 52900, 26400, 13200, 6600, 52700])
     assert ladder and ladder["share"] == 100
+
+
+def _slow(svc, n=8, **tcp):
+    for _ in range(n):
+        _add(svc.db, ttft_ms=54330, prefill_ms=1500, wall_ms=62000, **tcp)
+
+
+def test_tcp_counters_decide_the_verdict(app):
+    svc = app.state.services
+    _slow(svc, tcp_retrans=0, tcp_rwnd_ms=2.0)            # wire clean
+    ids = _ids(_run(svc, Pool()))
+    assert "server_intake" in ids
+    assert "network_retransmit" not in ids and "server_wait" not in ids
+
+
+def test_tcp_resends_confirm_network_loss(app):
+    svc = app.state.services
+    _slow(svc, tcp_retrans=8, tcp_rwnd_ms=0.0)
+    ids = _ids(_run(svc, Pool()))
+    assert "network_retransmit" in ids and "server_intake" not in ids
+
+
+def test_stalled_upload_means_server_not_reading(app):
+    svc = app.state.services
+    _slow(svc, tcp_retrans=0, tcp_rwnd_ms=52000.0)
+    ids = _ids(_run(svc, Pool()))
+    assert "server_not_reading" in ids and "network_retransmit" not in ids

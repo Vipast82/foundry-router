@@ -28,6 +28,8 @@ from typing import Any, AsyncIterator, Optional
 
 import httpx
 
+from . import tcpinfo
+
 log = logging.getLogger(__name__)
 
 
@@ -92,6 +94,11 @@ class ChatResult:
     # request: network (upload of a big prompt), a queue, or request setup.
     headers_ms: float = 0.0
     start_ms: float = 0.0
+    # Kernel TCP counters for this request (pool/tcpinfo.py; None = unknown):
+    # segments resent (packet loss) and ms the upload stalled on the server's
+    # full receive window (server not reading its socket).
+    tcp_retrans: Optional[int] = None
+    tcp_rwnd_ms: Optional[float] = None
     raw: Any = None
 
     def done_frame(self) -> dict:
@@ -114,6 +121,8 @@ class ChatResult:
                 "timing_source": self.timing_source,
                 "headers_ms": self.headers_ms,
                 "start_ms": self.start_ms,
+                "tcp_retrans": self.tcp_retrans,
+                "tcp_rwnd_ms": self.tcp_rwnd_ms,
                 "finish_reason": self.finish_reason}
 
     @classmethod
@@ -139,7 +148,9 @@ class ChatResult:
                    reasoning_tokens=int(c.get("reasoning_tokens") or 0),
                    timing_source=c.get("timing_source") or "",
                    headers_ms=float(c.get("headers_ms") or 0),
-                   start_ms=float(c.get("start_ms") or 0))
+                   start_ms=float(c.get("start_ms") or 0),
+                   tcp_retrans=c.get("tcp_retrans"),
+                   tcp_rwnd_ms=c.get("tcp_rwnd_ms"))
 
 
 # Request controls that ride in `options` for the openai / anthropic dialects
@@ -1166,6 +1177,7 @@ class OpenAIProtocol(BaseProtocol):
         t_start = time.monotonic_ns()
         t_first = t_last = 0
         headers_ms = start_ms = 0.0
+        tcp: dict = {}
         for attempt in (0, 1):
             async with self.client.stream("POST", f"{self._base()}/chat/completions",
                                           json=payload, headers=self._headers()) as r:
@@ -1263,6 +1275,7 @@ class OpenAIProtocol(BaseProtocol):
                         yield {"content": "", "done": False, "progress": {
                             "tool_chars": sum(len(f["arguments"]) for f in frags.values()),
                             "tool": next((f["name"] for f in frags.values() if f["name"]), "")}}
+                tcp = tcpinfo.request_delta(tcpinfo.socket_of(r))
                 break
         fc, ft = splitter.flush()
         if fc or ft:
@@ -1295,6 +1308,8 @@ class OpenAIProtocol(BaseProtocol):
                "timing_source": source,
                "headers_ms": round(headers_ms, 1),
                "start_ms": round(start_ms, 1),
+               "tcp_retrans": tcp.get("retrans"),
+               "tcp_rwnd_ms": tcp.get("rwnd_ms"),
                "finish_reason": finish}
 
 
