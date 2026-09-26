@@ -202,5 +202,9 @@ enumerates the valid set.
      note, so the trimmed prompt stays identical turn after turn and
      llama.cpp / Claude keep reusing their prompt cache — trimming a little
      every turn would force a full re-prefill of the whole context each time.
+     The prompt size reported back to Cline is the size of *its* full history,
+     not the trimmed copy — otherwise Cline sees a number under its compaction
+     threshold and keeps showing "Compaction skipped" while Foundry keeps
+     trimming (the processed size stays visible as `foundry.prompt_sent`).
 - **Only use these personas for Cline.** They're purpose-built thin routers; your
   other clients keep using `Foundry-Chat`/`Foundry-Coding`/etc.

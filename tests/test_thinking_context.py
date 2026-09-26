@@ -277,3 +277,30 @@ def test_guard_keeps_the_prefix_stable_across_turns():
     # crossed (once over these 6 turns) — not on every turn
     changes = sum(1 for a, b in zip(prefixes, prefixes[1:]) if a != b)
     assert changes <= 1
+
+
+def test_trimmed_request_reports_the_clients_full_size(app, client):
+    """Cline decides to compact from the reported prompt size; reporting the
+    trimmed size kept it under its threshold forever ('Compaction skipped')."""
+    svc = app.state.services
+
+    class P(CapturePool):
+        async def chat(self, model, messages, **kw):
+            from foundry_router.pool.protocols import ChatResult
+            self.sent.append(messages)
+            sent = context_guard.estimate(messages, None, model)
+            return ChatResult(content="ok", prompt_tokens=sent, completion_tokens=3), "b1"
+    pool = P("openai-compatible")
+    real, svc.pool = svc.pool, pool
+    svc.registry.upsert_auto("qwen", source="discovery", context_length=65536)
+    svc.personas.upsert("Act", execution_mode="direct", model_allowlist=["qwen"],
+                        pinned_models=[], context_window=65536)
+    history = _convo(30)
+    try:
+        r = client.post("/api/chat", json={"model": "Act", "stream": False,
+                                           "messages": history}).json()
+    finally:
+        svc.pool = real
+    sent = r["foundry"]["prompt_sent"]
+    assert sent <= 65536                                  # what the model processed
+    assert r["prompt_eval_count"] > 65536 > sent          # what Cline is told: its real size

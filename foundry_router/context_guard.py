@@ -194,4 +194,5 @@ def describe(rep: dict) -> str:
         parts.append(f"cut {rep['trimmed']} oversized tool result/message(s)")
     return (f"context guard: ~{rep['before'] / 1000:.0f}k tokens would overflow the "
             f"{rep['window'] / 1000:.0f}k window — " + ", ".join(parts or ["trimmed"])
-            + f" → ~{rep['after'] / 1000:.0f}k sent (your client keeps its full history)")
+            + f" → ~{rep['after'] / 1000:.0f}k sent. Your client keeps its full history and "
+            f"is told its real size (~{rep['before'] / 1000:.0f}k), so it can compact.")

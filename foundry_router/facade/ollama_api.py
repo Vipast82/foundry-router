@@ -1156,12 +1156,23 @@ def _apply_context_guard(svc, persona, model_id, messages, tools, options, logge
     return out, note
 
 
-def _prompt_accounting(svc, model_id, res, convo, tools, stats: dict) -> dict:
-    """Make the prompt size the client sees the TOTAL it sent. Clients (Cline)
-    decide when to auto-compact from this number; Ollama's prompt_eval_count
-    counts only tokens it re-processed (cached ones excluded), so after the
-    first turn it can be a fraction of the real context — and the client
-    never compacts. Totals from other backends calibrate the estimator."""
+def _prompt_accounting(svc, model_id, res, convo, tools, stats: dict,
+                       client_convo=None) -> dict:
+    """Make the prompt size the client sees the size of ITS conversation.
+    Clients (Cline) decide when to auto-compact from this number, so it must
+    reflect the history the client holds:
+
+      * Ollama's prompt_eval_count counts only tokens it re-processed (cached
+        ones excluded) — after the first turn a fraction of the real context;
+      * when the context guard trimmed the request, the backend only saw the
+        trimmed copy. Reporting that smaller number kept Cline just under its
+        compaction threshold forever ("Compaction skipped") while Foundry kept
+        trimming — the model silently lost history every turn.
+
+    The client is told the size of the conversation it sent (the tokens the
+    backend actually processed stay visible as foundry.prompt_sent /
+    prompt_evaluated). Real totals from non-Ollama backends calibrate the
+    estimator."""
     try:
         btype = (svc.pool.backend_info(model_id) or {}).get("type")
         if btype == "ollama":
@@ -1171,6 +1182,12 @@ def _prompt_accounting(svc, model_id, res, convo, tools, stats: dict) -> dict:
                 stats["prompt_tokens"] = est
         elif res.prompt_tokens:
             context_guard.learn(model_id, convo, tools, res.prompt_tokens)
+        if client_convo is not None and client_convo is not convo:
+            full = context_guard.estimate(client_convo, tools, model_id)
+            sent = int(stats.get("prompt_tokens") or 0)
+            if full > sent:
+                stats["prompt_sent"] = sent
+                stats["prompt_tokens"] = full
     except Exception:                                             # noqa: BLE001
         pass
     return stats
@@ -1323,6 +1340,7 @@ async def _direct_dispatch_chat(svc, persona, model_name, messages, client_tools
         fmt = None                        # structured output would break tool calls
     tool_cap = int(getattr(brain_cfg, "worker_tool_max_steps", 6) or 6)
     base_convo = prompts.sanitize_history(messages)
+    client_convo = base_convo            # what the client holds (before any trim)
     out_cap = _output_cap(svc, persona)
     # Never send more than the model's window (Cline's auto-compact can lag).
     base_convo, _guard_note = _apply_context_guard(svc, persona, model_id, base_convo,
@@ -1492,7 +1510,7 @@ async def _direct_dispatch_chat(svc, persona, model_name, messages, client_tools
         return tool_calls, _prompt_accounting(
             svc, model_id, res, base_convo, all_tools,
             tr.result_stats(res, time.monotonic_ns() - t0, model=model_id,
-                            backend=last_backend))
+                            backend=last_backend), client_convo)
 
     # LIVE STREAMING (opt-in): forward the worker's tokens as they generate — each
     # chunk is real proof the backend is working, resets the read timeout (no
@@ -1637,7 +1655,8 @@ async def _direct_dispatch_chat(svc, persona, model_name, messages, client_tools
                             stats=_prompt_accounting(
                                 svc, model_id, res, convo, all_tools,
                                 tr.result_stats(res, time.monotonic_ns() - t0,
-                                                model=model_id, backend=backend_name)))
+                                                model=model_id, backend=backend_name),
+                                client_convo))
                         return
                 except StreamStalled as e:
                     # The backend went silent (a hung / queued Claude session,
@@ -1780,6 +1799,7 @@ async def _passthrough_chat(svc, model_name, messages, client_tools, options,
     logger = RequestLogger(svc.db, "", model_name, "passthrough", user_text)
     max_tokens = svc.config_store.config.agent_brain.worker_max_tokens
     t0 = time.monotonic_ns()
+    client_messages = messages
     messages, guard_note = _apply_context_guard(svc, None, model_name, messages,
                                                 client_tools, options, logger)
     if not stream:
@@ -1814,7 +1834,8 @@ async def _passthrough_chat(svc, model_name, messages, client_tools, options,
                              **tr._stats(_prompt_accounting(
                                  svc, model_name, result, messages, client_tools,
                                  tr.result_stats(result, time.monotonic_ns() - t0,
-                                                 model=model_name, backend=backend)))})
+                                                 model=model_name, backend=backend),
+                                 client_messages))})
 
     async def gen():
         status, error = "ok", ""
@@ -1885,7 +1906,8 @@ async def _passthrough_chat(svc, model_name, messages, client_tools, options,
                                 stats=_prompt_accounting(
                                     svc, model_name, final, messages, client_tools,
                                     tr.result_stats(final, time.monotonic_ns() - t0,
-                                                    model=model_name, backend=backend_name)))
+                                                    model=model_name, backend=backend_name),
+                                    client_messages))
         else:
             yield tr.chat_chunk(model_name, "", done=True,
                                 stats={"total_duration_ns": time.monotonic_ns() - t0})
