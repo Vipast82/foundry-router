@@ -259,3 +259,21 @@ def test_cline_personas_seeded_with_32k_output(app):
     for name in ("claude-cline-act", "claude-cline-plan"):
         p = svc.personas.get(name)
         assert p and int(p["max_output_tokens"]) == 32768
+
+
+def test_guard_keeps_the_prefix_stable_across_turns():
+    """Trimming must not move the cut point every turn — that would force a
+    full re-prefill each time (the prompt cache reuses the unchanged prefix)."""
+    history = _convo(40, 20000)
+    prefixes = []
+    for extra in range(6):                       # the conversation grows turn by turn
+        msgs = history[:-1] + [m for i in range(extra) for m in (
+            {"role": "assistant", "content": f"more {i}"},
+            {"role": "user", "content": f"next {i}"})] + [history[-1]]
+        out, rep = context_guard.fit(msgs, None, 131072, 8192, "stable-model")
+        assert rep and rep["after"] <= rep["budget"]
+        prefixes.append(json.dumps(out[:12]))
+    # identical from turn to turn, changing only when a block boundary is
+    # crossed (once over these 6 turns) — not on every turn
+    changes = sum(1 for a, b in zip(prefixes, prefixes[1:]) if a != b)
+    assert changes <= 1

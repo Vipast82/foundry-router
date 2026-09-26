@@ -198,5 +198,9 @@ enumerates the valid set.
      results. Cline keeps its full history, and the turn shows
      `⚠️ context guard: ~251k tokens would overflow the 262k window — dropped
      14 older message(s) …`. The Usage Log and Events record it too.
+     Cuts are made in large fixed blocks (25% of the budget) with a constant
+     note, so the trimmed prompt stays identical turn after turn and
+     llama.cpp / Claude keep reusing their prompt cache — trimming a little
+     every turn would force a full re-prefill of the whole context each time.
 - **Only use these personas for Cline.** They're purpose-built thin routers; your
   other clients keep using `Foundry-Chat`/`Foundry-Coding`/etc.

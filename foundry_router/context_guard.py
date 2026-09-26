@@ -101,9 +101,22 @@ def _units(msgs: list[dict]) -> list[list[dict]]:
     return out
 
 
+_BLOCK_MSGS = 20        # step-1 eligibility moves in blocks of this many messages
+_DROP_BLOCK = 0.25      # step-2 drops in blocks of this share of the budget
+
+
 def fit(messages: list[dict], tools: Optional[list], window: int, reserve: int,
         model: str = "") -> tuple[list[dict], Optional[dict]]:
-    """Return (messages to send, report or None when nothing was trimmed)."""
+    """Return (messages to send, report or None when nothing was trimmed).
+
+    Prompt-cache friendly: llama.cpp / vLLM / Claude reuse the KV cache for
+    the longest unchanged PREFIX of the prompt. Trimming a little more every
+    turn would move the cut point each turn and force a full re-prefill of a
+    200k-token context every time. So every cut is quantized — tool-result
+    cutting moves in blocks of messages, turn dropping in blocks of 25% of the
+    budget, and the note is constant — making the trimmed prefix identical
+    from turn to turn until the next block boundary is crossed (the same idea
+    as Cline dropping half its history at once)."""
     if not window or window <= 0 or not messages:
         return messages, None
     budget = int((window - max(0, reserve)) * 0.97)      # 3% margin for estimate error
@@ -114,36 +127,49 @@ def fit(messages: list[dict], tools: Optional[list], window: int, reserve: int,
     msgs = [dict(m) for m in messages]
     trimmed = 0
 
-    # 1) cut oversized tool results in older turns
+    # 1) cut oversized tool results in older turns; "older" = before a
+    #    boundary that only advances every _BLOCK_MSGS messages (stable prefix)
     limit_chars = int(max(2000, budget * r * 0.04))       # ≤4% of the budget each
-    for i, m in enumerate(msgs[:-_KEEP_RECENT] if len(msgs) > _KEEP_RECENT else []):
+    boundary = max(0, ((len(msgs) - _KEEP_RECENT) // _BLOCK_MSGS) * _BLOCK_MSGS)
+    for i in range(boundary):
+        m = msgs[i]
         if m.get("role") == "tool" and isinstance(m.get("content"), str) \
                 and len(m["content"]) > limit_chars:
             msgs[i] = {**m, "content": _cut(m["content"], limit_chars, "older tool result")}
             trimmed += 1
     now = estimate(msgs, tools, model)
 
-    # 2) drop the oldest turns after the protected prefix (system + first user)
+    # 2) drop the oldest turns after the protected prefix (system + first
+    #    user), in blocks: the amount dropped is rounded UP to a multiple of
+    #    25% of the budget, measured over the (append-only) history, so the
+    #    cut stays at the same message while the conversation grows.
     dropped = 0
     if now > budget:
         first_user = next((i for i, m in enumerate(msgs) if m.get("role") == "user"), None)
         cut_from = (first_user + 1) if first_user is not None else 0
         prefix, rest = msgs[:cut_from], msgs[cut_from:]
         units = _units(rest)
-        while now > budget and len(units) > 1:
-            gone = units.pop(0)
-            dropped += len(gone)
-            now = estimate(prefix + [m for u in units for m in u], tools, model)
+        over_chars = (now - budget) * r
+        block = max(1.0, budget * r * _DROP_BLOCK)
+        target = -(-over_chars // block) * block               # ceil to a block
+        gone_chars = 0.0
+        while units[1:] and gone_chars < target:
+            u = units.pop(0)
+            dropped += len(u)
+            gone_chars += sum(message_chars(m) for m in u)
         rest = [m for u in units for m in u]
         if dropped:
-            note = (f"[Foundry context guard: {dropped} earlier message(s) were removed "
-                    f"so this conversation fits the model's {window:,}-token context "
-                    f"window. Continue from the recent context below.]")
+            # Constant wording (no counts): the prefix stays byte-identical
+            # across turns, so the backend's prompt cache keeps working.
+            note = (f"[Foundry context guard: earlier messages were removed so this "
+                    f"conversation fits the model's {window:,}-token context window. "
+                    f"Continue from the recent context below.]")
             if prefix and prefix[-1].get("role") == "user" and isinstance(prefix[-1].get("content"), str):
                 prefix[-1] = {**prefix[-1], "content": prefix[-1]["content"] + "\n\n" + note}
             else:
                 rest = [{"role": "user", "content": note}] + rest
         msgs = prefix + rest
+        now = estimate(msgs, tools, model)
 
     # 3) a single recent message still too big: cut its middle
     if now > budget:
