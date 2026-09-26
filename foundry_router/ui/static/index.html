@@ -1754,7 +1754,13 @@ async function tabLive() {
     const _tps = Object.fromEntries((a.models || []).map(m => [m.model, m.tps]));
     const calls = a.calls || [];
     $("#live-models").innerHTML = calls.length
-      ? calls.map(c => `<span class="pill ok" title="request ${esc(c.request_id || "?")} on backend ${esc(c.backend || "?")} — the client's '⏳ … still working' line shows the same id (first thinking line) and the same clock">▶ ${esc(c.model)} · ${_el(c.seconds)}${_tps[c.model] ? " · ~" + _tps[c.model] + " tok/s" : ""} <span class="mono" style="opacity:.75">req ${esc((c.request_id || "").slice(0, 8))}</span></span>`).join(" ")
+      ? calls.map(c => {
+          const pf = (c.progress || {}).prefill;
+          const phase = pf && pf.total ? (() => { const n = Math.max(1, pf.total - (pf.cache || 0)), d = Math.max(0, (pf.processed || 0) - (pf.cache || 0));
+              return ` · reading prompt ${Math.floor(100 * d / n)}% (${d.toLocaleString()}/${n.toLocaleString()} new tok)`; })()
+            : c.phase ? " · " + esc(c.phase) : "";
+          return `<span class="pill ok" title="request ${esc(c.request_id || "?")} on backend ${esc(c.backend || "?")} — the client's '⏳ … still working' line shows the same id (first thinking line) and the same clock">▶ ${esc(c.model)} · ${_el(c.seconds)}${phase}${_tps[c.model] ? " · ~" + _tps[c.model] + " tok/s" : ""} <span class="mono" style="opacity:.75">req ${esc((c.request_id || "").slice(0, 8))}</span></span>`;
+        }).join(" ")
       : (a.models || []).length
       ? a.models.map(m => `<span class="pill ok">▶ ${esc(m.model)} · ${_el(m.seconds)}${m.count > 1 ? " ×" + m.count : ""}${m.tps ? " · ~" + m.tps + " tok/s" : ""}</span>`).join(" ")
       : '<span class="hint">idle — no model generating</span>';

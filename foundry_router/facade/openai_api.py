@@ -285,6 +285,14 @@ async def _ndjson_objects(resp):
         yield json.loads(buf)
 
 
+def _error_obj(message) -> dict:
+    from .translate import client_error
+    text, overflow = client_error(message)
+    return {"message": text,
+            "type": "invalid_request_error" if overflow else "server_error",
+            "code": "context_length_exceeded" if overflow else "backend_error"}
+
+
 def _error_envelope(resp) -> JSONResponse:
     try:
         err = json.loads(resp.body).get("error")
@@ -292,6 +300,8 @@ def _error_envelope(resp) -> JSONResponse:
         err = None
     msg = err if isinstance(err, str) else (err or {}).get("message") if isinstance(err, dict) else "error"
     code = "model_not_found" if resp.status_code == 404 else "backend_error"
+    if "context window exceeded" in (msg or "").lower():
+        code = "context_length_exceeded"
     return JSONResponse({"error": {"message": msg or "error", "type": "invalid_request_error"
                                    if resp.status_code < 500 else "api_error", "code": code}},
                         status_code=resp.status_code)
@@ -327,6 +337,12 @@ async def chat_completions(request: Request):
             yield _sse(_chunk(cid, created, model_name, delta={"role": "assistant"}))
             pending_tools: list = []
             async for obj in source:
+                if "error" in obj and "message" not in obj:
+                    # Mid-stream failure -> an OpenAI error event (the OpenAI SDKs
+                    # raise it as an APIError), code context_length_exceeded for an
+                    # overflow so agents (Cline, OpenCode) can compact and retry.
+                    yield _sse({"error": _error_obj(obj["error"])})
+                    break
                 msg = obj.get("message") or {}
                 if msg.get("thinking"):
                     yield _sse(_chunk(cid, created, model_name,
@@ -363,6 +379,10 @@ async def chat_completions(request: Request):
 
     content, reasoning, final, tools = [], [], {}, []
     async for obj in source:
+        if "error" in obj and "message" not in obj:
+            err = _error_obj(obj["error"])
+            return JSONResponse({"error": err}, status_code=400
+                                if err.get("code") == "context_length_exceeded" else 502)
         msg = obj.get("message") or {}
         if msg.get("thinking"):
             reasoning.append(msg["thinking"])

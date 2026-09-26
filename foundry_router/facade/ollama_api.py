@@ -56,6 +56,8 @@ def _canonical_messages(raw: list[dict]) -> list[dict]:
     out = []
     for m in raw or []:
         role = m.get("role") or "user"
+        if role == "developer":          # OpenAI's newer name for the system role
+            role = "system"
         if role not in ("system", "user", "assistant", "tool"):
             role = "user"
         if role == "assistant":
@@ -538,9 +540,11 @@ async def _agent_backend_chat(svc, persona, agent_name, model_name, messages, st
                                         thinking=ev.get("thinking") or None)
         except Exception as e:                                     # noqa: BLE001
             status, error = "error", str(e)
-            yield tr.chat_chunk(model_name, f"\n[foundry-router] agent {agent_name}: {e}")
+            yield tr.error_chunk(tr.client_error(f"agent {agent_name}: {e}")[0])
         finally:
             _finish_log(done, status, error)
+        if status == "error":
+            return
         yield tr.chat_chunk(model_name, "", done=True, stats=_stats(done))
     return StreamingResponse(gen(), media_type="application/x-ndjson")
 
@@ -1682,12 +1686,10 @@ async def _direct_dispatch_chat(svc, persona, model_name, messages, client_tools
                 except Exception as e:                            # noqa: BLE001
                     logger.finish("error", str(e))
                     err = e
-                yield tr.chat_chunk(model_name,
-                                    f"[router: stream failed — {str(err)[:200]}]",
-                                    done=False)
-                yield tr.chat_chunk(model_name, "", done=True, stats={
-                    "prompt_tokens": 0, "completion_tokens": 0,
-                    "total_duration_ns": time.monotonic_ns() - t0})
+                # A real error, not reply text: the client shows a failed
+                # request (Cline: retry, and automatic compaction when it's a
+                # context overflow) instead of treating it as the model's answer.
+                yield tr.error_chunk(tr.client_error(err)[0])
                 return
         return StreamingResponse(sgen(), media_type="application/x-ndjson")
 
@@ -1696,7 +1698,8 @@ async def _direct_dispatch_chat(svc, persona, model_name, messages, client_tools
             result = await _run_with_failover()
         except AllBackendsFailed as e:
             _on_error(e)
-            return JSONResponse({"error": str(e)}, status_code=502)
+            msg, overflow = tr.client_error(e)
+            return JSONResponse({"error": msg}, status_code=400 if overflow else 502)
         tool_calls, stats = _finalize(result)
         msg: dict = {"role": "assistant", "content": result.content}
         if result.thinking:
@@ -1757,12 +1760,7 @@ async def _direct_dispatch_chat(svc, persona, model_name, messages, client_tools
         while notes:
             yield tr.chat_chunk(model_name, "", done=False, thinking=notes.pop(0))
         if err is not None:
-            yield tr.chat_chunk(model_name,
-                                f"[router: worker call failed — {err[:200]}]",
-                                done=False)
-            yield tr.chat_chunk(model_name, "", done=True, stats={
-                "prompt_tokens": 0, "completion_tokens": 0,
-                "total_duration_ns": time.monotonic_ns() - t0})
+            yield tr.error_chunk(tr.client_error(err)[0])
             return
         tool_calls, stats = _finalize(result)
         _tn = _truncation_note(result, out_cap, persona, svc, model_id)
@@ -1810,7 +1808,8 @@ async def _passthrough_chat(svc, model_name, messages, client_tools, options,
         except AllBackendsFailed as e:
             _note_exhaustion(svc, model_name, e)
             logger.finish("error", str(e))
-            return JSONResponse({"error": str(e)}, status_code=502)
+            msg, overflow = tr.client_error(e)
+            return JSONResponse({"error": msg}, status_code=400 if overflow else 502)
         logger.record_model_call(model_name, backend, result.prompt_tokens,
                                  result.completion_tokens,
                                  estimate_cost_usd(svc.registry.get(model_name),
@@ -1895,9 +1894,11 @@ async def _passthrough_chat(svc, model_name, messages, client_tools, options,
         except AllBackendsFailed as e:
             _note_exhaustion(svc, model_name, e)
             status, error = "error", str(e)
-            yield tr.chat_chunk(model_name, f"\n[foundry-router] {e}")
+            yield tr.error_chunk(tr.client_error(e)[0])
         finally:
             logger.finish(status, error)
+        if status == "error":
+            return
         if final is not None:
             tcs = [{**({"id": t["id"]} if t.get("id") else {}),
                                     "function": {"name": t["name"], "arguments": t["arguments"]}}
@@ -1956,6 +1957,8 @@ async def generate(request: Request):
     resp = await _chat_dispatch(svc, chat_body)
 
     def _reshape(obj: dict) -> dict:
+        if "error" in obj and "message" not in obj:
+            return obj                    # Ollama error line: pass through as-is
         msg = obj.get("message") or {}
         out = {"model": model_name, "created_at": obj.get("created_at") or tr.now_iso(),
                "response": msg.get("content") or "", "done": bool(obj.get("done"))}

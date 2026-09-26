@@ -138,3 +138,33 @@ def test_streamed_reasoning_is_verbatim(app, client):
     lines = [json.loads(x) for x in r.text.splitlines() if x.strip()]
     thinking = "".join(l["message"].get("thinking") or "" for l in lines)
     assert "Let me think" in thinking                      # not one token per line
+
+
+async def test_llamacpp_prompt_progress_reaches_status_and_counts_as_output():
+    frames = [{"choices": [], "prompt_progress": {"total": 120000, "cache": 100000,
+                                                   "processed": 100000 + n * 5000, "time_ms": n}}
+              for n in range(5)]
+    frames += [{"choices": [{"delta": {"content": "ok"}}]},
+               {"choices": [{"delta": {}, "finish_reason": "stop"}]}]
+    body = "".join(f"data: {json.dumps(f)}\n\n" for f in frames) + "data: [DONE]\n\n"
+    seen = []
+
+    def h(r):
+        seen.append(json.loads(r.content))
+        return httpx.Response(200, text=body)
+    proto = OpenAIProtocol("http://llama:8080", None,
+                           httpx.AsyncClient(transport=httpx.MockTransport(h)), flavor="llamacpp")
+    chunks = [c async for c in proto.chat_stream("qwen", [{"role": "user", "content": "x"}])]
+    assert seen[0]["return_progress"] is True                  # asked for progress
+    prog = [c["progress"]["prefill"] for c in chunks if c.get("progress")]
+    assert prog[-1]["processed"] == 120000 and prog[-1]["cache"] == 100000
+    detail = keepalive.progress_detail({"prefill": prog[2]})
+    assert "reading the prompt · 10,000 / 20,000 new tokens (50%)" in detail
+    assert "100,000 from cache" in detail
+    # other flavors are not sent the llama.cpp-only field
+    vseen = []
+    v = OpenAIProtocol("http://v", None, httpx.AsyncClient(transport=httpx.MockTransport(
+        lambda r: (vseen.append(json.loads(r.content)), httpx.Response(200, text="data: [DONE]\n\n"))[1])),
+        flavor="vllm")
+    [c async for c in v.chat_stream("m", [{"role": "user", "content": "x"}])]
+    assert "return_progress" not in vseen[0]

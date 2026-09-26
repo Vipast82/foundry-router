@@ -100,6 +100,14 @@ def progress_detail(progress: Optional[dict]) -> str:
     """Status-line detail for what the model is producing unseen."""
     if not progress:
         return ""
+    pf = progress.get("prefill")
+    if isinstance(pf, dict) and pf.get("total") and not progress.get("tool_chars"):
+        total, done_, cache = pf["total"], pf.get("processed") or 0, pf.get("cache") or 0
+        new_total = max(1, total - cache)
+        done_new = max(0, done_ - cache)
+        return (f"reading the prompt · {done_new:,} / {new_total:,} new tokens "
+                f"({100 * done_new // new_total}%)"
+                + (f", {cache:,} from cache" if cache else ""))
     n = progress.get("tool_chars")
     if n:
         size = f"{n / 1000:.1f}k" if n >= 1000 else str(n)

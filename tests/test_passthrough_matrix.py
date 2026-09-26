@@ -288,7 +288,11 @@ def test_backend_error_reaches_client_cleanly(wired, client, path, fmt):
             assert r.status_code in (200, 502)
             if r.status_code == 200:
                 objs = [json.loads(x) for x in text.splitlines() if x.strip()]
-                assert objs[-1]["done"] is True
+                # ends with a done chunk (answer from a failover model) or an
+                # Ollama error line — never a torn stream or error-as-answer
+                assert objs[-1].get("done") is True or "error" in objs[-1]
+                assert not any("[router:" in (o.get("message") or {}).get("content", "")
+                               for o in objs)
         else:
             r = client.post("/v1/chat/completions", json={"model": name, "stream": True,
                                                           "messages": [{"role": "user", "content": "x"}]})
@@ -308,3 +312,57 @@ def test_generate_carries_thinking(wired, client):
     assert "T-olm" in "".join(o.get("thinking") or "" for o in objs)
     assert "Hello" in "".join(o.get("response") or "" for o in objs)
     assert objs[-1]["done"] and objs[-1]["eval_count"] == 7
+
+
+LLAMA_OVERFLOW = ('{"error":{"code":400,"message":"the request exceeds the available context '
+                  'size, try increasing it","type":"exceed_context_size_error"}}')
+
+
+@pytest.mark.parametrize("path", ["raw", "direct-stream", "direct-buffered"])
+def test_context_overflow_is_a_recognisable_error_for_cline(wired, client, path):
+    """llama.cpp's overflow must reach Cline as an ERROR whose text matches
+    Cline's context-window patterns — it then compacts and retries itself."""
+    import tests.test_passthrough_matrix as m
+    orig = m._llama
+
+    def full(req):
+        if req.url.path.endswith("/models"):
+            return orig(req)
+        return httpx.Response(400, text=LLAMA_OVERFLOW)
+    m._llama = full
+    wired.config_store.config.agent_brain.direct_stream = path == "direct-stream"
+    wired.personas.upsert("P-llm-only", execution_mode="direct", model_allowlist=["llm"],
+                          pinned_models=[])
+    name = "llm" if path == "raw" else "P-llm-only"
+    import foundry_router.facade.ollama_api as oa
+    orig_fo = oa._failover_list
+
+    async def no_failover(svc, persona, first, *a, **k):
+        return [first]
+    oa._failover_list = no_failover
+    try:
+        r = client.post("/api/chat", json={"model": name, "messages": [
+            {"role": "user", "content": "x"}]})
+        objs = [json.loads(x) for x in r.text.splitlines() if x.strip()]
+        err = objs[-1]["error"]
+        assert err.startswith("context window exceeded:") and "available context size" in err
+        assert not any(o.get("done") for o in objs)           # no done after the error
+        o = client.post("/v1/chat/completions", json={"model": name, "stream": True,
+                                                      "messages": [{"role": "user", "content": "x"}]})
+        ev = [json.loads(l[5:]) for l in o.text.splitlines()
+              if l.startswith("data:") and l.strip() != "data: [DONE]"]
+        e = [x for x in ev if "error" in x][0]["error"]
+        assert e["code"] == "context_length_exceeded"
+        ns = client.post("/v1/chat/completions", json={"model": name,
+                                                       "messages": [{"role": "user", "content": "x"}]})
+        assert ns.status_code == 400 and ns.json()["error"]["code"] == "context_length_exceeded"
+    finally:
+        m._llama = orig
+        oa._failover_list = orig_fo
+
+
+def test_developer_role_is_treated_as_system():
+    from foundry_router.facade.ollama_api import _canonical_messages
+    out = _canonical_messages([{"role": "developer", "content": "rules"},
+                               {"role": "user", "content": "hi"}])
+    assert out[0]["role"] == "system"

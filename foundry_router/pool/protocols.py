@@ -1147,6 +1147,10 @@ class OpenAIProtocol(BaseProtocol):
                                 max_tokens or 4096, think, fmt)
         payload["stream"] = True
         payload["stream_options"] = {"include_usage": True}
+        if (self.flavor or "") == "llamacpp":
+            # Ask llama.cpp to stream prompt-processing progress (ignored by
+            # builds that don't support it).
+            payload.setdefault("return_progress", True)
         t_start = time.monotonic_ns()
         t_first = t_last = 0
         for attempt in (0, 1):
@@ -1190,6 +1194,17 @@ class OpenAIProtocol(BaseProtocol):
                         ct = usage.get("completion_tokens") or ct
                         cached = _cached_tokens(usage) or cached
                         reasoning_tok = _reasoning_tokens(usage) or reasoning_tok
+                    # llama.cpp prompt-processing progress (return_progress):
+                    # how far through reading the prompt it is — shown in the
+                    # client's status line and the Live view, and proof of
+                    # life for the stall watchdog during a long prefill.
+                    pp = obj.get("prompt_progress")
+                    if isinstance(pp, dict) and pp.get("total"):
+                        yield {"content": "", "done": False, "progress": {"prefill": {
+                            "processed": int(pp.get("processed") or 0),
+                            "total": int(pp.get("total") or 0),
+                            "cache": int(pp.get("cache") or 0),
+                            "time_ms": pp.get("time_ms")}}}
                     choices = obj.get("choices") or []
                     if not choices:
                         continue

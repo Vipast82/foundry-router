@@ -5,6 +5,7 @@ translation — no routing logic lives here or in ollama_api.py).
 from __future__ import annotations
 
 import hashlib
+import re
 import json
 from datetime import datetime, timezone
 from typing import Iterator, Optional
@@ -34,6 +35,36 @@ def chat_chunk(model: str, content: str = "", done: bool = False,
     if done:
         obj.update(_stats(stats))
     return _line(obj)
+
+
+_OVERFLOW_RE = re.compile(
+    r"exceed\w*[^.\n]{0,40}context|context[^.\n]{0,30}\b(?:size|length|window|limit)\b"
+    r"|maximum context|too many tokens|prompt is too long|input is too long"
+    r"|exceed_context_size|context_length_exceeded", re.I)
+
+
+def client_error(err) -> tuple[str, bool]:
+    """(message for the client, is_context_overflow).
+
+    A context overflow is worded so clients recognise it: Cline matches
+    'context window' / 'maximum context' / 'prompt is too long' (and the code
+    context_length_exceeded) and then compacts its history and retries on its
+    own. llama.cpp says 'exceeds the available context size', which it would
+    not match — so the message is prefixed."""
+    text = str(err or "error").strip()
+    overflow = bool(_OVERFLOW_RE.search(text))
+    if overflow and "context window exceeded" not in text.lower():
+        text = "context window exceeded: " + text
+    return text[:1500], overflow
+
+
+def error_chunk(message: str) -> bytes:
+    """Ollama's native mid-stream error line: {"error": "..."}. Clients treat
+    it as a failed request (Cline: an error with retry / automatic
+    compaction for context overflows; ollama-js throws) instead of reading an
+    error text as the model's answer. No done chunk follows it — a done would
+    turn the failure back into a normal finish."""
+    return _line({"error": message})
 
 
 def generate_chunk(model: str, response: str = "", done: bool = False,

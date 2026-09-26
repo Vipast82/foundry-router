@@ -208,3 +208,47 @@ enumerates the valid set.
      trimming (the processed size stays visible as `foundry.prompt_sent`).
 - **Only use these personas for Cline.** They're purpose-built thin routers; your
   other clients keep using `Foundry-Chat`/`Foundry-Coding`/etc.
+
+
+## Checklist: Cline ↔ Foundry ↔ llama.cpp
+
+Audited against Cline's own source (its Ollama provider, `ollama-ai-provider-v2`
+with Cline's patch, and its error classifier). What Cline reads from Foundry:
+
+| Cline uses | Foundry sends | Result in Cline |
+|---|---|---|
+| `message.thinking` | the model's reasoning (llama.cpp `reasoning_content`, inline `<think>` split out) + Foundry's status lines | the reasoning panel, live |
+| `message.content` | the answer text | the reply |
+| `message.tool_calls` (object arguments, `id`) | complete tool calls with stable ids | tool execution |
+| `done_reason` | `stop` / `length` | `length` → "output-token limit reached" nudge |
+| `prompt_eval_count` / `eval_count` | the size of Cline's full history / output tokens | token counter + auto-compact decision |
+| `{"error": …}` line | failures as real errors (no done after) | error + retry; a **context overflow** ("context window exceeded: …") triggers Cline's own compact-and-retry |
+| response headers within 300 s | sent immediately | no header timeouts during long prefills |
+
+**Cline settings**
+- API provider **Ollama**, base URL = your Foundry URL, model `claude-cline-act` /
+  `claude-cline-plan`.
+- **Context window** = the persona's `context_window` (262144 for a `-c 262144`
+  llama.cpp) — Cline compacts from it; Foundry reports your real history size.
+- Auto-compact on. Leave temperature unset in Cline (the server / persona decides).
+- Reasoning toggle: leave unset and let the persona's `reasoning_effort` decide.
+
+**Foundry**
+- Cline personas in `direct` mode; Global settings: direct_stream ✓, keep-alive
+  10 s, stall timeout 900 s, context guard `trim`, max output tokens 32768.
+- Earlier reasoning Cline sends back is forwarded to llama.cpp as
+  `reasoning_content` (matches `--reasoning-preserve`), with Foundry's own status
+  lines stripped.
+
+**llama.cpp**
+- `--jinja` (tool calls), `--reasoning-format deepseek` (reasoning as its own
+  channel), `--reasoning-preserve`, `--metrics` (Live / advisor), `-np 1`,
+  `-c` = the persona's `context_window`, `--no-context-shift` (overflows become
+  a recognisable error Cline recovers from).
+- Foundry asks llama.cpp to stream **prompt-processing progress**
+  (`return_progress`, recent builds): Cline's status line then shows
+  `reading the prompt · 45,000 / 120,000 new tokens (37%)`, the Live view shows
+  the same per call, and a long prefill never trips the stall watchdog.
+- No `-n` / `--n-predict` cap (it silently cuts replies below Foundry's limit).
+- Consider `--cache-ram 0` with a single Cline conversation (see the Performance
+  advisor's server-wait finding).

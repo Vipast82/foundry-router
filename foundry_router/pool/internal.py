@@ -303,7 +303,11 @@ class InternalPool(BackendPool):
         now = time.monotonic()
         return sorted(({"model": c["model"], "backend": c["backend"],
                         "seconds": round(now - c["since"], 1),
-                        "request_id": c["request_id"]}
+                        "request_id": c["request_id"],
+                        "progress": c.get("progress"),
+                        "phase": ("generating" if c.get("generating") else
+                                  "reading prompt" if (c.get("progress") or {}).get("prefill")
+                                  else "writing tool call" if c.get("progress") else "")}
                        for c in (getattr(self, "_calls", None) or {}).values()),
                       key=lambda x: -x["seconds"])
 
@@ -378,6 +382,7 @@ class InternalPool(BackendPool):
         s = candidates[0]
         call_id = self._inflight_enter(model, s.config.name)
         s.busy += 1
+        calls = getattr(self, "_calls", None) or {}
         try:
             async for chunk in s.protocol.chat_stream(model, messages, tools=tools,
                                                       options=options,
@@ -385,6 +390,11 @@ class InternalPool(BackendPool):
                                                       think=think,
                                                       max_tokens=max_tokens,
                                                       fmt=fmt):
+                if chunk.get("progress") and call_id in calls:
+                    calls[call_id]["progress"] = chunk["progress"]
+                elif (chunk.get("content") or chunk.get("thinking")) and call_id in calls:
+                    calls[call_id].pop("progress", None)
+                    calls[call_id]["generating"] = True
                 yield chunk
             s.consecutive_failures = 0
         except (httpx.HTTPError, ProtocolError, OSError, ExceptionGroup) as e:
