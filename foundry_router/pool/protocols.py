@@ -84,6 +84,14 @@ class ChatResult:
     # stream itself because the server reports nothing — vLLM/OpenRouter; the
     # prefill figure then includes network + queue time), or "" (no timing).
     timing_source: str = ""
+    # Where the time before the first token went (streaming llama.cpp only;
+    # 0 = unknown). headers_ms: request sent -> HTTP response headers back.
+    # start_ms: request sent -> the server STARTED processing the prompt
+    # (first prompt_progress arrival minus its own time_ms). A large start_ms
+    # with a small prefill means the delay is before the engine worked on the
+    # request: network (upload of a big prompt), a queue, or request setup.
+    headers_ms: float = 0.0
+    start_ms: float = 0.0
     raw: Any = None
 
     def done_frame(self) -> dict:
@@ -104,6 +112,8 @@ class ChatResult:
                 "prefill_tokens": self.prefill_tokens,
                 "reasoning_tokens": self.reasoning_tokens,
                 "timing_source": self.timing_source,
+                "headers_ms": self.headers_ms,
+                "start_ms": self.start_ms,
                 "finish_reason": self.finish_reason}
 
     @classmethod
@@ -127,7 +137,9 @@ class ChatResult:
                    cached_tokens=int(c.get("cached_tokens") or 0),
                    prefill_tokens=int(c.get("prefill_tokens") or 0),
                    reasoning_tokens=int(c.get("reasoning_tokens") or 0),
-                   timing_source=c.get("timing_source") or "")
+                   timing_source=c.get("timing_source") or "",
+                   headers_ms=float(c.get("headers_ms") or 0),
+                   start_ms=float(c.get("start_ms") or 0))
 
 
 # Request controls that ride in `options` for the openai / anthropic dialects
@@ -1153,9 +1165,11 @@ class OpenAIProtocol(BaseProtocol):
             payload.setdefault("return_progress", True)
         t_start = time.monotonic_ns()
         t_first = t_last = 0
+        headers_ms = start_ms = 0.0
         for attempt in (0, 1):
             async with self.client.stream("POST", f"{self._base()}/chat/completions",
                                           json=payload, headers=self._headers()) as r:
+                headers_ms = (time.monotonic_ns() - t_start) / 1e6
                 if r.status_code >= 400:
                     body = (await r.aread()).decode("utf-8", "replace")
                     fitted = (_fit_max_tokens(body, payload.get("max_tokens") or 0)
@@ -1200,6 +1214,15 @@ class OpenAIProtocol(BaseProtocol):
                     # life for the stall watchdog during a long prefill.
                     pp = obj.get("prompt_progress")
                     if isinstance(pp, dict) and pp.get("total"):
+                        if not start_ms:
+                            # time_ms = how long llama.cpp has been processing
+                            # the prompt; subtracting it from our clock gives
+                            # when it STARTED, measured from our send.
+                            arrived = (time.monotonic_ns() - t_start) / 1e6
+                            try:
+                                start_ms = max(0.1, arrived - float(pp.get("time_ms") or 0))
+                            except (TypeError, ValueError):
+                                start_ms = arrived
                         yield {"content": "", "done": False, "progress": {"prefill": {
                             "processed": int(pp.get("processed") or 0),
                             "total": int(pp.get("total") or 0),
@@ -1270,6 +1293,8 @@ class OpenAIProtocol(BaseProtocol):
                "prefill_tokens": prefill_n,
                "reasoning_tokens": reasoning_tok,
                "timing_source": source,
+               "headers_ms": round(headers_ms, 1),
+               "start_ms": round(start_ms, 1),
                "finish_reason": finish}
 
 

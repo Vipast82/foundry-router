@@ -325,6 +325,8 @@ class Database:
             ("perf_samples", "prefill_tokens", "INTEGER"),
             ("perf_samples", "reasoning_tokens", "INTEGER"),
             ("perf_samples", "load_ms", "REAL"),
+            ("perf_samples", "headers_ms", "REAL"),
+            ("perf_samples", "start_ms", "REAL"),
             ("models", "adequacy_ok", "INTEGER DEFAULT 0"),
             ("models", "adequacy_failed", "INTEGER DEFAULT 0"),
             ("models", "calls_ok", "INTEGER DEFAULT 0"),

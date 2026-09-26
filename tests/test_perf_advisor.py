@@ -56,7 +56,7 @@ def test_healthy_setup_has_no_findings(app):
 def test_history_rules_fire(app):
     svc = app.state.services
     for i in range(10):   # the live pattern + other problems
-        _add(svc.db, ttft_ms=55000, prefill_ms=2000, wall_ms=62000,
+        _add(svc.db, ttft_ms=42000 + i * 1500, prefill_ms=2000, wall_ms=62000,
              cache_hit_pct=20.0, spec_accept_pct=25.0,
              finish_reason="length" if i < 4 else "tool_calls",
              prefill_tokens=8000, prefill_tps=90.0)
@@ -64,7 +64,7 @@ def test_history_rules_fire(app):
     ids = _ids(res)
     assert {"server_wait", "cache_miss", "low_spec", "truncation", "slow_prefill"} <= ids
     sw = next(f for f in res["findings"] if f["id"] == "server_wait")
-    assert sw["severity"] == "critical" and "--cache-ram 0" in " ".join(sw["fix"])
+    assert sw["severity"] == "critical" and "curl" in " ".join(sw["fix"])
     assert res["findings"][0]["severity"] == "critical"          # sorted by severity
 
 
@@ -89,3 +89,26 @@ def test_live_engine_backend_config_and_event_rules(app):
 def test_advisor_endpoint(app, client):
     r = client.get("/admin/api/perf/advisor", params={"hours": 24}).json()
     assert "findings" in r and "counts" in r and r["hours"] == 24
+
+
+def test_waits_on_tcp_backoff_ladder_are_flagged_as_network(app):
+    """The live pattern: waits of 6.6 / 13.2 / 26.4 / 52.8 s (doubling) are TCP
+    retransmission timeouts, not engine work."""
+    svc = app.state.services
+    for w in [52830] * 8 + [26710, 13460, 6730, 250]:
+        _add(svc.db, ttft_ms=w + 1500, prefill_ms=1500, wall_ms=w + 9000, start_ms=w + 20)
+    res = _run(svc, Pool())
+    ids = _ids(res)
+    assert "network_retransmit" in ids and "server_wait" not in ids
+    f = next(f for f in res["findings"] if f["id"] == "network_retransmit")
+    assert f["severity"] == "critical"
+    assert "52.5s" in f["evidence"]["waits on the doubling steps"]
+    assert "sent → server starts work (median)" in f["evidence"]
+    assert "ping -M do" in " ".join(f["fix"])
+
+
+def test_backoff_ladder_ignores_spread_waits():
+    spread = [11000, 17500, 23000, 31000, 38500, 44000, 49500, 58000, 61000, 70000]
+    assert perf_advisor.backoff_ladder(spread) is None
+    ladder = perf_advisor.backoff_ladder([52800, 52900, 26400, 13200, 6600, 52700])
+    assert ladder and ladder["share"] == 100

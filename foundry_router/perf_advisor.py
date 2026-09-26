@@ -50,6 +50,36 @@ def _f(sev, fid, title, summary, why, fix, evidence=None, scope="") -> dict:
             "fix": fix, "evidence": evidence or {}, "scope": scope}
 
 
+def backoff_ladder(waits_ms: list) -> Optional[dict]:
+    """Do the waits sit on TCP's retransmission-timeout ladder?
+
+    When a packet is lost, Linux resends it after the retransmission timeout
+    (RTO: min 200ms on a LAN) and DOUBLES the timeout on every further loss —
+    0.2, 0.4 … 6.6, 13.2, 26.4, 52.8s. Real work (queueing, prefill, setup)
+    takes a spread of times; waits that land almost exactly on those
+    doubling steps are the fingerprint of packets being lost between Foundry
+    and the server (MTU mismatch, a flaky link/NIC, VPN or tunnel). Returns
+    {share, steps} when >=70% of the >=1s waits are within ~5% of a step."""
+    import math
+    long_ = [w for w in waits_ms if w and w >= 1000]
+    if len(long_) < MIN_N:
+        return None
+    steps: dict = {}
+    hits = 0
+    for w in long_:
+        x = math.log2(w / 205.0)             # ~205ms = LAN RTO (200ms floor + rtt)
+        k = round(x)
+        if abs(x - k) <= 0.08:
+            hits += 1
+            steps[k] = steps.get(k, 0) + 1
+    share = hits / len(long_)
+    if share < 0.7:
+        return None
+    return {"share": round(100 * share),
+            "steps": [f"{205 * 2 ** k / 1000:.1f}s" for k in sorted(steps, key=steps.get,
+                                                                    reverse=True)[:4]]}
+
+
 # --------------------------------------------------------------------------- #
 # per-model history rules                                                     #
 # --------------------------------------------------------------------------- #
@@ -71,25 +101,70 @@ def _model_rules(model: str, backend: str, rows: list[dict], ctx_len: Optional[i
     if len(waits) >= MIN_N:
         w50 = _med(waits)
         share = round(100.0 * sum(waits) / wall_total)
-        if w50 >= 10000:
+        # Foundry -> engine start (llama.cpp prompt_progress): how much of the
+        # wait passes BEFORE the engine begins on the prompt.
+        starts = [r["start_ms"] for r in server if r.get("start_ms")]
+        s50 = _med(starts) if len(starts) >= MIN_N else None
+        ladder = backoff_ladder(waits)
+        ev = {"median wait": _s(w50), "share of time": f"{share}%", "requests": len(waits)}
+        if s50 is not None:
+            ev["sent → server starts work (median)"] = _s(s50)
+        if ladder:
+            ev["waits on the doubling steps"] = f"{ladder['share']}% ({', '.join(ladder['steps'])})"
+        if w50 >= 10000 and ladder:
+            out.append(_f(
+                "critical" if share >= 30 else "warning", "network_retransmit",
+                "Requests are delayed on the network before the server gets them",
+                f"Median {_s(w50)} per request passes before the prompt is processed "
+                f"({share}% of all time), and {ladder['share']}% of those waits are almost "
+                f"exactly {', '.join(ladder['steps'])} — each step double the last.",
+                "Real work takes a spread of times. Waits that only ever come in "
+                "doubling steps (0.2s × 2, × 2, …) are how TCP behaves when packets get "
+                "lost: it resends after 0.2s, then waits twice as long after each further "
+                "loss. The big request (the whole conversation, often 0.5 MB+) is stuck "
+                "being re-sent before llama.cpp can start. Foundry's clock is accurate "
+                "here — it matches the server's own decode timer to milliseconds.",
+                ["Test the path MTU from the Foundry host to the llama.cpp host: "
+                 "`ping -M do -s 1472 <llama-host>` must succeed (1500-byte MTU). If it "
+                 "fails, lower the MTU on the Docker network / VPN / tunnel, or make "
+                 "every hop agree (jumbo frames on one side only cause exactly this).",
+                 "Watch the retransmit counter while Cline runs: "
+                 "`nstat -az TcpRetransSegs TcpExtTCPTimeouts` on the Foundry host — it "
+                 "should barely move.",
+                 "Compare with a request sent on the llama.cpp host itself (curl to "
+                 "localhost): if that starts immediately, the network between the two "
+                 "hosts is the problem, not llama.cpp.",
+                 "Check the link: cable, NIC offload settings (try `ethtool -K <nic> tso "
+                 "off gso off`), Wi-Fi/powerline or a VPN hop between the two machines.",
+                 "Set a run label before changing anything, so you can compare."],
+                ev, scope))
+        elif w50 >= 10000:
+            where = ""
+            if s50 is not None:
+                where = (" Most of it passes before the server starts on the prompt."
+                         if s50 >= 0.7 * w50 else
+                         " The server starts on the prompt quickly, so the time is spent "
+                         "inside llama.cpp before it reports prompt processing.")
             out.append(_f(
                 "critical" if share >= 30 else "warning", "server_wait",
                 "Requests sit idle at the server before any work starts",
                 f"Median {_s(w50)} per request passes before the prompt is even processed "
-                f"— {share}% of all time spent on this model.",
+                f"— {share}% of all time spent on this model." + where,
                 "This time is neither reading the prompt nor writing the answer: the "
-                "server is busy with something else first. It is invisible in tok/s "
-                "numbers but can be the single biggest cost.",
-                ["llama.cpp: with one conversation per slot, try --cache-ram 0 (the host-RAM "
-                 "prompt cache copies the whole slot state over PCIe on each request; the "
-                 "in-GPU slot cache already gives the cache hits).",
+                "request is waiting on the network or the server is busy with something "
+                "else first. It is invisible in tok/s numbers but can be the single "
+                "biggest cost.",
+                ["Send one request with curl on the llama.cpp host itself and time the "
+                 "first token: if it's fast there, the delay is the network between the "
+                 "hosts; if it's slow there too, it is inside llama.cpp.",
                  "Check that no other client or abandoned request is using the same slot "
                  "(-np 1 means one request at a time).",
+                 "llama.cpp: test one flag at a time — without the speculative draft "
+                 "(--spec-type), without --slot-save-path, with --ctx-checkpoints 0.",
                  "llama-swap: make sure the model isn't being swapped out between requests.",
                  "Set a run label on the Performance tab before changing anything, so you "
                  "can compare before/after."],
-                {"median wait": _s(w50), "share of time": f"{share}%", "requests": len(waits)},
-                scope))
+                ev, scope))
 
     # 2. prompt cache not reused on long conversations
     big = [r for r in rows if (r.get("prompt_tokens") or 0) >= 20000
@@ -532,8 +607,8 @@ async def advise(svc, hours: float = 24) -> dict:
     rows = db.query(
         "SELECT model, backend, prompt_tokens, prefill_tokens, completion_tokens, "
         "reasoning_tokens, cached_tokens, draft_n, decode_tps, prefill_tps, prefill_ms, "
-        "ttft_ms, wall_ms, load_ms, cache_hit_pct, spec_accept_pct, finish_reason, timing_src "
-        "FROM perf_samples WHERE datetime(ts) >= datetime('now', ?)", (f"-{hours} hours",))
+        "ttft_ms, wall_ms, load_ms, cache_hit_pct, spec_accept_pct, finish_reason, timing_src, "
+        "headers_ms, start_ms FROM perf_samples WHERE datetime(ts) >= datetime('now', ?)", (f"-{hours} hours",))
     groups: dict = {}
     for r in rows:
         groups.setdefault((r["model"], r["backend"] or ""), []).append(r)

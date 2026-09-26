@@ -79,14 +79,39 @@ held the request before (or around) working on it, and it should be near 0.
 When it is consistently above 10 s, the Performance tab shows a warning card
 with the share of wall time it costs.
 
-Seen live on 2× RTX 2080 Ti (PCIe Gen3 x4 OcuLink), Qwen3.8-27B, `-c 262144`,
-`-np 1`, `--cache-ram 32768`: a near-constant **~53 s wait on 469 of 643 Cline
-turns — 61% of all wall time** — independent of context size, while prefill
-was only ~2 s thanks to 99% slot-cache hits. That signature matches the
-host-RAM prompt cache saving/restoring the slot state over the narrow PCIe
-links on each request. With one conversation per slot the in-GPU slot cache
-already provides the hits, so try `--cache-ram 0` and compare the wait column
-(set a new run label first so before/after are separate).
+**Is the timer right?** Yes — verified. The time-to-first-token clock starts
+immediately before Foundry sends the request (building and sending even a
+750k-character conversation takes 20–80 ms), and for every sample
+`wall − (ttft + decode) ≈ 7 ms`: Foundry's clock agrees with llama.cpp's own
+decode timer to milliseconds. So a wait is real time before llama.cpp starts
+on the prompt.
+
+To say *where* it goes, each streamed llama.cpp request also records (CSV:
+`headers_ms`, `start_ms`):
+
+- **headers_ms** — request sent → HTTP response headers back;
+- **start_ms** — request sent → llama.cpp *started processing the prompt*
+  (first `prompt_progress` arrival minus its own `time_ms`).
+
+A large `start_ms` means the delay is before the engine touched the request
+(network, queue, request setup).
+
+Seen live on 2× RTX 2080 Ti (PCIe Gen3 x4 OcuLink), Qwen3.8-27B, `-np 1`: a
+**~53 s wait on most Cline turns, 61–66% of all wall time**, independent of
+context size, and unchanged by `--cache-ram 0`. 94% of the waits land almost
+exactly on **0.2, 6.6, 13.2, 26.4 or 52.8 s** — each step double the last.
+That is TCP's retransmission-timeout ladder (resend after ~0.2 s, doubling on
+every further loss): packets of the large request are being lost between
+Foundry and llama.cpp. The llama.cpp log confirms it: after each
+`slot release` the server sits idle for ~53 s before the next
+`get_available slot` line. That line comes after llama.cpp has received and
+parsed the request, so the time goes to the request *reaching* llama.cpp,
+before any slot, cache, checkpoint or speculative-decoding work. The advisor
+flags this pattern as *"Requests are delayed on the network"*. Check, in order: path MTU
+(`ping -M do -s 1472 <llama-host>` must work; jumbo frames on one side or a
+VPN/tunnel/Docker network with a smaller MTU cause exactly this), the
+retransmit counters (`nstat -az TcpRetransSegs TcpExtTCPTimeouts` while Cline
+runs), a curl from the llama.cpp host itself, NIC offloads, and the cable/link.
 
 Other causes of a high wait: another client (or an abandoned request) holding
 the only slot on `-np 1`, and model swaps under llama-swap.

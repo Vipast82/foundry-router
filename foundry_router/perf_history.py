@@ -71,7 +71,8 @@ def record_sample(db: Database, *, model: str, backend: str = "", persona: str =
                   ttft_ms: Optional[float] = None, wall_ms: Optional[int] = None,
                   finish_reason: str = "", prefill_tokens: int = 0,
                   reasoning_tokens: int = 0, load_duration_ns: int = 0,
-                  timing_source: str = "", run_label: Optional[str] = None) -> None:
+                  timing_source: str = "", run_label: Optional[str] = None,
+                  headers_ms: float = 0, start_ms: float = 0) -> None:
     """Write one completed model call's metrics as a time-series point. Derived
     rates/percentages are computed here so every reader gets them consistently.
     Best-effort: a logging failure must never break the request that produced it.
@@ -95,8 +96,9 @@ def record_sample(db: Database, *, model: str, backend: str = "", persona: str =
             "prompt_tokens, completion_tokens, cached_tokens, draft_n, "
             "draft_n_accepted, decode_tps, prefill_tps, decode_ms, prefill_ms, "
             "ttft_ms, eff_tps, wall_ms, cache_hit_pct, spec_accept_pct, finish_reason, "
-            "run_label, timing_src, prefill_tokens, reasoning_tokens, load_ms) "
-            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            "run_label, timing_src, prefill_tokens, reasoning_tokens, load_ms, "
+            "headers_ms, start_ms) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (utcnow(), model, backend, persona, mode,
              int(prompt_tokens or 0), int(completion_tokens or 0), int(cached_tokens or 0),
              int(draft_n or 0), int(draft_n_accepted or 0),
@@ -107,7 +109,9 @@ def record_sample(db: Database, *, model: str, backend: str = "", persona: str =
              timing_source or ("server" if eval_duration_ns else ""),
              (int(prefill_tokens) if prefill_tokens else None),
              (int(reasoning_tokens) if reasoning_tokens else None),
-             (round(load_duration_ns / 1e6, 1) if load_duration_ns else None)))
+             (round(load_duration_ns / 1e6, 1) if load_duration_ns else None),
+             (round(headers_ms, 1) if headers_ms else None),
+             (round(start_ms, 1) if start_ms else None)))
     except Exception:
         return
     # Opportunistic prune (≈2% of inserts) — keeps the table bounded without a
@@ -128,7 +132,7 @@ SERIES_COLUMNS = ("ts", "model", "backend", "persona", "mode", "run_label",
                   "reasoning_tokens", "cached_tokens", "draft_n", "draft_n_accepted",
                   "decode_tps", "prefill_tps", "decode_ms", "prefill_ms", "ttft_ms",
                   "eff_tps", "wall_ms", "load_ms", "cache_hit_pct", "spec_accept_pct",
-                  "finish_reason", "timing_src")
+                  "finish_reason", "timing_src", "headers_ms", "start_ms")
 
 
 def _filters(hours: Optional[float], model: Optional[str], backend: Optional[str],

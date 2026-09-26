@@ -250,5 +250,6 @@ with Cline's patch, and its error classifier). What Cline reads from Foundry:
   `reading the prompt · 45,000 / 120,000 new tokens (37%)`, the Live view shows
   the same per call, and a long prefill never trips the stall watchdog.
 - No `-n` / `--n-predict` cap (it silently cuts replies below Foundry's limit).
-- Consider `--cache-ram 0` with a single Cline conversation (see the Performance
-  advisor's server-wait finding).
+- A long, constant wait before the first token (Performance → wait column):
+  see LLAMACPP_VLLM.md "Finding hidden server time" — waits in doubling steps
+  (6.6 / 13.2 / 26.4 / 52.8 s) are packet loss on the network, not llama.cpp.

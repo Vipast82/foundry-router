@@ -72,3 +72,14 @@ def test_failover_list_not_built_when_first_model_works(app, client):
         oa._failover_list = orig
     assert r.json()["message"]["content"] == "ok"
     assert calls == []                        # no pre-dispatch guardrail lookups
+
+
+def test_send_and_start_timings_are_stored(app):
+    from foundry_router import perf_history
+    db = app.state.services.db
+    perf_history.record_sample(db, model="m", prompt_tokens=10, completion_tokens=5,
+                               eval_duration_ns=10**9, ttft_ms=53000,
+                               headers_ms=52900.0, start_ms=52850.0)
+    row = db.query("SELECT headers_ms, start_ms FROM perf_samples WHERE model='m'")[0]
+    assert (row["headers_ms"], row["start_ms"]) == (52900.0, 52850.0)
+    assert {"headers_ms", "start_ms"} <= set(perf_history.SERIES_COLUMNS)

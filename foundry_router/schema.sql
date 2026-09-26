@@ -180,7 +180,9 @@ CREATE TABLE IF NOT EXISTS perf_samples (
   timing_src TEXT,                  -- "server" | "estimated" | "" — where the durations came from
   prefill_tokens INTEGER,           -- prompt tokens actually prefilled (excl. cache hits)
   reasoning_tokens INTEGER,         -- hidden thinking tokens inside completion_tokens
-  load_ms REAL                      -- cold model-load time this call (NULL when warm)
+  load_ms REAL,                     -- cold model-load time this call (NULL when warm)
+  headers_ms REAL,                  -- request sent -> response headers (streaming llama.cpp)
+  start_ms REAL                     -- request sent -> engine started processing the prompt
 );
 
 CREATE INDEX IF NOT EXISTS idx_perf_samples_ts ON perf_samples(ts);

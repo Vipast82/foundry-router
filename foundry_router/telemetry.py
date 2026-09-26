@@ -64,4 +64,6 @@ def record_call(db: Any, registry: Any, *, model: str, backend: str, result: Any
         prefill_tokens=getattr(r, "prefill_tokens", 0) or 0,
         reasoning_tokens=getattr(r, "reasoning_tokens", 0) or 0,
         load_duration_ns=r.load_duration_ns,
-        timing_source=getattr(r, "timing_source", "") or "")
+        timing_source=getattr(r, "timing_source", "") or "",
+        headers_ms=getattr(r, "headers_ms", 0) or 0,
+        start_ms=getattr(r, "start_ms", 0) or 0)
