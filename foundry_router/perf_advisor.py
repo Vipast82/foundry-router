@@ -186,7 +186,14 @@ def _model_rules(model: str, backend: str, rows: list[dict], ctx_len: Optional[i
                 "loss. The big request (the whole conversation, often 0.5 MB+) is stuck "
                 "being re-sent before llama.cpp can start. Foundry's clock is accurate "
                 "here — it matches the server's own decode timer to milliseconds.",
-                ["Test the path MTU from the Foundry host to the llama.cpp host: "
+                ["Check for ASYMMETRIC ROUTING first (the most common cause when the "
+                 "two machines are on different subnets): on the llama.cpp host run "
+                 "`ip route get <Foundry host IP>`. If it answers via a directly "
+                 "connected interface while Foundry reaches it through a router, the "
+                 "router only sees half of each connection and stalls big uploads. "
+                 "Fix: point the backend URL at the server's address on Foundry's own "
+                 "subnet (or give both machines an address on one subnet).",
+                 "Test the path MTU from the Foundry host to the llama.cpp host: "
                  "`ping -M do -s 1472 <llama-host>` must succeed (1500-byte MTU). If it "
                  "fails, lower the MTU on the Docker network / VPN / tunnel, or make "
                  "every hop agree (jumbo frames on one side only cause exactly this).",
