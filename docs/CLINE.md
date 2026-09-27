@@ -286,3 +286,24 @@ auto-approve the tools you trust, and keep long commands (builds, test
 runs) in the background or behind a timeout. Nothing needs to be passed
 from Cline to llama.cpp; the full conversation already goes with every
 request.
+
+### System-clock timestamps and the clock check
+
+Durations use a stopwatch (the monotonic clock). Each turn also records the
+same moments on the system's UTC clock (CSV: `prev_reply_at`, `arrived_at`,
+`sent_at`, `first_token_at`; `ts` = finished). Cline's first thinking line
+shows `arrived HH:MM:SS.mmm UTC`, and every `⏳ still working` line shows
+`sent HH:MM:SS.mmm UTC`.
+
+To line a turn up against llama.cpp, run its logs with Docker's system-clock
+prefix, which uses the same host clock when both containers run on one
+machine:
+
+    docker logs -t -f llama-qwen38-dual2080ti
+
+Compare `sent_at` with the `get_available slot` line of the next task.
+
+On every call Foundry compares the stopwatch with the system clock
+(`clock_diff_ms`, normally a few ms). A disagreement over 500 ms is logged
+in Events ("clock check …"): the clock was stepped (NTP), or the host or VM
+stalled.

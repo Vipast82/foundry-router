@@ -71,4 +71,5 @@ def record_call(db: Any, registry: Any, *, model: str, backend: str, result: Any
         tcp_retrans=getattr(r, "tcp_retrans", None),
         tcp_rwnd_ms=getattr(r, "tcp_rwnd_ms", None),
         **{k: v for k, v in (extra or {}).items()
-           if k in ("client_gap_ms", "client_tool", "router_ms")})
+           if k in ("client_gap_ms", "client_tool", "router_ms", "arrived_at", "sent_at",
+                    "first_token_at", "prev_reply_at", "clock_diff_ms")})

@@ -30,7 +30,7 @@ import time
 from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse, PlainTextResponse, StreamingResponse
 
-from .. import client_gap
+from .. import client_gap, walltime
 from .. import __version__
 from .. import context_guard, keepalive, request_context, telemetry
 from ..brain import prompts
@@ -655,6 +655,36 @@ async def _failover_list(svc, persona, first: str, user_text: str, eff,
     return out
 
 
+def _timeline(svc, gap: dict, arrived, sent, first_tok_wall, ttft_ms, t_round,
+              router_ms, model_id: str) -> dict:
+    """System-clock timestamps for one backend call + a cross-check of the
+    stopwatch against the system clock (a >500ms disagreement is logged)."""
+    wall_now = walltime.now()
+    mono_wall_ms = (time.monotonic_ns() - t_round) / 1e6
+    diffs = [abs(mono_wall_ms - (walltime.ms_between(sent.wall, wall_now) or 0))]
+    if ttft_ms is not None and first_tok_wall is not None:
+        diffs.append(abs(ttft_ms - (walltime.ms_between(sent.wall, first_tok_wall) or 0)))
+    if gap.get("client_gap_wall_ms") is not None:
+        diffs.append(abs(gap["client_gap_ms"] - gap["client_gap_wall_ms"]))
+    diff = round(max(diffs), 1)
+    if diff > 500:
+        try:
+            svc.db.log_event("warning", "timing",
+                             f"clock check on {model_id}: stopwatch and system clock "
+                             f"disagree by {diff:.0f} ms for one request — the system "
+                             f"clock was adjusted, or the host is suspending/stalling")
+        except Exception:                                        # noqa: BLE001
+            pass
+    out = {"sent_at": walltime.iso(sent.wall), "clock_diff_ms": diff,
+           "first_token_at": walltime.iso(first_tok_wall)}
+    if router_ms is not None:          # first call of the request: the full timeline
+        out.update({"router_ms": router_ms, "arrived_at": walltime.iso(arrived.wall),
+                    "client_gap_ms": gap.get("client_gap_ms"),
+                    "client_tool": gap.get("client_tool") or "",
+                    "prev_reply_at": walltime.iso(gap.get("prev_reply_at"))})
+    return out
+
+
 def _waiting_detail(svc, model_id: str) -> str:
     """Status detail before the first token when the backend has reported no
     progress. llama.cpp streams prompt-processing progress as soon as it
@@ -1240,6 +1270,7 @@ async def _direct_dispatch_chat(svc, persona, model_name, messages, client_tools
     # Client-side time since Foundry's previous reply in this conversation
     # (the client running the tool that reply asked for).
     gap = client_gap.arrived(messages)
+    arrived = walltime.Stamp()          # same moment on the system clock + stopwatch
     eff = svc.guardrails.effective(persona)
     model_id = None
     route_notes: list[str] = []      # why this model (shown as thinking)
@@ -1558,7 +1589,8 @@ async def _direct_dispatch_chat(svc, persona, model_name, messages, client_tools
             yield tr.chat_chunk(model_name, "", done=False,
                                 thinking=f"⚙️ {_tag} · {model_id} — streaming… "
                                          f"[{_think_label(svc, model_id, persona, client_think)} · "
-                                         f"Foundry {__version__} · req {_rid}]\n")
+                                         f"Foundry {__version__} · req {_rid} · "
+                                         f"arrived {walltime.hms(arrived.wall)}]\n")
             if mcp_defs:
                 yield tr.chat_chunk(model_name, "", done=False,
                                     thinking=f"🔧 {len(mcp_defs)} persona MCP tool(s) available "
@@ -1594,6 +1626,8 @@ async def _direct_dispatch_chat(svc, persona, model_name, messages, client_tools
                         t_round = time.monotonic_ns()
                         # arrival at Foundry -> sent to the backend (first call only)
                         router_ms = logger.elapsed_ms if (rnd == 0 and attempt == 0) else None
+                        sent = walltime.Stamp()
+                        first_tok_wall = None
                         # status clock = this backend call's start — the same
                         # clock Live's "Models generating now" shows for it
                         hb_start = time.monotonic()
@@ -1614,9 +1648,10 @@ async def _direct_dispatch_chat(svc, persona, model_name, messages, client_tools
                                     model_name, "", done=False,
                                     thinking=pacer.line(
                                         f"{_tag} · {model_id}", _payload,
-                                        keepalive.progress_detail(prog)
-                                        or (_waiting_detail(svc, model_id)
-                                            if ttft_ms is None else "")))
+                                        f"sent {walltime.hms(sent.wall)} · "
+                                        + (keepalive.progress_detail(prog)
+                                           or (_waiting_detail(svc, model_id)
+                                               if ttft_ms is None else "generating"))))
                                 continue
                             chunk = _payload
                             if chunk.get("done"):
@@ -1630,6 +1665,7 @@ async def _direct_dispatch_chat(svc, persona, model_name, messages, client_tools
                                 # First generated token of ANY kind — the
                                 # time-to-first-token, prefill-dominated.
                                 ttft_ms = (time.monotonic_ns() - t_round) / 1e6
+                                first_tok_wall = walltime.now()
                             if c or th:
                                 produced = True
                                 yield tr.chat_chunk(model_name, c, done=False,
@@ -1650,8 +1686,8 @@ async def _direct_dispatch_chat(svc, persona, model_name, messages, client_tools
                             result=res, persona=logger.persona, mode=logger.mode,
                             ttft_ms=ttft_ms, wall_ms=(time.monotonic_ns() - t_round) / 1e6,
                             max_tokens=out_cap,
-                            extra=({**gap, "router_ms": router_ms}
-                                   if router_ms is not None else None))
+                            extra=_timeline(svc, gap, arrived, sent, first_tok_wall,
+                                            ttft_ms, t_round, router_ms, model_id))
                         own, rest = _split_calls(res)
                         if own and rnd < tool_cap:
                             # Foundry-owned tools: run them, feed the results

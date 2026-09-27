@@ -187,7 +187,12 @@ CREATE TABLE IF NOT EXISTS perf_samples (
   tcp_rwnd_ms REAL,                 -- ms the upload stalled on the server's full receive window
   client_gap_ms REAL,               -- previous reply finished -> this request arrived (client/tool time)
   client_tool TEXT,                 -- tool(s) the client was running in that gap
-  router_ms REAL                    -- arrival at Foundry -> sent to the backend
+  router_ms REAL,                   -- arrival at Foundry -> sent to the backend
+  arrived_at TEXT,                  -- system clock (UTC): request arrived at Foundry
+  sent_at TEXT,                     -- system clock: sent to the backend
+  first_token_at TEXT,              -- system clock: first token back
+  prev_reply_at TEXT,               -- system clock: previous reply in this conversation finished
+  clock_diff_ms REAL                -- stopwatch vs system clock disagreement for this call
 );
 
 CREATE INDEX IF NOT EXISTS idx_perf_samples_ts ON perf_samples(ts);

@@ -383,10 +383,21 @@ def test_turn_timeline_records_client_tool_time(wired, client):
             {"function": {"name": "read_file", "arguments": ARGS}}]},
         {"role": "tool", "content": "file body"}]})
     assert r.status_code == 200
-    row = wired.db.query("SELECT client_gap_ms, client_tool, router_ms FROM perf_samples "
+    row = wired.db.query("SELECT client_gap_ms, client_tool, router_ms, prev_reply_at, "
+                         "arrived_at, sent_at, first_token_at, clock_diff_ms FROM perf_samples "
                          "ORDER BY id DESC LIMIT 1")[0]
     assert row["client_gap_ms"] >= 300 and row["client_tool"] == "read_file"
     assert row["router_ms"] is not None and row["router_ms"] >= 0
+    # system-clock timestamps, in order, and agreeing with the stopwatch
+    from datetime import datetime
+    ts = [datetime.fromisoformat(row[k].replace("Z", "+00:00"))
+          for k in ("prev_reply_at", "arrived_at", "sent_at", "first_token_at")]
+    assert ts == sorted(ts)
+    assert abs((ts[1] - ts[0]).total_seconds() * 1000 - row["client_gap_ms"]) < 100
+    assert row["clock_diff_ms"] is not None and row["clock_diff_ms"] < 100
+    thinking = "".join(json.loads(l)["message"].get("thinking") or ""
+                       for l in r.text.splitlines() if l.strip())
+    assert " UTC]" in thinking and "arrived " in thinking
 
 
 def test_disabled_backend_is_not_probed_routed_or_alerted(app, client):

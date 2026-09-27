@@ -24,11 +24,12 @@ import time
 from collections import OrderedDict
 from typing import Optional
 
+from . import walltime
 from .agents import conversation_key
 
 _MAX = 500
 _STALE_S = 3600.0
-_last: "OrderedDict[str, tuple[float, str]]" = OrderedDict()
+_last: "OrderedDict[str, tuple[float, str, object]]" = OrderedDict()
 
 
 def arrived(messages: list[dict]) -> dict:
@@ -41,11 +42,13 @@ def arrived(messages: list[dict]) -> dict:
     hit = _last.get(key)
     if not hit:
         return {}
-    t, tools = hit
+    t, tools, wall = hit
     gap = time.monotonic() - t
     if gap < 0 or gap > _STALE_S:
         return {}
-    return {"client_gap_ms": round(gap * 1000.0, 1), "client_tool": tools}
+    return {"client_gap_ms": round(gap * 1000.0, 1), "client_tool": tools,
+            "prev_reply_at": wall,
+            "client_gap_wall_ms": walltime.ms_between(wall, walltime.now())}
 
 
 def finished(messages: list[dict], tool_names: Optional[list] = None) -> None:
@@ -55,7 +58,7 @@ def finished(messages: list[dict], tool_names: Optional[list] = None) -> None:
     except Exception:                                            # noqa: BLE001
         return
     names = ",".join(n for n in (tool_names or []) if n)[:120]
-    _last[key] = (time.monotonic(), names)
+    _last[key] = (time.monotonic(), names, walltime.now())
     _last.move_to_end(key)
     while len(_last) > _MAX:
         _last.popitem(last=False)
