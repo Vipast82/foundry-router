@@ -436,3 +436,30 @@ def test_enable_toggle_endpoint(app, client):
     assert next(x for x in r.json()["backends"] if x["name"] == "b1")["enabled"] is True
     assert client.post("/admin/api/backends/enabled",
                        json={"name": "nope", "enabled": True}).status_code == 404
+
+
+def test_cline_compaction_summary_gets_thinking_off(wired, client):
+    """Cline's compaction summarizer must reach the backend with thinking off
+    (else reasoning eats its 8k output budget -> 'Compaction skipped'), and
+    the outcome is logged."""
+    r = client.post("/api/chat", json={"model": "P-llm", "stream": True, "messages": [
+        {"role": "system", "content": "Summarize the provided coding session into a concise "
+                                      "continuation note with detailed next steps."},
+        {"role": "user", "content": "<conversation>…</conversation>"}]})
+    assert r.status_code == 200
+    body = SEEN["llama"]
+    assert body.get("chat_template_kwargs", {}).get("enable_thinking") is False
+    assert "reasoning_effort" not in body
+    thinking = "".join(json.loads(l)["message"].get("thinking") or ""
+                       for l in r.text.splitlines() if l.strip())
+    assert "compaction summary request" in thinking
+    ev = wired.db.query("SELECT message FROM event_log WHERE source='compaction' "
+                        "ORDER BY id DESC LIMIT 1")
+    assert ev and "chars of summary" in ev[0]["message"]
+
+
+def test_normal_turn_is_not_treated_as_summary(wired, client):
+    client.post("/api/chat", json={"model": "P-llm", "stream": True, "tools": TOOLS,
+                                   "messages": [{"role": "system", "content": "You are Cline"},
+                                                {"role": "user", "content": "read a.lua"}]})
+    assert "enable_thinking" not in (SEEN["llama"].get("chat_template_kwargs") or {})

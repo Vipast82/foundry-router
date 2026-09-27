@@ -307,3 +307,28 @@ On every call Foundry compares the stopwatch with the system clock
 (`clock_diff_ms`, normally a few ms). A disagreement over 500 ms is logged
 in Events ("clock check …"): the clock was stepped (NTP), or the host or VM
 stalled.
+
+## "Compaction skipped": what it really means
+
+In current Cline, auto-compaction triggers at **90% of the context window**
+Cline is configured with. It then sends a separate one-shot request, with the
+system prompt "Summarize the provided coding session…", asking for **no
+thinking** and **8,192 output tokens**. If that request returns no summary
+text, Cline shows **"Compaction skipped"** and keeps the full history. The
+usual cause is a thinking model spending the whole output budget on
+reasoning.
+
+Foundry recognises the summary request. It forces thinking off for it (for
+llama.cpp: `chat_template_kwargs.enable_thinking=false`, sent even if the
+model's thinking support wasn't detected) and logs the result in Events
+(`compaction`: summary chars, thinking chars, finish reason). An empty
+summary is logged as a warning.
+
+Recommended Cline setting: set the Ollama provider's **context window a bit
+below the real one**, e.g. **229376** for a 262144 model. Cline then compacts
+at ~206k, before Foundry's context guard starts trimming at
+~222k (window − max output tokens, minus 3%). The guard stays as a safety
+net instead of trimming every turn.
+
+Cline logs the exact reason for a skip in VS Code → **Output** → **Cline**:
+look for `Skipped agentic compaction: …` or `Agentic compaction failed`.

@@ -655,6 +655,39 @@ async def _failover_list(svc, persona, first: str, user_text: str, eff,
     return out
 
 
+_SUMMARY_MARKERS = ("summarize the provided coding session",)
+
+
+def _is_client_summary_request(messages) -> bool:
+    """Cline's compaction summarizer: a system prompt starting 'Summarize the
+    provided coding session…' plus one user message holding the transcript."""
+    for m in messages or []:
+        if m.get("role") == "system":
+            text = m.get("content")
+            if isinstance(text, list):
+                text = " ".join(str(p.get("text") or "") for p in text if isinstance(p, dict))
+            if str(text or "").strip().lower().startswith(_SUMMARY_MARKERS):
+                return True
+    return False
+
+
+def _log_summary_outcome(svc, model_id, text_chars, think_chars, res, elapsed_ms) -> None:
+    """Events entry for a client's compaction summary: an empty summary is
+    exactly what makes Cline report 'Compaction skipped'."""
+    fin = getattr(res, "finish_reason", "") or ""
+    msg = (f"Cline compaction summary via {model_id}: {text_chars:,} chars of summary, "
+           f"{think_chars:,} chars of thinking, {getattr(res, 'prompt_tokens', 0):,} prompt "
+           f"tokens, finish={fin or '?'}, {elapsed_ms / 1000:.0f}s")
+    try:
+        if text_chars:
+            svc.db.log_event("info", "compaction", msg)
+        else:
+            svc.db.log_event("warning", "compaction",
+                             msg + " — EMPTY: Cline will report 'Compaction skipped'")
+    except Exception:                                            # noqa: BLE001
+        pass
+
+
 def _timeline(svc, gap: dict, arrived, sent, first_tok_wall, ttft_ms, t_round,
               router_ms, model_id: str) -> dict:
     """System-clock timestamps for one backend call + a cross-check of the
@@ -1271,9 +1304,17 @@ async def _direct_dispatch_chat(svc, persona, model_name, messages, client_tools
     # (the client running the tool that reply asked for).
     gap = client_gap.arrived(messages)
     arrived = walltime.Stamp()          # same moment on the system clock + stopwatch
+    # Cline's context compaction sends its own one-shot "summarize this
+    # session" request and asks for NO thinking: reasoning would eat the
+    # summary's output budget (8,192 tokens), leave no text, and Cline then
+    # reports "Compaction skipped" and keeps the oversized history.
+    summary_req = _is_client_summary_request(messages)
     eff = svc.guardrails.effective(persona)
     model_id = None
     route_notes: list[str] = []      # why this model (shown as thinking)
+    if summary_req:
+        route_notes.append("Cline context-compaction summary request — thinking forced "
+                           "off so the whole output budget goes to the summary")
     pins = _paid_pin_order(svc, persona)
     if pins:
         # Paid-pin priority cascade (prefer_paid persona, e.g. Cline PLAN): try each
@@ -1474,7 +1515,8 @@ async def _direct_dispatch_chat(svc, persona, model_name, messages, client_tools
                 model_id, convo,
                 tools=all_tools, options=options, keep_alive=keep_alive,
                 max_tokens=out_cap,
-                think=_think_for(svc, model_id, persona, client_think), fmt=fmt)
+                think=(False if summary_req else _think_for(svc, model_id, persona, client_think)),
+                fmt=fmt)
             # Empirical tool-calling reliability: direct dispatch is where worker
             # models actually exercise tool calling (client-supplied tools).
             svc.registry.record_tool_call(model_id, ok=True)
@@ -1616,6 +1658,7 @@ async def _direct_dispatch_chat(svc, persona, model_name, messages, client_tools
                     _btype = binfo0.get("type")
                     backend_name = binfo0.get("name") or mid
                 produced = False         # any output sent -> no failover possible
+                text_chars = think_chars = 0
                 convo = list(base_convo)
                 err = None
                 try:
@@ -1635,7 +1678,8 @@ async def _direct_dispatch_chat(svc, persona, model_name, messages, client_tools
                             model_id, convo,
                             tools=all_tools, options=options, keep_alive=keep_alive,
                             max_tokens=out_cap,
-                            think=_think_for(svc, model_id, persona, client_think), fmt=fmt)
+                            think=(False if summary_req else _think_for(svc, model_id, persona, client_think)),
+                fmt=fmt)
                         prog: dict = {}
                         async for _kind, _payload in _stream_with_heartbeat(_src, hb, hb_start,
                                                                             stall, prog):
@@ -1669,6 +1713,8 @@ async def _direct_dispatch_chat(svc, persona, model_name, messages, client_tools
                                 first_tok_wall = walltime.now()
                             if c or th:
                                 produced = True
+                                text_chars += len(c)
+                                think_chars += len(th)
                                 yield tr.chat_chunk(model_name, c, done=False,
                                                     thinking=th or None)
                         final = final or {}
@@ -1720,6 +1766,9 @@ async def _direct_dispatch_chat(svc, persona, model_name, messages, client_tools
                                 client_convo))
                         client_gap.finished(messages, [t["function"]["name"]
                                                        for t in tcs_out or []])
+                        if summary_req:
+                            _log_summary_outcome(svc, model_id, text_chars, think_chars,
+                                                 res, logger.elapsed_ms)
                         return
                 except StreamStalled as e:
                     # The backend went silent (a hung / queued Claude session,
