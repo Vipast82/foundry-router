@@ -102,7 +102,91 @@ def _units(msgs: list[dict]) -> list[list[dict]]:
 
 
 _BLOCK_MSGS = 20        # step-1 eligibility moves in blocks of this many messages
+_LEDGER_SHARE = 0.12    # the tool ledger may use up to 12% of the budget
 _DROP_BLOCK = 0.25      # step-2 drops in blocks of this share of the budget
+
+
+def _one_line(text, n: int) -> str:
+    t = " ".join(str(text or "").split())
+    return t if len(t) <= n else t[: n - 1] + "…"
+
+
+def _content_text(c) -> str:
+    if isinstance(c, list):
+        return " ".join(str(p.get("text") or "") for p in c if isinstance(p, dict))
+    return str(c or "")
+
+
+def _ledger_lines(units: list) -> list:
+    """One line per dropped step, oldest first."""
+    import hashlib
+    lines = []
+    n = 0
+    for u in units:
+        head = u[0]
+        role = head.get("role")
+        if role == "assistant" and head.get("tool_calls"):
+            results = [m for m in u[1:] if m.get("role") == "tool"]
+            said = _content_text(head.get("content"))
+            if said.strip():
+                lines.append(f"  note: {_one_line(said, 160)}")
+            for k, tc in enumerate(head["tool_calls"]):
+                n += 1
+                fn = tc.get("function") or tc
+                name = fn.get("name") or "tool"
+                args = fn.get("arguments")
+                if not isinstance(args, str):
+                    args = json.dumps(args, ensure_ascii=False, default=str, sort_keys=True)
+                res = _content_text(results[k].get("content")) if k < len(results) else ""
+                sha = hashlib.sha1(res.encode("utf-8", "replace")).hexdigest()[:10]
+                status = ("ERROR " if res.lstrip().lower().startswith(("error", "failed"))
+                          else "")
+                lines.append(f"  #{n} {name}({_one_line(args, 140)}) → {status}"
+                             f"{_one_line(res, 140) or '(no output)'} "
+                             f"[{len(res):,} chars, sha1 {sha}]")
+        elif role == "assistant":
+            txt = _content_text(head.get("content"))
+            if txt.strip():
+                lines.append(f"  assistant: {_one_line(txt, 200)}")
+        elif role == "user":
+            lines.append(f"  user: {_one_line(_content_text(head.get('content')), 200)}")
+    return lines
+
+
+def _ledger_chars(units: list) -> int:
+    return sum(len(x) + 1 for x in _ledger_lines(units)) + 400 if units else 0
+
+
+def tool_ledger(units: list, window: int, cap_chars: int = 0) -> str:
+    """The note that replaces dropped rounds: every tool call they contained,
+    one line each, so completed work stays verifiable. Above `cap_chars` the
+    oldest lines fold into per-tool counts."""
+    lines = _ledger_lines(units)
+    calls = sum(1 for x in lines if x.lstrip().startswith("#"))
+    header = (f"[Foundry context guard — TOOL LEDGER. {calls} earlier tool call(s) were "
+              f"collapsed so this conversation fits the model's {window:,}-token window. "
+              f"Their full outputs were produced and read earlier in this task; each line "
+              f"records the call, its arguments, a result excerpt, the result size and a "
+              f"sha1 of the full output. Treat them as done — do not repeat them unless "
+              f"you need the full output again.]")
+    if cap_chars and sum(len(x) + 1 for x in lines) > cap_chars:
+        keep, used = [], 0
+        for x in reversed(lines):
+            if used + len(x) + 1 > cap_chars * 0.8:
+                break
+            keep.append(x)
+            used += len(x) + 1
+        keep.reverse()
+        older = lines[: len(lines) - len(keep)]
+        counts: dict = {}
+        for x in older:
+            t = x.strip()
+            if t.startswith("#"):
+                name = t.split(" ", 1)[1].split("(", 1)[0]
+                counts[name] = counts.get(name, 0) + 1
+        folded = ", ".join(f"{k}×{v}" for k, v in sorted(counts.items(), key=lambda kv: -kv[1]))
+        lines = [f"  (oldest {len(older)} step(s), summarized: {folded or 'notes only'})"] + keep
+    return header + "\n" + "\n".join(lines)
 
 
 def fit(messages: list[dict], tools: Optional[list], window: int, reserve: int,
@@ -149,39 +233,39 @@ def fit(messages: list[dict], tools: Optional[list], window: int, reserve: int,
         cut_from = (first_user + 1) if first_user is not None else 0
         prefix, rest = msgs[:cut_from], msgs[cut_from:]
         units = _units(rest)
-        # The LATEST typed user prompt is the current task (after a client
-        # compaction the first user message is only the summary, and the
-        # request that started this long tool loop comes later). Never drop
-        # it; it keeps its place, so the trimmed prefix stays stable turn to
-        # turn for the prompt cache.
-        pin = next((j for j in range(len(units) - 1, -1, -1)
-                    if units[j][0].get("role") == "user"), None)
+        # Typed user prompts are the task and its requirements (after a client
+        # compaction the first user message is only the summary; the request
+        # that started this long tool loop, and any later "continue", come
+        # after it). They are small — never drop them; they keep their order.
+        # Only tool rounds and the model's own text collapse into the ledger.
         over_chars = (now - budget) * r
         block = max(1.0, budget * r * _DROP_BLOCK)
         target = -(-over_chars // block) * block               # ceil to a block
+        ledger_cap = budget * r * _LEDGER_SHARE
         gone_chars = 0.0
-        kept_pinned: list = []
-        while len(units) > 1 and gone_chars < target:
-            if pin == 0:                                       # keep the task prompt
-                kept_pinned = units.pop(0)
-                pin = None
-                continue
+        kept_users: list = []
+        gone_units: list = []
+        while len(units) > 1 and gone_chars - min(_ledger_chars(gone_units), ledger_cap) < target:
             u = units.pop(0)
-            if pin is not None:
-                pin -= 1
+            if u[0].get("role") == "user":
+                kept_users.extend(u)
+                continue
             dropped += len(u)
+            gone_units.append(u)
             gone_chars += sum(message_chars(m) for m in u)
-        rest = kept_pinned + [m for u in units for m in u]
+        remaining = [m for u in units for m in u]
+        rest = kept_users + remaining
         if dropped:
-            # Constant wording (no counts): the prefix stays byte-identical
-            # across turns, so the backend's prompt cache keeps working.
-            note = (f"[Foundry context guard: earlier messages were removed so this "
-                    f"conversation fits the model's {window:,}-token context window. "
-                    f"Continue from the recent context below.]")
-            if prefix and prefix[-1].get("role") == "user" and isinstance(prefix[-1].get("content"), str):
-                prefix[-1] = {**prefix[-1], "content": prefix[-1]["content"] + "\n\n" + note}
-            else:
-                rest = [{"role": "user", "content": note}] + rest
+            # The dropped rounds are not lost silently: they collapse into a
+            # TOOL LEDGER — one line per call (tool, arguments, result excerpt,
+            # size, sha1) — so the model keeps a verifiable record of what was
+            # already done and checked. Deterministic text: the same dropped
+            # set gives byte-identical output, so the prompt cache holds until
+            # the next block boundary.
+            rest = kept_users + [{"role": "user", "content": tool_ledger(
+                gone_units, window, int(ledger_cap))}] + remaining
+        msgs = prefix + rest
+        now = estimate(msgs, tools, model)
         msgs = prefix + rest
         now = estimate(msgs, tools, model)
 
@@ -203,7 +287,8 @@ def fit(messages: list[dict], tools: Optional[list], window: int, reserve: int,
 def describe(rep: dict) -> str:
     parts = []
     if rep.get("dropped"):
-        parts.append(f"dropped {rep['dropped']} older message(s)")
+        parts.append(f"collapsed {rep['dropped']} older message(s) into a tool ledger "
+                     f"(one verifiable line per call)")
     if rep.get("trimmed"):
         parts.append(f"cut {rep['trimmed']} oversized tool result/message(s)")
     return (f"context guard: ~{rep['before'] / 1000:.0f}k tokens would overflow the "

@@ -354,7 +354,36 @@ silently returns "Compaction skipped". It logs no reason line (only
 - **Workaround:** during a long autonomous loop, type a short message
   ("continue"). Your latest prompt moves to the end and the old loop becomes
   summarizable.
-- **Foundry's guard** covers the gap: it trims the oldest tool rounds when
-  the window is really full, and it always keeps the system prompt, the
-  first user message (Cline's summary) and your **latest typed prompt** in
-  place, so the model never loses the current task.
+- **Foundry's guard** covers the gap automatically. When the window is
+  really full (~246k of 262k), it:
+  - keeps the system prompt, Cline's summary and **every typed prompt**
+    (your task and its requirements) in place;
+  - collapses the oldest tool rounds into a **TOOL LEDGER**: one line per
+    call with the tool, its arguments, a result excerpt, the result size and
+    a **sha1 of the full output**. Failures are marked `ERROR`, and the
+    model's notes between calls are kept. Completed work stays verifiable,
+    and the model is told those steps are done so it doesn't repeat them;
+  - folds the oldest ledger lines into per-tool counts only if the ledger
+    alone would pass 12% of the window;
+  - produces deterministic text, so llama.cpp's prompt cache keeps working
+    between trims.
+
+### Making long tool loops work automatically
+
+1. **Leave Auto Compact on** (Cline settings, `useAutoCondense`) and leave
+   Cline's context window at the real value (262144).
+2. **Keep Focus Chain on** (default: on, reminder every 6 messages). Cline
+   keeps a task checklist (`task_progress`) that survives compaction, and
+   Cline's docs recommend it for long runs.
+3. **Put the requirements in the task prompt or in `.clinerules`**, e.g.
+   "after every sprint item, record: item, command run, PASS/FAIL, evidence
+   file". Typed prompts and rules are never trimmed by Foundry, and Cline's
+   summary format already has Done / In Progress / Blocked and Files
+   read/edited sections.
+4. **For hard verification evidence, have the model write it to a file**
+   (e.g. `docs/evidence/S39.md` with the raw PASS/FAIL output). Files
+   survive any compaction, and the ledger records the write call with its
+   sha1.
+5. During a very long single-prompt loop, an occasional typed "continue"
+   lets Cline's own summarizer fold the old loop. Without it, Foundry's
+   ledger keeps the record.

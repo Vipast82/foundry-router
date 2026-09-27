@@ -88,12 +88,13 @@ def test_guard_trims_old_tool_results_then_drops_oldest_turns_keeping_pairs():
     out, rep = context_guard.fit(msgs, None, 131072, 8192)
     assert rep and rep["after"] <= rep["budget"]
     assert out[0]["role"] == "system" and "TASK" in out[1]["content"]   # task kept
-    assert "context guard" in out[1]["content"]                          # model is told
+    assert "TOOL LEDGER" in out[2]["content"]                            # model is told
+    assert "read_file(" in out[2]["content"] and "sha1" in out[2]["content"]
     assert out[-1]["content"] == "now fix the bug"                       # latest kept
     ids = {tc["id"] for m in out if m.get("tool_calls") for tc in m["tool_calls"]}
     results = {m["tool_call_id"] for m in out if m["role"] == "tool"}
     assert results <= ids                                # no orphaned tool result
-    assert rep["dropped"] > 0 and "dropped" in context_guard.describe(rep)
+    assert rep["dropped"] > 0 and "tool ledger" in context_guard.describe(rep)
     assert msgs[3]["content"].startswith("-- file 0")   # client's copy untouched
 
 
@@ -332,3 +333,45 @@ def test_guard_keeps_latest_typed_prompt_after_client_compaction():
     out2, _ = context_guard.fit(msgs + [{"role": "assistant", "content": "ok"}], None,
                                 100_000, 8192, "m")
     assert out2[:6] == out[:6]
+
+
+def _loop(n, big=12000):
+    msgs = [{"role": "system", "content": "sys"},
+            {"role": "user", "content": "[summary]"},
+            {"role": "user", "content": "TASK: S39"}]
+    for i in range(n):
+        msgs.append({"role": "assistant", "content": f"checking step {i}",
+                     "tool_calls": [{"function": {"name": "execute_command" if i % 3 else "read_file",
+                                                  "arguments": {"cmd": f"run {i}"}}}]})
+        body = ("Error: test C3 failed\n" if i == 5 else f"PASS step {i}\n") + "x" * big
+        msgs.append({"role": "tool", "content": body})
+    return msgs
+
+
+def test_tool_ledger_records_every_dropped_call_verifiably():
+    msgs = _loop(40)
+    out, rep = context_guard.fit(msgs, None, 100_000, 8192, "m")
+    ledger = next(m["content"] for m in out if "TOOL LEDGER" in str(m.get("content")))
+    assert out.index(next(m for m in out if "TOOL LEDGER" in str(m.get("content")))) == 3
+    lines = [l for l in ledger.splitlines() if l.strip().startswith("#")]
+    assert len(lines) == rep["dropped"] // 2                  # one line per dropped call
+    assert lines[0].strip().startswith("#1 read_file(") and "sha1 " in lines[0]
+    assert "ERROR Error: test C3 failed" in ledger            # failures stay visible
+    assert "note: checking step 0" in ledger                  # the model's reasoning notes
+    assert rep["after"] <= rep["budget"]
+
+
+def test_tool_ledger_is_deterministic_for_the_prompt_cache():
+    a, _ = context_guard.fit(_loop(40), None, 100_000, 8192, "m")
+    b, _ = context_guard.fit(_loop(40) + [{"role": "user", "content": "go on"}],
+                             None, 100_000, 8192, "m")
+    la = next(m["content"] for m in a if "TOOL LEDGER" in str(m.get("content")))
+    lb = next(m["content"] for m in b if "TOOL LEDGER" in str(m.get("content")))
+    assert la == lb
+
+
+def test_tool_ledger_folds_oldest_lines_above_its_cap():
+    text = context_guard.tool_ledger(context_guard._units(_loop(300, big=10)[3:]), 262144,
+                                     cap_chars=3000)
+    assert "oldest" in text and "execute_command×" in text
+    assert len(text) < 5000
