@@ -1649,6 +1649,7 @@ async def _direct_dispatch_chat(svc, persona, model_name, messages, client_tools
                                     thinking=pacer.line(
                                         f"{_tag} · {model_id}", _payload,
                                         f"sent {walltime.hms(sent.wall)} · "
+                                        f"now {walltime.hms(walltime.now())[:8]} UTC · "
                                         + (keepalive.progress_detail(prog)
                                            or (_waiting_detail(svc, model_id)
                                                if ttft_ms is None else "generating"))))
