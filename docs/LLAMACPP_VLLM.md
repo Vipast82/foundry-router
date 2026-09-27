@@ -121,6 +121,20 @@ produces both on packet loss and when the receiver stops reading. MTU was
 checked and matches on every hop, and the TCP counters above decide which
 case it is.
 
+**Root cause: asymmetric routing.** Foundry (192.168.0.112) reached
+llama.cpp at 192.168.30.206 through the router at 192.168.0.254. The server
+also had 192.168.0.206 on a second NIC, so it sent every reply straight back
+on that NIC, bypassing the router. The router saw only half of each TCP
+connection and stalled every large upload until TCP's retry timers pushed it
+through: the TCP counters showed 45–65 resends per turn. A 700 KB
+`/tokenize` upload took 52.7 s via 192.168.30.206 and 0.17 s via
+192.168.0.206, so the fix was to point the backend URL at the same-subnet
+address.
+
+Check any setup the same way: run `ip route get <Foundry IP>` on the model
+server. If it answers through a directly connected interface while Foundry
+goes through a router, that's asymmetric routing.
+
 Other causes of a high wait: another client (or an abandoned request) holding
 the only slot on `-np 1`, and model swaps under llama-swap.
 
