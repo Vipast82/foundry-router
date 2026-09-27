@@ -189,6 +189,10 @@ class BackendConfig(BaseModel):
     url: str
     api_key: Optional[str] = None
     priority: int = 100
+    # False = parked: kept in the config (and listed in the UI) but never
+    # probed, routed to, or alerted on — for switching servers off while
+    # testing without deleting their settings.
+    enabled: bool = True
     # `flavor` names the SERVER SOFTWARE behind the wire protocol so the Host
     # Admin UI can offer the right management surface. `type` is only the wire
     # dialect (ollama / openai / anthropic); several very different servers speak

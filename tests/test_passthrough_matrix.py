@@ -366,3 +366,62 @@ def test_developer_role_is_treated_as_system():
     out = _canonical_messages([{"role": "developer", "content": "rules"},
                                {"role": "user", "content": "hi"}])
     assert out[0]["role"] == "system"
+
+
+def test_turn_timeline_records_client_tool_time(wired, client):
+    """Turn 2 of a conversation records how long the client took (running the
+    tool turn 1 asked for), which tool it was, and Foundry's own prep time."""
+    import time as _t
+    first = [{"role": "system", "content": "sys"}, {"role": "user", "content": "read a.lua"}]
+    r = client.post("/api/chat", json={"model": "P-llm", "stream": True, "tools": TOOLS,
+                                       "messages": first})
+    assert r.status_code == 200
+    _t.sleep(0.3)                                   # "Cline runs read_file"
+    r = client.post("/api/chat", json={"model": "P-llm", "stream": True, "tools": TOOLS,
+                                       "messages": first + [
+        {"role": "assistant", "content": "", "tool_calls": [
+            {"function": {"name": "read_file", "arguments": ARGS}}]},
+        {"role": "tool", "content": "file body"}]})
+    assert r.status_code == 200
+    row = wired.db.query("SELECT client_gap_ms, client_tool, router_ms FROM perf_samples "
+                         "ORDER BY id DESC LIMIT 1")[0]
+    assert row["client_gap_ms"] >= 300 and row["client_tool"] == "read_file"
+    assert row["router_ms"] is not None and row["router_ms"] >= 0
+
+
+def test_disabled_backend_is_not_probed_routed_or_alerted(app, client):
+    svc = app.state.services
+    hits = []
+    http = httpx.AsyncClient(transport=httpx.MockTransport(
+        lambda r: (hits.append(r.url.host), _router(r))[1]))
+    pool = InternalPool([
+        BackendConfig(name="llama", type="openai-compatible", url="http://llm-host", flavor="llamacpp"),
+        BackendConfig(name="ollama", type="ollama", url="http://olm-host", enabled=False)],
+        BackendPoolConfig(), http, svc.db)
+    import asyncio
+    asyncio.run(pool.check_all())
+    assert "olm-host" not in hits and "ollama" not in pool.backends
+    st = {b["name"]: b for b in pool.backend_status()}
+    assert st["ollama"]["enabled"] is False and st["llama"]["enabled"] is True
+    assert pool._candidates("olm") == []
+    from foundry_router import perf_advisor
+
+    class S:
+        pass
+    s = S(); s.pool = pool
+    assert not [f for f in perf_advisor._backend_rules(s) if f["scope"] == "ollama"]
+
+
+def test_enable_toggle_endpoint(app, client):
+    r = client.post("/admin/api/config/backends", json=[
+        {"name": "b1", "type": "ollama", "url": "http://olm-host"}])
+    assert r.status_code == 200
+    r = client.post("/admin/api/backends/enabled", json={"name": "b1", "enabled": False})
+    assert r.status_code == 200
+    b = next(x for x in r.json()["backends"] if x["name"] == "b1")
+    assert b["enabled"] is False
+    assert app.state.services.config_store.config.backend_pool.internal.backends[0].enabled is False
+    r = client.post("/admin/api/backends/enabled", json={"name": "b1", "enabled": True})
+    assert next(x for x in r.json()["backends"] if x["name"] == "b1")["enabled"] is True
+    assert client.post("/admin/api/backends/enabled",
+                       json={"name": "nope", "enabled": True}).status_code == 404

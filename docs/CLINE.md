@@ -258,3 +258,31 @@ with Cline's patch, and its error classifier). What Cline reads from Foundry:
   sends the request to llama.cpp, after Cline has run the tool and replied.
   Until llama.cpp reports prompt progress the status line reads
   `sent — waiting for llama.cpp to start on it` (Live: "waiting for server").
+
+
+## Where a turn's time goes (turn timeline)
+
+Cline works in a loop: Foundry streams a turn ending in a tool call, Cline
+runs the tool (reads a file, runs a PowerShell command, waits for your
+approval), then sends the next request with the result. llama.cpp is idle
+during the Cline part, so its log shows `slot release` … gap …
+`get_available slot` even when the server is doing nothing wrong.
+
+Foundry now records every part of a turn (Performance CSV and the advisor's
+**Where each turn's time goes** card):
+
+| column | what it measures |
+|---|---|
+| `client_gap_ms` | Foundry finished the previous reply → Cline's next request arrived (tool run + approval) |
+| `client_tool` | the tool(s) Cline was running in that gap |
+| `router_ms` | request arrived at Foundry → sent to llama.cpp |
+| `start_ms` | sent → llama.cpp started on the prompt |
+| `tcp_retrans`, `tcp_rwnd_ms` | network resends / upload stalled on llama.cpp's receive buffer |
+| `prefill_ms`, `decode_ms` | llama.cpp's own prompt reading and generation |
+
+If Cline's own time is the big part (median ≥ 20 s), the card turns into a
+warning and lists the slowest tools. The fixes are on the Cline side:
+auto-approve the tools you trust, and keep long commands (builds, test
+runs) in the background or behind a timeout. Nothing needs to be passed
+from Cline to llama.cpp; the full conversation already goes with every
+request.

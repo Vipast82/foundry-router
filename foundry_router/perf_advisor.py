@@ -228,6 +228,48 @@ def _model_rules(model: str, backend: str, rows: list[dict], ctx_len: Optional[i
                  "can compare before/after."],
                 ev, scope))
 
+    # 1b. where each turn's time goes (client tool time vs Foundry vs server)
+    turns = [r for r in server if r.get("client_gap_ms") is not None]
+    if len(turns) >= MIN_N:
+        gap50 = _med([r["client_gap_ms"] for r in turns])
+        rt50 = _med([r.get("router_ms") for r in turns])
+        wt50 = _med([max(0.0, r["ttft_ms"] - r["prefill_ms"]) for r in turns
+                     if r.get("ttft_ms") is not None and r.get("prefill_ms") is not None])
+        pf50 = _med([r.get("prefill_ms") for r in turns])
+        dc50 = _med([r.get("decode_ms") for r in turns])
+        by_tool: dict = {}
+        for r in turns:
+            for t in (r.get("client_tool") or "(text reply)").split(","):
+                by_tool.setdefault(t, []).append(r["client_gap_ms"])
+        tools_ev = ", ".join(f"{t} {_s(_med(v))}" for t, v in sorted(
+            by_tool.items(), key=lambda kv: -_med(kv[1]))[:4])
+        ev = {"client (tool run + approval), median": _s(gap50),
+              "Foundry prep, median": _s(rt50),
+              "sent → first token minus prefill, median": _s(wt50),
+              "prefill, median": _s(pf50), "generation, median": _s(dc50),
+              "client time by tool (median)": tools_ev, "turns": len(turns)}
+        slow_client = gap50 is not None and gap50 >= 20000
+        out.append(_f(
+            "warning" if slow_client else "info", "turn_breakdown",
+            ("The client spends a long time between turns" if slow_client
+             else "Where each turn's time goes"),
+            (f"Median {_s(gap50)} passes on the client side (running the tool the model "
+             f"asked for) before it sends the next request." if slow_client else
+             f"Client {_s(gap50)} → Foundry {_s(rt50)} → wait {_s(wt50)} → prefill "
+             f"{_s(pf50)} → generation {_s(dc50)} (medians per turn)."),
+            "In an agent loop (Cline) every turn is: the client runs a tool, sends the "
+            "result, the server reads it and answers. The backend sits idle while the "
+            "client works, so its log shows a gap that isn't the server's fault.",
+            (["Look at 'client time by tool': slow commands (builds, tests, PowerShell "
+              "scripts) are the client's time, not the model's.",
+              "In Cline, enable auto-approve for the tools you trust — waiting for a "
+              "click counts as client time.",
+              "Long-running commands: have the model run them in the background or with a "
+              "timeout, or split them."] if slow_client else
+             ["Nothing to do — this card explains the timeline. The largest number is the "
+              "one to work on."]),
+            ev, scope))
+
     # 2. prompt cache not reused on long conversations
     big = [r for r in rows if (r.get("prompt_tokens") or 0) >= 20000
            and r.get("cache_hit_pct") is not None]
@@ -564,6 +606,8 @@ def _event_rules(db, hours: float) -> list[dict]:
 def _backend_rules(svc) -> list[dict]:
     out = []
     for b in getattr(svc.pool, "backend_status", lambda: [])() or []:
+        if b.get("enabled") is False:
+            continue                      # parked on purpose — not a problem
         if not b.get("healthy"):
             out.append(_f(
                 "critical", "backend_down", f"Backend {b['name']} is offline",
@@ -670,7 +714,8 @@ async def advise(svc, hours: float = 24) -> dict:
         "SELECT model, backend, prompt_tokens, prefill_tokens, completion_tokens, "
         "reasoning_tokens, cached_tokens, draft_n, decode_tps, prefill_tps, prefill_ms, "
         "ttft_ms, wall_ms, load_ms, cache_hit_pct, spec_accept_pct, finish_reason, timing_src, "
-        "headers_ms, start_ms, tcp_retrans, tcp_rwnd_ms FROM perf_samples WHERE datetime(ts) >= datetime('now', ?)", (f"-{hours} hours",))
+        "headers_ms, start_ms, tcp_retrans, tcp_rwnd_ms, client_gap_ms, client_tool, router_ms, "
+        "decode_ms FROM perf_samples WHERE datetime(ts) >= datetime('now', ?)", (f"-{hours} hours",))
     groups: dict = {}
     for r in rows:
         groups.setdefault((r["model"], r["backend"] or ""), []).append(r)

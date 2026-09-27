@@ -30,6 +30,7 @@ import time
 from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse, PlainTextResponse, StreamingResponse
 
+from .. import client_gap
 from .. import __version__
 from .. import context_guard, keepalive, request_context, telemetry
 from ..brain import prompts
@@ -1236,6 +1237,9 @@ async def _direct_dispatch_chat(svc, persona, model_name, messages, client_tools
     # answers. Revisit if per-turn re-routing inside coding sessions matters.
     logger = RequestLogger(svc.db, persona["virtual_name"], model_name,
                            log_mode, user_text)
+    # Client-side time since Foundry's previous reply in this conversation
+    # (the client running the tool that reply asked for).
+    gap = client_gap.arrived(messages)
     eff = svc.guardrails.effective(persona)
     model_id = None
     route_notes: list[str] = []      # why this model (shown as thinking)
@@ -1588,6 +1592,8 @@ async def _direct_dispatch_chat(svc, persona, model_name, messages, client_tools
                         final = None
                         ttft_ms = None
                         t_round = time.monotonic_ns()
+                        # arrival at Foundry -> sent to the backend (first call only)
+                        router_ms = logger.elapsed_ms if (rnd == 0 and attempt == 0) else None
                         # status clock = this backend call's start — the same
                         # clock Live's "Models generating now" shows for it
                         hb_start = time.monotonic()
@@ -1643,7 +1649,9 @@ async def _direct_dispatch_chat(svc, persona, model_name, messages, client_tools
                             svc.db, svc.registry, model=model_id, backend=backend_name,
                             result=res, persona=logger.persona, mode=logger.mode,
                             ttft_ms=ttft_ms, wall_ms=(time.monotonic_ns() - t_round) / 1e6,
-                            max_tokens=out_cap)
+                            max_tokens=out_cap,
+                            extra=({**gap, "router_ms": router_ms}
+                                   if router_ms is not None else None))
                         own, rest = _split_calls(res)
                         if own and rnd < tool_cap:
                             # Foundry-owned tools: run them, feed the results
@@ -1673,6 +1681,8 @@ async def _direct_dispatch_chat(svc, persona, model_name, messages, client_tools
                                 tr.result_stats(res, time.monotonic_ns() - t0,
                                                 model=model_id, backend=backend_name),
                                 client_convo))
+                        client_gap.finished(messages, [t["function"]["name"]
+                                                       for t in tcs_out or []])
                         return
                 except StreamStalled as e:
                     # The backend went silent (a hung / queued Claude session,

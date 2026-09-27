@@ -74,7 +74,9 @@ def record_sample(db: Database, *, model: str, backend: str = "", persona: str =
                   timing_source: str = "", run_label: Optional[str] = None,
                   headers_ms: float = 0, start_ms: float = 0,
                   tcp_retrans: Optional[int] = None,
-                  tcp_rwnd_ms: Optional[float] = None) -> None:
+                  tcp_rwnd_ms: Optional[float] = None,
+                  client_gap_ms: Optional[float] = None, client_tool: str = "",
+                  router_ms: Optional[float] = None) -> None:
     """Write one completed model call's metrics as a time-series point. Derived
     rates/percentages are computed here so every reader gets them consistently.
     Best-effort: a logging failure must never break the request that produced it.
@@ -99,8 +101,9 @@ def record_sample(db: Database, *, model: str, backend: str = "", persona: str =
             "draft_n_accepted, decode_tps, prefill_tps, decode_ms, prefill_ms, "
             "ttft_ms, eff_tps, wall_ms, cache_hit_pct, spec_accept_pct, finish_reason, "
             "run_label, timing_src, prefill_tokens, reasoning_tokens, load_ms, "
-            "headers_ms, start_ms, tcp_retrans, tcp_rwnd_ms) "
-            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            "headers_ms, start_ms, tcp_retrans, tcp_rwnd_ms, client_gap_ms, client_tool, "
+            "router_ms) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (utcnow(), model, backend, persona, mode,
              int(prompt_tokens or 0), int(completion_tokens or 0), int(cached_tokens or 0),
              int(draft_n or 0), int(draft_n_accepted or 0),
@@ -115,7 +118,10 @@ def record_sample(db: Database, *, model: str, backend: str = "", persona: str =
              (round(headers_ms, 1) if headers_ms else None),
              (round(start_ms, 1) if start_ms else None),
              (int(tcp_retrans) if tcp_retrans is not None else None),
-             (round(tcp_rwnd_ms, 1) if tcp_rwnd_ms is not None else None)))
+             (round(tcp_rwnd_ms, 1) if tcp_rwnd_ms is not None else None),
+             (round(client_gap_ms, 1) if client_gap_ms is not None else None),
+             (client_tool or None),
+             (round(router_ms, 1) if router_ms is not None else None)))
     except Exception:
         return
     # Opportunistic prune (≈2% of inserts) — keeps the table bounded without a
@@ -137,7 +143,8 @@ SERIES_COLUMNS = ("ts", "model", "backend", "persona", "mode", "run_label",
                   "decode_tps", "prefill_tps", "decode_ms", "prefill_ms", "ttft_ms",
                   "eff_tps", "wall_ms", "load_ms", "cache_hit_pct", "spec_accept_pct",
                   "finish_reason", "timing_src", "headers_ms", "start_ms",
-                  "tcp_retrans", "tcp_rwnd_ms")
+                  "tcp_retrans", "tcp_rwnd_ms", "client_gap_ms", "client_tool",
+                  "router_ms")
 
 
 def _filters(hours: Optional[float], model: Optional[str], backend: Optional[str],

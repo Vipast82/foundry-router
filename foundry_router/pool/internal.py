@@ -47,7 +47,13 @@ class InternalPool(BackendPool):
         self.db = db
         self.client = client
         self.backends: dict[str, BackendState] = {}
+        # Disabled backends are kept only for the status list: nothing probes,
+        # routes to, or raises alerts about them.
+        self.disabled: list[BackendConfig] = [b for b in backends
+                                              if not getattr(b, "enabled", True)]
         for b in backends:
+            if not getattr(b, "enabled", True):
+                continue
             self.backends[b.name] = BackendState(
                 config=b, protocol=make_protocol(b.type, b.url, b.api_key, client,
                                                  flavor=getattr(b, "effective_flavor", None),
@@ -275,7 +281,13 @@ class InternalPool(BackendPool):
             "priority": s.config.priority, "healthy": s.healthy,
             "consecutive_failures": s.consecutive_failures,
             "models": s.models, "last_error": s.last_error, "busy": s.busy,
-        } for s in self.backends.values()]
+            "enabled": True,
+        } for s in self.backends.values()] + [{
+            "name": b.name, "type": b.type, "url": b.url,
+            "flavor": getattr(b, "effective_flavor", None), "priority": b.priority,
+            "healthy": None, "consecutive_failures": 0, "models": [],
+            "last_error": "", "busy": 0, "enabled": False,
+        } for b in getattr(self, "disabled", [])]
 
     # -- in-flight tracking ------------------------------------------------------------
 

@@ -111,6 +111,28 @@ async def set_backends(request: Request):
     return {"ok": True, "backends": svc.pool.backend_status()}
 
 
+@router.post("/admin/api/backends/enabled")
+async def set_backend_enabled(request: Request):
+    """Park / unpark one backend: {"name": ..., "enabled": bool}. A disabled
+    backend stays in config.yaml but is never probed, routed to or alerted on."""
+    svc = _svc(request)
+    body = await request.json()
+    name, enabled = body.get("name"), bool(body.get("enabled"))
+    raw_backends = (svc.config_store.config.backend_pool.internal.backends or [])
+    if not any(b.name == name for b in raw_backends):
+        return JSONResponse({"error": f"no backend named {name!r}"}, status_code=404)
+
+    def mutate(raw):
+        for b in raw.setdefault("backend_pool", {}).setdefault("internal", {}).get("backends", []):
+            if b.get("name") == name:
+                b["enabled"] = enabled
+    svc.config_store.save(mutate)
+    await svc.rebuild_pool()
+    svc.db.log_event("info", "backend_pool",
+                     f"backend {name} {'enabled' if enabled else 'disabled'} by operator")
+    return {"ok": True, "backends": svc.pool.backend_status()}
+
+
 @router.post("/admin/api/config/pool_mode")
 async def set_pool_mode(request: Request):
     svc = _svc(request)
@@ -207,7 +229,7 @@ async def activity(request: Request):
              **svc.brain.mode_status(),
              **(await svc.brain.loaded_detail())}
     backends = [{"name": b["name"], "type": b["type"], "flavor": b.get("flavor") or "",
-                 "healthy": b["healthy"],
+                 "healthy": b["healthy"], "enabled": b.get("enabled", True),
                  "models": len(b.get("models") or []),
                  "last_error": b.get("last_error") or ""}
                 for b in svc.pool.backend_status()]

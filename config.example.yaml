@@ -109,6 +109,7 @@ backend_pool:
         type: ollama
         url: http://192.168.1.50:11434      # EDIT: TrueNAS Ollama (4060 Ti pair)
         priority: 100
+        # enabled: false   # park it: kept here, but never probed / routed to / alerted on
       - name: mini-pc-ollama
         type: ollama
         url: http://192.168.1.60:11434      # EDIT: RTX 3050 mini-PC Ollama

@@ -22,7 +22,8 @@ log = logging.getLogger("foundry.telemetry")
 def record_call(db: Any, registry: Any, *, model: str, backend: str, result: Any,
                 persona: str = "", mode: str = "", ttft_ms: Optional[float] = None,
                 wall_ms: Optional[float] = None,
-                max_tokens: Optional[int] = None) -> None:
+                max_tokens: Optional[int] = None,
+                extra: Optional[dict] = None) -> None:
     """Fold one completed call into the registry's rolling stats (Live view),
     the finish-reason / truncation counter, and a perf-history sample
     (Performance tab). A truncated reply (finish_reason=length) also raises a
@@ -68,4 +69,6 @@ def record_call(db: Any, registry: Any, *, model: str, backend: str, result: Any
         headers_ms=getattr(r, "headers_ms", 0) or 0,
         start_ms=getattr(r, "start_ms", 0) or 0,
         tcp_retrans=getattr(r, "tcp_retrans", None),
-        tcp_rwnd_ms=getattr(r, "tcp_rwnd_ms", None))
+        tcp_rwnd_ms=getattr(r, "tcp_rwnd_ms", None),
+        **{k: v for k, v in (extra or {}).items()
+           if k in ("client_gap_ms", "client_tool", "router_ms")})

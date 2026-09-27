@@ -184,7 +184,10 @@ CREATE TABLE IF NOT EXISTS perf_samples (
   headers_ms REAL,                  -- request sent -> response headers (streaming llama.cpp)
   start_ms REAL,                    -- request sent -> engine started processing the prompt
   tcp_retrans INTEGER,              -- TCP segments resent during this request (packet loss)
-  tcp_rwnd_ms REAL                  -- ms the upload stalled on the server's full receive window
+  tcp_rwnd_ms REAL,                 -- ms the upload stalled on the server's full receive window
+  client_gap_ms REAL,               -- previous reply finished -> this request arrived (client/tool time)
+  client_tool TEXT,                 -- tool(s) the client was running in that gap
+  router_ms REAL                    -- arrival at Foundry -> sent to the backend
 );
 
 CREATE INDEX IF NOT EXISTS idx_perf_samples_ts ON perf_samples(ts);
