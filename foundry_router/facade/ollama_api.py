@@ -1830,6 +1830,14 @@ async def _direct_dispatch_chat(svc, persona, model_name, messages, client_tools
                 # A real error, not reply text: the client shows a failed
                 # request (Cline: retry, and automatic compaction when it's a
                 # context overflow) instead of treating it as the model's answer.
+                if summary_req:
+                    try:
+                        svc.db.log_event("warning", "compaction",
+                                         f"Cline compaction summary via {model_id} FAILED: "
+                                         f"{str(err)[:300]} — Cline will report "
+                                         f"'Compaction skipped'")
+                    except Exception:                            # noqa: BLE001
+                        pass
                 yield tr.error_chunk(tr.client_error(err)[0])
                 return
         return StreamingResponse(sgen(), media_type="application/x-ndjson")
