@@ -149,15 +149,29 @@ def fit(messages: list[dict], tools: Optional[list], window: int, reserve: int,
         cut_from = (first_user + 1) if first_user is not None else 0
         prefix, rest = msgs[:cut_from], msgs[cut_from:]
         units = _units(rest)
+        # The LATEST typed user prompt is the current task (after a client
+        # compaction the first user message is only the summary, and the
+        # request that started this long tool loop comes later). Never drop
+        # it; it keeps its place, so the trimmed prefix stays stable turn to
+        # turn for the prompt cache.
+        pin = next((j for j in range(len(units) - 1, -1, -1)
+                    if units[j][0].get("role") == "user"), None)
         over_chars = (now - budget) * r
         block = max(1.0, budget * r * _DROP_BLOCK)
         target = -(-over_chars // block) * block               # ceil to a block
         gone_chars = 0.0
-        while units[1:] and gone_chars < target:
+        kept_pinned: list = []
+        while len(units) > 1 and gone_chars < target:
+            if pin == 0:                                       # keep the task prompt
+                kept_pinned = units.pop(0)
+                pin = None
+                continue
             u = units.pop(0)
+            if pin is not None:
+                pin -= 1
             dropped += len(u)
             gone_chars += sum(message_chars(m) for m in u)
-        rest = [m for u in units for m in u]
+        rest = kept_pinned + [m for u in units for m in u]
         if dropped:
             # Constant wording (no counts): the prefix stays byte-identical
             # across turns, so the backend's prompt cache keeps working.

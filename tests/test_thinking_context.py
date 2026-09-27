@@ -304,3 +304,31 @@ def test_trimmed_request_reports_the_clients_full_size(app, client):
     sent = r["foundry"]["prompt_sent"]
     assert sent <= 65536                                  # what the model processed
     assert r["prompt_eval_count"] > 65536 > sent          # what Cline is told: its real size
+
+
+def test_guard_keeps_latest_typed_prompt_after_client_compaction():
+    """Post-compaction Cline transcript: [system, summary(user), TASK(user),
+    long tool loop]. Trimming drops old tool rounds but never the task."""
+    from foundry_router import context_guard
+    msgs = [{"role": "system", "content": "sys"},
+            {"role": "user", "content": "[compaction summary] " + "s" * 2000},
+            {"role": "user", "content": "TASK: implement sprint S39"}]
+    for i in range(40):
+        msgs.append({"role": "assistant", "content": "",
+                     "tool_calls": [{"function": {"name": "read_file",
+                                                  "arguments": {"path": f"f{i}"}}}]})
+        msgs.append({"role": "tool", "content": "x" * 12000})
+    out, rep = context_guard.fit(msgs, None, 100_000, 8192, "m")
+    assert rep and rep["dropped"] > 0
+    task = [m for m in out if "TASK: implement" in str(m.get("content"))]
+    assert len(task) == 1
+    i = out.index(task[0])
+    assert out[1]["content"].startswith("[compaction summary]")   # prefix kept
+    assert i == 2                                                 # task keeps its place
+    assert out[-1]["role"] == "tool"                              # recent rounds kept
+    # no orphaned tool results right after the task
+    assert out[i + 1]["role"] in ("assistant", "user")
+    # stable: trimming the same history again gives the same prefix
+    out2, _ = context_guard.fit(msgs + [{"role": "assistant", "content": "ok"}], None,
+                                100_000, 8192, "m")
+    assert out2[:6] == out[:6]

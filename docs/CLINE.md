@@ -341,3 +341,20 @@ Setting `context_guard_reserve_tokens` restores a larger fixed reserve.
 
 Cline logs the exact reason for a skip in VS Code → **Output** → **Cline**:
 look for `Skipped agentic compaction: …` or `Agentic compaction failed`.
+
+### Why Cline sometimes skips even when the model is fine
+
+Cline never summarizes away your **latest typed prompt** ("the cut stays at
+or before it so that whole turn survives verbatim"). After one successful
+compaction the history is *summary → your prompt → a long tool loop*.
+Everything Cline may fold is already in the summary, so every later attempt
+silently returns "Compaction skipped". It logs no reason line (only
+`Context compaction diagnostics` followed by the model request).
+
+- **Workaround:** during a long autonomous loop, type a short message
+  ("continue"). Your latest prompt moves to the end and the old loop becomes
+  summarizable.
+- **Foundry's guard** covers the gap: it trims the oldest tool rounds when
+  the window is really full, and it always keeps the system prompt, the
+  first user message (Cline's summary) and your **latest typed prompt** in
+  place, so the model never loses the current task.
