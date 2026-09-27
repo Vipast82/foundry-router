@@ -130,8 +130,10 @@ class AgentBrainConfig(BaseModel):
     # tool results cut first, then the oldest turns after the task. The client
     # keeps its full history; the turn says what was cut. "off" = send as-is.
     context_guard: Literal["trim", "off"] = "trim"
-    # Output tokens kept free for the answer. 0 = the request's max tokens
-    # (client num_predict, else worker_max_tokens), capped at 1/4 of the window.
+    # Output tokens kept free for the answer when the guard decides whether to
+    # trim. 0 = auto: the request's max tokens capped at 8192 (and 1/4 of the
+    # window), so the guard only trims a conversation that truly won't fit and
+    # the client's own compaction (Cline: 90% of the window) runs first.
     context_guard_reserve_tokens: int = 0
     # Stall watchdog (direct_stream): if a backend sends NO output (no token,
     # thinking or tool call) for this long, the call is abandoned (the upstream

@@ -127,6 +127,14 @@ def think_value(effort, model_id: str, caps=None, backend_type: str = ""):
     norm = normalize(effort)
     if norm is None:
         return None
+    if norm is False and backend_type in ("openai-compatible", "anthropic-compatible"):
+        # An explicit OFF always goes through for these: turning thinking off
+        # is harmless on a model that can't think (llama.cpp/vLLM get the
+        # enable_thinking=false template kwarg only for local flavors; Claude
+        # simply gets no thinking block), while dropping it lets a thinking
+        # model whose family isn't recognised think anyway. Ollama stays gated:
+        # it rejects a think field on non-thinking models.
+        return False
     if not supports_thinking(model_id, caps, backend_type):
         return None
     return norm

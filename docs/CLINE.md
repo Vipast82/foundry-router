@@ -324,11 +324,20 @@ model's thinking support wasn't detected) and logs the result in Events
 (`compaction`: summary chars, thinking chars, finish reason). An empty
 summary is logged as a warning.
 
-Recommended Cline setting: set the Ollama provider's **context window a bit
-below the real one**, e.g. **229376** for a 262144 model. Cline then compacts
-at ~206k, before Foundry's context guard starts trimming at
-~222k (window − max output tokens, minus 3%). The guard stays as a safety
-net instead of trimming every turn.
+The summary's thinking-off overrides every Foundry thinking setting: persona
+`reasoning_effort` with "force (override client)", persona and global
+`reasoning_effort`, and a client `think: true`. Normal turns keep those
+settings. An explicit **off** (forced or global) is now always sent to
+llama.cpp/vLLM/Claude backends, even for a model family Foundry doesn't
+recognise.
+
+**Context guard vs Cline.** The guard is a last resort. It keeps at most
+**8k tokens** free for the reply (`context_guard_reserve_tokens: 0` = auto),
+so for a 262144 window it only trims above ~246k. Cline compacts at 90%
+(~236k), so Cline's own compaction always gets there first. Leave Cline's
+context window at the **real** value (262144). If a reply then runs out of
+room, it ends with `finish=length` and Cline compacts on the next turn.
+Setting `context_guard_reserve_tokens` restores a larger fixed reserve.
 
 Cline logs the exact reason for a skip in VS Code → **Output** → **Cline**:
 look for `Skipped agentic compaction: …` or `Agentic compaction failed`.

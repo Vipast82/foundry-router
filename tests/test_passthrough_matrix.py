@@ -463,3 +463,83 @@ def test_normal_turn_is_not_treated_as_summary(wired, client):
                                    "messages": [{"role": "system", "content": "You are Cline"},
                                                 {"role": "user", "content": "read a.lua"}]})
     assert "enable_thinking" not in (SEEN["llama"].get("chat_template_kwargs") or {})
+
+
+_SUMMARY = [{"role": "system", "content": "Summarize the provided coding session into a "
+                                          "concise continuation note with detailed next steps."},
+            {"role": "user", "content": "<conversation>…</conversation>"}]
+
+
+@pytest.mark.parametrize("setup", ["persona_force_high", "global_high", "client_think_true",
+                                   "agent_mode_persona", "raw_model"])
+def test_summary_thinking_off_beats_every_thinking_setting(wired, client, setup):
+    model = "P-llm"
+    body = {"stream": True, "messages": _SUMMARY}
+    if setup == "persona_force_high":
+        wired.personas.upsert("P-llm", reasoning_effort="high", force_reasoning_effort=True)
+    elif setup == "global_high":
+        wired.config_store.config.agent_brain.reasoning_effort = "high"
+    elif setup == "client_think_true":
+        body["think"] = True
+    elif setup == "agent_mode_persona":
+        wired.personas.upsert("P-agent", execution_mode="agent",
+                              model_allowlist=["llm"], pinned_models=[])
+        model = "P-agent"
+    elif setup == "raw_model":
+        model = "llm"
+    try:
+        r = client.post("/api/chat", json={"model": model, **body})
+    finally:
+        wired.config_store.config.agent_brain.reasoning_effort = None
+    assert r.status_code == 200, r.text
+    sent = SEEN["llama"]
+    assert sent.get("chat_template_kwargs", {}).get("enable_thinking") is False, sent
+    assert "reasoning_effort" not in sent
+
+
+def test_forced_and_global_settings_still_apply_to_normal_turns(wired, client):
+    turn = {"model": "P-llm", "stream": True, "tools": TOOLS,
+            "messages": [{"role": "user", "content": "read a.lua"}]}
+    # persona force OFF beats a client asking for thinking — even on a model
+    # whose family Foundry doesn't recognise
+    wired.personas.upsert("P-llm", reasoning_effort="off", force_reasoning_effort=True)
+    client.post("/api/chat", json={**turn, "think": True})
+    assert SEEN["llama"].get("chat_template_kwargs", {}).get("enable_thinking") is False
+    # global OFF applies when neither persona nor client set anything
+    wired.personas.upsert("P-llm", reasoning_effort=None, force_reasoning_effort=False)
+    wired.config_store.config.agent_brain.reasoning_effort = "off"
+    try:
+        client.post("/api/chat", json=turn)
+    finally:
+        wired.config_store.config.agent_brain.reasoning_effort = None
+    assert SEEN["llama"].get("chat_template_kwargs", {}).get("enable_thinking") is False
+    # nothing set -> model default (no field)
+    client.post("/api/chat", json=turn)
+    assert "enable_thinking" not in (SEEN["llama"].get("chat_template_kwargs") or {})
+
+
+def test_forced_level_reaches_a_recognised_thinking_model():
+    from foundry_router import thinking
+    q = "/cache/Qwen3.8-27B-UD-Q5_K_XL-fixed-template.gguf"
+    assert thinking.think_value("high", q, None, "openai-compatible") == "high"
+    assert thinking.think_value("off", q, None, "openai-compatible") is False
+    assert thinking.think_value("off", "some-unknown-model", None, "openai-compatible") is False
+    assert thinking.think_value("off", "some-unknown-model", [], "ollama") is None
+
+
+def test_guard_leaves_room_for_cline_to_compact(wired, client):
+    """With a 262k window the guard must not trim a ~240k conversation (Cline
+    compacts at 90% = ~236k); it only trims what truly won't fit."""
+    from foundry_router import context_guard
+    from foundry_router.facade.ollama_api import _apply_context_guard
+    wired.personas.upsert("P-llm", context_window=262144, max_output_tokens=32768)
+    persona = wired.personas.get("P-llm")
+    big = [{"role": "system", "content": "s"}, {"role": "user", "content": "task"}] + [
+        {"role": "user" if i % 2 else "assistant", "content": "x" * 32000} for i in range(24)]
+    est = context_guard.estimate(big, None, "llm")
+    assert 235_000 < est < 245_000
+    out, note = _apply_context_guard(wired, persona, "llm", big, None, None, None, 32768)
+    assert note == "" and out is big
+    huge = big + [{"role": "user", "content": "x" * 64000}]
+    out, note = _apply_context_guard(wired, persona, "llm", huge, None, None, None, 32768)
+    assert note and context_guard.estimate(out, None, "llm") < 262144 - 8192

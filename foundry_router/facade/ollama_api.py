@@ -380,12 +380,15 @@ async def _chat_dispatch(svc, body: dict):
                          f"model={model_name}")
 
     persona = svc.personas.get(model_name)
+    summary_req = _is_client_summary_request(messages)
 
     if persona is None:
         if svc.pool.backend_info(model_name) is not None:
             return await _passthrough_chat(svc, model_name, messages, client_tools,
                                            options, stream, user_text,
-                                           think=client_think, fmt=client_format,
+                                           think=(_summary_think(svc, model_name)
+                                                  if summary_req else client_think),
+                                           fmt=client_format,
                                            keep_alive=body.get("keep_alive"))
         return _model_not_found(model_name)
 
@@ -425,7 +428,9 @@ async def _chat_dispatch(svc, body: dict):
                                            log_mode="passthrough", note=brain_skip,
                                            client_keep_alive=body.get("keep_alive"))
 
-    if client_tools or exec_mode == "direct":
+    # A client's compaction summary is a plain one-shot answer: serve it
+    # directly (never through the brain loop) so thinking-off applies.
+    if client_tools or exec_mode == "direct" or (summary_req and exec_mode != "pipeline"):
         return await _direct_dispatch_chat(svc, persona, model_name, messages,
                                            client_tools, options, stream, user_text,
                                            client_think=client_think,
@@ -668,6 +673,23 @@ def _is_client_summary_request(messages) -> bool:
                 text = " ".join(str(p.get("text") or "") for p in text if isinstance(p, dict))
             if str(text or "").strip().lower().startswith(_SUMMARY_MARKERS):
                 return True
+    return False
+
+
+def _summary_think(svc, model_id: str):
+    """think value for a client's compaction summary: OFF, overriding every
+    Foundry setting (persona force_reasoning_effort, persona / global
+    reasoning_effort) — reasoning only eats the summary's output budget.
+    llama.cpp / vLLM get chat_template_kwargs.enable_thinking=false and Claude
+    no thinking block, both harmless on non-thinking models. Ollama rejects a
+    think field on models without thinking, so there it's sent only when the
+    model can think (a non-thinking model has nothing to switch off)."""
+    from .. import thinking
+    btype = (svc.pool.backend_info(model_id) or {}).get("type", "")
+    if btype == "ollama":
+        meta = svc.registry.get(model_id) or {}
+        return False if thinking.supports_thinking(model_id, meta.get("capabilities"),
+                                                   btype) else None
     return False
 
 
@@ -1206,6 +1228,9 @@ def _guard_window(svc, persona, model_id: str) -> int:
     return min(vals) if vals else 0
 
 
+_GUARD_MAX_AUTO_RESERVE = 8192
+
+
 def _apply_context_guard(svc, persona, model_id, messages, tools, options, logger=None,
                          out_cap: int = 0):
     """Trim what's sent to the model so it fits its window. Returns
@@ -1218,12 +1243,18 @@ def _apply_context_guard(svc, persona, model_id, messages, tools, options, logge
         return messages, ""
     reserve = int(getattr(cfg, "context_guard_reserve_tokens", 0) or 0)
     if not reserve:
+        # Last-resort guard: keep only enough room for a reply to START
+        # (<= 8k), not the whole output cap. The client owns its context —
+        # Cline compacts at 90% of the window (~236k of 262k) and needs the
+        # guard NOT to trim below that, or it never sees its history grow
+        # past its trigger. A reply that then runs out of room ends with
+        # finish=length and the client compacts on the next turn.
         try:
             reserve = int((options or {}).get("num_predict") or 0)
         except (TypeError, ValueError):
             reserve = 0
         reserve = reserve or out_cap or int(cfg.worker_max_tokens or 8192)
-        reserve = min(reserve, window // 4)
+        reserve = min(reserve, _GUARD_MAX_AUTO_RESERVE, window // 4)
     out, rep = context_guard.fit(messages, tools, window, reserve, model_id)
     if not rep:
         return messages, ""
@@ -1515,7 +1546,8 @@ async def _direct_dispatch_chat(svc, persona, model_name, messages, client_tools
                 model_id, convo,
                 tools=all_tools, options=options, keep_alive=keep_alive,
                 max_tokens=out_cap,
-                think=(False if summary_req else _think_for(svc, model_id, persona, client_think)),
+                think=(_summary_think(svc, model_id) if summary_req
+                       else _think_for(svc, model_id, persona, client_think)),
                 fmt=fmt)
             # Empirical tool-calling reliability: direct dispatch is where worker
             # models actually exercise tool calling (client-supplied tools).
@@ -1630,7 +1662,7 @@ async def _direct_dispatch_chat(svc, persona, model_name, messages, client_tools
             _rid = (request_context.request_id() or "")[:8]
             yield tr.chat_chunk(model_name, "", done=False,
                                 thinking=f"⚙️ {_tag} · {model_id} — streaming… "
-                                         f"[{_think_label(svc, model_id, persona, client_think)} · "
+                                         f"[{'think: off (compaction summary)' if summary_req else _think_label(svc, model_id, persona, client_think)} · "
                                          f"Foundry {__version__} · req {_rid} · "
                                          f"arrived {walltime.hms(arrived.wall)}]\n")
             if mcp_defs:
@@ -1678,7 +1710,8 @@ async def _direct_dispatch_chat(svc, persona, model_name, messages, client_tools
                             model_id, convo,
                             tools=all_tools, options=options, keep_alive=keep_alive,
                             max_tokens=out_cap,
-                            think=(False if summary_req else _think_for(svc, model_id, persona, client_think)),
+                            think=(_summary_think(svc, model_id) if summary_req
+                       else _think_for(svc, model_id, persona, client_think)),
                 fmt=fmt)
                         prog: dict = {}
                         async for _kind, _payload in _stream_with_heartbeat(_src, hb, hb_start,
@@ -1840,7 +1873,7 @@ async def _direct_dispatch_chat(svc, persona, model_name, messages, client_tools
         if hb:
             yield tr.chat_chunk(model_name, "", done=False,
                                 thinking=f"⚙️ routing to {where} · {model_id} — working… "
-                                         f"[{_think_label(svc, model_id, persona, client_think)} · "
+                                         f"[{'think: off (compaction summary)' if summary_req else _think_label(svc, model_id, persona, client_think)} · "
                                          f"Foundry {__version__} · req "
                                          f"{(request_context.request_id() or '')[:8]}]\n")
         started = time.monotonic()
