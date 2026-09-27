@@ -101,3 +101,16 @@ def test_tcp_info_reads_a_real_socket():
         assert tcpinfo.request_delta(None) == {}
     finally:
         c.close(); a.close(); srv.close()
+
+
+def test_status_says_waiting_until_llamacpp_reports_progress():
+    from foundry_router.facade.ollama_api import _waiting_detail
+
+    class Pool:
+        def __init__(self, flavor): self.flavor = flavor
+        def backend_info(self, m): return {"flavor": self.flavor}
+
+    class Svc:
+        def __init__(self, flavor): self.pool = Pool(flavor)
+    assert "waiting for llama.cpp" in _waiting_detail(Svc("llamacpp"), "m")
+    assert _waiting_detail(Svc("ollama"), "m") == "reading the prompt"

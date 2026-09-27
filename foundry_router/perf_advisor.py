@@ -150,6 +150,10 @@ def _model_rules(model: str, backend: str, rows: list[dict], ctx_len: Optional[i
                  "the template input) and without --mmproj (routes text through the "
                  "multimodal tokenizer).",
                  "Give the HTTP server more threads (--threads-http 4).",
+                 "If Foundry reaches llama.cpp through a published host port (e.g. "
+                 ":34200), Docker's port proxy sits in between and these TCP counters "
+                 "only see the hop to it — put Foundry and llama.cpp on one Docker "
+                 "network and use http://<llama container>:8080/v1 to remove that hop.",
                  "Set a run label before each change so the Performance tab compares them."],
                 ev, scope))
         elif w50 >= 10000 and tcp == "not_reading":

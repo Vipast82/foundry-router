@@ -254,3 +254,7 @@ with Cline's patch, and its error classifier). What Cline reads from Foundry:
   see LLAMACPP_VLLM.md "Finding hidden server time" — waits in doubling steps
   (6.6 / 13.2 / 26.4 / 52.8 s) come from the TCP layer; the advisor uses the
   per-request TCP counters to say whether it's the network or llama.cpp.
+  Cline's own tool runs are NOT part of it: Foundry's clock starts when it
+  sends the request to llama.cpp, after Cline has run the tool and replied.
+  Until llama.cpp reports prompt progress the status line reads
+  `sent — waiting for llama.cpp to start on it` (Live: "waiting for server").

@@ -654,6 +654,17 @@ async def _failover_list(svc, persona, first: str, user_text: str, eff,
     return out
 
 
+def _waiting_detail(svc, model_id: str) -> str:
+    """Status detail before the first token when the backend has reported no
+    progress. llama.cpp streams prompt-processing progress as soon as it
+    starts on a request, so silence there means it hasn't started yet (still
+    receiving / parsing / queueing) — not that it is reading the prompt."""
+    flavor = ((svc.pool.backend_info(model_id) or {}).get("flavor") or "")
+    if flavor == "llamacpp":
+        return "sent — waiting for llama.cpp to start on it"
+    return "reading the prompt"
+
+
 def _persona_has_mcp_tools(persona: dict) -> bool:
     try:
         return bool(json.loads(persona.get("preferred_mcp_tools") or "[]"))
@@ -1598,7 +1609,8 @@ async def _direct_dispatch_chat(svc, persona, model_name, messages, client_tools
                                     thinking=pacer.line(
                                         f"{_tag} · {model_id}", _payload,
                                         keepalive.progress_detail(prog)
-                                        or ("reading the prompt" if ttft_ms is None else "")))
+                                        or (_waiting_detail(svc, model_id)
+                                            if ttft_ms is None else "")))
                                 continue
                             chunk = _payload
                             if chunk.get("done"):
@@ -1864,7 +1876,7 @@ async def _passthrough_chat(svc, model_name, messages, client_tools, options,
                                         thinking=pacer.line(
                                             model_name, chunk,
                                             keepalive.progress_detail(prog)
-                                            or ("reading the prompt" if ttft_ms is None
+                                            or (_waiting_detail(svc, model_name) if ttft_ms is None
                                                 else "")))
                     continue
                 if chunk.get("done"):

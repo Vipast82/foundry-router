@@ -307,7 +307,8 @@ class InternalPool(BackendPool):
                         "progress": c.get("progress"),
                         "phase": ("generating" if c.get("generating") else
                                   "reading prompt" if (c.get("progress") or {}).get("prefill")
-                                  else "writing tool call" if c.get("progress") else "")}
+                                  else "writing tool call" if c.get("progress")
+                                  else "waiting for server")}
                        for c in (getattr(self, "_calls", None) or {}).values()),
                       key=lambda x: -x["seconds"])
 
