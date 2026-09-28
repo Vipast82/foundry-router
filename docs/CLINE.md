@@ -387,3 +387,19 @@ silently returns "Compaction skipped". It logs no reason line (only
 5. During a very long single-prompt loop, an occasional typed "continue"
    lets Cline's own summarizer fold the old loop. Without it, Foundry's
    ledger keeps the record.
+
+### Ready-made `.clinerules` for long runs
+
+Copy `contrib/cline/clinerules-long-runs.md` into your project as
+`.clinerules/long-runs.md`, or append it to `.clinerules`. It makes the
+model:
+- keep state and verification evidence in files (`docs/STATE.md`,
+  `docs/evidence/<sprint>.md`);
+- keep tool output small;
+- trust Foundry's tool ledger;
+- finish one sprint per task.
+
+These are the things that keep a Cline task inside what its own compaction
+can handle. Cline has no handoff tool any more: `new_task` is legacy and
+`/newtask` now just runs `/compact`. So **start a new Cline task per sprint**
+yourself; the state file carries everything over.

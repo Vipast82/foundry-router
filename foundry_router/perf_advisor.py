@@ -591,9 +591,24 @@ def _event_rules(db, hours: float) -> list[dict]:
         out.append(_f(
             "info", "context_guard", "Conversations are being trimmed to fit",
             f"The context guard trimmed {guard} request(s).",
-            "Trimming keeps requests inside the window but the model loses older messages.",
-            ["Start new tasks more often, or let the client compact earlier (set its "
-             "context window to the persona's)."],
+            "Trimming keeps requests inside the window. Old tool rounds are collapsed into a "
+            "TOOL LEDGER (one line per call with a result excerpt and sha1), and every typed "
+            "prompt is kept, but the model no longer sees the full old outputs. With Cline it "
+            "usually means one task has grown past what Cline's own compaction can fold: Cline "
+            "never summarizes past your latest typed prompt, so a long single-prompt tool loop "
+            "(or many sprints in one task) keeps growing.",
+            ["Start a NEW Cline task per sprint or milestone; carry state in a file "
+             "(e.g. docs/STATE.md: done / in progress / evidence), not in the chat history.",
+             "Tell the model to record verification evidence in a file after each item "
+             "(e.g. docs/evidence/<sprint>.md). Files survive every compaction and trim.",
+             "Keep tool output small: ask for filtered commands (Select-Object -First N, "
+             "Select-String, git diff --stat) instead of dumping whole files or logs.",
+             "Let Cline use subagents for broad read-only research: their reads stay in the "
+             "subagent's own context, not the main task's.",
+             "During a long run, typing a short message (\"continue\") lets Cline's own "
+             "compaction fold the earlier loop.",
+             "Leave Cline's Auto Compact on (Agentic) and its context window at the real "
+             "value; see docs/CLINE.md for a ready-made .clinerules."],
             {"trimmed requests": guard}))
     fo = db.query_one(
         "SELECT COUNT(*) AS n FROM request_log WHERE datetime(ts) >= datetime('now', ?) "
