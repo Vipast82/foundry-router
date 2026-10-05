@@ -55,6 +55,14 @@ def _sse(frames) -> str:
 def _llama(req: httpx.Request):
     if req.url.path.endswith("/models"):
         return httpx.Response(200, json={"data": [{"id": "llm"}]})
+    if req.url.path.endswith("/embeddings"):
+        body = json.loads(req.content)
+        SEEN["llama_embed"] = body
+        inp = body.get("input")
+        n = len(inp) if isinstance(inp, list) else 1
+        return httpx.Response(200, json={"data": [{"embedding": [0.5, -1.0, 2.0], "index": i}
+                                                  for i in range(n)],
+                                         "usage": {"prompt_tokens": 7}})
     body = json.loads(req.content)
     SEEN["llama"] = body
     if body.get("stream"):
@@ -568,3 +576,124 @@ def test_openai_client_images_and_reasoning_effort_reach_llamacpp(wired, client)
     assert any(e.get("usage") for e in events)                    # include_usage honoured
     assert any((e.get("choices") or [{}])[0].get("delta", {}).get("reasoning_content")
                for e in events)                                   # thinking streamed
+
+
+
+# -- full API surface: OpenAI + Ollama endpoints ---------------------------------
+
+def test_openai_embeddings_float_and_base64(wired, client):
+    import base64, struct
+    r = client.post("/v1/embeddings", json={"model": "llm", "input": ["a", "b"]})
+    assert r.status_code == 200, r.text
+    d = r.json()
+    assert d["object"] == "list" and len(d["data"]) == 2
+    assert d["data"][1]["index"] == 1 and d["data"][0]["embedding"] == [0.5, -1.0, 2.0]
+    assert d["usage"]["prompt_tokens"] == 7
+    r = client.post("/v1/embeddings", json={"model": "llm", "input": "a",
+                                            "encoding_format": "base64"})
+    raw = base64.b64decode(r.json()["data"][0]["embedding"])
+    assert list(struct.unpack("<3f", raw)) == [0.5, -1.0, 2.0]
+    assert client.post("/v1/embeddings", json={"model": "nope", "input": "a"}).status_code == 404
+    assert client.post("/v1/embeddings", json={"model": "llm"}).status_code == 400
+
+
+def test_openai_legacy_completions(wired, client):
+    r = client.post("/v1/completions", json={"model": "P-llm", "prompt": "say hi",
+                                             "max_tokens": 50})
+    assert r.status_code == 200, r.text
+    d = r.json()
+    assert d["object"] == "text_completion" and d["choices"][0]["text"] == "Hello"
+    assert "usage" in d and d["choices"][0]["finish_reason"] in ("stop", "length")
+    assert SEEN["llama"]["messages"][-1]["content"] == "say hi"
+    r = client.post("/v1/completions", json={"model": "P-llm", "prompt": "say hi",
+                                             "stream": True})
+    events = [json.loads(l[5:]) for l in r.text.splitlines()
+              if l.startswith("data:") and l.strip() != "data: [DONE]"]
+    assert "".join(e["choices"][0]["text"] for e in events if e.get("choices")) == "Hello"
+    assert r.text.rstrip().endswith("data: [DONE]")
+
+
+def _resp_events(text):
+    out = []
+    for block in text.split("\n\n"):
+        lines = [l for l in block.splitlines() if l.startswith("data:")]
+        if lines:
+            out.append(json.loads(lines[0][5:]))
+    return out
+
+
+def test_openai_responses_non_stream_with_tools_and_history(wired, client):
+    r = client.post("/v1/responses", json={
+        "model": "P-llm", "instructions": "be brief",
+        "input": [{"role": "user", "content": [{"type": "input_text", "text": "read a.lua"}]},
+                  {"type": "function_call", "call_id": "call_1", "name": "read_file",
+                   "arguments": "{\"path\": \"a.lua\"}"},
+                  {"type": "function_call_output", "call_id": "call_1", "output": "file body"},
+                  {"role": "user", "content": "again"}],
+        "tools": [{"type": "function", "name": "read_file", "description": "read",
+                   "parameters": {"type": "object", "properties": {"path": {"type": "string"}}}},
+                  {"type": "web_search"}],
+        "reasoning": {"effort": "high"}, "max_output_tokens": 1000})
+    assert r.status_code == 200, r.text
+    d = r.json()
+    assert d["object"] == "response" and d["status"] == "completed"
+    kinds = [o["type"] for o in d["output"]]
+    assert kinds == ["reasoning", "message", "function_call"]
+    assert d["output"][1]["content"][0]["text"] == "Hello" and d["output_text"] == "Hello"
+    fc = d["output"][2]
+    assert fc["name"] == "read_file" and json.loads(fc["arguments"]) == {"path": "a.lua"}
+    assert d["usage"]["input_tokens"] > 0
+    sent = SEEN["llama"]
+    roles = [m["role"] for m in sent["messages"]]
+    assert roles == ["system", "user", "assistant", "tool", "user"]
+    assert sent["messages"][3]["tool_call_id"] == sent["messages"][2]["tool_calls"][0]["id"]
+    assert [t["function"]["name"] for t in sent["tools"]] == ["read_file"]   # hosted tool dropped
+
+
+def test_openai_responses_stream_events(wired, client):
+    r = client.post("/v1/responses", json={"model": "P-llm", "input": "read a.lua",
+                                           "stream": True, "tools": [
+        {"type": "function", "name": "read_file", "parameters": {"type": "object"}}]})
+    evs = _resp_events(r.text)
+    types = [e["type"] for e in evs]
+    assert types[0] == "response.created" and types[-1] == "response.completed"
+    assert "response.reasoning_summary_text.delta" in types
+    assert "response.output_text.delta" in types
+    assert "response.function_call_arguments.done" in types
+    seqs = [e["sequence_number"] for e in evs]
+    assert seqs == sorted(seqs) and len(set(seqs)) == len(seqs)
+    done = evs[-1]["response"]
+    assert [o["type"] for o in done["output"]] == ["reasoning", "message", "function_call"]
+    text = "".join(e["delta"] for e in evs if e["type"] == "response.output_text.delta")
+    assert text == "Hello"
+
+
+def test_openai_responses_refuses_previous_response_id(wired, client):
+    r = client.post("/v1/responses", json={"model": "P-llm", "input": "x",
+                                           "previous_response_id": "resp_1"})
+    assert r.status_code == 400 and r.json()["error"]["param"] == "previous_response_id"
+
+
+def test_ollama_root_probe_and_management_endpoints(wired, client):
+    r = client.get("/")
+    assert r.status_code == 200 and r.text == "Ollama is running"
+    assert client.head("/").status_code == 200
+    r = client.get("/", headers={"accept": "text/html"}, follow_redirects=False)
+    assert r.status_code == 307 and r.headers["location"] == "/ui"
+    r = client.post("/api/pull", json={"model": "P-llm", "stream": False})
+    assert r.status_code == 200 and r.json()["status"] == "success"
+    r = client.post("/api/pull", json={"model": "P-llm"})
+    assert json.loads(r.text.strip())["status"] == "success"
+    assert client.post("/api/pull", json={"model": "nope"}).status_code == 404
+    for method, path in (("post", "/api/create"), ("post", "/api/copy"),
+                         ("delete", "/api/delete"), ("post", "/api/push")):
+        r = getattr(client, method)(path, json={"model": "x"}) if method == "post" \
+            else client.request("DELETE", path, json={"model": "x"})
+        assert r.status_code == 400 and "Foundry" in r.json()["error"]
+
+
+def test_ollama_embed_endpoints_still_work(wired, client):
+    r = client.post("/api/embed", json={"model": "llm", "input": ["a"]})
+    assert r.status_code == 200 and r.json()["embeddings"] == [[0.5, -1.0, 2.0]]
+    r = client.post("/api/embeddings", json={"model": "llm", "prompt": "a"})
+    assert r.json()["embedding"] == [0.5, -1.0, 2.0]

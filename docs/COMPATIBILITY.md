@@ -27,6 +27,41 @@ Client inputs forwarded: `tools`, `options` / sampling fields, `think` /
 `keep_alive` (raw-model requests), images (Ollama `images` or OpenAI
 data-URI parts), prior-turn reasoning, session headers (see Meridian).
 
+## Client API endpoints (input side)
+
+Foundry answers both APIs on the same port. Every chat-style endpoint goes
+through one dispatcher, so personas, direct mode, guardrails, the context
+guard, compaction handling, telemetry and stats are the same whichever API a
+client uses. Model names are persona names (raw backend model names also
+work).
+
+**Ollama API**
+
+| Endpoint | Status |
+|---|---|
+| `GET` / `HEAD /` | `Ollama is running` (browsers are redirected to `/ui`) |
+| `GET /api/version` | ✅ (advertises an Ollama API version + `foundry_router`) |
+| `GET /api/tags` | ✅ personas |
+| `POST /api/show` | ✅ context length, capabilities (vision / thinking / tools from the backends) |
+| `GET /api/ps` | ✅ models resident on the backends |
+| `POST /api/chat` | ✅ streaming + non-streaming, tools, images, `think`, `format`, `options` |
+| `POST /api/generate` | ✅ (on top of chat; empty prompt = load / `keep_alive: 0` = unload) |
+| `POST /api/embed`, `POST /api/embeddings` | ✅ raw embedding models |
+| `POST /api/pull` | ✅ success for names Foundry serves (nothing to download), 404 otherwise |
+| `POST /api/create`, `/api/copy`, `/api/push`, `DELETE /api/delete`, `/api/blobs/*` | ❌ clear Ollama-style error: manage models in the dashboard or on the backend |
+
+**OpenAI API**
+
+| Endpoint | Status |
+|---|---|
+| `GET /v1/models`, `GET /v1/models/{id}` | ✅ personas |
+| `POST /v1/chat/completions` | ✅ streaming (SSE, `stream_options.include_usage`) + non-streaming; tools / `tool_choice` / `parallel_tool_calls`; images (data URIs); `reasoning_effort` / `reasoning.effort`; `response_format`; `max_tokens` / `max_completion_tokens`; sampling incl. llama.cpp extras; reasoning out as `reasoning_content`; `context_length_exceeded` errors |
+| `POST /v1/responses` | ✅ Responses API: `input` (string or items: messages with `input_text` / `input_image` / `output_text`, `function_call`, `function_call_output`), `instructions`, function `tools`, `tool_choice`, `reasoning.effort`, `text.format` (json schema), `max_output_tokens`; streams the typed events (`response.created`, `output_item.added/done`, `output_text.delta/done`, `reasoning_summary_text.delta/done`, `function_call_arguments.delta/done`, `response.completed` / `incomplete` / `failed`). Stateless: `previous_response_id` is refused (send the full input); hosted tools (web_search, file_search, computer use) are dropped |
+| `POST /v1/completions` | ✅ legacy text completion (stream + non-stream); `suffix` (fill-in-the-middle) is given to the model as context; `n` > 1, `echo`, `logprobs`, `best_of` ignored |
+| `POST /v1/embeddings` | ✅ `input` string / list / token arrays; `encoding_format: "base64"` (float32), `dimensions` |
+| `POST /v1/feedback` | Foundry extension: rate an answer |
+| Audio, images, files, batches, moderations, assistants, fine-tuning | ❌ not served |
+
 ## Backends
 
 | | Ollama | llama.cpp | vLLM | Meridian (Claude) |

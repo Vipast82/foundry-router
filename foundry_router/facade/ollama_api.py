@@ -105,9 +105,54 @@ def _model_not_found(name: str) -> JSONResponse:
 # --------------------------------------------------------------------------- #
 
 @router.api_route("/", methods=["GET", "HEAD"])
-async def root() -> PlainTextResponse:
-    # Byte-for-byte what a real Ollama answers — several clients string-match it.
+async def root(request: Request):
+    """Ollama's liveness probe — byte-for-byte what a real Ollama answers
+    ("Ollama is running"); several clients string-match it. A browser
+    (Accept: text/html) is sent to the dashboard instead."""
+    if "text/html" in (request.headers.get("accept") or ""):
+        from fastapi.responses import RedirectResponse
+        return RedirectResponse("/ui", status_code=307)
     return PlainTextResponse("Ollama is running")
+
+
+# Model management. Foundry serves personas (routing policies) and backend
+# models it discovers, so there is nothing to download, copy or delete through
+# the client API. /api/pull for a name Foundry already serves reports success
+# (clients often "pull" before first use); everything else gets a clear Ollama-
+# shaped error pointing at the dashboard, instead of a bare 404/405.
+def _served_name(svc, name: str) -> bool:
+    return bool(name) and (svc.personas.get(name) is not None
+                           or svc.pool.backend_info(name) is not None)
+
+
+@router.post("/api/pull")
+async def pull(request: Request):
+    svc = _svc(request)
+    body = await request.json()
+    name = body.get("model") or body.get("name") or ""
+    if not _served_name(svc, name):
+        return JSONResponse({"error": f"pull model manifest: '{name}' is not served by "
+                                      f"Foundry Router — add it on a backend (Foundry "
+                                      f"dashboard → Backends) or use a persona name"},
+                            status_code=404)
+    if body.get("stream", True):
+        return StreamingResponse(iter([json.dumps({"status": "success"}) + "\n"]),
+                                 media_type="application/x-ndjson")
+    return {"status": "success"}
+
+
+@router.post("/api/push")
+@router.post("/api/create")
+@router.post("/api/copy")
+@router.delete("/api/delete")
+@router.post("/api/blobs/{digest}")
+@router.head("/api/blobs/{digest}")
+async def manage_unsupported(request: Request):
+    return JSONResponse({"error": f"{request.url.path} is not available through Foundry "
+                                  f"Router: it serves personas and discovered backend "
+                                  f"models. Manage models in the Foundry dashboard "
+                                  f"(Backends / Ollama admin) or on the backend itself."},
+                        status_code=400)
 
 
 @router.get("/api/version")

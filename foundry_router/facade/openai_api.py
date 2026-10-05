@@ -2,7 +2,8 @@
 
 Many clients (security tools, IDE plugins, SDKs built on the OpenAI library)
 speak the OpenAI wire protocol, not Ollama's — they call `GET /v1/models` and
-`POST /v1/chat/completions`. This module exposes exactly those two so Foundry is
+`POST /v1/chat/completions`. This module exposes those plus the Responses API
+(`/v1/responses`), legacy `/v1/completions` and `/v1/embeddings`, so Foundry is
 a drop-in "OpenAI-compatible" endpoint, while reusing the *same* routing brain,
 personas, guardrails, and request logging as the Ollama facade: a persona name
 is the OpenAI `model`, and generation is produced by the identical agent event
@@ -409,3 +410,420 @@ async def chat_completions(request: Request):
     if u.get("served_by"):
         out["served_by"] = u["served_by"]
     return JSONResponse(out)
+
+
+# --------------------------------------------------------------------------- #
+# /v1/embeddings                                                              #
+# --------------------------------------------------------------------------- #
+
+@router.post("/v1/embeddings")
+async def embeddings(request: Request):
+    """OpenAI embeddings on the same embed path as Ollama's /api/embed. `input`
+    may be a string, a list of strings, or token arrays; encoding_format
+    "base64" returns little-endian float32 bytes, as the OpenAI SDKs expect."""
+    import base64
+    import struct
+    from .ollama_api import _do_embed, _embed_inputs
+    svc = _svc(request)
+    body = await request.json()
+    inputs = _embed_inputs(body.get("input"))
+    if not inputs:
+        return JSONResponse({"error": {"message": "'input' is required",
+                                       "type": "invalid_request_error",
+                                       "code": "invalid_input"}}, status_code=400)
+    res, err = await _do_embed(svc, body, inputs)
+    if err is not None:
+        return _error_envelope(err)
+    b64 = body.get("encoding_format") == "base64"
+    data = []
+    for i, vec in enumerate(res.get("embeddings") or []):
+        emb = (base64.b64encode(struct.pack(f"<{len(vec)}f", *vec)).decode("ascii")
+               if b64 else vec)
+        data.append({"object": "embedding", "index": i, "embedding": emb})
+    n = int(res.get("prompt_eval_count") or 0)
+    return {"object": "list", "data": data, "model": body.get("model") or "",
+            "usage": {"prompt_tokens": n, "total_tokens": n}}
+
+
+# --------------------------------------------------------------------------- #
+# /v1/completions (legacy text completion)                                    #
+# --------------------------------------------------------------------------- #
+
+@router.post("/v1/completions")
+async def completions(request: Request):
+    """Legacy text completion (autocomplete plugins, older SDKs). The prompt
+    becomes a one-turn chat through the same dispatch as everything else, so
+    personas, routing, guardrails and telemetry are identical; the reply comes
+    back as `text_completion` objects. Reasoning is not part of this format and
+    is dropped. A list prompt uses its first element (n=1); `suffix`
+    (fill-in-the-middle) is passed to the model as context after the prompt."""
+    svc = _svc(request)
+    from .. import request_context
+    from .ollama_api import _chat_dispatch
+    request_context.capture(request.headers)
+    body = await request.json()
+    model_name = body.get("model") or ""
+    prompt = body.get("prompt")
+    if isinstance(prompt, list):
+        prompt = prompt[0] if prompt and isinstance(prompt[0], str) else ""
+    prompt = prompt or ""
+    if body.get("suffix"):
+        prompt = (f"{prompt}<|fill-in-here|>{body['suffix']}\n\n"
+                  "Reply with only the text that replaces <|fill-in-here|>.")
+    stream = bool(body.get("stream", False))
+    chat = {k: v for k, v in body.items() if k not in ("prompt", "suffix", "echo", "best_of",
+                                                        "logprobs", "n")}
+    chat["messages"] = [{"role": "user", "content": prompt}]
+    resp = await _chat_dispatch(svc, _to_ollama_body(chat))
+    cid = "cmpl-" + uuid.uuid4().hex
+    created = _now()
+    if not isinstance(resp, StreamingResponse):
+        if resp.status_code != 200:
+            return _error_envelope(resp)
+        objs = [json.loads(resp.body)]
+
+        async def _one():
+            for o in objs:
+                yield o
+        source = _one()
+    else:
+        source = _ndjson_objects(resp)
+
+    def _c(text="", finish=None, usage=None):
+        out = {"id": cid, "object": "text_completion", "created": created,
+               "model": model_name,
+               "choices": [{"index": 0, "text": text, "logprobs": None,
+                            "finish_reason": finish}]}
+        if usage is not None:
+            out["usage"] = usage
+        return out
+
+    if stream:
+        async def gen():
+            async for obj in source:
+                if "error" in obj and "message" not in obj:
+                    yield _sse({"error": _error_obj(obj["error"])})
+                    break
+                msg = obj.get("message") or {}
+                if msg.get("content"):
+                    yield _sse(_c(msg["content"]))
+                elif not obj.get("done"):
+                    yield ": keep-alive\n\n"
+                if obj.get("done"):
+                    yield _sse(_c("", _finish_from(obj, False), _usage_from(obj)["usage"]))
+            yield "data: [DONE]\n\n"
+        return StreamingResponse(gen(), media_type="text/event-stream")
+
+    text, final = [], {}
+    async for obj in source:
+        if "error" in obj and "message" not in obj:
+            err = _error_obj(obj["error"])
+            return JSONResponse({"error": err}, status_code=400
+                                if err.get("code") == "context_length_exceeded" else 502)
+        msg = obj.get("message") or {}
+        if msg.get("content"):
+            text.append(msg["content"])
+        if obj.get("done"):
+            final = obj
+    return JSONResponse(_c("".join(text), _finish_from(final, False),
+                           _usage_from(final)["usage"]))
+
+
+# --------------------------------------------------------------------------- #
+# /v1/responses (OpenAI Responses API)                                        #
+# --------------------------------------------------------------------------- #
+
+def _responses_to_chat(body: dict) -> dict:
+    """A Responses API request -> an OpenAI chat-completions body, so it rides
+    the existing translation and dispatch. Input items: role messages
+    (input_text / input_image / output_text parts), function_call and
+    function_call_output; reasoning items are dropped (the backend re-thinks).
+    Only function tools are forwarded — hosted tools (web_search, file_search,
+    computer use) don't exist on these backends."""
+    msgs: list[dict] = []
+    if body.get("instructions"):
+        msgs.append({"role": "system", "content": body["instructions"]})
+    items = body.get("input")
+    if isinstance(items, str):
+        items = [{"role": "user", "content": items}]
+    pending_calls: list[dict] = []
+
+    def flush_calls():
+        if pending_calls:
+            msgs.append({"role": "assistant", "content": "", "tool_calls": list(pending_calls)})
+            pending_calls.clear()
+
+    for it in items or []:
+        if not isinstance(it, dict):
+            continue
+        typ = it.get("type") or ("message" if it.get("role") else "")
+        if typ == "function_call":
+            pending_calls.append({"id": it.get("call_id") or it.get("id"), "type": "function",
+                                  "function": {"name": it.get("name") or "",
+                                               "arguments": it.get("arguments") or "{}"}})
+            continue
+        flush_calls()
+        if typ == "function_call_output":
+            out = it.get("output")
+            if not isinstance(out, str):
+                out = json.dumps(out, ensure_ascii=False)
+            msgs.append({"role": "tool", "tool_call_id": it.get("call_id"), "content": out})
+        elif typ == "message":
+            content = it.get("content")
+            if isinstance(content, list):
+                parts = []
+                for p in content:
+                    if not isinstance(p, dict):
+                        continue
+                    if p.get("type") in ("input_text", "output_text", "text"):
+                        parts.append({"type": "text", "text": p.get("text") or ""})
+                    elif p.get("type") == "input_image":
+                        url = p.get("image_url")
+                        url = url.get("url") if isinstance(url, dict) else url
+                        if url:
+                            parts.append({"type": "image_url", "image_url": {"url": url}})
+                content = parts
+            msgs.append({"role": it.get("role") or "user", "content": content or ""})
+    flush_calls()
+
+    chat: dict = {"model": body.get("model") or "", "messages": msgs,
+                  "stream": bool(body.get("stream", False))}
+    tools = [{"type": "function",
+              "function": {"name": t.get("name"), "description": t.get("description") or "",
+                           "parameters": t.get("parameters") or {"type": "object",
+                                                                 "properties": {}}}}
+             for t in body.get("tools") or [] if isinstance(t, dict)
+             and t.get("type") == "function" and t.get("name")]
+    if tools:
+        chat["tools"] = tools
+        tc = body.get("tool_choice")
+        if isinstance(tc, dict) and tc.get("type") == "function":
+            tc = {"type": "function", "function": {"name": tc.get("name")}}
+        if tc is not None:
+            chat["tool_choice"] = tc
+        if body.get("parallel_tool_calls") is not None:
+            chat["parallel_tool_calls"] = body["parallel_tool_calls"]
+    for k in ("temperature", "top_p", "seed"):
+        if body.get(k) is not None:
+            chat[k] = body[k]
+    if body.get("max_output_tokens"):
+        chat["max_tokens"] = body["max_output_tokens"]
+    if isinstance(body.get("reasoning"), dict):
+        chat["reasoning"] = body["reasoning"]
+    fmt = ((body.get("text") or {}).get("format") or {}) if isinstance(body.get("text"), dict) else {}
+    if fmt.get("type") == "json_schema":
+        chat["response_format"] = {"type": "json_schema",
+                                   "json_schema": {"name": fmt.get("name") or "output",
+                                                   "schema": fmt.get("schema") or {}}}
+    elif fmt.get("type") == "json_object":
+        chat["response_format"] = {"type": "json_object"}
+    return chat
+
+
+def _resp_usage(done: dict) -> dict:
+    u = _usage_from(done)["usage"]
+    out = {"input_tokens": u["prompt_tokens"], "output_tokens": u["completion_tokens"],
+           "total_tokens": u["total_tokens"],
+           "input_tokens_details": {"cached_tokens": (u.get("prompt_tokens_details") or {})
+                                    .get("cached_tokens", 0)},
+           "output_tokens_details": {"reasoning_tokens": (u.get("completion_tokens_details") or {})
+                                     .get("reasoning_tokens", 0)}}
+    return out
+
+
+def _resp_object(rid, created, model, status, output, usage=None, incomplete=None,
+                 error=None) -> dict:
+    return {"id": rid, "object": "response", "created_at": created, "status": status,
+            "model": model, "output": output, "parallel_tool_calls": True,
+            "error": error, "incomplete_details": incomplete,
+            "usage": usage, "tool_choice": "auto", "tools": [], "text": {"format": {"type": "text"}}}
+
+
+@router.post("/v1/responses")
+async def responses(request: Request):
+    """OpenAI Responses API on the same dispatch as chat completions.
+    Stateless: send the full `input` each turn (previous_response_id is
+    refused rather than silently ignored). Streams the standard typed events —
+    response.created / output_item.added / output_text.delta /
+    reasoning_summary_text.delta / function_call_arguments.* / completed."""
+    svc = _svc(request)
+    from .. import request_context
+    from .ollama_api import _chat_dispatch
+    request_context.capture(request.headers)
+    body = await request.json()
+    if body.get("previous_response_id"):
+        return JSONResponse({"error": {
+            "message": "previous_response_id is not supported: Foundry is stateless — send "
+                       "the full conversation in `input` (store=false style).",
+            "type": "invalid_request_error", "code": "unsupported_parameter",
+            "param": "previous_response_id"}}, status_code=400)
+    model_name = body.get("model") or ""
+    stream = bool(body.get("stream", False))
+    resp = await _chat_dispatch(svc, _to_ollama_body(_responses_to_chat(body)))
+    rid = "resp_" + uuid.uuid4().hex
+    created = _now()
+    if not isinstance(resp, StreamingResponse):
+        if resp.status_code != 200:
+            return _error_envelope(resp)
+        objs = [json.loads(resp.body)]
+
+        async def _one():
+            for o in objs:
+                yield o
+        source = _one()
+    else:
+        source = _ndjson_objects(resp)
+
+    def _fc_items(tcs):
+        return [{"type": "function_call", "id": "fc_" + uuid.uuid4().hex[:24],
+                 "call_id": t["id"], "name": t["function"]["name"],
+                 "arguments": t["function"]["arguments"], "status": "completed"}
+                for t in _openai_tool_calls(tcs)]
+
+    def _status(done, has_calls):
+        if not has_calls and done.get("done_reason") == "length":
+            return "incomplete", {"reason": "max_output_tokens"}
+        return "completed", None
+
+    if not stream:
+        text, thinking, tools, final = [], [], [], {}
+        async for obj in source:
+            if "error" in obj and "message" not in obj:
+                err = _error_obj(obj["error"])
+                return JSONResponse({"error": err}, status_code=400
+                                    if err.get("code") == "context_length_exceeded" else 502)
+            msg = obj.get("message") or {}
+            if msg.get("thinking"):
+                thinking.append(msg["thinking"])
+            if msg.get("content"):
+                text.append(msg["content"])
+            if msg.get("tool_calls") and not (obj.get("done") and tools):
+                tools.extend(msg["tool_calls"])
+            if obj.get("done"):
+                final = obj
+        output: list = []
+        if thinking:
+            output.append({"type": "reasoning", "id": "rs_" + uuid.uuid4().hex[:24],
+                           "summary": [{"type": "summary_text", "text": "".join(thinking)}]})
+        if text:
+            output.append({"type": "message", "id": "msg_" + uuid.uuid4().hex[:24],
+                           "status": "completed", "role": "assistant",
+                           "content": [{"type": "output_text", "text": "".join(text),
+                                        "annotations": []}]})
+        calls = _fc_items(tools)
+        output += calls
+        status, inc = _status(final, bool(calls))
+        out = _resp_object(rid, created, model_name, status, output, _resp_usage(final), inc)
+        out["output_text"] = "".join(text)
+        return JSONResponse(out)
+
+    async def gen():
+        seq = 0
+
+        def ev(name, payload):
+            nonlocal seq
+            payload = {"type": name, "sequence_number": seq, **payload}
+            seq += 1
+            return f"event: {name}\ndata: {json.dumps(payload, ensure_ascii=False)}\n\n"
+
+        output: list = []
+        cur = None            # the open item: {"kind", "index", "id", "text"}
+        pending_tools: list = []
+
+        def close_item():
+            nonlocal cur
+            evs = []
+            if cur is None:
+                return evs
+            if cur["kind"] == "reasoning":
+                item = {"type": "reasoning", "id": cur["id"],
+                        "summary": [{"type": "summary_text", "text": cur["text"]}]}
+                evs.append(ev("response.reasoning_summary_text.done",
+                              {"item_id": cur["id"], "output_index": cur["index"],
+                               "summary_index": 0, "text": cur["text"]}))
+            else:
+                part = {"type": "output_text", "text": cur["text"], "annotations": []}
+                item = {"type": "message", "id": cur["id"], "status": "completed",
+                        "role": "assistant", "content": [part]}
+                evs.append(ev("response.output_text.done",
+                              {"item_id": cur["id"], "output_index": cur["index"],
+                               "content_index": 0, "text": cur["text"]}))
+                evs.append(ev("response.content_part.done",
+                              {"item_id": cur["id"], "output_index": cur["index"],
+                               "content_index": 0, "part": part}))
+            evs.append(ev("response.output_item.done", {"output_index": cur["index"],
+                                                        "item": item}))
+            output.append(item)
+            cur = None
+            return evs
+
+        def open_item(kind):
+            nonlocal cur
+            idx = len(output)
+            if kind == "reasoning":
+                iid = "rs_" + uuid.uuid4().hex[:24]
+                cur = {"kind": kind, "index": idx, "id": iid, "text": ""}
+                return [ev("response.output_item.added", {"output_index": idx, "item": {
+                            "type": "reasoning", "id": iid, "summary": []}})]
+            iid = "msg_" + uuid.uuid4().hex[:24]
+            cur = {"kind": kind, "index": idx, "id": iid, "text": ""}
+            return [ev("response.output_item.added", {"output_index": idx, "item": {
+                        "type": "message", "id": iid, "status": "in_progress",
+                        "role": "assistant", "content": []}}),
+                    ev("response.content_part.added", {
+                        "item_id": iid, "output_index": idx, "content_index": 0,
+                        "part": {"type": "output_text", "text": "", "annotations": []}})]
+
+        start = _resp_object(rid, created, model_name, "in_progress", [])
+        yield ev("response.created", {"response": start})
+        yield ev("response.in_progress", {"response": start})
+        async for obj in source:
+            if "error" in obj and "message" not in obj:
+                for e in close_item():
+                    yield e
+                err = _error_obj(obj["error"])
+                yield ev("error", {"code": err["code"], "message": err["message"], "param": None})
+                yield ev("response.failed", {"response": _resp_object(
+                    rid, created, model_name, "failed", output, error={
+                        "code": err["code"], "message": err["message"]})})
+                return
+            msg = obj.get("message") or {}
+            if msg.get("thinking"):
+                if cur is None or cur["kind"] != "reasoning":
+                    for e in close_item() + open_item("reasoning"):
+                        yield e
+                cur["text"] += msg["thinking"]
+                yield ev("response.reasoning_summary_text.delta",
+                         {"item_id": cur["id"], "output_index": cur["index"],
+                          "summary_index": 0, "delta": msg["thinking"]})
+            if msg.get("content"):
+                if cur is None or cur["kind"] != "message":
+                    for e in close_item() + open_item("message"):
+                        yield e
+                cur["text"] += msg["content"]
+                yield ev("response.output_text.delta",
+                         {"item_id": cur["id"], "output_index": cur["index"],
+                          "content_index": 0, "delta": msg["content"]})
+            if not obj.get("done"):
+                if msg.get("tool_calls"):
+                    pending_tools.extend(msg["tool_calls"])
+                elif not msg.get("thinking") and not msg.get("content"):
+                    yield ": keep-alive\n\n"
+                continue
+            for e in close_item():
+                yield e
+            for item in _fc_items(msg.get("tool_calls") or pending_tools):
+                idx = len(output)
+                yield ev("response.output_item.added", {"output_index": idx, "item": {
+                    **item, "arguments": "", "status": "in_progress"}})
+                yield ev("response.function_call_arguments.delta", {
+                    "item_id": item["id"], "output_index": idx, "delta": item["arguments"]})
+                yield ev("response.function_call_arguments.done", {
+                    "item_id": item["id"], "output_index": idx, "arguments": item["arguments"]})
+                yield ev("response.output_item.done", {"output_index": idx, "item": item})
+                output.append(item)
+            status, inc = _status(obj, any(i["type"] == "function_call" for i in output))
+            name = "response.completed" if status == "completed" else "response.incomplete"
+            yield ev(name, {"response": _resp_object(rid, created, model_name, status, output,
+                                                     _resp_usage(obj), inc)})
+    return StreamingResponse(gen(), media_type="text/event-stream")
