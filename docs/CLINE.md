@@ -420,7 +420,13 @@ survives its message handling and becomes `image_url` blocks for llama.cpp
 them. Foundry also reports vision (detected from llama.cpp's `/props`) on
 `/api/show`.
 
-**Override in Cline:** edit
+**Easiest:** close VS Code and run `contrib/cline/enable-model-features.ps1`
+in PowerShell 7 (`pwsh`). It backs up `models.json`, keeps what's there, and
+enables every feature that works end to end through Foundry: images, tools,
+streaming, reasoning, reasoning-effort, structured output and temperature.
+Add `-Models a,b` for other persona names.
+
+**Or by hand:** edit
 `%USERPROFILE%\.cline\data\settings\models.json` (next to
 `providers.json`; create it if missing), close VS Code first, and mark the
 persona models as vision-capable. Merge into what's there and keep any
