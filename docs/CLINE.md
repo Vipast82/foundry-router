@@ -403,3 +403,45 @@ These are the things that keep a Cline task inside what its own compaction
 can handle. Cline has no handoff tool any more: `new_task` is legacy and
 `/newtask` now just runs `/compact`. So **start a new Cline task per sprint**
 yourself; the state file carries everything over.
+
+## Images ("doesn't support images, the attached image will be ignored")
+
+The block is in Cline, not in Foundry. Cline's built-in **Ollama** provider
+declares `capabilities: ["tools"]`, every Ollama model inherits that list,
+and since it has no `images` entry, Cline marks every Ollama model as
+unable to take images. Cline reads only model names from Foundry's
+`/api/tags`, so nothing Foundry reports changes it. The same applies to both
+`claude-cline-act` and `claude-cline-plan` when they're used through the
+Ollama provider.
+
+Foundry itself passes images end to end: Cline's Ollama `images` field
+survives its message handling and becomes `image_url` blocks for llama.cpp
+(Claude image blocks for Meridian). With `--mmproj` loaded, the model sees
+them. Foundry also reports vision (detected from llama.cpp's `/props`) on
+`/api/show`.
+
+**Override in Cline:** edit
+`%USERPROFILE%\.cline\data\settings\models.json` (next to
+`providers.json`; create it if missing), close VS Code first, and mark the
+persona models as vision-capable. Merge into what's there and keep any
+existing entries:
+
+```json
+{
+  "version": 1,
+  "providers": {
+    "ollama": {
+      "models": {
+        "claude-cline-act":  { "supportsVision": true },
+        "claude-cline-plan": { "supportsVision": true }
+      }
+    }
+  }
+}
+```
+
+Reopen VS Code and reselect the model (or start a new task). The warning
+should be gone. If Cline rewrites the file and drops the entry, use the
+OpenAI-compatible provider against Foundry's `/v1` instead
+(`http://<foundry>:11435/v1`), where the model info is configurable in the
+UI, including "supports images".
