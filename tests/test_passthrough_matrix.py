@@ -543,3 +543,28 @@ def test_guard_leaves_room_for_cline_to_compact(wired, client):
     huge = big + [{"role": "user", "content": "x" * 64000}]
     out, note = _apply_context_guard(wired, persona, "llm", huge, None, None, None, 32768)
     assert note and context_guard.estimate(out, None, "llm") < 262144 - 8192
+
+
+def test_openai_client_images_and_reasoning_effort_reach_llamacpp(wired, client):
+    """Cline's OpenAI Compatible provider: image_url data URIs and
+    reasoning_effort must arrive at llama.cpp intact."""
+    png = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk"
+    wired.personas.upsert("P-llm", reasoning_effort=None, force_reasoning_effort=False)
+    r = client.post("/v1/chat/completions", json={
+        "model": "P-llm", "stream": True, "stream_options": {"include_usage": True},
+        "reasoning_effort": "high", "tools": TOOLS, "max_tokens": 32768,
+        "messages": [{"role": "user", "content": [
+            {"type": "text", "text": "what is in this image?"},
+            {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{png}"}}]}]})
+    assert r.status_code == 200
+    sent = SEEN["llama"]
+    parts = sent["messages"][-1]["content"]
+    assert any(p.get("type") == "image_url" and png in p["image_url"]["url"] for p in parts)
+    # reasoning effort is honoured (when the family is recognised it's sent as
+    # reasoning_effort; 'llm' is a test name, so only check it isn't forced off)
+    assert (sent.get("chat_template_kwargs") or {}).get("enable_thinking") is not False
+    events = [json.loads(l[5:]) for l in r.text.splitlines()
+              if l.startswith("data:") and l.strip() != "data: [DONE]"]
+    assert any(e.get("usage") for e in events)                    # include_usage honoured
+    assert any((e.get("choices") or [{}])[0].get("delta", {}).get("reasoning_content")
+               for e in events)                                   # thinking streamed
