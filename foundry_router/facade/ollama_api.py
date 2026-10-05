@@ -32,7 +32,7 @@ from fastapi.responses import JSONResponse, PlainTextResponse, StreamingResponse
 
 from .. import client_gap, walltime
 from .. import __version__
-from .. import context_guard, keepalive, request_context, telemetry
+from .. import client_compaction, context_guard, keepalive, request_context, telemetry
 from ..brain import prompts
 from ..brain.agent import RequestContext
 from ..brain.fallback import guess_category, pick_fallback_model
@@ -1311,6 +1311,25 @@ def _apply_context_guard(svc, persona, model_id, messages, tools, options, logge
     return out, note
 
 
+def _compaction_stuck_note(svc, persona, model_id, client_convo, tools, logger=None) -> str:
+    """Warn when Cline's own auto-compaction can't make progress (its last
+    summary is followed directly by the user's latest message) and the
+    conversation is near the window. Logged once per stuck episode."""
+    try:
+        window = _guard_window(svc, persona, model_id)
+        note, det = client_compaction.warning(client_convo, tools, window, model_id)
+        if not note:
+            return ""
+        if client_compaction.first_report(client_convo, det):
+            svc.db.log_event("warning", "compaction", f"{model_id}: {note}",
+                             json.dumps(det))
+        if logger is not None:
+            logger.record_guardrail(note)
+        return note
+    except Exception:                                             # noqa: BLE001
+        return ""
+
+
 def _prompt_accounting(svc, model_id, res, convo, tools, stats: dict,
                        client_convo=None) -> dict:
     """Make the prompt size the client sees the size of ITS conversation.
@@ -1514,6 +1533,10 @@ async def _direct_dispatch_chat(svc, persona, model_name, messages, client_tools
                                                    all_tools, options, logger, out_cap)
     if _guard_note:
         route_notes.append(_guard_note)
+    _stuck_note = _compaction_stuck_note(svc, persona, model_id, client_convo,
+                                         all_tools, logger)
+    if _stuck_note:
+        route_notes.append(_stuck_note)
 
     async def _exec_foundry_tools(calls: list, narrate=None) -> list:
         """Run the Foundry-owned tool calls of one model turn; returns the tool
@@ -1994,6 +2017,8 @@ async def _passthrough_chat(svc, model_name, messages, client_tools, options,
     client_messages = messages
     messages, guard_note = _apply_context_guard(svc, None, model_name, messages,
                                                 client_tools, options, logger)
+    stuck_note = _compaction_stuck_note(svc, None, model_name, client_messages,
+                                        client_tools, logger)
     if not stream:
         try:
             result, backend = await svc.pool.chat(
@@ -2044,6 +2069,8 @@ async def _passthrough_chat(svc, model_name, messages, client_tools, options,
         start = time.monotonic()
         if guard_note:
             yield tr.chat_chunk(model_name, "", thinking=f"⚠️ {guard_note}\n")
+        if stuck_note:
+            yield tr.chat_chunk(model_name, "", thinking=f"⚠️ {stuck_note}\n")
         try:
             src = svc.pool.chat_stream(model_name, messages,
                                        tools=client_tools, options=options,

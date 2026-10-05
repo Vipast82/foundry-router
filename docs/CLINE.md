@@ -351,9 +351,23 @@ Everything Cline may fold is already in the summary, so every later attempt
 silently returns "Compaction skipped". It logs no reason line (only
 `Context compaction diagnostics` followed by the model request).
 
-- **Workaround:** during a long autonomous loop, type a short message
-  ("continue"). Your latest prompt moves to the end and the old loop becomes
-  summarizable.
+Cline's own log confirms the pattern: after each message you send, Cline
+compacts **once**, then logs `Estimated prompt tokens exceed model context
+window` on every request (one real run: 92 requests in a row) until you
+type again. No `Skipped agentic compaction` line is written.
+
+- **Workaround:** during a long autonomous loop, type `/compact` (or any
+  short message). Your latest prompt moves to the end and the old loop
+  becomes summarizable.
+- **Foundry warns you.** When Foundry sees this state (Cline's
+  `Context summary:` message followed directly by your latest message, then
+  a tool loop) and the conversation has reached **75% of the window**, every
+  turn's thinking shows:
+  `⚠️ Cline can't auto-compact this task (~210k of 262k): … Type /compact
+  (or any short message) and Cline will compact on the next turn.`
+  Events gets one `compaction` warning per stuck episode. Screenshot
+  messages that Cline splits out of tool results don't count as typed
+  messages.
 - **Foundry's guard** covers the gap automatically. When the window is
   really full (~246k of 262k), it:
   - keeps the system prompt, Cline's summary and **every typed prompt**

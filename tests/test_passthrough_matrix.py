@@ -697,3 +697,63 @@ def test_ollama_embed_endpoints_still_work(wired, client):
     assert r.status_code == 200 and r.json()["embeddings"] == [[0.5, -1.0, 2.0]]
     r = client.post("/api/embeddings", json={"model": "llm", "prompt": "a"})
     assert r.json()["embedding"] == [0.5, -1.0, 2.0]
+
+
+def _stuck_history(n_steps: int, chars: int, typed_after_summary: bool = True):
+    """Cline after one compaction: system · summary · typed prompt · tool loop."""
+    msgs = [{"role": "system", "content": "You are Cline"},
+            {"role": "user", "content": "Context summary:\n\nDone: S50 parts 1-8."}]
+    if not typed_after_summary:
+        msgs += [{"role": "assistant", "content": "", "tool_calls": [
+            {"function": {"name": "read_file", "arguments": {"path": "a"}}}]},
+            {"role": "tool", "content": "old"}]
+    msgs.append({"role": "user", "content": "S50 CLOSEOUT PART 9 — run the sweep"})
+    for i in range(n_steps):
+        msgs += [{"role": "assistant", "content": "", "tool_calls": [
+            {"function": {"name": "execute_command", "arguments": {"command": f"c{i}"}}}]},
+            {"role": "tool", "content": "x" * chars},
+            {"role": "user", "content": "", "images": ["iVBORw0KGgo="]}]
+    return msgs
+
+
+def test_cline_stuck_compaction_detection():
+    from foundry_router import client_compaction as cc
+    st = cc.stuck(_stuck_history(3, 10))
+    assert st == {"summary_index": 1, "prompt_index": 2, "steps": 3}
+    # image-only user messages (tool screenshots) are not typed prompts
+    assert not cc.is_typed({"role": "user", "content": "", "images": ["x"]})
+    # something still foldable between summary and prompt -> Cline can compact
+    assert cc.stuck(_stuck_history(3, 10, typed_after_summary=False)) is None
+    # no summary yet -> first compaction will work
+    assert cc.stuck([{"role": "system", "content": "s"}, {"role": "user", "content": "t"},
+                     {"role": "assistant", "content": "a"}]) is None
+    # user typed after the loop -> the loop is foldable again
+    h = _stuck_history(3, 10) + [{"role": "user", "content": "continue"}]
+    assert cc.stuck(h) is None
+    # OpenAI-style list content for the summary
+    h = _stuck_history(2, 10)
+    h[1] = {"role": "user", "content": [{"type": "text", "text": "Context summary:\n\nx"}]}
+    assert cc.stuck(h)["steps"] == 2
+    # warns only near the window
+    assert cc.warning(_stuck_history(3, 10), None, 262144)[0] == ""
+    note, det = cc.warning(_stuck_history(30, 22000), None, 262144)
+    assert "/compact" in note and det["steps"] == 30
+
+
+def test_cline_stuck_compaction_warning_reaches_client_once_logged(wired, client):
+    wired.personas.upsert("P-llm", context_window=262144, max_output_tokens=32768)
+    hist = _stuck_history(30, 22000)
+    for _ in range(2):
+        r = client.post("/api/chat", json={"model": "P-llm", "stream": True,
+                                           "tools": TOOLS, "messages": hist})
+        assert r.status_code == 200
+        thinking = "".join(json.loads(l)["message"].get("thinking") or ""
+                           for l in r.text.splitlines() if l.strip())
+        assert "Cline can't auto-compact" in thinking and "/compact" in thinking
+    ev = wired.db.query("SELECT message FROM event_log WHERE source='compaction' "
+                        "AND message LIKE '%auto-compact%'")
+    assert len(ev) == 1
+    # a normal (not stuck) turn carries no warning
+    r = client.post("/api/chat", json={"model": "P-llm", "stream": True, "tools": TOOLS,
+                                       "messages": hist + [{"role": "user", "content": "go"}]})
+    assert "Cline can't auto-compact" not in r.text
