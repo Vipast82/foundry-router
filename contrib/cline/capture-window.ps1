@@ -16,8 +16,8 @@
     .\capture-window.ps1 -Process RobloxStudio -Out shots\ui.png
     .\capture-window.ps1 -Process blender -Out shots\front.png
     .\capture-window.ps1 -Process RobloxStudio -Out shots\board.png -Crop 1600,200,800,600
-    .\capture-window.ps1 -Process blender -Title "model.blend"
-    .\capture-window.ps1 -Process RobloxStudio -Title "place_master_restore3" -Out shots\p.png -Out shots\b.png
+    .\capture-window.ps1 -Process blender -Title "model.blend" -Out shots\b.png
+    .\capture-window.ps1 -Process RobloxStudio -Title "place_master_restore3" -Out shots\p.png
 
   -Crop x,y,width,height is relative to the window's top-left corner.
 #>
