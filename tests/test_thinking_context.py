@@ -375,3 +375,28 @@ def test_tool_ledger_folds_oldest_lines_above_its_cap():
                                      cap_chars=3000)
     assert "oldest" in text and "execute_command×" in text
     assert len(text) < 5000
+
+
+def test_client_cap_cut_is_blamed_on_the_client_not_the_server(app, client):
+    """Cline sends max_tokens = window - its prompt estimate; near a 'full'
+    window (screenshots inflate its estimate) that is a few hundred tokens.
+    The cut must be explained as the client's cap, and the advisor must not
+    claim the server has an -n limit."""
+    from foundry_router import perf_advisor
+    svc = app.state.services
+    pool = TruncPool(ct=390)
+    real, svc.pool = svc.pool, pool
+    svc.personas.upsert("Act", execution_mode="direct", model_allowlist=["qwen"],
+                        pinned_models=[], max_output_tokens=65536)
+    try:
+        r = client.post("/api/chat", json={"model": "Act", "options": {"num_predict": 390},
+                                           "messages": [{"role": "user", "content": "go"}]})
+        thinking = "".join(json.loads(x)["message"].get("thinking") or ""
+                           for x in r.text.splitlines() if x.strip())
+        assert "limit the CLIENT asked for" in thinking and "BACKEND" not in thinking
+    finally:
+        svc.pool = real
+    ev = svc.db.query("SELECT message FROM event_log WHERE source='truncation'")
+    assert ev and "client cap" in ev[-1]["message"]
+    ids = {f["id"] for f in perf_advisor._event_rules(svc.db, 24)}
+    assert "backend_output_cap" not in ids and "client_output_cap" in ids

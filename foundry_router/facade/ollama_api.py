@@ -1226,20 +1226,41 @@ def _output_cap(svc, persona) -> int:
     return v if v > 0 else int(svc.config_store.config.agent_brain.worker_max_tokens or 8192)
 
 
-def _truncation_note(res, cap: int, persona, svc=None, model_id: str = "") -> str:
+def _truncation_note(res, cap: int, persona, svc=None, model_id: str = "",
+                     options=None) -> str:
     """Thinking line (and Events entry) for a reply cut at an output limit.
 
     Compares what the reply actually got with the cap Foundry sent: if the
     backend stopped it well SHORT of that, the limit is on the server
     (llama.cpp -n/--n-predict, a llama-swap default, Ollama num_predict, or
-    the context filling up) — raising Foundry's cap then changes nothing."""
+    the context filling up) — raising Foundry's cap then changes nothing.
+
+    A client-sent cap (Ollama num_predict / OpenAI max_tokens) replaces
+    Foundry's, so it is the cap that was really sent. Cline sends "window
+    minus its estimate of the prompt", and its estimate counts screenshots by
+    their base64 size — near a full window it asks for only a few hundred
+    tokens. That is reported as the client's cap, not the server's."""
     if (getattr(res, "finish_reason", "") or "").lower() not in ("length", "max_tokens"):
         return ""
     got = int(getattr(res, "completion_tokens", 0) or 0)
+    try:
+        client_cap = int((options or {}).get("num_predict") or 0)
+    except (TypeError, ValueError):
+        client_cap = 0
     where = ("this persona's max output tokens" if (persona or {}).get("max_output_tokens")
              else "Global settings → worker_max_tokens")
     incomplete = " — the tool call was incomplete" if not getattr(res, "tool_calls", None) else ""
-    if got and cap and got < cap * 0.9:
+    if client_cap > 0:
+        cap = client_cap
+        where = "the client's own max tokens"
+    if client_cap > 0 and (not got or got >= cap * 0.9):
+        note = (f"⚠️ reply cut at the {cap:,}-token limit the CLIENT asked for{incomplete} "
+                f"(Foundry allowed {_output_cap(svc, persona) if svc else '?'}). Cline asks "
+                f"for \"context window minus its prompt estimate\"; a tiny cap means it "
+                f"thinks the context is full — its estimate counts screenshots by their "
+                f"base64 size. Type /compact, or send a message without an image so the "
+                f"screenshot can be folded.\n")
+    elif got and cap and got < cap * 0.9:
         note = (f"⚠️ reply cut at {got:,} output tokens{incomplete}, but Foundry allowed "
                 f"{cap:,} — the BACKEND stopped it. Check the server's own limit "
                 f"(llama.cpp -n / --n-predict, llama-swap cmd, Ollama num_predict) or "
@@ -1251,7 +1272,8 @@ def _truncation_note(res, cap: int, persona, svc=None, model_id: str = "") -> st
         try:
             svc.db.log_event("warning", "truncation",
                              f"{model_id or '?'}: reply cut at {got or '?'} output tokens "
-                             f"(cap sent {cap}){incomplete}",
+                             f"(cap sent {cap}{', client cap' if client_cap > 0 else ''})"
+                             f"{incomplete}",
                              f"persona={(persona or {}).get('virtual_name', '')}")
         except Exception:                                         # noqa: BLE001
             pass
@@ -1855,7 +1877,7 @@ async def _direct_dispatch_chat(svc, persona, model_name, messages, client_tools
                                     "function": {"name": t["name"], "arguments": t["arguments"]}}
                                    for t in rest] or None
                         res.tool_calls = rest
-                        _tn = _truncation_note(res, out_cap, persona, svc, model_id)
+                        _tn = _truncation_note(res, out_cap, persona, svc, model_id, options)
                         if _tn:
                             yield tr.chat_chunk(model_name, "", done=False, thinking=_tn)
                         yield tr.chat_chunk(
@@ -1980,7 +2002,7 @@ async def _direct_dispatch_chat(svc, persona, model_name, messages, client_tools
             yield tr.error_chunk(tr.client_error(err)[0])
             return
         tool_calls, stats = _finalize(result)
-        _tn = _truncation_note(result, out_cap, persona, svc, model_id)
+        _tn = _truncation_note(result, out_cap, persona, svc, model_id, options)
         if _tn:
             yield tr.chat_chunk(model_name, "", thinking=_tn)
         if result.thinking:

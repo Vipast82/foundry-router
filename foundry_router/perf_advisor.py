@@ -586,6 +586,26 @@ def _event_rules(db, hours: float) -> list[dict]:
              "Ollama: raise num_predict in the model / Modelfile.",
              "Or the context filled up mid-reply: check the context window vs prompt size."],
             {"cut at": f"~{int(got):,}", "Foundry limit": f"{cap:,}", "replies": len(short)}))
+    tiny = []
+    for r in cut_rows:
+        m = re.search(r"cut at (\d+) output tokens \(cap sent (\d+), client cap\)",
+                      r["message"] or "")
+        if m and int(m.group(2)) < 4096:
+            tiny.append(int(m.group(2)))
+    if tiny:
+        out.append(_f(
+            "warning", "client_output_cap", "The client asked for very short replies",
+            f"{len(tiny)} reply(ies) were cut at a limit the CLIENT sent "
+            f"(median ~{int(statistics.median(tiny)):,} tokens), not Foundry's or the server's.",
+            "Cline asks for \"context window minus its prompt estimate\". When it thinks the "
+            "context is nearly full it asks for only a few hundred tokens, and the reply "
+            "(often a tool call) is cut. Its estimate counts screenshots by their base64 "
+            "size, so one image can make a 262k window look full.",
+            ["Type /compact, or send a message without an image so the screenshot can be "
+             "folded into the summary.",
+             "Crop screenshots to the part that matters before attaching them.",
+             "Start a new Cline task per sprint; carry state in a file."],
+            {"client caps": len(tiny)}))
     guard = count("source='context'")
     if guard >= 3:
         out.append(_f(
