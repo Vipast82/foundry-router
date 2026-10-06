@@ -11,6 +11,11 @@
   window could not be focused, stop and say so instead of capturing anyway.
 - Both apps live on the main 1440p monitor. Keep the target window maximized
   there; never capture from the ultrawide.
+- Choose where each image goes with `-Out` (a folder or a full `.png` path)
+  to suit the task, e.g. `docs/evidence/<sprint>/` for evidence, or a
+  scratch folder for quick looks; `-Name` sets the file name prefix. With no
+  `-Out` it saves to `screenshots/<name>-<timestamp>.png`. Use the path on
+  the final `Saved:` line to open the image and in the evidence file.
 - Check the script's output line: if it says the capture is above the 5120
   token cap, re-capture with `-Crop x,y,w,h` (relative to the window).
 

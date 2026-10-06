@@ -13,24 +13,53 @@
     5. prints the size and the approximate vision-token cost.
 
   Usage (Windows PowerShell 5.1 or pwsh 7):
-    .\capture-window.ps1 -Process RobloxStudio -Out shots\ui.png
-    .\capture-window.ps1 -Process blender -Out shots\front.png
-    .\capture-window.ps1 -Process RobloxStudio -Out shots\board.png -Crop 1600,200,800,600
-    .\capture-window.ps1 -Process blender -Title "model.blend" -Out shots\b.png
+    .\capture-window.ps1 -Process RobloxStudio
+    .\capture-window.ps1 -Process RobloxStudio -Out docs\evidence\S50\
+    .\capture-window.ps1 -Process RobloxStudio -Out docs\evidence\S50\leaderboard-after.png -Crop 1600,200,800,600
+    .\capture-window.ps1 -Process blender -Out shots\ -Name sword-front
     .\capture-window.ps1 -Process RobloxStudio -Title "place_master_restore3" -Out shots\p.png
+
+  Where the image goes (-Out is optional; the caller decides):
+    no -Out                 .\screenshots\<name>-<timestamp>.png
+    -Out a folder\          <folder>\<name>-<timestamp>.png
+                            (also when the path is an existing folder or has
+                            no extension)
+    -Out a\file.png         exactly that file (overwritten if it exists)
+    <name> is -Name if given, else the process name. Folders are created as
+    needed. The last line printed is "Saved: <full path>", so the caller can
+    open or attach the image from there.
 
   -Crop x,y,width,height is relative to the window's top-left corner.
 #>
 param(
     [Parameter(Mandatory)] [string]$Process,
-    [Parameter(Mandatory)] [string]$Out,
+    [string]$Out = "",
+    [string]$Name = "",
     [string]$Title = "",
     [int[]]$Crop = @(),
     [int]$SettleMs = 400
 )
 
 $ErrorActionPreference = "Stop"
+
+# Resolve the output path first, so a bad path fails before anything moves.
+$stamp = Get-Date -Format "yyyyMMdd-HHmmss-fff"
+$base = (($(if ($Name) { $Name } else { $Process })) -replace '[^\w.-]+', '_')
+$file = "$base-$stamp.png"
+if (-not $Out) {
+    $Out = Join-Path "screenshots" $file
+} elseif ($Out -match '[\\/]$' -or (Test-Path -LiteralPath $Out -PathType Container) -or
+          -not [System.IO.Path]::GetExtension($Out)) {
+    $Out = Join-Path $Out $file
+} elseif ([System.IO.Path]::GetExtension($Out) -ne ".png") {
+    $Out = [System.IO.Path]::ChangeExtension($Out, ".png")
+}
+# Relative paths are relative to the current PowerShell location (the
+# project folder when Cline runs it), not the process working directory.
+$Out = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($Out)
 Add-Type -AssemblyName System.Drawing
+# Cline reuses its terminal: register the helper type only once per session.
+if (-not ("CapWin" -as [type])) {
 Add-Type @"
 using System;
 using System.Runtime.InteropServices;
@@ -47,6 +76,7 @@ public static class CapWin {
     [DllImport("dwmapi.dll")] public static extern int DwmGetWindowAttribute(IntPtr h, int attr, out RECT r, int size);
 }
 "@
+}
 
 [void][CapWin]::SetProcessDPIAware()     # real pixels on scaled 1440p displays
 
@@ -101,3 +131,4 @@ $tokHi = [Math]::Ceiling($w / 28) * [Math]::Ceiling($hgt / 28)
 Write-Host ("Captured '{0}' {1}x{2} -> {3} (~{4}-{5} vision tokens{6})" -f `
     $p.MainWindowTitle, $w, $hgt, $Out, $tokLo, $tokHi,
     $(if ($tokHi -gt 5120) { "; above the 5120 cap, will be downscaled - crop it" } else { "" }))
+Write-Host "Saved: $Out"
