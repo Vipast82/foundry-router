@@ -13,10 +13,11 @@
     5. prints the size and the approximate vision-token cost.
 
   Usage (Windows PowerShell 5.1 or pwsh 7):
-    .\capture-window.ps1 -Process RobloxStudioBeta -Out shots\ui.png
+    .\capture-window.ps1 -Process RobloxStudio -Out shots\ui.png
     .\capture-window.ps1 -Process blender -Out shots\front.png
-    .\capture-window.ps1 -Process RobloxStudioBeta -Out shots\board.png -Crop 1600,200,800,600
-    .\capture-window.ps1 -Process blender -Title "model.blend" -Out shots\b.png
+    .\capture-window.ps1 -Process RobloxStudio -Out shots\board.png -Crop 1600,200,800,600
+    .\capture-window.ps1 -Process blender -Title "model.blend"
+    .\capture-window.ps1 -Process RobloxStudio -Title "place_master_restore3" -Out shots\p.png -Out shots\b.png
 
   -Crop x,y,width,height is relative to the window's top-left corner.
 #>
@@ -49,8 +50,15 @@ public static class CapWin {
 
 [void][CapWin]::SetProcessDPIAware()     # real pixels on scaled 1440p displays
 
-$procs = Get-Process -Name $Process -ErrorAction SilentlyContinue |
-    Where-Object { $_.MainWindowHandle -ne [IntPtr]::Zero }
+# Exact name first, then a prefix match: Roblox Studio has run as both
+# RobloxStudioBeta.exe and RobloxStudio.exe, so -Process RobloxStudio finds
+# either. Processes without a window (e.g. RobloxCrashHandler) are skipped.
+$procs = @(Get-Process -Name $Process -ErrorAction SilentlyContinue |
+    Where-Object { $_.MainWindowHandle -ne [IntPtr]::Zero })
+if (-not $procs) {
+    $procs = @(Get-Process -Name "$Process*" -ErrorAction SilentlyContinue |
+        Where-Object { $_.MainWindowHandle -ne [IntPtr]::Zero })
+}
 if ($Title) { $procs = $procs | Where-Object { $_.MainWindowTitle -like "*$Title*" } }
 $p = $procs | Select-Object -First 1
 if (-not $p) { throw "No visible window for process '$Process'$(if ($Title) { " with title '*$Title*'" })." }

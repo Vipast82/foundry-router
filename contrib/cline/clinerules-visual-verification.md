@@ -3,7 +3,8 @@
 ## Capturing
 - Capture with `tools/capture-window.ps1` (copy of Foundry's
   `contrib/cline/capture-window.ps1`), never a full-desktop grab:
-  - Roblox Studio: `-Process RobloxStudioBeta`
+  - Roblox Studio: `-Process RobloxStudio` (add `-Title "<place name>"` when
+    more than one place is open)
   - Blender: `-Process blender`
   The script brings the window to the foreground, confirms it is in focus,
   and captures only that window at native resolution. If it reports that the
