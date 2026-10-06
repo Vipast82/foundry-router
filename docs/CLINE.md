@@ -418,6 +418,26 @@ can handle. Cline has no handoff tool any more: `new_task` is legacy and
 `/newtask` now just runs `/compact`. So **start a new Cline task per sprint**
 yourself; the state file carries everything over.
 
+### Ready-made `.clinerules` for screenshot verification
+
+For tasks where Cline checks its own work visually (game UI, Blender models):
+- copy `contrib/cline/capture-window.ps1` into the project as
+  `tools/capture-window.ps1`;
+- copy `contrib/cline/clinerules-visual-verification.md` to
+  `.clinerules/visual-verification.md`.
+
+The script brings the target window (Roblox Studio, Blender) to the
+foreground, refuses to capture if it can't, and grabs only that window, or a
+`-Crop` inside it, at native, DPI-aware resolution. It prints the approximate
+vision-token cost. The rules make the model crop UI checks, render fixed
+Blender views at 1024x1024 instead of screenshotting the UI, and confirm
+precision with numbers (dimensions, `AbsoluteSize`) as well as images.
+
+On the llama.cpp side, `--image-max-tokens` only helps up to the capture's
+native resolution: a full 2560x1440 capture is about 3.6k-4.7k tokens, so
+`--image-max-tokens 5120` keeps it at full detail. Higher values add VRAM on
+the main GPU (the vision encoder isn't split across GPUs) with no gain.
+
 ## Images ("doesn't support images, the attached image will be ignored")
 
 The block is in Cline, not in Foundry. Cline's built-in **Ollama** provider
