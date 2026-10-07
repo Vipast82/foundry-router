@@ -15,16 +15,18 @@
   Usage (Windows PowerShell 5.1 or pwsh 7):
     .\capture-window.ps1 -Process RobloxStudio
     .\capture-window.ps1 -Process RobloxStudio -Out docs\evidence\S50\
-    .\capture-window.ps1 -Process RobloxStudio -Out docs\evidence\S50\leaderboard-after.png -Crop 1600,200,800,600
+    .\capture-window.ps1 -Process RobloxStudio -Out docs\evidence\S50\leaderboard-after.jpg -Crop 1600,200,800,600
     .\capture-window.ps1 -Process blender -Out shots\ -Name sword-front
-    .\capture-window.ps1 -Process RobloxStudio -Title "place_master_restore3" -Out shots\p.png
+    .\capture-window.ps1 -Process RobloxStudio -Title "place_master_restore3" -Out shots\p.jpg
+    .\capture-window.ps1 -Process RobloxStudio -Format png    # lossless, ~4-6x bigger
 
   Where the image goes (-Out is optional; the caller decides):
-    no -Out                 .\screenshots\<name>-<timestamp>.png
-    -Out a folder\          <folder>\<name>-<timestamp>.png
+    no -Out                 .\screenshots\<name>-<timestamp>.jpg
+    -Out a folder\          <folder>\<name>-<timestamp>.jpg
                             (also when the path is an existing folder or has
                             no extension)
-    -Out a\file.png         exactly that file (overwritten if it exists)
+    -Out a\file.jpg         exactly that file (overwritten if it exists); the
+                            extension follows -Format
     <name> is -Name if given, else the process name. Folders are created as
     needed. The last line printed is "Saved: <full path>", so the caller can
     open or attach the image from there.
@@ -37,7 +39,14 @@ param(
     [string]$Name = "",
     [string]$Title = "",
     [int[]]$Crop = @(),
-    [int]$SettleMs = 400
+    [int]$SettleMs = 400,
+    # JPEG by default: a 1440p game/Studio capture is ~1.5-2 MB as PNG but
+    # ~0.3-0.5 MB as JPEG q90 with no visible loss for a vision model. Cline
+    # counts an image by its base64 size, so big PNGs make it think the
+    # context is full (tiny replies, skipped compaction) and bloat its task
+    # file. Use -Format png only when pixel-exact output matters.
+    [ValidateSet("jpg", "png")] [string]$Format = "jpg",
+    [ValidateRange(50, 100)] [int]$Quality = 90
 )
 
 $ErrorActionPreference = "Stop"
@@ -45,14 +54,15 @@ $ErrorActionPreference = "Stop"
 # Resolve the output path first, so a bad path fails before anything moves.
 $stamp = Get-Date -Format "yyyyMMdd-HHmmss-fff"
 $base = (($(if ($Name) { $Name } else { $Process })) -replace '[^\w.-]+', '_')
-$file = "$base-$stamp.png"
+$ext = ".$Format"
+$file = "$base-$stamp$ext"
 if (-not $Out) {
     $Out = Join-Path "screenshots" $file
 } elseif ($Out -match '[\\/]$' -or (Test-Path -LiteralPath $Out -PathType Container) -or
           -not [System.IO.Path]::GetExtension($Out)) {
     $Out = Join-Path $Out $file
-} elseif ([System.IO.Path]::GetExtension($Out) -ne ".png") {
-    $Out = [System.IO.Path]::ChangeExtension($Out, ".png")
+} elseif ([System.IO.Path]::GetExtension($Out) -ne $ext) {
+    $Out = [System.IO.Path]::ChangeExtension($Out, $ext)
 }
 # Relative paths are relative to the current PowerShell location (the
 # project folder when Cline runs it), not the process working directory.
@@ -123,12 +133,22 @@ $g = [System.Drawing.Graphics]::FromImage($bmp)
 $g.CopyFromScreen($x, $y, 0, 0, $bmp.Size)
 $dir = Split-Path -Parent $Out
 if ($dir) { New-Item -ItemType Directory -Force -Path $dir | Out-Null }
-$bmp.Save($Out, [System.Drawing.Imaging.ImageFormat]::Png)
+if ($Format -eq "png") {
+    $bmp.Save($Out, [System.Drawing.Imaging.ImageFormat]::Png)
+} else {
+    $codec = [System.Drawing.Imaging.ImageCodecInfo]::GetImageEncoders() |
+        Where-Object { $_.MimeType -eq "image/jpeg" }
+    $ep = New-Object System.Drawing.Imaging.EncoderParameters 1
+    $ep.Param[0] = New-Object System.Drawing.Imaging.EncoderParameter(
+        [System.Drawing.Imaging.Encoder]::Quality, [long]$Quality)
+    $bmp.Save($Out, $codec, $ep)
+}
 $g.Dispose(); $bmp.Dispose()
 
 $tokLo = [Math]::Ceiling($w / 32) * [Math]::Ceiling($hgt / 32)
 $tokHi = [Math]::Ceiling($w / 28) * [Math]::Ceiling($hgt / 28)
-Write-Host ("Captured '{0}' {1}x{2} -> {3} (~{4}-{5} vision tokens{6})" -f `
-    $p.MainWindowTitle, $w, $hgt, $Out, $tokLo, $tokHi,
+$kb = [Math]::Round((Get-Item -LiteralPath $Out).Length / 1KB)
+Write-Host ("Captured '{0}' {1}x{2}, {3} KB (~{4}-{5} vision tokens{6})" -f `
+    $p.MainWindowTitle, $w, $hgt, $kb, $tokLo, $tokHi,
     $(if ($tokHi -gt 5120) { "; above the 5120 cap, will be downscaled - crop it" } else { "" }))
 Write-Host "Saved: $Out"
