@@ -590,8 +590,9 @@ class AgentRunner:
         available = list(self.pool.available_models().keys())
 
         def is_sub(mid: str) -> bool:
-            return (self.pool.backend_info(mid) or {}).get(
-                "type") == "anthropic-compatible"
+            # Subscription cloud backends: Meridian and CLIProxyAPI-style proxies.
+            info = self.pool.backend_info(mid) or {}
+            return info.get("type") == "anthropic-compatible" or bool(info.get("cloud"))
 
         def is_paid(mid: str) -> bool:
             if is_sub(mid):

@@ -682,6 +682,8 @@ async def cost_compare(request: Request):
         t = info.get("type") or ""
         if t == "openai-compatible" and info.get("flavor") in ("llamacpp", "vllm", "unsloth"):
             return "openai-compatible-local"
+        if t == "openai-compatible" and info.get("cloud"):
+            return "openai-compatible-subscription"
         return t
     return pricing.compute_costs(
         svc.db, hours=hours, model=(q.get("model") or None),

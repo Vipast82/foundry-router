@@ -171,7 +171,8 @@ class Services:
 
         from .registry.tagging import (content_policy_from_name,
                                        is_embedding_name, tags_from_name)
-        from .usage import CLAUDE_DEFAULT_CONTEXT, claude_cost_tier
+        from .usage import (CLAUDE_DEFAULT_CONTEXT, claude_cost_tier,
+                            subscription_context, subscription_cost_tier)
 
         for s in getattr(self.pool, "backends", {}).values():
             if not s.healthy:
@@ -204,6 +205,16 @@ class Services:
                         # manual override still wins over both.
                         fields.update(relative_cost_tier=claude_cost_tier(model_id),
                                       context_length=CLAUDE_DEFAULT_CONTEXT)
+                    elif getattr(s.config, "is_cloud", False):
+                        # Subscription proxy (CLIProxyAPI): GPT/Codex, Claude,
+                        # Gemini behind the openai dialect. No dollar cost (plan
+                        # quota), a tier so ranking prefers cheaper models, and a
+                        # default window since its /v1/models carries none.
+                        fields.update(relative_cost_tier=subscription_cost_tier(model_id),
+                                      cost_per_1k_input=0.0, cost_per_1k_output=0.0)
+                        ctx = subscription_context(model_id)
+                        if ctx:
+                            fields["context_length"] = ctx
                     if not refined:
                         tags = tags_from_name(model_id)
                         if tags:

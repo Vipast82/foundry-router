@@ -210,7 +210,8 @@ class InternalPool(BackendPool):
         # api_key rides along for the guardrails' authenticated quota check —
         # backend_info is internal plumbing, never serialized to the UI.
         return {"name": c.name, "type": c.type, "url": c.url, "api_key": c.api_key,
-                "flavor": getattr(c, "effective_flavor", None)}
+                "flavor": getattr(c, "effective_flavor", None),
+                "cloud": bool(getattr(c, "is_cloud", False))}
 
     async def loaded_models(self) -> set[str]:
         """Union of models resident in VRAM across healthy ollama backends,
@@ -278,6 +279,7 @@ class InternalPool(BackendPool):
         return [{
             "name": s.config.name, "type": s.config.type, "url": s.config.url,
             "flavor": getattr(s.config, "effective_flavor", None),
+            "cloud": bool(getattr(s.config, "is_cloud", False)),
             "priority": s.config.priority, "healthy": s.healthy,
             "consecutive_failures": s.consecutive_failures,
             "models": s.models, "last_error": s.last_error, "busy": s.busy,
@@ -285,6 +287,7 @@ class InternalPool(BackendPool):
         } for s in self.backends.values()] + [{
             "name": b.name, "type": b.type, "url": b.url,
             "flavor": getattr(b, "effective_flavor", None), "priority": b.priority,
+            "cloud": bool(getattr(b, "is_cloud", False)),
             "healthy": None, "consecutive_failures": 0, "models": [],
             "last_error": "", "busy": 0, "enabled": False,
         } for b in getattr(self, "disabled", [])]

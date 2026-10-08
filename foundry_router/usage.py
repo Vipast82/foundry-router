@@ -74,6 +74,40 @@ def claude_cost_tier(model_id: str) -> str:
     return _PREMIUM_LEVEL_COST_TIER.get(claude_premium_level(model_id), "high")
 
 
+# Subscription proxies (CLIProxyAPI) report no context window in /v1/models.
+# Conservative defaults so the context guard and escalation gates have a
+# number; a persona context_window or manual registry override still wins.
+# GPT-5-family via the Codex sign-in accepts ~272k input tokens.
+CODEX_DEFAULT_CONTEXT = 272_000
+GEMINI_DEFAULT_CONTEXT = 1_048_576
+
+
+def subscription_cost_tier(model_id: str) -> str:
+    """relative_cost_tier for a model behind a subscription proxy: Claude by
+    its tier ladder; GPT/Codex and Gemini by size suffix (nano/lite < mini/
+    flash < full). Unknown names stay 'high' (don't make them look cheap)."""
+    mid = (model_id or "").lower()
+    if claude_premium_level(mid):
+        return claude_cost_tier(mid)
+    if any(k in mid for k in ("nano", "lite")):
+        return "low"
+    if any(k in mid for k in ("mini", "flash", "spark")):
+        return "medium"
+    return "high"
+
+
+def subscription_context(model_id: str) -> int | None:
+    """Default context window for a model behind a subscription proxy."""
+    mid = (model_id or "").lower()
+    if claude_premium_level(mid) or "claude" in mid:
+        return CLAUDE_DEFAULT_CONTEXT
+    if mid.startswith("gemini"):
+        return GEMINI_DEFAULT_CONTEXT
+    if "gpt" in mid or "codex" in mid:
+        return CODEX_DEFAULT_CONTEXT
+    return None
+
+
 def _is_fable_bucket(bucket_type: str) -> bool:
     t = bucket_type.lower()
     return "fable" in t or "mythos" in t

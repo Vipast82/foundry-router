@@ -42,7 +42,11 @@ CLAUDE_BUDGETS = {"low": 2048, "medium": 8192, "high": 16384, "max": 32768}
 # builds served by current Ollama accept the graded low/medium/high/max, not
 # just on/off.)
 _FAMILY_MENUS: list[tuple[re.Pattern, list[str]]] = [
-    (re.compile(r"gpt-?oss|gpt-?5|\bo[134]\b", re.I),
+    # GPT-5 and later (gpt-5.x, gpt-6, *-codex): graded effort up to the top
+    # level, which a CLIProxyAPI backend receives as "xhigh".
+    (re.compile(r"gpt-?[5-9]|codex", re.I),
+     ["off", "low", "medium", "high", "max"]),
+    (re.compile(r"gpt-?oss|\bo[134]\b", re.I),
      ["off", "low", "medium", "high"]),
     (re.compile(r"qwen3|qwq|deepseek-?r1|magistral", re.I),
      ["off", "low", "medium", "high", "max"]),
@@ -140,21 +144,29 @@ def think_value(effort, model_id: str, caps=None, backend_type: str = ""):
     return norm
 
 
-def openai_reasoning_effort(think) -> Optional[str]:
+def openai_reasoning_effort(think, extended: bool = False) -> Optional[str]:
     """Map a normalized think value onto OpenAI's `reasoning_effort` field
     ("low"/"medium"/"high") — the reasoning control understood by openai-dialect
     servers (llama.cpp's gpt-oss/Qwen3 builds, Unsloth, vLLM, and OpenAI's own
     o-series). Returns None when thinking should NOT be requested (off / unset),
     so the caller omits the field entirely. Ollama's top level "max" has no
-    OpenAI equivalent, so it collapses to "high"; a bare on maps to "medium"."""
+    OpenAI equivalent, so it collapses to "high"; a bare on maps to "medium".
+
+    extended=True is for servers that take the full Codex/GPT-5 scale and clamp
+    it per model (CLIProxyAPI): top level -> "xhigh", OFF -> "none" (instead of
+    omitting the field, which CLIProxyAPI turns into its default "medium")."""
     norm = normalize(think)
-    if norm is None or norm is False:
+    if norm is None:
         return None
+    if norm is False:
+        return "none" if extended else None
     if norm is True:
         return "medium"
     level = str(norm).strip().lower()
     if level == "max":
-        return "high"
+        return "xhigh" if extended else "high"
+    if extended and level == "minimal":
+        return "minimal"
     return level if level in ("low", "medium", "high") else None
 
 

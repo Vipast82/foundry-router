@@ -1078,7 +1078,8 @@ class OpenAIProtocol(BaseProtocol):
         if norm is False and local:
             tkw["enable_thinking"] = False
         else:
-            eff = _thinking.openai_reasoning_effort(think)
+            eff = _thinking.openai_reasoning_effort(
+                think, extended=(flavor == "cliproxyapi"))
             if eff:
                 payload["reasoning_effort"] = eff
         if tkw:

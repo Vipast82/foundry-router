@@ -64,14 +64,16 @@ work).
 
 ## Backends
 
-| | Ollama | llama.cpp | vLLM | Meridian (Claude) |
-|---|---|---|---|---|
-| Thinking | `message.thinking` | `reasoning_content` | `reasoning_content` / `reasoning` | `thinking` blocks (redacted blocks shown as a note) |
-| Decode / prefill timing | server | server (`timings`) | estimated from stream | estimated from stream |
-| Cache hits | — | `cache_n` / cached_tokens | cached_tokens | `cache_read_input_tokens` |
-| Speculative acceptance | — | per call | engine-wide | — |
-| Engine metrics (Live) | — | `/metrics`, `/slots` | `/metrics` | `/health` + `/metrics` |
-| Errors | HTTP | HTTP | HTTP (+ context-overflow retry) | HTTP **and in-stream `event: error`** |
+| | Ollama | llama.cpp | vLLM | Meridian (Claude) | CLIProxyAPI (ChatGPT/Codex…) |
+|---|---|---|---|---|---|
+| Thinking | `message.thinking` | `reasoning_content` | `reasoning_content` / `reasoning` | `thinking` blocks (redacted blocks shown as a note) | `reasoning_content` summaries (effort Low…Xhigh, Off → `none`) |
+| Decode / prefill timing | server | server (`timings`) | estimated from stream | estimated from stream | estimated from stream |
+| Cache hits | — | `cache_n` / cached_tokens | cached_tokens | `cache_read_input_tokens` | cached_tokens |
+| Speculative acceptance | — | per call | engine-wide | — | — |
+| Engine metrics (Live) | — | `/metrics`, `/slots` | `/metrics` | `/health` + `/metrics` | — (quotas in its own panel) |
+| Errors | HTTP | HTTP | HTTP (+ context-overflow retry) | HTTP **and in-stream `event: error`** | HTTP (429 → failover) |
+
+CLIProxyAPI setup and details: [CLIPROXYAPI.md](CLIPROXYAPI.md).
 
 ## Meridian notes
 

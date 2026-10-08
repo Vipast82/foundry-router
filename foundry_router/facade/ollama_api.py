@@ -676,6 +676,20 @@ class _LazyFailover:
         return self.items[i] if i < len(self.items) else None
 
 
+_LOCAL_OPENAI_FLAVORS = ("llamacpp", "vllm", "unsloth")
+
+
+def _is_paid_backend(info: dict) -> bool:
+    """A backend whose models cost money or subscription quota: Meridian
+    (anthropic-compatible), a subscription proxy flagged cloud (CLIProxyAPI),
+    or a non-local openai-dialect endpoint (OpenAI / OpenRouter API key).
+    Local servers (Ollama, llama.cpp, vLLM, Unsloth) are free."""
+    t = (info or {}).get("type")
+    if t == "anthropic-compatible" or (info or {}).get("cloud"):
+        return True
+    return t == "openai-compatible" and (info or {}).get("flavor") not in _LOCAL_OPENAI_FLAVORS
+
+
 async def _failover_list(svc, persona, first: str, user_text: str, eff,
                          limit: int = 3) -> list[str]:
     """`first` plus the next models this persona's policy allows, for
@@ -692,9 +706,7 @@ async def _failover_list(svc, persona, first: str, user_text: str, eff,
         if mid in out:
             continue
         info = svc.pool.backend_info(mid) or {}
-        if info.get("type") == "anthropic-compatible" or (
-                info.get("type") == "openai-compatible"
-                and info.get("flavor") not in ("llamacpp", "vllm", "unsloth")):
+        if _is_paid_backend(info):
             v = await svc.guardrails.check_paid_call(mid, info, svc.registry.get(mid),
                                                      RequestGuardState(), eff)
             if not v.allowed:
@@ -1152,7 +1164,7 @@ def _paid_pin_order(svc, persona) -> list:
     for p in _jl_list((persona or {}).get("pinned_models")):
         if p not in avail:
             continue
-        if (svc.pool.backend_info(p) or {}).get("type") == "ollama":
+        if not _is_paid_backend(svc.pool.backend_info(p) or {}):
             continue                                   # local pins -> local fallback
         if allow and not (p in allowset or str(p).split(":")[0] in allowset):
             continue
@@ -1393,12 +1405,15 @@ def _local_down_notes(svc, model_id: str) -> list[str]:
     """When a request lands on Claude because the local backend(s) are marked
     down, say so — otherwise a mid-session switch from local to Sonnet looks
     random."""
+    def _cloud(i: dict) -> bool:
+        return i.get("type") == "anthropic-compatible" or bool(i.get("cloud"))
+
     info = svc.pool.backend_info(model_id) or {}
-    if info.get("type") != "anthropic-compatible":
+    if not _cloud(info):
         return []
     out = []
     for b in getattr(svc.pool, "backend_status", lambda: [])():
-        if b.get("type") == "anthropic-compatible" or b.get("healthy"):
+        if _cloud(b) or b.get("healthy") or b.get("enabled") is False:
             continue
         err = (b.get("last_error") or "health checks failing")[:140]
         out.append(f"local backend {b['name']} is marked down ({err}) → using {model_id}")
@@ -1957,8 +1972,10 @@ async def _direct_dispatch_chat(svc, persona, model_name, messages, client_tools
         # idle-timeout the connection.
         notes: list[str] = []
         task = asyncio.create_task(_run_with_failover(narrate=notes.append))
-        btype = (svc.pool.backend_info(model_id) or {}).get("type") or ""
-        where = "Claude" if btype == "anthropic-compatible" else "local"
+        _wi = svc.pool.backend_info(model_id) or {}
+        btype = _wi.get("type") or ""
+        where = ("Claude" if btype == "anthropic-compatible" else
+                 "cloud" if _wi.get("cloud") else "local")
         # IMMEDIATE beat so the client shows activity from the first moment (not a
         # silent "thinking…") — in the NATIVE thinking field, so content stays
         # clean. Names WHICH model is answering (local vs Claude).

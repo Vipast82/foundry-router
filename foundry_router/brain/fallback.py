@@ -72,7 +72,7 @@ def pick_fallback_model(pool, registry: ModelRegistry,
     # Local pins are honored here too (LOCAL only — a paid pin would dodge the
     # guardrails on the blind path).
     for p in _jl((persona or {}).get("pinned_models")):
-        if p in available and (pool.backend_info(p) or {}).get("type") == "ollama":
+        if p in available and _is_local(pool.backend_info(p) or {}):
             return p
 
     local, remote = [], []
@@ -83,7 +83,7 @@ def pick_fallback_model(pool, registry: ModelRegistry,
         if meta and meta.get("embedding"):
             continue
         info = pool.backend_info(model_id) or {}
-        (local if info.get("type") == "ollama" else remote).append(model_id)
+        (local if _is_local(info) else remote).append(model_id)
 
     paid_first = (allow_paid_first
                   and (persona or {}).get("local_bias_strength") == "prefer_paid")
@@ -95,6 +95,17 @@ def pick_fallback_model(pool, registry: ModelRegistry,
             return ranked[0]["id"]
         return group[0]
     return None
+
+
+def _is_local(info: dict) -> bool:
+    """A free model on your own hardware: Ollama, or a llama.cpp / vLLM /
+    Unsloth server. Cloud subscriptions (Meridian, CLIProxyAPI) and generic
+    openai-dialect endpoints are remote."""
+    if info.get("cloud"):
+        return False
+    return info.get("type") == "ollama" or (
+        info.get("type") == "openai-compatible"
+        and info.get("flavor") in ("llamacpp", "vllm", "unsloth"))
 
 
 def fallback_candidates(pool, registry: ModelRegistry, persona: Optional[dict],
@@ -113,9 +124,7 @@ def fallback_candidates(pool, registry: ModelRegistry, persona: Optional[dict],
         if model_id == first or (meta and meta.get("embedding")):
             continue
         info = pool.backend_info(model_id) or {}
-        (local if info.get("type") == "ollama" or (info.get("type") == "openai-compatible"
-                                                  and info.get("flavor") in ("llamacpp", "vllm", "unsloth"))
-         else remote).append(model_id)
+        (local if _is_local(info) else remote).append(model_id)
     out = [first]
     for group in (local, remote):
         ranked = [r["id"] for r in registry.ranked_for_category(category, group, limit=limit)]
