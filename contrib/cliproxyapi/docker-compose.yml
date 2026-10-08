@@ -1,0 +1,14 @@
+# CLIProxyAPI next to Foundry: ChatGPT/Codex (and optionally Claude Code,
+# Gemini) subscription sign-ins behind one OpenAI-compatible endpoint.
+# See docs/CLIPROXYAPI.md. Upstream: https://github.com/router-for-me/CLIProxyAPI
+services:
+  cli-proxy-api:
+    image: eceasy/cli-proxy-api:latest
+    container_name: cli-proxy-api
+    ports:
+      - "8317:8317"          # API (Foundry points here) + /management.html
+    volumes:
+      - ./config.yaml:/CLIProxyAPI/config.yaml
+      - ./auths:/root/.cli-proxy-api      # OAuth tokens (keep private, back up)
+      - ./logs:/CLIProxyAPI/logs
+    restart: unless-stopped

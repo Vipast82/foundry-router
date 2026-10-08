@@ -180,7 +180,8 @@ def compute_costs(db: Database, *, hours: float = 72, model: Optional[str] = Non
         "ORDER BY input + output DESC", tuple(params))
     for r in by_model:
         t = backend_type(r["model"]) if backend_type else ""
-        r["kind"] = ("subscription" if t == "anthropic-compatible"
+        r["kind"] = ("subscription" if t in ("anthropic-compatible",
+                                              "openai-compatible-subscription")
                      else "local" if t in ("ollama", "openai-compatible-local")
                      else "metered" if t == "openai-compatible" else (t or "unknown"))
         r["share_pct"] = round(100.0 * (r["input"] + r["output"]) / (inp + out), 1) if inp + out else 0

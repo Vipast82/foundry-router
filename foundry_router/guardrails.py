@@ -93,7 +93,12 @@ class GuardrailEngine:
         counts against max_paid_calls and the usage window, never dollar caps)
         and metered models (counts against max_paid_calls and spend caps)."""
         backend_type = (backend_info or {}).get("type", "")
-        is_subscription = backend_type == "anthropic-compatible"
+        # Subscription = any cloud backend: Meridian (anthropic-compatible) or
+        # an openai-dialect subscription proxy (CLIProxyAPI). Only Meridian has
+        # a usage window Foundry can read, so the window check below is
+        # Meridian-only; the paid-call count applies to all of them.
+        is_meridian = backend_type == "anthropic-compatible"
+        is_subscription = is_meridian or bool((backend_info or {}).get("cloud"))
         is_metered = bool(model_meta and (
             (model_meta.get("cost_per_1k_input") or 0) > 0
             or (model_meta.get("cost_per_1k_output") or 0) > 0))
@@ -109,7 +114,7 @@ class GuardrailEngine:
             state.events.append(f"denied {model_id}: {msg}")
             return Verdict(False, msg)
 
-        if is_subscription and backend_info and backend_info.get("url"):
+        if is_meridian and backend_info and backend_info.get("url"):
             from .usage import claude_premium_level
             snap = await self.meridian_usage.snapshot(
                 backend_info["url"], backend_info.get("api_key"))

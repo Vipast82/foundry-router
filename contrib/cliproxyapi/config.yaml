@@ -1,0 +1,17 @@
+# Minimal CLIProxyAPI config for use behind Foundry. Copy next to the compose
+# file. Full reference: config.example.yaml in the CLIProxyAPI repo.
+config-version: 8
+
+server:
+  host: ""            # all interfaces; restrict with a firewall to Foundry's host
+  port: 8317
+
+management:
+  allow-remote: false # management panel from localhost only
+  secret-key: "change-me-management-key"
+
+# Keys CLIENTS (Foundry) must send. Put the same value in Foundry's backend
+# api_key. These are NOT provider keys.
+access:
+  api-keys:
+    - "change-me-foundry-key"

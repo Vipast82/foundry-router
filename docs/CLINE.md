@@ -438,6 +438,25 @@ native resolution: a full 2560x1440 capture is about 3.6k-4.7k tokens, so
 `--image-max-tokens 5120` keeps it at full detail. Higher values add VRAM on
 the main GPU (the vision encoder isn't split across GPUs) with no gain.
 
+### Escalation: big-model plan, local fix
+
+When the local model keeps failing on a hard problem, use a bigger model for
+the *thinking* and keep the local model for the *edits*:
+
+1. Give the Plan persona a paid cascade (`local_bias_strength: prefer_paid`,
+   `pinned_models` in the order to try, e.g. Claude via Meridian, then GPT via
+   [CLIProxyAPI](CLIPROXYAPI.md)). Foundry moves to the next model when one
+   is rate-limited or down, then to local.
+2. Start a **new** Plan task with the failing output and file paths (small
+   context: subscription budgets drain fast on 200k-token conversations).
+   The big model reads and searches the code with Cline's read-only Plan
+   tools and writes `docs/fix-plans/<topic>.md`: root cause, exact ordered
+   changes, a check per change, risks. No code.
+3. Act (local model) applies the plan step by step and records PASS/FAIL.
+
+Copy `contrib/cline/clinerules-escalation.md` into `.clinerules` (or append
+it) to make the model follow this format.
+
 ## Images ("doesn't support images, the attached image will be ignored")
 
 The block is in Cline, not in Foundry. Cline's built-in **Ollama** provider

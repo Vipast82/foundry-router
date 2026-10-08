@@ -204,7 +204,15 @@ class BackendConfig(BaseModel):
     # diagnostics (list models / props / health / slots). None = infer from
     # `type` (ollama -> "ollama", else -> "openai").
     flavor: Optional[Literal["ollama", "llamacpp", "unsloth",
-                             "vllm", "openai"]] = None
+                             "vllm", "openai", "cliproxyapi"]] = None
+    # Subscription CLOUD backend: counted as a paid model (persona paid-pin
+    # cascades, max_paid_calls guardrail, status lines, cost reports) instead
+    # of a free local one. None = inferred: anthropic-compatible (Meridian)
+    # and flavor "cliproxyapi" (CLIProxyAPI: ChatGPT/Codex, Claude Code,
+    # Gemini sign-ins behind one OpenAI-dialect endpoint) are cloud; every
+    # other openai-dialect backend is treated as before. Set true for any
+    # other subscription proxy (e.g. ChatMock) behind the openai dialect.
+    cloud: Optional[bool] = None
     # Optional discovery fallback ONLY — used if the backend exposes no
     # model-list endpoint (§4.3: "do not hardcode model lists for backends
     # that can be discovered").
@@ -235,6 +243,13 @@ class BackendConfig(BaseModel):
         if self.flavor:
             return self.flavor
         return "ollama" if self.type == "ollama" else "openai"
+
+    @property
+    def is_cloud(self) -> bool:
+        """True for a subscription/cloud backend (see `cloud`)."""
+        if self.cloud is not None:
+            return bool(self.cloud)
+        return self.type == "anthropic-compatible" or self.flavor == "cliproxyapi"
 
 
 class InternalPoolConfig(BaseModel):

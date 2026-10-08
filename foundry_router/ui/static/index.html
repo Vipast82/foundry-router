@@ -2046,8 +2046,13 @@ async function tabBackends() {
       the value is written into config.yaml verbatim. Saving rebuilds the pool live.</p>
       <p class="hint">Optional <code>flavor</code> on an <code>openai-compatible</code> backend names the
       server software so <b>Host Admin</b> shows the right panel:
-      <code>llamacpp</code>, <code>unsloth</code>, <code>vllm</code>, or <code>openai</code>
-      (default). Ollama backends always get full model CRUD; the openai-dialect flavors get
+      <code>llamacpp</code>, <code>unsloth</code>, <code>vllm</code>, <code>cliproxyapi</code>
+      or <code>openai</code> (default). <code>cliproxyapi</code> =
+      <a href="https://github.com/router-for-me/CLIProxyAPI" target="_blank">CLIProxyAPI</a>
+      (ChatGPT/Codex, Claude Code, Gemini sign-ins behind one endpoint): its models count as
+      <b>paid subscription</b> models (persona paid cascades, max_paid_calls, cost report) and
+      get the full reasoning scale (Xhigh → <code>xhigh</code>). Any other subscription proxy:
+      add <code>"cloud": true</code>. Ollama backends always get full model CRUD; the openai-dialect flavors get
       read-only diagnostics. The flavor also unlocks that server's extra sampling knobs
       (llama.cpp DRY/XTC/top-n-sigma…, vLLM repetition_penalty/min_tokens/guided decoding…),
       thinking on/off, engine metrics on the Live tab and context auto-detection.
@@ -3782,7 +3787,8 @@ async function tabMCP() {
 // selected backend's FLAVOR. Ollama flavors get full model CRUD; openai-dialect
 // flavors (llama.cpp / Unsloth / vLLM / OpenAI) get read-only diagnostics.
 const _FLAVOR_LABEL = {ollama: "Ollama", llamacpp: "llama.cpp", meridian: "Meridian",
-                       unsloth: "Unsloth", vllm: "vLLM", openai: "OpenAI"};
+                       unsloth: "Unsloth", vllm: "vLLM", openai: "OpenAI",
+                       cliproxyapi: "CLIProxyAPI"};
 async function tabHostAdmin() {
   clearInterval(window._ollamaPoll);
   const d = await api("host/backends");
@@ -3828,6 +3834,7 @@ async function hostRenderDiag(cur, selector) {
     unsloth: "Unsloth serves chat (OpenAI + Anthropic compatible). Loading a model is a host CLI, not a REST call, so there is nothing to add or delete over HTTP.",
     vllm: "vLLM is read-only over HTTP — it serves the model(s) it was launched with. Engine metrics (KV cache, queue, preemptions, TTFT/TPOT) also appear live on Dashboard → Live.",
     openai: "Generic OpenAI-compatible endpoint — read-only model listing.",
+    cliproxyapi: "CLIProxyAPI subscription proxy — models from every signed-in account (ChatGPT/Codex, Claude Code, Gemini…). Accounts, sign-ins and quotas are managed in CLIProxyAPI's own panel (<span class='mono'>/management.html</span>).",
   }[cur.flavor] || "";
   $("#main").innerHTML = `
     <h2 style="display:flex;align-items:center">Host Admin — diagnostics ${help(cur.flavor === "vllm" ? "host_vllm" : cur.flavor === "llamacpp" ? "host_llamacpp" : "")}</h2>
