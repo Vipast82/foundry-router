@@ -93,8 +93,11 @@ class GuardrailEngine:
         counts against max_paid_calls and the usage window, never dollar caps)
         and metered models (counts against max_paid_calls and spend caps)."""
         backend_type = (backend_info or {}).get("type", "")
-        is_subscription = backend_type == "anthropic-compatible"
-        is_metered = bool(model_meta and (
+        is_meridian = backend_type == "anthropic-compatible"
+        is_subscription = is_meridian or bool((backend_info or {}).get("subscription"))
+        # A subscription is never metered: its registry price (if research
+        # matched one) is a list price, not money this call spends.
+        is_metered = not is_subscription and bool(model_meta and (
             (model_meta.get("cost_per_1k_input") or 0) > 0
             or (model_meta.get("cost_per_1k_output") or 0) > 0))
         if not is_subscription and not is_metered:
@@ -109,7 +112,13 @@ class GuardrailEngine:
             state.events.append(f"denied {model_id}: {msg}")
             return Verdict(False, msg)
 
-        if is_subscription and backend_info and backend_info.get("url"):
+        if is_subscription:
+            v = self._call_budget(model_id, backend_info or {})
+            if v is not None:
+                state.events.append(f"denied {model_id}: {v.reason}")
+                return v
+
+        if is_meridian and backend_info and backend_info.get("url"):
             from .usage import claude_premium_level
             snap = await self.meridian_usage.snapshot(
                 backend_info["url"], backend_info.get("api_key"))
@@ -191,3 +200,24 @@ class GuardrailEngine:
 
         state.paid_calls += 1
         return Verdict(True)
+
+    def _call_budget(self, model_id: str, info: dict) -> Optional[Verdict]:
+        """Deny when a subscription backend has served its configured number of
+        calls in the last 5 hours / 24 hours (Foundry's own usage log — $20
+        plans report no usage, so counting is the only reliable guard)."""
+        from datetime import datetime, timedelta, timezone
+        name = info.get("name") or ""
+        for key, hours, label in (("call_budget_5h", 5, "5-hour"),
+                                  ("call_budget_daily", 24, "daily")):
+            cap = info.get(key)
+            if not cap or not name:
+                continue
+            since = (datetime.now(timezone.utc) - timedelta(hours=hours)).isoformat()
+            row = self.db.query_one(
+                "SELECT COUNT(*) AS n FROM claude_usage_log WHERE backend=? AND ts >= ?",
+                (name, since))
+            used = int(row["n"]) if row else 0
+            if used >= int(cap):
+                return Verdict(False, f"{label} call budget for {name} used "
+                                      f"({used}/{cap}) — use a local model or wait")
+        return None

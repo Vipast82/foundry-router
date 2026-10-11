@@ -1072,6 +1072,38 @@ async def upsert_persona(request: Request):
     return {"ok": True, "persona": svc.personas.get(name)}
 
 
+@router.get("/admin/api/scoreboard")
+async def scoreboard(request: Request, hours: float = 168, persona: str = ""):
+    """Turn-assist scoreboard: per conversation (turns, tool calls, errors per
+    100 calls, interventions, frontier calls), errors by context zone."""
+    from .. import interventions
+    return interventions.scoreboard(_svc(request).db, hours=hours, persona=persona)
+
+
+@router.get("/admin/api/interventions")
+async def list_interventions(request: Request, hours: float = 24, limit: int = 200,
+                             conversation: str = ""):
+    from datetime import datetime, timedelta, timezone
+    since = (datetime.now(timezone.utc) - timedelta(hours=hours)).isoformat()
+    q, args = "SELECT * FROM interventions WHERE ts >= ?", [since]
+    if conversation:
+        q += " AND conversation_key = ?"
+        args.append(conversation)
+    rows = _svc(request).db.query(q + " ORDER BY id DESC LIMIT ?", (*args, int(limit)))
+    return {"interventions": rows}
+
+
+@router.get("/admin/api/interventions/export")
+async def export_interventions(request: Request, hours: float = 24 * 30, kinds: str = ""):
+    """JSONL fine-tuning material: trigger → intervention (→ what came next)."""
+    from fastapi.responses import PlainTextResponse
+    from .. import interventions
+    body = interventions.export_jsonl(_svc(request).db, hours=hours,
+                                      kinds=[k for k in kinds.split(",") if k] or None)
+    return PlainTextResponse(body, media_type="application/x-ndjson", headers={
+        "Content-Disposition": "attachment; filename=foundry-interventions.jsonl"})
+
+
 @router.post("/admin/api/personas/clone")
 async def clone_persona(request: Request):
     svc = _svc(request)

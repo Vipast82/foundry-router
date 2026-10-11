@@ -677,6 +677,7 @@ const TABS = {
   "Live":           tabLive,
   "Performance":    tabPerformance,
   "Cost":           tabCost,
+  "Scoreboard":     tabScoreboard,
   "Pool":           tabBackends,
   "Model Registry": tabModels,
   "Host Admin":     tabHostAdmin,
@@ -695,7 +696,7 @@ const TABS = {
 // Primary nav groups -> their leaf tabs (the secondary row). Reorganizes the
 // former flat bar into logical sections without dropping anything.
 const GROUPS = [
-  ["Dashboard",   ["Live", "Performance", "Cost"]],
+  ["Dashboard",   ["Live", "Performance", "Cost", "Scoreboard"]],
   ["Backends",    ["Pool", "Model Registry", "Host Admin"]],
   ["Routing",     ["Personas", "Guardrails"]],
   ["Tools & MCP", ["Tools", "MCP Servers", "MCP Metrics", "Agents"]],
@@ -1492,6 +1493,47 @@ try { Object.assign(_COST, JSON.parse(localStorage.getItem("costCtl") || "{}"));
 const _money = v => v == null ? "—"
   : "$" + (v >= 1000 ? v.toLocaleString(undefined, { maximumFractionDigits: 0 })
     : v >= 1 ? v.toFixed(2) : v >= 0.01 ? v.toFixed(3) : v.toFixed(4));
+
+// Turn-assist scoreboard: per conversation (sprint) tool calls, errors per 100
+// calls, runaway outputs, router interventions and frontier calls; errors by
+// context zone; the latest interventions. Data: /admin/api/scoreboard.
+let _SB_HOURS = 168;
+async function tabScoreboard() {
+  const winOpts = [[24, "24h"], [72, "3d"], [168, "7d"], [336, "14d"], [720, "30d"]];
+  $("#main").innerHTML = `
+    <h2 style="margin-top:0">Scoreboard</h2>
+    <p class="hint">What turn assist saw and did on coding conversations (personas with an <code>assist</code> setting). Errors are tool calls whose result the client marked as failed. Kinds: supervisor_* = loop / error-streak / cycling detectors, prejudge_* = blocked or rewritten commands, audit_* = completion audits, advisor = consult_senior. Observe mode logs without changing anything.</p>
+    <div class="card" style="display:flex;gap:12px;align-items:center;flex-wrap:wrap">
+      <label>Window <select id="sb-win">${winOpts.map(([h, l]) => `<option value="${h}"${h === _SB_HOURS ? " selected" : ""}>${l}</option>`).join("")}</select></label>
+      <button class="act" id="sb-refresh">Refresh</button>
+      <a class="act" id="sb-export" href="#" title="Interventions as JSONL (trigger → intervention → what came next) for fine-tuning data">Export JSONL</a>
+    </div>
+    <div class="card"><div class="card-h">Errors per 100 tool calls by context size</div><div id="sb-zones"></div></div>
+    <div class="card"><div class="card-h">Interventions in this window</div><div id="sb-kinds"></div></div>
+    <div class="card"><div class="card-h">Conversations <span class="hint">— newest first</span></div><div id="sb-convs"></div></div>
+    <div class="card"><div class="card-h">Latest interventions</div><div id="sb-latest"></div></div>`;
+  const load = async () => {
+    _SB_HOURS = +$("#sb-win").value;
+    $("#sb-export").href = `/admin/api/interventions/export?hours=${_SB_HOURS}`;
+    const [d, l] = await Promise.all([api(`scoreboard?hours=${_SB_HOURS}`),
+                                      api(`interventions?hours=${_SB_HOURS}&limit=50`)]);
+    $("#sb-zones").innerHTML = `<table><tr><th>context</th><th>turns</th><th>tool calls</th><th>errors</th><th>per 100</th></tr>${
+      d.zones.map(z => `<tr><td>${esc(z.zone)}</td><td>${z.turns}</td><td>${z.calls}</td><td>${z.errors}</td><td>${z.errors_per_100 ?? "—"}</td></tr>`).join("")}</table>`;
+    const kinds = Object.entries(d.interventions || {});
+    $("#sb-kinds").innerHTML = kinds.length ? kinds.map(([k, n]) => `<span class="pill">${esc(k)} ${n}</span>`).join(" ")
+      : `<span class="hint">none yet</span>`;
+    $("#sb-convs").innerHTML = d.conversations.length ? `<table><tr><th>last</th><th>sprint</th><th>persona</th><th>turns</th><th>calls</th><th>err/100</th><th>max ctx</th><th>runaway</th><th>interventions</th><th>paid calls</th></tr>${
+      d.conversations.map(c => `<tr><td>${esc((c.last_ts || "").slice(0, 16).replace("T", " "))}</td><td>${esc(c.sprint || "")}</td><td>${esc(c.persona)}</td><td>${c.turns}</td><td>${c.calls ?? 0}</td><td>${c.errors_per_100 ?? "—"}</td><td>${c.max_ctx ? formatCtx(c.max_ctx) : "—"}</td><td>${c.runaway || 0}</td><td>${
+        Object.entries(c.kinds || {}).map(([k, n]) => `${esc(k)}×${n}`).join(", ") || "—"}</td><td>${c.paid_calls || 0}</td></tr>`).join("")}</table>`
+      : `<span class="hint">No assisted conversations in this window. Turn assist is set per persona (Routing → Personas → turn assist).</span>`;
+    $("#sb-latest").innerHTML = l.interventions.length ? `<table><tr><th>time</th><th>kind</th><th>mode</th><th>detail</th><th>model</th></tr>${
+      l.interventions.map(i => `<tr><td>${esc((i.ts || "").slice(11, 19))}</td><td>${esc(i.kind)}</td><td>${esc(i.mode || "")}</td><td title="${esc(i.intervention || "")}">${esc((i.detail || "").slice(0, 160))}</td><td>${esc(i.frontier_model || "")}</td></tr>`).join("")}</table>`
+      : `<span class="hint">none</span>`;
+  };
+  $("#sb-win").onchange = () => load().catch(e => toast(e.message, true));
+  $("#sb-refresh").onclick = () => load().catch(e => toast(e.message, true));
+  await load();
+}
 
 async function tabCost() {
   const winOpts = [[6, "6h"], [24, "24h"], [72, "3d"], [168, "7d"], [336, "14d"]];
@@ -2911,6 +2953,13 @@ async function tabPersonas() {
         <span class="hint">e.g. a <b>Foundry-Agent</b> persona served by Hermes ${help("agents")}</span>
         <label title="Maximum OUTPUT tokens per model call for this persona (blank = the global worker_max_tokens, default 32768). The model's reasoning counts toward it, so a coding persona that thinks AND writes large file edits needs more — otherwise the reply is cut before its tool call finishes and Cline reports 'output-token limit reached before a tool call' and asks for a more concise response. 32768 is a good start for a Cline Act/Plan persona (the answer reserve of the context guard follows it).">max output tokens</label>
         <input id="pe-maxout" type="number" min="256" step="1024" style="width:90px" placeholder="(global)"></div>
+      <div class="row">
+        <label title="What a DIRECT persona does when every paid model is denied by the usage guardrail. local (default) = answer with a local model and say so in the thinking line. refuse = return a clear error instead — use it for Cline PLAN, where a plan quietly written by the local coder would be trusted as a Claude plan.">fallback when paid denied</label>
+        <select id="pe-fallback"><option value="">local (default)</option><option value="refuse">refuse</option></select>
+        <label title="Leave Foundry's own status lines (routing header, notes, heartbeat text) out of the reasoning stream. Keep-alive frames still flow. For data-generation personas (Foundry-FineTune) so reasoning traces come out clean.">quiet narration</label>
+        <input type="checkbox" id="pe-quiet"></div>
+      <div class="row tight"><label title="Turn assist for coding clients in direct mode (Cline Act) — JSON object, every key optional, {} = all off. think_policy: client|persona|adaptive (+ think_levels {routine, after_edit, after_failure}); dedupe_reads; roblox_cleanup; image_keep N; soft_budget_tokens N; prejudge: off|observe|enforce; supervisor: off|observe|nudge|escalate; auditor: off|observe|enforce (+ auditor_min_tool_turns, auditor_max_rejections, auditor_required_patterns [regex]); advisor true + frontier_models [ids, tried in order] + frontier_max_calls per conversation; frontier_rounds. See docs/TURN_ASSIST.md. Results: Dashboard → Scoreboard.">turn assist (JSON obj)</label>
+        <textarea id="pe-assist" rows="3" cols="70" placeholder='{"think_policy": "adaptive", "dedupe_reads": true, "prejudge": "observe", "supervisor": "observe", "auditor": "observe"}'>{}</textarea></div>
       <div class="row"><label title="Optional JSON overriding the multi-signal ranking weights for this persona. Signals: primary (requested category), tool_calling, adequacy (observed outcome-judge quality), latency (warm tokens/sec). e.g. a speed-sensitive persona: {&quot;latency&quot;: 0.5}. Empty = defaults.">selection_weights (JSON obj)</label>
         <input id="pe-weights" size="50" value="{}" placeholder='{"latency": 0.4, "adequacy": 0.8}'></div>
       <div class="row"><label title="JSON object: client name → compatibility note (how that client experiences this persona). Documentation only — surfaced as badges in the list above. Don't fork a persona per client; note the differences here instead.">client_compat (JSON obj)</label>
@@ -2984,7 +3033,10 @@ async function tabPersonas() {
     reasoning_effort: $("#pe-effort").value || null,
     sampling_options: JSON.parse($("#pe-samp").value || "{}"),
     output_format: $("#pe-fmt").value.trim() || null,
-    force_reasoning_effort: $("#pe-force-effort").checked ? 1 : 0}}));
+    force_reasoning_effort: $("#pe-force-effort").checked ? 1 : 0,
+    fallback_policy: $("#pe-fallback").value || null,
+    quiet_narration: $("#pe-quiet").checked ? 1 : 0,
+    assist: JSON.parse($("#pe-assist").value || "{}")}}));
 window.clonePersona = async source => {
   const newName = prompt("New persona name (clone of " + source + "):",
                          source + "-copy");
@@ -3226,6 +3278,10 @@ window.editPersona = name => {
   $("#pe-mcp-direct").checked = p.mcp_tools_in_direct == null ? true : !!p.mcp_tools_in_direct;
   _setAgentSelect(p.agent_backend || "");
   $("#pe-maxout").value = p.max_output_tokens || "";
+  $("#pe-fallback").value = p.fallback_policy || "";
+  $("#pe-quiet").checked = !!p.quiet_narration;
+  $("#pe-assist").value = typeof p.assist === "string"
+    ? (p.assist || "{}") : JSON.stringify(p.assist || {});
 };
 function _setAgentSelect(v) {
   const sel = $("#pe-agent");

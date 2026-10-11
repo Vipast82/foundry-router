@@ -226,6 +226,19 @@ class BackendConfig(BaseModel):
     # turns). Off by default: two concurrent conversations that open with the
     # identical system prompt + first message would share a session.
     meridian_session_affinity: bool = False
+    # Subscription backend that is NOT Meridian (e.g. CLIProxyAPI in front of a
+    # ChatGPT Plus login): treated as paid for the guardrails — never as metered
+    # dollars, never as free local. Meridian (anthropic-compatible) is always a
+    # subscription. A $20 plan reports no usage to Foundry, so the call budgets
+    # below are the guard: calls this backend served in the last 5 hours / 24
+    # hours, counted from Foundry's own subscription usage log. None = no cap.
+    subscription: bool = False
+    call_budget_5h: Optional[int] = None
+    call_budget_daily: Optional[int] = None
+
+    @property
+    def is_subscription(self) -> bool:
+        return self.subscription or self.type == "anthropic-compatible"
 
     @property
     def effective_flavor(self) -> str:

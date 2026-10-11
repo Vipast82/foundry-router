@@ -177,7 +177,7 @@ def split_think(text: str) -> tuple[str, str]:
 # time, output budget burned, tool calls cut off. They must never reach a model.
 _ROUTER_LINE_RE = re.compile(
     r"^\s*(?:"
-    r"(?:⚙️|⚙|⏳|⚠️|⚠|🔧|✂️|🔎|⚡|↳)\s.*"                    # status / narration glyphs
+    r"(?:⚙️|⚙|⏳|⚠️|⚠|🔧|✂️|🔎|⚡|↳|🛑|✎|⛔|🧾|✅|🧑‍🏫)\s.*"  # status / narration glyphs
     r"|.*\bstill working\b.*"                               # keep-alive lines, any version
     r"|.*\[Foundry [0-9][^\]]*·\s*req\b.*"                  # turn header
     r"|\[router: .*|\[foundry-router\].*"                   # in-band router errors

@@ -999,7 +999,8 @@ class AgentRunner:
             cost = estimate_cost_usd(meta, result.prompt_tokens, result.completion_tokens)
             ctx.logger.record_model_call(model_id, backend_name,
                                          result.prompt_tokens, result.completion_tokens, cost)
-            if backend_info and backend_info.get("type") == "anthropic-compatible":
+            if backend_info and (backend_info.get("type") == "anthropic-compatible"
+                                 or backend_info.get("subscription")):
                 # Subscription consumption is measured in tokens, not dollars
                 # — our own historical record alongside Meridian's snapshot.
                 log_subscription_usage(self.model_registry.db, model_id,
@@ -1481,7 +1482,7 @@ class AgentRunner:
         cost = estimate_cost_usd(meta, result.prompt_tokens, result.completion_tokens)
         ctx.logger.record_model_call(model, backend, result.prompt_tokens,
                                      result.completion_tokens, cost)
-        if info.get("type") == "anthropic-compatible":
+        if info.get("type") == "anthropic-compatible" or info.get("subscription"):
             log_subscription_usage(db, model, backend,
                                    result.prompt_tokens, result.completion_tokens)
         data = extract_json(result.content) or {}
@@ -1538,7 +1539,8 @@ class AgentRunner:
                 ctx.logger.record_model_call(judge_model, backend,
                                              result.prompt_tokens,
                                              result.completion_tokens, 0.0)
-                if info and info.get("type") == "anthropic-compatible":
+                if info and (info.get("type") == "anthropic-compatible"
+                             or info.get("subscription")):
                     log_subscription_usage(db, judge_model, backend,
                                            result.prompt_tokens,
                                            result.completion_tokens)

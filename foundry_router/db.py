@@ -152,8 +152,70 @@ STARTER_PERSONAS = [
         "pipeline_check_enabled": 0,
         "max_output_tokens": 32768,
     },
+    # --- Fine-tuning data generation ---------------------------------------
+    # The endpoint the training-data generator scripts call. Every default is
+    # chosen so a generated sample is exactly what the model wrote: `direct`
+    # mode (no brain, no semantic cache, no review pass, no 🔎/⚡ markers in
+    # content), no injected MCP tools, the generator's own prompt / format /
+    # think level always win, and paid models are hard-blocked
+    # (max_paid_calls_per_request 0) so a bulk run can't drain a subscription.
+    # The remaining columns are filled by _seed_finetune_defaults.
+    {
+        "virtual_name": "Foundry-FineTune",
+        "description": "Endpoint for fine-tuning training-data generators. Verbatim "
+                       "local-only passthrough: no brain, cache, review or markers; "
+                       "the generator's prompt, response_format and think level win. "
+                       "Lock model_allowlist to ONE model per dataset run.",
+        "benchmark_category": "coding",
+        "local_bias_strength": "strong",
+        "escalation_triggers": json.dumps([]),
+        "preferred_mcp_tools": json.dumps([]),
+        "guardrail_overrides": json.dumps({"max_paid_calls_per_request": 0}),
+        "execution_mode": "direct",
+        "pipeline_check_enabled": 0,
+    },
 ]
 
+# Defaults for Foundry-FineTune beyond the INSERT's columns (see
+# _seed_finetune_defaults). Sampling favours diverse-but-correct samples:
+# temperature 0.7 + min_p 0.05 widens phrasing without the incoherent tail a
+# high temperature alone lets in; no repeat penalty (it corrupts code). The
+# generator can override any of these per request (client options win).
+FINETUNE_PERSONA_DEFAULTS = {
+    "sampling_options": json.dumps({"temperature": 0.7, "top_p": 0.95, "min_p": 0.05}),
+    "reasoning_effort": "medium",      # used only when the generator sends no think level
+    "force_reasoning_effort": 0,       # generator's think level wins (traces on or off per dataset)
+    "max_output_tokens": 16384,        # long code samples + reasoning without runaway output
+    "context_window": 32768,           # generator prompts are short; keeps the KV cache small
+    "quiet_narration": 1,              # no Foundry status lines in reasoning traces
+    "mcp_tools_in_direct": 0,          # never offer tools the sample didn't ask for
+    "escalate_when_local_busy": 0,     # never fall over to a paid model
+    "prefer_permissive": 0,            # avoid uncensored builds as data sources
+    "prefer_loaded": 0,                # don't switch models mid-run because another is warm
+    "review_enabled": 0,
+    "expose_tool_trail": 0,
+    "client_compat": json.dumps({
+        "training-data generators": "POST /v1/chat/completions with stream=false and "
+            "read choices[0].message.content. Reasoning arrives separately in "
+            "reasoning_content; if you keep traces, drop Foundry's status lines "
+            "(lines starting with ⚙️ ⏳ ⚠️ 🔧). Send response_format for JSON samples.",
+    }),
+}
+
+
+# Turn-assist defaults seeded onto claude-cline-act (see _seed_cline_assist).
+CLINE_ACT_ASSIST = {
+    "think_policy": "adaptive",
+    "think_levels": {"routine": "off", "after_edit": "low", "after_failure": "high"},
+    "dedupe_reads": True,
+    "roblox_cleanup": True,
+    "image_keep": 3,
+    "prejudge": "observe",
+    "supervisor": "observe",
+    "auditor": "observe",
+    "advisor": False,
+    "frontier_models": [],
+}
 
 # Baseline client-compatibility notes (quality spec Phase 5) — documentation
 # metadata, not behavior. One persona serves multiple clients; these record
@@ -390,6 +452,19 @@ class Database:
             # client sent (e.g. Cline's think:false), so thinking is controlled in
             # Foundry rather than by the client. Off = client passthrough wins.
             ("personas", "force_reasoning_effort", "INTEGER DEFAULT 0"),
+            # Turn assist (turn_assist.py / frontier_assist.py): JSON object of
+            # per-persona settings — think policy, read dedupe, Roblox cleanup,
+            # screenshot pruning, pre-judge, supervisor, auditor, advisor.
+            # NULL/{} = all off.
+            ("personas", "assist", "TEXT"),
+            # What a direct persona does when every paid model is denied:
+            # NULL/'local' = fall back to a local model (old behaviour);
+            # 'refuse' = answer with a clear error instead (Cline PLAN).
+            ("personas", "fallback_policy", "TEXT"),
+            # Leave Foundry's own status lines (routing header, notes, heartbeat
+            # text) out of the reasoning stream — clean traces for data
+            # generation. Keep-alive frames are still sent, just empty.
+            ("personas", "quiet_narration", "INTEGER DEFAULT 0"),
             # Code-sandbox audit trail: the submitted code (call arguments) and
             # a flag marking calls that ran on an executes_code server.
             ("tool_call_log", "arguments", "TEXT"),
@@ -429,6 +504,52 @@ class Database:
         self._seed_client_compat()
         self._seed_cline_direct()
         self._seed_cline_max_output()
+        # The effort seeds used to run only from inside _seed_cline_direct,
+        # after ITS flag check — installs that already had the v4 flag never
+        # got v5/v6. Each seed checks its own flag, so calling it here is safe.
+        self._seed_cline_effort()
+        self._seed_finetune_defaults()
+        self._seed_cline_assist()
+
+    def _seed_cline_assist(self) -> None:
+        """Turn assist for the Cline pair (v9), once, only where unset:
+        ACT gets the free rule-based features — adaptive thinking (on llama.cpp
+        Qwen the levels are effectively on/off, so routine turns run with
+        thinking off), read dedupe, Roblox cleanup, 3 screenshots kept — and
+        the supervisor, pre-judge and auditor in OBSERVE mode (logged, nothing
+        changed, no paid calls). PLAN refuses instead of silently running on a
+        local model when every Claude pin is denied."""
+        if self.kv_get("persona_seed_v9_cline_assist"):
+            return
+        now = utcnow()
+        self.execute(
+            "UPDATE personas SET assist=?, updated_at=? WHERE virtual_name='claude-cline-act' "
+            "AND (assist IS NULL OR assist='' OR assist='{}')",
+            (json.dumps(CLINE_ACT_ASSIST), now))
+        self.execute(
+            "UPDATE personas SET fallback_policy='refuse', updated_at=? "
+            "WHERE virtual_name='claude-cline-plan' "
+            "AND (fallback_policy IS NULL OR fallback_policy='')", (now,))
+        self.kv_set("persona_seed_v9_cline_assist", now)
+        self.log_event("info", "main", "persona seed v9 applied (Cline ACT turn assist in "
+                                       "observe mode, PLAN fallback_policy=refuse)")
+
+    def _seed_finetune_defaults(self) -> None:
+        """Fill Foundry-FineTune's remaining defaults once (v8), only while the
+        row is untouched since its seed INSERT (created_at == updated_at) — a
+        same-named persona the operator made or edited keeps their values.
+        Integer columns carry schema defaults (mcp_tools_in_direct=1), so
+        "still empty" can't be the test. Runs on its own (not chained)."""
+        if self.kv_get("persona_seed_v8_finetune"):
+            return
+        now = utcnow()
+        cols = ", ".join(f"{c}=?" for c in FINETUNE_PERSONA_DEFAULTS)
+        self.execute(
+            f"UPDATE personas SET {cols}, updated_at=? "
+            "WHERE virtual_name='Foundry-FineTune' AND created_at=updated_at",
+            (*FINETUNE_PERSONA_DEFAULTS.values(), now))
+        self.kv_set("persona_seed_v8_finetune", now)
+        self.log_event("info", "main", "persona seed v8 applied (Foundry-FineTune defaults)")
 
     def _seed_upgrades(self) -> None:
         """One-time data upgrades for EXISTING deployments (INSERT OR IGNORE

@@ -34,6 +34,16 @@ In `direct` mode nothing does mid-task delegation, so the Act persona's
 in Act (local/free), flip to Plan when you need Claude to reason through something
 hard — predictable and cheap.
 
+**Turn assist** adds router-side help to Act without changing Cline: adaptive
+thinking, repeated-read dedupe, a command pre-judge, a loop supervisor, a
+completion auditor and a `consult_senior` tool. The seeded Act persona has the
+free parts on and the rest in observe mode. See [TURN_ASSIST.md](TURN_ASSIST.md)
+and Dashboard → Scoreboard.
+
+**Plan never silently runs on local.** The seeded Plan persona has
+`fallback_policy: refuse`: when the guardrail denies every Claude pin, Cline gets
+a clear error instead of a plan written by the local coder.
+
 ## 1. Point Cline at Foundry
 
 In Cline's settings, add an API provider:
