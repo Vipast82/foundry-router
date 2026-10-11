@@ -170,10 +170,11 @@ def test_supervisor_observe_does_not_touch_history():
 
 def test_supervisor_playtest_cycling():
     pairs = []
-    for i in range(8):
+    for i in range(10):
         pairs.append(("robloxstudio-mcp__solo_playtest", {"action": "start" if i % 2 == 0 else "stop"}, OK))
-    sup = ta.supervise(history(*pairs), "observe")
-    assert any(f.kind == "cycling" for f in sup.findings)
+    assert any(f.kind == "cycling" for f in ta.supervise(history(*pairs), "observe").findings)
+    # thresholds are tunable: 10 calls don't fire at 12
+    assert not ta.supervise(history(*pairs), "observe", {"sup_play_calls": 12}).findings
 
 
 # -- auditor lint -----------------------------------------------------------------------

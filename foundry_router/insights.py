@@ -108,7 +108,7 @@ def generate_digest(db: Database, days: int = 7) -> dict[str, Any]:
             "SELECT persona, COUNT(*) AS n, "
             "SUM(status='error') AS errors, SUM(status='asked_user') AS asked, "
             "AVG(duration_ms) AS avg_ms, SUM(est_cost_usd) AS cost "
-            "FROM request_log WHERE ts > datetime('now', ?) "
+            "FROM request_log WHERE datetime(ts) > datetime('now', ?) "
             "GROUP BY persona ORDER BY n DESC", (since,)):
         personas[r["persona"] or "(none)"] = {
             "requests": r["n"], "errors": r["errors"] or 0,
@@ -120,7 +120,7 @@ def generate_digest(db: Database, days: int = 7) -> dict[str, Any]:
         }
     for r in db.query(
             "SELECT persona, SUM(rating > 0) AS up, SUM(rating < 0) AS down "
-            "FROM response_feedback WHERE ts > datetime('now', ?) "
+            "FROM response_feedback WHERE datetime(ts) > datetime('now', ?) "
             "GROUP BY persona", (since,)):
         p = personas.setdefault(r["persona"] or "(none)", {
             "requests": 0, "errors": 0, "asked_user": 0, "avg_duration_ms": 0,
@@ -133,7 +133,7 @@ def generate_digest(db: Database, days: int = 7) -> dict[str, Any]:
     guard_counts: dict[str, dict[str, int]] = {}
     for r in db.query(
             "SELECT persona, guardrail_events FROM request_log "
-            "WHERE ts > datetime('now', ?) AND guardrail_events IS NOT NULL "
+            "WHERE datetime(ts) > datetime('now', ?) AND guardrail_events IS NOT NULL "
             "AND guardrail_events != '[]'", (since,)):
         try:
             events = json.loads(r["guardrail_events"] or "[]")
@@ -153,7 +153,7 @@ def generate_digest(db: Database, days: int = 7) -> dict[str, Any]:
     # -- review-pass outcomes (Phase 2 writes these) --------------------------
     for r in db.query(
             "SELECT persona, COUNT(*) AS n, SUM(corrected) AS corrected "
-            "FROM review_log WHERE ts > datetime('now', ?) GROUP BY persona",
+            "FROM review_log WHERE datetime(ts) > datetime('now', ?) GROUP BY persona",
             (since,)):
         if (r["persona"] or "(none)") in personas:
             p = personas[r["persona"] or "(none)"]
@@ -165,7 +165,7 @@ def generate_digest(db: Database, days: int = 7) -> dict[str, Any]:
         "SELECT caller, server, tool, COUNT(*) AS n, SUM(ok) AS ok, "
         "AVG(duration_ms) AS avg_ms, "
         "MAX(CASE WHEN ok=0 THEN error END) AS last_error "
-        "FROM tool_call_log WHERE ts > datetime('now', ?) "
+        "FROM tool_call_log WHERE datetime(ts) > datetime('now', ?) "
         "GROUP BY caller, server, tool ORDER BY n DESC LIMIT 40", (since,))
     tool_rows = [{
         "caller": t["caller"], "server": t["server"], "tool": t["tool"],
@@ -179,7 +179,7 @@ def generate_digest(db: Database, days: int = 7) -> dict[str, Any]:
     # -- recurring error types from the event log -----------------------------
     errors = db.query(
         "SELECT source, message, COUNT(*) AS n FROM event_log "
-        "WHERE ts > datetime('now', ?) AND level='error' "
+        "WHERE datetime(ts) > datetime('now', ?) AND level='error' "
         "GROUP BY source, message ORDER BY n DESC LIMIT 10", (since,))
 
     # -- model tool-calling reliability (lifetime counters on the registry) ---

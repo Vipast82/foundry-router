@@ -1289,7 +1289,8 @@ def _guard_window(svc, persona, model_id: str) -> int:
     vals = []
     try:
         from ..turn_assist import config as _assist_cfg
-        soft = _assist_cfg(persona).get("soft_budget_tokens") if persona else 0
+        soft = _assist_cfg(persona, svc.config_store.config.turn_assist).get(
+            "soft_budget_tokens") if persona else 0
     except Exception:                                             # noqa: BLE001
         soft = 0
     for v in ((persona or {}).get("context_window"),
@@ -1623,7 +1624,7 @@ async def _direct_dispatch_chat(svc, persona, model_name, messages, client_tools
     # persona's `assist` JSON turns it on. See docs/TURN_ASSIST.md.
     from .. import turn_assist as ta, frontier_assist as fa, interventions as iv
     from ..agents import conversation_key as _conv_key
-    acfg = ta.config(persona)
+    acfg = ta.config(persona, svc.config_store.config.turn_assist)
     assist_on = ta.enabled(acfg) and not summary_req and bool(client_tools)
     advisor_on = assist_on and bool(acfg.get("advisor")) and bool(acfg.get("frontier_models"))
     conv_key = _conv_key(messages) if assist_on else ""
@@ -1655,12 +1656,12 @@ async def _direct_dispatch_chat(svc, persona, model_name, messages, client_tools
             elif "your Luau code, line" in t or "call list_roblox_studios once" in t:
                 _iv("roblox", mode="on", detail=t[:300])
         if smode == "escalate" and sup.new:
-            if sup.level >= 4:
+            if sup.level >= int(acfg.get("sup_escalate_block_at") or 4):
                 text = ta.blocked_reply(sup.findings, sup.level)
                 _iv("blocked", mode=smode, detail=sup.new[-1].detail, intervention=text)
                 logger.finish("ok")
                 return _plain_reply(model_name, text, stream)
-            if sup.level == 3:
+            if sup.level == int(acfg.get("sup_escalate_advice_at") or 3):
                 adv, ans = await fa.auto_advice(svc, acfg, persona, conv_key, base_convo,
                                                 sup.new[-1].detail)
                 _iv("auto_advice", mode=smode, detail=sup.new[-1].detail, intervention=adv,
@@ -1676,7 +1677,7 @@ async def _direct_dispatch_chat(svc, persona, model_name, messages, client_tools
         if prep.think:
             persona = {**persona, "reasoning_effort": prep.think,
                        "force_reasoning_effort": 1, "_think_why": prep.think_why}
-        _evs = ta.events(base_convo)
+        _evs = ta.events(base_convo, ta.error_rx(acfg))
         _new = [e for e in _evs if e.result_idx >= start]
         assist_turn_id = iv.record_turn(
             svc.db, conversation_key=conv_key, persona=persona["virtual_name"],
@@ -1873,6 +1874,8 @@ async def _direct_dispatch_chat(svc, persona, model_name, messages, client_tools
                 max_tokens=out_cap)
             last_backend = backend
             own, rest = _split_calls(res)
+            if assist_on:
+                iv.fill_next(svc.db, conv_key, res.content or "", res.tool_calls or [])
             if not own and rnd < tool_cap:
                 cont, convo2, vis, anotes, rest = await _assist_after(res, rest, convo)
                 for n in anotes:
@@ -2101,6 +2104,9 @@ async def _direct_dispatch_chat(svc, persona, model_name, messages, client_tools
                             extra=_timeline(svc, gap, arrived, sent, first_tok_wall,
                                             ttft_ms, t_round, router_ms, model_id))
                         own, rest = _split_calls(res)
+                        if assist_on:
+                            iv.fill_next(svc.db, conv_key, res.content or "",
+                                         res.tool_calls or [])
                         if own and rnd < tool_cap:
                             # Foundry-owned tools: run them, feed the results
                             # back, and keep streaming the model's next turn.

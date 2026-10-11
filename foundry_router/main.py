@@ -334,7 +334,19 @@ class Services:
             asyncio.create_task(self._brain_health_loop()),
             asyncio.create_task(self._pricing_loop()),
             asyncio.create_task(self._agent_health_loop()),
+            asyncio.create_task(self._retention_loop()),
         ]
+
+    async def _retention_loop(self) -> None:
+        """Keep log tables inside data_retention.days (Logs -> Data)."""
+        from .datatools import prune
+        while True:
+            cfg = self.config_store.config.data_retention
+            try:
+                await asyncio.to_thread(prune, self.db, cfg.days)
+            except Exception:
+                log.exception("retention prune failed")
+            await asyncio.sleep(max(5, int(cfg.prune_interval_minutes or 60)) * 60)
 
     async def refresh_brain_health(self) -> dict:
         """Probe the brain and update the cached snapshot. Called on the

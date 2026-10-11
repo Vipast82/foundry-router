@@ -22,7 +22,7 @@ from dataclasses import dataclass
 from typing import Optional
 
 from . import interventions
-from .turn_assist import NOTE_TAG, _text, events
+from .turn_assist import NOTE_TAG, _text, error_rx, events
 
 log = logging.getLogger(__name__)
 
@@ -129,12 +129,13 @@ class FrontierAnswer:
 
 
 async def call_frontier(svc, cfg: dict, persona: dict, conversation_key: str,
-                        system: str, user: str, max_tokens: int = 1500
+                        system: str, user: str, max_tokens: int = 0
                         ) -> tuple[Optional[FrontierAnswer], str]:
     """(answer, why-not). Tries cfg.frontier_models in order, each through the
     paid-call guardrail; respects the per-conversation frontier budget."""
     from .guardrails import RequestGuardState
     from .usage import log_subscription_usage
+    max_tokens = int(max_tokens or cfg.get("frontier_max_tokens") or 1500)
     models = [m for m in (cfg.get("frontier_models") or []) if m]
     if not models:
         return None, "no frontier_models configured"
@@ -203,7 +204,7 @@ def lint(report: str, messages: list[dict], cfg: dict) -> list[str]:
             continue
         if mm:
             defects.append(f"unverified claim \"{mm.group(0)}\" — run the check and paste its output")
-    recent = events(messages)[-4:]
+    recent = events(messages, error_rx(cfg))[-4:]
     # a failure counts only when no later call of the same tool succeeded
     failed = [e for i, e in enumerate(recent) if not e.ok
               and not any(x.ok and x.name == e.name for x in recent[i + 1:])]
@@ -216,7 +217,7 @@ def lint(report: str, messages: list[dict], cfg: dict) -> list[str]:
 
 def is_final_report(res, summary_req: bool, messages: list[dict], cfg: dict) -> bool:
     return (not summary_req and not (res.tool_calls or [])
-            and len((res.content or "").strip()) > 40
+            and len((res.content or "").strip()) > int(cfg.get("auditor_min_report_chars") or 0)
             and tool_turns(messages) >= int(cfg.get("auditor_min_tool_turns") or 0))
 
 
@@ -239,9 +240,10 @@ async def audit(svc, cfg: dict, persona: dict, conversation_key: str,
         return Audit(False, defects, "\n".join(f"{i}. {d}" for i, d in enumerate(defects, 1)))
     if mode != "enforce":
         return Audit(True, [], "rule check passed")
-    packet = build_packet(messages)
+    packet = build_packet(messages, int(cfg.get("packet_turns") or 15),
+                          int(cfg.get("packet_max_chars") or 60000))
     ans, why = await call_frontier(
-        svc, cfg, persona, conversation_key, AUDITOR_SYSTEM,
+        svc, cfg, persona, conversation_key, cfg.get("auditor_prompt") or AUDITOR_SYSTEM,
         packet + "\n\n## FINAL REPORT TO AUDIT\n" + _clip(report, 8000, 4000))
     if ans is None:
         return Audit(True, [], "rule check passed; frontier judge unavailable", note=why)
@@ -265,10 +267,12 @@ async def consult(svc, cfg: dict, persona: dict, conversation_key: str,
     q = str(args.get("question") or "").strip()
     tried = str(args.get("what_i_tried") or "").strip()
     evidence = str(args.get("evidence") or "").strip()
-    user = (build_packet(messages, turns=15, max_chars=45000)
+    user = (build_packet(messages, int(cfg.get("packet_turns") or 15),
+                         int(cfg.get("packet_max_chars") or 60000) * 3 // 4)
             + f"\n\n## The model's question\n{q}\n\n## What it tried\n{tried}"
             + (f"\n\n## Evidence it selected\n{_clip(evidence, 4000, 2000)}" if evidence else ""))
-    ans, why = await call_frontier(svc, cfg, persona, conversation_key, ADVISOR_SYSTEM, user)
+    ans, why = await call_frontier(svc, cfg, persona, conversation_key,
+                                   cfg.get("advisor_prompt") or ADVISOR_SYSTEM, user)
     if ans is None:
         return (f"{NOTE_TAG}] No senior is available right now ({why}). Continue on your "
                 f"own: write a STUCK note in the plan and try one different approach."), None, why

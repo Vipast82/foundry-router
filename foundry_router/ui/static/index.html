@@ -692,6 +692,7 @@ const TABS = {
   "Usage Log":      tabUsage,
   "Events":         tabEvents,
   "Dev Log":        tabDevLog,
+  "Data":           tabData,
 };
 // Primary nav groups -> their leaf tabs (the secondary row). Reorganizes the
 // former flat bar into logical sections without dropping anything.
@@ -701,7 +702,7 @@ const GROUPS = [
   ["Routing",     ["Personas", "Guardrails"]],
   ["Tools & MCP", ["Tools", "MCP Servers", "MCP Metrics", "Agents"]],
   ["Labs",        ["Research", "Evals"]],
-  ["Logs",        ["Usage Log", "Events", "Dev Log"]],
+  ["Logs",        ["Usage Log", "Events", "Dev Log", "Data"]],
 ];
 const _groupOf = leaf => (GROUPS.find(g => g[1].includes(leaf)) || GROUPS[1])[0];
 const _lastLeaf = {};        // group name -> last leaf visited (remembered on switch)
@@ -1508,6 +1509,7 @@ async function tabScoreboard() {
       <button class="act" id="sb-refresh">Refresh</button>
       <a class="act" id="sb-export" href="#" title="Interventions as JSONL (trigger → intervention → what came next) for fine-tuning data">Export JSONL</a>
     </div>
+    <div class="card"><div class="card-h">Subscription call budgets <span class="hint">— calls Foundry sent in the last 5 h / 24 h vs each backend's call_budget_5h / call_budget_daily</span></div><div id="sb-budgets"></div></div>
     <div class="card"><div class="card-h">Errors per 100 tool calls by context size</div><div id="sb-zones"></div></div>
     <div class="card"><div class="card-h">Interventions in this window</div><div id="sb-kinds"></div></div>
     <div class="card"><div class="card-h">Conversations <span class="hint">— newest first</span></div><div id="sb-convs"></div></div>
@@ -1515,8 +1517,13 @@ async function tabScoreboard() {
   const load = async () => {
     _SB_HOURS = +$("#sb-win").value;
     $("#sb-export").href = `/admin/api/interventions/export?hours=${_SB_HOURS}`;
-    const [d, l] = await Promise.all([api(`scoreboard?hours=${_SB_HOURS}`),
-                                      api(`interventions?hours=${_SB_HOURS}&limit=50`)]);
+    const [d, l, bud] = await Promise.all([api(`scoreboard?hours=${_SB_HOURS}`),
+                                      api(`interventions?hours=${_SB_HOURS}&limit=50`),
+                                      api("subscription-budgets")]);
+    const cell = x => x.budget ? `${x.used} / ${x.budget} <span class="hint">(${x.remaining} left)</span>` : `${x.used} <span class="hint">(no cap)</span>`;
+    $("#sb-budgets").innerHTML = bud.backends.length ? `<table><tr><th>backend</th><th>type</th><th>last 5 h</th><th>last 24 h</th></tr>${
+      bud.backends.map(b => `<tr><td>${esc(b.backend)}${b.enabled ? "" : " (parked)"}</td><td>${esc(b.type)}</td><td>${cell(b["5h"])}</td><td>${cell(b.daily)}</td></tr>`).join("")}</table>`
+      : `<span class="hint">No subscription backends. Meridian is one automatically; mark others with <code>subscription: true</code> in Pool → backends.</span>`;
     $("#sb-zones").innerHTML = `<table><tr><th>context</th><th>turns</th><th>tool calls</th><th>errors</th><th>per 100</th></tr>${
       d.zones.map(z => `<tr><td>${esc(z.zone)}</td><td>${z.turns}</td><td>${z.calls}</td><td>${z.errors}</td><td>${z.errors_per_100 ?? "—"}</td></tr>`).join("")}</table>`;
     const kinds = Object.entries(d.interventions || {});
@@ -3436,6 +3443,104 @@ async function tabGuardrails() {
     max_paid_calls_per_request: +$("#g-paid").value,
     daily_spend_cap_usd: $("#g-daily").value === "" ? null : +$("#g-daily").value,
     weekly_spend_cap_usd: $("#g-weekly").value === "" ? null : +$("#g-weekly").value}}));
+  await renderTurnAssistCard();
+}
+
+// Global turn-assist settings: defaults for every persona (any threshold,
+// prompt or size), the pre-judge rule tables and the tool-error markers —
+// each pre-filled with the built-ins so they can be edited in place — plus how
+// often each rule / detector has fired. Persona `assist` JSON still wins.
+async function renderTurnAssistCard() {
+  const d = await api("config/turn_assist");
+  const ta = d.turn_assist;
+  const pretty = v => JSON.stringify(v, null, 1);
+  const card = document.createElement("div");
+  card.className = "card";
+  const hits = Object.entries(d.hits || {});
+  card.innerHTML = `
+    <h2 style="margin-top:0">Turn assist (global) <span class="hint">— docs/TURN_ASSIST.md</span></h2>
+    <p class="hint">Applies to every persona with turn assist; a persona's own <code>assist</code> JSON overrides these. Empty tables = built-in rules (shown pre-filled). Thresholds were tuned by replaying recorded Cline sessions: <code>python -m foundry_router.evalharness replay &lt;sessions dir&gt; --sweep</code>.</p>
+    <div class="row tight"><label title="Any built-in key: thresholds (sup_*), dedupe_min_chars, prejudge_max_edit_chars, auditor_*, packet_*, frontier_*, advisor_prompt, auditor_prompt, think_levels…">defaults (JSON obj)</label>
+      <textarea id="ta-defaults" rows="5" cols="90">${esc(pretty(ta.defaults || {}))}</textarea></div>
+    <details><summary class="hint">built-in defaults (reference)</summary><pre style="white-space:pre-wrap;font-size:11px">${esc(pretty(d.builtin_defaults))}</pre></details>
+    <div class="row tight"><label title="[{pattern, rule, advice, unless, enabled}] — pattern/unless are regexes (case-insensitive). unless exempts a command that also matches it.">block rules (JSON list)</label>
+      <textarea id="ta-block" rows="8" cols="90">${esc(pretty(ta.block_rules && ta.block_rules.length ? ta.block_rules : d.builtin_block_rules))}</textarea></div>
+    <div class="row tight"><label title="[{pattern, replacement, desc, enabled}] — regex rewrite applied to each shell command in enforce mode.">fix rules (JSON list)</label>
+      <textarea id="ta-fix" rows="5" cols="90">${esc(pretty(ta.fix_rules && ta.fix_rules.length ? ta.fix_rules : d.builtin_fix_rules))}</textarea></div>
+    <div class="row tight"><label title="Regexes that mark a tool RESULT as failed (used by the supervisor, adaptive thinking and the scoreboard).">error markers (JSON list)</label>
+      <textarea id="ta-err" rows="4" cols="90">${esc(pretty(ta.error_patterns && ta.error_patterns.length ? ta.error_patterns : d.builtin_error_patterns))}</textarea></div>
+    <div class="row"><button class="act primary" id="ta-save">Save turn assist</button>
+      <button class="act" id="ta-reset" title="Clear the global tables so the built-in rules apply again">Use built-in rules</button></div>
+    <div class="card-h" style="margin-top:8px">Rule / detector hits</div>
+    ${hits.length ? `<table><tr><th>rule or detector</th><th>hits</th><th>last</th></tr>${hits.map(([k, v]) =>
+      `<tr><td>${esc(k)}</td><td>${v.n}</td><td>${esc((v.last || "").slice(0, 16).replace("T", " "))}</td></tr>`).join("")}</table>`
+      : `<span class="hint">no hits yet</span>`}`;
+  $("#main").appendChild(card);
+  const parse = (id, kind) => {
+    const v = JSON.parse($(id).value || (kind === "obj" ? "{}" : "[]"));
+    if (kind === "obj" ? (typeof v !== "object" || Array.isArray(v)) : !Array.isArray(v))
+      throw new Error(`${id}: expected a JSON ${kind === "obj" ? "object" : "list"}`);
+    return v;
+  };
+  $("#ta-save").onclick = () => {
+    let body;
+    try {
+      body = {defaults: parse("#ta-defaults", "obj"), block_rules: parse("#ta-block", "list"),
+              fix_rules: parse("#ta-fix", "list"), error_patterns: parse("#ta-err", "list")};
+    } catch (e) { toast(e.message, true); return; }
+    run(api("config/turn_assist", {method: "POST", body}));
+  };
+  $("#ta-reset").onclick = () => run(api("config/turn_assist", {method: "POST",
+    body: {block_rules: [], fix_rules: [], error_patterns: []}}));
+}
+
+// Logs -> Data: every table's size and age, retention per log table, and
+// export of any table (JSONL / CSV / JSON) or all of them as one zip with a
+// manifest — for analysis by an AI, a spreadsheet or scripts.
+async function tabData() {
+  const d = await api("data/tables");
+  const fmts = d.formats.map(f => `<option>${f}</option>`).join("");
+  const days = d.retention.days || {};
+  $("#main").innerHTML = `
+    <h2 style="margin-top:0">Data</h2>
+    <p class="hint">Everything Foundry records, per table. Retention prunes log tables older than N days (0 = keep forever) every ${d.retention.prune_interval_minutes} min. Exports are attachments; the "all" zip includes manifest.json (tables, columns, time column). The kv table (auth tokens) is never exported.</p>
+    <div class="card" style="display:flex;gap:12px;align-items:center;flex-wrap:wrap">
+      <label>Format <select id="dx-fmt">${fmts}</select></label>
+      <label title="Only rows newer than this (0 = all)">Last <input id="dx-hours" type="number" min="0" value="0" style="width:70px"> hours</label>
+      <button class="act primary" id="dx-all">Export all (zip)</button>
+      <label>Prune every <input id="dx-int" type="number" min="5" value="${d.retention.prune_interval_minutes}" style="width:60px"> min</label>
+      <button class="act" id="dx-save">Save retention</button>
+      <button class="act" id="dx-prune">Prune now</button>
+    </div>
+    <div class="card"><table><tr><th>table</th><th>rows</th><th>oldest</th><th>newest</th><th>keep days</th><th></th></tr>${
+      d.tables.map(t => `<tr><td>${esc(t.table)}${t.log ? "" : ' <span class="hint">state</span>'}</td><td>${t.rows.toLocaleString()}</td>
+        <td>${esc((t.oldest || "").slice(0, 16).replace("T", " "))}</td><td>${esc((t.newest || "").slice(0, 16).replace("T", " "))}</td>
+        <td>${t.log ? `<input class="dx-days" data-t="${esc(t.table)}" type="number" min="0" style="width:60px" value="${days[t.table] || 0}">` : "—"}</td>
+        <td><button class="act dx-exp" data-t="${esc(t.table)}">Export</button>
+            ${t.log ? `<button class="act dx-clear" data-t="${esc(t.table)}" title="Delete rows (older than N days, or all)">Clear…</button>` : ""}</td></tr>`).join("")}</table></div>`;
+  const q = () => `format=${$("#dx-fmt").value}&hours=${+$("#dx-hours").value || 0}`;
+  $("#dx-all").onclick = () => { location.href = `/admin/api/data/export-all?${q()}`; };
+  document.querySelectorAll(".dx-exp").forEach(b => b.onclick = () => {
+    location.href = `/admin/api/data/export?table=${encodeURIComponent(b.dataset.t)}&${q()}`; });
+  document.querySelectorAll(".dx-clear").forEach(b => b.onclick = async () => {
+    const ans = prompt(`Clear ${b.dataset.t}: delete rows older than how many days? (0 = ALL rows)`, "30");
+    if (ans === null) return;
+    try {
+      const r = await api("data/clear", {method: "POST", body: {table: b.dataset.t, older_than_days: +ans || 0}});
+      toast(`Deleted ${r.deleted} row(s)`); render();
+    } catch (e) { toast(e.message, true); }
+  });
+  $("#dx-save").onclick = () => {
+    const nd = {...days};
+    document.querySelectorAll(".dx-days").forEach(i => { nd[i.dataset.t] = +i.value || 0; });
+    run(api("config/data_retention", {method: "POST",
+      body: {days: nd, prune_interval_minutes: +$("#dx-int").value || 60}}));
+  };
+  $("#dx-prune").onclick = async () => {
+    try { const r = await api("data/prune", {method: "POST", body: {}});
+          toast("Pruned: " + (Object.entries(r.pruned).map(([t, n]) => `${t} ${n}`).join(", ") || "nothing"));
+          render(); } catch (e) { toast(e.message, true); }
+  };
 }
 
 /* ------------------------------------------------------------------- mcp -- */

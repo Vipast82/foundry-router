@@ -465,6 +465,10 @@ class Database:
             # text) out of the reasoning stream — clean traces for data
             # generation. Keep-alive frames are still sent, just empty.
             ("personas", "quiet_narration", "INTEGER DEFAULT 0"),
+            # What the model did right after an intervention (its next reply:
+            # text head + tool calls) — the "response" half of a fine-tuning pair.
+            ("interventions", "next_action", "TEXT"),
+            ("interventions", "next_ts", "TEXT"),
             # Code-sandbox audit trail: the submitted code (call arguments) and
             # a flag marking calls that ran on an executes_code server.
             ("tool_call_log", "arguments", "TEXT"),
@@ -676,6 +680,15 @@ class Database:
             cur = self._conn.execute(sql, tuple(params))
             self._conn.commit()
             return cur.lastrowid or cur.rowcount
+
+    def execute_count(self, sql: str, params: Iterable[Any] = ()) -> int:
+        """Run an UPDATE/DELETE and return the number of rows it touched
+        (execute() returns lastrowid when there is one, which a DELETE
+        inherits from the last INSERT)."""
+        with self._lock:
+            cur = self._conn.execute(sql, tuple(params))
+            self._conn.commit()
+            return cur.rowcount
 
     def executemany(self, sql: str, seq: Iterable[Iterable[Any]]) -> None:
         with self._lock:

@@ -450,7 +450,9 @@ CREATE TABLE IF NOT EXISTS interventions (
   excerpt TEXT,             -- what triggered it (tool result / report tail)
   frontier_model TEXT,
   prompt_tokens INTEGER,
-  completion_tokens INTEGER
+  completion_tokens INTEGER,
+  next_action TEXT,         -- the model's next reply after this intervention
+  next_ts TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_interventions_conv ON interventions(conversation_key, ts);
 CREATE INDEX IF NOT EXISTS idx_interventions_ts ON interventions(ts);

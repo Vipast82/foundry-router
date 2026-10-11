@@ -1104,6 +1104,167 @@ async def export_interventions(request: Request, hours: float = 24 * 30, kinds: 
         "Content-Disposition": "attachment; filename=foundry-interventions.jsonl"})
 
 
+# ---- data management (Logs -> Data) ------------------------------------------------
+
+@router.get("/admin/api/data/tables")
+async def data_tables(request: Request):
+    from .. import datatools
+    svc = _svc(request)
+    cfg = svc.config_store.config.data_retention
+    return {"tables": datatools.stats(svc.db, cfg.days), "retention": cfg.model_dump(),
+            "formats": list(datatools.FORMATS)}
+
+
+@router.get("/admin/api/data/export")
+async def data_export(request: Request, table: str, format: str = "jsonl",
+                      hours: float = 0, limit: int = 0):
+    """One table as JSONL / CSV / JSON. Extra query params that name a column
+    filter on it (e.g. &conversation_key=… &persona=…)."""
+    from fastapi.responses import PlainTextResponse
+    from .. import datatools
+    svc = _svc(request)
+    reserved = {"table", "format", "hours", "limit"}
+    where = {k: v for k, v in request.query_params.items() if k not in reserved}
+    try:
+        body = datatools.export(svc.db, table, format, hours, limit, where)
+    except ValueError as e:
+        return JSONResponse({"error": str(e)}, status_code=400)
+    media = {"csv": "text/csv", "json": "application/json"}.get(format, "application/x-ndjson")
+    return PlainTextResponse(body, media_type=media, headers={
+        "Content-Disposition": f"attachment; filename=foundry-{table}.{format}"})
+
+
+@router.get("/admin/api/data/export-all")
+async def data_export_all(request: Request, format: str = "jsonl", hours: float = 0,
+                          tables: str = ""):
+    """Every exportable table (or a comma list) as one zip + manifest.json."""
+    from fastapi.responses import Response
+    from .. import datatools
+    try:
+        blob = datatools.export_all(_svc(request).db, format, hours,
+                                    [t for t in tables.split(",") if t] or None)
+    except ValueError as e:
+        return JSONResponse({"error": str(e)}, status_code=400)
+    return Response(blob, media_type="application/zip", headers={
+        "Content-Disposition": f"attachment; filename=foundry-data-{format}.zip"})
+
+
+@router.post("/admin/api/data/clear")
+async def data_clear(request: Request):
+    """{"table": ..., "older_than_days": N (0 = everything)} — log tables only."""
+    from .. import datatools
+    body = await request.json()
+    try:
+        n = datatools.clear(_svc(request).db, body.get("table") or "",
+                            float(body.get("older_than_days") or 0))
+    except ValueError as e:
+        return JSONResponse({"error": str(e)}, status_code=400)
+    return {"ok": True, "deleted": n}
+
+
+@router.post("/admin/api/data/prune")
+async def data_prune(request: Request):
+    from .. import datatools
+    svc = _svc(request)
+    return {"ok": True, "pruned": datatools.prune(svc.db, svc.config_store.config.data_retention.days)}
+
+
+@router.post("/admin/api/config/data_retention")
+async def set_data_retention(request: Request):
+    svc = _svc(request)
+    body = await request.json()
+    updates = {k: v for k, v in body.items() if k in ("days", "prune_interval_minutes")}
+
+    def mutate(raw):
+        raw.setdefault("data_retention", {}).update(updates)
+    try:
+        cfg = svc.config_store.save(mutate)
+    except Exception as e:
+        from ..errors import describe_exception
+        return JSONResponse({"error": describe_exception(e)}, status_code=400)
+    return {"ok": True, "data_retention": cfg.data_retention.model_dump()}
+
+
+# ---- turn assist global settings (Routing -> Guardrails) ---------------------------
+
+@router.get("/admin/api/config/turn_assist")
+async def get_turn_assist(request: Request):
+    """Global turn-assist settings, the built-in defaults/rules they override,
+    and how often each pre-judge rule / detector has fired."""
+    from .. import turn_assist as ta
+    svc = _svc(request)
+    cfg = svc.config_store.config.turn_assist
+    hits = svc.db.query(
+        "SELECT kind, detail, COUNT(*) AS n, MAX(ts) AS last FROM interventions "
+        "WHERE kind IN ('prejudge_block', 'prejudge_fix') OR kind LIKE 'supervisor_%' "
+        "GROUP BY kind, detail ORDER BY n DESC LIMIT 300")
+    by_rule: dict = {}
+    for h in hits:
+        key = h["detail"] if h["kind"].startswith("prejudge") else h["kind"]
+        d = by_rule.setdefault(key, {"n": 0, "last": ""})
+        d["n"] += h["n"]
+        d["last"] = max(d["last"], h["last"] or "")
+    block, fix = ta.rule_tables({})
+    return {"turn_assist": cfg.model_dump(), "builtin_defaults": ta.ASSIST_DEFAULTS,
+            "builtin_block_rules": block, "builtin_fix_rules": fix,
+            "builtin_error_patterns": ta.ERROR_PATTERNS, "hits": by_rule}
+
+
+@router.post("/admin/api/config/turn_assist")
+async def set_turn_assist(request: Request):
+    """Replace any of: defaults (obj), block_rules, fix_rules, error_patterns
+    (lists). Regexes are validated before saving. Applies live."""
+    import re as _re
+    svc = _svc(request)
+    body = await request.json()
+    updates = {k: v for k, v in body.items()
+               if k in ("defaults", "block_rules", "fix_rules", "error_patterns")}
+    for k in ("block_rules", "fix_rules"):
+        for r in updates.get(k) or []:
+            try:
+                _re.compile(r.get("pattern") or "")
+            except (_re.error, AttributeError) as e:
+                return JSONResponse({"error": f"{k}: bad pattern {r!r}: {e}"}, status_code=400)
+    for p in updates.get("error_patterns") or []:
+        try:
+            _re.compile(p)
+        except _re.error as e:
+            return JSONResponse({"error": f"error_patterns: bad pattern {p!r}: {e}"},
+                                status_code=400)
+
+    def mutate(raw):
+        raw.setdefault("turn_assist", {}).update(updates)
+    try:
+        cfg = svc.config_store.save(mutate)
+    except Exception as e:
+        from ..errors import describe_exception
+        return JSONResponse({"error": describe_exception(e)}, status_code=400)
+    return {"ok": True, "turn_assist": cfg.turn_assist.model_dump()}
+
+
+@router.get("/admin/api/subscription-budgets")
+async def subscription_budgets(request: Request):
+    """Calls used vs call_budget_5h / call_budget_daily per subscription backend."""
+    from datetime import datetime, timedelta, timezone
+    svc = _svc(request)
+    out = []
+    for b in svc.config_store.config.backend_pool.internal.backends:
+        if not b.is_subscription:
+            continue
+        row = {"backend": b.name, "type": b.type, "enabled": b.enabled}
+        for key, hours in (("5h", 5), ("daily", 24)):
+            since = (datetime.now(timezone.utc) - timedelta(hours=hours)).isoformat()
+            n = svc.db.query_one(
+                "SELECT COUNT(*) AS n FROM claude_usage_log WHERE backend=? AND ts >= ?",
+                (b.name, since))
+            cap = getattr(b, f"call_budget_{key}")
+            used = int(n["n"]) if n else 0
+            row[key] = {"used": used, "budget": cap,
+                        "remaining": (max(0, cap - used) if cap else None)}
+        out.append(row)
+    return {"backends": out}
+
+
 @router.post("/admin/api/personas/clone")
 async def clone_persona(request: Request):
     svc = _svc(request)

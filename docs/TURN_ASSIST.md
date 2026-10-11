@@ -22,7 +22,7 @@ Everything is configured per persona in the **turn assist (JSON obj)** field
 | `image_keep` | N (0 = all) | Keep only the newest N screenshots in context |
 | `soft_budget_tokens` | N (0 = off) | Extra context ceiling for the guard, without changing what Ollama loads |
 | `prejudge` | `off` · `observe` · `enforce` | Rules applied to the model's tool calls before Cline runs them (below) |
-| `prejudge_max_edit_chars` | N (default 6000) | An `editor` replacement longer than this is blocked in enforce mode |
+| `prejudge_max_edit_chars` | N (default 12000) | An `editor` replacement longer than this is blocked in enforce mode |
 | `supervisor` | `off` · `observe` · `nudge` · `escalate` | Loop / error-streak / cycling detectors (below) |
 | `auditor` | `off` · `observe` · `enforce` | Checks a final report (below) |
 | `auditor_min_tool_turns` | N (default 20) | Only audit sessions with at least this many tool turns |
@@ -33,6 +33,13 @@ Everything is configured per persona in the **turn assist (JSON obj)** field
 | `frontier_models` | [model ids] | Tried in order for the auditor and advisor, each through the paid-call guardrail |
 | `frontier_max_calls` | N (default 3) | Frontier calls per conversation (auditor + advisor together) |
 | `frontier_rounds` | N (default 4) | Extra in-request rounds for audits and advice, on top of `worker_tool_max_steps` |
+| `prejudge_disabled_rules` | [rule names] | Skip these block / fix rules for this persona |
+| `sup_loop_repeats` … `sup_capture_repeats` | N | Every supervisor threshold (see "Tuning" below) |
+| `sup_escalate_advice_at`, `sup_escalate_block_at` | N (3, 4) | Escalate mode: which finding asks the advisor / returns BLOCKED |
+| `dedupe_min_chars` | N (400) | Shorter read results are never deduped |
+| `auditor_min_report_chars` | N (40) | Shorter final replies aren't audited |
+| `auditor_prompt`, `advisor_prompt` | text | Replace the built-in frontier instructions |
+| `packet_turns`, `packet_max_chars`, `frontier_max_tokens` | N (15, 60000, 1500) | Frontier packet and answer sizes |
 
 The seeded `claude-cline-act` starts with the free features on and the rest in
 observe mode:
@@ -47,6 +54,51 @@ observe mode:
 
 On llama.cpp, Qwen's thinking is effectively on or off (the level only matters
 for gpt-oss-style models), which is why routine turns use `off`.
+
+## Global settings and precedence
+
+Routing → Guardrails → **Turn assist (global)** edits, live:
+
+* **defaults** — any key from the table above, for every persona;
+* **block rules** — `{pattern, rule, advice, unless, enabled}`; `unless` exempts
+  a command that also matches it (scratch files, the temp folder);
+* **fix rules** — `{pattern, replacement, desc, enabled}`;
+* **error markers** — the regexes that mark a tool result as failed.
+
+The tables are pre-filled with the built-ins; "Use built-in rules" clears them.
+Each rule's and detector's hit count is shown underneath. Per request:
+built-in defaults < global defaults < the persona's `assist` JSON.
+
+## Tuning: replaying recorded sessions
+
+```bash
+python -m foundry_router.evalharness replay ~/.cline/data/sessions --sweep --json out.json
+python -m foundry_router.evalharness replay <dir> --set sup_play_calls=12
+```
+
+This converts each recorded Cline session into the messages Foundry receives
+and runs the supervisor and pre-judge over it. With no ground truth, each
+finding is scored by what happened next in the recording: **kept going** (the
+trouble continued — a note would have helped) or self-corrected (noise).
+
+Results on 165 sessions / 48,050 tool calls (2026-08-18 → 2026-10-11), which
+set the defaults:
+
+| Detector | Threshold | Fired | Kept going | Alternative tried |
+|---|---|---|---|---|
+| cycling | 10 start/stop in 40 calls | 45 | 80% | 8 → 86 fired, 56% |
+| edit | 3 failed edits, same file | 30 | 67% | 2 → 123 fired, 45% |
+| polling | 6 sleeps in a row | 13 | 46% | 4 → 46 fired, 35% |
+| errors | 5 in a row / 6 of 8 | 42 | 33% | 4 → 68 fired, 27% |
+| loop | 3 identical call + result | 14 | 36% | 2 → 94 fired, 31% |
+| capture | output lost twice | 4 | 25% | — |
+
+S43 (1,027 calls, 244 playtest calls): cycling first fires at call 681.
+Pre-judge on the same corpus (observe): 144 npm→npm.cmd and 94 npx→npx.cmd
+fixes; 135 shell rewrites of tracked files, 94 `git add -A`, 48 `-NoNewline`
+writes, 24 oversized edits, 13 `--no-verify`, 12 recursive deletes would be
+blocked. The editor limit is 12,000 chars because 6,000 would have blocked 3.4%
+of all edits.
 
 ## The prompt-cache rule
 
@@ -156,7 +208,21 @@ per 100 calls by context zone and the latest interventions.
 
 **Export JSONL** (`/admin/api/interventions/export?hours=720`) writes one line
 per intervention: the trigger excerpt, the finding, the text the model got,
-and the next intervention in the same conversation — material for fine-tuning.
+`model_next_action` (the model's very next reply — its text and tool calls)
+and the next intervention in the same conversation — trigger → intervention →
+response, ready as fine-tuning pairs. The Scoreboard also shows the
+subscription call budgets (used / budget / left per backend).
+
+## Data: retention and export
+
+Logs → **Data** lists every table with its size and age. Log tables can be
+cleared (all rows or older than N days) and given a retention (`data_retention`
+in config; defaults: interventions 180 days, assist_turns 90), pruned every
+hour. Any table exports as JSONL / CSV / JSON, filtered by time and by any
+column (`/admin/api/data/export?table=interventions&format=csv&conversation_key=…`),
+or everything at once as a zip with a `manifest.json` describing each table
+(`/admin/api/data/export-all?format=jsonl`). The `kv` table (auth tokens) is
+never exported.
 
 ## Suggested rollout
 

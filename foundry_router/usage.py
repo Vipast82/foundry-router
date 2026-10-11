@@ -636,7 +636,7 @@ def observed_subscription_usage(db: Database) -> dict:
         row = db.query_one(
             "SELECT COUNT(*) AS calls, COALESCE(SUM(prompt_tokens),0) AS ptok, "
             "COALESCE(SUM(completion_tokens),0) AS ctok FROM claude_usage_log "
-            "WHERE ts > datetime('now', ?)", (modifier,))
+            "WHERE datetime(ts) > datetime('now', ?)", (modifier,))
         return {"calls": row["calls"], "prompt_tokens": row["ptok"],
                 "completion_tokens": row["ctok"]} if row else {}
     return {"last_5h": _window("-5 hours"), "last_7d": _window("-7 days")}
@@ -744,5 +744,5 @@ class RequestLogger:
 def spend_since(db: Database, since_sql_modifier: str) -> float:
     row = db.query_one(
         "SELECT COALESCE(SUM(est_cost_usd),0) AS total FROM request_log "
-        "WHERE ts > datetime('now', ?)", (since_sql_modifier,))
+        "WHERE datetime(ts) > datetime('now', ?)", (since_sql_modifier,))
     return float(row["total"]) if row else 0.0

@@ -1069,7 +1069,7 @@ class ModelRegistry:
                     WHERE m.id IN ({placeholders})
                       AND (m.reasoning_style IS NOT NULL
                            OR m.research_status IN ('ok', 'failed'))
-                      AND m.last_updated > datetime('now', ?)""",
+                      AND datetime(m.last_updated) > datetime('now', ?)""",
                 model_ids + [f"-{stale_days} days"],
             )
         }

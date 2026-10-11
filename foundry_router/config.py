@@ -553,6 +553,32 @@ class AgentConfig(BaseModel):
     session_continuity: bool = True
 
 
+class TurnAssistConfig(BaseModel):
+    """Global turn-assist settings (docs/TURN_ASSIST.md), editable live in
+    Routing -> Guardrails -> Turn assist. Precedence per request: built-in
+    defaults < `defaults` here < the persona's `assist` JSON."""
+    # Any ASSIST_DEFAULTS key (thresholds, prompts, packet sizes, ...).
+    defaults: dict = Field(default_factory=dict)
+    # Pre-judge tables. Empty = the built-in rules. Each block rule:
+    # {pattern, rule, advice, enabled}; each fix rule:
+    # {pattern, replacement, desc, enabled}.
+    block_rules: list[dict] = Field(default_factory=list)
+    fix_rules: list[dict] = Field(default_factory=list)
+    # Regexes that mark a tool RESULT as failed. Empty = built-in markers.
+    error_patterns: list[str] = Field(default_factory=list)
+
+
+class DataRetentionConfig(BaseModel):
+    """Days to keep rows per log table (0 / absent = keep forever). Pruned
+    on startup and every `prune_interval_minutes`. perf_samples keeps its own
+    retention (perf_history.RETENTION_DAYS)."""
+    days: dict[str, int] = Field(default_factory=lambda: {
+        "interventions": 180,      # fine-tuning material — keep longer
+        "assist_turns": 90,
+    })
+    prune_interval_minutes: int = 60
+
+
 class AppConfig(BaseModel):
     server: ServerConfig = Field(default_factory=ServerConfig)
     agent_brain: AgentBrainConfig = Field(default_factory=AgentBrainConfig)
@@ -563,6 +589,8 @@ class AppConfig(BaseModel):
     mcp_servers: list[MCPServerConfig] = Field(default_factory=list)
     tool_sync: ToolSyncConfig = Field(default_factory=ToolSyncConfig)
     semantic_cache: SemanticCacheConfig = Field(default_factory=SemanticCacheConfig)
+    turn_assist: TurnAssistConfig = Field(default_factory=TurnAssistConfig)
+    data_retention: DataRetentionConfig = Field(default_factory=DataRetentionConfig)
     mcp_aggregator: MCPAggregatorConfig = Field(default_factory=MCPAggregatorConfig)
     agents: list[AgentConfig] = Field(default_factory=list)
     logging: LoggingConfig = Field(default_factory=LoggingConfig)

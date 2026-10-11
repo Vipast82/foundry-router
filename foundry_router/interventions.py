@@ -68,6 +68,33 @@ def record_turn(db: Database, *, conversation_key: str, persona: str, model: str
         return None
 
 
+def describe_action(content: str, tool_calls: list) -> str:
+    """Compact JSON of one model reply: its text head and its tool calls."""
+    calls = []
+    for tc in tool_calls or []:
+        fn = tc.get("function") or tc
+        args = fn.get("arguments")
+        calls.append({"name": fn.get("name"),
+                      "arguments": (json.dumps(args, ensure_ascii=False)
+                                    if not isinstance(args, str) else args)[:1500]})
+    return json.dumps({"text": (content or "")[:2000], "tool_calls": calls},
+                      ensure_ascii=False)
+
+
+def fill_next(db: Database, conversation_key: str, content: str, tool_calls: list) -> int:
+    """Attach the model's reply to every intervention in this conversation
+    still waiting for one — the reply the model produced right after it."""
+    if not conversation_key:
+        return 0
+    try:
+        return db.execute_count(
+            "UPDATE interventions SET next_action=?, next_ts=? "
+            "WHERE conversation_key=? AND next_action IS NULL",
+            (describe_action(content, tool_calls), utcnow(), conversation_key))
+    except Exception:                                             # noqa: BLE001
+        return 0
+
+
 def finish_turn(db: Database, row_id: Optional[int], output_tokens: int) -> None:
     if not row_id:
         return
@@ -154,6 +181,9 @@ def export_jsonl(db: Database, hours: float = 24 * 30, kinds: Optional[list] = N
             "model": r["model"], "kind": r["kind"], "mode": r["mode"],
             "trigger": r["excerpt"], "finding": r["detail"],
             "intervention": r["intervention"], "frontier_model": r["frontier_model"],
-            "next": ({"kind": nxt["kind"], "detail": nxt["detail"], "ts": nxt["ts"]}
-                     if nxt else None)}, ensure_ascii=False))
+            "model_next_action": (json.loads(r["next_action"]) if r.get("next_action")
+                                  else None),
+            "next_intervention": ({"kind": nxt["kind"], "detail": nxt["detail"],
+                                   "ts": nxt["ts"]} if nxt else None)},
+            ensure_ascii=False))
     return "\n".join(out) + ("\n" if out else "")
