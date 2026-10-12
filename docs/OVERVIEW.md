@@ -62,6 +62,7 @@ Worker model (± MCP tools, ± tiered review) → response streamed back to the 
 - **Dashboard → Live / Performance / Cost** — live per-model speed, engine
   load from llama.cpp/vLLM, per-call history with run labels (compare
   hardware runs) and a clear-data tool; see [LLAMACPP_VLLM.md](LLAMACPP_VLLM.md).
+  Strata (Qwen3.8-Flash-Next on GPU + RAM): see [STRATA.md](STRATA.md).
   What each backend reports and how it reaches each client:
   [COMPATIBILITY.md](COMPATIBILITY.md).
 - **Backend Pool** — backends, health, the routing brain, and **Meridian

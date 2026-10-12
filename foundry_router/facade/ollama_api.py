@@ -1066,7 +1066,7 @@ def _think_label(svc, model_id: str, persona=None, client_think=None) -> str:
         return "think ?"
     p = persona or {}
     if p.get("_think_why"):
-        who = f"adaptive ({p['_think_why']})"
+        who = f"{p.get('_think_src') or 'adaptive'} ({p['_think_why']})"
     elif p.get("force_reasoning_effort") and p.get("reasoning_effort"):
         who = "persona (forced)"
     elif client_think not in (None, ""):
@@ -1235,6 +1235,25 @@ def _output_cap(svc, persona) -> int:
     except (TypeError, ValueError):
         v = 0
     return v if v > 0 else int(svc.config_store.config.agent_brain.worker_max_tokens or 8192)
+
+
+def _fit_output_cap(svc, persona, model_id: str, convo, tools, out_cap: int) -> int:
+    """Shrink the output cap so prompt + reply fit the model's window. llama.cpp
+    just stops at the window, but stricter servers (Strata, vLLM) REFUSE a request
+    whose max_tokens can't fit — and near a full context a 32K-65K persona cap
+    can't. Only lowers the cap; never below 1024 (a prompt that leaves less room
+    than that is the guard's / client's problem, not something a smaller reply fixes)."""
+    window = _guard_window(svc, persona, model_id)
+    if not window or not out_cap:
+        return out_cap
+    try:
+        est = context_guard.estimate(convo, tools, model_id)
+    except Exception:                                             # noqa: BLE001
+        return out_cap
+    room = int((window - est) * 0.95) - 256          # 5% for estimate error
+    if room >= out_cap or room < 1024:
+        return out_cap
+    return room
 
 
 def _truncation_note(res, cap: int, persona, svc=None, model_id: str = "",
@@ -1633,6 +1652,7 @@ async def _direct_dispatch_chat(svc, persona, model_name, messages, client_tools
                                          all_tools, logger)
     if _stuck_note:
         route_notes.append(_stuck_note)
+    out_cap = _fit_output_cap(svc, persona, model_id, base_convo, all_tools, out_cap)
 
     # ---- turn assist (turn_assist.py rules + frontier_assist.py helpers) --------
     # Only for client-tool turns (Cline Act); everything is off unless the
@@ -1694,7 +1714,8 @@ async def _direct_dispatch_chat(svc, persona, model_name, messages, client_tools
                 route_notes.append("🧑‍🏫 supervisor escalation: advisor consulted")
         if prep.think:
             persona = {**persona, "reasoning_effort": prep.think,
-                       "force_reasoning_effort": 1, "_think_why": prep.think_why}
+                       "force_reasoning_effort": 1, "_think_why": prep.think_why,
+                       "_think_src": acfg.get("think_policy") or "adaptive"}
         _evs = ta.events(base_convo, ta.error_rx(acfg))
         _new = [e for e in _evs if e.result_idx >= start]
         assist_turn_id = iv.record_turn(
@@ -1756,7 +1777,8 @@ async def _direct_dispatch_chat(svc, persona, model_name, messages, client_tools
                     return False, convo, "\n\n" + stop + "\n\n", notes, []
                 # the re-ask thinks harder: the model is stuck, a one-off prompt change is worth it
                 persona = {**persona, "reasoning_effort": acfg.get("think_escalate") or "high",
-                           "force_reasoning_effort": 1, "_think_why": "loop-breaker"}
+                           "force_reasoning_effort": 1, "_think_why": "repeated call blocked",
+                           "_think_src": "loop-breaker"}
                 blocked = {id(h.call): h for h in hits}
                 results = []
                 for tc in rest:

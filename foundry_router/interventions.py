@@ -100,7 +100,8 @@ MISS_BELOW = 0.5              # cached < 50% of the prompt = a miss
 
 
 def new_call_stats() -> dict:
-    return {"prompt": 0, "cached": 0, "prefill_ms": 0.0, "miss": False, "calls": 0}
+    return {"prompt": 0, "cached": 0, "prefill_ms": 0.0, "miss": False, "calls": 0,
+            "unknown": False}
 
 
 def note_call(stats: dict, res) -> None:
@@ -110,7 +111,16 @@ def note_call(stats: dict, res) -> None:
     try:
         prompt = int(getattr(res, "prompt_tokens", 0) or 0)
         cached = int(getattr(res, "cached_tokens", 0) or 0)
+        prefilled = int(getattr(res, "prefill_tokens", 0) or 0)
+        if not cached and prefilled:
+            cached = max(0, prompt - prefilled)        # server reported what it re-read instead
         stats["calls"] += 1
+        if not cached and not prefilled:
+            # The backend reports neither cached nor re-read tokens (some servers
+            # don't): we can't tell a hit from a miss, so don't call it a miss.
+            stats["unknown"] = True
+            stats["prompt"] = prompt
+            return
         stats["prompt"], stats["cached"] = prompt, cached
         stats["prefill_ms"] += float(getattr(res, "prompt_eval_duration_ns", 0) or 0) / 1e6
         if prompt >= MISS_MIN_PROMPT and cached < MISS_BELOW * prompt:
@@ -148,7 +158,8 @@ def finish_turn(db: Database, row_id: Optional[int], output_tokens: int,
                        (int(output_tokens or 0), row_id))
             return
         cause = (classify_miss(db, row_id, conversation_key, think, stats["prompt"],
-                               guard_advanced) if stats["miss"] else "")
+                               guard_advanced) if stats["miss"]
+                 else "not_reported" if stats.get("unknown") else "")
         db.execute(
             "UPDATE assist_turns SET output_tokens=?, prompt_tokens=?, cached_tokens=?, "
             "prefill_ms=?, cache_miss=?, cache_cause=? WHERE id=?",

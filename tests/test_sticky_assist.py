@@ -232,11 +232,11 @@ def test_plan_persona_without_assist_is_untouched_by_the_loop_breaker(app, clien
 
 def test_cache_misses_are_recorded_with_their_cause_and_shown_on_the_scoreboard(app, client, act):
     act({"think_policy": "persona"},
-        {"qwen": [ChatResult(content="ok", prompt_tokens=60_000, cached_tokens=0,
+        {"qwen": [ChatResult(content="ok", prompt_tokens=60_000, cached_tokens=0, prefill_tokens=60_000,
                              prompt_eval_duration_ns=120_000_000_000),
-                  ChatResult(content="ok", prompt_tokens=61_000, cached_tokens=60_900,
+                  ChatResult(content="ok", prompt_tokens=61_000, cached_tokens=60_900, prefill_tokens=100,
                              prompt_eval_duration_ns=1_000_000_000),
-                  ChatResult(content="ok", prompt_tokens=61_500, cached_tokens=0,
+                  ChatResult(content="ok", prompt_tokens=61_500, cached_tokens=0, prefill_tokens=61_500,
                              prompt_eval_duration_ns=125_000_000_000)]})
     h = history(("read_files", {"files": []}, FILE))
     post(client, h)
@@ -275,3 +275,37 @@ def test_seed_v10_upgrades_only_the_untouched_v098_default(tmp_path):
     db._seed_cline_sticky()
     assert json.loads(db.query_one("SELECT assist FROM personas WHERE virtual_name='claude-cline-act'")
                       ["assist"]) == edited                            # the operator's edit survives
+
+
+# -- servers without cache numbers / strict output budgets (Strata) ------------------------------
+
+def test_backend_without_cache_numbers_is_not_counted_as_a_miss(app, client, act):
+    act({"think_policy": "persona"},
+        {"m": [ChatResult(content="ok", prompt_tokens=90_000, cached_tokens=0, prefill_tokens=0)]})
+    post(client, history(("read_files", {"files": []}, FILE)))
+    row = app.state.services.db.query_one("SELECT cache_miss, cache_cause FROM assist_turns")
+    assert row["cache_miss"] == 0 and row["cache_cause"] == "not_reported"
+
+
+def test_reread_count_stands_in_for_missing_cached_tokens(app, client, act):
+    act({"think_policy": "persona"},
+        {"m": [ChatResult(content="ok", prompt_tokens=90_000, cached_tokens=0, prefill_tokens=500)]})
+    post(client, history(("read_files", {"files": []}, FILE)))
+    row = app.state.services.db.query_one("SELECT cache_miss, cached_tokens FROM assist_turns")
+    assert row["cache_miss"] == 0 and row["cached_tokens"] == 89_500
+
+
+def test_output_cap_is_fitted_to_the_room_left_in_the_window(app, client, act):
+    pool = act({"think_policy": "persona"}, {"m": [ChatResult(content="ok")]},
+               context_window=40_000, max_output_tokens=32_768)
+    big = history(*[("read_files", {"files": [i]}, "x" * 20_000) for i in range(5)])
+    post(client, big)
+    cap = pool.kw[0]["max_tokens"]
+    assert 1024 <= cap < 32_768                                # was 32,768: a strict server would 400
+
+
+def test_output_cap_untouched_when_there_is_room(app, client, act):
+    pool = act({"think_policy": "persona"}, {"m": [ChatResult(content="ok")]},
+               context_window=262_144, max_output_tokens=16_384)
+    post(client, history(("read_files", {"files": []}, FILE)))
+    assert pool.kw[0]["max_tokens"] == 16_384
