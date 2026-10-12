@@ -470,9 +470,14 @@ CREATE TABLE IF NOT EXISTS assist_turns (
   new_calls INTEGER,
   new_errors INTEGER,
   total_calls INTEGER,
-  think TEXT,
+  think TEXT,               -- the thinking level this request actually ran with
   think_why TEXT,
-  output_tokens INTEGER
+  output_tokens INTEGER,
+  prompt_tokens INTEGER,    -- full prompt of the last model call this request
+  cached_tokens INTEGER,    -- of it, served from the server's KV cache
+  prefill_ms REAL,          -- prompt-processing time summed over this request's calls
+  cache_miss INTEGER,       -- 1 = a >20K-token prompt was mostly re-read (cached < 50%)
+  cache_cause TEXT          -- conversation_start | guard_trim | think_change | compaction | unknown
 );
 CREATE INDEX IF NOT EXISTS idx_assist_turns_conv ON assist_turns(conversation_key, ts);
 CREATE INDEX IF NOT EXISTS idx_assist_turns_ts ON assist_turns(ts);

@@ -15,8 +15,10 @@ Everything is configured per persona in the **turn assist (JSON obj)** field
 
 | Key | Values | What it does |
 |---|---|---|
-| `think_policy` | `client` · `persona` · `adaptive` | `adaptive` picks the thinking level per turn from what just happened, using `think_levels` |
-| `think_levels` | `{"routine", "after_edit", "after_failure"}` | Levels for: a plain read/search result · the turn after an edit · a failed tool call, a new user message or a supervisor note |
+| `think_policy` | `client` · `persona` · `sticky` · `adaptive` | **`sticky`** (recommended): the persona's own level until the supervisor's detectors fire, then `think_escalate` until you next write — at most one change per stretch. `persona`: constant. `adaptive`: a level per turn from `think_levels` — see "Thinking levels and the cache" |
+| `think_base` / `think_escalate` / `think_escalate_after` | `""` / `high` / 1 | Sticky: level while all is well (`""` = the persona's) · level once stuck (`high` is Qwen's `xhigh`) · detector findings since your last message that count as stuck |
+| `think_levels` | `{"routine", "after_edit", "after_failure"}` | Adaptive only: levels for a plain read/search result · the turn after an edit · a failed tool call, a new user message or a supervisor note |
+| `loop_block_at` / `loop_block_any_at` / `loop_block_max` | 4 / 5 / 2 | Loop breaker (below): block the Nth identical call when its results never change · whatever the results · blocks per request before the turn ends with a message. 0 turns a threshold off |
 | `dedupe_reads` | bool | A `read_files` result identical to an earlier one becomes "identical to the read at message N" |
 | `roblox_cleanup` | bool | Strips Roblox Studio's Assistant-plugin stack prefix from Luau errors (the real error and line stay); adds "call list_roblox_studios" to stale-studio errors |
 | `image_keep` | N (0 = all) | Keep only the newest N screenshots in context |
@@ -45,15 +47,28 @@ The seeded `claude-cline-act` starts with the free features on and the rest in
 observe mode:
 
 ```json
-{"think_policy": "adaptive",
- "think_levels": {"routine": "off", "after_edit": "low", "after_failure": "high"},
+{"think_policy": "sticky",
  "dedupe_reads": true, "roblox_cleanup": true, "image_keep": 3,
  "prejudge": "observe", "supervisor": "observe", "auditor": "observe",
  "advisor": false, "frontier_models": []}
 ```
 
-On llama.cpp, Qwen's thinking is effectively on or off (the level only matters
-for gpt-oss-style models), which is why routine turns use `off`.
+With `sticky`, the level for every turn is the persona's own (`reasoning_effort`,
+forced) until the model is stuck. Set the persona to `medium` — the Qwen template's
+default, which adds nothing to the prompt — or `low`.
+
+## Thinking levels and the cache
+
+The Qwen3.8 template (froggeric `Qwen-Fixed-Chat-Templates`) takes
+`reasoning_effort` = `low` · `medium` (default, zero injected tokens) · `xhigh` ·
+`none`; `high` and `max` count as `xhigh`. Foundry sends `high` for `xhigh`, and
+thinking off as `enable_thinking=false`. Each level injects different instruction
+text, and off removes the thinking examples from the tools block, so **changing
+the level between turns rewrites part of the prompt**. Measured on a 2.85-hour
+session: 18 of 50 level changes forced a full re-read of the context (36%), against
+4 of 236 turns when the level stayed put. At 120K tokens a re-read is 4–6 minutes
+on a 27B, so `adaptive` (which changed level 54 times in that session) cost about
+26 minutes. `sticky` changed it twice.
 
 ## Global settings and precedence
 
@@ -103,10 +118,39 @@ of all edits.
 ## The prompt-cache rule
 
 llama.cpp keeps the previous turn's prompt cached; changing an older message
-forces a re-read of everything after it. Every history change turn assist makes
-is a pure function of the messages before it, so the same history is rewritten
-the same way every turn and the cached prefix still matches. Only the newest
-messages are ever new.
+(or anything near the top of the prompt) forces a re-read of everything after it,
+4–6 minutes at 120K tokens. Every history change turn assist makes is a pure
+function of the messages before it, so the same history is rewritten the same
+way every turn and the cached prefix still matches.
+
+**Context guard.** The guard (`context_guard`, `agent_brain` settings) trims a
+conversation that would overflow the persona's `context_window`. Its older,
+stateless form re-decided every turn from an estimate that wobbles with the
+learned chars/token ratio, so near the limit it flipped between trimmed and
+untrimmed prompts (a real session: 131 prompt changes in 332 turns, 1 hour of
+re-reading). The **sticky guard** (`context_guard_sticky`, on by default) keeps a
+memo per conversation: the number of leading steps already collapsed into the
+tool ledger. It never un-trims, applies the same cut every later turn, and
+advances only when the prompt is over budget again — by a whole block, down to
+72% of the budget (4 changes in the same session). Best of all is to keep it
+dormant: leave the persona `context_window` at 0 so the guard window is the
+model's, and let Cline compact (≈2.5 minutes) before the guard has to cut.
+
+The Scoreboard's **Prompt-cache misses** card shows every miss with its cause.
+
+## Loop breaker
+
+Cline 4.1.23 stops the whole task at its 5th identical tool call in a row ("Cline
+ran into N errors in a row and stopped the task… send a message to continue"),
+after a warning at the 3rd. Foundry sees each call before Cline does, so it blocks
+one earlier: the Nth identical call whose results never changed (default 4) is not
+forwarded; the model gets `[Foundry loop-breaker] blocked before it ran…` and is
+asked again in the same request, at `think_escalate`. A run whose results keep
+changing (reading a log while a job runs) is allowed until the 5th. If the model
+insists after `loop_block_max` blocks, the turn ends with a `BLOCKED by Foundry
+loop-breaker` message instead of the call, so the task never hard-stops. Active
+only for personas with an `assist` setting. In a real session the 5 identical
+calls that stopped Cline would have been cut off at the 4th.
 
 ## Pre-judge
 
@@ -226,8 +270,12 @@ never exported.
 
 ## Suggested rollout
 
+0. Before anything else: persona `context_window` 0 (guard dormant), Cline's
+   model context window ≈128K so it compacts near 115K, `think_policy: sticky`
+   with the persona on `medium` forced, `Roblox_Studio` MCP timeout 300 s.
 1. One sprint as seeded (observe). Compare Scoreboard findings with what you
-   would have stopped by hand.
+   would have stopped by hand — and watch the cache-miss card: it should show
+   a few misses at conversation start / compaction and almost none else.
 2. `prejudge: enforce`, `supervisor: nudge`.
 3. Set `frontier_models` (e.g. `["claude-sonnet-5", "cpa-gpt-5"]`) and
    `auditor: enforce` on a UI sprint; then `advisor: true`.

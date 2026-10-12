@@ -38,8 +38,22 @@ from dataclasses import dataclass, field
 from typing import Any, Optional
 
 ASSIST_DEFAULTS: dict[str, Any] = {
+    # think_policy: client | persona | sticky | adaptive.
+    #   persona  the persona's reasoning_effort, constant (cache friendly)
+    #   sticky   persona's level until the model is stuck, then think_escalate
+    #            until the user's next message — at most one change per task
+    #   adaptive a level per turn from think_levels. Every level change rewrites
+    #            the prompt (the Qwen template injects effort text) and measured
+    #            36% of changes forced a full re-read of the context (4-6 min at
+    #            120K tokens); keep for short contexts / experiments only.
     "think_policy": "persona",
     "think_levels": {"routine": "low", "after_edit": "medium", "after_failure": "high"},
+    "think_base": "",                     # sticky: level while all is well ("" = the persona's own)
+    "think_escalate": "high",             # sticky: level once stuck ("high" = Qwen's xhigh)
+    "think_escalate_after": 1,            # sticky: supervisor findings since the user's last message
+    "loop_block_at": 4,                   # block the Nth identical call when results never change (0 = off)
+    "loop_block_any_at": 5,               # block the Nth identical call whatever the results (Cline stops its task at 5)
+    "loop_block_max": 2,                  # blocks per request before the turn ends with a message
     "dedupe_reads": False,
     "roblox_cleanup": False,
     "image_keep": 0,
@@ -105,6 +119,7 @@ def config(persona: Optional[dict], global_cfg=None) -> dict:
                 cfg[k].update(v)
             else:
                 cfg[k] = v
+    cfg["_explicit"] = bool(layers[1])        # this persona has its own assist settings
     if g is not None:
         if getattr(g, "block_rules", None):
             cfg["_block_rules"] = g.block_rules
@@ -118,7 +133,9 @@ def config(persona: Optional[dict], global_cfg=None) -> dict:
 def enabled(cfg: dict) -> bool:
     return bool(cfg.get("dedupe_reads") or cfg.get("roblox_cleanup")
                 or int(cfg.get("image_keep") or 0) > 0
-                or cfg.get("think_policy") == "adaptive"
+                or cfg.get("think_policy") in ("adaptive", "sticky")
+                or (cfg.get("_explicit") and (int(cfg.get("loop_block_at") or 0) > 0
+                                              or int(cfg.get("loop_block_any_at") or 0) > 0))
                 or cfg.get("prejudge", "off") != "off"
                 or cfg.get("supervisor", "off") != "off"
                 or cfg.get("auditor", "off") != "off"
@@ -230,6 +247,24 @@ def events(messages: list[dict], err_rx=None) -> list[Event]:
                 ev.ok = not is_error(ev.result, err_rx)
                 ev.result_idx = i
     return out
+
+
+_CLINE_LOOP_WARN = "consecutive identical calls"
+
+
+def real_user_index(messages: list[dict]) -> int:
+    """Index of the last message the USER typed. Foundry's own notes and Cline's
+    injected loop warnings arrive as user messages but are not the user."""
+    last = -1
+    for i, m in enumerate(messages):
+        if m.get("role") != "user":
+            continue
+        t = _text(m.get("content"))
+        head = t[:200]
+        if NOTE_TAG in head or (head.startswith("Detected ") and _CLINE_LOOP_WARN in head):
+            continue
+        last = i
+    return last
 
 
 def tail_start(messages: list[dict]) -> int:
@@ -633,9 +668,7 @@ def supervise(messages: list[dict], mode: str, cfg: Optional[dict] = None) -> Su
         return Supervision(messages, [], [], 0)
     found = _detect(events(messages, error_rx(cfg)), cfg)
     start = tail_start(messages)
-    last_user = max((i for i, m in enumerate(messages)
-                     if m.get("role") == "user" and NOTE_TAG not in _text(m.get("content"))[:200]),
-                    default=-1)
+    last_user = real_user_index(messages)
     out = list(messages)
     since_user = 0
     for f in found:
@@ -652,6 +685,86 @@ def blocked_reply(findings: list, tried: int) -> str:
     return (f"BLOCKED by Foundry supervisor: {what}. Tried: {tried} supervisor notes "
             f"and the advisor. Needs: a decision from you — change the approach, "
             f"give a hint, or stop this task.")
+
+
+# ---- loop breaker ------------------------------------------------------------------
+
+def _call_key(tc: dict) -> str:
+    args = tc.get("arguments") if isinstance(tc.get("arguments"), dict) else _args(tc)
+    return str(tc.get("name") or "") + "|" + json.dumps(args, sort_keys=True)[:4000]
+
+
+@dataclass
+class LoopHit:
+    call: dict
+    repeats: int            # how many times in a row the call would have been made
+    same_results: bool
+    excerpt: str
+
+
+def loop_check(messages: list[dict], calls: list, cfg: dict, err_rx=None) -> list:
+    """Calls that would be the Nth identical call in a row. Cline stops the whole
+    task at its 5th identical call (loop guard, hard threshold) and waits for the
+    user; blocking one call earlier keeps the task alive. A run whose results
+    never changed is blocked at loop_block_at (4); a run whose results keep
+    changing (polling a log) is let through until loop_block_any_at (5)."""
+    at, any_at = int(cfg.get("loop_block_at") or 0), int(cfg.get("loop_block_any_at") or 0)
+    if not at and not any_at:
+        return []
+    evs = events(messages, err_rx)
+    hits = []
+    for tc in calls:
+        key = _call_key(tc)
+        run = []
+        for e in reversed(evs):
+            if e.key != key:
+                break
+            run.append(e)
+        n = len(run) + 1
+        if len(run) < 1:
+            continue
+        results = {hashlib.sha1(e.result.encode("utf-8", "replace")).hexdigest() for e in run}
+        same = len(results) == 1 and all(e.result_idx >= 0 for e in run)
+        if (at and n >= at and same) or (any_at and n >= any_at):
+            hits.append(LoopHit(tc, n, same, _text(run[0].result)[:240].replace("\n", " ")))
+    return hits
+
+
+def loop_block_text(h: LoopHit, cfg: dict) -> str:
+    name = str(h.call.get("name") or "tool")
+    if h.same_results:
+        return (f"{NOTE_TAG} loop-breaker] blocked before it ran: this exact {name} call "
+                f"was already made {h.repeats - 1} times in a row and returned the same "
+                f"result every time ({h.excerpt[:160]!r}). Making it again cannot change "
+                f"the outcome. Stop and change something material: re-read the code or "
+                f"error you are chasing, test a different hypothesis, or use a different "
+                f"tool. If you are out of ideas, say what you tried and what you need.")
+    return (f"{NOTE_TAG} loop-breaker] blocked before it ran: {name} was called with the "
+            f"same arguments {h.repeats - 1} times in a row (the client stops a task at "
+            f"{int(cfg.get('loop_block_any_at') or 5)}). Do something else first, then "
+            f"check again if you still need to.")
+
+
+def loop_stop_text(h: LoopHit) -> str:
+    return (f"BLOCKED by Foundry loop-breaker: the model kept repeating "
+            f"`{h.call.get('name')}` with identical arguments after being told not to "
+            f"({h.repeats - 1} times in a row). Last result: {h.excerpt[:200]!r}. "
+            f"Needs: a decision from you — give a hint, change the approach, or stop.")
+
+
+# ---- sticky thinking ---------------------------------------------------------------
+
+def sticky_think(messages: list[dict], findings: list, cfg: dict) -> tuple[Optional[str], str]:
+    """(level or None, why). None = leave the persona's own level. Escalates once
+    the supervisor's detectors fire after the user's last message, and stays
+    escalated until the user writes again — one change at most per stretch, so at
+    most one forced re-read of the context instead of one per level flip."""
+    last_user = real_user_index(messages)
+    n = sum(1 for f in findings if f.at > last_user)
+    if n >= max(1, int(cfg.get("think_escalate_after") or 1)):
+        return (cfg.get("think_escalate") or "high"), f"stuck: {n} finding(s) since your last message"
+    base = (cfg.get("think_base") or "").strip()
+    return (base or None), "steady"
 
 
 # ---- one call for the request path ---------------------------------------------
@@ -684,7 +797,11 @@ def prepare(messages: list[dict], cfg: dict) -> Prepared:
     for f in sup.new:
         notes.append(f"🛑 supervisor ({cfg.get('supervisor')}): {f.kind} — {f.detail}")
     p = Prepared(out, notes=notes, supervision=sup)
-    if cfg.get("think_policy") == "adaptive":
+    if cfg.get("think_policy") == "sticky":
+        found = sup.findings if (cfg.get("supervisor") or "off") != "off" \
+            else _detect(events(out, error_rx(cfg)), cfg)
+        p.think, p.think_why = sticky_think(out, found, cfg)
+    elif cfg.get("think_policy") == "adaptive":
         p.think, p.think_why = adaptive_think(out, cfg.get("think_levels") or {}, error_rx(cfg))
         if sup.new and cfg.get("supervisor") in ("nudge", "escalate"):
             p.think = (cfg.get("think_levels") or {}).get("after_failure", "high")

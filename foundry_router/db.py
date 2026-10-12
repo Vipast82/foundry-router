@@ -205,8 +205,10 @@ FINETUNE_PERSONA_DEFAULTS = {
 
 # Turn-assist defaults seeded onto claude-cline-act (see _seed_cline_assist).
 CLINE_ACT_ASSIST = {
-    "think_policy": "adaptive",
-    "think_levels": {"routine": "off", "after_edit": "low", "after_failure": "high"},
+    # sticky: the persona's own level (constant, cache friendly) until the model is
+    # stuck, then "high" (Qwen xhigh) until the user's next message. adaptive
+    # flipped the level every few turns and each flip cost a full prompt re-read.
+    "think_policy": "sticky",
     "dedupe_reads": True,
     "roblox_cleanup": True,
     "image_keep": 3,
@@ -215,6 +217,15 @@ CLINE_ACT_ASSIST = {
     "auditor": "observe",
     "advisor": False,
     "frontier_models": [],
+}
+
+# The v0.98 seed (adaptive thinking). _seed_cline_sticky upgrades a row that
+# still holds EXACTLY this — an edited persona is left alone.
+_CLINE_ACT_ASSIST_V9 = {
+    "think_policy": "adaptive",
+    "think_levels": {"routine": "off", "after_edit": "low", "after_failure": "high"},
+    "dedupe_reads": True, "roblox_cleanup": True, "image_keep": 3, "prejudge": "observe",
+    "supervisor": "observe", "auditor": "observe", "advisor": False, "frontier_models": [],
 }
 
 # Baseline client-compatibility notes (quality spec Phase 5) — documentation
@@ -467,6 +478,11 @@ class Database:
             ("personas", "quiet_narration", "INTEGER DEFAULT 0"),
             # What the model did right after an intervention (its next reply:
             # text head + tool calls) — the "response" half of a fine-tuning pair.
+            ("assist_turns", "prompt_tokens", "INTEGER"),
+            ("assist_turns", "cached_tokens", "INTEGER"),
+            ("assist_turns", "prefill_ms", "REAL"),
+            ("assist_turns", "cache_miss", "INTEGER"),
+            ("assist_turns", "cache_cause", "TEXT"),
             ("interventions", "next_action", "TEXT"),
             ("interventions", "next_ts", "TEXT"),
             # Code-sandbox audit trail: the submitted code (call arguments) and
@@ -514,6 +530,7 @@ class Database:
         self._seed_cline_effort()
         self._seed_finetune_defaults()
         self._seed_cline_assist()
+        self._seed_cline_sticky()
 
     def _seed_cline_assist(self) -> None:
         """Turn assist for the Cline pair (v9), once, only where unset:
@@ -537,6 +554,24 @@ class Database:
         self.kv_set("persona_seed_v9_cline_assist", now)
         self.log_event("info", "main", "persona seed v9 applied (Cline ACT turn assist in "
                                        "observe mode, PLAN fallback_policy=refuse)")
+
+    def _seed_cline_sticky(self) -> None:
+        """v10: Act's untouched v0.98 assist seed switches adaptive -> sticky
+        thinking (adaptive changed the level every few turns; each change forced
+        a full re-read of the context). Runs once, only on an exact match."""
+        if self.kv_get("persona_seed_v10_cline_sticky"):
+            return
+        row = self.query_one("SELECT assist FROM personas WHERE virtual_name='claude-cline-act'")
+        try:
+            cur = json.loads((row or {}).get("assist") or "null")
+        except (TypeError, ValueError):
+            cur = None
+        if cur == _CLINE_ACT_ASSIST_V9:
+            self.execute("UPDATE personas SET assist=?, updated_at=? "
+                         "WHERE virtual_name='claude-cline-act'",
+                         (json.dumps(CLINE_ACT_ASSIST), utcnow()))
+            self.log_event("info", "main", "persona seed v10 applied (Act: sticky thinking)")
+        self.kv_set("persona_seed_v10_cline_sticky", utcnow())
 
     def _seed_finetune_defaults(self) -> None:
         """Fill Foundry-FineTune's remaining defaults once (v8), only while the

@@ -1510,6 +1510,7 @@ async function tabScoreboard() {
       <a class="act" id="sb-export" href="#" title="Interventions as JSONL (trigger → intervention → what came next) for fine-tuning data">Export JSONL</a>
     </div>
     <div class="card"><div class="card-h">Subscription call budgets <span class="hint">— calls Foundry sent in the last 5 h / 24 h vs each backend's call_budget_5h / call_budget_daily</span></div><div id="sb-budgets"></div></div>
+    <div class="card"><div class="card-h">Prompt-cache misses <span class="hint">— every time the model server had to re-read most of a big (&gt;20K-token) prompt instead of using its cache. On a 27B at ~430 tok/s a 120K re-read is ~4–5 minutes, so this is where Act time silently goes. Causes: guard_trim = the context guard moved its cut; think_change = the thinking level differed from the previous turn; compaction = Cline compacted; conversation_start = first turn; unknown = nothing Foundry can see (check the llama.cpp log).</span></div><div id="sb-cache"></div></div>
     <div class="card"><div class="card-h">Errors per 100 tool calls by context size</div><div id="sb-zones"></div></div>
     <div class="card"><div class="card-h">Interventions in this window</div><div id="sb-kinds"></div></div>
     <div class="card"><div class="card-h">Conversations <span class="hint">— newest first</span></div><div id="sb-convs"></div></div>
@@ -1524,13 +1525,17 @@ async function tabScoreboard() {
     $("#sb-budgets").innerHTML = bud.backends.length ? `<table><tr><th>backend</th><th>type</th><th>last 5 h</th><th>last 24 h</th></tr>${
       bud.backends.map(b => `<tr><td>${esc(b.backend)}${b.enabled ? "" : " (parked)"}</td><td>${esc(b.type)}</td><td>${cell(b["5h"])}</td><td>${cell(b.daily)}</td></tr>`).join("")}</table>`
       : `<span class="hint">No subscription backends. Meridian is one automatically; mark others with <code>subscription: true</code> in Pool → backends.</span>`;
+    const ch = d.cache || {};
+    $("#sb-cache").innerHTML = ch.turns ? `<p style="margin:0 0 6px"><b>${ch.misses}</b> of ${ch.turns} requests missed the cache — <b>${ch.miss_minutes} min</b> of re-reading out of ${ch.prefill_minutes} min of total prompt processing.</p>` +
+      (ch.causes.length ? `<table><tr><th>cause</th><th>requests</th><th>minutes lost</th><th>tokens re-read</th></tr>${ch.causes.map(c => `<tr><td>${esc(c.cause)}</td><td>${c.turns}</td><td>${c.minutes}</td><td>${(c.tokens_reread || 0).toLocaleString()}</td></tr>`).join("")}</table>` : "") :
+      `<span class="hint">No cache data yet — it is recorded for assisted requests (personas with a turn assist setting) once they finish.</span>`;
     $("#sb-zones").innerHTML = `<table><tr><th>context</th><th>turns</th><th>tool calls</th><th>errors</th><th>per 100</th></tr>${
       d.zones.map(z => `<tr><td>${esc(z.zone)}</td><td>${z.turns}</td><td>${z.calls}</td><td>${z.errors}</td><td>${z.errors_per_100 ?? "—"}</td></tr>`).join("")}</table>`;
     const kinds = Object.entries(d.interventions || {});
     $("#sb-kinds").innerHTML = kinds.length ? kinds.map(([k, n]) => `<span class="pill">${esc(k)} ${n}</span>`).join(" ")
       : `<span class="hint">none yet</span>`;
-    $("#sb-convs").innerHTML = d.conversations.length ? `<table><tr><th>last</th><th>sprint</th><th>persona</th><th>turns</th><th>calls</th><th>err/100</th><th>max ctx</th><th>runaway</th><th>interventions</th><th>paid calls</th></tr>${
-      d.conversations.map(c => `<tr><td>${esc((c.last_ts || "").slice(0, 16).replace("T", " "))}</td><td>${esc(c.sprint || "")}</td><td>${esc(c.persona)}</td><td>${c.turns}</td><td>${c.calls ?? 0}</td><td>${c.errors_per_100 ?? "—"}</td><td>${c.max_ctx ? formatCtx(c.max_ctx) : "—"}</td><td>${c.runaway || 0}</td><td>${
+    $("#sb-convs").innerHTML = d.conversations.length ? `<table><tr><th>last</th><th>sprint</th><th>persona</th><th>turns</th><th>calls</th><th>err/100</th><th>max ctx</th><th>runaway</th><th>cache misses</th><th>interventions</th><th>paid calls</th></tr>${
+      d.conversations.map(c => `<tr><td>${esc((c.last_ts || "").slice(0, 16).replace("T", " "))}</td><td>${esc(c.sprint || "")}</td><td>${esc(c.persona)}</td><td>${c.turns}</td><td>${c.calls ?? 0}</td><td>${c.errors_per_100 ?? "—"}</td><td>${c.max_ctx ? formatCtx(c.max_ctx) : "—"}</td><td>${c.runaway || 0}</td><td>${c.cache_misses || 0}${c.miss_ms ? ` <span class="hint">(${(c.miss_ms / 60000).toFixed(0)} min)</span>` : ""}</td><td>${
         Object.entries(c.kinds || {}).map(([k, n]) => `${esc(k)}×${n}`).join(", ") || "—"}</td><td>${c.paid_calls || 0}</td></tr>`).join("")}</table>`
       : `<span class="hint">No assisted conversations in this window. Turn assist is set per persona (Routing → Personas → turn assist).</span>`;
     $("#sb-latest").innerHTML = l.interventions.length ? `<table><tr><th>time</th><th>kind</th><th>mode</th><th>detail</th><th>model</th></tr>${
@@ -2174,6 +2179,8 @@ async function tabBackends() {
         <input id="brain-hbvis" type="number" min="0" step="15" value="60" style="width:70px">
         <label title="Context guard: before sending a request to a model, Foundry estimates its size (messages + tool definitions). If it would overflow the model's context window (persona context_window, or the engine's n_ctx / max_model_len) minus the output reserve, Foundry trims the copy it sends — oversized old tool results first, then the oldest turns after your task (the system prompt and the task are always kept, tool calls stay paired with their results). Your client keeps its full history; the turn shows what was cut. Protects Cline when its own auto-compact doesn't fire in time.">context guard</label>
         <select id="brain-cguard"><option value="trim">trim</option><option value="off">off</option></select>
+        <label title="Sticky guard (recommended): once the guard has collapsed part of a conversation it keeps exactly that cut on every later turn and only collapses MORE when the prompt is over budget again (down to ~72% of it). Without this the cut moved or switched on and off turn to turn, and every change forced a minutes-long re-read of the whole prompt on the GPU.">sticky guard</label>
+        <input type="checkbox" id="brain-csticky" checked>
         <label title="Output tokens kept free for the answer when the context guard sizes a request. 0 = auto: the request's max tokens (client num_predict, else worker_max_tokens), capped at a quarter of the window.">answer reserve</label>
         <input id="brain-creserve" type="number" min="0" step="1024" value="0" style="width:80px">
         <label title="AGENT mode (Foundry-Chat etc.): stream the worker's REASONING (its thinking tokens) live as narration while it generates, but BUFFER the answer so the brain still reviews it (refusal/permissive fallback, outcome-judge) before showing it. Watch the model reason in real time; the final answer stays gated. Ollama workers only. (AGENT path.)">stream_worker_reasoning</label>
@@ -2251,6 +2258,7 @@ async function tabBackends() {
   $("#brain-hbvis").value = cfg.agent_brain.heartbeat_visible_seconds ?? 60;
   $("#brain-cguard").value = cfg.agent_brain.context_guard || "trim";
   $("#brain-creserve").value = cfg.agent_brain.context_guard_reserve_tokens || 0;
+  $("#brain-csticky").checked = cfg.agent_brain.context_guard_sticky !== false;
   $("#brain-swr").checked = !!cfg.agent_brain.stream_worker_reasoning;
   $("#brain-re").value = (cfg.agent_brain.reasoning_effort === "xhigh" ? "max"
     : cfg.agent_brain.reasoning_effort) || "";
@@ -2482,6 +2490,7 @@ async function tabBackends() {
       heartbeat_visible_seconds: parseInt($("#brain-hbvis").value, 10) || 0,
       context_guard: $("#brain-cguard").value,
       context_guard_reserve_tokens: parseInt($("#brain-creserve").value, 10) || 0,
+      context_guard_sticky: $("#brain-csticky").checked,
       stream_worker_reasoning: $("#brain-swr").checked,
       reasoning_effort: $("#brain-re").value.trim() || null,
       sampling_defaults: JSON.parse($("#brain-samp").value || "{}")}}));

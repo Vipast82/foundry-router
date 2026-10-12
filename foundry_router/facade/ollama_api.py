@@ -1082,6 +1082,15 @@ def _think_label(svc, model_id: str, persona=None, client_think=None) -> str:
     return f"think: {'on' if v is True else v} by {who}"
 
 
+def _think_level(svc, model_id: str, persona=None, client_think=None) -> str:
+    """The thinking level this request will run with, as a short word
+    (off / low / medium / high / max / default) — recorded per turn so a change
+    between turns (which rewrites part of the prompt) is visible."""
+    import re as _re
+    m = _re.match(r"think: (\S+)", _think_label(svc, model_id, persona, client_think))
+    return m.group(1) if m else "?"
+
+
 def _available_paid(svc, persona) -> list:
     """Reachable non-local (paid) chat models, honoring the persona allowlist."""
     import json as _json
@@ -1330,9 +1339,15 @@ def _apply_context_guard(svc, persona, model_id, messages, tools, options, logge
             reserve = 0
         reserve = reserve or out_cap or int(cfg.worker_max_tokens or 8192)
         reserve = min(reserve, _GUARD_MAX_AUTO_RESERVE, window // 4)
-    out, rep = context_guard.fit(messages, tools, window, reserve, model_id)
+    memo = None
+    if persona is not None and getattr(cfg, "context_guard_sticky", True):
+        from ..agents import conversation_key as _ck
+        memo = context_guard.memo_for(f"{persona.get('virtual_name')}|{model_id}|{_ck(messages)}")
+    out, rep = context_guard.fit(messages, tools, window, reserve, model_id, memo=memo)
     if not rep:
         return messages, ""
+    if rep.get("advanced") is False:
+        return out, ""                 # the same cut as last turn: nothing new to log or say
     note = context_guard.describe(rep)
     svc.db.log_event("warning", "context", f"{model_id}: {note}",
                      json.dumps(rep))
@@ -1632,6 +1647,9 @@ async def _direct_dispatch_chat(svc, persona, model_name, messages, client_tools
     assist_turn_id = None
     assist_visible: list[str] = []     # text the client must keep (advice, verdicts)
     audit_rejections = [0]             # rejections made inside THIS request
+    loop_blocks = [0]                  # identical calls blocked inside THIS request
+    turn_stats = iv.new_call_stats()   # cache numbers over this request's model calls
+    turn_think = ""
 
     def _iv(kind, **kw):
         iv.record(svc.db, conversation_key=conv_key, persona=persona["virtual_name"],
@@ -1684,7 +1702,9 @@ async def _direct_dispatch_chat(svc, persona, model_name, messages, client_tools
             model=model_id, sprint=iv.sprint_of(messages),
             context_tokens=context_guard.estimate(client_convo, all_tools, model_id),
             new_calls=len(_new), new_errors=sum(1 for e in _new if not e.ok),
-            total_calls=len(_evs), think=prep.think or "", think_why=prep.think_why)
+            total_calls=len(_evs), think=_think_level(svc, model_id, persona, client_think),
+            think_why=prep.think_why or "persona")
+        turn_think = _think_level(svc, model_id, persona, client_think)
         # Audits and advice get their own rounds instead of taking the model's.
         tool_cap += int(acfg.get("frontier_rounds") or 0)
         if advisor_on:
@@ -1694,6 +1714,7 @@ async def _direct_dispatch_chat(svc, persona, model_name, messages, client_tools
     async def _assist_after(res, rest, convo):
         """After a model round with no Foundry-owned calls: pre-judge its client
         calls, audit a final report. Returns (continue, convo, visible, notes, rest)."""
+        nonlocal persona
         notes: list[str] = []
         if not assist_on:
             return False, convo, "", notes, rest
@@ -1719,6 +1740,33 @@ async def _direct_dispatch_chat(svc, persona, model_name, messages, client_tools
                                     f"same turn was blocked. Re-issue it if you still need it."})
                 return True, convo + [_assistant_turn(res, rest)] + results, "", notes, rest
             rest = j.calls
+        if rest and (acfg.get("loop_block_at") or acfg.get("loop_block_any_at")):
+            hits = ta.loop_check(convo, rest, acfg, ta.error_rx(acfg))
+            if hits:
+                loop_blocks[0] += 1
+                h0 = hits[0]
+                text = ta.loop_block_text(h0, acfg)
+                _iv("loop_break", mode="on", detail=f"{h0.call.get('name')} ×{h0.repeats}",
+                    intervention=text, excerpt=h0.excerpt)
+                notes.append(f"🔁 loop-breaker: {h0.call.get('name')} would be call #{h0.repeats} "
+                             f"in a row — blocked")
+                if loop_blocks[0] > int(acfg.get("loop_block_max") or 2):
+                    stop = ta.loop_stop_text(h0)
+                    _iv("blocked", mode="loop", detail=stop[:300], intervention=stop)
+                    return False, convo, "\n\n" + stop + "\n\n", notes, []
+                # the re-ask thinks harder: the model is stuck, a one-off prompt change is worth it
+                persona = {**persona, "reasoning_effort": acfg.get("think_escalate") or "high",
+                           "force_reasoning_effort": 1, "_think_why": "loop-breaker"}
+                blocked = {id(h.call): h for h in hits}
+                results = []
+                for tc in rest:
+                    h = blocked.get(id(tc))
+                    results.append({"role": "tool", "tool_call_id": tc.get("id"),
+                                    "tool_name": tc.get("name"),
+                                    "content": ta.loop_block_text(h, acfg) if h else
+                                    f"{ta.NOTE_TAG} loop-breaker] not run: another call in the "
+                                    f"same turn was blocked. Re-issue it if you still need it."})
+                return True, convo + [_assistant_turn(res, rest)] + results, "", notes, rest
         amode = acfg.get("auditor") or "off"
         if rest or amode == "off" or not fa.is_final_report(res, summary_req, convo, acfg):
             return False, convo, "", notes, rest
@@ -1875,6 +1923,7 @@ async def _direct_dispatch_chat(svc, persona, model_name, messages, client_tools
             last_backend = backend
             own, rest = _split_calls(res)
             if assist_on:
+                iv.note_call(turn_stats, res)
                 iv.fill_next(svc.db, conv_key, res.content or "", res.tool_calls or [])
             if not own and rnd < tool_cap:
                 cont, convo2, vis, anotes, rest = await _assist_after(res, rest, convo)
@@ -1896,7 +1945,8 @@ async def _direct_dispatch_chat(svc, persona, model_name, messages, client_tools
             if not own or rnd >= tool_cap:
                 if own:
                     logger.record_guardrail(f"persona tool loop hit the {tool_cap}-round cap")
-                iv.finish_turn(svc.db, assist_turn_id, res.completion_tokens)
+                iv.finish_turn(svc.db, assist_turn_id, res.completion_tokens, turn_stats,
+                               conv_key, turn_think, bool(_guard_note))
                 res.tool_calls = rest          # never hand Foundry-owned calls to the client
                 # Keep what the model said / reasoned in earlier tool rounds
                 # (live streaming shows it as it happens; buffered must too).
@@ -2105,6 +2155,7 @@ async def _direct_dispatch_chat(svc, persona, model_name, messages, client_tools
                                             ttft_ms, t_round, router_ms, model_id))
                         own, rest = _split_calls(res)
                         if assist_on:
+                            iv.note_call(turn_stats, res)
                             iv.fill_next(svc.db, conv_key, res.content or "",
                                          res.tool_calls or [])
                         if own and rnd < tool_cap:
@@ -2133,7 +2184,8 @@ async def _direct_dispatch_chat(svc, persona, model_name, messages, client_tools
                                 produced = True
                                 convo = convo2
                                 continue
-                        iv.finish_turn(svc.db, assist_turn_id, res.completion_tokens)
+                        iv.finish_turn(svc.db, assist_turn_id, res.completion_tokens, turn_stats,
+                                       conv_key, turn_think, bool(_guard_note))
                         if own:
                             logger.record_guardrail(
                                 f"persona tool loop hit the {tool_cap}-round cap")

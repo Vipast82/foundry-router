@@ -130,6 +130,11 @@ class AgentBrainConfig(BaseModel):
     # tool results cut first, then the oldest turns after the task. The client
     # keeps its full history; the turn says what was cut. "off" = send as-is.
     context_guard: Literal["trim", "off"] = "trim"
+    # Sticky guard: remember per conversation how many steps are already
+    # collapsed and only ever collapse more (never un-trim, never move the cut
+    # back). The stateless guard flipped between trimmed and untrimmed prompts
+    # turn to turn near the limit and every flip cost a full re-prefill.
+    context_guard_sticky: bool = True
     # Output tokens kept free for the answer when the guard decides whether to
     # trim. 0 = auto: the request's max tokens capped at 8192 (and 1/4 of the
     # window), so the guard only trims a conversation that truly won't fit and

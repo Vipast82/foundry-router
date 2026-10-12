@@ -189,8 +189,124 @@ def tool_ledger(units: list, window: int, cap_chars: int = 0) -> str:
     return header + "\n" + "\n".join(lines)
 
 
+# ---- sticky mode -----------------------------------------------------------------
+# The stateless fit() below re-decides every turn, from an estimate that moves
+# (learned chars/token, tool results cut when a block boundary passes). Measured
+# on a real Cline session it flipped between trimmed (108K) and untrimmed (148K)
+# prompts on consecutive turns and the cut point drifted 54 -> 56 -> 54 -> 58
+# messages: every change rewrote the prompt from the first dropped message on
+# and cost a 4-6 minute re-prefill. Sticky mode keeps one memo per conversation:
+# the number of leading steps already collapsed. It only ever grows, is applied
+# on every later turn whether or not the estimate still crosses the budget, and
+# advances only when the prompt is over budget again — then by a whole block
+# (down to _STICKY_TARGET of the budget), so the next advance is ~25% of the
+# budget of growth away. No other history is touched in this mode.
+
+_STICKY_TARGET = 0.72          # after an advance the prompt is cut down to this share of the budget
+_memos: dict = {}              # conversation key -> {"n": steps collapsed, "sig": hash of them}
+_MEMO_CAP = 64
+
+
+def memo_for(key: str) -> dict:
+    """The (mutable) sticky memo for one conversation; bounded LRU."""
+    m = _memos.pop(key, None)
+    if m is None:
+        m = {}
+    _memos[key] = m
+    while len(_memos) > _MEMO_CAP:
+        _memos.pop(next(iter(_memos)))
+    return m
+
+
+def _sig(units: list) -> str:
+    import hashlib
+    h = hashlib.sha1()
+    for u in units:
+        for m in u:
+            h.update(json.dumps([m.get("role"), m.get("content"), m.get("tool_calls")],
+                                sort_keys=True, default=str).encode("utf-8", "replace"))
+    return h.hexdigest()
+
+
+def _build(prefix: list, units: list, n: int, window: int, ledger_cap: float) -> tuple:
+    """(messages, dropped message count) with the first n steps collapsed."""
+    kept_users: list = []
+    gone: list = []
+    for u in units[:n]:
+        if u[0].get("role") == "user":
+            kept_users.extend(u)      # typed prompts are the task: never dropped
+        else:
+            gone.append(u)
+    remaining = [m for u in units[n:] for m in u]
+    dropped = sum(len(u) for u in gone)
+    if not dropped:
+        return prefix + kept_users + remaining, 0
+    ledger = {"role": "user", "content": tool_ledger(gone, window, int(ledger_cap))}
+    return prefix + kept_users + [ledger] + remaining, dropped
+
+
+def fit_sticky(messages: list[dict], tools: Optional[list], window: int, reserve: int,
+               model: str, memo: dict) -> tuple[list[dict], Optional[dict]]:
+    """fit() for a conversation with a memo (see above). Always returns a report
+    when it changed anything; report["advanced"] says whether the cut moved this
+    turn (False = the same cut as last turn, nothing new to tell anyone)."""
+    if not window or window <= 0 or not messages:
+        return messages, None
+    budget = int((window - max(0, reserve)) * 0.97)
+    if budget <= 0:
+        return messages, None
+    r = ratio_for(model)
+    msgs = [dict(m) for m in messages]
+    first_user = next((i for i, m in enumerate(msgs) if m.get("role") == "user"), None)
+    cut_from = (first_user + 1) if first_user is not None else 0
+    prefix, rest = msgs[:cut_from], msgs[cut_from:]
+    units = _units(rest)
+    before = estimate(messages, tools, model)
+
+    n = int(memo.get("n") or 0)
+    if n and (n > len(units) or memo.get("sig") != _sig(units[:n])):
+        n = 0                                   # history isn't what the memo was made from
+        memo.clear()
+    # The ledger's size cap decides which lines fold into counts, so it is part of
+    # the prompt: fixed when the cut is made, never recomputed from the learned
+    # chars/token ratio (which wobbles every turn and would rewrite the ledger).
+    ledger_cap = float(memo.get("cap") or budget * r * _LEDGER_SHARE)
+    advanced = False
+    out, dropped = _build(prefix, units, n, window, ledger_cap)
+    now = estimate(out, tools, model)
+    if now > budget:
+        # over budget again: advance by a whole block, down to the target share
+        target = budget * _STICKY_TARGET
+        while now > target and n < len(units) - 1:
+            n += 1
+            out, dropped = _build(prefix, units, n, window, ledger_cap)
+            now = estimate(out, tools, model)
+        advanced = True
+        ledger_cap = budget * r * _LEDGER_SHARE
+        out, dropped = _build(prefix, units, n, window, ledger_cap)
+        now = estimate(out, tools, model)
+        memo["n"], memo["sig"], memo["cap"] = n, _sig(units[:n]), ledger_cap
+    elif n:
+        memo["n"], memo["sig"], memo["cap"] = n, _sig(units[:n]), ledger_cap
+    if not n and not advanced:
+        return messages, None
+
+    trimmed = 0
+    if now > budget:                             # one huge recent message: cut its middle
+        biggest = max(range(len(out)), key=lambda i: message_chars(out[i]))
+        m = out[biggest]
+        if isinstance(m.get("content"), str):
+            over_chars = int((now - budget) * r) + 200
+            keep = max(1000, len(m["content"]) - over_chars)
+            out[biggest] = {**m, "content": _cut(m["content"], keep, "message too large")}
+            trimmed += 1
+            now = estimate(out, tools, model)
+    return out, {"window": window, "budget": budget, "before": before, "after": now,
+                 "dropped": dropped, "trimmed": trimmed, "advanced": advanced, "steps": n}
+
+
 def fit(messages: list[dict], tools: Optional[list], window: int, reserve: int,
-        model: str = "") -> tuple[list[dict], Optional[dict]]:
+        model: str = "", memo: Optional[dict] = None) -> tuple[list[dict], Optional[dict]]:
     """Return (messages to send, report or None when nothing was trimmed).
 
     Prompt-cache friendly: llama.cpp / vLLM / Claude reuse the KV cache for
@@ -201,6 +317,8 @@ def fit(messages: list[dict], tools: Optional[list], window: int, reserve: int,
     budget, and the note is constant — making the trimmed prefix identical
     from turn to turn until the next block boundary is crossed (the same idea
     as Cline dropping half its history at once)."""
+    if memo is not None:
+        return fit_sticky(messages, tools, window, reserve, model, memo)
     if not window or window <= 0 or not messages:
         return messages, None
     budget = int((window - max(0, reserve)) * 0.97)      # 3% margin for estimate error
