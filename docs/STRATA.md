@@ -16,7 +16,9 @@ on llama.cpp/ggml and takes the same reasoning and sampling fields).
 | `--context` | 131072 if RAM allows (65536 otherwise) | Cline needs room; the number goes into the persona and Cline below |
 | `fit_max_tokens: true` in `strata-<model>.json` (or `--fit-max-tokens`) | **required** | Strata refuses a request whose `max_tokens` doesn't fit the remaining context. Foundry also fits the cap itself (v0.100.1), this is the backstop |
 | `--prompt-cache` | leave on (default) | the conversation cache; one conversation is cached at a time |
-| `--prompt-cache-tail` | on (single-GPU serve only) | one extra checkpoint near the end of each prompt: a change late in the prompt re-reads less |
+| `--prompt-cache-tail` | on, **single-GPU serve only** (not with `layer_split` across two cards) | one extra checkpoint near the end of each prompt: a change late in the prompt re-reads less |
+| `--conversation-cache-mib` | e.g. 8192 | RAM cache for conversations, so another request doesn't cost Cline's whole context |
+| `reasoning_budget_tokens` | e.g. 24576 | caps thinking; the persona's `max_output_tokens` must be larger (thinking + the tool call) |
 | `--parallel` / `"parallel"` | 1 | Cline's loop is sequential; a second slot only splits memory |
 | Quant | `IQ3_XXS` (47 GB RAM+VRAM) or `IQ3_S` (55 GB, "matches the full model") | the "Q3" sizes Strata ships; `IQ2_XS` (39 GB) if RAM is short |
 
@@ -68,7 +70,7 @@ and with experts in system RAM a long re-read is slower than on a dense GPU mode
 | `model_allowlist` | `["<Strata's model id>"]` — one model only |
 | `context_window` | Strata's `--context` (e.g. `131072`) |
 | `reasoning_effort` | `medium`, **force on** — constant every turn (Strata's own default is `high`) |
-| `max_output_tokens` | `16384` |
+| `max_output_tokens` | `16384`, or **`32768` when Strata's `reasoning_budget_tokens` is above ~12K** (thinking counts toward it; a cap under the budget cuts the reply before its tool call) |
 | `sampling_options` | `{"temperature": 0.6, "top_p": 0.95, "top_k": 20, "min_p": 0}` |
 | turn assist | see below |
 
@@ -83,6 +85,23 @@ Cline (OpenAI Compatible model settings): context window ≈ **0.9 × Strata's
 context** (e.g. 118000 for 131072) so Cline compacts before Foundry's guard would
 have to cut; request timeout 900 s or blank. `cline_mcp_settings.json`:
 `Roblox_Studio` `"timeout": 300`.
+
+### Thinking levels to test
+
+* **Fixed high** (`think_policy: "persona"`, `reasoning_effort: "high"`, force on): the
+  level never changes, so it never costs a re-read. Slowest turns, most thinking.
+* **Adaptive later** (`think_policy: "adaptive"`): use Strata's levels only —
+  `"think_levels": {"routine": "low", "after_edit": "medium", "after_failure": "high"}`
+  (no `off`). Every level change rewrites part of the prompt; the Scoreboard's
+  cache card counts those as `think_change`, so you can see what adaptive costs
+  on your PCIe link before keeping it.
+
+### Sampling
+
+Strata's own `sampling` block is used only when the request carries none. Foundry
+sends the persona's `sampling_options`, and anything the CLIENT sends wins over
+both. Events → `client set reasoning effort … sampling={…}` shows what Cline
+actually sends (v0.100.2); if it sends a temperature, that is what runs.
 
 ## 5. Check after the first session
 

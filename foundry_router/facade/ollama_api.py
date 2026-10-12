@@ -419,10 +419,17 @@ async def _chat_dispatch(svc, body: dict):
     client_think = body.get("think")
     if client_think is None:
         client_think = body.get("reasoning_effort") or (options or {}).get("reasoning_effort")
-    if client_think is not None:
+    # Client-sent sampling wins over the persona's sampling_options (sampling.
+    # resolve_options), so log it beside the think value: a client that sends
+    # e.g. temperature 0 silently replaces the persona's tuned values.
+    client_sampling = {k: (options or {}).get(k) for k in
+                       ("temperature", "top_p", "top_k", "min_p", "repeat_penalty",
+                        "presence_penalty") if (options or {}).get(k) is not None}
+    if client_think is not None or client_sampling:
         svc.db.log_event("info", "facade",
                          f"client set reasoning effort: think={client_think!r} "
-                         f"model={model_name}")
+                         f"model={model_name}"
+                         + (f" sampling={client_sampling}" if client_sampling else ""))
 
     persona = svc.personas.get(model_name)
     summary_req = _is_client_summary_request(messages)

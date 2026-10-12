@@ -309,3 +309,13 @@ def test_output_cap_untouched_when_there_is_room(app, client, act):
                context_window=262_144, max_output_tokens=16_384)
     post(client, history(("read_files", {"files": []}, FILE)))
     assert pool.kw[0]["max_tokens"] == 16_384
+
+
+def test_client_sent_sampling_is_logged_beside_the_think_value(app, client, act):
+    act({"think_policy": "persona"}, {"m": [ChatResult(content="ok")]})
+    client.post("/v1/chat/completions", json={
+        "model": "Act", "stream": False, "temperature": 0, "top_p": 1,
+        "reasoning_effort": "xhigh", "messages": history(("read_files", {"files": []}, FILE)),
+        "tools": [{"type": "function", "function": {"name": "run_commands", "parameters": {}}}]})
+    ev = app.state.services.db.query("SELECT message FROM event_log WHERE source='facade'")
+    assert any("think='xhigh'" in e["message"] and "'temperature': 0" in e["message"] for e in ev)
