@@ -883,6 +883,8 @@ function renderServers(servers) {
     if (sv.mean_e2e_ms != null) it("mean request", _num(sv.mean_e2e_ms, "ms"), "Mean end-to-end request latency.");
     if (sv.prefix_cache_hit_pct != null) it("prefix cache", _num(sv.prefix_cache_hit_pct, "%"), "Share of prompt tokens served from the prefix cache (lifetime).");
     if (sv.spec_accept_pct != null) it("spec accept", _num(sv.spec_accept_pct, "%"), "Engine-wide speculative-decoding acceptance (lifetime).");
+    if (sv.expert_cache_hit_pct != null) it("expert cache", _num(sv.expert_cache_hit_pct, "%"), "Strata: share of MoE experts the last request found resident in VRAM. The rest are copied over PCIe or computed on the CPU — the main speed cost on a narrow link.");
+    if (sv.ram_used_pct != null) it("host RAM", _num(sv.ram_used_pct, "%"), "Strata: host RAM in use (all experts live in RAM).");
     if (sv.preemptions_total != null)
       it("preemptions", sv.preemptions_total ? `<span class="pill warn">${K(sv.preemptions_total)}</span>` : "0",
          "vLLM paused a request because the KV cache ran out. Growing = VRAM pressure: lower --max-num-seqs / --max-model-len.");

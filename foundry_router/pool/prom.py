@@ -77,6 +77,35 @@ def _r(v: Optional[float], nd: int = 1) -> Optional[float]:
     return None if v is None else round(v, nd)
 
 
+def dialect(m: dict) -> Optional[str]:
+    """Which engine's metric names these are: "vllm" | "llamacpp" | None."""
+    names = list(m)
+    if any(n.startswith("vllm:") for n in names):
+        return "vllm"
+    if any(n.startswith("llamacpp:") for n in names):
+        return "llamacpp"
+    return None
+
+
+def _strata_extras(m: dict) -> dict:
+    """Strata's own gauges beside its vLLM-style metrics: the expert cache it
+    exists for (experts served from VRAM vs fetched over PCIe / run on CPU),
+    its live rates and host RAM."""
+    if not any(n.startswith("strata:") for n in m):
+        return {}
+    out: dict = {"engine": "strata"}
+    hit = _sum(m, "strata:last_hit_rate")
+    if hit is not None:
+        out["expert_cache_hit_pct"] = _r(hit * 100.0 if hit <= 1.0 else hit)
+    out["live_decode_tps"] = _r(_sum(m, "strata:live_tok_s"))
+    out["live_prefill_tps"] = _r(_sum(m, "strata:live_prefill_tok_s_mean"))
+    out["prompt_seconds_total"] = _r(_sum(m, "strata:totals_prompt_seconds_total"))
+    out["decode_seconds_total"] = _r(_sum(m, "strata:totals_decode_seconds_total"))
+    used, total = _sum(m, "strata:ram_used_bytes"), _sum(m, "strata:ram_total_bytes")
+    out["ram_used_pct"] = _pct(used, total)
+    return {k: v for k, v in out.items() if v is not None}
+
+
 def summarize(flavor: str, m: dict) -> dict:
     """Normalize one engine's parsed metrics. Keys (all optional):
       requests_running / requests_waiting   — in-flight / queued requests
@@ -144,6 +173,9 @@ def summarize(flavor: str, m: dict) -> dict:
         out["truncated_total"] = _sum(m, "vllm:request_success_total",
                                       where={"finished_reason": "length"})
         out["requests_finished_total"] = _sum(m, "vllm:request_success_total")
+        out.update(_strata_extras(m))
+        if out.get("avg_decode_tps") is None and out.get("live_decode_tps"):
+            out["avg_decode_tps"] = out["live_decode_tps"]
     elif flavor == "meridian":
         # Meridian proxy telemetry: requests by status + latency by phase
         # (histogram means over its recent-request window).
