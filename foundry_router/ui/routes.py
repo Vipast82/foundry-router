@@ -43,6 +43,13 @@ def _mask(value):
     return "***" if value else value
 
 
+def _is_masked(value) -> bool:
+    """A value that is the UI's masked echo of a stored secret ("ca***" / "***"),
+    i.e. the user did not type a new one. Saving it must keep the stored value —
+    writing it would replace a working key with five characters."""
+    return isinstance(value, str) and value.endswith("***") and len(value) <= 5
+
+
 # --------------------------------------------------------------------------- #
 # Page                                                                        #
 # --------------------------------------------------------------------------- #
@@ -105,7 +112,15 @@ async def set_backends(request: Request):
                                 status_code=400)
 
     def mutate(raw):
-        raw.setdefault("backend_pool", {}).setdefault("internal", {})["backends"] = backends
+        internal = raw.setdefault("backend_pool", {}).setdefault("internal", {})
+        stored = {x.get("name"): x for x in (internal.get("backends") or [])
+                  if isinstance(x, dict)}
+        for b in backends:
+            if _is_masked(b.get("api_key")):
+                # The editor shows keys masked; keep the stored value (as written
+                # in config.yaml, ${VAR} reference included) for an unchanged one.
+                b["api_key"] = (stored.get(b.get("name")) or {}).get("api_key")
+        internal["backends"] = backends
     svc.config_store.save(mutate)
     await svc.rebuild_pool()
     return {"ok": True, "backends": svc.pool.backend_status()}
@@ -165,6 +180,8 @@ async def set_brain(request: Request):
                "stream_worker_reasoning", "reasoning_effort", "sampling_defaults",
                "routing_mode", "worker_tool_result_chars"}
     updates = {k: v for k, v in body.items() if k in allowed}
+    if _is_masked(updates.get("api_key")):
+        updates.pop("api_key")                       # masked echo: keep the stored key
     if updates.get("routing_mode") not in (None, "auto", "brain", "passthrough"):
         return JSONResponse({"error": "routing_mode must be auto, brain or passthrough"},
                             status_code=400)
