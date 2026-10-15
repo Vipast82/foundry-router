@@ -1689,6 +1689,9 @@ async def _direct_dispatch_chat(svc, persona, model_name, messages, client_tools
         route_notes.extend(_local_down_notes(svc, model_id))
     for n in route_notes:
         logger.record_guardrail(n)
+    request_context.note_route(
+        served_model=model_id, backend=(svc.pool.backend_info(model_id) or {}).get("name"),
+        routing="strict" if strict else "flexible")
     t0 = time.monotonic_ns()
     brain_cfg = svc.config_store.config.agent_brain
     # keep a heavy model warm between turns; a client-sent keep_alive wins
@@ -2418,62 +2421,69 @@ async def _direct_dispatch_chat(svc, persona, model_name, messages, client_tools
         # idle-timeout the connection.
         notes: list[str] = []
         task = asyncio.create_task(_run_with_failover(narrate=notes.append))
-        _wi = svc.pool.backend_info(model_id) or {}
-        btype = _wi.get("type") or ""
-        where = ("Claude" if btype == "anthropic-compatible" else
-                 "cloud" if _wi.get("subscription") else "local")
-        # IMMEDIATE beat so the client shows activity from the first moment (not a
-        # silent "thinking…") — in the NATIVE thinking field, so content stays
-        # clean. Names WHICH model is answering (local vs Claude).
-        if note:
-            yield tr.chat_chunk(model_name, "", done=False,
-                                thinking=f"⚙️ passthrough ({note}) — {persona['virtual_name']} "
-                                         f"policy picked {model_id}\n")
-        for n in route_notes:
-            yield tr.chat_chunk(model_name, "", done=False, thinking=f"⚠️ {n}\n")
-        if hb:
-            yield tr.chat_chunk(model_name, "", done=False,
-                                thinking=f"⚙️ routing to {where} · {model_id} — working… "
-                                         f"[{'think: off (compaction summary)' if summary_req else _think_label(svc, model_id, persona, client_think)} · "
-                                         f"Foundry {__version__} · req "
-                                         f"{(request_context.request_id() or '')[:8]}]\n")
-        started = time.monotonic()
-        pacer = keepalive.Pacer(keepalive.visible_every(brain_cfg))
-        while hb:
-            done, _ = await asyncio.wait({task}, timeout=hb)
-            if done:
-                break
+        try:
+            _wi = svc.pool.backend_info(model_id) or {}
+            btype = _wi.get("type") or ""
+            where = ("Claude" if btype == "anthropic-compatible" else
+                     "cloud" if _wi.get("subscription") else "local")
+            # IMMEDIATE beat so the client shows activity from the first moment (not a
+            # silent "thinking…") — in the NATIVE thinking field, so content stays
+            # clean. Names WHICH model is answering (local vs Claude).
+            if note:
+                yield tr.chat_chunk(model_name, "", done=False,
+                                    thinking=f"⚙️ passthrough ({note}) — {persona['virtual_name']} "
+                                             f"policy picked {model_id}\n")
+            for n in route_notes:
+                yield tr.chat_chunk(model_name, "", done=False, thinking=f"⚠️ {n}\n")
+            if hb:
+                yield tr.chat_chunk(model_name, "", done=False,
+                                    thinking=f"⚙️ routing to {where} · {model_id} — working… "
+                                             f"[{'think: off (compaction summary)' if summary_req else _think_label(svc, model_id, persona, client_think)} · "
+                                             f"Foundry {__version__} · req "
+                                             f"{(request_context.request_id() or '')[:8]}]\n")
+            started = time.monotonic()
+            pacer = keepalive.Pacer(keepalive.visible_every(brain_cfg))
+            while hb:
+                done, _ = await asyncio.wait({task}, timeout=hb)
+                if done:
+                    break
+                while notes:
+                    yield tr.chat_chunk(model_name, "", done=False, thinking=notes.pop(0))
+                yield tr.chat_chunk(
+                    model_name, "", done=False,
+                    thinking=pacer.line(f"{where} · {model_id}", time.monotonic() - started))
+            # Retrieve the result (or the failure) OUTSIDE the poll loop, so any error
+            # becomes a clean in-band message + done, never a torn stream.
+            err = None
+            try:
+                result = await task
+            except AllBackendsFailed as e:
+                _on_error(e)
+                err = str(e)
+            except Exception as e:                                # noqa: BLE001
+                logger.finish("error", str(e))
+                err = str(e)
             while notes:
                 yield tr.chat_chunk(model_name, "", done=False, thinking=notes.pop(0))
-            yield tr.chat_chunk(
-                model_name, "", done=False,
-                thinking=pacer.line(f"{where} · {model_id}", time.monotonic() - started))
-        # Retrieve the result (or the failure) OUTSIDE the poll loop, so any error
-        # becomes a clean in-band message + done, never a torn stream.
-        err = None
-        try:
-            result = await task
-        except AllBackendsFailed as e:
-            _on_error(e)
-            err = str(e)
-        except Exception as e:                                # noqa: BLE001
-            logger.finish("error", str(e))
-            err = str(e)
-        while notes:
-            yield tr.chat_chunk(model_name, "", done=False, thinking=notes.pop(0))
-        if err is not None:
-            yield tr.error_chunk(tr.client_error(err)[0])
-            return
-        tool_calls, stats = _finalize(result)
-        _tn = _truncation_note(result, out_cap, persona, svc, model_id, options)
-        if _tn:
-            yield tr.chat_chunk(model_name, "", thinking=_tn)
-        if result.thinking:
-            # The model's own reasoning (Claude extended thinking, a local
-            # model's think block) — to the native thinking pane, not content.
-            yield tr.chat_chunk(model_name, "", thinking=result.thinking)
-        yield tr.chat_chunk(model_name, result.content, tool_calls=tool_calls)
-        yield tr.chat_chunk(model_name, "", done=True, stats=stats)
+            if err is not None:
+                yield tr.error_chunk(tr.client_error(err)[0])
+                return
+            tool_calls, stats = _finalize(result)
+            _tn = _truncation_note(result, out_cap, persona, svc, model_id, options)
+            if _tn:
+                yield tr.chat_chunk(model_name, "", thinking=_tn)
+            if result.thinking:
+                # The model's own reasoning (Claude extended thinking, a local
+                # model's think block) — to the native thinking pane, not content.
+                yield tr.chat_chunk(model_name, "", thinking=result.thinking)
+            yield tr.chat_chunk(model_name, result.content, tool_calls=tool_calls)
+            yield tr.chat_chunk(model_name, "", done=True, stats=stats)
+        finally:
+            # Client went away mid-call (Cline restart, Kilo cancel): stop the
+            # backend work instead of letting it run to the end unseen.
+            if not task.done():
+                task.cancel()
+                logger.finish("cancelled", "client disconnected — backend call cancelled")
     return StreamingResponse(_quiet_stream(gen()) if quiet else gen(),
                              media_type="application/x-ndjson")
 
@@ -2520,6 +2530,8 @@ async def _passthrough_chat(svc, model_name, messages, client_tools, options,
     with the backend's real stats (durations, done_reason) handed back and the
     call recorded in the Live / Performance telemetry."""
     logger = RequestLogger(svc.db, "", model_name, "passthrough", user_text)
+    request_context.note_route(served_model=model_name,
+                               backend=(svc.pool.backend_info(model_name) or {}).get("name"))
     max_tokens = svc.config_store.config.agent_brain.worker_max_tokens
     t0 = time.monotonic_ns()
     client_messages = messages

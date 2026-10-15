@@ -348,7 +348,7 @@ class MeridianConfig(BaseModel):
     # first Claude attempt after exhaustion is denied with instructions to try
     # local; an insistent second attempt is permitted and logged as spending
     # credits. "never": exhaustion is a hard stop (credits never burned).
-    usage_credits: Literal["never", "last_resort"] = "last_resort"
+    usage_credits: Literal["never", "last_resort"] = "never"
     # User-directed paid routing: when the user's own message explicitly
     # requests a paid model ("use claude", "route this to opus"), the request
     # is honored past the free-first default — but if the relevant usage

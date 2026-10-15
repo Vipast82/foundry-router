@@ -693,6 +693,8 @@ class RequestLogger:
         self.steps = 0
         self.est_cost = 0.0
         self._t0 = time.monotonic()
+        from . import request_context
+        request_context.note_route(persona=persona or None, mode=mode or None)
 
     @property
     def elapsed_ms(self) -> float:
@@ -701,6 +703,8 @@ class RequestLogger:
 
     def record_model_call(self, model: str, backend: str, prompt_tokens: int,
                           completion_tokens: int, est_cost_usd: float) -> None:
+        from . import request_context
+        request_context.note_route(served_model=model or None, backend=backend or None)
         self.models_used.append({
             "model": model, "backend": backend,
             "prompt_tokens": prompt_tokens, "completion_tokens": completion_tokens,
@@ -759,6 +763,11 @@ class RequestLogger:
 
     def finish(self, status: str, error: str = "") -> None:
         from . import request_context
+        # One row per request: a late finish (e.g. "cancelled" after the call
+        # already recorded its outcome) must not log the request twice.
+        if getattr(self, "_finished", False):
+            return
+        self._finished = True
         try:
             self.db.execute(
                 """INSERT INTO request_log

@@ -145,3 +145,71 @@ def test_flexible_persona_behaviour_unchanged(strict, client):
                            model_allowlist=["missing-model"], pinned_models=[])
     r = _ask(client, "Old-Act")
     assert r.status_code == 200
+
+
+def test_response_headers_name_persona_and_served_model(strict, client):
+    strict.personas.upsert("Kilo-Local", execution_mode="direct", routing="strict",
+                           model_allowlist=["qwen-local"], pinned_models=[])
+    for path in ("/api/chat", "/v1/chat/completions"):
+        r = _ask(client, "Kilo-Local", path)
+        assert r.status_code == 200
+        h = r.headers
+        assert h["x-foundry-persona"] == "Kilo-Local"
+        assert h["x-foundry-served-model"] == "qwen-local"
+        assert h["x-foundry-served-backend"] == "llama"
+        assert h["x-foundry-routing"] == "strict"
+    # streaming too (headers are sent before the first token)
+    r = client.post("/v1/chat/completions", json={"model": "Kilo-Local", "stream": True,
+                    "messages": [{"role": "user", "content": "hi"}]})
+    assert r.headers["x-foundry-served-model"] == "qwen-local"
+
+
+def test_request_is_logged_once():
+    from foundry_router.usage import RequestLogger
+
+    class DB:
+        rows = 0
+
+        def execute(self, *a):
+            DB.rows += 1
+    lg = RequestLogger(DB(), "p", "p", "direct", "x")
+    lg.finish("ok")
+    lg.finish("cancelled", "client disconnected")
+    assert DB.rows == 1
+
+
+def test_disconnect_cancels_backend_task(strict):
+    """The buffered stream runs the backend call as a task; closing the stream
+    early (client gone) must cancel it."""
+    import asyncio
+    from foundry_router.facade import ollama_api
+    src = open(ollama_api.__file__).read()
+    assert "task.cancel()" in src and "client disconnected — backend call cancelled" in src
+
+    async def run():
+        started, cancelled = asyncio.Event(), asyncio.Event()
+
+        async def slow():
+            started.set()
+            try:
+                await asyncio.sleep(30)
+            except asyncio.CancelledError:
+                cancelled.set()
+                raise
+
+        async def gen():
+            task = asyncio.create_task(slow())
+            try:
+                while True:
+                    done, _ = await asyncio.wait({task}, timeout=0.01)
+                    yield b"."
+            finally:
+                if not task.done():
+                    task.cancel()
+        g = gen()
+        await g.__anext__()
+        await started.wait()
+        await g.aclose()                  # what Starlette does on disconnect
+        await asyncio.wait_for(cancelled.wait(), 1)
+        return True
+    assert asyncio.run(run())

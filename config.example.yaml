@@ -235,8 +235,9 @@ meridian:
   # Purchased usage credits (if enabled on the plan) kick in when windows
   # exhaust. "last_resort": first Claude attempt after exhaustion is denied
   # with "try local first"; an insistent retry is permitted and logged as
-  # spending credits. "never": exhaustion is a hard stop.
-  usage_credits: "last_resort"
+  # spending credits. "never" (default): exhaustion is a hard stop — no
+  # purchased credits are ever spent.
+  usage_credits: "never"
   # Active oauth-staleness watch: poll the quota endpoint (free, read-only)
   # this often. Meridian's sources.oauth has silently gone null twice —
   # usage figures drift with no error anywhere until someone compares numbers

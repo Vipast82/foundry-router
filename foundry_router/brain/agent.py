@@ -387,12 +387,18 @@ class AgentRunner:
                 queue.put_nowait(None)
 
         task = asyncio.create_task(runner())
-        while True:
-            ev = await queue.get()
-            if ev is None:
-                break
-            yield ev
-        await task
+        try:
+            while True:
+                ev = await queue.get()
+                if ev is None:
+                    break
+                yield ev
+            await task
+        finally:
+            # Consumer gone (client disconnected): stop the agent loop and its
+            # model calls instead of finishing unseen.
+            if not task.done():
+                task.cancel()
 
     # ------------------------------------------------- brain-view previewing --
 

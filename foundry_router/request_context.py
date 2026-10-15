@@ -81,6 +81,31 @@ def set_agent_caller(name: str):
     return _agent_caller.set(name or "")
 
 
+# Per-request ROUTE record, filled in by dispatch and stamped onto the response
+# headers by RequestIdMiddleware when the response starts — so every client
+# sees which persona was asked for and which backend/model actually served it.
+_route: contextvars.ContextVar[Optional[dict]] = contextvars.ContextVar(
+    "foundry_route", default=None)
+
+
+def note_route(**fields) -> None:
+    """Record route facts for this request (persona, served_model, backend,
+    mode, routing). Later calls overwrite earlier ones (e.g. after failover,
+    for responses that haven't started yet)."""
+    r = _route.get()
+    if r is not None:
+        r.update({k: v for k, v in fields.items() if v is not None})
+
+
+def route() -> dict:
+    return dict(_route.get() or {})
+
+
+_ROUTE_HEADERS = (("persona", b"x-foundry-persona"), ("served_model", b"x-foundry-served-model"),
+                  ("backend", b"x-foundry-served-backend"), ("mode", b"x-foundry-route-mode"),
+                  ("routing", b"x-foundry-routing"))
+
+
 def client_headers() -> dict:
     return dict(_client_headers.get())
 
@@ -145,11 +170,20 @@ class RequestIdMiddleware:
             headers.append((b"x-request-id", rid.encode("latin-1")))
             scope = dict(scope, headers=headers)
         rid_b = rid.encode("latin-1", "replace")
+        holder: dict = {}
+        token = _route.set(holder)
 
         async def send_with_id(message):
             if message.get("type") == "http.response.start":
                 h = [(k, v) for k, v in (message.get("headers") or []) if k != b"x-request-id"]
                 h.append((b"x-request-id", rid_b))
+                for key, hname in _ROUTE_HEADERS:
+                    v = holder.get(key)
+                    if v:
+                        h.append((hname, str(v).encode("latin-1", "replace")[:200]))
                 message = dict(message, headers=h)
             await send(message)
-        await self.app(scope, receive, send_with_id)
+        try:
+            await self.app(scope, receive, send_with_id)
+        finally:
+            _route.reset(token)
