@@ -40,12 +40,20 @@ class BackendState:
     busy: int = 0                      # calls in flight on THIS backend right now
 
 
+def _estimate(messages) -> int:
+    from ..budget import estimate_tokens
+    return estimate_tokens(messages)
+
+
 class InternalPool(BackendPool):
     def __init__(self, backends: list[BackendConfig], pool_cfg: BackendPoolConfig,
                  client: httpx.AsyncClient, db: Database):
         self.cfg = pool_cfg
         self.db = db
         self.client = client
+        # Budget ledger (budget.py), set by Services: every call is reserved
+        # before it is sent and settled after. None = no budget enforcement.
+        self.ledger = None
         self.backends: dict[str, BackendState] = {}
         # Disabled backends are kept only for the status list: nothing probes,
         # routes to, or raises alerts about them.
@@ -221,6 +229,7 @@ class InternalPool(BackendPool):
                 "subscription": bool(getattr(c, "is_subscription", False)),
                 "call_budget_5h": getattr(c, "call_budget_5h", None),
                 "call_budget_daily": getattr(c, "call_budget_daily", None),
+                "meridian_profile": getattr(c, "meridian_profile", None),
                 "management_key": getattr(c, "management_key", None),
                 "management_url": getattr(c, "management_url", None),
                 "usage_limit_pct": getattr(c, "usage_limit_pct", None)}
@@ -369,20 +378,30 @@ class InternalPool(BackendPool):
         if not candidates:
             raise AllBackendsFailed(f"no backend serves model {model!r}")
         errors = []
+        est = _estimate(messages) if self.ledger else 0
         call_id = self._inflight_enter(model, candidates[0].config.name)
         try:
             for s in candidates:
+                # Budget: reserved per attempt (retries count); a denial is raised
+                # as-is, never answered by trying another backend.
+                eid = await self._reserve(model, s, est)
                 s.busy += 1
+                settled = False
                 try:
                     result = await s.protocol.chat(model, messages, tools=tools,
                                                    options=options, max_tokens=max_tokens,
                                                    keep_alive=keep_alive, think=think, fmt=fmt)
                     s.consecutive_failures = 0
+                    self._settle(eid, "settled", result.prompt_tokens, result.completion_tokens)
+                    settled = True
                     return result, s.config.name
                 # ExceptionGroup: anyio TaskGroups can leak through httpcore on
                 # transport failures (observed live as an empty error string).
                 except (httpx.HTTPError, ProtocolError, OSError, ExceptionGroup) as e:
                     detail = describe_exception(e)
+                    self._settle(eid, "released" if isinstance(
+                        e, (httpx.ConnectError, httpx.ConnectTimeout)) else "error", detail=detail)
+                    settled = True
                     errors.append(f"{s.config.name}: {detail}")
                     if self._record_failure(s, detail):
                         self._notify()
@@ -391,9 +410,21 @@ class InternalPool(BackendPool):
                                       detail)
                 finally:
                     s.busy = max(0, s.busy - 1)
+                    if not settled:            # cancelled or an unexpected error
+                        self._settle(eid, "error", detail="call did not complete")
         finally:
             self._inflight_exit(model, call_id)
         raise AllBackendsFailed(f"all backends failed for {model!r}: " + " | ".join(errors))
+
+    async def _reserve(self, model: str, s: BackendState, est: int) -> Optional[int]:
+        if self.ledger is None:
+            return None
+        from ..budget import context_for
+        return await self.ledger.reserve_wait(context_for(model, s.config, est))
+
+    def _settle(self, eid, status, pt=0, ct=0, detail=""):
+        if self.ledger is not None and eid:
+            self.ledger.settle(eid, status, pt, ct, detail)
 
     async def chat_stream(self, model: str, messages: list[dict],
                           tools: Optional[list] = None,
@@ -408,6 +439,8 @@ class InternalPool(BackendPool):
         if not candidates:
             raise AllBackendsFailed(f"no backend serves model {model!r}")
         s = candidates[0]
+        eid = await self._reserve(model, s, _estimate(messages) if self.ledger else 0)
+        usage = {"pt": 0, "ct": 0, "status": "error", "detail": "stream did not complete"}
         call_id = self._inflight_enter(model, s.config.name)
         s.busy += 1
         calls = getattr(self, "_calls", None) or {}
@@ -423,16 +456,23 @@ class InternalPool(BackendPool):
                 elif (chunk.get("content") or chunk.get("thinking")) and call_id in calls:
                     calls[call_id].pop("progress", None)
                     calls[call_id]["generating"] = True
+                if chunk.get("done"):
+                    usage.update(pt=chunk.get("prompt_tokens") or 0,
+                                 ct=chunk.get("completion_tokens") or 0)
                 yield chunk
             s.consecutive_failures = 0
+            usage.update(status="settled", detail="")
         except (httpx.HTTPError, ProtocolError, OSError, ExceptionGroup) as e:
             detail = describe_exception(e)
+            usage.update(detail=detail, status="released" if isinstance(
+                e, (httpx.ConnectError, httpx.ConnectTimeout)) else "error")
             if self._record_failure(s, detail):
                 self._notify()
             raise AllBackendsFailed(f"stream from {s.config.name} failed: {detail}") from e
         finally:
             s.busy = max(0, s.busy - 1)
             self._inflight_exit(model, call_id)
+            self._settle(eid, usage["status"], usage["pt"], usage["ct"], usage["detail"])
 
     async def embed(self, model: str, inputs: list[str], **kw) -> tuple[dict, str]:
         """Embeddings with the same priority-ordered failover as chat()."""

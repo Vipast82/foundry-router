@@ -663,6 +663,46 @@ class MediaConfig(BaseModel):
     mcp_tools: bool = True
 
 
+class BudgetRule(BaseModel):
+    """One shared limit in the budget ledger (budget.py).
+
+    `match` selects the model calls it covers (all keys optional; a value is a
+    glob or a list of globs): backend, persona, client, account (e.g.
+    "cliproxy:codex", "meridian:claude"), model; and paid: true|false
+    (subscription/paid backends vs local). `per` splits the limit into one
+    allowance per client / persona / session / task (a helper run) / request /
+    backend / account; none = one shared allowance."""
+    name: str
+    enabled: bool = True
+    mode: Literal["enforce", "observe"] = "enforce"   # observe = log "would deny" only
+    match: dict = Field(default_factory=dict)
+    per: Optional[Literal["client", "persona", "session", "task", "request",
+                          "backend", "account"]] = None
+    window_minutes: int = 300          # 0 = no window: the whole life of the group
+    max_calls: Optional[int] = None    # model rounds, retries included
+    max_tokens: Optional[int] = None   # input + output tokens
+    max_concurrent: Optional[int] = None   # calls in flight at once
+    # Distinct helpers active at once (a helper = task id, else session, else
+    # client+persona); one stays "active" until idle_seconds after its last call.
+    max_active: Optional[int] = None
+    active_by: Literal["task", "session", "client", "persona"] = "task"
+    idle_seconds: int = 60
+    wait_seconds: float = 0            # wait this long for a free slot before refusing
+
+
+def _default_budget_rules() -> list:
+    return [BudgetRule(
+        name="one-frontier-helper",
+        match={"persona": "Foundry-Kilo-*", "paid": True},
+        max_concurrent=1, max_active=1, active_by="task", idle_seconds=60)]
+
+
+class BudgetsConfig(BaseModel):
+    enabled: bool = True
+    rules: list[BudgetRule] = Field(default_factory=_default_budget_rules)
+    retention_days: int = 90           # ledger rows (usage_events)
+
+
 class AppConfig(BaseModel):
     server: ServerConfig = Field(default_factory=ServerConfig)
     agent_brain: AgentBrainConfig = Field(default_factory=AgentBrainConfig)
@@ -686,6 +726,7 @@ class AppConfig(BaseModel):
     # are created, untouched ones updated to the profile's newer version, edited
     # ones left alone. Also available on demand from the Personas tab.
     persona_profiles: list[str] = Field(default_factory=list)
+    budgets: BudgetsConfig = Field(default_factory=BudgetsConfig)
 
 
 # --------------------------------------------------------------------------- #

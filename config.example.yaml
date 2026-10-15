@@ -401,6 +401,26 @@ media:
 # Also available on demand: Routing -> Personas -> "Default personas".
 persona_profiles: []               # e.g. [animaluprising-kilo]
 
+# Budget ledger (docs/BUDGETS.md): every model call from every client is
+# reserved before it is sent and settled with actual tokens. Rules limit calls,
+# tokens, calls in flight and active helpers per account / backend / persona /
+# client / session / task / request. Pause switches: Usage Log tab.
+budgets:
+  enabled: true
+  retention_days: 90
+  rules:
+    - name: one-frontier-helper        # one Kilo frontier helper at a time
+      match: {persona: "Foundry-Kilo-*", paid: true}
+      max_concurrent: 1
+      max_active: 1
+      active_by: task
+      idle_seconds: 60
+#    - name: kilo-session
+#      match: {client: kilo}
+#      per: session
+#      max_calls: 400
+#      window_minutes: 300
+
 # Client keys (docs/CLIENTS.md): who is asking, and what each client may reach.
 # mode optional = keyless clients still work while keys are rolled out.
 client_auth:

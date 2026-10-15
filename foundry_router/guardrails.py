@@ -48,6 +48,7 @@ class RequestGuardState:
 class Verdict:
     allowed: bool
     reason: str = ""
+    retry_after: Optional[float] = None     # seconds, when the denial knows its reset
 
 
 class GuardrailEngine:
@@ -94,6 +95,15 @@ class GuardrailEngine:
         things (§4.7, don't conflate): subscription-window models (Meridian —
         counts against max_paid_calls and the usage window, never dollar caps)
         and metered models (counts against max_paid_calls and spend caps)."""
+        ledger = getattr(self, "ledger", None)
+        if ledger is not None and backend_info:
+            from .budget import context_from_info
+            denial = ledger.check(context_from_info(model_id, backend_info))
+            if denial is not None:
+                ledger.record(context_from_info(model_id, backend_info), "denied",
+                              denial.rule, denial.message)
+                state.events.append(f"denied {model_id}: {denial.message}")
+                return Verdict(False, denial.message, denial.reset_s)
         backend_type = (backend_info or {}).get("type", "")
         is_meridian = backend_type == "anthropic-compatible"
         is_subscription = is_meridian or bool((backend_info or {}).get("subscription"))

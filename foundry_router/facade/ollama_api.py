@@ -878,7 +878,7 @@ def strict_candidates(svc, persona) -> list[str]:
 
 
 def strict_refusal(svc, persona, logger, code: str, detail: str, denials=None,
-                   status: int = 503):
+                   status: int = 503, retry_after=None):
     """Clear, machine-readable refusal for a strict persona. Never a silent
     substitute: the client sees why and what to do."""
     name = persona["virtual_name"]
@@ -887,8 +887,12 @@ def strict_refusal(svc, persona, logger, code: str, detail: str, denials=None,
     logger.finish("error", msg)
     svc.db.log_event("warning", "routing", msg, json.dumps({"code": code,
                                                           "denials": denials or []}))
-    return JSONResponse({"error": msg, "code": code, "persona": name,
-                         "denials": denials or []}, status_code=status)
+    body = {"error": msg, "code": code, "persona": name, "denials": denials or []}
+    headers = {}
+    if retry_after:
+        body["reset_seconds"] = int(retry_after)
+        headers["Retry-After"] = str(max(1, int(retry_after)))
+    return JSONResponse(body, status_code=status, headers=headers)
 
 
 async def _failover_list(svc, persona, first: str, user_text: str, eff,
@@ -1753,6 +1757,7 @@ async def _direct_dispatch_chat(svc, persona, model_name, messages, client_tools
             return strict_refusal(svc, persona, logger, "route_unavailable",
                                   ("no model in its allowlist is reachable "
                                    f"({', '.join(map(str, allow)) or 'allowlist is empty'})"))
+        resets = []
         for cand in cands:
             v = await svc.guardrails.check_paid_call(
                 cand, svc.pool.backend_info(cand), svc.registry.get(cand),
@@ -1762,11 +1767,14 @@ async def _direct_dispatch_chat(svc, persona, model_name, messages, client_tools
                 break
             logger.record_guardrail(f"denied {cand}: {v.reason}")
             denials.append(f"{cand}: {v.reason}")
+            if getattr(v, "retry_after", None):
+                resets.append(v.retry_after)
         if model_id is None:
             return strict_refusal(svc, persona, logger, "budget_denied",
                                   "every model in its route was denied by the usage "
                                   "budget (" + "; ".join(denials)[:500] + ")",
-                                  denials, status=429)
+                                  denials, status=429,
+                                  retry_after=min(resets) if resets else None)
         if denials:
             route_notes.append("strict route: " + " → ".join(
                 [d.split(":")[0] + " denied" for d in denials] + [model_id]))
@@ -2547,6 +2555,9 @@ async def _direct_dispatch_chat(svc, persona, model_name, messages, client_tools
             result = await _run_with_failover()
         except AllBackendsFailed as e:
             _on_error(e)
+            denied = _budget_denied_response(e)
+            if denied is not None:
+                return denied
             msg, overflow = tr.client_error(e)
             return JSONResponse({"error": msg}, status_code=400 if overflow else 502)
         tool_calls, stats = _finalize(result)
@@ -2634,6 +2645,20 @@ async def _direct_dispatch_chat(svc, persona, model_name, messages, client_tools
                              media_type="application/x-ndjson")
 
 
+def _budget_denied_response(e) -> "JSONResponse | None":
+    """A budget ledger denial (or a pause) as a 429 with its code and reset
+    time, so clients see a quota refusal rather than a backend failure."""
+    from ..budget import BudgetDenied
+    if not isinstance(e, BudgetDenied):
+        return None
+    body = {"error": e.message, "code": e.code, "rule": e.rule}
+    headers = {}
+    if e.reset_s:
+        body["reset_seconds"] = int(e.reset_s)
+        headers["Retry-After"] = str(max(1, int(e.reset_s)))
+    return JSONResponse(body, status_code=429, headers=headers)
+
+
 async def _quiet_stream(agen):
     """Drop Foundry's status lines from the thinking field of each NDJSON
     chunk (the model's own reasoning passes through). A chunk left with no
@@ -2693,6 +2718,9 @@ async def _passthrough_chat(svc, model_name, messages, client_tools, options,
         except AllBackendsFailed as e:
             _note_exhaustion(svc, model_name, e)
             logger.finish("error", str(e))
+            denied = _budget_denied_response(e)
+            if denied is not None:
+                return denied
             msg, overflow = tr.client_error(e)
             return JSONResponse({"error": msg}, status_code=400 if overflow else 502)
         logger.record_model_call(model_name, backend, result.prompt_tokens,

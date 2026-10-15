@@ -95,6 +95,8 @@
          line-height:1.3; }
   td.pname { min-width: 210px; max-width: 360px; }
   td.pdesc { min-width: 260px; }
+  td.bw-wide { min-width: 240px; }
+  td.bw-mid { min-width: 150px; }
   td.pname .pills { display: flex; flex-wrap: wrap; gap: 3px; margin-top: 3px; align-items: center; }
   td.pname .pills .pill { margin: 0; }
   .stat { margin-left: 18px; color: var(--dim); white-space: nowrap; }
@@ -4670,6 +4672,97 @@ function bindSubUsageCard() {
   $("#su-refresh").onclick = async () => { await api("subscription-usage?refresh=1"); render(); };
 }
 
+// Budget ledger monitor (budget.py): what every client used, where each
+// figure comes from, the shared rules and pause switches.
+function budgetCard(b) {
+  if (!b) return "";
+  const n = v => v == null ? '<span class="hint">unknown</span>' : Number(v).toLocaleString();
+  const calls = c => c === 1 ? "call" : "calls";
+  const tok = a => `${n(a.input_tokens)} in / ${n(a.output_tokens)} out`;
+  const paused = new Set((b.pauses || []).map(p => p.scope + "|" + p.value));
+  const pauseBtn = (scope, value) => {
+    const on = paused.has(scope + "|" + value);
+    return `<button class="act" title="${on ? "Resume" : "Pause"} every model call for this ${scope}. Paused calls are refused (never sent elsewhere)." onclick='budgetPause(${JSON.stringify(scope)}, ${JSON.stringify(value)}, ${!on})'>${on ? "resume" : "pause"}</button>${on ? ' <span class="pill bad">paused</span>' : ""}`;
+  };
+  const left = s => s == null ? "" : s >= 86400 ? `${Math.floor(s / 86400)}d ${Math.floor(s % 86400 / 3600)}h` : s >= 3600 ? `${Math.floor(s / 3600)}h ${Math.floor(s % 3600 / 60)}m` : `${Math.max(0, Math.floor(s / 60))}m`;
+  const win = w => {
+    const cls = w.used_pct >= 85 ? "bad" : w.used_pct >= 70 ? "warn" : "";
+    const reset = w.resets_in_s != null ? ` · resets in ${left(w.resets_in_s)}` : w.resets_at ? ` · resets ${esc(String(w.resets_at).slice(5, 16).replace("T", " "))}` : "";
+    return `<div class="nw"><span class="meter ${cls}"><span style="width:${Math.min(100, w.used_pct)}%"></span></span> ${esc(w.name)} <b>${w.used_pct}%</b><span class="hint" style="margin:0">${reset}</span></div>`;
+  };
+  const acctRows = (b.accounts || []).map(a => `<tr>
+    <td class="nw mono">${esc(a.account)}${a.plan ? ` <span class="pill">${esc(a.plan)}</span>` : ""}</td>
+    <td class="nw">${esc(a.kind)}</td>
+    <td>${a.provider_windows ? a.provider_windows.map(win).join("") + `<div class="hint" style="margin:0">${esc(a.provider_source || "")}${a.provider_age_s != null ? " · " + fmtDur(a.provider_age_s * 1000) + " old" : ""}</div>`
+          : a.kind === "local" ? '<span class="hint">—</span>' : `<span class="hint">unknown${a.provider_error ? " — " + esc(a.provider_error) : ""}</span>`}</td>
+    <td class="nw">${n(a.measured_5h.calls)} ${calls(a.measured_5h.calls)}<div class="hint" style="margin:0">${tok(a.measured_5h)}</div></td>
+    <td class="nw">${n(a.measured_7d.calls)} ${calls(a.measured_7d.calls)}<div class="hint" style="margin:0">${tok(a.measured_7d)}${a.measured_7d.quota_errors ? ` · <span style="color:var(--bad)">${a.measured_7d.quota_errors} quota errors</span>` : ""}</div></td>
+    <td class="nw">${a.image_jobs_5h == null ? '<span class="hint">—</span>' : `${a.image_jobs_5h} (5 h) · ${a.image_jobs_24h} (24 h)`}</td>
+    <td class="nw">${Object.entries(a.foundry_caps || {}).map(([k, v]) => `${esc(k.replace("call_budget_", ""))}: ${v}`).join(" · ") || '<span class="hint">—</span>'}</td>
+    <td class="nw">${a.kind === "local" ? pauseBtn("backend", a.backend) : pauseBtn("account", a.account)}</td></tr>`).join("");
+  const active = (b.active || []).map(c => `<span class="pill warn" title="${esc(c.client_id)} · ${esc(c.task_id || c.session_id || "")}">${esc(c.persona || c.model)} · ${esc(c.backend)} · ${c.seconds}s</span>`).join(" ");
+  const ruleRows = (b.rules || []).map(r => {
+    const lim = [r.max_calls ? `${r.max_calls} calls` : "", r.max_tokens ? `${Number(r.max_tokens).toLocaleString()} tokens` : "",
+                 r.max_concurrent ? `${r.max_concurrent} in flight` : "", r.max_active ? `${r.max_active} active ${r.active_by} (idle ${r.idle_seconds}s)` : ""].filter(Boolean).join(" · ");
+    const span = (r.max_calls || r.max_tokens) ? (r.window_minutes ? ` per ${r.window_minutes >= 60 ? (r.window_minutes / 60) + " h" : r.window_minutes + " min"}` : " in total") : "";
+    const use = r.usage.groups.slice(0, 4).map(g => `${esc(g.group)}: ${g.calls}${r.max_calls ? "/" + r.max_calls : ""} ${calls(r.max_calls || g.calls)}${r.max_tokens ? ", " + g.tokens.toLocaleString() + " tok" : ""}`).join("<br>") || '<span class="hint">no calls yet</span>';
+    return `<tr><td class="nw"><b>${esc(r.name)}</b>${r.enabled ? "" : ' <span class="pill">off</span>'}${r.mode === "observe" ? ' <span class="pill warn" title="logs what it would deny, denies nothing">observe</span>' : ""}</td>
+      <td class="mono bw-wide" style="white-space:normal">${esc(JSON.stringify(r.match))}${r.per ? ` · per ${esc(r.per)}` : " · shared"}</td>
+      <td class="bw-mid">${esc(lim + span)}</td>
+      <td class="bw-mid">${use}${r.usage.in_flight ? `<div class="hint" style="margin:0">${r.usage.in_flight} in flight</div>` : ""}${r.max_active && r.usage.active_helpers.length ? `<div class="hint" style="margin:0">active: ${esc(r.usage.active_helpers.join(", "))}</div>` : ""}</td></tr>`;
+  }).join("");
+  const breakdown = (rows, scope) => rows.length ? `<table><tr><th>${scope}</th><th>calls 24 h</th><th>5 h</th><th>paid</th><th>tokens</th><th>errors</th><th></th></tr>${rows.map(r => `<tr>
+      <td class="nw">${esc(r.name)}</td><td>${r.calls}</td><td>${r.calls_5h}</td><td>${r.paid_calls}</td>
+      <td class="nw">${tok(r)}</td><td>${r.errors}${r.quota_errors ? ` <span class="hint" style="margin:0">(${r.quota_errors} quota)</span>` : ""}</td>
+      <td class="nw">${r.name === "(none)" ? "" : pauseBtn(scope, r.name)}</td></tr>`).join("")}</table>` : '<p class="hint">No calls in the last 24 h.</p>';
+  const denials = (b.denials || []).map(d => `<tr><td class="mono nw">${esc(new Date(d.ts * 1000).toISOString().slice(11, 19))}</td>
+    <td class="nw">${d.status === "observed" ? '<span class="pill warn">would deny</span>' : '<span class="pill bad">denied</span>'} ${esc(d.rule || "")}</td>
+    <td class="nw">${esc(d.client || "")} · ${esc(d.persona || d.model || "")}</td><td class="bw-wide" style="white-space:normal">${esc(d.detail || "")}</td></tr>`).join("");
+  const otherPauses = (b.pauses || []).filter(p => p.scope !== "account" && p.scope !== "backend");
+  const t = b.totals;
+  return `<div class="card">
+    <h2 style="margin-top:0">Budgets &amp; usage <span class="hint" style="font-weight:normal">every client, every call</span> ${b.enabled ? "" : '<span class="pill bad">enforcement off</span>'}</h2>
+    <div class="row"><span class="stat" style="margin-left:0">last 5 h <b>${n(t["5h"].calls)} ${calls(t["5h"].calls)}</b></span>
+      <span class="stat">${tok(t["5h"])}</span>
+      <span class="stat">24 h <b>${n(t["24h"].calls)} ${calls(t["24h"].calls)}</b></span>
+      <span class="stat">retries <b>${t.retries_24h}</b></span>
+      <span class="stat">errors <b>${t["24h"].errors}</b>${t["24h"].quota_errors ? ` (${t["24h"].quota_errors} quota)` : ""}</span>
+      <span class="stat">denied <b>${t.denied_24h}</b></span>
+      ${t.observed_24h ? `<span class="stat">would deny <b>${t.observed_24h}</b></span>` : ""}</div>
+    <div class="row"><label>in flight now</label>${active || '<span class="hint">nothing</span>'}</div>
+    <h3>Accounts</h3>
+    <table><tr><th>account</th><th>kind</th><th title="${esc(b.sources.provider)}">plan usage (provider-reported)</th><th title="${esc(b.sources.measured)}">measured 5 h</th><th>measured 7 d</th><th>image jobs</th><th title="call_budget_5h / call_budget_daily on the backend">Foundry caps</th><th></th></tr>${acctRows}</table>
+    <p class="hint">Measured = ${esc(b.sources.measured)}. Provider-reported = ${esc(b.sources.provider)}. ${esc(b.sources.estimate)}.</p>
+    <h3>Rules</h3>
+    <table><tr><th>rule</th><th>covers</th><th>limit</th><th>current use</th></tr>${ruleRows || '<tr><td colspan="4" class="hint">no rules</td></tr>'}</table>
+    <details><summary style="cursor:pointer">Edit rules (JSON)</summary>
+      <p class="hint">Each rule: name, match {backend, persona, client, account, model: glob or list; paid: true/false}, per (client | persona | session | task | request | backend | account), window_minutes (0 = no window), max_calls, max_tokens, max_concurrent, max_active + active_by + idle_seconds, wait_seconds, mode (enforce | observe), enabled. See docs/BUDGETS.md.</p>
+      <textarea id="bg-rules" rows="10" style="width:100%" class="mono">${esc(JSON.stringify((b.rules || []).map(r => { const {usage, ...rest} = r; return rest; }), null, 2))}</textarea>
+      <div class="row"><input type="checkbox" id="bg-enabled" ${b.enabled ? "checked" : ""}><label for="bg-enabled">enforce budgets</label>
+        <button class="act primary" onclick="saveBudgetRules()">Save rules</button></div>
+    </details>
+    <h3>By client (24 h)</h3>${breakdown(b.by_client || [], "client")}
+    <h3>By persona (24 h)</h3>${breakdown(b.by_persona || [], "persona")}
+    ${otherPauses.length ? `<h3>Paused</h3>${otherPauses.map(p => `<div class="row"><span class="pill bad">${esc(p.scope)} ${esc(p.value)}</span> <span class="hint">since ${esc((p.paused_at || "").slice(0, 16))}</span> <button class="act" onclick='budgetPause(${JSON.stringify(p.scope)}, ${JSON.stringify(p.value)}, false)'>resume</button></div>`).join("")}` : ""}
+    <h3>Denials (24 h)</h3>
+    ${denials ? `<table><tr><th>time (UTC)</th><th>rule</th><th>who</th><th>detail</th></tr>${denials}</table>` : '<p class="hint">None.</p>'}
+  </div>`;
+}
+
+window.budgetPause = async (scope, value, paused) => {
+  try { await api("budgets/pause", {method: "POST", body: {scope, value, paused}}); render(); }
+  catch (e) { toast(e.message, true); }
+};
+
+window.saveBudgetRules = async () => {
+  let rules;
+  try { rules = JSON.parse($("#bg-rules").value || "[]"); } catch (e) { toast("Rules are not valid JSON: " + e.message, true); return; }
+  try {
+    await api("config/budgets", {method: "POST", body: {rules, enabled: $("#bg-enabled").checked}});
+    toast("Budget rules saved"); render();
+  } catch (e) { toast(e.message, true); }
+};
+
 // Image jobs (media.py): budget, models, settings and the recent jobs.
 function mediaCard(md) {
   if (!md) return "";
@@ -4862,9 +4955,10 @@ async function tabEvals() {
 }
 
 async function tabUsage() {
-  const [d, q, ce, su, md] = await Promise.all([
+  const [d, q, ce, su, md, bg] = await Promise.all([
     api("usage?limit=100"), api("quota"), api("tool_calls?executed_code=1&limit=50"),
-    api("subscription-usage").catch(() => null), api("media?limit=20").catch(() => null)]);
+    api("subscription-usage").catch(() => null), api("media?limit=20").catch(() => null),
+    api("budgets").catch(() => null)]);
   const reqs = d.requests || [];
 
   // ---- Code-execution audit (the sandbox's strongest audit trail) ---------------
@@ -4981,6 +5075,7 @@ async function tabUsage() {
     <td>${fbCell(r)}</td>
     </tr>`).join("");
   $("#main").innerHTML = `
+    ${budgetCard(bg)}
     ${quotaCard(q)}
     ${subUsageCard(su)}
     ${mediaCard(md)}

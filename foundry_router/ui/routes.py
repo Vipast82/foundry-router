@@ -878,6 +878,56 @@ async def set_subscription_usage(request: Request):
     return {"ok": True, "subscription_usage": cfg.subscription_usage.model_dump()}
 
 
+@router.get("/admin/api/budgets")
+async def budgets_monitor(request: Request):
+    """Budget ledger monitor: accounts (provider-reported vs measured),
+    calls in flight, client/persona breakdowns, rules and their use, denials,
+    pause switches."""
+    from .. import budget
+    return await budget.monitor(_svc(request))
+
+
+@router.post("/admin/api/budgets/pause")
+async def budgets_pause(request: Request):
+    """{scope: account|backend|persona|client, value, paused: bool, note}."""
+    svc = _svc(request)
+    body = await request.json()
+    try:
+        svc.ledger.set_pause(body.get("scope") or "", str(body.get("value") or "").strip(),
+                             bool(body.get("paused", True)), str(body.get("note") or "")[:200])
+    except ValueError as e:
+        return JSONResponse({"error": str(e)}, status_code=400)
+    svc.db.log_event("warning" if body.get("paused", True) else "info", "budgets",
+                     f"{body.get('scope')} {body.get('value')!r} "
+                     f"{'PAUSED' if body.get('paused', True) else 'resumed'}")
+    return {"ok": True, "pauses": svc.ledger.pauses()}
+
+
+@router.post("/admin/api/config/budgets")
+async def set_budgets(request: Request):
+    """{enabled?, retention_days?, rules?: [BudgetRule]} — rules replace the list."""
+    from ..config import BudgetsConfig
+    svc = _svc(request)
+    body = await request.json()
+    cur = svc.config_store.config.budgets.model_dump()
+    for k in ("enabled", "retention_days", "rules"):
+        if k in body:
+            cur[k] = body[k]
+    try:
+        validated = BudgetsConfig.model_validate(cur)
+    except Exception as e:                                        # noqa: BLE001
+        return JSONResponse({"error": f"invalid budgets: {e}"}, status_code=400)
+    names = [r.name for r in validated.rules]
+    if len(names) != len(set(names)):
+        return JSONResponse({"error": "rule names must be unique"}, status_code=400)
+    dumped = validated.model_dump(exclude_defaults=False)
+
+    def mutate(raw):
+        raw["budgets"] = dumped
+    cfg = svc.config_store.save(mutate)
+    return {"ok": True, "budgets": cfg.budgets.model_dump()}
+
+
 @router.get("/admin/api/media")
 async def media_overview(request: Request):
     """Image jobs: budget use, models (last success = verified), config and

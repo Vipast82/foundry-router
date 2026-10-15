@@ -99,6 +99,10 @@ class Services:
         self.guardrails = GuardrailEngine(cfg.guardrails, db, self.meridian_usage,
                                           pool_mode=cfg.backend_pool.mode)
         self.guardrails.cliproxy_usage = self.cliproxy_usage
+        from .budget import Ledger
+        self.ledger = Ledger(lambda: self.config_store.config.budgets, db)
+        self.guardrails.ledger = self.ledger
+        self.pool.ledger = self.ledger
         self.brain = BrainClient(cfg.agent_brain, self.http, db=db)
         self.research = ResearchAgent(
             cfg.registry.research, db, self.registry, self.mcp,
@@ -289,6 +293,7 @@ class Services:
     async def rebuild_pool(self) -> None:
         old = self.pool
         self.pool = build_pool(self.config_store.config, self.http, self.db)
+        self.pool.ledger = self.ledger
         self.pool.add_state_listener(self._on_pool_change)
         self.agent.pool = self.pool
         self.ollama_admin.pool = self.pool
@@ -381,8 +386,9 @@ class Services:
                 log.exception("retention prune failed")
             try:
                 await asyncio.to_thread(self.media.prune)
+                await asyncio.to_thread(self.ledger.prune)
             except Exception:
-                log.exception("media prune failed")
+                log.exception("media / ledger prune failed")
             await asyncio.sleep(max(5, int(cfg.prune_interval_minutes or 60)) * 60)
 
     async def refresh_brain_health(self) -> dict:

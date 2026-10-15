@@ -310,8 +310,11 @@ def _error_envelope(resp) -> JSONResponse:
         code = "context_length_exceeded"
     etype = ("rate_limit_error" if resp.status_code == 429 else
              "invalid_request_error" if resp.status_code < 500 else "api_error")
-    return JSONResponse({"error": {"message": msg or "error", "type": etype, "code": code}},
-                        status_code=resp.status_code)
+    err = {"message": msg or "error", "type": etype, "code": code}
+    if isinstance(body, dict) and body.get("reset_seconds"):
+        err["reset_seconds"] = body["reset_seconds"]
+    headers = {"Retry-After": resp.headers["retry-after"]} if resp.headers.get("retry-after") else {}
+    return JSONResponse({"error": err}, status_code=resp.status_code, headers=headers)
 
 
 @router.post("/v1/chat/completions")

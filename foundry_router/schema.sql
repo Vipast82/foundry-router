@@ -511,3 +511,39 @@ CREATE TABLE IF NOT EXISTS media_jobs (
 );
 CREATE INDEX IF NOT EXISTS idx_media_jobs_ts ON media_jobs(created_ts);
 CREATE INDEX IF NOT EXISTS idx_media_jobs_key ON media_jobs(client_id, idem_key);
+
+-- Budget ledger (budget.py): one row per model call (reserved before the call,
+-- settled after with actual tokens), plus denials. Shared by every client.
+CREATE TABLE IF NOT EXISTS usage_events (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  ts REAL,                           -- epoch seconds
+  request_id TEXT,
+  client_id TEXT,
+  session_id TEXT,
+  task_id TEXT,
+  parent_task_id TEXT,
+  persona TEXT,
+  backend TEXT,
+  model TEXT,
+  account TEXT,                      -- backend:provider for subscription backends
+  paid INTEGER DEFAULT 0,
+  status TEXT,                       -- reserved | settled | error | released | denied | observed
+  est_tokens INTEGER DEFAULT 0,
+  input_tokens INTEGER,
+  output_tokens INTEGER,
+  rule TEXT,                         -- denials: the rule (or "paused")
+  detail TEXT,
+  settled_ts REAL
+);
+CREATE INDEX IF NOT EXISTS idx_usage_events_ts ON usage_events(ts);
+CREATE INDEX IF NOT EXISTS idx_usage_events_session ON usage_events(session_id);
+CREATE INDEX IF NOT EXISTS idx_usage_events_task ON usage_events(task_id);
+
+-- Pause switches: scope = account | backend | persona | client.
+CREATE TABLE IF NOT EXISTS budget_pauses (
+  scope TEXT,
+  value TEXT,
+  paused_at TEXT,
+  note TEXT,
+  PRIMARY KEY (scope, value)
+);
