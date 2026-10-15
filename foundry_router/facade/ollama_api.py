@@ -114,9 +114,30 @@ def _client_model_denied(name: str, persona) -> "JSONResponse | None":
 
 
 def _visible_personas(svc) -> list:
+    """Chat personas this client may use (image personas are media policies,
+    not chat models, so they're never listed as models)."""
     from .. import client_auth
     return [p for p in svc.personas.list(enabled_only=True)
-            if client_auth.persona_allowed(p["virtual_name"])]
+            if client_auth.persona_allowed(p["virtual_name"])
+            and (p.get("kind") or "chat") != "media"]
+
+
+def _persona_gate(persona) -> "JSONResponse | None":
+    """A disabled persona is not served (Foundry's own validation runs are
+    the one exception), and an image persona is not a chat model."""
+    if persona is None:
+        return None
+    from .. import client_auth
+    name = persona["virtual_name"]
+    if not persona.get("enabled", 1) and not client_auth.current().get("internal"):
+        return JSONResponse({"error": f"persona {name!r} is disabled. Enable it in Foundry "
+                                      f"(Personas) to use it.", "code": "persona_disabled"},
+                            status_code=403)
+    if (persona.get("kind") or "chat") == "media":
+        return JSONResponse({"error": f"{name!r} is an image persona: use "
+                                      f"/v1/images/generations or the generate_image tool, "
+                                      f"not chat.", "code": "image_persona"}, status_code=400)
+    return None
 
 
 # --------------------------------------------------------------------------- #
@@ -393,6 +414,92 @@ async def _raw_show(svc, name: str):
             "capabilities": sorted(set(caps) | {"completion", "tools"})}
 
 
+def persona_meta(svc, persona: dict) -> dict:
+    """What a client should assume about a persona: the context window it can
+    really use, the output cap, and what it accepts.
+
+    Strict personas report the EFFECTIVE limits of the one model they use: the
+    lowest of the persona's context_window and the model's (backend-reported)
+    window, and the persona's max output capped by that. Flexible personas
+    keep the existing behaviour (the persona override, else the largest
+    routable window), since they can be served by different models."""
+    strict = is_strict(persona)
+    declared = [str(c) for c in _jl_list(persona.get("capabilities"))]
+    served = None
+    if strict:
+        cands = strict_candidates(svc, persona)
+        allow = _jl_list(persona.get("model_allowlist"))
+        served = cands[0] if cands else (str(allow[0]) if allow else None)
+
+    def _int(v):
+        try:
+            v = int(v)
+            return v if v > 0 else None
+        except (TypeError, ValueError):
+            return None
+
+    model_meta = (svc.registry.get(served) or {}) if served else {}
+    if strict:
+        ctx = min([v for v in (_int(persona.get("context_window")),
+                               _int(model_meta.get("context_length"))) if v] or [None])
+    else:
+        ctx = _persona_context_length(svc, persona)
+    out = _int(persona.get("max_output_tokens"))
+    if out and ctx:
+        out = min(out, ctx)
+    caps = _persona_capabilities(svc, persona)
+    if strict:
+        mcaps = set(_jl_list(model_meta.get("capabilities"))) | (
+            {"vision"} if "vision" in _jl_list(model_meta.get("tags")) else set())
+        caps = ["completion", "chat"]
+        if "tools" in declared or not declared:
+            caps.append("tools")
+        # vision only when the persona declares image input (or declares
+        # nothing and its model is known to see images)
+        if "image_input" in declared or (not declared and "vision" in mcaps):
+            caps.append("vision")
+        if "thinking" in mcaps:
+            caps.append("thinking")
+    validation = {}
+    try:
+        validation = json.loads(persona.get("validation") or "{}") or {}
+    except (TypeError, ValueError):
+        pass
+    return {"context_length": ctx, "max_output_tokens": out, "capabilities": caps,
+            "input_modalities": ["text", "image"] if "vision" in caps else ["text"],
+            "strict": strict, "served_model": served,
+            "backend": (persona.get("backend") or None),
+            "validation": validation.get("status")}
+
+
+def openai_model_entry(svc, persona: dict, created: int) -> dict:
+    """/v1/models entry with the metadata coding clients size themselves from
+    (OpenRouter-style top_provider/architecture plus plain aliases). Extra
+    fields are ignored by clients that don't know them."""
+    m = persona_meta(svc, persona)
+    entry = {"id": persona["virtual_name"], "object": "model", "created": created,
+             "owned_by": "foundry-router"}
+    if m["context_length"]:
+        entry["context_length"] = entry["context_window"] = m["context_length"]
+    if m["max_output_tokens"]:
+        entry["max_output_tokens"] = m["max_output_tokens"]
+    if m["context_length"] or m["max_output_tokens"]:
+        entry["top_provider"] = {k: v for k, v in (
+            ("context_length", m["context_length"]),
+            ("max_completion_tokens", m["max_output_tokens"])) if v}
+    entry["architecture"] = {"input_modalities": m["input_modalities"],
+                             "output_modalities": ["text"]}
+    entry["capabilities"] = {"tools": "tools" in m["capabilities"],
+                             "vision": "vision" in m["capabilities"],
+                             "reasoning": "thinking" in m["capabilities"]}
+    entry["foundry"] = {k: v for k, v in (
+        ("description", persona.get("description") or None),
+        ("routing", "strict" if m["strict"] else "flexible"),
+        ("served_model", m["served_model"]), ("backend", m["backend"]),
+        ("validation", m["validation"])) if v}
+    return entry
+
+
 @router.post("/api/show")
 async def show(request: Request) -> JSONResponse:
     svc = _svc(request)
@@ -402,9 +509,9 @@ async def show(request: Request) -> JSONResponse:
     if persona is None:
         raw = await _raw_show(svc, name)
         return JSONResponse(raw) if raw is not None else _model_not_found(name)
+    meta = persona_meta(svc, persona)
     return JSONResponse(tr.show_response(
-        persona, context_length=_persona_context_length(svc, persona),
-        capabilities=_persona_capabilities(svc, persona)))
+        persona, context_length=meta["context_length"], capabilities=meta["capabilities"]))
 
 
 # --------------------------------------------------------------------------- #
@@ -455,6 +562,9 @@ async def _chat_dispatch(svc, body: dict):
     denied = _client_model_denied(model_name, persona)
     if denied is not None:
         return denied
+    gate = _persona_gate(persona)
+    if gate is not None:
+        return gate
 
     if persona is None:
         if svc.pool.backend_info(model_name) is not None:
@@ -743,7 +853,17 @@ def strict_candidates(svc, persona) -> list[str]:
     allow = [str(a) for a in _jl_list((persona or {}).get("model_allowlist"))]
     pins = [str(p) for p in _jl_list((persona or {}).get("pinned_models"))]
     order = [p for p in pins if p in allow] + [a for a in allow if a not in pins]
-    avail = set(svc.pool.available_models())
+    pinned_backend = ((persona or {}).get("backend") or "").strip()
+    if pinned_backend:
+        # Exact backend identity: only what THAT backend serves, and only
+        # while it's usable — never the same model id from another backend.
+        s = (getattr(svc.pool, "backends", None) or {}).get(pinned_backend)
+        if s is None or not getattr(s.config, "enabled", True) or \
+                (s.ever_checked and not s.healthy):
+            return []
+        avail = set(s.models) | set(s.config.models or [])
+    else:
+        avail = set(svc.pool.available_models())
     out = []
     for m in order:
         hit = m if m in avail else next(
@@ -1619,6 +1739,10 @@ async def _direct_dispatch_chat(svc, persona, model_name, messages, client_tools
     strict = is_strict(persona)
     pins = [] if strict else _paid_pin_order(svc, persona)
     if strict:
+        # From here on the pool may only use this persona's backend (or the
+        # single best one when none is set): no cross-backend failover.
+        from .. import request_context as _rc
+        _rc.pin_backend((persona.get("backend") or "").strip() or "*first")
         # STRICT: the allowlist (in pinned order) is the whole route. Each
         # candidate is budget-checked; a denial moves to the next listed model
         # (shown to the client), never outside the list. Nothing listed is

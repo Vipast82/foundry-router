@@ -1,0 +1,316 @@
+"""Step 2: versioned default personas, exact-backend strict routing, disabled
+and image personas, /v1/models metadata, and end-to-end persona validation."""
+
+import json
+
+import httpx
+import pytest
+
+from foundry_router import profiles
+from foundry_router.config import BackendConfig, BackendPoolConfig
+from foundry_router.pool.internal import InternalPool
+
+HITS: list = []
+STATE: dict = {}
+KILO = "animaluprising-kilo"
+MODELS = {"strata": ["qwen3.8-flash-next-iq3_s"],
+          "meridian": ["claude-haiku-5-5", "claude-sonnet-5-5", "claude-opus-5-5"],
+          "cliproxy": ["gpt-6-luna", "gpt-6.1-sol", "gpt-6-astra", "claude-sonnet-5-5",
+                       "gpt-image-2.5-sunburst", "gpt-image-2.5-flare"]}
+HOSTS = {"strata-host": "strata", "meridian-host": "meridian", "cpa-host": "cliproxy"}
+
+
+def _reply(content=None, tool_calls=None, finish="stop"):
+    msg = {"role": "assistant", "content": content}
+    if tool_calls:
+        msg["tool_calls"] = tool_calls
+    return httpx.Response(200, json={"choices": [{"finish_reason": finish, "message": msg}],
+                                     "usage": {"prompt_tokens": 5, "completion_tokens": 2}})
+
+
+def _text_of(m):
+    c = m.get("content")
+    if isinstance(c, list):
+        return " ".join(p.get("text", "") for p in c if p.get("type") == "text"), \
+            any(p.get("type") == "image_url" for p in c)
+    return c or "", False
+
+
+async def _router(req: httpx.Request):
+    backend = HOSTS[req.url.host]
+    if req.url.path.endswith("/models"):
+        return httpx.Response(200, json={"data": [{"id": m} for m in MODELS[backend]]})
+    if "/images/" in req.url.path:
+        import base64
+        from tests.test_media import png
+        HITS.append((backend, "image"))
+        return httpx.Response(200, json={"data": [{"b64_json": base64.b64encode(png()).decode()}]})
+    body = json.loads(req.content)
+    HITS.append((backend, body["model"]))
+    if backend in STATE.get("fail", ()):
+        return httpx.Response(500, text="boom")
+    last = body["messages"][-1]
+    text, has_image = _text_of(last)
+    if last.get("role") == "tool":
+        return _reply("Flag alpha is now on.")
+    if body.get("tools") and last.get("role") == "user":
+        val = "true" if STATE.get("bool_as_string") else True
+        return _reply(None, [{"id": "call_1", "type": "function", "function": {
+            "name": "set_flag", "arguments": json.dumps({"name": "alpha", "enabled": val})}}],
+            finish="tool_calls")
+    if has_image:
+        return _reply("Blue" if STATE.get("blind") else "Red")
+    if body.get("max_tokens") == 16:
+        return _reply("1 2 3 4 5", finish="length")
+    if "FOUNDRY_OK" in text:
+        return _reply("FOUNDRY_OK")
+    return _reply("hello there my good friend")
+
+
+@pytest.fixture()
+def fleet(app, client):
+    svc = app.state.services
+    HITS.clear()
+    STATE.clear()
+    http = httpx.AsyncClient(transport=httpx.MockTransport(_router))
+    pool = InternalPool([
+        BackendConfig(name="strata", type="openai-compatible", url="http://strata-host/v1",
+                      flavor="llamacpp", priority=100),
+        # Meridian is mocked with the openai dialect here; its type marks it as Meridian.
+        BackendConfig(name="meridian", type="openai-compatible", url="http://meridian-host/v1",
+                      subscription=True, priority=100),
+        BackendConfig(name="cliproxy", type="openai-compatible", url="http://cpa-host/v1",
+                      api_key="k", flavor="cliproxyapi", priority=50)],
+        BackendPoolConfig(), http, svc.db)
+    for name, models in MODELS.items():
+        s = pool.backends[name]
+        s.healthy = s.ever_checked = True
+        s.models = list(models)
+    real_pool, real_http = svc.pool, svc.http
+    svc.pool, svc.http = pool, http
+    svc.config_store.config.agent_brain.direct_stream = False
+    svc.register_discovered()
+    svc.registry.upsert_auto("qwen3.8-flash-next-iq3_s", source="discovery", context_length=131072)
+    # the test pool marks Meridian by type in real deployments; map the profile's
+    # "meridian" kind onto this backend for the test
+    orig = profiles._resolve_backend
+    profiles._resolve_backend = lambda svc_, kind: (
+        "meridian" if kind == "meridian" else orig(svc_, kind))
+    yield svc
+    profiles._resolve_backend = orig
+    svc.pool, svc.http = real_pool, real_http
+
+
+def _rows(svc):
+    return {p["virtual_name"]: p for p in svc.personas.list() if p["virtual_name"].startswith("Foundry-Kilo")}
+
+
+# -- profile --------------------------------------------------------------------
+
+def test_profile_creates_strict_personas_frontier_disabled(fleet, client):
+    rep = client.post(f"/admin/api/profiles/{KILO}/apply").json()
+    assert rep["counts"] == {"create": 11}
+    rows = _rows(fleet)
+    assert len(rows) == 11
+    assert [n for n, r in rows.items() if r["enabled"]] == ["Foundry-Kilo-Local"]
+    for r in rows.values():
+        assert r["routing"] == "strict" and r["execution_mode"] == "direct"
+        assert r["fallback_policy"] == "refuse" and r["profile"] == f"{KILO}@1"
+    assert rows["Foundry-Kilo-Local"]["backend"] == "strata"
+    assert rows["Foundry-Kilo-Sonnet"]["backend"] == "meridian"
+    assert rows["Foundry-Kilo-Sol"]["backend"] == "cliproxy"
+    assert rows["Foundry-Kilo-Images"]["kind"] == "media"
+    again = client.post(f"/admin/api/profiles/{KILO}/apply").json()
+    assert again["counts"] == {"unchanged": 11}
+
+
+def test_profile_update_preserves_edits_enabled_state_and_foreign_personas(fleet, client, monkeypatch):
+    fleet.personas.upsert("Foundry-Kilo-Sol", description="mine", routing="flexible")
+    client.post(f"/admin/api/profiles/{KILO}/apply")
+    fleet.personas.upsert("Foundry-Kilo-Opus", description="my own wording")   # an edit
+    fleet.personas.upsert("Foundry-Kilo-Haiku", enabled=1)                    # just enabled
+    # a UI save that re-sends unchanged values (numbers as strings) is not an edit
+    fleet.personas.upsert("Foundry-Kilo-Luna", max_output_tokens="8192")
+    v2 = json.loads(json.dumps(profiles.PROFILES[KILO]))
+    v2["version"] = 2
+    for d in v2["personas"]:
+        d["max_output_tokens"] = 12000 if d["max_output_tokens"] else None
+    monkeypatch.setitem(profiles.PROFILES, KILO, v2)
+    status = {p["persona"]: p["action"] for p in
+              client.get("/admin/api/profiles").json()["profiles"][0]["personas"]}
+    assert status["Foundry-Kilo-Sol"] == "conflict" and status["Foundry-Kilo-Opus"] == "kept"
+    assert status["Foundry-Kilo-Haiku"] == status["Foundry-Kilo-Luna"] == "update"
+    client.post(f"/admin/api/profiles/{KILO}/apply")
+    rows = _rows(fleet)
+    assert rows["Foundry-Kilo-Sol"]["description"] == "mine"
+    assert rows["Foundry-Kilo-Sol"]["routing"] == "flexible"
+    assert rows["Foundry-Kilo-Opus"]["description"] == "my own wording"
+    assert rows["Foundry-Kilo-Opus"]["profile"] == f"{KILO}@1"
+    assert rows["Foundry-Kilo-Haiku"]["max_output_tokens"] == 12000
+    assert rows["Foundry-Kilo-Haiku"]["enabled"] == 1                          # kept on
+    assert rows["Foundry-Kilo-Haiku"]["profile"] == f"{KILO}@2"
+
+
+# -- routing gates ----------------------------------------------------------------
+
+def _chat(client, model, path="/v1/chat/completions"):
+    return client.post(path, json={"model": model, "stream": False,
+                                   "messages": [{"role": "user", "content": "hi"}]})
+
+
+def test_disabled_and_image_personas_are_not_chat_models(fleet, client):
+    client.post(f"/admin/api/profiles/{KILO}/apply")
+    ids = {m["id"] for m in client.get("/v1/models").json()["data"]}
+    assert "Foundry-Kilo-Local" in ids
+    assert "Foundry-Kilo-Sol" not in ids and "Foundry-Kilo-Images" not in ids
+    r = _chat(client, "Foundry-Kilo-Sol")
+    assert r.status_code == 403 and r.json()["error"]["code"] == "persona_disabled"
+    r = _chat(client, "Foundry-Kilo-Sol", "/api/chat")
+    assert r.status_code == 403 and r.json()["code"] == "persona_disabled"
+    assert client.get("/v1/models/Foundry-Kilo-Sol").status_code == 404
+    fleet.personas.upsert("Foundry-Kilo-Images", enabled=1)
+    r = _chat(client, "Foundry-Kilo-Images")
+    assert r.status_code == 400 and r.json()["error"]["code"] == "image_persona"
+    assert HITS == []
+
+
+def test_strict_persona_never_switches_backend_for_same_model(fleet, client):
+    STATE["fail"] = {"meridian"}
+    # claude-sonnet-5-5 is offered by meridian AND by a Claude account in CLIProxyAPI
+    fleet.personas.upsert("Pinned", execution_mode="direct", routing="strict",
+                          backend="meridian", model_allowlist=["claude-sonnet-5-5"])
+    assert _chat(client, "Pinned").status_code >= 500
+    assert {b for b, _ in HITS} == {"meridian"}
+    HITS.clear()
+    fleet.personas.upsert("StrictNoBackend", execution_mode="direct", routing="strict",
+                          model_allowlist=["claude-sonnet-5-5"])
+    assert _chat(client, "StrictNoBackend").status_code >= 500
+    assert {b for b, _ in HITS} == {"meridian"}            # the single best backend only
+    HITS.clear()
+    # pinned backend that doesn't serve the model -> refused before any call
+    fleet.personas.upsert("WrongBackend", execution_mode="direct", routing="strict",
+                          backend="strata", model_allowlist=["claude-sonnet-5-5"])
+    r = _chat(client, "WrongBackend")
+    assert r.status_code == 503 and r.json()["error"]["code"] == "route_unavailable"
+    assert HITS == []
+    # flexible personas keep their old cross-backend failover
+    fleet.personas.upsert("Flexible", execution_mode="direct",
+                          model_allowlist=["claude-sonnet-5-5"])
+    assert _chat(client, "Flexible").status_code == 200
+    assert ("cliproxy", "claude-sonnet-5-5") in HITS
+
+
+# -- metadata ---------------------------------------------------------------------
+
+def test_models_metadata_reports_effective_limits(fleet, client):
+    client.post(f"/admin/api/profiles/{KILO}/apply")
+    fleet.personas.upsert("Foundry-Kilo-Local", context_window=262144)   # above the model's
+    fleet.personas.upsert("Foundry-Kilo-Vision", enabled=1)
+    data = {m["id"]: m for m in client.get("/v1/models").json()["data"]}
+    local = data["Foundry-Kilo-Local"]
+    assert local["context_length"] == 131072                 # min(persona, model)
+    assert local["max_output_tokens"] == 32768
+    assert local["top_provider"] == {"context_length": 131072, "max_completion_tokens": 32768}
+    assert local["architecture"]["input_modalities"] == ["text"]
+    assert local["capabilities"] == {"tools": True, "vision": False, "reasoning": False}
+    assert local["foundry"]["routing"] == "strict" and local["foundry"]["backend"] == "strata"
+    assert local["foundry"]["served_model"] == "qwen3.8-flash-next-iq3_s"
+    vis = data["Foundry-Kilo-Vision"]
+    assert vis["capabilities"]["vision"] and "image" in vis["architecture"]["input_modalities"]
+    show = client.post("/api/show", json={"model": "Foundry-Kilo-Vision"}).json()
+    assert "vision" in show["capabilities"]
+    assert client.get("/v1/models/Foundry-Kilo-Local").json()["context_length"] == 131072
+    show = client.post("/api/show", json={"model": "Foundry-Kilo-Local"}).json()
+    assert show["model_info"]["general.context_length"] == 131072
+
+
+# -- validation -------------------------------------------------------------------
+
+def _validate(client, name):
+    r = client.post("/admin/api/personas/validate", json={"virtual_name": name})
+    assert r.status_code == 200, r.text
+    return r.json()
+
+
+def test_validate_local_persona_passes_every_check(fleet, client):
+    client.post(f"/admin/api/profiles/{KILO}/apply")
+    res = _validate(client, "Foundry-Kilo-Local")
+    checks = {c["name"]: c for c in res["checks"]}
+    assert res["status"] == "passed", res
+    assert [checks[n]["status"] for n in ("route", "text", "stream", "tools", "length")] == \
+        ["ok"] * 5
+    assert checks["image_input"]["status"] == "skip"
+    assert res["served_models"] == ["qwen3.8-flash-next-iq3_s"] and res["backends"] == ["strata"]
+    assert {b for b, _ in HITS} == {"strata"}
+    stored = json.loads(fleet.personas.get("Foundry-Kilo-Local")["validation"])
+    assert stored["status"] == "passed"
+    entry = next(m for m in client.get("/v1/models").json()["data"]
+                 if m["id"] == "Foundry-Kilo-Local")
+    assert entry["foundry"]["validation"] == "passed"
+    rows = fleet.db.query("SELECT client_id FROM request_log ORDER BY id DESC LIMIT 1")
+    assert rows[0]["client_id"] == "foundry:validate"
+
+
+def test_validate_disabled_vision_helper_and_failures(fleet, client):
+    client.post(f"/admin/api/profiles/{KILO}/apply")
+    res = _validate(client, "Foundry-Kilo-Vision")       # disabled, still validated
+    checks = {c["name"]: c["status"] for c in res["checks"]}
+    assert res["status"] == "passed" and checks["image_input"] == "ok"
+    assert checks["length"] == "ok"
+    assert fleet.personas.get("Foundry-Kilo-Vision")["enabled"] == 0
+    assert _chat(client, "Foundry-Kilo-Vision").status_code == 403   # clients still can't
+    STATE.update(blind=True, bool_as_string=True)
+    res = _validate(client, "Foundry-Kilo-Vision")
+    checks = {c["name"]: c for c in res["checks"]}
+    assert res["status"] == "failed"
+    assert "arrived as str" in checks["tools"]["detail"]
+    assert checks["image_input"]["status"] == "fail"
+    STATE.clear()
+    STATE["fail"] = {"cliproxy"}
+    res = _validate(client, "Foundry-Kilo-Sol")
+    assert res["status"] == "failed"
+    assert {c["name"]: c["status"] for c in res["checks"]}["text"] == "fail"
+    assert {b for b, _ in HITS if b != "strata"} <= {"meridian", "cliproxy"}
+    assert ("meridian", "gpt-6.1-sol") not in HITS
+
+
+def test_validate_image_persona_runs_one_job(fleet, client):
+    client.post(f"/admin/api/profiles/{KILO}/apply")
+    res = _validate(client, "Foundry-Kilo-Images-Draft")
+    checks = {c["name"]: c for c in res["checks"]}
+    assert res["status"] == "passed", res
+    assert "gpt-image-2.5-flare" in checks["image_job"]["detail"]
+    assert HITS.count(("cliproxy", "image")) == 1
+
+
+def test_unresolved_backend_fails_closed_until_it_appears(fleet, client, monkeypatch):
+    """No Meridian found at install: the Claude personas must NOT be served by
+    another backend that happens to list the model (CLIProxyAPI's Claude
+    account here); once Meridian exists, re-applying fills the backend in."""
+    monkeypatch.setattr(profiles, "_resolve_backend",
+                        lambda svc_, kind: "cliproxy" if kind == "cliproxyapi" else None)
+    client.post(f"/admin/api/profiles/{KILO}/apply")
+    assert fleet.personas.get("Foundry-Kilo-Sonnet")["backend"] == "<meridian>"
+    fleet.personas.upsert("Foundry-Kilo-Sonnet", enabled=1)
+    r = _chat(client, "Foundry-Kilo-Sonnet")
+    assert r.status_code == 503 and r.json()["error"]["code"] == "route_unavailable"
+    assert HITS == []
+    monkeypatch.setattr(profiles, "_resolve_backend",
+                        lambda svc_, kind: {"cliproxyapi": "cliproxy", "meridian": "meridian"}.get(kind))
+    rep = {p["persona"]: p for p in client.post(f"/admin/api/profiles/{KILO}/apply").json()["personas"]}
+    assert rep["Foundry-Kilo-Sonnet"]["action"] == "unchanged"
+    assert fleet.personas.get("Foundry-Kilo-Sonnet")["backend"] == "meridian"
+    assert _chat(client, "Foundry-Kilo-Sonnet").status_code == 200
+    assert HITS == [("meridian", "claude-sonnet-5-5")]
+
+
+def test_kilo_provider_config(fleet, client):
+    client.post(f"/admin/api/profiles/{KILO}/apply")
+    cfg = client.get("/admin/api/personas/kilo-config?base_url=http://foundry:11435").json()
+    prov = cfg["provider"]["foundry"]
+    assert prov["options"]["baseURL"] == "http://foundry:11435/v1"
+    assert "Foundry-Kilo-Images" not in prov["models"]
+    local = prov["models"]["Foundry-Kilo-Local"]
+    assert local["limit"] == {"context": 131072, "output": 32768} and local["tool_call"]
+    assert prov["models"]["Foundry-Kilo-Vision"]["attachment"] is True
+    assert "(disabled in Foundry)" in prov["models"]["Foundry-Kilo-Sol"]["name"]

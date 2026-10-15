@@ -346,6 +346,7 @@ class Services:
             log.exception("agent probe failed")
         await self.tool_registry.sync(self.pool)
         await self.populate_context_lengths()
+        self._apply_persona_profiles()
         await self.refresh_brain_health()   # populate the indicator immediately
         self.research.start()
         self._bg_tasks = [
@@ -358,6 +359,16 @@ class Services:
             asyncio.create_task(self._agent_health_loop()),
             asyncio.create_task(self._retention_loop()),
         ]
+
+    def _apply_persona_profiles(self) -> None:
+        from . import profiles
+        for pid in self.config_store.config.persona_profiles or []:
+            try:
+                profiles.apply(self, pid)
+            except KeyError:
+                self.db.log_event("warning", "profiles", f"unknown persona profile {pid!r}")
+            except Exception:
+                log.exception("persona profile %s failed", pid)
 
     async def _retention_loop(self) -> None:
         """Keep log tables inside data_retention.days (Logs -> Data)."""

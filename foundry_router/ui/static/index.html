@@ -93,6 +93,10 @@
   .ctl { display:inline-flex; align-items:center; gap:7px; padding:3px 10px 3px 8px;
          border:1px solid var(--line); border-radius:6px; background:var(--bg);
          line-height:1.3; }
+  td.pname { min-width: 210px; max-width: 360px; }
+  td.pdesc { min-width: 260px; }
+  td.pname .pills { display: flex; flex-wrap: wrap; gap: 3px; margin-top: 3px; align-items: center; }
+  td.pname .pills .pill { margin: 0; }
   .stat { margin-left: 18px; color: var(--dim); white-space: nowrap; }
   .stat b { color: var(--fg); margin-left: 4px; }
   .media-thumb { width: 48px; height: 48px; object-fit: contain; border: 1px solid var(--line); border-radius: 4px; margin-right: 4px; cursor: zoom-in; background: repeating-conic-gradient(#8883 0 25%, transparent 0 50%) 0 0 / 12px 12px; vertical-align: middle; }
@@ -2846,9 +2850,92 @@ window.editModel = id => {
 };
 
 /* -------------------------------------------------------------- personas -- */
+function validationPill(p) {
+  let v = {};
+  try { v = JSON.parse(p.validation || "{}") || {}; } catch (e) {}
+  if (!v.status) return p.routing === "strict" ? '<span class="pill" title="never validated end to end">not validated</span>' : "";
+  const cls = v.status === "passed" ? "ok" : v.status === "failed" ? "bad" : "warn";
+  const tip = (v.checks || []).map(c => `${c.name}: ${c.status} — ${c.detail}`).join("\n");
+  return `<span class="pill ${cls}" title="${esc((v.at || "").slice(0, 16) + "\n" + tip)}">${esc(v.status)}</span>`;
+}
+
+function limitsHint(m) {
+  if (!m || (!m.context_length && !m.max_output_tokens)) return "";
+  const parts = [m.context_length ? formatCtx(m.context_length) + " ctx" : "",
+                 m.max_output_tokens ? formatCtx(m.max_output_tokens) + " out" : "",
+                 m.capabilities.includes("vision") ? "images" : ""].filter(Boolean);
+  return `<span class="hint" style="margin:0 0 0 4px" title="What clients are told (/v1/models, /api/show): effective context and output cap${m.served_model ? " of " + esc(m.served_model) : ""}">${esc(parts.join(" · "))}</span>`;
+}
+
+function profileCard(pr) {
+  const act = {create: ["will be created", "warn"], update: ["will update", "warn"], unchanged: ["up to date", "ok"],
+               kept: ["your edits kept", ""], conflict: ["name taken, untouched", "bad"]};
+  const c = pr.counts || {};
+  const pending = (c.create || 0) + (c.update || 0);
+  const rows = pr.personas.map(e => `<tr><td class="nw mono">${esc(e.persona)}</td>
+    <td class="nw mono">${esc(e.model)}</td><td class="nw">${e.backend ? esc(e.backend) : '<span class="hint">' + esc(e.backend_kind) + '</span>'}</td>
+    <td class="nw">${e.kind === "media" ? "image" : "chat"}</td>
+    <td class="nw">${e.enabled === undefined ? (e.enabled_default ? "on" : "off (default)") : (e.enabled ? "on" : "off")}</td>
+    <td class="nw"><span class="pill ${act[e.action][1]}">${act[e.action][0]}</span></td>
+    <td>${esc(e.warning || e.note || "")}</td></tr>`).join("");
+  return `<div class="card">
+    <h2 style="margin-top:0">Default personas: ${esc(pr.title)} <span class="pill">v${pr.version}</span></h2>
+    <p class="hint">${esc(pr.description)} Updates never overwrite a persona you've edited, a persona with the same name that the profile didn't create, or the enabled switch.</p>
+    <div class="row"><button class="act primary" onclick='applyProfile(${JSON.stringify(pr.id)})' ${pending ? "" : "disabled"}>${pr.installed ? "Update" : "Install"} (${pending} change${pending === 1 ? "" : "s"})</button>
+      <button class="act" onclick="showKiloConfig()" title="A Kilo / OpenCode provider block with each persona's real context/output limits and modalities">Kilo provider config</button></div>
+    <details${pr.installed ? "" : " open"}><summary style="cursor:pointer">${pr.personas.length} personas</summary>
+    <table><tr><th>persona</th><th>model</th><th>backend</th><th>kind</th><th>enabled</th><th>status</th><th></th></tr>${rows}</table></details>
+    <pre id="kilo-config" class="mono" style="display:none;max-height:360px;overflow:auto;white-space:pre"></pre>
+  </div>`;
+}
+
+window.applyProfile = async id => {
+  try {
+    const r = await api(`profiles/${id}/apply`, {method: "POST"});
+    toast("Profile applied: " + Object.entries(r.counts).map(([k, v]) => `${v} ${k}`).join(", "));
+    render();
+  } catch (e) { toast(e.message, true); }
+};
+
+window.showKiloConfig = async () => {
+  const el = $("#kilo-config");
+  if (el.style.display !== "none") { el.style.display = "none"; return; }
+  const r = await api("personas/kilo-config?base_url=" + encodeURIComponent(location.origin));
+  el.textContent = "// kilo.jsonc: merge into \"provider\" (set FOUNDRY_KEY_KILO to Kilo's Foundry client key)\n"
+    + JSON.stringify(r, null, 2);
+  el.style.display = "block";
+};
+
+window.validatePersona = async name => {
+  const p = (window._personas || {})[name] || {};
+  const b = (window._backends || []).find(x => x.name === p.backend);
+  const paid = p.kind === "media" || (b && (b.subscription || b.flavor === "openai"));
+  if (paid && !confirm(`Validate ${name}? This sends about 5 real requests${p.kind === "media" ? " (one image job)" : ""} to ${p.backend || "its backend"}, which uses subscription quota.`)) return;
+  const out = $("#pv-result");
+  out.innerHTML = `<div class="card"><b>Validating ${esc(name)}…</b> <span class="hint">real requests through Foundry's own route; frontier models can take a minute</span></div>`;
+  out.scrollIntoView({behavior: "smooth", block: "start"});
+  try {
+    const r = await api("personas/validate", {method: "POST", body: {virtual_name: name}});
+    const cls = s => s === "ok" ? "ok" : s === "fail" ? "bad" : s === "warn" ? "warn" : "";
+    window._pvKeep = `<div class="card"><button class="act" style="float:right" onclick="window._pvKeep='';this.closest('.card').remove()">close</button><h2 style="margin-top:0">Validation: ${esc(name)}
+      <span class="pill ${r.status === "passed" ? "ok" : r.status === "failed" ? "bad" : "warn"}">${esc(r.status)}</span></h2>
+      <p class="hint">served by ${esc((r.served_models || []).join(", ") || "—")} on ${esc((r.backends || []).join(", ") || "—")}</p>
+      <table><tr><th>check</th><th>result</th><th>detail</th><th>time</th></tr>${r.checks.map(c =>
+        `<tr><td class="nw">${esc(c.name)}</td><td><span class="pill ${cls(c.status)}">${esc(c.status)}</span></td>
+         <td style="white-space:normal">${esc(c.detail)}</td><td class="nw">${c.ms != null ? fmtDur(c.ms) : ""}</td></tr>`).join("")}</table></div>`;
+    render();          // refresh the list's pills; the result card re-renders from _pvKeep
+  } catch (e) {
+    out.innerHTML = `<div class="card"><span class="pill bad">error</span> ${esc(e.message)}</div>`;
+  }
+};
+
 async function tabPersonas() {
-  const [d, td, md, sd] = await Promise.all([
-    api("personas"), api("tools"), api("models"), api("mcp_servers")]);
+  const [d, td, md, sd, pf, pm, st] = await Promise.all([
+    api("personas"), api("tools"), api("models"), api("mcp_servers"),
+    api("profiles").catch(() => ({profiles: []})), api("personas/meta").catch(() => ({personas: {}})),
+    api("status").catch(() => ({backends: []}))]);
+  window._backends = (st.backends || []);
+  const meta = pm.personas || {};
   // Servers that execute code — a persona preferring any of them is
   // code-execution-enabled and gets flagged distinctly from read-only personas.
   const codeExecServers = new Set(
@@ -3000,16 +3087,23 @@ async function tabPersonas() {
     }).join(" ");
   };
   const rows = d.personas.map(p => `<tr>
-    <td class="nw"><b>${esc(p.virtual_name)}</b> ${p.enabled ? "" : '<span class="pill warn">disabled</span>'}
+    <td class="pname"><b class="nw">${esc(p.virtual_name)}</b><div class="pills">${p.enabled ? "" : '<span class="pill warn">disabled</span>'}
       ${p.context_window ? '<span class="pill ok" title="admin-set context override">ctx: ' + esc(formatCtx(p.context_window)) + '</span>' : ''}
-      ${p.routing === "strict" ? '<span class="pill warn" title="strict routing: only its allowlisted models, fails closed with a clear refusal">strict</span>' : ''}
+      ${p.routing === "strict" ? (p.backend && p.backend.startsWith("<")
+        ? '<span class="pill bad" title="installed by a profile but no ' + esc(p.backend.slice(1, -1)) + ' backend exists yet: requests are refused (never served by another backend). Re-apply the profile once the backend is added.">strict · no ' + esc(p.backend.slice(1, -1)) + ' backend</span>'
+        : '<span class="pill warn" title="strict routing: only its allowlisted models' + (p.backend ? ' on backend ' + esc(p.backend) : '') + ', fails closed with a clear refusal">strict' + (p.backend ? ' · ' + esc(p.backend) : '') + '</span>') : ''}
+      ${p.kind === "media" ? '<span class="pill" title="image policy: used by generate_image / edit_image, never as a chat model">image</span>' : ''}
+      ${validationPill(p)}
+      ${p.profile ? '<span class="pill" title="installed by the default profile ' + esc(p.profile) + '">' + esc(p.profile.split("@")[1] ? "profile v" + p.profile.split("@")[1] : p.profile) + '</span>' : ''}
+      ${p.kind === "media" ? "" : limitsHint(meta[p.virtual_name])}
       ${p.review_enabled ? '<span class="pill ' + (p.review_model ? 'ok' : 'warn') + '" title="tiered review pass: ' + esc(p.review_model || 'NO MODEL SELECTED — review will be skipped') + '">🔎 review</span>' : ''}
-      ${personaExecutesCode(p) ? '<span class="pill bad" title="This persona can EXECUTE CODE — it prefers a code-sandbox MCP server. Every execution is audited in tool_call_log.">⚠ code exec</span>' : ''}</td>
+      ${personaExecutesCode(p) ? '<span class="pill bad" title="This persona can EXECUTE CODE — it prefers a code-sandbox MCP server. Every execution is audited in tool_call_log.">⚠ code exec</span>' : ''}</div></td>
     <td class="nw">${esc(p.benchmark_category)}</td><td class="nw">${esc(p.local_bias_strength)}</td>
     <td>${mcpGrantCell(p)}</td>
     <td>${compatCell(p)}</td>
-    <td>${esc(p.description || "")}</td>
+    <td class="pdesc">${esc(p.description || "")}</td>
     <td class="nw"><button class="act" onclick='editPersona(${JSON.stringify(p.virtual_name)})'>edit</button>
+        <button class="act" title="Real round trips through Foundry's own route: text, streaming, a tool call with a boolean argument, image input, length cut-off (one image job for image personas). Works on disabled personas." onclick='validatePersona(${JSON.stringify(p.virtual_name)})'>validate</button>
         <button class="act" onclick='clonePersona(${JSON.stringify(p.virtual_name)})'>clone</button>
         <button class="act" onclick='run(api("personas/delete",{method:"POST",body:{virtual_name:${JSON.stringify(p.virtual_name)}}}))'>delete</button></td>
     </tr>`).join("");
@@ -3017,6 +3111,8 @@ async function tabPersonas() {
     <h2>Personas — virtual models advertised via /api/tags</h2>
     <p class="hint">Each row is a routing policy. Adding a workload type (e.g. Foundry-Creative)
     is adding a row here — never a code change (§4.8).</p>
+    ${(pf.profiles || []).map(profileCard).join("")}
+    <div id="pv-result">${window._pvKeep || ""}</div>
     <table><tr><th>name</th><th>category</th><th>local bias</th><th>MCP tools</th><th title="Which clients this persona is tuned for — hover a badge for the note. Documentation metadata: one persona serves multiple clients; only fork a client-specific persona when an existing one genuinely doesn't serve that client well.">clients</th><th>description</th><th></th></tr>${rows}</table>
     <div class="card">
       <h2 style="margin-top:0" id="pe-title">Add / edit persona</h2>
@@ -3082,8 +3178,17 @@ async function tabPersonas() {
         <select id="pe-fallback"><option value="">local (default)</option><option value="refuse">refuse</option></select>
         <label title="strict = fail closed: only the models in model_allowlist are ever used (pinned_models sets the order of an explicit fallback chain, each step budget-checked and shown). No fall-through to other models, no local degrade, no busy-escalation, no brain — nothing usable returns a clear refusal (route_unavailable / budget_denied). Use for Kilo personas and every frontier helper. flexible = previous behaviour.">routing</label>
         <select id="pe-routing"><option value="">flexible (default)</option><option value="strict">strict — allowlist only, fail closed</option></select>
+        <label title="Strict personas only: the exact backend. The persona then never uses the same model id from another backend (e.g. a second Claude account in CLIProxyAPI). Blank = the single best backend serving the model.">backend</label>
+        <select id="pe-backend"><option value="">(best serving backend)</option>${(window._backends || []).map(b => `<option value="${esc(b.name)}">${esc(b.name)}${b.subscription ? " · subscription" : ""}</option>`).join("")}</select>
         <label title="Leave Foundry's own status lines (routing header, notes, heartbeat text) out of the reasoning stream. Keep-alive frames still flow. For data-generation personas (Foundry-FineTune) so reasoning traces come out clean.">quiet narration</label>
         <input type="checkbox" id="pe-quiet"></div>
+      <div class="row"><label title="What this persona must support. Strict personas advertise exactly these to clients (/v1/models, /api/show), and validation tests each one. Image policies (kind image) are used by generate_image / edit_image only.">capabilities</label>
+        <label for="pe-cap-text">text</label><input type="checkbox" id="pe-cap-text" class="pe-cap" value="text">
+        <label for="pe-cap-tools">tool calling</label><input type="checkbox" id="pe-cap-tools" class="pe-cap" value="tools">
+        <label for="pe-cap-image_input">image input</label><input type="checkbox" id="pe-cap-image_input" class="pe-cap" value="image_input">
+        <label for="pe-cap-image_output">image output</label><input type="checkbox" id="pe-cap-image_output" class="pe-cap" value="image_output">
+        <label title="chat = a model clients pick; image = an image policy (generate_image / edit_image with model = this persona), never listed or served as a chat model">kind</label>
+        <select id="pe-kind"><option value="">chat</option><option value="media">image</option></select></div>
       <div class="row tight"><label title="Turn assist for coding clients in direct mode (Cline Act) — JSON object, every key optional, {} = all off. think_policy: client|persona|adaptive (+ think_levels {routine, after_edit, after_failure}); dedupe_reads; roblox_cleanup; image_keep N; soft_budget_tokens N; prejudge: off|observe|enforce; supervisor: off|observe|nudge|escalate; auditor: off|observe|enforce (+ auditor_min_tool_turns, auditor_max_rejections, auditor_required_patterns [regex]); advisor true + frontier_models [ids, tried in order] + frontier_max_calls per conversation; frontier_rounds. See docs/TURN_ASSIST.md. Results: Dashboard → Scoreboard.">turn assist (JSON obj)</label>
         <textarea id="pe-assist" rows="3" cols="70" placeholder='{"think_policy": "adaptive", "dedupe_reads": true, "prejudge": "observe", "supervisor": "observe", "auditor": "observe"}'>{}</textarea></div>
       <div class="row"><label title="Optional JSON overriding the multi-signal ranking weights for this persona. Signals: primary (requested category), tool_calling, adequacy (observed outcome-judge quality), latency (warm tokens/sec). e.g. a speed-sensitive persona: {&quot;latency&quot;: 0.5}. Empty = defaults.">selection_weights (JSON obj)</label>
@@ -3162,6 +3267,9 @@ async function tabPersonas() {
     force_reasoning_effort: $("#pe-force-effort").checked ? 1 : 0,
     fallback_policy: $("#pe-fallback").value || null,
     routing: $("#pe-routing").value || null,
+    backend: $("#pe-backend").value || null,
+    kind: $("#pe-kind").value || null,
+    capabilities: [...document.querySelectorAll(".pe-cap:checked")].map(c => c.value),
     quiet_narration: $("#pe-quiet").checked ? 1 : 0,
     assist: JSON.parse($("#pe-assist").value || "{}")}}));
 window.clonePersona = async source => {
@@ -3407,6 +3515,13 @@ window.editPersona = name => {
   $("#pe-maxout").value = p.max_output_tokens || "";
   $("#pe-fallback").value = p.fallback_policy || "";
   $("#pe-routing").value = p.routing || "";
+  const bsel = $("#pe-backend");
+  if (p.backend && ![...bsel.options].some(o => o.value === p.backend))
+    bsel.add(new Option(p.backend.startsWith("<") ? `no ${p.backend.slice(1, -1)} backend yet (refuses)` : p.backend + " (not configured)", p.backend));
+  bsel.value = p.backend || "";
+  $("#pe-kind").value = p.kind === "media" ? "media" : "";
+  const caps = parseTags(p.capabilities);
+  document.querySelectorAll(".pe-cap").forEach(c => { c.checked = caps.includes(c.value); });
   $("#pe-quiet").checked = !!p.quiet_narration;
   $("#pe-assist").value = typeof p.assist === "string"
     ? (p.assist || "{}") : JSON.stringify(p.assist || {});

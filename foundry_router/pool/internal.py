@@ -191,7 +191,14 @@ class InternalPool(BackendPool):
                 retryable.append(s)
         healthy.sort(key=lambda s: -s.config.priority)
         retryable.sort(key=lambda s: -s.config.priority)
-        return healthy + retryable
+        out = healthy + retryable
+        from ..request_context import backend_pin
+        pin = backend_pin()
+        if pin == "*first":
+            return out[:1]
+        if pin:
+            return [s for s in out if s.config.name == pin]
+        return out
 
     def available_models(self) -> dict[str, list[str]]:
         out: dict[str, list[str]] = {}

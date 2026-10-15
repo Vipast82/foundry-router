@@ -682,6 +682,10 @@ class AppConfig(BaseModel):
     clients: list[ClientConfig] = Field(default_factory=list)
     client_auth: ClientAuthConfig = Field(default_factory=ClientAuthConfig)
     media: MediaConfig = Field(default_factory=MediaConfig)
+    # Default persona sets (profiles.py) applied at startup: missing personas
+    # are created, untouched ones updated to the profile's newer version, edited
+    # ones left alone. Also available on demand from the Personas tab.
+    persona_profiles: list[str] = Field(default_factory=list)
 
 
 # --------------------------------------------------------------------------- #

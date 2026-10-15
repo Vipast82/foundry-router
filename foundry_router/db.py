@@ -476,6 +476,19 @@ class Database:
             # pinned order, each budget-checked; no fall-through to the pool,
             # no local degrade, no brain. NULL/'flexible' = previous behaviour.
             ("personas", "routing", "TEXT"),
+            # Strict personas: the exact backend (no other backend serving the
+            # same model id, e.g. a second Claude account, is ever used).
+            ("personas", "backend", "TEXT"),
+            # JSON list of required capabilities: text | tools | image_input | image_output.
+            ("personas", "capabilities", "TEXT"),
+            # 'chat' (default) | 'media' (an image policy used by media.py, never chat).
+            ("personas", "kind", "TEXT"),
+            # Provenance for profile-managed personas: '<profile>@<version>' and a
+            # hash of the values it set (unchanged hash = safe to update).
+            ("personas", "profile", "TEXT"),
+            ("personas", "profile_hash", "TEXT"),
+            # Last validation run (JSON: status, at, checks[]).
+            ("personas", "validation", "TEXT"),
             # Who asked (client key name) and the client's own correlation ids
             # (x-foundry-session / -task / -parent-task headers).
             ("request_log", "client_id", "TEXT"),

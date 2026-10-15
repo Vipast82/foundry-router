@@ -396,6 +396,11 @@ media:
   retention_days: 30
   mcp_tools: true                  # /mcp/media for MCP chat clients (needs mcp_aggregator)
 
+# Default persona sets applied at startup (docs/KILO.md). Missing personas are
+# created, untouched ones follow newer profile versions, edited ones are kept.
+# Also available on demand: Routing -> Personas -> "Default personas".
+persona_profiles: []               # e.g. [animaluprising-kilo]
+
 # Client keys (docs/CLIENTS.md): who is asking, and what each client may reach.
 # mode optional = keyless clients still work while keys are rolled out.
 client_auth:

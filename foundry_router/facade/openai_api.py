@@ -116,24 +116,24 @@ def _not_found(name: str) -> JSONResponse:
 
 @router.get("/v1/models")
 async def list_models(request: Request) -> dict:
-    from .ollama_api import _visible_personas
     """Enabled personas, in OpenAI's model-list shape (same policy-only set the
-    Ollama /api/tags advertises)."""
+    Ollama /api/tags advertises), with context/output/modality metadata."""
+    from .ollama_api import _visible_personas, openai_model_entry
     svc = _svc(request)
     created = _now()
-    data = [{"id": p["virtual_name"], "object": "model", "created": created,
-             "owned_by": "foundry-router"}
-            for p in _visible_personas(svc)]
-    return {"object": "list", "data": data}
+    return {"object": "list",
+            "data": [openai_model_entry(svc, p, created) for p in _visible_personas(svc)]}
 
 
 @router.get("/v1/models/{model}")
 async def retrieve_model(request: Request, model: str):
+    from .ollama_api import _visible_personas, openai_model_entry
     svc = _svc(request)
-    if svc.personas.get(model) is None:
+    persona = svc.personas.get(model)
+    if persona is None or persona["virtual_name"] not in {
+            p["virtual_name"] for p in _visible_personas(svc)}:
         return _not_found(model)
-    return {"id": model, "object": "model", "created": _now(),
-            "owned_by": "foundry-router"}
+    return openai_model_entry(svc, persona, _now())
 
 
 def _to_ollama_messages(raw: list) -> list[dict]:

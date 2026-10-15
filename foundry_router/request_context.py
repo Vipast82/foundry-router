@@ -106,6 +106,22 @@ _ROUTE_HEADERS = (("persona", b"x-foundry-persona"), ("served_model", b"x-foundr
                   ("routing", b"x-foundry-routing"))
 
 
+# Strict personas pin the backend for the rest of the request: the pool then
+# never fails over to ANOTHER backend serving the same model id (a second
+# subscription account, a paid API). None = no pin; "<name>" = exactly that
+# backend; "*first" = only the best-ranked backend for each model.
+_backend_pin: contextvars.ContextVar[Optional[str]] = contextvars.ContextVar(
+    "foundry_backend_pin", default=None)
+
+
+def pin_backend(name: Optional[str]):
+    return _backend_pin.set(name or None)
+
+
+def backend_pin() -> Optional[str]:
+    return _backend_pin.get()
+
+
 def client_headers() -> dict:
     return dict(_client_headers.get())
 

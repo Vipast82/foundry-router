@@ -28,6 +28,7 @@ from __future__ import annotations
 import contextvars
 import hmac
 import json
+import secrets
 from typing import Callable, Optional
 
 _client: contextvars.ContextVar[Optional[dict]] = contextvars.ContextVar(
@@ -36,6 +37,12 @@ _client: contextvars.ContextVar[Optional[dict]] = contextvars.ContextVar(
 CORRELATION_HEADERS = {"x-foundry-session": "session_id", "x-foundry-task": "task_id",
                        "x-foundry-parent-task": "parent_task_id"}
 _OPEN_PATHS = ("/", "/api/version")          # liveness probes stay open
+
+# Foundry calling itself (persona validation runs the real HTTP route
+# in-process). A per-process random secret: never configured, logged or sent
+# anywhere, so only code inside this process can present it.
+INTERNAL_HEADER = "x-foundry-internal"
+INTERNAL_TOKEN = secrets.token_urlsafe(32)
 
 
 def current() -> dict:
@@ -74,6 +81,10 @@ def _keys_from(headers: dict) -> list[str]:
 
 def identify(cfg, headers: dict, agent_tokens: Optional[dict] = None) -> tuple[Optional[dict], bool]:
     """(client or None, key_was_presented). Constant-time key comparison."""
+    internal = headers.get(INTERNAL_HEADER)
+    if internal and hmac.compare_digest(internal.encode(), INTERNAL_TOKEN.encode()):
+        return ({"client_id": "foundry:validate", "scopes": ["inference", "media"],
+                 "personas": [], "internal": True}, True)
     keys = _keys_from(headers)
     for k in keys:
         for c in getattr(cfg, "clients", []) or []:

@@ -229,6 +229,12 @@ class MediaService:
 
     # -- model / backend selection (fail closed) -------------------------------
 
+    def persona_backend(self, persona_name: Optional[str]) -> Optional[str]:
+        if not persona_name:
+            return None
+        p = self.svc.personas.get(persona_name)
+        return ((p or {}).get("backend") or "").strip() or None
+
     def resolve_model(self, requested: Optional[str]) -> tuple[str, Optional[str]]:
         """'final'/'draft'/'' -> configured models; a persona name -> its first
         listed image model; otherwise the exact id. Must be in media.models."""
@@ -242,9 +248,9 @@ class MediaService:
         else:
             persona = self.svc.personas.get(req) if req not in cfg.models else None
             if persona:
-                if not persona.get("enabled", 1):
-                    raise MediaError(403, "persona_disabled", f"persona {req!r} is disabled")
                 from . import client_auth
+                if not persona.get("enabled", 1) and not client_auth.current().get("internal"):
+                    raise MediaError(403, "persona_disabled", f"persona {req!r} is disabled")
                 if not client_auth.persona_allowed(persona["virtual_name"]):
                     raise MediaError(403, "model_not_allowed",
                                      f"this client may not use persona {req!r}")
@@ -263,19 +269,21 @@ class MediaService:
                              f"{', '.join(cfg.models) or 'none'} (or 'final' / 'draft').")
         return model, persona_name
 
-    def resolve_backend(self, model: str):
-        """(BackendState, info dict) for the configured image backend. Refuses
-        rather than picking another backend when the chosen one can't serve."""
+    def resolve_backend(self, model: str, pinned: Optional[str] = None):
+        """(BackendState, info dict) for the image backend: an image persona's
+        own backend when it has one, else media.backend, else CLIProxyAPI.
+        Refuses rather than picking another backend when that one can't serve."""
         backends = getattr(self.svc.pool, "backends", None)
         if backends is None:
             raise MediaError(503, "media_backend_unavailable",
                              "image jobs need Foundry's internal backend pool")
         cfg = self.cfg
-        if cfg.backend:
-            s = backends.get(cfg.backend)
+        chosen = pinned or cfg.backend
+        if chosen:
+            s = backends.get(chosen)
             if s is None:
                 raise MediaError(503, "media_backend_unavailable",
-                                 f"media.backend {cfg.backend!r} is not a configured backend")
+                                 f"image backend {chosen!r} is not a configured backend")
         else:
             cands = [s for s in backends.values()
                      if s.config.effective_flavor == "cliproxyapi"
@@ -423,7 +431,7 @@ class MediaService:
             raise MediaError(400, "invalid_request", "input images belong to edit_image")
 
         model_id, persona = self.resolve_model(model)
-        state, info = self.resolve_backend(model_id)
+        state, info = self.resolve_backend(model_id, self.persona_backend(persona))
         from . import client_auth
         client = client or client_auth.current()
         cid = client.get("client_id") or "anonymous"

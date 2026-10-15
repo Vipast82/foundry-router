@@ -1413,6 +1413,79 @@ async def subscription_budgets(request: Request):
     return {"backends": out}
 
 
+@router.post("/admin/api/personas/validate")
+async def validate_persona(request: Request):
+    """Real round trips through Foundry's own route (text, streaming, a tool
+    call with a boolean argument, image input, length cut-off; one image job
+    for image personas). Works on disabled personas. Stores the result."""
+    from .. import persona_validate
+    body = await request.json()
+    try:
+        return await persona_validate.validate(_svc(request), request.app,
+                                               body.get("virtual_name") or "")
+    except KeyError:
+        return JSONResponse({"error": "no such persona"}, status_code=404)
+
+
+@router.get("/admin/api/personas/meta")
+async def personas_meta(request: Request):
+    """Per persona: what clients are told (effective context, max output,
+    capabilities, served model, backend, validation status)."""
+    from ..facade.ollama_api import persona_meta
+    svc = _svc(request)
+    return {"personas": {p["virtual_name"]: persona_meta(svc, p) for p in svc.personas.list()}}
+
+
+@router.get("/admin/api/personas/kilo-config")
+async def kilo_provider_config(request: Request):
+    """A Kilo / OpenCode custom-provider block for Foundry's chat personas,
+    with each persona's effective context/output limits and modalities (Kilo
+    sizes compaction from these, not from /v1/models). Disabled personas are
+    included, marked, so the block doesn't change when you enable one."""
+    from ..facade.ollama_api import persona_meta
+    svc = _svc(request)
+    cfg = svc.config_store.config
+    base = request.query_params.get("base_url") or (
+        f"http://{cfg.server.host if cfg.server.host not in ('0.0.0.0', '::', '') else 'FOUNDRY_HOST'}"
+        f":{cfg.server.port}")
+    prefix = request.query_params.get("prefix", "Foundry-Kilo")
+    models = {}
+    for p in svc.personas.list():
+        if (p.get("kind") or "chat") == "media" or not p["virtual_name"].startswith(prefix):
+            continue
+        m = persona_meta(svc, p)
+        entry = {"name": p["virtual_name"] + ("" if p.get("enabled") else " (disabled in Foundry)"),
+                 "tool_call": "tools" in m["capabilities"],
+                 "attachment": "vision" in m["capabilities"],
+                 "reasoning": bool(p.get("reasoning_effort")),
+                 "modalities": {"input": m["input_modalities"], "output": ["text"]}}
+        limit = {k: v for k, v in (("context", m["context_length"]),
+                                   ("output", m["max_output_tokens"])) if v}
+        if limit:
+            entry["limit"] = limit
+        models[p["virtual_name"]] = entry
+    return {"provider": {"foundry": {
+        "npm": "@ai-sdk/openai-compatible", "name": "Foundry Router",
+        "options": {"baseURL": base.rstrip("/") + "/v1", "apiKey": "{env:FOUNDRY_KEY_KILO}"},
+        "models": models}}}
+
+
+@router.get("/admin/api/profiles")
+async def list_persona_profiles(request: Request):
+    """Default persona sets and what applying each would do right now."""
+    from .. import profiles
+    return {"profiles": profiles.list_profiles(_svc(request))}
+
+
+@router.post("/admin/api/profiles/{profile_id}/apply")
+async def apply_persona_profile(request: Request, profile_id: str):
+    from .. import profiles
+    try:
+        return profiles.apply(_svc(request), profile_id)
+    except KeyError:
+        return JSONResponse({"error": f"unknown profile {profile_id!r}"}, status_code=404)
+
+
 @router.post("/admin/api/personas/clone")
 async def clone_persona(request: Request):
     svc = _svc(request)
