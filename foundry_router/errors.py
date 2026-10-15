@@ -31,3 +31,27 @@ def describe_exception(e: BaseException, limit: int = 500) -> str:
 
     walk(e)
     return " | ".join(parts)[:limit] or type(e).__name__
+
+
+# Foundry's own refusal codes, grouped so an automated client (the
+# development coordinator, a script) can decide what to do without parsing
+# messages:
+#   budget    a Foundry budget rule or provider usage limit; wait for the reset
+#   pause     an operator pause switch; wait for a human to resume it
+#   route     the persona's one route is unavailable right now (backend down,
+#             model missing, queue timeout); retry later or report a blocker
+#   config    the request can never succeed as configured (disabled persona,
+#             wrong persona kind, model not allowed); needs a human
+#   auth      the client key is missing, wrong or lacks the scope
+DENIAL_CATEGORIES = {
+    "budget_denied": "budget", "usage_limit": "budget", "quota_exhausted": "budget",
+    "paused": "pause",
+    "route_unavailable": "route", "queue_timeout": "route",
+    "persona_disabled": "config", "image_persona": "config", "model_not_allowed": "config",
+    "invalid_api_key": "auth", "missing_api_key": "auth", "insufficient_scope": "auth",
+}
+
+
+def denial_category(code) -> str:
+    """The category of a Foundry refusal code ("" for anything else)."""
+    return DENIAL_CATEGORIES.get(str(code or ""), "")

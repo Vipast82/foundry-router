@@ -748,6 +748,7 @@ const TABS = {
   "Cost":           tabCost,
   "Scoreboard":     tabScoreboard,
   "Compare":        tabCompare,
+  "Work":           tabWork,
   "Pool":           tabBackends,
   "Model Registry": tabModels,
   "Host Admin":     tabHostAdmin,
@@ -768,7 +769,7 @@ const TABS = {
 // Primary nav groups -> their leaf tabs (the secondary row). Reorganizes the
 // former flat bar into logical sections without dropping anything.
 const GROUPS = [
-  ["Dashboard",   ["Live", "Performance", "Cost", "Scoreboard", "Compare"]],
+  ["Dashboard",   ["Live", "Work", "Performance", "Cost", "Scoreboard", "Compare"]],
   ["Backends",    ["Pool", "Model Registry", "Host Admin"]],
   ["Routing",     ["Personas", "Guardrails", "Routes"]],
   ["Tools & MCP", ["Tools", "MCP Servers", "MCP Metrics", "Agents"]],
@@ -2152,6 +2153,57 @@ async function tabCompare() {
     <p class="hint">Not visible to Foundry (needs client-side telemetry): ${esc(r.not_observable.join(", "))}.</p>`;
   $("#cmp-hours").onchange = e => { o.hours = +e.target.value; render(); };
   $("#cmp-group").onchange = e => { o.group = e.target.value; render(); };
+}
+
+// Work (orchestration.py): a development coordinator's tasks and the coding
+// sessions it bound to them, next to the model calls Foundry measured for each.
+// Coordinator state is as reported by the coordinator; Foundry never decides
+// whether a task is done, and doesn't see local edits or Studio operations.
+window._workOpts = window._workOpts || {project: "", hours: 72};
+async function tabWork() {
+  const o = window._workOpts;
+  const w = await api(`work?hours=${o.hours}&project=${encodeURIComponent(o.project)}`);
+  const stCls = {COMPLETE: "ok", APPROVED: "ok", BLOCKED: "bad", FAILED: "bad", CANCELLED: "",
+    AWAITING_HUMAN: "warn", PAUSED: "warn", CHANGES_REQUIRED: "warn"};
+  const pill = st => `<span class="pill ${stCls[st] || ""}">${esc(st || "—")}</span>`;
+  const sha = v => v ? `<code>${esc(String(v).slice(0, 10))}</code>` : '<span class="hint">—</span>';
+  const when = ts => ts ? esc(_tsText(ts)) : "";
+  const tasks = w.tasks.map(t => {
+    const d = t.data || {};
+    const note = d.blocker || d.awaiting || d.pause_reason || d.next_action || "";
+    const finds = (t.state === "COMPLETE" ? [] : d.findings || []).slice(0, 3).map(f => `<div class="hint">• ${esc(f.slice(0, 200))}</div>`).join("");
+    return `<tr><td class="nw">${esc(t.project_id)}</td><td class="nw"><b>${esc(t.task_id)}</b></td>
+      <td class="nw">${pill(t.state)}${d.stage === "after_close" ? ' <span class="hint">closed, awaiting approval</span>' : ""}</td>
+      <td class="nw">${d.attempt ?? ""}${d.sessions ? ` <span class="hint">(${d.sessions} sessions)</span>` : ""}</td>
+      <td class="nw">${sha(d.head_sha)}${d.reviewed_sha ? ` <span class="hint">reviewed</span> ${sha(d.reviewed_sha)}` : ""}</td>
+      <td class="bw-wide" style="white-space:normal">${esc(note.slice(0, 300))}${finds}</td><td class="nw hint">${when(t.updated_ts)}</td></tr>`;
+  }).join("");
+  const sessions = w.sessions.map(s => {
+    const u = s.usage || {};
+    return `<tr><td class="nw"><code title="${esc(s.session_id)}">${esc(s.session_id.slice(0, 18))}</code></td>
+      <td class="nw">${esc(s.project_id)} / ${esc(s.task_id || "")}</td><td class="nw">${esc(s.role || "")}</td>
+      <td class="nw">${esc(s.persona || "")}</td><td class="nw hint">${esc(s.run_id || "")}</td>
+      <td class="nw">${u.calls ?? 0}${u.denied ? ` <span class="pill bad">${u.denied} denied</span>` : ""}${u.inflight ? ` <span class="pill warn">${u.inflight} running</span>` : ""}</td>
+      <td class="nw">${(u.tokens || 0).toLocaleString()}</td><td class="hint bw-mid" style="white-space:normal">${esc((u.routes || "").replace(/,/g, ", "))}</td>
+      <td class="nw">${s.ended_ts ? '<span class="hint">ended ' + esc(s.outcome || "") + "</span>" : '<span class="pill ok">open</span>'}${s.parent_session_id ? ` <span class="hint">helper of ${esc(s.parent_session_id.slice(0, 12))}</span>` : ""}</td></tr>`;
+  }).join("");
+  const events = w.events.slice(0, 40).map(e => `<tr><td class="nw hint">${when(e.ts)}</td>
+    <td class="nw">${esc(e.project_id)} / ${esc(e.task_id || "—")}</td><td class="nw">${esc(e.kind)}</td>
+    <td class="nw">${e.state ? pill(e.state) : ""}</td>
+    <td class="hint bw-wide" style="white-space:normal">${esc(Object.entries(e.detail || {}).filter(([k]) => k !== "results").map(([k, v]) => `${k}: ${typeof v === "object" ? JSON.stringify(v) : v}`).join(" · ").slice(0, 260))}</td></tr>`).join("");
+  $("#main").innerHTML = `
+    <h2>Work</h2>
+    <p class="hint">Tasks a development coordinator runs (e.g. <code>python -m foundry_coordinator</code>) and the coding sessions it bound to them, with every model call Foundry measured for each session. Task states come from the coordinator; Foundry doesn't decide completion and can't see local file edits or Studio operations.</p>
+    <div class="row"><label>project</label><select id="wk-proj"><option value="">all</option>${w.projects.map(p => `<option ${p === o.project ? "selected" : ""}>${esc(p)}</option>`).join("")}</select>
+      <label>window</label><select id="wk-hours">${[6, 24, 72, 168, 720].map(h => `<option value="${h}" ${h == o.hours ? "selected" : ""}>${h < 24 ? h + " h" : h / 24 + " d"}</option>`).join("")}</select></div>
+    <div class="card"><h3>Tasks</h3>${w.tasks.length ? `<div class="tscroll"><table><tr><th>project</th><th>task</th><th>state</th><th>attempt</th><th>commit</th><th>now / blocker / findings</th><th>updated</th></tr>${tasks}</table></div>` : '<p class="hint">No coordinator has reported tasks in this window.</p>'}</div>
+    <div class="card"><h3>Sessions</h3>${w.sessions.length ? `<div class="tscroll"><table><tr><th>session</th><th>project / task</th><th>role</th><th>persona</th><th>run</th><th>calls</th><th>tokens</th><th>backend / model actually used</th><th>status</th></tr>${sessions}</table></div>` : '<p class="hint">No bound sessions.</p>'}</div>
+    <div class="card"><h3>Events</h3>${events ? `<div class="tscroll"><table><tr><th>when</th><th>project / task</th><th>event</th><th>state</th><th>detail</th></tr>${events}</table></div>` : '<p class="hint">No events.</p>'}</div>
+    <p class="hint">${esc(w.note)}</p>`;
+  $("#wk-proj").onchange = e => { o.project = e.target.value; render(); };
+  $("#wk-hours").onchange = e => { o.hours = +e.target.value; render(); };
+  if (window._workTimer) clearInterval(window._workTimer);
+  window._workTimer = setInterval(() => { if (current !== "Work") return clearInterval(window._workTimer); render(); }, 15000);
 }
 
 // Route view (routes_view.py): the routing graph generated from the live

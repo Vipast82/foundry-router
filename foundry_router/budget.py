@@ -13,7 +13,10 @@ judges), is one ledger row:
 Rules (config `budgets.rules`, see config.BudgetRule) limit calls, tokens,
 calls in flight, and distinct helpers active at once, per client / persona /
 session / task / request / backend / account or shared. Pause switches stop
-an account, backend, persona or client immediately.
+an account, backend, persona or client immediately. Calls from a session a
+coordinator registered (orchestration.py) also carry project / work_task /
+run / role, so rules can be per project, per sprint, per sprint attempt (run)
+or per role, on top of the shared account and backend limits.
 
 A denial is a BudgetDenied (an AllBackendsFailed, so the request takes the
 same path as any other denial: a strict persona refuses with budget_denied, a
@@ -60,6 +63,11 @@ class CallCtx:
     task_id: str = ""
     parent_task_id: str = ""
     request_id: str = ""
+    # From a coordinator's work binding (orchestration.py), when the session has one.
+    project_id: str = ""
+    work_task_id: str = ""
+    run_id: str = ""
+    role: str = ""
     est_tokens: int = 0
     extra: dict = field(default_factory=dict)
 
@@ -71,7 +79,14 @@ class CallCtx:
             return self.task_id or self.session_id or f"{self.client_id}/{self.persona}"
         if dim == "session":
             return self.session_id or f"{self.client_id}/{self.persona}"
-        return str(getattr(self, {"client": "client_id", "request": "request_id"}.get(dim, dim), "") or "")
+        if dim == "run":
+            # A coordinator run (one sprint attempt) — else the helper key.
+            return self.run_id or self.key("task")
+        return str(getattr(self, _DIM_ATTR.get(dim, dim), "") or "")
+
+
+_DIM_ATTR = {"client": "client_id", "request": "request_id", "project": "project_id",
+             "work_task": "work_task_id"}
 
 
 def _row_ctx(r: dict) -> CallCtx:
@@ -80,7 +95,9 @@ def _row_ctx(r: dict) -> CallCtx:
                    persona=r.get("persona") or "", client_id=r.get("client_id") or "anonymous",
                    session_id=r.get("session_id") or "", task_id=r.get("task_id") or "",
                    parent_task_id=r.get("parent_task_id") or "",
-                   request_id=r.get("request_id") or "")
+                   request_id=r.get("request_id") or "",
+                   project_id=r.get("project_id") or "", work_task_id=r.get("work_task_id") or "",
+                   run_id=r.get("run_id") or "", role=r.get("role") or "")
 
 
 def _glob(value: str, pattern) -> bool:
@@ -88,15 +105,19 @@ def _glob(value: str, pattern) -> bool:
     return any(fnmatch.fnmatchcase(value or "", str(p)) for p in pats)
 
 
+_MATCH_ATTR = {"backend": "backend", "persona": "persona", "client": "client_id",
+               "account": "account", "model": "model", "session": "session_id",
+               "task": "task_id", "project": "project_id", "work_task": "work_task_id",
+               "run": "run_id", "role": "role"}
+
+
 def matches(match: dict, ctx: CallCtx) -> bool:
     for k, v in (match or {}).items():
         if k == "paid":
             if bool(v) != bool(ctx.paid):
                 return False
-        elif k in ("backend", "persona", "client", "account", "model", "session", "task"):
-            val = ctx.client_id if k == "client" else ctx.session_id if k == "session" \
-                else ctx.task_id if k == "task" else getattr(ctx, k)
-            if not _glob(val, v):
+        elif k in _MATCH_ATTR:
+            if not _glob(getattr(ctx, _MATCH_ATTR[k]), v):
                 return False
     return True
 
@@ -133,7 +154,9 @@ def context_for(model: str, backend_cfg, est_tokens: int = 0) -> CallCtx:
                    client_id=c.get("client_id") or "anonymous",
                    session_id=c.get("session_id") or "", task_id=c.get("task_id") or "",
                    parent_task_id=c.get("parent_task_id") or "",
-                   request_id=request_context.request_id() or "", est_tokens=est_tokens)
+                   request_id=request_context.request_id() or "", est_tokens=est_tokens,
+                   project_id=c.get("project_id") or "", work_task_id=c.get("work_task_id") or "",
+                   run_id=c.get("run_id") or "", role=c.get("role") or "")
 
 
 def context_from_info(model: str, info: dict, est_tokens: int = 0) -> CallCtx:
@@ -346,10 +369,12 @@ class Ledger:
         cur = self.db.execute(
             "INSERT INTO usage_events (ts, request_id, client_id, session_id, task_id, "
             "parent_task_id, persona, backend, model, account, paid, status, est_tokens, rule, "
-            "detail) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            "detail, project_id, work_task_id, run_id, role) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (time.time(), ctx.request_id, ctx.client_id, ctx.session_id, ctx.task_id,
              ctx.parent_task_id, ctx.persona, ctx.backend, ctx.model, ctx.account,
-             1 if ctx.paid else 0, status, ctx.est_tokens, rule, (detail or "")[:500]))
+             1 if ctx.paid else 0, status, ctx.est_tokens, rule, (detail or "")[:500],
+             ctx.project_id, ctx.work_task_id, ctx.run_id, ctx.role))
         return cur
 
     def prune(self) -> int:

@@ -118,6 +118,9 @@ class Services:
         self.health = HealthMonitor(self)
         from .configops import ConfigHistory
         self.config_history = ConfigHistory(self)
+        from .orchestration import WorkRegistry, set_registry
+        self.work = WorkRegistry(db)
+        set_registry(self.work)
         ensure_eval_seed(db)
         self.evals = EvalHarness(self)
         self._eval_tasks: list[asyncio.Task] = []  # keep background runs alive
@@ -392,6 +395,8 @@ class Services:
             try:
                 await asyncio.to_thread(self.media.prune)
                 await asyncio.to_thread(self.ledger.prune)
+                await asyncio.to_thread(self.work.prune,
+                                        self.config_store.config.budgets.retention_days or 90)
             except Exception:
                 log.exception("media / ledger prune failed")
             await asyncio.sleep(max(5, int(cfg.prune_interval_minutes or 60)) * 60)
@@ -597,5 +602,7 @@ def create_app(config_path: Optional[Path] = None,
     app.include_router(facade_router)
     app.include_router(openai_router)
     app.include_router(media_router)
+    from .facade.work_api import router as work_router
+    app.include_router(work_router)
     app.include_router(ui_router)
     return app

@@ -1,0 +1,17 @@
+[
+  {
+    "id": "FX-1",
+    "title": "Greeting file",
+    "scope": ["src/greeting.txt"],
+    "tags": ["code"],
+    "spec": "Create src/greeting.txt containing the word OK and a greeting.\nREVIEW-SCRIPT: changes-first\n\n```pilot-actions:implement\n[{\"tool\": \"write\", \"args\": {\"filePath\": \"src/greeting.txt\", \"content\": \"OK hello\\n\"}},\n {\"tool\": \"bash\", \"args\": {\"command\": \"git add src/greeting.txt && git commit -q -m 'FX-1: greeting'\"}}]\n```\n\n```pilot-actions:repair\n[{\"tool\": \"read\", \"args\": {\"filePath\": \"src/greeting.txt\"}},\n {\"tool\": \"write\", \"args\": {\"filePath\": \"src/greeting.txt\", \"content\": \"OK hello friend\\n\"}},\n {\"tool\": \"bash\", \"args\": {\"command\": \"git add src/greeting.txt && git commit -q -m 'FX-1: greet a friend (review)'\"}}]\n```"
+  },
+  {
+    "id": "FX-2",
+    "title": "Farewell file",
+    "scope": ["src/farewell.txt"],
+    "deps": ["FX-1"],
+    "tags": ["code"],
+    "spec": "Create src/farewell.txt containing the word OK and a farewell.\n\n```pilot-actions:implement\n[{\"tool\": \"write\", \"args\": {\"filePath\": \"src/farewell.txt\", \"content\": \"bye\\n\"}},\n {\"tool\": \"bash\", \"args\": {\"command\": \"git add src/farewell.txt && git commit -q -m 'FX-2: farewell'\"}}]\n```\n\n```pilot-actions:repair\n[{\"tool\": \"bash\", \"args\": {\"command\": \"python3 verify.py; true\"}},\n {\"tool\": \"write\", \"args\": {\"filePath\": \"src/farewell.txt\", \"content\": \"OK bye\\n\"}},\n {\"tool\": \"bash\", \"args\": {\"command\": \"git add src/farewell.txt && git commit -q -m 'FX-2: farewell passes the check'\"}}]\n```"
+  }
+]

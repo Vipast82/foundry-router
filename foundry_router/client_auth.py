@@ -19,8 +19,11 @@ in the logs and budgets) and its scopes decide what it may reach:
 Keys are read from `Authorization: Bearer`, `x-api-key` or `x-foundry-key`.
 Hermes agent caller tokens remain valid (client "agent:<name>").
 Correlation headers a client may add — x-foundry-session, x-foundry-task,
-x-foundry-parent-task — are recorded with the client id. Prompt text is never
-used to infer them.
+x-foundry-parent-task — are recorded with the client id. Without
+x-foundry-session, a client's own session header (Kilo/OpenCode send
+x-session-id) is used as the session id. A session a coordinator registered
+(orchestration.py) adds its project, coordinator task, run and role. Prompt
+text is never used to infer any of them.
 """
 
 from __future__ import annotations
@@ -36,6 +39,9 @@ _client: contextvars.ContextVar[Optional[dict]] = contextvars.ContextVar(
 
 CORRELATION_HEADERS = {"x-foundry-session": "session_id", "x-foundry-task": "task_id",
                        "x-foundry-parent-task": "parent_task_id"}
+# A client's own session id when it sends no x-foundry-session (Kilo and
+# OpenCode send x-session-id = their session id on every model call).
+SESSION_FALLBACK_HEADERS = ("x-session-id", "x-opencode-session", "x-session-affinity")
 _OPEN_PATHS = ("/", "/api/version")          # liveness probes stay open
 
 # Foundry calling itself (persona validation runs the real HTTP route
@@ -57,6 +63,8 @@ def scope_for(path: str) -> Optional[str]:
         return "media"         # Foundry's built-in image tools
     if path.startswith("/mcp"):
         return None            # Foundry-MCP has its own token (mcp_aggregator.token)
+    if path.startswith("/v1/foundry/work"):
+        return "orchestration"   # a development coordinator's bindings and state
     if path.startswith("/admin"):
         # The /ui page is a static shell (no data); its data comes from /admin/api,
         # which the UI calls with the admin key the user enters once.
@@ -122,7 +130,7 @@ class ClientAuthMiddleware:
         headers = {k.decode("latin-1").lower(): v.decode("latin-1")
                    for k, v in scope.get("headers") or []}
         client, presented = identify(cfg, headers, self.get_agent_tokens())
-        corr = {f: headers[h][:120] for h, f in CORRELATION_HEADERS.items() if headers.get(h)}
+        corr = correlation(headers)
         mode = getattr(ca, "mode", "optional") if ca else "optional"
         protect_admin = bool(getattr(ca, "protect_admin", False)) if ca else False
         problem = None
@@ -130,6 +138,11 @@ class ClientAuthMiddleware:
             # A key that matches nothing is always refused — a typo must not
             # silently become "anonymous".
             problem = _deny(401, "unknown Foundry client key", "invalid_api_key")
+        elif need == "orchestration":
+            if client is None or not ({"orchestration", "admin"} & set(client["scopes"])):
+                problem = _deny(401 if client is None else 403,
+                                "work bindings need a client key with the orchestration "
+                                "scope", "insufficient_scope")
         elif need in ("inference", "media"):
             if client is None and mode == "required":
                 problem = _deny(401, "this Foundry requires a client key "
@@ -155,6 +168,24 @@ class ClientAuthMiddleware:
             await self.app(scope, receive, send)
         finally:
             _client.reset(token)
+
+
+def correlation(headers: dict) -> dict:
+    """Correlation fields for a request: explicit x-foundry-* headers, else the
+    client's own session header, plus what a registered work binding adds."""
+    corr = {f: headers[h][:120] for h, f in CORRELATION_HEADERS.items() if headers.get(h)}
+    if "session_id" not in corr:
+        for h in SESSION_FALLBACK_HEADERS:
+            if headers.get(h):
+                corr["session_id"] = headers[h][:120]
+                break
+    if corr.get("session_id"):
+        from .orchestration import get_registry
+        reg = get_registry()
+        if reg is not None:
+            for k, v in reg.correlation(corr["session_id"]).items():
+                corr.setdefault(k, v)
+    return corr
 
 
 def persona_allowed(persona_name: str) -> bool:

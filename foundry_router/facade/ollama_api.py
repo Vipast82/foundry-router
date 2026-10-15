@@ -110,7 +110,7 @@ def _client_model_denied(name: str, persona) -> "JSONResponse | None":
     if persona is not None and client_auth.persona_allowed(persona["virtual_name"]):
         return None
     return JSONResponse({"error": f"client {cl.get('client_id')!r} may not use model "
-                                  f"{name!r}", "code": "model_not_allowed"}, status_code=403)
+                                  f"{name!r}", "code": "model_not_allowed", "category": "config"}, status_code=403)
 
 
 def _visible_personas(svc) -> list:
@@ -131,12 +131,12 @@ def _persona_gate(persona) -> "JSONResponse | None":
     name = persona["virtual_name"]
     if not persona.get("enabled", 1) and not client_auth.current().get("internal"):
         return JSONResponse({"error": f"persona {name!r} is disabled. Enable it in Foundry "
-                                      f"(Personas) to use it.", "code": "persona_disabled"},
+                                      f"(Personas) to use it.", "code": "persona_disabled", "category": "config"},
                             status_code=403)
     if (persona.get("kind") or "chat") == "media":
         return JSONResponse({"error": f"{name!r} is an image persona: use "
                                       f"/v1/images/generations or the generate_image tool, "
-                                      f"not chat.", "code": "image_persona"}, status_code=400)
+                                      f"not chat.", "code": "image_persona", "category": "config"}, status_code=400)
     return None
 
 
@@ -888,7 +888,9 @@ def strict_refusal(svc, persona, logger, code: str, detail: str, denials=None,
     logger.finish("error", msg)
     svc.db.log_event("warning", "routing", msg, json.dumps({"code": code,
                                                           "denials": denials or []}))
-    body = {"error": msg, "code": code, "persona": name, "denials": denials or []}
+    from ..errors import denial_category
+    body = {"error": msg, "code": code, "persona": name, "denials": denials or [],
+            "category": denial_category(code)}
     headers = {}
     if retry_after:
         body["reset_seconds"] = int(retry_after)
@@ -1758,7 +1760,7 @@ async def _direct_dispatch_chat(svc, persona, model_name, messages, client_tools
             return strict_refusal(svc, persona, logger, "route_unavailable",
                                   ("no model in its allowlist is reachable "
                                    f"({', '.join(map(str, allow)) or 'allowlist is empty'})"))
-        resets = []
+        resets, paused = [], []
         for cand in cands:
             v = await svc.guardrails.check_paid_call(
                 cand, svc.pool.backend_info(cand), svc.registry.get(cand),
@@ -1770,7 +1772,14 @@ async def _direct_dispatch_chat(svc, persona, model_name, messages, client_tools
             denials.append(f"{cand}: {v.reason}")
             if getattr(v, "retry_after", None):
                 resets.append(v.retry_after)
+            paused.append(getattr(v, "code", "") == "paused")
         if model_id is None:
+            # Every candidate stopped by a pause switch: say so, so an automated
+            # client waits for a human rather than for a budget reset.
+            if paused and all(paused):
+                return strict_refusal(svc, persona, logger, "paused",
+                                      "its route is paused in Foundry ("
+                                      + "; ".join(denials)[:500] + ")", denials, status=429)
             return strict_refusal(svc, persona, logger, "budget_denied",
                                   "every model in its route was denied by the usage "
                                   "budget (" + "; ".join(denials)[:500] + ")",
@@ -1939,6 +1948,20 @@ async def _direct_dispatch_chat(svc, persona, model_name, messages, client_tools
     from .. import turn_assist as ta, frontier_assist as fa, interventions as iv
     from ..agents import conversation_key as _conv_key
     acfg = ta.config(persona, svc.config_store.config.turn_assist)
+    if strict and not acfg.get("strict_frontier"):
+        # A strict persona's route is its one backend/model. Frontier helpers
+        # (advisor, auditor, escalation advice) would be another model on
+        # another subscription, so they stay off unless the persona's assist
+        # JSON names them explicitly with strict_frontier: true.
+        frontier_wanted = (acfg.get("advisor") or (acfg.get("auditor") or "off") != "off"
+                           or acfg.get("supervisor") == "escalate")
+        acfg["advisor"] = False
+        acfg["auditor"] = "off"
+        if acfg.get("supervisor") == "escalate":
+            acfg["supervisor"] = "nudge"
+        if frontier_wanted and client_tools:
+            route_notes.append("strict routing: turn-assist frontier helpers off "
+                               "(set assist.strict_frontier to allow them)")
     assist_on = ta.enabled(acfg) and not summary_req and bool(client_tools)
     advisor_on = assist_on and bool(acfg.get("advisor")) and bool(acfg.get("frontier_models"))
     conv_key = _conv_key(messages) if assist_on else ""
@@ -2652,7 +2675,9 @@ def _budget_denied_response(e) -> "JSONResponse | None":
     from ..budget import BudgetDenied
     if not isinstance(e, BudgetDenied):
         return None
-    body = {"error": e.message, "code": e.code, "rule": e.rule}
+    from ..errors import denial_category
+    body = {"error": e.message, "code": e.code, "rule": e.rule,
+            "category": denial_category(e.code)}
     headers = {}
     if e.reset_s:
         body["reset_seconds"] = int(e.reset_s)

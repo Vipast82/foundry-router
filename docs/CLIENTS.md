@@ -27,6 +27,7 @@ client_auth:
 | `inference` | Ollama `/api/*` and OpenAI `/v1/*` chat, completions, responses, embeddings, model lists |
 | `media` | `/v1/images/*`, `/media/*`, `/mcp/media` (image jobs, artifacts; see docs/MEDIA.md) |
 | `admin` | `/admin/*` (the web UI's API; the `/ui` page shell itself is static) |
+| `orchestration` | `/v1/foundry/work/*`: a development coordinator's session bindings, task state and events (docs/COORDINATOR.md) |
 
 - **Sending the key:** `Authorization: Bearer <key>` (OpenAI clients: Kilo,
   Cline's OpenAI Compatible provider, OpenWebUI, AnythingLLM), `x-api-key`, or
@@ -54,6 +55,37 @@ log. They are never guessed from prompt text.
 | `x-foundry-session` | the coding session (e.g. one Kilo task) |
 | `x-foundry-task` | this helper run / sub-task |
 | `x-foundry-parent-task` | the task that started it |
+
+Without `x-foundry-session`, the client's own session header is used:
+**Kilo and OpenCode send `x-session-id`** (their session id) on every model
+call, so Kilo traffic is grouped per session with no client change.
+
+### Work bindings (development coordinator)
+
+A coordinator that starts coding sessions registers each one with
+`POST /v1/foundry/work/sessions {session_id, project_id, task_id, run_id,
+role, parent_session_id, persona}` (client scope **`orchestration`**). From
+then on every call carrying that session id is recorded, budgeted and traced
+with its project, coordinator task (sprint), run (attempt) and role, and its
+parent session as `parent_task_id`. A session id stays bound to one project
+(re-binding it to another is refused, 409). See docs/COORDINATOR.md.
+
+### Refusal categories
+
+Foundry's own refusals carry a machine-readable category, so an automated
+client can decide without parsing the message: `category` in Ollama-style
+bodies, `error.foundry_category` in OpenAI-style ones.
+
+| Category | Codes | What to do |
+|---|---|---|
+| `budget` | `budget_denied` | wait for `reset_seconds` / `Retry-After` |
+| `pause` | `paused` | wait for an operator to resume the pause switch |
+| `route` | `route_unavailable`, `queue_timeout` | retry later, or report a blocker |
+| `config` | `persona_disabled`, `image_persona`, `model_not_allowed` | needs a person |
+| `auth` | `invalid_api_key`, `missing_api_key`, `insufficient_scope` | fix the key |
+
+A strict persona whose only route is paused now answers `paused`, not
+`budget_denied`.
 
 ## What every response tells the client
 

@@ -62,6 +62,12 @@ the optional companion services (with one-line installers).
   aggregator for Cline / AnythingLLM) or as a persona backend (streamed
   answer, agent tool progress as thinking, per-chat sessions), with loop
   protection and run metrics. See [docs/AGENTS.md](docs/AGENTS.md).
+- **Development coordinator** — runs an approved queue of sprints one after
+  another: a fresh Kilo session per attempt through Foundry's strict local
+  persona, the project's own checks on the committed code, one frontier review
+  of the exact commit, closeout, human approval where required, then the next
+  task. Project-agnostic (profiles + narrow adapters), stdlib only. See
+  [docs/COORDINATOR.md](docs/COORDINATOR.md).
 - **Cost calculator with automatic prices** — local-vs-cloud cost of your real
   traffic; service prices refresh from OpenRouter's public catalog on a
   schedule (brain-matched, lockable per row).

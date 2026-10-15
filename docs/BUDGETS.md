@@ -51,6 +51,17 @@ budgets:
       match: {account: "cliproxy:codex"}
       max_tokens: 2000000
       window_minutes: 1440
+    # coordinator sessions (docs/COORDINATOR.md): at most 2 review calls per
+    # sprint attempt, and a per-project allowance on top of the shared ones
+    - name: review-per-attempt
+      match: {role: reviewer}
+      per: run
+      max_calls: 2
+      window_minutes: 0
+    - name: animaluprising-day
+      match: {project: animaluprising, paid: true}
+      max_calls: 60
+      window_minutes: 1440
     # try a limit without enforcing it
     - name: cline-plan-watch
       mode: observe
@@ -60,8 +71,8 @@ budgets:
 
 | Field | Meaning |
 |---|---|
-| `match` | which calls the rule covers: `backend`, `persona`, `client`, `account`, `model` (glob or list of globs), `paid: true/false`. Empty = every call. `persona: ""` matches raw model names (no persona). |
-| `per` | one allowance per `client`, `persona`, `session`, `task` (a helper run), `request`, `backend` or `account`; omitted = shared by all matching calls |
+| `match` | which calls the rule covers: `backend`, `persona`, `client`, `account`, `model`, `session`, `task`, and for coordinator-bound sessions `project`, `work_task`, `run`, `role` (glob or list of globs), `paid: true/false`. Empty = every call. `persona: ""` matches raw model names (no persona). |
+| `per` | one allowance per `client`, `persona`, `session`, `task` (a helper run), `request`, `backend`, `account`, `project`, `work_task` (a sprint), `run` (one sprint attempt) or `role`; omitted = shared by all matching calls |
 | `window_minutes` | rolling window for `max_calls` / `max_tokens`; `0` = no window |
 | `max_calls` | model rounds, retries included |
 | `max_tokens` | input + output tokens. The admission check uses the request's estimated input; the actual tokens are settled after the call. |
@@ -78,7 +89,14 @@ budgets:
 - client: `match.client` / `per: client`, the client key's name;
 - parent coding session: `per: session`;
 - helper run: `per: task`;
-- individual request: `per: request`.
+- individual request: `per: request`;
+- project (a game registered with the coordinator): `match.project` / `per: project`;
+- sprint and sprint attempt: `per: work_task`, `per: run`; agent role: `match.role`.
+
+Project, sprint, run and role come from the coordinator's work bindings
+(docs/COORDINATOR.md): Kilo sends its session id, the coordinator registered
+that session. Account and backend rules still apply to every project at once,
+so two games share one Claude subscription limit.
 
 The existing per-request paid-call cap (`guardrails.max_paid_calls_per_request`),
 the backend `call_budget_5h` / `call_budget_daily`, Meridian's conservation

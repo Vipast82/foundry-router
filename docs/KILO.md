@@ -13,6 +13,9 @@ each one's inference route and limits.
 | `Foundry-Kilo-Vision-Deep` | CLIProxyAPI / GPT-6 Astra, image input | disabled |
 | `Foundry-Kilo-Images` / `-Images-Draft` | image policies: `gpt-image-2.5-sunburst` / `-flare` (docs/MEDIA.md) | disabled |
 
+To run sprints one after another (each in a fresh Kilo session, verified and
+reviewed before the next), see docs/COORDINATOR.md.
+
 All of them use **strict routing** (`routing: strict`, `execution_mode:
 direct`, `fallback_policy: refuse`).
 

@@ -526,6 +526,16 @@ class Database:
             # a flag marking calls that ran on an executes_code server.
             ("tool_call_log", "arguments", "TEXT"),
             ("tool_call_log", "executed_code", "INTEGER DEFAULT 0"),
+            # Work bindings (orchestration.py): the project / coordinator task /
+            # run / role of the session that made the call.
+            ("usage_events", "project_id", "TEXT"),
+            ("usage_events", "work_task_id", "TEXT"),
+            ("usage_events", "run_id", "TEXT"),
+            ("usage_events", "role", "TEXT"),
+            ("request_log", "project_id", "TEXT"),
+            ("request_log", "work_task_id", "TEXT"),
+            ("request_log", "run_id", "TEXT"),
+            ("request_log", "role", "TEXT"),
         ]
         with self._lock:
             for table, column, ddl in added:

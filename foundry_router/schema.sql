@@ -566,3 +566,47 @@ CREATE TABLE IF NOT EXISTS state_snapshots (
   reason TEXT,
   data TEXT                          -- JSON {personas, budget_pauses, tool_overrides, model_overrides}
 );
+
+-- Work bindings (orchestration.py): a coding session (e.g. a Kilo session id
+-- sent as x-session-id) registered by a development coordinator with its
+-- project, task, run and role.
+CREATE TABLE IF NOT EXISTS work_sessions (
+  session_id TEXT PRIMARY KEY,
+  project_id TEXT,
+  task_id TEXT,
+  run_id TEXT,
+  role TEXT,
+  parent_session_id TEXT,
+  persona TEXT,
+  client_id TEXT,
+  meta TEXT,
+  created_ts REAL,
+  updated_ts REAL,
+  ended_ts REAL,
+  outcome TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_work_sessions_project ON work_sessions(project_id, task_id);
+
+-- The coordinator's latest reported state per task (display only).
+CREATE TABLE IF NOT EXISTS work_tasks (
+  project_id TEXT,
+  task_id TEXT,
+  state TEXT,
+  data TEXT,
+  updated_ts REAL,
+  PRIMARY KEY (project_id, task_id)
+);
+
+-- Coordinator lifecycle events (display only); event_id dedupes resends.
+CREATE TABLE IF NOT EXISTS work_events (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  event_id TEXT UNIQUE,
+  ts REAL,
+  project_id TEXT,
+  task_id TEXT,
+  session_id TEXT,
+  kind TEXT,
+  state TEXT,
+  detail TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_work_events_ts ON work_events(ts);

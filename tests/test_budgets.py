@@ -28,6 +28,7 @@ async def _router(req: httpx.Request):
         return httpx.Response(200, json={"data": [{"id": m} for m in MODELS[backend]]})
     body = json.loads(req.content)
     HITS.append((backend, body["model"]))
+    STATE["last_body"] = body
     delay = STATE.get("delay", 0)
     if delay:
         await asyncio.sleep(delay)

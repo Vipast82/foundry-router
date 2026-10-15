@@ -1,0 +1,98 @@
+# AnimalUprising project profile for the Foundry development coordinator.
+# Paths are for Victor's workstation. Secrets are environment variable NAMES.
+schema_version = 1
+id = "animaluprising"
+name = "Animal Uprising"
+version = "1"
+
+[workspace]
+path = "C:/Roblox/AnimalUprising"
+# Where sessions may write at all; each sprint's own scope (its plan's
+# "Files this sprint may change") is always narrower.
+allowed_dirs = ["src", "tests", "docs", "tools", "assets", "default.project.json"]
+branch = "master"
+remote = "origin"
+
+[adapter]
+module = "foundry_coordinator.projects.animaluprising.adapter:AnimalUprisingAdapter"
+
+[animaluprising]
+# Refuse to start a sprint until AGENT_RULES.md carries the coordinator
+# amendment (RULE_AMENDMENT.md). Never turn this off to "get going".
+require_rule_amendment = true
+# python = ["py", "-3"]          # default: the coordinator's own Python
+# lune = "C:/Users/shock/.rokit/bin/lune.exe"
+
+[client]
+kind = "kilo"
+url = "http://127.0.0.1:4096"       # `kilo serve --port 4096` (see docs/COORDINATOR.md)
+password_env = "KILO_SERVER_PASSWORD"
+provider = "foundry"                # the provider id in kilo.jsonc
+agent = "code"
+session_timeout_minutes = 240
+
+[roles]
+implementer = "Foundry-Kilo-Local"
+researcher = "Foundry-Kilo-Haiku"
+reviewer = "Foundry-Kilo-Sonnet"
+deep_reviewer = "Foundry-Kilo-Opus"        # or Foundry-Kilo-Astra
+visual_reviewer = "Foundry-Kilo-Vision"
+image_generator = "Foundry-Kilo-Images"
+
+[foundry]
+url = "http://192.168.0.112:11435"
+key_env = "FOUNDRY_COORDINATOR_KEY"        # a clients: key with scopes [inference, orchestration]
+require_binding = true
+
+[review]
+required = true
+deep_when = ["risk:high"]
+max_diff_bytes = 80000
+max_tokens = 4000
+
+[approval]
+# MASTER_ORDER: a sprint may start when the one above it is DONE, or
+# COMPLETE-PENDING-VISUAL-REVIEW where only Victor's look is missing.
+deps_accept_pending = ["visual"]
+
+[[approval.rules]]
+match = "visual"
+kind = "visual"
+stage = "after_close"
+artifacts = ["docs/evidence/{task}/*.png"]
+
+[publish]
+# AGENT_RULES §9/§24: the CLOSE session runs one plain `git push origin master`;
+# the coordinator only verifies that origin/master equals HEAD. Never tags.
+mode = "verify_only"
+remote = "origin"
+branch = "master"
+
+[commit]
+prefix = "{task}:"
+require_prefix = true
+
+[limits]
+max_attempts = 3
+max_sessions_per_task = 8
+max_review_calls = 3
+max_closeout_attempts = 2
+session_timeout_minutes = 240
+max_task_minutes = 1440
+auto_resume_after_budget_reset = true
+
+[resources]
+# One process owns Studio play/stop and the Rojo serve at a time.
+exclusive = ["studio:victor-workstation", "rojo:34872"]
+
+[closeout]
+mode = "session"
+# Files a CLOSE session writes; changing them after the review doesn't void it.
+exempt_paths = [
+  "docs/progress/{task}_*",
+  "docs/progress/STATE.md",
+  "docs/progress/state/*",
+  "docs/progress/STATE_ARCHIVE.md",
+  "docs/MASTER_ORDER.md",
+  "docs/design/ASSET_LEDGER.md",
+]

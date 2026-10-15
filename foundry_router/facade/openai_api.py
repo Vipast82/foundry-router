@@ -313,6 +313,9 @@ def _error_envelope(resp) -> JSONResponse:
     err = {"message": msg or "error", "type": etype, "code": code}
     if isinstance(body, dict) and body.get("reset_seconds"):
         err["reset_seconds"] = body["reset_seconds"]
+    from ..errors import denial_category
+    if denial_category(code):
+        err["foundry_category"] = denial_category(code)
     headers = {"Retry-After": resp.headers["retry-after"]} if resp.headers.get("retry-after") else {}
     return JSONResponse({"error": err}, status_code=resp.status_code, headers=headers)
 

@@ -620,7 +620,7 @@ class ClientConfig(BaseModel):
     See client_auth.py for what each scope reaches."""
     name: str
     key: Optional[str] = None          # use a ${VAR} reference in config.yaml
-    scopes: list[Literal["inference", "media", "admin"]] = Field(
+    scopes: list[Literal["inference", "media", "admin", "orchestration"]] = Field(
         default_factory=lambda: ["inference"])
     # Optional: only these personas are visible/usable for this client.
     personas: list[str] = Field(default_factory=list)
@@ -675,15 +675,19 @@ class BudgetRule(BaseModel):
     `match` selects the model calls it covers (all keys optional; a value is a
     glob or a list of globs): backend, persona, client, account (e.g.
     "cliproxy:codex", "meridian:claude"), model; and paid: true|false
-    (subscription/paid backends vs local). `per` splits the limit into one
-    allowance per client / persona / session / task (a helper run) / request /
-    backend / account; none = one shared allowance."""
+    (subscription/paid backends vs local); and, for sessions a development
+    coordinator registered: project, work_task (its sprint/task id), run (one
+    attempt) and role (implementer, reviewer, ...). `per` splits the limit into
+    one allowance per client / persona / session / task (a helper run) /
+    request / backend / account / project / work_task / run / role; none = one
+    shared allowance."""
     name: str
     enabled: bool = True
     mode: Literal["enforce", "observe"] = "enforce"   # observe = log "would deny" only
     match: dict = Field(default_factory=dict)
     per: Optional[Literal["client", "persona", "session", "task", "request",
-                          "backend", "account"]] = None
+                          "backend", "account", "project", "work_task", "run",
+                          "role"]] = None
     window_minutes: int = 300          # 0 = no window: the whole life of the group
     max_calls: Optional[int] = None    # model rounds, retries included
     max_tokens: Optional[int] = None   # input + output tokens
@@ -691,7 +695,7 @@ class BudgetRule(BaseModel):
     # Distinct helpers active at once (a helper = task id, else session, else
     # client+persona); one stays "active" until idle_seconds after its last call.
     max_active: Optional[int] = None
-    active_by: Literal["task", "session", "client", "persona"] = "task"
+    active_by: Literal["task", "session", "client", "persona", "run"] = "task"
     idle_seconds: int = 60
     wait_seconds: float = 0            # wait this long for a free slot before refusing
 

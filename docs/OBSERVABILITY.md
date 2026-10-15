@@ -85,6 +85,26 @@ API: `GET /admin/api/routes?hours=24&all=0`,
 `GET /admin/api/routes/edge?kind=&src=&dst=&hours=`,
 `GET /admin/api/requests/{request_id}/trace`.
 
+## Work (Dashboard → Work)
+
+What a development coordinator (docs/COORDINATOR.md) is doing, next to the
+model calls Foundry measured for it:
+
+- **Tasks**: project, task (sprint), state as the coordinator reports it,
+  attempt and sessions used, head commit and the commit the review approved,
+  and what it waits on now (next action, blocker, question, pause reason, the
+  findings a repair must fix).
+- **Sessions**: every coding session the coordinator bound (implementer,
+  reviewer, Kilo helper subagents with their parent), the persona asked for,
+  the backend/model that actually answered, calls, tokens, denials and calls
+  in flight.
+- **Events**: the lifecycle as it happened (transitions with their evidence
+  summary, sessions started, verifications, reviews, approvals).
+
+API: `GET /admin/api/work?project=&hours=`, `GET /admin/api/work/usage?project=&task=&run=&session=`.
+Foundry only displays this state; the coordinator's own store decides. Local
+file edits and Roblox Studio operations are not visible to Foundry.
+
 ## Compare (Dashboard → Compare)
 
 Kilo vs Cline (or persona vs persona) from Foundry's own records. Every

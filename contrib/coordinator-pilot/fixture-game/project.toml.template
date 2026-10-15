@@ -1,0 +1,63 @@
+# A second, generic game: no adapter code at all, only this profile.
+# Template for registering a new project: copy, fill in paths and roles.
+schema_version = 1
+id = "fixture-game"
+name = "Fixture Game"
+version = "1"
+
+[workspace]
+path = "@WORKSPACE@"
+allowed_dirs = ["src", "docs"]
+branch = "main"
+remote = "origin"
+
+[tasks]
+source = "json"
+file = "tasks.json"
+
+[client]
+kind = "kilo"
+url = "@KILO_URL@"
+password_env = "KILO_SERVER_PASSWORD"
+provider = "foundry"
+agent = "code"
+session_timeout_minutes = 30
+
+[client.permissions]
+bash = "allow"
+edit = "allow"
+
+[roles]
+implementer = "Foundry-Kilo-Local"
+reviewer = "Foundry-Kilo-Sonnet"
+deep_reviewer = "Foundry-Kilo-Opus"
+
+[foundry]
+url = "@FOUNDRY_URL@"
+key_env = "FOUNDRY_COORDINATOR_KEY"
+
+[review]
+required = true
+
+[[verify.checks]]
+name = "fixture-check"
+command = ["{python}", "verify.py"]
+pass_regex = "^ALL PASS$"
+
+[publish]
+mode = "push"
+remote = "origin"
+branch = "main"
+
+[limits]
+max_attempts = 3
+max_review_calls = 3
+session_timeout_minutes = 20
+
+[resources]
+# shares the "studio" with AnimalUprising on purpose: the lock is global
+exclusive = ["studio:victor-workstation"]
+
+[closeout]
+mode = "none"
+exempt_paths = ["docs/progress/{task}_*"]

@@ -985,6 +985,19 @@ async def compare_clients(request: Request, hours: float = 168, group: str = "cl
                           group="persona" if group == "persona" else "client")
 
 
+@router.get("/admin/api/work")
+async def work_view(request: Request, project: str = "", hours: float = 72):
+    """Coordinator tasks, bound sessions with their measured usage, and
+    lifecycle events (orchestration.py)."""
+    return _svc(request).work.view(project, hours=max(1.0, min(2160.0, hours)))
+
+
+@router.get("/admin/api/work/usage")
+async def work_usage(request: Request, project: str = "", task: str = "", run: str = "",
+                     session: str = ""):
+    return _svc(request).work.usage(project, task, run, session)
+
+
 @router.get("/admin/api/routes")
 async def routes_graph(request: Request, hours: float = 24, all: int = 0):
     """Routing graph from the live configuration + traffic / denials /
@@ -1694,10 +1707,16 @@ async def kilo_provider_config(request: Request):
         if limit:
             entry["limit"] = limit
         models[p["virtual_name"]] = entry
-    return {"provider": {"foundry": {
-        "npm": "@ai-sdk/openai-compatible", "name": "Foundry Router",
-        "options": {"baseURL": base.rstrip("/") + "/v1", "apiKey": "{env:FOUNDRY_KEY_KILO}"},
-        "models": models}}}
+    return {
+        "provider": {"foundry": {
+            "npm": "@ai-sdk/openai-compatible", "name": "Foundry Router",
+            "options": {"baseURL": base.rstrip("/") + "/v1", "apiKey": "{env:FOUNDRY_KEY_KILO}"},
+            "models": models}},
+        # Only Foundry: Kilo's `task` tool otherwise falls back to the Kilo
+        # Gateway (paid credits) when a model isn't found under the current
+        # provider. And helpers may not start helpers of their own.
+        "enabled_providers": ["foundry"],
+        "subagent_depth": 1}
 
 
 @router.get("/admin/api/profiles")

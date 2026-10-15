@@ -26,10 +26,14 @@ dev = ["pytest>=8.0", "pytest-asyncio>=0.24"]
 version = { attr = "foundry_router.__version__" }
 
 [tool.setuptools.packages.find]
-include = ["foundry_router*"]
+include = ["foundry_router*", "foundry_coordinator*"]
+
+[project.scripts]
+foundry-coordinator = "foundry_coordinator.cli:main"
 
 [tool.setuptools.package-data]
 "foundry_router" = ["schema.sql", "ui/static/*"]
+"foundry_coordinator" = ["projects/*/*.toml", "projects/*/*.md"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
