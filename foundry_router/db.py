@@ -495,6 +495,20 @@ class Database:
             ("request_log", "session_id", "TEXT"),
             ("request_log", "task_id", "TEXT"),
             ("request_log", "parent_task_id", "TEXT"),
+            # Observability (step 5): what actually served the request, how many
+            # model calls it took (attempts), how many of those were failed
+            # attempts followed by another (retries), and a finer outcome
+            # (ok | error | cancelled | timeout | denied); flags = JSON
+            # {client_tools, compaction, tool_calls_out}.
+            ("request_log", "served_model", "TEXT"),
+            ("request_log", "served_backend", "TEXT"),
+            ("request_log", "routing", "TEXT"),
+            ("request_log", "attempts", "INTEGER"),
+            ("request_log", "retries", "INTEGER"),
+            ("request_log", "outcome", "TEXT"),
+            ("request_log", "flags", "TEXT"),
+            ("perf_samples", "request_id", "TEXT"),
+            ("perf_samples", "client_id", "TEXT"),
             # Leave Foundry's own status lines (routing header, notes, heartbeat
             # text) out of the reasoning stream — clean traces for data
             # generation. Keep-alive frames are still sent, just empty.

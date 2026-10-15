@@ -30,6 +30,12 @@ def record_call(db: Any, registry: Any, *, model: str, backend: str, result: Any
     warning in the Events log. Best-effort: telemetry never breaks a request."""
     r = result
     try:
+        from . import request_context
+        names = [tc.get("name") for tc in (getattr(r, "tool_calls", None) or []) if tc.get("name")]
+        request_context.note_route(tool_calls_out=names)
+    except Exception:                                               # noqa: BLE001
+        pass
+    try:
         registry.note_inference(
             model, r.completion_tokens, r.eval_duration_ns, r.load_duration_ns,
             prompt_count=r.prompt_tokens,

@@ -703,6 +703,18 @@ class BudgetsConfig(BaseModel):
     retention_days: int = 90           # ledger rows (usage_events)
 
 
+class HealthConfig(BaseModel):
+    """Functional health (health.py): reachable vs actually serving."""
+    # Probe a backend with a tiny generation when it has had no successful call
+    # for this long and is idle. 0 = never probe automatically.
+    probe_minutes: int = 15
+    # Also auto-probe paid/subscription backends (each probe spends quota).
+    probe_paid: bool = False
+    probe_timeout_seconds: int = 120
+    # A success within this window counts as "serving".
+    fresh_minutes: int = 15
+
+
 class AppConfig(BaseModel):
     server: ServerConfig = Field(default_factory=ServerConfig)
     agent_brain: AgentBrainConfig = Field(default_factory=AgentBrainConfig)
@@ -727,6 +739,7 @@ class AppConfig(BaseModel):
     # ones left alone. Also available on demand from the Personas tab.
     persona_profiles: list[str] = Field(default_factory=list)
     budgets: BudgetsConfig = Field(default_factory=BudgetsConfig)
+    health: HealthConfig = Field(default_factory=HealthConfig)
 
 
 # --------------------------------------------------------------------------- #

@@ -106,8 +106,9 @@ def record_sample(db: Database, *, model: str, backend: str = "", persona: str =
             "ttft_ms, eff_tps, wall_ms, cache_hit_pct, spec_accept_pct, finish_reason, "
             "run_label, timing_src, prefill_tokens, reasoning_tokens, load_ms, "
             "headers_ms, start_ms, tcp_retrans, tcp_rwnd_ms, client_gap_ms, client_tool, "
-            "router_ms, arrived_at, sent_at, first_token_at, prev_reply_at, clock_diff_ms) "
-            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            "router_ms, arrived_at, sent_at, first_token_at, prev_reply_at, clock_diff_ms, "
+            "request_id, client_id) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (utcnow(), model, backend, persona, mode,
              int(prompt_tokens or 0), int(completion_tokens or 0), int(cached_tokens or 0),
              int(draft_n or 0), int(draft_n_accepted or 0),
@@ -127,7 +128,8 @@ def record_sample(db: Database, *, model: str, backend: str = "", persona: str =
              (client_tool or None),
              (round(router_ms, 1) if router_ms is not None else None),
              arrived_at, sent_at, first_token_at, prev_reply_at,
-             (round(clock_diff_ms, 1) if clock_diff_ms is not None else None)))
+             (round(clock_diff_ms, 1) if clock_diff_ms is not None else None),
+             *_correlation()))
     except Exception:
         return
     # Opportunistic prune (≈2% of inserts) — keeps the table bounded without a
@@ -336,3 +338,14 @@ def clear_samples(db: Database, model: Optional[str] = None,
     if n:
         db.execute(f"DELETE FROM perf_samples WHERE {clause}", tuple(params))
     return n
+
+
+def _correlation() -> tuple:
+    """(request_id, client_id) of the request this call belongs to, so a
+    sample joins its request_log row (traces, per-client comparisons)."""
+    try:
+        from . import client_auth, request_context
+        return (request_context.request_id() or None,
+                client_auth.current().get("client_id"))
+    except Exception:                                              # noqa: BLE001
+        return (None, None)

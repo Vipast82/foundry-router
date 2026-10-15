@@ -96,6 +96,17 @@
   td.pname { min-width: 210px; max-width: 360px; }
   td.pdesc { min-width: 260px; }
   td.bw-wide { min-width: 240px; }
+  .routes-svg { display:block; font: 12px system-ui, sans-serif; }
+  .routes-svg .rhead { fill: var(--dim); font-size: 12px; text-transform: uppercase; letter-spacing: .04em; }
+  .routes-svg .rnode-box { fill: var(--panel); stroke: var(--line); }
+  .routes-svg .rnode-box.has-err { stroke: var(--bad); }
+  .routes-svg .rname { fill: var(--fg); font-weight: 600; }
+  .routes-svg .rsub { fill: var(--dim); font-size: 11px; }
+  .routes-svg .rgate { fill: var(--warn); font-size: 11px; font-weight: 600; }
+  .routes-svg .rlbl { fill: var(--fg); font-size: 11px; text-anchor: middle; paint-order: stroke; stroke: var(--bg); stroke-width: 3px; }
+  .routes-svg .rdot.ok { fill: var(--ok, #3a4); } .routes-svg .rdot.bad { fill: var(--bad); } .routes-svg .rdot.warn { fill: var(--warn); }
+  .routes-svg .redge.click { cursor: pointer; }
+  .routes-svg .redge.click:hover path:first-of-type { opacity: 1; filter: brightness(1.2); }
   td.bw-mid { min-width: 150px; }
   td.pname .pills { display: flex; flex-wrap: wrap; gap: 3px; margin-top: 3px; align-items: center; }
   td.pname .pills .pill { margin: 0; }
@@ -736,11 +747,13 @@ const TABS = {
   "Performance":    tabPerformance,
   "Cost":           tabCost,
   "Scoreboard":     tabScoreboard,
+  "Compare":        tabCompare,
   "Pool":           tabBackends,
   "Model Registry": tabModels,
   "Host Admin":     tabHostAdmin,
   "Personas":       tabPersonas,
   "Guardrails":     tabGuardrails,
+  "Routes":         tabRoutes,
   "Tools":          tabTools,
   "MCP Servers":    tabMCP,
   "MCP Metrics":    tabMcpMetrics,
@@ -755,9 +768,9 @@ const TABS = {
 // Primary nav groups -> their leaf tabs (the secondary row). Reorganizes the
 // former flat bar into logical sections without dropping anything.
 const GROUPS = [
-  ["Dashboard",   ["Live", "Performance", "Cost", "Scoreboard"]],
+  ["Dashboard",   ["Live", "Performance", "Cost", "Scoreboard", "Compare"]],
   ["Backends",    ["Pool", "Model Registry", "Host Admin"]],
-  ["Routing",     ["Personas", "Guardrails"]],
+  ["Routing",     ["Personas", "Guardrails", "Routes"]],
   ["Tools & MCP", ["Tools", "MCP Servers", "MCP Metrics", "Agents"]],
   ["Labs",        ["Research", "Evals"]],
   ["Logs",        ["Usage Log", "Events", "Dev Log", "Data"]],
@@ -2100,6 +2113,205 @@ async function tabLive() {
   await paint();
 }
 
+// Client comparison (compare.py): Kilo vs Cline (or persona vs persona) from
+// what Foundry observed. Metrics are rows, clients are columns.
+window._cmpOpts = window._cmpOpts || {hours: 168, group: "client"};
+async function tabCompare() {
+  const o = window._cmpOpts;
+  const r = await api(`compare?hours=${o.hours}&group=${o.group}`);
+  const gs = r.groups;
+  const n = v => v == null ? '<span class="hint">—</span>' : typeof v === "number" ? v.toLocaleString() : esc(String(v));
+  const ms = v => v == null ? '<span class="hint">—</span>' : fmtDur(v);
+  const pct = v => v == null ? '<span class="hint">—</span>' : v + "%";
+  const metrics = [
+    ["Volume", null],
+    ["requests", g => n(g.requests)], ["sessions", g => n(g.sessions)], ["requests / session", g => n(g.requests_per_session)],
+    ["Outcomes", null],
+    ["ok", g => pct(g.ok_rate)], ["errors + timeouts", g => pct(g.error_rate)], ["cancelled", g => pct(g.cancel_rate)],
+    ["denied by budget / strict route", g => n(g.denied)], ["retries", g => n(g.retries)], ["longest error streak", g => n(g.error_streak_max)],
+    ["Speed", null],
+    ["duration, median (end to end)", g => ms(g.duration_ms_median)], ["duration, p90", g => ms(g.duration_ms_p90)],
+    ["time to first token, median", g => ms(g.ttft_ms_median)], ["decode tokens/s, median (generation only)", g => n(g.decode_tps_median)],
+    ["Usage", null],
+    ["input / output tokens", g => `${n(g.input_tokens)} / ${n(g.output_tokens)}`], ["model calls", g => n(g.model_calls)],
+    ["paid (frontier) calls", g => n(g.paid_calls)], ["frontier calls / session", g => n(g.paid_calls_per_session)],
+    ["compactions", g => n(g.compactions)], ["context per session (median of max)", g => n(g.context_tokens_median_max)],
+    ["Tool loop", null],
+    ["tool calls returned to the client", g => n(g.tool_calls_out)], ["immediately repeated tool calls", g => n(g.repeated_tool_calls)],
+  ];
+  const body = metrics.map(([label, f]) => f
+    ? `<tr><td class="nw">${esc(label)}</td>${gs.map(g => `<td class="nw">${f(g)}</td>`).join("")}</tr>`
+    : `<tr><th colspan="${gs.length + 1}" style="padding-top:14px">${esc(label)}</th></tr>`).join("");
+  $("#main").innerHTML = `
+    <h2>Compare ${o.group === "persona" ? "personas" : "clients"}</h2>
+    <p class="hint">From Foundry's own records (request log, timing samples, budget ledger) — every client through the same router, so the numbers are comparable. Higher token speed or more agents alone is not proof of better productivity; read outcomes and frontier use beside speed.</p>
+    <div class="row"><label>window</label><select id="cmp-hours">${[24, 72, 168, 720].map(h => `<option value="${h}" ${h == o.hours ? "selected" : ""}>${h / 24} d</option>`).join("")}</select>
+      <label>group by</label><select id="cmp-group"><option value="client">client key</option><option value="persona" ${o.group === "persona" ? "selected" : ""}>persona</option></select></div>
+    ${gs.length ? `<table><tr><th>metric</th>${gs.map(g => `<th>${esc(g.group)}</th>`).join("")}</tr>${body}</table>` : '<p class="hint">No requests in this window.</p>'}
+    <p class="hint">${Object.entries(r.notes).map(([k, v]) => `<b>${esc(k.replace(/_/g, " "))}</b>: ${esc(v)}`).join(". ")}.</p>
+    <p class="hint">Not visible to Foundry (needs client-side telemetry): ${esc(r.not_observable.join(", "))}.</p>`;
+  $("#cmp-hours").onchange = e => { o.hours = +e.target.value; render(); };
+  $("#cmp-group").onchange = e => { o.group = e.target.value; render(); };
+}
+
+// Route view (routes_view.py): the routing graph generated from the live
+// configuration, overlaid with traffic, budget denials, failures and image jobs.
+window._routeOpts = window._routeOpts || {hours: 24, all: false};
+async function tabRoutes() {
+  const o = window._routeOpts;
+  const g = await api(`routes?hours=${o.hours}&all=${o.all ? 1 : 0}`);
+  const cols = ["client", "persona", "model", "backend"];
+  const colName = {client: "clients", persona: "personas · route · budget gate", model: "models", backend: "backends"};
+  const byCol = Object.fromEntries(cols.map(c => [c, g.nodes.filter(n => n.kind === c)
+    .sort((a, b) => (b.count - a.count) || a.label.localeCompare(b.label))]));
+  const W = 1180, NW = 220, NH = 46, GAP = 14, TOP = 34;
+  const colX = i => 10 + i * ((W - NW - 20) / 3);
+  const pos = {};
+  cols.forEach((c, i) => byCol[c].forEach((n, j) => { pos[n.id] = {x: colX(i), y: TOP + j * (NH + GAP)}; }));
+  const H = TOP + Math.max(1, ...cols.map(c => byCol[c].length)) * (NH + GAP) + 10;
+  const style = {
+    traffic: "stroke:#3b82f6;opacity:.8", failed: "stroke:var(--bad)", denied: "stroke:var(--bad);stroke-dasharray:6 4",
+    config: "stroke:var(--dim);stroke-dasharray:3 4;opacity:.6", fallback: "stroke:var(--dim);stroke-dasharray:1 4;opacity:.8",
+    image: "stroke:#a855f7;stroke-dasharray:8 3"};
+  const width = e => ["config", "fallback"].includes(e.kind) ? 1.3 : 1.6 + Math.log2((e.count || 0) + 1) * 1.4;
+  const edgesSvg = g.edges.filter(e => pos[e.from] && pos[e.to]).map((e, i) => {
+    const a = pos[e.from], b = pos[e.to];
+    const x1 = a.x + NW, y1 = a.y + NH / 2, x2 = b.x, y2 = b.y + NH / 2, mx = (x1 + x2) / 2;
+    const d = `M${x1},${y1} C${mx},${y1} ${mx},${y2} ${x2},${y2}`;
+    const clickable = !["config", "fallback"].includes(e.kind);
+    const lbl = e.kind === "fallback" ? `#${e.order}` : clickable ? `${e.count}${e.errors ? " (" + e.errors + "✗)" : ""}` : "";
+    const tip = `${e.kind}: ${e.from} → ${e.to}` + (e.count ? ` · ${e.count}` : "") + (e.avg_ms ? ` · avg ${fmtDur(e.avg_ms)}` : "") + (e.rules ? " · " + Object.keys(e.rules).join(", ") : "");
+    return `<g class="redge${clickable ? " click" : ""}" ${clickable ? `onclick='showRouteEdge(${JSON.stringify(e.kind)}, ${JSON.stringify(e.from)}, ${JSON.stringify(e.to)})'` : ""}>
+      <title>${esc(tip)}</title>
+      <path d="${d}" fill="none" style="${style[e.kind]};stroke-width:${width(e)}"/>
+      ${clickable ? `<path d="${d}" fill="none" stroke="transparent" stroke-width="14"/>` : ""}
+      ${lbl ? `<text x="${mx}" y="${(y1 + y2) / 2 - 4}" class="rlbl">${esc(lbl)}</text>` : ""}</g>`;
+  }).join("");
+  const healthCls = {serving: "ok", failing: "bad", down: "bad", unverified: "warn", disabled: ""};
+  const nodesSvg = g.nodes.filter(n => pos[n.id]).map(n => {
+    const p = pos[n.id];
+    let sub = "", dot = "";
+    if (n.kind === "persona") {
+      const bk = n.backend && n.backend.startsWith("<") ? "no " + n.backend.slice(1, -1) + " backend" : n.backend;
+      sub = [n.strict ? "strict" + (bk ? " · " + bk : "") : (n.mode ? "flexible" : ""), n.mode].filter(Boolean).join(" · ");
+      dot = n.validation ? ({passed: "ok", failed: "bad"}[n.validation] || "warn") : "";
+    } else if (n.kind === "backend") {
+      sub = [n.flavor, n.health, n.missing ? "not configured" : ""].filter(Boolean).join(" · ");
+      dot = healthCls[n.health] || "";
+    } else if (n.kind === "client") {
+      sub = n.configured ? `${(n.scopes || []).join("+")}${n.restricted ? " · restricted" : ""}` : "no key";
+    } else if (n.kind === "model") {
+      sub = n.image ? "image model" : n.raw ? "raw model (no persona)" : "";
+    }
+    const dim = n.enabled === false || n.disabled ? "opacity:.45" : "";
+    const gates = n.gates || [];
+    const label = n.kind === "backend" && n.label.startsWith("<") ? `no ${n.label.slice(1, -1)} backend` : n.label;
+    return `<g class="rnode" style="${dim}"><title>${esc(label)}${n.count ? " · " + n.count + " requests" : ""}${n.errors ? " · " + n.errors + " failed" : ""}${gates.length ? "\nbudget rules: " + gates.join(", ") : ""}</title>
+      <rect x="${p.x}" y="${p.y}" width="${NW}" height="${NH}" rx="7" class="rnode-box ${n.errors ? "has-err" : ""}"/>
+      ${dot ? `<circle cx="${p.x + NW - 11}" cy="${p.y + 11}" r="4.5" class="rdot ${dot}"/>` : ""}
+      <text x="${p.x + 9}" y="${p.y + 18}" class="rname">${esc(label.length > 27 ? label.slice(0, 26) + "…" : label)}${n.enabled === false ? " (off)" : ""}</text>
+      ${gates.length ? `<text x="${p.x + NW - (dot ? 22 : 9)}" y="${p.y + 18}" class="rgate" text-anchor="end">⛁${gates.length}</text>` : ""}
+      <text x="${p.x + 9}" y="${p.y + 35}" class="rsub">${esc((sub || "").slice(0, 38))}${n.count ? (sub ? " · " : "") + n.count : ""}</text></g>`;
+  }).join("");
+  const heads = cols.map((c, i) => `<text x="${colX(i)}" y="18" class="rhead">${colName[c]}</text>`).join("");
+  $("#main").innerHTML = `
+    <h2>Routes — generated from the live configuration</h2>
+    <p class="hint">Dotted grey = what the config allows (persona allowlists in pinned order: #2, #3 are the explicit fallback chain; client persona restrictions; the backend each model is served by — the pinned backend for strict routes). <b style="color:#3b82f6">Blue</b> = requests in the window (thicker = more), <b style="color:var(--bad)">red</b> = failed, red dashed = denied by a budget rule, <b style="color:#a855f7">purple dashed</b> = image jobs. ⛁N = budget rules that gate a client or persona (hover for names); the dot = validation (personas) or serving health (backends). Click a coloured edge for its requests, then a request for its full trace.</p>
+    <div class="row"><label>window</label><select id="rt-hours">${[1, 6, 24, 168].map(h => `<option value="${h}" ${h == o.hours ? "selected" : ""}>${h >= 24 ? h / 24 + " d" : h + " h"}</option>`).join("")}</select>
+      <label for="rt-all">all personas</label><input type="checkbox" id="rt-all" ${o.all ? "checked" : ""}>
+      <span class="stat">${g.requests} requests · ${g.denials} denials · ${g.image_jobs} image jobs</span></div>
+    <div class="tscroll"><svg viewBox="0 0 ${W} ${H}" width="${W}" height="${H}" class="routes-svg">${heads}${edgesSvg}${nodesSvg}</svg></div>
+    <div id="rt-detail"></div><div id="rt-trace"></div>`;
+  $("#rt-hours").onchange = e => { o.hours = +e.target.value; render(); };
+  $("#rt-all").onchange = e => { o.all = e.target.checked; render(); };
+}
+
+window.showRouteEdge = async (kind, src, dst) => {
+  const box = $("#rt-detail");
+  box.innerHTML = `<div class="card"><span class="hint">loading…</span></div>`;
+  const r = await api(`routes/edge?kind=${encodeURIComponent(kind)}&src=${encodeURIComponent(src)}&dst=${encodeURIComponent(dst)}&hours=${window._routeOpts.hours}`);
+  const rows = r.requests.map(q => `<tr>
+    <td class="mono nw">${esc((q.ts || "").slice(5, 19).replace("T", " "))}</td>
+    <td class="nw">${esc(q.client || "")}${q.session ? `<div class="hint" style="margin:0">${esc(q.session)}${q.task ? " / " + esc(q.task) : ""}</div>` : ""}</td>
+    <td class="nw">${esc(q.persona || "")}</td><td class="mono nw">${esc(q.model || "")}</td><td class="nw">${esc(q.backend || "")}</td>
+    <td class="nw"><span class="pill ${q.outcome === "ok" || q.outcome === "succeeded" ? "ok" : q.outcome === "cancelled" ? "" : "bad"}">${esc(q.outcome || "")}</span>${q.retries ? ` <span class="hint" style="margin:0">${q.retries} retr${q.retries === 1 ? "y" : "ies"}</span>` : ""}</td>
+    <td class="nw">${q.duration_ms != null ? fmtDur(q.duration_ms) : ""}</td>
+    <td class="nw">${q.input_tokens != null ? `${q.input_tokens.toLocaleString()} / ${(q.output_tokens || 0).toLocaleString()}` : ""}</td>
+    <td class="bw-wide" style="white-space:normal">${esc(q.error || q.summary || "")}</td>
+    <td>${q.request_id && kind !== "image" ? `<button class="act" onclick='showTrace(${JSON.stringify(q.request_id)})'>trace</button>` : ""}</td></tr>`).join("");
+  box.innerHTML = `<div class="card"><h2 style="margin-top:0">${esc(kind)}: ${esc(src)} → ${esc(dst)}</h2>
+    ${rows ? `<table><tr><th>time (UTC)</th><th>client · session/task</th><th>persona</th><th>model</th><th>backend</th><th>outcome</th><th>time</th><th>tokens in/out</th><th>detail</th><th></th></tr>${rows}</table>` : '<p class="hint">No requests on this edge in the window.</p>'}</div>`;
+  box.scrollIntoView({behavior: "smooth", block: "start"});
+};
+
+window.showTrace = async rid => {
+  const box = $("#rt-trace");
+  try {
+    const t = await api(`requests/${encodeURIComponent(rid)}/trace`);
+    const q = t.request || {};
+    const calls = (t.model_calls || []).map(c => `<tr><td class="mono nw">${esc((c.ts || "").slice(11, 19))}</td><td class="mono nw">${esc(c.model)}</td><td class="nw">${esc(c.backend || "")}</td>
+      <td class="nw">${c.ttft_ms != null ? fmtDur(c.ttft_ms) : "—"}</td><td class="nw">${c.prefill_ms != null ? fmtDur(c.prefill_ms) : "—"}${c.prefill_tps ? ` · ${Math.round(c.prefill_tps)} t/s` : ""}</td>
+      <td class="nw">${c.decode_ms != null ? fmtDur(c.decode_ms) : "—"}${c.decode_tps ? ` · ${c.decode_tps.toFixed(1)} t/s` : ""}</td>
+      <td class="nw">${(c.prompt_tokens || 0).toLocaleString()} / ${(c.completion_tokens || 0).toLocaleString()}${c.cached_tokens ? ` <span class="hint" style="margin:0">(${c.cached_tokens.toLocaleString()} cached)</span>` : ""}</td>
+      <td class="nw">${c.wall_ms != null ? fmtDur(c.wall_ms) : ""}</td><td class="nw">${esc(c.finish_reason || "")}</td></tr>`).join("");
+    const led = (t.ledger || []).map(l => `<tr><td class="mono nw">${esc(l.ts.slice(11, 19))}</td><td class="nw"><span class="pill ${l.status === "settled" ? "ok" : l.status === "denied" || l.status === "error" ? "bad" : ""}">${esc(l.status)}</span></td>
+      <td class="nw">${esc(l.backend || "")} · <span class="mono">${esc(l.model || "")}</span></td><td class="nw">${esc(l.account || "")}</td>
+      <td class="nw">${l.input_tokens != null ? l.input_tokens + " / " + l.output_tokens : ""}</td><td class="nw">${l.ms != null ? fmtDur(l.ms) : ""}</td>
+      <td style="white-space:normal">${esc([l.rule, l.detail].filter(Boolean).join(": "))}</td></tr>`).join("");
+    const tools = (t.tool_calls || []).map(c => `<tr><td class="mono nw">${esc((c.ts || "").slice(11, 19))}</td><td class="nw">${esc(c.server)} · ${esc(c.tool)}</td>
+      <td><span class="pill ${c.ok ? "ok" : "bad"}">${c.ok ? "ok" : "failed"}</span></td><td class="nw">${c.duration_ms != null ? fmtDur(c.duration_ms) : ""}</td><td style="white-space:normal">${esc(c.error || "")}</td></tr>`).join("");
+    box.innerHTML = `<div class="card"><h2 style="margin-top:0">Trace <span class="mono" style="font-size:13px">${esc(rid)}</span></h2>
+      <div class="row"><span class="stat" style="margin-left:0">client <b>${esc(q.client || "—")}</b></span><span class="stat">persona <b>${esc(q.persona || "—")}</b></span>
+        <span class="stat">served <b>${esc(q.model || "—")}</b> on <b>${esc(q.backend || "—")}</b></span><span class="stat">${esc(q.mode || "")} · ${esc(q.routing || "")}</span>
+        <span class="stat">outcome <b>${esc(q.outcome || "—")}</b></span><span class="stat">total <b>${q.duration_ms != null ? fmtDur(q.duration_ms) : "—"}</b></span>
+        <span class="stat">attempts <b>${q.attempts ?? "—"}</b>${q.retries ? ` (${q.retries} retr${q.retries === 1 ? "y" : "ies"})` : ""}</span></div>
+      ${q.error ? `<p style="color:var(--bad)">${esc(q.error)}</p>` : ""}
+      ${(t.guardrail_events || []).length ? `<div class="row"><label>route notes</label><div>${t.guardrail_events.map(e => `<div class="hint" style="margin:0">${esc(e)}</div>`).join("")}</div></div>` : ""}
+      ${Object.keys(t.flags || {}).length ? `<div class="row"><label>request</label><span class="hint" style="margin:0">${esc(Object.entries(t.flags).map(([k, v]) => k + ": " + (Array.isArray(v) ? v.join(", ") : v)).join(" · "))}</span></div>` : ""}
+      <h3>Budget ledger (each model call)</h3>${led ? `<table><tr><th>time</th><th>status</th><th>backend · model</th><th>account</th><th>tokens</th><th>call time</th><th>detail</th></tr>${led}</table>` : '<p class="hint">No ledger rows.</p>'}
+      <h3>Model calls (timing)</h3>${calls ? `<table><tr><th>done</th><th>model</th><th>backend</th><th>first token</th><th>prefill</th><th>decode</th><th>tokens in/out</th><th>wall</th><th>finish</th></tr>${calls}</table>` : '<p class="hint">No timing samples (failed or refused before a model answered).</p>'}
+      ${tools ? `<h3>Foundry MCP tool calls</h3><table><tr><th>time</th><th>tool</th><th>result</th><th>time</th><th>error</th></tr>${tools}</table>` : ""}</div>`;
+    box.scrollIntoView({behavior: "smooth", block: "start"});
+  } catch (e) { toast(e.message, true); }
+};
+
+// Functional health (health.py): HTTP-reachable is not the same as able to
+// generate. Evidence comes from real calls; idle local backends get a tiny probe.
+function functionalCard(fh) {
+  if (!fh) return "";
+  const age = s => s == null ? "" : s < 90 ? `${s}s ago` : s < 5400 ? `${Math.round(s / 60)} min ago` : s < 172800 ? `${Math.round(s / 3600)} h ago` : `${Math.round(s / 86400)} d ago`;
+  const pill = {serving: ["ok", "serving"], failing: ["bad", "failing"], unverified: ["warn", "reachable, not verified"],
+                down: ["bad", "down"], disabled: ["", "disabled"]};
+  const rows = fh.backends.map(b => {
+    const [cls, label] = pill[b.status] || ["", b.status];
+    const ok = b.last_ok ? `${esc(age(b.last_ok.age_s))} · <span class="mono">${esc(b.last_ok.model || "")}</span> <span class="hint" style="margin:0">(${esc(b.last_ok.source)})</span>` : '<span class="hint">none in 24 h</span>';
+    const err = b.last_error ? `<span title="${esc(b.last_error.detail || "")}">${esc(age(b.last_error.age_s))} · ${esc((b.last_error.detail || "").slice(0, 70))}</span>` : '<span class="hint">—</span>';
+    return `<tr><td class="nw"><b>${esc(b.backend)}</b> <span class="hint" style="margin:0">${esc(b.flavor || b.type)}${b.paid ? " · paid" : ""}</span></td>
+      <td class="nw"><span class="pill ${cls}">${label}</span></td>
+      <td class="nw">${b.reachable === true ? "yes" : b.reachable === false ? '<span style="color:var(--bad)">no</span>' : '<span class="hint">not checked</span>'}</td>
+      <td class="bw-mid">${ok}</td><td class="bw-wide">${err}</td>
+      <td class="nw">${b.calls_1h}${b.errors_1h ? ` <span class="hint" style="margin:0">(${b.errors_1h} failed)</span>` : ""}</td>
+      <td class="nw">${b.status === "disabled" ? "" : `<button class="act" title="One tiny real generation (reply OK, 16 tokens) on exactly this backend${b.paid ? " — spends a little subscription quota" : ""}" onclick='probeBackend(${JSON.stringify(b.backend)}, ${b.paid})'>probe</button>`}${b.auto_probe ? ' <span class="hint" style="margin:0" title="probed automatically when idle with no recent success">auto</span>' : ""}</td></tr>`;
+  }).join("");
+  const br = fh.brain || {};
+  return `<div class="card">
+    <h2 style="margin-top:0">Can it serve?</h2>
+    <p class="hint">"Reachable" is the pool's HTTP check. <b>Serving</b> means a generation actually succeeded in the last ${fh.fresh_minutes} min — from real traffic, or a tiny probe when a backend sits idle (${fh.probe_minutes ? `local backends every ${fh.probe_minutes} min${fh.probe_paid ? ", paid too" : ""}` : "auto-probes off"}).</p>
+    <table><tr><th>backend</th><th>status</th><th>reachable</th><th>last success</th><th>last failure</th><th>calls 1 h</th><th></th></tr>${rows}</table>
+    <div class="row"><label>brain</label>${br.healthy === true ? '<span class="pill ok">reachable</span>' : br.healthy === false ? `<span class="pill bad" title="${esc(br.error || "")}">down</span>` : '<span class="hint">not checked</span>'}
+      <label>image jobs</label>${fh.media && fh.media.backend ? `<b>${fh.media.active}</b>&nbsp;queued/running · ${fh.media.failed_24h} failed (24 h)` : `<span class="hint">${esc((fh.media || {}).backend_error || "no image backend")}</span>`}</div>
+  </div>`;
+}
+
+window.probeBackend = async (name, paid) => {
+  if (paid && !confirm(`Probe ${name}? This sends one tiny real generation (uses a little subscription quota).`)) return;
+  try {
+    const r = await api("health/probe", {method: "POST", body: {backend: name}});
+    toast(r.ok ? `${name}: serving (${r.model}, ${fmtDur(r.ms)})` : `${name}: probe failed — ${r.detail}`, !r.ok);
+    render();
+  } catch (e) { toast(e.message, true); }
+};
+
 async function tabBackends() {
   const st = await api("status");
   const bh = st.brain.health || {};
@@ -2143,7 +2355,9 @@ async function tabBackends() {
     } catch (e) { if (el) el.innerHTML = '<span class="pill bad">error</span>'; toast(e.message, true); }
   };
   const merAuth = await api("meridian/auth").catch(() => ({url: "", has_token: false}));
+  const fh = await api("health/functional").catch(() => null);
   $("#main").innerHTML = `
+    ${functionalCard(fh)}
     <h2>Backend Pool — mode: ${esc(st.pool_mode)}</h2>
     <p class="hint">Health flips only after repeated failures (removal grace period). Use <b>test</b>
       for an immediate free liveness probe (lists the backend's models — no generation).</p>

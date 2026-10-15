@@ -559,6 +559,7 @@ async def _chat_dispatch(svc, body: dict):
 
     persona = svc.personas.get(model_name)
     summary_req = _is_client_summary_request(messages)
+    request_context.note_route(client_tools=len(client_tools or []), compaction=summary_req)
     denied = _client_model_denied(model_name, persona)
     if denied is not None:
         return denied

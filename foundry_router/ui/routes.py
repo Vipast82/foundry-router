@@ -878,6 +878,70 @@ async def set_subscription_usage(request: Request):
     return {"ok": True, "subscription_usage": cfg.subscription_usage.model_dump()}
 
 
+@router.get("/admin/api/compare")
+async def compare_clients(request: Request, hours: float = 168, group: str = "client"):
+    """Client (or persona) comparison from Foundry's own records."""
+    from .. import compare
+    return compare.report(_svc(request), hours=max(1.0, min(2160.0, hours)),
+                          group="persona" if group == "persona" else "client")
+
+
+@router.get("/admin/api/routes")
+async def routes_graph(request: Request, hours: float = 24, all: int = 0):
+    """Routing graph from the live configuration + traffic / denials /
+    failures / image jobs in the last `hours`."""
+    from .. import routes_view
+    return routes_view.graph(_svc(request), hours=max(0.1, min(720.0, hours)), show_all=bool(all))
+
+
+@router.get("/admin/api/routes/edge")
+async def routes_edge(request: Request, kind: str, src: str, dst: str, hours: float = 24):
+    from .. import routes_view
+    try:
+        return {"requests": routes_view.edge_requests(_svc(request), kind, src, dst, hours)}
+    except (KeyError, ValueError):
+        return JSONResponse({"error": "unknown edge"}, status_code=400)
+
+
+@router.get("/admin/api/requests/{request_id}/trace")
+async def request_trace(request: Request, request_id: str):
+    from .. import routes_view
+    t = routes_view.trace(_svc(request), request_id)
+    if not t:
+        return JSONResponse({"error": "nothing recorded for that request id"}, status_code=404)
+    return t
+
+
+@router.get("/admin/api/health/functional")
+async def functional_health(request: Request):
+    """Per backend: reachable (HTTP) vs serving (a real or probe generation
+    recently succeeded), last success / failure, calls and errors in the last
+    hour; plus the brain and the image-job backlog."""
+    svc = _svc(request)
+    media = {}
+    try:
+        m = svc.media.summary()
+        media = {"active": m["active"], "failed_24h": (m["last_24h"] or {}).get("failed", 0),
+                 "backend": m["backend"], "backend_error": m["backend_error"]}
+    except Exception:                                             # noqa: BLE001
+        pass
+    return {"backends": svc.health.status(), "brain": getattr(svc, "_brain_health", None),
+            "media": media, "fresh_minutes": svc.config_store.config.health.fresh_minutes,
+            "probe_minutes": svc.config_store.config.health.probe_minutes,
+            "probe_paid": svc.config_store.config.health.probe_paid}
+
+
+@router.post("/admin/api/health/probe")
+async def functional_probe(request: Request):
+    """{backend, model?}: one tiny real generation on exactly that backend."""
+    svc = _svc(request)
+    body = await request.json()
+    try:
+        return await svc.health.probe(body.get("backend") or "", body.get("model") or None)
+    except KeyError:
+        return JSONResponse({"error": "no such backend"}, status_code=404)
+
+
 @router.get("/admin/api/budgets")
 async def budgets_monitor(request: Request):
     """Budget ledger monitor: accounts (provider-reported vs measured),

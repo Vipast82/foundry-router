@@ -771,22 +771,67 @@ class RequestLogger:
         try:
             from . import client_auth
             cl = client_auth.current()
+            rid = request_context.request_id() or ""
+            route = request_context.route()
+            attempts, retries = _attempts(self.db, rid)
+            flags = {k: route[k] for k in ("client_tools", "compaction", "tool_calls_out")
+                     if route.get(k) not in (None, 0, False, [])}
+            served = route.get("served_model") or (
+                self.models_used[-1].get("model") if self.models_used else None)
+            backend = route.get("backend") or (
+                self.models_used[-1].get("backend") if self.models_used else None)
             self.db.execute(
                 """INSERT INTO request_log
                    (ts, persona, client_model, mode, summary, models_used,
                     tool_calls, steps, duration_ms, guardrail_events,
                     est_cost_usd, status, error, request_id,
-                    client_id, session_id, task_id, parent_task_id)
-                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                    client_id, session_id, task_id, parent_task_id,
+                    served_model, served_backend, routing, attempts, retries, outcome, flags)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                 (utcnow(), self.persona, self.client_model, self.mode, self.summary,
                  json.dumps(self.models_used), json.dumps(self.tool_calls),
                  self.steps, int((time.monotonic() - self._t0) * 1000),
                  json.dumps(self.guardrail_events), round(self.est_cost, 6),
-                 status, error[:1000], request_context.request_id() or "",
+                 status, error[:1000], rid,
                  cl.get("client_id"), cl.get("session_id"), cl.get("task_id"),
-                 cl.get("parent_task_id")))
+                 cl.get("parent_task_id"), served, backend, route.get("routing"),
+                 attempts, retries, outcome_of(status, error), json.dumps(flags) if flags else None))
         except Exception:
             log.exception("failed to write request_log row")
+
+
+_TIMEOUT_MARKERS = ("timed out", "timeout", "no output for", "stalled", "readtimeout")
+_DENIED_MARKERS = ("budget", "denied", "paused", "refused", "route_unavailable",
+                   "strict routing", "usage limit")
+
+
+def outcome_of(status: str, error: str = "") -> str:
+    """ok | error | cancelled | timeout | denied (a budget/strict refusal) —
+    finer than `status` for dashboards and the client comparison."""
+    if status in ("ok", "cancelled"):
+        return status
+    e = (error or "").lower()
+    if any(m in e for m in _TIMEOUT_MARKERS):
+        return "timeout"
+    if any(m in e for m in _DENIED_MARKERS):
+        return "denied"
+    return status or "error"
+
+
+def _attempts(db: Database, request_id: str) -> tuple:
+    """(model calls attempted, failed attempts that were followed by another)
+    for one request, from the budget ledger. (None, None) = not recorded."""
+    if not request_id:
+        return None, None
+    try:
+        rows = db.query("SELECT status FROM usage_events WHERE request_id=? AND status IN "
+                        "('reserved','settled','error','released') ORDER BY id", (request_id,))
+    except Exception:                                              # noqa: BLE001
+        return None, None
+    if not rows:
+        return None, None
+    failed = [i for i, r in enumerate(rows) if r["status"] in ("error", "released")]
+    return len(rows), sum(1 for i in failed if i < len(rows) - 1)
 
 
 def spend_since(db: Database, since_sql_modifier: str) -> float:

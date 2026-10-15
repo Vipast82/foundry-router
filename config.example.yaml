@@ -421,6 +421,14 @@ budgets:
 #      max_calls: 400
 #      window_minutes: 300
 
+# Functional health (docs/OBSERVABILITY.md): "reachable" vs actually serving.
+# Real traffic is the evidence; an idle backend with no recent success gets a
+# tiny probe (local backends automatically, paid ones only on demand).
+health:
+  probe_minutes: 15
+  probe_paid: false
+  fresh_minutes: 15
+
 # Client keys (docs/CLIENTS.md): who is asking, and what each client may reach.
 # mode optional = keyless clients still work while keys are rolled out.
 client_auth:

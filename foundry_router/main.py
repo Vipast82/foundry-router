@@ -114,6 +114,8 @@ class Services:
         self.mcp_aggregator = MCPAggregator(self)
         from .media import MediaService
         self.media = MediaService(self)
+        from .health import HealthMonitor
+        self.health = HealthMonitor(self)
         ensure_eval_seed(db)
         self.evals = EvalHarness(self)
         self._eval_tasks: list[asyncio.Task] = []  # keep background runs alive
@@ -363,6 +365,7 @@ class Services:
             asyncio.create_task(self._pricing_loop()),
             asyncio.create_task(self._agent_health_loop()),
             asyncio.create_task(self._retention_loop()),
+            asyncio.create_task(self.health.loop()),
         ]
 
     def _apply_persona_profiles(self) -> None:
