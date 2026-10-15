@@ -99,7 +99,7 @@ class GuardrailEngine:
         ledger = getattr(self, "ledger", None)
         if ledger is not None and backend_info:
             from .budget import context_from_info
-            denial = ledger.check(context_from_info(model_id, backend_info))
+            denial = ledger.check(context_from_info(model_id, backend_info), slots=False)
             if denial is not None:
                 ledger.record(context_from_info(model_id, backend_info), "denied",
                               denial.rule, denial.message)

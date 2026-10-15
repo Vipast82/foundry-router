@@ -80,21 +80,56 @@ def test_config_migration_stamps_version_and_keeps_backup(tmp_path):
 
 
 
-def test_migration_v3_splits_the_shipped_helper_rule_per_account(tmp_path):
+def test_migration_v3_splits_the_shipped_helper_rule_per_account():
+    """The v3 step on its own (v4 then moves the rule onto the backends)."""
+    from foundry_router.config import _m3_helper_per_account
+    shipped = {"name": "one-frontier-helper", "match": {"persona": "Foundry-Kilo-*", "paid": True},
+               "max_concurrent": 1, "max_active": 1, "active_by": "task", "idle_seconds": 60}
+    raw = {"budgets": {"rules": [dict(shipped)]}}
+    assert any("per: account" in n for n in _m3_helper_per_account(raw))
+    assert raw["budgets"]["rules"][0]["per"] == "account"
+    edited = {"budgets": {"rules": [dict(shipped, match={"persona": "Foundry-Kilo-*"})]}}
+    assert _m3_helper_per_account(edited) == [] and "per" not in edited["budgets"]["rules"][0]
+
+
+def _backends_yaml():
+    return {"internal": {"backends": [
+        {"name": "strata", "type": "openai-compatible", "url": "http://s/v1", "flavor": "llamacpp"},
+        {"name": "meridian", "type": "anthropic-compatible", "url": "http://m"},
+        {"name": "cliproxyapi", "type": "openai-compatible", "url": "http://c/v1", "flavor": "cliproxyapi"},
+        {"name": "mine", "type": "anthropic-compatible", "url": "http://x", "helpers_allowed": 2}]}}
+
+
+def test_migration_v4_moves_the_helper_rule_onto_paid_backends(tmp_path):
     from foundry_router.config import ConfigStore
     p = tmp_path / "config.yaml"
     shipped = {"name": "one-frontier-helper", "match": {"persona": "Foundry-Kilo-*", "paid": True},
-               "max_concurrent": 1, "max_active": 1, "active_by": "task", "idle_seconds": 60}
-    edited = dict(shipped, match={"persona": "Foundry-Kilo-*"})
-    p.write_text(yaml.safe_dump({"config_version": 2, "budgets": {"rules": [shipped]}}))
+               "per": "account", "max_concurrent": 1, "max_active": 1, "active_by": "task",
+               "idle_seconds": 60}
+    cap = {"name": "kilo-session", "match": {"client": "kilo"}, "per": "session", "max_calls": 400}
+    p.write_text(yaml.safe_dump({"config_version": 3, "backend_pool": _backends_yaml(),
+                                 "budgets": {"rules": [shipped, cap]}}))
     store = ConfigStore(p)
     store.load()
-    assert store.config.budgets.rules[0].per == "account"
-    assert any("per: account" in n for n in store.migration_notes)
-    assert (tmp_path / "config.yaml.v2.bak").exists()
-    p.write_text(yaml.safe_dump({"config_version": 2, "budgets": {"rules": [edited]}}))
+    helpers = {b.name: b.helpers_allowed for b in store.config.backend_pool.internal.backends}
+    assert helpers == {"strata": None, "meridian": 0, "cliproxyapi": 0, "mine": 2}
+    assert [r.name for r in store.config.budgets.rules] == ["kilo-session"]
+    assert any("meridian, cliproxyapi" in n for n in store.migration_notes)
+    assert (tmp_path / "config.yaml.v3.bak").exists()
+    # no budget rules in the file: the old default was in effect, so the same
+    p.write_text(yaml.safe_dump({"config_version": 3, "backend_pool": _backends_yaml()}))
     store.load()
-    assert store.config.budgets.rules[0].per is None       # the user's own rule is kept -------------------------------------------------------
+    assert {b.name: b.helpers_allowed for b in store.config.backend_pool.internal.backends}["meridian"] == 0
+    # an edited rule, or budgets switched off: nothing changes
+    edited = dict(shipped, max_active=2)
+    for doc in ({"budgets": {"rules": [edited]}}, {"budgets": {"enabled": False}}):
+        p.write_text(yaml.safe_dump({"config_version": 3, "backend_pool": _backends_yaml(), **doc}))
+        store.load()
+        assert {b.name: b.helpers_allowed
+                for b in store.config.backend_pool.internal.backends}["meridian"] is None
+
+
+# -- export / import / snapshots -------------------------------------------------------
 
 def test_export_import_keeps_real_secrets_and_snapshots(app, client):
     svc = app.state.services

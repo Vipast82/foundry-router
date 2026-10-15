@@ -2424,6 +2424,17 @@ function functionalCard(fh) {
   const load = q => !q ? "" : q.limited
     ? `${q.active}/${q.capacity}${q.waiting_total ? ` <span class="pill warn" title="${esc(Object.entries(q.waiting).map(([c, n]) => c + ": " + n).join(", "))}">${q.waiting_total} waiting · ${q.oldest_wait_s}s</span>` : ""}${q.timeouts ? ` <span class="hint" style="margin:0">${q.timeouts} timed out</span>` : ""}`
     : `${q.busy} <span class="hint" style="margin:0" title="no max_concurrent: the backend queues internally">· no limit</span>`;
+  // Sessions on the backend vs helpers_allowed (main stream + N helpers).
+  const streams = x => {
+    if (!x) return "";
+    const who = (x.active || []).map(a => `${a.persona || a.client} (${a.idle_s}s idle)`).join("
+");
+    const n = (x.active || []).length;
+    return x.streams_allowed == null
+      ? `<span class="hint" style="margin:0" title="${esc(who || "no active sessions")}
+helpers_allowed not set">${n} · no limit</span>`
+      : `<span class="${n >= x.streams_allowed ? "pill warn" : ""}" title="${esc(who || "no active sessions")}">${n}/${x.streams_allowed}</span> <span class="hint" style="margin:0">main + ${x.helpers_allowed}</span>`;
+  };
   const breaker = x => !x ? "" : x.state === "closed"
     ? `<span class="hint" style="margin:0">closed</span>`
     : `<span class="pill ${x.state === "open" ? "bad" : "warn"}" title="${esc(x.last_error || "")}">${x.state}${x.retry_in_s ? " · " + x.retry_in_s + "s" : ""}</span> <button class="act" title="Close the breaker now (after fixing the backend)" onclick='resetBreaker(${JSON.stringify(x.backend)})'>reset</button>`;
@@ -2436,14 +2447,14 @@ function functionalCard(fh) {
       <td class="nw">${b.reachable === true ? "yes" : b.reachable === false ? '<span style="color:var(--bad)">no</span>' : '<span class="hint">not checked</span>'}</td>
       <td class="bw-mid">${ok}</td><td class="bw-wide">${err}</td>
       <td class="nw">${b.calls_1h}${b.errors_1h ? ` <span class="hint" style="margin:0">(${b.errors_1h} failed)</span>` : ""}</td>
-      <td class="nw">${load(queues[b.backend])}</td><td class="nw">${breaker(breakers[b.backend])}</td>
+      <td class="nw">${load(queues[b.backend])}</td><td class="nw">${streams(b.streams)}</td><td class="nw">${breaker(breakers[b.backend])}</td>
       <td class="nw">${b.status === "disabled" ? "" : `<button class="act" title="One tiny real generation (reply OK, 16 tokens) on exactly this backend${b.paid ? " — spends a little subscription quota" : ""}" onclick='probeBackend(${JSON.stringify(b.backend)}, ${b.paid})'>probe</button>`}${b.auto_probe ? ' <span class="hint" style="margin:0" title="probed automatically when idle with no recent success">auto</span>' : ""}</td></tr>`;
   }).join("");
   const br = fh.brain || {};
   return `<div class="card">
     <h2 style="margin-top:0">Can it serve?</h2>
     <p class="hint">"Reachable" is the pool's HTTP check. <b>Serving</b> means a generation actually succeeded in the last ${fh.fresh_minutes} min — from real traffic, or a tiny probe when a backend sits idle (${fh.probe_minutes ? `local backends every ${fh.probe_minutes} min${fh.probe_paid ? ", paid too" : ""}` : "auto-probes off"}).</p>
-    <table><tr><th>backend</th><th>status</th><th>reachable</th><th>last success</th><th>last failure</th><th>calls 1 h</th><th title="calls running / max_concurrent, and the fair queue">load</th><th title="closed = in use; open = failing, skipped until the cooldown ends; half-open = the next call is a trial">breaker</th><th></th></tr>${rows}</table>
+    <table><tr><th>backend</th><th>status</th><th>reachable</th><th>last success</th><th>last failure</th><th>calls 1 h</th><th title="calls running / max_concurrent, and the fair queue">load</th><th title="client sessions active on the backend / allowed (main stream + helpers_allowed). Set helpers_allowed in Backends → Pool.">streams</th><th title="closed = in use; open = failing, skipped until the cooldown ends; half-open = the next call is a trial">breaker</th><th></th></tr>${rows}</table>
     <div class="row"><label>brain</label>${br.healthy === true ? '<span class="pill ok">reachable</span>' : br.healthy === false ? `<span class="pill bad" title="${esc(br.error || "")}">down</span>` : '<span class="hint">not checked</span>'}
       <label>image jobs</label>${fh.media && fh.media.backend ? `<b>${fh.media.active}</b>&nbsp;queued/running · ${fh.media.failed_24h} failed (24 h)` : `<span class="hint">${esc((fh.media || {}).backend_error || "no image backend")}</span>`}</div>
   </div>`;
@@ -2587,6 +2598,11 @@ async function tabBackends() {
       "url":"http://192.168.30.206:8080","flavor":"llamacpp"}</code> ·
       <code>{"name":"vllm-1","type":"openai-compatible","url":"http://192.168.30.207:8000",
       "flavor":"vllm"}</code>.</p>
+      <p class="hint"><code>helpers_allowed</code>: how many helper streams (sub-agents) a backend serves next to
+      your main one, counted as client sessions active on it: <code>0</code> = main stream only, <code>1</code> = main + one
+      helper, … <code>null</code> = no limit. Each backend has its own. A session over the limit waits up to
+      <code>queue_timeout_seconds</code> for a slot, then is refused. A session holds its slot until 60 s after its last
+      call. Dashboard → <i>Can it serve?</i> shows who holds each one.</p>
       <textarea id="backends-json" rows="12"></textarea>
       <div class="row"><button class="act primary" id="save-backends">Save backends</button>
       <select id="pool-mode">

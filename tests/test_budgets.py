@@ -64,7 +64,11 @@ def ledgered(app, client):
     cfg = svc.config_store.config
     cfg.agent_brain.direct_stream = False
     saved = (cfg.budgets, cfg.clients)
-    cfg.budgets = BudgetsConfig()          # default: one-frontier-helper
+    # The rule that used to ship by default (now per-backend helpers_allowed):
+    # still a supported rule, and what these tests exercise.
+    cfg.budgets = BudgetsConfig(rules=[BudgetRule(
+        name="one-frontier-helper", match={"persona": "Foundry-Kilo-*", "paid": True},
+        per="account", max_concurrent=1, max_active=1, active_by="task", idle_seconds=60)])
     cfg.clients = [ClientConfig(name="kilo", key="kk"), ClientConfig(name="cline", key="ck")]
     for name, backend, model in (("Foundry-Kilo-Sol", "cliproxy", "gpt-6.1-sol"),
                                  ("Foundry-Kilo-Astra", "cliproxy", "gpt-6-astra"),
@@ -278,3 +282,68 @@ def test_monitor_and_config_endpoints(ledgered, client):
          "window_minutes": 1440}]})
     assert ok.status_code == 200
     assert [r.name for r in ledgered.config_store.config.budgets.rules] == ["sol-day"]
+
+
+# -- per-backend streams (helpers_allowed) -------------------------------------------
+
+@pytest.fixture()
+def streams(ledgered, monkeypatch):
+    """No budget rules; strata limited by helpers_allowed, short idle/timeout."""
+    from foundry_router import budget
+    ledgered.config_store.config.budgets = BudgetsConfig(rules=[])
+    monkeypatch.setattr(budget, "STREAM_IDLE_SECONDS", 1)
+    strata = ledgered.pool.backends["strata"].config
+    strata.queue_timeout_seconds = 0.3
+    return strata
+
+
+def test_backend_serves_main_plus_its_helpers(streams, client):
+    streams.helpers_allowed = 1
+    assert _chat(client, "Foundry-Kilo-Local", session="main").status_code == 200
+    assert _chat(client, "Foundry-Kilo-Local", session="helper-1").status_code == 200
+    r = _chat(client, "Foundry-Kilo-Local", session="helper-2")
+    assert r.status_code == 429
+    msg = r.json()["error"]["message"]
+    assert "backend 'strata' serves the main stream plus 1 helper" in msg and "2 session(s)" in msg
+    # the sessions already holding a slot keep going
+    assert _chat(client, "Foundry-Kilo-Local", session="main").status_code == 200
+    assert _chat(client, "Foundry-Kilo-Local", session="helper-1").status_code == 200
+    # other backends have their own setting (none here)
+    assert _chat(client, "Foundry-Kilo-Sol", session="helper-2").status_code == 200
+
+
+def test_zero_helpers_means_main_only_and_probes_are_free(streams, client):
+    from foundry_router import client_auth
+    streams.helpers_allowed = 0
+    assert _chat(client, "Foundry-Kilo-Local", session="main").status_code == 200
+    assert _chat(client, "Foundry-Kilo-Local", session="sub").status_code == 429
+    tok = client_auth._client.set({"client_id": "foundry:health", "internal": True,
+                                   "scopes": ["inference"], "personas": []})
+    try:
+        ctx = CallCtx(model="qwen-local", backend="strata", client_id="foundry:health")
+        streams_ledger = client.app.state.services.ledger
+        assert streams_ledger.check(ctx) is None
+        assert set(streams_ledger.sessions("strata")) == {"main"}
+    finally:
+        client_auth._client.reset(tok)
+
+
+def test_helper_waits_for_a_slot_instead_of_failing(streams, client):
+    streams.helpers_allowed = 0
+    streams.queue_timeout_seconds = 5
+    assert _chat(client, "Foundry-Kilo-Local", session="main").status_code == 200
+    t = time.monotonic()
+    assert _chat(client, "Foundry-Kilo-Local", session="sub").status_code == 200   # main went idle
+    assert 0.5 < time.monotonic() - t < 4
+
+
+def test_streams_shown_in_health_and_route_gates(streams, client):
+    streams.helpers_allowed = 2
+    _chat(client, "Foundry-Kilo-Local", session="main")
+    fh = {b["backend"]: b for b in client.get("/admin/api/health/functional").json()["backends"]}
+    st = fh["strata"]["streams"]
+    assert st["streams_allowed"] == 3 and [a["session"] for a in st["active"]] == ["main"]
+    assert fh["cliproxy"]["streams"]["streams_allowed"] is None
+    g = client.get("/admin/api/routes?hours=24&all=1").json()
+    nodes = {n["id"]: n for n in g["nodes"]}
+    assert "strata: main + 2 helpers" in nodes["persona:Foundry-Kilo-Local"]["gates"]

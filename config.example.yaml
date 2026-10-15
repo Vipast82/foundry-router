@@ -116,11 +116,15 @@ backend_pool:
         priority: 90
         # max_concurrent: 1          # optional: calls at once (e.g. llama.cpp -np);
         # queue_timeout_seconds: 300 # extra calls wait in a fair per-client queue
+        # helpers_allowed: 1         # optional: sessions at once = your main stream + this
+        #                            # many helpers (0 = main only; unset = no limit).
+        #                            # Over the limit waits queue_timeout_seconds, then refuses.
       - name: meridian
         type: anthropic-compatible
         url: http://192.168.1.40:3456       # EDIT: Meridian bridge
         api_key: "${MERIDIAN_API_KEY}"
         priority: 100
+        helpers_allowed: 0                  # one Claude session at a time (main stream only)
         # meridian_agent: opencode          # optional: Meridian adapter (x-meridian-agent)
         # meridian_session_affinity: true   # optional: stable per-conversation session
         #                                   # key -> warm prompt cache (docs/COMPATIBILITY.md)
@@ -410,14 +414,9 @@ persona_profiles: []               # e.g. [animaluprising-kilo]
 budgets:
   enabled: true
   retention_days: 90
-  rules:
-    - name: one-frontier-helper        # one Kilo frontier helper per subscription at a time
-      match: {persona: "Foundry-Kilo-*", paid: true}
-      per: account                     # Meridian's Claude and CLIProxyAPI's ChatGPT each get one
-      max_concurrent: 1
-      max_active: 1
-      active_by: task
-      idle_seconds: 60
+  # How many helper streams each backend serves is set on the backend
+  # (helpers_allowed), not here.
+  rules: []
 #    - name: kilo-session
 #      match: {client: kilo}
 #      per: session

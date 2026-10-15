@@ -373,3 +373,22 @@ def test_backend_save_fills_placeholders_of_a_ui_installed_profile(fleet, client
     assert rep["Foundry-Kilo-Luna"]["action"] == "kept"
     assert rep["Foundry-Kilo-Sol"]["action"] == "unchanged"
     assert profiles.fill_placeholders(fleet) == []
+
+
+def test_length_check_is_skipped_on_meridian(fleet, client, monkeypatch):
+    """Meridian (anthropic-compatible) never applies max_tokens, so the check
+    is a skip with the reason, not a warning on every Claude persona."""
+    import asyncio
+    from foundry_router import persona_validate
+    real = fleet.pool.backend_info
+    monkeypatch.setattr(fleet.pool, "backend_info", lambda m: dict(
+        real(m) or {}, type="anthropic-compatible") if m.startswith("claude") else real(m))
+    client.post(f"/admin/api/profiles/{KILO}/apply")
+    run = persona_validate._Run(fleet, client.app, fleet.personas.get("Foundry-Kilo-Haiku"))
+    try:
+        asyncio.run(persona_validate._length(run))
+    finally:
+        asyncio.run(run.client.aclose())
+    assert run.checks == [{"name": "length", "status": "skip", "ms": None,
+                           "detail": "Meridian ignores max_tokens (Claude Code SDK has no output cap)"}]
+    assert ("meridian", "claude-haiku-5-5") not in HITS

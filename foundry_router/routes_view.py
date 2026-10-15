@@ -144,6 +144,9 @@ def graph(svc, hours: float = 24, show_all: bool = False) -> dict:
         gates = [r.name for r in rules if r.enabled and _rule_may_cover(r, name)
                  and not ("paid" in (r.match or {}) and persona_paid is not None
                           and bool(r.match["paid"]) != persona_paid)]
+        helpers = getattr(pinned_cfg.config, "helpers_allowed", None) if pinned_cfg else None
+        if helpers is not None and cfg.budgets.enabled:
+            gates.append(f"{pinned_cfg.config.name}: main + {helpers} helper{'' if helpers == 1 else 's'}")
         pid = node("persona", name, enabled=enabled, strict=strict, mode=mode, pkind=kind,
                    backend=p.get("backend"), gates=gates,
                    validation=(json.loads(p["validation"]).get("status")

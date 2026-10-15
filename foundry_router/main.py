@@ -100,7 +100,10 @@ class Services:
                                           pool_mode=cfg.backend_pool.mode)
         self.guardrails.cliproxy_usage = self.cliproxy_usage
         from .budget import Ledger
-        self.ledger = Ledger(lambda: self.config_store.config.budgets, db)
+        # Backend limits come from the live pool (rebuilt whenever backends are saved).
+        self.ledger = Ledger(lambda: self.config_store.config.budgets, db,
+                             lambda: {n: st.config for n, st in
+                                      (getattr(self.pool, "backends", None) or {}).items()})
         self.guardrails.ledger = self.ledger
         self.pool.ledger = self.ledger
         from .capture import Capture

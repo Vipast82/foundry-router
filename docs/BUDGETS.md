@@ -18,6 +18,44 @@ by trying another provider on its own. A strict persona refuses outright; a
 flexible persona follows only the fallback you configured for it (e.g. Cline
 Plan's pinned cascade).
 
+## Streams per backend (main + helpers)
+
+Each backend sets how many sessions it serves at once with `helpers_allowed`
+(Backends → Pool):
+
+| `helpers_allowed` | sessions at once |
+|---|---|
+| unset / `null` | no limit (default) |
+| `0` | your main stream only |
+| `1` | main + one helper (e.g. a Kilo sub-agent) |
+| `2`, `3`, … | main + that many helpers |
+
+```json
+{"name": "strata", "type": "openai-compatible", "url": "http://…:34201/v1",
+ "flavor": "llamacpp", "helpers_allowed": 1},
+{"name": "meridian", "type": "anthropic-compatible", "url": "http://…:3456",
+ "helpers_allowed": 0}
+```
+
+- Foundry can't tell which session is "main", so it counts **distinct client
+  sessions** active on the backend (Kilo/OpenCode send `x-session-id`; a
+  client without one counts as one session per client+persona). Two main
+  conversations on one backend at once (e.g. Cline and Kilo both on strata)
+  use two of its slots.
+- A session holds its slot until 60 s after its last call, so a main stream
+  waiting for its own sub-agent keeps its place.
+- A session over the limit **waits** up to the backend's
+  `queue_timeout_seconds` (default 300) for a slot, then gets a 429 naming
+  the backend and who holds the slots (`rule: backend-helpers`).
+- Health probes don't take a slot. With `budgets.enabled: false` the limit is
+  off too.
+- Dashboard → *Can it serve?* → **streams** shows `active/allowed` and, on
+  hover, which persona or client holds each slot.
+
+This replaces the old default `one-frontier-helper` rule: config v4 turns it
+into `helpers_allowed: 0` on every paid backend (unless you had edited the rule).
+`max_concurrent` is separate: it limits calls in flight, not sessions.
+
 ## Rules
 
 `budgets.rules` in config.yaml, or Usage Log → Budgets & usage → Edit rules.
@@ -27,7 +65,8 @@ budgets:
   enabled: true
   retention_days: 90
   rules:
-    # default: one frontier helper per subscription at a time (Kilo helper personas only)
+    # one frontier helper per subscription at a time (Kilo helper personas only);
+    # for a plain per-backend limit use helpers_allowed instead (below)
     - name: one-frontier-helper
       match: {persona: "Foundry-Kilo-*", paid: true}
       per: account               # one for Meridian's Claude, one for CLIProxyAPI's ChatGPT, ...

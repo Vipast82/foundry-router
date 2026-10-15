@@ -256,6 +256,11 @@ async def _length(run: _Run) -> None:
     if info and info.get("flavor") == "cliproxyapi":
         run.add("length", "skip", "Codex models ignore max_tokens (CLIProxyAPI)")
         return
+    if info and info.get("type") == "anthropic-compatible":
+        # Meridian runs Claude through the Claude Code SDK, which has no output
+        # cap: max_tokens is sent but not applied (replies end when Claude is done).
+        run.add("length", "skip", "Meridian ignores max_tokens (Claude Code SDK has no output cap)")
+        return
     r, ms = await run.post("/v1/chat/completions", run.body(
         [{"role": "user", "content": "Count from 1 to 300, separated by spaces."}],
         max_tokens=16, reasoning_effort="none"))

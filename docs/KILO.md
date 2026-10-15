@@ -115,7 +115,7 @@ without enabling them for clients.
 | stream | streamed deltas, a finish reason and `[DONE]` |
 | tools | a `set_flag(name, enabled: boolean)` call arrives with a real boolean, and the tool result round trip continues |
 | image_input | (personas declaring image input) a generated red image is recognised as red |
-| length | `max_tokens: 16` ends with `finish_reason: "length"` (skipped for Codex, which ignores max_tokens) |
+| length | `max_tokens: 16` ends with `finish_reason: "length"` (skipped for Codex and for Claude via Meridian, which both ignore max_tokens) |
 | image_job | (image personas) one real low-quality generation succeeds |
 
 The result is stored on the persona: a pill in the list (hover for each

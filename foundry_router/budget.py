@@ -23,8 +23,13 @@ same path as any other denial: a strict persona refuses with budget_denied, a
 flexible persona follows its own configured fallback). Denials are recorded
 for the monitor with the rule and the reset time.
 
+Backends also limit how many sessions they serve at once (BackendConfig
+helpers_allowed: the main stream plus N helpers). A session over the limit
+waits up to the backend's queue_timeout_seconds for a slot, then is refused.
+
 Guardrails also call `check()` (no reservation) while choosing a model, so a
-denial shows up in route notes before anything is sent.
+denial shows up in route notes before anything is sent. They skip the backend
+session slots, which are waited for at reservation instead.
 """
 
 from __future__ import annotations
@@ -42,6 +47,10 @@ log = logging.getLogger(__name__)
 
 COUNTED = ("reserved", "settled", "error")
 PAUSE_SCOPES = ("account", "backend", "persona", "client")
+# A session holds its backend stream until this long after its last call, so a
+# main stream waiting on its own sub-agent keeps its slot.
+STREAM_IDLE_SECONDS = 60
+SLOT_EXEMPT_CLIENTS = ("foundry:health",)     # health probes never take a stream
 
 
 class BudgetDenied(AllBackendsFailed):
@@ -182,9 +191,10 @@ def _fmt_wait(s: float) -> str:
 
 
 class Ledger:
-    def __init__(self, get_config, db):
+    def __init__(self, get_config, db, get_backends=None):
         self.get_config = get_config
         self.db = db
+        self.get_backends = get_backends          # () -> {name: BackendConfig}
         self._active: dict[int, CallCtx] = {}    # event id -> in-flight call
         self._recorded: dict = {}
         # finish anything a previous process left reserved
@@ -229,15 +239,20 @@ class Ledger:
             "SELECT * FROM usage_events WHERE ts >= ? AND status IN ('reserved','settled','error')",
             (since,))
 
-    def check(self, ctx: CallCtx) -> Optional[BudgetDenied]:
+    def check(self, ctx: CallCtx, slots: bool = True) -> Optional[BudgetDenied]:
         """The denial this call would get right now, or None. Observe-mode
-        rules never deny (they're recorded as 'observed')."""
+        rules never deny (they're recorded as 'observed'). slots=False skips
+        the backend session slots (waited for at reservation)."""
         cfg = self.cfg
         if not cfg or not cfg.enabled:
             return None
         paused = self._paused(ctx)
         if paused:
             return paused
+        if slots:
+            busy = self._stream_denial(ctx, time.time())
+            if busy:
+                return busy
         now = time.time()
         cache: dict = {}
 
@@ -313,6 +328,62 @@ class Ledger:
                     f"if it stays idle.", rule=rule.name, reset_s=wait)
         return None
 
+    # -- backend streams (main + helpers) ---------------------------------------------
+
+    def _helpers_allowed(self, backend: str) -> Optional[int]:
+        c = (self.get_backends() or {}).get(backend) if self.get_backends else None
+        return getattr(c, "helpers_allowed", None) if c is not None else None
+
+    def sessions(self, backend: str, now: Optional[float] = None) -> dict:
+        """Sessions active on a backend: {session key: {last, client, persona}}."""
+        now = now or time.time()
+        out: dict = {}
+
+        def note(c: CallCtx, t: float):
+            if c.client_id in SLOT_EXEMPT_CLIENTS:
+                return
+            k = c.key("session")
+            if k not in out or t > out[k]["last"]:
+                out[k] = {"last": t, "client": c.client_id, "persona": c.persona}
+        for r in self.db.query(
+                "SELECT * FROM usage_events WHERE backend=? AND status IN ('reserved','settled','error') "
+                "AND COALESCE(settled_ts, ts) >= ?", (backend, now - STREAM_IDLE_SECONDS)):
+            note(_row_ctx(r), r.get("settled_ts") or r["ts"])
+        for c in self._active.values():
+            if c.backend == backend:
+                note(c, now)
+        return out
+
+    def _stream_denial(self, ctx: CallCtx, now: float) -> Optional[BudgetDenied]:
+        n = self._helpers_allowed(ctx.backend)
+        if n is None or ctx.client_id in SLOT_EXEMPT_CLIENTS:
+            return None
+        others = {k: v for k, v in self.sessions(ctx.backend, now).items()
+                  if k != ctx.key("session")}
+        if len(others) < n + 1:
+            return None
+        wait = max(0, min(v["last"] for v in others.values()) + STREAM_IDLE_SECONDS - now)
+        who = ", ".join(sorted({v["persona"] or v["client"] for v in others.values()}))
+        streams = "the main stream only" if n == 0 else f"the main stream plus {n} helper{'s' if n > 1 else ''}"
+        return BudgetDenied(
+            f"backend {ctx.backend!r} serves {streams} and {len(others)} session(s) are "
+            f"active ({who}). Free in about {_fmt_wait(wait)} if one stays idle "
+            f"(Backends → Pool: helpers_allowed).", rule="backend-helpers", reset_s=wait)
+
+    def backend_streams(self) -> list[dict]:
+        """Each backend's stream limit and active sessions (monitor / health)."""
+        now = time.time()
+        out = []
+        for name, c in (self.get_backends() or {} if self.get_backends else {}).items():
+            n = getattr(c, "helpers_allowed", None)
+            act = self.sessions(name, now)
+            out.append({"backend": name, "helpers_allowed": n,
+                        "streams_allowed": None if n is None else n + 1,
+                        "active": [{"session": k, "client": v["client"], "persona": v["persona"],
+                                    "idle_s": round(now - v["last"])}
+                                   for k, v in sorted(act.items(), key=lambda kv: kv[1]["last"])]})
+        return out
+
     # -- reserve / settle ------------------------------------------------------------
 
     def reserve(self, ctx: CallCtx) -> int:
@@ -332,6 +403,9 @@ class Ledger:
         cfg = self.cfg
         wait = max([r.wait_seconds for r in (cfg.rules if cfg and cfg.enabled else [])
                     if r.enabled and matches(r.match, ctx)] or [0])
+        if self._helpers_allowed(ctx.backend) is not None:
+            c = (self.get_backends() or {}).get(ctx.backend)
+            wait = max(wait, float(getattr(c, "queue_timeout_seconds", 300) or 0))
         deadline = time.monotonic() + wait
         while True:
             denial = self.check(ctx)

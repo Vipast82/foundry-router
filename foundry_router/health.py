@@ -73,6 +73,8 @@ class HealthMonitor:
         ev = self._ledger_evidence(now - 86400)
         out = []
         pool = self.svc.pool
+        ledger = getattr(self.svc, "ledger", None)
+        streams = {x["backend"]: x for x in (ledger.backend_streams() if ledger else [])}
         for s in (getattr(pool, "backends", None) or {}).values():
             c = s.config
             e = ev.get(c.name, {"last_ok": None, "last_error": None, "calls_1h": 0, "errors_1h": 0})
@@ -101,6 +103,7 @@ class HealthMonitor:
                 "last_ok": _aged(last_ok, now), "last_error": _aged(last_err, now),
                 "calls_1h": e["calls_1h"], "errors_1h": e["errors_1h"],
                 "busy": s.busy, "probe": _aged(probe, now) if probe else None,
+                "streams": streams.get(c.name),
                 "auto_probe": (self.cfg.probe_minutes > 0
                                and (not self._paid(c) or self.cfg.probe_paid)),
             })

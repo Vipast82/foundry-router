@@ -216,6 +216,12 @@ class BackendConfig(BaseModel):
     # limit (the backend queues internally, invisibly).
     max_concurrent: Optional[int] = None
     queue_timeout_seconds: float = 300.0
+    # Helper streams this backend serves next to your main one, counted as
+    # distinct client sessions active on it (a session stays active until 60s
+    # after its last call): 0 = the main stream only, 1 = main + one sub-agent,
+    # ... None = no limit. A session over the limit waits up to
+    # queue_timeout_seconds for a slot, then is refused (budget.py).
+    helpers_allowed: Optional[int] = Field(default=None, ge=0)
     # Optional discovery fallback ONLY — used if the backend exposes no
     # model-list endpoint (§4.3: "do not hardcode model lists for backends
     # that can be discovered").
@@ -715,12 +721,9 @@ class BudgetRule(BaseModel):
 
 
 def _default_budget_rules() -> list:
-    # One helper per subscription account (Meridian's Claude, CLIProxyAPI's
-    # ChatGPT, ...): separate plans don't share a slot.
-    return [BudgetRule(
-        name="one-frontier-helper",
-        match={"persona": "Foundry-Kilo-*", "paid": True}, per="account",
-        max_concurrent=1, max_active=1, active_by="task", idle_seconds=60)]
+    # Helper limits live on each backend (helpers_allowed); rules are for
+    # call / token caps and anything more specific.
+    return []
 
 
 class BudgetsConfig(BaseModel):
@@ -801,7 +804,53 @@ def _m3_helper_per_account(raw: dict) -> list[str]:
     return []
 
 
-MIGRATIONS = [(2, _m2_stamp), (3, _m3_helper_per_account)]
+def _shipped_helper_rule(r) -> bool:
+    return (isinstance(r, dict) and r.get("name") == "one-frontier-helper"
+            and r.get("match") == {"persona": "Foundry-Kilo-*", "paid": True}
+            and r.get("per") in (None, "account") and r.get("max_active") == 1)
+
+
+def _m4_helpers_on_backends(raw: dict) -> list[str]:
+    """v4: helper limits move from the one-frontier-helper budget rule to each
+    backend's helpers_allowed. The shipped rule (or the implicit default, when
+    the file has no budget rules) becomes helpers_allowed: 0 on every paid
+    backend that doesn't set it; a rule the user edited is left alone."""
+    budgets = raw.get("budgets") if isinstance(raw.get("budgets"), dict) else None
+    if budgets and budgets.get("enabled") is False:
+        return []                                    # limits were off; keep them off
+    rules = budgets.get("rules") if budgets else None
+    if rules is None:
+        shipped = True                               # defaults were in effect
+    else:
+        keep = [r for r in rules if not _shipped_helper_rule(r)]
+        shipped = len(keep) != len(rules)
+        if shipped:
+            budgets["rules"] = keep
+    if not shipped:
+        return []
+    def is_paid(c) -> bool:                          # budget.is_paid, without its imports
+        return (c.type == "anthropic-compatible" or c.is_subscription
+                or (c.type == "openai-compatible"
+                    and c.effective_flavor not in ("llamacpp", "vllm", "unsloth")))
+    set_on = []
+    backends = (((raw.get("backend_pool") or {}).get("internal") or {}).get("backends")) or []
+    for b in backends:
+        if not isinstance(b, dict) or "helpers_allowed" in b:
+            continue
+        try:
+            paid = is_paid(BackendConfig(**b))
+        except Exception:                                  # noqa: BLE001
+            continue
+        if paid:
+            b["helpers_allowed"] = 0
+            set_on.append(str(b.get("name")))
+    notes = ["budget rule one-frontier-helper replaced by per-backend helpers_allowed"]
+    if set_on:
+        notes.append("helpers_allowed: 0 (main stream only) on " + ", ".join(set_on))
+    return notes
+
+
+MIGRATIONS = [(2, _m2_stamp), (3, _m3_helper_per_account), (4, _m4_helpers_on_backends)]
 CONFIG_VERSION = MIGRATIONS[-1][0]
 
 
