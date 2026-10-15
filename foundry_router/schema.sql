@@ -429,3 +429,55 @@ CREATE TABLE IF NOT EXISTS agent_runs (
   error TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_agent_runs_ts ON agent_runs(ts);
+
+-- Turn assist (rule-based supervisor / pre-judge / auditor / advisor for coding
+-- clients). One row per router intervention — the record of what Foundry did
+-- to a conversation, and the raw material for fine-tuning data (a trigger
+-- excerpt paired with the intervention text).
+CREATE TABLE IF NOT EXISTS interventions (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  ts TEXT,
+  conversation_key TEXT,
+  persona TEXT,
+  model TEXT,
+  request_id TEXT,
+  kind TEXT,                -- supervisor_loop | prejudge_block | prejudge_fix | dedupe | roblox |
+                            -- audit_lint | audit_accept | audit_reject | advisor | auto_advice |
+                            -- blocked | fallback_refused | frontier_denied
+  mode TEXT,                -- observe | nudge | enforce | ...
+  detail TEXT,              -- what was found / the rule hit
+  intervention TEXT,        -- the text the model (or user) received
+  excerpt TEXT,             -- what triggered it (tool result / report tail)
+  frontier_model TEXT,
+  prompt_tokens INTEGER,
+  completion_tokens INTEGER,
+  next_action TEXT,         -- the model's next reply after this intervention
+  next_ts TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_interventions_conv ON interventions(conversation_key, ts);
+CREATE INDEX IF NOT EXISTS idx_interventions_ts ON interventions(ts);
+
+-- One row per assisted request: this turn's new tool calls / errors and the
+-- context size, so the scoreboard can show errors per 100 calls by context zone.
+CREATE TABLE IF NOT EXISTS assist_turns (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  ts TEXT,
+  conversation_key TEXT,
+  persona TEXT,
+  model TEXT,
+  sprint TEXT,              -- sprint id parsed from the kickoff message, if any
+  context_tokens INTEGER,   -- estimate of what the client sent
+  new_calls INTEGER,
+  new_errors INTEGER,
+  total_calls INTEGER,
+  think TEXT,               -- the thinking level this request actually ran with
+  think_why TEXT,
+  output_tokens INTEGER,
+  prompt_tokens INTEGER,    -- full prompt of the last model call this request
+  cached_tokens INTEGER,    -- of it, served from the server's KV cache
+  prefill_ms REAL,          -- prompt-processing time summed over this request's calls
+  cache_miss INTEGER,       -- 1 = a >20K-token prompt was mostly re-read (cached < 50%)
+  cache_cause TEXT          -- conversation_start | guard_trim | think_change | compaction | unknown
+);
+CREATE INDEX IF NOT EXISTS idx_assist_turns_conv ON assist_turns(conversation_key, ts);
+CREATE INDEX IF NOT EXISTS idx_assist_turns_ts ON assist_turns(ts);

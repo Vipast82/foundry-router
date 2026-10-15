@@ -71,7 +71,8 @@ cloud backend and send the full effort scale. Use `openai-compatible` for
 CLIProxyAPI doesn't answer.
 
 Any other OpenAI-dialect subscription proxy (ChatMock, …) can be marked the
-same way with `"cloud": true`.
+same way with `"subscription": true` (optionally with `call_budget_5h` /
+`call_budget_daily` caps, since these plans report no usage to Foundry).
 
 ## 3. Use it for hard problems (Plan escalation)
 

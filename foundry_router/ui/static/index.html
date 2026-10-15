@@ -677,6 +677,7 @@ const TABS = {
   "Live":           tabLive,
   "Performance":    tabPerformance,
   "Cost":           tabCost,
+  "Scoreboard":     tabScoreboard,
   "Pool":           tabBackends,
   "Model Registry": tabModels,
   "Host Admin":     tabHostAdmin,
@@ -691,16 +692,17 @@ const TABS = {
   "Usage Log":      tabUsage,
   "Events":         tabEvents,
   "Dev Log":        tabDevLog,
+  "Data":           tabData,
 };
 // Primary nav groups -> their leaf tabs (the secondary row). Reorganizes the
 // former flat bar into logical sections without dropping anything.
 const GROUPS = [
-  ["Dashboard",   ["Live", "Performance", "Cost"]],
+  ["Dashboard",   ["Live", "Performance", "Cost", "Scoreboard"]],
   ["Backends",    ["Pool", "Model Registry", "Host Admin"]],
   ["Routing",     ["Personas", "Guardrails"]],
   ["Tools & MCP", ["Tools", "MCP Servers", "MCP Metrics", "Agents"]],
   ["Labs",        ["Research", "Evals"]],
-  ["Logs",        ["Usage Log", "Events", "Dev Log"]],
+  ["Logs",        ["Usage Log", "Events", "Dev Log", "Data"]],
 ];
 const _groupOf = leaf => (GROUPS.find(g => g[1].includes(leaf)) || GROUPS[1])[0];
 const _lastLeaf = {};        // group name -> last leaf visited (remembered on switch)
@@ -881,6 +883,8 @@ function renderServers(servers) {
     if (sv.mean_e2e_ms != null) it("mean request", _num(sv.mean_e2e_ms, "ms"), "Mean end-to-end request latency.");
     if (sv.prefix_cache_hit_pct != null) it("prefix cache", _num(sv.prefix_cache_hit_pct, "%"), "Share of prompt tokens served from the prefix cache (lifetime).");
     if (sv.spec_accept_pct != null) it("spec accept", _num(sv.spec_accept_pct, "%"), "Engine-wide speculative-decoding acceptance (lifetime).");
+    if (sv.expert_cache_hit_pct != null) it("expert cache", _num(sv.expert_cache_hit_pct, "%"), "Strata: share of MoE experts the last request found resident in VRAM. The rest are copied over PCIe or computed on the CPU — the main speed cost on a narrow link.");
+    if (sv.ram_used_pct != null) it("host RAM", _num(sv.ram_used_pct, "%"), "Strata: host RAM in use (all experts live in RAM).");
     if (sv.preemptions_total != null)
       it("preemptions", sv.preemptions_total ? `<span class="pill warn">${K(sv.preemptions_total)}</span>` : "0",
          "vLLM paused a request because the KV cache ran out. Growing = VRAM pressure: lower --max-num-seqs / --max-model-len.");
@@ -1493,6 +1497,58 @@ const _money = v => v == null ? "—"
   : "$" + (v >= 1000 ? v.toLocaleString(undefined, { maximumFractionDigits: 0 })
     : v >= 1 ? v.toFixed(2) : v >= 0.01 ? v.toFixed(3) : v.toFixed(4));
 
+// Turn-assist scoreboard: per conversation (sprint) tool calls, errors per 100
+// calls, runaway outputs, router interventions and frontier calls; errors by
+// context zone; the latest interventions. Data: /admin/api/scoreboard.
+let _SB_HOURS = 168;
+async function tabScoreboard() {
+  const winOpts = [[24, "24h"], [72, "3d"], [168, "7d"], [336, "14d"], [720, "30d"]];
+  $("#main").innerHTML = `
+    <h2 style="margin-top:0">Scoreboard</h2>
+    <p class="hint">What turn assist saw and did on coding conversations (personas with an <code>assist</code> setting). Errors are tool calls whose result the client marked as failed. Kinds: supervisor_* = loop / error-streak / cycling detectors, prejudge_* = blocked or rewritten commands, audit_* = completion audits, advisor = consult_senior. Observe mode logs without changing anything.</p>
+    <div class="card" style="display:flex;gap:12px;align-items:center;flex-wrap:wrap">
+      <label>Window <select id="sb-win">${winOpts.map(([h, l]) => `<option value="${h}"${h === _SB_HOURS ? " selected" : ""}>${l}</option>`).join("")}</select></label>
+      <button class="act" id="sb-refresh">Refresh</button>
+      <a class="act" id="sb-export" href="#" title="Interventions as JSONL (trigger → intervention → what came next) for fine-tuning data">Export JSONL</a>
+    </div>
+    <div class="card"><div class="card-h">Subscription call budgets <span class="hint">— calls Foundry sent in the last 5 h / 24 h vs each backend's call_budget_5h / call_budget_daily</span></div><div id="sb-budgets"></div></div>
+    <div class="card"><div class="card-h">Prompt-cache misses <span class="hint">— every time the model server had to re-read most of a big (&gt;20K-token) prompt instead of using its cache. On a 27B at ~430 tok/s a 120K re-read is ~4–5 minutes, so this is where Act time silently goes. Causes: guard_trim = the context guard moved its cut; think_change = the thinking level differed from the previous turn; compaction = Cline compacted; conversation_start = first turn; unknown = nothing Foundry can see (check the llama.cpp log).</span></div><div id="sb-cache"></div></div>
+    <div class="card"><div class="card-h">Errors per 100 tool calls by context size</div><div id="sb-zones"></div></div>
+    <div class="card"><div class="card-h">Interventions in this window</div><div id="sb-kinds"></div></div>
+    <div class="card"><div class="card-h">Conversations <span class="hint">— newest first</span></div><div id="sb-convs"></div></div>
+    <div class="card"><div class="card-h">Latest interventions</div><div id="sb-latest"></div></div>`;
+  const load = async () => {
+    _SB_HOURS = +$("#sb-win").value;
+    $("#sb-export").href = `/admin/api/interventions/export?hours=${_SB_HOURS}`;
+    const [d, l, bud] = await Promise.all([api(`scoreboard?hours=${_SB_HOURS}`),
+                                      api(`interventions?hours=${_SB_HOURS}&limit=50`),
+                                      api("subscription-budgets")]);
+    const cell = x => x.budget ? `${x.used} / ${x.budget} <span class="hint">(${x.remaining} left)</span>` : `${x.used} <span class="hint">(no cap)</span>`;
+    $("#sb-budgets").innerHTML = bud.backends.length ? `<table><tr><th>backend</th><th>type</th><th>last 5 h</th><th>last 24 h</th></tr>${
+      bud.backends.map(b => `<tr><td>${esc(b.backend)}${b.enabled ? "" : " (parked)"}</td><td>${esc(b.type)}</td><td>${cell(b["5h"])}</td><td>${cell(b.daily)}</td></tr>`).join("")}</table>`
+      : `<span class="hint">No subscription backends. Meridian is one automatically; mark others with <code>subscription: true</code> in Pool → backends.</span>`;
+    const ch = d.cache || {};
+    $("#sb-cache").innerHTML = ch.turns ? `<p style="margin:0 0 6px"><b>${ch.misses}</b> of ${ch.turns} requests missed the cache — <b>${ch.miss_minutes} min</b> of re-reading out of ${ch.prefill_minutes} min of total prompt processing.</p>` +
+      (ch.causes.length ? `<table><tr><th>cause</th><th>requests</th><th>minutes lost</th><th>tokens re-read</th></tr>${ch.causes.map(c => `<tr><td>${esc(c.cause)}</td><td>${c.turns}</td><td>${c.minutes}</td><td>${(c.tokens_reread || 0).toLocaleString()}</td></tr>`).join("")}</table>` : "") :
+      `<span class="hint">No cache data yet — it is recorded for assisted requests (personas with a turn assist setting) once they finish.</span>`;
+    $("#sb-zones").innerHTML = `<table><tr><th>context</th><th>turns</th><th>tool calls</th><th>errors</th><th>per 100</th></tr>${
+      d.zones.map(z => `<tr><td>${esc(z.zone)}</td><td>${z.turns}</td><td>${z.calls}</td><td>${z.errors}</td><td>${z.errors_per_100 ?? "—"}</td></tr>`).join("")}</table>`;
+    const kinds = Object.entries(d.interventions || {});
+    $("#sb-kinds").innerHTML = kinds.length ? kinds.map(([k, n]) => `<span class="pill">${esc(k)} ${n}</span>`).join(" ")
+      : `<span class="hint">none yet</span>`;
+    $("#sb-convs").innerHTML = d.conversations.length ? `<table><tr><th>last</th><th>sprint</th><th>persona</th><th>turns</th><th>calls</th><th>err/100</th><th>max ctx</th><th>runaway</th><th>cache misses</th><th>interventions</th><th>paid calls</th></tr>${
+      d.conversations.map(c => `<tr><td>${esc((c.last_ts || "").slice(0, 16).replace("T", " "))}</td><td>${esc(c.sprint || "")}</td><td>${esc(c.persona)}</td><td>${c.turns}</td><td>${c.calls ?? 0}</td><td>${c.errors_per_100 ?? "—"}</td><td>${c.max_ctx ? formatCtx(c.max_ctx) : "—"}</td><td>${c.runaway || 0}</td><td>${c.cache_misses || 0}${c.miss_ms ? ` <span class="hint">(${(c.miss_ms / 60000).toFixed(0)} min)</span>` : ""}</td><td>${
+        Object.entries(c.kinds || {}).map(([k, n]) => `${esc(k)}×${n}`).join(", ") || "—"}</td><td>${c.paid_calls || 0}</td></tr>`).join("")}</table>`
+      : `<span class="hint">No assisted conversations in this window. Turn assist is set per persona (Routing → Personas → turn assist).</span>`;
+    $("#sb-latest").innerHTML = l.interventions.length ? `<table><tr><th>time</th><th>kind</th><th>mode</th><th>detail</th><th>model</th></tr>${
+      l.interventions.map(i => `<tr><td>${esc((i.ts || "").slice(11, 19))}</td><td>${esc(i.kind)}</td><td>${esc(i.mode || "")}</td><td title="${esc(i.intervention || "")}">${esc((i.detail || "").slice(0, 160))}</td><td>${esc(i.frontier_model || "")}</td></tr>`).join("")}</table>`
+      : `<span class="hint">none</span>`;
+  };
+  $("#sb-win").onchange = () => load().catch(e => toast(e.message, true));
+  $("#sb-refresh").onclick = () => load().catch(e => toast(e.message, true));
+  await load();
+}
+
 async function tabCost() {
   const winOpts = [[6, "6h"], [24, "24h"], [72, "3d"], [168, "7d"], [336, "14d"]];
   $("#main").innerHTML = `
@@ -2052,7 +2108,7 @@ async function tabBackends() {
       (ChatGPT/Codex, Claude Code, Gemini sign-ins behind one endpoint): its models count as
       <b>paid subscription</b> models (persona paid cascades, max_paid_calls, cost report) and
       get the full reasoning scale (Xhigh → <code>xhigh</code>). Any other subscription proxy:
-      add <code>"cloud": true</code>. Ollama backends always get full model CRUD; the openai-dialect flavors get
+      add <code>"subscription": true</code>. Ollama backends always get full model CRUD; the openai-dialect flavors get
       read-only diagnostics. The flavor also unlocks that server's extra sampling knobs
       (llama.cpp DRY/XTC/top-n-sigma…, vLLM repetition_penalty/min_tokens/guided decoding…),
       thinking on/off, engine metrics on the Live tab and context auto-detection.
@@ -2130,6 +2186,8 @@ async function tabBackends() {
         <input id="brain-hbvis" type="number" min="0" step="15" value="60" style="width:70px">
         <label title="Context guard: before sending a request to a model, Foundry estimates its size (messages + tool definitions). If it would overflow the model's context window (persona context_window, or the engine's n_ctx / max_model_len) minus the output reserve, Foundry trims the copy it sends — oversized old tool results first, then the oldest turns after your task (the system prompt and the task are always kept, tool calls stay paired with their results). Your client keeps its full history; the turn shows what was cut. Protects Cline when its own auto-compact doesn't fire in time.">context guard</label>
         <select id="brain-cguard"><option value="trim">trim</option><option value="off">off</option></select>
+        <label title="Sticky guard (recommended): once the guard has collapsed part of a conversation it keeps exactly that cut on every later turn and only collapses MORE when the prompt is over budget again (down to ~72% of it). Without this the cut moved or switched on and off turn to turn, and every change forced a minutes-long re-read of the whole prompt on the GPU.">sticky guard</label>
+        <input type="checkbox" id="brain-csticky" checked>
         <label title="Output tokens kept free for the answer when the context guard sizes a request. 0 = auto: the request's max tokens (client num_predict, else worker_max_tokens), capped at a quarter of the window.">answer reserve</label>
         <input id="brain-creserve" type="number" min="0" step="1024" value="0" style="width:80px">
         <label title="AGENT mode (Foundry-Chat etc.): stream the worker's REASONING (its thinking tokens) live as narration while it generates, but BUFFER the answer so the brain still reviews it (refusal/permissive fallback, outcome-judge) before showing it. Watch the model reason in real time; the final answer stays gated. Ollama workers only. (AGENT path.)">stream_worker_reasoning</label>
@@ -2207,6 +2265,7 @@ async function tabBackends() {
   $("#brain-hbvis").value = cfg.agent_brain.heartbeat_visible_seconds ?? 60;
   $("#brain-cguard").value = cfg.agent_brain.context_guard || "trim";
   $("#brain-creserve").value = cfg.agent_brain.context_guard_reserve_tokens || 0;
+  $("#brain-csticky").checked = cfg.agent_brain.context_guard_sticky !== false;
   $("#brain-swr").checked = !!cfg.agent_brain.stream_worker_reasoning;
   $("#brain-re").value = (cfg.agent_brain.reasoning_effort === "xhigh" ? "max"
     : cfg.agent_brain.reasoning_effort) || "";
@@ -2438,6 +2497,7 @@ async function tabBackends() {
       heartbeat_visible_seconds: parseInt($("#brain-hbvis").value, 10) || 0,
       context_guard: $("#brain-cguard").value,
       context_guard_reserve_tokens: parseInt($("#brain-creserve").value, 10) || 0,
+      context_guard_sticky: $("#brain-csticky").checked,
       stream_worker_reasoning: $("#brain-swr").checked,
       reasoning_effort: $("#brain-re").value.trim() || null,
       sampling_defaults: JSON.parse($("#brain-samp").value || "{}")}}));
@@ -2916,6 +2976,13 @@ async function tabPersonas() {
         <span class="hint">e.g. a <b>Foundry-Agent</b> persona served by Hermes ${help("agents")}</span>
         <label title="Maximum OUTPUT tokens per model call for this persona (blank = the global worker_max_tokens, default 32768). The model's reasoning counts toward it, so a coding persona that thinks AND writes large file edits needs more — otherwise the reply is cut before its tool call finishes and Cline reports 'output-token limit reached before a tool call' and asks for a more concise response. 32768 is a good start for a Cline Act/Plan persona (the answer reserve of the context guard follows it).">max output tokens</label>
         <input id="pe-maxout" type="number" min="256" step="1024" style="width:90px" placeholder="(global)"></div>
+      <div class="row">
+        <label title="What a DIRECT persona does when every paid model is denied by the usage guardrail. local (default) = answer with a local model and say so in the thinking line. refuse = return a clear error instead — use it for Cline PLAN, where a plan quietly written by the local coder would be trusted as a Claude plan.">fallback when paid denied</label>
+        <select id="pe-fallback"><option value="">local (default)</option><option value="refuse">refuse</option></select>
+        <label title="Leave Foundry's own status lines (routing header, notes, heartbeat text) out of the reasoning stream. Keep-alive frames still flow. For data-generation personas (Foundry-FineTune) so reasoning traces come out clean.">quiet narration</label>
+        <input type="checkbox" id="pe-quiet"></div>
+      <div class="row tight"><label title="Turn assist for coding clients in direct mode (Cline Act) — JSON object, every key optional, {} = all off. think_policy: client|persona|adaptive (+ think_levels {routine, after_edit, after_failure}); dedupe_reads; roblox_cleanup; image_keep N; soft_budget_tokens N; prejudge: off|observe|enforce; supervisor: off|observe|nudge|escalate; auditor: off|observe|enforce (+ auditor_min_tool_turns, auditor_max_rejections, auditor_required_patterns [regex]); advisor true + frontier_models [ids, tried in order] + frontier_max_calls per conversation; frontier_rounds. See docs/TURN_ASSIST.md. Results: Dashboard → Scoreboard.">turn assist (JSON obj)</label>
+        <textarea id="pe-assist" rows="3" cols="70" placeholder='{"think_policy": "adaptive", "dedupe_reads": true, "prejudge": "observe", "supervisor": "observe", "auditor": "observe"}'>{}</textarea></div>
       <div class="row"><label title="Optional JSON overriding the multi-signal ranking weights for this persona. Signals: primary (requested category), tool_calling, adequacy (observed outcome-judge quality), latency (warm tokens/sec). e.g. a speed-sensitive persona: {&quot;latency&quot;: 0.5}. Empty = defaults.">selection_weights (JSON obj)</label>
         <input id="pe-weights" size="50" value="{}" placeholder='{"latency": 0.4, "adequacy": 0.8}'></div>
       <div class="row"><label title="JSON object: client name → compatibility note (how that client experiences this persona). Documentation only — surfaced as badges in the list above. Don't fork a persona per client; note the differences here instead.">client_compat (JSON obj)</label>
@@ -2989,7 +3056,10 @@ async function tabPersonas() {
     reasoning_effort: $("#pe-effort").value || null,
     sampling_options: JSON.parse($("#pe-samp").value || "{}"),
     output_format: $("#pe-fmt").value.trim() || null,
-    force_reasoning_effort: $("#pe-force-effort").checked ? 1 : 0}}));
+    force_reasoning_effort: $("#pe-force-effort").checked ? 1 : 0,
+    fallback_policy: $("#pe-fallback").value || null,
+    quiet_narration: $("#pe-quiet").checked ? 1 : 0,
+    assist: JSON.parse($("#pe-assist").value || "{}")}}));
 window.clonePersona = async source => {
   const newName = prompt("New persona name (clone of " + source + "):",
                          source + "-copy");
@@ -3231,6 +3301,10 @@ window.editPersona = name => {
   $("#pe-mcp-direct").checked = p.mcp_tools_in_direct == null ? true : !!p.mcp_tools_in_direct;
   _setAgentSelect(p.agent_backend || "");
   $("#pe-maxout").value = p.max_output_tokens || "";
+  $("#pe-fallback").value = p.fallback_policy || "";
+  $("#pe-quiet").checked = !!p.quiet_narration;
+  $("#pe-assist").value = typeof p.assist === "string"
+    ? (p.assist || "{}") : JSON.stringify(p.assist || {});
 };
 function _setAgentSelect(v) {
   const sel = $("#pe-agent");
@@ -3385,6 +3459,104 @@ async function tabGuardrails() {
     max_paid_calls_per_request: +$("#g-paid").value,
     daily_spend_cap_usd: $("#g-daily").value === "" ? null : +$("#g-daily").value,
     weekly_spend_cap_usd: $("#g-weekly").value === "" ? null : +$("#g-weekly").value}}));
+  await renderTurnAssistCard();
+}
+
+// Global turn-assist settings: defaults for every persona (any threshold,
+// prompt or size), the pre-judge rule tables and the tool-error markers —
+// each pre-filled with the built-ins so they can be edited in place — plus how
+// often each rule / detector has fired. Persona `assist` JSON still wins.
+async function renderTurnAssistCard() {
+  const d = await api("config/turn_assist");
+  const ta = d.turn_assist;
+  const pretty = v => JSON.stringify(v, null, 1);
+  const card = document.createElement("div");
+  card.className = "card";
+  const hits = Object.entries(d.hits || {});
+  card.innerHTML = `
+    <h2 style="margin-top:0">Turn assist (global) <span class="hint">— docs/TURN_ASSIST.md</span></h2>
+    <p class="hint">Applies to every persona with turn assist; a persona's own <code>assist</code> JSON overrides these. Empty tables = built-in rules (shown pre-filled). Thresholds were tuned by replaying recorded Cline sessions: <code>python -m foundry_router.evalharness replay &lt;sessions dir&gt; --sweep</code>.</p>
+    <div class="row tight"><label title="Any built-in key: thresholds (sup_*), dedupe_min_chars, prejudge_max_edit_chars, auditor_*, packet_*, frontier_*, advisor_prompt, auditor_prompt, think_levels…">defaults (JSON obj)</label>
+      <textarea id="ta-defaults" rows="5" cols="90">${esc(pretty(ta.defaults || {}))}</textarea></div>
+    <details><summary class="hint">built-in defaults (reference)</summary><pre style="white-space:pre-wrap;font-size:11px">${esc(pretty(d.builtin_defaults))}</pre></details>
+    <div class="row tight"><label title="[{pattern, rule, advice, unless, enabled}] — pattern/unless are regexes (case-insensitive). unless exempts a command that also matches it.">block rules (JSON list)</label>
+      <textarea id="ta-block" rows="8" cols="90">${esc(pretty(ta.block_rules && ta.block_rules.length ? ta.block_rules : d.builtin_block_rules))}</textarea></div>
+    <div class="row tight"><label title="[{pattern, replacement, desc, enabled}] — regex rewrite applied to each shell command in enforce mode.">fix rules (JSON list)</label>
+      <textarea id="ta-fix" rows="5" cols="90">${esc(pretty(ta.fix_rules && ta.fix_rules.length ? ta.fix_rules : d.builtin_fix_rules))}</textarea></div>
+    <div class="row tight"><label title="Regexes that mark a tool RESULT as failed (used by the supervisor, adaptive thinking and the scoreboard).">error markers (JSON list)</label>
+      <textarea id="ta-err" rows="4" cols="90">${esc(pretty(ta.error_patterns && ta.error_patterns.length ? ta.error_patterns : d.builtin_error_patterns))}</textarea></div>
+    <div class="row"><button class="act primary" id="ta-save">Save turn assist</button>
+      <button class="act" id="ta-reset" title="Clear the global tables so the built-in rules apply again">Use built-in rules</button></div>
+    <div class="card-h" style="margin-top:8px">Rule / detector hits</div>
+    ${hits.length ? `<table><tr><th>rule or detector</th><th>hits</th><th>last</th></tr>${hits.map(([k, v]) =>
+      `<tr><td>${esc(k)}</td><td>${v.n}</td><td>${esc((v.last || "").slice(0, 16).replace("T", " "))}</td></tr>`).join("")}</table>`
+      : `<span class="hint">no hits yet</span>`}`;
+  $("#main").appendChild(card);
+  const parse = (id, kind) => {
+    const v = JSON.parse($(id).value || (kind === "obj" ? "{}" : "[]"));
+    if (kind === "obj" ? (typeof v !== "object" || Array.isArray(v)) : !Array.isArray(v))
+      throw new Error(`${id}: expected a JSON ${kind === "obj" ? "object" : "list"}`);
+    return v;
+  };
+  $("#ta-save").onclick = () => {
+    let body;
+    try {
+      body = {defaults: parse("#ta-defaults", "obj"), block_rules: parse("#ta-block", "list"),
+              fix_rules: parse("#ta-fix", "list"), error_patterns: parse("#ta-err", "list")};
+    } catch (e) { toast(e.message, true); return; }
+    run(api("config/turn_assist", {method: "POST", body}));
+  };
+  $("#ta-reset").onclick = () => run(api("config/turn_assist", {method: "POST",
+    body: {block_rules: [], fix_rules: [], error_patterns: []}}));
+}
+
+// Logs -> Data: every table's size and age, retention per log table, and
+// export of any table (JSONL / CSV / JSON) or all of them as one zip with a
+// manifest — for analysis by an AI, a spreadsheet or scripts.
+async function tabData() {
+  const d = await api("data/tables");
+  const fmts = d.formats.map(f => `<option>${f}</option>`).join("");
+  const days = d.retention.days || {};
+  $("#main").innerHTML = `
+    <h2 style="margin-top:0">Data</h2>
+    <p class="hint">Everything Foundry records, per table. Retention prunes log tables older than N days (0 = keep forever) every ${d.retention.prune_interval_minutes} min. Exports are attachments; the "all" zip includes manifest.json (tables, columns, time column). The kv table (auth tokens) is never exported.</p>
+    <div class="card" style="display:flex;gap:12px;align-items:center;flex-wrap:wrap">
+      <label>Format <select id="dx-fmt">${fmts}</select></label>
+      <label title="Only rows newer than this (0 = all)">Last <input id="dx-hours" type="number" min="0" value="0" style="width:70px"> hours</label>
+      <button class="act primary" id="dx-all">Export all (zip)</button>
+      <label>Prune every <input id="dx-int" type="number" min="5" value="${d.retention.prune_interval_minutes}" style="width:60px"> min</label>
+      <button class="act" id="dx-save">Save retention</button>
+      <button class="act" id="dx-prune">Prune now</button>
+    </div>
+    <div class="card"><table><tr><th>table</th><th>rows</th><th>oldest</th><th>newest</th><th>keep days</th><th></th></tr>${
+      d.tables.map(t => `<tr><td>${esc(t.table)}${t.log ? "" : ' <span class="hint">state</span>'}</td><td>${t.rows.toLocaleString()}</td>
+        <td>${esc((t.oldest || "").slice(0, 16).replace("T", " "))}</td><td>${esc((t.newest || "").slice(0, 16).replace("T", " "))}</td>
+        <td>${t.log ? `<input class="dx-days" data-t="${esc(t.table)}" type="number" min="0" style="width:60px" value="${days[t.table] || 0}">` : "—"}</td>
+        <td><button class="act dx-exp" data-t="${esc(t.table)}">Export</button>
+            ${t.log ? `<button class="act dx-clear" data-t="${esc(t.table)}" title="Delete rows (older than N days, or all)">Clear…</button>` : ""}</td></tr>`).join("")}</table></div>`;
+  const q = () => `format=${$("#dx-fmt").value}&hours=${+$("#dx-hours").value || 0}`;
+  $("#dx-all").onclick = () => { location.href = `/admin/api/data/export-all?${q()}`; };
+  document.querySelectorAll(".dx-exp").forEach(b => b.onclick = () => {
+    location.href = `/admin/api/data/export?table=${encodeURIComponent(b.dataset.t)}&${q()}`; });
+  document.querySelectorAll(".dx-clear").forEach(b => b.onclick = async () => {
+    const ans = prompt(`Clear ${b.dataset.t}: delete rows older than how many days? (0 = ALL rows)`, "30");
+    if (ans === null) return;
+    try {
+      const r = await api("data/clear", {method: "POST", body: {table: b.dataset.t, older_than_days: +ans || 0}});
+      toast(`Deleted ${r.deleted} row(s)`); render();
+    } catch (e) { toast(e.message, true); }
+  });
+  $("#dx-save").onclick = () => {
+    const nd = {...days};
+    document.querySelectorAll(".dx-days").forEach(i => { nd[i.dataset.t] = +i.value || 0; });
+    run(api("config/data_retention", {method: "POST",
+      body: {days: nd, prune_interval_minutes: +$("#dx-int").value || 60}}));
+  };
+  $("#dx-prune").onclick = async () => {
+    try { const r = await api("data/prune", {method: "POST", body: {}});
+          toast("Pruned: " + (Object.entries(r.pruned).map(([t, n]) => `${t} ${n}`).join(", ") || "nothing"));
+          render(); } catch (e) { toast(e.message, true); }
+  };
 }
 
 /* ------------------------------------------------------------------- mcp -- */

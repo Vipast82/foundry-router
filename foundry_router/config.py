@@ -130,6 +130,11 @@ class AgentBrainConfig(BaseModel):
     # tool results cut first, then the oldest turns after the task. The client
     # keeps its full history; the turn says what was cut. "off" = send as-is.
     context_guard: Literal["trim", "off"] = "trim"
+    # Sticky guard: remember per conversation how many steps are already
+    # collapsed and only ever collapse more (never un-trim, never move the cut
+    # back). The stateless guard flipped between trimmed and untrimmed prompts
+    # turn to turn near the limit and every flip cost a full re-prefill.
+    context_guard_sticky: bool = True
     # Output tokens kept free for the answer when the guard decides whether to
     # trim. 0 = auto: the request's max tokens capped at 8192 (and 1/4 of the
     # window), so the guard only trims a conversation that truly won't fit and
@@ -205,14 +210,6 @@ class BackendConfig(BaseModel):
     # `type` (ollama -> "ollama", else -> "openai").
     flavor: Optional[Literal["ollama", "llamacpp", "unsloth",
                              "vllm", "openai", "cliproxyapi"]] = None
-    # Subscription CLOUD backend: counted as a paid model (persona paid-pin
-    # cascades, max_paid_calls guardrail, status lines, cost reports) instead
-    # of a free local one. None = inferred: anthropic-compatible (Meridian)
-    # and flavor "cliproxyapi" (CLIProxyAPI: ChatGPT/Codex, Claude Code,
-    # Gemini sign-ins behind one OpenAI-dialect endpoint) are cloud; every
-    # other openai-dialect backend is treated as before. Set true for any
-    # other subscription proxy (e.g. ChatMock) behind the openai dialect.
-    cloud: Optional[bool] = None
     # Optional discovery fallback ONLY — used if the backend exposes no
     # model-list endpoint (§4.3: "do not hardcode model lists for backends
     # that can be discovered").
@@ -234,6 +231,22 @@ class BackendConfig(BaseModel):
     # turns). Off by default: two concurrent conversations that open with the
     # identical system prompt + first message would share a session.
     meridian_session_affinity: bool = False
+    # Subscription backend that is NOT Meridian (e.g. CLIProxyAPI in front of a
+    # ChatGPT Plus login): treated as paid for the guardrails — never as metered
+    # dollars, never as free local. Meridian (anthropic-compatible) is always a
+    # subscription. A $20 plan reports no usage to Foundry, so the call budgets
+    # below are the guard: calls this backend served in the last 5 hours / 24
+    # hours, counted from Foundry's own subscription usage log. None = no cap.
+    subscription: bool = False
+    call_budget_5h: Optional[int] = None
+    call_budget_daily: Optional[int] = None
+
+    @property
+    def is_subscription(self) -> bool:
+        # flavor "cliproxyapi" (CLIProxyAPI: ChatGPT/Codex, Claude Code, Gemini
+        # sign-ins behind the openai dialect) is a subscription by definition.
+        return (self.subscription or self.type == "anthropic-compatible"
+                or self.flavor == "cliproxyapi")
 
     @property
     def effective_flavor(self) -> str:
@@ -243,13 +256,6 @@ class BackendConfig(BaseModel):
         if self.flavor:
             return self.flavor
         return "ollama" if self.type == "ollama" else "openai"
-
-    @property
-    def is_cloud(self) -> bool:
-        """True for a subscription/cloud backend (see `cloud`)."""
-        if self.cloud is not None:
-            return bool(self.cloud)
-        return self.type == "anthropic-compatible" or self.flavor == "cliproxyapi"
 
 
 class InternalPoolConfig(BaseModel):
@@ -555,6 +561,32 @@ class AgentConfig(BaseModel):
     session_continuity: bool = True
 
 
+class TurnAssistConfig(BaseModel):
+    """Global turn-assist settings (docs/TURN_ASSIST.md), editable live in
+    Routing -> Guardrails -> Turn assist. Precedence per request: built-in
+    defaults < `defaults` here < the persona's `assist` JSON."""
+    # Any ASSIST_DEFAULTS key (thresholds, prompts, packet sizes, ...).
+    defaults: dict = Field(default_factory=dict)
+    # Pre-judge tables. Empty = the built-in rules. Each block rule:
+    # {pattern, rule, advice, enabled}; each fix rule:
+    # {pattern, replacement, desc, enabled}.
+    block_rules: list[dict] = Field(default_factory=list)
+    fix_rules: list[dict] = Field(default_factory=list)
+    # Regexes that mark a tool RESULT as failed. Empty = built-in markers.
+    error_patterns: list[str] = Field(default_factory=list)
+
+
+class DataRetentionConfig(BaseModel):
+    """Days to keep rows per log table (0 / absent = keep forever). Pruned
+    on startup and every `prune_interval_minutes`. perf_samples keeps its own
+    retention (perf_history.RETENTION_DAYS)."""
+    days: dict[str, int] = Field(default_factory=lambda: {
+        "interventions": 180,      # fine-tuning material — keep longer
+        "assist_turns": 90,
+    })
+    prune_interval_minutes: int = 60
+
+
 class AppConfig(BaseModel):
     server: ServerConfig = Field(default_factory=ServerConfig)
     agent_brain: AgentBrainConfig = Field(default_factory=AgentBrainConfig)
@@ -565,6 +597,8 @@ class AppConfig(BaseModel):
     mcp_servers: list[MCPServerConfig] = Field(default_factory=list)
     tool_sync: ToolSyncConfig = Field(default_factory=ToolSyncConfig)
     semantic_cache: SemanticCacheConfig = Field(default_factory=SemanticCacheConfig)
+    turn_assist: TurnAssistConfig = Field(default_factory=TurnAssistConfig)
+    data_retention: DataRetentionConfig = Field(default_factory=DataRetentionConfig)
     mcp_aggregator: MCPAggregatorConfig = Field(default_factory=MCPAggregatorConfig)
     agents: list[AgentConfig] = Field(default_factory=list)
     logging: LoggingConfig = Field(default_factory=LoggingConfig)

@@ -332,3 +332,46 @@ class EvalHarness:
     def results(self, run_id: int) -> list[dict]:
         return self.db.query(
             "SELECT * FROM eval_results WHERE run_id=? ORDER BY id", (run_id,))
+
+
+# --------------------------------------------------------------------------- #
+# Session replay (turn assist) — python -m foundry_router.evalharness replay  #
+# --------------------------------------------------------------------------- #
+
+def main(argv: Optional[list] = None) -> int:
+    """`replay <cline sessions dir> [--sweep] [--json out.json] [--set k=v …]`:
+    run turn assist's supervisor + pre-judge over recorded Cline sessions
+    (see replay.py) and print how each detector would have behaved."""
+    import argparse
+    from . import replay as rp
+    ap = argparse.ArgumentParser(prog="python -m foundry_router.evalharness")
+    sub = ap.add_subparsers(dest="cmd", required=True)
+    r = sub.add_parser("replay", help="replay recorded Cline sessions through turn assist")
+    r.add_argument("sessions_dir")
+    r.add_argument("--sweep", action="store_true", help="also vary each detector's thresholds")
+    r.add_argument("--json", help="write the full result (per session too) to this file")
+    r.add_argument("--set", action="append", default=[], metavar="KEY=VALUE",
+                   help="override a setting, e.g. --set sup_loop_repeats=4")
+    a = ap.parse_args(argv)
+    cfg = {}
+    for kv in a.set:
+        k, _, v = kv.partition("=")
+        try:
+            cfg[k] = json.loads(v)
+        except ValueError:
+            cfg[k] = v
+    result = rp.replay(a.sessions_dir, cfg)
+    print(rp.report(result))
+    out = {"replay": result}
+    if a.sweep:
+        s = rp.sweep(a.sessions_dir, cfg)
+        print(rp.report_sweep(s))
+        out["sweep"] = s
+    if a.json:
+        with open(a.json, "w", encoding="utf-8") as f:
+            json.dump(out, f, indent=1, default=lambda o: dict(o) if isinstance(o, dict) else str(o))
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

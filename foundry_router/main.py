@@ -205,7 +205,7 @@ class Services:
                         # manual override still wins over both.
                         fields.update(relative_cost_tier=claude_cost_tier(model_id),
                                       context_length=CLAUDE_DEFAULT_CONTEXT)
-                    elif getattr(s.config, "is_cloud", False):
+                    elif getattr(s.config, "is_subscription", False):
                         # Subscription proxy (CLIProxyAPI): GPT/Codex, Claude,
                         # Gemini behind the openai dialect. No dollar cost (plan
                         # quota), a tier so ranking prefers cheaper models, and a
@@ -345,7 +345,19 @@ class Services:
             asyncio.create_task(self._brain_health_loop()),
             asyncio.create_task(self._pricing_loop()),
             asyncio.create_task(self._agent_health_loop()),
+            asyncio.create_task(self._retention_loop()),
         ]
+
+    async def _retention_loop(self) -> None:
+        """Keep log tables inside data_retention.days (Logs -> Data)."""
+        from .datatools import prune
+        while True:
+            cfg = self.config_store.config.data_retention
+            try:
+                await asyncio.to_thread(prune, self.db, cfg.days)
+            except Exception:
+                log.exception("retention prune failed")
+            await asyncio.sleep(max(5, int(cfg.prune_interval_minutes or 60)) * 60)
 
     async def refresh_brain_health(self) -> dict:
         """Probe the brain and update the cached snapshot. Called on the

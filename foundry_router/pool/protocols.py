@@ -961,16 +961,30 @@ class OpenAIProtocol(BaseProtocol):
             # llama-swap proxies each resident llama-server under /upstream/<id>.
             paths.append(f"/upstream/{running[0].get('model')}/metrics")
         out["metrics_ok"] = False
+        # Ask for the Prometheus text format the way Prometheus does: some
+        # engines (Strata) negotiate on Accept and answer JSON otherwise.
+        hdrs = {**self._headers(),
+                "Accept": "text/plain;version=0.0.4;q=1,application/openmetrics-text;q=0.5,*/*;q=0.1"}
         for path in paths:
             try:
-                r = await self.client.get(f"{self._root()}{path}",
-                                          headers=self._headers(), timeout=4)
-                if r.status_code < 400 and "#" in (r.text or ""):
-                    out.update(prom.summarize(flavor, prom.parse(r.text)))
+                r = await self.client.get(f"{self._root()}{path}", headers=hdrs, timeout=4)
+                body = r.text or ""
+                parsed = prom.parse(body) if r.status_code < 400 else {}
+                if parsed:
+                    # The metric names say which engine this is, whatever the
+                    # configured flavor (Strata is llama.cpp-based but exports
+                    # vLLM-style names, plus strata:* extras).
+                    dialect = prom.dialect(parsed) or flavor
+                    out.update(prom.summarize(dialect, parsed))
+                    if dialect != flavor:
+                        out["metrics_dialect"] = dialect
                     out["metrics_ok"] = True
                     out.pop("metrics_error", None)
                     break
-                out["metrics_error"] = f"HTTP {r.status_code}"
+                ctype = (r.headers.get("content-type") or "").split(";")[0]
+                out["metrics_error"] = (f"HTTP {r.status_code}" if r.status_code >= 400
+                                        else f"HTTP {r.status_code}, but not Prometheus text "
+                                             f"({ctype or 'unknown content'})")
             except Exception as e:
                 out["metrics_error"] = str(e)[:120] or type(e).__name__
         if flavor == "llamacpp" and running is None:

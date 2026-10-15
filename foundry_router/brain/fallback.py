@@ -101,7 +101,7 @@ def _is_local(info: dict) -> bool:
     """A free model on your own hardware: Ollama, or a llama.cpp / vLLM /
     Unsloth server. Cloud subscriptions (Meridian, CLIProxyAPI) and generic
     openai-dialect endpoints are remote."""
-    if info.get("cloud"):
+    if info.get("subscription"):
         return False
     return info.get("type") == "ollama" or (
         info.get("type") == "openai-compatible"

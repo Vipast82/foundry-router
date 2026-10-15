@@ -96,15 +96,15 @@ def cpa(app, client):
 
 def test_flavor_marks_backend_as_cloud_subscription(cpa):
     info = cpa.pool.backend_info("gpt-5.5")
-    assert info["cloud"] is True and info["flavor"] == "cliproxyapi"
-    assert cpa.pool.backend_info("qwen-local")["cloud"] is False
+    assert info["subscription"] is True and info["flavor"] == "cliproxyapi"
+    assert cpa.pool.backend_info("qwen-local")["subscription"] is False
     st = {b["name"]: b for b in cpa.pool.backend_status()}
-    assert st["cliproxy"]["cloud"] is True and st["llama"]["cloud"] is False
+    assert st["cliproxy"]["subscription"] is True and st["llama"]["subscription"] is False
     # explicit override for any other subscription proxy (e.g. ChatMock)
     assert BackendConfig(name="cm", type="openai-compatible", url="http://x",
-                         cloud=True).is_cloud
-    assert not BackendConfig(name="o", type="openai-compatible", url="http://x").is_cloud
-    assert BackendConfig(name="m", type="anthropic-compatible", url="http://x").is_cloud
+                         subscription=True).is_subscription
+    assert not BackendConfig(name="o", type="openai-compatible", url="http://x").is_subscription
+    assert BackendConfig(name="m", type="anthropic-compatible", url="http://x").is_subscription
 
 
 def test_model_discovery_with_bearer_key(cpa):

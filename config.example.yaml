@@ -134,6 +134,19 @@ backend_pool:
         # models:
         #   - claude-sonnet-5
         #   - claude-opus-4-8
+        # A $20 Claude Pro plan reports no usage through Meridian, so the
+        # conserve_* thresholds never fire; cap calls instead (counted from
+        # Foundry's own usage log). Omit for no cap.
+        # call_budget_5h: 40
+        # call_budget_daily: 150
+      # - name: cliproxy                    # ChatGPT subscription via CLIProxyAPI
+      #   type: openai-compatible           # (router-for-me/CLIProxyAPI, your own LAN
+      #   url: http://192.168.1.40:8317/v1  #  instance — never a third-party relay)
+      #   api_key: "${CLIPROXY_API_KEY}"
+      #   subscription: true                # paid for the guardrails, never metered $
+      #   call_budget_5h: 30                # ChatGPT Plus has small limits — cap it
+      #   call_budget_daily: 100
+      #   priority: 100
       # - name: openrouter                  # optional — uncomment when connected
       #   type: openai-compatible
       #   url: https://openrouter.ai/api/v1

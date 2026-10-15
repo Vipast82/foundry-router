@@ -419,10 +419,17 @@ async def _chat_dispatch(svc, body: dict):
     client_think = body.get("think")
     if client_think is None:
         client_think = body.get("reasoning_effort") or (options or {}).get("reasoning_effort")
-    if client_think is not None:
+    # Client-sent sampling wins over the persona's sampling_options (sampling.
+    # resolve_options), so log it beside the think value: a client that sends
+    # e.g. temperature 0 silently replaces the persona's tuned values.
+    client_sampling = {k: (options or {}).get(k) for k in
+                       ("temperature", "top_p", "top_k", "min_p", "repeat_penalty",
+                        "presence_penalty") if (options or {}).get(k) is not None}
+    if client_think is not None or client_sampling:
         svc.db.log_event("info", "facade",
                          f"client set reasoning effort: think={client_think!r} "
-                         f"model={model_name}")
+                         f"model={model_name}"
+                         + (f" sampling={client_sampling}" if client_sampling else ""))
 
     persona = svc.personas.get(model_name)
     summary_req = _is_client_summary_request(messages)
@@ -685,7 +692,7 @@ def _is_paid_backend(info: dict) -> bool:
     or a non-local openai-dialect endpoint (OpenAI / OpenRouter API key).
     Local servers (Ollama, llama.cpp, vLLM, Unsloth) are free."""
     t = (info or {}).get("type")
-    if t == "anthropic-compatible" or (info or {}).get("cloud"):
+    if t == "anthropic-compatible" or (info or {}).get("subscription"):
         return True
     return t == "openai-compatible" and (info or {}).get("flavor") not in _LOCAL_OPENAI_FLAVORS
 
@@ -1077,7 +1084,9 @@ def _think_label(svc, model_id: str, persona=None, client_think=None) -> str:
     except Exception:                                             # noqa: BLE001
         return "think ?"
     p = persona or {}
-    if p.get("force_reasoning_effort") and p.get("reasoning_effort"):
+    if p.get("_think_why"):
+        who = f"{p.get('_think_src') or 'adaptive'} ({p['_think_why']})"
+    elif p.get("force_reasoning_effort") and p.get("reasoning_effort"):
         who = "persona (forced)"
     elif client_think not in (None, ""):
         who = "client"
@@ -1090,6 +1099,15 @@ def _think_label(svc, model_id: str, persona=None, client_think=None) -> str:
     if v is False or str(v).lower() in ("off", "false", "none"):
         return f"think: off by {who}"
     return f"think: {'on' if v is True else v} by {who}"
+
+
+def _think_level(svc, model_id: str, persona=None, client_think=None) -> str:
+    """The thinking level this request will run with, as a short word
+    (off / low / medium / high / max / default) — recorded per turn so a change
+    between turns (which rewrites part of the prompt) is visible."""
+    import re as _re
+    m = _re.match(r"think: (\S+)", _think_label(svc, model_id, persona, client_think))
+    return m.group(1) if m else "?"
 
 
 def _available_paid(svc, persona) -> list:
@@ -1238,6 +1256,25 @@ def _output_cap(svc, persona) -> int:
     return v if v > 0 else int(svc.config_store.config.agent_brain.worker_max_tokens or 8192)
 
 
+def _fit_output_cap(svc, persona, model_id: str, convo, tools, out_cap: int) -> int:
+    """Shrink the output cap so prompt + reply fit the model's window. llama.cpp
+    just stops at the window, but stricter servers (Strata, vLLM) REFUSE a request
+    whose max_tokens can't fit — and near a full context a 32K-65K persona cap
+    can't. Only lowers the cap; never below 1024 (a prompt that leaves less room
+    than that is the guard's / client's problem, not something a smaller reply fixes)."""
+    window = _guard_window(svc, persona, model_id)
+    if not window or not out_cap:
+        return out_cap
+    try:
+        est = context_guard.estimate(convo, tools, model_id)
+    except Exception:                                             # noqa: BLE001
+        return out_cap
+    room = int((window - est) * 0.95) - 256          # 5% for estimate error
+    if room >= out_cap or room < 1024:
+        return out_cap
+    return room
+
+
 def _truncation_note(res, cap: int, persona, svc=None, model_id: str = "",
                      options=None) -> str:
     """Thinking line (and Events entry) for a reply cut at an output limit.
@@ -1297,8 +1334,14 @@ def _guard_window(svc, persona, model_id: str) -> int:
     persona's context_window and the model's known window (llama.cpp n_ctx /
     vLLM max_model_len / Ollama GGUF / registry), whichever is smaller."""
     vals = []
+    try:
+        from ..turn_assist import config as _assist_cfg
+        soft = _assist_cfg(persona, svc.config_store.config.turn_assist).get(
+            "soft_budget_tokens") if persona else 0
+    except Exception:                                             # noqa: BLE001
+        soft = 0
     for v in ((persona or {}).get("context_window"),
-              (svc.registry.get(model_id) or {}).get("context_length")):
+              (svc.registry.get(model_id) or {}).get("context_length"), soft):
         try:
             if v and int(v) > 0:
                 vals.append(int(v))
@@ -1334,9 +1377,15 @@ def _apply_context_guard(svc, persona, model_id, messages, tools, options, logge
             reserve = 0
         reserve = reserve or out_cap or int(cfg.worker_max_tokens or 8192)
         reserve = min(reserve, _GUARD_MAX_AUTO_RESERVE, window // 4)
-    out, rep = context_guard.fit(messages, tools, window, reserve, model_id)
+    memo = None
+    if persona is not None and getattr(cfg, "context_guard_sticky", True):
+        from ..agents import conversation_key as _ck
+        memo = context_guard.memo_for(f"{persona.get('virtual_name')}|{model_id}|{_ck(messages)}")
+    out, rep = context_guard.fit(messages, tools, window, reserve, model_id, memo=memo)
     if not rep:
         return messages, ""
+    if rep.get("advanced") is False:
+        return out, ""                 # the same cut as last turn: nothing new to log or say
     note = context_guard.describe(rep)
     svc.db.log_event("warning", "context", f"{model_id}: {note}",
                      json.dumps(rep))
@@ -1401,12 +1450,20 @@ def _prompt_accounting(svc, model_id, res, convo, tools, stats: dict,
     return stats
 
 
+def _flat_rate(binfo) -> bool:
+    """A non-Meridian subscription backend (CLIProxyAPI / ChatGPT Plus): calls
+    cost nothing extra, so they must not add to the metered spend that the
+    dollar caps read. (Meridian keeps its existing cost accounting.)"""
+    b = binfo or {}
+    return bool(b.get("subscription")) and b.get("type") != "anthropic-compatible"
+
+
 def _local_down_notes(svc, model_id: str) -> list[str]:
     """When a request lands on Claude because the local backend(s) are marked
     down, say so — otherwise a mid-session switch from local to Sonnet looks
     random."""
     def _cloud(i: dict) -> bool:
-        return i.get("type") == "anthropic-compatible" or bool(i.get("cloud"))
+        return i.get("type") == "anthropic-compatible" or bool(i.get("subscription"))
 
     info = svc.pool.backend_info(model_id) or {}
     if not _cloud(info):
@@ -1418,6 +1475,35 @@ def _local_down_notes(svc, model_id: str) -> list[str]:
         err = (b.get("last_error") or "health checks failing")[:140]
         out.append(f"local backend {b['name']} is marked down ({err}) → using {model_id}")
     return out[:2]
+
+
+def _plain_reply(model_name: str, text: str, stream: bool):
+    """A router-written final answer (no model call) in the client's format."""
+    if stream:
+        return StreamingResponse(iter([tr.chat_chunk(model_name, text),
+                                       tr.chat_chunk(model_name, "", done=True, stats={})]),
+                                 media_type="application/x-ndjson")
+    return JSONResponse({"model": model_name, "created_at": tr.now_iso(),
+                         "message": {"role": "assistant", "content": text},
+                         "done": True, **tr._stats({})})
+
+
+def _refuse_fallback(svc, persona, logger, messages, denials: list):
+    """fallback_policy=refuse: every paid model was denied, and this persona
+    must not quietly answer with a local model (Cline PLAN — a plan written
+    by the local coder would be trusted as a Claude plan). A real error, so
+    the client shows it instead of treating it as the model's answer."""
+    why = "; ".join(denials)[:600] or "no paid model allowed"
+    msg = (f"{persona['virtual_name']}: every frontier model is unavailable ({why}). "
+           f"fallback_policy=refuse, so no local model was used. Retry later, or "
+           f"switch to Act mode to continue locally.")
+    logger.finish("error", msg)
+    from .. import interventions
+    from ..agents import conversation_key
+    interventions.record(svc.db, conversation_key=conversation_key(messages),
+                         persona=persona["virtual_name"], kind="fallback_refused",
+                         detail=why, intervention=msg)
+    return JSONResponse({"error": msg}, status_code=503)
 
 
 async def _direct_dispatch_chat(svc, persona, model_name, messages, client_tools,
@@ -1447,6 +1533,8 @@ async def _direct_dispatch_chat(svc, persona, model_name, messages, client_tools
     if summary_req:
         route_notes.append("Cline context-compaction summary request — thinking forced "
                            "off so the whole output budget goes to the summary")
+    refuse_local = (persona.get("fallback_policy") or "").strip().lower() == "refuse"
+    denials: list[str] = []
     pins = _paid_pin_order(svc, persona)
     if pins:
         # Paid-pin priority cascade (prefer_paid persona, e.g. Cline PLAN): try each
@@ -1463,6 +1551,9 @@ async def _direct_dispatch_chat(svc, persona, model_name, messages, client_tools
                 model_id = cand
                 break
             logger.record_guardrail(f"denied pinned {cand}: {v.reason}")
+            denials.append(f"{cand}: {v.reason}")
+        if model_id is None and refuse_local:
+            return _refuse_fallback(svc, persona, logger, messages, denials)
         if model_id is None:
             model_id = _local_fallback(svc, persona)
             if model_id is None:
@@ -1496,6 +1587,9 @@ async def _direct_dispatch_chat(svc, persona, model_name, messages, client_tools
             # LOCAL model, preferring the persona's allowlisted locals. Only error
             # if literally nothing local is reachable.
             logger.record_guardrail(f"denied {model_id}: {verdict.reason}")
+            if refuse_local:
+                return _refuse_fallback(svc, persona, logger, messages,
+                                        [f"{model_id}: {verdict.reason}"])
             model_id = _local_fallback(svc, persona)
             if model_id is None:
                 logger.finish("error", verdict.reason)
@@ -1513,6 +1607,12 @@ async def _direct_dispatch_chat(svc, persona, model_name, messages, client_tools
     keep_alive = (client_keep_alive if client_keep_alive is not None
                   else brain_cfg.worker_keep_alive)
     hb = brain_cfg.heartbeat_seconds or 0
+    # quiet_narration (data-generation personas): Foundry's own status lines
+    # stay out of the reasoning stream; keep-alive frames still flow, empty.
+    quiet = bool(persona.get("quiet_narration"))
+
+    def _q(text):
+        return None if quiet else text
     # Merge sampling defaults (global < persona < client) + resolve the persona's
     # structured-output format for this worker.
     from .. import sampling
@@ -1574,8 +1674,180 @@ async def _direct_dispatch_chat(svc, persona, model_name, messages, client_tools
                                          all_tools, logger)
     if _stuck_note:
         route_notes.append(_stuck_note)
+    out_cap = _fit_output_cap(svc, persona, model_id, base_convo, all_tools, out_cap)
 
-    async def _exec_foundry_tools(calls: list, narrate=None) -> list:
+    # ---- turn assist (turn_assist.py rules + frontier_assist.py helpers) --------
+    # Only for client-tool turns (Cline Act); everything is off unless the
+    # persona's `assist` JSON turns it on. See docs/TURN_ASSIST.md.
+    from .. import turn_assist as ta, frontier_assist as fa, interventions as iv
+    from ..agents import conversation_key as _conv_key
+    acfg = ta.config(persona, svc.config_store.config.turn_assist)
+    assist_on = ta.enabled(acfg) and not summary_req and bool(client_tools)
+    advisor_on = assist_on and bool(acfg.get("advisor")) and bool(acfg.get("frontier_models"))
+    conv_key = _conv_key(messages) if assist_on else ""
+    _rid8 = (request_context.request_id() or "")[:8]
+    assist_turn_id = None
+    assist_visible: list[str] = []     # text the client must keep (advice, verdicts)
+    audit_rejections = [0]             # rejections made inside THIS request
+    loop_blocks = [0]                  # identical calls blocked inside THIS request
+    turn_stats = iv.new_call_stats()   # cache numbers over this request's model calls
+    turn_think = ""
+
+    def _iv(kind, **kw):
+        iv.record(svc.db, conversation_key=conv_key, persona=persona["virtual_name"],
+                  model=model_id or "", request_id=_rid8, kind=kind, **kw)
+
+    if assist_on:
+        prep = ta.prepare(base_convo, acfg)
+        base_convo = prep.messages
+        route_notes.extend(prep.notes)
+        sup = prep.supervision
+        smode = acfg.get("supervisor") or "off"
+        start = ta.tail_start(base_convo)
+        for f in sup.new:
+            _iv("supervisor_" + f.kind, mode=smode, detail=f.detail,
+                intervention=(ta._note_for(f, max(sup.level, 1))
+                              if smode in ("nudge", "escalate") else ""),
+                excerpt=ta._text(base_convo[f.at].get("content"))[-1500:])
+        for m in base_convo[start:]:
+            t = ta._text(m.get("content"))
+            if t.startswith(ta.NOTE_TAG + ": identical"):
+                _iv("dedupe", mode="on", detail=t[:300])
+            elif "your Luau code, line" in t or "call list_roblox_studios once" in t:
+                _iv("roblox", mode="on", detail=t[:300])
+        if smode == "escalate" and sup.new:
+            if sup.level >= int(acfg.get("sup_escalate_block_at") or 4):
+                text = ta.blocked_reply(sup.findings, sup.level)
+                _iv("blocked", mode=smode, detail=sup.new[-1].detail, intervention=text)
+                logger.finish("ok")
+                return _plain_reply(model_name, text, stream)
+            if sup.level == int(acfg.get("sup_escalate_advice_at") or 3):
+                adv, ans = await fa.auto_advice(svc, acfg, persona, conv_key, base_convo,
+                                                sup.new[-1].detail)
+                _iv("auto_advice", mode=smode, detail=sup.new[-1].detail, intervention=adv,
+                    frontier_model=ans.model if ans else "",
+                    prompt_tokens=ans.prompt_tokens if ans else 0,
+                    completion_tokens=ans.completion_tokens if ans else 0)
+                at = sup.new[-1].at
+                base_convo = list(base_convo)
+                base_convo[at] = ta._append(base_convo[at], adv)
+                if ans:
+                    assist_visible.append(adv)
+                route_notes.append("🧑‍🏫 supervisor escalation: advisor consulted")
+        if prep.think:
+            persona = {**persona, "reasoning_effort": prep.think,
+                       "force_reasoning_effort": 1, "_think_why": prep.think_why,
+                       "_think_src": acfg.get("think_policy") or "adaptive"}
+        _evs = ta.events(base_convo, ta.error_rx(acfg))
+        _new = [e for e in _evs if e.result_idx >= start]
+        assist_turn_id = iv.record_turn(
+            svc.db, conversation_key=conv_key, persona=persona["virtual_name"],
+            model=model_id, sprint=iv.sprint_of(messages),
+            context_tokens=context_guard.estimate(client_convo, all_tools, model_id),
+            new_calls=len(_new), new_errors=sum(1 for e in _new if not e.ok),
+            total_calls=len(_evs), think=_think_level(svc, model_id, persona, client_think),
+            think_why=prep.think_why or "persona")
+        turn_think = _think_level(svc, model_id, persona, client_think)
+        # Audits and advice get their own rounds instead of taking the model's.
+        tool_cap += int(acfg.get("frontier_rounds") or 0)
+        if advisor_on:
+            all_tools = list(all_tools or []) + [fa.CONSULT_TOOL]
+            fmt = None
+
+    async def _assist_after(res, rest, convo):
+        """After a model round with no Foundry-owned calls: pre-judge its client
+        calls, audit a final report. Returns (continue, convo, visible, notes, rest)."""
+        nonlocal persona
+        notes: list[str] = []
+        if not assist_on:
+            return False, convo, "", notes, rest
+        pmode = acfg.get("prejudge") or "off"
+        if rest and pmode != "off":
+            j = ta.prejudge(rest, acfg)
+            for before, after, desc in j.fixes:
+                _iv("prejudge_fix", mode=pmode, detail=desc, intervention=after, excerpt=before)
+                notes.append(f"✎ pre-judge ({pmode}): {desc}")
+            for tc, rule, advice in j.blocked:
+                _iv("prejudge_block", mode=pmode, detail=rule,
+                    intervention=ta.blocked_result(rule, advice),
+                    excerpt=json.dumps(tc.get("arguments"), ensure_ascii=False)[:1500])
+                notes.append(f"⛔ pre-judge ({pmode}): {rule}")
+            if pmode == "enforce" and j.blocked:
+                results = []
+                for tc in rest:
+                    hit = next(((r, a) for t, r, a in j.blocked if t is tc), None)
+                    results.append({"role": "tool", "tool_call_id": tc.get("id"),
+                                    "tool_name": tc.get("name"),
+                                    "content": ta.blocked_result(*hit) if hit else
+                                    f"{ta.NOTE_TAG} pre-judge] not run: another call in the "
+                                    f"same turn was blocked. Re-issue it if you still need it."})
+                return True, convo + [_assistant_turn(res, rest)] + results, "", notes, rest
+            rest = j.calls
+        if rest and (acfg.get("loop_block_at") or acfg.get("loop_block_any_at")):
+            hits = ta.loop_check(convo, rest, acfg, ta.error_rx(acfg))
+            if hits:
+                loop_blocks[0] += 1
+                h0 = hits[0]
+                text = ta.loop_block_text(h0, acfg)
+                _iv("loop_break", mode="on", detail=f"{h0.call.get('name')} ×{h0.repeats}",
+                    intervention=text, excerpt=h0.excerpt)
+                notes.append(f"🔁 loop-breaker: {h0.call.get('name')} would be call #{h0.repeats} "
+                             f"in a row — blocked")
+                if loop_blocks[0] > int(acfg.get("loop_block_max") or 2):
+                    stop = ta.loop_stop_text(h0)
+                    _iv("blocked", mode="loop", detail=stop[:300], intervention=stop)
+                    return False, convo, "\n\n" + stop + "\n\n", notes, []
+                # the re-ask thinks harder: the model is stuck, a one-off prompt change is worth it
+                persona = {**persona, "reasoning_effort": acfg.get("think_escalate") or "high",
+                           "force_reasoning_effort": 1, "_think_why": "repeated call blocked",
+                           "_think_src": "loop-breaker"}
+                blocked = {id(h.call): h for h in hits}
+                results = []
+                for tc in rest:
+                    h = blocked.get(id(tc))
+                    results.append({"role": "tool", "tool_call_id": tc.get("id"),
+                                    "tool_name": tc.get("name"),
+                                    "content": ta.loop_block_text(h, acfg) if h else
+                                    f"{ta.NOTE_TAG} loop-breaker] not run: another call in the "
+                                    f"same turn was blocked. Re-issue it if you still need it."})
+                return True, convo + [_assistant_turn(res, rest)] + results, "", notes, rest
+        amode = acfg.get("auditor") or "off"
+        if rest or amode == "off" or not fa.is_final_report(res, summary_req, convo, acfg):
+            return False, convo, "", notes, rest
+        done_rej = fa.rejections_since_user(convo) + audit_rejections[0]
+        cap = int(acfg.get("auditor_max_rejections") or 0)
+        a = await fa.audit(svc, acfg, persona, conv_key, convo, res.content or "")
+        ftok = dict(frontier_model=a.frontier.model if a.frontier else "",
+                    prompt_tokens=a.frontier.prompt_tokens if a.frontier else 0,
+                    completion_tokens=a.frontier.completion_tokens if a.frontier else 0)
+        report_tail = (res.content or "")[-3000:]
+        if a.accepted:
+            if a.frontier:
+                _iv("audit_accept", mode=amode, detail=a.verdict_text[:1000],
+                    excerpt=report_tail, **ftok)
+            notes.append("✅ auditor: " + (f"accepted by {a.frontier.model}" if a.frontier
+                                          else a.verdict_text)
+                         + (f" ({a.note})" if a.note else ""))
+            return False, convo, "", notes, rest
+        if amode == "enforce" and done_rej < cap:
+            audit_rejections[0] += 1
+            text = fa.reject_turn(a.verdict_text, done_rej + 1, cap)
+            _iv("audit_reject", mode=amode, detail=a.verdict_text[:2000], intervention=text,
+                excerpt=report_tail, **ftok)
+            notes.append(f"🧾 auditor: NOT ACCEPTED ({done_rej + 1}/{cap})")
+            convo = convo + [{"role": "assistant", "content": res.content or ""},
+                             {"role": "user", "content": text}]
+            return True, convo, "\n\n" + text + "\n\n", notes, rest
+        _iv("audit_lint" if not a.frontier else "audit_reject", mode=amode,
+            detail=a.verdict_text[:2000], excerpt=report_tail, **ftok)
+        if amode == "enforce":
+            return False, convo, (f"\n\n{fa.AUDIT_TAG} still not accepted after {cap} "
+                                  f"rejections:\n{a.verdict_text}"), notes, rest
+        notes.append("🧾 auditor (observe): would reject — "
+                     + (a.verdict_text.splitlines() or [""])[0][:200])
+        return False, convo, "", notes, rest
+
+    async def _exec_foundry_tools(calls: list, narrate=None, convo=None) -> list:
         """Run the Foundry-owned tool calls of one model turn; returns the tool
         messages to append. Failures come back to the model as tool errors
         (it can recover or answer without the tool) instead of aborting."""
@@ -1583,6 +1855,24 @@ async def _direct_dispatch_chat(svc, persona, model_name, messages, client_tools
         limit = int(getattr(brain_cfg, "worker_tool_result_chars", 0) or 24000)
         out = []
         for tc in calls:
+            if advisor_on and tc["name"] == fa.CONSULT_TOOL_NAME:
+                if narrate:
+                    narrate("🧑‍🏫 consult_senior…\n")
+                args = tc.get("arguments") if isinstance(tc.get("arguments"), dict) else {}
+                text, ans, why = await fa.consult(svc, acfg, persona, conv_key,
+                                                  convo or base_convo, args)
+                _iv("advisor", mode="tool", detail=str(args.get("question") or "")[:1000],
+                    intervention=text, excerpt=str(args.get("what_i_tried") or "")[:1500],
+                    frontier_model=ans.model if ans else "",
+                    prompt_tokens=ans.prompt_tokens if ans else 0,
+                    completion_tokens=ans.completion_tokens if ans else 0)
+                if ans:
+                    assist_visible.append(text)
+                if narrate:
+                    narrate(f"🧑‍🏫 consult_senior → {ans.model if ans else 'unavailable: ' + why}\n")
+                out.append({"role": "tool", "name": tc["name"], "tool_call_id": tc.get("id"),
+                            "content": text})
+                continue
             td = mcp_defs[tc["name"]]
             if tc.get("arguments_error"):
                 out.append({"role": "tool", "name": tc["name"], "tool_call_id": tc.get("id"),
@@ -1622,10 +1912,12 @@ async def _direct_dispatch_chat(svc, persona, model_name, messages, client_tools
             out.append(msg)
         return out
 
+    own_names = set(mcp_defs) | ({fa.CONSULT_TOOL_NAME} if advisor_on else set())
+
     def _split_calls(res):
         """(foundry-owned calls, client calls) of one model turn."""
-        own = [tc for tc in (res.tool_calls or []) if tc.get("name") in mcp_defs]
-        rest = [tc for tc in (res.tool_calls or []) if tc.get("name") not in mcp_defs]
+        own = [tc for tc in (res.tool_calls or []) if tc.get("name") in own_names]
+        rest = [tc for tc in (res.tool_calls or []) if tc.get("name") not in own_names]
         return own, rest
 
     def _assistant_turn(res, own):
@@ -1658,12 +1950,13 @@ async def _direct_dispatch_chat(svc, persona, model_name, messages, client_tools
             # models actually exercise tool calling (client-supplied tools).
             svc.registry.record_tool_call(model_id, ok=True)
             binfo = svc.pool.backend_info(model_id)
-            if binfo and binfo.get("type") == "anthropic-compatible":
+            if binfo and (binfo.get("type") == "anthropic-compatible" or binfo.get("subscription")):
                 log_subscription_usage(svc.db, model_id, backend,
                                        res.prompt_tokens, res.completion_tokens)
+            if binfo and binfo.get("type") == "anthropic-compatible":
                 svc.meridian_usage.note_successful_call(binfo["url"])
-            cost = estimate_cost_usd(svc.registry.get(model_id),
-                                     res.prompt_tokens, res.completion_tokens)
+            cost = 0.0 if _flat_rate(binfo) else estimate_cost_usd(
+                svc.registry.get(model_id), res.prompt_tokens, res.completion_tokens)
             logger.record_model_call(model_id, backend, res.prompt_tokens,
                                      res.completion_tokens, cost)
             telemetry.record_call(
@@ -1673,9 +1966,31 @@ async def _direct_dispatch_chat(svc, persona, model_name, messages, client_tools
                 max_tokens=out_cap)
             last_backend = backend
             own, rest = _split_calls(res)
+            if assist_on:
+                iv.note_call(turn_stats, res)
+                iv.fill_next(svc.db, conv_key, res.content or "", res.tool_calls or [])
+            if not own and rnd < tool_cap:
+                cont, convo2, vis, anotes, rest = await _assist_after(res, rest, convo)
+                for n in anotes:
+                    logger.record_guardrail(n)
+                    if narrate:
+                        narrate(n + "\n")
+                if cont:
+                    if (res.content or "").strip():
+                        said.append(res.content.strip())
+                    if vis.strip():
+                        said.append(vis.strip())
+                    if (res.thinking or "").strip():
+                        thought.append(res.thinking.strip())
+                    convo = convo2
+                    continue
+                if vis:
+                    res.content = (res.content or "") + vis
             if not own or rnd >= tool_cap:
                 if own:
                     logger.record_guardrail(f"persona tool loop hit the {tool_cap}-round cap")
+                iv.finish_turn(svc.db, assist_turn_id, res.completion_tokens, turn_stats,
+                               conv_key, turn_think, bool(_guard_note))
                 res.tool_calls = rest          # never hand Foundry-owned calls to the client
                 # Keep what the model said / reasoned in earlier tool rounds
                 # (live streaming shows it as it happens; buffered must too).
@@ -1689,7 +2004,10 @@ async def _direct_dispatch_chat(svc, persona, model_name, messages, client_tools
                 said.append(res.content.strip())
             if (res.thinking or "").strip():
                 thought.append(res.thinking.strip())
-            convo = convo + [_assistant_turn(res, own)] + await _exec_foundry_tools(own, narrate)
+            convo = convo + [_assistant_turn(res, own)] + await _exec_foundry_tools(
+                own, narrate, convo)
+            said.extend(assist_visible)
+            assist_visible.clear()
         raise AllBackendsFailed("persona tool loop ended unexpectedly")
 
     def _on_error(e: BaseException, finish: bool = True) -> None:
@@ -1801,6 +2119,7 @@ async def _direct_dispatch_chat(svc, persona, model_name, messages, client_tools
                 try:
                     for rnd in range(tool_cap + 1):
                         acc_tools: list = []
+                        round_text: list[str] = []      # this round's streamed content (for the auditor)
                         final = None
                         ttft_ms = None
                         t_round = time.monotonic_ns()
@@ -1852,18 +2171,23 @@ async def _direct_dispatch_chat(svc, persona, model_name, messages, client_tools
                             if c or th:
                                 produced = True
                                 text_chars += len(c)
+                                round_text.append(c)
                                 think_chars += len(th)
                                 yield tr.chat_chunk(model_name, c, done=False,
                                                     thinking=th or None)
                         final = final or {}
                         finals = acc_tools or (final.get("tool_calls") or [])
                         res = ChatResult.from_done_frame(final, tool_calls=finals)
+                        if not res.content and round_text:
+                            res.content = "".join(round_text)
                         pt, ct = res.prompt_tokens, res.completion_tokens
                         svc.registry.record_tool_call(model_id, ok=True)
-                        if _btype == "anthropic-compatible":
+                        if _btype == "anthropic-compatible" or binfo0.get("subscription"):
                             log_subscription_usage(svc.db, model_id, backend_name, pt, ct)
+                        if _btype == "anthropic-compatible":
                             svc.meridian_usage.note_successful_call(binfo0.get("url"))
-                        cost = estimate_cost_usd(svc.registry.get(model_id), pt, ct)
+                        cost = 0.0 if _flat_rate(binfo0) else estimate_cost_usd(
+                            svc.registry.get(model_id), pt, ct)
                         logger.record_model_call(model_id, backend_name, pt, ct, cost)
                         # Perf + truncation telemetry, per model call.
                         telemetry.record_call(
@@ -1874,16 +2198,38 @@ async def _direct_dispatch_chat(svc, persona, model_name, messages, client_tools
                             extra=_timeline(svc, gap, arrived, sent, first_tok_wall,
                                             ttft_ms, t_round, router_ms, model_id))
                         own, rest = _split_calls(res)
+                        if assist_on:
+                            iv.note_call(turn_stats, res)
+                            iv.fill_next(svc.db, conv_key, res.content or "",
+                                         res.tool_calls or [])
                         if own and rnd < tool_cap:
                             # Foundry-owned tools: run them, feed the results
                             # back, and keep streaming the model's next turn.
                             produced = True
                             notes: list[str] = []
                             convo = convo + [_assistant_turn(res, own)] \
-                                + await _exec_foundry_tools(own, notes.append)
+                                + await _exec_foundry_tools(own, notes.append, convo)
                             for n in notes:
-                                yield tr.chat_chunk(model_name, "", done=False, thinking=n)
+                                yield tr.chat_chunk(model_name, "", done=False, thinking=_q(n))
+                            while assist_visible:
+                                yield tr.chat_chunk(model_name, "\n\n" + assist_visible.pop(0)
+                                                    + "\n\n", done=False)
                             continue
+                        if not own and rnd < tool_cap:
+                            cont, convo2, vis, anotes, rest = await _assist_after(res, rest, convo)
+                            for n in anotes:
+                                logger.record_guardrail(n)
+                                yield tr.chat_chunk(model_name, "", done=False,
+                                                    thinking=_q(n + "\n"))
+                            if vis:
+                                produced = True
+                                yield tr.chat_chunk(model_name, vis, done=False)
+                            if cont:
+                                produced = True
+                                convo = convo2
+                                continue
+                        iv.finish_turn(svc.db, assist_turn_id, res.completion_tokens, turn_stats,
+                                       conv_key, turn_think, bool(_guard_note))
                         if own:
                             logger.record_guardrail(
                                 f"persona tool loop hit the {tool_cap}-round cap")
@@ -1945,7 +2291,8 @@ async def _direct_dispatch_chat(svc, persona, model_name, messages, client_tools
                         pass
                 yield tr.error_chunk(tr.client_error(err)[0])
                 return
-        return StreamingResponse(sgen(), media_type="application/x-ndjson")
+        return StreamingResponse(_quiet_stream(sgen()) if quiet else sgen(),
+                                 media_type="application/x-ndjson")
 
     if not stream:
         try:
@@ -1975,7 +2322,7 @@ async def _direct_dispatch_chat(svc, persona, model_name, messages, client_tools
         _wi = svc.pool.backend_info(model_id) or {}
         btype = _wi.get("type") or ""
         where = ("Claude" if btype == "anthropic-compatible" else
-                 "cloud" if _wi.get("cloud") else "local")
+                 "cloud" if _wi.get("subscription") else "local")
         # IMMEDIATE beat so the client shows activity from the first moment (not a
         # silent "thinking…") — in the NATIVE thinking field, so content stays
         # clean. Names WHICH model is answering (local vs Claude).
@@ -2028,7 +2375,30 @@ async def _direct_dispatch_chat(svc, persona, model_name, messages, client_tools
             yield tr.chat_chunk(model_name, "", thinking=result.thinking)
         yield tr.chat_chunk(model_name, result.content, tool_calls=tool_calls)
         yield tr.chat_chunk(model_name, "", done=True, stats=stats)
-    return StreamingResponse(gen(), media_type="application/x-ndjson")
+    return StreamingResponse(_quiet_stream(gen()) if quiet else gen(),
+                             media_type="application/x-ndjson")
+
+
+async def _quiet_stream(agen):
+    """Drop Foundry's status lines from the thinking field of each NDJSON
+    chunk (the model's own reasoning passes through). A chunk left with no
+    content is still sent — it is the keep-alive."""
+    async for raw in agen:
+        try:
+            obj = json.loads(raw)
+            msg = obj.get("message") or {}
+            th = msg.get("thinking")
+            if th:
+                kept = prompts.scrub_router_lines(th)
+                if kept != th:
+                    if kept.strip():
+                        msg["thinking"] = kept
+                    else:
+                        msg.pop("thinking", None)
+                    raw = tr._line(obj)
+        except Exception:                                         # noqa: BLE001
+            pass
+        yield raw
 
 
 # ---- passthrough (raw backend model requested by name) ----------------------------
