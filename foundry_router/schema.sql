@@ -547,3 +547,22 @@ CREATE TABLE IF NOT EXISTS budget_pauses (
   note TEXT,
   PRIMARY KEY (scope, value)
 );
+
+-- Config history (configops.py): every saved config.yaml state. The raw YAML
+-- keeps ${VAR} references as written; it is shown and diffed redacted.
+CREATE TABLE IF NOT EXISTS config_versions (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  ts TEXT,
+  source TEXT,                       -- save | startup | restore #N | import
+  sections TEXT,                     -- JSON list of top-level sections changed
+  yaml TEXT
+);
+
+-- Snapshots of state that isn't in config.yaml (personas, pauses, overrides),
+-- taken before bulk changes (import, profile apply) so they can be restored.
+CREATE TABLE IF NOT EXISTS state_snapshots (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  ts TEXT,
+  reason TEXT,
+  data TEXT                          -- JSON {personas, budget_pauses, tool_overrides, model_overrides}
+);

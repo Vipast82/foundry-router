@@ -210,6 +210,12 @@ class BackendConfig(BaseModel):
     # `type` (ollama -> "ollama", else -> "openai").
     flavor: Optional[Literal["ollama", "llamacpp", "unsloth",
                              "vllm", "openai", "cliproxyapi"]] = None
+    # Per-backend concurrency: at most this many calls run on the backend at
+    # once (e.g. llama.cpp's -np slots); more wait in a queue that takes turns
+    # between clients, so one client's burst can't starve another. None = no
+    # limit (the backend queues internally, invisibly).
+    max_concurrent: Optional[int] = None
+    queue_timeout_seconds: float = 300.0
     # Optional discovery fallback ONLY — used if the backend exposes no
     # model-list endpoint (§4.3: "do not hardcode model lists for backends
     # that can be discovered").
@@ -716,6 +722,8 @@ class HealthConfig(BaseModel):
 
 
 class AppConfig(BaseModel):
+    # Config file format version (see migrate_raw); stamped on load.
+    config_version: int = 1
     server: ServerConfig = Field(default_factory=ServerConfig)
     agent_brain: AgentBrainConfig = Field(default_factory=AgentBrainConfig)
     backend_pool: BackendPoolConfig = Field(default_factory=BackendPoolConfig)
@@ -745,6 +753,37 @@ class AppConfig(BaseModel):
 # --------------------------------------------------------------------------- #
 # Load / save                                                                 #
 # --------------------------------------------------------------------------- #
+
+# --------------------------------------------------------------------------- #
+# Versioned config migrations                                                 #
+# --------------------------------------------------------------------------- #
+# Each entry upgrades the RAW document (so ${VAR} references survive) from
+# version N-1 to N. Add a function and bump CONFIG_VERSION when a setting is
+# renamed or reshaped; load() applies the pending ones, keeps a backup of the
+# old file (config.yaml.v<N>.bak) and writes the upgraded document.
+
+def _m2_stamp(raw: dict) -> list[str]:
+    """v2: versioned config format introduced (no settings change)."""
+    return []
+
+
+MIGRATIONS = [(2, _m2_stamp)]
+CONFIG_VERSION = MIGRATIONS[-1][0]
+
+
+def migrate_raw(raw: dict) -> tuple[dict, list[str]]:
+    """(raw upgraded to CONFIG_VERSION, notes). A file from a NEWER Foundry
+    is left untouched."""
+    notes: list[str] = []
+    ver = int(raw.get("config_version") or 1)
+    for target, fn in MIGRATIONS:
+        if ver < target:
+            notes += fn(raw) or []
+            notes.append(f"config migrated to version {target}")
+            ver = target
+            raw["config_version"] = target
+    return raw, notes
+
 
 def config_path() -> Path:
     return Path(os.environ.get("FOUNDRY_CONFIG", "/config/config.yaml"))
@@ -795,6 +834,19 @@ class ConfigStore:
                 self.path.write_text("{}\n", encoding="utf-8")
         with open(self.path, "r", encoding="utf-8") as f:
             self.raw = yaml.safe_load(f) or {}
+        before = int(self.raw.get("config_version") or 1)
+        self.raw, notes = migrate_raw(self.raw)
+        if notes:
+            backup = self.path.with_name(self.path.name + f".v{before}.bak")
+            try:
+                if not backup.exists():
+                    shutil.copy(self.path, backup)
+                self._write_raw()
+                log.warning("config upgraded v%s -> v%s (backup %s): %s", before,
+                            self.raw["config_version"], backup.name, "; ".join(notes))
+            except OSError as e:
+                log.warning("config upgraded in memory only (could not write: %s)", e)
+        self.migration_notes = notes
         self.config = AppConfig.model_validate(_expand_env(copy.deepcopy(self.raw)))
         return self.config
 
@@ -804,10 +856,24 @@ class ConfigStore:
         Callers mutate the *raw* document so ${VAR} references survive the
         round trip instead of being replaced by their expanded secrets.
         """
+        before = copy.deepcopy(self.raw)
         mutate(self.raw)
+        try:
+            config = AppConfig.model_validate(_expand_env(copy.deepcopy(self.raw)))
+        except Exception:
+            self.raw = before            # never persist a document that doesn't load
+            raise
+        self._write_raw()
+        self.config = config
+        for cb in list(getattr(self, "on_saved", [])):
+            try:
+                cb(before, self.raw)
+            except Exception:
+                log.exception("config on_saved hook failed")
+        return self.config
+
+    def _write_raw(self) -> None:
         tmp = self.path.with_suffix(".yaml.tmp")
         with open(tmp, "w", encoding="utf-8") as f:
             yaml.safe_dump(self.raw, f, sort_keys=False, allow_unicode=True)
         tmp.replace(self.path)
-        self.config = AppConfig.model_validate(_expand_env(copy.deepcopy(self.raw)))
-        return self.config

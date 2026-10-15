@@ -2282,6 +2282,14 @@ function functionalCard(fh) {
   const age = s => s == null ? "" : s < 90 ? `${s}s ago` : s < 5400 ? `${Math.round(s / 60)} min ago` : s < 172800 ? `${Math.round(s / 3600)} h ago` : `${Math.round(s / 86400)} d ago`;
   const pill = {serving: ["ok", "serving"], failing: ["bad", "failing"], unverified: ["warn", "reachable, not verified"],
                 down: ["bad", "down"], disabled: ["", "disabled"]};
+  const queues = Object.fromEntries((fh.queues || []).map(q => [q.backend, q]));
+  const breakers = Object.fromEntries((fh.breakers || []).map(x => [x.backend, x]));
+  const load = q => !q ? "" : q.limited
+    ? `${q.active}/${q.capacity}${q.waiting_total ? ` <span class="pill warn" title="${esc(Object.entries(q.waiting).map(([c, n]) => c + ": " + n).join(", "))}">${q.waiting_total} waiting · ${q.oldest_wait_s}s</span>` : ""}${q.timeouts ? ` <span class="hint" style="margin:0">${q.timeouts} timed out</span>` : ""}`
+    : `${q.busy} <span class="hint" style="margin:0" title="no max_concurrent: the backend queues internally">· no limit</span>`;
+  const breaker = x => !x ? "" : x.state === "closed"
+    ? `<span class="hint" style="margin:0">closed</span>`
+    : `<span class="pill ${x.state === "open" ? "bad" : "warn"}" title="${esc(x.last_error || "")}">${x.state}${x.retry_in_s ? " · " + x.retry_in_s + "s" : ""}</span> <button class="act" title="Close the breaker now (after fixing the backend)" onclick='resetBreaker(${JSON.stringify(x.backend)})'>reset</button>`;
   const rows = fh.backends.map(b => {
     const [cls, label] = pill[b.status] || ["", b.status];
     const ok = b.last_ok ? `${esc(age(b.last_ok.age_s))} · <span class="mono">${esc(b.last_ok.model || "")}</span> <span class="hint" style="margin:0">(${esc(b.last_ok.source)})</span>` : '<span class="hint">none in 24 h</span>';
@@ -2291,17 +2299,23 @@ function functionalCard(fh) {
       <td class="nw">${b.reachable === true ? "yes" : b.reachable === false ? '<span style="color:var(--bad)">no</span>' : '<span class="hint">not checked</span>'}</td>
       <td class="bw-mid">${ok}</td><td class="bw-wide">${err}</td>
       <td class="nw">${b.calls_1h}${b.errors_1h ? ` <span class="hint" style="margin:0">(${b.errors_1h} failed)</span>` : ""}</td>
+      <td class="nw">${load(queues[b.backend])}</td><td class="nw">${breaker(breakers[b.backend])}</td>
       <td class="nw">${b.status === "disabled" ? "" : `<button class="act" title="One tiny real generation (reply OK, 16 tokens) on exactly this backend${b.paid ? " — spends a little subscription quota" : ""}" onclick='probeBackend(${JSON.stringify(b.backend)}, ${b.paid})'>probe</button>`}${b.auto_probe ? ' <span class="hint" style="margin:0" title="probed automatically when idle with no recent success">auto</span>' : ""}</td></tr>`;
   }).join("");
   const br = fh.brain || {};
   return `<div class="card">
     <h2 style="margin-top:0">Can it serve?</h2>
     <p class="hint">"Reachable" is the pool's HTTP check. <b>Serving</b> means a generation actually succeeded in the last ${fh.fresh_minutes} min — from real traffic, or a tiny probe when a backend sits idle (${fh.probe_minutes ? `local backends every ${fh.probe_minutes} min${fh.probe_paid ? ", paid too" : ""}` : "auto-probes off"}).</p>
-    <table><tr><th>backend</th><th>status</th><th>reachable</th><th>last success</th><th>last failure</th><th>calls 1 h</th><th></th></tr>${rows}</table>
+    <table><tr><th>backend</th><th>status</th><th>reachable</th><th>last success</th><th>last failure</th><th>calls 1 h</th><th title="calls running / max_concurrent, and the fair queue">load</th><th title="closed = in use; open = failing, skipped until the cooldown ends; half-open = the next call is a trial">breaker</th><th></th></tr>${rows}</table>
     <div class="row"><label>brain</label>${br.healthy === true ? '<span class="pill ok">reachable</span>' : br.healthy === false ? `<span class="pill bad" title="${esc(br.error || "")}">down</span>` : '<span class="hint">not checked</span>'}
       <label>image jobs</label>${fh.media && fh.media.backend ? `<b>${fh.media.active}</b>&nbsp;queued/running · ${fh.media.failed_24h} failed (24 h)` : `<span class="hint">${esc((fh.media || {}).backend_error || "no image backend")}</span>`}</div>
   </div>`;
 }
+
+window.resetBreaker = async name => {
+  try { await api(`backends/${encodeURIComponent(name)}/reset-breaker`, {method: "POST"}); toast(`${name}: breaker closed`); render(); }
+  catch (e) { toast(e.message, true); }
+};
 
 window.probeBackend = async (name, paid) => {
   if (paid && !confirm(`Probe ${name}? This sends one tiny real generation (uses a little subscription quota).`)) return;
@@ -3949,8 +3963,15 @@ async function renderTurnAssistCard() {
 // Logs -> Data: every table's size and age, retention per log table, and
 // export of any table (JSONL / CSV / JSON) or all of them as one zip with a
 // manifest — for analysis by an AI, a spreadsheet or scripts.
+// A table's time column is ISO text in most tables and epoch seconds in a few
+// (usage_events, media_jobs): show both the same way.
+const _tsText = v => v == null || v === "" ? "" : typeof v === "number"
+  ? new Date(v * 1000).toISOString().slice(0, 16).replace("T", " ")
+  : String(v).slice(0, 16).replace("T", " ");
+
 async function tabData() {
-  const d = await api("data/tables");
+  const [d, cv, sn] = await Promise.all([api("data/tables"),
+    api("config/versions").catch(() => ({versions: []})), api("snapshots").catch(() => ({snapshots: []}))]);
   const fmts = d.formats.map(f => `<option>${f}</option>`).join("");
   const days = d.retention.days || {};
   $("#main").innerHTML = `
@@ -3964,9 +3985,10 @@ async function tabData() {
       <button class="act" id="dx-save">Save retention</button>
       <button class="act" id="dx-prune">Prune now</button>
     </div>
+    ${opsCards(cv, sn)}
     <div class="card"><table><tr><th>table</th><th>rows</th><th>oldest</th><th>newest</th><th>keep days</th><th></th></tr>${
       d.tables.map(t => `<tr><td>${esc(t.table)}${t.log ? "" : ' <span class="hint">state</span>'}</td><td>${t.rows.toLocaleString()}</td>
-        <td>${esc((t.oldest || "").slice(0, 16).replace("T", " "))}</td><td>${esc((t.newest || "").slice(0, 16).replace("T", " "))}</td>
+        <td>${esc(_tsText(t.oldest))}</td><td>${esc(_tsText(t.newest))}</td>
         <td>${t.log ? `<input class="dx-days" data-t="${esc(t.table)}" type="number" min="0" style="width:60px" value="${days[t.table] || 0}">` : "—"}</td>
         <td><button class="act dx-exp" data-t="${esc(t.table)}">Export</button>
             ${t.log ? `<button class="act dx-clear" data-t="${esc(t.table)}" title="Delete rows (older than N days, or all)">Clear…</button>` : ""}</td></tr>`).join("")}</table></div>`;
@@ -3988,12 +4010,109 @@ async function tabData() {
     run(api("config/data_retention", {method: "POST",
       body: {days: nd, prune_interval_minutes: +$("#dx-int").value || 60}}));
   };
+  bindOpsCards();
   $("#dx-prune").onclick = async () => {
     try { const r = await api("data/prune", {method: "POST", body: {}});
           toast("Pruned: " + (Object.entries(r.pruned).map(([t, n]) => `${t} ${n}`).join(", ") || "nothing"));
           render(); } catch (e) { toast(e.message, true); }
   };
 }
+
+// Configuration operations (configops.py): history + rollback, snapshots,
+// export / import, diagnostics.
+function opsCards(cv, sn) {
+  const vrows = (cv.versions || []).map((v, i) => `<tr>
+    <td class="mono nw">#${v.id}</td><td class="mono nw">${esc((v.ts || "").slice(0, 19).replace("T", " "))}</td>
+    <td class="nw">${esc(v.source)}</td><td>${(v.sections || []).map(x => `<span class="pill">${esc(x)}</span>`).join(" ") || '<span class="hint">—</span>'}</td>
+    <td class="nw"><button class="act" onclick="showConfigVersion(${v.id})">${i === 0 ? "view" : "diff"}</button>
+      ${i === 0 ? '<span class="pill ok">current</span>' : `<button class="act" onclick="restoreConfigVersion(${v.id})">restore</button>`}</td></tr>`).join("");
+  const srows = (sn.snapshots || []).map(x => `<tr><td class="mono nw">#${x.id}</td><td class="mono nw">${esc((x.ts || "").slice(0, 19).replace("T", " "))}</td>
+    <td>${esc(x.reason)}</td><td class="nw">${x.personas} personas · ${x.pauses} pauses</td>
+    <td><button class="act" onclick="restoreSnapshot(${x.id})">restore</button></td></tr>`).join("");
+  return `<div class="card">
+    <h2 style="margin-top:0">Configuration history <span class="hint" style="font-weight:normal">config format v${esc(String(cv.config_version || 1))}</span></h2>
+    <p class="hint">Every save of config.yaml is a version (from the UI, an import, a restore, or an edit of the file itself, noticed at start-up). Restore applies what can change live and lists what needs a restart; a restore is itself a version, so it can be undone. Shown with secrets redacted.</p>
+    <div class="tscroll"><table><tr><th>version</th><th>saved (UTC)</th><th>by</th><th>sections changed</th><th></th></tr>${vrows || '<tr><td colspan="5" class="hint">no versions yet</td></tr>'}</table></div>
+    <pre id="cv-view" class="mono" style="display:none;max-height:420px;overflow:auto;white-space:pre"></pre>
+  </div>
+  <div class="card">
+    <h2 style="margin-top:0">Export, import &amp; snapshots</h2>
+    <div class="row"><button class="act primary" id="ex-btn">Export configuration</button>
+      <label for="ex-secrets" title="Include API keys and tokens written literally in config.yaml (\${VAR} references are always kept as references). Off: they are exported as <redacted> and an import keeps the values already configured.">include secrets</label><input type="checkbox" id="ex-secrets"
+        onchange="document.querySelector('#ex-secrets-note').style.display=this.checked?'inline':'none'">
+      <span id="ex-secrets-note" class="pill bad" style="display:none">the file will contain secrets</span></div>
+    <p class="hint">The bundle holds config.yaml (secrets redacted by default), personas, pause switches, tool and model overrides.</p>
+    <div class="row"><label>import</label><input type="file" id="im-file" accept=".json,application/json">
+      <label for="im-config">config</label><input type="checkbox" id="im-config" checked>
+      <label for="im-personas">personas</label><input type="checkbox" id="im-personas" checked>
+      <select id="im-mode" title="merge = add new personas and update existing ones; add = only add personas that don't exist yet"><option value="merge">merge personas</option><option value="add">only add new personas</option></select>
+      <label for="im-other">pauses &amp; overrides</label><input type="checkbox" id="im-other" checked>
+      <button class="act" id="im-go">Import</button></div>
+    <p class="hint">Before an import (and before a default-profile apply) the personas, pauses and overrides are snapshotted; the config change is a version above. Redacted values in a bundle never overwrite the real ones configured here.</p>
+    <div class="tscroll"><table><tr><th>snapshot</th><th>taken (UTC)</th><th>why</th><th>contents</th><th></th></tr>${srows || '<tr><td colspan="5" class="hint">no snapshots yet</td></tr>'}</table></div>
+    <div class="row"><button class="act" onclick="takeSnapshot()">Take a snapshot now</button></div>
+  </div>
+  <div class="card">
+    <h2 style="margin-top:0">Diagnostics</h2>
+    <p class="hint">A zip for troubleshooting: versions, redacted config, backend status, health, queues and breakers, personas, budgets, recent events, request metadata and timing, warnings. Secrets are removed by name and by value; prompts, replies, request summaries and images are not included.</p>
+    <div class="row"><button class="act primary" onclick="location.href='/admin/api/diagnostics'">Download diagnostic bundle</button></div>
+  </div>`;
+}
+
+function bindOpsCards() {
+  const exp = $("#ex-btn");
+  if (exp) exp.onclick = () => { location.href = "/admin/api/export" + ($("#ex-secrets").checked ? "?secrets=1" : ""); };
+  const go = $("#im-go");
+  if (!go) return;
+  go.onclick = async () => {
+    const f = $("#im-file").files[0];
+    if (!f) { toast("Choose an export file first", true); return; }
+    let bundle;
+    try { bundle = JSON.parse(await f.text()); } catch (e) { toast("Not a JSON file", true); return; }
+    const sections = [];
+    if ($("#im-config").checked) sections.push("config");
+    if ($("#im-personas").checked) sections.push("personas");
+    if ($("#im-other").checked) sections.push("budget_pauses", "tool_overrides", "model_overrides");
+    if (!confirm(`Import ${sections.join(", ")} from ${f.name}? A snapshot and a config version are kept so this can be undone.`)) return;
+    try {
+      const r = await api("import", {method: "POST", body: {bundle, sections, persona_mode: $("#im-mode").value}});
+      const c = r.config || {};
+      toast(`Imported. ${r.personas ? `Personas: ${r.personas.added} added, ${r.personas.updated} updated. ` : ""}${(c.restart_needed || []).length ? "Restart to apply: " + c.restart_needed.join(", ") : ""}`);
+      render();
+    } catch (e) { toast(e.message, true); }
+  };
+}
+
+window.showConfigVersion = async id => {
+  const el = $("#cv-view");
+  const r = await api(`config/versions/${id}`);
+  el.textContent = r.diff_to_current ? `# changes from version ${id} to the current config\n${r.diff_to_current}` : r.yaml;
+  el.style.display = "block";
+  el.scrollIntoView({behavior: "smooth", block: "nearest"});
+};
+
+window.restoreConfigVersion = async id => {
+  if (!confirm(`Restore config version #${id}? The current config stays in the history, so this can be undone.`)) return;
+  try {
+    const r = await api(`config/versions/${id}/restore`, {method: "POST"});
+    toast(`Restored #${id}. Applied: ${r.applied.join(", ") || "—"}${r.restart_needed.length ? ". Restart to apply: " + r.restart_needed.join(", ") : ""}`, !!r.restart_needed.length);
+    render();
+  } catch (e) { toast(e.message, true); }
+};
+
+window.restoreSnapshot = async id => {
+  if (!confirm(`Restore personas and pause switches from snapshot #${id}? Personas created since then are removed. (A snapshot of the current state is taken first.)`)) return;
+  try {
+    const r = await api(`snapshots/${id}/restore`, {method: "POST"});
+    toast(`Restored: ${r.personas.added} added, ${r.personas.updated} updated, ${r.personas.removed} removed`);
+    render();
+  } catch (e) { toast(e.message, true); }
+};
+
+window.takeSnapshot = async () => {
+  try { await api("snapshots", {method: "POST", body: {reason: "manual snapshot"}}); toast("Snapshot taken"); render(); }
+  catch (e) { toast(e.message, true); }
+};
 
 /* ------------------------------------------------------------------- mcp -- */
 // Live per-server MCP activity (all callers incl. background research). This is

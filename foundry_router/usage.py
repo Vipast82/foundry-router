@@ -774,7 +774,8 @@ class RequestLogger:
             rid = request_context.request_id() or ""
             route = request_context.route()
             attempts, retries = _attempts(self.db, rid)
-            flags = {k: route[k] for k in ("client_tools", "compaction", "tool_calls_out")
+            flags = {k: route[k] for k in ("client_tools", "compaction", "tool_calls_out",
+                                           "queue_ms")
                      if route.get(k) not in (None, 0, False, [])}
             served = route.get("served_model") or (
                 self.models_used[-1].get("model") if self.models_used else None)

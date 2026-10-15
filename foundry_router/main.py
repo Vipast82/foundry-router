@@ -116,6 +116,8 @@ class Services:
         self.media = MediaService(self)
         from .health import HealthMonitor
         self.health = HealthMonitor(self)
+        from .configops import ConfigHistory
+        self.config_history = ConfigHistory(self)
         ensure_eval_seed(db)
         self.evals = EvalHarness(self)
         self._eval_tasks: list[asyncio.Task] = []  # keep background runs alive

@@ -878,6 +878,105 @@ async def set_subscription_usage(request: Request):
     return {"ok": True, "subscription_usage": cfg.subscription_usage.model_dump()}
 
 
+# --------------------------------------------------------------------------- #
+# Config history / rollback, snapshots, export / import, diagnostics          #
+# --------------------------------------------------------------------------- #
+
+@router.get("/admin/api/config/versions")
+async def config_versions(request: Request):
+    svc = _svc(request)
+    return {"versions": svc.config_history.versions(),
+            "config_version": svc.config_store.raw.get("config_version")}
+
+
+@router.get("/admin/api/config/versions/{vid}")
+async def config_version_detail(request: Request, vid: int):
+    svc = _svc(request)
+    y = svc.config_history.redacted_yaml(vid)
+    if y is None:
+        return JSONResponse({"error": "no such version"}, status_code=404)
+    return {"id": vid, "yaml": y, "diff_to_current": svc.config_history.diff(vid)}
+
+
+@router.post("/admin/api/config/versions/{vid}/restore")
+async def config_version_restore(request: Request, vid: int):
+    svc = _svc(request)
+    try:
+        r = await svc.config_history.restore(vid)
+    except KeyError:
+        return JSONResponse({"error": "no such version"}, status_code=404)
+    except Exception as e:                                        # noqa: BLE001
+        return JSONResponse({"error": f"that version doesn't load: {e}"}, status_code=400)
+    svc.db.log_event("warning", "config", f"config restored from version {vid}",
+                     json.dumps(r))
+    return {"ok": True, **r}
+
+
+@router.get("/admin/api/snapshots")
+async def state_snapshots(request: Request):
+    from .. import configops
+    return {"snapshots": configops.snapshots(_svc(request))}
+
+
+@router.post("/admin/api/snapshots")
+async def take_snapshot(request: Request):
+    from .. import configops
+    body = await request.json() if request.headers.get("content-length") not in (None, "0") else {}
+    sid = configops.snapshot(_svc(request), (body or {}).get("reason") or "manual snapshot")
+    return {"ok": True, "id": sid}
+
+
+@router.post("/admin/api/snapshots/{sid}/restore")
+async def restore_state_snapshot(request: Request, sid: int):
+    from .. import configops
+    svc = _svc(request)
+    try:
+        r = configops.restore_snapshot(svc, sid)
+    except KeyError:
+        return JSONResponse({"error": "no such snapshot"}, status_code=404)
+    svc.db.log_event("warning", "config", f"personas/pauses restored from snapshot {sid}",
+                     json.dumps(r))
+    return {"ok": True, **r}
+
+
+@router.get("/admin/api/export")
+async def export_bundle(request: Request, secrets: int = 0):
+    from .. import configops
+    from fastapi.responses import Response
+    bundle = configops.export_bundle(_svc(request), include_secrets=bool(secrets))
+    name = f"foundry-export-{utcnow()[:19].replace(':', '').replace('-', '')}.json"
+    return Response(json.dumps(bundle, indent=1, default=str), media_type="application/json",
+                    headers={"Content-Disposition": f'attachment; filename="{name}"'})
+
+
+@router.post("/admin/api/import")
+async def import_bundle(request: Request):
+    """{bundle, sections: [...], persona_mode: merge|add}."""
+    from .. import configops
+    svc = _svc(request)
+    body = await request.json()
+    try:
+        r = await configops.import_bundle(svc, body.get("bundle") or {},
+                                          body.get("sections") or list(configops.EXPORT_SECTIONS),
+                                          body.get("persona_mode") or "merge")
+    except ValueError as e:
+        return JSONResponse({"error": str(e)}, status_code=400)
+    except Exception as e:                                        # noqa: BLE001
+        return JSONResponse({"error": f"import failed: {e}"}, status_code=400)
+    svc.db.log_event("warning", "config", "configuration imported", json.dumps(r, default=str)[:2000])
+    return {"ok": True, **r}
+
+
+@router.get("/admin/api/diagnostics")
+async def diagnostics(request: Request):
+    from .. import configops
+    from fastapi.responses import Response
+    data = await configops.diagnostics_zip(_svc(request))
+    name = f"foundry-diagnostics-{utcnow()[:19].replace(':', '').replace('-', '')}.zip"
+    return Response(data, media_type="application/zip",
+                    headers={"Content-Disposition": f'attachment; filename="{name}"'})
+
+
 @router.get("/admin/api/compare")
 async def compare_clients(request: Request, hours: float = 168, group: str = "client"):
     """Client (or persona) comparison from Foundry's own records."""
@@ -926,6 +1025,8 @@ async def functional_health(request: Request):
     except Exception:                                             # noqa: BLE001
         pass
     return {"backends": svc.health.status(), "brain": getattr(svc, "_brain_health", None),
+            "queues": getattr(svc.pool, "queue_status", lambda: [])(),
+            "breakers": getattr(svc.pool, "breaker_status", lambda: [])(),
             "media": media, "fresh_minutes": svc.config_store.config.health.fresh_minutes,
             "probe_minutes": svc.config_store.config.health.probe_minutes,
             "probe_paid": svc.config_store.config.health.probe_paid}
@@ -940,6 +1041,16 @@ async def functional_probe(request: Request):
         return await svc.health.probe(body.get("backend") or "", body.get("model") or None)
     except KeyError:
         return JSONResponse({"error": "no such backend"}, status_code=404)
+
+
+@router.post("/admin/api/backends/{name}/reset-breaker")
+async def reset_breaker(request: Request, name: str):
+    """Close a backend's circuit breaker now (after fixing the backend)
+    instead of waiting for the cooldown and a trial call."""
+    pool = _svc(request).pool
+    if not getattr(pool, "reset_breaker", None) or not pool.reset_breaker(name):
+        return JSONResponse({"error": "no such backend"}, status_code=404)
+    return {"ok": True}
 
 
 @router.get("/admin/api/budgets")
@@ -984,7 +1095,12 @@ async def set_budgets(request: Request):
     names = [r.name for r in validated.rules]
     if len(names) != len(set(names)):
         return JSONResponse({"error": "rule names must be unique"}, status_code=400)
-    dumped = validated.model_dump(exclude_defaults=False)
+    # Only what differs from the defaults goes into config.yaml (keeps the file
+    # and its version diffs readable); a rule always keeps its name.
+    dumped = validated.model_dump(exclude_defaults=True)
+    if "rules" in cur:
+        dumped["rules"] = [{"name": r.name, **r.model_dump(exclude_defaults=True)}
+                           for r in validated.rules]
 
     def mutate(raw):
         raw["budgets"] = dumped

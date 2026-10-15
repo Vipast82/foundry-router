@@ -114,6 +114,8 @@ backend_pool:
         type: ollama
         url: http://192.168.1.60:11434      # EDIT: RTX 3050 mini-PC Ollama
         priority: 90
+        # max_concurrent: 1          # optional: calls at once (e.g. llama.cpp -np);
+        # queue_timeout_seconds: 300 # extra calls wait in a fair per-client queue
       - name: meridian
         type: anthropic-compatible
         url: http://192.168.1.40:3456       # EDIT: Meridian bridge

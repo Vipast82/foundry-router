@@ -44,6 +44,13 @@ def _columns(db: Database, table: str) -> list[str]:
     return [r["name"] for r in db.query(f"PRAGMA table_info({table})")]
 
 
+def _ts_sql(col: str) -> str:
+    """A time column as a comparable datetime: ISO text in most tables, epoch
+    seconds (REAL/INTEGER) in a few (usage_events)."""
+    return (f"(CASE WHEN typeof({col}) IN ('real','integer') THEN datetime({col}, 'unixepoch') "
+            f"ELSE datetime({col}) END)")
+
+
 def ts_column(db: Database, table: str) -> Optional[str]:
     cols = _columns(db, table)
     return next((c for c in _TS_COLS if c in cols), None)
@@ -81,7 +88,7 @@ def _rows(db: Database, table: str, hours: float = 0, limit: int = 0,
     conds = []
     ts = ts_column(db, table)
     if hours and ts:
-        conds.append(f"datetime({ts}) >= datetime(?)")
+        conds.append(f"{_ts_sql(ts)} >= datetime(?)")
         args.append(_cutoff(hours))
     for k, v in (where or {}).items():
         if k in cols and v not in (None, ""):
@@ -151,7 +158,7 @@ def clear(db: Database, table: str, older_than_days: float = 0) -> int:
         raise ValueError(f"{table} holds configuration/state, not logs — not clearable here")
     ts = ts_column(db, table)
     if older_than_days and ts:
-        return db.execute_count(f"DELETE FROM {table} WHERE datetime({ts}) < datetime(?)",
+        return db.execute_count(f"DELETE FROM {table} WHERE {_ts_sql(ts)} < datetime(?)",
                           (_cutoff(older_than_days * 24),))
     return db.execute_count(f"DELETE FROM {table}")
 

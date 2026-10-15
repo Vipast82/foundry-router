@@ -175,6 +175,15 @@ def status(svc, profile_id: str) -> dict:
 
 
 def apply(svc, profile_id: str) -> dict:
+    """Apply (after a dry run shows there's something to change, a snapshot of
+    the personas is taken so the apply can be undone from Logs -> Data)."""
+    preview = _apply(svc, profile_id, dry_run=True)
+    if preview["counts"].get("create") or preview["counts"].get("update"):
+        try:
+            from .configops import snapshot
+            snapshot(svc, f"before applying profile {profile_id}")
+        except Exception:                                          # noqa: BLE001
+            pass
     return _apply(svc, profile_id, dry_run=False)
 
 

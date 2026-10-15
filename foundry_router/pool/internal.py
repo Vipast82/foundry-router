@@ -12,6 +12,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
+from collections import deque
 from dataclasses import dataclass, field
 from typing import Any, AsyncIterator, Callable, Optional
 
@@ -40,6 +41,94 @@ class BackendState:
     busy: int = 0                      # calls in flight on THIS backend right now
 
 
+class QueueTimeout(Exception):
+    pass
+
+
+class FairGate:
+    """At most `capacity` calls on one backend at a time. Callers beyond that
+    wait; a freed slot goes to the next CLIENT in turn (round robin), FIFO
+    within a client, so one client's burst can't starve another."""
+
+    def __init__(self, capacity: int):
+        self.capacity = max(1, int(capacity))
+        self.active = 0
+        self.waiting: dict = {}                 # client -> deque[(future, since)]
+        self.order: deque = deque()             # clients with waiters, in turn order
+        self.served_from_queue = 0
+        self.timeouts = 0
+
+    def waiting_count(self) -> int:
+        return sum(len(q) for q in self.waiting.values())
+
+    async def acquire(self, client: str, timeout: float) -> float:
+        """Seconds waited. Raises QueueTimeout."""
+        if self.active < self.capacity and not self.waiting:
+            self.active += 1
+            return 0.0
+        loop = asyncio.get_running_loop()
+        fut = loop.create_future()
+        t0 = time.monotonic()
+        q = self.waiting.setdefault(client, deque())
+        q.append((fut, t0))
+        if client not in self.order:
+            self.order.append(client)
+        try:
+            await asyncio.wait_for(asyncio.shield(fut), timeout)
+        except (asyncio.TimeoutError, asyncio.CancelledError) as e:
+            if fut.done() and not fut.cancelled():
+                self.release()                  # the slot arrived just as we gave up
+            else:
+                fut.cancel()
+                self._forget(client, fut)
+            if isinstance(e, asyncio.TimeoutError):
+                self.timeouts += 1
+                raise QueueTimeout(f"waited {int(timeout)}s for a free slot") from None
+            raise
+        return time.monotonic() - t0
+
+    def _forget(self, client, fut) -> None:
+        q = self.waiting.get(client)
+        if q is None:
+            return
+        for item in list(q):
+            if item[0] is fut:
+                q.remove(item)
+        if not q:
+            self.waiting.pop(client, None)
+            try:
+                self.order.remove(client)
+            except ValueError:
+                pass
+
+    def release(self) -> None:
+        while self.order:
+            client = self.order.popleft()
+            q = self.waiting.get(client)
+            if not q:
+                self.waiting.pop(client, None)
+                continue
+            fut, _t0 = q.popleft()
+            if q:
+                self.order.append(client)       # back of the line for its next waiter
+            else:
+                self.waiting.pop(client, None)
+            if not fut.done():
+                fut.set_result(True)            # slot handed over: active unchanged
+                self.served_from_queue += 1
+                return
+        self.active = max(0, self.active - 1)
+
+    def status(self) -> dict:
+        now = time.monotonic()
+        oldest = min([t for q in self.waiting.values() for _f, t in q] or [now])
+        return {"capacity": self.capacity, "active": self.active,
+                "waiting": {c: len(q) for c, q in self.waiting.items()},
+                "waiting_total": self.waiting_count(),
+                "oldest_wait_s": round(now - oldest, 1) if self.waiting else 0,
+                "served_from_queue": self.served_from_queue, "timeouts": self.timeouts}
+
+
 def _estimate(messages) -> int:
     from ..budget import estimate_tokens
     return estimate_tokens(messages)
@@ -54,6 +143,7 @@ class InternalPool(BackendPool):
         # Budget ledger (budget.py), set by Services: every call is reserved
         # before it is sent and settled after. None = no budget enforcement.
         self.ledger = None
+        self.gates: dict[str, FairGate] = {}
         self.backends: dict[str, BackendState] = {}
         # Disabled backends are kept only for the status list: nothing probes,
         # routes to, or raises alerts about them.
@@ -385,6 +475,16 @@ class InternalPool(BackendPool):
                 # Budget: reserved per attempt (retries count); a denial is raised
                 # as-is, never answered by trying another backend.
                 eid = await self._reserve(model, s, est)
+                try:
+                    await self._acquire(s)
+                except QueueTimeout as e:
+                    detail = f"{s.config.name}: queue — {e}"
+                    errors.append(detail)
+                    self._settle(eid, "released", detail=detail)
+                    continue
+                except BaseException:
+                    self._settle(eid, "released", detail="cancelled while queued")
+                    raise
                 s.busy += 1
                 settled = False
                 try:
@@ -410,11 +510,80 @@ class InternalPool(BackendPool):
                                       detail)
                 finally:
                     s.busy = max(0, s.busy - 1)
+                    self._release(s)
                     if not settled:            # cancelled or an unexpected error
                         self._settle(eid, "error", detail="call did not complete")
         finally:
             self._inflight_exit(model, call_id)
         raise AllBackendsFailed(f"all backends failed for {model!r}: " + " | ".join(errors))
+
+    def _gate(self, s: BackendState) -> Optional[FairGate]:
+        cap = getattr(s.config, "max_concurrent", None)
+        if not cap:
+            return None
+        g = self.gates.get(s.config.name)
+        if g is None or g.capacity != max(1, int(cap)):
+            g = self.gates[s.config.name] = FairGate(cap) if g is None else _resized(g, cap)
+        return g
+
+    async def _acquire(self, s: BackendState) -> None:
+        g = self._gate(s)
+        if g is None:
+            return
+        from .. import client_auth, request_context
+        waited = await g.acquire(client_auth.current().get("client_id") or "anonymous",
+                                 float(getattr(s.config, "queue_timeout_seconds", 300) or 300))
+        if waited >= 0.05:
+            r = request_context.route()
+            request_context.note_route(queue_ms=round((r.get("queue_ms") or 0) + waited * 1000))
+
+    def _release(self, s: BackendState) -> None:
+        g = self.gates.get(s.config.name)
+        if g is not None and getattr(s.config, "max_concurrent", None):
+            g.release()
+
+    def queue_status(self) -> list[dict]:
+        out = []
+        for s in self.backends.values():
+            cap = getattr(s.config, "max_concurrent", None)
+            g = self.gates.get(s.config.name)
+            out.append({"backend": s.config.name, "limited": bool(cap),
+                        **(g.status() if g else {"capacity": cap, "active": s.busy if cap else None,
+                                                 "waiting": {}, "waiting_total": 0,
+                                                 "oldest_wait_s": 0, "served_from_queue": 0,
+                                                 "timeouts": 0}),
+                        "busy": s.busy})
+        return out
+
+    def breaker_status(self) -> list[dict]:
+        """closed = in use; open = failing, skipped until the cooldown ends;
+        half-open = cooldown over, the next call is the trial."""
+        now = time.monotonic()
+        out = []
+        for s in self.backends.values():
+            if s.healthy or not s.ever_checked:
+                state, retry = "closed", None
+            elif now < s.cooldown_until:
+                state, retry = "open", round(s.cooldown_until - now)
+            else:
+                state, retry = "half-open", 0
+            out.append({"backend": s.config.name, "state": state,
+                        "consecutive_failures": s.consecutive_failures,
+                        "threshold": self.cfg.failure_threshold,
+                        "retry_in_s": retry, "last_error": s.last_error or None})
+        return out
+
+    def reset_breaker(self, name: str) -> bool:
+        s = self.backends.get(name)
+        if s is None:
+            return False
+        s.consecutive_failures = 0
+        s.cooldown_until = 0.0
+        s.healthy = True
+        s.last_error = ""
+        self.db.log_event("info", "backend_pool", f"breaker for {name} reset by the operator")
+        self._notify()
+        return True
 
     async def _reserve(self, model: str, s: BackendState, est: int) -> Optional[int]:
         if self.ledger is None:
@@ -440,6 +609,14 @@ class InternalPool(BackendPool):
             raise AllBackendsFailed(f"no backend serves model {model!r}")
         s = candidates[0]
         eid = await self._reserve(model, s, _estimate(messages) if self.ledger else 0)
+        try:
+            await self._acquire(s)
+        except QueueTimeout as e:
+            self._settle(eid, "released", detail=f"queue — {e}")
+            raise AllBackendsFailed(f"{s.config.name}: queue — {e}") from None
+        except BaseException:
+            self._settle(eid, "released", detail="cancelled while queued")
+            raise
         usage = {"pt": 0, "ct": 0, "status": "error", "detail": "stream did not complete"}
         call_id = self._inflight_enter(model, s.config.name)
         s.busy += 1
@@ -471,6 +648,7 @@ class InternalPool(BackendPool):
             raise AllBackendsFailed(f"stream from {s.config.name} failed: {detail}") from e
         finally:
             s.busy = max(0, s.busy - 1)
+            self._release(s)
             self._inflight_exit(model, call_id)
             self._settle(eid, usage["status"], usage["pt"], usage["ct"], usage["detail"])
 
@@ -491,3 +669,9 @@ class InternalPool(BackendPool):
 
     def backends_of_type(self, backend_type: str) -> list[BackendState]:
         return [s for s in self.backends.values() if s.config.type == backend_type]
+
+
+def _resized(g: FairGate, cap: int) -> FairGate:
+    """Capacity changed in config: keep the waiters and in-flight count."""
+    g.capacity = max(1, int(cap))
+    return g
