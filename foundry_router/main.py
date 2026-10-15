@@ -554,7 +554,13 @@ def create_app(config_path: Optional[Path] = None,
         app.add_middleware(
             CORSMiddleware, allow_origins=origins, allow_credentials=False,
             allow_methods=["*"], allow_headers=["*"])
+    from . import request_context as _rc
+    from .client_auth import ClientAuthMiddleware
     from .request_context import RequestIdMiddleware
+    # Added first = inner: client auth runs inside the request-id middleware,
+    # so refusals still carry X-Request-Id.
+    app.add_middleware(ClientAuthMiddleware, get_config=lambda: config_store.config,
+                       get_agent_tokens=lambda: dict(_rc._agent_tokens))
     app.add_middleware(RequestIdMiddleware)
     app.include_router(facade_router)
     app.include_router(openai_router)

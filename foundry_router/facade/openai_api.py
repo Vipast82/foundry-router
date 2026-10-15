@@ -116,13 +116,14 @@ def _not_found(name: str) -> JSONResponse:
 
 @router.get("/v1/models")
 async def list_models(request: Request) -> dict:
+    from .ollama_api import _visible_personas
     """Enabled personas, in OpenAI's model-list shape (same policy-only set the
     Ollama /api/tags advertises)."""
     svc = _svc(request)
     created = _now()
     data = [{"id": p["virtual_name"], "object": "model", "created": created,
              "owned_by": "foundry-router"}
-            for p in svc.personas.list(enabled_only=True)]
+            for p in _visible_personas(svc)]
     return {"object": "list", "data": data}
 
 

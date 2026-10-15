@@ -476,6 +476,12 @@ class Database:
             # pinned order, each budget-checked; no fall-through to the pool,
             # no local degrade, no brain. NULL/'flexible' = previous behaviour.
             ("personas", "routing", "TEXT"),
+            # Who asked (client key name) and the client's own correlation ids
+            # (x-foundry-session / -task / -parent-task headers).
+            ("request_log", "client_id", "TEXT"),
+            ("request_log", "session_id", "TEXT"),
+            ("request_log", "task_id", "TEXT"),
+            ("request_log", "parent_task_id", "TEXT"),
             # Leave Foundry's own status lines (routing header, notes, heartbeat
             # text) out of the reasoning stream — clean traces for data
             # generation. Keep-alive frames are still sent, just empty.

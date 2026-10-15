@@ -609,6 +609,26 @@ class DataRetentionConfig(BaseModel):
     prune_interval_minutes: int = 60
 
 
+class ClientConfig(BaseModel):
+    """One API client (Kilo, Cline, OpenWebUI, a script) with its own key.
+    See client_auth.py for what each scope reaches."""
+    name: str
+    key: Optional[str] = None          # use a ${VAR} reference in config.yaml
+    scopes: list[Literal["inference", "media", "admin"]] = Field(
+        default_factory=lambda: ["inference"])
+    # Optional: only these personas are visible/usable for this client.
+    personas: list[str] = Field(default_factory=list)
+    enabled: bool = True
+
+
+class ClientAuthConfig(BaseModel):
+    # optional: keyless requests pass as "anonymous" (wrong keys are refused);
+    # required: inference/media need a valid client key.
+    mode: Literal["optional", "required"] = "optional"
+    # Also require an admin-scoped key for the web UI and /admin API.
+    protect_admin: bool = False
+
+
 class AppConfig(BaseModel):
     server: ServerConfig = Field(default_factory=ServerConfig)
     agent_brain: AgentBrainConfig = Field(default_factory=AgentBrainConfig)
@@ -625,6 +645,8 @@ class AppConfig(BaseModel):
     mcp_aggregator: MCPAggregatorConfig = Field(default_factory=MCPAggregatorConfig)
     agents: list[AgentConfig] = Field(default_factory=list)
     logging: LoggingConfig = Field(default_factory=LoggingConfig)
+    clients: list[ClientConfig] = Field(default_factory=list)
+    client_auth: ClientAuthConfig = Field(default_factory=ClientAuthConfig)
 
 
 # --------------------------------------------------------------------------- #

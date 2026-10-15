@@ -239,13 +239,28 @@
 const $ = (s, el=document) => el.querySelector(s);
 const esc = s => String(s ?? "").replace(/[&<>"]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
 
+function _adminKey() { try { return localStorage.getItem("foundryAdminKey") || ""; } catch (e) { return ""; } }
 async function api(path, opts={}) {
+  const headers = {"Content-Type": "application/json"};
+  const k = _adminKey();
+  if (k) headers["Authorization"] = "Bearer " + k;
   const r = await fetch("/admin/api/" + path, {
-    headers: {"Content-Type": "application/json"}, ...opts,
+    headers, ...opts,
     body: opts.body !== undefined ? JSON.stringify(opts.body) : undefined,
   });
   const data = await r.json().catch(() => ({}));
-  if (!r.ok) throw new Error(data.error || r.statusText);
+  if (r.status === 401 || (r.status === 403 && (data.error || {}).code === "admin_key_required")) {
+    // client_auth.protect_admin is on: ask once for an admin-scoped client key.
+    const entered = prompt("This Foundry's admin UI needs an admin client key (clients[] with the 'admin' scope):");
+    if (entered) {
+      try { localStorage.setItem("foundryAdminKey", entered.trim()); } catch (e) {}
+      return api(path, opts);
+    }
+  }
+  if (!r.ok) {
+    const e = data.error;
+    throw new Error((e && e.message) || e || r.statusText);
+  }
   return data;
 }
 function toast(msg, isErr=false) {

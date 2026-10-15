@@ -100,6 +100,25 @@ def _model_not_found(name: str) -> JSONResponse:
     return JSONResponse({"error": f"model '{name}' not found"}, status_code=404)
 
 
+def _client_model_denied(name: str, persona) -> "JSONResponse | None":
+    """A client restricted to certain personas (clients[].personas) may use
+    only those — not other personas, not raw backend model names."""
+    from .. import client_auth
+    cl = client_auth.current()
+    if not cl.get("personas"):
+        return None
+    if persona is not None and client_auth.persona_allowed(persona["virtual_name"]):
+        return None
+    return JSONResponse({"error": f"client {cl.get('client_id')!r} may not use model "
+                                  f"{name!r}", "code": "model_not_allowed"}, status_code=403)
+
+
+def _visible_personas(svc) -> list:
+    from .. import client_auth
+    return [p for p in svc.personas.list(enabled_only=True)
+            if client_auth.persona_allowed(p["virtual_name"])]
+
+
 # --------------------------------------------------------------------------- #
 # Health / discovery endpoints                                                #
 # --------------------------------------------------------------------------- #
@@ -170,7 +189,7 @@ async def tags(request: Request) -> dict:
     # persona names. Raw backend model names are still ACCEPTED by /api/chat
     # (passthrough mode) for anyone who wants to bypass routing — they're just
     # not advertised, keeping client dropdowns policy-only.
-    return {"models": [tr.persona_tag_entry(p) for p in svc.personas.list(enabled_only=True)]}
+    return {"models": [tr.persona_tag_entry(p) for p in _visible_personas(svc)]}
 
 
 @router.get("/api/ps")
@@ -433,6 +452,9 @@ async def _chat_dispatch(svc, body: dict):
 
     persona = svc.personas.get(model_name)
     summary_req = _is_client_summary_request(messages)
+    denied = _client_model_denied(model_name, persona)
+    if denied is not None:
+        return denied
 
     if persona is None:
         if svc.pool.backend_info(model_name) is not None:
@@ -2681,6 +2703,9 @@ async def generate(request: Request):
     persona = svc.personas.get(model_name)
     if persona is None and svc.pool.backend_info(model_name) is None:
         return _model_not_found(model_name)
+    denied = _client_model_denied(model_name, persona)
+    if denied is not None:
+        return denied
     if not prompt and not body.get("images"):
         ka = body.get("keep_alive")
         reason = "unload" if ka in (0, "0", "0s", "0m") else "load"

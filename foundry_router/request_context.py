@@ -173,6 +173,13 @@ class RequestIdMiddleware:
         holder: dict = {}
         token = _route.set(holder)
 
+        def _client_name() -> str:
+            try:
+                from .client_auth import current
+                return current().get("client_id") or ""
+            except Exception:
+                return ""
+
         async def send_with_id(message):
             if message.get("type") == "http.response.start":
                 h = [(k, v) for k, v in (message.get("headers") or []) if k != b"x-request-id"]
@@ -181,6 +188,9 @@ class RequestIdMiddleware:
                     v = holder.get(key)
                     if v:
                         h.append((hname, str(v).encode("latin-1", "replace")[:200]))
+                cname = _client_name()
+                if cname:
+                    h.append((b"x-foundry-client", cname.encode("latin-1", "replace")[:120]))
                 message = dict(message, headers=h)
             await send(message)
         try:

@@ -380,3 +380,14 @@ semantic_cache:
 
 logging:
   level: "INFO"
+
+# Client keys (docs/CLIENTS.md): who is asking, and what each client may reach.
+# mode optional = keyless clients still work while keys are rolled out.
+client_auth:
+  mode: optional
+  protect_admin: false
+clients: []
+#  - name: kilo
+#    key: "${FOUNDRY_KEY_KILO}"
+#    scopes: [inference, media]
+#    personas: [Foundry-Kilo-Local]
