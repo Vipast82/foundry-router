@@ -21,6 +21,9 @@ RUN pip install --no-cache-dir --no-index --find-links=/wheels -r requirements.t
     && rm -rf /wheels
 
 COPY foundry_router/ ./foundry_router/
+# The router imports foundry_training.redact for training-data capture and
+# episode uploads; the coordinator and the training CLI run on the workstation.
+COPY foundry_training/ ./foundry_training/
 COPY config.example.yaml .
 
 # /config holds config.yaml (copied from config.example.yaml on first start if
