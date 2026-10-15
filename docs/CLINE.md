@@ -69,16 +69,17 @@ Personas → edit each → **model_allowlist**. This is a hard restriction:
 **empty = Foundry picks from all; one id = locked to it; a few ids = choose among
 those.** The field suggests your real model ids as you type.
 
-**`claude-cline-plan`** — click **⊕ Claude** next to the field. It auto-fills your
-paid/Claude model ids, cheapest tier first (Sonnet before Opus), so Plan is
-guaranteed Claude in one click. The brain uses the cheapest that fits and only
-escalates to Opus for genuinely hard architecture (the persona's escalation
-trigger). If you leave the allow-list empty, it still *prefers* paid (via
-`prefer_paid` bias) but isn't guaranteed — the button is the reliable path.
+**`claude-cline-plan`** — next to the field, pick your Claude backend (e.g.
+`meridian`) in the backend dropdown, then a model (or **all N models**) and
+click **+ Add**. Repeat for another backend (e.g. `cliproxyapi`'s GPT models)
+to mix providers. The brain uses the cheapest that fits and only escalates to
+Opus for genuinely hard architecture (the persona's escalation trigger). If you
+leave the allow-list empty, it still *prefers* paid (via `prefer_paid` bias)
+but isn't guaranteed — the allow-list is the reliable path.
 
 **`claude-cline-act`** — leave the allow-list **empty** to let Foundry pick the
 best local coder and escalate to Claude for debugging. Or restrict it (the
-**⊕ Local** button fills all local model ids to trim down):
+backend dropdown → your local backend → **all N models** → **+ Add**, then trim):
 - Lock to one local coder (avoids model-reload churn): `["qwen3.8:27b"]`
 - Limit the pool: `["qwen3.8:27b", "claude-sonnet-4-6"]` (local writes, Claude for
   debugging, nothing else)

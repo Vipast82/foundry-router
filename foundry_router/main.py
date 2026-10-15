@@ -319,6 +319,9 @@ class Services:
         self.register_discovered()
         await self.tool_registry.sync(self.pool)
         await self.populate_context_lengths()
+        # A backend added or re-flavored here fills profile personas that were
+        # waiting for it (strict routing refuses on the placeholder until then).
+        self._apply_persona_profiles()
 
     def rebuild_brain(self) -> None:
         self.brain = BrainClient(self.config_store.config.agent_brain, self.http,

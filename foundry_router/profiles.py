@@ -107,6 +107,17 @@ def _resolve_backend(svc, kind: str) -> Optional[str]:
     return None
 
 
+def _unflavored_cliproxy(svc) -> Optional[str]:
+    """A backend that looks like CLIProxyAPI by name but has no flavor set
+    (so it's treated as plain OpenAI), for a warning that says what to fix."""
+    backends = getattr(svc.pool, "backends", None) or {}
+    for s in backends.values():
+        c = s.config
+        if "cliproxy" in c.name.lower() and c.effective_flavor != "cliproxyapi":
+            return c.name
+    return None
+
+
 def _local_backend_for(svc, model: str) -> Optional[str]:
     from .facade.ollama_api import _is_paid_backend
     backends = getattr(svc.pool, "backends", None) or {}
@@ -211,6 +222,11 @@ def _apply(svc, profile_id: str, dry_run: bool) -> dict:
         elif values_hash(row) != row.get("profile_hash"):
             entry["action"] = "kept"
             entry["note"] = "edited since it was installed; your values are kept"
+            # The placeholder was never the user's choice: fill it once the
+            # backend exists, keeping every value they did edit.
+            if (row.get("backend") == f"<{d['backend_kind']}>"
+                    and not _unresolved(fields["backend"]) and not dry_run):
+                svc.personas.upsert(name, backend=fields["backend"])
         elif row["profile"] == tag:
             entry["action"] = "unchanged"
             if _unresolved(row.get("backend")) and not _unresolved(fields["backend"]) and not dry_run:
@@ -229,6 +245,10 @@ def _apply(svc, profile_id: str, dry_run: bool) -> dict:
             entry["warning"] = (f"no {d['backend_kind']} backend found"
                                 + (f" serving {d['model']}" if d["backend_kind"] == "local" else "")
                                 + "; strict routing will refuse until one exists")
+            near = _unflavored_cliproxy(svc) if d["backend_kind"] == "cliproxyapi" else None
+            if near:
+                entry["warning"] += (f" (backend '{near}' looks like CLIProxyAPI: set its"
+                                     ' "flavor": "cliproxyapi" in Backends → Pool)')
         report.append(entry)
     counts: dict = {}
     for e in report:

@@ -314,3 +314,20 @@ def test_kilo_provider_config(fleet, client):
     assert local["limit"] == {"context": 131072, "output": 32768} and local["tool_call"]
     assert prov["models"]["Foundry-Kilo-Vision"]["attachment"] is True
     assert "(disabled in Foundry)" in prov["models"]["Foundry-Kilo-Sol"]["name"]
+
+
+def test_unflavored_cliproxy_is_named_and_filled_once_flavored(fleet, client):
+    """A CLIProxyAPI backend saved without flavor: the profile says which
+    backend to fix; after the fix an edited persona keeps its edits but gets
+    the real backend instead of the placeholder."""
+    cpa = fleet.pool.backends["cliproxy"].config
+    cpa.flavor = None
+    rep = {p["persona"]: p for p in client.post(f"/admin/api/profiles/{KILO}/apply").json()["personas"]}
+    assert fleet.personas.get("Foundry-Kilo-Astra")["backend"] == "<cliproxyapi>"
+    assert "backend 'cliproxy' looks like CLIProxyAPI" in rep["Foundry-Kilo-Astra"]["warning"]
+    fleet.personas.upsert("Foundry-Kilo-Astra", description="my edit")
+    cpa.flavor = "cliproxyapi"
+    rep = {p["persona"]: p for p in client.post(f"/admin/api/profiles/{KILO}/apply").json()["personas"]}
+    assert rep["Foundry-Kilo-Astra"]["action"] == "kept"
+    row = fleet.personas.get("Foundry-Kilo-Astra")
+    assert row["backend"] == "cliproxy" and row["description"] == "my edit"
