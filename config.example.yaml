@@ -411,8 +411,9 @@ budgets:
   enabled: true
   retention_days: 90
   rules:
-    - name: one-frontier-helper        # one Kilo frontier helper at a time
+    - name: one-frontier-helper        # one Kilo frontier helper per subscription at a time
       match: {persona: "Foundry-Kilo-*", paid: true}
+      per: account                     # Meridian's Claude and CLIProxyAPI's ChatGPT each get one
       max_concurrent: 1
       max_active: 1
       active_by: task

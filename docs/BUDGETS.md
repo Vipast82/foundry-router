@@ -27,9 +27,10 @@ budgets:
   enabled: true
   retention_days: 90
   rules:
-    # default: one frontier helper at a time (Kilo helper personas only)
+    # default: one frontier helper per subscription at a time (Kilo helper personas only)
     - name: one-frontier-helper
       match: {persona: "Foundry-Kilo-*", paid: true}
+      per: account               # one for Meridian's Claude, one for CLIProxyAPI's ChatGPT, ...
       max_concurrent: 1          # calls in flight
       max_active: 1              # distinct helpers active
       active_by: task            # a helper = x-foundry-task, else session, else client+persona

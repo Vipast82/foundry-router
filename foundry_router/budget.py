@@ -308,7 +308,7 @@ class Ledger:
                 k, t = max(others.items(), key=lambda kv: kv[1])
                 wait = max(0, t + rule.idle_seconds - now)
                 return BudgetDenied(
-                    f"budget rule {rule.name!r}: another helper is active ({rule.active_by} "
+                    f"budget rule {rule.name!r}: another helper is active{where} ({rule.active_by} "
                     f"{k}); at most {rule.max_active} at a time. Free in about {_fmt_wait(wait)} "
                     f"if it stays idle.", rule=rule.name, reset_s=wait)
         return None

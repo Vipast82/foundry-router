@@ -79,7 +79,22 @@ def test_config_migration_stamps_version_and_keeps_backup(tmp_path):
     assert store.raw["config_version"] == 99 and store.migration_notes == []
 
 
-# -- export / import / snapshots -------------------------------------------------------
+
+def test_migration_v3_splits_the_shipped_helper_rule_per_account(tmp_path):
+    from foundry_router.config import ConfigStore
+    p = tmp_path / "config.yaml"
+    shipped = {"name": "one-frontier-helper", "match": {"persona": "Foundry-Kilo-*", "paid": True},
+               "max_concurrent": 1, "max_active": 1, "active_by": "task", "idle_seconds": 60}
+    edited = dict(shipped, match={"persona": "Foundry-Kilo-*"})
+    p.write_text(yaml.safe_dump({"config_version": 2, "budgets": {"rules": [shipped]}}))
+    store = ConfigStore(p)
+    store.load()
+    assert store.config.budgets.rules[0].per == "account"
+    assert any("per: account" in n for n in store.migration_notes)
+    assert (tmp_path / "config.yaml.v2.bak").exists()
+    p.write_text(yaml.safe_dump({"config_version": 2, "budgets": {"rules": [edited]}}))
+    store.load()
+    assert store.config.budgets.rules[0].per is None       # the user's own rule is kept -------------------------------------------------------
 
 def test_export_import_keeps_real_secrets_and_snapshots(app, client):
     svc = app.state.services

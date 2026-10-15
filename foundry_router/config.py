@@ -715,9 +715,11 @@ class BudgetRule(BaseModel):
 
 
 def _default_budget_rules() -> list:
+    # One helper per subscription account (Meridian's Claude, CLIProxyAPI's
+    # ChatGPT, ...): separate plans don't share a slot.
     return [BudgetRule(
         name="one-frontier-helper",
-        match={"persona": "Foundry-Kilo-*", "paid": True},
+        match={"persona": "Foundry-Kilo-*", "paid": True}, per="account",
         max_concurrent=1, max_active=1, active_by="task", idle_seconds=60)]
 
 
@@ -786,7 +788,20 @@ def _m2_stamp(raw: dict) -> list[str]:
     return []
 
 
-MIGRATIONS = [(2, _m2_stamp)]
+def _m3_helper_per_account(raw: dict) -> list[str]:
+    """v3: the default one-frontier-helper rule allows one helper per
+    subscription account instead of one across all of them. Only the rule as
+    shipped (no `per` set) is changed; an edited one is left alone."""
+    rules = ((raw.get("budgets") or {}).get("rules")) or []
+    for r in rules:
+        if (isinstance(r, dict) and r.get("name") == "one-frontier-helper" and "per" not in r
+                and r.get("match") == {"persona": "Foundry-Kilo-*", "paid": True}):
+            r["per"] = "account"
+            return ["budget rule one-frontier-helper: one helper per subscription account (per: account)"]
+    return []
+
+
+MIGRATIONS = [(2, _m2_stamp), (3, _m3_helper_per_account)]
 CONFIG_VERSION = MIGRATIONS[-1][0]
 
 

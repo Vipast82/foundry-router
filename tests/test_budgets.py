@@ -135,6 +135,18 @@ def test_one_frontier_helper_at_a_time(ledgered, client):
     assert denials and all(d["rule"] == "one-frontier-helper" for d in denials)
 
 
+
+def test_one_helper_per_subscription_account(ledgered, client):
+    """A GPT helper on CLIProxyAPI doesn't hold up a Claude helper on Meridian
+    (separate subscriptions); a second GPT helper still waits."""
+    ledgered.personas.upsert("Foundry-Kilo-Sonnet", execution_mode="direct", routing="strict",
+                             backend="meridian", model_allowlist=["claude-sonnet-5-5"],
+                             pinned_models=["claude-sonnet-5-5"])
+    assert _chat(client, "Foundry-Kilo-Sol", task="gpt-helper").status_code == 200
+    assert _chat(client, "Foundry-Kilo-Sonnet", task="claude-helper").status_code == 200
+    r = _chat(client, "Foundry-Kilo-Astra", task="gpt-helper-2")
+    assert r.status_code == 429 and "for account cliproxy:codex" in r.json()["error"]["message"]
+
 def test_ledger_reservation_is_atomic():
     """Two reservations back to back (as two parallel helpers would make):
     the second is refused, nothing is double-booked."""
