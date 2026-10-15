@@ -29,6 +29,7 @@ Checked against CLIProxyAPI v8 (its source) and covered by
 | Paid-call guardrail, persona paid cascades, cost report | ✅ counted as **subscription**, never as free/local |
 | Context guard | ✅ default windows: GPT/Codex 272k, Claude 200k, Gemini 1M (a persona `context_window` or registry override wins) |
 | `max_tokens` / `temperature` for Codex models | ⚠ ignored upstream: Codex accepts neither. Replies end when the model is done. |
+| Image generation / editing (`gpt-image-2.5-sunburst` / `-flare`) | ✅ as Foundry image jobs: allowlisted models, duplicate protection, image budget, artifacts saved into your project by the local adapter. See docs/MEDIA.md. Image models are never used for chat. |
 | Usage windows (ChatGPT 5-hour / weekly, Claude Code 5h / 7d) | ✅ read from CLIProxyAPI's management API (set `management_key`): shown on the Usage tab and in each turn's status line; a model stops being used at **85%** (configurable) so the persona cascade moves on before the plan runs out. See "Usage limits" below. |
 
 ## 1. Run CLIProxyAPI

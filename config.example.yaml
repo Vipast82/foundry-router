@@ -381,6 +381,21 @@ semantic_cache:
 logging:
   level: "INFO"
 
+# Image jobs (docs/MEDIA.md): generate_image / edit_image on ONE backend and
+# only these models; no fallback to another model, provider or a paid API.
+media:
+  enabled: true
+  backend: ""                      # "" = the CLIProxyAPI backend (flavor cliproxyapi)
+  models: [gpt-image-2.5-sunburst, gpt-image-2.5-flare, gpt-image-2.5, gpt-image-2]
+  default_model: gpt-image-2.5-sunburst   # "final"
+  draft_model: gpt-image-2.5-flare        # "draft"
+  jobs_per_5h: 20                  # image budget, separate from chat (0 = no cap)
+  jobs_per_day: 60
+  max_concurrent: 1
+  dedupe_minutes: 30               # the same request returns the existing job
+  retention_days: 30
+  mcp_tools: true                  # /mcp/media for MCP chat clients (needs mcp_aggregator)
+
 # Client keys (docs/CLIENTS.md): who is asking, and what each client may reach.
 # mode optional = keyless clients still work while keys are rolled out.
 client_auth:
@@ -389,5 +404,5 @@ client_auth:
 clients: []
 #  - name: kilo
 #    key: "${FOUNDRY_KEY_KILO}"
-#    scopes: [inference, media]
+#    scopes: [inference, media]     # media = image jobs (local media adapter)
 #    personas: [Foundry-Kilo-Local]

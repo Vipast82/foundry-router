@@ -214,3 +214,23 @@ def test_describe_reports_mounted_endpoints(agg_client):
     d = svc.mcp_aggregator.describe()
     paths = {e["path"] for e in d["endpoints"]}
     assert "/mcp" in paths and "/mcp/p/music" in paths
+
+
+def test_media_tools_endpoint_mounted_over_http(agg_client):
+    """{base}/media serves Foundry's built-in image tools (and only those);
+    the other endpoints' tool lists are unchanged."""
+    h = {"Accept": "application/json, text/event-stream", "X-API-KEY": "s3cret"}
+    r = agg_client.post("/mcp/media/", headers=h, json={
+        "jsonrpc": "2.0", "id": 1, "method": "initialize",
+        "params": {"protocolVersion": "2025-06-18", "capabilities": {},
+                   "clientInfo": {"name": "t", "version": "1"}}})
+    assert r.status_code == 200, r.text
+    r = agg_client.post("/mcp/media/", headers=h,
+                        json={"jsonrpc": "2.0", "id": 2, "method": "tools/list"})
+    names = {t["name"] for t in r.json()["result"]["tools"]}
+    assert names == {"generate_image", "edit_image", "image_job_status", "cancel_image_job"}
+    r = agg_client.post("/mcp/", headers=h,
+                        json={"jsonrpc": "2.0", "id": 3, "method": "tools/list"})
+    assert "generate_image" not in {t["name"] for t in r.json()["result"]["tools"]}
+    paths = {e["path"] for e in agg_client.app.state.services.mcp_aggregator.describe()["endpoints"]}
+    assert "/mcp/media" in paths

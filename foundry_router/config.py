@@ -629,6 +629,40 @@ class ClientAuthConfig(BaseModel):
     protect_admin: bool = False
 
 
+class MediaConfig(BaseModel):
+    """Image generation/editing jobs (media.py). Jobs run on ONE backend and
+    only on the models listed here — never on another model or provider."""
+    enabled: bool = True
+    # Backend name from backend_pool; "" = the CLIProxyAPI backend (flavor
+    # cliproxyapi). A backend billed per call (OpenAI/OpenRouter API key) is
+    # refused unless allow_paid_api is set.
+    backend: str = ""
+    allow_paid_api: bool = False
+    models: list[str] = Field(default_factory=lambda: [
+        "gpt-image-2.5-sunburst", "gpt-image-2.5-flare", "gpt-image-2.5", "gpt-image-2"])
+    default_model: str = "gpt-image-2.5-sunburst"     # "final"
+    draft_model: str = "gpt-image-2.5-flare"          # "draft"
+    # Image budget, separate from chat: jobs that reached the backend count.
+    max_concurrent: int = 1
+    max_queued: int = 8
+    jobs_per_5h: int = 20             # 0 = no cap
+    jobs_per_day: int = 60
+    client_jobs_per_day: int = 0      # per client key; 0 = no cap
+    max_images_per_job: int = 4
+    job_timeout_seconds: int = 600
+    # Retries only when the request provably did not start an image (connect
+    # failure, 502/503 from the proxy). A timeout is never resubmitted.
+    max_attempts: int = 2
+    # The same request (client, model, prompt, settings, input images) within
+    # this window returns the existing job instead of generating again.
+    dedupe_minutes: int = 30
+    max_input_mb: float = 20.0
+    retention_days: int = 30          # artifacts and job rows
+    # Serve generate_image / edit_image / image_job_status at {mcp base}/media
+    # (needs mcp_aggregator.enabled). Never added to the other MCP endpoints.
+    mcp_tools: bool = True
+
+
 class AppConfig(BaseModel):
     server: ServerConfig = Field(default_factory=ServerConfig)
     agent_brain: AgentBrainConfig = Field(default_factory=AgentBrainConfig)
@@ -647,6 +681,7 @@ class AppConfig(BaseModel):
     logging: LoggingConfig = Field(default_factory=LoggingConfig)
     clients: list[ClientConfig] = Field(default_factory=list)
     client_auth: ClientAuthConfig = Field(default_factory=ClientAuthConfig)
+    media: MediaConfig = Field(default_factory=MediaConfig)
 
 
 # --------------------------------------------------------------------------- #

@@ -93,7 +93,10 @@
   .ctl { display:inline-flex; align-items:center; gap:7px; padding:3px 10px 3px 8px;
          border:1px solid var(--line); border-radius:6px; background:var(--bg);
          line-height:1.3; }
-  .ctl:hover { border-color:var(--accent); }
+  .stat { margin-left: 18px; color: var(--dim); white-space: nowrap; }
+  .stat b { color: var(--fg); margin-left: 4px; }
+  .media-thumb { width: 48px; height: 48px; object-fit: contain; border: 1px solid var(--line); border-radius: 4px; margin-right: 4px; cursor: zoom-in; background: repeating-conic-gradient(#8883 0 25%, transparent 0 50%) 0 0 / 12px 12px; vertical-align: middle; }
+.ctl:hover { border-color:var(--accent); }
   /* Same enclosed look when the checkbox is written INSIDE its label. */
   .row > label:has(> input[type=checkbox]), .row > label:has(> input[type=radio]) {
          display:inline-flex; align-items:center; gap:7px; padding:3px 10px 3px 8px;
@@ -2638,7 +2641,7 @@ async function tabModels() {
     return `<span title="${tip}">${dt || "—"}<span class="hint"> / ${pt || "—"}</span></span>${truncBadge}`;
   };
   const rowHtml = m => `<tr${isEnabled(m) ? "" : ' style="opacity:.45"'}>
-    <td class="mono">${esc(m.id)} ${m.reachable ? '<span class="pill ok">live</span>' : ""}${m.embedding ? ' <span class="pill warn" title="embedding-only model — excluded from chat routing (can\'t serve /api/chat)">embedding</span>' : ""}</td>
+    <td class="mono">${esc(m.id)} ${m.reachable ? '<span class="pill ok">live</span>' : ""}${m.embedding ? (/gpt-image|dall-e|grok-imagine|imagen|flux|stable-diffusion|sdxl/i.test(m.id) ? ' <span class="pill" title="image-generation model — excluded from chat routing; used by image jobs (Usage → Images)">image</span>' : ' <span class="pill warn" title="embedding-only model — excluded from chat routing (can\'t serve /api/chat)">embedding</span>') : ""}</td>
     <td class="nw">${esc(m.relative_cost_tier ?? "")}</td>
     <td class="nw">${perfCell(m)}</td>
     <td>${esc(parseTags(m.tags).join(", "))}${m.content_policy === "permissive" ? ' <span class="pill warn">permissive</span>' : ""}</td>
@@ -4552,6 +4555,79 @@ function bindSubUsageCard() {
   $("#su-refresh").onclick = async () => { await api("subscription-usage?refresh=1"); render(); };
 }
 
+// Image jobs (media.py): budget, models, settings and the recent jobs.
+function mediaCard(md) {
+  if (!md) return "";
+  const s = md.summary, c = md.config;
+  const cap = (n, m) => `${n}${m ? " / " + m : ""}`;
+  const jobs = (md.jobs || []).map(j => {
+    const cls = j.status === "succeeded" ? "ok" : j.status === "failed" ? "bad" : "warn";
+    const err = j.error ? `<div class="hint" style="white-space:normal;color:var(--bad)">${esc(j.error.message || "")}</div>` : "";
+    const thumbs = (j.artifacts || []).map(a =>
+      `<img class="media-thumb" data-src="media/artifacts/${esc(j.job_id)}/${a.index}" alt="" title="${a.width}×${a.height} · ${Math.round(a.bytes / 1024)} KB">`).join("");
+    return `<tr><td class="mono nw">${esc((j.created_at || "").slice(0, 19))}</td>
+      <td class="nw">${esc(j.client_id || "")}</td><td class="mono nw">${esc(j.model)}</td>
+      <td class="nw"><span class="pill ${cls}">${esc(j.status)}</span>${j.attempts > 1 ? ` <span class="hint">${j.attempts} tries</span>` : ""}${err}</td>
+      <td style="max-width:360px;white-space:normal">${esc(j.prompt)}</td>
+      <td class="nw">${fmtDur(j.duration_ms)}</td><td class="nw">${thumbs}
+      ${j.status === "queued" || j.status === "running" ? `<button class="act" onclick="cancelMediaJob('${esc(j.job_id)}')">Cancel</button>` : ""}</td></tr>`;
+  }).join("");
+  const models = s.models.map(m => `<span class="pill${m.verified_at ? " ok" : ""}" title="${m.verified_at ? "last success " + esc(m.verified_at) : "no successful job yet"}">${esc(m.id)}${m.role ? " · " + m.role : ""}</span>`).join(" ");
+  return `<div class="card">
+    <h2 style="margin-top:0">Images (generate_image / edit_image)</h2>
+    <div class="row"><label>backend</label>${s.backend ? `<b>${esc(s.backend)}</b>` : `<span class="pill bad">none</span> <span class="hint">${esc(s.backend_error || "")}</span>`}
+      <span class="stat" title="Jobs that reached the backend / cap">last 5 h <b>${cap(s.used_5h, s.jobs_per_5h)}</b></span>
+      <span class="stat">last 24 h <b>${cap(s.used_day, s.jobs_per_day)}</b></span>
+      <span class="stat" title="Queued or running now">active <b>${s.active}</b></span></div>
+    <div class="row"><label title="Green = at least one job succeeded on this model (verified end to end)">models</label>${models}</div>
+    <div class="row"><input type="checkbox" id="md-enabled" ${c.enabled ? "checked" : ""}><label for="md-enabled">image jobs enabled</label>
+      <input type="checkbox" id="md-mcp" ${c.mcp_tools ? "checked" : ""}><label for="md-mcp" title="Serve the image tools at /mcp/media (Foundry-MCP must be enabled). Takes effect after a restart.">MCP tools at /mcp/media</label></div>
+    <div class="row"><label title="Backend name; empty = the CLIProxyAPI backend">backend</label><input id="md-backend" size="16" value="${esc(c.backend)}" placeholder="auto (CLIProxyAPI)">
+      <label>final</label><input id="md-final" size="24" value="${esc(c.default_model)}">
+      <label>draft</label><input id="md-draft" size="24" value="${esc(c.draft_model)}"></div>
+    <div class="row"><label title="Only these image models are ever used. Comma-separated.">allowed models</label><input id="md-models" style="flex:1;min-width:200px" value="${esc(c.models.join(", "))}"></div>
+    <div class="row"><label title="Jobs that reached the backend count; 0 = no cap">jobs / 5 h</label><input id="md-5h" type="number" min="0" style="width:70px" value="${c.jobs_per_5h}">
+      <label>jobs / day</label><input id="md-day" type="number" min="0" style="width:70px" value="${c.jobs_per_day}">
+      <label title="Per client key, 24 h; 0 = no cap">per client / day</label><input id="md-client" type="number" min="0" style="width:70px" value="${c.client_jobs_per_day}">
+      <label>at once</label><input id="md-conc" type="number" min="1" max="8" style="width:60px" value="${c.max_concurrent}">
+      <button id="md-save">Save</button></div>
+    <p class="hint">A timeout is never resubmitted, the same request within ${c.dedupe_minutes} min returns the existing job, and a refused or unavailable model fails without falling back to another model or provider. Kilo/Cline save results into the project via the local media adapter (contrib/media-adapter).</p>
+    ${jobs ? `<table><tr><th>time (UTC)</th><th>client</th><th>model</th><th>status</th><th>prompt</th><th>time</th><th>result</th></tr>${jobs}</table>` : '<p class="hint">No image jobs yet.</p>'}
+  </div>`;
+}
+
+function bindMediaCard() {
+  const save = $("#md-save");
+  if (!save) return;
+  save.onclick = async () => {
+    try {
+      await api("config/media", {method: "POST", body: {
+        enabled: $("#md-enabled").checked, mcp_tools: $("#md-mcp").checked,
+        backend: $("#md-backend").value, default_model: $("#md-final").value.trim(),
+        draft_model: $("#md-draft").value.trim(), models: $("#md-models").value,
+        jobs_per_5h: +$("#md-5h").value, jobs_per_day: +$("#md-day").value,
+        client_jobs_per_day: +$("#md-client").value, max_concurrent: +$("#md-conc").value}});
+      toast("Image settings saved"); render();
+    } catch (e) { toast(e.message, true); }
+  };
+  // Thumbnails go through fetch (it carries the admin key); <img src> can't.
+  document.querySelectorAll("img.media-thumb[data-src]").forEach(async img => {
+    try {
+      const k = _adminKey();
+      const r = await fetch("/admin/api/" + img.dataset.src, {headers: k ? {Authorization: "Bearer " + k} : {}});
+      if (!r.ok) return;
+      const url = URL.createObjectURL(await r.blob());
+      img.src = url; img.removeAttribute("data-src");
+      img.onclick = () => window.open(url, "_blank");
+    } catch (e) {}
+  });
+}
+
+async function cancelMediaJob(id) {
+  try { await api(`media/jobs/${id}/cancel`, {method: "POST"}); render(); }
+  catch (e) { toast(e.message, true); }
+}
+
 // ms -> compact human string (244478 ms reads awful; "4m 4s" doesn't).
 function fmtDur(ms) {
   if (ms == null) return "";
@@ -4671,9 +4747,9 @@ async function tabEvals() {
 }
 
 async function tabUsage() {
-  const [d, q, ce, su] = await Promise.all([
+  const [d, q, ce, su, md] = await Promise.all([
     api("usage?limit=100"), api("quota"), api("tool_calls?executed_code=1&limit=50"),
-    api("subscription-usage").catch(() => null)]);
+    api("subscription-usage").catch(() => null), api("media?limit=20").catch(() => null)]);
   const reqs = d.requests || [];
 
   // ---- Code-execution audit (the sandbox's strongest audit trail) ---------------
@@ -4792,6 +4868,7 @@ async function tabUsage() {
   $("#main").innerHTML = `
     ${quotaCard(q)}
     ${subUsageCard(su)}
+    ${mediaCard(md)}
     ${codeCard}
     ${mcpCard}
     <div class="row" style="justify-content:space-between;align-items:baseline">
@@ -4805,6 +4882,7 @@ async function tabUsage() {
     <table><tr><th>time (UTC)</th><th>persona</th><th>mode</th><th>request</th>
     <th>model(s)</th><th>tools (MCP)</th><th>steps</th><th>time</th><th>cost</th><th>guard</th><th>status</th><th title="Rate this response — feeds the insight digest and per-persona quality trends">rate</th></tr>${rows}</table>`;
   bindSubUsageCard();
+  bindMediaCard();
 }
 
 // Thumbs feedback from the Usage tab (quality tracking Phase 1). Re-render so

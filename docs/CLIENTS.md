@@ -25,7 +25,7 @@ client_auth:
 | Scope | Reaches |
 |---|---|
 | `inference` | Ollama `/api/*` and OpenAI `/v1/*` chat, completions, responses, embeddings, model lists |
-| `media` | `/v1/images/*`, `/media/*` (image jobs, artifacts) |
+| `media` | `/v1/images/*`, `/media/*`, `/mcp/media` (image jobs, artifacts; see docs/MEDIA.md) |
 | `admin` | `/admin/*` (the web UI's API; the `/ui` page shell itself is static) |
 
 - **Sending the key:** `Authorization: Bearer <key>` (OpenAI clients: Kilo,

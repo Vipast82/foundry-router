@@ -279,6 +279,124 @@ class MCPAggregator:
 
         return server
 
+    # -- built-in media tools ({base}/media) ---------------------------------------
+
+    def _media_on(self) -> bool:
+        media = getattr(self.svc.config_store.config, "media", None)
+        return bool(media and media.enabled and media.mcp_tools
+                    and getattr(self.svc, "media", None) is not None)
+
+    _MEDIA_COMMON = {
+        "model": {"type": "string", "description": "'final' (default), 'draft', an allowed "
+                  "image model id, or an image persona name"},
+        "size": {"type": "string", "description": "WIDTHxHEIGHT (e.g. 1024x1024, 1536x1024) or auto"},
+        "quality": {"type": "string", "description": "low | medium | high | auto"},
+        "background": {"type": "string", "description": "transparent | opaque | auto"},
+        "output_format": {"type": "string", "description": "png | webp | jpeg"},
+        "n": {"type": "integer", "minimum": 1, "description": "number of images (default 1)"},
+        "idempotency_key": {"type": "string", "description": "reuse to get the same job back "
+                            "instead of generating again"},
+        "allow_duplicate": {"type": "boolean", "description": "generate even if an identical "
+                            "request ran recently (a deliberate variation)"},
+        "wait_seconds": {"type": "integer", "minimum": 0, "maximum": 60,
+                         "description": "wait up to this long for the result (default 45)"},
+        "return_image": {"type": "boolean", "description": "include the finished image itself "
+                         "in the reply (chat clients that display images); default false"},
+    }
+
+    def _media_tools(self):
+        import mcp.types as types
+        c = self._MEDIA_COMMON
+        return [
+            types.Tool(name="generate_image", description=(
+                "Generate an image with Foundry's configured image model. Returns a job; when "
+                "it finishes, artifact URLs. If it is still running, call image_job_status — "
+                "never call generate_image again for the same request."),
+                inputSchema={"type": "object", "required": ["prompt"],
+                             "properties": {"prompt": {"type": "string"}, **c}}),
+            types.Tool(name="edit_image", description=(
+                "Edit or combine images (and an optional mask) with Foundry's image model. "
+                "images: data URLs or base64 PNG/JPEG/WebP."),
+                inputSchema={"type": "object", "required": ["prompt", "images"],
+                             "properties": {"prompt": {"type": "string"},
+                                            "images": {"type": "array", "items": {"type": "string"}},
+                                            "mask": {"type": "string"},
+                                            "input_fidelity": {"type": "string",
+                                                               "description": "low | high"},
+                                            **c}}),
+            types.Tool(name="image_job_status", description=(
+                "Status of an image job (waits up to wait_seconds). Never submits anything."),
+                inputSchema={"type": "object", "required": ["job_id"],
+                             "properties": {"job_id": {"type": "string"},
+                                            "wait_seconds": c["wait_seconds"],
+                                            "return_image": c["return_image"]}},
+                annotations=types.ToolAnnotations(readOnlyHint=True)),
+            types.Tool(name="cancel_image_job", description="Cancel a queued or running image job.",
+                       inputSchema={"type": "object", "required": ["job_id"],
+                                    "properties": {"job_id": {"type": "string"}}}),
+        ]
+
+    async def _media_call(self, name: str, args: dict) -> list:
+        import base64
+        import json as _json
+
+        import mcp.types as types
+
+        from ..media import MediaError
+        media = self.svc.media
+        base = self._base_url()
+        wait = max(0.0, min(60.0, float(args.get("wait_seconds", 45) or 0)))
+        try:
+            if name in ("generate_image", "edit_image"):
+                row, dup = await media.submit(
+                    "edit" if name == "edit_image" else "generate",
+                    prompt=args.get("prompt") or "", model=args.get("model"),
+                    size=args.get("size"), quality=args.get("quality"),
+                    background=args.get("background"), output_format=args.get("output_format"),
+                    n=args.get("n") or 1, images=args.get("images") or [],
+                    mask=args.get("mask"), input_fidelity=args.get("input_fidelity"),
+                    idempotency_key=args.get("idempotency_key"),
+                    auto_dedupe=not args.get("allow_duplicate"))
+            elif name in ("image_job_status", "cancel_image_job"):
+                row, dup = media.get(str(args.get("job_id") or "")), False
+                from .. import client_auth
+                c = client_auth.current()
+                if row is None or not ("admin" in (c.get("scopes") or [])
+                                       or row.get("client_id") == c.get("client_id")):
+                    raise MediaError(404, "job_not_found", f"no image job {args.get('job_id')!r}")
+                if name == "cancel_image_job":
+                    row = await media.cancel(row["id"])
+                    wait = 0
+            else:
+                raise MediaError(400, "unknown_tool", f"unknown tool {name}")
+        except MediaError as e:
+            return [types.TextContent(type="text", text=_json.dumps(e.body()["error"]))]
+        if wait:
+            row = await media.wait(row["id"], wait)
+        view = media.view(row, base, deduplicated=dup)
+        out = [types.TextContent(type="text", text=_json.dumps(view, indent=1))]
+        if args.get("return_image") and row["status"] == "succeeded":
+            for a in view["artifacts"]:
+                hit = media.artifact_path(row["id"], a["index"])
+                if hit:
+                    out.append(types.ImageContent(type="image", mimeType=a["mime"],
+                                                  data=base64.b64encode(hit[0].read_bytes()).decode()))
+        return out
+
+    def _build_media_server(self):
+        from mcp.server.lowlevel import Server
+        server = Server("foundry-mcp:media")
+
+        @server.list_tools()
+        async def _list():
+            return self._media_tools()
+
+        @server.call_tool()
+        async def _call(name: str, arguments: Optional[dict]):
+            return await self._media_call(name, arguments or {})
+
+        return server
+
     async def _dispatch_with_heartbeat(self, server, name, arguments,
                                        server_filter, hb: int, name_filter=None,
                                        scope: str = "all", client: str = ""):
@@ -380,18 +498,26 @@ class MCPAggregator:
 
         if getattr(cfg, "persona_endpoints", True):
             plan.append(("persona", None, f"{base}/persona"))
+        if self._media_on():
+            plan.append(("media", None, f"{base}/media"))
         # Mount the SPECIFIC endpoints (profiles, personas) before the base:
         # Starlette Mounts match by path prefix, so a base "/mcp" mounted first
         # swallowed "/mcp/p/<name>" and "/mcp/persona/<name>" and served every
         # tool on them (profile scoping silently did nothing).
         plan = plan[1:] + plan[:1]
         for scope_name, server_filter, path in plan:
-            server = self._build_server(scope_name, server_filter,
-                                        persona_mode=(scope_name == "persona"))
+            server = (self._build_media_server() if scope_name == "media" else
+                      self._build_server(scope_name, server_filter,
+                                         persona_mode=(scope_name == "persona")))
             manager = StreamableHTTPSessionManager(
                 app=server, json_response=json_response, stateless=stateless)
             await stack.enter_async_context(manager.run())
             app.router.routes.append(Mount(path, app=self._guarded(manager, cfg)))
+            if scope_name == "media":
+                self._endpoints.append({"scope": "media", "path": path, "servers": None,
+                                        "builtin": "image tools"})
+                log.info("foundry-mcp media tools mounted: %s", path)
+                continue
             if scope_name == "persona":
                 self._endpoints.append({"scope": "persona", "path": path + "/<persona>",
                                         "servers": None})
@@ -428,6 +554,9 @@ class MCPAggregator:
         for pname, servers in (cfg.profiles or {}).items():
             plan.append({"scope": pname, "path": f"{base}/p/{pname}",
                          "servers": sorted(servers)})
+        if self._media_on():
+            plan.append({"scope": "media", "path": f"{base}/media", "servers": None,
+                         "builtin": "image tools"})
         if getattr(cfg, "persona_endpoints", True) and getattr(self.svc, "personas", None):
             from urllib.parse import quote
             for p in self.svc.personas.list(enabled_only=True):

@@ -5,7 +5,7 @@ Foundry key in `clients:`. A request's key identifies the client (`client_id`
 in the logs and budgets) and its scopes decide what it may reach:
 
   inference  /api/* (Ollama) and /v1/* chat/completions/responses/embeddings/models
-  media      /v1/images/*, /media/* (image jobs and artifacts)
+  media      /v1/images/*, /media/*, /mcp/media (image jobs and artifacts)
   admin      /admin/* (the web UI's API; the /ui page shell itself is static)
 
 `client_auth.mode`:
@@ -46,6 +46,8 @@ def current() -> dict:
 def scope_for(path: str) -> Optional[str]:
     if path in _OPEN_PATHS:
         return None
+    if path.startswith("/mcp/media"):
+        return "media"         # Foundry's built-in image tools
     if path.startswith("/mcp"):
         return None            # Foundry-MCP has its own token (mcp_aggregator.token)
     if path.startswith("/admin"):

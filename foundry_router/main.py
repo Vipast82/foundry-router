@@ -29,7 +29,7 @@ from .brain.agent import AgentRunner
 from .brain.client import BrainClient
 from .config import ConfigStore, data_dir
 from .db import Database
-from .facade import openai_router, router as facade_router
+from .facade import media_router, openai_router, router as facade_router
 from .guardrails import GuardrailEngine
 from .personas import PersonaStore
 from .pool.base import build_pool
@@ -108,6 +108,8 @@ class Services:
                                  research=self.research)
         self.semcache = SemanticCache(cfg.semantic_cache, self.http, db)
         self.mcp_aggregator = MCPAggregator(self)
+        from .media import MediaService
+        self.media = MediaService(self)
         ensure_eval_seed(db)
         self.evals = EvalHarness(self)
         self._eval_tasks: list[asyncio.Task] = []  # keep background runs alive
@@ -173,6 +175,7 @@ class Services:
         never replaces a hand-set value)."""
         import json as _json
 
+        from .media import is_image_model
         from .registry.tagging import (content_policy_from_name,
                                        is_embedding_name, tags_from_name)
         from .usage import (CLAUDE_DEFAULT_CONTEXT, claude_cost_tier,
@@ -196,7 +199,10 @@ class Services:
                     # so they're never a chat candidate (the capability probe in
                     # populate_context_lengths confirms/corrects this). Only ever
                     # set to 1; never un-flags a model.
-                    if is_embedding_name(model_id):
+                    # Image-generation models (gpt-image-*, which CLIProxyAPI
+                    # lists in /v1/models) can't chat either: same flag, so
+                    # they're never a chat candidate. media.py serves them.
+                    if is_embedding_name(model_id) or is_image_model(model_id):
                         fields["embedding"] = 1
                     if s.config.type == "ollama":
                         fields.update(relative_cost_tier="free",
@@ -362,6 +368,10 @@ class Services:
                 await asyncio.to_thread(prune, self.db, cfg.days)
             except Exception:
                 log.exception("retention prune failed")
+            try:
+                await asyncio.to_thread(self.media.prune)
+            except Exception:
+                log.exception("media prune failed")
             await asyncio.sleep(max(5, int(cfg.prune_interval_minutes or 60)) * 60)
 
     async def refresh_brain_health(self) -> dict:
@@ -564,5 +574,6 @@ def create_app(config_path: Optional[Path] = None,
     app.add_middleware(RequestIdMiddleware)
     app.include_router(facade_router)
     app.include_router(openai_router)
+    app.include_router(media_router)
     app.include_router(ui_router)
     return app

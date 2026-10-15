@@ -481,3 +481,33 @@ CREATE TABLE IF NOT EXISTS assist_turns (
 );
 CREATE INDEX IF NOT EXISTS idx_assist_turns_conv ON assist_turns(conversation_key, ts);
 CREATE INDEX IF NOT EXISTS idx_assist_turns_ts ON assist_turns(ts);
+
+-- Image generation/editing jobs (media.py). Input images are never stored;
+-- outputs live under <data dir>/media/<id>/ and are pruned with the row.
+CREATE TABLE IF NOT EXISTS media_jobs (
+  id TEXT PRIMARY KEY,               -- img_<16 hex>
+  created_at TEXT,
+  created_ts REAL,                   -- epoch seconds (budget windows)
+  started_ts REAL,
+  finished_ts REAL,
+  op TEXT,                           -- generate | edit
+  status TEXT,                       -- queued | running | succeeded | failed | cancelled
+  model TEXT,
+  backend TEXT,
+  persona TEXT,
+  client_id TEXT,
+  session_id TEXT,
+  task_id TEXT,
+  idem_key TEXT,                     -- k:<client key> or h:<request hash>
+  params TEXT,                       -- JSON: prompt, size, quality, ... input hashes
+  attempts INTEGER DEFAULT 0,
+  charged INTEGER DEFAULT 0,         -- 1 = the request reached the backend (counts toward the budget)
+  error TEXT,
+  error_code TEXT,
+  error_status INTEGER,
+  artifacts TEXT,                    -- JSON list
+  usage TEXT,                        -- JSON as the backend reported it
+  duration_ms REAL
+);
+CREATE INDEX IF NOT EXISTS idx_media_jobs_ts ON media_jobs(created_ts);
+CREATE INDEX IF NOT EXISTS idx_media_jobs_key ON media_jobs(client_id, idem_key);

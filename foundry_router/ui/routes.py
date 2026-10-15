@@ -878,6 +878,77 @@ async def set_subscription_usage(request: Request):
     return {"ok": True, "subscription_usage": cfg.subscription_usage.model_dump()}
 
 
+@router.get("/admin/api/media")
+async def media_overview(request: Request):
+    """Image jobs: budget use, models (last success = verified), config and
+    the recent jobs of every client."""
+    svc = _svc(request)
+    base = str(request.base_url).rstrip("/")
+    limit = int(request.query_params.get("limit", 30))
+    return {"summary": svc.media.summary(),
+            "config": svc.config_store.config.media.model_dump(),
+            "jobs": [svc.media.view(r, base) for r in svc.media.list_jobs(limit)]}
+
+
+@router.get("/admin/api/media/artifacts/{job_id}/{index}")
+async def media_artifact_admin(request: Request, job_id: str, index: int):
+    hit = _svc(request).media.artifact_path(job_id, index)
+    if hit is None:
+        return JSONResponse({"error": "no such artifact"}, status_code=404)
+    return FileResponse(hit[0], media_type=hit[1]["mime"])
+
+
+@router.post("/admin/api/media/jobs/{job_id}/cancel")
+async def media_cancel_admin(request: Request, job_id: str):
+    svc = _svc(request)
+    row = await svc.media.cancel(job_id)
+    if row is None:
+        return JSONResponse({"error": "no such job"}, status_code=404)
+    return svc.media.view(row)
+
+
+_MEDIA_INTS = {"max_concurrent": (1, 8), "max_queued": (1, 100), "jobs_per_5h": (0, 10000),
+               "jobs_per_day": (0, 100000), "client_jobs_per_day": (0, 100000),
+               "max_images_per_job": (1, 10), "job_timeout_seconds": (30, 3600),
+               "max_attempts": (1, 5), "dedupe_minutes": (0, 1440), "retention_days": (0, 3650)}
+
+
+@router.post("/admin/api/config/media")
+async def set_media(request: Request):
+    svc = _svc(request)
+    body = await request.json()
+    updates: dict = {}
+    for k, (lo, hi) in _MEDIA_INTS.items():
+        if k in body:
+            try:
+                updates[k] = max(lo, min(hi, int(body[k])))
+            except (TypeError, ValueError):
+                return JSONResponse({"error": f"{k} must be an integer"}, status_code=400)
+    for k in ("enabled", "allow_paid_api", "mcp_tools"):
+        if k in body:
+            updates[k] = bool(body[k])
+    for k in ("backend", "default_model", "draft_model"):
+        if k in body:
+            updates[k] = str(body[k] or "").strip()
+    if "models" in body:
+        models = body["models"]
+        if isinstance(models, str):
+            models = [m.strip() for m in models.replace("\n", ",").split(",")]
+        if not isinstance(models, list):
+            return JSONResponse({"error": "models must be a list"}, status_code=400)
+        updates["models"] = [str(m).strip() for m in models if str(m).strip()]
+    allowed = updates.get("models", svc.config_store.config.media.models)
+    for k in ("default_model", "draft_model"):
+        v = updates.get(k)
+        if v and v not in allowed:
+            return JSONResponse({"error": f"{k} {v!r} is not in models"}, status_code=400)
+
+    def mutate(raw):
+        raw.setdefault("media", {}).update(updates)
+    cfg = svc.config_store.save(mutate)
+    return {"ok": True, "media": cfg.media.model_dump()}
+
+
 @router.post("/admin/api/config/meridian")
 async def set_meridian(request: Request):
     svc = _svc(request)
