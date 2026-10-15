@@ -26,10 +26,11 @@ dev = ["pytest>=8.0", "pytest-asyncio>=0.24"]
 version = { attr = "foundry_router.__version__" }
 
 [tool.setuptools.packages.find]
-include = ["foundry_router*", "foundry_coordinator*"]
+include = ["foundry_router*", "foundry_coordinator*", "foundry_training*"]
 
 [project.scripts]
 foundry-coordinator = "foundry_coordinator.cli:main"
+foundry-training = "foundry_training.cli:main"
 
 [tool.setuptools.package-data]
 "foundry_router" = ["schema.sql", "ui/static/*"]

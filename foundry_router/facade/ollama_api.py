@@ -532,6 +532,9 @@ async def _chat_dispatch(svc, body: dict):
     same routing, telemetry and response stats."""
     model_name = body.get("model") or ""
     stream = body.get("stream", True)
+    cap = getattr(svc, "capture", None)
+    if cap is not None:
+        cap.record_received(body, "ollama")     # no-op unless capture is on for this request
     client_tools = body.get("tools") or None
     messages = _canonical_messages(body.get("messages") or [])
     options = body.get("options") or None

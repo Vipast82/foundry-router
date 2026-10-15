@@ -96,3 +96,43 @@ exempt_paths = [
   "docs/MASTER_ORDER.md",
   "docs/design/ASSET_LEDGER.md",
 ]
+
+[training]
+# Training-data capture (python -m foundry_training; docs/TRAINING_DATA.md).
+# The coordinator only writes a pointer manifest at closeout; the pipeline
+# ingests asynchronously. Foundry-side capture is enabled separately
+# (training_capture in Foundry's config). Nothing is uploaded or trained.
+enabled = true
+sources = ["kilo", "foundry", "coordinator", "git"]
+artifact_roots = ["docs/evidence"]        # screenshots may be read only from here
+local_models = ["qwen3.8-flash-next-iq3_s"]
+local_personas = ["Foundry-Kilo-Local"]
+
+[training.policy.sft]
+require = ["verification_pass", "review_approved_at_revision", "complete_tool_sequence",
+           "system_and_tools_known", "local_author", "no_loop", "approval_if_required"]
+max_tokens = 32768
+
+[training.policy.correction]
+require = ["verification_pass", "review_approved_at_revision", "feedback_present",
+           "local_author", "approval_if_required"]
+
+[training.policy.multimodal]
+# visual sprints: the screenshot bytes must exist and the visual approval be recorded
+require = ["verification_pass", "artifacts_present", "approval_if_required"]
+
+[training.split]
+eval_fraction = 0.15
+seed = "au-v1"
+
+[training.retention]
+raw_days = 30
+normalized_days = 180
+
+[training.export]
+targets = ["canonical", "chatml-tools"]
+allow_frontier_targets = false            # reviewer/frontier text is never a training target
+include_reasoning = false
+
+[training.capture]
+on_failure = "warn"                       # ignore | warn | hold

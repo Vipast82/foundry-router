@@ -21,6 +21,7 @@ from typing import Callable, Optional
 
 from . import review as R
 from . import states as S
+from . import training_hook
 from .adapters import Project
 from .adapters.base import FAIL, PASS, UNKNOWN, VerificationResult
 from .adapters.foundry import FoundryDenied, FoundryError
@@ -94,6 +95,10 @@ class Coordinator:
                 after = self.store.task(pid, t["task_id"])
                 if after and after["state"] != before[0]:
                     acted.append(f"{pid}/{t['task_id']}: {before[0]} -> {after['state']}")
+                    # closeout finalizes capture itself; these exits are best effort
+                    if after["state"] == S.FAILED or (after["state"] == S.COMPLETE
+                                                      and before[0] == S.AWAITING_HUMAN):
+                        self._training(P, after, after["state"])
         self.flush()
         return acted
 
@@ -691,6 +696,15 @@ class Coordinator:
 
     def _closing(self, P: Project, t: dict) -> None:
         pid, tid = P.id, t["task_id"]
+        held = t["data"].get("training_hold")
+        if held:
+            # capture policy `hold`: closeout already passed at this head; only
+            # the capture manifest is outstanding
+            if held.get("head") == P.ws.head():
+                return self._finish_close(P, t, held["cid"], held["head"], held["need"],
+                                          held["published"])
+            self.store.merge_data(pid, tid, training_hold=None)
+            t = self.store.task(pid, tid)
         spec = P.adapter.describe(tid)
         mode = P.adapter.closeout_mode()
         if mode == "session":
@@ -733,17 +747,47 @@ class Coordinator:
         if bad:
             return self._closeout_retry(P, t, "; ".join(failed_findings(bad))[:1500], cid=cid)
         need = self._approvals_needed(P, t, spec, "after_close", head)
+        self._finish_close(P, t, cid, head, need, published)
+
+    def _finish_close(self, P: Project, t: dict, cid: str, head: str, need: list,
+                      published) -> None:
+        pid, tid = P.id, t["task_id"]
+        outcome = "CLOSED_AWAITING_APPROVAL" if need else S.COMPLETE
+        if not self._training(P, {**t, "head_sha": head}, outcome):
+            self.store.merge_data(pid, tid, training_hold={
+                "cid": cid, "head": head, "need": need, "published": published})
+            return self._note(P, t, "closeout passed; holding until the training capture "
+                                    "manifest is written ([training.capture] on_failure=hold)")
+        t = self.store.task(pid, tid)
+        data = {k: v for k, v in t["data"].items() if k != "training_hold"}
         if need:
             self.store.release(pid, tid)
             return self.store.transition(pid, tid, S.AWAITING_HUMAN, {
                 "closeout_id": cid, "awaiting": "approval: " + ", ".join(need),
                 "published": published},
                 closeout_id=cid, head_sha=head, awaiting="approval: " + ", ".join(need),
-                data={**t["data"], "stage": "after_close", "awaiting_kinds": need})
+                data={**data, "stage": "after_close", "awaiting_kinds": need})
         self.store.release(pid, tid)
         self.store.transition(pid, tid, S.COMPLETE, {
             "closeout_id": cid, "review_valid": True, "published": published},
-            closeout_id=cid, head_sha=head, next_action="")
+            closeout_id=cid, head_sha=head, next_action="", data=data)
+
+    def _training(self, P: Project, t: dict, outcome: str) -> bool:
+        """Queue the task's capture manifest. False only when it failed and
+        the profile's policy is `hold`; capture never fails a task."""
+        if not training_hook.enabled(P.profile):
+            return True
+        try:
+            training_hook.finalize(self.store, P, t, outcome, self.state_dir)
+            return True
+        except Exception as e:                                    # noqa: BLE001
+            pol = training_hook.policy(P.profile)
+            if pol != "ignore":
+                self.store.event(P.id, t["task_id"], "training_capture_failed",
+                                 detail={"error": f"{type(e).__name__}: {e}"[:500],
+                                         "policy": pol, "outcome": outcome})
+                self.log(f"{P.id}/{t['task_id']}: training capture failed: {e}")
+            return pol != "hold"
 
     def _closeout_retry(self, P: Project, t: dict, why: str, cid: str = "") -> None:
         pid, tid = P.id, t["task_id"]

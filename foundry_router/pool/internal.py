@@ -487,6 +487,10 @@ class InternalPool(BackendPool):
                     raise
                 s.busy += 1
                 settled = False
+                cap = getattr(self, "capture", None)
+                ctok = cap.begin_call() if cap is not None else None
+                csettings = {"options": options, "max_tokens": max_tokens, "think": think,
+                             "format": fmt, "keep_alive": keep_alive}
                 try:
                     result = await s.protocol.chat(model, messages, tools=tools,
                                                    options=options, max_tokens=max_tokens,
@@ -494,6 +498,10 @@ class InternalPool(BackendPool):
                     s.consecutive_failures = 0
                     self._settle(eid, "settled", result.prompt_tokens, result.completion_tokens)
                     settled = True
+                    if ctok is not None:
+                        cap.finish_call(ctok, model=model, backend=s.config.name,
+                                        messages=messages, tools=tools, settings=csettings,
+                                        result=result)
                     return result, s.config.name
                 # ExceptionGroup: anyio TaskGroups can leak through httpcore on
                 # transport failures (observed live as an empty error string).
@@ -503,6 +511,10 @@ class InternalPool(BackendPool):
                         e, (httpx.ConnectError, httpx.ConnectTimeout)) else "error", detail=detail)
                     settled = True
                     errors.append(f"{s.config.name}: {detail}")
+                    if ctok is not None:
+                        cap.finish_call(ctok, model=model, backend=s.config.name,
+                                        messages=messages, tools=tools, settings=csettings,
+                                        error=detail, status="error")
                     if self._record_failure(s, detail):
                         self._notify()
                     self.db.log_event("warning", "backend_pool",
@@ -513,6 +525,11 @@ class InternalPool(BackendPool):
                     self._release(s)
                     if not settled:            # cancelled or an unexpected error
                         self._settle(eid, "error", detail="call did not complete")
+                        if ctok is not None:
+                            cap.finish_call(ctok, model=model, backend=s.config.name,
+                                            messages=messages, tools=tools, settings=csettings,
+                                            error="call did not complete (cancelled)",
+                                            status="cancelled")
         finally:
             self._inflight_exit(model, call_id)
         raise AllBackendsFailed(f"all backends failed for {model!r}: " + " | ".join(errors))
@@ -618,6 +635,11 @@ class InternalPool(BackendPool):
             self._settle(eid, "released", detail="cancelled while queued")
             raise
         usage = {"pt": 0, "ct": 0, "status": "error", "detail": "stream did not complete"}
+        cap = getattr(self, "capture", None)
+        ctok = cap.begin_call() if cap is not None else None
+        if ctok is not None:
+            from ..capture import accumulate, stream_accumulator
+            cacc = stream_accumulator()
         call_id = self._inflight_enter(model, s.config.name)
         s.busy += 1
         calls = getattr(self, "_calls", None) or {}
@@ -636,6 +658,8 @@ class InternalPool(BackendPool):
                 if chunk.get("done"):
                     usage.update(pt=chunk.get("prompt_tokens") or 0,
                                  ct=chunk.get("completion_tokens") or 0)
+                if ctok is not None:
+                    accumulate(cacc, chunk)
                 yield chunk
             s.consecutive_failures = 0
             usage.update(status="settled", detail="")
@@ -651,6 +675,18 @@ class InternalPool(BackendPool):
             self._release(s)
             self._inflight_exit(model, call_id)
             self._settle(eid, usage["status"], usage["pt"], usage["ct"], usage["detail"])
+            if ctok is not None:
+                ok = usage["status"] == "settled" and cacc["done"]
+                cap.finish_call(
+                    ctok, model=model, backend=s.config.name, messages=messages, tools=tools,
+                    settings={"options": options, "max_tokens": max_tokens, "think": think,
+                              "format": fmt, "keep_alive": keep_alive},
+                    stream=True, stream_acc=cacc,
+                    reconstruction="complete" if ok else "incomplete",
+                    status="ok" if ok else ("error" if usage["status"] in ("error", "released")
+                                            and usage["detail"] != "stream did not complete"
+                                            else "cancelled"),
+                    error="" if ok else usage["detail"])
 
     async def embed(self, model: str, inputs: list[str], **kw) -> tuple[dict, str]:
         """Embeddings with the same priority-ordered failover as chat()."""

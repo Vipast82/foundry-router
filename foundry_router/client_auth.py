@@ -63,8 +63,8 @@ def scope_for(path: str) -> Optional[str]:
         return "media"         # Foundry's built-in image tools
     if path.startswith("/mcp"):
         return None            # Foundry-MCP has its own token (mcp_aggregator.token)
-    if path.startswith("/v1/foundry/work"):
-        return "orchestration"   # a development coordinator's bindings and state
+    if path.startswith("/v1/foundry/"):
+        return "orchestration"   # coordinator bindings/state, training capture, pipeline status
     if path.startswith("/admin"):
         # The /ui page is a static shell (no data); its data comes from /admin/api,
         # which the UI calls with the admin key the user enters once.
@@ -164,6 +164,8 @@ class ClientAuthMiddleware:
             return
         info = {**(client or {"client_id": "anonymous", "scopes": [], "personas": []}), **corr}
         token = _client.set(info)
+        from .capture import reset_request
+        reset_request()
         try:
             await self.app(scope, receive, send)
         finally:

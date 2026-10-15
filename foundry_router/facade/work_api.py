@@ -107,3 +107,54 @@ async def denials(request: Request, session: str = "", run: str = "", since: flo
         f"WHERE status='denied' AND {col}=? AND ts >= ? ORDER BY ts DESC LIMIT 50",
         (val, since or time.time() - 86400))
     return {"denials": [dict(r) for r in rows]}
+
+
+# -- training-data capture (capture.py) and pipeline status (foundry_training) ---------
+
+@router.get("/v1/foundry/capture/records")
+async def capture_records(request: Request, after_id: int = 0, limit: int = 200,
+                          project: str = ""):
+    """Captured inference records (already redacted), oldest first, after
+    `after_id`: the training pipeline's incremental, idempotent source."""
+    cap = request.app.state.services.capture
+    if not cap.cfg.enabled and cap._store is None:
+        return {"records": [], "enabled": False, "next_after_id": after_id}
+    rows = cap.records(after_id, limit, project)
+    return {"records": rows, "enabled": bool(cap.cfg.enabled),
+            "next_after_id": rows[-1]["id"] if rows else after_id, "boundary": rows[0]["boundary"]
+            if rows else None}
+
+
+@router.put("/v1/foundry/training/status/{pipeline_id}")
+async def put_training_status(pipeline_id: str, request: Request):
+    import json as _json
+    data = await request.json()
+    request.app.state.services.db.execute(
+        "INSERT INTO training_status (pipeline_id, data, updated_ts) VALUES (?,?,?) "
+        "ON CONFLICT(pipeline_id) DO UPDATE SET data=excluded.data, updated_ts=excluded.updated_ts",
+        (pipeline_id[:80], _json.dumps(data, default=str)[:200000], time.time()))
+    return {"ok": True}
+
+
+@router.post("/v1/foundry/training/episodes/{pipeline_id}")
+async def put_training_episodes(pipeline_id: str, request: Request):
+    """Episode summaries (redacted previews only). Re-sending replaces."""
+    import json as _json
+    from foundry_training.redact import scan
+    body = await request.json()
+    n = 0
+    db = request.app.state.services.db
+    for e in (body.get("episodes") or [])[:500]:
+        if not isinstance(e, dict) or not e.get("episode_id"):
+            continue
+        if scan(e).count:              # never store anything that still looks secret
+            continue
+        db.execute("INSERT INTO training_episodes (episode_id, pipeline_id, project_id, task_id, "
+                   "kind, status, data, updated_ts) VALUES (?,?,?,?,?,?,?,?) ON CONFLICT"
+                   "(episode_id) DO UPDATE SET status=excluded.status, data=excluded.data, "
+                   "kind=excluded.kind, updated_ts=excluded.updated_ts",
+                   (str(e["episode_id"])[:120], pipeline_id[:80], str(e.get("project_id") or ""),
+                    str(e.get("task_id") or ""), str(e.get("kind") or ""),
+                    str(e.get("status") or ""), _json.dumps(e, default=str)[:60000], time.time()))
+        n += 1
+    return {"ok": True, "recorded": n}

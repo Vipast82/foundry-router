@@ -610,3 +610,22 @@ CREATE TABLE IF NOT EXISTS work_events (
   detail TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_work_events_ts ON work_events(ts);
+
+-- Training-data pipeline status as reported by foundry_training (display
+-- only; redacted summaries, never raw payloads).
+CREATE TABLE IF NOT EXISTS training_status (
+  pipeline_id TEXT PRIMARY KEY,
+  data TEXT,
+  updated_ts REAL
+);
+CREATE TABLE IF NOT EXISTS training_episodes (
+  episode_id TEXT PRIMARY KEY,
+  pipeline_id TEXT,
+  project_id TEXT,
+  task_id TEXT,
+  kind TEXT,
+  status TEXT,               -- selected | excluded | eval | candidate | deleted
+  data TEXT,                 -- JSON summary (redacted, truncated previews)
+  updated_ts REAL
+);
+CREATE INDEX IF NOT EXISTS idx_training_episodes_project ON training_episodes(project_id, status);

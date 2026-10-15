@@ -669,6 +669,20 @@ class MediaConfig(BaseModel):
     mcp_tools: bool = True
 
 
+class TrainingCaptureConfig(BaseModel):
+    """Opt-in capture of inference traffic for training data (capture.py).
+    Off by default; redacted before it is written; a separate store."""
+    enabled: bool = False
+    projects: list[str] = Field(default_factory=list)       # empty = every bound project
+    exclude_projects: list[str] = Field(default_factory=list)
+    include_unbound: bool = False      # traffic no coordinator bound (plain Kilo/Cline use)
+    clients: list[str] = Field(default_factory=list)        # empty = every client
+    retention_days: int = 30
+    max_body_bytes: int = 4_000_000
+    store_path: Optional[str] = None   # default <data>/training/capture.sqlite
+    allowed_email_domains: list[str] = Field(default_factory=list)
+
+
 class BudgetRule(BaseModel):
     """One shared limit in the budget ledger (budget.py).
 
@@ -751,6 +765,7 @@ class AppConfig(BaseModel):
     # ones left alone. Also available on demand from the Personas tab.
     persona_profiles: list[str] = Field(default_factory=list)
     budgets: BudgetsConfig = Field(default_factory=BudgetsConfig)
+    training_capture: TrainingCaptureConfig = Field(default_factory=TrainingCaptureConfig)
     health: HealthConfig = Field(default_factory=HealthConfig)
 
 

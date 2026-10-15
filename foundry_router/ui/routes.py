@@ -998,6 +998,42 @@ async def work_usage(request: Request, project: str = "", task: str = "", run: s
     return _svc(request).work.usage(project, task, run, session)
 
 
+@router.get("/admin/api/training")
+async def training_view(request: Request, project: str = "", status: str = ""):
+    """Training data: Foundry's own capture status, and what the training
+    pipeline reported (counts, gaps, datasets, episode summaries)."""
+    import json as _json
+    svc = _svc(request)
+    pipes = []
+    for r in svc.db.query("SELECT * FROM training_status ORDER BY updated_ts DESC"):
+        d = _json.loads(r["data"] or "{}")
+        pipes.append({"pipeline_id": r["pipeline_id"], "updated_ts": r["updated_ts"], **d})
+    q, args = "SELECT * FROM training_episodes WHERE 1=1", []
+    if project:
+        q += " AND project_id=?"
+        args.append(project)
+    if status:
+        q += " AND status=?"
+        args.append(status)
+    eps = []
+    for r in svc.db.query(q + " ORDER BY updated_ts DESC LIMIT 300", tuple(args)):
+        d = _json.loads(r["data"] or "{}")
+        eps.append({k: d.get(k) for k in ("episode_id", "project_id", "task_id", "kind", "status",
+                                          "reasons", "split", "outcome", "sources", "turns",
+                                          "summary")})
+    return {"capture": svc.capture.status(), "pipelines": pipes, "episodes": eps}
+
+
+@router.get("/admin/api/training/episodes/{episode_id}")
+async def training_episode(request: Request, episode_id: str):
+    import json as _json
+    rows = _svc(request).db.query("SELECT data FROM training_episodes WHERE episode_id=?",
+                                  (episode_id,))
+    if not rows:
+        return JSONResponse({"error": "unknown episode"}, status_code=404)
+    return _json.loads(rows[0]["data"] or "{}")
+
+
 @router.get("/admin/api/routes")
 async def routes_graph(request: Request, hours: float = 24, all: int = 0):
     """Routing graph from the live configuration + traffic / denials /

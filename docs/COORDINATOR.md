@@ -254,6 +254,18 @@ State lives in `%USERPROFILE%\.foundry-coordinator\coordinator.sqlite`
 (or `--state`). Raw check output is under `evidence\<project>\<task>\<commit>\`.
 Only one coordinator may run on a store (`run --force` takes over a stale one).
 
+### Training-data capture at closeout
+
+With `[training] enabled = true` in a profile, each task that closes
+(COMPLETE, closed awaiting approval, or FAILED) gets a pointer manifest in
+`<state>/training-spool/`. The manifest lists the task's sessions, SHAs,
+verification sets, evidence, reviews and approvals; it holds no prompts or
+outputs. `python -m foundry_training queue` processes the spool
+asynchronously. `[training.capture] on_failure` (ignore | warn | hold)
+decides whether a failed manifest write is ignored, recorded as an event
+(the default), or holds the task in CLOSING until it succeeds. See
+[TRAINING_DATA.md](TRAINING_DATA.md).
+
 ## Registering another game
 
 Copy `contrib/coordinator-pilot/fixture-game/project.toml.template` to

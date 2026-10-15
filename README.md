@@ -68,6 +68,13 @@ the optional companion services (with one-line installers).
   of the exact commit, closeout, human approval where required, then the next
   task. Project-agnostic (profiles + narrow adapters), stdlib only. See
   [docs/COORDINATOR.md](docs/COORDINATOR.md).
+- **Training-data pipeline** — opt-in capture of what the coding agent saw and
+  did (Foundry's effective requests, Kilo / Cline sessions, the coordinator's
+  verification and review records, git), redacted before it is stored, turned
+  into episodes, kept only when the outcome is proven, and exported locally
+  as canonical / chat-with-tools / preference datasets with separate
+  evaluation sets. Never uploads or trains. See
+  [docs/TRAINING_DATA.md](docs/TRAINING_DATA.md).
 - **Cost calculator with automatic prices** — local-vs-cloud cost of your real
   traffic; service prices refresh from OpenRouter's public catalog on a
   schedule (brain-matched, lockable per row).

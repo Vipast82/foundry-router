@@ -61,3 +61,21 @@ exclusive = ["studio:victor-workstation"]
 [closeout]
 mode = "none"
 exempt_paths = ["docs/progress/{task}_*"]
+
+[training]
+# Second example profile: a different project, different policy, same engine.
+enabled = true
+sources = ["kilo", "foundry", "coordinator", "git"]
+local_personas = ["Foundry-Kilo-Local"]
+
+[training.policy.sft]
+# fixture tasks have no human approvals; review approval at the head is enough
+require = ["verification_pass", "review_approved_at_revision", "complete_tool_sequence",
+           "local_author", "no_loop"]
+
+[training.split]
+eval_fraction = 0.5
+seed = "fx-v1"
+
+[training.capture]
+on_failure = "warn"

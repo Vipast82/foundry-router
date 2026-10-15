@@ -327,6 +327,8 @@ async def chat_completions(request: Request):
     from .ollama_api import _chat_dispatch
     request_context.capture(request.headers)
     body = await request.json()
+    if getattr(svc, "capture", None) is not None:
+        svc.capture.record_received(body, "openai")
     model_name = body.get("model") or ""
     stream = bool(body.get("stream", False))
     include_usage = bool((body.get("stream_options") or {}).get("include_usage"))

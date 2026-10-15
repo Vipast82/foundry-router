@@ -103,6 +103,12 @@ class Services:
         self.ledger = Ledger(lambda: self.config_store.config.budgets, db)
         self.guardrails.ledger = self.ledger
         self.pool.ledger = self.ledger
+        from .capture import Capture
+        from .configops import secret_values
+        self.capture = Capture(lambda: self.config_store.config.training_capture,
+                               Path(getattr(db, "path", data_dir() / "foundry.sqlite")).parent,
+                               secrets_fn=lambda: secret_values(self))
+        self.pool.capture = self.capture
         self.brain = BrainClient(cfg.agent_brain, self.http, db=db)
         self.research = ResearchAgent(
             cfg.registry.research, db, self.registry, self.mcp,
@@ -301,6 +307,7 @@ class Services:
         old = self.pool
         self.pool = build_pool(self.config_store.config, self.http, self.db)
         self.pool.ledger = self.ledger
+        self.pool.capture = self.capture
         self.pool.add_state_listener(self._on_pool_change)
         self.agent.pool = self.pool
         self.ollama_admin.pool = self.pool
@@ -395,6 +402,10 @@ class Services:
             try:
                 await asyncio.to_thread(self.media.prune)
                 await asyncio.to_thread(self.ledger.prune)
+                await asyncio.to_thread(
+                    self.capture.store.prune,
+                    self.config_store.config.training_capture.retention_days or 30) \
+                    if self.config_store.config.training_capture.enabled else None
                 await asyncio.to_thread(self.work.prune,
                                         self.config_store.config.budgets.retention_days or 90)
             except Exception:

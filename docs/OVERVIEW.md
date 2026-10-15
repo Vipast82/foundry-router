@@ -81,6 +81,10 @@ Worker model (± MCP tools, ± tiered review) → response streamed back to the 
   search+fetch" verifies the pipeline end to end.
 - **Dev-Log / Events** — live app log tail and the operational event stream
   (usage alerts, research outcomes, gateway changes).
+- **Logs → Training** — opt-in training-data capture status, what the
+  training pipeline reported (episodes by status, exclusion reasons,
+  redaction, artifacts, gaps, datasets) and redacted episode cards
+  ([TRAINING_DATA.md](TRAINING_DATA.md)).
 
 ---
 
@@ -142,5 +146,7 @@ You want `{"ok": true}`. Then firewall the port to Foundry's host/subnet only.
 | Meridian re-auth (refresh + full login) | [MERIDIAN_AUTH.md](MERIDIAN_AUTH.md) |
 | Docker MCP Gateway admin | [GATEWAY_SERVERS.md](GATEWAY_SERVERS.md) |
 | Code-execution sandbox MCP | [CODE_SANDBOX.md](CODE_SANDBOX.md) |
+| Development coordinator | [COORDINATOR.md](COORDINATOR.md) |
+| Training-data capture, curation, export | [TRAINING_DATA.md](TRAINING_DATA.md) |
 | Contributor conventions (versioning, branches) | [CONVENTIONS.md](CONVENTIONS.md) |
 | Client setup + the "why" | [../README.md](../README.md) |

@@ -23,6 +23,11 @@ Phases (each printed and recorded in DIR/report.json + DIR/report.md):
     resumes it
   5 evidence: transitions, sessions, reviews, Foundry request log, backend
     calls, git logs and remotes
+  6 (--training) training-data pipeline against the live run: Foundry's
+    capture API, the coordinator's closeout spool, `kilo serve`'s session
+    API, a copy-only snapshot of Kilo's database (source hash compared),
+    curation, exports + validation, and the report pushed to Foundry.
+    Nothing is uploaded anywhere and no training is started.
 """
 
 from __future__ import annotations
@@ -167,7 +172,7 @@ def setup_au(out: str, au_src: str) -> str:
     return root
 
 
-def foundry_config(out: str) -> str:
+def foundry_config(out: str, training: bool = False) -> str:
     cfg = textwrap.dedent(f"""\
         server: {{host: 127.0.0.1, port: {PORTS['foundry']}}}
         agent_brain: {{provider: ollama, endpoint: "http://127.0.0.1:9", model: b,
@@ -189,6 +194,8 @@ def foundry_config(out: str) -> str:
           - {{name: coordinator, key: {COORD_KEY}, scopes: [inference, orchestration]}}
         """)
     cfg += "budgets:\n  enabled: true\n  rules: " + json.dumps(RULES) + "\n"
+    if training:
+        cfg += "training_capture: {enabled: true}\n"     # every coordinator-bound project
     path = os.path.join(out, "foundry.yaml")
     open(path, "w").write(cfg)
     return path
@@ -242,6 +249,8 @@ def main():
     ap.add_argument("--kilo", required=True, help="path to the kilo CLI binary")
     ap.add_argument("--au", required=True, help="AnimalUprising clone with history")
     ap.add_argument("--out", required=True)
+    ap.add_argument("--training", action="store_true",
+                    help="enable Foundry capture and run the training pipeline (phase 6)")
     a = ap.parse_args()
     out = os.path.abspath(a.out)
     shutil.rmtree(out, ignore_errors=True)
@@ -261,13 +270,14 @@ def run(a, out):
     start([sys.executable, os.path.join(HERE, "mock_backends.py"), "--strata", str(PORTS["strata"]),
            "--meridian", str(PORTS["meridian"]), "--log", calls], os.path.join(out, "mocks.log"))
     wait_http(f"http://127.0.0.1:{PORTS['strata']}/v1/models")
-    fenv = dict(os.environ, FOUNDRY_CONFIG=foundry_config(out), FOUNDRY_DATA_DIR=os.path.join(out, "foundry-data"),
+    fcfg = foundry_config(out, training=a.training)
+    fenv = dict(os.environ, FOUNDRY_CONFIG=fcfg, FOUNDRY_DATA_DIR=os.path.join(out, "foundry-data"),
                 PYTHONPATH=REPO)
     start([sys.executable, "-c", textwrap.dedent(f"""
         import uvicorn
         from pathlib import Path
         from foundry_router.main import create_app
-        app = create_app(config_path=Path({foundry_config(out)!r}),
+        app = create_app(config_path=Path({fcfg!r}),
                          database_path=Path({os.path.join(out, 'foundry.sqlite')!r}))
         uvicorn.run(app, host="127.0.0.1", port={PORTS['foundry']}, log_level="warning")
         """)], os.path.join(out, "foundry.log"), env=fenv, cwd=REPO)
@@ -337,6 +347,71 @@ def run(a, out):
     else:
         phase("4 shared budget", note="no task was paused (the shared limit was not reached)")
     collect(out, F, fx, au, calls)
+    if a.training:
+        training_phase(out, F, kurl)
+
+
+def training(out, *args, check=True) -> dict | str:
+    env = dict(os.environ, FOUNDRY_TRAINING_STORE=os.path.join(out, "training-store"),
+               FOUNDRY_TRAINING_PROFILES=os.path.join(out, "profiles"),
+               FOUNDRY_TRAINING_KEY=COORD_KEY, KILO_SERVER_PASSWORD=KILO_PW, PYTHONPATH=REPO)
+    r = subprocess.run([sys.executable, "-m", "foundry_training", *args], cwd=REPO, env=env,
+                       capture_output=True, text=True, timeout=600)
+    if check and r.returncode:
+        raise RuntimeError(f"foundry_training {' '.join(args)}: {r.stdout[-1500:]}{r.stderr[-1500:]}")
+    try:
+        return json.loads(r.stdout)
+    except ValueError:
+        return (r.stdout + r.stderr).strip()
+
+
+def training_phase(out, F, kurl):
+    import hashlib
+    spool = os.path.join(out, "coordinator-state", "training-spool")
+    manifests = sorted(os.listdir(spool)) if os.path.isdir(spool) else []
+    captured = http("GET", f"{F}/v1/foundry/capture/records?limit=1000", key=COORD_KEY)["records"]
+    queue = training(out, "queue", "--spool", spool, "--foundry-url", F, "--kilo-url", kurl)
+    # Kilo's own database: copied, never opened in place; its files must not change
+    kdb = os.path.join(out, "kilo-home", ".local", "share", "kilo", "kilo.db")
+
+    def digest():
+        return {sfx or "db": hashlib.sha256(open(kdb + sfx, "rb").read()).hexdigest()[:16]
+                for sfx in ("", "-wal") if os.path.exists(kdb + sfx)}
+    before = digest() if os.path.exists(kdb) else {}
+    dbres = training(out, "ingest", "kilo", "--db", kdb, check=False) if before else "no kilo.db"
+    after = digest() if before else {}
+    exports = {}
+    for pid in ("fixture-game", "animaluprising"):
+        training(out, "ingest", "git", "--project", pid)
+        training(out, "curate", "--project", pid)
+        for kind, target in (("sft", "chatml-tools"), ("sft", "canonical"),
+                             ("correction", "canonical")):
+            exports[f"{pid} {kind}/{target}"] = training(out, "export", "--project", pid,
+                                                         "--kind", kind, "--target", target)
+    status = training(out, "status", "--json")
+    pushed = training(out, "push", "--foundry-url", F, "--id", "pilot")
+    view = http("GET", f"{F}/admin/api/training")
+    eps = []
+    for ep in view["episodes"]:
+        eps.append({k: ep.get(k) for k in ("project_id", "task_id", "kind", "status", "split",
+                                           "reasons", "outcome")}
+                   | {"session": (ep.get("summary") or {}).get("session"),
+                      "context": (ep.get("summary") or {}).get("context_source"),
+                      "turns": len(ep.get("turns") or [])})
+    phase("6 training-data pipeline (no upload, no training)",
+          closeout_manifests=manifests,
+          foundry_capture={"records": len(captured),
+                           "by_kind": {k: sum(1 for r in captured if r["kind"] == k)
+                                       for k in ("received", "backend_call")},
+                           "projects": sorted({r["project_id"] for r in captured})},
+          queue=queue, kilo_db={"result": dbres, "source_before": before, "source_after": after,
+                                "unchanged": before == after},
+          exports=exports,
+          status={pid: {k: d[k] for k in ("episodes", "exclusion_reasons", "gaps", "duplicates",
+                                         "redaction", "sessions")}
+                  for pid, d in status["projects"].items()},
+          datasets=status["datasets"], pushed=pushed, foundry_view_episodes=eps,
+          gaps=training(out, "gaps"))
 
 
 def collect(out, F, fx, au, calls):

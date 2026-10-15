@@ -423,6 +423,19 @@ budgets:
 #      max_calls: 400
 #      window_minutes: 300
 
+# Training-data capture (docs/TRAINING_DATA.md). Off by default. When on,
+# Foundry records the request it received and the effective request it sent
+# to each backend (plus output, tool calls, usage, status), redacted BEFORE
+# writing, to <data>/training/capture.sqlite (0600). Read by the
+# foundry_training pipeline via GET /v1/foundry/capture/records (orchestration
+# key). Nothing is uploaded and no training is started.
+training_capture:
+  enabled: false
+  projects: []                     # empty = every coordinator-bound project
+  exclude_projects: []
+  include_unbound: false           # traffic with no project binding
+  retention_days: 30
+
 # Functional health (docs/OBSERVABILITY.md): "reachable" vs actually serving.
 # Real traffic is the evidence; an idle backend with no recent success gets a
 # tiny probe (local backends automatically, paid ones only on demand).
