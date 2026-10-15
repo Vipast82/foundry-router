@@ -472,6 +472,10 @@ class Database:
             # NULL/'local' = fall back to a local model (old behaviour);
             # 'refuse' = answer with a clear error instead (Cline PLAN).
             ("personas", "fallback_policy", "TEXT"),
+            # 'strict' = fail closed: only the persona's model_allowlist, in
+            # pinned order, each budget-checked; no fall-through to the pool,
+            # no local degrade, no brain. NULL/'flexible' = previous behaviour.
+            ("personas", "routing", "TEXT"),
             # Leave Foundry's own status lines (routing header, notes, heartbeat
             # text) out of the reasoning stream — clean traces for data
             # generation. Keep-alive frames are still sent, just empty.

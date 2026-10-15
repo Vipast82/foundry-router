@@ -451,6 +451,11 @@ async def _chat_dispatch(svc, body: dict):
         if refusal is None:
             return await _agent_backend_chat(svc, persona, agent_name, model_name,
                                              messages, stream, user_text, client_tools)
+        if is_strict(persona):
+            return JSONResponse({"error": f"{persona['virtual_name']}: agent "
+                                          f"{agent_name!r} unavailable ({refusal}); strict "
+                                          f"routing, so no model was substituted",
+                                 "code": "route_unavailable"}, status_code=503)
         # Loop protection / agent down: serve the persona with its normal model
         # policy instead, and say why in the event log.
         svc.db.log_event("warning", "agents",
@@ -470,6 +475,13 @@ async def _chat_dispatch(svc, body: dict):
     # without MCP tools is served by direct dispatch (static policy pick +
     # guardrails + failover, request forwarded as-is); one WITH MCP tools
     # still runs the worker-owned tool loop, which never needed the brain.
+    # Strict personas never involve the brain or the pipeline: direct only.
+    if is_strict(persona):
+        return await _direct_dispatch_chat(svc, persona, model_name, messages,
+                                           client_tools, options, stream, user_text,
+                                           client_think=client_think,
+                                           client_format=client_format,
+                                           client_keep_alive=body.get("keep_alive"))
     brain_skip = svc.brain.skip_reason() if hasattr(svc.brain, "skip_reason") else None
     if brain_skip and not client_tools and exec_mode == "agent" \
             and not _persona_has_mcp_tools(persona):
@@ -697,6 +709,46 @@ def _is_paid_backend(info: dict) -> bool:
     return t == "openai-compatible" and (info or {}).get("flavor") not in _LOCAL_OPENAI_FLAVORS
 
 
+def is_strict(persona) -> bool:
+    """routing=strict: the persona's allowlist is the whole route."""
+    return str((persona or {}).get("routing") or "").strip().lower() == "strict"
+
+
+def strict_candidates(svc, persona) -> list[str]:
+    """A strict persona's models, in order: pinned_models that are allowlisted
+    (the explicit fallback chain) first, then the rest of model_allowlist —
+    only the reachable, chat-capable ones. Nothing outside the allowlist."""
+    allow = [str(a) for a in _jl_list((persona or {}).get("model_allowlist"))]
+    pins = [str(p) for p in _jl_list((persona or {}).get("pinned_models"))]
+    order = [p for p in pins if p in allow] + [a for a in allow if a not in pins]
+    avail = set(svc.pool.available_models())
+    out = []
+    for m in order:
+        hit = m if m in avail else next(
+            (a for a in avail if str(a).split(":")[0] == m.split(":")[0]), None)
+        if not hit or hit in out:
+            continue
+        meta = svc.registry.get(hit)
+        if meta and meta.get("embedding"):
+            continue
+        out.append(hit)
+    return out
+
+
+def strict_refusal(svc, persona, logger, code: str, detail: str, denials=None,
+                   status: int = 503):
+    """Clear, machine-readable refusal for a strict persona. Never a silent
+    substitute: the client sees why and what to do."""
+    name = persona["virtual_name"]
+    msg = (f"{name}: {detail}. This persona uses strict routing, so no other "
+           f"model, backend or account was used.")
+    logger.finish("error", msg)
+    svc.db.log_event("warning", "routing", msg, json.dumps({"code": code,
+                                                          "denials": denials or []}))
+    return JSONResponse({"error": msg, "code": code, "persona": name,
+                         "denials": denials or []}, status_code=status)
+
+
 async def _failover_list(svc, persona, first: str, user_text: str, eff,
                          limit: int = 3) -> list[str]:
     """`first` plus the next models this persona's policy allows, for
@@ -705,10 +757,14 @@ async def _failover_list(svc, persona, first: str, user_text: str, eff,
     clears it right now."""
     from ..brain.fallback import fallback_candidates
     out = [first]
-    try:
-        cands = fallback_candidates(svc.pool, svc.registry, persona, user_text, limit=6)
-    except Exception:
-        cands = []
+    if is_strict(persona):
+        # Strict: fail over only within the persona's own allowlist chain.
+        cands = strict_candidates(svc, persona)
+    else:
+        try:
+            cands = fallback_candidates(svc.pool, svc.registry, persona, user_text, limit=6)
+        except Exception:
+            cands = []
     for mid in cands:
         if mid in out:
             continue
@@ -1538,8 +1594,37 @@ async def _direct_dispatch_chat(svc, persona, model_name, messages, client_tools
                            "off so the whole output budget goes to the summary")
     refuse_local = (persona.get("fallback_policy") or "").strip().lower() == "refuse"
     denials: list[str] = []
-    pins = _paid_pin_order(svc, persona)
-    if pins:
+    strict = is_strict(persona)
+    pins = [] if strict else _paid_pin_order(svc, persona)
+    if strict:
+        # STRICT: the allowlist (in pinned order) is the whole route. Each
+        # candidate is budget-checked; a denial moves to the next listed model
+        # (shown to the client), never outside the list. Nothing listed is
+        # reachable / allowed -> a clear refusal, never a substitute.
+        cands = strict_candidates(svc, persona)
+        if not cands:
+            allow = _jl_list(persona.get("model_allowlist"))
+            return strict_refusal(svc, persona, logger, "route_unavailable",
+                                  ("no model in its allowlist is reachable "
+                                   f"({', '.join(map(str, allow)) or 'allowlist is empty'})"))
+        for cand in cands:
+            v = await svc.guardrails.check_paid_call(
+                cand, svc.pool.backend_info(cand), svc.registry.get(cand),
+                RequestGuardState(), eff)
+            if v.allowed:
+                model_id = cand
+                break
+            logger.record_guardrail(f"denied {cand}: {v.reason}")
+            denials.append(f"{cand}: {v.reason}")
+        if model_id is None:
+            return strict_refusal(svc, persona, logger, "budget_denied",
+                                  "every model in its route was denied by the usage "
+                                  "budget (" + "; ".join(denials)[:500] + ")",
+                                  denials, status=429)
+        if denials:
+            route_notes.append("strict route: " + " → ".join(
+                [d.split(":")[0] + " denied" for d in denials] + [model_id]))
+    elif pins:
         # Paid-pin priority cascade (prefer_paid persona, e.g. Cline PLAN): try each
         # pinned paid model in pin order — Opus 4.8 -> Sonnet 5 -> ... — each probed
         # with its OWN guardrail state so no credits/paid-call bleed between them.

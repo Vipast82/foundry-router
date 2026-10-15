@@ -296,15 +296,20 @@ def _error_obj(message) -> dict:
 
 def _error_envelope(resp) -> JSONResponse:
     try:
-        err = json.loads(resp.body).get("error")
+        body = json.loads(resp.body)
+        err = body.get("error")
     except Exception:
-        err = None
+        body, err = {}, None
     msg = err if isinstance(err, str) else (err or {}).get("message") if isinstance(err, dict) else "error"
     code = "model_not_found" if resp.status_code == 404 else "backend_error"
+    # Foundry's own machine-readable reason (strict routing / budget refusals)
+    if isinstance(body, dict) and isinstance(body.get("code"), str):
+        code = body["code"]
     if "context window exceeded" in (msg or "").lower():
         code = "context_length_exceeded"
-    return JSONResponse({"error": {"message": msg or "error", "type": "invalid_request_error"
-                                   if resp.status_code < 500 else "api_error", "code": code}},
+    etype = ("rate_limit_error" if resp.status_code == 429 else
+             "invalid_request_error" if resp.status_code < 500 else "api_error")
+    return JSONResponse({"error": {"message": msg or "error", "type": etype, "code": code}},
                         status_code=resp.status_code)
 
 
