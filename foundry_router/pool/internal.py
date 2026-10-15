@@ -213,7 +213,10 @@ class InternalPool(BackendPool):
                 "flavor": getattr(c, "effective_flavor", None),
                 "subscription": bool(getattr(c, "is_subscription", False)),
                 "call_budget_5h": getattr(c, "call_budget_5h", None),
-                "call_budget_daily": getattr(c, "call_budget_daily", None)}
+                "call_budget_daily": getattr(c, "call_budget_daily", None),
+                "management_key": getattr(c, "management_key", None),
+                "management_url": getattr(c, "management_url", None),
+                "usage_limit_pct": getattr(c, "usage_limit_pct", None)}
 
     async def loaded_models(self) -> set[str]:
         """Union of models resident in VRAM across healthy ollama backends,

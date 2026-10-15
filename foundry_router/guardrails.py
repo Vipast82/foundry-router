@@ -57,6 +57,8 @@ class GuardrailEngine:
         self.db = db
         self.meridian_usage = meridian_usage
         self.pool_mode = pool_mode
+        # CLIProxyAPI usage readings (set by Services); None in bare tests.
+        self.cliproxy_usage = None
 
     def _defers(self) -> bool:
         # defer_to_pool is inert under mode: internal (§4.3) — there is no
@@ -117,6 +119,13 @@ class GuardrailEngine:
             if v is not None:
                 state.events.append(f"denied {model_id}: {v.reason}")
                 return v
+            cu = self.cliproxy_usage
+            if cu is not None and cu.configured(backend_info):
+                st = await cu.model_status(model_id, backend_info or {})
+                if not st["available"]:
+                    msg = f"{st['note']} — use another model or wait"
+                    state.events.append(f"denied {model_id}: {msg}")
+                    return Verdict(False, msg)
 
         if is_meridian and backend_info and backend_info.get("url"):
             from .usage import claude_premium_level

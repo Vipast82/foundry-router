@@ -7,7 +7,11 @@ server:
   port: 8317
 
 management:
-  allow-remote: false # management panel from localhost only
+  # Foundry reads usage windows from the management API with this key (set
+  # the same value as the backend's management_key in Foundry). If Foundry
+  # runs on another host, set allow-remote: true and firewall port 8317 to
+  # Foundry's address only.
+  allow-remote: false
   secret-key: "change-me-management-key"
 
 # Keys CLIENTS (Foundry) must send. Put the same value in Foundry's backend

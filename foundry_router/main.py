@@ -46,6 +46,7 @@ from .agents import AgentManager
 from .facade.mcp_aggregator import MCPAggregator
 from .tools.sync import ToolRegistry
 from .ui import router as ui_router
+from .cliproxy_usage import CliproxyUsage
 from .usage import MeridianUsage
 
 log = logging.getLogger(__name__)
@@ -93,8 +94,11 @@ class Services:
         self.mcp.agents = self.agents
         self.tool_registry = ToolRegistry(db, self.registry, self.mcp)
         self.meridian_usage = MeridianUsage(cfg.meridian, self.http, db)
+        self.cliproxy_usage = CliproxyUsage(
+            lambda: self.config_store.config.subscription_usage, self.http, db)
         self.guardrails = GuardrailEngine(cfg.guardrails, db, self.meridian_usage,
                                           pool_mode=cfg.backend_pool.mode)
+        self.guardrails.cliproxy_usage = self.cliproxy_usage
         self.brain = BrainClient(cfg.agent_brain, self.http, db=db)
         self.research = ResearchAgent(
             cfg.registry.research, db, self.registry, self.mcp,
@@ -342,6 +346,7 @@ class Services:
             asyncio.create_task(self._openrouter_loop()),
             asyncio.create_task(self._tool_sync_loop()),
             asyncio.create_task(self._quota_poll_loop()),
+            asyncio.create_task(self._subscription_usage_loop()),
             asyncio.create_task(self._brain_health_loop()),
             asyncio.create_task(self._pricing_loop()),
             asyncio.create_task(self._agent_health_loop()),
@@ -475,6 +480,26 @@ class Services:
                     await self.meridian_usage.snapshot(s.config.url, s.config.api_key)
             except Exception:
                 log.exception("quota poll loop error")
+
+    async def _subscription_usage_loop(self) -> None:
+        """Keep CLIProxyAPI usage readings fresh for the dashboard even when no
+        requests flow (requests read them on demand as well)."""
+        while True:
+            interval = self.config_store.config.subscription_usage.poll_seconds
+            await asyncio.sleep(max(15, interval or 60))
+            if interval <= 0:
+                continue
+            try:
+                for s in getattr(self.pool, "backends", {}).values():
+                    info = {"name": s.config.name, "url": s.config.url,
+                            "flavor": s.config.effective_flavor,
+                            "management_key": s.config.management_key,
+                            "management_url": s.config.management_url,
+                            "usage_limit_pct": s.config.usage_limit_pct}
+                    if CliproxyUsage.configured(info):
+                        await self.cliproxy_usage.snapshot(info, force=True)
+            except Exception:
+                log.exception("subscription usage poll error")
 
     async def shutdown(self) -> None:
         for t in self._bg_tasks:

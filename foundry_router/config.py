@@ -240,6 +240,17 @@ class BackendConfig(BaseModel):
     subscription: bool = False
     call_budget_5h: Optional[int] = None
     call_budget_daily: Optional[int] = None
+    # CLIProxyAPI usage readings (flavor "cliproxyapi"): its management key
+    # lets Foundry read the usage windows each signed-in account reported
+    # (ChatGPT 5-hour / weekly %, Claude Code 5h / 7d utilization) from
+    # GET /v0/management/auth-files, and stop using the backend's models once
+    # a window reaches the limit. Needs CLIProxyAPI's management.secret-key
+    # (and management.allow-remote: true when Foundry runs on another host).
+    # management_url defaults to the backend url without /v1.
+    management_key: Optional[str] = None
+    management_url: Optional[str] = None
+    # Per-backend override of subscription_usage.limit_pct.
+    usage_limit_pct: Optional[float] = None
 
     @property
     def is_subscription(self) -> bool:
@@ -294,6 +305,17 @@ class GuardrailsConfig(BaseModel):
     max_paid_calls_per_request: int = 3
     daily_spend_cap_usd: Optional[float] = None
     weekly_spend_cap_usd: Optional[float] = None
+
+
+class SubscriptionUsageConfig(BaseModel):
+    # Subscription proxies that report usage windows (CLIProxyAPI): a model is
+    # not used once any window covering it is at or above this percentage, so
+    # persona cascades move on to the next model before the plan runs out.
+    limit_pct: float = 85.0
+    # Background refresh for the dashboard; requests also read it on demand.
+    poll_seconds: int = 60
+    # How long one read of the management API is reused.
+    cache_seconds: float = 20.0
 
 
 class MeridianConfig(BaseModel):
@@ -593,6 +615,7 @@ class AppConfig(BaseModel):
     backend_pool: BackendPoolConfig = Field(default_factory=BackendPoolConfig)
     guardrails: GuardrailsConfig = Field(default_factory=GuardrailsConfig)
     meridian: MeridianConfig = Field(default_factory=MeridianConfig)
+    subscription_usage: SubscriptionUsageConfig = Field(default_factory=SubscriptionUsageConfig)
     registry: RegistryConfig = Field(default_factory=RegistryConfig)
     mcp_servers: list[MCPServerConfig] = Field(default_factory=list)
     tool_sync: ToolSyncConfig = Field(default_factory=ToolSyncConfig)

@@ -1221,8 +1221,11 @@ def _local_fallback(svc, persona) -> "str | None":
     coder (e.g. qwen3.8:27b), else any local, else None if nothing local is up."""
     allow = set(_jl_list((persona or {}).get("model_allowlist")))
     allow_bases = {str(a).split(":")[0] for a in allow}
+    # Local = Ollama or a llama.cpp / vLLM / Unsloth server (the same test as
+    # the paid cascade uses), not just Ollama — a llama.cpp coder is the usual
+    # Cline local and must be the landing spot when paid models are denied.
     local = [m for m in svc.pool.available_models()
-             if (svc.pool.backend_info(m) or {}).get("type") == "ollama"]
+             if not _is_paid_backend(svc.pool.backend_info(m) or {})]
     if allow:
         scoped = [m for m in local
                   if m in allow or str(m).split(":")[0] in allow_bases]
@@ -1674,6 +1677,17 @@ async def _direct_dispatch_chat(svc, persona, model_name, messages, client_tools
                                          all_tools, logger)
     if _stuck_note:
         route_notes.append(_stuck_note)
+    # Subscription usage (CLIProxyAPI): show where the account stands, so a
+    # Plan turn on GPT says e.g. "ChatGPT plus usage: 5-hour 42%, weekly 61%".
+    _binfo_u = svc.pool.backend_info(model_id) or {}
+    _cu = getattr(svc, "cliproxy_usage", None)
+    if _cu is not None and _cu.configured(_binfo_u):
+        try:
+            _ust = await _cu.model_status(model_id, _binfo_u)
+            if _ust.get("note"):
+                route_notes.append(_ust["note"])
+        except Exception:                                         # noqa: BLE001
+            pass
     out_cap = _fit_output_cap(svc, persona, model_id, base_convo, all_tools, out_cap)
 
     # ---- turn assist (turn_assist.py rules + frontier_assist.py helpers) --------

@@ -4408,6 +4408,48 @@ function quotaCard(q) {
   </div>`;
 }
 
+function subUsageCard(su) {
+  const bes = (su && su.backends) || [];
+  if (!bes.length) return "";
+  const left = s => s == null ? "" : s >= 86400 ? `resets in ${Math.floor(s / 86400)}d ${Math.floor(s % 86400 / 3600)}h`
+    : s >= 3600 ? `resets in ${Math.floor(s / 3600)}h ${Math.floor(s % 3600 / 60)}m` : `resets in ${Math.max(0, Math.floor(s / 60))}m`;
+  const rows = bes.flatMap(b => {
+    if (!b.ok) return [`<div class="row"><label>${esc(b.backend)}</label>
+      <span class="pill warn">${b.configured ? "usage unavailable" : "not configured"}</span>
+      <span class="hint">${esc(b.error || "")}${b.configured ? "" : " — add management_key (CLIProxyAPI's management.secret-key) to this backend"}</span></div>`];
+    if (!b.accounts.length) return [`<div class="row"><label>${esc(b.backend)}</label><span class="hint">no signed-in accounts</span></div>`];
+    return b.accounts.flatMap(a => {
+      const who = `${esc(b.backend)} · ${a.provider === "codex" ? "ChatGPT" : "Claude"}${a.plan ? " " + esc(a.plan) : ""}${a.label ? " · " + esc(a.label) : ""}`;
+      if (a.disabled) return [`<div class="row"><label>${who}</label><span class="pill">disabled</span></div>`];
+      if (!a.windows.length) return [`<div class="row"><label>${who}</label>
+        ${a.unavailable ? '<span class="pill bad">unavailable (cooling down)</span>' : ""}
+        <span class="hint">no usage reading yet — it arrives with the next request through CLIProxyAPI</span></div>`];
+      return a.windows.map(w => `<div class="row"><label>${who} · ${esc(w.name)}</label>
+        <b>${Math.round(w.used)}% used</b>
+        ${w.used >= b.limit_pct ? `<span class="pill bad">at limit — not used</span>` : w.used >= b.limit_pct - 15 ? '<span class="pill warn">near limit</span>' : ""}
+        <span class="hint">${esc(left(w.resets_in_s))}${a.age_s != null ? ` · reading ${fmtDur(a.age_s * 1000)} old` : ""}${w.used !== w.reported ? " · window reset since the reading" : ""}</span></div>`);
+    });
+  });
+  return `<div class="card">
+    <h2 style="margin-top:0">Subscription usage (CLIProxyAPI)</h2>
+    ${rows.join("")}
+    <div class="row"><label title="A ChatGPT/Claude model behind CLIProxyAPI is not used once any usage window covering it reaches this %, so persona cascades move on (e.g. GPT → Claude → local) before the plan runs out. Per-backend override: usage_limit_pct.">stop using at</label>
+      <input id="su-limit" type="number" min="1" max="100" style="width:70px" value="${su.limit_pct}"> %
+      <button id="su-save">Save</button> <button id="su-refresh" title="Re-read CLIProxyAPI's management API now">Refresh</button></div>
+    <p class="hint">Readings are the usage headers ChatGPT / Claude sent with the last request through CLIProxyAPI, so they refresh as requests flow; a window past its reset time counts as reset.</p>
+  </div>`;
+}
+
+function bindSubUsageCard() {
+  const save = $("#su-save");
+  if (!save) return;
+  save.onclick = async () => {
+    await api("config/subscription_usage", {method: "POST", body: {limit_pct: +$("#su-limit").value}});
+    render();
+  };
+  $("#su-refresh").onclick = async () => { await api("subscription-usage?refresh=1"); render(); };
+}
+
 // ms -> compact human string (244478 ms reads awful; "4m 4s" doesn't).
 function fmtDur(ms) {
   if (ms == null) return "";
@@ -4527,8 +4569,9 @@ async function tabEvals() {
 }
 
 async function tabUsage() {
-  const [d, q, ce] = await Promise.all([
-    api("usage?limit=100"), api("quota"), api("tool_calls?executed_code=1&limit=50")]);
+  const [d, q, ce, su] = await Promise.all([
+    api("usage?limit=100"), api("quota"), api("tool_calls?executed_code=1&limit=50"),
+    api("subscription-usage").catch(() => null)]);
   const reqs = d.requests || [];
 
   // ---- Code-execution audit (the sandbox's strongest audit trail) ---------------
@@ -4646,6 +4689,7 @@ async function tabUsage() {
     </tr>`).join("");
   $("#main").innerHTML = `
     ${quotaCard(q)}
+    ${subUsageCard(su)}
     ${codeCard}
     ${mcpCard}
     <div class="row" style="justify-content:space-between;align-items:baseline">
@@ -4658,6 +4702,7 @@ async function tabUsage() {
       <b>direct · client tools</b> row bypassed Foundry's tools entirely.</p>
     <table><tr><th>time (UTC)</th><th>persona</th><th>mode</th><th>request</th>
     <th>model(s)</th><th>tools (MCP)</th><th>steps</th><th>time</th><th>cost</th><th>guard</th><th>status</th><th title="Rate this response — feeds the insight digest and per-persona quality trends">rate</th></tr>${rows}</table>`;
+  bindSubUsageCard();
 }
 
 // Thumbs feedback from the Usage tab (quality tracking Phase 1). Re-render so

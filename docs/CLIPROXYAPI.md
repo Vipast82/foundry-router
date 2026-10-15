@@ -29,7 +29,7 @@ Checked against CLIProxyAPI v8 (its source) and covered by
 | Paid-call guardrail, persona paid cascades, cost report | ✅ counted as **subscription**, never as free/local |
 | Context guard | ✅ default windows: GPT/Codex 272k, Claude 200k, Gemini 1M (a persona `context_window` or registry override wins) |
 | `max_tokens` / `temperature` for Codex models | ⚠ ignored upstream: Codex accepts neither. Replies end when the model is done. |
-| Quota / window gauge | ⚠ not shown in Foundry. CLIProxyAPI's own panel (`/management.html`) shows quotas; on a rate limit Foundry fails over to the persona's next model. |
+| Usage windows (ChatGPT 5-hour / weekly, Claude Code 5h / 7d) | ✅ read from CLIProxyAPI's management API (set `management_key`): shown on the Usage tab and in each turn's status line; a model stops being used at **85%** (configurable) so the persona cascade moves on before the plan runs out. See "Usage limits" below. |
 
 ## 1. Run CLIProxyAPI
 
@@ -61,8 +61,11 @@ Backends → Pool → backend list (JSON):
 ```json
 {"name": "cliproxy", "type": "openai-compatible",
  "url": "http://<host>:8317/v1", "api_key": "${CLIPROXY_API_KEY}",
- "flavor": "cliproxyapi"}
+ "flavor": "cliproxyapi", "management_key": "${CLIPROXY_MGMT_KEY}"}
 ```
+
+`management_key` is CLIProxyAPI's `management.secret-key`. It's optional but
+turns on usage tracking (below). The UI shows it masked, like `api_key`.
 
 `flavor: "cliproxyapi"` is what makes Foundry treat it as a subscription
 cloud backend and send the full effort scale. Use `openai-compatible` for
@@ -73,6 +76,42 @@ CLIProxyAPI doesn't answer.
 Any other OpenAI-dialect subscription proxy (ChatMock, …) can be marked the
 same way with `"subscription": true` (optionally with `call_budget_5h` /
 `call_budget_daily` caps, since these plans report no usage to Foundry).
+
+## Usage limits (like Meridian's usage window, for ChatGPT)
+
+With `management_key` set, Foundry reads the usage each signed-in account
+reported to CLIProxyAPI (`GET /v0/management/auth-files`):
+
+- **ChatGPT/Codex**: the 5-hour and weekly windows (% used, reset time), the
+  plan, and any named per-model limits (e.g. GPT-5.3-Codex-Spark).
+- **Claude Code accounts**: the 5h / 7d unified windows.
+- An account still under a provider `Retry-After` counts as 100%.
+
+What Foundry does with it:
+
+- **Stops using a model at 85%** of any window that covers it (Usage tab →
+  "stop using at", or `subscription_usage.limit_pct`; per-backend
+  `usage_limit_pct`). The guardrail denies it, so a Plan persona's cascade
+  moves to its next pinned model (e.g. Claude via Meridian), then local. It
+  resumes automatically once the window resets.
+- With several accounts of the same kind, the model stays usable while **any**
+  account is under the limit (CLIProxyAPI rotates between them).
+- **Usage tab** card: every account's windows, % used, reset time and the
+  reading's age; **Events** logs when a model hits the limit.
+- **Status line** on each turn served by a CLIProxyAPI model, e.g.
+  `ChatGPT plus usage: weekly 61%, 5-hour 42%`.
+
+Readings come from the headers ChatGPT/Claude send with each reply, so they
+refresh as requests flow through CLIProxyAPI. Before the first request
+there's no reading and the model is allowed; the optional `call_budget_5h` /
+`call_budget_daily` caps still apply. A window whose reset time has passed
+counts as reset.
+
+**Foundry on a different host from CLIProxyAPI** (e.g. Foundry on victor-ai,
+CLIProxyAPI on TrueNAS): set `management.allow-remote: true` in CLIProxyAPI's
+`config.yaml` and firewall port 8317 to Foundry's host. The management API
+can change CLIProxyAPI's settings, so don't expose it further. Running both
+on the same host avoids this.
 
 ## 3. Use it for hard problems (Plan escalation)
 
@@ -91,6 +130,11 @@ model apply it in Act. Keep the escalation context small: ChatGPT Plus
 budgets drain in minutes when every request resends a 200k-token conversation.
 
 ## Troubleshooting
+
+- **Usage tab says "usage unavailable (HTTP 403/404)"**: CLIProxyAPI only
+  allows the management API from localhost by default. Set
+  `management.allow-remote: true` (see "Usage limits"), or check that
+  `management_key` matches `management.secret-key`.
 
 - **401 from Foundry's discovery**: `api_key` must match one of CLIProxyAPI's
   `access.api-keys`.

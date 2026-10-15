@@ -143,8 +143,10 @@ backend_pool:
       #   type: openai-compatible           # (router-for-me/CLIProxyAPI, your own LAN
       #   url: http://192.168.1.40:8317/v1  #  instance — never a third-party relay)
       #   api_key: "${CLIPROXY_API_KEY}"
-      #   subscription: true                # paid for the guardrails, never metered $
-      #   call_budget_5h: 30                # ChatGPT Plus has small limits — cap it
+      #   flavor: cliproxyapi               # subscription + full effort scale (xhigh/none)
+      #   management_key: "${CLIPROXY_MGMT_KEY}"  # reads ChatGPT's 5h/weekly usage;
+      #                                     # stops at subscription_usage.limit_pct
+      #   call_budget_5h: 30                # optional extra cap (Foundry's own count)
       #   call_budget_daily: 100
       #   priority: 100
       # - name: openrouter                  # optional — uncomment when connected
@@ -207,6 +209,13 @@ guardrails:
   weekly_spend_cap_usd: null
 
 # --- §4.7 Meridian usage-window awareness ------------------------------------
+# Subscription proxies that report usage windows (CLIProxyAPI with a backend
+# management_key): stop using a model once any window covering it reaches
+# limit_pct, so persona cascades move on before the plan runs out.
+subscription_usage:
+  limit_pct: 85
+  poll_seconds: 60
+
 meridian:
   # Real per-profile usage data (5-hour + weekly buckets), authenticated with
   # the backend's api_key. Queried before committing to any Claude call,

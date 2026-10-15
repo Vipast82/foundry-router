@@ -89,6 +89,8 @@ async def get_config(request: Request):
     for b in cfg.get("backend_pool", {}).get("internal", {}).get("backends", []):
         if b.get("api_key"):
             b["api_key"] = _mask(b["api_key"])
+        if b.get("management_key"):
+            b["management_key"] = _mask(b["management_key"])
     if cfg.get("agent_brain", {}).get("api_key"):
         cfg["agent_brain"]["api_key"] = _mask(cfg["agent_brain"]["api_key"])
     if cfg.get("backend_pool", {}).get("litellm", {}).get("api_key"):
@@ -116,10 +118,12 @@ async def set_backends(request: Request):
         stored = {x.get("name"): x for x in (internal.get("backends") or [])
                   if isinstance(x, dict)}
         for b in backends:
-            if _is_masked(b.get("api_key")):
-                # The editor shows keys masked; keep the stored value (as written
-                # in config.yaml, ${VAR} reference included) for an unchanged one.
-                b["api_key"] = (stored.get(b.get("name")) or {}).get("api_key")
+            for k in ("api_key", "management_key"):
+                if _is_masked(b.get(k)):
+                    # The editor shows keys masked; keep the stored value (as
+                    # written in config.yaml, ${VAR} reference included) for an
+                    # unchanged one.
+                    b[k] = (stored.get(b.get("name")) or {}).get(k)
         internal["backends"] = backends
     svc.config_store.save(mutate)
     await svc.rebuild_pool()
@@ -818,6 +822,60 @@ async def meridian_health(request: Request):
         out.append({"backend": s.config.name, "url": s.config.url,
                     **health, "telemetry": tele})
     return {"backends": out, "checked": utcnow()}
+
+
+def _cliproxy_infos(svc) -> list[dict]:
+    out = []
+    for s in getattr(svc.pool, "backends", {}).values():
+        c = s.config
+        info = {"name": c.name, "url": c.url, "flavor": c.effective_flavor,
+                "management_key": c.management_key, "management_url": c.management_url,
+                "usage_limit_pct": c.usage_limit_pct, "healthy": s.healthy}
+        if c.effective_flavor == "cliproxyapi":
+            out.append(info)
+    return out
+
+
+@router.get("/admin/api/subscription-usage")
+async def subscription_usage(request: Request):
+    """Usage windows each CLIProxyAPI account reported (ChatGPT/Codex 5-hour
+    and weekly, Claude Code 5h/7d), and the limit at which Foundry stops
+    using that account's models."""
+    svc = _svc(request)
+    out = []
+    for info in _cliproxy_infos(svc):
+        if not info["management_key"]:
+            out.append({"backend": info["name"], "ok": False, "configured": False,
+                        "error": "no management_key set on this backend", "accounts": [],
+                        "limit_pct": svc.cliproxy_usage.limit_for(info)})
+            continue
+        refresh = request.query_params.get("refresh") in ("1", "true")
+        snap = await svc.cliproxy_usage.snapshot(info, force=refresh)
+        out.append({**snap, "configured": True})
+    return {"backends": out, "limit_pct": svc.config_store.config.subscription_usage.limit_pct,
+            "poll_seconds": svc.config_store.config.subscription_usage.poll_seconds}
+
+
+@router.post("/admin/api/config/subscription_usage")
+async def set_subscription_usage(request: Request):
+    svc = _svc(request)
+    body = await request.json()
+    updates = {}
+    if "limit_pct" in body:
+        try:
+            updates["limit_pct"] = max(1.0, min(100.0, float(body["limit_pct"])))
+        except (TypeError, ValueError):
+            return JSONResponse({"error": "limit_pct must be a number"}, status_code=400)
+    if "poll_seconds" in body:
+        try:
+            updates["poll_seconds"] = max(0, int(body["poll_seconds"]))
+        except (TypeError, ValueError):
+            return JSONResponse({"error": "poll_seconds must be an integer"}, status_code=400)
+
+    def mutate(raw):
+        raw.setdefault("subscription_usage", {}).update(updates)
+    cfg = svc.config_store.save(mutate)
+    return {"ok": True, "subscription_usage": cfg.subscription_usage.model_dump()}
 
 
 @router.post("/admin/api/config/meridian")

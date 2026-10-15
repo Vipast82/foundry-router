@@ -31,7 +31,34 @@ def _sse(frames) -> str:
     return "".join(f"data: {json.dumps(f)}\n\n" for f in frames) + "data: [DONE]\n\n"
 
 
+MGMT = "cpa-mgmt-key"
+USAGE: dict = {"files": []}          # what /v0/management/auth-files returns
+
+
+def _now_iso(offset_s: float = 0) -> str:
+    from datetime import datetime, timedelta, timezone
+    return (datetime.now(timezone.utc) + timedelta(seconds=offset_s)).isoformat()
+
+
+def codex_account(primary, secondary, label="me@x", plan="plus", age_s=60,
+                  reset_s=3600, extra=None, unavailable=False):
+    sig = {"X-Codex-Plan-Type": plan,
+           "X-Codex-Primary-Used-Percent": str(primary),
+           "X-Codex-Primary-Window-Minutes": "300",
+           "X-Codex-Primary-Reset-After-Seconds": str(reset_s),
+           "X-Codex-Secondary-Used-Percent": str(secondary),
+           "X-Codex-Secondary-Window-Minutes": "10080",
+           "X-Codex-Secondary-Reset-After-Seconds": "400000"}
+    sig.update(extra or {})
+    return {"provider": "codex", "label": label, "disabled": False, "unavailable": unavailable,
+            "quota": {"observed_at": _now_iso(-age_s), "signals": sig}}
+
+
 def _cpa(req: httpx.Request):
+    if req.url.path == "/v0/management/auth-files":
+        if req.headers.get("authorization") != f"Bearer {MGMT}":
+            return httpx.Response(401, json={"error": "invalid management key"})
+        return httpx.Response(200, json={"observed_at": _now_iso(), **USAGE})
     if req.headers.get("authorization") != f"Bearer {KEY}":
         return httpx.Response(401, json={"error": {"message": "Missing API key"}})
     if req.url.path == "/v1/models":
@@ -78,10 +105,12 @@ def _router(req):
 def cpa(app, client):
     svc = app.state.services
     SEEN.clear()
+    USAGE["files"] = []
+    svc.cliproxy_usage._cache.clear()
     http = httpx.AsyncClient(transport=httpx.MockTransport(_router))
     pool = InternalPool([
         BackendConfig(name="cliproxy", type="openai-compatible", url="http://cpa-host:8317/v1",
-                      api_key=KEY, flavor="cliproxyapi"),
+                      api_key=KEY, flavor="cliproxyapi", management_key=MGMT),
         BackendConfig(name="llama", type="openai-compatible", url="http://llm-host",
                       flavor="llamacpp")],
         BackendPoolConfig(), http, svc.db)
@@ -90,8 +119,10 @@ def cpa(app, client):
     pool.backends["llama"].healthy = pool.backends["llama"].ever_checked = True
     pool.backends["llama"].models = ["qwen-local"]
     real, svc.pool = svc.pool, pool
+    real_client, svc.cliproxy_usage.client = svc.cliproxy_usage.client, http
     yield svc
     svc.pool = real
+    svc.cliproxy_usage.client = real_client
 
 
 def test_flavor_marks_backend_as_cloud_subscription(cpa):
@@ -228,3 +259,116 @@ def test_local_first_fallback_never_picks_cloud_as_local(cpa):
     cands = fallback_candidates(cpa.pool, cpa.registry, persona, "fix the bug", limit=6)
     assert cands[0] == "qwen-local"
     assert set(cands[1:]) <= set(MODELS)                # cloud only after local
+
+
+# --------------------------------------------------------------------------- #
+# usage windows from CLIProxyAPI's management API                             #
+# --------------------------------------------------------------------------- #
+
+def test_parse_codex_and_claude_windows():
+    import time
+    from foundry_router.cliproxy_usage import parse_account
+    a = parse_account(codex_account(42, 61, extra={
+        "X-Codex-Additional-Gpt-5-3-Codex-Spark-Primary-Used-Percent": "97",
+        "X-Codex-Additional-Gpt-5-3-Codex-Spark-Limit-Name": "GPT-5.3-Codex-Spark",
+        "X-Codex-Bengalfox-Primary-Used-Percent": "10"}))
+    names = {w["name"]: w for w in a["windows"]}
+    assert names["5-hour"]["used"] == 42 and names["weekly"]["used"] == 61
+    assert a["plan"] == "plus" and 0 < names["5-hour"]["resets_in_s"] <= 3600
+    spark = next(w for w in a["windows"] if "Spark" in w["name"])
+    assert spark["scope"] == "gpt-5.3-codex-spark" and spark["used"] == 97
+    assert next(w for w in a["windows"] if w["name"].startswith("bengalfox"))["scope"] == "?"
+    # a window whose reset time has passed counts as reset
+    old = parse_account(codex_account(95, 30, age_s=7200, reset_s=3600))
+    five = next(w for w in old["windows"] if w["name"] == "5-hour")
+    assert five["used"] == 0 and five["reported"] == 95
+    # Claude Code: utilization fraction + reset timestamp; Retry-After in force
+    c = parse_account({"provider": "claude", "label": "c", "quota": {
+        "observed_at": _now_iso(-10), "signals": {
+            "anthropic-ratelimit-unified-5h-utilization": "0.9",
+            "anthropic-ratelimit-unified-5h-reset": str(int(time.time()) + 600),
+            "Retry-After": "300"}}})
+    assert any(w["name"] == "5h" and w["used"] == 90 for w in c["windows"])
+    assert c["windows"][0]["used"] == 100 and "Retry-After" in c["windows"][0]["name"]
+    assert parse_account({"provider": "gemini"}) is None
+
+
+def test_model_status_limit_default_85(cpa):
+    import asyncio
+    info = cpa.pool.backend_info("gpt-5.5")
+    run = lambda m="gpt-5.5": asyncio.run(cpa.cliproxy_usage.model_status(m, info))
+    USAGE["files"] = [codex_account(42, 61)]
+    st = run()
+    assert st["available"] and st["known"] and st["worst"] == 61
+    assert "ChatGPT plus usage" in st["note"] and "weekly 61%" in st["note"]
+    cpa.cliproxy_usage._cache.clear()
+    USAGE["files"] = [codex_account(20, 85)]
+    st = run()
+    assert not st["available"] and "weekly at 85% (limit 85%)" in st["note"]
+    ev = cpa.db.query("SELECT message FROM event_log WHERE source='subscription_usage'")
+    assert ev and "gpt-5.5 not used" in ev[-1]["message"]
+    # a second account with room keeps the model usable
+    cpa.cliproxy_usage._cache.clear()
+    USAGE["files"] = [codex_account(20, 99, label="a"), codex_account(10, 30, label="b")]
+    assert run()["available"]
+    # Claude models behind the proxy are judged by Claude accounts only
+    assert run("claude-opus-4-8")["known"] is False
+    # no reading yet -> allowed
+    cpa.cliproxy_usage._cache.clear()
+    USAGE["files"] = [{"provider": "codex", "label": "new", "quota": {"signals": {}}}]
+    st = run()
+    assert st["available"] and not st["known"]
+
+
+def test_guardrail_denies_at_limit_and_cascade_falls_back_to_local(cpa, client):
+    USAGE["files"] = [codex_account(90, 50)]
+    cpa.personas.upsert("Plan", execution_mode="direct", local_bias_strength="prefer_paid",
+                        model_allowlist=["gpt-5.5", "qwen-local"],
+                        pinned_models=["gpt-5.5", "qwen-local"])
+    r = client.post("/api/chat", json={"model": "Plan", "stream": False, "messages": [
+        {"role": "user", "content": "plan the fix"}]})
+    assert r.status_code == 200, r.text
+    assert r.json()["message"]["content"] == "local"
+    assert not any(b.get("model") == "gpt-5.5" for b in SEEN.get("bodies", []))
+
+
+def test_status_line_shows_usage_below_limit(cpa, client):
+    USAGE["files"] = [codex_account(42, 61)]
+    cpa.personas.upsert("GPT-Plan", execution_mode="direct", model_allowlist=["gpt-5.5"],
+                        pinned_models=[])
+    r = client.post("/api/chat", json={"model": "GPT-Plan", "stream": True, "messages": [
+        {"role": "user", "content": "plan"}]})
+    thinking = "".join(json.loads(x)["message"].get("thinking") or ""
+                       for x in r.text.splitlines() if x.strip())
+    assert "ChatGPT plus usage: weekly 61%, 5-hour 42%" in thinking
+
+
+def test_admin_usage_endpoint_config_and_key_masking(cpa, client):
+    USAGE["files"] = [codex_account(42, 61)]
+    d = client.get("/admin/api/subscription-usage").json()
+    assert d["limit_pct"] == 85
+    b = d["backends"][0]
+    assert b["ok"] and b["configured"] and b["accounts"][0]["plan"] == "plus"
+    r = client.post("/admin/api/config/subscription_usage", json={"limit_pct": 70})
+    assert r.json()["subscription_usage"]["limit_pct"] == 70
+    assert cpa.cliproxy_usage.cfg.limit_pct == 70            # live, no restart
+    client.post("/admin/api/config/subscription_usage", json={"limit_pct": 85})
+
+
+def test_management_key_masked_and_kept_on_save(cpa, client):
+    r = client.post("/admin/api/config/backends", json=[
+        {"name": "cliproxy", "type": "openai-compatible", "url": "http://cpa-host:8317/v1",
+         "api_key": KEY, "flavor": "cliproxyapi", "management_key": "real-secret"}])
+    assert r.status_code == 200
+    shown = client.get("/admin/api/config").json()["backend_pool"]["internal"]["backends"][0]
+    assert shown["management_key"] != "real-secret"
+    client.post("/admin/api/config/backends", json=[{**shown, "api_key": KEY}])
+    raw = cpa.config_store.raw["backend_pool"]["internal"]["backends"][0]
+    assert raw["management_key"] == "real-secret"
+
+
+def test_wrong_management_key_reports_error_not_denial(cpa):
+    import asyncio
+    info = {**cpa.pool.backend_info("gpt-5.5"), "management_key": "nope"}
+    st = asyncio.run(cpa.cliproxy_usage.model_status("gpt-5.5", info))
+    assert st["available"] and "usage unavailable (HTTP 401" in st["note"]
