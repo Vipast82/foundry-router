@@ -262,9 +262,17 @@ async def _length(run: _Run) -> None:
     if r.status_code != 200:
         run.add("length", "fail", f"HTTP {r.status_code}: {_err_text(r)}", ms)
         return
-    fr = (r.json().get("choices") or [{}])[0].get("finish_reason")
-    run.add("length", "ok" if fr == "length" else "warn",
-            f"finish_reason {fr!r}" + ("" if fr == "length" else " (expected 'length')"), ms)
+    data = r.json()
+    fr = (data.get("choices") or [{}])[0].get("finish_reason")
+    if fr == "length":
+        run.add("length", "ok", f"finish_reason {fr!r}", ms)
+        return
+    # Say which way it went: a reply past the cap means the backend didn't
+    # apply max_tokens; a short one just stopped early.
+    n = (data.get("usage") or {}).get("completion_tokens")
+    why = (f"; {n} tokens, so the backend didn't apply max_tokens 16" if isinstance(n, int) and n > 16
+           else f"; stopped at {n} tokens" if isinstance(n, int) else "")
+    run.add("length", "warn", f"finish_reason {fr!r} (expected 'length'){why}", ms)
 
 
 async def _image_job(run: _Run) -> None:
@@ -282,6 +290,11 @@ async def _image_job(run: _Run) -> None:
         job = rr.json()
     ms += (time.monotonic() - t0) * 1000
     if job.get("status") == "succeeded":
+        # Media replies carry no served-model headers; the job records the route.
+        if job.get("model"):
+            run.served.add(job["model"])
+        if job.get("backend"):
+            run.backends.add(job["backend"])
         a = (job.get("artifacts") or [{}])[0]
         run.add("image_job", "ok", f"{job['model']} produced {a.get('width')}×{a.get('height')} "
                                    f"(job {job['job_id']})", ms)

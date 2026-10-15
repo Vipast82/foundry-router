@@ -60,6 +60,10 @@ async def _router(req: httpx.Request):
             finish="tool_calls")
     if has_image:
         return _reply("Blue" if STATE.get("blind") else "Red")
+    if body.get("max_tokens") == 16 and STATE.get("ignore_max"):
+        r = _reply(" ".join(map(str, range(1, 301))))
+        r = httpx.Response(200, json={**r.json(), "usage": {"prompt_tokens": 5, "completion_tokens": 300}})
+        return r
     if body.get("max_tokens") == 16:
         return _reply("1 2 3 4 5", finish="length")
     if "FOUNDRY_OK" in text:
@@ -281,6 +285,16 @@ def test_validate_image_persona_runs_one_job(fleet, client):
     assert res["status"] == "passed", res
     assert "gpt-image-2.5-flare" in checks["image_job"]["detail"]
     assert HITS.count(("cliproxy", "image")) == 1
+    assert res["served_models"] == ["gpt-image-2.5-flare"] and res["backends"] == ["cliproxy"]
+
+
+def test_validate_length_warning_says_the_cap_was_not_applied(fleet, client):
+    client.post(f"/admin/api/profiles/{KILO}/apply")
+    STATE["ignore_max"] = True
+    res = _validate(client, "Foundry-Kilo-Local")
+    length = next(c for c in res["checks"] if c["name"] == "length")
+    assert res["status"] == "warnings" and length["status"] == "warn"
+    assert "300 tokens, so the backend didn't apply max_tokens 16" in length["detail"]
 
 
 def test_unresolved_backend_fails_closed_until_it_appears(fleet, client, monkeypatch):
