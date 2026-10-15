@@ -298,8 +298,10 @@ def test_unresolved_backend_fails_closed_until_it_appears(fleet, client, monkeyp
     monkeypatch.setattr(profiles, "_resolve_backend",
                         lambda svc_, kind: {"cliproxyapi": "cliproxy", "meridian": "meridian"}.get(kind))
     rep = {p["persona"]: p for p in client.post(f"/admin/api/profiles/{KILO}/apply").json()["personas"]}
-    assert rep["Foundry-Kilo-Sonnet"]["action"] == "unchanged"
+    assert rep["Foundry-Kilo-Sonnet"]["action"] == "fill"
     assert fleet.personas.get("Foundry-Kilo-Sonnet")["backend"] == "meridian"
+    again = client.get("/admin/api/profiles").json()["profiles"]
+    assert next(p for p in again if p["id"] == KILO)["counts"].get("fill") is None
     assert _chat(client, "Foundry-Kilo-Sonnet").status_code == 200
     assert HITS == [("meridian", "claude-sonnet-5-5")]
 
@@ -327,7 +329,33 @@ def test_unflavored_cliproxy_is_named_and_filled_once_flavored(fleet, client):
     assert "backend 'cliproxy' looks like CLIProxyAPI" in rep["Foundry-Kilo-Astra"]["warning"]
     fleet.personas.upsert("Foundry-Kilo-Astra", description="my edit")
     cpa.flavor = "cliproxyapi"
+    # the preview counts the fill, so the Update button isn't stuck at 0 changes
+    prof = next(p for p in client.get("/admin/api/profiles").json()["profiles"] if p["id"] == KILO)
+    assert prof["counts"]["fill"] == 6
+    assert fleet.personas.get("Foundry-Kilo-Astra")["backend"] == "<cliproxyapi>"
     rep = {p["persona"]: p for p in client.post(f"/admin/api/profiles/{KILO}/apply").json()["personas"]}
-    assert rep["Foundry-Kilo-Astra"]["action"] == "kept"
+    assert rep["Foundry-Kilo-Astra"]["action"] == "fill"
     row = fleet.personas.get("Foundry-Kilo-Astra")
     assert row["backend"] == "cliproxy" and row["description"] == "my edit"
+
+
+def test_backend_save_fills_placeholders_of_a_ui_installed_profile(fleet, client):
+    """Installed from the UI (not in config persona_profiles): saving the
+    backend list must still fill the waiting personas, edits and all."""
+    assert KILO not in (fleet.config_store.config.persona_profiles or [])
+    cpa = fleet.pool.backends["cliproxy"].config
+    cpa.flavor = None
+    client.post(f"/admin/api/profiles/{KILO}/apply")
+    fleet.personas.upsert("Foundry-Kilo-Luna", description="my edit")
+    cpa.flavor = "cliproxyapi"
+    filled = profiles.fill_placeholders(fleet)
+    assert set(filled) == {"Foundry-Kilo-Luna", "Foundry-Kilo-Sol", "Foundry-Kilo-Astra",
+                           "Foundry-Kilo-Vision-Deep", "Foundry-Kilo-Images",
+                           "Foundry-Kilo-Images-Draft"}
+    rows = _rows(fleet)
+    assert all(rows[n]["backend"] == "cliproxy" for n in filled)
+    assert rows["Foundry-Kilo-Luna"]["description"] == "my edit"
+    rep = {p["persona"]: p for p in client.post(f"/admin/api/profiles/{KILO}/apply").json()["personas"]}
+    assert rep["Foundry-Kilo-Luna"]["action"] == "kept"
+    assert rep["Foundry-Kilo-Sol"]["action"] == "unchanged"
+    assert profiles.fill_placeholders(fleet) == []

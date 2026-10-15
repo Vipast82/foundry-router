@@ -189,7 +189,7 @@ def apply(svc, profile_id: str) -> dict:
     """Apply (after a dry run shows there's something to change, a snapshot of
     the personas is taken so the apply can be undone from Logs -> Data)."""
     preview = _apply(svc, profile_id, dry_run=True)
-    if preview["counts"].get("create") or preview["counts"].get("update"):
+    if any(preview["counts"].get(k) for k in ("create", "update", "fill")):
         try:
             from .configops import snapshot
             snapshot(svc, f"before applying profile {profile_id}")
@@ -224,14 +224,18 @@ def _apply(svc, profile_id: str, dry_run: bool) -> dict:
             entry["note"] = "edited since it was installed; your values are kept"
             # The placeholder was never the user's choice: fill it once the
             # backend exists, keeping every value they did edit.
-            if (row.get("backend") == f"<{d['backend_kind']}>"
-                    and not _unresolved(fields["backend"]) and not dry_run):
-                svc.personas.upsert(name, backend=fields["backend"])
+            if _fillable(row, d, fields):
+                entry["action"] = "fill"
+                entry["note"] = "your edits are kept; only the missing backend is set"
+                if not dry_run:
+                    svc.personas.upsert(name, backend=fields["backend"])
         elif row["profile"] == tag:
             entry["action"] = "unchanged"
-            if _unresolved(row.get("backend")) and not _unresolved(fields["backend"]) and not dry_run:
-                svc.personas.upsert(name, backend=fields["backend"])   # backend appeared later
-                _stamp(svc, name, tag)
+            if _fillable(row, d, fields):
+                entry["action"] = "fill"           # backend appeared after install
+                if not dry_run:
+                    svc.personas.upsert(name, backend=fields["backend"])
+                    _stamp(svc, name, tag)
         else:
             entry["action"] = "update"
             entry["from"] = row["profile"]
@@ -253,7 +257,7 @@ def _apply(svc, profile_id: str, dry_run: bool) -> dict:
     counts: dict = {}
     for e in report:
         counts[e["action"]] = counts.get(e["action"], 0) + 1
-    if not dry_run and (counts.get("create") or counts.get("update")):
+    if not dry_run and (counts.get("create") or counts.get("update") or counts.get("fill")):
         svc.db.log_event("info", "profiles", f"profile {tag} applied: " +
                          ", ".join(f"{v} {k}" for k, v in sorted(counts.items())))
     return {"profile": profile_id, "version": prof["version"], "title": prof["title"],
@@ -262,6 +266,35 @@ def _apply(svc, profile_id: str, dry_run: bool) -> dict:
 
 def _unresolved(backend) -> bool:
     return not backend or str(backend).startswith("<")
+
+
+def _fillable(row: dict, d: dict, fields: dict) -> bool:
+    """Still on the install-time placeholder, and the backend now exists."""
+    return (_unresolved(row.get("backend")) and not _unresolved(fields["backend"])
+            and (not row.get("backend") or row["backend"] == f"<{d['backend_kind']}>"))
+
+
+def fill_placeholders(svc) -> list[str]:
+    """Set the backend of every installed profile persona still waiting on a
+    placeholder, without touching anything else (run when backends change, so a
+    profile installed from the UI doesn't wait for a restart or a manual apply)."""
+    filled = []
+    for pid, prof in PROFILES.items():
+        for d in prof["personas"]:
+            row = svc.personas.get(d["virtual_name"])
+            if not row or not str(row.get("profile") or "").startswith(pid + "@"):
+                continue
+            fields = definition_fields(svc, d)
+            if not _fillable(row, d, fields):
+                continue
+            edited = values_hash(row) != row.get("profile_hash")
+            svc.personas.upsert(d["virtual_name"], backend=fields["backend"])
+            if not edited:
+                _stamp(svc, d["virtual_name"], row["profile"])
+            filled.append(d["virtual_name"])
+    if filled:
+        svc.db.log_event("info", "profiles", "backend set for " + ", ".join(filled))
+    return filled
 
 
 def _stamp(svc, name: str, tag: str) -> None:

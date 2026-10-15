@@ -3236,9 +3236,10 @@ function limitsHint(m) {
 
 function profileCard(pr) {
   const act = {create: ["will be created", "warn"], update: ["will update", "warn"], unchanged: ["up to date", "ok"],
-               kept: ["your edits kept", ""], conflict: ["name taken, untouched", "bad"]};
+               kept: ["your edits kept", ""], conflict: ["name taken, untouched", "bad"],
+               fill: ["will set backend", "warn"]};
   const c = pr.counts || {};
-  const pending = (c.create || 0) + (c.update || 0);
+  const pending = (c.create || 0) + (c.update || 0) + (c.fill || 0);
   const rows = pr.personas.map(e => `<tr><td class="nw mono">${esc(e.persona)}</td>
     <td class="nw mono">${esc(e.model)}</td><td class="nw">${e.backend ? esc(e.backend) : '<span class="hint">' + esc(e.backend_kind) + '</span>'}</td>
     <td class="nw">${e.kind === "media" ? "image" : "chat"}</td>
