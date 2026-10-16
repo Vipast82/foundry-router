@@ -2427,8 +2427,7 @@ function functionalCard(fh) {
   // Sessions on the backend vs helpers_allowed (main stream + N helpers).
   const streams = x => {
     if (!x) return "";
-    const who = (x.active || []).map(a => `${a.persona || a.client} (${a.idle_s}s idle)`).join("
-");
+    const who = (x.active || []).map(a => `${a.persona || a.client} (${a.idle_s}s idle)`).join("\n");
     const n = (x.active || []).length;
     return x.streams_allowed == null
       ? `<span class="hint" style="margin:0" title="${esc(who || "no active sessions")}
