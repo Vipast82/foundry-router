@@ -30,3 +30,15 @@ def test_ui_strings_have_no_raw_line_breaks():
     bad = [n for n, line in enumerate(UI.read_text(encoding="utf-8").splitlines(), 1)
            if re.search(r'\.join\("$|\.join\(\'$', line.rstrip())]
     assert not bad, f"string broken across lines at index.html:{bad}"
+
+
+def test_list_fields_use_the_multi_picker():
+    """Fields that take several values are pickers (chips + a dropdown that
+    stays open), not single-choice datalists or comma/JSON text boxes."""
+    html = UI.read_text(encoding="utf-8")
+    for field in ("nc-personas", "ed-personas", "pe-allow", "pe-pins", "pe-reqtags", "pe-trig",
+                  "me-tags", "md-models", "ep-checks"):
+        m = re.search(r'<input id="%s"[^>]*>' % field, html)
+        assert m and "data-multi=" in m.group(0), field
+    assert "(comma-separated)</label>" not in html and "(JSON list)</label>" not in html.replace("rules (JSON list)</label>", "").replace("markers (JSON list)</label>", "")
+    assert not re.search(r'<input id="(nc|ed)-personas"[^>]*list=', html)
