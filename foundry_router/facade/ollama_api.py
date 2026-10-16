@@ -631,10 +631,10 @@ async def _chat_dispatch(svc, body: dict):
     # A client's compaction summary is a plain one-shot answer: serve it
     # directly (never through the brain loop) so thinking-off applies. So is a
     # structured-output request (response_format / format, e.g. Mealie's
-    # {"text": ...} schema): the brain loop doesn't carry the client's format,
-    # and its tools and narration don't belong in a JSON answer.
-    one_shot = summary_req or client_format is not None
-    if client_tools or exec_mode == "direct" or (one_shot and exec_mode != "pipeline"):
+    # {"text": ...} schema), in any mode: neither the brain loop nor the
+    # pipeline carries the client's format, and their tools and narration don't
+    # belong in a JSON answer.
+    if client_tools or exec_mode == "direct" or client_format is not None             or (summary_req and exec_mode != "pipeline"):
         return await _direct_dispatch_chat(svc, persona, model_name, messages,
                                            client_tools, options, stream, user_text,
                                            client_think=client_think,

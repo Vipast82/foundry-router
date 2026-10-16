@@ -402,6 +402,7 @@ def test_structured_output_request_skips_the_brain_loop(fleet, client, monkeypat
     not by the brain loop, which would drop it."""
     monkeypatch.setattr(fleet.brain, "skip_reason", lambda: None)     # brain "healthy"
     fleet.personas.upsert("Chatty", execution_mode="agent", model_allowlist=["claude-haiku-5-5"])
+    fleet.personas.upsert("Piped", execution_mode="pipeline", model_allowlist=["claude-haiku-5-5"])
     schema = {"type": "object", "properties": {"text": {"type": "string"}},
               "required": ["text"], "additionalProperties": False}
     r = client.post("/v1/chat/completions", json={
@@ -414,3 +415,19 @@ def test_structured_output_request_skips_the_brain_loop(fleet, client, monkeypat
     assert HITS == [("meridian", "claude-haiku-5-5")]
     sent = STATE["last_body"]["response_format"]
     assert sent["type"] == "json_schema" and sent["json_schema"]["schema"] == schema
+    # a pipeline persona too: one direct call, JSON mode passed on
+    HITS.clear()
+    r = client.post("/api/chat", json={"model": "Piped", "stream": False, "format": "json",
+                                       "messages": [{"role": "user", "content": "hi"}]})
+    assert r.status_code == 200, r.text
+    assert HITS == [("meridian", "claude-haiku-5-5")]
+    assert STATE["last_body"]["response_format"] == {"type": "json_object"}
+
+
+def test_unfence_json_only_unwraps_one_valid_block():
+    from foundry_router.pool.protocols import unfence_json
+    assert unfence_json('```json\n{"text": "hi"}\n```') == '{"text": "hi"}'
+    assert unfence_json('  ```\n[1, 2]\n```  ') == "[1, 2]"
+    for keep in ('{"text": "hi"}', "Sure! ```json\n{}\n```", "```json\n{oops\n```",
+                 '```json\n{"a": 1}\n```\n```json\n{"b": 2}\n```', "plain prose"):
+        assert unfence_json(keep) == keep

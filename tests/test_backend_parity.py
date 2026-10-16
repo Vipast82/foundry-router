@@ -374,3 +374,18 @@ def test_make_protocol_threads_flavor():
     assert isinstance(p, OpenAIProtocol) and p.flavor == "unsloth"
     p2 = make_protocol("ollama", "http://y", None, None)
     assert p2.flavor is None
+
+
+async def test_anthropic_unwraps_fenced_json_only_when_a_format_was_asked():
+    fenced = '```json\n{"text": "hi"}\n```'
+
+    def handler(request):
+        return httpx.Response(200, json={"content": [{"type": "text", "text": fenced}],
+                                         "stop_reason": "end_turn",
+                                         "usage": {"input_tokens": 3, "output_tokens": 9}})
+    proto = AnthropicProtocol("http://m", "k", _collect(handler))
+    msgs = [{"role": "user", "content": "hi"}]
+    assert (await proto.chat("claude-haiku-5-5", msgs, fmt="json")).content == '{"text": "hi"}'
+    schema = {"type": "object", "properties": {"text": {"type": "string"}}}
+    assert (await proto.chat("claude-haiku-5-5", msgs, fmt=schema)).content == '{"text": "hi"}'
+    assert (await proto.chat("claude-haiku-5-5", msgs)).content == fenced     # no format: untouched

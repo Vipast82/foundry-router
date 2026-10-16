@@ -1390,6 +1390,25 @@ def _merge_turns(msgs: list[dict]) -> list[dict]:
     return out
 
 
+_JSON_FENCE = re.compile(r"^```(?:json|JSON)?[ \t]*\n(.*)\n[ \t]*```$", re.S)
+
+
+def unfence_json(text: str) -> str:
+    """A reply that is one fenced JSON block -> the bare JSON. Claude has no
+    JSON mode (the format is only asked for in the system prompt) and sometimes
+    fences it anyway; a client that asked for JSON parses the content as-is.
+    Anything else (prose, several blocks, invalid JSON) is returned unchanged."""
+    m = _JSON_FENCE.match((text or "").strip())
+    if not m:
+        return text
+    inner = m.group(1).strip()
+    try:
+        json.loads(inner)
+    except ValueError:
+        return text
+    return inner
+
+
 class AnthropicProtocol(BaseProtocol):
     """Anthropic Messages API — Claude via Meridian (or any Messages endpoint).
 
@@ -1617,6 +1636,8 @@ class AnthropicProtocol(BaseProtocol):
                                    "name": block.get("name"),
                                    "arguments": block.get("input") or {}})
         pt, cache_read, ct = _anthropic_usage(data.get("usage"))
+        if fmt and not tool_calls:
+            content_text = unfence_json(content_text)
         return ChatResult(
             content=content_text,
             thinking=thinking_text,
