@@ -626,11 +626,18 @@ class ClientConfig(BaseModel):
     See client_auth.py for what each scope reaches."""
     name: str
     key: Optional[str] = None          # use a ${VAR} reference in config.yaml
+    # Keys made in the web UI (Setup -> Clients & keys) are stored only as a
+    # SHA-256 hash: config.yaml, its version history and export bundles never
+    # hold the key itself. key_hint is the first/last characters, for display.
+    key_hash: Optional[str] = None
+    key_hint: Optional[str] = None
     scopes: list[Literal["inference", "media", "admin", "orchestration"]] = Field(
         default_factory=lambda: ["inference"])
     # Optional: only these personas are visible/usable for this client.
     personas: list[str] = Field(default_factory=list)
     enabled: bool = True
+    note: str = ""                     # free text: what/where this client is
+    created: Optional[str] = None      # ISO time the key was made / last rotated
 
 
 class ClientAuthConfig(BaseModel):
@@ -639,6 +646,11 @@ class ClientAuthConfig(BaseModel):
     mode: Literal["optional", "required"] = "optional"
     # Also require an admin-scoped key for the web UI and /admin API.
     protect_admin: bool = False
+    # A key that matches no client: refuse (default; a typo must not become
+    # "anonymous"), or, in optional mode only, let it through as anonymous
+    # while keys are rolled out (clients such as Cline's OpenAI-compatible
+    # provider always send whatever is in their API-key field).
+    unknown_keys: Literal["refuse", "anonymous"] = "refuse"
 
 
 class MediaConfig(BaseModel):

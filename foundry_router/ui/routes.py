@@ -97,6 +97,11 @@ async def get_config(request: Request):
         cfg["backend_pool"]["litellm"]["api_key"] = _mask(cfg["backend_pool"]["litellm"]["api_key"])
     if cfg.get("mcp_aggregator", {}).get("token"):
         cfg["mcp_aggregator"]["token"] = _mask(cfg["mcp_aggregator"]["token"])
+    for c in cfg.get("clients") or []:
+        # client keys are secrets too (managed ones are only a hash, still hidden)
+        for k in ("key", "key_hash"):
+            if c.get(k):
+                c[k] = _mask(c[k])
     return cfg
 
 

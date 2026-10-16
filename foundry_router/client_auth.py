@@ -13,6 +13,10 @@ in the logs and budgets) and its scopes decide what it may reach:
                        Ollama provider and existing chat clients keep working
                        while keys are rolled out); a WRONG key is refused.
   required           — inference/media need a valid key.
+`client_auth.unknown_keys` — refuse (default) a key that matches no client, or
+                       (optional mode only) let it through as anonymous.
+Keys can be managed in the web UI (Setup → Clients & keys); those are stored
+hashed (client_keys.py). Recent unknown keys are listed there by fingerprint.
 `client_auth.protect_admin` — also require an admin-scoped key for /admin and
                        /ui (off by default so nobody locks themselves out).
 
@@ -93,12 +97,13 @@ def identify(cfg, headers: dict, agent_tokens: Optional[dict] = None) -> tuple[O
     if internal and hmac.compare_digest(internal.encode(), INTERNAL_TOKEN.encode()):
         return ({"client_id": "foundry:validate", "scopes": ["inference", "media"],
                  "personas": [], "internal": True}, True)
+    from .client_keys import matches
     keys = _keys_from(headers)
     for k in keys:
         for c in getattr(cfg, "clients", []) or []:
-            if not c.enabled or not c.key:
+            if not c.enabled or not (c.key or getattr(c, "key_hash", None)):
                 continue
-            if hmac.compare_digest(k.encode(), str(c.key).encode()):
+            if matches(k, c):
                 return ({"client_id": c.name, "scopes": list(c.scopes or ["inference"]),
                          "personas": list(c.personas or [])}, True)
         for tok, name in (agent_tokens or {}).items():
@@ -133,11 +138,28 @@ class ClientAuthMiddleware:
         corr = correlation(headers)
         mode = getattr(ca, "mode", "optional") if ca else "optional"
         protect_admin = bool(getattr(ca, "protect_admin", False)) if ca else False
+        unknown = getattr(ca, "unknown_keys", "refuse") if ca else "refuse"
         problem = None
+        from .client_keys import activity
+        addr = (headers.get("x-forwarded-for", "").split(",")[0].strip()
+                or headers.get("x-real-ip", "") or (scope.get("client") or ("", 0))[0] or "")
+        agent = headers.get("user-agent", "")
+        if client is not None and need:
+            activity.client_seen(client["client_id"], addr, agent)
+        lenient = (unknown == "anonymous" and mode == "optional"
+                   and need in ("inference", "media"))
         if need and presented and client is None and getattr(cfg, "clients", None):
-            # A key that matches nothing is always refused — a typo must not
-            # silently become "anonymous".
-            problem = _deny(401, "unknown Foundry client key", "invalid_api_key")
+            for k in _keys_from(headers)[:1]:
+                activity.key_rejected(k, path, addr, agent,
+                                      "allowed as anonymous" if lenient else "refused")
+        if need and presented and client is None and getattr(cfg, "clients", None) \
+                and not lenient:
+            # A key that matches nothing is refused — a typo must not silently
+            # become "anonymous" (unless the operator chose unknown_keys:
+            # anonymous for a rollout). Setup -> Clients & keys lists them.
+            problem = _deny(401, "unknown Foundry client key — make one in Foundry's web UI "
+                                 "(Setup → Clients & keys) and put it in this client's API "
+                                 "key field", "invalid_api_key")
         elif need == "orchestration":
             if client is None or not ({"orchestration", "admin"} & set(client["scopes"])):
                 problem = _deny(401 if client is None else 403,

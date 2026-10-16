@@ -3,6 +3,47 @@
 Give every client its own Foundry key so requests, budgets and the logs know
 **who** asked, and so each client only reaches what it should.
 
+## Managing clients in the web UI (recommended)
+
+**Setup → Clients & keys** does all of this without editing files:
+
+- **Add a client.** Pick a preset (Cline, Kilo, coordinator, Open WebUI,
+  training pipeline, admin) or custom, then set its name, scopes, an optional
+  persona restriction and a note. Foundry generates a key (`fnd_…`) and shows
+  it **once**, with the exact steps to connect that program. Only a SHA-256
+  hash is stored in config.yaml, so the key never appears in config history
+  or export bundles.
+- **Edit** scopes, personas, note or enabled; **New key** rotates (the old key
+  stops working at once); **Delete**. The name is the client's identifier in
+  logs, budget rules (`match: {client: …}`) and the Work view, so it isn't
+  renamed.
+- **Access** settings:
+  - requests without a key: allowed or refused (`mode`);
+  - keys that match no client: refuse or let through (`unknown_keys`);
+  - protect the web UI (`protect_admin`, refused until this browser holds an
+    admin key, so you can't lock yourself out).
+- **Keys that matched no client.** Programs sending a key Foundry doesn't
+  know, by fingerprint (never the key), with what it looks like
+  (placeholder, OpenAI-style, old Foundry key…), path, address and user
+  agent.
+
+**Setup → Helpers & limits** sets each backend's `helpers_allowed`,
+`max_concurrent` and `queue_timeout_seconds` from a form, with the sessions
+holding slots right now.
+
+### "unknown Foundry client key"
+
+In `optional` mode a program that sends **no** key still works (as
+`anonymous`). A program that sends a key matching no client is refused once
+any client exists. Cline's OpenAI-compatible provider always sends whatever
+is in its API Key field, so after you add your first client (e.g. for Kilo),
+Cline's placeholder key starts being refused. Fix it by making a client for
+Cline and pasting its key into Cline. While you roll keys out, you can
+instead set "keys that match no client" to *let through as anonymous*.
+
+Keys written in config.yaml by hand (below) keep working alongside managed
+ones; "New key" on such a client converts it to a managed key.
+
 ```yaml
 clients:
   - name: kilo

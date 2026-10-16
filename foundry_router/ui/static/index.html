@@ -79,6 +79,7 @@
   button.act:disabled { opacity:.35; cursor:not-allowed; }
   button.act:disabled:hover { border-color:var(--line); }
   button.primary { border-color:var(--accent); color:var(--accent); }
+  button.danger:hover { border-color:var(--bad); color:var(--bad); }
   input, select, textarea { background:var(--bg); color:var(--fg);
     border:1px solid var(--line); border-radius:5px; padding:5px 8px; font-size:13px; }
   textarea { width:100%; font-family:ui-monospace, monospace; }
@@ -766,11 +767,14 @@ const TABS = {
   "Dev Log":        tabDevLog,
   "Data":           tabData,
   "Training":       tabTraining,
+  "Clients & Keys": tabClients,
+  "Helpers & Limits": tabLimits,
 };
 // Primary nav groups -> their leaf tabs (the secondary row). Reorganizes the
 // former flat bar into logical sections without dropping anything.
 const GROUPS = [
   ["Dashboard",   ["Live", "Work", "Performance", "Cost", "Scoreboard", "Compare"]],
+  ["Setup",       ["Clients & Keys", "Helpers & Limits"]],
   ["Backends",    ["Pool", "Model Registry", "Host Admin"]],
   ["Routing",     ["Personas", "Guardrails", "Routes"]],
   ["Tools & MCP", ["Tools", "MCP Servers", "MCP Metrics", "Agents"]],
@@ -2289,6 +2293,167 @@ function showTrainingEpisode(id) {
     ${checks ? `<h4>Verification at head</h4><ul>${checks}</ul>` : ""}
     ${fb ? `<h4>Feedback</h4><ul>${fb}</ul>` : ""}
     <h4>Turns (redacted, first 300 characters)</h4><div class="tscroll"><table><tr><th>role</th><th>author</th><th>content</th></tr>${turns}</table></div>`);
+}
+
+// Setup → Clients & Keys (setup_routes.py): one key per program, made and
+// rotated here. Keys are shown once; Foundry stores only their hash.
+function _connectHelp(preset, name, key, ep) {
+  const k = key || "<this client's key>";
+  const pre = s => `<pre class="mono" style="white-space:pre-wrap;overflow-wrap:anywhere">${esc(s)}</pre>`;
+  const generic = `<p>Any OpenAI-compatible program: base URL <code>${esc(ep.openai)}</code>, API key = the key.
+    Ollama-style programs: <code>${esc(ep.ollama)}</code> with header <code>Authorization: Bearer &lt;key&gt;</code>.</p>`;
+  const how = {
+    cline: `<p><b>Cline</b> → Settings → API Configuration: API Provider <b>OpenAI Compatible</b>,
+      Base URL <code>${esc(ep.openai)}</code>, API Key = the key, Model ID = a persona name (e.g. a Foundry-Cline persona).
+      Cline's <i>Ollama</i> provider can't send a key; use OpenAI Compatible.</p>`,
+    kilo: `<p><b>Kilo Code</b>: in <code>kilo.jsonc</code> (or the provider settings) set the Foundry provider's key.
+      Routing → Personas → <i>Kilo config</i> generates the whole provider block.</p>` +
+      pre(`"provider": { "foundry": { "options": {\n  "baseURL": "${ep.openai}",\n  "apiKey": "${k}" } } }`),
+    coordinator: `<p><b>Coordinator</b> (on the machine that runs <code>python -m foundry_coordinator</code>): the
+      profile's <code>[foundry] key_env</code> names the variable (default <code>FOUNDRY_COORDINATOR_KEY</code>),
+      and <code>url</code> is <code>${esc(ep.foundry)}</code>. Windows:</p>` + pre(`setx FOUNDRY_COORDINATOR_KEY "${k}"`) +
+      `<p class="hint">Open a new terminal afterwards. Linux/macOS: <code>export FOUNDRY_COORDINATOR_KEY=…</code></p>`,
+    training: `<p><b>Training pipeline</b>: set <code>FOUNDRY_TRAINING_KEY</code> where <code>python -m foundry_training</code> runs.</p>` +
+      pre(`setx FOUNDRY_TRAINING_KEY "${k}"`),
+    admin: `<p><b>Admin key</b>: needed only if "Protect the web UI" is on. The UI asks for it once per browser.</p>`,
+  }[preset] || "";
+  return how + generic;
+}
+
+window._clientOpts = window._clientOpts || {preset: "cline"};
+async function tabClients() {
+  const d = await api("setup/clients");
+  const o = window._clientOpts;
+  const a = d.auth;
+  const when = ts => ts ? esc(_tsText(ts)) : "";
+  const pill = (t, cls = "") => `<span class="pill ${cls}">${esc(t)}</span>`;
+  const presetOf = c => Object.keys(d.presets).find(p => c.name.toLowerCase().startsWith(p)) || "";
+  const rows = d.clients.map(c => {
+    const s = c.seen || {}, u = c.usage || {};
+    return `<tr><td class="nw"><b>${esc(c.name)}</b>${c.name === d.you ? ' <span class="hint">(this browser)</span>' : ""}<div class="hint">${esc(c.note || "")}</div></td>
+      <td class="nw">${c.scopes.map(x => pill(x, x === "admin" ? "warn" : "")).join(" ")}</td>
+      <td class="hint" style="white-space:normal">${c.personas.length ? esc(c.personas.join(", ")) : "all"}</td>
+      <td class="nw"><code>${esc(c.key_hint || (c.key_kind === "config" ? "••••" : "no key"))}</code><div class="hint">${c.key_kind === "managed" ? "made here" + (c.created ? " " + esc(c.created.slice(0, 10)) : "") : c.key_kind === "config" ? "in config.yaml" : ""}</div></td>
+      <td class="nw">${u.calls_24h || 0}</td>
+      <td class="hint" style="white-space:normal">${s.last_ts ? `${when(s.last_ts)} · ${esc(s.addr || "")}<div>${esc((s.agent || "").slice(0, 60))}</div>` : (u.last_logged ? esc(_tsText(u.last_logged)) : "not since restart")}</td>
+      <td class="nw">${c.enabled ? pill("on", "ok") : pill("off")}</td>
+      <td class="nw"><button class="act" data-edit="${esc(c.name)}">Edit</button>
+        <button class="act" data-rotate="${esc(c.name)}">New key</button>
+        <button class="act" data-connect="${esc(c.name)}" data-preset="${esc(presetOf(c))}">Connect</button>
+        <button class="act danger" data-del="${esc(c.name)}">Delete</button></td></tr>`;
+  }).join("");
+  const rej = d.rejected.map(r => `<tr><td class="nw"><code>${esc(r.fingerprint)}</code></td><td class="nw">${esc(r.looks_like)}</td>
+    <td class="nw">${r.count}</td><td class="nw">${r.outcome === "refused" ? pill("refused", "bad") : pill("let through", "warn")}</td>
+    <td class="hint">${esc(r.path || "")}</td><td class="hint" style="white-space:normal">${esc(r.addr || "")} · ${esc((r.agent || "").slice(0, 70))}</td>
+    <td class="nw hint">${when(r.last_ts)}</td></tr>`).join("");
+  const ps = d.presets[o.preset] || {scopes: ["inference"], note: ""};
+  $("#main").innerHTML = `
+    <h2>Clients &amp; keys</h2>
+    <p class="hint">Give each program (Cline, Kilo, the coordinator, Open WebUI…) its own key: the logs, budgets and
+      the Work view then show who made each call, and one key can be turned off without touching the others.
+      Keys made here are shown <b>once</b>; Foundry keeps only a hash. Changes save to config.yaml and appear in config history.</p>
+    <div class="card"><h3>Access</h3>
+      <div class="row"><label title="optional: a program that sends no key still works (as 'anonymous'). required: every chat/media request needs a valid key.">requests without a key</label>
+        <select id="ca-mode"><option value="optional" ${a.mode === "optional" ? "selected" : ""}>allowed (anonymous)</option><option value="required" ${a.mode === "required" ? "selected" : ""}>refused (key required)</option></select>
+        <label title="A key that matches no client. Refuse is safer (a typo doesn't silently become anonymous). 'Let through' helps while you hand out keys: programs that always send something in their API-key field keep working. Only in 'allowed' mode.">keys that match no client</label>
+        <select id="ca-unknown"><option value="refuse" ${a.unknown_keys === "refuse" ? "selected" : ""}>refuse</option><option value="anonymous" ${a.unknown_keys === "anonymous" ? "selected" : ""}>let through as anonymous</option></select>
+        <label title="Require an admin-scoped key for this web UI and its API. Make an admin client first; the UI asks for its key once per browser."><input type="checkbox" id="ca-protect" ${a.protect_admin ? "checked" : ""}> protect the web UI</label>
+        <button class="act primary" id="ca-save">Save access</button></div>
+      <p class="hint">Last 24 h: ${(d.anonymous.calls_24h || 0)} request(s) with no key (anonymous).</p></div>
+    <div class="card"><h3>Clients</h3>${rows ? `<div class="tscroll"><table><tr><th>client (identifier)</th><th>scopes</th><th>personas</th><th>key</th><th>calls 24 h</th><th>last seen</th><th>enabled</th><th></th></tr>${rows}</table></div>` : '<p class="hint">No clients yet: every program is anonymous. Add one below.</p>'}</div>
+    <div class="card"><h3>Add a client</h3>
+      <div class="row"><label>for</label><select id="nc-preset">${Object.entries(d.presets).map(([k, v]) => `<option value="${k}" ${k === o.preset ? "selected" : ""}>${esc(k)} — ${esc(v.note)}</option>`).join("")}<option value="custom" ${o.preset === "custom" ? "selected" : ""}>custom</option></select></div>
+      <div class="row"><label title="The client's identifier in logs, budgets (match: client) and the Work view. Letters, digits, . _ : -">name</label><input id="nc-name" value="${esc(o.preset === "custom" ? "" : o.preset)}" placeholder="e.g. cline-laptop">
+        <label>note</label><input id="nc-note" value="${esc(ps.note || "")}" style="min-width:260px"></div>
+      <div class="row"><label>scopes</label>${d.scopes.map(s => `<label style="min-width:0"><input type="checkbox" class="nc-scope" value="${s}" ${(ps.scopes || []).includes(s) ? "checked" : ""}> ${s}</label>`).join(" ")}</div>
+      <div class="row"><label title="Leave empty for all personas. Otherwise only these are listed and usable for this client.">only personas</label><input id="nc-personas" list="persona-list" placeholder="empty = all (comma-separated)" style="min-width:320px">
+        <datalist id="persona-list">${d.personas.map(p => `<option value="${esc(p)}">`).join("")}</datalist>
+        <button class="act primary" id="nc-create">Create client and key</button></div>
+      <p class="hint">Scopes: <b>inference</b> chat/models · <b>media</b> image jobs · <b>orchestration</b> coordinator bindings and training capture · <b>admin</b> this web UI's API.</p></div>
+    <div class="card"><h3>Keys that matched no client</h3>
+      <p class="hint">A program sending a key Foundry doesn't know (since restart; only a fingerprint is kept, never the key). Usually a placeholder or an old key in that program's API-key field: make a client above and paste its key there.</p>
+      ${rej ? `<div class="tscroll"><table><tr><th>fingerprint</th><th>looks like</th><th>requests</th><th>result</th><th>last path</th><th>from</th><th>last</th></tr>${rej}</table></div><div class="row"><button class="act" id="rej-clear">Clear list</button></div>` : '<p class="hint">None.</p>'}</div>`;
+  const scopesOf = sel => [...document.querySelectorAll(sel)].filter(x => x.checked).map(x => x.value);
+  const list = v => v.split(",").map(x => x.trim()).filter(Boolean);
+  const showKey = (title, name, key, preset) => {
+    const body = openModal(title, `<p>Copy this key now — Foundry stores only its hash and can't show it again.</p>
+      <div class="row"><code id="new-key" style="font-size:14px;overflow-wrap:anywhere">${esc(key)}</code> <button class="act primary" id="copy-key">Copy</button></div>
+      ${preset === "admin" ? '<div class="row"><button class="act" id="use-key">Use this key in this browser</button></div>' : ""}
+      <h4>Connect ${esc(name)}</h4>${_connectHelp(preset, name, key, d.endpoints)}`);
+    $("#copy-key", body).onclick = () => { navigator.clipboard.writeText(key).then(() => toast("Key copied"), () => toast("Select the key and copy it", true)); };
+    const use = $("#use-key", body);
+    if (use) use.onclick = () => { try { localStorage.setItem("foundryAdminKey", key); } catch (e) {} toast("This browser now uses the admin key"); };
+  };
+  $("#ca-save").onclick = () => api("setup/client_auth", {method: "POST", body: {mode: $("#ca-mode").value,
+    unknown_keys: $("#ca-unknown").value, protect_admin: $("#ca-protect").checked}})
+    .then(r => { toast((r.warnings || []).join(" ") || "Saved", !!(r.warnings || []).length); render(); })
+    .catch(e => toast(e.message, true));
+  $("#nc-preset").onchange = e => { o.preset = e.target.value; render(); };
+  $("#nc-create").onclick = () => api("setup/clients", {method: "POST", body: {name: $("#nc-name").value.trim(),
+    note: $("#nc-note").value, scopes: scopesOf(".nc-scope"), personas: list($("#nc-personas").value)}})
+    .then(r => { render(); showKey(`Client ${r.client.name} created`, r.client.name, r.key, o.preset); })
+    .catch(e => toast(e.message, true));
+  document.querySelectorAll("[data-rotate]").forEach(b => b.onclick = () => {
+    const n = b.dataset.rotate;
+    if (!confirm(`Make a new key for ${n}? The current key stops working immediately.`)) return;
+    api(`setup/clients/${encodeURIComponent(n)}/rotate`, {method: "POST"})
+      .then(r => { render(); showKey(`New key for ${n}`, n, r.key, presetOf({name: n})); }).catch(e => toast(e.message, true));
+  });
+  document.querySelectorAll("[data-del]").forEach(b => b.onclick = () => {
+    const n = b.dataset.del;
+    if (!confirm(`Delete client ${n}? Its key stops working immediately.`)) return;
+    run(api(`setup/clients/${encodeURIComponent(n)}`, {method: "DELETE"}));
+  });
+  document.querySelectorAll("[data-connect]").forEach(b => b.onclick = () =>
+    openModal(`Connect ${b.dataset.connect}`, _connectHelp(b.dataset.preset, b.dataset.connect, "", d.endpoints) +
+      '<p class="hint">The key itself isn\'t stored here. Lost it? Use "New key".</p>'));
+  document.querySelectorAll("[data-edit]").forEach(b => b.onclick = () => {
+    const c = d.clients.find(x => x.name === b.dataset.edit);
+    const body = openModal(`Edit ${c.name}`, `
+      <div class="row"><label>scopes</label>${d.scopes.map(s => `<label style="min-width:0"><input type="checkbox" class="ed-scope" value="${s}" ${c.scopes.includes(s) ? "checked" : ""}> ${s}</label>`).join(" ")}</div>
+      <div class="row"><label>only personas</label><input id="ed-personas" list="persona-list" value="${esc(c.personas.join(", "))}" placeholder="empty = all" style="min-width:300px"></div>
+      <div class="row"><label>note</label><input id="ed-note" value="${esc(c.note || "")}" style="min-width:300px"></div>
+      <div class="row"><label><input type="checkbox" id="ed-enabled" ${c.enabled ? "checked" : ""}> enabled</label>
+        <button class="act primary" id="ed-save">Save</button></div>
+      <p class="hint">The name is this client's identifier in logs and budget rules, so it isn't renamed; make a new client instead.</p>`);
+    $("#ed-save", body).onclick = () => api(`setup/clients/${encodeURIComponent(c.name)}`, {method: "PATCH", body: {
+      scopes: scopesOf(".ed-scope"), personas: list($("#ed-personas", body).value), note: $("#ed-note", body).value,
+      enabled: $("#ed-enabled", body).checked}}).then(() => { closeModal(); toast("Saved"); render(); }).catch(e => toast(e.message, true));
+  });
+  const rc = $("#rej-clear");
+  if (rc) rc.onclick = () => run(api("setup/rejected", {method: "DELETE"}));
+}
+
+// Setup → Helpers & Limits: per-backend concurrency and helper streams,
+// edited as a form (stored on each backend in config.yaml).
+async function tabLimits() {
+  const d = await api("setup/limits");
+  const num = (v, ph) => `value="${v == null ? "" : esc(v)}" placeholder="${ph}"`;
+  const rows = d.backends.map(b => {
+    const s = d.streams[b.name];
+    const active = s ? (s.active || []).map(a => `${a.persona || a.client} (${a.idle_s}s idle)`).join(", ") : "";
+    return `<tr><td class="nw"><b>${esc(b.name)}</b><div class="hint">${esc(b.type)}${b.flavor ? " · " + esc(b.flavor) : ""}${b.subscription ? " · subscription" : ""}${b.enabled === false ? " · disabled" : ""}</div></td>
+      <td class="nw"><input type="number" min="0" max="64" style="width:80px" data-f="helpers_allowed" data-b="${esc(b.name)}" ${num(b.helpers_allowed, "no limit")}></td>
+      <td class="nw"><input type="number" min="1" max="256" style="width:80px" data-f="max_concurrent" data-b="${esc(b.name)}" ${num(b.max_concurrent, "no limit")}></td>
+      <td class="nw"><input type="number" min="1" max="3600" style="width:90px" data-f="queue_timeout_seconds" data-b="${esc(b.name)}" ${num(b.queue_timeout_seconds, "300")}></td>
+      <td class="hint" style="white-space:normal">${s ? `${(s.active || []).length}${s.streams_allowed != null ? "/" + s.streams_allowed : ""} ${esc(active)}` : "—"}</td>
+      <td class="nw"><button class="act primary" data-save="${esc(b.name)}">Save</button></td></tr>`;
+  }).join("");
+  $("#main").innerHTML = `
+    <h2>Helpers &amp; limits</h2>
+    <p class="hint">Per backend. <b>Helpers allowed</b>: how many helper streams (sub-agents, e.g. Kilo's task tool or
+      parallel coordinator sessions) the backend serves next to your main one: <code>0</code> = main stream only,
+      <code>1</code> = main + one helper, empty = no limit. A session over the limit waits up to the queue timeout for a slot,
+      then is refused; a session holds its slot until 60 s after its last call.
+      <b>Max concurrent</b>: calls running at once (e.g. llama.cpp <code>-np</code> slots); more wait in a fair queue.
+      Call/token caps per account, client or task are budget rules (Logs → Usage Log).</p>
+    <div class="card">${rows ? `<div class="tscroll"><table><tr><th>backend</th><th>helpers allowed</th><th>max concurrent</th><th>queue timeout s</th><th>sessions now</th><th></th></tr>${rows}</table></div>` : '<p class="hint">No backends configured (Backends → Pool).</p>'}</div>`;
+  document.querySelectorAll("[data-save]").forEach(b => b.onclick = () => {
+    const name = b.dataset.save, body = {name};
+    document.querySelectorAll(`input[data-b="${CSS.escape(name)}"]`).forEach(i => { body[i.dataset.f] = i.value; });
+    if (body.queue_timeout_seconds === "") delete body.queue_timeout_seconds;
+    run(api("setup/limits", {method: "POST", body}));
+  });
 }
 
 // Route view (routes_view.py): the routing graph generated from the live

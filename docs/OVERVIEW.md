@@ -65,6 +65,9 @@ Worker model (± MCP tools, ± tiered review) → response streamed back to the 
   Strata (Qwen3.8-Flash-Next on GPU + RAM): see [STRATA.md](STRATA.md).
   What each backend reports and how it reaches each client:
   [COMPATIBILITY.md](COMPATIBILITY.md).
+- **Setup → Clients & Keys / Helpers & Limits** — make, rotate and revoke a
+  key per program (shown once, stored hashed), access mode, unknown-key log,
+  and per-backend helpers / concurrency ([CLIENTS.md](CLIENTS.md)).
 - **Backend Pool** — backends, health, the routing brain, and **Meridian
   re-authentication** (refresh token / full re-login — [MERIDIAN_AUTH.md](MERIDIAN_AUTH.md)).
 - **Models** — the registry: score badges, `~seed` vs researched, cross-model
