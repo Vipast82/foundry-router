@@ -47,6 +47,7 @@ async def _router(req: httpx.Request):
         return httpx.Response(200, json={"data": [{"b64_json": base64.b64encode(png()).decode()}]})
     body = json.loads(req.content)
     HITS.append((backend, body["model"]))
+    STATE["last_body"] = body
     if backend in STATE.get("fail", ()):
         return httpx.Response(500, text="boom")
     last = body["messages"][-1]
@@ -392,3 +393,24 @@ def test_length_check_is_skipped_on_meridian(fleet, client, monkeypatch):
     assert run.checks == [{"name": "length", "status": "skip", "ms": None,
                            "detail": "Meridian ignores max_tokens (Claude Code SDK has no output cap)"}]
     assert ("meridian", "claude-haiku-5-5") not in HITS
+
+
+
+def test_structured_output_request_skips_the_brain_loop(fleet, client, monkeypatch):
+    """An agent-mode persona asked for a JSON schema (Mealie's provider test)
+    is answered by one direct model call with the client's response_format,
+    not by the brain loop, which would drop it."""
+    monkeypatch.setattr(fleet.brain, "skip_reason", lambda: None)     # brain "healthy"
+    fleet.personas.upsert("Chatty", execution_mode="agent", model_allowlist=["claude-haiku-5-5"])
+    schema = {"type": "object", "properties": {"text": {"type": "string"}},
+              "required": ["text"], "additionalProperties": False}
+    r = client.post("/v1/chat/completions", json={
+        "model": "Chatty",
+        "messages": [{"role": "system", "content": "Respond in JSON."},
+                     {"role": "user", "content": [{"type": "text", "text": "Hello, can I reach you?"}]}],
+        "response_format": {"type": "json_schema",
+                            "json_schema": {"name": "OpenAIText", "strict": True, "schema": schema}}})
+    assert r.status_code == 200, r.text
+    assert HITS == [("meridian", "claude-haiku-5-5")]
+    sent = STATE["last_body"]["response_format"]
+    assert sent["type"] == "json_schema" and sent["json_schema"]["schema"] == schema
