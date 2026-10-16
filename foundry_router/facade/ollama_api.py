@@ -1919,7 +1919,11 @@ async def _direct_dispatch_chat(svc, persona, model_name, messages, client_tools
     # here and the model continues; calls to a client tool go back to the
     # client exactly as before. A persona with no MCP tools (e.g. a Cline
     # persona that relies on Cline's own MCP servers) is completely unchanged.
-    mcp_defs = _direct_mcp_tools(svc, persona, client_tools)
+    # A structured-output request (client format, no client tools) is a one-shot
+    # JSON answer: the persona's MCP tools are left off so the format can be
+    # applied, instead of the tools winning and the schema being dropped.
+    mcp_defs = ({} if client_format is not None and not client_tools
+                else _direct_mcp_tools(svc, persona, client_tools))
     all_tools = (list(client_tools or []) + [td.spec() for td in mcp_defs.values()]) or None
     if mcp_defs:
         fmt = None                        # structured output would break tool calls

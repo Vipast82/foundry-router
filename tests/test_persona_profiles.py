@@ -431,3 +431,29 @@ def test_unfence_json_only_unwraps_one_valid_block():
     for keep in ('{"text": "hi"}', "Sure! ```json\n{}\n```", "```json\n{oops\n```",
                  '```json\n{"a": 1}\n```\n```json\n{"b": 2}\n```', "plain prose"):
         assert unfence_json(keep) == keep
+
+
+def test_structured_output_keeps_the_schema_on_a_persona_with_mcp_tools(fleet, client, monkeypatch):
+    """Direct mode drops the format when it attaches the persona's MCP tools
+    (forced JSON would break tool calls); a JSON request from a client with no
+    tools of its own gets the schema and no tools instead."""
+    from foundry_router.facade import ollama_api
+
+    class _Tool:
+        name = "searxng_search"
+
+        def spec(self):
+            return {"type": "function", "function": {"name": self.name, "parameters": {}}}
+    monkeypatch.setattr(ollama_api, "_direct_mcp_tools", lambda svc, p, ct: {"searxng_search": _Tool()})
+    fleet.personas.upsert("Tooly", execution_mode="direct", model_allowlist=["qwen3.8-flash-next-iq3_s"])
+    schema = {"type": "object", "properties": {"text": {"type": "string"}}, "required": ["text"]}
+    r = client.post("/v1/chat/completions", json={
+        "model": "Tooly", "messages": [{"role": "user", "content": "hi"}],
+        "response_format": {"type": "json_schema", "json_schema": {"name": "OpenAIText", "schema": schema}}})
+    assert r.status_code == 200, r.text
+    sent = STATE["last_body"]
+    assert sent["response_format"]["json_schema"]["schema"] == schema and not sent.get("tools")
+    # without a format the persona's tools are still offered
+    client.post("/v1/chat/completions", json={"model": "Tooly", "messages": [{"role": "user", "content": "hi"}]})
+    assert [t["function"]["name"] for t in STATE["last_body"]["tools"]] == ["searxng_search"]
+    assert "response_format" not in STATE["last_body"]
