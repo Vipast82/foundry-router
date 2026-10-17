@@ -23,7 +23,7 @@ from . import review as R
 from . import states as S
 from . import training_hook
 from .adapters import Project
-from .adapters.base import FAIL, PASS, UNKNOWN, VerificationResult
+from .adapters.base import FAIL, PASS, UNKNOWN, SessionState, VerificationResult
 from .adapters.foundry import FoundryDenied, FoundryError
 from .adapters.git import GitError
 from .adapters.project import AdapterError, failed_findings
@@ -45,6 +45,10 @@ class Coordinator:
         self.max_writers = max(1, int(max_writers))
         self.clock = clock
         self.log = log
+        # Called after every tick by the process that owns the engine (`run`):
+        # the control-center channel (control.py) applies operator actions here,
+        # so nothing but this process ever changes the engine's state.
+        self.after_tick: list[Callable[[], None]] = []
         for p in projects:
             store.register_project(p.id, p.profile.name, p.profile.path, p.profile.hash,
                                    p.profile.version, os.path.realpath(p.profile.workspace))
@@ -109,6 +113,11 @@ class Coordinator:
             acted = self.tick()
             for a in acted:
                 self.log(a)
+            for hook in list(self.after_tick):
+                try:
+                    hook()
+                except Exception as e:                            # noqa: BLE001
+                    self.log(f"after-tick hook failed: {type(e).__name__}: {e}")
             if owner:
                 self.store.heartbeat(owner)
             n += 1
@@ -280,7 +289,9 @@ class Coordinator:
             self._bind(P, sid, tid, run_id, role, persona)
         if not res.get("prompt_ts"):
             ts = self.clock()
+            prompt, notes = self._with_operator_notes(P.id, tid, prompt, "")
             P.client.prompt(sid, prompt, directory=directory, persona=persona, agent=agent)
+            self._notes_delivered(notes, sid)
             self.store.op_update(key, "done", {"session_id": sid, "prompt_ts": ts})
             self.store.update_session(sid, status="prompted", prompt_ts=ts)
             self.store.event(P.id, tid, "session_started", session_id=sid,
@@ -326,6 +337,12 @@ class Coordinator:
     def _poll(self, P: Project, t: dict, sid: str, phase: str):
         """Poll a session. Returns the idle SessionState, or None after
         handling anything else (still busy, question, error, denial)."""
+        s = self._poll_inner(P, t, sid, phase)
+        # the handlers below return transition rows (dicts); only an idle
+        # session's state may reach the caller
+        return s if isinstance(s, SessionState) else None
+
+    def _poll_inner(self, P: Project, t: dict, sid: str, phase: str):
         pid, tid = P.id, t["task_id"]
         sess = self.store.session(sid) or {}
         prompt_ts = sess.get("prompt_ts") or 0
@@ -913,6 +930,7 @@ class Coordinator:
                               since_ts=0).status == "missing" or \
                     self._acquire(P, t, self._session_locks(P), writer=True):
                 target = S.CHANGES_REQUIRED if target == S.IMPLEMENTING else S.CLOSING
+                self._notes_undeliverable(project_id, task_id, sid)
                 data["findings"] = data.get("findings") or ["continue the interrupted work"]
                 data["free_retry"] = True
                 if target == S.CLOSING:
@@ -920,10 +938,13 @@ class Coordinator:
             else:
                 spec = P.adapter.describe(task_id)
                 ts = self.clock()
-                P.client.prompt(sid, P.adapter.continue_prompt(spec, t["pause_reason"] or "paused"),
-                                directory=P.profile.workspace,
+                prompt, notes = self._with_operator_notes(
+                    project_id, task_id, P.adapter.continue_prompt(spec, t["pause_reason"] or "paused"),
+                    sid)
+                P.client.prompt(sid, prompt, directory=P.profile.workspace,
                                 persona=P.profile.persona("implementer"),
                                 agent=P.profile.client.get("agent") or "code")
+                self._notes_delivered(notes, sid)
                 self.store.update_session(sid, status="prompted", prompt_ts=ts, ended_ts=None)
                 if P.foundry is not None:
                     self._bind(P, sid, task_id, t["run_id"], "implementer",
@@ -1002,6 +1023,42 @@ class Coordinator:
         return self.store.transition(project_id, task_id,
                                      S.CLOSING if back == S.CLOSING else S.IMPLEMENTING,
                                      {"answered": answer}, actor=actor, data=data)
+
+    # ======================================================================= operator notes
+
+    def _with_operator_notes(self, project_id: str, task_id: str, prompt: str,
+                             session_id: str) -> tuple[str, list[str]]:
+        """Append queued control-center instructions to a prompt the engine is
+        about to send anyway (a safe point: never a second, concurrent prompt).
+        They are the operator's words for this task, inside its existing scope
+        and permissions: they don't widen scope or waive a check."""
+        try:
+            notes = self.store.pending_operator_messages(project_id, task_id, session_id)
+        except Exception:                                         # noqa: BLE001
+            return prompt, []
+        if not notes:
+            return prompt, []
+        ids = [n["msg_id"] for n in notes]
+        self.store.mark_operator_messages(ids, "delivering", session_id)
+        body = "\n\n".join(
+            f"[{n['actor']}, {time.strftime('%Y-%m-%d %H:%M', time.localtime(n['created_ts']))}]"
+            f"\n{n['text']}" for n in notes)
+        return (prompt + "\n\n## Operator instructions (from the control center)\n"
+                "Follow these within the task's approved scope and rules; they do not authorize "
+                "new scope, skipped checks or changed routing.\n\n" + body + "\n"), ids
+
+    def _notes_delivered(self, ids: list[str], session_id: str) -> None:
+        if ids:
+            self.store.mark_operator_messages(ids, "delivered", session_id,
+                                              "included in the prompt Kilo accepted")
+
+    def _notes_undeliverable(self, project_id: str, task_id: str, session_id: str) -> None:
+        for n in self.store.pending_operator_messages(project_id, task_id, session_id):
+            if n["scope"] == "session":
+                self.store.mark_operator_messages([n["msg_id"]], "rejected", "",
+                                                  f"session {session_id} is gone; a "
+                                                  f"session-specific instruction is not moved "
+                                                  f"to another session")
 
     # ======================================================================= helpers
 

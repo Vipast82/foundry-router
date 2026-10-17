@@ -244,6 +244,12 @@ top: `max_attempts`, `max_sessions_per_task`, `max_review_calls`,
 | `answer P T <text>` | answer the session's question; it continues |
 | `approve P T --kind visual --by victor` | approval bound to the current revision and artifact hashes |
 | `reject P T --by victor --finding ".."` | back to a repair session with those findings |
+| `bridge` | read-only telemetry bridge for the control center (Kilo + this store → Foundry) |
+| `run --control [--telemetry]` | also apply control-center operator actions in this engine loop (and run the bridge) |
+
+The **control center** (Foundry `/ui/control`, reached from Work) shows live transcripts,
+helpers, alerts and replies, and sends typed operator actions that this engine applies
+itself: [CONTROL_CENTER.md](CONTROL_CENTER.md).
 
 Foundry → Dashboard → **Work** shows tasks, bound sessions (persona asked for,
 backend/model that answered, calls, tokens, denials) and events.

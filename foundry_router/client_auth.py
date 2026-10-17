@@ -7,6 +7,12 @@ in the logs and budgets) and its scopes decide what it may reach:
   inference  /api/* (Ollama) and /v1/* chat/completions/responses/embeddings/models
   media      /v1/images/*, /media/*, /mcp/media (image jobs and artifacts)
   admin      /admin/* (the web UI's API; the /ui page shell itself is static)
+  orchestration  /v1/foundry/* (coordinator bindings/state, claiming operator actions)
+  telemetry  /v1/foundry/telemetry/* (the workstation bridge's observations; also
+             accepted from an orchestration key)
+  operator   the coordinator control center (/control/api/*): a person signs in
+             once with this key and gets an HttpOnly session; the key is never
+             kept by the browser (control_api.py). admin also works.
 
 `client_auth.mode`:
   optional (default) — keyless requests pass as client "anonymous" (so Cline's
@@ -67,6 +73,8 @@ def scope_for(path: str) -> Optional[str]:
         return "media"         # Foundry's built-in image tools
     if path.startswith("/mcp"):
         return None            # Foundry-MCP has its own token (mcp_aggregator.token)
+    if path.startswith("/v1/foundry/telemetry/"):
+        return "telemetry"       # workstation bridge: read-only observations in (control_api.py)
     if path.startswith("/v1/foundry/"):
         return "orchestration"   # coordinator bindings/state, training capture, pipeline status
     if path.startswith("/admin"):
@@ -105,7 +113,8 @@ def identify(cfg, headers: dict, agent_tokens: Optional[dict] = None) -> tuple[O
                 continue
             if matches(k, c):
                 return ({"client_id": c.name, "scopes": list(c.scopes or ["inference"]),
-                         "personas": list(c.personas or [])}, True)
+                         "personas": list(c.personas or []),
+                         "projects": list(getattr(c, "projects", None) or [])}, True)
         for tok, name in (agent_tokens or {}).items():
             if tok and hmac.compare_digest(k.encode(), tok.encode()):
                 return ({"client_id": f"agent:{name}", "scopes": ["inference", "media"],
@@ -160,6 +169,11 @@ class ClientAuthMiddleware:
             problem = _deny(401, "unknown Foundry client key — make one in Foundry's web UI "
                                  "(Setup → Clients & keys) and put it in this client's API "
                                  "key field", "invalid_api_key")
+        elif need == "telemetry":
+            if client is None or not ({"telemetry", "orchestration", "admin"} & set(client["scopes"])):
+                problem = _deny(401 if client is None else 403,
+                                "telemetry needs a client key with the telemetry (or "
+                                "orchestration) scope", "insufficient_scope")
         elif need == "orchestration":
             if client is None or not ({"orchestration", "admin"} & set(client["scopes"])):
                 problem = _deny(401 if client is None else 403,

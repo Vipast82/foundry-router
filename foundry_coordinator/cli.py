@@ -13,7 +13,15 @@ Commands
   queue approve PROJECT TASK [--deps A,B] --by NAME [--note TEXT]
   status [--json]
   tick                                     one engine step for every task
-  run [--poll S] [--max-ticks N] [--until-settled]
+  run [--poll S] [--max-ticks N] [--until-settled] [--control] [--telemetry]
+                                           --control: apply control-center actions (pause,
+                                           answer, approve, instructions...) from Foundry
+                                           inside this engine loop, and heartbeat to Foundry
+                                           --telemetry: also run the read-only bridge below
+  bridge [--poll S] [--replay N] [--once] [--no-events]
+                                           read-only telemetry bridge for the control center:
+                                           Kilo + this store -> Foundry. Safe to run next to a
+                                           live `run`; changes nothing, makes no model calls
   pause PROJECT TASK --reason TEXT         stop a task (its session is aborted)
   resume PROJECT TASK
   cancel PROJECT TASK --reason TEXT
@@ -67,6 +75,28 @@ def _fmt_task(t: dict) -> str:
     sha = (t.get("head_sha") or "")[:10]
     return (f"  {t['task_id']:<14} {t['state']:<17} attempt {t['attempt']}  "
             f"{('@' + sha) if sha else '':<12} {extra[:110]}")
+
+
+def _bridge(c: Coordinator, a):
+    """The read-only telemetry bridge for this store's projects. Foundry
+    credentials: [telemetry] key_env in a profile (a telemetry-scoped key), else
+    the profile's [foundry] key (orchestration scope is accepted for telemetry)."""
+    from .adapters.foundry import FoundryClient
+    from .telemetry import TelemetryBridge
+    P0 = next((P for P in c.projects.values() if P.profile.foundry.get("url")), None)
+    if P0 is None:
+        print("error: the bridge needs a [foundry] url in a profile", file=sys.stderr)
+        return None
+    tel = (getattr(P0.profile, "raw", None) or {}).get("telemetry")
+    key = ""
+    if isinstance(tel, dict) and tel.get("key_env"):
+        key = os.environ.get(tel["key_env"], "")
+    key = key or P0.profile.secret(P0.profile.foundry, "key")
+    f = FoundryClient(P0.profile.foundry["url"], key=key, timeout=30)
+    return TelemetryBridge(list(c.projects.values()), c.store.path, f,
+                           poll_s=float(getattr(a, "poll", 2) or 2),
+                           replay_sessions=int(getattr(a, "replay", 40) or 40),
+                           use_events=not getattr(a, "no_events", False), log=c.log)
 
 
 def doctor(c: Coordinator, project: str = "") -> int:
@@ -136,6 +166,16 @@ def main(argv=None, clients=None, foundry=None) -> int:
     r = sub.add_parser("run"); r.add_argument("--poll", type=float, default=5)
     r.add_argument("--max-ticks", type=int); r.add_argument("--until-settled", action="store_true")
     r.add_argument("--force", action="store_true")
+    r.add_argument("--control", action="store_true",
+                   help="apply control-center operator actions from Foundry in this loop")
+    r.add_argument("--telemetry", action="store_true",
+                   help="also run the read-only telemetry bridge in this process")
+    b = sub.add_parser("bridge")
+    b.add_argument("--poll", type=float, default=2)
+    b.add_argument("--replay", type=int, default=40,
+                   help="existing sessions to replay from Kilo at start (most recent first)")
+    b.add_argument("--once", action="store_true", help="one pass, then exit")
+    b.add_argument("--no-events", action="store_true", help="poll only; don't use Kilo's /event")
     for name in ("pause", "cancel"):
         x = sub.add_parser(name); x.add_argument("project"); x.add_argument("task")
         x.add_argument("--reason", required=True)
@@ -205,13 +245,45 @@ def _dispatch(a, c: Coordinator) -> int:
         return 0
     if a.cmd == "run":
         me = s.claim_owner(force=a.force)
+        bridge = None
+        if a.control:
+            from .control import ControlChannel
+            ch = ControlChannel(c, log=c.log)
+            if ch.foundry is None:
+                print("error: --control needs a [foundry] url and key in a profile", file=sys.stderr)
+                s.release_owner(me)
+                return 2
+            c.after_tick.append(ch.poll)
+        if a.telemetry:
+            import threading
+            bridge = _bridge(c, a)
+            if bridge is None:
+                s.release_owner(me)
+                return 2
+            threading.Thread(target=bridge.run, daemon=True, name="telemetry-bridge").start()
         try:
             c.run(poll_seconds=a.poll, max_ticks=a.max_ticks, until_settled=a.until_settled,
                   owner=me)
         except KeyboardInterrupt:
             print("stopped (state is saved; run again to resume)")
         finally:
+            if bridge is not None:
+                bridge.stop()
             s.release_owner(me)
+        return 0
+    if a.cmd == "bridge":
+        br = _bridge(c, a)
+        if br is None:
+            return 2
+        if a.once:
+            print(json.dumps(br.step()))
+            return 0
+        print(f"telemetry bridge {br.source_id}: {', '.join(sorted(br.projects))} -> "
+              f"{br.foundry.url} (read-only; Ctrl+C stops it)", flush=True)
+        try:
+            br.run()
+        except KeyboardInterrupt:
+            br.stop()
         return 0
     if a.cmd == "pause":
         c.pause(a.project, a.task, a.reason)

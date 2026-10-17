@@ -633,8 +633,11 @@ class ClientConfig(BaseModel):
     # hold the key itself. key_hint is the first/last characters, for display.
     key_hash: Optional[str] = None
     key_hint: Optional[str] = None
-    scopes: list[Literal["inference", "media", "admin", "orchestration"]] = Field(
-        default_factory=lambda: ["inference"])
+    scopes: list[Literal["inference", "media", "admin", "orchestration", "telemetry",
+                         "operator"]] = Field(default_factory=lambda: ["inference"])
+    # Optional: only these coordinator projects (control center, telemetry,
+    # operator actions). Empty = every project.
+    projects: list[str] = Field(default_factory=list)
     # Optional: only these personas are visible/usable for this client.
     personas: list[str] = Field(default_factory=list)
     enabled: bool = True

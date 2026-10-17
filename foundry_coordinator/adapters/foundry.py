@@ -101,6 +101,25 @@ class FoundryClient:
                                                   ("since", since)) if v}, timeout=20)[0].get(
             "denials") or []
 
+    # -- control center (control_api.py) ----------------------------------------------
+
+    def telemetry(self, batch: dict) -> dict:
+        return self._req("POST", "/v1/foundry/telemetry/batch", batch, timeout=30)[0]
+
+    def heartbeat(self, payload: dict) -> dict:
+        return self._req("POST", "/v1/foundry/telemetry/heartbeat", payload, timeout=15)[0]
+
+    def claim_actions(self, source_id: str, projects: list[str], limit: int = 20) -> list[dict]:
+        return self._req("POST", "/v1/foundry/control/claim",
+                         {"source_id": source_id, "projects": projects, "limit": limit},
+                         timeout=20)[0].get("actions") or []
+
+    def action_status(self, action_id: str, source_id: str, status: str, detail: str,
+                      result: Optional[dict] = None) -> dict:
+        return self._req("POST", f"/v1/foundry/control/actions/{urllib.parse.quote(action_id)}/status",
+                         {"source_id": source_id, "status": status, "detail": detail[:1000],
+                          "result": result or {}}, timeout=20)[0]
+
     # -- inference -----------------------------------------------------------------
 
     def chat(self, persona: str, messages: list, *, session_id: str = "",

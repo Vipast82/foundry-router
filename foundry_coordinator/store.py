@@ -67,6 +67,14 @@ CREATE TABLE IF NOT EXISTS locks (
 CREATE TABLE IF NOT EXISTS events (
   id INTEGER PRIMARY KEY AUTOINCREMENT, event_id TEXT UNIQUE, ts REAL, project_id TEXT,
   task_id TEXT, session_id TEXT, kind TEXT, state TEXT, detail TEXT, pushed INTEGER DEFAULT 0);
+-- Operator instructions from the control center (control.py), owned here: the
+-- engine adds queued task-scoped ones to the next session prompt it sends, or a
+-- pause-and-steer one to the continue prompt of that exact session.
+CREATE TABLE IF NOT EXISTS operator_messages (
+  msg_id TEXT PRIMARY KEY, action_id TEXT UNIQUE, project_id TEXT, task_id TEXT,
+  session_id TEXT, scope TEXT, delivery TEXT, actor TEXT, text TEXT, status TEXT,
+  created_ts REAL, delivered_session TEXT, delivered_ts REAL, detail TEXT,
+  reported TEXT DEFAULT '');
 """
 
 
@@ -489,6 +497,48 @@ class Store:
         for r in rows:
             r["detail"] = _uj(r["detail"], {})
         return rows
+
+
+    # -- operator messages (control center) ------------------------------------------
+
+    def add_operator_message(self, action_id: str, project_id: str, task_id: str,
+                             session_id: str, scope: str, delivery: str, actor: str,
+                             text: str) -> dict:
+        """Idempotent per action id."""
+        self.x("INSERT OR IGNORE INTO operator_messages (msg_id, action_id, project_id, task_id, "
+               "session_id, scope, delivery, actor, text, status, created_ts) "
+               "VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+               (f"om-{uuid.uuid4().hex[:12]}", action_id, project_id, task_id, session_id, scope,
+                delivery, actor, text, "queued", time.time()))
+        return self.q("SELECT * FROM operator_messages WHERE action_id=?", (action_id,))[0]
+
+    def operator_message(self, action_id: str) -> Optional[dict]:
+        r = self.q("SELECT * FROM operator_messages WHERE action_id=?", (action_id,))
+        return r[0] if r else None
+
+    def operator_messages(self, status: Optional[str] = None) -> list[dict]:
+        return self.q("SELECT * FROM operator_messages" + (" WHERE status=?" if status else "")
+                      + " ORDER BY created_ts", (status,) if status else ())
+
+    def pending_operator_messages(self, project_id: str, task_id: str,
+                                  session_id: str = "") -> list[dict]:
+        """Queued instructions deliverable now: every task-scoped one, plus
+        session-scoped ones only for that exact session (never reassigned)."""
+        return self.q("SELECT * FROM operator_messages WHERE project_id=? AND task_id=? AND "
+                      "status='queued' AND (scope='task' OR (scope='session' AND session_id=? "
+                      "AND ?!='')) ORDER BY created_ts",
+                      (project_id, task_id, session_id, session_id))
+
+    def mark_operator_messages(self, msg_ids: list[str], status: str, session_id: str = "",
+                               detail: str = "") -> None:
+        for m in msg_ids:
+            self.x("UPDATE operator_messages SET status=?, delivered_session=COALESCE(NULLIF(?,''), "
+                   "delivered_session), delivered_ts=CASE WHEN ?='delivered' THEN ? ELSE "
+                   "delivered_ts END, detail=? WHERE msg_id=?",
+                   (status, session_id, status, time.time(), detail[:500], m))
+
+    def set_operator_reported(self, msg_id: str, reported: str) -> None:
+        self.x("UPDATE operator_messages SET reported=? WHERE msg_id=?", (reported, msg_id))
 
 
 class _Tx:

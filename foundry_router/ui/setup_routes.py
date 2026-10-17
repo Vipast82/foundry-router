@@ -21,7 +21,7 @@ from .. import client_auth, client_keys
 router = APIRouter()
 
 NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,39}$")
-SCOPES = ("inference", "media", "admin", "orchestration")
+SCOPES = ("inference", "media", "admin", "orchestration", "telemetry", "operator")
 # What each kind of client usually needs, offered as presets in the UI.
 PRESETS = {
     "cline": {"scopes": ["inference"], "note": "Cline (VS Code), OpenAI-compatible provider"},
@@ -31,6 +31,9 @@ PRESETS = {
     "openwebui": {"scopes": ["inference"], "note": "Open WebUI / AnythingLLM / chat client"},
     "training": {"scopes": ["orchestration"], "note": "foundry_training pipeline (FOUNDRY_TRAINING_KEY)"},
     "admin": {"scopes": ["admin"], "note": "web UI admin key (needed if the UI is protected)"},
+    "operator": {"scopes": ["operator"], "note": "a person using the coordinator control center"},
+    "bridge": {"scopes": ["telemetry"], "note": "workstation telemetry bridge "
+                                                "(python -m foundry_coordinator bridge)"},
 }
 
 
@@ -60,7 +63,7 @@ def _usage(svc) -> dict:
 
 def _view(c, usage: dict, seen: dict) -> dict:
     return {"name": c.name, "scopes": list(c.scopes), "personas": list(c.personas),
-            "enabled": c.enabled, "note": c.note, "created": c.created,
+            "projects": list(getattr(c, "projects", None) or []), "enabled": c.enabled, "note": c.note, "created": c.created,
             "key_kind": client_keys.key_kind(c),
             "key_hint": c.key_hint,
             "usage": usage.get(c.name) or {}, "seen": seen.get(c.name)}
@@ -119,6 +122,7 @@ async def create_client(request: Request):
     entry = {"name": name, "key_hash": client_keys.hash_key(key),
              "key_hint": client_keys.hint(key), "scopes": scopes,
              "personas": [str(p) for p in body.get("personas") or []],
+             "projects": [str(p) for p in body.get("projects") or []],
              "note": str(body.get("note") or "")[:200],
              "created": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())}
 
@@ -173,6 +177,8 @@ async def update_client(request: Request, name: str):
         return _err(str(e))
     if "personas" in body:
         upd["personas"] = [str(p) for p in body["personas"] or []]
+    if "projects" in body:
+        upd["projects"] = [str(p) for p in body["projects"] or []]
     if "note" in body:
         upd["note"] = str(body["note"] or "")[:200]
     if "enabled" in body:

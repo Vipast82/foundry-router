@@ -1,0 +1,2278 @@
+<!doctype html>
+<!--
+  Foundry coordinator control center (/ui/control).
+  One static page, vanilla JS, no CDN (works on the LAN without internet).
+  Data: /control/api/* behind an HttpOnly operator session (control_api.py).
+  Viewing is read-only. Every change goes out as a typed operator action that
+  the coordinator process re-validates and applies itself.
+  Browser storage holds display preferences and alert ids only: no keys,
+  transcripts, drafts or answers.
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Control center · Foundry</title>
+<style>
+:root {
+  color-scheme: dark;
+  --bg:#1e1e1e; --panel:#252526; --panel-2:#2d2d30; --line:#3c3c3c; --line-2:#474747;
+  --fg:#d4d4d4; --fg-2:#cccccc; --dim:#9d9d9d; --accent:#3794ff; --focus:#007fd4;
+  --ok:#89d185; --bad:#f14c4c; --warn:#cca700; --think:#d7ba7d; --info:#75beff;
+  --ok-bg:#1e3a1e; --bad-bg:#4b1818; --warn-bg:#3d3414; --think-bg:#2b2618; --info-bg:#1b2b3d;
+  --sel:#264f78; --code-bg:#1a1a1a;
+  --syn-kw:#569cd6; --syn-ctl:#c586c0; --syn-str:#ce9178; --syn-num:#b5cea8; --syn-com:#6a9955;
+  --syn-fn:#dcdcaa; --syn-type:#4ec9b0; --syn-var:#9cdcfe; --syn-punc:#d4d4d4;
+  --ui-font: system-ui, "Segoe UI", -apple-system, sans-serif;
+  --code-font: "Cascadia Code", "Cascadia Mono", Consolas, "Courier New", monospace;
+  --fs: 13px; --lh: 1.5; --pad: 8px;
+}
+:root[data-theme="light"] {
+  color-scheme: light;
+  --bg:#ffffff; --panel:#f3f3f3; --panel-2:#e8e8e8; --line:#d4d4d4; --line-2:#c4c4c4;
+  --fg:#1f1f1f; --fg-2:#333; --dim:#616161; --accent:#005fb8; --focus:#0066bf;
+  --ok:#2e7d32; --bad:#c62828; --warn:#8a6d00; --think:#795e26; --info:#0b62a8;
+  --ok-bg:#e6f4e6; --bad-bg:#fde7e7; --warn-bg:#fff6d5; --think-bg:#faf3e3; --info-bg:#e5f0fb;
+  --sel:#add6ff; --code-bg:#f7f7f7;
+  --syn-kw:#0000ff; --syn-ctl:#af00db; --syn-str:#a31515; --syn-num:#098658; --syn-com:#008000;
+  --syn-fn:#795e26; --syn-type:#267f99; --syn-var:#001080; --syn-punc:#1f1f1f;
+}
+:root[data-theme="hc"] {
+  color-scheme: dark;
+  --bg:#000; --panel:#0a0a0a; --panel-2:#111; --line:#6fc3df; --line-2:#6fc3df;
+  --fg:#fff; --fg-2:#fff; --dim:#d0d0d0; --accent:#f38518; --focus:#f38518;
+  --ok:#7cfc00; --bad:#ff5f5f; --warn:#ffd700; --think:#ffd27f; --info:#7fd7ff;
+  --ok-bg:#002200; --bad-bg:#330000; --warn-bg:#332b00; --think-bg:#2b2000; --info-bg:#001a33;
+  --sel:#f38518; --code-bg:#000;
+}
+* { box-sizing:border-box; }
+html, body { height:100%; }
+body { margin:0; background:var(--bg); color:var(--fg); font:var(--fs)/var(--lh) var(--ui-font);
+       display:flex; flex-direction:column; overflow:hidden; }
+body.compact { --pad: 5px; }
+::selection { background:var(--sel); }
+button, select, input, textarea { font:inherit; color:inherit; }
+button { background:var(--panel-2); border:1px solid var(--line-2); border-radius:3px; padding:3px 9px;
+         cursor:pointer; color:var(--fg); }
+button:hover { border-color:var(--accent); }
+button.primary { background:var(--accent); border-color:var(--accent); color:#fff; }
+button.danger { border-color:var(--bad); color:var(--bad); }
+button.ghost { background:none; border-color:transparent; }
+button.ghost:hover { border-color:var(--line-2); }
+button:disabled { opacity:.5; cursor:not-allowed; }
+:focus-visible { outline:2px solid var(--focus); outline-offset:1px; }
+select, input[type=text], input[type=search], input[type=number], input[type=password], input[type=time], textarea {
+  background:var(--bg); border:1px solid var(--line-2); border-radius:3px; padding:3px 6px; }
+textarea { resize:vertical; width:100%; font-family:var(--code-font); font-size:calc(var(--fs) - 0.5px); }
+code, pre, .mono { font-family:var(--code-font); font-size:calc(var(--fs) - 1px); }
+a { color:var(--accent); }
+.dim { color:var(--dim); } .nw { white-space:nowrap; } .spacer { flex:1; }
+.pill { display:inline-block; padding:0 7px; border-radius:9px; font-size:11px; line-height:18px;
+        border:1px solid var(--line-2); white-space:nowrap; vertical-align:middle; }
+.pill.ok { color:var(--ok); border-color:var(--ok); background:var(--ok-bg); }
+.pill.bad { color:var(--bad); border-color:var(--bad); background:var(--bad-bg); }
+.pill.warn { color:var(--warn); border-color:var(--warn); background:var(--warn-bg); }
+.pill.info { color:var(--info); border-color:var(--info); background:var(--info-bg); }
+.pill.think { color:var(--think); border-color:var(--think); background:var(--think-bg); }
+.sr { position:absolute; width:1px; height:1px; overflow:hidden; clip:rect(0 0 0 0); }
+
+/* ---------------------------------------------------------------- header */
+header { display:flex; align-items:center; gap:8px; padding:5px 10px; background:var(--panel);
+         border-bottom:1px solid var(--line); flex-wrap:wrap; min-height:38px; }
+header .brand { font-weight:600; color:var(--accent); white-space:nowrap; }
+header .grp { display:flex; align-items:center; gap:5px; flex-wrap:wrap; }
+#conn { display:flex; gap:4px; align-items:center; flex-wrap:wrap; }
+#bell { position:relative; }
+#bell .count { position:absolute; top:-6px; right:-6px; min-width:16px; height:16px; border-radius:8px;
+               background:var(--bad); color:#fff; font-size:10px; line-height:16px; text-align:center; padding:0 3px; }
+#bell.critical { border-color:var(--bad); animation:pulse 1.6s infinite; }
+@keyframes pulse { 50% { box-shadow:0 0 0 3px var(--bad-bg); } }
+body.chrome-hidden header, body.chrome-hidden #banner, body.chrome-hidden #composer { display:none; }
+
+#banner { display:none; padding:5px 10px; background:var(--info-bg); border-bottom:1px solid var(--line);
+          gap:8px; align-items:center; flex-wrap:wrap; }
+#banner.show { display:flex; }
+#banner.warn { background:var(--warn-bg); }
+
+/* ---------------------------------------------------------------- workspace */
+#workspace { flex:1; min-height:0; display:grid; overflow:hidden; }
+.resizer { background:var(--line); touch-action:none; position:relative; z-index:2; }
+.resizer.col { cursor:col-resize; width:5px; }
+.resizer.row { cursor:row-resize; height:5px; }
+.resizer:hover, .resizer:focus-visible, .resizer.drag { background:var(--accent); }
+.pane { display:flex; flex-direction:column; min-width:0; min-height:0; background:var(--bg);
+        border-right:1px solid var(--line); }
+.pane.focused .pane-head { box-shadow:inset 0 -2px 0 var(--accent); }
+.pane-head { display:flex; align-items:center; gap:6px; padding:4px 8px; background:var(--panel);
+             border-bottom:1px solid var(--line); flex-wrap:wrap; min-height:32px; }
+.pane-head .title { font-weight:600; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; max-width:40ch; }
+.pane-head .sid { color:var(--dim); }
+.live-ind { font-size:11px; font-weight:600; letter-spacing:.04em; }
+.live-ind.live { color:var(--ok); } .live-ind.pinned { color:var(--warn); }
+.transcript { flex:1; overflow:auto; padding:6px 10px 40px; overflow-anchor:none; position:relative; }
+.resume-live { position:absolute; right:18px; bottom:14px; z-index:5; display:none;
+               box-shadow:0 2px 8px rgba(0,0,0,.5); }
+.resume-live.show { display:block; }
+.pane-body { position:relative; flex:1; min-height:0; display:flex; flex-direction:column; }
+.pane-note { padding:4px 10px; background:var(--info-bg); border-bottom:1px solid var(--line); font-size:12px; display:none; }
+.pane-note.show { display:block; }
+
+.msg { margin:8px 0 12px; }
+.msg-head { display:flex; gap:8px; align-items:baseline; color:var(--dim); font-size:11.5px;
+            border-bottom:1px solid var(--line); padding-bottom:2px; margin-bottom:4px; flex-wrap:wrap; }
+.msg-head .who { color:var(--fg-2); font-weight:600; text-transform:uppercase; letter-spacing:.04em; font-size:11px; }
+.msg.user .msg-head .who { color:var(--info); }
+.msg.assistant .msg-head .who { color:var(--ok); }
+.md { overflow-wrap:anywhere; }
+.md p { margin:4px 0; } .md h1,.md h2,.md h3,.md h4 { margin:8px 0 4px; font-size:1.05em; }
+.md ul, .md ol { margin:4px 0; padding-left:22px; }
+.md blockquote { margin:4px 0; padding-left:10px; border-left:3px solid var(--line-2); color:var(--dim); }
+.md table { border-collapse:collapse; margin:4px 0; display:block; overflow-x:auto; }
+.md td, .md th { border:1px solid var(--line-2); padding:2px 6px; }
+.md code { background:var(--panel-2); padding:0 3px; border-radius:3px; }
+pre.code { background:var(--code-bg); border:1px solid var(--line); border-radius:4px; padding:6px 8px;
+           margin:4px 0; overflow:auto; white-space:pre; tab-size:4; max-width:100%; }
+body.wrap pre.code { white-space:pre-wrap; overflow-wrap:anywhere; }
+pre.code.clip { max-height:calc(var(--long-lines, 14) * 1.45em + 12px); overflow:hidden; position:relative; }
+.syn-kw { color:var(--syn-kw); } .syn-ctl { color:var(--syn-ctl); } .syn-str { color:var(--syn-str); }
+.syn-num { color:var(--syn-num); } .syn-com { color:var(--syn-com); font-style:italic; }
+.syn-fn { color:var(--syn-fn); } .syn-type { color:var(--syn-type); } .syn-key { color:var(--syn-var); }
+
+.card { border:1px solid var(--line); border-left:3px solid var(--line-2); border-radius:4px; margin:5px 0;
+        background:var(--panel); min-width:0; }
+.card-head { display:flex; gap:6px; align-items:center; padding:3px 8px; cursor:pointer; flex-wrap:wrap;
+             user-select:none; }
+.card-head .chev { width:12px; display:inline-block; transition:transform .1s; color:var(--dim); }
+.card.open > .card-head .chev { transform:rotate(90deg); }
+.card-body { display:none; padding:4px 8px 6px; border-top:1px solid var(--line); min-width:0; }
+.card.open > .card-body { display:block; }
+.card .sub { color:var(--dim); font-size:11px; margin-top:4px; text-transform:uppercase; letter-spacing:.05em; }
+.card.tool { border-left-color:var(--info); }
+.card.tool.st-running, .card.tool.st-pending { border-left-color:var(--warn); }
+.card.tool.st-completed { border-left-color:var(--ok); }
+.card.tool.st-error { border-left-color:var(--bad); }
+.card.think { border-left-color:var(--think); background:var(--think-bg); }
+.card.think .card-head { color:var(--think); }
+.card.think .md { color:var(--fg-2); }
+.card.err { border-left-color:var(--bad); background:var(--bad-bg); }
+.card.warnc { border-left-color:var(--warn); background:var(--warn-bg); }
+.tool-name { font-family:var(--code-font); font-weight:600; color:var(--syn-fn); }
+.tool-title { color:var(--fg-2); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; max-width:60ch; }
+.ts { color:var(--dim); font-size:11px; }
+.divider { text-align:center; color:var(--dim); font-size:11px; margin:8px 0; border-top:1px dashed var(--line-2); }
+.diag { color:var(--dim); font-size:11px; font-family:var(--code-font); }
+.chip { display:inline-block; border:1px solid var(--line-2); border-radius:3px; padding:0 5px; margin:2px; font-size:11px; }
+.notprov { color:var(--dim); font-size:11px; font-style:italic; margin:2px 0; }
+.hit { outline:2px solid var(--warn); }
+
+/* ---------------------------------------------------------------- inspector */
+#inspector { display:flex; flex-direction:column; min-width:0; min-height:0; background:var(--panel); overflow:auto; }
+#inspector .ihead { display:flex; gap:6px; align-items:center; padding:5px 8px; border-bottom:1px solid var(--line);
+                    position:sticky; top:0; background:var(--panel); z-index:3; }
+.sec { border-bottom:1px solid var(--line); }
+.sec-head { display:flex; align-items:center; gap:4px; padding:4px 8px; cursor:pointer; user-select:none;
+            font-weight:600; font-size:12px; text-transform:uppercase; letter-spacing:.04em; color:var(--fg-2); }
+.sec-head .chev { width:12px; color:var(--dim); transition:transform .1s; display:inline-block; }
+.sec:not(.collapsed) .sec-head .chev { transform:rotate(90deg); }
+.sec-head .tools { margin-left:auto; display:flex; gap:2px; }
+.sec-head .tools button { padding:0 5px; font-size:11px; }
+.sec-body { padding:4px 10px 8px; font-size:12.5px; }
+.sec.collapsed .sec-body { display:none; }
+.kv { display:grid; grid-template-columns:minmax(90px, max-content) 1fr; gap:1px 8px; }
+.kv > div:nth-child(odd) { color:var(--dim); }
+.kv > div { min-width:0; overflow-wrap:anywhere; }
+.src { color:var(--dim); font-size:10.5px; font-style:italic; }
+.bar { height:10px; background:var(--panel-2); border:1px solid var(--line-2); border-radius:3px; position:relative; overflow:hidden; margin:3px 0; }
+.bar > i { position:absolute; left:0; top:0; bottom:0; background:var(--accent); }
+.bar > i.reserve { background:var(--warn); opacity:.55; }
+.bar > b { position:absolute; top:-2px; bottom:-2px; width:2px; background:var(--think); }
+.warnbox { border:1px solid var(--warn); background:var(--warn-bg); padding:3px 6px; border-radius:3px; margin:4px 0; font-size:12px; }
+.errbox { border:1px solid var(--bad); background:var(--bad-bg); padding:3px 6px; border-radius:3px; margin:4px 0; font-size:12px; }
+.list { list-style:none; margin:0; padding:0; }
+.list li { padding:3px 0; border-bottom:1px solid var(--line); }
+.tree li { padding:2px 0; }
+.tree .node { display:flex; gap:5px; align-items:center; flex-wrap:wrap; cursor:pointer; }
+.tree .node:hover { background:var(--panel-2); }
+.tree .node.cur { background:var(--sel); }
+.tree ul { list-style:none; margin:0 0 0 14px; padding:0; border-left:1px dashed var(--line-2); }
+table.t { border-collapse:collapse; width:100%; font-size:12px; }
+table.t td, table.t th { border-bottom:1px solid var(--line); padding:2px 4px; text-align:left; vertical-align:top; }
+table.t th { color:var(--dim); font-weight:normal; }
+
+/* ---------------------------------------------------------------- composer */
+#composer { border-top:1px solid var(--line); background:var(--panel); padding:5px 10px 7px; max-height:34vh;
+            overflow:auto; flex:none; }
+#composer.collapsed .cbody { display:none; }
+#composer .ctabs { display:flex; gap:4px; align-items:center; flex-wrap:wrap; }
+#composer .ctabs button.on { background:var(--accent); border-color:var(--accent); color:#fff; }
+#composer .target { font-size:12px; margin:4px 0; }
+#composer textarea { min-height:64px; }
+#composer .row { display:flex; gap:8px; align-items:center; flex-wrap:wrap; margin:4px 0; }
+.qcard { border:1px solid var(--warn); background:var(--warn-bg); border-radius:4px; padding:6px 8px; margin:4px 0; }
+.qcard .qtext { font-weight:600; white-space:pre-wrap; margin:2px 0 4px; }
+.opts label { display:block; padding:1px 0; }
+.timeline { display:flex; gap:4px; flex-wrap:wrap; align-items:center; font-size:11.5px; margin-top:4px; }
+.timeline .step { opacity:.4; } .timeline .step.done { opacity:1; }
+.palette li { padding:4px 6px; cursor:pointer; border-radius:3px; }
+.palette li.sel, .palette li:hover { background:var(--sel); }
+
+/* ---------------------------------------------------------------- graph */
+#graphPanel { background:var(--panel); border-top:1px solid var(--line); min-height:0; display:flex; flex-direction:column; }
+#graphPanel .ghead { display:flex; gap:6px; align-items:center; padding:3px 8px; border-bottom:1px solid var(--line); flex-wrap:wrap; }
+#graphPanel .gbody { flex:1; min-height:0; overflow:auto; position:relative; }
+#graph svg { width:100%; height:100%; display:block; cursor:grab; }
+.gnode rect { fill:var(--panel-2); stroke:var(--line-2); rx:4; }
+.gnode text { fill:var(--fg); font-size:11px; font-family:var(--ui-font); }
+.gnode.k-coordinator rect { stroke:var(--accent); } .gnode.k-session rect { stroke:var(--info); }
+.gnode.k-mcp rect { stroke:var(--syn-ctl); } .gnode.k-media_job rect { stroke:var(--syn-type); }
+.gnode.k-model rect { stroke:var(--ok); }
+.gedge { fill:none; stroke-width:1.6; stroke:var(--line-2); cursor:pointer; }
+.gedge.completed { stroke:var(--dim); } .gedge.failed { stroke:var(--bad); stroke-dasharray:4 3; }
+.gedge.fallback { stroke:var(--warn); } .gedge.queued { stroke:var(--info); stroke-dasharray:2 3; }
+.gedge.stale { stroke:var(--line); stroke-dasharray:1 4; }
+.gedge.active { stroke:var(--ok); stroke-width:2.6; stroke-dasharray:6 4; }
+body.anim .gedge.active { animation:flow 0.9s linear infinite; }
+.gedge.kind-tool { stroke-dasharray:3 2; }
+@keyframes flow { to { stroke-dashoffset:-20; } }
+
+/* ---------------------------------------------------------------- drawers & dialogs */
+.drawer { position:fixed; top:0; right:0; bottom:0; width:min(560px, 100vw); background:var(--panel);
+          border-left:1px solid var(--line-2); z-index:40; display:none; flex-direction:column;
+          box-shadow:-4px 0 18px rgba(0,0,0,.45); }
+.drawer.open { display:flex; }
+.drawer .dhead { display:flex; gap:6px; align-items:center; padding:7px 10px; border-bottom:1px solid var(--line); flex-wrap:wrap; }
+.drawer .dbody { flex:1; overflow:auto; padding:8px 10px; }
+.alert { border:1px solid var(--line-2); border-left:4px solid var(--line-2); border-radius:4px; padding:5px 8px; margin:6px 0; }
+.alert.sev-critical { border-left-color:var(--bad); } .alert.sev-high { border-left-color:var(--warn); }
+.alert.sev-info { border-left-color:var(--info); } .alert.sev-warning { border-left-color:var(--warn); }
+.alert.st-new { background:var(--panel-2); }
+.alert .atitle { font-weight:600; }
+dialog { background:var(--panel); color:var(--fg); border:1px solid var(--line-2); border-radius:6px; padding:0;
+         width:min(880px, 96vw); max-height:92vh; }
+dialog::backdrop { background:rgba(0,0,0,.55); }
+dialog .dlg-head { display:flex; gap:8px; align-items:center; padding:8px 12px; border-bottom:1px solid var(--line); position:sticky; top:0; background:var(--panel); }
+dialog .dlg-body { padding:8px 12px 14px; overflow:auto; max-height:calc(92vh - 50px); }
+fieldset { border:1px solid var(--line); border-radius:4px; margin:8px 0; padding:4px 10px 8px; }
+legend { color:var(--accent); font-weight:600; padding:0 4px; }
+.setting { display:grid; grid-template-columns:minmax(150px, 230px) 1fr; gap:8px; align-items:center; padding:3px 0; }
+.setting .help { grid-column:2; color:var(--dim); font-size:11.5px; margin-top:-2px; }
+#toasts { position:fixed; right:12px; bottom:12px; z-index:60; display:flex; flex-direction:column; gap:6px; max-width:min(420px, 92vw); }
+.toast { background:var(--panel-2); border:1px solid var(--line-2); border-left:4px solid var(--accent); border-radius:4px;
+         padding:6px 10px; box-shadow:0 2px 10px rgba(0,0,0,.5); }
+.toast.bad { border-left-color:var(--bad); } .toast.warn { border-left-color:var(--warn); }
+#login { position:fixed; inset:0; background:var(--bg); z-index:80; display:none; align-items:center; justify-content:center; padding:16px; }
+#login.show { display:flex; }
+#login .box { background:var(--panel); border:1px solid var(--line-2); border-radius:6px; padding:18px; width:min(460px, 100%); }
+#narrowTabs { display:none; }
+
+/* ---------------------------------------------------------------- narrow */
+@media (max-width: 760px) {
+  #narrowTabs { display:flex; gap:2px; border-top:1px solid var(--line); background:var(--panel); flex:none; }
+  #narrowTabs button { flex:1; border-radius:0; }
+  #narrowTabs button.on { background:var(--accent); color:#fff; }
+  header .hide-narrow { display:none; }
+  .pane-head .title { max-width:22ch; }
+}
+@media (prefers-reduced-motion: reduce) { body.anim-auto .gedge.active { animation:none; } #bell.critical { animation:none; } }
+body.noanim * { animation:none !important; transition:none !important; }
+</style>
+</head>
+<body class="anim">
+<div id="login" role="dialog" aria-modal="true" aria-labelledby="login-h">
+  <div class="box">
+    <h2 id="login-h" style="margin-top:0;color:var(--accent)">Coordinator control center</h2>
+    <p class="dim">Sign in with a Foundry client key that has the <b>operator</b> (or admin) scope.
+      Foundry turns it into a short HttpOnly session; this page never stores the key.</p>
+    <form id="login-form" autocomplete="off">
+      <label for="login-key">Operator key</label>
+      <input id="login-key" type="password" style="width:100%;margin:6px 0" autocomplete="off" spellcheck="false">
+      <div style="display:flex;gap:8px;align-items:center"><button class="primary" type="submit">Sign in</button>
+        <span id="login-msg" class="dim"></span></div>
+    </form>
+    <p class="dim" style="font-size:11.5px">Make one in Foundry → Setup → Clients &amp; keys (preset “operator”).</p>
+  </div>
+</div>
+
+<header>
+  <span class="brand">Control center</span>
+  <div class="grp">
+    <label class="sr" for="sel-project">Project</label><select id="sel-project" title="Project"></select>
+    <label class="sr" for="sel-task">Task</label><select id="sel-task" title="Task"></select>
+    <span id="task-state"></span>
+  </div>
+  <div class="grp">
+    <label title="Follow the coordinator: the main pane switches to the task's current implementation, repair or closeout session when it changes (unless you pinned a session)"><input type="checkbox" id="follow"> Follow coordinator</label>
+  </div>
+  <span class="spacer"></span>
+  <div id="conn" aria-live="polite"></div>
+  <div class="grp">
+    <button id="bell" title="Action required (inbox)" aria-label="Action required inbox">🔔 <span class="count" id="bell-count" hidden>0</span></button>
+    <button id="sound-btn" title="Sound alerts"></button>
+    <select id="layout-preset" title="Layout preset" class="hide-narrow">
+      <option value="auto">Layout: auto</option><option value="portrait">Portrait</option>
+      <option value="landscape">Landscape</option><option value="focus">Main worker focus</option>
+      <option value="helpers">Worker + helpers</option><option value="overview">Overview</option>
+    </select>
+    <button id="btn-graph" class="hide-narrow" title="Show/hide the route graph">Graph</button>
+    <button id="btn-inspector" title="Show/hide the inspector sidebar">Inspector</button>
+    <button id="btn-chrome" class="hide-narrow" title="Focus mode: hide the header, composer and banners (Esc restores)">Focus</button>
+    <button id="btn-settings" title="Settings">⚙</button>
+    <button id="btn-logout" title="Sign out" class="ghost">⎋</button>
+  </div>
+</header>
+<div id="banner" role="status"></div>
+<div id="workspace"></div>
+<div id="narrowTabs" role="tablist"></div>
+<section id="composer" aria-label="Composer"></section>
+
+<aside id="inbox" class="drawer" aria-label="Action required inbox">
+  <div class="dhead"><b>Action required</b>
+    <select id="inbox-filter"><option value="open">open</option><option value="new">new</option>
+      <option value="acknowledged">acknowledged</option><option value="answered">answered</option>
+      <option value="resolved">resolved</option><option value="expired">expired</option><option value="">all</option></select>
+    <span class="spacer"></span><button id="inbox-close" aria-label="Close inbox">✕</button></div>
+  <div class="dbody" id="inbox-body"></div>
+</aside>
+
+<dialog id="settings"><div class="dlg-head"><b>Settings</b><span class="spacer"></span>
+  <button id="set-reset">Reset display defaults</button><button id="set-close">Close</button></div>
+  <div class="dlg-body" id="settings-body"></div></dialog>
+<dialog id="detail"><div class="dlg-head"><b id="detail-title">Details</b><span class="spacer"></span>
+  <button onclick="this.closest('dialog').close()">Close</button></div><div class="dlg-body" id="detail-body"></div></dialog>
+<div id="toasts" aria-live="polite"></div>
+
+<script>
+"use strict";
+/* ======================================================================== basics */
+const $ = (s, r = document) => r.querySelector(s);
+const $$ = (s, r = document) => Array.from(r.querySelectorAll(s));
+const ESC_MAP = {"&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;"};
+const esc = s => String(s ?? "").replace(/[&<>"']/g, c => ESC_MAP[c]);
+const uid = () => (crypto.randomUUID ? crypto.randomUUID() : Date.now().toString(36) + Math.random().toString(36).slice(2));
+const QS = new URLSearchParams(location.search);
+const POPOUT = QS.get("popout") || "";
+const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
+const num = v => (v === null || v === undefined || v === "" || Number.isNaN(+v)) ? null : +v;
+const fmtN = v => v === null || v === undefined ? "N/A" : Number(v).toLocaleString();
+const short = (s, n = 10) => s ? String(s).slice(0, n) : "";
+function fmtDur(s) {
+  if (s === null || s === undefined || Number.isNaN(s)) return "N/A";
+  if (s < 1) return Math.round(s * 1000) + " ms";
+  if (s < 90) return s.toFixed(1) + " s";
+  const m = Math.floor(s / 60); if (m < 90) return m + "m " + Math.round(s % 60) + "s";
+  return Math.floor(m / 60) + "h " + (m % 60) + "m";
+}
+
+/* ======================================================================== preferences */
+// Display preferences only (per browser, per layout preset). Never keys,
+// transcripts, drafts or answers. Version-migrated; Reset restores defaults.
+const PREF_KEY = "fr.cc.prefs";
+const PREF_VERSION = 2;
+const SECTIONS = ["identity", "context", "tokens", "speed", "routes", "mcp", "todo", "helpers",
+  "verification", "capabilities", "sessions", "search", "actions"];
+const SECTION_TITLES = {identity: "Identity & state", context: "Context", tokens: "Tokens", speed: "Speed & latency",
+  routes: "Models & routes", mcp: "MCP servers", todo: "To-do", helpers: "Helpers", verification: "Verification",
+  capabilities: "Other capabilities", sessions: "Sessions & history", search: "Search", actions: "Operator actions"};
+const DEFAULT_PREFS = {
+  v: PREF_VERSION,
+  theme: "dark", fontSize: 13, lineHeight: 1.5, codeWrap: false, density: "comfortable",
+  tz: "America/Chicago", tsFormat: "time", showTimestamps: true,
+  showThinking: true, thinkingDefault: "collapsed", showToolArgs: true, showToolResults: true,
+  showAssistantText: true, showApprovals: true, showDiagnostics: false, collapseCompleted: true,
+  collapseLong: true, longLines: 14, exportThinking: false,
+  followCoordinator: true, followScroll: true, historyPageSize: 200,
+  events: {text: true, reasoning: true, tool: true, retry: true, compaction: true, file: true, step: false, agent: true},
+  sidebar: {order: SECTIONS.slice(), hidden: [], collapsed: ["search", "capabilities", "actions"]},
+  showDisabledMcp: true, showTokenDetails: true, showTiming: true, showTodo: true, showCapabilities: true, showHelpers: true,
+  graph: true, graphVertical: "auto", routeAnimation: true, reducedMotion: "system",
+  refreshS: 10, staleAfterS: 45,
+  notify: {enabled: false, critical: true, high: true, completion: false, stale: true},
+  sound: {enabled: true, volume: 0.6, muted: false, question: true, approval: true, failure: true,
+          completion: true, stale: true, repeatCriticalS: 120, repeatMax: 5, snoozeUntil: 0,
+          quiet: false, quietStart: "22:00", quietEnd: "07:00"},
+  layout: {preset: "auto",
+           presets: {portrait: {inspectorW: 330, inspectorPos: "side", graphH: 200, helperW: 420, helpers: 0},
+                     landscape: {inspectorW: 380, inspectorPos: "side", graphH: 170, helperW: 520, helpers: 1},
+                     focus: {inspectorW: 0, inspectorPos: "hidden", graphH: 0, helperW: 0, helpers: 0},
+                     helpers: {inspectorW: 330, inspectorPos: "side", graphH: 0, helperW: 520, helpers: 2},
+                     overview: {inspectorW: 420, inspectorPos: "side", graphH: 300, helperW: 420, helpers: 1}}},
+  fontScale: {main: 1, helper: 1}, composerCollapsed: false,
+};
+function deepMerge(base, over) {
+  if (Array.isArray(base)) return Array.isArray(over) ? over.slice() : base.slice();
+  if (base && typeof base === "object") {
+    const out = {};
+    for (const k of Object.keys(base)) out[k] = deepMerge(base[k], over && typeof over === "object" ? over[k] : undefined);
+    return out;
+  }
+  return over === undefined || over === null || typeof over !== typeof base ? base : over;
+}
+function migratePrefs(raw) {
+  if (!raw || typeof raw !== "object") return deepMerge(DEFAULT_PREFS, {});
+  if (raw.v === 1) {  // v1 kept a flat "inspectorWidth" and "thinking" flag
+    raw = {...raw, showThinking: raw.thinking !== false,
+           layout: {presets: {landscape: {inspectorW: raw.inspectorWidth || 380}}}};
+  }
+  const out = deepMerge(DEFAULT_PREFS, raw);
+  const known = new Set(SECTIONS);
+  out.sidebar.order = out.sidebar.order.filter(s => known.has(s));
+  for (const s of SECTIONS) if (!out.sidebar.order.includes(s)) out.sidebar.order.push(s);
+  out.v = PREF_VERSION;
+  return out;
+}
+function loadPrefs() {
+  try { return migratePrefs(JSON.parse(localStorage.getItem(PREF_KEY) || "null")); }
+  catch (e) { return migratePrefs(null); }
+}
+let P = loadPrefs();
+function savePrefs() { try { localStorage.setItem(PREF_KEY, JSON.stringify(P)); } catch (e) {} }
+function getPath(o, path) { return path.split(".").reduce((a, k) => a == null ? a : a[k], o); }
+function setPath(o, path, v) { const ks = path.split("."); const last = ks.pop(); ks.reduce((a, k) => a[k], o)[last] = v; }
+
+/* ======================================================================== time */
+function tsText(ts, mode) {
+  if (!ts) return "";
+  const d = new Date(ts * 1000);
+  mode = mode || P.tsFormat;
+  if (mode === "relative") return relAge(Date.now() / 1000 - ts) + " ago";
+  const o = {timeZone: P.tz || undefined, hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: false};
+  if (mode === "datetime") Object.assign(o, {year: "numeric", month: "2-digit", day: "2-digit"});
+  try { return new Intl.DateTimeFormat(undefined, o).format(d); } catch (e) { return d.toISOString(); }
+}
+function fullTs(ts) { return ts ? tsText(ts, "datetime") + " " + tzLabel() : ""; }
+function tzLabel() {
+  try { return new Intl.DateTimeFormat("en-US", {timeZone: P.tz, timeZoneName: "short"}).formatToParts(new Date()).find(p => p.type === "timeZoneName").value; }
+  catch (e) { return ""; }
+}
+function relAge(s) { s = Math.max(0, s); if (s < 60) return Math.round(s) + "s"; if (s < 3600) return Math.round(s / 60) + "m"; if (s < 86400) return (s / 3600).toFixed(1) + "h"; return (s / 86400).toFixed(1) + "d"; }
+function nowS() { return Date.now() / 1000; }
+
+/*md-start*/
+/* ======================================================================== markdown + highlight */
+// Safe by construction: every input character is HTML-escaped first; markup
+// is produced only by these rules. Links: http(s)/mailto only, opened with
+// noopener. No raw HTML from the model or a tool is ever interpreted.
+const KW = {
+  common: "if else elif for while do return break continue function def class const let var local then end in not and or is new import from export as try catch except finally throw raise with yield await async switch case default nil null None true false True False self this typeof instanceof repeat until goto pass lambda struct enum interface type public private protected static fn mut use match where impl trait pub mod",
+};
+const KWSET = new Set(KW.common.split(" "));
+const CTL = new Set("if else elif for while do return break continue then end try catch except finally throw raise switch case default repeat until goto match yield await".split(" "));
+function highlight(code, lang) {
+  lang = (lang || "").toLowerCase();
+  const e = esc(code);
+  if (lang === "json" || (!lang && /^\s*[\[{]/.test(code) && code.length < 200000)) {
+    return e.replace(/(&quot;(?:[^&]|&(?!quot;))*?&quot;)(\s*:)?|(-?\b\d+(?:\.\d+)?(?:[eE][+-]?\d+)?\b)|\b(true|false|null)\b/g,
+      (m, s, colon, n, lit) => s ? (colon ? `<span class="syn-key">${s}</span>${colon}` : `<span class="syn-str">${s}</span>`)
+        : n ? `<span class="syn-num">${n}</span>` : `<span class="syn-kw">${lit}</span>`);
+  }
+  if (["", "text", "txt", "log", "output", "diff"].includes(lang) && lang !== "diff") return e;
+  const comment = ["lua", "luau", "sql"].includes(lang) ? "--[^\\n]*" : ["py", "python", "sh", "bash", "shell", "ps1", "powershell", "toml", "yaml", "yml", "rb", "ruby"].includes(lang) ? "#[^\\n]*" : "\\/\\/[^\\n]*|\\/\\*[\\s\\S]*?\\*\\/";
+  if (lang === "diff") return e.split("\n").map(l => l.startsWith("+") ? `<span class="syn-str" style="color:var(--ok)">${l}</span>` : l.startsWith("-") ? `<span style="color:var(--bad)">${l}</span>` : l.startsWith("@@") ? `<span class="syn-type">${l}</span>` : l).join("\n");
+  const re = new RegExp(`(${comment})|(&quot;(?:\\\\.|[^&\\\\]|&(?!quot;))*?&quot;|&#39;(?:\\\\.|[^&\\\\]|&(?!#39;))*?&#39;|\`[^\`]*\`)|(\\b\\d+(?:\\.\\d+)?\\b)|(\\b[A-Za-z_][A-Za-z0-9_]*\\b)(\\s*\\()?`, "g");
+  return e.replace(re, (m, com, str, n, word, paren) => {
+    if (com) return `<span class="syn-com">${com}</span>`;
+    if (str) return `<span class="syn-str">${str}</span>`;
+    if (n) return `<span class="syn-num">${n}</span>`;
+    if (word) {
+      if (KWSET.has(word)) return `<span class="${CTL.has(word) ? "syn-ctl" : "syn-kw"}">${word}</span>${paren || ""}`;
+      if (paren) return `<span class="syn-fn">${word}</span>${paren}`;
+      if (/^[A-Z][a-z]/.test(word)) return `<span class="syn-type">${word}</span>`;
+      return word;
+    }
+    return m;
+  });
+}
+function mdInline(s) {
+  // s is already escaped
+  const codes = [];
+  s = s.replace(/`([^`\n]+)`/g, (m, c) => { codes.push(c); return `\u0000${codes.length - 1}\u0000`; });
+  s = s.replace(/\[([^\]\n]+)\]\(((?:https?:\/\/|mailto:)[^\s)]+)\)/g,
+    (m, t, u) => `<a href="${u}" target="_blank" rel="noopener noreferrer nofollow">${t}</a>`);
+  s = s.replace(/\*\*([^*\n]+)\*\*/g, "<strong>$1</strong>").replace(/__([^_\n]+)__/g, "<strong>$1</strong>");
+  s = s.replace(/(^|[\s(])\*([^*\n]+)\*(?=[\s).,;:!?]|$)/g, "$1<em>$2</em>").replace(/(^|[\s(])_([^_\n]+)_(?=[\s).,;:!?]|$)/g, "$1<em>$2</em>");
+  s = s.replace(/~~([^~\n]+)~~/g, "<del>$1</del>");
+  return s.replace(/\u0000(\d+)\u0000/g, (m, i) => `<code>${codes[+i]}</code>`);
+}
+function md(text) {
+  const src = String(text ?? "").replace(/\r\n?/g, "\n");
+  const out = [];
+  const lines = src.split("\n");
+  let i = 0, para = [], list = null;
+  const flushPara = () => { if (para.length) { out.push("<p>" + mdInline(esc(para.join("\n"))).replace(/\n/g, "<br>") + "</p>"); para = []; } };
+  const flushList = () => { if (list) { out.push(`<${list.t}>` + list.items.map(x => "<li>" + mdInline(esc(x)) + "</li>").join("") + `</${list.t}>`); list = null; } };
+  while (i < lines.length) {
+    const l = lines[i];
+    const fence = l.match(/^\s*(```+|~~~+)\s*([\w+#.-]*)/);
+    if (fence) {
+      flushPara(); flushList();
+      const buf = []; i++;
+      while (i < lines.length && !lines[i].trim().startsWith(fence[1])) { buf.push(lines[i]); i++; }
+      i++;
+      out.push(`<pre class="code" data-lang="${esc(fence[2])}">${highlight(buf.join("\n"), fence[2])}</pre>`);
+      continue;
+    }
+    const h = l.match(/^(#{1,6})\s+(.*)$/);
+    if (h) { flushPara(); flushList(); const n = Math.min(4, h[1].length); out.push(`<h${n}>${mdInline(esc(h[2]))}</h${n}>`); i++; continue; }
+    if (/^\s*>\s?/.test(l)) {
+      flushPara(); flushList(); const buf = [];
+      while (i < lines.length && /^\s*>\s?/.test(lines[i])) { buf.push(lines[i].replace(/^\s*>\s?/, "")); i++; }
+      out.push("<blockquote>" + md(buf.join("\n")) + "</blockquote>"); continue;
+    }
+    if (/^\s*\|.*\|\s*$/.test(l) && i + 1 < lines.length && /^\s*\|[\s:|-]+\|\s*$/.test(lines[i + 1])) {
+      flushPara(); flushList();
+      const row = r => r.trim().replace(/^\||\|$/g, "").split("|").map(c => mdInline(esc(c.trim())));
+      const head = row(l); i += 2; const body = [];
+      while (i < lines.length && /^\s*\|.*\|\s*$/.test(lines[i])) { body.push(row(lines[i])); i++; }
+      out.push("<table><tr>" + head.map(c => `<th>${c}</th>`).join("") + "</tr>" + body.map(r => "<tr>" + r.map(c => `<td>${c}</td>`).join("") + "</tr>").join("") + "</table>");
+      continue;
+    }
+    const li = l.match(/^\s*([-*+]|\d+[.)])\s+(.*)$/);
+    if (li) {
+      flushPara(); const t = /\d/.test(li[1]) ? "ol" : "ul";
+      if (!list || list.t !== t) { flushList(); list = {t, items: []}; }
+      list.items.push(li[2]); i++; continue;
+    }
+    if (!l.trim()) { flushPara(); flushList(); i++; continue; }
+    if (list && /^\s{2,}\S/.test(l)) { list.items[list.items.length - 1] += " " + l.trim(); i++; continue; }
+    flushList(); para.push(l); i++;
+  }
+  flushPara(); flushList();
+  return out.join("");
+}
+/*md-end*/
+
+/* ======================================================================== state */
+const S = {
+  me: null, csrf: "", ov: null, seq: 0,
+  tasks: new Map(),       // "p/t" -> task row
+  sessions: new Map(),    // sid -> session row
+  details: new Map(),     // sid -> detail (foundry facts, persona, config) fetched on demand
+  messages: new Map(),    // sid -> Map(mid -> msg)
+  parts: new Map(),       // sid -> Map(pid -> part)
+  older: new Map(),       // sid -> has older pages
+  pending: new Map(), alerts: new Map(), actions: new Map(), transitions: new Map(), snapshots: new Map(),
+  sources: [], project: "", task: "", panes: [], focused: "main",
+  conn: {stream: "connecting", lastEvent: 0, attempt: 0}, unseen: 0, idem: {}, lastAction: null,
+  composerMode: "instruction", selectedRequest: "", narrow: "transcript", graph: null,
+};
+function taskKey(p, t) { return `${p}/${t}`; }
+function curTask() { return S.tasks.get(taskKey(S.project, S.task)); }
+function tdata(t) { return (t && t.data) || {}; }
+
+/* ======================================================================== api */
+async function api(path, opts = {}) {
+  const o = {method: opts.method || "GET", credentials: "same-origin", headers: {"accept": "application/json"}};
+  if (opts.body !== undefined) { o.body = JSON.stringify(opts.body); o.headers["content-type"] = "application/json"; }
+  if (o.method !== "GET") o.headers["x-foundry-csrf"] = S.csrf;
+  let r;
+  try { r = await fetch("/control/api/" + path, o); }
+  catch (e) { setConn("foundry", "unreachable"); const err = new Error("Foundry unreachable (network)"); err.network = true; throw err; }
+  let data = {};
+  try { data = await r.json(); } catch (e) {}
+  if (r.status === 401 && data.code === "login_required") { showLogin(); }
+  if (!r.ok) { const err = new Error(data.error || ("HTTP " + r.status)); err.status = r.status; err.code = data.code; err.data = data; throw err; }
+  return data;
+}
+
+/* ======================================================================== login */
+function showLogin(msg) { $("#login").classList.add("show"); $("#login-msg").textContent = msg || ""; $("#login-key").focus(); }
+$("#login-form").addEventListener("submit", async ev => {
+  ev.preventDefault();
+  const key = $("#login-key").value.trim();
+  $("#login-key").value = "";
+  try {
+    const r = await fetch("/control/api/login", {method: "POST", credentials: "same-origin",
+      headers: {"content-type": "application/json"}, body: JSON.stringify({key})});
+    const d = await r.json();
+    if (!r.ok) return showLogin(d.error || "refused");
+    S.csrf = d.csrf; S.me = d;
+    $("#login").classList.remove("show");
+    boot();
+  } catch (e) { showLogin("Foundry unreachable"); }
+});
+$("#btn-logout").onclick = async () => { try { await api("logout", {method: "POST", body: {}}); } catch (e) {} location.reload(); };
+
+/* ======================================================================== toasts */
+function toast(html, cls = "", ms = 6000) {
+  const d = document.createElement("div");
+  d.className = "toast " + cls; d.innerHTML = html; d.setAttribute("role", "status");
+  $("#toasts").appendChild(d);
+  if (ms) setTimeout(() => d.remove(), ms);
+  return d;
+}
+
+/* ======================================================================== apply display prefs */
+function applyDisplay() {
+  const root = document.documentElement;
+  root.dataset.theme = P.theme;
+  root.style.setProperty("--fs", P.fontSize + "px");
+  root.style.setProperty("--lh", P.lineHeight);
+  root.style.setProperty("--long-lines", P.longLines);
+  document.body.classList.toggle("compact", P.density === "compact");
+  document.body.classList.toggle("wrap", !!P.codeWrap);
+  const reduce = P.reducedMotion === "on" || (P.reducedMotion === "system" && matchMedia("(prefers-reduced-motion: reduce)").matches);
+  document.body.classList.toggle("anim", !!P.routeAnimation && !reduce);
+  document.body.classList.toggle("noanim", reduce);
+  $("#follow").checked = !!P.followCoordinator;
+}
+
+/* ======================================================================== connection */
+const CONN = {foundry: "ok"};
+function setConn(k, v) { CONN[k] = v; renderConn(); }
+function sourceState() {
+  const src = S.sources || [];
+  const bridge = src.filter(s => s.kind === "bridge");
+  const coord = src.filter(s => s.kind === "coordinator");
+  return {bridge, coord};
+}
+function renderConn() {
+  const parts = [];
+  const st = S.conn.stream;
+  const age = S.conn.lastEvent ? nowS() - S.conn.lastEvent : null;
+  let cls = st === "live" ? "ok" : st === "reconnecting" ? "warn" : "bad";
+  let label = st === "live" ? "Live" : st === "reconnecting" ? `Reconnecting (try ${S.conn.attempt})` : st === "offline" ? "Foundry unreachable" : st;
+  if (st === "live" && age !== null && age > P.staleAfterS) { cls = "warn"; label = "Stream quiet " + relAge(age); }
+  parts.push(`<span class="pill ${cls}" title="Browser ↔ Foundry event stream. Last event ${S.conn.lastEvent ? fullTs(S.conn.lastEvent) : "never"}">${esc(label)}</span>`);
+  const {bridge, coord} = sourceState();
+  if (!bridge.length) parts.push(`<span class="pill warn" title="No workstation telemetry bridge has reported to Foundry yet (python -m foundry_coordinator bridge)">bridge: never seen</span>`);
+  for (const b of bridge) {
+    const k = (b.detail || {}).kilo || {};
+    parts.push(`<span class="pill ${b.fresh ? "ok" : "bad"}" title="${esc(b.source_id)} last heartbeat ${esc(fullTs(b.last_seen))} (expiry ${b.expiry_s}s). Event stream: ${esc(JSON.stringify((b.detail || {}).event_stream || {}))}">bridge ${b.fresh ? relAge(b.age_s) : "STALE " + relAge(b.age_s)}</span>`);
+    parts.push(`<span class="pill ${k.ok === false ? "bad" : k.ok ? "ok" : ""}" title="Kilo API as seen by the bridge${k.error ? ": " + esc(k.error) : ""}${k.version ? " · version " + esc(k.version) : ""}">kilo ${k.ok === false ? "down" : k.ok ? "ok" : "?"}</span>`);
+    const own = (b.detail || {}).coordinator_owner || {};
+    if (own.present) {
+      const oa = own.beat_ts ? nowS() - own.beat_ts : null;
+      parts.push(`<span class="pill ${oa !== null && oa < 120 ? "ok" : "bad"}" title="The coordinator engine's own heartbeat in its store (${esc(own.id || "?")}), read by the bridge">engine ${oa === null ? "?" : relAge(oa)}</span>`);
+    }
+  }
+  for (const c of coord) parts.push(`<span class="pill ${c.fresh ? "ok" : "bad"}" title="${esc(c.source_id)}: control channel heartbeat (run --control)">control ${c.fresh ? "ok" : "STALE " + relAge(c.age_s)}</span>`);
+  if (!coord.length) parts.push(`<span class="pill" title="No coordinator has heart-beated with --control: operator actions will wait as 'accepted' until one does">control: off</span>`);
+  if (S.unseen) parts.push(`<button class="pill info" id="unseen" title="New activity you haven't looked at">${S.unseen} new</button>`);
+  $("#conn").innerHTML = parts.join(" ");
+  const u = $("#unseen"); if (u) u.onclick = () => { S.unseen = 0; goLive(paneById("main")); renderConn(); };
+}
+
+/* ======================================================================== stream */
+let ES = null, esTimer = null;
+function subscribedSessions() { return [...new Set(S.panes.map(p => p.sid).filter(Boolean))].slice(0, 12); }
+function connectStream() {
+  if (ES) { ES.close(); ES = null; }
+  clearTimeout(esTimer);
+  const subs = subscribedSessions().join(",");
+  ES = new EventSource(`/control/api/stream?after=${S.seq}&sessions=${encodeURIComponent(subs)}`);
+  S.conn.subs = subs;
+  ES.addEventListener("hello", () => { S.conn.stream = "live"; S.conn.attempt = 0; S.conn.lastEvent = nowS(); setConn("foundry", "ok"); renderConn(); });
+  ES.addEventListener("batch", ev => { S.conn.lastEvent = nowS(); S.conn.stream = "live"; onBatch(JSON.parse(ev.data)); });
+  ES.addEventListener("heartbeat", ev => { S.conn.lastEvent = nowS(); const d = JSON.parse(ev.data); S.sources = d.sources || S.sources; renderConn(); });
+  ES.addEventListener("expired", () => { ES.close(); showLogin("Session expired: sign in again"); });
+  ES.onerror = () => {
+    if (ES) ES.close(); ES = null;
+    S.conn.stream = "reconnecting"; S.conn.attempt += 1; renderConn();
+    const delay = Math.min(30000, 1000 * Math.pow(2, Math.min(5, S.conn.attempt - 1)));
+    esTimer = setTimeout(async () => {
+      try { await api("session"); connectStream(); }
+      catch (e) { S.conn.stream = e.network ? "offline" : "reconnecting"; renderConn(); esTimer = setTimeout(connectStream, delay); }
+    }, delay);
+  };
+}
+function resubscribeIfNeeded() { if (subscribedSessions().join(",") !== S.conn.subs) connectStream(); }
+
+function onBatch(b) {
+  const touched = new Set();
+  let tasksChanged = false, alertsChanged = false, actionsChanged = false;
+  for (const it of b.items || []) {
+    S.seq = Math.max(S.seq, it.seq);
+    const e = it.entity;
+    switch (it.kind) {
+      case "part": {
+        const m = S.parts.get(e.session_id) || new Map(); S.parts.set(e.session_id, m);
+        const old = m.get(e.part_id);
+        if (old && old.seq > e.seq) break;          // out of order: keep the newer one
+        m.set(e.part_id, e); touched.add(e.session_id); break;
+      }
+      case "message": {
+        const m = S.messages.get(e.session_id) || new Map(); S.messages.set(e.session_id, m);
+        m.set(e.message_id, e); touched.add(e.session_id); break;
+      }
+      case "session": S.sessions.set(e.session_id, {...(S.sessions.get(e.session_id) || {}), ...e}); touched.add("*sessions"); break;
+      case "task": onTask(e); tasksChanged = true; break;
+      case "transition": { const k = taskKey(e.project_id, e.task_id); const a = S.transitions.get(k) || []; if (!a.find(x => x.src_id === e.src_id)) a.unshift(e); S.transitions.set(k, a); break; }
+      case "pending": if (e.status === "open") S.pending.set(e.request_id, e); else S.pending.delete(e.request_id); alertsChanged = true; break;
+      case "alert": onAlert(e); alertsChanged = true; break;
+      case "action": S.actions.set(e.action_id, e); actionsChanged = true; onActionUpdate(e); break;
+      case "snapshot": S.snapshots.set(`${e.kind}|${e.project_id}|${e.session_id}`, e); touched.add("*snap"); break;
+      case "source": S.sources = [...(S.sources || []).filter(s => s.source_id !== e.source_id), e]; renderConn(); break;
+    }
+  }
+  if (tasksChanged) { renderTaskSelect(); applyFollow(); }
+  for (const sid of touched) if (!sid.startsWith("*")) for (const p of S.panes) if (p.sid === sid) renderPane(p, true);
+  if (touched.has("*sessions")) for (const p of S.panes) renderPaneHead(p);
+  if (alertsChanged) { renderBell(); if ($("#inbox").classList.contains("open")) renderInbox(); }
+  // the request being answered went away (answered, cancelled, replaced): redraw even mid-edit
+  const gone = S.composerMode === "answer" && S.selectedRequest && !S.pending.has(S.selectedRequest);
+  if (gone) { S.selectedRequest = ""; renderComposer(true); }
+  else if (alertsChanged || tasksChanged || actionsChanged) renderComposer();
+  scheduleInspector();
+}
+
+/* ======================================================================== tasks / follow */
+function onTask(e) {
+  const k = taskKey(e.project_id, e.task_id);
+  const prev = S.tasks.get(k);
+  S.tasks.set(k, e);
+  const ps = tdata(prev).session_id, ns = tdata(e).session_id;
+  if (prev && ps && ns && ps !== ns && e.project_id === S.project && e.task_id === S.task) {
+    const d = tdata(e);
+    const note = `Coordinator moved ${esc(e.task_id)} to a new session: <b>${esc(d.phase || "?")}</b>, attempt ${esc(d.attempt)} · previous <code>${esc(short(ps, 16))}</code> (kept in history) → new <code>${esc(short(ns, 16))}</code>${d.head_sha ? " · revision <code>" + esc(short(d.head_sha)) + "</code>" : ""} · ${esc(tsText(e.received_ts || nowS()))}`;
+    S.transitionNote = {html: note, ts: nowS(), from: ps, to: ns};
+    const main = paneById("main");
+    if (main && main.pinned) banner(note + ` — you are viewing a pinned session. <button id="go-live-btn" class="primary">Go to the live session</button>`, "warn");
+    else banner(note);
+  }
+}
+function banner(html, cls = "") {
+  const b = $("#banner"); b.className = "show " + cls;
+  b.innerHTML = html + ` <span class="spacer"></span><button class="ghost" aria-label="Dismiss" id="banner-x">✕</button>`;
+  $("#banner-x").onclick = () => { b.className = ""; };
+  const g = $("#go-live-btn"); if (g) g.onclick = () => { goLive(paneById("main")); b.className = ""; };
+}
+function applyFollow() {
+  const main = paneById("main");
+  if (!main || POPOUT) return;
+  const t = curTask();
+  const sid = tdata(t).session_id;
+  if (P.followCoordinator && !main.pinned && sid && main.sid !== sid) openInPane(main, sid, {follow: true});
+  renderPaneHead(main);
+}
+
+/* ======================================================================== panes */
+function paneById(id) { return S.panes.find(p => p.id === id); }
+function newPane(id, kind) {
+  return {id, kind, sid: "", pinned: false, atBottom: true, newCount: 0, expanded: new Set(), collapsed: new Set(),
+          filter: "all", loading: false, lastRender: 0, highlight: ""};
+}
+async function openInPane(pane, sid, opts = {}) {
+  pane.sid = sid;
+  pane.pinned = !opts.follow && !!opts.pin;
+  pane.atBottom = !opts.part; pane.newCount = 0; pane.highlight = opts.part || "";
+  if (pane.el) pane.el.querySelector(".transcript").innerHTML = '<p class="dim">Loading…</p>';
+  renderPaneHead(pane);
+  await loadSession(sid, opts.part ? opts.partTs : 0);
+  resubscribeIfNeeded();
+  renderPane(pane);
+  scheduleInspector();
+}
+async function loadSession(sid, aroundTs) {
+  try {
+    const d = await api("sessions/" + encodeURIComponent(sid));
+    S.details.set(sid, d);
+    S.sessions.set(sid, {...(S.sessions.get(sid) || {}), ...d, children: undefined, messages: undefined});
+    for (const c of d.children || []) S.sessions.set(c.session_id, {...(S.sessions.get(c.session_id) || {}), ...c});
+    const mm = S.messages.get(sid) || new Map(); for (const m of d.messages || []) mm.set(m.message_id, m); S.messages.set(sid, mm);
+    if (d.todo) S.snapshots.set(`todo|${d.project_id}|${sid}`, d.todo);
+    for (const p of d.pending || []) S.pending.set(p.request_id, p);
+  } catch (e) { if (e.status === 404) S.details.set(sid, {missing: true, session_id: sid}); else toast(esc(e.message), "bad"); }
+  try {
+    const q = aroundTs ? `before=${aroundTs + 0.001}&limit=${P.historyPageSize}` : `limit=${P.historyPageSize}`;
+    const r = await api(`sessions/${encodeURIComponent(sid)}/parts?${q}`);
+    const m = S.parts.get(sid) || new Map(); for (const p of r.parts) m.set(p.part_id, p); S.parts.set(sid, m);
+    S.older.set(sid, r.has_older);
+    S.seq = Math.max(S.seq, 0);
+  } catch (e) { if (e.status !== 404) toast(esc(e.message), "bad"); }
+}
+async function loadOlder(pane) {
+  const m = S.parts.get(pane.sid); if (!m || !m.size) return;
+  const oldest = Math.min(...[...m.values()].map(p => p.ts || Infinity));
+  const t = pane.el.querySelector(".transcript"); const h0 = t.scrollHeight, top0 = t.scrollTop;
+  const r = await api(`sessions/${encodeURIComponent(pane.sid)}/parts?before=${oldest}&limit=${P.historyPageSize}`);
+  for (const p of r.parts) m.set(p.part_id, p);
+  S.older.set(pane.sid, r.has_older);
+  renderPane(pane);
+  t.scrollTop = top0 + (t.scrollHeight - h0);     // keep the reader where they were
+}
+function goLive(pane) {
+  if (!pane) return;
+  pane.pinned = false; pane.newCount = 0;
+  const sid = pane.id === "main" ? tdata(curTask()).session_id : pane.sid;
+  if (sid && sid !== pane.sid) openInPane(pane, sid, {follow: true});
+  else { pane.atBottom = true; renderPane(pane); }
+  if (pane.id === "main") { S.unseen = 0; renderConn(); }
+}
+function sessionLabel(s) {
+  if (!s) return "";
+  const role = s.role || (s.parent_id ? "helper" : "session");
+  return `${role}${s.phase ? " · " + s.phase : ""}${s.attempt ? " #" + s.attempt : ""}`;
+}
+function statusPill(s) {
+  if (!s) return "";
+  const st = s.status || "";
+  const coord = (s.data || {}).coordinator || {};
+  let label = st || "unknown", cls = "";
+  if (st === "busy") cls = "ok"; else if (st === "retry") { cls = "warn"; label = "retrying"; }
+  else if (st === "missing") { cls = "bad"; label = "not in Kilo"; }
+  else if (st === "idle") label = s.ended_ts ? "finished" : "idle";
+  if (s.binding_only) { label = "bound (no Kilo data)"; cls = ""; }
+  const waiting = [...S.pending.values()].some(p => p.session_id === s.session_id && p.status === "open");
+  if (waiting) { label = "waiting for human"; cls = "bad"; }
+  const why = `${s.status_source || "no Kilo observation"}${s.status_ts ? " · as of " + fullTs(s.status_ts) : ""}${s.outcome ? " · coordinator outcome: " + s.outcome : ""}${coord.status ? " · coordinator session status: " + coord.status : ""}`;
+  return `<span class="pill ${cls}" title="${esc(why)}">${esc(label)}</span>${s.outcome && s.ended_ts ? ` <span class="pill" title="Coordinator's recorded end of this session">${esc(s.outcome)}</span>` : ""}`;
+}
+function renderPaneHead(pane) {
+  if (!pane.el) return;
+  const s = S.sessions.get(pane.sid) || {};
+  const t = curTask();
+  const isCurrent = pane.sid && pane.sid === tdata(t).session_id;
+  const live = !pane.pinned && (pane.id !== "main" || isCurrent || !P.followCoordinator);
+  const h = pane.el.querySelector(".pane-head");
+  h.innerHTML = `
+    <span class="title" title="${esc(s.title || "")}">${esc(sessionLabel(s) || "no session")}${s.task_id ? " · " + esc(s.task_id) : ""}</span>
+    <code class="sid" title="${esc(pane.sid)}${s.parent_id ? " · parent " + esc(s.parent_id) : ""}">${esc(short(pane.sid, 18))}</code>
+    ${statusPill(s)}
+    ${s.model ? `<span class="pill" title="Model id Kilo reported for this session's latest assistant turn">${esc(s.model)}</span>` : ""}
+    <span class="spacer"></span>
+    <span class="live-ind ${live ? "live" : "pinned"}" title="${live ? "Following live activity" : "Pinned: new activity elsewhere won't move this pane"}">${live ? "● LIVE" : "📌 PINNED"}</span>
+    ${!live ? `<button data-a="live" title="Return to the live session">Live</button>` : `<button data-a="pin" title="Pin this session (follow mode won't switch it)">Pin</button>`}
+    <label class="sr" for="flt-${pane.id}">Filter</label>
+    <select id="flt-${pane.id}" data-a="filter" title="What this pane shows">
+      ${[["all", "All"], ["talk", "Conversation"], ["tools", "Tools"], ["thinking", "Thinking"], ["errors", "Errors & retries"]].map(([v, l]) => `<option value="${v}" ${pane.filter === v ? "selected" : ""}>${l}</option>`).join("")}
+    </select>
+    <button data-a="font-" title="Smaller text in this pane" aria-label="Smaller text">A−</button><button data-a="font+" title="Larger text in this pane" aria-label="Larger text">A+</button>
+    <button data-a="pop" title="Open this session in its own window">⧉</button>
+    ${pane.id !== "main" ? `<button data-a="close" title="Close this pane (viewing only: the helper keeps running)" aria-label="Close pane">✕</button>` : ""}`;
+  h.querySelectorAll("[data-a]").forEach(b => {
+    const a = b.dataset.a;
+    if (a === "filter") b.onchange = () => { pane.filter = b.value; renderPane(pane); };
+    else b.onclick = () => paneAction(pane, a);
+  });
+  const note = pane.el.querySelector(".pane-note");
+  if (pane.id === "main" && S.transitionNote && S.transitionNote.to === pane.sid && nowS() - S.transitionNote.ts < 600) {
+    note.innerHTML = S.transitionNote.html; note.classList.add("show");
+  } else if (!isCurrent && pane.sid && pane.id === "main" && t) {
+    note.innerHTML = `Viewing a session that is not the task's current one (current: <code>${esc(short(tdata(t).session_id, 16))}</code>). Instructions and commands still target the task through the coordinator.`;
+    note.classList.add("show");
+  } else note.classList.remove("show");
+}
+function paneAction(pane, a) {
+  if (a === "live") goLive(pane);
+  else if (a === "pin") { pane.pinned = true; renderPaneHead(pane); }
+  else if (a === "font-" || a === "font+") {
+    const k = pane.id === "main" ? "main" : "helper";
+    P.fontScale[k] = clamp(+(P.fontScale[k] + (a === "font+" ? 0.1 : -0.1)).toFixed(2), 0.7, 1.8); savePrefs();
+    for (const p of S.panes) applyPaneFont(p);
+  } else if (a === "pop") popout({popout: "pane", session: pane.sid, project: S.project, task: S.task});
+  else if (a === "close") { S.panes = S.panes.filter(p => p !== pane); layout(); resubscribeIfNeeded(); }
+}
+function applyPaneFont(p) { if (p.el) p.el.querySelector(".transcript").style.fontSize = `calc(var(--fs) * ${P.fontScale[p.id === "main" ? "main" : "helper"]})`; }
+function popout(params) {
+  const url = "/ui/control?" + new URLSearchParams(params).toString();
+  const w = window.open(url, "_blank", "popup=yes,width=900,height=1000");
+  if (!w) toast(`Your browser blocked the pop-up. <a href="${esc(url)}" target="_blank" rel="noopener">Open it here</a>`, "warn", 15000);
+}
+function openBeside(sid) {
+  const helpers = S.panes.filter(p => p.id !== "main");
+  if (helpers.length >= 3) { toast("At most 4 panes are shown; close one or use a pop-out window.", "warn"); return; }
+  const p = newPane("h" + uid().slice(0, 6), "helper"); S.panes.push(p); layout();
+  openInPane(p, sid, {pin: true});
+}
+
+/* ---------------------------------------------------------------- transcript rendering */
+function partStart(p) { return ((p.data || {}).time || {}).start || p.ts || 0; }
+function partsFor(sid) {
+  const parts = [...(S.parts.get(sid) || new Map()).values()];
+  const msgs = S.messages.get(sid) || new Map();
+  const byMsg = new Map();
+  for (const p of parts) { const a = byMsg.get(p.message_id) || []; a.push(p); byMsg.set(p.message_id, a); }
+  const order = [...byMsg.keys()].map(mid => {
+    const m = msgs.get(mid);
+    const first = Math.min(...byMsg.get(mid).map(p => p.ts || Infinity));
+    return {mid, m, ts: (m && m.created_ts) || first};
+  }).sort((a, b) => (a.ts || 0) - (b.ts || 0) || String(a.mid).localeCompare(String(b.mid)));
+  return order.map(o => ({...o, parts: byMsg.get(o.mid).sort((a, b) => partStart(a) - partStart(b) || String(a.part_id).localeCompare(String(b.part_id)))}));
+}
+function showPart(pane, p) {
+  const f = pane.filter, k = p.kind;
+  if (!P.events[k === "step-start" || k === "step-finish" ? "step" : k === "subtask" ? "agent" : k] && P.events[k] !== undefined) return false;
+  if ((k === "step-start" || k === "step-finish") && !P.events.step) return false;
+  if (k === "reasoning" && !P.showThinking) return false;
+  if (k === "text" && !P.showAssistantText && p._role === "assistant") return false;
+  if (f === "talk") return k === "text" || k === "reasoning";
+  if (f === "tools") return k === "tool";
+  if (f === "thinking") return k === "reasoning";
+  if (f === "errors") return k === "retry" || k === "error" || (k === "tool" && ((p.data || {}).tool || {}).status === "error");
+  return true;
+}
+function renderPane(pane, incremental) {
+  if (!pane.el || !pane.sid) return;
+  const t = pane.el.querySelector(".transcript");
+  const wasBottom = t.scrollHeight - t.scrollTop - t.clientHeight < 40;
+  if (incremental && !wasBottom) {
+    pane.newCount += 1;
+    if (pane.id === "main") { S.unseen += 1; renderConn(); }
+  }
+  const det = S.details.get(pane.sid) || {};
+  if (det.missing && !(S.parts.get(pane.sid) || new Map()).size) {
+    t.innerHTML = `<p class="dim">Foundry has no record of session <code>${esc(pane.sid)}</code>. It may predate capture or be outside the retention window.</p>`; return;
+  }
+  const groups = partsFor(pane.sid);
+  const html = [];
+  if (S.older.get(pane.sid)) html.push(`<button class="ghost" data-older="1">Load older activity…</button>`);
+  else if (groups.length) html.push(`<div class="divider">Start of captured history for this session${det.data && det.data.capture_boundary ? " · " + esc(JSON.stringify(det.data.capture_boundary)) : ""}</div>`);
+  if (!groups.length) html.push(`<p class="dim">No messages captured for this session yet.${(S.sessions.get(pane.sid) || {}).binding_only ? " Foundry has the coordinator's binding, but the workstation bridge hasn't reported Kilo data for it (bridge not running, or the session predates it)." : ""}</p>`);
+  for (const g of groups) html.push(renderMessage(pane, g));
+  t.innerHTML = html.join("");
+  const ob = t.querySelector("[data-older]"); if (ob) ob.onclick = () => loadOlder(pane);
+  wireCards(pane, t);
+  applyPaneFont(pane);
+  const btn = pane.el.querySelector(".resume-live");
+  if (pane.highlight) {
+    const el = t.querySelector(`[data-part="${CSS.escape(pane.highlight)}"]`);
+    if (el) { el.classList.add("hit"); el.scrollIntoView({block: "center"}); }
+    pane.highlight = ""; pane.atBottom = false;
+  } else if ((wasBottom || pane.atBottom) && P.followScroll && !(incremental && !wasBottom)) {
+    t.scrollTop = t.scrollHeight; pane.newCount = 0; pane.atBottom = true;
+  }
+  btn.classList.toggle("show", pane.newCount > 0 || !pane.atBottom);
+  btn.innerHTML = pane.newCount ? `Resume live ↓ <b>${pane.newCount}</b> new` : "Jump to latest ↓";
+}
+function renderMessage(pane, g) {
+  const m = g.m || {};
+  const role = m.role || (g.parts.some(p => p.kind === "reasoning" || p.kind === "tool" || p.kind === "step-finish") ? "assistant" : "user");
+  const d = m.data || {};
+  const tok = d.tokens || {};
+  const out = [];
+  const head = [`<span class="who">${esc(role)}</span>`];
+  if (d.agent) head.push(`<span title="Kilo agent">${esc(d.agent)}</span>`);
+  if (d.model_id) head.push(`<span title="Model Kilo used (as the persona name sent to Foundry)">${esc((d.provider_id ? d.provider_id + "/" : "") + d.model_id)}</span>`);
+  if (P.showTimestamps && (m.created_ts || g.ts)) head.push(`<span class="ts" title="${esc(fullTs(m.created_ts || g.ts))}">${esc(tsText(m.created_ts || g.ts))}</span>`);
+  if (role === "assistant" && P.showTokenDetails && (tok.input !== undefined || tok.output !== undefined)) {
+    head.push(`<span class="diag" title="Kilo-reported tokens for this assistant message">in ${fmtN(tok.input)} · out ${fmtN(tok.output)}${tok.reasoning ? " · reasoning " + fmtN(tok.reasoning) : ""}${tok.cache_read ? " · cache read " + fmtN(tok.cache_read) : ""}</span>`);
+  }
+  if (role === "assistant" && !m.completed_ts && m.message_id) head.push(`<span class="pill warn" title="Kilo hasn't marked this message completed">in progress</span>`);
+  out.push(`<div class="msg ${esc(role)}" data-msg="${esc(g.mid)}"><div class="msg-head">${head.join(" ")}</div>`);
+  if (d.error) out.push(`<div class="card err open"><div class="card-head">⚠ Error</div><div class="card-body"><pre class="code">${esc(typeof d.error === "string" ? d.error : JSON.stringify(d.error, null, 2))}</pre></div></div>`);
+  const hasThink = g.parts.some(p => p.kind === "reasoning");
+  if (role === "assistant" && P.showThinking && !hasThink && m.completed_ts && pane.filter !== "tools" && pane.filter !== "errors")
+    out.push(`<div class="notprov" title="Kilo published no reasoning text for this turn. Nothing is inferred from timing.">Thinking: not provided${tok.reasoning ? ` (provider reported ${fmtN(tok.reasoning)} hidden reasoning tokens)` : ""}</div>`);
+  for (const p of g.parts) {
+    p._role = role;
+    if (!showPart(pane, p)) continue;
+    out.push(renderPart(pane, p, d));
+  }
+  out.push(`</div>`);
+  return out.join("");
+}
+function cardOpen(pane, id, defOpen) {
+  if (pane.expanded.has(id)) return true;
+  if (pane.collapsed.has(id)) return false;
+  return defOpen;
+}
+function renderPart(pane, p, msgData) {
+  const d = p.data || {};
+  const id = p.part_id;
+  const tm = d.time || {};
+  const dur = tm.start && tm.end ? tm.end - tm.start : null;
+  const tsH = P.showTimestamps && (tm.start || p.ts) ? `<span class="ts" title="${esc(fullTs(tm.start || p.ts))}">${esc(tsText(tm.start || p.ts))}</span>` : "";
+  switch (p.kind) {
+    case "text":
+      if (d.raw_type === "text:synthetic") return `<div class="diag" data-part="${esc(id)}">[context Kilo added] ${esc((p.text || "").slice(0, 300))}</div>`;
+      return `<div class="md" data-part="${esc(id)}">${md(p.text)}${d.truncated ? `<div class="dim">… capture truncated at ${fmtN((p.text || "").length)} of ${fmtN(d.full_chars)} characters</div>` : ""}</div>`;
+    case "reasoning": {
+      const open = cardOpen(pane, id, P.thinkingDefault === "expanded");
+      const label = d.provider_label || msgData.model_id || "provider";
+      const running = tm.start && !tm.end;
+      return `<div class="card think ${open ? "open" : ""}" data-part="${esc(id)}" data-card="${esc(id)}">
+        <div class="card-head" role="button" tabindex="0" aria-expanded="${open}"><span class="chev">▸</span> Thinking <span class="dim">· ${esc(label)}</span>
+          ${dur !== null ? `<span class="ts" title="Reported start/end of this reasoning part">${esc(fmtDur(dur))}</span>` : running ? `<span class="pill think">streaming</span>` : ""}
+          ${!open && p.text ? `<span class="dim" style="overflow:hidden;white-space:nowrap;text-overflow:ellipsis;flex:1;min-width:0">${esc(p.text.slice(0, 140))}</span>` : ""}${tsH}</div>
+        <div class="card-body">${d.withheld ? `<p class="dim">${esc(d.withheld)}</p>` : `<div class="md">${md(p.text)}</div>`}${d.truncated ? `<div class="dim">… truncated at capture</div>` : ""}</div></div>`;
+    }
+    case "tool": {
+      const t = d.tool || {};
+      const st = t.status || "unknown";
+      const done = st === "completed";
+      const open = cardOpen(pane, id, st === "error" || (!done && st !== "pending") || !P.collapseCompleted);
+      const pill = {completed: "ok", error: "bad", running: "warn", pending: "info"}[st] || "";
+      const srcL = t.mcp_server ? `MCP: ${t.mcp_server}` : "built-in / unattributed";
+      const out = [];
+      if (P.showToolArgs && t.input) out.push(`<div class="sub">Arguments${t.input_truncated ? " (truncated at capture)" : ""}</div>${codeBlock(pane, id + ":in", prettyJson(t.input), "json")}`);
+      if (P.showToolResults) {
+        if (d.output_withheld) out.push(`<div class="sub">Result</div><p class="dim">${esc(d.output_withheld)}</p>`);
+        else if (t.output) out.push(`<div class="sub">Result${t.output_truncated ? " (truncated at capture)" : ""} <button class="ghost" data-copy="${esc(id)}" title="Copy the redacted result">Copy</button></div>${codeBlock(pane, id + ":out", t.output, guessLang(t.output))}`);
+        else if (!done && st !== "error") out.push(`<div class="dim">${st === "running" ? "Running…" : "Waiting to run…"}</div>`);
+      }
+      if (t.error) out.push(`<div class="sub">Error</div><pre class="code" style="color:var(--bad)">${esc(t.error)}</pre>`);
+      if (t.child_session) out.push(`<div><button data-open="${esc(t.child_session)}">Open helper session</button> <button data-pop="${esc(t.child_session)}">⧉</button></div>`);
+      return `<div class="card tool st-${esc(st)} ${open ? "open" : ""}" data-part="${esc(id)}" data-card="${esc(id)}">
+        <div class="card-head" role="button" tabindex="0" aria-expanded="${open}"><span class="chev">▸</span><span class="tool-name">${esc(t.name || "tool")}</span>
+          <span class="tool-title">${esc(t.title || "")}</span><span class="pill ${pill}">${esc(st)}</span>
+          ${dur !== null ? `<span class="ts" title="Tool start → end as Kilo reported it">${esc(fmtDur(dur))}</span>` : tm.start && !tm.end ? `<span class="ts">${esc(fmtDur(nowS() - tm.start))} so far</span>` : ""}
+          <span class="src">${esc(srcL)}</span>${tsH}</div>
+        <div class="card-body">${out.join("")}<div class="diag">call ${esc(t.call_id || "?")}</div></div></div>`;
+    }
+    case "step-finish":
+      if (!P.showDiagnostics) return "";
+      return `<div class="diag" data-part="${esc(id)}">step finished${d.reason ? " (" + esc(d.reason) + ")" : ""}${d.tokens ? " · tokens " + esc(JSON.stringify(d.tokens)) : ""}${d.cost !== undefined ? " · Kilo cost $" + esc(d.cost) : ""}</div>`;
+    case "step-start": return P.showDiagnostics ? `<div class="diag" data-part="${esc(id)}">step started</div>` : "";
+    case "retry":
+      return `<div class="card warnc open" data-part="${esc(id)}"><div class="card-head">↻ Retry ${d.attempt ? "#" + esc(d.attempt) : ""} ${tsH}</div><div class="card-body"><pre class="code">${esc(p.text || d.error || "")}</pre></div></div>`;
+    case "compaction": return `<div class="divider" data-part="${esc(id)}">Context compacted${d.auto ? " (automatic)" : ""} ${tsH}</div>`;
+    case "file": return `<div data-part="${esc(id)}"><span class="chip">📎 ${esc(d.filename || "file")} ${esc(d.mime || "")}</span></div>`;
+    case "patch": return `<div data-part="${esc(id)}"><span class="chip">Patch ${esc(short(d.hash, 8))} · ${(d.files || []).length} file(s)</span>${(d.files || []).slice(0, 8).map(f => `<span class="chip">${esc(f)}</span>`).join("")}</div>`;
+    case "agent": case "subtask":
+      return `<div class="card open" data-part="${esc(id)}"><div class="card-head">↳ Delegated to <b>${esc(d.agent || "helper")}</b> ${tsH}</div><div class="card-body">${esc(d.description || "")}${d.prompt ? `<div class="md">${md(String(d.prompt).slice(0, 2000))}</div>` : ""}</div></div>`;
+    default:
+      return P.showDiagnostics ? `<div class="diag" data-part="${esc(id)}">Unrecognized part type “${esc(d.raw_type || p.kind)}” (kept for diagnostics)</div>` : "";
+  }
+}
+function prettyJson(s) { try { return JSON.stringify(JSON.parse(s), null, 2); } catch (e) { return String(s); } }
+function guessLang(s) { const t = String(s || "").trim(); return /^[\[{]/.test(t) ? "json" : /^diff --git|^@@ /m.test(t) ? "diff" : "text"; }
+function codeBlock(pane, id, text, lang) {
+  const lines = String(text).split("\n").length;
+  const long = P.collapseLong && lines > P.longLines;
+  const open = pane.expanded.has(id);
+  return `<pre class="code ${long && !open ? "clip" : ""}" data-lang="${esc(lang)}">${highlight(String(text), lang)}</pre>${long ? `<button class="ghost" data-expand="${esc(id)}">${open ? "Collapse" : `Expand (${lines} lines)`}</button>` : ""}`;
+}
+function wireCards(pane, root) {
+  root.querySelectorAll(".card-head[role=button]").forEach(h => {
+    const toggle = () => {
+      const c = h.parentElement; const id = c.dataset.card; const open = !c.classList.contains("open");
+      c.classList.toggle("open", open); h.setAttribute("aria-expanded", open);
+      if (open) { pane.expanded.add(id); pane.collapsed.delete(id); } else { pane.collapsed.add(id); pane.expanded.delete(id); }
+    };
+    h.onclick = toggle;
+    h.onkeydown = e => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); toggle(); } };
+  });
+  root.querySelectorAll("[data-expand]").forEach(b => b.onclick = () => {
+    const id = b.dataset.expand; if (pane.expanded.has(id)) pane.expanded.delete(id); else pane.expanded.add(id);
+    const t = pane.el.querySelector(".transcript"); const top = t.scrollTop; renderPane(pane); t.scrollTop = top;
+  });
+  root.querySelectorAll("[data-copy]").forEach(b => b.onclick = () => {
+    const p = (S.parts.get(pane.sid) || new Map()).get(b.dataset.copy);
+    const text = (((p || {}).data || {}).tool || {}).output || "";
+    navigator.clipboard.writeText(text).then(() => toast("Copied the redacted result"), () => toast("Copy blocked by the browser", "warn"));
+  });
+  root.querySelectorAll("[data-open]").forEach(b => b.onclick = () => openBeside(b.dataset.open));
+  root.querySelectorAll("[data-pop]").forEach(b => b.onclick = () => popout({popout: "pane", session: b.dataset.pop, project: S.project, task: S.task}));
+}
+
+/* ======================================================================== inspector */
+let inspTimer = null;
+function scheduleInspector() { clearTimeout(inspTimer); inspTimer = setTimeout(renderInspector, 150); }
+function focusedSession() {
+  const p = paneById(S.focused) || paneById("main") || S.panes[0];
+  return p ? S.sessions.get(p.sid) || (p.sid ? {session_id: p.sid} : null) : null;
+}
+function renderInspector() {
+  const el = $("#inspector"); if (!el || el.hidden) return;
+  const only = POPOUT.startsWith("section:") ? POPOUT.slice(8) : "";
+  const s = focusedSession();
+  const order = only ? [only] : P.sidebar.order.filter(x => !P.sidebar.hidden.includes(x));
+  const body = order.map(name => {
+    if (name === "mcp" && false) return "";
+    const col = !only && P.sidebar.collapsed.includes(name);
+    let inner = "";
+    try { inner = col ? "" : (SECTION_RENDER[name] || (() => ""))(s); } catch (e) { inner = `<div class="errbox">${esc(e.message)}</div>`; }
+    return `<section class="sec ${col ? "collapsed" : ""}" data-sec="${name}">
+      <div class="sec-head" role="button" tabindex="0" aria-expanded="${!col}"><span class="chev">▸</span>${esc(SECTION_TITLES[name])}
+        <span class="tools">${only ? "" : `<button class="ghost" data-mv="-1" title="Move up" aria-label="Move ${esc(SECTION_TITLES[name])} up">↑</button><button class="ghost" data-mv="1" title="Move down" aria-label="Move down">↓</button><button class="ghost" data-pop="1" title="Pop out this section">⧉</button><button class="ghost" data-hide="1" title="Hide (Settings → Sidebar brings it back)" aria-label="Hide section">✕</button>`}</span></div>
+      <div class="sec-body">${inner}</div></section>`;
+  }).join("");
+  const hidden = P.sidebar.hidden.length ? `<div class="dim" style="padding:4px 8px">Hidden: ${P.sidebar.hidden.map(h => `<button class="ghost" data-unhide="${h}">${esc(SECTION_TITLES[h])}</button>`).join(" ")}</div>` : "";
+  const sc = el.scrollTop;
+  el.innerHTML = `<div class="ihead"><b>Inspector</b><span class="dim">${s ? esc(short(s.session_id, 18)) : "no session"}</span><span class="spacer"></span>
+    <button class="ghost" id="insp-collapse-all" title="Collapse all sections">⊟</button></div>${body}${hidden}`;
+  el.scrollTop = sc;
+  el.querySelectorAll(".sec").forEach(sec => {
+    const name = sec.dataset.sec;
+    const head = sec.querySelector(".sec-head");
+    const toggle = ev => {
+      if (ev.target.closest("button")) return;
+      const c = P.sidebar.collapsed; const i = c.indexOf(name);
+      if (i >= 0) c.splice(i, 1); else c.push(name); savePrefs(); renderInspector();
+    };
+    head.onclick = toggle; head.onkeydown = e => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); toggle(e); } };
+    sec.querySelectorAll("[data-mv]").forEach(b => b.onclick = () => {
+      const o = P.sidebar.order; const i = o.indexOf(name); const j = clamp(i + +b.dataset.mv, 0, o.length - 1);
+      o.splice(i, 1); o.splice(j, 0, name); savePrefs(); renderInspector();
+    });
+    sec.querySelectorAll("[data-hide]").forEach(b => b.onclick = () => { P.sidebar.hidden.push(name); savePrefs(); renderInspector(); });
+    sec.querySelectorAll("[data-pop]").forEach(b => b.onclick = () => popout({popout: "section:" + name, session: (s || {}).session_id || "", project: S.project, task: S.task}));
+    (SECTION_WIRE[name] || (() => {}))(sec, s);
+  });
+  el.querySelectorAll("[data-unhide]").forEach(b => b.onclick = () => { P.sidebar.hidden = P.sidebar.hidden.filter(x => x !== b.dataset.unhide); savePrefs(); renderInspector(); });
+  const ca = $("#insp-collapse-all"); if (ca) ca.onclick = () => { P.sidebar.collapsed = SECTIONS.slice(); savePrefs(); renderInspector(); };
+}
+function kv(rows) { return `<div class="kv">${rows.filter(Boolean).map(([k, v]) => `<div>${esc(k)}</div><div>${v}</div>`).join("")}</div>`; }
+function NA(why) { return `<span class="dim" title="${esc(why || "not reported by any source")}">N/A</span>`; }
+function lastAssistant(sid) {
+  // the latest assistant turn that actually reported counts (an in-progress turn reports zeros)
+  const msgs = [...(S.messages.get(sid) || new Map()).values()].filter(m => { const t = m.role === "assistant" && (m.data || {}).tokens; return t && ((+t.input || 0) + (+t.output || 0) + (+t.cache_read || 0)) > 0; });
+  msgs.sort((a, b) => (a.created_ts || 0) - (b.created_ts || 0));
+  return msgs[msgs.length - 1];
+}
+function currentAction(sid) {
+  const parts = [...(S.parts.get(sid) || new Map()).values()].sort((a, b) => (a.ts || 0) - (b.ts || 0));
+  for (let i = parts.length - 1; i >= 0; i--) {
+    const p = parts[i]; const t = (p.data || {}).tool;
+    if (p.kind === "tool" && t && (t.status === "running" || t.status === "pending")) return `running <code>${esc(t.name)}</code>${t.title ? " · " + esc(t.title.slice(0, 80)) : ""}`;
+  }
+  const last = parts[parts.length - 1];
+  if (!last) return NA("no activity captured");
+  const s = S.sessions.get(sid) || {};
+  if (s.status !== "busy" && s.status !== "retry") return `<span class="dim">last: ${esc(last.kind)} at ${esc(tsText(last.ts))}</span>`;
+  return last.kind === "reasoning" ? "thinking (published reasoning)" : last.kind === "text" ? "writing a reply" : esc(last.kind);
+}
+const SECTION_RENDER = {
+  identity(s) {
+    if (!s) return '<p class="dim">Select a session.</p>';
+    const t = S.tasks.get(taskKey(s.project_id || S.project, s.task_id || S.task));
+    const d = tdata(t);
+    const start = s.created_ts; const last = s.last_activity_ts;
+    const {bridge} = sourceState();
+    const fresh = bridge[0] ? `${bridge[0].fresh ? "fresh" : "STALE"} · bridge seen ${relAge(bridge[0].age_s)} ago` : "no bridge";
+    return kv([
+      ["Project / task", `${esc(s.project_id || "?")} / <b>${esc(s.task_id || "?")}</b>`],
+      ["Run", `<code>${esc(s.run_id || d.run_id || "")}</code>`],
+      ["Coordinator", t ? `<span class="pill ${stateCls(t.state)}">${esc(t.state)}</span> phase ${esc(d.phase || "?")} · attempt ${esc(d.attempt ?? "?")}${d.next_action ? `<div class="dim">${esc(d.next_action)}</div>` : ""}` : NA("coordinator task not reported")],
+      ["Role / agent", `${esc(s.role || "?")} / ${esc(s.agent || "?")}`],
+      ["Session", `<code title="${esc(s.session_id)}">${esc(short(s.session_id, 22))}</code> ${statusPill(s)}`],
+      s.parent_id ? ["Parent", `<code>${esc(short(s.parent_id, 22))}</code>`] : null,
+      ["Started", start ? `${esc(tsText(start, "datetime"))} <span class="dim">(${esc(relAge(nowS() - start))} ago)</span>` : NA()],
+      ["Last activity", last ? `${esc(tsText(last))} <span class="dim">(${esc(relAge(nowS() - last))} ago)</span>` : NA()],
+      ["Now", currentAction(s.session_id)],
+      ["Status source", `<span class="src">${esc(s.status_source || "none")}</span>`],
+      ["Freshness", esc(fresh)],
+    ]);
+  },
+  context(s) {
+    if (!s) return "";
+    const det = S.details.get(s.session_id) || {};
+    const la = lastAssistant(s.session_id);
+    const tok = la ? la.data.tokens : null;
+    const kiloUsed = tok ? (+tok.input || 0) + (+tok.cache_read || 0) + (+tok.cache_write || 0) : null;
+    const reqs = ((det.foundry || {}).requests || []);
+    const lastReq = reqs.find(r => r.prompt_tokens);
+    const cfg = ((det.kilo_config || {}).data || {});
+    const modelKey = `${s.provider || "foundry"}/${s.model || ""}`;
+    const km = (cfg.models || {})[modelKey] || null;
+    const persona = det.persona || null;
+    const maxes = [];
+    if (km && km.context) maxes.push({v: km.context, src: "Kilo model metadata (client-side; Kilo compacts at this)", out: km.output});
+    if (persona && persona.context_window) maxes.push({v: persona.context_window, src: "Foundry persona declaration", out: persona.max_output_tokens});
+    const t = S.tasks.get(taskKey(s.project_id, s.task_id));
+    const marks = (tdata(t).limits || {}).context_checkpoints || [];
+    const used = kiloUsed ?? (lastReq ? lastReq.prompt_tokens : null);
+    const max = maxes[0];
+    const rows = [];
+    if (used === null) rows.push(`<p class="dim">No token report yet for this session.</p>`);
+    else if (max) {
+      const pct = 100 * used / max.v;
+      const reserve = max.out ? 100 * max.out / max.v : 0;
+      rows.push(`<div class="bar" role="img" aria-label="Context ${pct.toFixed(1)} percent used"><i style="width:${clamp(pct, 0, 100)}%"></i>${reserve ? `<i class="reserve" style="left:${clamp(100 - reserve, 0, 100)}%;width:${clamp(reserve, 0, 100)}%" title="Output reserve (${fmtN(max.out)})"></i>` : ""}${marks.map(m => `<b style="left:${clamp(100 * m / max.v, 0, 100)}%" title="Configured checkpoint ${fmtN(m)}"></b>`).join("")}</div>`);
+      rows.push(kv([["Used", `${fmtN(used)} (${pct.toFixed(1)}%)`], ["Remaining", fmtN(Math.max(0, max.v - used))],
+        ["Maximum", `${fmtN(max.v)} <div class="src">${esc(max.src)}</div>`], ["Output reserve", max.out ? fmtN(max.out) : NA("no output limit reported")]]));
+    } else rows.push(kv([["Used", fmtN(used)], ["Maximum", NA("no context limit known for " + modelKey)]]));
+    rows.push(`<div class="src">Current context = the latest assistant call's prompt as Kilo reported it (input + cache read + cache write)${tok ? `: ${fmtN(tok.input)} + ${fmtN(tok.cache_read)} + ${fmtN(tok.cache_write)}` : ""}. This is not a sum over the session.${lastReq ? ` Foundry measured ${fmtN(lastReq.prompt_tokens)} prompt tokens on its latest call for this session (request ${esc(short(lastReq.request_id, 8))}).` : ""}</div>`);
+    if (maxes.length > 1 && maxes[0].v !== maxes[1].v) rows.push(`<div class="warnbox">Limits disagree: ${maxes.map(m => `${fmtN(m.v)} (${esc(m.src)})`).join(" vs ")}. The bar uses Kilo's value because Kilo compacts at it; the larger number is not assumed.</div>`);
+    if (marks.length) rows.push(`<div class="src">Checkpoint markers: ${marks.map(fmtN).join(", ")} (profile [telemetry] context_checkpoints)</div>`);
+    else rows.push(`<div class="src">No checkpoint markers configured.</div>`);
+    const comp = [...(S.parts.get(s.session_id) || new Map()).values()].filter(p => p.kind === "compaction");
+    rows.push(`<div class="src">Compactions captured: ${comp.length}${comp.length ? " (last " + esc(tsText(comp[comp.length - 1].ts)) + ")" : ""}</div>`);
+    return rows.join("");
+  },
+  tokens(s) {
+    if (!s) return "";
+    const scope = S.tokScope || "last";
+    const sel = `<div class="row" role="radiogroup" aria-label="Token scope">${[["last", "Last call"], ["session", "Session"], ["task", "Task"]].map(([v, l]) => `<button class="${scope === v ? "primary" : ""}" data-scope="${v}">${l}</button>`).join(" ")}</div>`;
+    const msgs = [...(S.messages.get(s.session_id) || new Map()).values()].filter(m => m.role === "assistant" && (m.data || {}).tokens);
+    const sum = f => msgs.reduce((a, m) => a + (+(m.data.tokens[f]) || 0), 0);
+    let rows;
+    if (scope === "last") {
+      const la = lastAssistant(s.session_id); const t = la ? la.data.tokens : null;
+      if (!t) return sel + '<p class="dim">No assistant turn with token counts yet.</p>';
+      rows = tokRows(t.input, t.output, t.reasoning, t.cache_read, t.cache_write, "Kilo, latest assistant message", la.data.cost);
+    } else if (scope === "session") {
+      rows = tokRows(sum("input"), sum("output"), sum("reasoning"), sum("cache_read"), sum("cache_write"), `Kilo, ${msgs.length} assistant messages in this session`, msgs.reduce((a, m) => a + (+m.data.cost || 0), 0));
+      const f = ((S.details.get(s.session_id) || {}).foundry || {}).totals;
+      if (f) rows += `<div class="sub dim" style="margin-top:6px">Foundry measured (separate ledger — do not add)</div>` + kv([["Calls", fmtN(f.calls)], ["Prompt", fmtN(f.prompt_tokens)], ["Output", fmtN(f.completion_tokens)], ["Cache hit", f.cache_hit_pct === null ? NA() : f.cache_hit_pct + "% <span class='src'>cached ÷ prompt tokens, Foundry-measured calls</span>"]]);
+    } else {
+      const tt = S.taskTotals;
+      if (!tt || tt.key !== taskKey(s.project_id, s.task_id)) { loadTaskTotals(s); return sel + '<p class="dim">Loading…</p>'; }
+      const k = tt.data.kilo, f = tt.data.foundry;
+      rows = tokRows(k.input, k.output, k.reasoning, k.cache_read, k.cache_write, `Kilo, ${k.messages} assistant messages across ${k.sessions} sessions`, k.cost) +
+        `<div class="sub dim" style="margin-top:6px">Foundry measured (separate ledger — do not add)</div>` + kv([["Calls", fmtN(f.calls)], ["Input", fmtN(f.input_tokens)], ["Output", fmtN(f.output_tokens)], ["Denied", fmtN(f.denied)], ["In flight", fmtN(f.inflight)]]);
+    }
+    return sel + rows;
+  },
+  speed(s) {
+    if (!s || !P.showTiming) return P.showTiming ? "" : '<p class="dim">Timing metrics are hidden (Settings).</p>';
+    const f = (S.details.get(s.session_id) || {}).foundry || {};
+    const r = (f.requests || [])[0];
+    const tools = [...(S.parts.get(s.session_id) || new Map()).values()].filter(p => p.kind === "tool" && (p.data.time || {}).end);
+    const lastTool = tools.sort((a, b) => b.data.time.end - a.data.time.end)[0];
+    const lastPart = Math.max(0, ...[...(S.parts.get(s.session_id) || new Map()).values()].map(p => (p.data.time || {}).end || p.ts || 0));
+    const busy = s.status === "busy";
+    const rows = [];
+    if (r) {
+      rows.push(["Decode speed", r.decode_tps ? `${r.decode_tps.toFixed(1)} tok/s <span class="src">output ÷ decode time (${esc(r.timing_src || "?")})</span>` : NA("backend reported no decode timing")]);
+      rows.push(["TTFT", r.ttft_ms ? `${(r.ttft_ms / 1000).toFixed(2)} s` : NA("non-streaming call or not measured")]);
+      rows.push(["Prefill", r.prefill_ms ? `${(r.prefill_ms / 1000).toFixed(2)} s${r.prefill_tps ? " · " + r.prefill_tps.toFixed(0) + " tok/s" : ""}` : NA()]);
+      rows.push(["Backend wait", r.start_ms ? `${(r.start_ms / 1000).toFixed(2)} s <span class="src">sent → backend started work (queue)</span>` : NA()]);
+      rows.push(["End-to-end", r.wall_ms ? `${(r.wall_ms / 1000).toFixed(1)} s${r.eff_tps ? ` · ${r.eff_tps.toFixed(1)} tok/s overall <span class="src">includes queue/prefill</span>` : ""}` : (r.duration_ms ? (r.duration_ms / 1000).toFixed(1) + " s" : NA())]);
+      rows.push(["Foundry routing", r.router_ms ? `${r.router_ms.toFixed(0)} ms` : NA()]);
+      rows.push(["Session decode avg", f.totals && f.totals.decode_tps_weighted ? `${f.totals.decode_tps_weighted} tok/s <span class="src">Σ output ÷ Σ decode time over ${f.totals.calls} calls</span>` : NA()]);
+    } else rows.push(["Latest call", NA("Foundry has no request for this session (x-session-id) yet")]);
+    rows.push(["Last tool", lastTool ? `<code>${esc(lastTool.data.tool.name)}</code> ${fmtDur(lastTool.data.time.end - lastTool.data.time.start)}` : NA()]);
+    rows.push(["Since last output", lastPart ? `${fmtDur(nowS() - lastPart)}${busy ? ' <span class="src">session busy per Kilo; quiet decoding or a long tool is not a crash</span>' : ""}` : NA()]);
+    return kv(rows) + `<div class="src">Source: Foundry request_log + perf_samples for this session's x-session-id; tool times from Kilo parts. Stream chunks are not tokens.</div>`;
+  },
+  routes(s) {
+    if (!s) return "";
+    const det = S.details.get(s.session_id) || {};
+    const f = det.foundry || {};
+    const reqs = f.requests || [];
+    const persona = det.persona;
+    const rows = [["Requested persona", s.model ? `<code>${esc(s.model)}</code>` : NA()]];
+    if (persona) rows.push(["Allowed route", (persona.pinned_models || []).length ? persona.pinned_models.map(m => `<span class="chip">${esc(m)}</span>`).join("→") : "<span class='dim'>persona routing</span>"], ["Reasoning", esc(persona.reasoning_effort || "model default")]);
+    const last = reqs[0];
+    if (last) {
+      rows.push(["Actually served", `${esc(last.served_backend || "?")} / <code>${esc(last.served_model || "?")}</code>`]);
+      if ((last.route_attempts || []).length > 1) rows.push(["Fallback", last.route_attempts.slice(0, -1).map(a => `<span class="pill warn">${esc(a.backend)}/${esc(a.model)}</span> ${esc(a.error || "")}`).join("<br>")]);
+    }
+    if ((f.inflight || []).length) rows.push(["In flight now", f.inflight.map(x => `<span class="pill ok">${esc(x.backend)}/${esc(x.model)}</span>`).join(" ")]);
+    if ((f.denied || []).length) rows.push(["Denied", f.denied.slice(0, 3).map(x => `<span class="pill bad">${esc(x.rule || "")}</span>`).join(" ")]);
+    const by = {};
+    for (const r of reqs) { const k = `${r.served_backend}/${r.served_model}`; const b = by[k] || (by[k] = {calls: 0, tok: 0, cost: 0}); b.calls++; b.tok += (+r.prompt_tokens || 0) + (+r.completion_tokens || 0); b.cost += +r.est_cost_usd || 0; }
+    const table = Object.keys(by).length ? `<table class="t"><tr><th>backend/model</th><th>calls</th><th>tokens</th><th>est. cost</th></tr>${Object.entries(by).map(([k, b]) => `<tr><td>${esc(k)}</td><td>${b.calls}</td><td>${fmtN(b.tok)}</td><td>${b.cost ? "$" + b.cost.toFixed(4) : '<span class="dim" title="$0 is not proof the service is free: subscription or unpriced">$0 / unpriced</span>'}</td></tr>`).join("")}</table>` : "";
+    return kv(rows) + table + `<div class="src">${esc(f.source || "")} · ${esc(f.window || "")}</div>`;
+  },
+  mcp(s) {
+    const proj = (s && s.project_id) || S.project;
+    const hist = s && s.ended_ts;
+    const snap = hist ? (S.mcpAt && S.mcpAt.sid === s.session_id ? S.mcpAt.snap : null) : S.snapshots.get(`mcp|${proj}|`);
+    if (hist && !(S.mcpAt && S.mcpAt.sid === s.session_id)) { loadMcpAt(s); return '<p class="dim">Loading the snapshot in force at this session’s time…</p>'; }
+    if (!snap) return `<p class="dim">${hist ? "No MCP snapshot was captured at or before this session's last activity; its MCP state is unknown." : "No MCP snapshot from the bridge yet."}</p>`;
+    const servers = (snap.data.servers || []).filter(x => P.showDisabledMcp || x.configured_enabled !== false);
+    const cfg = (S.snapshots.get(`config|${proj}|`) || {}).data || {};
+    const agent = s && s.agent; const tools = agent ? ((cfg.agents || {})[agent] || {}).tools || null : null;
+    const permitted = n => {
+      if (!agent) return '<span class="dim">agent unknown</span>';
+      if (!tools) return `<span class="dim" title="No per-agent tool switches in Kilo's config; session permission rules may still deny">not restricted for ${esc(agent)}</span>`;
+      const hit = Object.entries(tools).find(([pat]) => new RegExp("^" + pat.replace(/[.+^${}()|[\]\\]/g, "\\$&").replace(/\*/g, ".*") + "$").test(n + "_x") || pat === n);
+      return hit ? (hit[1] ? `<span class="pill ok">allowed for ${esc(agent)}</span>` : `<span class="pill bad">denied for ${esc(agent)}</span>`) : `<span class="dim">not restricted for ${esc(agent)}</span>`;
+    };
+    const live = st => ({connected: "ok", failed: "bad", disabled: "", needs_auth: "warn"}[st] ?? "warn");
+    return `<div class="src">Scope: workspace-wide (one Kilo workspace; every session shares these connections). ${hist ? "Historical snapshot" : "Snapshot"} from ${esc(fullTs(snap.source_ts))}, last confirmed ${esc(fullTs(snap.confirmed_ts))}.</div>
+      <label><input type="checkbox" id="mcp-dis" ${P.showDisabledMcp ? "checked" : ""}> Show disabled servers <span class="dim">(display only)</span></label>
+      <table class="t"><tr><th>server</th><th>configured</th><th>live</th><th>this agent</th></tr>${servers.map(x => `<tr><td><code>${esc(x.name)}</code>${x.type ? ` <span class="dim">${esc(x.type)}</span>` : ""}</td>
+        <td>${x.configured_enabled === false ? '<span class="pill">disabled</span>' : x.configured_enabled ? '<span class="pill ok">enabled</span>' : NA()}</td>
+        <td><span class="pill ${live(x.status)}">${esc(x.status || "unknown")}</span>${x.error ? `<div class="dim">${esc(x.error)}</div>` : ""}</td><td>${permitted(x.name)}</td></tr>`).join("")}</table>
+      ${snap.data.status_endpoint === false ? '<div class="warnbox">Kilo did not report live MCP status (endpoint unsupported): states shown as unknown.</div>' : ""}`;
+  },
+  todo(s) {
+    if (!P.showTodo) return '<p class="dim">Hidden in Settings.</p>';
+    if (!s) return "";
+    const snap = S.snapshots.get(`todo|${s.project_id}|${s.session_id}`);
+    const t = S.tasks.get(taskKey(s.project_id, s.task_id));
+    const overview = t ? `<div class="sub dim" style="margin-top:6px">Task overview (coordinator, separate)</div><div>${esc(tdata(t).next_action || tdata(t).phase || "")}</div>` : "";
+    if (!snap) return `<p class="dim">No structured to-do list from Kilo for this session (none written, or the endpoint is unsupported). Nothing is inferred from prose.</p>${overview}`;
+    const items = snap.data.items || [];
+    const done = items.filter(i => i.status === "completed").length;
+    const icon = {completed: "☑", in_progress: "▶", pending: "☐", cancelled: "✕"};
+    return `<div>${done}/${items.length} completed <span class="src">updated ${esc(tsText(snap.source_ts))} · ${esc(snap.data.source || "")}</span></div>
+      <ul class="list">${items.map(i => `<li style="${i.status === "in_progress" ? "color:var(--warn);font-weight:600" : i.status === "completed" ? "color:var(--dim)" : ""}">${icon[i.status] || "•"} ${esc(i.content)}</li>`).join("")}</ul>
+      <div class="src">A completed to-do item is the model's bookkeeping, not coordinator acceptance.</div>${overview}`;
+  },
+  helpers(s) {
+    if (!P.showHelpers) return '<p class="dim">Hidden in Settings.</p>';
+    if (!s) return "";
+    const kids = [...S.sessions.values()].filter(x => x.parent_id === s.session_id);
+    if (!kids.length) return '<p class="dim">No helper sessions under this session.</p>';
+    return `<ul class="list">${kids.map(k => {
+      const subtask = [...(S.parts.get(s.session_id) || new Map()).values()].find(p => p.kind === "tool" && ((p.data || {}).tool || {}).child_session === k.session_id);
+      const desc = subtask ? (subtask.data.tool.title || "") : (k.title || "");
+      return `<li><div style="display:flex;gap:5px;flex-wrap:wrap;align-items:center"><b>${esc(k.agent || k.role || "helper")}</b>${statusPill(k)}<code>${esc(k.model || "model ?")}</code>
+        <span class="spacer"></span><button data-open="${esc(k.session_id)}">Inspect</button><button data-pop="${esc(k.session_id)}" title="Pop out">⧉</button></div>
+        <div>${esc(desc)}</div><div class="dim">started ${esc(tsText(k.created_ts))}${k.created_ts ? " · " + relAge((k.ended_ts || nowS()) - k.created_ts) : ""} · ${currentAction(k.session_id)}</div></li>`;
+    }).join("")}</ul><div class="src">Model from Kilo's message metadata; "?" when not yet reported.</div>`;
+  },
+  verification(s) {
+    const t = s ? S.tasks.get(taskKey(s.project_id, s.task_id)) : curTask();
+    if (!t) return '<p class="dim">No coordinator task reported.</p>';
+    const d = tdata(t); const lim = d.limits || {};
+    const rows = [["State", `<span class="pill ${stateCls(t.state)}">${esc(t.state)}</span>${d.stage ? " · stage " + esc(d.stage) : ""}`],
+      ["Attempts", `${esc(d.attempt ?? 0)} / ${esc(lim.max_attempts ?? "?")} · sessions ${esc(d.sessions ?? 0)} / ${esc(lim.max_sessions_per_task ?? "?")}`],
+      ["Reviewed SHA", d.reviewed_sha ? `<code>${esc(short(d.reviewed_sha, 12))}</code>` : NA("no review yet")],
+      ["Head SHA", d.head_sha ? `<code>${esc(short(d.head_sha, 12))}</code>` : NA()],
+      ["Workspace HEAD", d.workspace_head ? `<code>${esc(short(d.workspace_head, 12))}</code>${d.reviewed_sha && d.workspace_head !== d.reviewed_sha ? ' <span class="pill warn">differs from reviewed</span>' : ""}` : NA()]];
+    const rv = (d.reviews || []).slice(-1)[0];
+    if (rv) rows.push(["Review", `<span class="pill ${rv.verdict === "APPROVED" ? "ok" : rv.valid ? "warn" : "bad"}">${esc(rv.verdict || (rv.valid ? "?" : "invalid"))}</span> ${esc(rv.persona || "")} @ <code>${esc(short(rv.reviewed_sha))}</code>`]);
+    if (d.blocker) rows.push(["Blocker", `<div class="errbox">${esc(d.blocker)}</div>`]);
+    if (d.awaiting) rows.push(["Awaiting", esc(d.awaiting)]);
+    const checks = (d.verification || []).map(v => `<tr><td><code>${esc(v.check_name)}</code>${v.required ? "" : ' <span class="dim">(advisory)</span>'}</td><td><span class="pill ${v.result === "PASS" ? "ok" : v.result === "FAIL" ? "bad" : "warn"}">${esc(v.result)}</span></td><td class="dim" title="${esc(v.detail || "")}">${esc((v.evidence || "").slice(0, 80))}</td></tr>`).join("");
+    const ap = d.approval;
+    const card = ap ? approvalCard(t) : "";
+    const findings = (d.findings || []).length ? `<div class="sub dim">Findings</div><ul class="list">${d.findings.map(f => `<li>${esc(f)}</li>`).join("")}</ul>` : "";
+    return kv(rows) + (checks ? `<div class="sub dim" style="margin-top:6px">Checks @ ${esc(short(d.head_sha))}</div><table class="t">${checks}</table><div class="src">Evidence pointers are paths recorded by the coordinator; this page doesn't open workstation files.</div>` : "") + findings + card +
+      `<div class="src">Model-reported DONE (${esc(((d.last_report || {}).status) || "none")}) is advisory; only the coordinator's state above advances the task.</div>`;
+  },
+  capabilities(s) {
+    if (!P.showCapabilities) return '<p class="dim">Hidden in Settings.</p>';
+    const snap = S.snapshots.get(`capabilities|${(s && s.project_id) || S.project}|`);
+    if (!snap) return '<p class="dim">Not reported by the bridge yet.</p>';
+    const it = snap.data.items || {};
+    return `<table class="t">${Object.entries(it).map(([k, v]) => `<tr><td>${esc(k)}</td><td>${v.supported === false ? '<span class="pill">unsupported</span>' : v.status ? `<code>${esc(JSON.stringify(v.status).slice(0, 160))}</code>` : NA()}</td></tr>`).join("")}</table><div class="src">Separate from MCP. ${esc(snap.data.source || "")} · ${esc(fullTs(snap.source_ts))}</div>`;
+  },
+  sessions(s) {
+    const f = S.sessFilter || (S.sessFilter = {role: "", state: "", model: "", q: ""});
+    const all = [...S.sessions.values()].filter(x => (!S.project || x.project_id === S.project) && (!S.task || x.task_id === S.task));
+    const models = [...new Set(all.map(x => x.model).filter(Boolean))];
+    const match = x => (!f.role || (x.role || "") === f.role) && (!f.state || (x.status || "") === f.state) && (!f.model || x.model === f.model) && (!f.q || (x.session_id + " " + (x.title || "")).toLowerCase().includes(f.q.toLowerCase()));
+    const roots = all.filter(x => !x.parent_id || !all.find(y => y.session_id === x.parent_id)).sort((a, b) => (a.created_ts || 0) - (b.created_ts || 0));
+    const cur = tdata(curTask()).session_id;
+    const node = x => {
+      const kids = all.filter(y => y.parent_id === x.session_id);
+      const shown = match(x) || kids.some(match);
+      if (!shown) return "";
+      return `<li><div class="node ${x.session_id === (paneById("main") || {}).sid ? "cur" : ""}" data-sid="${esc(x.session_id)}" tabindex="0" role="button">
+        <b>${esc(sessionLabel(x))}</b>${x.session_id === cur ? ' <span class="pill ok">current</span>' : ""} ${statusPill(x)} <code class="dim">${esc(short(x.session_id, 12))}</code>
+        <span class="dim">${esc(tsText(x.created_ts, "datetime"))}</span><span class="spacer"></span>
+        <button class="ghost" data-beside="${esc(x.session_id)}" title="Open beside">⊞</button><button class="ghost" data-pop="${esc(x.session_id)}" title="Pop out">⧉</button></div>
+        ${kids.length ? `<ul>${kids.map(node).join("")}</ul>` : ""}</li>`;
+    };
+    return `<div class="row" style="flex-wrap:wrap;gap:4px">
+      <select data-f="role"><option value="">any role</option>${["implementer", "helper", "reviewer"].map(r => `<option ${f.role === r ? "selected" : ""}>${r}</option>`).join("")}</select>
+      <select data-f="state"><option value="">any state</option>${["busy", "retry", "idle", "missing"].map(r => `<option ${f.state === r ? "selected" : ""}>${r}</option>`).join("")}</select>
+      <select data-f="model"><option value="">any model</option>${models.map(m => `<option ${f.model === m ? "selected" : ""}>${esc(m)}</option>`).join("")}</select>
+      <input type="search" data-f="q" placeholder="id / title" value="${esc(f.q)}" style="width:110px"></div>
+      <ul class="tree list">${roots.map(node).join("") || '<li class="dim">No sessions in this window.</li>'}</ul>
+      <div class="src">Click opens in the main pane and pins it (follow mode won't move it). Finished sessions stay here.</div>`;
+  },
+  search() {
+    const r = S.search || {};
+    return `<form id="sform" class="row"><input type="search" id="sq" placeholder="Search captured transcripts" value="${esc(r.q || "")}" style="flex:1;min-width:120px">
+      <select id="skind"><option value="">all parts</option>${["text", "reasoning", "tool"].map(k => `<option ${r.kind === k ? "selected" : ""}>${k}</option>`).join("")}</select>
+      <label><input type="checkbox" id="sthis" ${r.thisTask ? "checked" : ""}> this task</label><button>Search</button></form>
+      ${r.error ? `<div class="errbox">${esc(r.error)}</div>` : ""}
+      <ul class="list">${(r.results || []).map(x => `<li><a href="#" data-hit="${esc(x.part_id)}" data-sid="${esc(x.session_id)}" data-ts="${x.ts}">${esc(x.kind)} · ${esc(short(x.session_id, 12))} · ${esc(tsText(x.ts, "datetime"))}</a><div class="dim mono" style="white-space:pre-wrap">${esc(x.snippet)}</div></li>`).join("")}</ul>
+      ${r.more ? `<button id="smore">More results</button>` : ""}<div class="src">Searches redacted captured text in Foundry (bounded, paged).</div>`;
+  },
+  actions(s) {
+    const list = [...S.actions.values()].filter(a => (!S.project || a.project_id === S.project) && (!S.task || a.task_id === S.task)).sort((a, b) => b.created_ts - a.created_ts).slice(0, 25);
+    if (!list.length) return '<p class="dim">No operator actions for this task.</p>';
+    return `<ul class="list">${list.map(a => `<li><span class="pill ${actionCls(a.status)}">${esc(a.status)}</span> <b>${esc(a.kind)}</b> by ${esc(a.actor)} <span class="dim">${esc(tsText(a.created_ts))}</span>
+      <div class="dim">${esc(a.summary || "")}</div><div>${esc(a.status_detail || "")}</div>
+      ${a.status === "accepted" ? `<button data-cancel-act="${esc(a.action_id)}">Cancel before delivery</button>` : ""}${a.status === "queued" && a.kind === "instruction" ? `<button data-withdraw="${esc(a.action_id)}">Withdraw</button>` : ""}</li>`).join("")}</ul>
+      <div class="src">Accepted = stored by Foundry. Delivered = Kilo accepted it. Applied = the coordinator recorded the result.</div>`;
+  },
+};
+const SECTION_WIRE = {
+  tokens(sec) { sec.querySelectorAll("[data-scope]").forEach(b => b.onclick = () => { S.tokScope = b.dataset.scope; renderInspector(); }); },
+  mcp(sec) { const c = sec.querySelector("#mcp-dis"); if (c) c.onchange = () => { P.showDisabledMcp = c.checked; savePrefs(); renderInspector(); }; },
+  helpers(sec) { wireOpenButtons(sec); },
+  sessions(sec) {
+    sec.querySelectorAll("[data-f]").forEach(i => { const ev = i.tagName === "INPUT" ? "input" : "change"; i.addEventListener(ev, () => { S.sessFilter[i.dataset.f] = i.value; if (ev === "change") renderInspector(); else { clearTimeout(S.sfT); S.sfT = setTimeout(renderInspector, 300); } }); });
+    sec.querySelectorAll(".node").forEach(n => {
+      const go = e => { if (e.target.closest("button")) return; const m = paneById("main"); openInPane(m, n.dataset.sid, {pin: n.dataset.sid !== tdata(curTask()).session_id}); };
+      n.onclick = go; n.onkeydown = e => { if (e.key === "Enter") go(e); };
+    });
+    sec.querySelectorAll("[data-beside]").forEach(b => b.onclick = () => openBeside(b.dataset.beside));
+    wireOpenButtons(sec);
+  },
+  search(sec) {
+    const f = sec.querySelector("#sform");
+    const run = async (offset = 0) => {
+      const q = sec.querySelector("#sq").value.trim(); const kind = sec.querySelector("#skind").value; const thisTask = sec.querySelector("#sthis").checked;
+      S.search = {q, kind, thisTask, results: offset ? (S.search || {}).results || [] : []};
+      try {
+        const sessFilter = "";
+        const r = await api(`search?q=${encodeURIComponent(q)}&kind=${kind}&project=${encodeURIComponent(thisTask ? S.project : "")}&session=${sessFilter}&offset=${offset}&limit=30`);
+        S.search.results = S.search.results.concat(thisTask ? r.results.filter(x => (S.sessions.get(x.session_id) || {}).task_id === S.task || !S.task) : r.results);
+        S.search.more = r.more; S.search.offset = offset + r.limit;
+      } catch (e) { S.search.error = e.message; }
+      renderInspector();
+    };
+    if (f) f.onsubmit = ev => { ev.preventDefault(); run(0); };
+    const m = sec.querySelector("#smore"); if (m) m.onclick = () => run(S.search.offset || 30);
+    sec.querySelectorAll("[data-hit]").forEach(a => a.onclick = ev => { ev.preventDefault(); openInPane(paneById("main"), a.dataset.sid, {pin: true, part: a.dataset.hit, partTs: +a.dataset.ts}); });
+  },
+  verification(sec) { wireApproval(sec); },
+  actions(sec) {
+    sec.querySelectorAll("[data-cancel-act]").forEach(b => b.onclick = async () => { try { await api(`actions/${b.dataset.cancelAct}/cancel`, {method: "POST", body: {}}); } catch (e) { toast(esc(e.message), "bad"); } });
+    sec.querySelectorAll("[data-withdraw]").forEach(b => b.onclick = () => submitAction({kind: "withdraw_instruction", target_action_id: b.dataset.withdraw}));
+  },
+};
+function wireOpenButtons(root) {
+  root.querySelectorAll("[data-open]").forEach(b => b.onclick = () => openBeside(b.dataset.open));
+  root.querySelectorAll("[data-pop]").forEach(b => { if (!b.closest(".sec-head")) b.onclick = () => popout({popout: "pane", session: b.dataset.pop, project: S.project, task: S.task}); });
+}
+function tokRows(i, o, r, cr, cw, src, cost) {
+  const prompt = (+i || 0) + (+cr || 0) + (+cw || 0);
+  const hit = prompt ? (100 * (+cr || 0) / prompt).toFixed(1) + "%" : null;
+  return kv([["Input", fmtN(i)], ["Output", fmtN(o)], ["Reasoning", r ? fmtN(r) : NA("not reported")], ["Cache read", fmtN(cr)], ["Cache write", fmtN(cw)],
+    ["Cache hit", hit ? `${hit} <span class="src">cache read ÷ (input + cache read + cache write)</span>` : NA()],
+    ["Kilo cost", cost ? "$" + (+cost).toFixed(4) : '<span class="dim" title="Kilo reported $0. That does not prove the service is free (subscription or unpriced).">$0 reported</span>']]) + `<div class="src">${esc(src)}</div>`;
+}
+async function loadTaskTotals(s) {
+  const k = taskKey(s.project_id, s.task_id);
+  if (S.ttLoading === k) return; S.ttLoading = k;
+  try { S.taskTotals = {key: k, data: await api(`tasks/${encodeURIComponent(s.project_id)}/${encodeURIComponent(s.task_id)}/totals`)}; } catch (e) {}
+  S.ttLoading = ""; renderInspector();
+}
+async function loadMcpAt(s) {
+  if (S.mcpLoading === s.session_id) return; S.mcpLoading = s.session_id;
+  try { const r = await api(`snapshots?kind=mcp&project=${encodeURIComponent(s.project_id)}&at=${s.last_activity_ts || s.ended_ts}`); S.mcpAt = {sid: s.session_id, snap: r.snapshot}; } catch (e) { S.mcpAt = {sid: s.session_id, snap: null}; }
+  S.mcpLoading = ""; renderInspector();
+}
+function stateCls(st) { return {COMPLETE: "ok", APPROVED: "ok", IMPLEMENTING: "info", VERIFYING: "info", REVIEWING: "info", CLOSING: "info", BLOCKED: "bad", FAILED: "bad", AWAITING_HUMAN: "bad", PAUSED: "warn", CHANGES_REQUIRED: "warn"}[st] || ""; }
+function actionCls(st) { return {applied: "ok", delivered: "ok", rejected: "bad", failed: "bad", expired: "warn", cancelled: "", queued: "info", claimed: "info", accepted: "info"}[st] || ""; }
+
+/* ---------------------------------------------------------------- approvals */
+function approvalCard(t) {
+  const d = tdata(t), ap = d.approval; if (!ap) return "";
+  return `<div class="qcard" data-approval="${esc(taskKey(t.project_id, t.task_id))}"><b>Human ${esc(ap.kinds.join(", "))} approval</b> · stage ${esc(ap.stage || "?")}
+    <div>Revision <code>${esc(ap.revision || "?")}</code></div>
+    ${ap.kinds.map(k => `<div class="sub dim">${esc(k)} artifacts (sha256)</div><ul class="list">${Object.entries((ap.artifacts || {})[k] || {}).map(([p, h]) => `<li><code>${esc(p)}</code> <span class="dim mono">${esc(short(h, 16))}</span></li>`).join("") || "<li class='dim'>none named by the rule</li>"}</ul>`).join("")}
+    ${d.approval_error ? `<div class="errbox">${esc(d.approval_error)}</div>` : ""}
+    <div class="row">${ap.kinds.map(k => `<button class="primary" data-decide="approve" data-kind="${esc(k)}">Approve ${esc(k)}</button><button data-decide="request_changes" data-kind="${esc(k)}">Request changes</button><button class="danger" data-decide="reject" data-kind="${esc(k)}">Reject</button>`).join("")}</div>
+    <div class="src">Approving binds to exactly this revision and these file hashes; if either changes before the coordinator applies it, the approval is refused.</div></div>`;
+}
+function wireApproval(root) {
+  root.querySelectorAll("[data-decide]").forEach(b => b.onclick = () => {
+    const card = b.closest("[data-approval]"); const [p, t] = card.dataset.approval.split("/");
+    S.decision = {project: p, task: t, kind: b.dataset.kind, mode: b.dataset.decide, snapshot: JSON.parse(JSON.stringify(tdata(S.tasks.get(card.dataset.approval)).approval))};
+    setComposerMode("decision");
+  });
+}
+
+/* ======================================================================== alerts, inbox, audio */
+const AUDIO = {ctx: null, owner: false, blocked: false, played: new Set(), repeats: new Map()};
+const BC = ("BroadcastChannel" in window) ? new BroadcastChannel("fr-cc") : null;
+try { for (const id of JSON.parse(localStorage.getItem("fr.cc.played") || "[]")) AUDIO.played.add(id); } catch (e) {}
+function rememberPlayed(id) {
+  AUDIO.played.add(id);
+  try { localStorage.setItem("fr.cc.played", JSON.stringify([...AUDIO.played].slice(-400))); } catch (e) {}
+  if (BC) BC.postMessage({type: "played", id});
+}
+if (BC) BC.onmessage = ev => { const m = ev.data || {}; if (m.type === "played") AUDIO.played.add(m.id); if (m.type === "ack") stopRepeat(m.id); };
+function electAudioOwner() {
+  // One tab plays sound. Web Locks: the holder keeps the lock while open; the
+  // next tab in line takes over when it closes. Fallback: a renewed lease.
+  if (navigator.locks && navigator.locks.request) {
+    navigator.locks.request("fr-cc-audio-owner", () => { AUDIO.owner = true; renderSoundBtn(); return new Promise(() => {}); });
+  } else {
+    const me = uid();
+    const tick = () => {
+      let cur = null; try { cur = JSON.parse(localStorage.getItem("fr.cc.audioOwner") || "null"); } catch (e) {}
+      if (!cur || cur.id === me || Date.now() - cur.ts > 8000) { AUDIO.owner = true; try { localStorage.setItem("fr.cc.audioOwner", JSON.stringify({id: me, ts: Date.now()})); } catch (e) {} }
+      else AUDIO.owner = false;
+      renderSoundBtn();
+    };
+    tick(); setInterval(tick, 3000);
+  }
+}
+async function enableSound() {
+  try {
+    AUDIO.ctx = AUDIO.ctx || new (window.AudioContext || window.webkitAudioContext)();
+    await AUDIO.ctx.resume();
+    AUDIO.blocked = AUDIO.ctx.state !== "running";
+  } catch (e) { AUDIO.blocked = true; }
+  P.sound.enabled = true; savePrefs(); renderSoundBtn();
+  return !AUDIO.blocked;
+}
+const SOUNDS = {
+  question: [[660, 0, .16], [880, .18, .22]], approval: [[523, 0, .14], [659, .15, .14], [784, .3, .24]],
+  failure: [[440, 0, .2], [330, .22, .2], [220, .44, .34]], completion: [[523, 0, .1], [659, .1, .1], [784, .2, .1], [1046, .3, .26]],
+  stale: [[300, 0, .14], [300, .3, .14], [300, .6, .14]],
+};
+const WAVE = {question: "sine", approval: "triangle", failure: "square", completion: "sine", stale: "sawtooth"};
+function soundClass(a) {
+  return {question: "question", permission: "question", approval: "approval", blocker: "failure", failure: "failure",
+          coordinator_error: "failure", source_stale: "stale", completion: "completion", queue_exhausted: "completion"}[a.kind] || "";
+}
+function inQuietHours() {
+  if (!P.sound.quiet) return false;
+  try {
+    const hm = new Intl.DateTimeFormat("en-GB", {timeZone: P.tz, hour: "2-digit", minute: "2-digit", hour12: false}).format(new Date());
+    const [s, e] = [P.sound.quietStart, P.sound.quietEnd];
+    return s <= e ? hm >= s && hm < e : hm >= s || hm < e;
+  } catch (e) { return false; }
+}
+function soundAllowed(cls) {
+  if (!cls || !P.sound.enabled || P.sound.muted || !P.sound[cls]) return false;
+  if (P.sound.snoozeUntil && Date.now() < P.sound.snoozeUntil) return false;
+  return !inQuietHours();
+}
+function playTone(cls) {
+  const ctx = AUDIO.ctx;
+  if (!ctx || ctx.state !== "running") { AUDIO.blocked = true; renderSoundBtn(); return false; }
+  const t0 = ctx.currentTime + 0.02; const vol = clamp(+P.sound.volume, 0, 1) * 0.35;
+  for (const [f, at, len] of SOUNDS[cls] || SOUNDS.question) {
+    const o = ctx.createOscillator(); const g = ctx.createGain();
+    o.type = WAVE[cls] || "sine"; o.frequency.value = f;
+    g.gain.setValueAtTime(0.0001, t0 + at); g.gain.exponentialRampToValueAtTime(vol * (WAVE[cls] === "square" || WAVE[cls] === "sawtooth" ? 0.4 : 1), t0 + at + 0.02);
+    g.gain.exponentialRampToValueAtTime(0.0001, t0 + at + len);
+    o.connect(g).connect(ctx.destination); o.start(t0 + at); o.stop(t0 + at + len + 0.05);
+  }
+  return true;
+}
+function report(alertId, channel, result, detail) { api(`alerts/${encodeURIComponent(alertId)}/delivery`, {method: "POST", body: {channel, result, detail: detail || ""}}).catch(() => {}); }
+function onAlert(a) {
+  const prev = S.alerts.get(a.alert_id);
+  S.alerts.set(a.alert_id, a);
+  if (a.status !== "new") { stopRepeat(a.alert_id); return; }
+  if (prev && prev.status === "new") return;
+  const key = a.alert_id + ":" + a.updated_ts;
+  if (!S.booted) return;                           // initial load: shown in the inbox, not re-announced
+  toast(`<b>${esc(a.title)}</b><div class="dim">${esc(a.detail || "")}</div><button data-inbox="1">Open inbox</button>`, a.severity === "critical" || a.severity === "high" ? "bad" : "", 12000)
+    .querySelector("[data-inbox]").onclick = openInbox;
+  if (!AUDIO.owner || AUDIO.played.has(key)) return;
+  rememberPlayed(key);
+  report(a.alert_id, "visual", "shown");
+  const cls = soundClass(a);
+  if (soundAllowed(cls)) {
+    const ok = playTone(cls); report(a.alert_id, "audio", ok ? "played" : "blocked", ok ? cls : "browser blocked audio; press Enable sound");
+    if (ok && a.severity === "critical" && P.sound.repeatCriticalS > 0) startRepeat(a, cls);
+  } else if (cls && P.sound.enabled) report(a.alert_id, "audio", "suppressed", P.sound.muted ? "muted" : inQuietHours() ? "quiet hours" : "snoozed or class off");
+  notifyOS(a);
+}
+function startRepeat(a, cls) {
+  stopRepeat(a.alert_id);
+  let n = 0;
+  const h = setInterval(() => {
+    const cur = S.alerts.get(a.alert_id);
+    if (!cur || cur.status !== "new" || ++n > P.sound.repeatMax) return stopRepeat(a.alert_id);
+    if (soundAllowed(cls) && AUDIO.owner) { playTone(cls); report(a.alert_id, "audio", "repeat", `${n}/${P.sound.repeatMax}`); }
+  }, P.sound.repeatCriticalS * 1000);
+  AUDIO.repeats.set(a.alert_id, h);
+}
+function stopRepeat(id) { const h = AUDIO.repeats.get(id); if (h) { clearInterval(h); AUDIO.repeats.delete(id); } }
+function notifyOS(a) {
+  if (!P.notify.enabled || !("Notification" in window) || Notification.permission !== "granted") return;
+  const cls = a.kind === "completion" || a.kind === "queue_exhausted" ? "completion" : a.kind === "source_stale" ? "stale" : a.severity;
+  if (!P.notify[cls]) return;
+  try { new Notification(a.title, {body: a.detail || "", tag: a.alert_id}); report(a.alert_id, "notification", "shown"); }
+  catch (e) { report(a.alert_id, "notification", "failed", e.message); }
+}
+function renderSoundBtn() {
+  const b = $("#sound-btn");
+  const state = !P.sound.enabled ? "off" : P.sound.muted ? "muted" : (P.sound.snoozeUntil > Date.now()) ? "snoozed" : AUDIO.blocked || !AUDIO.ctx || AUDIO.ctx.state !== "running" ? "blocked" : "on";
+  b.textContent = {off: "🔇 Sound off", muted: "🔇 Muted", snoozed: "💤 Snoozed", blocked: "🔈 Enable sound", on: "🔊 Sound"}[state];
+  b.className = state === "blocked" ? "danger" : "";
+  b.title = state === "blocked" ? "The browser hasn't allowed audio for this page yet (autoplay rule). Click to enable." : `Sound alerts ${state}${AUDIO.owner ? " · this tab plays alert sounds" : " · another tab plays alert sounds"}`;
+}
+$("#sound-btn").onclick = async () => {
+  if (!AUDIO.ctx || AUDIO.ctx.state !== "running" || !P.sound.enabled) { const ok = await enableSound(); toast(ok ? "Sound enabled for this page" : "The browser blocked audio. Allow sound for this site and try again.", ok ? "" : "bad"); if (ok) playTone("question"); }
+  else { P.sound.muted = !P.sound.muted; savePrefs(); renderSoundBtn(); }
+};
+function renderBell() {
+  const open = [...S.alerts.values()].filter(a => a.status === "new" || a.status === "acknowledged");
+  const fresh = open.filter(a => a.status === "new");
+  const pend = [...S.pending.values()].filter(p => p.status === "open");
+  const n = fresh.length || 0;
+  const c = $("#bell-count"); c.hidden = !(open.length || pend.length); c.textContent = n || open.length || pend.length;
+  $("#bell").classList.toggle("critical", fresh.some(a => a.severity === "critical"));
+  $("#bell").title = `Action required: ${fresh.length} new, ${open.length - fresh.length} acknowledged, ${pend.length} pending request(s)`;
+  document.title = (fresh.length ? `(${fresh.length}) ` : "") + "Control center · Foundry";
+}
+function openInbox() { $("#inbox").classList.add("open"); renderInbox(); }
+$("#bell").onclick = openInbox;
+$("#inbox-close").onclick = () => $("#inbox").classList.remove("open");
+$("#inbox-filter").onchange = () => renderInbox();
+async function renderInbox() {
+  const f = $("#inbox-filter").value;
+  let list;
+  if (f === "open") list = [...S.alerts.values()].filter(a => a.status === "new" || a.status === "acknowledged");
+  else { try { list = (await api(`alerts?status=${f}&limit=150&log=1`)).alerts; for (const a of list) S.alerts.set(a.alert_id, {...S.alerts.get(a.alert_id), ...a}); } catch (e) { list = []; } }
+  list.sort((a, b) => ({critical: 0, high: 1, warning: 2, info: 3}[a.severity] - {critical: 0, high: 1, warning: 2, info: 3}[b.severity]) || b.updated_ts - a.updated_ts);
+  const pend = [...S.pending.values()].filter(p => p.status === "open");
+  const pHtml = pend.length ? `<h4 style="margin:4px 0">Pending requests (${pend.length})</h4>` + pend.map(p => `<div class="alert sev-critical"><div class="atitle">${p.kind === "question" ? "Question" : "Permission request"} · ${esc(p.task_id || "")}</div>
+      <div class="dim">session <code>${esc(short(p.session_id, 16))}</code> · request <code>${esc(p.request_id)}</code> · waiting ${esc(relAge(nowS() - (p.created_ts || nowS())))}</div>
+      <div style="white-space:pre-wrap">${esc(p.kind === "question" ? ((p.data.questions || [])[0] || {}).question || "" : `${p.data.permission || ""} ${(p.data.patterns || []).join(", ")}`)}</div>
+      <div class="row"><button class="primary" data-answer="${esc(p.request_id)}">${p.kind === "question" ? "Answer" : "Decide"}</button><button data-view="${esc(p.session_id)}">Open session</button></div></div>`).join("") : "";
+  $("#inbox-body").innerHTML = pHtml + `<h4 style="margin:8px 0 4px">Alerts</h4>` + (list.map(a => `<div class="alert sev-${esc(a.severity)} st-${esc(a.status)}">
+      <div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap"><span class="pill ${a.severity === "critical" ? "bad" : a.severity === "high" ? "warn" : "info"}">${esc(a.severity)}</span><span class="atitle">${esc(a.title)}</span>
+      <span class="spacer"></span><span class="pill">${esc(a.status)}</span></div>
+      <div>${esc(a.detail || "")}</div>
+      <div class="dim">${esc(a.kind)} · ${esc(tsText(a.created_ts, "datetime"))}${a.ack_by ? ` · acknowledged by ${esc(a.ack_by)}` : ""}${a.resolution ? ` · ${esc(a.resolution)}` : ""}${a.project_id ? ` · ${esc(a.project_id)}/${esc(a.task_id)}` : ""}</div>
+      <div class="row">${a.status === "new" ? `<button data-ack="${esc(a.alert_id)}" title="Marks it seen. It does not answer, approve or resolve anything.">Acknowledge</button>` : ""}
+        ${a.request_id && S.pending.has(a.request_id) ? `<button class="primary" data-answer="${esc(a.request_id)}">Answer</button>` : ""}
+        ${a.session_id ? `<button data-view="${esc(a.session_id)}">Open session</button>` : ""}${a.task_id ? `<button data-task="${esc(a.project_id)}/${esc(a.task_id)}">Open task</button>` : ""}</div>
+      ${(a.log || []).length ? `<details><summary class="dim">Delivery & acknowledgement history</summary><ul class="list">${a.log.map(l => `<li class="dim">${esc(tsText(l.ts, "datetime"))} ${esc(l.event)} ${esc(l.actor)} ${esc(l.detail || "")}</li>`).join("")}</ul></details>` : ""}
+    </div>`).join("") || '<p class="dim">Nothing here.</p>') +
+    `<p class="src">Alerts are stored in Foundry and stay here until resolved. Sound and notifications only reach an open page; nothing plays when every control-center tab is closed.</p>`;
+  const body = $("#inbox-body");
+  body.querySelectorAll("[data-ack]").forEach(b => b.onclick = async () => { try { const a = await api(`alerts/${b.dataset.ack}/ack`, {method: "POST", body: {}}); S.alerts.set(a.alert_id, a); stopRepeat(a.alert_id); if (BC) BC.postMessage({type: "ack", id: a.alert_id}); renderBell(); renderInbox(); } catch (e) { toast(esc(e.message), "bad"); } });
+  body.querySelectorAll("[data-answer]").forEach(b => b.onclick = () => { selectRequest(b.dataset.answer); $("#inbox").classList.remove("open"); });
+  body.querySelectorAll("[data-view]").forEach(b => b.onclick = () => { openInPane(paneById("main"), b.dataset.view, {pin: b.dataset.view !== tdata(curTask()).session_id}); $("#inbox").classList.remove("open"); });
+  body.querySelectorAll("[data-task]").forEach(b => b.onclick = () => { const [p, t] = b.dataset.task.split("/"); selectTask(p, t); $("#inbox").classList.remove("open"); });
+}
+function selectRequest(rid) {
+  const p = S.pending.get(rid); if (!p) return;
+  if (p.project_id && (p.project_id !== S.project || (p.task_id && p.task_id !== S.task))) selectTask(p.project_id, p.task_id || S.task);
+  S.selectedRequest = rid; setComposerMode("answer");
+}
+
+/* ======================================================================== composer */
+function setComposerMode(m) { S.composerMode = m; P.composerCollapsed = false; savePrefs(); renderComposer(true); }
+function composerTarget() {
+  const t = curTask(); const d = tdata(t);
+  const ws = d.session_id ? S.sessions.get(d.session_id) : null;
+  return {t, d, ws, busy: ws && (ws.status === "busy" || ws.status === "retry")};
+}
+let draftTimer = null;
+function draftKey() {
+  if (S.composerMode === "answer") return `answer:${S.selectedRequest}`;
+  if (S.composerMode === "instruction") return `instruction:${S.project}/${S.task}`;
+  if (S.composerMode === "decision") return `decision:${S.project}/${S.task}`;
+  return "";
+}
+function saveDraftSoon(text) {
+  const k = draftKey(); if (!k) return;
+  S.drafts = S.drafts || {}; S.drafts[k] = text;
+  clearTimeout(draftTimer);
+  draftTimer = setTimeout(() => api("drafts", {method: "PUT", body: {target: k, text}}).catch(() => {}), 1200);
+}
+function renderComposer(force) {
+  const c = $("#composer"); if (!c || POPOUT) return;
+  if (!force && c.contains(document.activeElement) && document.activeElement.matches("textarea, input[type=text], input[type=search]")) { renderComposerStatus(); return; }
+  const {t, d, ws, busy} = composerTarget();
+  const pend = [...S.pending.values()].filter(p => p.status === "open" && (!S.project || p.project_id === S.project));
+  const m = S.composerMode;
+  const tabs = `<div class="ctabs" role="tablist">
+    <button role="tab" aria-selected="${m === "answer"}" class="${m === "answer" ? "on" : ""}" data-mode="answer">Answer request${pend.length ? ` (${pend.length})` : ""}</button>
+    <button role="tab" aria-selected="${m === "instruction"}" class="${m === "instruction" ? "on" : ""}" data-mode="instruction">Send instruction</button>
+    <button role="tab" aria-selected="${m === "command"}" class="${m === "command" ? "on" : ""}" data-mode="command">Coordinator command</button>
+    ${m === "decision" ? `<button class="on" data-mode="decision">Approval decision</button>` : ""}
+    <span class="spacer"></span><button class="ghost" id="comp-toggle" aria-label="Collapse composer">▾</button></div>`;
+  const target = t ? `<div class="target">Target: <b>${esc(t.project_id)} / ${esc(t.task_id)}</b> · <span class="pill ${stateCls(t.state)}">${esc(t.state)}</span> · phase ${esc(d.phase || "?")}
+      · worker ${d.session_id ? `<code>${esc(short(d.session_id, 14))}</code> ${ws ? statusPill(ws) : ""}` : "none"}${busy ? ' <span class="dim">(busy)</span>' : ""}</div>` : `<div class="target dim">Select a task.</div>`;
+  let body = "";
+  if (m === "answer") body = composerAnswer(pend);
+  else if (m === "instruction") body = composerInstruction(t, d, busy);
+  else if (m === "command") body = composerCommand(t, d);
+  else if (m === "decision") body = composerDecision();
+  c.innerHTML = tabs + `<div class="cbody">${target}${body}<div id="comp-status"></div></div>`;
+  c.querySelectorAll("[data-mode]").forEach(b => b.onclick = () => setComposerMode(b.dataset.mode));
+  c.classList.toggle("collapsed", !!P.composerCollapsed && m !== "answer" && m !== "decision");
+  $("#comp-toggle").textContent = c.classList.contains("collapsed") ? "▴" : "▾";
+  $("#comp-toggle").onclick = () => { P.composerCollapsed = !c.classList.contains("collapsed"); savePrefs(); renderComposer(true); };
+  wireComposer(c);
+  renderComposerStatus();
+}
+function composerAnswer(pend) {
+  if (!pend.length) return '<p class="dim">No pending question or permission request. Requests appear here and in the inbox as soon as Kilo asks.</p>';
+  if (!S.selectedRequest || !S.pending.has(S.selectedRequest)) S.selectedRequest = pend[0].request_id;
+  const p = S.pending.get(S.selectedRequest);
+  const sess = S.sessions.get(p.session_id) || {};
+  const t = S.tasks.get(taskKey(p.project_id, p.task_id)) || {};
+  const sel = pend.length > 1 ? `<div class="row"><label>Request</label><select id="req-sel">${pend.map(x => `<option value="${esc(x.request_id)}" ${x.request_id === S.selectedRequest ? "selected" : ""}>${esc(x.kind)} · ${esc(x.task_id || "")} · ${esc(short(x.session_id, 10))}</option>`).join("")}</select></div>` : "";
+  const ctx = `<div class="dim" style="font-size:12px">${esc(p.kind)} <code>${esc(p.request_id)}</code> · ${esc(p.project_id)}/${esc(p.task_id || "?")} · session <code>${esc(short(p.session_id, 16))}</code> (${esc(sessionLabel(sess))}${sess.agent ? ", " + esc(sess.agent) : ""}) · task ${esc(t.state || "?")} · asked ${esc(relAge(nowS() - (p.created_ts || nowS())))} ago <button class="ghost" data-view="${esc(p.session_id)}">view context</button></div>`;
+  if (p.kind === "permission") {
+    const d = p.data || {};
+    return sel + ctx + `<div class="qcard"><div class="qtext">Permission: ${esc(d.permission || "?")}</div>
+      <div>Patterns: ${(d.patterns || []).map(x => `<code>${esc(x)}</code>`).join(", ") || NA()}</div>
+      ${d.metadata && Object.keys(d.metadata).length ? `<pre class="code">${highlight(JSON.stringify(d.metadata, null, 2), "json")}</pre>` : ""}
+      <div class="row"><button class="primary" data-perm="once">Allow once</button><button class="danger" data-perm="reject">Reject</button>
+      <input type="text" id="perm-msg" placeholder="Optional message to the agent (with Reject)" style="flex:1;min-width:150px"></div>
+      <div class="src">“Allow once” answers this request only. Persistent “always” rules are not created from here.</div></div>`;
+  }
+  const qs = (p.data || {}).questions || [];
+  return sel + ctx + qs.map((q, i) => {
+    const multi = !!q.multiple; const nm = `q${i}`;
+    const k = `answer:${p.request_id}:${i}`; const draft = (S.drafts || {})[k] || "";
+    return `<div class="qcard">${q.header ? `<div class="dim">${esc(q.header)}</div>` : ""}<div class="qtext">${esc(q.question)}</div>
+      <div class="opts">${(q.options || []).map((o, j) => `<label><input type="${multi ? "checkbox" : "radio"}" name="${nm}" value="${esc(o.label)}"> <b>${esc(o.label)}</b> ${o.description ? `<span class="dim">— ${esc(o.description)}</span>` : ""}</label>`).join("")}</div>
+      ${q.custom !== false ? `<label class="dim" for="${nm}-txt">Your answer (Markdown; Enter adds a line, Ctrl+Enter sends)</label><textarea id="${nm}-txt" data-q="${i}" data-draft="${esc(k)}" rows="5" placeholder="Write a detailed reply…">${esc(draft)}</textarea>
+        <div class="row"><button class="ghost" data-preview="${nm}-txt">Preview</button></div><div class="md" id="${nm}-txt-prev"></div>` : ""}</div>`;
+  }).join("") + `<div class="row"><button class="primary" id="send-answer">Send reply</button><span class="dim">Ctrl+Enter</span></div>`;
+}
+function composerInstruction(t, d, busy) {
+  if (!t) return "";
+  const k = draftKey(); const draft = (S.drafts || {})[k] || "";
+  const saved = Object.entries(S.drafts || {}).filter(([kk]) => kk.startsWith("saved:"));
+  const running = t.state === "IMPLEMENTING" || t.state === "CLOSING";
+  const viewing = (paneById(S.focused) || {}).sid;
+  const notCurrent = viewing && viewing !== d.session_id;
+  return `${notCurrent ? `<div class="warnbox">You are viewing <code>${esc(short(viewing, 14))}</code>, which is not this task's active worker. The instruction goes to task ${esc(t.task_id)} through the coordinator, not to the session on screen.</div>` : ""}
+    <textarea id="ins-text" rows="3" placeholder="Detailed instruction for the controlled agent, within the task's approved scope…" data-draft="${esc(k)}">${esc(draft)}</textarea>
+    <div class="md" id="ins-text-prev"></div>
+    <div class="row">
+      <label><input type="radio" name="ins-del" value="next_session" checked> Queue for the next session prompt</label>
+      <label title="${running ? "" : "Needs a running worker"}"><input type="radio" name="ins-del" value="pause_and_steer" ${running ? "" : "disabled"}> Pause and steer now</label>
+      <label title="Session-specific: delivered only to the current worker by pause-and-steer; never moved to another session"><input type="checkbox" id="ins-scope"> only this session</label>
+    </div>
+    <div id="ins-explain" class="src"></div>
+    <div class="row"><button class="primary" id="send-ins">Send instruction</button><span class="dim">Ctrl+Enter</span><button class="ghost" data-preview="ins-text">Preview</button>
+      <span class="spacer"></span><select id="saved-sel"><option value="">Saved prompts…</option>${saved.map(([kk]) => `<option value="${esc(kk)}">${esc(kk.slice(6))}</option>`).join("")}</select>
+      <button class="ghost" id="saved-insert">Insert</button><button class="ghost" id="saved-save">Save as…</button></div>
+    <div class="src">Not a shell: the page never executes text. Widening scope, changing paid routing or bypassing a failed gate needs its own authorization; an instruction can't grant it.</div>`;
+}
+const COMMANDS = [
+  {id: "pause", label: "Pause task", need: "reason", ok: t => !["COMPLETE", "CANCELLED", "PAUSED"].includes(t.state), effect: t => `Stops ${t.task_id}: aborts its running session (${["IMPLEMENTING", "CLOSING"].includes(t.state) ? "work in progress stops mid-step" : "no session is writing"}) and keeps all state. Resume continues the same session.`},
+  {id: "resume", label: "Resume task", ok: t => t.state === "PAUSED", effect: t => `Returns ${t.task_id} to ${tdata(t).resume_state || "its previous state"} and continues the same session if it still exists.`},
+  {id: "unblock", label: "Unblock task", need: "resolution", ok: t => ["BLOCKED", "FAILED"].includes(t.state), effect: t => `Moves ${t.task_id} back to READY after you fixed the cause. Optionally resets the attempt counters.`},
+  {id: "cancel", label: "Cancel task (for good)", need: "reason", confirm: true, ok: t => !["COMPLETE", "CANCELLED"].includes(t.state), effect: t => `Stops ${t.task_id} permanently: aborts its session and releases its locks. This cannot be resumed.`},
+  {id: "status", label: "Inspect status", ok: () => true, effect: () => "Read-only: shows the coordinator's current record for this task. Sends nothing."},
+  {id: "approve", label: "Approve / reject human checkpoint…", ok: t => !!tdata(t).approval, effect: () => "Opens the decision card bound to the exact revision and evidence hashes."},
+];
+function composerCommand(t, d) {
+  if (!t) return "";
+  const q = (S.cmdQ || "").toLowerCase();
+  const list = COMMANDS.filter(c => !q || c.label.toLowerCase().includes(q) || c.id.includes(q));
+  const cur = COMMANDS.find(c => c.id === S.cmd) || null;
+  return `<input type="search" id="cmd-q" placeholder="Type a command (pause, resume, unblock, cancel, status, approve)…" value="${esc(S.cmdQ || "")}" style="width:100%" aria-label="Command">
+    <ul class="palette list" role="listbox">${list.map(c => `<li role="option" tabindex="0" aria-selected="${cur && cur.id === c.id}" class="${cur && cur.id === c.id ? "sel" : ""}" data-cmd="${c.id}" style="${c.ok(t) ? "" : "opacity:.45"}">${esc(c.label)} ${c.ok(t) ? "" : `<span class="dim">(not available while ${esc(t.state)})</span>`}</li>`).join("")}</ul>
+    ${cur ? `<div class="qcard"><b>${esc(cur.label)}</b> — ${esc(t.project_id)}/${esc(t.task_id)}<div>${esc(cur.effect(t))}</div>
+      ${cur.need ? `<label class="dim" for="cmd-text">${cur.need === "reason" ? "Reason (recorded)" : "What was fixed (recorded)"}</label><textarea id="cmd-text" rows="3"></textarea>` : ""}
+      ${cur.id === "unblock" ? `<label><input type="checkbox" id="cmd-reset"> Reset attempt and session counters</label>` : ""}
+      ${cur.confirm ? `<label class="dim" for="cmd-confirm">Type <code>cancel ${esc(t.task_id)}</code> to confirm</label><input type="text" id="cmd-confirm" style="width:100%">` : ""}
+      <div class="row"><button class="${cur.id === "cancel" ? "danger" : "primary"}" id="cmd-go" ${cur.ok(t) ? "" : "disabled"}>${cur.id === "status" ? "Show" : "Submit"}</button></div>
+      ${cur.id === "status" ? `<pre class="code" id="cmd-out" style="display:none"></pre>` : ""}</div>` : ""}`;
+}
+function composerDecision() {
+  const dcs = S.decision; if (!dcs) return '<p class="dim">No decision selected.</p>';
+  const t = S.tasks.get(taskKey(dcs.project, dcs.task));
+  const live = tdata(t).approval;
+  const stale = JSON.stringify(live) !== JSON.stringify(dcs.snapshot);
+  const arts = (dcs.snapshot.artifacts || {})[dcs.kind] || {};
+  const k = draftKey(); const draft = (S.drafts || {})[k] || "";
+  return `<div class="qcard"><b>${esc({approve: "Approve", reject: "Reject", request_changes: "Request changes"}[dcs.mode])}</b> ${esc(dcs.kind)} for ${esc(dcs.task)} @ <code>${esc(dcs.snapshot.revision)}</code>
+    <ul class="list">${Object.entries(arts).map(([p, h]) => `<li><code>${esc(p)}</code> <span class="mono dim">${esc(h)}</span></li>`).join("")}</ul>
+    ${stale ? '<div class="errbox">The revision or evidence changed since you opened this card. Re-open it from the Verification section before deciding.</div>' : ""}
+    <label class="dim" for="dec-text">${dcs.mode === "approve" ? "Note (optional, recorded with the approval)" : "What is wrong / what to change (one finding per paragraph; goes to the repair session)"}</label>
+    <textarea id="dec-text" rows="5" data-draft="${esc(k)}">${esc(draft)}</textarea>
+    <div class="row"><button class="${dcs.mode === "approve" ? "primary" : "danger"}" id="dec-go" ${stale ? "disabled" : ""}>${esc({approve: "Record approval", reject: "Reject", request_changes: "Request changes"}[dcs.mode])}</button>
+      <span class="src">${dcs.mode === "approve" ? "" : "Both Reject and Request changes return the task to a repair session (the coordinator has one rejection path); Cancel is separate."}</span></div></div>`;
+}
+function wireComposer(c) {
+  c.querySelectorAll("textarea[data-draft]").forEach(ta => {
+    ta.addEventListener("input", () => saveDraftSoon(ta.value));
+    ta.addEventListener("keydown", e => { if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) { e.preventDefault(); const b = c.querySelector("#send-answer, #send-ins, #dec-go"); if (b && !b.disabled) b.click(); } });
+  });
+  c.querySelectorAll("[data-preview]").forEach(b => b.onclick = () => { const ta = $("#" + b.dataset.preview); const pv = $("#" + b.dataset.preview + "-prev"); pv.innerHTML = pv.innerHTML ? "" : md(ta.value); });
+  c.querySelectorAll("[data-view]").forEach(b => b.onclick = () => openInPane(paneById("main"), b.dataset.view, {pin: b.dataset.view !== tdata(curTask()).session_id}));
+  const rs = $("#req-sel"); if (rs) rs.onchange = () => { S.selectedRequest = rs.value; renderComposer(true); };
+  const sa = $("#send-answer"); if (sa) sa.onclick = sendAnswer;
+  c.querySelectorAll("[data-perm]").forEach(b => b.onclick = () => sendPermission(b.dataset.perm));
+  const si = $("#send-ins"); if (si) {
+    const explain = () => {
+      const del = (c.querySelector("input[name=ins-del]:checked") || {}).value;
+      const {busy} = composerTarget();
+      $("#ins-explain").textContent = del === "pause_and_steer"
+        ? "The coordinator pauses the task (aborting the current step, including a running tool), then continues the same session with your instruction in its prompt."
+        : `Stored by the coordinator and added to the next prompt it sends for this task (repair, closeout or continue)${busy ? ". The worker is busy now and will not be interrupted" : ""}. Withdraw it any time before then.`;
+    };
+    c.querySelectorAll("input[name=ins-del]").forEach(r => r.onchange = explain); explain();
+    si.onclick = sendInstruction;
+    $("#saved-insert").onclick = () => { const k = $("#saved-sel").value; if (k) { const ta = $("#ins-text"); ta.value += (ta.value ? "\n\n" : "") + S.drafts[k]; saveDraftSoon(ta.value); } };
+    $("#saved-save").onclick = () => { const name = prompt("Name for this reusable prompt"); if (!name) return; const k = "saved:" + name.slice(0, 60); S.drafts[k] = $("#ins-text").value; api("drafts", {method: "PUT", body: {target: k, text: S.drafts[k]}}).then(() => { toast("Saved (not sent)"); renderComposer(true); }); };
+  }
+  const cq = $("#cmd-q"); if (cq) {
+    cq.oninput = () => { S.cmdQ = cq.value; const pos = cq.selectionStart; renderComposer(true); const n = $("#cmd-q"); n.focus(); n.setSelectionRange(pos, pos); };
+    cq.onkeydown = e => { if (e.key === "Enter") { const first = c.querySelector("[data-cmd]"); if (first) { S.cmd = first.dataset.cmd; renderComposer(true); } } };
+    c.querySelectorAll("[data-cmd]").forEach(li => { const go = () => { S.cmd = li.dataset.cmd; if (S.cmd === "approve") { const t = curTask(); const ap = tdata(t).approval; S.decision = {project: t.project_id, task: t.task_id, kind: ap.kinds[0], mode: "approve", snapshot: JSON.parse(JSON.stringify(ap))}; setComposerMode("decision"); } else renderComposer(true); }; li.onclick = go; li.onkeydown = e => { if (e.key === "Enter") go(); }; });
+    const go = $("#cmd-go"); if (go) go.onclick = sendCommand;
+  }
+  const dg = $("#dec-go"); if (dg) dg.onclick = sendDecision;
+}
+function idemFor(target) { if (!S.idem[target]) S.idem[target] = uid(); return S.idem[target]; }
+async function submitAction(body, target) {
+  const t = curTask();
+  body = {project_id: S.project, task_id: S.task, expected: {task_state: t && t.state}, ...body};
+  const key = target || `${body.kind}:${body.request_id || ""}:${S.project}/${S.task}`;
+  body.idempotency_key = idemFor(key);
+  try {
+    const a = await api("actions", {method: "POST", body});
+    S.actions.set(a.action_id, a); S.lastAction = a.action_id;
+    delete S.idem[key];                               // accepted: a new submission gets a new key
+    renderComposerStatus();
+    toast(a.duplicate ? "Already submitted (same submission); showing its status" : `Accepted by Foundry: ${esc(a.summary || a.kind)}. Waiting for the coordinator.`);
+    return a;
+  } catch (e) {
+    if (e.network) toast("Not sent: Foundry unreachable. Your text is kept; retrying reuses the same submission key, so it can't be applied twice.", "bad", 12000);
+    else {
+      if (["stale_request", "stale_state", "stale_evidence", "stale_session", "duplicate_reply", "unknown_request"].includes(e.code)) delete S.idem[key];
+      const cur = ((e.data || {}).current) || [];
+      const tt = toast(`<b>Refused:</b> ${esc(e.message)}${Array.isArray(cur) && cur.length ? ` <button data-goreq="${esc(cur[0])}">Go to the current request</button>` : ""}`, "bad", 15000);
+      const g = tt.querySelector("[data-goreq]"); if (g) g.onclick = () => selectRequest(g.dataset.goreq);
+    }
+    return null;
+  }
+}
+async function sendAnswer() {
+  const p = S.pending.get(S.selectedRequest); if (!p) return;
+  const qs = (p.data || {}).questions || [{}];
+  const answers = qs.map((q, i) => {
+    const picked = $$(`input[name=q${i}]:checked`).map(x => x.value);
+    const txt = ($(`#q${i}-txt`) || {}).value || "";
+    const out = picked.slice(); if (txt.trim()) out.push(txt);
+    return out;
+  });
+  if (answers.some(a => !a.length)) { toast("Each question needs a choice or a written answer.", "warn"); return; }
+  $("#send-answer").disabled = true;
+  const a = await submitAction({kind: "answer_question", request_id: p.request_id, session_id: p.session_id, answers}, `answer:${p.request_id}`);
+  if (a) { qs.forEach((q, i) => api("drafts", {method: "PUT", body: {target: `answer:${p.request_id}:${i}`, text: ""}}).catch(() => {})); }
+  const b = $("#send-answer"); if (b) b.disabled = false;
+}
+async function sendPermission(reply) {
+  const p = S.pending.get(S.selectedRequest); if (!p) return;
+  await submitAction({kind: "reply_permission", request_id: p.request_id, session_id: p.session_id, reply, message: ($("#perm-msg") || {}).value || ""}, `perm:${p.request_id}`);
+}
+async function sendInstruction() {
+  const text = $("#ins-text").value;
+  if (!text.trim()) return toast("Write the instruction first.", "warn");
+  const delivery = ($("input[name=ins-del]:checked") || {}).value || "next_session";
+  const scope = $("#ins-scope").checked ? "session" : "task";
+  const t = curTask();
+  if (delivery === "pause_and_steer" && !confirm(`Pause ${t.task_id} now (its current step stops, including a running tool) and continue the same session with this instruction?`)) return;
+  const a = await submitAction({kind: "instruction", text, delivery, scope, session_id: tdata(t).session_id}, `instruction:${S.project}/${S.task}`);
+  if (a) { $("#ins-text").value = ""; saveDraftSoon(""); }
+}
+async function sendCommand() {
+  const t = curTask(); const id = S.cmd;
+  if (id === "status") { const o = $("#cmd-out"); o.style.display = "block"; o.innerHTML = highlight(JSON.stringify({state: t.state, ...tdata(t), verification: undefined, reviews: undefined}, null, 2), "json"); return; }
+  const text = ($("#cmd-text") || {}).value || "";
+  const body = {kind: id};
+  if (id === "pause" || id === "cancel") body.reason = text;
+  if (id === "unblock") { body.resolution = text; body.reset_attempts = $("#cmd-reset").checked; }
+  if (id === "cancel") body.confirm = ($("#cmd-confirm") || {}).value || "";
+  if ((id === "pause" || id === "cancel" || id === "unblock") && !text.trim()) return toast("A reason is required.", "warn");
+  await submitAction(body, `cmd:${id}:${S.project}/${S.task}`);
+}
+async function sendDecision() {
+  const dcs = S.decision; const text = $("#dec-text").value;
+  const body = {project_id: dcs.project, task_id: dcs.task, approval_kind: dcs.kind, revision: dcs.snapshot.revision,
+                artifacts: (dcs.snapshot.artifacts || {})[dcs.kind] || {}, expected: {task_state: "AWAITING_HUMAN"}};
+  if (dcs.mode === "approve") { body.kind = "approve_review"; body.note = text; }
+  else { body.kind = "reject_review"; body.mode = dcs.mode; body.findings = text.split(/\n\s*\n/).map(x => x.trim()).filter(Boolean); if (!body.findings.length) return toast("Say what is wrong first.", "warn"); }
+  if (!confirm(`${{approve: "Approve", reject: "Reject", request_changes: "Request changes for"}[dcs.mode]} ${dcs.kind} on ${dcs.task} @ ${String(dcs.snapshot.revision).slice(0, 12)}?`)) return;
+  const a = await submitAction(body, `decision:${dcs.project}/${dcs.task}:${dcs.mode}`);
+  if (a) { saveDraftSoon(""); }
+}
+const STEPS = ["accepted", "claimed", "queued", "delivered", "applied"];
+function onActionUpdate(a) {
+  if (a.action_id === S.lastAction) renderComposerStatus();
+  if (["rejected", "failed", "expired"].includes(a.status) && S.booted && a.actor === (S.me || {}).actor) toast(`<b>${esc(a.kind)} ${esc(a.status)}</b>: ${esc(a.status_detail || "")}`, "bad", 15000);
+  if (a.status === "applied" && S.booted && a.actor === (S.me || {}).actor) toast(`${esc(a.kind)} applied: ${esc(a.status_detail || "")}`);
+}
+function renderComposerStatus() {
+  const el = $("#comp-status"); if (!el) return;
+  const a = S.lastAction && S.actions.get(S.lastAction);
+  if (!a) { el.innerHTML = ""; return; }
+  const final = ["rejected", "failed", "expired", "cancelled"].includes(a.status);
+  const idx = STEPS.indexOf(a.status);
+  el.innerHTML = `<div class="timeline" aria-live="polite"><span class="dim">Last action ${esc(a.kind)}:</span>${STEPS.map((s, i) => `<span class="step ${i <= idx ? "done" : ""}"><span class="pill ${i <= idx ? actionCls(s) : ""}">${s}</span></span>${i < STEPS.length - 1 ? "→" : ""}`).join("")}
+    ${final ? `<span class="pill bad">${esc(a.status)}</span>` : ""}<span class="dim">${esc(a.status_detail || "")}</span>
+    ${a.status === "accepted" ? `<button id="cancel-last">Cancel before delivery</button>` : ""}</div>`;
+  const cl = $("#cancel-last"); if (cl) cl.onclick = async () => { try { const r = await api(`actions/${a.action_id}/cancel`, {method: "POST", body: {}}); S.actions.set(r.action_id, r); renderComposerStatus(); } catch (e) { toast(esc(e.message), "bad"); } };
+}
+
+/* ======================================================================== graph */
+async function refreshGraph() {
+  if (!P.graph || !$("#graphPanel") || $("#graphPanel").hidden || document.hidden) return;
+  try { S.graph = await api(`graph?project=${encodeURIComponent(S.project)}&task=${encodeURIComponent(S.graphAll ? "" : S.task)}&minutes=${S.graphMin || 30}`); renderGraph(); }
+  catch (e) { const b = $("#graph"); if (b) b.innerHTML = `<p class="dim">${esc(e.message)}</p>`; }
+}
+const GCOL = {coordinator: 0, session: 1, persona: 2, mcp: 2, media_job: 2, backend: 3, model: 4};
+function renderGraph() {
+  const g = S.graph; const host = $("#graph"); if (!g || !host) return;
+  if (S.graphTable) {
+    host.innerHTML = `<table class="t"><tr><th>state</th><th>from</th><th>to</th><th>kind</th><th>count</th><th>open</th></tr>${g.edges.map((e, i) => `<tr><td><span class="pill ${e.state === "active" ? "ok" : e.state === "failed" ? "bad" : e.state === "fallback" ? "warn" : ""}">${esc(e.state)}</span></td><td>${esc(nodeLabel(e.from))}</td><td>${esc(nodeLabel(e.to))}</td><td>${esc(e.kind)}${e.label ? " · " + esc(e.label) : ""}</td><td>${e.count}</td><td><button data-edge="${i}">details</button></td></tr>`).join("")}</table>
+      ${g.unassociated_media.length ? `<p class="dim">Unassociated media jobs (no session link captured): ${g.unassociated_media.map(j => esc(j.id)).join(", ")}</p>` : ""}<p class="src">${esc(g.note)}</p>`;
+    host.querySelectorAll("[data-edge]").forEach(b => b.onclick = () => edgeDetails(g.edges[+b.dataset.edge]));
+    return;
+  }
+  const vertical = P.graphVertical === "on" || (P.graphVertical === "auto" && host.clientHeight > host.clientWidth);
+  const cols = {}; const pos = {};
+  for (const n of g.nodes) { const c = GCOL[n.kind] ?? 2; (cols[c] = cols[c] || []).push(n); }
+  const CW = 190, RH = 34, NW = 160, NH = 24;
+  let maxRows = 0;
+  for (const [c, ns] of Object.entries(cols)) { ns.forEach((n, i) => { pos[n.id] = vertical ? {x: 10 + i * (NW + 14), y: 10 + c * 70} : {x: 10 + c * CW, y: 10 + i * RH}; }); maxRows = Math.max(maxRows, ns.length); }
+  const W = vertical ? Math.max(400, maxRows * (NW + 14) + 20) : 5 * CW + 20, H = vertical ? 5 * 70 + 40 : Math.max(120, maxRows * RH + 20);
+  const edges = g.edges.map((e, i) => {
+    const a = pos[e.from], b = pos[e.to]; if (!a || !b) return "";
+    const x1 = vertical ? a.x + NW / 2 : a.x + NW, y1 = vertical ? a.y + NH : a.y + NH / 2, x2 = vertical ? b.x + NW / 2 : b.x, y2 = vertical ? b.y : b.y + NH / 2;
+    const d = vertical ? `M${x1},${y1} C${x1},${(y1 + y2) / 2} ${x2},${(y1 + y2) / 2} ${x2},${y2}` : `M${x1},${y1} C${(x1 + x2) / 2},${y1} ${(x1 + x2) / 2},${y2} ${x2},${y2}`;
+    return `<path class="gedge ${esc(e.state)} kind-${esc(e.kind)}" d="${d}" data-edge="${i}" tabindex="0"><title>${esc(e.kind)} ${esc(e.state)} · ${e.count} event(s)${e.label ? " · " + esc(e.label) : ""}</title></path>`;
+  }).join("");
+  const nodes = g.nodes.map(n => { const p = pos[n.id]; return `<g class="gnode k-${esc(n.kind)}" transform="translate(${p.x},${p.y})" data-node="${esc(n.id)}" tabindex="0"><rect width="${NW}" height="${NH}"></rect><text x="6" y="16">${esc(String(n.label).slice(0, 24))}</text><title>${esc(n.kind)}: ${esc(n.label)}</title></g>`; }).join("");
+  const vb = S.graphVB || [0, 0, W, H];
+  host.innerHTML = `<svg viewBox="${vb.join(" ")}" role="img" aria-label="Route and activity graph">${edges}${nodes}</svg>`;
+  const svg = host.querySelector("svg");
+  svg.querySelectorAll("[data-edge]").forEach(p => { p.onclick = () => edgeDetails(g.edges[+p.dataset.edge]); p.onkeydown = e => { if (e.key === "Enter") edgeDetails(g.edges[+p.dataset.edge]); }; });
+  svg.querySelectorAll("[data-node]").forEach(n => { const go = () => { const node = g.nodes.find(x => x.id === n.dataset.node); if (node && node.ref && node.ref.session) openBeside(node.ref.session); else if (node) edgeDetails({from: node.id, to: "", kind: node.kind, state: "", refs: [node.ref || {}], count: 0}); }; n.onclick = go; n.onkeydown = e => { if (e.key === "Enter") go(); }; });
+  svg.onwheel = e => { e.preventDefault(); const v = S.graphVB || [0, 0, W, H]; const k = e.deltaY > 0 ? 1.15 : 0.87; S.graphVB = [v[0], v[1], v[2] * k, v[3] * k]; svg.setAttribute("viewBox", S.graphVB.join(" ")); };
+  let drag = null;
+  svg.onpointerdown = e => { if (e.target.closest("[data-edge],[data-node]")) return; drag = {x: e.clientX, y: e.clientY, vb: (S.graphVB || [0, 0, W, H]).slice()}; svg.setPointerCapture(e.pointerId); };
+  svg.onpointermove = e => { if (!drag) return; const sc = drag.vb[2] / svg.clientWidth; S.graphVB = [drag.vb[0] - (e.clientX - drag.x) * sc, drag.vb[1] - (e.clientY - drag.y) * sc, drag.vb[2], drag.vb[3]]; svg.setAttribute("viewBox", S.graphVB.join(" ")); };
+  svg.onpointerup = () => { drag = null; };
+  S.graphFit = () => { S.graphVB = [0, 0, W, H]; svg.setAttribute("viewBox", S.graphVB.join(" ")); };
+}
+function nodeLabel(id) { const n = ((S.graph || {}).nodes || []).find(x => x.id === id); return n ? `${n.kind}: ${n.label}` : id; }
+async function edgeDetails(e) {
+  const refs = e.refs || [];
+  const rows = [];
+  for (const r of refs.slice(0, 20)) {
+    if (r.request) {
+      const det = S.details.get(r.session) || (r.session ? await api("sessions/" + encodeURIComponent(r.session)).catch(() => null) : null);
+      if (det && r.session) S.details.set(r.session, det);
+      const req = det && ((det.foundry || {}).requests || []).find(x => x.request_id === r.request);
+      rows.push(`<li>Request <code>${esc(r.request)}</code>${r.inflight ? ' <span class="pill ok">in flight</span>' : ""}${req ? `: ${esc(req.persona)} → ${esc(req.served_backend)}/${esc(req.served_model)} · ${esc(req.outcome || req.status)} · ${req.duration_ms ? (req.duration_ms / 1000).toFixed(1) + "s" : ""}${(req.route_attempts || []).length > 1 ? `<br>attempts: ${req.route_attempts.map(a => `${esc(a.backend)}/${esc(a.model)}${a.error ? " (" + esc(a.error) + ")" : ""}`).join(" → ")}` : ""}` : ""}${r.error ? `<br><span style="color:var(--bad)">${esc(r.error)}</span>` : ""} ${r.session ? `<button data-s="${esc(r.session)}">session</button>` : ""}</li>`);
+    } else if (r.part) rows.push(`<li>Tool call <code>${esc(r.tool || "")}</code> <button data-s="${esc(r.session)}" data-p="${esc(r.part)}">open in transcript</button></li>`);
+    else if (r.media_job) rows.push(`<li>Media job <code>${esc(r.media_job)}</code> (attributed to its session by media_jobs.session_id)</li>`);
+    else if (r.session) rows.push(`<li>Session <code>${esc(r.session)}</code> <button data-s="${esc(r.session)}">open</button></li>`);
+  }
+  $("#detail-title").textContent = `${e.kind} ${e.state ? "· " + e.state : ""}`;
+  $("#detail-body").innerHTML = `<p>${esc(nodeLabel(e.from))}${e.to ? " → " + esc(nodeLabel(e.to)) : ""}${e.label ? " · " + esc(e.label) : ""}</p><ul class="list">${rows.join("") || "<li class='dim'>No linked records.</li>"}</ul><p class="src">${esc((S.graph || {}).note || "")}</p>`;
+  $("#detail-body").querySelectorAll("[data-s]").forEach(b => b.onclick = () => { $("#detail").close(); b.dataset.p ? openInPane(paneById("main"), b.dataset.s, {pin: true, part: b.dataset.p}) : openBeside(b.dataset.s); });
+  $("#detail").showModal();
+}
+
+/* ======================================================================== layout */
+function effectivePreset() {
+  if (POPOUT) return "popout";
+  const p = P.layout.preset;
+  if (p !== "auto") return p;
+  return innerHeight > innerWidth * 1.1 ? "portrait" : "landscape";
+}
+function isNarrow() { return innerWidth <= 760; }
+function layout() {
+  const ws = $("#workspace");
+  const preset = effectivePreset();
+  const L = P.layout.presets[preset] || P.layout.presets.landscape;
+  const inspHidden = S.inspectorHidden ?? (L.inspectorPos === "hidden");
+  const narrow = isNarrow();
+  // keep pane elements (state) and only move them; nothing reloads
+  for (const p of S.panes) if (!p.el) p.el = buildPaneEl(p);
+  let insp = $("#inspector") || Object.assign(document.createElement("aside"), {id: "inspector"});
+  let graph = $("#graphPanel") || buildGraphPanel();
+  // moving panes must not lose the reader's place
+  const scroll = S.panes.map(p => { const t = p.el.querySelector(".transcript"); return [p, t.scrollTop, p.atBottom]; });
+  const inspTop = insp.scrollTop;
+  requestAnimationFrame(() => {
+    for (const [p, top, atB] of scroll) { const t = p.el.querySelector(".transcript"); t.scrollTop = atB ? t.scrollHeight : top; }
+    insp.scrollTop = inspTop;
+  });
+  ws.innerHTML = "";
+  const only = POPOUT.startsWith("section:");
+  if (only) { ws.style.gridTemplate = "1fr / 1fr"; ws.appendChild(insp); insp.hidden = false; scheduleInspector(); return; }
+  const helpers = S.panes.filter(p => p.id !== "main");
+  const main = paneById("main");
+  if (narrow) {
+    const tab = S.narrow;
+    const show = tab === "transcript" ? (paneById(S.focused) || main).el : tab === "inspector" ? insp : tab === "graph" ? graph : null;
+    ws.style.gridTemplate = "1fr / 1fr";
+    if (tab === "inbox") { openInbox(); S.narrow = "transcript"; return layout(); }
+    if (show) { ws.appendChild(show); show.hidden = false; }
+    insp.hidden = tab !== "inspector"; graph.hidden = tab !== "graph";
+    renderNarrowTabs();
+  } else {
+    const cols = ["minmax(320px, 1fr)"]; const els = [main.el];
+    for (const h of helpers) { cols.push("5px", `minmax(260px, ${L.helperW || 480}px)`); els.push(resizer("col", "helperW", preset), h.el); }
+    const below = L.inspectorPos === "below";
+    if (!inspHidden && !below) { cols.push("5px", `${clamp(L.inspectorW || 340, 220, 900)}px`); els.push(resizer("col", "inspectorW", preset), insp); }
+    const rows = ["minmax(200px, 1fr)"];
+    const extraRows = [];
+    if (!inspHidden && below) extraRows.push(["inspectorH", insp, L.inspectorH || 300]);
+    const graphOn = P.graph && !POPOUT && L.graphH !== 0 && !S.graphHidden;
+    if (graphOn) extraRows.push(["graphH", graph, L.graphH || 220]);
+    for (const [k, el, h] of extraRows) rows.push("5px", `${clamp(h, 90, 900)}px`);
+    ws.style.gridTemplateColumns = cols.join(" ");
+    ws.style.gridTemplateRows = rows.join(" ");
+    els.forEach(el => { el.style.gridRow = "1"; ws.appendChild(el); el.hidden = false; });
+    let r = 2;
+    for (const [k, el] of extraRows) {
+      const rz = resizer("row", k, preset); rz.style.gridColumn = "1 / -1"; rz.style.gridRow = String(r); ws.appendChild(rz);
+      el.style.gridColumn = "1 / -1"; el.style.gridRow = String(r + 1); el.hidden = false; ws.appendChild(el); r += 2;
+    }
+    insp.hidden = inspHidden; if (!graphOn) graph.hidden = true;
+  }
+  for (const p of S.panes) { renderPaneHead(p); p.el.classList.toggle("focused", p.id === S.focused && S.panes.length > 1); }
+  $("#layout-preset").value = P.layout.preset;
+  scheduleInspector();
+  if (!graph.hidden) refreshGraph();
+}
+function renderNarrowTabs() {
+  const n = $("#narrowTabs");
+  n.innerHTML = [["transcript", "Transcript"], ["inspector", "Inspector"], ["inbox", "Inbox"], ["graph", "Graph"]].map(([k, l]) => `<button role="tab" aria-selected="${S.narrow === k}" class="${S.narrow === k ? "on" : ""}" data-n="${k}">${l}</button>`).join("");
+  n.querySelectorAll("[data-n]").forEach(b => b.onclick = () => { S.narrow = b.dataset.n; layout(); });
+}
+function resizer(kind, prop, preset) {
+  const r = document.createElement("div");
+  r.className = "resizer " + kind; r.tabIndex = 0; r.setAttribute("role", "separator");
+  r.setAttribute("aria-orientation", kind === "col" ? "vertical" : "horizontal");
+  r.setAttribute("aria-label", `Resize (${prop}); arrow keys adjust, Home resets`);
+  const L = P.layout.presets[preset];
+  r.setAttribute("aria-valuenow", L[prop] || 0);
+  const sign = prop === "inspectorW" || prop === "graphH" || prop === "inspectorH" || prop === "helperW" ? -1 : 1;
+  const set = v => { L[prop] = Math.round(clamp(v, prop.endsWith("H") ? 90 : 220, prop.endsWith("H") ? 900 : 1100)); savePrefs(); layout(); };
+  r.onpointerdown = e => {
+    e.preventDefault(); r.classList.add("drag"); r.setPointerCapture(e.pointerId);
+    const start = kind === "col" ? e.clientX : e.clientY; const v0 = L[prop] || (prop.endsWith("H") ? 220 : 340);
+    const ws = $("#workspace");
+    r.onpointermove = ev => {
+      const v = v0 + sign * ((kind === "col" ? ev.clientX : ev.clientY) - start);
+      L[prop] = Math.round(clamp(v, prop.endsWith("H") ? 90 : 220, prop.endsWith("H") ? 900 : 1100));
+      if (prop === "inspectorW") ws.style.gridTemplateColumns = ws.style.gridTemplateColumns.replace(/\d+px$/, L[prop] + "px");
+    };
+    r.onpointerup = () => { r.classList.remove("drag"); r.onpointermove = null; savePrefs(); layout(); };
+  };
+  r.onkeydown = e => {
+    const step = e.shiftKey ? 64 : 16; const cur = L[prop] || 300;
+    const dec = kind === "col" ? "ArrowRight" : "ArrowDown", inc = kind === "col" ? "ArrowLeft" : "ArrowUp";
+    if (e.key === inc) { e.preventDefault(); set(cur + step * (sign < 0 ? 1 : -1)); }
+    else if (e.key === dec) { e.preventDefault(); set(cur - step * (sign < 0 ? 1 : -1)); }
+    else if (e.key === "Home") { e.preventDefault(); set(DEFAULT_PREFS.layout.presets[preset][prop] || 300); }
+  };
+  return r;
+}
+function buildPaneEl(p) {
+  const el = document.createElement("section");
+  el.className = "pane"; el.dataset.pane = p.id; el.setAttribute("aria-label", p.id === "main" ? "Main worker transcript" : "Helper transcript");
+  el.innerHTML = `<div class="pane-head"></div><div class="pane-note"></div><div class="pane-body"><div class="transcript" tabindex="0" aria-live="off"></div><button class="resume-live primary">Resume live ↓</button></div>`;
+  const t = el.querySelector(".transcript");
+  t.addEventListener("scroll", () => {
+    const atB = t.scrollHeight - t.scrollTop - t.clientHeight < 40;
+    p.atBottom = atB; if (atB) { p.newCount = 0; if (p.id === "main" && S.unseen) { S.unseen = 0; renderConn(); } }
+    el.querySelector(".resume-live").classList.toggle("show", !atB);
+  }, {passive: true});
+  el.querySelector(".resume-live").onclick = () => { p.atBottom = true; p.newCount = 0; t.scrollTop = t.scrollHeight; if (p.pinned && p.id === "main") goLive(p); el.querySelector(".resume-live").classList.remove("show"); };
+  el.addEventListener("pointerdown", () => { if (S.focused !== p.id) { S.focused = p.id; for (const q of S.panes) q.el && q.el.classList.toggle("focused", q.id === p.id && S.panes.length > 1); scheduleInspector(); renderComposer(); } });
+  return el;
+}
+function buildGraphPanel() {
+  const g = document.createElement("section");
+  g.id = "graphPanel"; g.setAttribute("aria-label", "Route and activity graph");
+  g.innerHTML = `<div class="ghead"><b>Route / activity</b>
+    <select id="g-min" title="Window"><option value="10">10 min</option><option value="30" selected>30 min</option><option value="120">2 h</option><option value="1440">24 h</option></select>
+    <label><input type="checkbox" id="g-all"> whole project</label>
+    <button id="g-table" title="Keyboard-accessible table view">Table</button><button id="g-fit">Fit</button><button id="g-refresh">Refresh</button>
+    <span class="spacer"></span><span class="src">Animated only for in-flight ledger rows / running jobs</span><button class="ghost" id="g-hide" aria-label="Hide graph">✕</button></div>
+    <div class="gbody" id="graph"><p class="dim" style="padding:8px">Loading…</p></div>`;
+  g.querySelector("#g-min").onchange = e => { S.graphMin = +e.target.value; refreshGraph(); };
+  g.querySelector("#g-all").onchange = e => { S.graphAll = e.target.checked; refreshGraph(); };
+  g.querySelector("#g-table").onclick = () => { S.graphTable = !S.graphTable; renderGraph(); };
+  g.querySelector("#g-fit").onclick = () => { S.graphVB = null; if (S.graphFit) S.graphFit(); else renderGraph(); };
+  g.querySelector("#g-refresh").onclick = refreshGraph;
+  g.querySelector("#g-hide").onclick = () => { S.graphHidden = true; layout(); };
+  return g;
+}
+$("#layout-preset").onchange = e => { P.layout.preset = e.target.value; savePrefs(); S.inspectorHidden = undefined;
+  const L = P.layout.presets[effectivePreset()];
+  const want = L ? L.helpers || 0 : 0;
+  const kids = [...S.sessions.values()].filter(x => x.parent_id && x.parent_id === (paneById("main") || {}).sid);
+  while (S.panes.length - 1 < want && kids[S.panes.length - 1]) openBeside(kids[S.panes.length - 1].session_id);
+  layout(); };
+$("#btn-inspector").onclick = () => { S.inspectorHidden = !($("#inspector") && !$("#inspector").hidden ? false : true); if (isNarrow()) { S.narrow = S.narrow === "inspector" ? "transcript" : "inspector"; } layout(); };
+$("#btn-graph").onclick = () => { S.graphHidden = !S.graphHidden; if (!S.graphHidden && P.layout.presets[effectivePreset()].graphH === 0) P.layout.presets[effectivePreset()].graphH = 220; layout(); };
+$("#btn-chrome").onclick = () => document.body.classList.add("chrome-hidden");
+document.addEventListener("keydown", e => { if (e.key === "Escape" && document.body.classList.contains("chrome-hidden")) document.body.classList.remove("chrome-hidden"); });
+let lastOrient = innerHeight > innerWidth;
+addEventListener("resize", () => { clearTimeout(S.rz); S.rz = setTimeout(() => { const o = innerHeight > innerWidth; if (o !== lastOrient || isNarrow() !== S.wasNarrow) { lastOrient = o; S.wasNarrow = isNarrow(); layout(); } }, 200); });
+
+/* ======================================================================== settings */
+const SETTINGS = [
+  ["Display", [
+    ["theme", "Theme", "select", [["dark", "Dark+ (editor dark)"], ["light", "Light"], ["hc", "High contrast"]]],
+    ["fontSize", "Font size (px)", "number", [10, 22]], ["lineHeight", "Line spacing", "number", [1.1, 2.2, 0.05]],
+    ["density", "Density", "select", [["comfortable", "Comfortable"], ["compact", "Compact"]]],
+    ["codeWrap", "Wrap long code lines", "check", "Off: long lines scroll inside their card, never the page."],
+    ["tz", "Time zone", "text", "IANA name, e.g. America/Chicago"],
+    ["tsFormat", "Timestamps", "select", [["time", "Time"], ["datetime", "Date and time"], ["relative", "Relative"]]],
+    ["showTimestamps", "Show timestamps", "check"],
+  ]],
+  ["Transcript", [
+    ["showThinking", "Show thinking", "check", "Shows the reasoning text Kilo publishes. Hiding it here doesn't delete what Foundry stored (see Capture below)."],
+    ["thinkingDefault", "Thinking starts", "select", [["collapsed", "Collapsed (summary line)"], ["expanded", "Expanded"]]],
+    ["showAssistantText", "Show assistant text", "check"], ["showToolArgs", "Show tool arguments", "check"],
+    ["showToolResults", "Show tool results", "check"], ["showApprovals", "Show approval / permission records", "check"],
+    ["showDiagnostics", "Verbose diagnostics (steps, unknown parts)", "check"],
+    ["collapseCompleted", "Collapse completed tool cards", "check"], ["collapseLong", "Collapse long outputs", "check"],
+    ["longLines", "Lines before collapsing", "number", [4, 200]],
+    ["exportThinking", "Include thinking in redacted copy/export", "check", "Explicit opt-in."],
+    ["events.text", "Event filter: text", "check"], ["events.reasoning", "Event filter: reasoning", "check"],
+    ["events.tool", "Event filter: tools", "check"], ["events.retry", "Event filter: retries", "check"],
+    ["events.compaction", "Event filter: compaction", "check"], ["events.file", "Event filter: files/patches", "check"],
+    ["events.step", "Event filter: step markers", "check"], ["events.agent", "Event filter: delegation", "check"],
+  ]],
+  ["Follow & history", [
+    ["followCoordinator", "Follow coordinator", "check", "Main pane switches to the task's current session. A pinned/history view is never moved."],
+    ["followScroll", "Follow-scroll at the bottom", "check", "Scrolling up always pauses it."],
+    ["historyPageSize", "History page size", "number", [50, 500]],
+  ]],
+  ["Sidebar", [
+    ["showDisabledMcp", "Show disabled MCP servers", "check", "Display only: never enables or disables a server."],
+    ["showTokenDetails", "Token / cache details", "check"], ["showTiming", "Timing metrics", "check"],
+    ["showTodo", "To-do", "check"], ["showCapabilities", "Capability details", "check"], ["showHelpers", "Helper activity", "check"],
+    ["_sidebar", "Section order / visibility", "sidebar"],
+  ]],
+  ["Layout & motion", [
+    ["graph", "Route graph panel", "check"], ["graphVertical", "Graph arrangement", "select", [["auto", "Auto (vertical in a tall panel)"], ["on", "Vertical"], ["off", "Horizontal"]]],
+    ["routeAnimation", "Animate active routes", "check"], ["reducedMotion", "Reduced motion", "select", [["system", "Follow system"], ["on", "On"], ["off", "Off"]]],
+    ["_layout", "Panel sizes", "layout"],
+  ]],
+  ["Connection", [
+    ["refreshS", "Graph refresh (s)", "number", [2, 300], "Never faster than the server's floor."],
+    ["staleAfterS", "Call the stream stale after (s)", "number", [20, 600]],
+  ]],
+  ["Alerts & sound", [
+    ["sound.enabled", "Sound alerts", "check", "Browsers require a click (Enable sound) before a page may play audio."],
+    ["sound.muted", "Mute (visual alerts stay)", "check"], ["sound.volume", "Volume", "range", [0, 1, 0.05]],
+    ["sound.question", "Sound: questions / permissions", "check"], ["sound.approval", "Sound: human approvals", "check"],
+    ["sound.failure", "Sound: failures / blockers", "check"], ["sound.completion", "Sound: completion", "check"], ["sound.stale", "Sound: heartbeat lost", "check"],
+    ["sound.repeatCriticalS", "Repeat critical until acknowledged, every (s; 0 = off)", "number", [0, 3600]], ["sound.repeatMax", "…at most this many times", "number", [0, 50]],
+    ["sound.quiet", "Quiet hours", "check", "No sound in this window (in the time zone above); visible alerts stay."],
+    ["sound.quietStart", "Quiet from", "time"], ["sound.quietEnd", "Quiet until", "time"],
+    ["_sound", "Test & snooze", "sound"],
+  ]],
+  ["Browser notifications", [
+    ["notify.enabled", "Browser notifications", "check", "Off until you enable it; asks the browser for permission. Only from an open page."],
+    ["notify.critical", "Critical (questions, approvals)", "check"], ["notify.high", "High (failures, blockers)", "check"],
+    ["notify.completion", "Completion", "check"], ["notify.stale", "Heartbeat lost", "check"], ["_notify", "Test", "notify"],
+  ]],
+];
+function renderSettings() {
+  const out = [];
+  for (const [title, items] of SETTINGS) {
+    out.push(`<fieldset><legend>${esc(title)}</legend>`);
+    for (const [path, label, type, arg, help] of items) {
+      const id = "set-" + path.replace(/\W/g, "-");
+      const v = getPath(P, path);
+      let input = "";
+      if (type === "check") input = `<input type="checkbox" id="${id}" data-pref="${path}" ${v ? "checked" : ""}>`;
+      else if (type === "select") input = `<select id="${id}" data-pref="${path}">${arg.map(([k, l]) => `<option value="${k}" ${v === k ? "selected" : ""}>${esc(l)}</option>`).join("")}</select>`;
+      else if (type === "number") input = `<input type="number" id="${id}" data-pref="${path}" min="${arg[0]}" max="${arg[1]}" step="${arg[2] || 1}" value="${v}">`;
+      else if (type === "range") input = `<input type="range" id="${id}" data-pref="${path}" min="${arg[0]}" max="${arg[1]}" step="${arg[2]}" value="${v}">`;
+      else if (type === "text") input = `<input type="text" id="${id}" data-pref="${path}" value="${esc(v)}">`;
+      else if (type === "time") input = `<input type="time" id="${id}" data-pref="${path}" value="${esc(v)}">`;
+      else if (type === "sidebar") input = `<div>${P.sidebar.order.map((s, i) => `<div class="row" style="margin:1px 0"><label><input type="checkbox" data-sbvis="${s}" ${P.sidebar.hidden.includes(s) ? "" : "checked"}> ${esc(SECTION_TITLES[s])}</label><button class="ghost" data-sbmv="${s}" data-d="-1" ${i ? "" : "disabled"}>↑</button><button class="ghost" data-sbmv="${s}" data-d="1">↓</button></div>`).join("")}</div>`;
+      else if (type === "layout") input = `<div class="dim">Preset <b>${esc(effectivePreset())}</b>: inspector ${P.layout.presets[effectivePreset()] ? P.layout.presets[effectivePreset()].inspectorW : "?"}px. Drag the dividers (or focus one and use the arrow keys; Home resets).
+        <div class="row"><label>Inspector placement <select id="set-insp-pos"><option value="side">Side</option><option value="below">Below (portrait)</option><option value="hidden">Hidden</option></select></label><button id="set-layout-reset">Reset panel sizes</button></div></div>`;
+      else if (type === "sound") input = `<div class="row"><button id="set-snd-test">Test sound</button><select id="set-snd-cls">${Object.keys(SOUNDS).map(k => `<option>${k}</option>`).join("")}</select>
+        <button id="set-snooze-15">Snooze 15 min</button><button id="set-snooze-60">Snooze 1 h</button><button id="set-snooze-off">Unsnooze</button>
+        <span class="dim" id="set-snd-state">${AUDIO.owner ? "This tab plays sounds." : "Another open tab plays sounds."} ${P.sound.snoozeUntil > Date.now() ? "Snoozed until " + esc(new Date(P.sound.snoozeUntil).toLocaleTimeString()) : ""}</span></div>`;
+      else if (type === "notify") input = `<div class="row"><button id="set-ntf-perm">Ask browser permission</button><button id="set-ntf-test">Test notification</button>
+        <span class="dim">Permission: ${"Notification" in window ? esc(Notification.permission) : "unsupported in this browser"}. No background push service is installed: a closed tab gets nothing.</span></div>`;
+      out.push(`<div class="setting"><label for="${id}">${esc(label)}</label>${input}${help || (typeof arg === "string" ? arg : "") ? `<div class="help">${esc(help || arg)}</div>` : ""}</div>`);
+    }
+    out.push(`</fieldset>`);
+  }
+  out.push(`<fieldset><legend>Capture & retention (Foundry, shared)</legend><div id="server-settings" class="dim">Loading…</div>
+    <p class="src">These change what Foundry stores from now on, for everyone. Hiding something on screen above never deletes stored data; turning a capture switch off means new data of that kind isn't stored (existing data ages out with retention).</p></fieldset>`);
+  $("#settings-body").innerHTML = out.join("");
+  const body = $("#settings-body");
+  body.querySelectorAll("[data-pref]").forEach(el => el.addEventListener("change", () => {
+    const path = el.dataset.pref; let v = el.type === "checkbox" ? el.checked : el.type === "number" || el.type === "range" ? +el.value : el.value;
+    if (el.type === "number") v = clamp(v, +el.min, +el.max);
+    if (path === "refreshS") v = Math.max(v, ((S.ov || {}).settings || {}).min_refresh_s || 2);
+    setPath(P, path, v); savePrefs(); applyDisplay(); renderSoundBtn();
+    if (path === "notify.enabled" && v && "Notification" in window && Notification.permission === "default") Notification.requestPermission().then(() => renderSettings());
+    for (const p of S.panes) renderPane(p); scheduleInspector(); if (path.startsWith("graph")) layout(); setupGraphTimer();
+  }));
+  body.querySelectorAll("[data-sbvis]").forEach(c => c.onchange = () => { const s = c.dataset.sbvis; P.sidebar.hidden = c.checked ? P.sidebar.hidden.filter(x => x !== s) : [...P.sidebar.hidden, s]; savePrefs(); scheduleInspector(); });
+  body.querySelectorAll("[data-sbmv]").forEach(b => b.onclick = () => { const o = P.sidebar.order, i = o.indexOf(b.dataset.sbmv), j = clamp(i + +b.dataset.d, 0, o.length - 1); o.splice(i, 1); o.splice(j, 0, b.dataset.sbmv); savePrefs(); renderSettings(); scheduleInspector(); });
+  const ip = $("#set-insp-pos"); if (ip) { const L = P.layout.presets[effectivePreset()]; if (L) ip.value = L.inspectorPos; ip.onchange = () => { if (L) { L.inspectorPos = ip.value; S.inspectorHidden = undefined; savePrefs(); layout(); } }; }
+  const lr = $("#set-layout-reset"); if (lr) lr.onclick = () => { P.layout.presets = JSON.parse(JSON.stringify(DEFAULT_PREFS.layout.presets)); savePrefs(); layout(); renderSettings(); };
+  const st = $("#set-snd-test"); if (st) st.onclick = async () => { await enableSound(); const cls = $("#set-snd-cls").value; const ok = playTone(cls); report("test", "test", ok ? "played" : "blocked", cls); toast(ok ? `Played “${cls}”` : "The browser blocked audio for this page. Allow sound for this site, then try again.", ok ? "" : "bad"); };
+  const sz = m => () => { P.sound.snoozeUntil = m ? Date.now() + m * 60000 : 0; savePrefs(); renderSoundBtn(); renderSettings(); };
+  if ($("#set-snooze-15")) { $("#set-snooze-15").onclick = sz(15); $("#set-snooze-60").onclick = sz(60); $("#set-snooze-off").onclick = sz(0); }
+  const np = $("#set-ntf-perm"); if (np) np.onclick = () => { if ("Notification" in window) Notification.requestPermission().then(() => renderSettings()); };
+  const nt = $("#set-ntf-test"); if (nt) nt.onclick = () => {
+    if (!("Notification" in window)) return toast("This browser has no notification support.", "bad");
+    if (Notification.permission !== "granted") return toast(`Notifications are ${Notification.permission}. Use “Ask browser permission” first.`, "warn");
+    try { new Notification("Foundry control center test", {body: "If you see this, notifications work while a control-center page is open.", tag: "cc-test"}); report("test", "test", "notification shown"); } catch (e) { toast(esc(e.message), "bad"); }
+  };
+  loadServerSettings();
+}
+async function loadServerSettings() {
+  const box = $("#server-settings"); if (!box) return;
+  try {
+    const r = await api("settings");
+    const s = r.settings, lim = r.limits;
+    const help = {retention_days: "Transcript parts, sessions, snapshots", action_retention_days: "Actions, alerts and their audit logs",
+      collect_reasoning: "Store reasoning text Kilo publishes", collect_tool_output: "Store (redacted, capped) tool results",
+      max_part_chars: "Cap per text/reasoning part", max_tool_chars: "Cap per tool input/output", coordinator_expiry_s: "Watchdog: coordinator silent for",
+      bridge_expiry_s: "Watchdog: bridge silent for", action_ttl_s: "Unclaimed action expires after (s)", max_instruction_chars: "Longest reply/instruction",
+      rate_per_minute: "Operator actions per minute", session_hours: "Operator sign-in lasts (h)", min_refresh_s: "Polling floor for pages (s)"};
+    box.innerHTML = Object.entries(s).map(([k, v]) => `<div class="setting"><label for="srv-${k}">${esc(help[k] || k)}</label>${typeof v === "boolean" ? `<input type="checkbox" id="srv-${k}" data-srv="${k}" ${v ? "checked" : ""}>` : `<input type="number" id="srv-${k}" data-srv="${k}" value="${v}" min="${(lim[k] || [0])[0]}" max="${(lim[k] || [0, 1e9])[1]}">`}</div>`).join("") + `<button id="srv-save">Save capture settings</button>`;
+    $("#srv-save").onclick = async () => {
+      const patch = {}; box.querySelectorAll("[data-srv]").forEach(el => { patch[el.dataset.srv] = el.type === "checkbox" ? el.checked : +el.value; });
+      try { await api("settings", {method: "PUT", body: patch}); toast("Capture settings saved"); } catch (e) { toast(esc(e.message), "bad"); }
+    };
+  } catch (e) { box.textContent = e.message; }
+}
+$("#btn-settings").onclick = () => { renderSettings(); $("#settings").showModal(); };
+$("#set-close").onclick = () => $("#settings").close();
+$("#set-reset").onclick = () => { if (!confirm("Reset all display settings to their defaults? (Capture settings in Foundry are not changed.)")) return; P = migratePrefs(null); savePrefs(); applyDisplay(); renderSettings(); layout(); for (const p of S.panes) renderPane(p); };
+$("#follow").onchange = e => { P.followCoordinator = e.target.checked; savePrefs(); applyFollow(); };
+
+/* ======================================================================== task selection */
+function renderTaskSelect() {
+  const projects = [...new Set([...S.tasks.values()].map(t => t.project_id))].sort();
+  if (!S.project && projects.length) S.project = projects[0];
+  $("#sel-project").innerHTML = projects.map(p => `<option ${p === S.project ? "selected" : ""}>${esc(p)}</option>`).join("") || "<option>(no projects reported)</option>";
+  const tasks = [...S.tasks.values()].filter(t => t.project_id === S.project).sort((a, b) => (b.received_ts || 0) - (a.received_ts || 0));
+  if (!S.task || !tasks.find(t => t.task_id === S.task)) {
+    const active = tasks.find(t => ["IMPLEMENTING", "CLOSING", "VERIFYING", "REVIEWING", "AWAITING_HUMAN"].includes(t.state)) || tasks[0];
+    S.task = active ? active.task_id : "";
+  }
+  $("#sel-task").innerHTML = tasks.map(t => `<option value="${esc(t.task_id)}" ${t.task_id === S.task ? "selected" : ""}>${esc(t.task_id)} · ${esc(t.state)}</option>`).join("");
+  const t = curTask();
+  $("#task-state").innerHTML = t ? `<span class="pill ${stateCls(t.state)}">${esc(t.state)}</span>` : "";
+}
+function selectTask(p, t) {
+  S.project = p; S.task = t; renderTaskSelect();
+  const main = paneById("main"); if (main) { main.pinned = false; }
+  applyFollow(); renderComposer(true); scheduleInspector(); refreshGraph();
+  const u = new URL(location.href); u.searchParams.set("project", p); u.searchParams.set("task", t); history.replaceState(null, "", u);
+}
+$("#sel-project").onchange = e => { S.project = e.target.value; S.task = ""; renderTaskSelect(); selectTask(S.project, S.task); };
+$("#sel-task").onchange = e => selectTask(S.project, e.target.value);
+
+/* ======================================================================== boot */
+let graphTimer = null;
+function setupGraphTimer() { clearInterval(graphTimer); const floor = ((S.ov || {}).settings || {}).min_refresh_s || 2; graphTimer = setInterval(refreshGraph, Math.max(floor, P.refreshS, 5) * 1000); }
+async function boot() {
+  applyDisplay();
+  try { const s = await api("session"); S.csrf = s.csrf; S.me = s; }
+  catch (e) { if (e.network) { S.conn.stream = "offline"; renderConn(); setTimeout(boot, 5000); } return; }
+  $("#login").classList.remove("show");
+  try {
+    S.ov = await api("overview");
+    for (const t of S.ov.tasks) S.tasks.set(taskKey(t.project_id, t.task_id), t);
+    for (const s of S.ov.sessions) S.sessions.set(s.session_id, s);
+    for (const p of S.ov.pending) S.pending.set(p.request_id, p);
+    S.sources = S.ov.sources || [];
+    S.seq = S.ov.seq || 0;
+    const al = await api("alerts?status=open&limit=200"); for (const a of al.alerts) S.alerts.set(a.alert_id, a);
+    const ac = await api("actions?limit=100"); for (const a of ac.actions) S.actions.set(a.action_id, a);
+    try { const d = await api("drafts"); S.drafts = Object.fromEntries(d.drafts.map(x => [x.target, x.text])); } catch (e) { S.drafts = {}; }
+    for (const kind of ["mcp", "capabilities", "config"]) for (const p of S.ov.projects) {
+      try { const r = await api(`snapshots?kind=${kind}&project=${encodeURIComponent(p)}`); if (r.snapshot) S.snapshots.set(`${kind}|${p}|`, r.snapshot); } catch (e) {}
+    }
+  } catch (e) { toast(esc(e.message), "bad"); }
+  S.project = QS.get("project") || S.project; S.task = QS.get("task") || S.task;
+  renderTaskSelect();
+  S.panes = [newPane("main", "worker")];
+  if (POPOUT === "pane" || POPOUT.startsWith("section:")) document.body.classList.add("popout");
+  layout();
+  const sid = QS.get("session");
+  if (sid) await openInPane(paneById("main"), sid, {pin: POPOUT === "pane" || sid !== tdata(curTask()).session_id});
+  else applyFollow();
+  if (!paneById("main").sid) { connectStream(); renderPane(paneById("main")); }
+  renderBell(); renderSoundBtn(); renderConn(); renderComposer(true);
+  if (POPOUT) { $("#composer").hidden = true; }
+  S.booted = true;
+  setupGraphTimer();
+  setInterval(() => { renderConn(); for (const p of S.panes) renderPaneHead(p); }, 5000);
+  setInterval(() => { scheduleInspector(); }, 15000);
+  if (P.sound.enabled) { try { AUDIO.ctx = new (window.AudioContext || window.webkitAudioContext)(); AUDIO.blocked = AUDIO.ctx.state !== "running"; } catch (e) { AUDIO.blocked = true; } renderSoundBtn(); }
+}
+document.addEventListener("visibilitychange", () => { if (!document.hidden) { renderConn(); refreshGraph(); } });
+electAudioOwner();
+applyDisplay();
+boot();
+</script>
+</body>
+</html>

@@ -130,6 +130,8 @@ class Services:
         from .orchestration import WorkRegistry, set_registry
         self.work = WorkRegistry(db)
         set_registry(self.work)
+        from .control_center import ControlCenter
+        self.control = ControlCenter(db, secrets_fn=lambda: secret_values(self))
         ensure_eval_seed(db)
         self.evals = EvalHarness(self)
         self._eval_tasks: list[asyncio.Task] = []  # keep background runs alive
@@ -391,6 +393,7 @@ class Services:
             asyncio.create_task(self._pricing_loop()),
             asyncio.create_task(self._agent_health_loop()),
             asyncio.create_task(self._retention_loop()),
+            asyncio.create_task(self._control_watchdog_loop()),
             asyncio.create_task(self.health.loop()),
         ]
 
@@ -403,6 +406,21 @@ class Services:
                 self.db.log_event("warning", "profiles", f"unknown persona profile {pid!r}")
             except Exception:
                 log.exception("persona profile %s failed", pid)
+
+    async def _control_watchdog_loop(self) -> None:
+        """Control center watchdog: source heartbeat expiry and unclaimed action
+        expiry, on Foundry's own timer (independent of the coordinator), plus
+        the control center's retention every hour."""
+        n = 0
+        while True:
+            try:
+                await asyncio.to_thread(self.control.watchdog)
+                if n % 240 == 0:
+                    await asyncio.to_thread(self.control.prune)
+            except Exception:
+                log.exception("control-center watchdog failed")
+            n += 1
+            await asyncio.sleep(15)
 
     async def _retention_loop(self) -> None:
         """Keep log tables inside data_retention.days (Logs -> Data)."""
@@ -629,5 +647,7 @@ def create_app(config_path: Optional[Path] = None,
     app.include_router(media_router)
     from .facade.work_api import router as work_router
     app.include_router(work_router)
+    from .control_api import router as control_router
+    app.include_router(control_router)
     app.include_router(ui_router)
     return app

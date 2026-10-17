@@ -67,7 +67,9 @@ the optional companion services (with one-line installers).
   persona, the project's own checks on the committed code, one frontier review
   of the exact commit, closeout, human approval where required, then the next
   task. Project-agnostic (profiles + narrow adapters), stdlib only. See
-  [docs/COORDINATOR.md](docs/COORDINATOR.md).
+  [docs/COORDINATOR.md](docs/COORDINATOR.md). Its **control center** (`/ui/control`)
+  shows live transcripts, helpers, alerts and replies:
+  [docs/CONTROL_CENTER.md](docs/CONTROL_CENTER.md).
 - **Training-data pipeline** — opt-in capture of what the coding agent saw and
   did (Foundry's effective requests, Kilo / Cline sessions, the coordinator's
   verification and review records, git), redacted before it is stored, turned

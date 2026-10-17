@@ -2352,7 +2352,8 @@ async function tabWork() {
     const d = t.data || {};
     const note = d.blocker || d.awaiting || d.pause_reason || d.next_action || "";
     const finds = (t.state === "COMPLETE" ? [] : d.findings || []).slice(0, 3).map(f => `<div class="hint">• ${esc(f.slice(0, 200))}</div>`).join("");
-    return `<tr><td class="nw">${esc(t.project_id)}</td><td class="nw"><b>${esc(t.task_id)}</b></td>
+    const live = `/ui/control?project=${encodeURIComponent(t.project_id)}&task=${encodeURIComponent(t.task_id)}`;
+    return `<tr><td class="nw">${esc(t.project_id)}</td><td class="nw"><b>${esc(t.task_id)}</b> <a href="${esc(live)}" target="_blank" rel="noopener" title="Open the live view of this task in the control center (follows the coordinator's current session)">live view ↗</a></td>
       <td class="nw">${pill(t.state)}${d.stage === "after_close" ? ' <span class="hint">closed, awaiting approval</span>' : ""}</td>
       <td class="nw">${d.attempt ?? ""}${d.sessions ? ` <span class="hint">(${d.sessions} sessions)</span>` : ""}</td>
       <td class="nw">${sha(d.head_sha)}${d.reviewed_sha ? ` <span class="hint">reviewed</span> ${sha(d.reviewed_sha)}` : ""}</td>
@@ -2360,7 +2361,8 @@ async function tabWork() {
   }).join("");
   const sessions = w.sessions.map(s => {
     const u = s.usage || {};
-    return `<tr><td class="nw"><code title="${esc(s.session_id)}">${esc(s.session_id.slice(0, 18))}</code></td>
+    const sv = `/ui/control?project=${encodeURIComponent(s.project_id)}&task=${encodeURIComponent(s.task_id || "")}&session=${encodeURIComponent(s.session_id)}`;
+    return `<tr><td class="nw"><code title="${esc(s.session_id)}">${esc(s.session_id.slice(0, 18))}</code> <a href="${esc(sv)}" target="_blank" rel="noopener" title="Open this session's transcript in the control center">open ↗</a></td>
       <td class="nw">${esc(s.project_id)} / ${esc(s.task_id || "")}</td><td class="nw">${esc(s.role || "")}</td>
       <td class="nw">${esc(s.persona || "")}</td><td class="nw hint">${esc(s.run_id || "")}</td>
       <td class="nw">${u.calls ?? 0}${u.denied ? ` <span class="pill bad">${u.denied} denied</span>` : ""}${u.inflight ? ` <span class="pill warn">${u.inflight} running</span>` : ""}</td>
@@ -2373,6 +2375,8 @@ async function tabWork() {
     <td class="hint bw-wide" style="white-space:normal">${esc(Object.entries(e.detail || {}).filter(([k]) => k !== "results").map(([k, v]) => `${k}: ${typeof v === "object" ? JSON.stringify(v) : v}`).join(" · ").slice(0, 260))}</td></tr>`).join("");
   $("#main").innerHTML = `
     <h2>Work</h2>
+    <p><a class="act" href="/ui/control" target="_blank" rel="noopener" style="display:inline-block;padding:4px 10px;border:1px solid var(--accent);border-radius:4px;color:var(--accent);text-decoration:none">Open control center ↗</a>
+      <span class="hint">live transcripts, thinking, tools, helpers, alerts, replies and coordinator commands (operator key; this table stays as it is)</span></p>
     <p class="hint">Tasks a development coordinator runs (e.g. <code>python -m foundry_coordinator</code>) and the coding sessions it bound to them, with every model call Foundry measured for each session. Task states come from the coordinator; Foundry doesn't decide completion and can't see local file edits or Studio operations.</p>
     <div class="row"><label>project</label><select id="wk-proj"><option value="">all</option>${w.projects.map(p => `<option ${p === o.project ? "selected" : ""}>${esc(p)}</option>`).join("")}</select>
       <label>window</label><select id="wk-hours">${[6, 24, 72, 168, 720].map(h => `<option value="${h}" ${h == o.hours ? "selected" : ""}>${h < 24 ? h + " h" : h / 24 + " d"}</option>`).join("")}</select></div>
