@@ -60,6 +60,7 @@ class FakeKilo:
                     "robloxstudio-mcp": {"type": "local", "command": ["x"], "enabled": True}}}
         self.todos: dict[str, list] = {}
         self.on_prompt = None                    # callable(fake, session_id, text)
+        self.ignore_prompt_model = False
         self.server = None
         self.thread = None
 
@@ -214,7 +215,13 @@ class FakeKilo:
             if len(parts) == 3 and parts[0] == "session" and parts[2] == "prompt_async":
                 sid = parts[1]
                 text = "".join(p.get("text") or "" for p in (body or {}).get("parts") or [])
-                self.prompts.append({"session_id": sid, "text": text, "ts": time.time()})
+                model = ((body or {}).get("model") or {}).get("modelID") or ""
+                self.prompts.append({"session_id": sid, "text": text, "ts": time.time(),
+                                     "model": model})
+                # Kilo records the model each turn ran on; a fake that ignores the
+                # per-prompt model stands in for an installation that doesn't switch
+                if model and not self.ignore_prompt_model and sid in self.sessions:
+                    self.sessions[sid]["model"] = model
                 self.add_message(sid, "user", [{"type": "text", "text": text}],
                                  agent=(body or {}).get("agent"))
                 self.set_status(sid, "busy")

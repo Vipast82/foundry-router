@@ -53,6 +53,9 @@ class Coordinator:
         from .helpers import HelperManager
         # optional coding helpers (profile [helpers]); inert unless enabled
         self.helpers = HelperManager(self, clock=clock)
+        from .frontier import FrontierPhase
+        # optional frontier-primary phase (profile [frontier_primary]); off by default
+        self.frontier = FrontierPhase(self, clock=clock)
         for p in projects:
             store.register_project(p.id, p.profile.name, p.profile.path, p.profile.hash,
                                    p.profile.version, os.path.realpath(p.profile.workspace))
@@ -325,6 +328,8 @@ class Coordinator:
             self._bind(P, sid, tid, run_id, role, persona)
         if not res.get("prompt_ts"):
             ts = self.clock()
+            if role == "implementer":
+                self.frontier.on_new_session(P, tid)
             prompt, notes = self._with_operator_notes(P.id, tid, prompt, "")
             units = (self.helpers.proposals_for(P.id, tid)
                      if role == "implementer" and self.helpers.enabled(P) else [])
@@ -385,6 +390,8 @@ class Coordinator:
         blocked = status in ("BLOCKED", "NEEDS_HUMAN") and head == t["base_sha"]
         if self.helpers.enabled(P) and rep.get("helper_feedback"):
             self.helpers.record_feedback(P, self.store.task(pid, tid), rep)
+        if self.frontier.on_idle(P, self.store.task(pid, tid), rep):
+            return                       # a frontier phase started, continued or handed back
         if not blocked and self.helpers.enabled(P) and \
                 self._helper_handoff(P, self.store.task(pid, tid), rep):
             return                       # the primary continues, or waits for its helpers
@@ -531,6 +538,7 @@ class Coordinator:
         pid, tid = P.id, t["task_id"]
         cat = denial.get("category")
         retry = denial.get("retry_after")
+        self.frontier.on_refusal(P, tid, str(cat))
         self._release_session(P, t)
         if cat in ("config", "auth"):
             return self._block(P, t, f"Foundry refused the call ({cat}): {text[:300]}")
@@ -674,7 +682,7 @@ class Coordinator:
                 if any(matches_any(tag, [p]) for tag in spec.tags)]
         role = "deep_reviewer" if deep and "deep_reviewer" in P.profile.roles else "reviewer"
         persona = P.profile.persona(role)
-        authors = self.helpers.authors(pid, tid)
+        authors = self.helpers.authors(pid, tid) | self.frontier.authors(pid, tid)
         if persona in authors:
             # a persona that proposed code integrated here can't be its sole reviewer
             alt = next((r for r in ("deep_reviewer", "reviewer") if r in P.profile.roles
@@ -1210,13 +1218,14 @@ class Coordinator:
                 self.store.op_update(okey, "done", {"uncertain": True})
             return False
         ts = self.clock()
-        P.client.prompt(sid, text, directory=P.profile.workspace,
-                        persona=P.profile.persona("implementer"),
+        persona = self.frontier.persona(P, t)
+        # bind BEFORE the prompt: a frontier turn is gated as optional work
+        self._bind(P, sid, t["task_id"], t["run_id"], "implementer", persona,
+                   purpose=self.frontier.purpose(P, t))
+        P.client.prompt(sid, text, directory=P.profile.workspace, persona=persona,
                         agent=P.profile.client.get("agent") or "code")
-        self.store.op_update(okey, "done", {"prompt_ts": ts})
+        self.store.op_update(okey, "done", {"prompt_ts": ts, "persona": persona})
         self.store.update_session(sid, status="prompted", prompt_ts=ts, ended_ts=None)
-        self._bind(P, sid, t["task_id"], t["run_id"], "implementer",
-                   P.profile.persona("implementer"))
         return True
 
     def _deliver_proposals(self, P: Project, t: dict) -> bool:

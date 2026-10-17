@@ -222,6 +222,10 @@ def main(argv=None, clients=None, foundry=None) -> int:
     for name in ("history", "reviews"):
         x = sub.add_parser(name); x.add_argument("project"); x.add_argument("task")
     x = sub.add_parser("events"); x.add_argument("project", nargs="?", default="")
+    x = sub.add_parser("frontier", help="optional frontier-primary phase (default off)")
+    x.add_argument("action", choices=["request", "return", "status"])
+    x.add_argument("project"); x.add_argument("task")
+    x.add_argument("--reason", default=""); x.add_argument("--by", default="operator")
     a = ap.parse_args(argv)
     try:
         c = build(a, clients=clients, foundry=foundry)
@@ -343,6 +347,27 @@ def _dispatch(a, c: Coordinator) -> int:
                                                 "verdict", "valid", "error")}, default=str))
             if r["valid"]:
                 print(json.dumps(r["result"], indent=2)[:4000])
+        return 0
+    elif a.cmd == "frontier":
+        if a.action == "request":
+            if not a.reason:
+                print("error: --reason is required (why local reasoning is the bottleneck)",
+                      file=sys.stderr)
+                return 2
+            try:
+                ph = c.frontier.request(a.project, a.task, a.by, a.reason)
+            except ValueError as e:
+                print(f"refused: {e}", file=sys.stderr)
+                return 2
+            print(f"requested {ph['phase_id']}: starts at the primary's next idle safe point")
+        elif a.action == "return":
+            ph = c.frontier.request_return(a.project, a.task, a.by)
+            print("no live phase" if ph is None else f"{ph['phase_id']}: {ph['state']} "
+                                                    f"(an active phase returns at the next idle point)")
+        for ph in c.frontier.phases(a.project, a.task):
+            print(json.dumps({k: ph[k] for k in ("phase_id", "state", "persona", "turns",
+                                                 "verified_model", "head", "end_reason")},
+                             default=str))
         return 0
     elif a.cmd == "events":
         for e in reversed(s.events(a.project or None, 60)):
