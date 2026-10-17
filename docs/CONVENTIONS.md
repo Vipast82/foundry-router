@@ -10,6 +10,16 @@ Every user-visible change bumps `__version__` in `foundry_router/__init__.py`
 (patch for fixes, minor for features). The UI header and `/api/version` read
 it, so a deployment's behavior is always attributable to an exact version.
 
+## Version tag per version
+
+Every version that lands on `main` gets an annotated tag `vX.Y.Z` on the
+commit that set it, pushed with it (`git tag -a vX.Y.Z -m "Foundry Router
+vX.Y.Z"`, then `git push origin vX.Y.Z`). Tags make each version selectable
+in git and GitHub (`git checkout v0.115.0`, `git diff v0.114.1 v0.115.0`).
+Versions v0.1.0–v0.115.0 were back-filled on 2026-10-17. v0.98.0 points at
+147c098; a parallel CLIProxyAPI-branch commit (5d93d36) also called itself
+0.98.0 and was merged back in v0.101.0.
+
 ## `main` / `cline` branch parity
 
 `main` and `cline` track the same history. After landing work on `main`, push
