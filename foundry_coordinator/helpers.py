@@ -218,18 +218,37 @@ class HelperManager:
         if ls["enabled"]:
             self.lanes.ingest(P, t, spec, ls)
             t = self.store.task(P.id, t["task_id"]) or t
+            if not self.lanes.paused(P.id):
+                self.lanes.plan(P, t, spec, ls)
         for u in self.units(P.id, t["task_id"], "running"):
             self._poll(P, u, h)
-        running = len(self.units(P.id, t["task_id"], "running"))
+        running = self.units(P.id, t["task_id"], "running")
         now = self.clock()
-        for u in [*self.units(P.id, t["task_id"], "pending"),
-                  *self.units(P.id, t["task_id"], "deferred")]:
-            if running >= int(h["max_running"]):
+        waiting = [*self.units(P.id, t["task_id"], "pending"),
+                   *self.units(P.id, t["task_id"], "deferred")]
+        # dependency-aware priority queue (lanes.py); ordinary units keep
+        # their arrival order at the default priority, so with lanes off the
+        # order is exactly the v0.117 order
+        for u in self.lanes.order(P, waiting, ls, now):
+            if len(running) >= int(h["max_running"]):
                 break
             if (u["next_check"] or 0) > now:
                 continue
+            if u.get("lane"):
+                why = self.lanes.hold_reason(P, t, u, ls, running)
+                if why:
+                    if why.startswith("skip:"):
+                        self._skip(P, u, why[5:])
+                    continue
             if self._dispatch(P, t, spec, u, h):
-                running += 1
+                running = self.units(P.id, t["task_id"], "running")
+
+    def _skip(self, P, u: dict, why: str, feedback: str = "") -> None:
+        self.store.x("UPDATE helper_units SET status='skipped', reason=?, feedback=COALESCE(NULLIF(?,''),"
+                     " feedback), updated_ts=? WHERE unit_id=?", (why[:900], feedback, self.clock(),
+                                                                  u["unit_id"]))
+        self.store.event(P.id, u["task_id"], "helper_skipped", detail={"unit": u["unit_id"],
+                                                                       "reason": why[:300]})
 
     def _order(self, P, u: dict, h: dict) -> list[str]:
         order = list(h["order"]) or list(h["personas"])
@@ -240,8 +259,9 @@ class HelperManager:
         pid, tid = P.id, t["task_id"]
         reasons, nexts = [], []
         open_ended = False          # a backend that could clear at any time (UNKNOWN, error)
-        for backend in self._order(P, u, h):
-            persona = h["personas"][backend]
+        cands = (self.lanes.candidates(P, u, h) if u.get("lane") else
+                 [(b, h["personas"][b]) for b in self._order(P, u, h)])
+        for backend, persona in cands:
             try:
                 adm = P.foundry.helper_admission(persona)
             except FoundryError as e:
@@ -259,6 +279,14 @@ class HelperManager:
                 else:
                     open_ended = True
                 continue
+            if u.get("lane"):
+                why = self.lanes.admission_problem(P, u, adm)
+                if why:
+                    reasons.append(f"{backend}: {why}")
+                    open_ended = True
+                    continue
+                if u.get("mode") == "direct":
+                    return self.lanes.start_direct(P, t, spec, u, h, backend, persona, adm)
             return self._start(P, t, spec, u, h, backend, persona)
         if not reasons:
             reasons.append("no helper persona configured for any allowed backend "
@@ -306,7 +334,12 @@ class HelperManager:
                                purpose=u["kind"], worker_client=h["worker_client"],
                                assignment={"unit": u["unit_id"],
                                            "responsibility": u["responsibility"],
-                                           "files": u["files"], "kind": u["kind"]})
+                                           "files": u["files"], "kind": u["kind"],
+                                           **({"lane": u["lane"], "depth": u.get("depth") or 0,
+                                               "parent_unit": u.get("parent_unit") or "",
+                                               "snapshot": u.get("snapshot_id") or "",
+                                               "artifact": u.get("artifact_id") or ""}
+                                              if u.get("lane") else {})})
             except FoundryError as e:
                 # without its binding the session's calls wouldn't be gated: don't run it
                 P.client.abort(sid, directory=directory)
@@ -321,14 +354,14 @@ class HelperManager:
             res["bound"] = True
             self.store.op_update(key, "bound", res)
         if not res.get("prompted"):
-            P.client.prompt(sid, self.prompt(spec, u), directory=directory, persona=persona,
-                            agent=h["agent"])
+            text = self.lanes.prompt(P, spec, u) if u.get("lane") else self.prompt(spec, u)
+            P.client.prompt(sid, text, directory=directory, persona=persona, agent=h["agent"])
             self.store.op_update(key, "done", {**res, "prompted": True})
         now = self.clock()
         self.store.x("UPDATE helper_units SET status='running', persona=?, backend=?, "
                      "session_id=?, parent_session=?, attempts=attempts+1, reason=?, "
-                     "next_eligible=NULL, updated_ts=? WHERE unit_id=?",
-                     (persona, backend, sid, t["session_id"], f"admitted on {backend}", now,
+                     "next_eligible=NULL, updated_ts=?, started_ts=? WHERE unit_id=?",
+                     (persona, backend, sid, t["session_id"], f"admitted on {backend}", now, now,
                       u["unit_id"]))
         self.store.event(pid, tid, "helper_started", session_id=sid,
                          detail={"unit": u["unit_id"], "kind": u["kind"], "persona": persona,
@@ -350,6 +383,8 @@ class HelperManager:
                   "verify it.")
 
     def _poll(self, P, u: dict, h: dict) -> None:
+        if u.get("mode") == "direct":
+            return self.lanes.poll_direct(P, u, h)
         directory = P.profile.workspace
         sid = u["session_id"]
         now = self.clock()
@@ -371,13 +406,18 @@ class HelperManager:
             return
         text = (st.final_text or "").strip()
         self._finish(P, u, "done" if text else "failed",
-                     "proposal returned" if text else "no proposal text", text)
+                     "proposal returned" if text else "no proposal text", text,
+                     tokens=st.tokens)
 
-    def _finish(self, P, u: dict, status: str, reason: str, text: Optional[str]) -> None:
+    def _finish(self, P, u: dict, status: str, reason: str, text: Optional[str],
+                tokens: Optional[dict] = None, meta: Optional[dict] = None) -> None:
         cap = int(self.settings(P)["max_result_chars"])
-        self.store.x("UPDATE helper_units SET status=?, reason=?, result=?, updated_ts=? "
-                     "WHERE unit_id=?", (status, reason, (text or "")[:cap] or None, self.clock(),
-                                         u["unit_id"]))
+        if u.get("lane"):
+            status, reason = self.lanes.on_finish(P, u, status, reason, text, tokens, meta or {})
+        self.store.x("UPDATE helper_units SET status=?, reason=?, result=?, updated_ts=?, "
+                     "finished_ts=? WHERE unit_id=?",
+                     (status, reason, (text or "")[:cap] or None, self.clock(), self.clock(),
+                      u["unit_id"]))
         self.store.update_session(u["session_id"], status="ended", outcome=status,
                                   ended_ts=self.clock())
         if P.foundry is not None:
@@ -395,10 +435,15 @@ class HelperManager:
         unit has no result, so it's never delivered and never an author."""
         out = []
         for u in self.units(P.id, tid, "running"):
-            try:
-                P.client.abort(u["session_id"], directory=P.profile.workspace)
-            except Exception:                                    # noqa: BLE001
-                pass
+            if u.get("mode") == "direct":
+                # one HTTP call already in flight can't be recalled; its result
+                # (if it comes) is discarded, and the quota it used is spent
+                self.lanes.forget_direct(u["unit_id"])
+            else:
+                try:
+                    P.client.abort(u["session_id"], directory=P.profile.workspace)
+                except Exception:                                # noqa: BLE001
+                    pass
             self._finish(P, u, status, reason, None)
             out.append(u["unit_id"])
         return out
@@ -433,22 +478,97 @@ class HelperManager:
                 "skipped, so don't wait for one to make progress. Don't start au-helper through "
                 "your task tool, and don't ask helpers to review or approve your work.\n")
 
-    def proposals_for(self, pid: str, tid: str) -> list[dict]:
-        return [u for u in self.units(pid, tid, "done") if not u["delivered_session"]]
+    def proposals_for(self, pid: str, tid: str, session_id: str = "") -> list[dict]:
+        """Results the primary hasn't seen. Ordinary units: as in v0.117.
+        Lane units: only actionable, current, same-run results within the
+        delivery budget (lanes.deliverable); the rest stay visible in the
+        control center but never interrupt the primary."""
+        units = [u for u in self.units(pid, tid, "done") if not u["delivered_session"]]
+        plain = [u for u in units if not u.get("lane")]
+        lane = [u for u in units if u.get("lane")]
+        return plain + (self.lanes.deliverable(pid, tid, lane, session_id) if lane else [])
 
     def integration_prompt(self, units: list[dict]) -> str:
-        body = "\n\n".join(f"### {u['unit_id']} — {u['kind']}: {u['responsibility']} "
-                           f"(by {u['persona']})\n{u['result']}" for u in units)
-        return ("## Helper proposals (advisory)\nRead-only helpers returned these proposals for "
-                "independent parts of this task. You decide what to integrate: apply only what "
-                "fits the approved scope, run the meaningful tests, and commit as usual. Don't "
-                "treat a proposal as verified. Mention which unit ids you integrated or "
-                "rejected in your report.\n\n" + body + "\n")
+        plain = [u for u in units if not u.get("lane")]
+        lane = [u for u in units if u.get("lane")]
+        out = ""
+        if plain:
+            body = "\n\n".join(f"### {u['unit_id']} — {u['kind']}: {u['responsibility']} "
+                               f"(by {u['persona']})\n{u['result']}" for u in plain)
+            out = ("## Helper proposals (advisory)\nRead-only helpers returned these proposals for "
+                   "independent parts of this task. You decide what to integrate: apply only what "
+                   "fits the approved scope, run the meaningful tests, and commit as usual. Don't "
+                   "treat a proposal as verified. Mention which unit ids you integrated or "
+                   "rejected in your report.\n\n" + body + "\n")
+        if lane:
+            out += ("\n" if out else "") + self.lanes.cards(lane)
+        return out
 
     def mark_delivered(self, units: list[dict], session_id: str) -> None:
         for u in units:
             self.store.x("UPDATE helper_units SET status='delivered', delivered_session=?, "
-                         "updated_ts=? WHERE unit_id=?", (session_id, self.clock(), u["unit_id"]))
+                         "updated_ts=?, delivered_ts=?, feedback=CASE WHEN lane IS NULL THEN "
+                         "feedback ELSE 'delivered' END WHERE unit_id=?",
+                         (session_id, self.clock(), self.clock(), u["unit_id"]))
+        self.lanes.note_delivery(units, session_id)
+
+    def holding(self, pid: str, tid: str) -> list[dict]:
+        """Running units an idle primary waits for (bounded by
+        handoff_wait_minutes): ordinary units, and lanes whose result is
+        likely to change what the primary does next. Advisory lanes (visual,
+        research, preflight, handoff, evidence) never hold the primary."""
+        return [u for u in self.units(pid, tid, "running")
+                if not u.get("lane") or u["lane"] in ("failure_triage", "incremental_review",
+                                                      "proposer", "test_design")]
+
+    def record_feedback(self, P, t: dict, report: dict) -> list[str]:
+        """The primary's own account of what it did with delivered lane results
+        (report `helper_feedback`). Recorded as the primary's claim; it is not
+        evidence that a fix works (the gate, review and Victor decide that)."""
+        out = []
+        for f in (report or {}).get("helper_feedback") or []:
+            if not isinstance(f, dict):
+                continue
+            uid = str(f.get("unit") or "")
+            st = str(f.get("status") or "").lower()
+            if st not in ("integrated", "rejected", "deferred"):
+                continue
+            u = self.store.q("SELECT * FROM helper_units WHERE unit_id=? AND project_id=? AND "
+                             "task_id=? AND lane IS NOT NULL AND status='delivered'",
+                             (uid, P.id, t["task_id"]))
+            if not u:
+                continue
+            note = str(f.get("note") or f.get("reason") or "")[:500]
+            self.store.x("UPDATE helper_units SET feedback=?, feedback_detail=?, updated_ts=? "
+                         "WHERE unit_id=?", (st, json.dumps({"note": note, "claimed_by": "primary",
+                                                             "session": t["session_id"],
+                                                             "head": self._head(P)}),
+                                             self.clock(), uid))
+            self.store.event(P.id, t["task_id"], "helper_feedback", session_id=t["session_id"],
+                             detail={"unit": uid, "status": st, "note": note[:200]})
+            out.append(uid)
+        return out
+
+    @staticmethod
+    def _head(P) -> str:
+        try:
+            return P.ws.head()
+        except Exception:                                        # noqa: BLE001
+            return ""
+
+    def expire_lane_results(self, P, tid: str, reason: str) -> list[str]:
+        """Leaving IMPLEMENTING: undelivered lane results are never delivered
+        after verification or review (shown as expired)."""
+        out = []
+        for u in self.store.q("SELECT unit_id FROM helper_units WHERE project_id=? AND task_id=? "
+                              "AND lane IS NOT NULL AND status='done' AND delivered_session IS NULL "
+                              "AND COALESCE(feedback,'waiting') = 'waiting'",
+                              (P.id, tid)):
+            self.store.x("UPDATE helper_units SET feedback='expired', feedback_detail=?, "
+                         "updated_ts=? WHERE unit_id=?",
+                         (json.dumps({"note": reason}), self.clock(), u["unit_id"]))
+            out.append(u["unit_id"])
+        return out
 
     def authors(self, pid: str, tid: str) -> set[str]:
         """Personas whose proposals reached the primary (possible code authors)."""

@@ -106,6 +106,10 @@ def capture_output(path: str, data: bytes, w: int, h: int, valid: bool = True) -
                                        f"capture is never evidence)"])
 
 
+class Crash(BaseException):
+    """A coordinator process dying mid-tick (not caught like an Exception)."""
+
+
 class LaneFoundry(FakeFoundry):
     """Fake Foundry: admission per persona (with per-route modality), binding
     log, a recording chat endpoint whose answer is set per test."""
@@ -121,6 +125,9 @@ class LaneFoundry(FakeFoundry):
 
     def bind(self, session_id, project_id, task_id, run_id, role, persona, parent="", meta=None,
              purpose="", worker_client="", assignment=None):
+        if getattr(self, "crash_bind", None) and self.crash_bind(purpose):
+            self.crash_bind = None
+            raise Crash("coordinator died before binding")
         if purpose in self.refuse_purposes:
             from foundry_coordinator.adapters.foundry import FoundryError
             raise FoundryError(f"purpose must be one of ... ({purpose} unknown)")

@@ -375,6 +375,8 @@ class Coordinator:
         data = self.store.merge_data(pid, tid, last_report=rep or None)
         status = str(rep.get("status") or "").upper()
         blocked = status in ("BLOCKED", "NEEDS_HUMAN") and head == t["base_sha"]
+        if self.helpers.enabled(P) and rep.get("helper_feedback"):
+            self.helpers.record_feedback(P, self.store.task(pid, tid), rep)
         if not blocked and self.helpers.enabled(P) and \
                 self._helper_handoff(P, self.store.task(pid, tid), rep):
             return                       # the primary continues, or waits for its helpers
@@ -382,6 +384,8 @@ class Coordinator:
             self.helpers.abort_running(P, tid, "cancelled", "the primary finished first")
             self.helpers.skip_waiting(P, tid, "the primary finished before this unit was "
                                               "admitted")
+            self.helpers.expire_lane_results(P, tid, "the primary finished; lane results are "
+                                                     "never delivered after verification starts")
         data = self.store.merge_data(pid, tid, helper_wait_since=None)
         if blocked:
             self.store.release(pid, tid)
@@ -1139,7 +1143,7 @@ class Coordinator:
         if self._deliver_proposals(P, t):
             self.store.merge_data(pid, tid, helper_wait_since=None, helper_asked=None)
             return True
-        running = self.helpers.units(pid, tid, "running")
+        running = self.helpers.holding(pid, tid)
         if running:
             now = self.clock()
             since = (t.get("data") or {}).get("helper_wait_since")
@@ -1208,7 +1212,8 @@ class Coordinator:
         same idle session and keep implementing. Each proposal is delivered
         once; a unit counts as delivered (a possible author) even when a
         restart left the delivery uncertain."""
-        units = self.helpers.proposals_for(P.id, t["task_id"]) if self.helpers.enabled(P) else []
+        units = (self.helpers.proposals_for(P.id, t["task_id"], t["session_id"])
+                 if self.helpers.enabled(P) else [])
         if not units:
             return False
         sid = t["session_id"]
