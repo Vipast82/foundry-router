@@ -2511,7 +2511,7 @@ async function tabClients() {
     const s = c.seen || {}, u = c.usage || {};
     return `<tr><td class="nw"><b>${esc(c.name)}</b>${c.name === d.you ? ' <span class="hint">(this browser)</span>' : ""}<div class="hint">${esc(c.note || "")}</div></td>
       <td class="nw">${c.scopes.map(x => pill(x, x === "admin" ? "warn" : "")).join(" ")}</td>
-      <td class="hint" style="white-space:normal">${c.personas.length ? esc(c.personas.join(", ")) : "all"}</td>
+      <td class="hint" style="white-space:normal">${c.personas.length ? esc(c.personas.join(", ")) : "all"}${(c.role_gaps || []).map(g => `<div><span class="pill warn" title="${esc(g.message)}">missing ${esc(g.persona)} (${esc(g.role)})</span></div>`).join("")}</td>
       <td class="nw"><code>${esc(c.key_hint || (c.key_kind === "config" ? "••••" : "no key"))}</code><div class="hint">${c.key_kind === "managed" ? "made here" + (c.created ? " " + esc(c.created.slice(0, 10)) : "") : c.key_kind === "config" ? "in config.yaml" : ""}</div></td>
       <td class="nw">${u.calls_24h || 0}</td>
       <td class="hint" style="white-space:normal">${s.last_ts ? `${when(s.last_ts)} · ${esc(s.addr || "")}<div>${esc((s.agent || "").slice(0, 60))}</div>` : (u.last_logged ? esc(_tsText(u.last_logged)) : "not since restart")}</td>
@@ -2546,9 +2546,10 @@ async function tabClients() {
       <div class="row"><label title="The client's identifier in logs, budgets (match: client) and the Work view. Letters, digits, . _ : -">name</label><input id="nc-name" value="${esc(o.preset === "custom" ? "" : o.preset)}" placeholder="e.g. cline-laptop">
         <label>note</label><input id="nc-note" value="${esc(ps.note || "")}" style="min-width:260px"></div>
       <div class="row"><label>scopes</label>${d.scopes.map(s => `<label style="min-width:0"><input type="checkbox" class="nc-scope" value="${s}" ${(ps.scopes || []).includes(s) ? "checked" : ""}> ${s}</label>`).join(" ")}</div>
-      <div class="row"><label title="Leave empty for all personas. Otherwise only these are listed and usable for this client.">only personas</label><input id="nc-personas" data-multi="csv" data-options="personas" data-free="0" placeholder="all personas (pick to restrict)">
+      <div class="row"><label title="Leave empty for all personas. Otherwise only these are listed and usable for this client.">only personas</label><input id="nc-personas" data-multi="csv" data-options="personas" data-free="0" placeholder="all personas (pick to restrict)" value="${esc((ps.personas || []).join(", "))}">
         <button class="act primary" id="nc-create">Create client and key</button></div>
-      <p class="hint">Scopes: <b>inference</b> chat/models · <b>media</b> image jobs · <b>orchestration</b> coordinator bindings and training capture · <b>admin</b> this web UI's API.</p></div>
+      ${ps.roles ? `<p class="hint">Persona allowlist by coordinator role: ${Object.entries(ps.roles).map(([r, n]) => `<b>${esc(r)}</b> → <code>${esc(n)}</code>`).join(" · ")}. ${esc(ps.roles_note || "")} Legacy aliases (Foundry-Kilo-Sonnet, -Opus…) don't authorize these ids.</p>` : ""}
+      <p class="hint">Scopes: <b>inference</b> chat/models · <b>media</b> image jobs · <b>orchestration</b> coordinator bindings, training capture and control-center actions · <b>telemetry</b> the workstation bridge · <b>operator</b> a person using the control center · <b>admin</b> this web UI's API.</p></div>
     <div class="card"><h3>Keys that matched no client</h3>
       <p class="hint">A program sending a key Foundry doesn't know (since restart; only a fingerprint is kept, never the key). Usually a placeholder or an old key in that program's API-key field: make a client above and paste its key there.</p>
       ${rej ? `<div class="tscroll"><table><tr><th>fingerprint</th><th>looks like</th><th>requests</th><th>result</th><th>last path</th><th>from</th><th>last</th></tr>${rej}</table></div><div class="row"><button class="act" id="rej-clear">Clear list</button></div>` : '<p class="hint">None.</p>'}</div>`;
@@ -3629,9 +3630,15 @@ window.applyProfile = async id => {
 window.showKiloConfig = async () => {
   const el = $("#kilo-config");
   if (el.style.display !== "none") { el.style.display = "none"; return; }
-  const r = await api("personas/kilo-config?base_url=" + encodeURIComponent(location.origin));
+  const r = await api("personas/kilo-config?explain=1&base_url=" + encodeURIComponent(location.origin));
+  const notes = Object.entries(r.limits || {}).map(([n, l]) =>
+    `//   ${n}: context ${l.context ?? "unset"} (${l.context_source}), output ${l.output ?? "unset"}`
+    + (l.unknown_windows.length ? `; window unknown for ${l.unknown_windows.join(", ")}` : "")
+    + (l.unreachable_pins.length ? `; NOT REACHABLE now: ${l.unreachable_pins.join(", ")} (strict routing refuses)` : "")
+    + `; ${l.validation}`).join("\n");
   el.textContent = "// kilo.jsonc: merge into \"provider\" (set FOUNDRY_KEY_KILO to Kilo's Foundry client key)\n"
-    + JSON.stringify(r, null, 2);
+    + "// Limits: " + (r.policy || "") + "\n" + notes + "\n"
+    + JSON.stringify(r.config, null, 2);
   el.style.display = "block";
 };
 

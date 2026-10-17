@@ -418,9 +418,12 @@ def persona_meta(svc, persona: dict) -> dict:
     """What a client should assume about a persona: the context window it can
     really use, the output cap, and what it accepts.
 
-    Strict personas report the EFFECTIVE limits of the one model they use: the
-    lowest of the persona's context_window and the model's (backend-reported)
-    window, and the persona's max output capped by that. Flexible personas
+    Strict personas report the EFFECTIVE limits of their route: the lowest of
+    the persona's context_window and the known window of EVERY model in its
+    ordered chain (a fallback pin can serve any request, so the client must
+    fit the smallest), and the persona's max output capped by that. A model
+    with no known window doesn't lower it; `limit_sources` says which value
+    set the cap and which pins are unknown or unreachable. Flexible personas
     keep the existing behaviour (the persona override, else the largest
     routable window), since they can be served by different models."""
     strict = is_strict(persona)
@@ -439,9 +442,9 @@ def persona_meta(svc, persona: dict) -> dict:
             return None
 
     model_meta = (svc.registry.get(served) or {}) if served else {}
+    sources: dict = {}
     if strict:
-        ctx = min([v for v in (_int(persona.get("context_window")),
-                               _int(model_meta.get("context_length"))) if v] or [None])
+        ctx, sources = strict_context(svc, persona, _int)
     else:
         ctx = _persona_context_length(svc, persona)
     out = _int(persona.get("max_output_tokens"))
@@ -469,7 +472,35 @@ def persona_meta(svc, persona: dict) -> dict:
             "input_modalities": ["text", "image"] if "vision" in caps else ["text"],
             "strict": strict, "served_model": served,
             "backend": (persona.get("backend") or None),
-            "validation": validation.get("status")}
+            "validation": validation.get("status"), "limit_sources": sources}
+
+
+def strict_chain(persona) -> list[str]:
+    """A strict persona's whole ordered chain (pins that are allowlisted, then
+    the rest of the allowlist), reachable or not."""
+    allow = [str(a) for a in _jl_list((persona or {}).get("model_allowlist"))]
+    pins = [str(p) for p in _jl_list((persona or {}).get("pinned_models"))]
+    return [p for p in pins if p in allow] + [a for a in allow if a not in pins]
+
+
+def strict_context(svc, persona, _int) -> tuple:
+    """(effective context, sources) for a strict persona: min of the
+    declaration and every chain model's known window."""
+    declared = _int(persona.get("context_window"))
+    windows = []
+    unknown = []
+    for m in strict_chain(persona):
+        meta = svc.registry.get(m) or {}
+        w = _int(meta.get("context_length"))
+        (windows.append((w, m)) if w else unknown.append(m))
+    cands = ([(declared, "persona declaration")] if declared else []) +         [(w, f"model window of {m} (registry)") for w, m in windows]
+    ctx, by = min(cands, key=lambda c: (c[0], c[1] != "persona declaration")) if cands         else (None, "none known")
+    reachable = set(strict_candidates(svc, persona))
+    return ctx, {"context": by, "declared": declared,
+                 "model_windows": {m: w for w, m in windows}, "unknown_windows": unknown,
+                 "unreachable_pins": [m for m in strict_chain(persona) if m not in reachable
+                                      and not any(str(r).split(":")[0] == m.split(":")[0]
+                                                  for r in reachable)]}
 
 
 def openai_model_entry(svc, persona: dict, created: int) -> dict:

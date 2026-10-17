@@ -107,7 +107,10 @@ def fleet(app, client):
 
 
 def _rows(svc):
-    return {p["virtual_name"]: p for p in svc.personas.list() if p["virtual_name"].startswith("Foundry-Kilo")}
+    """The profile's personas (Foundry-Kilo-Review is a Foundry default seed, not
+    part of this profile)."""
+    names = {d["virtual_name"] for d in profiles.PROFILES[KILO]["personas"]}
+    return {p["virtual_name"]: p for p in svc.personas.list() if p["virtual_name"] in names}
 
 
 # -- profile --------------------------------------------------------------------

@@ -7,6 +7,7 @@ each one's inference route and limits.
 | Persona | Backend / model | Starts |
 |---|---|---|
 | `Foundry-Kilo-Local` | local Strata / `qwen3.8-flash-next-iq3_s` | **enabled** |
+| `Foundry-Kilo-Review` | `claude-sonnet-5-5`, then `gpt-6.1-sol` (automatic backend) | **enabled**, not validated — a Foundry default, not part of this profile (below) |
 | `Foundry-Kilo-Haiku` / `-Sonnet` / `-Opus` | Meridian / `claude-haiku-5-5`, `claude-sonnet-5-5`, `claude-opus-5-5` | disabled |
 | `Foundry-Kilo-Luna` / `-Sol` / `-Astra` | CLIProxyAPI / `gpt-6-luna`, `gpt-6.1-sol`, `gpt-6-astra` | disabled |
 | `Foundry-Kilo-Vision` | Meridian / Sonnet 5.5, image input | disabled |
@@ -15,6 +16,17 @@ each one's inference route and limits.
 
 To run sprints one after another (each in a fresh Kilo session, verified and
 reviewed before the next), see docs/COORDINATOR.md.
+
+**Canonical role ids.** The coordinator names personas by role: `reviewer` →
+`Foundry-Kilo-Review`, `deep_reviewer` → `Foundry-Kilo-Deep-Review`,
+`visual_reviewer` → `Foundry-Kilo-Visual-Review`, `planner` →
+`Foundry-Kilo-Planner`, `researcher` → `Foundry-Kilo-Research`, `implementer`
+→ `Foundry-Kilo-Local`. The single-model personas in the table (Haiku, Sonnet,
+Opus, Luna, Sol, Astra) are legacy aliases: valid personas, but not
+interchangeable with the role ids in client allowlists. `Foundry-Kilo-Review`
+is seeded by Foundry itself (seed v11): a fresh database gets it complete;
+an upgrade adds it only if no persona of that name exists, and never changes
+an existing one.
 
 All of them use **strict routing** (`routing: strict`, `execution_mode:
 direct`, `fallback_policy: refuse`).
@@ -95,6 +107,23 @@ On the Default personas card, **Kilo provider config** prints a block for
                                     "tool_call": true, "attachment": false, ...}}}}}
 ```
 
+Model names in the block show the role (`Foundry-Kilo-Review (normal
+reviewer)`) or `(legacy alias, not a coordinator role)`.
+
+**Limit policy.** For a strict persona, `limit.context` is the smallest of the
+persona's declared `context_window` and the known window of *every* model in
+its ordered chain (a fallback pin can serve any request, so Kilo must fit the
+smallest); `limit.output` is the persona's `max_output_tokens` capped by that.
+A model whose window Foundry doesn't know doesn't lower it. The card prints,
+above the block as `//` comments, where each number came from (declaration or
+which model's registry window), unknown windows, pins that aren't reachable
+right now, and validation status (`GET .../kilo-config?explain=1`; the plain
+endpoint returns only the mergeable block, since Kilo rejects unknown keys).
+Changing a persona doesn't update a `kilo.jsonc` you already saved:
+regenerate and merge it. This is why a helper could show 32,768 in Kilo while
+its persona declared 200,000: a model window or an older saved file set the
+smaller number, and the explanation now says which.
+
 Give Kilo its own client key (docs/CLIENTS.md), optionally restricted to the
 Kilo personas with `personas: [Foundry-Kilo-Local, ...]`. If the shape differs
 from what your Kilo version expects, match it to your existing provider entry;
@@ -124,6 +153,7 @@ a frontier persona spends about five subscription calls; the UI asks first.
 
 Suggested rollout (spec §15):
 1. Install the profile; validate `Foundry-Kilo-Local`.
-2. Validate one helper (e.g. `Foundry-Kilo-Sonnet`), then enable it.
+2. Validate `Foundry-Kilo-Review` (the coordinator's normal reviewer; it is
+   enabled by default but unvalidated), then each helper role before enabling it.
 3. Validate the vision and image personas with real screenshots and assets
    before enabling them.

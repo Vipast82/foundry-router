@@ -203,6 +203,46 @@ FINETUNE_PERSONA_DEFAULTS = {
 }
 
 
+# The coordinator's canonical normal reviewer (roles.reviewer in the
+# AnimalUprising profile; see kilo_roles.py). Inserted whole, once, by
+# _seed_kilo_review: the base STARTER_PERSONAS insert can't carry routing,
+# pins, limits or capabilities, and filling a half-made row later couldn't
+# tell it apart from a persona someone created by hand. No validation result
+# is written: creating a persona isn't validating it (Personas -> validate).
+KILO_REVIEW_SEED_TAG = "foundry-default:kilo-review@1"
+KILO_REVIEW_PERSONA = {
+    "virtual_name": "Foundry-Kilo-Review",
+    "description": "Normal reviewer for the development coordinator (roles.reviewer) and "
+                   "Kilo's au-review helper: exact-commit review and findings, never edits. "
+                   "Strict route: claude-sonnet-5-5, then gpt-6.1-sol; refuses otherwise.",
+    "benchmark_category": "coding",
+    "local_bias_strength": "prefer_paid",
+    "escalation_triggers": json.dumps([]),
+    "preferred_mcp_tools": json.dumps([]),
+    "guardrail_overrides": json.dumps({}),
+    "execution_mode": "direct",
+    "pipeline_check_enabled": 0,
+    "routing": "strict",
+    "backend": None,                                   # automatic: whichever backend serves the pin
+    "pinned_models": json.dumps(["claude-sonnet-5-5", "gpt-6.1-sol"]),   # ordered fallback chain
+    "model_allowlist": json.dumps(["claude-sonnet-5-5", "gpt-6.1-sol"]),  # nothing else, ever
+    "fallback_policy": "refuse",                       # no silent local fallback
+    "reasoning_effort": "medium",
+    "context_window": 200000,
+    "max_output_tokens": 4096,
+    "capabilities": json.dumps(["text", "tools"]),    # no image_input until a real image test
+    "kind": "chat",
+    "client_compat": json.dumps({
+        "foundry_coordinator": "Direct exact-commit review: one non-streaming chat completion "
+            "with response_format json_schema, x-session-id bound to the task's run. The "
+            "coordinator key must list Foundry-Kilo-Review itself; legacy aliases such as "
+            "Foundry-Kilo-Sonnet don't authorize it.",
+        "Kilo": "au-review helper agent, model foundry/Foundry-Kilo-Review. Read-only: returns "
+            "findings, never edits.",
+    }),
+    "enabled": 1,
+}
+
 # Turn-assist defaults seeded onto claude-cline-act (see _seed_cline_assist).
 CLINE_ACT_ASSIST = {
     # sticky: the persona's own level (constant, cache friendly) until the model is
@@ -578,6 +618,32 @@ class Database:
         self._seed_finetune_defaults()
         self._seed_cline_assist()
         self._seed_cline_sticky()
+        self._seed_kilo_review()
+
+    def _seed_kilo_review(self) -> None:
+        """v11: add the canonical Foundry-Kilo-Review persona, complete, once.
+        INSERT OR IGNORE: an existing persona of that name (edited, disabled,
+        other pins or backend) is left exactly as it is, and nothing else is
+        renamed, deleted or re-authorized. Runs once, so a persona the operator
+        later deletes isn't re-created."""
+        if self.kv_get("persona_seed_v11_kilo_review"):
+            return
+        now = utcnow()
+        row = dict(KILO_REVIEW_PERSONA, profile=KILO_REVIEW_SEED_TAG, created_at=now,
+                   updated_at=now)
+        cols = list(row)
+        with self._lock:
+            cur = self._conn.execute(
+                f"INSERT OR IGNORE INTO personas ({','.join(cols)}) "
+                f"VALUES ({','.join('?' * len(cols))})", [row[c] for c in cols])
+            added = cur.rowcount == 1
+            self._conn.commit()
+        self.kv_set("persona_seed_v11_kilo_review", now)
+        self.log_event("info", "main",
+                       "persona seed v11: " + ("added Foundry-Kilo-Review (strict: claude-sonnet-5-5 "
+                                               "then gpt-6.1-sol, refuse; not validated yet)"
+                                               if added else "Foundry-Kilo-Review already exists; "
+                                               "left unchanged"))
 
     def _seed_cline_assist(self) -> None:
         """Turn assist for the Cline pair (v9), once, only where unset:

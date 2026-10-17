@@ -1764,6 +1764,7 @@ async def kilo_provider_config(request: Request):
     sizes compaction from these, not from /v1/models). Disabled personas are
     included, marked, so the block doesn't change when you enable one."""
     from ..facade.ollama_api import persona_meta
+    from ..kilo_roles import display_name
     svc = _svc(request)
     cfg = svc.config_store.config
     base = request.query_params.get("base_url") or (
@@ -1771,11 +1772,13 @@ async def kilo_provider_config(request: Request):
         f":{cfg.server.port}")
     prefix = request.query_params.get("prefix", "Foundry-Kilo")
     models = {}
+    explain = {}
     for p in svc.personas.list():
         if (p.get("kind") or "chat") == "media" or not p["virtual_name"].startswith(prefix):
             continue
         m = persona_meta(svc, p)
-        entry = {"name": p["virtual_name"] + ("" if p.get("enabled") else " (disabled in Foundry)"),
+        entry = {"name": display_name(p["virtual_name"])
+                 + ("" if p.get("enabled") else " (disabled in Foundry)"),
                  "tool_call": "tools" in m["capabilities"],
                  "attachment": "vision" in m["capabilities"],
                  "reasoning": bool(p.get("reasoning_effort")),
@@ -1785,7 +1788,17 @@ async def kilo_provider_config(request: Request):
         if limit:
             entry["limit"] = limit
         models[p["virtual_name"]] = entry
-    return {
+        src = m.get("limit_sources") or {}
+        explain[p["virtual_name"]] = {
+            "context": m["context_length"], "output": m["max_output_tokens"],
+            "context_source": src.get("context") or ("persona declaration / largest routable "
+                                                     "window (flexible routing)"),
+            "declared_context": src.get("declared", p.get("context_window")),
+            "model_windows": src.get("model_windows") or {},
+            "unknown_windows": src.get("unknown_windows") or [],
+            "unreachable_pins": src.get("unreachable_pins") or [],
+            "enabled": bool(p.get("enabled")), "validation": m.get("validation") or "not validated"}
+    block = {
         "provider": {"foundry": {
             "npm": "@ai-sdk/openai-compatible", "name": "Foundry Router",
             "options": {"baseURL": base.rstrip("/") + "/v1", "apiKey": "{env:FOUNDRY_KEY_KILO}"},
@@ -1795,6 +1808,17 @@ async def kilo_provider_config(request: Request):
         # provider. And helpers may not start helpers of their own.
         "enabled_providers": ["foundry"],
         "subagent_depth": 1}
+    if request.query_params.get("explain") in ("1", "true"):
+        # Kilo's config schema rejects unknown keys, so the explanation is a
+        # separate envelope, never part of the block itself.
+        return {"config": block, "limits": explain,
+                "policy": "Strict personas: context = the smallest of the persona's declared "
+                          "context_window and the known window of every model in its ordered "
+                          "chain (a fallback pin can serve any request); output = the persona's "
+                          "max_output_tokens capped by that. Models with no known window don't "
+                          "lower it. An already-saved kilo.jsonc is not updated by changing a "
+                          "persona: regenerate and merge it."}
+    return block
 
 
 @router.get("/admin/api/profiles")

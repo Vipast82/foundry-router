@@ -1931,7 +1931,9 @@ async function edgeDetails(e) {
 
 /* ======================================================================== layout */
 function effectivePreset() {
-  if (POPOUT) return "popout";
+  // a pop-out uses a real preset for its shape (sizes, dividers); the graph and
+  // composer are left out of pop-outs elsewhere
+  if (POPOUT) return innerHeight > innerWidth * 1.1 ? "portrait" : "landscape";
   const p = P.layout.preset;
   if (p !== "auto") return p;
   return innerHeight > innerWidth * 1.1 ? "portrait" : "landscape";
@@ -2003,7 +2005,7 @@ function resizer(kind, prop, preset) {
   r.className = "resizer " + kind; r.tabIndex = 0; r.setAttribute("role", "separator");
   r.setAttribute("aria-orientation", kind === "col" ? "vertical" : "horizontal");
   r.setAttribute("aria-label", `Resize (${prop}); arrow keys adjust, Home resets`);
-  const L = P.layout.presets[preset];
+  const L = P.layout.presets[preset] || (P.layout.presets[preset] = {...DEFAULT_PREFS.layout.presets.landscape});
   r.setAttribute("aria-valuenow", L[prop] || 0);
   const sign = prop === "inspectorW" || prop === "graphH" || prop === "inspectorH" || prop === "helperW" ? -1 : 1;
   const set = v => { L[prop] = Math.round(clamp(v, prop.endsWith("H") ? 90 : 220, prop.endsWith("H") ? 900 : 1100)); savePrefs(); layout(); };
@@ -2256,6 +2258,7 @@ async function boot() {
   renderTaskSelect();
   S.panes = [newPane("main", "worker")];
   if (POPOUT === "pane" || POPOUT.startsWith("section:")) document.body.classList.add("popout");
+  if (POPOUT === "pane") S.inspectorHidden = true;     // transcript first; Inspector button shows it
   layout();
   const sid = QS.get("session");
   if (sid) await openInPane(paneById("main"), sid, {pin: POPOUT === "pane" || sid !== tdata(curTask()).session_id});

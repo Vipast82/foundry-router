@@ -78,3 +78,14 @@ def test_browser_storage_holds_preferences_only():
 def test_work_tab_links_to_the_control_center():
     ui = (PAGE.parent / "index.html").read_text(encoding="utf-8")
     assert "/ui/control" in ui
+
+
+def test_every_layout_preset_name_used_exists():
+    """A pane pop-out once used a preset name ("popout") that had no sizes, so
+    building its dividers threw and the window stayed blank."""
+    s = _script()
+    presets = set(re.findall(r"(\w+): \{inspectorW", s))
+    assert {"portrait", "landscape", "focus", "helpers", "overview"} <= presets
+    seg = s[s.index("function effectivePreset"):s.index("function isNarrow")]
+    returned = set(re.findall(r'"(\w+)"', seg)) - {"auto"}      # "auto" is the setting, not a preset
+    assert returned <= presets, returned - presets

@@ -17,6 +17,7 @@ from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse
 
 from .. import client_auth, client_keys
+from ..kilo_roles import CANONICAL, COORDINATOR_DIRECT_ROLES, coordinator_role_gaps
 
 router = APIRouter()
 
@@ -26,8 +27,16 @@ SCOPES = ("inference", "media", "admin", "orchestration", "telemetry", "operator
 PRESETS = {
     "cline": {"scopes": ["inference"], "note": "Cline (VS Code), OpenAI-compatible provider"},
     "kilo": {"scopes": ["inference", "media"], "note": "Kilo Code / kilo serve"},
+    # Direct reviews are the only inference the coordinator makes with its own
+    # key; the worker and helpers run on Kilo's key. So: reviewer roles only,
+    # by canonical id (legacy aliases don't authorize them). No admin, no Local.
     "coordinator": {"scopes": ["inference", "orchestration"],
-                    "note": "foundry_coordinator (FOUNDRY_COORDINATOR_KEY)"},
+                    "note": "foundry_coordinator (FOUNDRY_COORDINATOR_KEY)",
+                    "personas": [CANONICAL[r] for r in COORDINATOR_DIRECT_ROLES],
+                    "roles": {r: CANONICAL[r] for r in COORDINATOR_DIRECT_ROLES},
+                    "roles_note": "reviewer (required: normal direct review) and deep_reviewer "
+                                  "(high-risk tags). The primary worker (Local) and helpers use "
+                                  "Kilo's own key, so this key doesn't need them."},
     "openwebui": {"scopes": ["inference"], "note": "Open WebUI / AnythingLLM / chat client"},
     "training": {"scopes": ["orchestration"], "note": "foundry_training pipeline (FOUNDRY_TRAINING_KEY)"},
     "admin": {"scopes": ["admin"], "note": "web UI admin key (needed if the UI is protected)"},
@@ -66,7 +75,9 @@ def _view(c, usage: dict, seen: dict) -> dict:
             "projects": list(getattr(c, "projects", None) or []), "enabled": c.enabled, "note": c.note, "created": c.created,
             "key_kind": client_keys.key_kind(c),
             "key_hint": c.key_hint,
-            "usage": usage.get(c.name) or {}, "seen": seen.get(c.name)}
+            "usage": usage.get(c.name) or {}, "seen": seen.get(c.name),
+            # diagnostics only: an existing allowlist is never changed for you
+            "role_gaps": coordinator_role_gaps(list(c.scopes), list(c.personas))}
 
 
 def _admins(clients, exclude: str = "") -> list:

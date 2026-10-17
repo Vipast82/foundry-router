@@ -26,7 +26,7 @@ approved queue ─► coordinator engine ──► Kilo (`kilo serve` HTTP API) 
                         ├─► project adapter: task text, scope, checks, prompts, approvals
                         │      (generic profile, or a narrow adapter e.g. AnimalUprising)
                         ├─► project checks: done_check.py, gate verdict, Lune, verify.py ...
-                        └─► Foundry: review persona (Sonnet / Opus / Astra), work bindings,
+                        └─► Foundry: review persona (Foundry-Kilo-Review / -Deep-Review), work bindings,
                                budgets, usage, request log, Work tab
 ```
 
@@ -185,15 +185,26 @@ top: `max_attempts`, `max_sessions_per_task`, `max_review_calls`,
 
 ## Setting it up (Victor's workstation)
 
-1. **Foundry:** add a coordinator key and enable the reviewer persona:
+1. **Foundry:** add a coordinator key. Setup → Clients & keys → preset
+   **coordinator** fills a role-based persona list: `reviewer` →
+   `Foundry-Kilo-Review` (required for normal direct review) and
+   `deep_reviewer` → `Foundry-Kilo-Deep-Review`. The key needs no admin scope and
+   no `Foundry-Kilo-Local`: the worker and helpers run on Kilo's own key.
    ```yaml
    clients:
      - name: coordinator
        key: "${FOUNDRY_KEY_COORDINATOR}"
        scopes: [inference, orchestration]
+       personas: [Foundry-Kilo-Review, Foundry-Kilo-Deep-Review]
    ```
-   Routing → Personas: validate, then enable `Foundry-Kilo-Sonnet` (one
-   frontier helper at a time; the rest stay disabled until needed). Suggested
+   Allowlists match persona ids exactly: a legacy alias such as
+   `Foundry-Kilo-Sonnet` does **not** authorize `Foundry-Kilo-Review`, even
+   though both can reach `claude-sonnet-5-5`. Foundry ships
+   `Foundry-Kilo-Review` as a default persona (enabled; strict:
+   `claude-sonnet-5-5` then `gpt-6.1-sol`; refuses otherwise) but doesn't
+   validate it for you: Routing → Personas → validate it once (about five
+   subscription calls). `doctor` checks reviewers with the coordinator key and
+   the worker/helpers with Kilo's key, and says which allowlist to fix. Suggested
    budget rules: `review-per-attempt` (role reviewer, per run, 2 calls) and a
    per-project daily cap (docs/BUDGETS.md).
 2. **Kilo config:** Routing → Personas → Kilo config (or

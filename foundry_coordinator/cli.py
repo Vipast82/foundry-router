@@ -48,6 +48,12 @@ from .profile import ProfileError, find_profiles
 from .store import Store
 
 
+# Single-model aliases from Foundry's animaluprising-kilo profile v1 (same list
+# as foundry_router/kilo_roles.py; the coordinator stays independent of Foundry).
+_LEGACY_ALIASES = ("Foundry-Kilo-Haiku", "Foundry-Kilo-Sonnet", "Foundry-Kilo-Opus",
+                   "Foundry-Kilo-Luna", "Foundry-Kilo-Sol", "Foundry-Kilo-Astra")
+
+
 def _state_dir(a) -> str:
     return os.path.abspath(os.path.expanduser(
         a.state or os.environ.get("FOUNDRY_COORD_STATE") or "~/.foundry-coordinator"))
@@ -138,8 +144,19 @@ def doctor(c: Coordinator, project: str = "") -> int:
                     m = (ids if direct_review else worker_ids).get(persona)
                     source = 'coordinator key' if direct_review else 'worker inference key'
                     if not m:
+                        hint = ""
+                        if direct_review and worker_ids is not ids and persona in worker_ids:
+                            # it exists and is enabled (Kilo's key sees it): the
+                            # coordinator client's allowlist is what's missing
+                            legacy = sorted(x for x in ids if x in _LEGACY_ALIASES)
+                            hint = (f"; Kilo's key can use it, so add {persona} to the coordinator "
+                                    f"client's allowed personas (Foundry → Setup → Clients & keys)"
+                                    + (f" — {', '.join(legacy)} {'is' if len(legacy) == 1 else 'are'} "
+                                       f"allowed but legacy aliases don't authorize {persona}"
+                                       if legacy else ""))
                         rows.append(("FAIL" if role in needed else "WARN", f"persona {role}",
                                      f"{persona} not offered to {source} (missing, disabled or not allowed)"
+                                     + hint
                                      + ("" if role in needed else "; only needed when used")))
                     else:
                         fm = m.get("foundry") or {}

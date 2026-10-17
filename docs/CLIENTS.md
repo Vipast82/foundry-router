@@ -49,7 +49,11 @@ clients:
   - name: kilo
     key: "${FOUNDRY_KEY_KILO}"
     scopes: [inference, media]        # chat/completions + image jobs
-    personas: [Foundry-Kilo-Local, Foundry-Kilo-Sonnet]   # optional limit
+    personas: [Foundry-Kilo-Local, Foundry-Kilo-Review]   # optional limit (exact ids)
+  - name: coordinator
+    key: "${FOUNDRY_KEY_COORDINATOR}"
+    scopes: [inference, orchestration]
+    personas: [Foundry-Kilo-Review, Foundry-Kilo-Deep-Review]   # reviewer roles only
   - name: cline
     key: "${FOUNDRY_KEY_CLINE}"
   - name: openwebui
