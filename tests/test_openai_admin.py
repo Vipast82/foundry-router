@@ -78,9 +78,9 @@ def test_effective_flavor_explicit_and_inferred():
     # openai-compatible with no explicit flavor -> generic openai diagnostics
     assert BackendConfig(name="x", type="openai-compatible",
                          url="http://x").effective_flavor == "openai"
-    # anthropic (Meridian) never surfaces in Host Admin, but the property is defined
+    # anthropic-compatible is Meridian (its own read-only Host Admin panel)
     assert BackendConfig(name="m", type="anthropic-compatible",
-                         url="http://m").effective_flavor == "openai"
+                         url="http://m").effective_flavor == "meridian"
 
 
 # -- backends(): only openai-compatible, tagged with flavor ------------------------

@@ -166,6 +166,10 @@ async def call_frontier(svc, cfg: dict, persona: dict, conversation_key: str,
             continue
         if (info or {}).get("subscription") or (info or {}).get("type") == "anthropic-compatible":
             log_subscription_usage(svc.db, m, backend, res.prompt_tokens, res.completion_tokens)
+        from . import request_context, telemetry
+        telemetry.record_call(svc.db, svc.registry, model=m, backend=backend, result=res,
+                              persona=request_context.route().get("persona") or "",
+                              mode="assist", max_tokens=max_tokens)
         text = (res.content or "").strip()
         if not text:
             reasons.append(f"{m}: empty answer")

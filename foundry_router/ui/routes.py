@@ -437,6 +437,7 @@ async def activity(request: Request):
         servers = await svc.pool.server_metrics()
     except Exception:
         servers = []
+    servers = sorted(servers + await _cliproxy_servers(svc), key=lambda s: s.get("backend") or "")
     from .. import perf_history as _ph
     return {"models": active_models,
             # each in-flight call with its request id — the same id + clock
@@ -473,8 +474,19 @@ async def perf_history_api(request: Request):
     # run_label absent = every run; present (even "") = that run only ("" is
     # the unlabelled samples recorded before a label was set).
     run_label = q.get("run_label") if "run_label" in q else None
-    return ph.query_history(svc.db, hours=hours, model=model, backend=backend,
-                            run_label=run_label)
+    out = ph.query_history(svc.db, hours=hours, model=model, backend=backend,
+                           run_label=run_label)
+    # The backend filter lists every configured backend, not only those with
+    # samples in the window, so one with no traffic yet shows as (0).
+    seen = {b.get("backend") for b in out.get("backends") or []}
+    out["backends"] = list(out.get("backends") or []) + [
+        {"backend": n, "n": 0} for n in _configured_backends(svc) if n not in seen]
+    return out
+
+
+def _configured_backends(svc) -> list[str]:
+    return sorted(list(getattr(svc.pool, "backends", {}) or {})
+                  + [b.name for b in getattr(svc.pool, "disabled", []) or []])
 
 
 @router.get("/admin/api/perf/run-label")
@@ -838,6 +850,31 @@ def _cliproxy_infos(svc) -> list[dict]:
                 "usage_limit_pct": c.usage_limit_pct, "healthy": s.healthy}
         if c.effective_flavor == "cliproxyapi":
             out.append(info)
+    return out
+
+
+async def _cliproxy_servers(svc) -> list[dict]:
+    """CLIProxyAPI has no engine /metrics; its Live row is the signed-in
+    accounts and their usage windows (management API, cached), or what to set."""
+    out = []
+    cu = getattr(svc, "cliproxy_usage", None)
+    for info in _cliproxy_infos(svc):
+        row = {"backend": info["name"], "flavor": "cliproxyapi", "metrics_ok": False}
+        if cu is None or not cu.configured(info):
+            row["metrics_error"] = "no management_key — set it on the backend for account usage"
+        else:
+            try:
+                snap = await cu.snapshot(info)
+            except Exception as e:                                 # noqa: BLE001
+                snap = {"ok": False, "error": str(e)[:200], "accounts": []}
+            row["metrics_ok"] = bool(snap.get("ok"))
+            row["metrics_error"] = snap.get("error") or ""
+            row["accounts"] = [{"provider": a.get("provider"), "label": a.get("label"),
+                                "plan": a.get("plan"),
+                                "windows": [{"name": w.get("name"), "used": w.get("used")}
+                                            for w in a.get("windows") or []]}
+                               for a in snap.get("accounts") or []]
+        out.append(row)
     return out
 
 
@@ -2756,6 +2793,10 @@ async def host_backends(request: Request):
                 version = ""
         out.append({"name": b["name"], "url": b["url"], "flavor": b["flavor"],
                     "healthy": b["healthy"], "crud": False, "version": version})
+    for s in getattr(svc.pool, "backends", {}).values():
+        if s.config.type == "anthropic-compatible":
+            out.append({"name": s.config.name, "url": s.config.url, "flavor": "meridian",
+                        "healthy": getattr(s, "healthy", False), "crud": False, "version": ""})
     out.sort(key=lambda b: b["name"])
     return {"backends": out, "jobs": svc.ollama_admin.job_snapshot()}
 
@@ -2766,7 +2807,20 @@ async def host_diag(request: Request, backend: str):
     vLLM / OpenAI). Each probe is individually guarded, so a partial report comes
     back even when some endpoints are unimplemented or the host is half-up."""
     from ..errors import describe_exception
+    svc = _svc(request)
+    st = getattr(svc.pool, "backends", {}).get(backend)
+    if st is not None and st.config.type == "anthropic-compatible":
+        # Meridian: its own /health + /metrics view (the Live tab's), plus models.
+        try:
+            m = await st.protocol.server_metrics() or {}
+        except Exception as e:                                     # noqa: BLE001
+            m = {"metrics_ok": False, "metrics_error": describe_exception(e)}
+        return {"ok": True, "report": {
+            "backend": backend, "flavor": "meridian", "url": st.config.url,
+            "models": {"ok": True, "models": sorted(st.models)},
+            "metrics": {"ok": bool(m.get("metrics_ok")), "summary": m,
+                        "error": m.get("metrics_error") or ""}}}
     try:
-        return {"ok": True, "report": await _svc(request).openai_admin.diagnostics(backend)}
+        return {"ok": True, "report": await svc.openai_admin.diagnostics(backend)}
     except Exception as e:
         return {"ok": False, "error": describe_exception(e)}

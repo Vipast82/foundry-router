@@ -278,6 +278,8 @@ class BackendConfig(BaseModel):
         else -> a generic openai diagnostics surface)."""
         if self.flavor:
             return self.flavor
+        if self.type == "anthropic-compatible":
+            return "meridian"         # the only anthropic-compatible server Foundry targets
         return "ollama" if self.type == "ollama" else "openai"
 
 

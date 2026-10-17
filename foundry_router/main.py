@@ -168,9 +168,13 @@ class Services:
                         need = cfg.corpus_char_limit // 4 + 1024 + 4096
                     model_max = (self.registry.get(research_model) or {}).get("context_length")
                     options = {"num_ctx": min(need, int(model_max)) if model_max else need}
-                result, _ = await self.pool.chat(
+                result, backend = await self.pool.chat(
                     research_model, [{"role": "user", "content": prompt}],
                     options=options, max_tokens=4096)
+                from . import telemetry
+                telemetry.record_call(self.db, self.registry, model=research_model,
+                                      backend=backend, result=result, mode="research",
+                                      max_tokens=4096)
                 return result.content
             except Exception as e:
                 self.db.log_event("warning", "research",
