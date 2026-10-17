@@ -5,6 +5,8 @@ is exactly what the brain-unreachable fallback tests need."""
 import os
 
 os.environ["FOUNDRY_DISABLE_BACKGROUND"] = "1"  # before any app import
+# no background training runs from coordinator tests (tests opt in explicitly)
+os.environ["FOUNDRY_TRAINING_AUTO"] = "0"
 
 import pytest
 

@@ -629,3 +629,19 @@ CREATE TABLE IF NOT EXISTS training_episodes (
   updated_ts REAL
 );
 CREATE INDEX IF NOT EXISTS idx_training_episodes_project ON training_episodes(project_id, status);
+-- Fine-tuning datasets uploaded by `foundry_training auto` after a sprint
+-- (validated, redaction re-checked on arrival). Files live under
+-- <data>/training/datasets/<project>/<dataset_id>/{data.jsonl, manifest.json}.
+CREATE TABLE IF NOT EXISTS training_datasets (
+  dataset_id TEXT PRIMARY KEY,
+  project_id TEXT,
+  kind TEXT,
+  target TEXT,
+  examples INTEGER,
+  sha256 TEXT,
+  bytes INTEGER,
+  path TEXT,
+  manifest TEXT,
+  client_id TEXT,
+  uploaded_ts REAL
+);

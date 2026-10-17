@@ -1066,6 +1066,39 @@ async def training_view(request: Request, project: str = "", status: str = ""):
     return {"capture": svc.capture.status(), "pipelines": pipes, "episodes": eps}
 
 
+@router.get("/admin/api/training/datasets")
+async def training_datasets(request: Request, project: str = ""):
+    """Fine-tuning datasets uploaded by the training pipeline (newest first)."""
+    import json as _json
+    q, args = "SELECT * FROM training_datasets", ()
+    if project:
+        q, args = q + " WHERE project_id=?", (project,)
+    out = []
+    for r in _svc(request).db.query(q + " ORDER BY uploaded_ts DESC LIMIT 500", args):
+        m = _json.loads(r.pop("manifest") or "{}")
+        r["validation_ok"] = bool((m.get("validation") or {}).get("ok"))
+        r["episodes"] = len(m.get("episodes") or [])
+        r["created"] = m.get("created")
+        out.append(r)
+    return {"datasets": out}
+
+
+@router.get("/admin/api/training/datasets/{dataset_id}/{name}")
+async def training_dataset_file(request: Request, dataset_id: str, name: str):
+    """Download a stored dataset file (data.jsonl or manifest.json)."""
+    from fastapi.responses import FileResponse
+    import os
+    if name not in ("data.jsonl", "manifest.json"):
+        return JSONResponse({"error": "file must be data.jsonl or manifest.json"}, status_code=400)
+    r = _svc(request).db.query_one("SELECT path FROM training_datasets WHERE dataset_id=?",
+                                   (dataset_id,))
+    if not r or not os.path.isfile(os.path.join(r["path"], name)):
+        return JSONResponse({"error": "unknown dataset"}, status_code=404)
+    return FileResponse(os.path.join(r["path"], name),
+                        media_type="application/json" if name.endswith(".json")
+                        else "application/x-ndjson", filename=f"{dataset_id}-{name}")
+
+
 @router.get("/admin/api/training/episodes/{episode_id}")
 async def training_episode(request: Request, episode_id: str):
     import json as _json

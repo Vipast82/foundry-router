@@ -34,7 +34,7 @@ LOCAL = "qwen3.8-flash-next-iq3_s"
 
 
 def kilo_export() -> dict:
-    return json.loads(KILO_EXPORT.read_text())
+    return json.loads(KILO_EXPORT.read_text(encoding="utf-8"))
 
 
 def git(ws, *args) -> str:
@@ -69,7 +69,7 @@ def profile(root: Path, pid: str, ws: str, extra: str = "", eval_fraction: float
 id = "{pid}"
 name = "{pid}"
 [workspace]
-path = "{ws}"
+path = "{str(ws).replace(chr(92), "/")}"
 [roles]
 implementer = "Foundry-Kilo-Local"
 reviewer = "Foundry-Kilo-Sonnet"

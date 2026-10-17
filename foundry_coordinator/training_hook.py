@@ -76,3 +76,55 @@ def finalize(store, P, t: dict, outcome: str, state_dir: str) -> dict:
     store.event(pid, tid, "training_queued", detail={"manifest": name, "outcome": outcome,
                                                       "gaps": gaps})
     return m
+
+
+# ---------------------------------------------------------------------------- automatic run
+
+def auto_enabled(profile) -> bool:
+    # FOUNDRY_TRAINING_AUTO=0 turns automatic runs off for this process (tests,
+    # or an operator who wants to run the pipeline by hand)
+    if os.environ.get("FOUNDRY_TRAINING_AUTO", "1").strip().lower() in ("0", "false", "off", "no"):
+        return False
+    t = profile.raw.get("training") or {}
+    return bool(t.get("enabled")) and bool((t.get("auto") or {}).get("enabled", True))
+
+
+def _spawn(cmd: list, log_path: str, env: dict):
+    """Start the pipeline detached from the engine (tests replace this)."""
+    import subprocess
+    import sys
+    kw = {}
+    if sys.platform == "win32":
+        kw["creationflags"] = getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000)
+    else:
+        kw["start_new_session"] = True
+    log = open(log_path, "a", encoding="utf-8")
+    log.write(f"\n=== {time.strftime('%Y-%m-%d %H:%M:%S')} {' '.join(cmd)}\n")
+    log.flush()
+    return subprocess.Popen(cmd, stdout=log, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL,
+                            env=env, **kw)
+
+
+def launch_auto(store, P, t: dict, state_dir: str) -> bool:
+    """After a closeout manifest: parse, export, store and upload in the
+    background (foundry_training auto). Never blocks or fails the task; the
+    run's output goes to <spool>/auto.log and its datasets to the library."""
+    import sys
+    if not auto_enabled(P.profile):
+        return False
+    a = (P.profile.raw.get("training") or {}).get("auto") or {}
+    spool = spool_dir(P.profile, state_dir)
+    cmd = [sys.executable, "-m", "foundry_training", "--profiles", P.profile.path]
+    if a.get("store"):
+        cmd += ["--store", os.path.expanduser(str(a["store"]))]
+    cmd += ["auto", "--spool", spool]
+    env = dict(os.environ)
+    try:
+        _spawn(cmd, os.path.join(spool, "auto.log"), env)
+    except Exception as e:                                        # noqa: BLE001
+        store.event(P.id, t["task_id"], "training_auto_failed",
+                    detail={"error": f"{type(e).__name__}: {e}"[:300]})
+        return False
+    store.event(P.id, t["task_id"], "training_auto_started",
+                detail={"spool": spool, "log": os.path.join(spool, "auto.log")})
+    return True

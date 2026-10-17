@@ -2,6 +2,35 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.119.0 — automatic training data after every sprint
+
+**What changes**
+
+- **Automatic run after a task closes:** the coordinator starts
+  `foundry_training auto` in the background after writing the closeout manifest.
+  It parses and curates the sprint, exports validated fine-tuning datasets
+  (`chatml-tools`, `canonical`) only when the selected episodes changed, and
+  keeps them in one library: `~/.foundry-training/library/` with `INDEX.json`,
+  `README.md` and `<project>/<kind>/<format>/latest.jsonl`.
+- **Upload to Foundry:** each new valid train dataset is uploaded. If the upload
+  fails, the dataset stays in the library and the next run retries. No LLM is
+  used.
+- **Foundry:**
+  - `POST /v1/foundry/training/datasets/{id}` (orchestration scope): secrets are
+    re-checked on arrival; eval sets, sha mismatches and conflicting ids are
+    refused.
+  - `GET /admin/api/training/datasets` and a download route.
+  - A "Fine-tuning datasets in Foundry" card in the Training tab.
+- **Tests:** fixed three Windows-only fixture bugs in `tests/training` (a TOML
+  path, a UTF-8 read, `/tmp`). That suite now passes on Windows.
+
+**Migration:**
+
+- Additive: Foundry table `training_datasets`.
+- Automatic runs start for every project whose profile has
+  `[training] enabled = true`. Turn them off with `[training.auto] enabled = false`
+  or `FOUNDRY_TRAINING_AUTO=0`.
+
 ## v0.118.0 — proactive frontier lanes (all default off)
 
 **What changes**

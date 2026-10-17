@@ -176,6 +176,75 @@ async def capture_records(request: Request, after_id: int = 0, limit: int = 200,
             if rows else None}
 
 
+_DATASET_ID = __import__("re").compile(r"^[A-Za-z0-9._-]{8,120}$")
+MAX_DATASET_BYTES = 200 * 1024 * 1024
+
+
+@router.post("/v1/foundry/training/datasets/{dataset_id}")
+async def put_training_dataset(dataset_id: str, request: Request):
+    """A validated fine-tuning dataset from `foundry_training auto`. Stored as
+    files under <data>/training/datasets/; every line is re-scanned for
+    secrets and refused if anything still looks like one. Train sets only.
+    Re-sending the same bytes is a no-op; different bytes under the same id
+    are refused."""
+    import hashlib
+    import json as _json
+    import os
+    from foundry_training.redact import scan
+    if not _DATASET_ID.match(dataset_id):
+        return _bad(ValueError("bad dataset id"))
+    raw = await request.body()
+    if len(raw) > MAX_DATASET_BYTES + 1_000_000:
+        return JSONResponse({"error": f"dataset over {MAX_DATASET_BYTES // 2**20} MB",
+                             "code": "too_large"}, status_code=413)
+    try:
+        body = _json.loads(raw)
+    except ValueError as e:
+        return _bad(e)
+    m, data = body.get("manifest") or {}, body.get("data")
+    if not isinstance(m, dict) or not isinstance(data, str) or m.get("dataset_id") != dataset_id:
+        return _bad(ValueError("body needs manifest (with this dataset_id) and data"))
+    if m.get("purpose") != "train":
+        return _bad(ValueError("only train datasets are accepted (evaluation sets stay local)"))
+    sha = hashlib.sha256(data.encode()).hexdigest()
+    if body.get("sha256") and body["sha256"] != sha:
+        return _bad(ValueError("sha256 does not match the data (truncated upload?)"))
+    lines = [l for l in data.splitlines() if l.strip()]
+    for i, line in enumerate(lines, 1):
+        try:
+            rec = _json.loads(line)
+        except ValueError:
+            return _bad(ValueError(f"line {i} is not JSON"))
+        if scan(rec).count:
+            return JSONResponse({"error": f"line {i} still looks like it contains a secret; "
+                                          f"refused (nothing stored)", "code": "secret_detected"},
+                                status_code=422)
+    svc = request.app.state.services
+    db = svc.db
+    prior = db.query_one("SELECT sha256, path FROM training_datasets WHERE dataset_id=?",
+                         (dataset_id,))
+    if prior:
+        if prior["sha256"] == sha:
+            return {"ok": True, "duplicate": True, "path": prior["path"], "examples": len(lines)}
+        return JSONResponse({"error": "a different dataset with this id already exists",
+                             "code": "conflict"}, status_code=409)
+    pid = str((m.get("projects") or ["unknown"])[0] if len(m.get("projects") or []) == 1
+              else "multi")
+    safe_pid = "".join(ch if ch.isalnum() or ch in "-_." else "_" for ch in pid)[:80]
+    base = svc.capture.data_dir / "training" / "datasets" / safe_pid / dataset_id
+    base.mkdir(parents=True, exist_ok=True)
+    tmp = base / "data.jsonl.tmp"
+    tmp.write_text(data if data.endswith("\n") else data + "\n", encoding="utf-8")
+    os.replace(tmp, base / "data.jsonl")
+    (base / "manifest.json").write_text(_json.dumps(m, indent=2), encoding="utf-8")
+    db.execute("INSERT INTO training_datasets (dataset_id, project_id, kind, target, examples, "
+               "sha256, bytes, path, manifest, client_id, uploaded_ts) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+               (dataset_id, pid, str(m.get("kind") or ""), str(m.get("target") or ""), len(lines),
+                sha, len(data.encode()), str(base), _json.dumps(m)[:200000],
+                client_auth.current().get("client_id") or "", time.time()))
+    return {"ok": True, "path": str(base), "examples": len(lines)}
+
+
 @router.put("/v1/foundry/training/status/{pipeline_id}")
 async def put_training_status(pipeline_id: str, request: Request):
     import json as _json

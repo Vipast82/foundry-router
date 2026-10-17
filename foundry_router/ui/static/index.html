@@ -2397,6 +2397,7 @@ window._trainOpts = window._trainOpts || {project: "", status: ""};
 async function tabTraining() {
   const o = window._trainOpts;
   const d = await api(`training?project=${encodeURIComponent(o.project)}&status=${encodeURIComponent(o.status)}`);
+  const up = await api(`training/datasets?project=${encodeURIComponent(o.project)}`).catch(() => ({datasets: []}));
   const c = d.capture || {};
   const stCls = {selected: "ok", eval: "ok", excluded: "warn", duplicate: "", deleted: "bad"};
   const pill = (v, cls) => `<span class="pill ${cls ?? stCls[v] ?? ""}">${esc(v ?? "—")}</span>`;
@@ -2427,7 +2428,7 @@ async function tabTraining() {
     return `<div class="card"><h3>Pipeline <code>${esc(p.pipeline_id)}</code> <span class="hint">reported ${when(p.updated_ts)}${p.interrupted_runs ? ` · ${p.interrupted_runs} interrupted ingestion runs (re-run the same ingest)` : ""}</span></h3>
       ${projs ? `<div class="tscroll"><table><tr><th>project</th><th>capture</th><th>sessions by source</th><th>episodes</th><th>excluded because</th><th>redaction</th><th>artifacts</th><th>gaps</th></tr>${projs}</table></div>` : '<p class="hint">No projects.</p>'}
       ${runs ? `<h4>Ingestion runs</h4><div class="tscroll"><table><tr><th>source</th><th>status</th><th>counts</th><th>error</th><th>started</th></tr>${runs}</table></div>` : ""}
-      ${ds ? `<h4>Datasets (exported locally; nothing is uploaded)</h4><div class="tscroll"><table><tr><th>dataset</th><th>kind</th><th>target</th><th>purpose</th><th>examples</th><th>validation</th><th>created</th></tr>${ds}</table></div>` : ""}
+      ${ds ? `<h4>Datasets exported on the workstation</h4><div class="tscroll"><table><tr><th>dataset</th><th>kind</th><th>target</th><th>purpose</th><th>examples</th><th>validation</th><th>created</th></tr>${ds}</table></div>` : ""}
       ${gaps ? `<h4>Capture gaps</h4><div class="tscroll"><table><tr><th>project</th><th>source</th><th>gap</th><th>detail</th></tr>${gaps}</table></div>` : ""}</div>`;
   }).join("");
   (d.episodes || []).forEach(e => projects.add(e.project_id));
@@ -2441,11 +2442,16 @@ async function tabTraining() {
   window._trainEps = Object.fromEntries((d.episodes || []).map(e => [e.episode_id, e]));
   $("#main").innerHTML = `
     <h2>Training data</h2>
-    <p class="hint">Opt-in capture of model interactions for building training datasets. Foundry records what it received and what it sent to each backend (secrets redacted before writing); the <code>foundry_training</code> pipeline joins that with Kilo/Cline sessions, the coordinator's verification and review records, and git, then curates and exports locally. Nothing here uploads data or starts training. Episode cards are redacted and truncated.</p>
+    <p class="hint">Opt-in capture of model interactions for building training datasets. Foundry records what it received and what it sent to each backend (secrets redacted before writing); the <code>foundry_training</code> pipeline joins that with Kilo/Cline sessions, the coordinator's verification and review records, and git, then curates and exports. After each sprint it runs automatically and uploads validated fine-tuning datasets here; nothing starts training. Episode cards are redacted and truncated.</p>
     <div class="card"><h3>Foundry capture ${c.enabled ? pill("enabled", "ok") : pill("disabled", "")}</h3>
       <p class="hint">${esc(c.boundary || "")}</p>
       <p class="hint">projects: ${esc((c.projects || []).join(", ") || (c.enabled ? "all bound" : "—"))}${(c.exclude_projects || []).length ? " · excluded: " + esc(c.exclude_projects.join(", ")) : ""} · unbound requests ${c.include_unbound ? "captured" : "skipped"} · retention ${c.retention_days} d${c.errors ? ` · <span class="pill bad">${c.errors} capture errors</span> ${esc(c.last_error || "")}` : ""}${c.store_error ? ` · <span class="pill bad">store: ${esc(c.store_error)}</span>` : ""}</p>
       ${capRows ? `<div class="tscroll"><table><tr><th>project</th><th>record</th><th>count</th><th>truncated</th><th>redacted</th><th>last</th></tr>${capRows}</table></div>` : '<p class="hint">No capture records.</p>'}</div>
+    <div class="card"><h3>Fine-tuning datasets in Foundry</h3>
+      <p class="hint">Uploaded automatically after each sprint by <code>foundry_training auto</code> (validated; secrets re-checked on arrival). If an upload fails, the dataset stays in the workstation library (<code>~/.foundry-training/library/INDEX.json</code>) and is retried after the next sprint.</p>
+      ${(up.datasets || []).length ? `<div class="tscroll"><table><tr><th>dataset</th><th>project</th><th>kind</th><th>format</th><th>examples</th><th>episodes</th><th>validation</th><th>uploaded</th><th>download</th></tr>${up.datasets.map(x => `<tr><td class="nw"><code>${esc(x.dataset_id)}</code></td><td class="nw">${esc(x.project_id)}</td><td class="nw">${esc(x.kind)}</td><td class="nw">${esc(x.target)}</td>
+        <td class="nw">${x.examples}</td><td class="nw">${x.episodes}</td><td class="nw">${pill(x.validation_ok ? "valid" : "invalid", x.validation_ok ? "ok" : "bad")}</td><td class="nw hint">${when(x.uploaded_ts)}</td>
+        <td class="nw"><button onclick='downloadTrainingFile(${JSON.stringify(x.dataset_id)}, "data.jsonl")'>data.jsonl</button> <button onclick='downloadTrainingFile(${JSON.stringify(x.dataset_id)}, "manifest.json")'>manifest</button></td></tr>`).join("")}</table></div>` : '<p class="hint">No datasets uploaded yet.</p>'}</div>
     ${pipes || '<div class="card"><p class="hint">No training pipeline has reported. Run <code>python -m foundry_training push --foundry-url …</code> after ingesting.</p></div>'}
     <div class="card"><h3>Episodes</h3>
       <div class="row"><label>project</label><select id="tr-proj"><option value="">all</option>${[...projects].filter(Boolean).sort().map(p => `<option ${p === o.project ? "selected" : ""}>${esc(p)}</option>`).join("")}</select>
@@ -2453,6 +2459,15 @@ async function tabTraining() {
       ${eps ? `<div class="tscroll"><table><tr><th>episode</th><th>project / task</th><th>kind</th><th>status</th><th>split</th><th>outcome at head</th><th>turns</th><th>exclusion reasons</th></tr>${eps}</table></div>` : '<p class="hint">No episodes reported.</p>'}</div>`;
   $("#tr-proj").onchange = e => { o.project = e.target.value; render(); };
   $("#tr-st").onchange = e => { o.status = e.target.value; render(); };
+}
+async function downloadTrainingFile(id, name) {
+  const k = _adminKey();
+  const r = await fetch(`/admin/api/training/datasets/${encodeURIComponent(id)}/${name}`,
+                        {headers: k ? {"Authorization": "Bearer " + k} : {}});
+  if (!r.ok) { alert(`Download failed: HTTP ${r.status}`); return; }
+  const url = URL.createObjectURL(await r.blob());
+  const a = document.createElement("a"); a.href = url; a.download = `${id}-${name}`;
+  document.body.appendChild(a); a.click(); a.remove(); setTimeout(() => URL.revokeObjectURL(url), 5000);
 }
 function showTrainingEpisode(id) {
   const e = (window._trainEps || {})[id];

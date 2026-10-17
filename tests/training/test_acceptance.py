@@ -96,9 +96,10 @@ def test_kilo_database_is_read_through_a_readonly_snapshot(world, tmp_path):
     for f in (p.store.root / "raw" / "raw.sqlite", p.store.root / "normalized.sqlite"):
         assert b"DO-NOT-READ" not in f.read_bytes()       # credential/share tables never read
     # the snapshot directory is removed afterwards
-    assert not [d for d in os.listdir(os.environ.get("TMPDIR", "/tmp")) if d.startswith("kilo-ro-")
-                and os.path.exists(os.path.join(os.environ.get("TMPDIR", "/tmp"), d,
-                                                "kilo-snapshot.db"))]
+    import tempfile
+    tmpdir = tempfile.gettempdir()                         # /tmp on POSIX, %TEMP% on Windows
+    assert not [d for d in os.listdir(tmpdir) if d.startswith("kilo-ro-")
+                and os.path.exists(os.path.join(tmpdir, d, "kilo-snapshot.db"))]
 
 
 def test_kilo_database_with_an_unexpected_schema_is_refused(tmp_path, world):
@@ -514,7 +515,7 @@ def test_second_project_profile_changes_policy_not_code(world, tmp_path):
     root = Path(__file__).resolve().parents[2]
     tpl = (root / "contrib/coordinator-pilot/fixture-game/project.toml.template").read_text()
     fx = tmp / "fx.toml"
-    fx.write_text(tpl.replace("@WORKSPACE@", ws).replace("@KILO_URL@", "http://k.invalid")
+    fx.write_text(tpl.replace("@WORKSPACE@", ws.replace("\\", "/")).replace("@KILO_URL@", "http://k.invalid")
                   .replace("@FOUNDRY_URL@", "http://f.invalid"))
     au = TC.load(str(root / "foundry_coordinator/projects/animaluprising/project.toml"))
     fxc = TC.load(str(fx))

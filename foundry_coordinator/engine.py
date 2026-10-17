@@ -896,6 +896,7 @@ class Coordinator:
             return True
         try:
             training_hook.finalize(self.store, P, t, outcome, self.state_dir)
+            training_hook.launch_auto(self.store, P, t, self.state_dir)
             return True
         except Exception as e:                                    # noqa: BLE001
             pol = training_hook.policy(P.profile)

@@ -268,6 +268,72 @@ Foundry: <data>/training/capture.sqlite   (0700 dir, 0600 file)
    python -m foundry_training push --foundry-url http://192.168.0.112:11435
    ```
 
+### Automatic after every sprint (v0.119.0)
+
+You don't have to run the pipeline yourself. When a task closes, the
+coordinator writes its manifest and then starts `python -m foundry_training
+auto` in the background. That run never blocks or fails the task. It does four
+things:
+
+1. **Parse:** ingests and curates everything the manifest points at, the same as
+   `queue`.
+2. **Export:** writes validated fine-tuning datasets for each kind (`sft`,
+   `correction`, `multimodal`) whose selected episodes changed since the last
+   export. Each one is written in every configured format: `chatml-tools` (the
+   messages + tools JSONL that TRL, Unsloth and Axolotl read) and `canonical`
+   (full lineage).
+3. **Store centrally:** copies each dataset into one folder:
+   ```
+   ~/.foundry-training/library/
+     INDEX.json                          every dataset, newest first: project, kind, format,
+                                         examples, validation, episodes, folder, upload status
+     README.md
+     <project>/<kind>/<format>/latest.jsonl        always the newest of that kind/format
+     <project>/<kind>/<format>/<dataset_id>/{data.jsonl, manifest.json}
+   ```
+4. **Upload:** sends each new valid train dataset to Foundry
+   (`POST /v1/foundry/training/datasets/{id}`).
+   - Foundry re-checks every line for secrets, stores the files under
+     `<data>/training/datasets/<project>/<id>/` and lists them in the
+     **Training** tab, where you can download `data.jsonl` / `manifest.json`.
+   - If Foundry is down, refuses the upload or no key is set, the dataset
+     stays in the library. `INDEX.json` says why, and the next run retries.
+
+No LLM is used in any step. Evaluation sets are never uploaded.
+
+Settings (profile, all optional; defaults shown):
+
+```toml
+[training.auto]
+enabled = true                 # on whenever [training] enabled = true
+upload = true
+foundry_url = ""               # default: [foundry] url
+key_env = "FOUNDRY_TRAINING_KEY"   # falls back to [foundry] key_env (the coordinator key)
+kilo_url = ""                  # default: [client] url
+kinds = ["sft", "correction", "multimodal"]
+targets = []                   # default: [training.export] targets
+library = ""                   # default: <store>/library
+store = ""                     # default: $FOUNDRY_TRAINING_STORE or ~/.foundry-training
+```
+
+How to run it or switch it off:
+
+- **One process-wide off switch:** set the environment variable
+  `FOUNDRY_TRAINING_AUTO=0` for the coordinator.
+- **Output:** the run's log is `<state>/training-spool/auto.log`.
+- **Overlap:** only one run happens at a time (`.auto.lock`). A manifest that
+  arrives while a run is finishing is processed by the next sprint's run, or by
+  running the command yourself:
+
+  ```sh
+  python -m foundry_training --profiles <profile> auto --spool <state>/training-spool
+  ```
+
+For complete episodes, keep Foundry capture on (`training_capture.enabled`).
+Without it, Kilo-only sessions lack the system prompt and tool definitions and
+the default SFT policy excludes them (`missing_context`). In that case the run
+reports no datasets rather than producing incomplete ones.
+
 ### Commands
 
 ```
@@ -287,6 +353,7 @@ status [--json] | inspect EPISODE | gaps [--project P]
 prefer --project P --chosen EVENT --rejected EVENT --by NAME --note TEXT
 forget EPISODE --reason TEXT [--sources]
 retention | recover | push --foundry-url U [--id NAME]
+auto --spool DIR [--foundry-url U] [--kilo-url U] [--library DIR] [--no-upload]
 ```
 
 ## Operating it

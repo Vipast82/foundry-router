@@ -106,6 +106,13 @@ def main(argv=None) -> int:
     fg.add_argument("--sources", action="store_true")
     sub.add_parser("retention")
     sub.add_parser("recover")
+    au = sub.add_parser("auto", help="post-sprint: queue + export + library + upload")
+    au.add_argument("--spool", required=True)
+    au.add_argument("--foundry-url", default="")
+    au.add_argument("--kilo-url", default="")
+    au.add_argument("--library", default="")
+    au.add_argument("--no-upload", action="store_true")
+    au.add_argument("--lock", default="", help="lock file (one automatic run at a time)")
     pu = sub.add_parser("push")
     pu.add_argument("--foundry-url", required=True)
     pu.add_argument("--id", default="workstation")
@@ -195,6 +202,30 @@ def _run(a, p: Pipeline) -> int:
     elif a.cmd == "recover":
         out = {"interrupted_runs": p.store.interrupted_runs(),
                "note": "ingestion is idempotent: run the same ingest command again"}
+    elif a.cmd == "auto":
+        from .auto import auto_run
+        lock = a.lock or os.path.join(a.spool, ".auto.lock")
+        try:
+            fd = os.open(lock, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+        except FileExistsError:
+            import time as _t
+            if _t.time() - os.path.getmtime(lock) < 6 * 3600:
+                print("another automatic run is in progress; its next pass picks this up")
+                return 0
+            os.remove(lock)                  # stale lock from a crashed run
+            fd = os.open(lock, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+        os.write(fd, str(os.getpid()).encode())
+        os.close(fd)
+        try:
+            out = auto_run(p, a.spool, {"foundry_url": a.foundry_url, "kilo_url": a.kilo_url,
+                                        "library": a.library,
+                                        "upload": False if a.no_upload else None},
+                           log=lambda m: print(m, file=sys.stderr, flush=True))
+        finally:
+            try:
+                os.remove(lock)
+            except OSError:
+                pass
     elif a.cmd == "push":
         out = p.push(a.foundry_url, key, a.id)
     print(json.dumps(out, indent=2, default=str))
