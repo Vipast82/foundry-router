@@ -95,6 +95,13 @@ primary (Kilo, busy) --tool results--> ingest (GET transcript, rate-limited)
 - No existing column changes.
 - Purposes added to `OPTIONAL_PURPOSES`: `visual_observation`, `failure_triage`, `incremental_review`, `research`, `evidence_reconciliation`, `handoff_prep`, `preflight`, `frontier_primary`. They are never required.
 
+**Source snapshots (v0.119.1):** identity and ownership are scoped.
+
+- `snapshot_id` is a hash of project, task, run, workspace, HEAD and the file manifest. Two clones or fixtures with identical code therefore never share a row or a blob root.
+- Additive columns: `source_snapshots.content_fp` (hash of HEAD and manifest, used for "has the code changed?") and `workspace`.
+- Every lookup (packet excerpts, drift checks) passes the caller's project and task. A record owned by another project or task is never returned.
+- **Legacy rows** written by v0.118.0 keep their content-only id, their recorded owner and `content_fp = NULL`. They stay readable by that owner only; nothing is rewritten.
+
 **Files:** artifact copies go to `state_dir/evidence/<project>/<task>/artifacts/<sha24>.<ext>`. Snapshot blobs go to `state_dir/snapshots/<project>/blobs/<sha32>`. Both live outside the workspace.
 
 **Rollback:**
@@ -171,7 +178,8 @@ max_image_bytes = 8000000
 min_confidence = 0.75
 min_severity = "medium"
 propose = true                 # confident, in-scope findings -> proposer
-approved_models = []           # optional: restrict vision routes to these models
+approved_models = []           # optional extra restriction: EVERY reported route must be one of
+                               # these models, or the unit waits (it never removes a route)
 fs_fallback = false            # filesystem readiness fallback (stable size + complete image)
 retention_days = 30
 
@@ -317,7 +325,10 @@ UI-01's worker finishes or is paused.
 
 1. Deploy v0.118.0 and restart Foundry. This is a restart boundary and it interrupts in-flight calls, so do it while the primary is idle.
 2. Confirm the admission endpoint reports `vision` for each route: `GET /v1/foundry/helpers/admission?persona=Foundry-Kilo-Visual-Review` with the coordinator key.
-3. Check that **every** route of `Foundry-Kilo-Visual-Review` is vision-capable in the model registry. If it is not, fix the persona chain or set `approved_models`. Do not relabel the text-only Helper-Claude as vision.
+3. Check that **every** route of `Foundry-Kilo-Visual-Review` is vision-capable in the model registry.
+   - If any route is text-only, fix the persona chain itself so that it contains only vision-capable routes. Until then the visual unit stays deferred.
+   - `approved_models` cannot fix this. It only adds a restriction: every route Foundry reports must be on that list. It does not remove or skip a text-only fallback, so setting it cannot repair an incompatible route chain.
+   - Do not relabel the text-only Helper-Claude as vision.
 4. Persona allowlists:
    - The **coordinator** client key needs `Foundry-Kilo-Visual-Review`. The visual call uses the coordinator's key, like reviews.
    - The **Kilo inference** key needs the helper personas (unchanged), plus the frontier persona only if that phase is ever enabled.

@@ -2,6 +2,29 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.119.1 — scoped source-snapshot ownership (v0.118.0 review fix)
+
+**What changes**
+
+- **Fix:** `source_snapshot()` ids were HEAD plus manifest only, and the table's
+  INSERT was skipped when the id already existed. Two projects with identical code
+  therefore shared one row, owned by whoever snapshotted first, and
+  `snapshot_file()` read from that project's blob root.
+  - Identity is now scoped to project, task, run and workspace.
+  - `content_fp` keeps the "unchanged code" comparison, so incremental review still
+    never repeats unchanged code, including across runs.
+  - `snapshot()`, `snapshot_file()` and `drift()` require the caller's project (and
+    task) and refuse foreign records.
+  - A collision with another owner's row raises instead of adopting it.
+- **Docs:** `approved_models` only adds a restriction. It never removes a text-only
+  fallback, so the visual persona chain itself must contain only vision-capable
+  routes.
+
+**Migration:**
+
+- Additive: `source_snapshots.content_fp` and `workspace`, plus an owner index.
+- Legacy v0.118.0 rows are untouched and readable only by their recorded owner.
+
 ## v0.119.0 — automatic training data after every sprint
 
 **What changes**

@@ -317,7 +317,7 @@ class Proactive(VisualMixin, AdvisoryMixin):
                                    detail={**ev["detail"], "snapshot": snap["status"]})
         data = (self.store.task(pid, tid) or {}).get("data") or {}
         prev = data.get("lanes_reviewed") or {}
-        if prev.get("snapshot") == snap["snapshot_id"]:
+        if prev.get("content") == snap["content_fp"] or prev.get("snapshot") == snap["snapshot_id"]:
             return self._set_event(ev["event_key"], "unchanged")    # never re-review same code
         base = prev.get("head") or data.get("task_base") or t.get("base_sha") or ""
         try:
@@ -339,6 +339,7 @@ class Proactive(VisualMixin, AdvisoryMixin):
             snapshot_id=snap["snapshot_id"], event_key=ev["event_key"])
         if how == "created":
             self.store.merge_data(pid, tid, lanes_reviewed={"snapshot": snap["snapshot_id"],
+                                                            "content": snap["content_fp"],
                                                             "head": snap["head"]})
         self._done_event(ev, uid, how)
 
@@ -488,7 +489,8 @@ class Proactive(VisualMixin, AdvisoryMixin):
         snap = pk.get("snapshot")
         for rel in (pk.get("excerpt_files") or [])[:6]:
             try:
-                txt = self.artifacts.snapshot_file(snap, rel) if snap else None
+                txt = self.artifacts.snapshot_file(snap, rel, u["project_id"],
+                                                   u["task_id"]) if snap else None
             except (ValueError, OSError):
                 txt = None
             if txt is not None:
@@ -512,7 +514,7 @@ class Proactive(VisualMixin, AdvisoryMixin):
             checks["patch"] = v
             if u.get("snapshot_id") and v["paths"]:
                 checks["drift"] = self.artifacts.drift(u["snapshot_id"], P.profile.workspace,
-                                                       v["paths"])
+                                                       v["paths"], u["project_id"], u["task_id"])
         if env.get("structured") and u.get("snapshot_id") and env.get("base") and \
                 env["base"] != u["snapshot_id"]:
             checks["base_mismatch"] = (f"result names base {env['base']}, assignment was "

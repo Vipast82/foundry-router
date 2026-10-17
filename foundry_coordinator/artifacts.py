@@ -13,8 +13,17 @@ A helper must never look at a moving target. Two kinds of snapshot:
             read twice: if a file or HEAD changed between the two reads a writer
             is active and the snapshot is UNSTABLE (retry later, never reviewed).
             Two dirty trees with the same HEAD but different bytes get different
-            snapshot ids. File bytes are kept content-addressed so a helper
-            packet quotes exactly what was snapshotted.
+            snapshot ids. File bytes are kept content-addressed (per project) so
+            a helper packet quotes exactly what was snapshotted.
+
+            Identity and ownership are SCOPED: snapshot_id = hash(project, task,
+            run, workspace, HEAD, manifest), so two projects (or tasks, or runs)
+            with identical HEAD and bytes (clones, fixtures) never share a row
+            or a blob root. content_fp = hash(HEAD, manifest) is kept separately
+            for "has the code changed?" comparisons. Every lookup takes the
+            caller's project (and task) and refuses a record owned by another.
+            Rows written before v0.119.1 (content-only ids, content_fp NULL) are
+            left as they are: still readable by their recorded owner only.
 
 Readiness is deterministic: the capture tool's own record (tools/
 capture-window.ps1 prints VALID=..., CAPTURE ... fileBytes=N and Saved: <path>)
@@ -55,6 +64,7 @@ CREATE INDEX IF NOT EXISTS idx_artifacts_task ON artifacts(project_id, task_id, 
 CREATE TABLE IF NOT EXISTS source_snapshots (
   snapshot_id TEXT PRIMARY KEY, project_id TEXT, task_id TEXT, run_id TEXT, head TEXT,
   dirty INTEGER, manifest TEXT, status TEXT, reason TEXT, bytes INTEGER, created_ts REAL);
+CREATE INDEX IF NOT EXISTS idx_source_snapshots_owner ON source_snapshots(project_id, task_id);
 CREATE TABLE IF NOT EXISTS fs_watch (
   project_id TEXT, task_id TEXT, rel_path TEXT, size INTEGER, mtime REAL, seen_ts REAL,
   stable INTEGER DEFAULT 0, PRIMARY KEY (project_id, task_id, rel_path));
@@ -214,6 +224,13 @@ class ArtifactStore:
         self.state_dir = state_dir
         self.clock = clock
         store.conn.executescript(SCHEMA)
+        # v0.119.1, additive: scoped identity. Existing rows keep content_fp NULL
+        # (= legacy content-only id) and their recorded owner; nothing is rewritten.
+        for col in ("content_fp TEXT", "workspace TEXT"):
+            try:
+                store.conn.execute(f"ALTER TABLE source_snapshots ADD COLUMN {col}")
+            except Exception:                                    # noqa: BLE001
+                pass
 
     # -- artifacts -------------------------------------------------------------
 
@@ -435,8 +452,11 @@ class ArtifactStore:
                               "not used as a review target"}
         dirty_paths = {p for _, p in ws.status()}
         dirty = any(p in dirty_paths for p in man1)
-        sid = "ss-" + hashlib.sha256((head1 + json.dumps(man1, sort_keys=True)).encode()
-                                     ).hexdigest()[:16]
+        mjson = json.dumps(man1, sort_keys=True)
+        content_fp = hashlib.sha256((head1 + mjson).encode()).hexdigest()[:24]
+        wsid = os.path.normcase(os.path.realpath(workspace))
+        sid = "ss-" + hashlib.sha256("\0".join((project_id, task_id, run_id, wsid, head1, mjson))
+                                     .encode()).hexdigest()[:20]
         bdir = os.path.join(self.state_dir, "snapshots", project_id, "blobs")
         os.makedirs(bdir, exist_ok=True)
         for h, b in blobs.items():
@@ -446,26 +466,44 @@ class ArtifactStore:
                 with open(tmp, "wb") as f:
                     f.write(b)
                 os.replace(tmp, dest)
-        if not self.store.q("SELECT 1 FROM source_snapshots WHERE snapshot_id=?", (sid,)):
+        prior = self.store.q("SELECT project_id, task_id, run_id FROM source_snapshots WHERE "
+                             "snapshot_id=?", (sid,))
+        if prior and (prior[0]["project_id"], prior[0]["task_id"], prior[0]["run_id"]) != \
+                (project_id, task_id, run_id):
+            # only a hash collision could get here; never adopt another owner's row
+            raise ValueError(f"snapshot id {sid} is owned by another project/task/run")
+        if not prior:
             self.store.x("INSERT INTO source_snapshots (snapshot_id, project_id, task_id, run_id, "
-                         "head, dirty, manifest, status, reason, bytes, created_ts) VALUES "
-                         "(?,?,?,?,?,?,?,?,?,?,?)",
-                         (sid, project_id, task_id, run_id, head1, int(dirty),
-                          json.dumps(man1, sort_keys=True), "consistent",
-                          "; ".join(skipped)[:1000], total, self.clock()))
-        return {"status": "consistent", "snapshot_id": sid, "head": head1, "dirty": dirty,
-                "manifest": man1, "skipped": skipped}
+                         "head, dirty, manifest, status, reason, bytes, created_ts, content_fp, "
+                         "workspace) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                         (sid, project_id, task_id, run_id, head1, int(dirty), mjson, "consistent",
+                          "; ".join(skipped)[:1000], total, self.clock(), content_fp, wsid))
+        return {"status": "consistent", "snapshot_id": sid, "content_fp": content_fp,
+                "head": head1, "dirty": dirty, "manifest": man1, "skipped": skipped}
 
-    def snapshot(self, snapshot_id: str) -> Optional[dict]:
-        r = self.store.q("SELECT * FROM source_snapshots WHERE snapshot_id=?", (snapshot_id,))
+    def snapshot(self, snapshot_id: str, project_id: str, task_id: str = "") -> Optional[dict]:
+        """The snapshot record, only for its owner: a record of another project
+        (or, when task_id is given, another task) is never returned, whatever
+        id the caller supplies. Legacy rows (content_fp NULL) follow the same
+        rule with their recorded owner."""
+        if not snapshot_id or not project_id:
+            return None
+        if task_id:
+            r = self.store.q("SELECT * FROM source_snapshots WHERE snapshot_id=? AND project_id=? "
+                             "AND task_id=?", (snapshot_id, project_id, task_id))
+        else:
+            r = self.store.q("SELECT * FROM source_snapshots WHERE snapshot_id=? AND project_id=?",
+                             (snapshot_id, project_id))
         if not r:
             return None
         r = dict(r[0])
         r["manifest"] = json.loads(r["manifest"] or "{}")
+        r["legacy"] = r.get("content_fp") is None
         return r
 
-    def snapshot_file(self, snapshot_id: str, rel: str) -> Optional[str]:
-        s = self.snapshot(snapshot_id)
+    def snapshot_file(self, snapshot_id: str, rel: str, project_id: str,
+                      task_id: str = "") -> Optional[str]:
+        s = self.snapshot(snapshot_id, project_id, task_id)
         if not s or rel not in s["manifest"]:
             return None
         p = os.path.join(self.state_dir, "snapshots", s["project_id"], "blobs",
@@ -476,9 +514,11 @@ class ArtifactStore:
             raise ValueError(f"snapshot blob for {rel} no longer matches its hash")
         return b.decode("utf-8", "replace")
 
-    def drift(self, snapshot_id: str, workspace: str, paths: list[str]) -> dict:
-        """For each path: same as the snapshot, changed since, or not in it."""
-        s = self.snapshot(snapshot_id) or {"manifest": {}}
+    def drift(self, snapshot_id: str, workspace: str, paths: list[str], project_id: str,
+              task_id: str = "") -> dict:
+        """For each path: same as the snapshot, changed since, or not in it.
+        An unknown or foreign snapshot compares as empty (absent / new file)."""
+        s = self.snapshot(snapshot_id, project_id, task_id) or {"manifest": {}}
         out = {}
         for rel in paths:
             p = os.path.join(workspace, rel)

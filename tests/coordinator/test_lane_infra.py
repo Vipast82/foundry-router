@@ -146,8 +146,8 @@ def test_dirty_snapshots_sharing_head_differ_and_writer_race(tmp_path):
     (root / "src/a.lua").write_text("x = 2\n")
     s2 = a.source_snapshot(**kw)
     assert s1["head"] == s2["head"] and s1["snapshot_id"] != s2["snapshot_id"] and s2["dirty"]
-    assert a.snapshot_file(s1["snapshot_id"], "src/a.lua").strip() == "x = 1"   # frozen bytes
-    assert a.drift(s1["snapshot_id"], str(root), ["src/a.lua", "src/b.lua"]) == \
+    assert a.snapshot_file(s1["snapshot_id"], "src/a.lua", "g", "T").strip() == "x = 1"   # frozen bytes
+    assert a.drift(s1["snapshot_id"], str(root), ["src/a.lua", "src/b.lua"], "g", "T") == \
         {"src/a.lua": "changed", "src/b.lua": "absent"}
     heads = iter([s1["head"], "f" * 40])
     ws.head = lambda: next(heads)                 # HEAD moves between the two reads
