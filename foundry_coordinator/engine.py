@@ -1165,6 +1165,10 @@ class Coordinator:
         self.helpers.skip_waiting(P, tid, "not admitted before the primary was ready")
         self.store.merge_data(pid, tid, helper_wait_since=None)
         t = self.store.task(pid, tid)
+        # a lane observation held for a proposer that was just skipped becomes
+        # deliverable now (ordinary skipped units have no result: no change)
+        if self._deliver_proposals(P, t):
+            return True
         if (t.get("data") or {}).get("helper_asked") == t["session_id"]:
             self.store.merge_data(pid, tid, helper_asked=None)
             asked = [u for u in self.helpers.units(pid, tid)

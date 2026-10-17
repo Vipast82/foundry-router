@@ -37,7 +37,10 @@ FIELDS = ("project_id", "task_id", "run_id", "role", "parent_session_id", "perso
 # it. Required work keeps the existing guardrails; optional work is admitted
 # only on fresh, below-cutoff quota for the account that serves it.
 REQUIRED_PURPOSES = ("implementer", "planning", "review", "closeout", "blocker_diagnosis")
-OPTIONAL_PURPOSES = ("code_proposal", "test_design", "debug_advice", "exploration")
+OPTIONAL_PURPOSES = ("code_proposal", "test_design", "debug_advice", "exploration",
+                     # proactive lanes (coordinator v0.118.0): always optional work
+                     "visual_observation", "failure_triage", "incremental_review", "research",
+                     "evidence_reconciliation", "handoff_prep", "preflight", "frontier_primary")
 PURPOSES = REQUIRED_PURPOSES + OPTIONAL_PURPOSES
 
 

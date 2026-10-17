@@ -442,3 +442,32 @@ def test_admission_endpoint_is_orchestration_only_and_inference_free(app, client
     assert r.status_code == 200 and r.json()["admit"] is False
     assert svc.db.query_one("SELECT COUNT(*) n FROM usage_events")["n"] == before
     _ = json
+
+
+def test_lane_purposes_are_optional_and_bindable(app, client):
+    gate, _, _ = make_gate(app)
+    from foundry_router.orchestration import OPTIONAL_PURPOSES
+    for p in ("visual_observation", "failure_triage", "incremental_review", "research",
+              "evidence_reconciliation", "handoff_prep", "preflight", "frontier_primary"):
+        assert p in OPTIONAL_PURPOSES
+        assert gate.effective_purpose(CallCtx(purpose=p)) == "optional"   # never required
+    svc = app.state.services
+    svc.config_store.config.clients += [
+        ClientConfig(name="coordinator", key="coord-key", scopes=["inference", "orchestration"])]
+    assert _bind(client, "v1", "visual_observation").status_code == 200
+
+
+def test_admission_reports_image_modality_per_route(app, client):
+    svc = app.state.services
+    svc.config_store.config.clients += [
+        ClientConfig(name="coordinator", key="coord-key", scopes=["inference", "orchestration"])]
+    real = svc.registry.get
+    svc.registry.get = lambda m: ({"capabilities": '["vision"]'} if m == "seer" else real(m))
+    try:
+        r = client.get("/v1/foundry/helpers/admission?backend=meridian&model=seer", headers=COORD)
+        assert r.status_code == 200 and r.json()["routes"][0]["vision"] is True
+        r = client.get("/v1/foundry/helpers/admission?backend=meridian&model=plain-text",
+                       headers=COORD)
+        assert r.json()["routes"][0]["vision"] is False
+    finally:
+        svc.registry.get = real

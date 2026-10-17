@@ -120,8 +120,15 @@ async def helper_admission(request: Request, persona: str = "", backend: str = "
     else:
         return _bad(ValueError("give persona, or backend and model"))
     out = []
+    from ..brain.agent import _model_has_vision
     for be, m in routes:
-        d = await gate.evaluate(be, m)
+        d = dict(await gate.evaluate(be, m))
+        # image modality per route, from the model registry (capabilities/tags):
+        # a coordinator sending images refuses any route without it
+        try:
+            d["vision"] = bool(_model_has_vision(svc.registry, m))
+        except Exception:                                        # noqa: BLE001
+            d["vision"] = None
         out.append(d)
     streams = {b["backend"]: b for b in svc.ledger.backend_streams()}
     first = out[0]

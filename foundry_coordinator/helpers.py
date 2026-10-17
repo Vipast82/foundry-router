@@ -118,7 +118,7 @@ class HelperManager:
 
     def units(self, pid: str, tid: str, status: Optional[str] = None) -> list[dict]:
         rows = self.store.q("SELECT * FROM helper_units WHERE project_id=? AND task_id=?"
-                            + (" AND status=?" if status else "") + " ORDER BY created_ts",
+                            + (" AND status=?" if status else "") + " ORDER BY created_ts, rowid",
                             (pid, tid, status) if status else (pid, tid))
         for r in rows:
             r["files"] = json.loads(r["files"] or "[]")
@@ -534,16 +534,16 @@ class HelperManager:
             if st not in ("integrated", "rejected", "deferred"):
                 continue
             u = self.store.q("SELECT * FROM helper_units WHERE unit_id=? AND project_id=? AND "
-                             "task_id=? AND lane IS NOT NULL AND status='delivered'",
-                             (uid, P.id, t["task_id"]))
+                             "task_id=? AND lane IS NOT NULL AND status='delivered' AND "
+                             "COALESCE(feedback,'') != ?", (uid, P.id, t["task_id"], st))
             if not u:
                 continue
             note = str(f.get("note") or f.get("reason") or "")[:500]
+            det = json.loads(u[0].get("feedback_detail") or "{}")
+            det.update(note=note, claimed_by="primary", session=t["session_id"],
+                       head=self._head(P))
             self.store.x("UPDATE helper_units SET feedback=?, feedback_detail=?, updated_ts=? "
-                         "WHERE unit_id=?", (st, json.dumps({"note": note, "claimed_by": "primary",
-                                                             "session": t["session_id"],
-                                                             "head": self._head(P)}),
-                                             self.clock(), uid))
+                         "WHERE unit_id=?", (st, json.dumps(det), self.clock(), uid))
             self.store.event(P.id, t["task_id"], "helper_feedback", session_id=t["session_id"],
                              detail={"unit": uid, "status": st, "note": note[:200]})
             out.append(uid)
@@ -594,6 +594,16 @@ class HelperManager:
                              "superseded_by=?, reason=?, updated_ts=? WHERE unit_id=?",
                              (new_artifact, f"superseded by newer capture {new_artifact}",
                               self.clock(), u["unit_id"]))
+            elif u["status"] == "delivered":
+                # lineage: the primary recaptured after this result reached it
+                det = json.loads(u.get("feedback_detail") or "{}")
+                det["recaptured_as"] = new_artifact
+                self.store.x("UPDATE helper_units SET feedback_detail=?, updated_ts=? WHERE "
+                             "unit_id=?", (json.dumps(det), self.clock(), u["unit_id"]))
+                self.store.event(P.id, tid, "helper_recapture", detail={
+                    "unit": u["unit_id"], "artifact": old_artifact, "recapture": new_artifact,
+                    "feedback": u.get("feedback")})
+                continue
             elif u["status"] in ("running", "done"):
                 self.store.x("UPDATE helper_units SET feedback='superseded', superseded_by=?, "
                              "updated_ts=? WHERE unit_id=?", (new_artifact, self.clock(),

@@ -20,9 +20,10 @@ from typing import Optional
 
 from . import lanes as L
 from .artifacts import ArtifactStore
+from .visual import VisualMixin
 
 
-class Proactive:
+class Proactive(VisualMixin):
     def __init__(self, mgr):
         self.mgr = mgr
         self.store = mgr.store
@@ -323,9 +324,6 @@ class Proactive:
                                                             "head": snap["head"]})
         self._done_event(ev, uid, how)
 
-    def _plan_artifacts(self, P, t, spec, ls):
-        return None                                      # stage 3
-
     # ------------------------------------------------------------------ queue
 
     def order(self, P, waiting: list, ls: dict, now: float) -> list:
@@ -379,9 +377,6 @@ class Proactive:
         order = list(h["order"]) or list(h["personas"])
         return [(b, h["personas"][b]) for b in order if b in h["personas"]
                 and (u["value"] == "high" or b not in sel)]
-
-    def admission_problem(self, P, u: dict, adm: dict) -> str:
-        return ""                                        # stage 3: image modality
 
     # ------------------------------------------------------------------ prompts
 
@@ -595,8 +590,19 @@ class Proactive:
             informational = u["lane"] in ("test_design", "research", "evidence", "handoff",
                                           "preflight")
             if env.get("routed_to"):
-                self._display_only(u, f"its findings went to unit {env['routed_to']}")
-                continue
+                # observer -> proposer: one card, not two. Hold the observation
+                # while its proposer can still answer; deliver it if the
+                # proposer ends without a usable result.
+                ch = self.store.q("SELECT status, feedback FROM helper_units WHERE unit_id=?",
+                                  (env["routed_to"],))
+                cst, cfb = (ch[0]["status"], ch[0]["feedback"]) if ch else ("skipped", None)
+                if cst in ("pending", "deferred", "running"):
+                    continue
+                if cst in ("done", "delivered") and cfb in ("waiting", "delivered", "integrated",
+                                                            "rejected", "deferred") \
+                        and cfb != "rejected":
+                    self._display_only(u, f"covered by the code-proposal card {env['routed_to']}")
+                    continue
             if not (sev >= floor or has_patch or (informational and env.get("structured"))):
                 self._display_only(u, "no finding at or above the delivery threshold "
                                       f"({ls['min_delivery_severity']})")
@@ -636,6 +642,10 @@ class Proactive:
                          f"{u.get('snapshot_id') or u.get('artifact_id') or 'n/a'})")
             if env.get("summary"):
                 lines.append(env["summary"])
+            if u["lane"] == "proposer":
+                pk = json.loads(u.get("packet") or "{}")
+                if pk.get("evidence"):
+                    lines.append("Visual evidence: " + str(pk["evidence"])[:800])
             for f in sorted(fs, key=lambda f: -L.SEVERITY.get(f.get("severity"), 0))[:8]:
                 lines.append(f"- {f['id']} ({f['severity']}, confidence {f['confidence']:.2f}) "
                              f"observed: {f['observed'][:500]}"
@@ -659,14 +669,3 @@ class Proactive:
             if not env.get("structured"):
                 lines.append("(unstructured result)\n" + str(u.get("result") or "")[:4000])
         return "\n".join(lines) + "\n"
-
-    # ------------------------------------------------------------------ direct calls (stage 3)
-
-    def start_direct(self, P, t, spec, u, h, backend, persona, adm) -> bool:
-        return False
-
-    def poll_direct(self, P, u, h) -> None:
-        return None
-
-    def forget_direct(self, unit_id: str) -> None:
-        return None
