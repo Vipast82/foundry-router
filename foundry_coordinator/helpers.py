@@ -48,6 +48,14 @@ CREATE TABLE IF NOT EXISTS helper_units (
 #           pending/deferred -> skipped (primary was ready first; never blocks it)
 #           running -> timed_out (handoff wait over) | failed | cancelled (task paused/cancelled)
 REQUESTABLE_AGAIN = ("skipped", "timed_out", "failed", "cancelled")
+# v0.118.0 proactive lanes (lanes.py). feedback: waiting | delivered | display_only |
+# integrated | rejected | deferred | superseded | expired (what happened to the result)
+LANE_COLUMNS = ("lane TEXT", "priority INTEGER", "parent_unit TEXT", "depth INTEGER DEFAULT 0",
+                "artifact_id TEXT", "snapshot_id TEXT", "mode TEXT", "envelope TEXT",
+                "feedback TEXT", "feedback_detail TEXT", "superseded_by TEXT", "event_key TEXT",
+                "skills TEXT", "served_model TEXT", "tokens INTEGER", "started_ts REAL",
+                "finished_ts REAL", "delivered_ts REAL", "coalesced INTEGER DEFAULT 0",
+                "packet TEXT")
 _SUBAGENT_TITLE = re.compile(r"\(@([\w.-]+) subagent\)")
 
 
@@ -63,11 +71,15 @@ class HelperManager:
         self.store = coordinator.store
         self.clock = clock
         self.store.conn.executescript(SCHEMA)
-        try:                                  # v0.117.0 tables: additive column
-            self.store.conn.execute("ALTER TABLE helper_units ADD COLUMN requests INTEGER "
-                                    "DEFAULT 1")
-        except Exception:                                        # noqa: BLE001
-            pass
+        # additive columns only (v0.117.0 -> requests; v0.118.0 -> proactive lanes);
+        # existing rows keep their meaning (lane NULL = an ordinary helper unit)
+        for col in ("requests INTEGER DEFAULT 1", *LANE_COLUMNS):
+            try:
+                self.store.conn.execute(f"ALTER TABLE helper_units ADD COLUMN {col}")
+            except Exception:                                    # noqa: BLE001
+                pass
+        from .proactive import Proactive
+        self.lanes = Proactive(self)
 
     # ------------------------------------------------------------------ settings
 
@@ -201,6 +213,11 @@ class HelperManager:
             return
         self.collect(P, t, spec)
         h = self.settings(P)
+        from . import lanes as L
+        ls = L.settings(P)
+        if ls["enabled"]:
+            self.lanes.ingest(P, t, spec, ls)
+            t = self.store.task(P.id, t["task_id"]) or t
         for u in self.units(P.id, t["task_id"], "running"):
             self._poll(P, u, h)
         running = len(self.units(P.id, t["task_id"], "running"))
@@ -443,6 +460,30 @@ class HelperManager:
         agent = child_agent(title)
         return self.settings(P)["child_purposes"].get(agent, "exploration") if agent \
             else "exploration"
+
+    def supersede_artifact(self, P, tid: str, old_artifact: str, new_artifact: str) -> list[str]:
+        """A newer generation of the same capture arrived: work on the old one
+        never reaches the primary. Waiting units are superseded; a running one
+        finishes (its quota is already spent) and its result is marked
+        superseded, not delivered."""
+        out = []
+        for u in self.store.q("SELECT * FROM helper_units WHERE project_id=? AND task_id=? AND "
+                              "artifact_id=?", (P.id, tid, old_artifact)):
+            if u["status"] in ("pending", "deferred"):
+                self.store.x("UPDATE helper_units SET status='skipped', feedback='superseded', "
+                             "superseded_by=?, reason=?, updated_ts=? WHERE unit_id=?",
+                             (new_artifact, f"superseded by newer capture {new_artifact}",
+                              self.clock(), u["unit_id"]))
+            elif u["status"] in ("running", "done"):
+                self.store.x("UPDATE helper_units SET feedback='superseded', superseded_by=?, "
+                             "updated_ts=? WHERE unit_id=?", (new_artifact, self.clock(),
+                                                              u["unit_id"]))
+            else:
+                continue
+            self.store.event(P.id, tid, "helper_superseded", detail={
+                "unit": u["unit_id"], "artifact": old_artifact, "by": new_artifact})
+            out.append(u["unit_id"])
+        return out
 
     def snapshot(self, pid: str, tid: str) -> list[dict]:
         return [{k: u.get(k) for k in ("unit_id", "kind", "responsibility", "value", "source",
