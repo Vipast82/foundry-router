@@ -332,10 +332,18 @@ class Coordinator:
                 prompt += "\n\n" + self.helpers.integration_prompt(units)
             if role == "implementer" and self.helpers.enabled(P):
                 prompt += "\n" + self.helpers.request_guidance(P)
+                note, hu = self.helpers.lanes.handoff_note(P, tid)
+                if note:
+                    prompt += "\n" + note
+            else:
+                hu = ""
             P.client.prompt(sid, prompt, directory=directory, persona=persona, agent=agent)
             self._notes_delivered(notes, sid)
             if units:
                 self.helpers.mark_delivered(units, sid)
+            if hu:
+                self.helpers.mark_delivered(self.helpers.store.q(
+                    "SELECT * FROM helper_units WHERE unit_id=?", (hu,)), sid)
             self.store.op_update(key, "done", {"session_id": sid, "prompt_ts": ts})
             self.store.update_session(sid, status="prompted", prompt_ts=ts)
             self.store.event(P.id, tid, "session_started", session_id=sid,

@@ -77,7 +77,7 @@ LANE_DEFAULTS = {
                "min_confidence": 0.75, "min_severity": "medium", "propose": True,
                "skills": ["au-ui-review"], "max_tokens": 3000, "viewport": "",
                "retention_days": 30},
-    "research": {"max_per_task": 4, "max_running": 1, "cache_hours": 168},
+    "research": {"max_per_task": 4, "max_running": 1, "cache_hours": 168, "max_lookups": 6},
     "preflight": {"max_per_task": 1, "max_running": 1},
 }
 

@@ -20,10 +20,11 @@ from typing import Optional
 
 from . import lanes as L
 from .artifacts import ArtifactStore
+from .advisory import AdvisoryMixin
 from .visual import VisualMixin
 
 
-class Proactive(VisualMixin):
+class Proactive(VisualMixin, AdvisoryMixin):
     def __init__(self, mgr):
         self.mgr = mgr
         self.store = mgr.store
@@ -270,9 +271,6 @@ class Proactive(VisualMixin):
             planned = True
         if not planned:
             self._set_event(ev["event_key"], "ignored")
-
-    def _preflight(self, P, t, spec, ls, ev):
-        return None                                      # stage 5
 
     def _plan_failure(self, P, t, spec, ls, ev):
         if not L.lane_on(ls, "failure_triage"):
