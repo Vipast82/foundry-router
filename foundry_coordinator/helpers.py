@@ -25,6 +25,7 @@ At a quota cutoff a running unit finishes; nothing new starts.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 import time
@@ -41,8 +42,12 @@ CREATE TABLE IF NOT EXISTS helper_units (
   kind TEXT, value TEXT, prompt TEXT, files TEXT, source TEXT, status TEXT, persona TEXT,
   backend TEXT, session_id TEXT, parent_session TEXT, attempts INTEGER DEFAULT 0, reason TEXT,
   next_check REAL, next_eligible REAL, result TEXT, delivered_session TEXT, created_ts REAL,
-  updated_ts REAL, UNIQUE (project_id, task_id, responsibility));
+  updated_ts REAL, requests INTEGER DEFAULT 1, UNIQUE (project_id, task_id, responsibility));
 """
+# statuses: pending -> deferred <-> running -> done -> delivered
+#           pending/deferred -> skipped (primary was ready first; never blocks it)
+#           running -> timed_out (handoff wait over) | failed | cancelled (task paused/cancelled)
+REQUESTABLE_AGAIN = ("skipped", "timed_out", "failed", "cancelled")
 _SUBAGENT_TITLE = re.compile(r"\(@([\w.-]+) subagent\)")
 
 
@@ -58,6 +63,11 @@ class HelperManager:
         self.store = coordinator.store
         self.clock = clock
         self.store.conn.executescript(SCHEMA)
+        try:                                  # v0.117.0 tables: additive column
+            self.store.conn.execute("ALTER TABLE helper_units ADD COLUMN requests INTEGER "
+                                    "DEFAULT 1")
+        except Exception:                                        # noqa: BLE001
+            pass
 
     # ------------------------------------------------------------------ settings
 
@@ -75,6 +85,14 @@ class HelperManager:
         h.setdefault("poll_seconds", 60)
         h.setdefault("timeout_minutes", 30)
         h.setdefault("max_result_chars", 20000)
+        # an idle primary waits this long for ADMITTED, running helpers before
+        # verification; then they are stopped (timed_out). Units that were never
+        # admitted (deferred / unknown quota) never hold the primary.
+        h.setdefault("handoff_wait_minutes", 15)
+        # a skipped / timed-out unit may be requested again by a later report
+        # up to this many requests in total
+        h.setdefault("max_unit_requests", 2)
+        h.setdefault("max_requests_per_report", 4)
         # model-spawned child sessions (Kilo task tool): agent -> purpose
         h.setdefault("child_purposes", {"au-planner": "planning", "au-review": "review",
                                         "au-deep-review": "review",
@@ -99,10 +117,27 @@ class HelperManager:
         kind = str(u.get("kind") or "code_proposal")
         if not resp or kind not in OPTIONAL_KINDS:
             return None
+        now = self.clock()
+        prior = self.store.q("SELECT * FROM helper_units WHERE project_id=? AND task_id=? AND "
+                             "responsibility=?", (pid, tid, resp))
+        if prior:
+            p = prior[0]
+            if p["status"] in REQUESTABLE_AGAIN and source == "report" and \
+                    int(p["requests"] or 1) < int(h["max_unit_requests"]):
+                self.store.x("UPDATE helper_units SET status='pending', kind=?, prompt=?, "
+                             "files=?, run_id=?, requests=COALESCE(requests,1)+1, next_check=0, "
+                             "reason=?, session_id=NULL, updated_ts=? WHERE unit_id=?",
+                             (kind, str(u.get("prompt") or "")[:6000],
+                              json.dumps([str(f) for f in (u.get("files") or [])][:30]), run_id,
+                              f"requested again (was {p['status']}: {p['reason'] or ''})"[:500],
+                              now, p["unit_id"]))
+                self.store.event(pid, tid, "helper_unit", detail={"unit": p["unit_id"],
+                                                                  "requested_again": True})
+                return p["unit_id"]
+            return None                       # one unit per responsibility
         if len(self.units(pid, tid)) >= int(h["max_units_per_task"]):
             return None
         uid = f"hu-{uuid.uuid4().hex[:10]}"
-        now = self.clock()
         n = self.store.x("INSERT OR IGNORE INTO helper_units (unit_id, project_id, task_id, run_id, "
                          "responsibility, kind, value, prompt, files, source, status, created_ts, "
                          "updated_ts, next_check) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
@@ -118,27 +153,46 @@ class HelperManager:
         return uid
 
     def collect(self, P, t: dict, spec) -> None:
-        """New units from the task source and the primary's latest report.
-        Duplicate responsibilities are ignored (one unit each)."""
-        from .profile import matches_any
+        """Units declared by the task source (one per responsibility)."""
         h = self.settings(P)
         for u in (spec.data or {}).get("helpers") or []:
             if isinstance(u, dict):
                 self._add(P.id, t["task_id"], t["run_id"], u, "task", h)
-        rep = (t.get("data") or {}).get("last_report") or {}
-        for u in (rep.get("helper_requests") or [])[:6]:
+
+    def collect_report(self, P, t: dict, spec, report: dict) -> list[str]:
+        """Consume the helper_requests of a FRESH primary report, at the safe
+        point where the primary went idle, once per report. A model request is
+        always optional (never planning/review), never high-value, and only
+        keeps files inside the task's scope."""
+        from .profile import matches_any
+        reqs = (report or {}).get("helper_requests") or []
+        if not reqs or not isinstance(reqs, list):
+            return []
+        sig = hashlib.sha256(json.dumps(report, sort_keys=True, default=str).encode()).hexdigest()
+        seen = list((t.get("data") or {}).get("helper_reports_seen") or [])
+        if sig in seen:
+            return []                         # already consumed (e.g. before a restart)
+        h = self.settings(P)
+        out = []
+        for u in reqs[:int(h["max_requests_per_report"])]:
             if not isinstance(u, dict):
                 continue
-            files = [f for f in (u.get("files") or []) if matches_any(str(f), spec.scope)]
-            # whatever the model calls it, a requested unit is optional work
+            files = [str(f) for f in (u.get("files") or []) if matches_any(str(f), spec.scope)]
             kind = u.get("kind") if u.get("kind") in OPTIONAL_KINDS else "code_proposal"
-            self._add(P.id, t["task_id"], t["run_id"], {**u, "kind": kind, "files": files,
-                                                        "value": "normal"}, "report", h)
+            uid = self._add(P.id, t["task_id"], t["run_id"], {
+                "responsibility": u.get("responsibility"), "kind": kind,
+                "prompt": u.get("prompt") or u.get("question") or "", "files": files,
+                "value": "normal"}, "report", h)
+            if uid:
+                out.append(uid)
+        self.store.merge_data(P.id, t["task_id"], helper_reports_seen=(seen + [sig])[-20:])
+        return out
 
     # ------------------------------------------------------------------ the tick
 
     def tick(self, P, t: dict) -> None:
-        """Called while the task is IMPLEMENTING (the primary owns the writer)."""
+        """Called while the task is IMPLEMENTING (the primary owns the writer),
+        and at the safe point right after the primary reported."""
         if not self.enabled(P) or t["state"] != S.IMPLEMENTING:
             return
         try:
@@ -207,9 +261,11 @@ class HelperManager:
 
     def _start(self, P, t: dict, spec, u: dict, h: dict, backend: str, persona: str) -> bool:
         pid, tid = P.id, t["task_id"]
-        key = f"helper:{pid}:{tid}:{u['unit_id']}"
+        # one operation per request of the unit (a re-request is a new session)
+        key = f"helper:{pid}:{tid}:{u['unit_id']}:{int(u.get('requests') or 1)}"
         prior = self.store.op_begin(key, pid, tid, "helper")
-        sid = ((prior or {}).get("result") or {}).get("session_id")
+        res = dict((prior or {}).get("result") or {})
+        sid = res.get("session_id")
         directory = P.profile.workspace
         if not sid:
             sid = P.client.start_session(
@@ -219,11 +275,14 @@ class HelperManager:
                 metadata={"project": pid, "task": tid, "run": t["run_id"], "role": "helper",
                           "purpose": u["kind"], "unit": u["unit_id"]},
                 permissions=P.adapter.helper_permissions(spec))
-            self.store.op_update(key, "started", {"session_id": sid})
+            res = {"session_id": sid}
+            self.store.op_update(key, "started", res)
             self.store.add_session(sid, pid, tid, t["run_id"], "helper", "helper", t["attempt"],
                                    P.client.name, persona,
                                    {"parent": t["session_id"], "unit": u["unit_id"],
                                     "purpose": u["kind"]})
+        if not res.get("bound"):
+            # binding before inference, also when a restart came between the two
             try:
                 P.foundry.bind(sid, pid, tid, t["run_id"], "helper", persona,
                                parent=t["session_id"] or "",
@@ -234,17 +293,20 @@ class HelperManager:
             except FoundryError as e:
                 # without its binding the session's calls wouldn't be gated: don't run it
                 P.client.abort(sid, directory=directory)
+                self.store.update_session(sid, status="ended", outcome="unbound",
+                                          ended_ts=self.clock())
                 self.store.x("UPDATE helper_units SET status='deferred', reason=?, "
                              "next_check=?, updated_ts=? WHERE unit_id=?",
                              (f"binding failed: {e}"[:500], self.clock() + float(h["poll_seconds"]),
                               self.clock(), u["unit_id"]))
-                self.store.op_update(key, "failed", {"session_id": sid})
                 self.store.x("DELETE FROM ops WHERE key=?", (key,))
                 return False
-        if not ((prior or {}).get("result") or {}).get("prompted"):
+            res["bound"] = True
+            self.store.op_update(key, "bound", res)
+        if not res.get("prompted"):
             P.client.prompt(sid, self.prompt(spec, u), directory=directory, persona=persona,
                             agent=h["agent"])
-            self.store.op_update(key, "done", {"session_id": sid, "prompted": True})
+            self.store.op_update(key, "done", {**res, "prompted": True})
         now = self.clock()
         self.store.x("UPDATE helper_units SET status='running', persona=?, backend=?, "
                      "session_id=?, parent_session=?, attempts=attempts+1, reason=?, "
@@ -310,6 +372,49 @@ class HelperManager:
                          detail={"unit": u["unit_id"], "reason": reason})
 
     # ------------------------------------------------------------------ integration
+
+    def abort_running(self, P, tid: str, status: str, reason: str) -> list[str]:
+        """Stop every running unit of a task (no leaked sessions). A stopped
+        unit has no result, so it's never delivered and never an author."""
+        out = []
+        for u in self.units(P.id, tid, "running"):
+            try:
+                P.client.abort(u["session_id"], directory=P.profile.workspace)
+            except Exception:                                    # noqa: BLE001
+                pass
+            self._finish(P, u, status, reason, None)
+            out.append(u["unit_id"])
+        return out
+
+    def skip_waiting(self, P, tid: str, reason: str) -> list[str]:
+        """Units never admitted (pending / deferred) when the primary is ready:
+        skipped, so optional work never holds required progress."""
+        out = []
+        for st in ("pending", "deferred"):
+            for u in self.units(P.id, tid, st):
+                why = f"{reason}" + (f" (last: {u['reason']})" if u.get("reason") else "")
+                self.store.x("UPDATE helper_units SET status='skipped', reason=?, updated_ts=? "
+                             "WHERE unit_id=?", (why[:900], self.clock(), u["unit_id"]))
+                self.store.event(P.id, tid, "helper_skipped", detail={"unit": u["unit_id"],
+                                                                      "reason": why[:300]})
+                out.append(u["unit_id"])
+        return out
+
+    def request_guidance(self, P) -> str:
+        """What the primary is told about asking for optional help."""
+        h = self.settings(P)
+        return ("\n## Optional helpers (read-only)\nIf a bounded, independent part of THIS task would "
+                "benefit from a second opinion, you may ask the coordinator for up to "
+                f"{h['max_requests_per_report']} read-only helpers by adding \"helper_requests\" to "
+                "your coordinator-report block, then stopping your turn:\n"
+                '"helper_requests": [{"kind": "code_proposal | test_design | debug_advice | '
+                'exploration", "responsibility": "<one distinct part, e.g. S45 ordering test>", '
+                '"prompt": "<what you need>", "files": ["<paths inside this task scope>"]}]\n'
+                "Helpers can only read; they return proposals that arrive later in this session as "
+                "advisory text. You still write, test and commit everything yourself. Helpers run "
+                "only if the subscription quota allows optional work; a request may be deferred or "
+                "skipped, so don't wait for one to make progress. Don't start au-helper through "
+                "your task tool, and don't ask helpers to review or approve your work.\n")
 
     def proposals_for(self, pid: str, tid: str) -> list[dict]:
         return [u for u in self.units(pid, tid, "done") if not u["delivered_session"]]

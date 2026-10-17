@@ -2,6 +2,38 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.117.1 — helper request lifecycle fix
+
+**What changes**
+
+- **Fix:** `helper_requests` in a primary's coordinator-report are now consumed at the safe
+  point where the primary went idle, before BUILD can move to VERIFYING, and dispatched
+  right away.
+  - In v0.117.0 the task left IMPLEMENTING first, so 0 units were created.
+- **Bounded hand-off:**
+  - Proposals are delivered once to the current primary.
+  - Admitted helpers that are still running get up to `[helpers] handoff_wait_minutes`
+    (default 15). After that they're aborted (`timed_out`), and a late result is never
+    delivered.
+  - Deferred/UNKNOWN units are `skipped` and never hold the primary.
+  - A primary that stopped to ask is told the outcome once.
+- **Robustness:**
+  - Pause and cancel abort running helpers.
+  - A helper session is bound before its prompt even across a restart.
+  - Proposal and outcome deliveries are journaled and never resent.
+  - A skipped or timed-out unit can be requested again up to `max_unit_requests`.
+- **Prompts:** implementer prompts (all adapters) explain how to request helpers when
+  `[helpers]` is enabled.
+- **Version:** `foundry_router` 0.117.1. The Foundry service itself is unchanged; this is
+  coordinator code.
+
+**Migration:**
+
+- Additive: `helper_units.requests` (added on start).
+- New optional `[helpers]` keys: `handoff_wait_minutes`, `max_unit_requests`,
+  `max_requests_per_report`.
+- Helpers stay off until `[helpers] enabled = true`.
+
 ## v0.117.0 — backend-aware optional coding helpers
 
 **What changes**

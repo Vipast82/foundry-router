@@ -91,7 +91,10 @@ agent = "au-helper"                        # a READ-ONLY Kilo agent (see below)
 worker_client = "kilo"                     # the Foundry client name Kilo's key uses
 max_running = 3                            # never more than the backend's helper streams
 poll_seconds = 60                          # minimum gap between admission checks per unit
-timeout_minutes = 30
+timeout_minutes = 30                       # a helper session's own limit
+handoff_wait_minutes = 15                  # an idle primary waits this long for ADMITTED helpers
+max_unit_requests = 2                      # a skipped/timed-out unit may be asked for again once
+max_requests_per_report = 4
 
 [helpers.personas]                         # backend name -> helper persona
 meridian = "Foundry-Kilo-Helper-Claude"
@@ -101,6 +104,28 @@ cliproxyapi = "Foundry-Kilo-Helper-GPT"
 **Where units come from:** a json task's `helpers: [{responsibility, kind, prompt, files,
 value}]`, or the primary's report `helper_requests`. There is one unit per responsibility,
 and files outside the task's scope are dropped.
+
+**How the primary asks.** When `[helpers]` is enabled, every implementer prompt (any
+adapter, AnimalUprising included) gets a short "Optional helpers" section. It tells the
+primary to add this to its `coordinator-report` block and stop its turn:
+
+```json
+"helper_requests": [{"kind": "code_proposal | test_design | debug_advice | exploration",
+                     "responsibility": "<one distinct part>", "prompt": "<what you need>",
+                     "files": ["<paths inside the task scope>"]}]
+```
+
+The same section says: helpers only read; proposals arrive later as advisory text; a request
+may be deferred or skipped; don't use the task tool for `au-helper`; don't ask helpers to
+review. The Kilo agent and its skills are unchanged.
+
+A request is always optional work, normalized as follows:
+
+- An unknown kind (`review`, `planning`, …) becomes `code_proposal`.
+- `value` is always `normal`, so the selective ChatGPT backend is never self-awarded.
+- Files outside the task scope are dropped.
+- Each report is consumed once (hashed in the task data), at most `max_requests_per_report`
+  requests.
 
 **What happens to each unit**
 
@@ -116,6 +141,45 @@ and files outside the task's scope are dropped.
    safe point) the proposals go to it once, as advisory text. The primary integrates,
    tests and commits.
 5. **Restarts.** A unit is never started twice (keyed operation journal).
+
+**The safe point: the primary went idle (v0.117.1).** The engine decides in this order
+before BUILD can move to VERIFYING:
+
+1. **Consume.** The new report's `helper_requests` become units, and eligible ones are
+   dispatched right away (admission check, binding, prompt). Before v0.117.1, report
+   requests were read only on the next IMPLEMENTING tick, which never came, so they were
+   lost.
+2. **Deliver.** Returned proposals go once to this primary session, which continues
+   (still IMPLEMENTING).
+3. **Wait (bounded).** If admitted helpers are still running, the primary waits for them,
+   for up to `handoff_wait_minutes` from the first idle tick (persisted, so a restart
+   doesn't reset it). After that the helpers are aborted, recorded as `timed_out` and their
+   bindings ended. A result arriving after that is never read or delivered, and doesn't
+   count as authorship.
+4. **Skip.** Units never admitted (DEFER, UNKNOWN, no persona, failed binding) don't hold
+   the primary. They become `skipped`, with the last admission reason kept.
+5. **Tell the primary.** If the report that asked was not `DONE` (the primary stopped to
+   wait) and no proposal came, the primary gets one message listing each unit's outcome and
+   continues alone. If the report was `DONE`, the task goes to verification.
+
+Further rules:
+
+- A proposal is only delivered while the task is IMPLEMENTING, to its current primary. It
+  never reaches a revision that is being verified or reviewed.
+- Units done but not delivered when the task leaves IMPLEMENTING (e.g. on BLOCKED) reach
+  the next implementer session's first prompt and so become part of a new revision, which
+  is reviewed again.
+- Pause and cancel abort running helpers (`cancelled`).
+- A skipped, timed-out, failed or cancelled unit can be asked for again by a later report,
+  up to `max_unit_requests` in total. Delivered or running units cannot be.
+- Every delivery is journaled before it's sent (`deliver:` operation). If the coordinator
+  dies mid-send, it doesn't resend. It logs `helper_delivery_uncertain` and counts the unit
+  as delivered, so review stays independent of a possible author.
+- A helper session is journaled as `started → bound → done`, so a restart between creation
+  and binding binds before the first prompt; it never runs unbound.
+- Events: `helper_requests`, `helper_unit`, `helper_deferred`, `helper_started`,
+  `helper_handoff_wait`, `helper_proposals_delivered`, `helper_handoff_timeout`,
+  `helper_timed_out`, `helper_skipped`, `helper_outcome_delivered`, `helper_cancelled`.
 
 **Review independence:** if a persona that proposed code integrated into the revision is
 also the reviewer, the review moves to the other reviewer role. If no independent reviewer
@@ -203,3 +267,5 @@ No setting was changed and no upstream was restarted.
    point (see the runbook). It changes the profile hash, which the engine records.
 5. **Watch:** check the Helper capacity section, then confirm one deferred and one
    admitted unit on a low-risk task before relying on it.
+
+   v0.117.1 is required: v0.117.0 never dispatched report requests.

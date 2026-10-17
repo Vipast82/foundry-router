@@ -330,6 +330,8 @@ class Coordinator:
                      if role == "implementer" and self.helpers.enabled(P) else [])
             if units:
                 prompt += "\n\n" + self.helpers.integration_prompt(units)
+            if role == "implementer" and self.helpers.enabled(P):
+                prompt += "\n" + self.helpers.request_guidance(P)
             P.client.prompt(sid, prompt, directory=directory, persona=persona, agent=agent)
             self._notes_delivered(notes, sid)
             if units:
@@ -368,13 +370,20 @@ class Coordinator:
         if s is None:
             return
         pid, tid = P.id, t["task_id"]
-        if self._deliver_proposals(P, t):
-            return                       # the same session continues with the proposals
         head = P.ws.head()
         rep = s.report or {}
         data = self.store.merge_data(pid, tid, last_report=rep or None)
         status = str(rep.get("status") or "").upper()
-        if status in ("BLOCKED", "NEEDS_HUMAN") and head == t["base_sha"]:
+        blocked = status in ("BLOCKED", "NEEDS_HUMAN") and head == t["base_sha"]
+        if not blocked and self.helpers.enabled(P) and \
+                self._helper_handoff(P, self.store.task(pid, tid), rep):
+            return                       # the primary continues, or waits for its helpers
+        if self.helpers.enabled(P):
+            self.helpers.abort_running(P, tid, "cancelled", "the primary finished first")
+            self.helpers.skip_waiting(P, tid, "the primary finished before this unit was "
+                                              "admitted")
+        data = self.store.merge_data(pid, tid, helper_wait_since=None)
+        if blocked:
             self.store.release(pid, tid)
             return self.store.transition(pid, tid, S.BLOCKED, {
                 "blocker": f"session reported {status}: {rep.get('blocker') or rep.get('summary')}",
@@ -1030,6 +1039,7 @@ class Coordinator:
         if t["state"] in S.WRITING and t["session_id"]:
             P.client.abort(t["session_id"], directory=P.profile.workspace)
             self._release_session(P, t)
+        self.helpers.abort_running(P, task_id, "cancelled", f"task paused: {reason}"[:300])
         return self.store.transition(project_id, task_id, S.PAUSED, {
             "reason": reason, "resume_state": t["state"]}, actor=actor,
             data={**t["data"], "resume_action": "continue" if t["state"] in S.WRITING else None,
@@ -1041,6 +1051,7 @@ class Coordinator:
         if t["state"] in S.WRITING and t["session_id"]:
             P.client.abort(t["session_id"], directory=P.profile.workspace)
             self._end_session(P, t["session_id"], "cancelled")
+        self.helpers.abort_running(P, task_id, "cancelled", f"task cancelled: {reason}"[:300])
         self.store.release(project_id, task_id)
         return self.store.transition(project_id, task_id, S.CANCELLED, {"reason": reason},
                                      actor=actor)
@@ -1097,10 +1108,106 @@ class Coordinator:
 
     # ======================================================================= helper proposals
 
+    def _helper_handoff(self, P: Project, t: dict, rep: dict) -> bool:
+        """The primary just went idle (a safe point: no prompt in flight). In order:
+        1. consume this report's helper_requests (once per report) and dispatch
+           them now, through strict admission and binding
+        2. deliver returned proposals once to this primary session -> it continues
+        3. while ADMITTED helpers still run, wait up to handoff_wait_minutes, then
+           stop them (timed_out): a proposal is never delivered after this point,
+           so none reaches a revision that is verified or reviewed
+        4. units never admitted (deferred / unknown quota) don't hold the primary:
+           they're skipped. If the primary stopped to ask for help (report not
+           DONE) and none arrived, it's told the outcome once and continues alone.
+        True = stay IMPLEMENTING this tick."""
+        pid, tid = P.id, t["task_id"]
+        h = self.helpers.settings(P)
+        try:
+            spec = P.adapter.describe(tid)
+            new = self.helpers.collect_report(P, t, spec, rep)
+            if new:
+                self.store.event(pid, tid, "helper_requests", session_id=t["session_id"],
+                                 detail={"units": new, "report": rep.get("status")})
+                if str(rep.get("status") or "").upper() != "DONE":
+                    self.store.merge_data(pid, tid, helper_asked=t["session_id"])
+            self.helpers.tick(P, self.store.task(pid, tid))
+        except Exception as e:                                    # noqa: BLE001
+            self.store.event(pid, tid, "warning", detail={"helpers": f"{type(e).__name__}: "
+                                                                    f"{e}"[:300]})
+            return False
+        t = self.store.task(pid, tid)
+        if self._deliver_proposals(P, t):
+            self.store.merge_data(pid, tid, helper_wait_since=None, helper_asked=None)
+            return True
+        running = self.helpers.units(pid, tid, "running")
+        if running:
+            now = self.clock()
+            since = (t.get("data") or {}).get("helper_wait_since")
+            if not since:
+                since = now
+                self.store.merge_data(pid, tid, helper_wait_since=now)
+                self.store.event(pid, tid, "helper_handoff_wait",
+                                 detail={"units": [u["unit_id"] for u in running],
+                                         "max_minutes": h["handoff_wait_minutes"]})
+            limit = float(h["handoff_wait_minutes"]) * 60
+            if now - since < limit:
+                self._note(P, t, f"primary idle; waiting for {len(running)} running helper(s), "
+                                 f"at most {int((limit - (now - since)) // 60) + 1} more min")
+                return True
+            stopped = self.helpers.abort_running(P, tid, "timed_out",
+                                                 f"the primary was idle and waited "
+                                                 f"{h['handoff_wait_minutes']} min")
+            self.store.event(pid, tid, "helper_handoff_timeout", detail={"units": stopped})
+        self.helpers.skip_waiting(P, tid, "not admitted before the primary was ready")
+        self.store.merge_data(pid, tid, helper_wait_since=None)
+        t = self.store.task(pid, tid)
+        if (t.get("data") or {}).get("helper_asked") == t["session_id"]:
+            self.store.merge_data(pid, tid, helper_asked=None)
+            asked = [u for u in self.helpers.units(pid, tid)
+                     if u["status"] in ("skipped", "timed_out", "failed", "cancelled")
+                     and u["source"] == "report"]
+            lines = "\n".join(f"- {u['unit_id']} ({u['responsibility']}): {u['status']} - "
+                               f"{u['reason'] or ''}"[:400] for u in asked)
+            text = (P.adapter.continue_prompt(spec, "the helpers you asked for are unavailable")
+                    + "\n\n## Helper requests: no proposal\nNo helper proposal is coming for "
+                    "your last request:\n" + (lines or "- (none admitted)") + "\nContinue the "
+                    "task yourself. You may ask again later only if it really helps.\n")
+            key = "none:" + ",".join(sorted(f"{u['unit_id']}.{u['requests']}" for u in asked))
+            if self._prompt_primary(P, t, text, key):
+                self.store.event(pid, tid, "helper_outcome_delivered", session_id=t["session_id"],
+                                 detail={"units": [u["unit_id"] for u in asked]})
+                return True
+        return False
+
+    def _prompt_primary(self, P: Project, t: dict, text: str, key: str) -> bool:
+        """One coordinator prompt to the idle primary session, at most once per
+        key (journaled before sending). After a restart between journal and
+        prompt it isn't repeated: False (treated as sent, logged uncertain)."""
+        sid = t["session_id"]
+        okey = f"deliver:{P.id}:{t['task_id']}:{sid}:{key}"
+        prior = self.store.op_begin(okey, P.id, t["task_id"], "helper_delivery")
+        if prior is not None:
+            if prior["status"] != "done":
+                self.store.event(P.id, t["task_id"], "helper_delivery_uncertain", session_id=sid,
+                                 detail={"key": key, "reason": "the coordinator stopped while "
+                                         "sending; not repeated"})
+                self.store.op_update(okey, "done", {"uncertain": True})
+            return False
+        ts = self.clock()
+        P.client.prompt(sid, text, directory=P.profile.workspace,
+                        persona=P.profile.persona("implementer"),
+                        agent=P.profile.client.get("agent") or "code")
+        self.store.op_update(okey, "done", {"prompt_ts": ts})
+        self.store.update_session(sid, status="prompted", prompt_ts=ts, ended_ts=None)
+        self._bind(P, sid, t["task_id"], t["run_id"], "implementer",
+                   P.profile.persona("implementer"))
+        return True
+
     def _deliver_proposals(self, P: Project, t: dict) -> bool:
-        """The primary just went idle (a safe point: no concurrent prompt) and
-        helpers returned proposals it hasn't seen: send them to the same
-        session and keep implementing. Each proposal is delivered once."""
+        """Helpers returned proposals the primary hasn't seen: send them to the
+        same idle session and keep implementing. Each proposal is delivered
+        once; a unit counts as delivered (a possible author) even when a
+        restart left the delivery uncertain."""
         units = self.helpers.proposals_for(P.id, t["task_id"]) if self.helpers.enabled(P) else []
         if not units:
             return False
@@ -1108,17 +1215,12 @@ class Coordinator:
         spec = P.adapter.describe(t["task_id"])
         text = (P.adapter.continue_prompt(spec, "helper proposals arrived") + "\n\n"
                 + self.helpers.integration_prompt(units))
-        ts = self.clock()
-        P.client.prompt(sid, text, directory=P.profile.workspace,
-                        persona=P.profile.persona("implementer"),
-                        agent=P.profile.client.get("agent") or "code")
+        sent = self._prompt_primary(P, t, text, ",".join(sorted(u["unit_id"] for u in units)))
         self.helpers.mark_delivered(units, sid)
-        self.store.update_session(sid, status="prompted", prompt_ts=ts, ended_ts=None)
-        self._bind(P, sid, t["task_id"], t["run_id"], "implementer",
-                   P.profile.persona("implementer"))
-        self.store.event(P.id, t["task_id"], "helper_proposals_delivered", session_id=sid,
-                         detail={"units": [u["unit_id"] for u in units]})
-        return True
+        if sent:
+            self.store.event(P.id, t["task_id"], "helper_proposals_delivered", session_id=sid,
+                             detail={"units": [u["unit_id"] for u in units]})
+        return sent
 
     # ======================================================================= operator notes
 

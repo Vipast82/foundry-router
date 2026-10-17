@@ -154,15 +154,16 @@ def test_full_admission_defer_admit_deliver_cycle(env):
 
 def test_model_requests_are_always_optional_and_scoped(env):
     c = env["c"]
-    c.store.merge_data("game", "T1", last_report={"helper_requests": [
-        {"kind": "review", "responsibility": "approve my own patch", "files": ["src/a.txt", "../x"]},
-        {"kind": "planning", "responsibility": "plan more"}]})
     t = c.store.task("game", "T1")
     P = c.projects["game"]
-    c.helpers.collect(P, t, P.adapter.describe("T1"))
+    c.helpers.collect_report(P, t, P.adapter.describe("T1"), {"helper_requests": [
+        {"kind": "review", "responsibility": "approve my own patch", "files": ["src/a.txt", "../x"],
+         "value": "high"},
+        {"kind": "planning", "responsibility": "plan more"}]})
     u = units(c)
     assert u["approve my own patch"]["kind"] == "code_proposal"      # not "review"
     assert u["approve my own patch"]["files"] == ["src/a.txt"]       # outside scope dropped
+    assert u["approve my own patch"]["value"] == "normal"            # no self-awarded high value
     assert u["plan more"]["kind"] == "code_proposal"                  # not required planning
 
 
