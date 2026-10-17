@@ -161,12 +161,19 @@ class AnimalUprisingAdapter(GenericAdapter):
                 f"{AMENDMENT_MARKER}). You run exactly one sprint in this session: {spec.task_id}.")
 
     def implement_prompt(self, spec: TaskSpec, ctx: dict) -> str:
+        planning = ""
+        if self.p.roles.get("planner"):
+            planning = """
+Before executing this attempt, invoke the read-only `au-planner` subagent once through the task tool. Give it this sprint's approved plan, current revision, latest NEXT/checklist, relevant observed results, and any repair findings below. It uses the configured Foundry planner persona to identify the next bounded steps and resolve routine procedure choices already covered by the plan. Keep this delegation bounded; do not re-plan every file or run duplicate planning calls.
+The planner returns advice, not acceptance evidence or permission to widen scope. Integrate its result and continue the approved BUILD work in this Code session; do not stop merely to ask Victor to copy a planner response into another chat or switch modes. The primary alone writes and controls Studio. Stop for Victor only when the project actually requires a human decision, visual approval, credentials/OS interaction, or an unresolved blocker after the configured attempts. Never waive a failed/unknown gate or weaken a test to avoid a stop.
+"""
         return f"""BUILD session for sprint {spec.task_id} — {spec.title} (coordinator run {ctx.get('run_id')}, attempt {ctx.get('attempt')}).
 
 {self.rules_text(spec)}
 Read docs/progress/STATE.md header + last 5 ledger rows, then docs/progress/{spec.task_id}_PLAN.md, and resume from its checklist and NEXT line (§34 "Plan = memory"). Do not redo ticked steps unless their evidence is missing.
 
 {spec.spec}
+{planning}
 
 This session's job: the plan's remaining BUILD steps, each committed by explicit path with a message starting "{spec.task_id}: ", then the gate on committed code:
   pwsh -NoProfile -ExecutionPolicy Bypass -File tools/gate.ps1 -Sprint {spec.task_id} -Files <files under test> -Tier {spec.data.get('tier', 'A')} ...

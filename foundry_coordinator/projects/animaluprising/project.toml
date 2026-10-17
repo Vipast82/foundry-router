@@ -31,12 +31,19 @@ provider = "foundry"                # the provider id in kilo.jsonc
 agent = "code"
 session_timeout_minutes = 240
 
+[client.permissions.external_directory]
+# Victor authorized reading/transfer sources throughout C:/Roblox. Sprint writes
+# still stay within the approved plan; the adapter's secrets deny stays in force.
+"C:/Roblox" = "allow"
+"C:/Roblox/*" = "allow"
+
 [roles]
 implementer = "Foundry-Kilo-Local"
-researcher = "Foundry-Kilo-Haiku"
-reviewer = "Foundry-Kilo-Sonnet"
-deep_reviewer = "Foundry-Kilo-Opus"        # or Foundry-Kilo-Astra
-visual_reviewer = "Foundry-Kilo-Vision"
+planner = "Foundry-Kilo-Planner"
+researcher = "Foundry-Kilo-Research"
+reviewer = "Foundry-Kilo-Review"
+deep_reviewer = "Foundry-Kilo-Deep-Review"        # or Foundry-Kilo-Astra
+visual_reviewer = "Foundry-Kilo-Visual-Review"
 image_generator = "Foundry-Kilo-Images"
 
 [foundry]
@@ -96,6 +103,10 @@ exempt_paths = [
   "docs/MASTER_ORDER.md",
   "docs/design/ASSET_LEDGER.md",
 ]
+
+[telemetry]
+# Operational checkpoint markers; Kilo/model context limits are shown separately.
+context_checkpoints = [140000, 190000]
 
 [training]
 # Training-data capture (python -m foundry_training; docs/TRAINING_DATA.md).

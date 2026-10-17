@@ -25,7 +25,7 @@ from dataclasses import dataclass, field
 from typing import Any, Optional
 
 PROFILE_SCHEMA = 1
-ROLES = ("implementer", "researcher", "reviewer", "deep_reviewer", "visual_reviewer",
+ROLES = ("implementer", "planner", "researcher", "reviewer", "deep_reviewer", "visual_reviewer",
          "image_generator")
 _ID = re.compile(r"^[a-z0-9][a-z0-9._-]{0,63}$")
 _SECRETY_KEY = re.compile(r"(api_?key|token|secret|password|passwd)$", re.I)

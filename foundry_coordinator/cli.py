@@ -124,13 +124,22 @@ def doctor(c: Coordinator, project: str = "") -> int:
             try:
                 models, _ = P.foundry._req("GET", "/v1/models", timeout=20)
                 ids = {m.get("id"): m for m in models.get("data") or []}
+                worker_ids = ids
+                if callable(getattr(P.client, 'inference_models', None)):
+                    try:
+                        worker_ids = P.client.inference_models(P.profile.workspace)
+                    except Exception as e:
+                        worker_ids = {}
+                        rows.append(('FAIL', 'worker inference', str(e)))
                 needed = {"implementer"} | ({"reviewer"} if P.profile.review.get("required", True)
                                             else set())
                 for role, persona in sorted(P.profile.roles.items()):
-                    m = ids.get(persona)
+                    direct_review = role in ('reviewer', 'deep_reviewer')
+                    m = (ids if direct_review else worker_ids).get(persona)
+                    source = 'coordinator key' if direct_review else 'worker inference key'
                     if not m:
                         rows.append(("FAIL" if role in needed else "WARN", f"persona {role}",
-                                     f"{persona} not offered by Foundry (missing or disabled)"
+                                     f"{persona} not offered to {source} (missing, disabled or not allowed)"
                                      + ("" if role in needed else "; only needed when used")))
                     else:
                         fm = m.get("foundry") or {}
@@ -139,7 +148,7 @@ def doctor(c: Coordinator, project: str = "") -> int:
                         rows.append(("PASS" if val == "pass" else "WARN", f"persona {role}",
                                      f"{persona} -> {fm.get('backend') or '?'} / "
                                      f"{fm.get('served_model') or '?'} "
-                                     f"(routing {fm.get('routing') or '?'}, {val})"))
+                                     f"(routing {fm.get('routing') or '?'}, {val}; {source})"))
             except Exception as e:                                # noqa: BLE001
                 rows.append(("FAIL", "foundry", str(e)))
         for st, name, detail in rows:
@@ -161,6 +170,8 @@ def main(argv=None, clients=None, foundry=None) -> int:
     q2 = qs.add_parser("approve"); q2.add_argument("project"); q2.add_argument("task")
     q2.add_argument("--deps", default=""); q2.add_argument("--by", required=True)
     q2.add_argument("--note", default="")
+    q2.add_argument("--adopt-existing", action="append", default=[], metavar="PATH",
+                    help="explicitly adopt this dirty task-scope file, with verified external backup; repeat per file")
     st = sub.add_parser("status"); st.add_argument("--json", action="store_true")
     sub.add_parser("tick")
     r = sub.add_parser("run"); r.add_argument("--poll", type=float, default=5)
@@ -214,7 +225,7 @@ def _dispatch(a, c: Coordinator) -> int:
     if a.cmd == "queue":
         if a.qcmd == "approve":
             deps = [d.strip() for d in a.deps.split(",") if d.strip()]
-            e = c.approve(a.project, a.task, deps, a.by, a.note)
+            e = c.approve(a.project, a.task, deps, a.by, a.note, a.adopt_existing)
             print(f"approved {a.project}/{a.task} (position {e['position']}, deps {e['deps']})")
             return 0
         for p in s.projects():

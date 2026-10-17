@@ -7,6 +7,7 @@ production; only the model is replaced by a script."""
 
 import json
 import os
+import sys
 
 import pytest
 
@@ -520,13 +521,96 @@ def test_task_s_own_uncommitted_work_goes_to_the_repair_session(game):
     assert c.store.task("game", "T1")["attempt"] == 2
 
 
+def test_explicit_handoff_preserves_original_and_finishes_existing_work(game):
+    from pathlib import Path
+    tmp, root, _, prof = game
+    original = b"unfinished operator work\n"
+    (root / 'src').mkdir(exist_ok=True)
+    (root / 'src/a.txt').write_bytes(original)
+    c = coordinator(tmp, [prof], {'game': write_ok('src/a.txt')})
+    c.approve('game', 'T1', [], 'victor', adopt_existing=['src/a.txt'])
+    inherited = c.store.task('game', 'T1')['data']['inherited_work']
+    backup = Path(inherited['archive']) / 'files/src/a.txt'
+    assert backup.read_bytes() == original
+    assert run_until(c, lambda: _state(c, 'game', 'T1') == S.COMPLETE)
+    assert backup.read_bytes() == original
+    assert (root / 'src/a.txt').read_bytes() != original
+    assert any(e['kind'] == 'work_adopted' for e in c.store.events('game'))
+
+
+@pytest.mark.parametrize('change', ['workspace', 'backup', 'head', 'scope'])
+def test_handoff_changes_block_before_any_session(game, change):
+    from pathlib import Path
+    tmp, root, _, prof = game
+    (root / 'src').mkdir(exist_ok=True)
+    (root / 'src/a.txt').write_text('unfinished original')
+    c = coordinator(tmp, [prof], {'game': write_ok('src/a.txt')})
+    c.approve('game', 'T1', [], 'victor', adopt_existing=['src/a.txt'])
+    inherited = c.store.task('game', 'T1')['data']['inherited_work']
+    if change == 'workspace':
+        (root / 'src/a.txt').write_text('changed after approval')
+    elif change == 'backup':
+        (Path(inherited['archive']) / 'files/src/a.txt').write_text('changed backup')
+    elif change == 'head':
+        (root / 'other.md').write_text('another revision')
+        git(root, 'add', 'other.md')
+        git(root, 'commit', '-qm', 'other: changed revision')
+    else:
+        tasks = json.loads((root / 'tasks.json').read_text())
+        tasks[0]['scope'].append('src/extra.txt')
+        (root / 'tasks.json').write_text(json.dumps(tasks))
+    assert run_until(c, lambda: _state(c, 'game', 'T1') == S.BLOCKED)
+    assert 'handoff:' in c.store.task('game', 'T1')['blocker']
+    assert c.store.sessions('game', 'T1') == []
+
+
+def test_handoff_refuses_unrelated_file_and_keeps_queue_empty(game):
+    tmp, root, _, prof = game
+    (root / 'notes.md').write_text('unrelated')
+    c = coordinator(tmp, [prof], {'game': write_ok('src/a.txt')})
+    with pytest.raises(ValueError, match='dirty task-scope file'):
+        c.approve('game', 'T1', [], 'victor', adopt_existing=['notes.md'])
+    assert c.store.task('game', 'T1') is None
+
+
+def test_partial_handoff_does_not_adopt_other_dirty_task_files(game):
+    tmp, root, _, prof = game
+    tasks = json.loads((root / 'tasks.json').read_text())
+    tasks[0]['scope'].append('src/extra.txt')
+    (root / 'tasks.json').write_text(json.dumps(tasks))
+    (root / 'src').mkdir(exist_ok=True)
+    (root / 'src/a.txt').write_text('approved handoff')
+    (root / 'src/extra.txt').write_text('not handed off')
+    c = coordinator(tmp, [prof], {'game': write_ok('src/a.txt')})
+    c.approve('game', 'T1', [], 'victor', adopt_existing=['src/a.txt'])
+    assert run_until(c, lambda: _state(c, 'game', 'T1') == S.BLOCKED)
+    assert 'src/extra.txt' in c.store.task('game', 'T1')['blocker']
+    assert c.store.sessions('game', 'T1') == []
+
+
+def test_unchanged_shared_closeout_wip_is_preserved_not_claimed(game):
+    tmp, root, _, prof = game
+    text = prof.read_text()
+    old = 'exempt_paths = ["docs/progress/{task}_*"]'
+    assert old in text
+    prof.write_text(text.replace(old, 'exempt_paths = ["docs/progress/{task}_*", "docs/progress/state/*"]'))
+    (root / 'docs/progress/state').mkdir(parents=True)
+    shared = root / 'docs/progress/state/DECISIONS.md'
+    shared.write_text('another sprint WIP')
+    c = coordinator(tmp, [prof], {'game': write_ok('src/a.txt')})
+    c.approve('game', 'T1', [], 'victor')
+    assert run_until(c, lambda: _state(c, 'game', 'T1') == S.COMPLETE)
+    assert shared.read_text() == 'another sprint WIP'
+
+
 def test_session_touching_unrelated_wip_fails_verification(game):
     tmp, root, _, prof = game
     (root / "notes.md").write_text("wip")
 
     def clumsy(ctx):
         return {"writes": {"src/a.txt": "OK"}, "commit": "T1: x",
-                "run": [["sh", "-c", "echo changed > notes.md"]]}
+                "run": [[sys.executable, "-c",
+                         "from pathlib import Path; Path('notes.md').write_text('changed')"]]}
     c = coordinator(tmp, [prof], {"game": clumsy})
     c.approve("game", "T1", [], "victor")
     assert run_until(c, lambda: c.store.task("game", "T1")["attempt"] >= 1 and

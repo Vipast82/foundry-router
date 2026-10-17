@@ -174,6 +174,30 @@ class KiloClient(CodingClient):
 
     # -- configuration checks ------------------------------------------------------------
 
+    def inference_models(self, directory: str) -> dict:
+        """Read model visibility using Kilo's actual inference credential.
+
+        The coordinator key need not allow the local worker's model. Keep
+        provider options/credentials in memory; return only catalog entries.
+        """
+        cfg = self._req('GET', '/config/effective', query={'directory': directory}) or {}
+        options = ((cfg.get('provider') or {}).get(self.provider) or {}).get('options') or {}
+        base = options.get('baseURL') or ''
+        if not base.startswith(('http://', 'https://')):
+            raise KiloError('Kilo inference provider baseURL is unavailable')
+        req = urllib.request.Request(base.rstrip('/') + '/models')
+        key = options.get('apiKey') or ''
+        if key:
+            req.add_header('authorization', 'Bearer ' + key)
+        try:
+            with urllib.request.urlopen(req, timeout=self.timeout) as response:
+                catalog = json.load(response)
+        except urllib.error.HTTPError as e:
+            raise KiloError(f'Kilo inference model catalog: HTTP {e.code}') from None
+        except (urllib.error.URLError, TimeoutError, ConnectionError, OSError):
+            raise KiloError('Kilo inference model catalog is unreachable') from None
+        return {m.get('id'): m for m in catalog.get('data') or []}
+
     def preflight(self, directory: str) -> list[tuple[str, str, str]]:
         out = []
         try:

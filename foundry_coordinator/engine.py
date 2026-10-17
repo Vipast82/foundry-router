@@ -22,6 +22,7 @@ from typing import Callable, Optional
 from . import review as R
 from . import states as S
 from . import training_hook
+from . import handoff
 from .adapters import Project
 from .adapters.base import FAIL, PASS, UNKNOWN, SessionState, VerificationResult
 from .adapters.foundry import FoundryDenied, FoundryError
@@ -56,7 +57,7 @@ class Coordinator:
     # ======================================================================= queue
 
     def approve(self, project_id: str, task_id: str, deps: list[str], approver: str,
-                note: str = "") -> dict:
+                note: str = "", adopt_existing: Optional[list[str]] = None) -> dict:
         """Put a task on the approved queue. Dependencies must be tasks of the
         same project that are already approved (a dependency on another
         project's task is refused: projects are isolated)."""
@@ -70,10 +71,20 @@ class Coordinator:
             if not self.store.task(project_id, d):
                 raise ValueError(f"dependency {d} is not on {project_id}'s approved queue")
         try:
-            P.adapter.describe(task_id)
+            spec = P.adapter.describe(task_id)
         except AdapterError as e:
             raise ValueError(f"{project_id}/{task_id}: {e}") from None
-        return self.store.approve(project_id, task_id, deps, approver, note)
+        existing = self.store.task(project_id, task_id)
+        if existing and existing['state'] != S.QUEUED:
+            raise ValueError(f"{project_id}/{task_id} is already {existing['state']}")
+        adopted = (handoff.capture(P.ws, spec, self.state_dir, adopt_existing, approver)
+                   if adopt_existing else None)
+        with self.store.tx():
+            entry = self.store.approve(project_id, task_id, deps, approver, note)
+            if adopted:
+                self.store.merge_data(project_id, task_id, inherited_work=adopted)
+                self.store.event(project_id, task_id, 'work_adopted', detail=adopted)
+        return entry
 
     # ======================================================================= loop
 
@@ -230,8 +241,17 @@ class Coordinator:
         # to commit them). Work that was there before the task began is never
         # touched or attributed to the task.
         before_task = t["data"].get("task_baseline_dirty")
+        inherited = t['data'].get('inherited_work') or {}
+        adopted = set(inherited.get('files') or {})
+        if before_task is None and adopted:
+            try:
+                handoff.validate(P.ws, spec, self.state_dir, inherited)
+            except (ValueError, OSError) as e:
+                self.store.release(pid, tid)
+                return self._block(P, t, f"handoff: {e}")
         in_scope = [p for _, p in dirty if matches_any(p, spec.scope)]
-        foreign = [p for p in in_scope if before_task is None or p in before_task]
+        foreign = [p for p in in_scope if (before_task is None or p in before_task)
+                   and p not in adopted]
         if foreign:
             self.store.release(pid, tid)
             return self._block(P, t, "uncommitted changes in this task's files "
@@ -248,9 +268,16 @@ class Coordinator:
         ctx = {"attempt": attempt, "run_id": run_id, "base": base}
         prompt = (P.adapter.repair_prompt(spec, findings, ctx) if findings
                   else P.adapter.implement_prompt(spec, ctx))
+        if adopted:
+            prompt += ("\n## Explicit existing-work handoff\nThe operator adopted these task-scope "
+                       "files; original bytes are hash-verified and backed up outside the workspace:\n"
+                       + "\n".join('- ' + p for p in sorted(adopted))
+                       + "\nInspect and finish this work within the approved plan. Prior screenshots "
+                       "are not accepted evidence until the required validity and vision checks pass. "
+                       "Do not alter backups or unrelated work. Commit only verified task work.\n")
         data = dict(t["data"])
         if before_task is None:
-            data["task_baseline_dirty"] = sorted(p for _, p in dirty)
+            data["task_baseline_dirty"] = sorted(p for _, p in dirty if p not in adopted)
         data.update(baseline_dirty=baseline, free_retry=None, findings=findings or None,
                     task_base=data.get("task_base") or base, closeout_session=None,
                     closeout_attempts=0, review_errors=0)
@@ -549,7 +576,8 @@ class Coordinator:
             else f"{len(changed)} changed file(s), all within scope")
         dirty = P.ws.status()
         baseline = t["data"].get("baseline_dirty") or {}
-        in_scope_dirty = [p for _, p in dirty if matches_any(p, spec.scope + exempt)]
+        in_scope_dirty = [p for _, p in dirty if matches_any(p, spec.scope)
+                         or (matches_any(p, exempt) and (p not in baseline or p in changed))]
         add("clean", FAIL if in_scope_dirty else PASS,
             ("uncommitted changes in task files: " + ", ".join(in_scope_dirty[:10]))
             if in_scope_dirty else "task files are committed and clean")
