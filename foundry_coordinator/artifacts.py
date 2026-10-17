@@ -289,9 +289,11 @@ class ArtifactStore:
             return {"status": "duplicate", "artifact": self._out(same[-1]), "path": rel,
                     "reason": "same bytes as an existing generation"}
         ext = os.path.splitext(rel)[1].lower() or (".png" if img["mime"] == "image/png" else ".jpg")
-        dest = os.path.join(self._dir(project_id, task_id), sha + ext)
+        # short names keep deep state dirs under Windows MAX_PATH; the full sha256
+        # is in the row and re-checked on every read
+        dest = os.path.join(self._dir(project_id, task_id), sha[:24] + ext)
         if not os.path.exists(dest):
-            tmp = dest + f".tmp-{uuid.uuid4().hex[:6]}"
+            tmp = dest + f".t{uuid.uuid4().hex[:4]}"
             with open(tmp, "wb") as f:
                 f.write(data)
             os.replace(tmp, dest)
@@ -438,9 +440,9 @@ class ArtifactStore:
         bdir = os.path.join(self.state_dir, "snapshots", project_id, "blobs")
         os.makedirs(bdir, exist_ok=True)
         for h, b in blobs.items():
-            dest = os.path.join(bdir, h)
+            dest = os.path.join(bdir, h[:32])
             if not os.path.exists(dest):
-                tmp = dest + f".tmp-{uuid.uuid4().hex[:6]}"
+                tmp = dest + f".t{uuid.uuid4().hex[:4]}"
                 with open(tmp, "wb") as f:
                     f.write(b)
                 os.replace(tmp, dest)
@@ -466,7 +468,8 @@ class ArtifactStore:
         s = self.snapshot(snapshot_id)
         if not s or rel not in s["manifest"]:
             return None
-        p = os.path.join(self.state_dir, "snapshots", s["project_id"], "blobs", s["manifest"][rel])
+        p = os.path.join(self.state_dir, "snapshots", s["project_id"], "blobs",
+                         s["manifest"][rel][:32])
         with open(p, "rb") as f:
             b = f.read()
         if hashlib.sha256(b).hexdigest() != s["manifest"][rel]:

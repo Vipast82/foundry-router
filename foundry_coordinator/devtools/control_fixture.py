@@ -1,6 +1,6 @@
 """Control-center development fixture: the whole path, isolated, on localhost.
 
-    python -m foundry_coordinator.devtools.control_fixture [--port 18766] [--dir PATH]
+    python -m foundry_coordinator.devtools.control_fixture [--port 18766] [--dir PATH] [--lanes]
 
 Starts, in one process and a throwaway directory:
   * Foundry (this checkout) on 127.0.0.1:PORT with a temporary config/DB and
@@ -13,6 +13,12 @@ Starts, in one process and a throwaway directory:
     attributed to an MCP server), a todo list, a planner helper, a question,
     a repair session (follow-mode switch), a permission request, Foundry
     ledger rows with a fallback route, an in-flight call and a media job
+
+With --lanes the fixture profile enables [helpers] and the proactive lanes
+(visual + failure triage) and the scenario completes a synthetic capture and a
+failing test, so the "Proactive lanes" panel shows real lane units. The
+fixture Foundry has no subscription quota source and no visual persona, so
+those units are DEFERRED with Foundry's actual reason: nothing is inferred.
 
 The operator test key is written to <dir>/operator-key.txt (never printed).
 Nothing touches the real Kilo, Studio, coordinator store or Foundry.
@@ -43,7 +49,45 @@ def git(path, *args):
                           env=GIT_ENV, check=True).stdout.strip()
 
 
-def make_project(root: str) -> str:
+LANES_TOML = """
+[helpers]
+enabled = true
+order = ["meridian"]
+agent = "au-helper"
+worker_client = "kilo"
+poll_seconds = 20
+
+[helpers.personas]
+meridian = "Foundry-Kilo-Helper-Claude"
+
+[lanes]
+enabled = true
+transcript_poll_seconds = 2
+
+[lanes.visual]
+enabled = true
+debounce_seconds = 2
+capture_globs = ["docs/evidence/{task}/*.png"]
+
+[lanes.failure_triage]
+enabled = true
+"""
+
+
+def png_bytes(w: int = 48, h: int = 32) -> bytes:
+    import struct
+    import zlib
+    raw = b"".join(bytes([0]) + b"".join(bytes(((x * 5) % 256, (y * 7) % 256, 160))
+                                         for x in range(w)) for y in range(h))
+
+    def chunk(t, body):
+        return struct.pack(">I", len(body)) + t + body + struct.pack(">I", zlib.crc32(t + body) & 0xffffffff)
+    return (bytes([0x89]) + b"PNG" + bytes([13, 10, 26, 10])
+            + chunk(b"IHDR", struct.pack(">IIBBBBB", w, h, 8, 2, 0, 0, 0))
+            + chunk(b"IDAT", zlib.compress(raw)) + chunk(b"IEND", b""))
+
+
+def make_project(root: str, lanes: bool = False) -> str:
     ws = os.path.join(root, "game")
     remote = os.path.join(root, "game-remote.git")
     subprocess.run(["git", "init", "-q", "--bare", "-b", "main", remote], check=True, env=GIT_ENV)
@@ -117,7 +161,7 @@ def make_project(root: str) -> str:
             name = "project-check"
             command = ["{{python}}", "verify.py"]
             pass_regex = "^ALL PASS$"
-            '''))
+            ''') + (LANES_TOML if lanes else ""))
     return os.path.join(prof_dir, "project.toml")
 
 
@@ -144,9 +188,26 @@ def tok(i, o, r=0, cr=0, cw=0):
 
 
 class Scenario:
-    def __init__(self, fake, db, log):
+    def __init__(self, fake, db, log, workspace: str = "", lanes: bool = False):
         self.fake, self.db, self.log = fake, db, log
         self.n = 0
+        self.workspace, self.lanes = workspace, lanes
+
+    def lane_events(self, sid, mid):
+        """A finished capture and a failing test, as the capture procedure and
+        Lune would print them (synthetic image, no screen capture)."""
+        data = png_bytes()
+        rel = "docs/evidence/UI-01/menu_phone.png"
+        with open(os.path.join(self.workspace, rel), "wb") as f:
+            f.write(data)
+        out = "\n".join(["TOP-PRE ok", "VALIDATE V1 size 48x32 PASS",
+                         f"CAPTURE menu_phone 48x32 meanLum=90 litFraction=0.8 distinctColors=300 "
+                         f"minLum=0 maxLum=255 format=png fileBytes={len(data)} hash=0f1e2d3c",
+                         "VALID=OK", f"Saved: {os.path.join(self.workspace, rel)}"])
+        self.tool(sid, mid, "bash", {"command": f"pwsh tools/capture-window.ps1 -Out {rel}"}, out, 1.0,
+                  "capture 390x844 frame")
+        self.tool(sid, mid, "bash", {"command": "lune run tests/lune/run.luau"},
+                  "LUNE 41/42 FAIL\nFAIL S45 client arm order (0.4s)", 1.0, "lune")
 
     def ledger(self, sid, persona, backend, model, prompt, out, decode_s, attempts=None, inflight=0.0):
         rid = f"req-{uuid.uuid4().hex[:12]}"
@@ -265,6 +326,9 @@ class Scenario:
                   "git status")
         self.tool(sid, mid, "Roblox_Studio_run_code", {"code": "return workspace:GetChildren()"},
                   json.dumps({"ok": True, "children": 42}), 4.0, "Studio: list workspace")
+        if self.lanes:
+            self.lane_events(sid, mid)
+            time.sleep(6)                     # let the coordinator ingest them while busy
         self.db.execute("INSERT INTO media_jobs (id, created_ts, op, status, session_id, backend, model) "
                         "VALUES (?,?,?,?,?,?,?)", (f"img_{uuid.uuid4().hex[:16]}", time.time(), "generate",
                                                    "succeeded", sid, "comfy", "flux-dev"))
@@ -322,6 +386,7 @@ def main(argv=None) -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--port", type=int, default=18766)
     ap.add_argument("--dir", default="")
+    ap.add_argument("--lanes", action="store_true", help="enable the proactive lanes scenario")
     a = ap.parse_args(argv)
     root = a.dir or tempfile.mkdtemp(prefix="cc-fixture-")
     os.makedirs(root, exist_ok=True)
@@ -352,14 +417,14 @@ def main(argv=None) -> int:
 
     fake = FakeKilo(password=secrets.token_urlsafe(16))
     kurl = fake.start()
-    prof = load(make_project(root))
+    prof = load(make_project(root, lanes=a.lanes))
     state = os.path.join(root, "coord")
     coord_foundry = FoundryClient(url, key=keys["coordinator"], timeout=20)
     project = build_project(prof, state, client=KiloClient(kurl, password=fake.password),
                             foundry=coord_foundry)
     store = Store(os.path.join(state, "coordinator.sqlite"))
     c = Coordinator(store, [project], state, log=log)
-    scen = Scenario(fake, svc.db, log)
+    scen = Scenario(fake, svc.db, log, workspace=prof.workspace, lanes=a.lanes)
     fake.on_prompt = scen.on_prompt
     # an earlier, finished task so history/queue views aren't empty
     store.approve("fixturegame", "UI-00", [], "fixture")

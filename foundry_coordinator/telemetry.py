@@ -392,6 +392,22 @@ class CoordReader:
                        "next_eligible, attempts, delivered_session, updated_ts FROM helper_units "
                        "ORDER BY created_ts")
 
+    def lane_units(self) -> list[dict]:
+        """Proactive lane units (v0.118.0 columns; an older store has none)."""
+        return self._q("SELECT unit_id, project_id, task_id, run_id, kind, lane, responsibility, value, "
+                       "status, persona, backend, session_id, parent_session, parent_unit, depth, "
+                       "artifact_id, snapshot_id, mode, reason, next_eligible, attempts, requests, "
+                       "coalesced, feedback, feedback_detail, envelope, skills, served_model, "
+                       "tokens, packet, created_ts, started_ts, finished_ts, delivered_ts, "
+                       "delivered_session, updated_ts FROM helper_units WHERE lane IS NOT NULL "
+                       "ORDER BY created_ts")
+
+    def artifacts(self) -> list[dict]:
+        return self._q("SELECT * FROM artifacts ORDER BY created_ts")
+
+    def meta_like(self, prefix: str) -> list[dict]:
+        return self._q("SELECT key, value FROM meta WHERE key LIKE ?", (prefix + "%",))
+
     def operator_messages(self) -> list[dict]:
         return self._q("SELECT msg_id, action_id, project_id, task_id, scope, delivery, status, "
                        "delivered_session, delivered_ts, created_ts FROM operator_messages")
@@ -649,7 +665,9 @@ class TelemetryBridge:
         if evs:
             last_e = evs[-1]["id"]
             commits.append(lambda v=last_e: setattr(self, "cursor_events", v))
-        sessions = self.reader.sessions()
+        self._lane_facts(obs, commits)
+        # direct Foundry calls (visual observer) are not Kilo sessions: never poll Kilo for them
+        sessions = [s for s in self.reader.sessions() if s.get("client") != "foundry-direct"]
         recent = sessions[-self.replay_sessions:] if not self.replayed else sessions
         tasks_by = {(t["project_id"], t["task_id"]): t for t in tasks}
         for s in recent:
@@ -664,6 +682,70 @@ class TelemetryBridge:
                         ended_ts=s["ended_ts"], created_ts=s["created_ts"],
                         active=t.get("session_id") == s["session_id"])
         self.replayed = True
+
+    THUMB_MAX_BYTES = 400_000
+
+    def _lane_facts(self, obs: list, commits: list) -> None:
+        """Lane units, artifacts and the per-project kill switch. Each is
+        re-sent only when it changed (fingerprint), patches and packets capped."""
+        for u in self.reader.lane_units():
+            if u["project_id"] not in self.projects:
+                continue
+            env = _j(u.pop("envelope", None))
+            pk = _j(u.pop("packet", None))
+            o = {"type": "lane_unit", **{k: v for k, v in u.items()}}
+            o["feedback_detail"] = _j(u.get("feedback_detail"))
+            o["skills"] = _j(u.get("skills"))
+            o["envelope"] = {k: env.get(k) for k in (
+                "structured", "summary", "image_seen", "subject_present", "validity",
+                "checks_run", "checks_proposed", "skills_used", "sources", "limitations",
+                "next_action", "routed_to", "not_inspected", "base", "affected_paths")
+                if env.get(k) not in (None, "", [])}
+            o["envelope"]["findings"] = (env.get("findings") or [])[:12]
+            if env.get("patch"):
+                o["envelope"]["patch"] = _cap(env["patch"], 20000)
+            ch = env.get("checks") or {}
+            o["envelope"]["checks"] = {k: ch[k] for k in ("patch", "drift", "violations",
+                                                          "base_mismatch") if k in ch}
+            o["assignment"] = {k: pk.get(k) for k in (
+                "subject", "path", "generation", "viewport", "references", "reference_notes",
+                "sent", "skills_loaded", "skills_missing", "vision_routes", "evidence",
+                "signature", "command", "base", "head", "dirty", "snapshot", "snapshot_status")
+                if pk.get(k) not in (None, "", [])}
+            if pk.get("path"):
+                o["artifact_path"], o["artifact_generation"] = pk.get("path"), pk.get("generation")
+            self._emit(obs, commits, f"lane:{u['unit_id']}", o)
+        for a in self.reader.artifacts():
+            if a["project_id"] not in self.projects:
+                continue
+            o = {"type": "artifact", **{k: a.get(k) for k in (
+                "artifact_id", "project_id", "task_id", "run_id", "session_id", "kind", "rel_path",
+                "generation", "sha256", "bytes", "width", "height", "mime", "valid", "source",
+                "revision", "subject", "status", "superseded_by", "prev_artifact", "created_ts")}}
+            o["validity"] = _j(a.get("validity"))
+            key = f"art:{a['artifact_id']}"
+            if self.fp.get(key) is None and (a.get("bytes") or 0) <= self.THUMB_MAX_BYTES and \
+                    a.get("status") != "expired":
+                try:
+                    with open(a["store_path"], "rb") as f:
+                        raw = f.read(self.THUMB_MAX_BYTES + 1)
+                    if hashlib.sha256(raw).hexdigest() == a["sha256"]:
+                        o["thumbnail_b64"] = base64.b64encode(raw).decode()
+                except OSError:
+                    pass
+            if "thumbnail_b64" not in o:
+                o["thumbnail_note"] = ("image over the bridge thumbnail limit; hash and metadata "
+                                       "only" if (a.get("bytes") or 0) > self.THUMB_MAX_BYTES
+                                       else "snapshot copy unavailable or already sent")
+            self._emit(obs, commits, key, o)
+        paused = {r["key"].split(":", 1)[1]: r["value"] not in ("", "0")
+                  for r in self.reader.meta_like("lanes_paused:")}
+        for pid, P in self.projects.items():
+            raw = dict((getattr(P.profile, "raw", None) or {}).get("lanes") or {})
+            self._emit(obs, commits, f"lanestate:{pid}", {
+                "type": "lane_state", "project_id": pid, "paused": paused.get(pid, False),
+                "enabled": bool(raw.get("enabled", False)),
+                "lanes": {k: bool(v.get("enabled")) for k, v in raw.items() if isinstance(v, dict)}})
 
     def _task_obs(self, P, t: dict, siblings: list, omsgs: list) -> dict:
         d = t["data"] or {}

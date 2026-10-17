@@ -139,11 +139,18 @@ class Proactive(VisualMixin):
             if ev["status"] not in ("new", "pending"):
                 continue
             rec = ev["detail"]
-            r = self.artifacts.record(project_id=P.id, task_id=t["task_id"], run_id=t["run_id"],
-                                      session_id=sid, workspace=P.profile.workspace,
-                                      path=rec.get("path") or "", allowed=v["capture_globs"],
-                                      source="tool_result", revision=head, record=rec,
-                                      max_bytes=int(v["max_image_bytes"]))
+            try:
+                r = self.artifacts.record(project_id=P.id, task_id=t["task_id"],
+                                          run_id=t["run_id"], session_id=sid,
+                                          workspace=P.profile.workspace,
+                                          path=rec.get("path") or "", allowed=v["capture_globs"],
+                                          source="tool_result", revision=head, record=rec,
+                                          max_bytes=int(v["max_image_bytes"]))
+            except OSError as e:
+                # one unreadable/unwritable capture must not stop other lanes
+                self._set_event(ev["event_key"], "error",
+                                detail={**rec, "error": f"{type(e).__name__}: {e}"[:300]})
+                continue
             if r["status"] == "not_ready":
                 st = "pending" if ev["tries"] < 5 else "rejected"
                 self._set_event(ev["event_key"], st, detail={**rec, "not_ready": r["reason"]})
@@ -204,12 +211,13 @@ class Proactive(VisualMixin):
         self.store.x("INSERT INTO helper_units (unit_id, project_id, task_id, run_id, responsibility, "
                      "kind, value, prompt, files, source, status, created_ts, updated_ts, next_check, "
                      "lane, priority, parent_unit, depth, artifact_id, snapshot_id, mode, event_key, "
-                     "packet, coalesced) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,0)",
+                     "packet, coalesced, parent_session) VALUES "
+                     "(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,0,?)",
                      (uid, pid, tid, t["run_id"], resp, kind, value, "", json.dumps(
                          [str(f) for f in (files or [])][:30]), "lane", "pending", now, now, 0,
                       lane, prio if priority is None else priority, parent_unit or None, depth,
                       artifact_id or None, snapshot_id or None, mode, event_key or None,
-                      json.dumps(packet, default=str)[:60000]))
+                      json.dumps(packet, default=str)[:60000], t.get("session_id")))
         self.store.event(pid, tid, "helper_unit", detail={"unit": uid, "kind": kind, "lane": lane,
                                                           "responsibility": resp, "source": "lane",
                                                           "parent_unit": parent_unit,

@@ -108,7 +108,24 @@ SCHEMA = [
     """CREATE TABLE IF NOT EXISTS cc_drafts (
       actor TEXT, target TEXT, text TEXT, updated_ts REAL, PRIMARY KEY (actor, target))""",
     "CREATE TABLE IF NOT EXISTS cc_settings (key TEXT PRIMARY KEY, value TEXT)",
+    # proactive helper lanes (coordinator v0.118.0): units with their result
+    # envelope, immutable artifact metadata (+ a small thumbnail when the bridge
+    # sent one), and each project's lane kill-switch state
+    """CREATE TABLE IF NOT EXISTS cc_lane_units (
+      unit_id TEXT PRIMARY KEY, project_id TEXT, task_id TEXT, lane TEXT, status TEXT,
+      session_id TEXT, parent_session TEXT, parent_unit TEXT, artifact_id TEXT, data TEXT,
+      updated_ts REAL, received_ts REAL, seq INTEGER)""",
+    "CREATE INDEX IF NOT EXISTS idx_cc_lane_task ON cc_lane_units(project_id, task_id)",
+    """CREATE TABLE IF NOT EXISTS cc_artifacts (
+      artifact_id TEXT PRIMARY KEY, project_id TEXT, task_id TEXT, rel_path TEXT, generation INTEGER,
+      sha256 TEXT, status TEXT, data TEXT, thumb TEXT, mime TEXT, received_ts REAL, seq INTEGER)""",
+    """CREATE TABLE IF NOT EXISTS cc_lane_state (
+      project_id TEXT PRIMARY KEY, paused INTEGER, data TEXT, received_ts REAL)""",
 ]
+LANE_STATUS_EDGE = {"pending": "queued", "deferred": "deferred", "running": "waiting",
+                    "done": "completed", "delivered": "completed", "failed": "failed",
+                    "timed_out": "failed", "cancelled": "stale", "skipped": "stale"}
+MAX_THUMB_B64 = 600_000
 
 # Backend collection / retention settings (operator-editable, authenticated).
 # Display preferences live in the browser and never reach these.
@@ -136,7 +153,8 @@ SETTING_LIMITS = {
 }
 
 ACTION_KINDS = ("answer_question", "reply_permission", "approve_review", "reject_review",
-                "pause", "resume", "cancel", "unblock", "instruction", "withdraw_instruction")
+                "pause", "resume", "cancel", "unblock", "instruction", "withdraw_instruction",
+                "lanes")
 LIVE_ACTION = ("accepted", "claimed", "queued", "delivered")
 FINAL_ACTION = ("applied", "rejected", "failed", "expired", "cancelled")
 ACTION_STATUSES = LIVE_ACTION + FINAL_ACTION
@@ -676,6 +694,104 @@ class ControlCenter:
                      {"project_id": o.get("project_id"), "task_id": o.get("task_id")})]
         return []
 
+    def _in_lane_unit(self, c, o, st, now, src):
+        uid = _s(o.get("unit_id"), 60)
+        if not uid:
+            raise ValueError("unit id")
+        pid, tid = _s(o.get("project_id"), 120), _s(o.get("task_id"), 120)
+        data = {k: v for k, v in o.items() if k not in ("type",)}
+        seq = self._feed(c, "lane_unit", pid, o.get("session_id") or "", uid)
+        c.execute("INSERT INTO cc_lane_units (unit_id, project_id, task_id, lane, status, session_id, "
+                  "parent_session, parent_unit, artifact_id, data, updated_ts, received_ts, seq) "
+                  "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(unit_id) DO UPDATE SET "
+                  "status=excluded.status, session_id=excluded.session_id, data=excluded.data, "
+                  "parent_session=excluded.parent_session, updated_ts=excluded.updated_ts, "
+                  "received_ts=excluded.received_ts, seq=excluded.seq",
+                  (uid, pid, tid, _s(o.get("lane"), 40), _s(o.get("status"), 20),
+                   _s(o.get("session_id"), 160), _s(o.get("parent_session"), 160),
+                   _s(o.get("parent_unit"), 60), _s(o.get("artifact_id"), 80), _j(data),
+                   _f(o.get("updated_ts")), now, seq))
+        ref = {"project_id": pid, "task_id": tid, "session_id": o.get("session_id") or ""}
+        viol = ((o.get("envelope") or {}).get("checks") or {}).get("violations")
+        if viol:
+            return [("raise", f"helper_violation:{uid}", "helper_violation", "high",
+                     f"{tid}: helper {uid} tried a tool it may not use",
+                     ", ".join(_s(v.get("tool"), 60) for v in viol[:5] if isinstance(v, dict))
+                     + " — the session's permissions deny these; check the helper agent "
+                       "definition", ref)]
+        return []
+
+    def _in_artifact(self, c, o, st, now, src):
+        aid = _s(o.get("artifact_id"), 80)
+        if not aid:
+            raise ValueError("artifact id")
+        thumb = o.get("thumbnail_b64")
+        if not isinstance(thumb, str) or len(thumb) > MAX_THUMB_B64:
+            thumb = None
+        data = {k: v for k, v in o.items() if k not in ("type", "thumbnail_b64")}
+        data["thumbnail"] = bool(thumb)
+        seq = self._feed(c, "artifact", o.get("project_id"), "", aid)
+        c.execute("INSERT INTO cc_artifacts (artifact_id, project_id, task_id, rel_path, generation, "
+                  "sha256, status, data, thumb, mime, received_ts, seq) VALUES (?,?,?,?,?,?,?,?,?,?,?,?) "
+                  "ON CONFLICT(artifact_id) DO UPDATE SET status=excluded.status, data=excluded.data, "
+                  "thumb=COALESCE(excluded.thumb, cc_artifacts.thumb), received_ts=excluded.received_ts, "
+                  "seq=excluded.seq",
+                  (aid, _s(o.get("project_id"), 120), _s(o.get("task_id"), 120),
+                   _s(o.get("rel_path"), 300), int(o.get("generation") or 0),
+                   _s(o.get("sha256"), 64), _s(o.get("status"), 20), _j(data), thumb,
+                   _s(o.get("mime"), 40), now, seq))
+        return []
+
+    def _in_lane_state(self, c, o, st, now, src):
+        pid = _s(o.get("project_id"), 120)
+        if not pid:
+            raise ValueError("project")
+        c.execute("INSERT INTO cc_lane_state (project_id, paused, data, received_ts) VALUES (?,?,?,?) "
+                  "ON CONFLICT(project_id) DO UPDATE SET paused=excluded.paused, data=excluded.data, "
+                  "received_ts=excluded.received_ts",
+                  (pid, 1 if o.get("paused") else 0, _j({k: o.get(k) for k in (
+                      "enabled", "lanes", "settings") if o.get(k) is not None}), now))
+        self._feed(c, "lane_state", pid, "", pid)
+        return []
+
+    # ------------------------------------------------------------------ lanes (reads)
+
+    def lanes(self, projects: list, project: str, task: str = "") -> dict:
+        if projects and project not in projects:
+            raise ControlError("unknown project", "not_found", 404)
+        where, args = "project_id=?", [project]
+        if task:
+            where += " AND task_id=?"
+            args.append(task)
+        units = []
+        for r in self.db.query(f"SELECT * FROM cc_lane_units WHERE {where} ORDER BY "
+                               f"COALESCE(json_extract(data,'$.created_ts'),0)", args):
+            d = _uj(r["data"], {})
+            units.append({**d, "unit_id": r["unit_id"], "status": r["status"], "seq": r["seq"],
+                          "received_ts": r["received_ts"]})
+        arts = []
+        for r in self.db.query(f"SELECT artifact_id, project_id, task_id, rel_path, generation, sha256, "
+                               f"status, data, mime, received_ts, thumb IS NOT NULL AS has_thumb "
+                               f"FROM cc_artifacts WHERE {where} ORDER BY rel_path, generation", args):
+            arts.append({**_uj(r.pop("data"), {}), **r})
+        state = self.db.query_one("SELECT * FROM cc_lane_state WHERE project_id=?", (project,))
+        if state:
+            state = {"paused": bool(state["paused"]), **_uj(state["data"], {}),
+                     "received_ts": state["received_ts"]}
+        return {"units": units, "artifacts": arts, "state": state, "server_ts": self.clock()}
+
+    def artifact_thumb(self, artifact_id: str, projects: list) -> tuple:
+        r = self.db.query_one("SELECT project_id, thumb, mime FROM cc_artifacts WHERE artifact_id=?",
+                              (artifact_id,))
+        if not r or (projects and r["project_id"] not in projects):
+            raise ControlError("unknown artifact", "not_found", 404)
+        if not r["thumb"]:
+            raise ControlError("no thumbnail (image over the bridge's thumbnail size limit)",
+                               "no_thumbnail", 404)
+        import base64
+        return base64.b64decode(r["thumb"]), (r["mime"] if r["mime"] in ("image/png", "image/jpeg")
+                                              else "application/octet-stream")
+
     # ------------------------------------------------------------------ alerts
 
     def raise_alert(self, key: str, kind: str, severity: str, title: str, detail: str,
@@ -1104,7 +1220,8 @@ class ControlCenter:
             e = edges.setdefault(k, {"id": k, "from": a, "to": b, "kind": kind, "state": state,
                                      "refs": [], "label": label, "count": 0})
             e["count"] += 1
-            rank = {"active": 5, "queued": 4, "failed": 3, "fallback": 2, "completed": 1, "stale": 0}
+            rank = {"active": 5, "queued": 4, "failed": 3, "fallback": 2, "deferred": 2,
+                    "waiting": 2, "completed": 1, "stale": 0}
             if rank.get(state, 0) > rank.get(e["state"], 0):
                 e["state"] = state
             if len(e["refs"]) < 30:
@@ -1187,6 +1304,7 @@ class ControlCenter:
                       "error": "failed"}.get(t.get("status"), "completed")
                 edge(f"s:{r['session_id']}", mn, "tool", st,
                      {"part": r["part_id"], "session": r["session_id"], "tool": t.get("name")})
+        self._lane_lineage(nodes, edge, ids, since, where, wa, pf, pa)
         unassoc = self.db.query("SELECT id, op, status, backend, created_ts FROM media_jobs WHERE "
                                 "(session_id IS NULL OR session_id='') AND created_ts >= ? LIMIT 20",
                                 (since,))
@@ -1196,6 +1314,71 @@ class ControlCenter:
                         "x-session-id; MCP edges from tool calls whose name matched a configured "
                         "server; media edges from media_jobs.session_id. Nothing is joined by time "
                         "alone. 'active' = an in-flight ledger row or running job right now."}
+
+    def _lane_lineage(self, nodes, edge, ids, since, where, wa, pf, pa) -> None:
+        """artifact -> observer -> proposer -> primary -> recapture, from the
+        coordinator's own unit/artifact ids. A unit edge is 'active' only while
+        Foundry holds an in-flight ledger row for that unit's session (or Kilo
+        reports the helper session busy); a running unit with neither is
+        'waiting', never animated."""
+        units = [dict(r, data=_uj(r["data"], {})) for r in self.db.query(
+            f"SELECT * FROM cc_lane_units WHERE COALESCE(updated_ts, received_ts) >= ?{where}{pf}",
+            (since, *wa, *pa))]
+        if not units:
+            return
+        sids = [u["session_id"] for u in units if u["session_id"]]
+        inflight = set()
+        busy = set()
+        if sids:
+            q = ",".join("?" * len(sids))
+            inflight = {r["session_id"] for r in self.db.query(
+                f"SELECT DISTINCT session_id FROM usage_events WHERE status='reserved' AND "
+                f"session_id IN ({q})", sids)}
+            busy = {r["session_id"] for r in self.db.query(
+                f"SELECT session_id FROM cc_sessions WHERE status IN ('busy','retry') AND "
+                f"session_id IN ({q})", sids)}
+        arts = {}
+        for u in units:
+            d = u["data"]
+            un = f"u:{u['unit_id']}"
+            nodes[un] = {"id": un, "kind": "lane_unit", "label": f"{u['lane']} {u['unit_id'][-6:]}",
+                         "ref": {"unit": u["unit_id"], "session": u["session_id"]},
+                         "status": u["status"], "feedback": d.get("feedback"),
+                         "persona": d.get("persona"), "backend": d.get("backend")}
+            st = LANE_STATUS_EDGE.get(u["status"], "completed")
+            if u["status"] == "running" and (u["session_id"] in inflight or u["session_id"] in busy):
+                st = "active"
+            if d.get("feedback") in ("superseded", "expired"):
+                st = "stale"
+            ref = {"unit": u["unit_id"], "status": u["status"], "feedback": d.get("feedback"),
+                   "reason": _s(d.get("reason"), 200)}
+            if u["artifact_id"] and not u["parent_unit"]:
+                an = f"a:{u['artifact_id']}"
+                arts[u["artifact_id"]] = an
+                nodes.setdefault(an, {"id": an, "kind": "artifact", "label":
+                                      f"{_s(d.get('artifact_path') or 'capture', 40)} "
+                                      f"gen {d.get('artifact_generation') or '?'}",
+                                      "ref": {"artifact": u["artifact_id"]}})
+                edge(an, un, "lineage", st, ref, "observe")
+            if u["parent_unit"]:
+                edge(f"u:{u['parent_unit']}", un, "lineage", st, ref, "propose")
+            elif u["parent_session"] and u["parent_session"] in ids:
+                edge(f"s:{u['parent_session']}", un, "lineage", st, ref, u["lane"])
+            if u["session_id"] and u["session_id"] in ids:
+                edge(un, f"s:{u['session_id']}", "lineage", st, ref, "session")
+            if d.get("delivered_session"):
+                tgt = f"s:{d['delivered_session']}"
+                if d["delivered_session"] in ids:
+                    edge(un, tgt, "delivery", "completed", ref,
+                         d.get("feedback") if d.get("feedback") in ("integrated", "rejected",
+                                                                    "deferred") else "delivered")
+        for r in self.db.query(f"SELECT artifact_id, data FROM cc_artifacts WHERE "
+                               f"received_ts >= ?{where}{pf}", (since, *wa, *pa)):
+            d = _uj(r["data"], {})
+            prev = d.get("prev_artifact")
+            if prev and prev in arts and r["artifact_id"] in arts:
+                edge(arts[prev], arts[r["artifact_id"]], "lineage", "completed",
+                     {"artifact": r["artifact_id"]}, "recapture")
 
     def feed(self, after: int, projects: list, sessions: Optional[Iterable[str]] = None,
              limit: int = 300) -> tuple[list[dict], int]:
@@ -1256,6 +1439,19 @@ class ControlCenter:
             return self.action_view(eid)
         if kind == "snapshot":
             return self.snapshot_by_id(int(eid))
+        if kind == "lane_unit":
+            r = self.db.query_one("SELECT * FROM cc_lane_units WHERE unit_id=?", (eid,))
+            return ({**_uj(r["data"], {}), "unit_id": r["unit_id"], "status": r["status"]}
+                    if r else None)
+        if kind == "artifact":
+            r = self.db.query_one("SELECT artifact_id, project_id, task_id, rel_path, generation, "
+                                  "sha256, status, data, mime FROM cc_artifacts WHERE artifact_id=?",
+                                  (eid,))
+            return {**_uj(r.pop("data"), {}), **r} if r else None
+        if kind == "lane_state":
+            r = self.db.query_one("SELECT * FROM cc_lane_state WHERE project_id=?", (eid,))
+            return {"project_id": eid, "paused": bool(r["paused"]), **_uj(r["data"], {})} \
+                if r else None
         if kind == "source":
             for s in self.sources():
                 if s["source_id"] == eid:
@@ -1458,6 +1654,11 @@ class ControlCenter:
             payload = {"text": text, "delivery": delivery, "scope": scope}
             expected.update(session_id=sid if scope == "session" or delivery == "pause_and_steer"
                             else "")
+        elif kind == "lanes":
+            # operational: pause/un-pause proactive helper lanes for the project
+            # (never enables a lane the profile has off)
+            payload = {"paused": bool(body.get("paused", True)), "note": _s(body.get("note"), 500)}
+            expected.pop("task_state", None)
         elif kind == "withdraw_instruction":
             target = _s(body.get("target_action_id"), 80)
             t = self.db.query_one("SELECT * FROM cc_actions WHERE action_id=? AND kind='instruction'",
@@ -1508,6 +1709,8 @@ class ControlCenter:
     def _summary(kind: str, p: dict, tid: str) -> str:
         """What the audit log shows: no answer/instruction body (it may hold
         sensitive text); length only."""
+        if kind == "lanes":
+            return f"proactive lanes {'paused' if p.get('paused') else 'un-paused'} ({tid})"
         if kind == "answer_question":
             return f"answer {len(p.get('answers') or [])} question(s), " \
                    f"{sum(len(x) for a in p.get('answers') or [] for x in a)} chars"
@@ -1684,7 +1887,9 @@ class ControlCenter:
                           "'expired','cancelled') AND updated_ts < ?", acut),
                          ("DELETE FROM cc_action_log WHERE ts < ?", acut),
                          ("DELETE FROM cc_op_sessions WHERE expires_ts < ?", self.clock()),
-                         ("DELETE FROM cc_drafts WHERE updated_ts < ?", cut)):
+                         ("DELETE FROM cc_drafts WHERE updated_ts < ?", cut),
+                         ("DELETE FROM cc_lane_units WHERE received_ts < ?", cut),
+                         ("DELETE FROM cc_artifacts WHERE received_ts < ?", cut)):
             n += self.db.execute_count(sql, (arg,))
         return n
 

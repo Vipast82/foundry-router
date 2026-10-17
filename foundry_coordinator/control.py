@@ -136,7 +136,7 @@ class ControlChannel:
             return self._report(a, "rejected", f"unsupported action {a['kind']!r}")
         actor = f"{a.get('actor') or 'operator'} (control center)"
         if a["kind"] not in ("answer_question", "reply_permission", "instruction",
-                             "withdraw_instruction") and exp.get("task_state") \
+                             "withdraw_instruction", "lanes") and exp.get("task_state") \
                 and exp["task_state"] != t["state"]:
             return self._report(a, "rejected", f"{tid} is now {t['state']}, not "
                                                f"{exp['task_state']} as the operator saw it")
@@ -274,6 +274,17 @@ class ControlChannel:
         after = self.c.unblock(a["project_id"], a["task_id"], p.get("resolution") or "",
                                reset_attempts=bool(p.get("reset_attempts")), actor=actor)
         return self._report(a, "applied", "back to READY", {"task_state": after["state"]})
+
+    def _do_lanes(self, a, t, actor):
+        """Operational kill switch for proactive helper lanes of this project.
+        It can only stop new lane work (running units finish; their results
+        are still shown). Turning lanes ON stays a profile change."""
+        p = a.get("payload") or {}
+        paused = bool(p.get("paused", True))
+        self.c.helpers.lanes.set_paused(a["project_id"], paused, actor, p.get("note") or "")
+        return self._report(a, "applied", ("proactive lanes paused for " if paused else
+                                           "proactive lanes un-paused (profile settings apply) "
+                                           "for ") + a["project_id"], {"lanes_paused": paused})
 
     def _do_instruction(self, a, t, actor):
         p = a.get("payload") or {}

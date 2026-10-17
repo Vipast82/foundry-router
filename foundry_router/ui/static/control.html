@@ -230,6 +230,10 @@ table.t th { color:var(--dim); font-weight:normal; }
 .gedge.completed { stroke:var(--dim); } .gedge.failed { stroke:var(--bad); stroke-dasharray:4 3; }
 .gedge.fallback { stroke:var(--warn); } .gedge.queued { stroke:var(--info); stroke-dasharray:2 3; }
 .gedge.stale { stroke:var(--line); stroke-dasharray:1 4; }
+.gedge.deferred { stroke:var(--warn); stroke-dasharray:2 5; } .gedge.waiting { stroke:var(--info); stroke-dasharray:1 3; }
+.gnode.k-artifact rect { stroke:var(--syn-str); } .gnode.k-lane_unit rect { stroke:var(--syn-fn); }
+.diff .dadd { color:var(--ok); } .diff .ddel { color:var(--bad); } .diff .dhunk { color:var(--info); } .diff .dfile { color:var(--syn-kw); font-weight:600; }
+.lane-thumb { max-width:120px; max-height:80px; border:1px solid var(--line); border-radius:3px; image-rendering:auto; }
 .gedge.active { stroke:var(--ok); stroke-width:2.6; stroke-dasharray:6 4; }
 body.anim .gedge.active { animation:flow 0.9s linear infinite; }
 .gedge.kind-tool { stroke-dasharray:3 2; }
@@ -369,10 +373,10 @@ function fmtDur(s) {
 const PREF_KEY = "fr.cc.prefs";
 const PREF_VERSION = 2;
 const SECTIONS = ["identity", "context", "tokens", "speed", "routes", "mcp", "todo", "helpers",
-  "capacity", "verification", "capabilities", "sessions", "search", "actions"];
+  "capacity", "lanes", "verification", "capabilities", "sessions", "search", "actions"];
 const SECTION_TITLES = {identity: "Identity & state", context: "Context", tokens: "Tokens", speed: "Speed & latency",
   routes: "Models & routes", mcp: "MCP servers", todo: "To-do", helpers: "Helpers",
-  capacity: "Helper capacity & quota", verification: "Verification",
+  capacity: "Helper capacity & quota", lanes: "Proactive lanes", verification: "Verification",
   capabilities: "Other capabilities", sessions: "Sessions & history", search: "Search", actions: "Operator actions"};
 const DEFAULT_PREFS = {
   v: PREF_VERSION,
@@ -384,7 +388,7 @@ const DEFAULT_PREFS = {
   followCoordinator: true, followScroll: true, historyPageSize: 200,
   events: {text: true, reasoning: true, tool: true, retry: true, compaction: true, file: true, step: false, agent: true},
   sidebar: {order: SECTIONS.slice(), hidden: [], collapsed: ["search", "capabilities", "actions"]},
-  showDisabledMcp: true, showTokenDetails: true, showTiming: true, showTodo: true, showCapabilities: true, showHelpers: true,
+  showDisabledMcp: true, showTokenDetails: true, showTiming: true, showTodo: true, showCapabilities: true, showHelpers: true, showLanes: true,
   graph: true, graphVertical: "auto", routeAnimation: true, reducedMotion: "system",
   refreshS: 10, staleAfterS: 45,
   notify: {enabled: false, critical: true, high: true, completion: false, stale: true},
@@ -703,6 +707,7 @@ function onBatch(b) {
       case "action": S.actions.set(e.action_id, e); actionsChanged = true; onActionUpdate(e); break;
       case "snapshot": S.snapshots.set(`${e.kind}|${e.project_id}|${e.session_id}`, e); touched.add("*snap"); break;
       case "source": S.sources = [...(S.sources || []).filter(s => s.source_id !== e.source_id), e]; renderConn(); break;
+      case "lane_unit": case "artifact": case "lane_state": S.lanesAt = 0; touched.add("*lanes"); break;
     }
   }
   if (tasksChanged) { renderTaskSelect(); applyFollow(); }
@@ -1360,6 +1365,63 @@ const SECTION_RENDER = {
         <div class="dim">${esc(u.persona || "")}${u.backend ? " on " + esc(u.backend) : ""}${u.session_id ? ` · <a href="#" data-open="${esc(u.session_id)}">session</a>` : ""} · ${esc(u.reason || "")}${u.next_eligible ? " · next " + esc(tsText(u.next_eligible)) : ""}</div></li>`).join("")}</ul>` : '<p class="dim">No helper units.</p>'}
       <div class="src">Required work (planning, review, closeout, blocker diagnosis) keeps the existing guardrails. UNKNOWN (missing, stale or unreadable quota) is never admitted. Settings: ⚙ → Helper policy.</div>`;
   },
+  lanes(s) {
+    if (!P.showLanes) return '<p class="dim">Hidden in Settings (display only; lanes keep running per the profile).</p>';
+    if (!S.lanes || nowS() - (S.lanesAt || 0) > 15) loadLanes();
+    const L = S.lanes;
+    if (!L) return '<p class="dim">Loading…</p>';
+    if (L.error) return `<p class="dim">${esc(L.error)}</p>`;
+    const st = L.state || null;
+    const pill = (v, cls) => `<span class="pill ${cls || ""}">${esc(v)}</span>`;
+    const scls = {running: "ok", deferred: "warn", pending: "", failed: "bad", timed_out: "bad", done: "", delivered: "ok", skipped: "", cancelled: ""};
+    const fcls = {waiting: "warn", delivered: "ok", integrated: "ok", rejected: "bad", superseded: "", expired: "", display_only: "", deferred: "warn"};
+    const fword = {waiting: "waiting for the primary's idle point", delivered: "delivered (not yet acknowledged)", integrated: "integrated (primary's claim)", rejected: "rejected", deferred: "deferred by the primary", superseded: "superseded", expired: "expired (after verification)", display_only: "shown here only"};
+    const units = L.units || [];
+    const arts = new Map((L.artifacts || []).map(a => [a.artifact_id, a]));
+    const done = units.filter(u => u.finished_ts && u.started_ts);
+    const avg = xs => xs.length ? relAge(xs.reduce((a, b) => a + b, 0) / xs.length) : NA("no finished units yet");
+    const head = `${st ? kv([["Profile", st.enabled ? pill("lanes enabled", "ok") : pill("lanes off (default)")],
+        ["Lanes on", esc(Object.entries(st.lanes || {}).filter(([, v]) => v).map(([k]) => k).join(", ") || "none")],
+        ["Operational", st.paused ? pill("paused by an operator", "warn") : pill("not paused")]]) : '<p class="dim">No lane state from the bridge yet.</p>'}
+      <div class="row"><button data-lanes-pause="${st && st.paused ? "0" : "1"}">${st && st.paused ? "Un-pause lanes" : "Pause proactive lanes"}</button>
+      <span class="dim">Operational: stops new lane work for this project (running units finish). Enabling lanes stays a profile change.</span></div>
+      ${kv([["Units", `${units.length} (${units.filter(u => u.status === "running").length} running, ${units.filter(u => u.status === "deferred").length} deferred)`],
+        ["Turnaround", avg(done.map(u => u.finished_ts - u.started_ts))],
+        ["Queue wait", avg(units.filter(u => u.started_ts && u.created_ts).map(u => u.started_ts - u.created_ts))],
+        ["Results", `${units.filter(u => ["delivered", "integrated", "rejected", "deferred"].includes(u.feedback)).length} delivered · ${units.filter(u => u.feedback === "integrated").length} integrated (claimed) · ${units.filter(u => u.feedback === "display_only").length} not actionable · ${units.reduce((a, u) => a + (u.coalesced || 0), 0)} duplicates coalesced · ${units.filter(u => ["superseded", "expired"].includes(u.feedback)).length} stale`],
+        ["Tokens", units.some(u => u.tokens) ? esc(String(units.reduce((a, u) => a + (u.tokens || 0), 0))) : NA("not reported")]])}
+      <div class="src">Counts are recorded facts; "integrated" is the primary's own claim, not verification. No speedup is computed.</div>`;
+    const diffHtml = t => `<pre class="diff">${esc(t).split("\n").map(l => `<span class="${l.startsWith("+++") || l.startsWith("---") ? "dfile" : l.startsWith("+") ? "dadd" : l.startsWith("-") ? "ddel" : l.startsWith("@@") ? "dhunk" : ""}">${l}</span>`).join("\n")}</pre>`;
+    const row = u => {
+      const e = u.envelope || {}; const a = u.assignment || {}; const art = u.artifact_id ? arts.get(u.artifact_id) : null;
+      const fs = e.findings || [];
+      const sk = u.skills || {};
+      const drift = ((e.checks || {}).drift) || {};
+      const moved = Object.entries(drift).filter(([, v]) => v !== "unchanged").map(([k]) => k);
+      return `<li data-unit="${esc(u.unit_id)}"><div style="display:flex;gap:5px;flex-wrap:wrap;align-items:center">
+          ${pill(u.lane)}${pill(u.status, scls[u.status])}${u.feedback ? pill(fword[u.feedback] || u.feedback, fcls[u.feedback]) : ""}<b>${esc(u.unit_id)}</b>
+          <span class="dim">${esc(u.persona || "")}${u.backend ? " on " + esc(u.backend) : ""}${u.served_model ? " · served " + esc(u.served_model) : ""}</span></div>
+        <div class="dim">parent ${u.parent_unit ? `unit ${esc(u.parent_unit)}` : u.parent_session ? `<a href="#" data-open="${esc(u.parent_session)}">primary session</a>` : "?"}${u.session_id && !String(u.session_id).startsWith("lane-") ? ` · <a href="#" data-open="${esc(u.session_id)}">helper session</a>` : u.session_id ? " · direct Foundry call" : ""}
+          · created ${esc(tsText(u.created_ts))}${u.started_ts ? " · started " + esc(tsText(u.started_ts)) : ""}${u.finished_ts ? " · finished " + esc(tsText(u.finished_ts)) : ""}</div>
+        ${u.reason ? `<div class="dim">${esc(u.reason)}${u.next_eligible ? " · next eligible " + esc(tsText(u.next_eligible, "datetime")) : ""}</div>` : ""}
+        ${art ? `<div style="display:flex;gap:6px;align-items:flex-start;margin-top:3px">${art.has_thumb ? `<img class="lane-thumb" alt="capture ${esc(art.rel_path)}" src="/control/api/artifacts/${encodeURIComponent(art.artifact_id)}/thumbnail">` : `<span class="dim">${esc(art.thumbnail_note || "no thumbnail")}</span>`}
+          <div class="dim"><code>${esc(art.rel_path)}</code> gen ${esc(art.generation)} · ${esc(art.width)}×${esc(art.height)} · sha256 <code>${esc(String(art.sha256).slice(0, 16))}</code> · rev <code>${esc(String(art.revision || "").slice(0, 12))}</code> · ${pill(art.status)} · capture ${esc(art.valid)}</div></div>` : ""}
+        ${u.snapshot_id ? `<div class="dim">source snapshot <code>${esc(u.snapshot_id)}</code>${a.snapshot_status && a.snapshot_status !== "consistent" ? " (" + esc(a.snapshot_status) + ")" : ""}</div>` : ""}
+        ${a.sent ? `<div class="dim">image bytes sent: ${a.sent.map(x => `${esc(x.role)} ${esc(String(x.sha256).slice(0, 12))} (${esc(x.bytes)} B)`).join(", ")} · vision routes ${esc((a.vision_routes || []).join(", ") || "?")}</div>` : ""}
+        ${(sk.observed || []).length || (sk.claimed || []).length ? `<div class="dim">skills loaded: ${esc((sk.observed || []).join(", ") || "none observed")}${(sk.claimed || []).length ? " · claimed: " + esc(sk.claimed.join(", ")) : ""}</div>` : (a.skills_loaded ? `<div class="dim">skills loaded: ${esc(a.skills_loaded.map(x => x.name).join(", "))}</div>` : "")}
+        ${e.summary ? `<div>${esc(e.summary)}</div>` : ""}${e.not_inspected ? `<div class="warnbox">Not inspected: ${esc(u.reason || "no confirmed image input")}. No visual finding is reported.</div>` : ""}
+        ${fs.length ? `<ul class="list">${fs.map(f => `<li>${pill(f.severity, f.severity === "high" || f.severity === "critical" ? "bad" : f.severity === "medium" ? "warn" : "")} <span class="dim">conf ${(+f.confidence || 0).toFixed(2)}${f.region ? " · " + esc(f.region) : ""}</span>
+          <div><b>observed</b> ${esc(f.observed)}</div>${f.hypothesis ? `<div class="dim"><b>hypothesis</b> ${esc(f.hypothesis)}</div>` : ""}${(f.paths || []).length ? `<div class="dim">${esc(f.paths.join(", "))}</div>` : ""}</li>`).join("")}</ul>` : ""}
+        ${e.patch ? `<details><summary>Proposed diff${moved.length ? ` — base drifted (${esc(moved.join(", "))}): rebase needed` : ""}</summary>${diffHtml(e.patch)}</details>` : ""}
+        ${(e.checks_proposed || []).length ? `<div class="dim">checks proposed (not run): ${esc(e.checks_proposed.join("; "))}</div>` : ""}
+        ${(e.sources || []).length ? `<div class="dim">sources: ${esc(e.sources.join("; "))}</div>` : ""}
+        ${e.limitations ? `<div class="dim">limitations: ${esc(e.limitations)}</div>` : ""}
+        ${((e.checks || {}).violations || []).length ? `<div class="warnbox">Tried denied tools: ${esc(e.checks.violations.map(v => v.tool).join(", "))}</div>` : ""}
+        ${u.feedback_detail && u.feedback_detail.note ? `<div class="dim">${esc(u.feedback_detail.note)}${u.feedback_detail.recaptured_as ? " · recaptured as " + esc(u.feedback_detail.recaptured_as) : ""}</div>` : ""}</li>`;
+    };
+    return head + (units.length ? `<ul class="list">${units.slice().reverse().map(row).join("")}</ul>` : '<p class="dim">No lane units for this task.</p>')
+      + '<div class="src">Advisory lanes: a helper result is never a gate verdict, an independent review or Victor\'s visual approval. Feedback reaches the primary only when it is idle (Kilo has no tool-boundary injection).</div>';
+  },
   sessions(s) {
     const f = S.sessFilter || (S.sessFilter = {role: "", state: "", model: "", q: ""});
     const all = [...S.sessions.values()].filter(x => (!S.project || x.project_id === S.project) && (!S.task || x.task_id === S.task));
@@ -1403,6 +1465,12 @@ const SECTION_RENDER = {
       <div class="src">Accepted = stored by Foundry. Delivered = Kilo accepted it. Applied = the coordinator recorded the result.</div>`;
   },
 };
+async function loadLanes() {
+  if (S.lanesLoading || !S.project) return; S.lanesLoading = true;
+  try { S.lanes = await api(`lanes?project=${encodeURIComponent(S.project)}&task=${encodeURIComponent(S.task || "")}`); S.lanesAt = nowS(); }
+  catch (e) { S.lanes = {error: e.message}; S.lanesAt = nowS(); }
+  S.lanesLoading = false; scheduleInspector();
+}
 async function loadHelperStatus() {
   if (S.helperLoading) return; S.helperLoading = true;
   try { S.helperStatus = await api("helpers"); S.helperStatusAt = nowS(); } catch (e) { S.helperStatus = S.helperStatus || {warnings: [e.message]}; }
@@ -1419,6 +1487,15 @@ const SECTION_WIRE = {
   tokens(sec) { sec.querySelectorAll("[data-scope]").forEach(b => b.onclick = () => { S.tokScope = b.dataset.scope; renderInspector(); }); },
   mcp(sec) { const c = sec.querySelector("#mcp-dis"); if (c) c.onchange = () => { P.showDisabledMcp = c.checked; savePrefs(); renderInspector(); }; },
   helpers(sec) { wireOpenButtons(sec); },
+  lanes(sec) {
+    wireOpenButtons(sec);
+    sec.querySelectorAll("[data-lanes-pause]").forEach(b => b.onclick = async () => {
+      const paused = b.dataset.lanesPause === "1";
+      if (!confirm(paused ? "Pause proactive helper lanes for this project? New lane work stops; running units finish." : "Un-pause proactive lanes? Only lanes enabled in the profile resume.")) return;
+      const a = await submitAction({kind: "lanes", paused, note: paused ? "paused from the control center" : "un-paused from the control center"}, `lanes:${S.project}:${paused}`);
+      if (a) { S.lanesAt = 0; scheduleInspector(); }
+    });
+  },
   sessions(sec) {
     sec.querySelectorAll("[data-f]").forEach(i => { const ev = i.tagName === "INPUT" ? "input" : "change"; i.addEventListener(ev, () => { S.sessFilter[i.dataset.f] = i.value; if (ev === "change") renderInspector(); else { clearTimeout(S.sfT); S.sfT = setTimeout(renderInspector, 300); } }); });
     sec.querySelectorAll(".node").forEach(n => {
@@ -1923,7 +2000,7 @@ async function refreshGraph() {
   try { S.graph = await api(`graph?project=${encodeURIComponent(S.project)}&task=${encodeURIComponent(S.graphAll ? "" : S.task)}&minutes=${S.graphMin || 30}`); renderGraph(); }
   catch (e) { const b = $("#graph"); if (b) b.innerHTML = `<p class="dim">${esc(e.message)}</p>`; }
 }
-const GCOL = {coordinator: 0, session: 1, persona: 2, mcp: 2, media_job: 2, backend: 3, model: 4};
+const GCOL = {coordinator: 0, artifact: 0, session: 1, lane_unit: 2, persona: 2, mcp: 2, media_job: 2, backend: 3, model: 4};
 function renderGraph() {
   const g = S.graph; const host = $("#graph"); if (!g || !host) return;
   if (S.graphTable) {
@@ -2156,6 +2233,7 @@ const SETTINGS = [
     ["showDisabledMcp", "Show disabled MCP servers", "check", "Display only: never enables or disables a server."],
     ["showTokenDetails", "Token / cache details", "check"], ["showTiming", "Timing metrics", "check"],
     ["showTodo", "To-do", "check"], ["showCapabilities", "Capability details", "check"], ["showHelpers", "Helper activity", "check"],
+    ["showLanes", "Proactive lanes panel", "check", "Presentation only: hides the panel. Lane dispatch is set in the project profile; the panel's Pause button is the operational switch."],
     ["_sidebar", "Section order / visibility", "sidebar"],
   ]],
   ["Layout & motion", [

@@ -207,6 +207,27 @@ async def graph(request: Request, project: str = "", task: str = "", minutes: fl
     return _cc(request).route_graph(s["projects"], project, task, max(1.0, min(1440.0, minutes)))
 
 
+@router.get("/control/api/lanes")
+@_guard
+async def lanes(request: Request, project: str, task: str = ""):
+    """Proactive helper lanes: units (assignment, parent, model/backend, defer
+    reason, findings, proposed diff, feedback), artifacts and kill-switch state."""
+    s = _op(request)
+    return _cc(request).lanes(s["projects"], project, task)
+
+
+@router.get("/control/api/artifacts/{artifact_id}/thumbnail")
+@_guard
+async def artifact_thumbnail(request: Request, artifact_id: str):
+    from fastapi.responses import Response
+    s = _op(request)
+    data, mime = _cc(request).artifact_thumb(artifact_id, s["projects"])
+    return Response(content=data, media_type=mime,
+                    headers={"Cache-Control": "private, max-age=3600",
+                             "X-Content-Type-Options": "nosniff",
+                             "Content-Security-Policy": "default-src 'none'"})
+
+
 @router.get("/control/api/capabilities")
 @_guard
 async def capabilities(request: Request):

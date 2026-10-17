@@ -216,10 +216,16 @@ class HelperManager:
         from . import lanes as L
         ls = L.settings(P)
         if ls["enabled"]:
-            self.lanes.ingest(P, t, spec, ls)
-            t = self.store.task(P.id, t["task_id"]) or t
-            if not self.lanes.paused(P.id):
-                self.lanes.plan(P, t, spec, ls)
+            # lanes are optional: a lane error never stops ordinary helpers
+            for step in ("ingest", "plan"):
+                if step == "plan" and self.lanes.paused(P.id):
+                    break
+                try:
+                    getattr(self.lanes, step)(P, t, spec, ls)
+                except Exception as e:                           # noqa: BLE001
+                    self.store.event(P.id, t["task_id"], "warning", detail={
+                        "lanes": f"{step}: {type(e).__name__}: {e}"[:300]})
+                t = self.store.task(P.id, t["task_id"]) or t
         for u in self.units(P.id, t["task_id"], "running"):
             self._poll(P, u, h)
         running = self.units(P.id, t["task_id"], "running")
