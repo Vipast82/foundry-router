@@ -95,6 +95,7 @@ def settings(P) -> dict:
         "aging_seconds": float(raw.get("aging_seconds", 900)),
         "max_retries": int(raw.get("max_retries", 1)),
         "skill_dirs": list(raw.get("skill_dirs") or [".kilo/skills"]),
+        "snapshot_max_bytes": max(1, min(8_000_000, int(raw.get("snapshot_max_bytes", 400_000)))),
         "failure_commands": list(raw.get("failure_commands") or [
             "lune", "gate.ps1", "done_check", "pytest", "rojo build", "selene", "luau-analyze",
             "stylua", "run_regression", "GateRunner"]),

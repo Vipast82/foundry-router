@@ -147,6 +147,11 @@ class FoundryClient:
                                   headers={"x-session-id": session_id} if session_id else None)
         choice = (data.get("choices") or [{}])[0]
         text = ((choice.get("message") or {}).get("content")) or ""
-        meta = {"served_model": headers.get("X-Foundry-Served-Model") or data.get("model"),
+        # HTTP field names are case-insensitive. Uvicorn/proxies commonly send
+        # these in lowercase; using the virtual response model instead makes a
+        # valid visual call fail its served-route capability check.
+        response_headers = {k.lower(): v for k, v in headers.items()}
+        meta = {"served_model": response_headers.get("x-foundry-served-model") or data.get("model"),
+                "served_backend": response_headers.get("x-foundry-served-backend"),
                 "usage": data.get("usage") or {}, "finish": choice.get("finish_reason")}
         return text, meta

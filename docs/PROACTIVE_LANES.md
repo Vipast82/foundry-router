@@ -167,6 +167,7 @@ min_delivery_severity = "medium"
 aging_seconds = 900            # anti-starvation
 max_retries = 1
 skill_dirs = [".kilo/skills"]
+snapshot_max_bytes = 400000    # local immutable source snapshot; maximum 8000000
 
 [lanes.visual]                 # each lane: enabled = false by default
 enabled = true
@@ -300,7 +301,10 @@ How it works:
 
 - Only the approved capture and reference globs inside the workspace are copied. Paths that resolve through symlinks or junctions are refused, as are credentials, `.git` and `_secrets` paths.
 - Images go to Foundry only in the visual call, and only to a vision-validated route. The bridge sends thumbnails of 400 KB or less; larger images send hash and metadata only.
-- Source snapshots contain only authorized scope files (60 files, 400 KB).
+- Source snapshots contain only authorized scope files (60 files, 400 KB by default).
+  `lanes.snapshot_max_bytes` can raise the local snapshot budget up to 8 MB for
+  larger tasks. This does not expand task scope or increase the prompt excerpts.
+  Raw evidence paths are excluded case-insensitively; images use the separate artifact store.
 - Prompts carry excerpts, not the whole transcript.
 - Coordinator copies: removed after `[lanes.visual] retention_days` (checked at most hourly while lanes run). Rows stay as history, marked `expired`.
 - Control-center rows follow `retention_days`.

@@ -256,11 +256,13 @@ class Proactive(VisualMixin, AdvisoryMixin):
         self._plan_artifacts(P, t, spec, ls)
 
     def _snap(self, P, t, spec) -> dict:
+        ls = L.settings(P)
         return self.artifacts.source_snapshot(ws=P.ws, project_id=P.id, task_id=t["task_id"],
                                               run_id=t["run_id"], workspace=P.profile.workspace,
+                                              max_bytes=ls["snapshot_max_bytes"],
                                               patterns=[s for s in spec.scope if not s.lower()
                                                         .endswith((".png", ".jpg", ".jpeg"))
-                                                        and "evidence" not in s])
+                                                        and "evidence" not in s.lower()])
 
     def _done_event(self, ev, uid, how):
         self._set_event(ev["event_key"], {"created": "planned", "coalesced": "coalesced",

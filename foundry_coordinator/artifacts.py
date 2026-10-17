@@ -432,7 +432,7 @@ class ArtifactStore:
             total, man, blobs = 0, {}, {}
             for rel in ok_files:
                 with open(os.path.join(workspace, rel), "rb") as f:
-                    b = f.read()
+                    b = f.read(max_bytes - total + 1)
                 total += len(b)
                 if total > max_bytes:
                     return None, None, total
