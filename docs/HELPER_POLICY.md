@@ -269,3 +269,17 @@ No setting was changed and no upstream was restarted.
    admitted unit on a low-risk task before relying on it.
 
    v0.117.1 is required: v0.117.0 never dispatched report requests.
+
+## Proactive lanes (v0.118.0)
+
+Lane units are optional helper work under this same policy.
+
+- Each lane binds with its own optional purpose: `visual_observation`,
+  `failure_triage`, `incremental_review`, `research`, `evidence_reconciliation`,
+  `handoff_prep`, `preflight`, or `frontier_primary` for the optional
+  frontier-primary phase. A model never chooses the purpose.
+- Lanes share `[helpers]` personas, `max_running` and backend ceilings.
+- The visual lane additionally requires every route of its persona to report
+  image modality.
+
+See docs/PROACTIVE_LANES.md.

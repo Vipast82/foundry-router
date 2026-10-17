@@ -267,3 +267,15 @@ def test_head_move_and_context_threshold_are_events(env):
     c.tick()
     kinds = {e["kind"] for e in c.helpers.lanes.events("game", "T2")}
     assert {"run_start", "commit", "context"} <= kinds
+
+
+def test_retention_prunes_old_copies_but_keeps_history(tmp_path):
+    ws, a = _arts(tmp_path)
+    clock = [1000.0]
+    a.clock = lambda: clock[0]
+    (ws / "docs/evidence/T2/m.png").write_bytes(png())
+    r = _rec(a, ws, "docs/evidence/T2/m.png")
+    path = r["artifact"]["store_path"]
+    clock[0] += 31 * 86400
+    assert a.prune(30) == 1 and not os.path.exists(path)
+    assert a.get(r["artifact"]["artifact_id"])["status"] == "expired"

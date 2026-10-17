@@ -2,6 +2,55 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.118.0 — proactive frontier lanes (all default off)
+
+**What changes**
+
+- **Proactive helper lanes** on the existing helper journal. Full guide:
+  docs/PROACTIVE_LANES.md.
+  - Visual observer: a direct vision call with the actual capture bytes, and image
+    modality verified for each route.
+  - Code proposer.
+  - Failure triage.
+  - Incremental review.
+  - Independent test design.
+  - Documentation research.
+  - Evidence reconciliation.
+  - Handoff and preflight.
+- **Triggers come from the busy primary's completed tool results.** They are read
+  with GET only and classified deterministically. A naked file watcher never
+  spends money.
+- **Immutable lineage:**
+  - Content-addressed artifact snapshots with generations and supersession.
+  - Two-read source snapshots (HEAD plus a file manifest).
+- **Queue:**
+  - Dependency-aware, with priority and aging, coalescing, and per-lane and
+    per-task caps.
+  - Shares the aggregate cap of three and Foundry's per-backend ceilings.
+- **Delivery:** batched action cards, only at the primary's idle safe point. The
+  primary acknowledges via `helper_feedback`.
+- **Control center:**
+  - "Proactive lanes" panel.
+  - Artifact → observer → proposer → primary → recapture lineage in the graph,
+    animated only while the activity is observed.
+  - Operational `lanes` pause action.
+  - `helper_violation` alert.
+- **Optional frontier-primary phase:** manual, same session, verified at runtime,
+  default off.
+- **Foundry:**
+  - New optional purposes.
+  - `/v1/foundry/helpers/admission` reports `vision` for each route.
+  - Lane tables and endpoints in the control center.
+
+**Migration:**
+
+- Additive only. New columns on `helper_units`.
+- New coordinator tables: `artifacts`, `source_snapshots`, `fs_watch`,
+  `lane_events`, `lane_cache`, `primary_phases`.
+- New Foundry tables: `cc_lane_units`, `cc_artifacts`, `cc_lane_state`.
+- Nothing is enabled unless `[lanes]` or `[frontier_primary]` is set in a profile.
+- Roll back by removing those sections or by deploying v0.117.1.
+
 ## v0.117.1 — helper request lifecycle fix
 
 **What changes**

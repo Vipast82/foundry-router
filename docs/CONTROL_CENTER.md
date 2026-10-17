@@ -237,6 +237,22 @@ The **Helper capacity & quota** inspector section and ⚙ → **Helper policy & 
 cover optional coding helpers: per-account windows with how old each observation is,
 admission state, helper units and per-backend ceilings. See docs/HELPER_POLICY.md.
 
+
+## Proactive lanes (v0.118.0)
+
+The **Proactive lanes** inspector section shows each lane unit. It covers the
+assignment, parent, model and backend, the artifact (thumbnail, sha256,
+generation and revision), any quota-deferral reason, findings (observed and
+hypothesis), the proposed diff, and whether the feedback is waiting,
+delivered, integrated, rejected, superseded or expired.
+
+The route graph adds artifact → observer → proposer → primary → recapture
+edges. An edge animates only while Foundry holds an in-flight ledger row for
+that unit's session.
+
+**Pause proactive lanes** (action kind `lanes`) stops new lane work for the
+project. Enabling lanes stays a profile change. See docs/PROACTIVE_LANES.md.
+
 ## Settings
 
 Display settings are stored per browser and per layout preset (localStorage

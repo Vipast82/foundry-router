@@ -129,7 +129,19 @@ class Proactive(VisualMixin, AdvisoryMixin):
                                               "detail": {"artifact_id": a["artifact_id"],
                                                          "source": "filesystem"}}, sid)
         self._process_captures(P, t, ls, sid, head)
+        self._retention(ls)
         return new
+
+    def _retention(self, ls: dict) -> None:
+        """Drop expired artifact copies at most hourly ([lanes.visual] retention_days)."""
+        last = float(self.store.meta("lanes_pruned_ts") or 0)
+        if self.clock() - last < 3600:
+            return
+        self.store.set_meta("lanes_pruned_ts", str(self.clock()))
+        try:
+            self.artifacts.prune(float(ls["lanes"]["visual"].get("retention_days") or 30))
+        except Exception as e:                                    # noqa: BLE001
+            self.store.event("", "", "warning", detail={"lanes": f"prune: {e}"[:200]})
 
     def _process_captures(self, P, t: dict, ls: dict, sid: str, head: str) -> None:
         """Capture events -> immutable artifacts (only while the visual lane is on)."""
