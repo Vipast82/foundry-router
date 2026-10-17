@@ -369,9 +369,10 @@ function fmtDur(s) {
 const PREF_KEY = "fr.cc.prefs";
 const PREF_VERSION = 2;
 const SECTIONS = ["identity", "context", "tokens", "speed", "routes", "mcp", "todo", "helpers",
-  "verification", "capabilities", "sessions", "search", "actions"];
+  "capacity", "verification", "capabilities", "sessions", "search", "actions"];
 const SECTION_TITLES = {identity: "Identity & state", context: "Context", tokens: "Tokens", speed: "Speed & latency",
-  routes: "Models & routes", mcp: "MCP servers", todo: "To-do", helpers: "Helpers", verification: "Verification",
+  routes: "Models & routes", mcp: "MCP servers", todo: "To-do", helpers: "Helpers",
+  capacity: "Helper capacity & quota", verification: "Verification",
   capabilities: "Other capabilities", sessions: "Sessions & history", search: "Search", actions: "Operator actions"};
 const DEFAULT_PREFS = {
   v: PREF_VERSION,
@@ -1323,6 +1324,42 @@ const SECTION_RENDER = {
     const it = snap.data.items || {};
     return `<table class="t">${Object.entries(it).map(([k, v]) => `<tr><td>${esc(k)}</td><td>${v.supported === false ? '<span class="pill">unsupported</span>' : v.status ? `<code>${esc(JSON.stringify(v.status).slice(0, 160))}</code>` : NA()}</td></tr>`).join("")}</table><div class="src">Separate from MCP. ${esc(snap.data.source || "")} · ${esc(fullTs(snap.source_ts))}</div>`;
   },
+  capacity(s) {
+    const h = S.helperStatus;
+    if (!h || nowS() - (S.helperStatusAt || 0) > 30) loadHelperStatus();
+    if (!h) return '<p class="dim">Loading…</p>';
+    const pol = h.policy || {};
+    const pill = st => `<span class="pill ${{admit: "ok", defer: "warn", unknown: "bad", blocked: "bad"}[st] || ""}">${esc(String(st || "?").toUpperCase())}</span>`;
+    const pct = v => v === null || v === undefined ? NA("no figure") : `${(+v).toFixed(1)}%`;
+    const age = v => v === null || v === undefined ? '<span class="dim">unknown</span>' : relAge(v);
+    const t = s ? S.tasks.get(taskKey(s.project_id, s.task_id)) : curTask();
+    const units = tdata(t).helpers || [];
+    const ustate = {running: "active", deferred: "waiting (deferred)", pending: "queued", done: "returned", delivered: "delivered to primary", failed: "failed"};
+    const decisions = h.decisions || [];
+    return `${(h.warnings || []).map(w => `<div class="warnbox">${esc(w)}</div>`).join("")}
+      ${kv([["Optional helpers", pol.optional_enabled ? '<span class="pill ok">enabled</span>' : '<span class="pill">off (refused)</span>'],
+        ["Cutoff", `below ${esc(pol.cutoff_pct)}% USED in every window (session, weekly, model-scoped)`],
+        ["Resume", `below ${esc(pol.cutoff_pct - pol.hysteresis_pct)}% after ${esc(Math.round(pol.cooldown_seconds / 60))} min cooldown`],
+        ["Freshness", `observed within ${esc(Math.round(pol.max_observation_age_seconds / 60))} min`],
+        ["Preference", esc((pol.backend_preference || []).join(" → ") || "none set")],
+        ["High-value only", esc((pol.selective_backends || []).join(", ") || "none")]])}
+      <div class="sub dim" style="margin-top:6px">Capacity (ceilings, not activity)</div>
+      <table class="t"><tr><th>backend</th><th>streams</th><th>calls</th><th>now</th></tr>${(h.capacity || []).filter(c => c.enabled).map(c => `<tr><td>${esc(c.backend)}</td>
+        <td>${c.streams_allowed === null ? "no limit" : `main + ${c.helpers_allowed}`}</td><td>${c.max_concurrent ?? "no limit"}</td>
+        <td>${c.active_sessions.length} session(s), ${c.in_flight} in flight</td></tr>`).join("")}</table>
+      <div class="sub dim" style="margin-top:6px">Accounts (last admission checks)</div>
+      ${decisions.length ? decisions.map(d => `<div style="border-top:1px solid var(--line);padding:3px 0">${pill(d.state)} <b>${esc(d.backend)}</b> <code>${esc(d.model)}</code>
+        <button class="ghost" data-recheck="${esc(d.backend)}|${esc(d.model)}" title="Re-read the quota source (no inference)">re-check</button>
+        <div>${esc(d.reason)}</div>${d.next_eligible ? `<div class="dim">next eligible ${esc(tsText(d.next_eligible, "datetime"))}</div>` : ""}
+        ${(d.accounts || []).map(a => `<div class="dim">${esc(a.label)}: ${pill(a.state)}</div><table class="t">${(a.windows || []).filter(w => w.applies).map(w => `<tr><td>${esc(w.name)} <span class="dim">${esc(w.kind)}</span></td><td>${pct(w.used)}</td><td title="${esc(w.observation || "")}">observed ${age(w.observation_age_s)} ago</td><td>${w.resets_in_s ? "resets in " + relAge(w.resets_in_s) : ""}</td></tr>`).join("")}</table>`).join("")}
+        <div class="src">source: ${esc(d.source || "?")}${d.fetched_at ? ` · fetched ${esc(relAge(nowS() - d.fetched_at))} ago` : ""}</div></div>`).join("")
+        : '<p class="dim">No admission check yet (made when an optional helper is considered).</p>'}
+      <div class="sub dim" style="margin-top:6px">Helper units for this task</div>
+      ${units.length ? `<ul class="list">${units.map(u => `<li><span class="pill ${u.status === "running" ? "ok" : u.status === "deferred" ? "warn" : u.status === "failed" ? "bad" : ""}">${esc(ustate[u.status] || u.status)}</span>
+        <b>${esc(u.kind)}</b> ${esc(u.responsibility)} <span class="dim">(${esc(u.source)}${u.value === "high" ? ", high value" : ""})</span>
+        <div class="dim">${esc(u.persona || "")}${u.backend ? " on " + esc(u.backend) : ""}${u.session_id ? ` · <a href="#" data-open="${esc(u.session_id)}">session</a>` : ""} · ${esc(u.reason || "")}${u.next_eligible ? " · next " + esc(tsText(u.next_eligible)) : ""}</div></li>`).join("")}</ul>` : '<p class="dim">No helper units.</p>'}
+      <div class="src">Required work (planning, review, closeout, blocker diagnosis) keeps the existing guardrails. UNKNOWN (missing, stale or unreadable quota) is never admitted. Settings: ⚙ → Helper policy.</div>`;
+  },
   sessions(s) {
     const f = S.sessFilter || (S.sessFilter = {role: "", state: "", model: "", q: ""});
     const all = [...S.sessions.values()].filter(x => (!S.project || x.project_id === S.project) && (!S.task || x.task_id === S.task));
@@ -1366,7 +1403,19 @@ const SECTION_RENDER = {
       <div class="src">Accepted = stored by Foundry. Delivered = Kilo accepted it. Applied = the coordinator recorded the result.</div>`;
   },
 };
+async function loadHelperStatus() {
+  if (S.helperLoading) return; S.helperLoading = true;
+  try { S.helperStatus = await api("helpers"); S.helperStatusAt = nowS(); } catch (e) { S.helperStatus = S.helperStatus || {warnings: [e.message]}; }
+  S.helperLoading = false; scheduleInspector();
+}
 const SECTION_WIRE = {
+  capacity(sec) {
+    sec.querySelectorAll("[data-recheck]").forEach(b => b.onclick = async () => {
+      const [backend, model] = b.dataset.recheck.split("|");
+      try { await api("helpers/evaluate", {method: "POST", body: {backend, model}}); S.helperStatusAt = 0; loadHelperStatus(); } catch (e) { toast(esc(e.message), "bad"); }
+    });
+    sec.querySelectorAll("[data-open]").forEach(a => a.onclick = ev => { ev.preventDefault(); openBeside(a.dataset.open); });
+  },
   tokens(sec) { sec.querySelectorAll("[data-scope]").forEach(b => b.onclick = () => { S.tokScope = b.dataset.scope; renderInspector(); }); },
   mcp(sec) { const c = sec.querySelector("#mcp-dis"); if (c) c.onchange = () => { P.showDisabledMcp = c.checked; savePrefs(); renderInspector(); }; },
   helpers(sec) { wireOpenButtons(sec); },
@@ -2160,6 +2209,8 @@ function renderSettings() {
     }
     out.push(`</fieldset>`);
   }
+  out.push(`<fieldset><legend>Helper policy & capacity (Foundry, shared)</legend><div id="helper-settings" class="dim">Loading…</div>
+    <p class="src">Applies to optional coding helpers only. Required planning, review, closeout and blocker diagnosis keep their existing guardrails. Saved to config.yaml (config history).</p></fieldset>`);
   out.push(`<fieldset><legend>Capture & retention (Foundry, shared)</legend><div id="server-settings" class="dim">Loading…</div>
     <p class="src">These change what Foundry stores from now on, for everyone. Hiding something on screen above never deletes stored data; turning a capture switch off means new data of that kind isn't stored (existing data ages out with retention).</p></fieldset>`);
   $("#settings-body").innerHTML = out.join("");
@@ -2186,6 +2237,39 @@ function renderSettings() {
     try { new Notification("Foundry control center test", {body: "If you see this, notifications work while a control-center page is open.", tag: "cc-test"}); report("test", "test", "notification shown"); } catch (e) { toast(esc(e.message), "bad"); }
   };
   loadServerSettings();
+  loadHelperSettings();
+}
+async function loadHelperSettings() {
+  const box = $("#helper-settings"); if (!box) return;
+  try {
+    const h = await api("helpers"); const p = h.policy;
+    const row = (k, label, input, help) => `<div class="setting"><label for="hp-${k}">${esc(label)}</label>${input}${help ? `<div class="help">${esc(help)}</div>` : ""}</div>`;
+    box.innerHTML = row("optional_enabled", "Optional coding helpers", `<input type="checkbox" id="hp-optional_enabled" ${p.optional_enabled ? "checked" : ""}>`, "Off: optional-purpose calls are refused (never run unchecked).")
+      + row("cutoff_pct", "Usage cutoff (% USED)", `<input type="number" id="hp-cutoff_pct" min="1" max="99" step="0.1" value="${p.cutoff_pct}">`, "Stop admitting optional work on an account once ANY window reaches this. 70 = 30% remaining.")
+      + row("hysteresis_pct", "Resume below cutoff minus", `<input type="number" id="hp-hysteresis_pct" min="0" max="50" step="0.5" value="${p.hysteresis_pct}">`)
+      + row("cooldown_seconds", "Cooldown after a cutoff (s)", `<input type="number" id="hp-cooldown_seconds" min="0" max="86400" value="${p.cooldown_seconds}">`)
+      + row("max_observation_age_seconds", "Freshness: max observation age (s)", `<input type="number" id="hp-max_observation_age_seconds" min="60" max="86400" value="${p.max_observation_age_seconds}">`, "Older readings are UNKNOWN even if fetched just now.")
+      + row("backend_preference", "Backend preference", `<input type="text" id="hp-backend_preference" value="${esc((p.backend_preference || []).join(", "))}">`, "Comma-separated backend names, first preferred.")
+      + row("selective_backends", "High-value only backends", `<input type="text" id="hp-selective_backends" value="${esc((p.selective_backends || []).join(", "))}">`)
+      + row("required_helper_sessions_per_run", "Required helper sessions per run", `<input type="number" id="hp-required_helper_sessions_per_run" min="0" max="20" value="${p.required_helper_sessions_per_run}">`, "More planning/diagnosis helpers than this in one run count as optional.")
+      + `<div class="sub dim">Per-backend ceilings</div><table class="t"><tr><th>backend</th><th>helpers beyond main</th><th>total calls</th></tr>${(h.capacity || []).filter(c => c.enabled).map(c => `<tr><td>${esc(c.backend)}</td>
+          <td><input type="number" min="0" max="32" data-cap="${esc(c.backend)}|helpers_allowed" value="${c.helpers_allowed ?? ""}" style="width:70px"></td>
+          <td><input type="number" min="0" max="32" data-cap="${esc(c.backend)}|max_concurrent" value="${c.max_concurrent ?? ""}" style="width:70px"></td></tr>`).join("")}</table>
+        <p class="src">Empty = no limit. Keep the local backend at 0 helpers / 1 call. Ceilings are not targets: no helper is created to fill a slot.</p>
+        <button id="hp-save">Save helper policy</button>`;
+    $("#hp-save").onclick = async () => {
+      const num = id => +$("#hp-" + id).value;
+      const list = id => $("#hp-" + id).value.split(",").map(x => x.trim()).filter(Boolean);
+      const policy = {optional_enabled: $("#hp-optional_enabled").checked, cutoff_pct: num("cutoff_pct"), hysteresis_pct: num("hysteresis_pct"),
+        cooldown_seconds: num("cooldown_seconds"), max_observation_age_seconds: num("max_observation_age_seconds"),
+        backend_preference: list("backend_preference"), selective_backends: list("selective_backends"),
+        required_helper_sessions_per_run: num("required_helper_sessions_per_run")};
+      const backends = {};
+      box.querySelectorAll("[data-cap]").forEach(i => { const [b, k] = i.dataset.cap.split("|"); (backends[b] = backends[b] || {})[k] = i.value === "" ? null : +i.value; });
+      try { S.helperStatus = await api("helpers/policy", {method: "PUT", body: {policy, backends}}); S.helperStatusAt = nowS(); toast("Helper policy saved"); scheduleInspector(); }
+      catch (e) { toast(esc(e.message), "bad"); }
+    };
+  } catch (e) { box.textContent = e.message; }
 }
 async function loadServerSettings() {
   const box = $("#server-settings"); if (!box) return;

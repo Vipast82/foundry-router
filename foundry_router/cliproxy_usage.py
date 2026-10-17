@@ -73,6 +73,13 @@ def _window_label(minutes: Optional[float], slot: str) -> str:
     return slot
 
 
+def _kind(minutes: Optional[float], slot: str) -> str:
+    """session (the 5-hour window), weekly, or other."""
+    if minutes:
+        return "session" if int(minutes) == 300 else "weekly" if int(minutes) == 10080 else "other"
+    return {"primary": "session", "secondary": "weekly"}.get(slot, "other")
+
+
 def provider_of(model_id: str) -> Optional[str]:
     """Which CLIProxyAPI account type serves this model."""
     m = (model_id or "").lower()
@@ -138,7 +145,9 @@ def parse_account(entry: dict, now: Optional[float] = None) -> Optional[dict]:
                 scope = _norm(limit_name) if limit_name else None
                 name = (f"{limit_name} " if limit_name else "") + _window_label(minutes, slot)
             windows.append({"name": name, "used": round(eff, 1), "reported": used,
-                            "resets_in_s": left, "scope": scope})
+                            "resets_in_s": left, "scope": scope, "minutes": minutes,
+                            "kind": _kind(minutes, slot), "rolled_over": eff == 0.0 and used > 0
+                            and left == 0})
     else:
         for key, val in sig.items():
             m = _CLAUDE_WINDOW.match(key)
@@ -153,7 +162,10 @@ def parse_account(entry: dict, now: Optional[float] = None) -> Optional[dict]:
             eff, left = _effective(used, None, reset_at)
             scope = next((f for f in ("opus", "sonnet", "haiku", "fable") if f in w), None)
             windows.append({"name": w.replace("_", " "), "used": round(eff, 1),
-                            "reported": round(used, 1), "resets_in_s": left, "scope": scope})
+                            "reported": round(used, 1), "resets_in_s": left, "scope": scope,
+                            "kind": "session" if w.startswith("5h") else "weekly"
+                            if w.startswith("7d") else "other",
+                            "rolled_over": eff == 0.0 and used > 0 and left == 0})
 
     ra = _num(sig.get("retry-after"))
     if ra is not None and observed is not None and observed + ra > now:

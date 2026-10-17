@@ -77,6 +77,9 @@ class CallCtx:
     work_task_id: str = ""
     run_id: str = ""
     role: str = ""
+    # Helper policy: the purpose the coordinator bound this session with
+    # ("" = unbound/manual traffic, which keeps the existing guardrails).
+    purpose: str = ""
     est_tokens: int = 0
     extra: dict = field(default_factory=dict)
 
@@ -106,7 +109,8 @@ def _row_ctx(r: dict) -> CallCtx:
                    parent_task_id=r.get("parent_task_id") or "",
                    request_id=r.get("request_id") or "",
                    project_id=r.get("project_id") or "", work_task_id=r.get("work_task_id") or "",
-                   run_id=r.get("run_id") or "", role=r.get("role") or "")
+                   run_id=r.get("run_id") or "", role=r.get("role") or "",
+                   purpose=r.get("purpose") or "")
 
 
 def _glob(value: str, pattern) -> bool:
@@ -165,7 +169,8 @@ def context_for(model: str, backend_cfg, est_tokens: int = 0) -> CallCtx:
                    parent_task_id=c.get("parent_task_id") or "",
                    request_id=request_context.request_id() or "", est_tokens=est_tokens,
                    project_id=c.get("project_id") or "", work_task_id=c.get("work_task_id") or "",
-                   run_id=c.get("run_id") or "", role=c.get("role") or "")
+                   run_id=c.get("run_id") or "", role=c.get("role") or "",
+                   purpose=c.get("purpose") or "")
 
 
 def context_from_info(model: str, info: dict, est_tokens: int = 0) -> CallCtx:
@@ -197,6 +202,9 @@ class Ledger:
         self.get_backends = get_backends          # () -> {name: BackendConfig}
         self._active: dict[int, CallCtx] = {}    # event id -> in-flight call
         self._recorded: dict = {}
+        # quota_gate.QuotaGate (helper policy): optional-purpose calls are
+        # admitted only on fresh, below-cutoff quota. None = not wired (tests).
+        self.gate = None
         # finish anything a previous process left reserved
         db.execute("UPDATE usage_events SET status='error', detail='Foundry restarted during "
                    "the call', settled_ts=? WHERE status='reserved'", (time.time(),))
@@ -396,9 +404,20 @@ class Ledger:
         self._active[eid] = ctx
         return eid
 
+    async def optional_denial(self, ctx: CallCtx) -> Optional[BudgetDenied]:
+        """Helper-policy admission for this call (None = proceed)."""
+        if self.gate is None or not ctx.purpose:
+            return None
+        d = await self.gate.admit_call(ctx)
+        if d is None:
+            return None
+        return BudgetDenied(d["message"], rule=d["rule"], code=d["code"], reset_s=d["reset_s"])
+
     async def reserve_wait(self, ctx: CallCtx) -> int:
         """reserve(), waiting up to the longest wait_seconds of the matching
-        rules for a concurrency/active slot."""
+        rules for a concurrency/active slot. An optional-purpose call is
+        re-admitted on every pass, so one that waited for a slot is checked
+        against the quota as it is when it actually starts."""
         import asyncio
         cfg = self.cfg
         wait = max([r.wait_seconds for r in (cfg.rules if cfg and cfg.enabled else [])
@@ -408,6 +427,11 @@ class Ledger:
             wait = max(wait, float(getattr(c, "queue_timeout_seconds", 300) or 0))
         deadline = time.monotonic() + wait
         while True:
+            opt = await self.optional_denial(ctx)
+            if opt is not None:
+                # deferred, not queued: the coordinator retries after next_eligible
+                self.record(ctx, "denied", opt.rule, opt.message)
+                raise opt
             denial = self.check(ctx)
             if denial is None:
                 return self.reserve(ctx)
@@ -443,12 +467,12 @@ class Ledger:
         cur = self.db.execute(
             "INSERT INTO usage_events (ts, request_id, client_id, session_id, task_id, "
             "parent_task_id, persona, backend, model, account, paid, status, est_tokens, rule, "
-            "detail, project_id, work_task_id, run_id, role) "
-            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            "detail, project_id, work_task_id, run_id, role, purpose) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (time.time(), ctx.request_id, ctx.client_id, ctx.session_id, ctx.task_id,
              ctx.parent_task_id, ctx.persona, ctx.backend, ctx.model, ctx.account,
              1 if ctx.paid else 0, status, ctx.est_tokens, rule, (detail or "")[:500],
-             ctx.project_id, ctx.work_task_id, ctx.run_id, ctx.role))
+             ctx.project_id, ctx.work_task_id, ctx.run_id, ctx.role, ctx.purpose))
         return cur
 
     def prune(self) -> int:

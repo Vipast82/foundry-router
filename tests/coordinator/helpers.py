@@ -134,11 +134,18 @@ class FakeFoundry:
         self.binds, self.ended, self.events, self.tasks, self.chats = [], [], [], {}, []
         self.reviewer = reviewer or approve_all
         self.deny = None                     # FoundryDenied to raise on the next chat
+        self.admission = {}                  # persona -> helper admission answer
 
-    def bind(self, session_id, project_id, task_id, run_id, role, persona, parent="", meta=None):
+    def bind(self, session_id, project_id, task_id, run_id, role, persona, parent="", meta=None,
+             purpose="", worker_client="", assignment=None):
         self.binds.append(dict(session_id=session_id, project_id=project_id, task_id=task_id,
-                               run_id=run_id, role=role, persona=persona, parent=parent))
+                               run_id=run_id, role=role, persona=persona, parent=parent,
+                               purpose=purpose))
         return {}
+
+    def helper_admission(self, persona):
+        return (self.admission or {}).get(persona) or {"admit": False, "state": "unknown",
+                                                       "reason": "no fake admission set"}
 
     def end(self, session_id, outcome):
         self.ended.append((session_id, outcome))

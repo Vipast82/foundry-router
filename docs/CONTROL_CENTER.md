@@ -231,6 +231,12 @@ The audit summary never contains the answer or instruction text.
 - **Queue approval for new sprints** is not offered here. It stays a separate decision
   (`queue approve`).
 
+## Helper capacity
+
+The **Helper capacity & quota** inspector section and ⚙ → **Helper policy & capacity**
+cover optional coding helpers: per-account windows with how old each observation is,
+admission state, helper units and per-backend ceilings. See docs/HELPER_POLICY.md.
+
 ## Settings
 
 Display settings are stored per browser and per layout preset (localStorage

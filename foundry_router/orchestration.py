@@ -32,6 +32,13 @@ _ID = re.compile(r"^[A-Za-z0-9._:@/+-]{1,160}$")
 ROLES = ("implementer", "researcher", "reviewer", "deep_reviewer", "visual_reviewer",
          "image_generator", "coordinator", "helper")
 FIELDS = ("project_id", "task_id", "run_id", "role", "parent_session_id", "persona")
+# Why a session runs (helper policy, quota_gate.py). Set only by the
+# coordinator's orchestration-scoped binding: a client or model can't choose
+# it. Required work keeps the existing guardrails; optional work is admitted
+# only on fresh, below-cutoff quota for the account that serves it.
+REQUIRED_PURPOSES = ("implementer", "planning", "review", "closeout", "blocker_diagnosis")
+OPTIONAL_PURPOSES = ("code_proposal", "test_design", "debug_advice", "exploration")
+PURPOSES = REQUIRED_PURPOSES + OPTIONAL_PURPOSES
 
 
 class WorkError(ValueError):
@@ -67,6 +74,11 @@ class WorkRegistry:
         row = {f: _clean(data.get(f), f, required=f == "project_id") for f in FIELDS}
         if row["role"] and row["role"] not in ROLES:
             raise WorkError(f"role must be one of {', '.join(ROLES)}")
+        purpose = str(data.get("purpose") or "").strip()
+        if purpose and purpose not in PURPOSES:
+            raise WorkError(f"purpose must be one of {', '.join(PURPOSES)}")
+        worker_client = _clean(data.get("worker_client"), "worker_client")
+        assignment = json.dumps(data.get("assignment") or {}, default=str)[:4000]             if data.get("assignment") else ""
         existing = self.lookup(sid) or self._row(sid)
         if existing and existing.get("project_id") and existing["project_id"] != row["project_id"]:
             # One session belongs to one project for its whole life: a session
@@ -77,13 +89,17 @@ class WorkRegistry:
         meta = json.dumps(data.get("meta") or {}, default=str)[:4000]
         self.db.execute(
             "INSERT INTO work_sessions (session_id, project_id, task_id, run_id, role, "
-            "parent_session_id, persona, client_id, meta, created_ts, updated_ts) "
-            "VALUES (?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(session_id) DO UPDATE SET "
+            "parent_session_id, persona, client_id, meta, created_ts, updated_ts, purpose, "
+            "assignment, worker_client) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(session_id) DO UPDATE SET "
             "task_id=excluded.task_id, run_id=excluded.run_id, role=excluded.role, "
             "parent_session_id=excluded.parent_session_id, persona=excluded.persona, "
-            "meta=excluded.meta, updated_ts=excluded.updated_ts, ended_ts=NULL",
+            "meta=excluded.meta, updated_ts=excluded.updated_ts, ended_ts=NULL, "
+            "purpose=excluded.purpose, assignment=excluded.assignment, "
+            "worker_client=excluded.worker_client",
             (sid, row["project_id"], row["task_id"], row["run_id"], row["role"],
-             row["parent_session_id"], row["persona"], client_id, meta, now, now))
+             row["parent_session_id"], row["persona"], client_id, meta, now, now, purpose,
+             assignment, worker_client))
         rec = self._row(sid)
         with self._lock:
             self._cache[sid] = rec
@@ -108,8 +124,12 @@ class WorkRegistry:
         rows = self.db.query("SELECT * FROM work_sessions WHERE session_id=?", (sid,))
         return dict(rows[0]) if rows else None
 
-    def correlation(self, session_id: str) -> dict:
-        """The fields a bound session adds to a request's client context."""
+    def correlation(self, session_id: str, client_id: str = "") -> dict:
+        """The fields a bound session adds to a request's client context.
+        `purpose` comes only from the binding. When the coordinator named the
+        client that runs the session (worker_client) and another client sends
+        that session id, the purpose isn't trusted: it reads "unverified"
+        (treated as optional, never as required)."""
         b = self.lookup(session_id)
         if not b:
             return {}
@@ -117,6 +137,10 @@ class WorkRegistry:
                "role": b.get("role") or "", "work_task_id": b.get("task_id") or ""}
         if b.get("parent_session_id"):
             out["parent_task_id"] = b["parent_session_id"]
+        purpose = b.get("purpose") or ""
+        if purpose:
+            wc = b.get("worker_client") or ""
+            out["purpose"] = purpose if not wc or not client_id or client_id == wc                 else "unverified"
         return {k: v for k, v in out.items() if v}
 
     # -- coordinator state -----------------------------------------------------------

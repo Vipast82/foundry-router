@@ -132,6 +132,9 @@ class Services:
         set_registry(self.work)
         from .control_center import ControlCenter
         self.control = ControlCenter(db, secrets_fn=lambda: secret_values(self))
+        from .quota_gate import QuotaGate
+        self.quota_gate = QuotaGate(self)
+        self.ledger.gate = self.quota_gate
         ensure_eval_seed(db)
         self.evals = EvalHarness(self)
         self._eval_tasks: list[asyncio.Task] = []  # keep background runs alive

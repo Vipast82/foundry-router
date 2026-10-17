@@ -485,6 +485,7 @@ class InternalPool(BackendPool):
                 except BaseException:
                     self._settle(eid, "released", detail="cancelled while queued")
                     raise
+                await self._recheck_optional(s, eid)
                 s.busy += 1
                 settled = False
                 cap = getattr(self, "capture", None)
@@ -608,6 +609,22 @@ class InternalPool(BackendPool):
         from ..budget import context_for
         return await self.ledger.reserve_wait(context_for(model, s.config, est))
 
+    async def _recheck_optional(self, s: BackendState, eid) -> None:
+        """An optional-purpose call that waited in the backend queue is admitted
+        again as it starts (quota may have crossed the cutoff meanwhile)."""
+        if self.ledger is None or not eid:
+            return
+        ctx = self.ledger._active.get(eid)
+        if ctx is None or not ctx.purpose:
+            return
+        denial = await self.ledger.optional_denial(ctx)
+        if denial is not None:
+            self._release(s)
+            self._settle(eid, "released", detail="optional work deferred after waiting in "
+                                                 "the queue")
+            self.ledger.record(ctx, "denied", denial.rule, denial.message)
+            raise denial
+
     def _settle(self, eid, status, pt=0, ct=0, detail=""):
         if self.ledger is not None and eid:
             self.ledger.settle(eid, status, pt, ct, detail)
@@ -634,6 +651,7 @@ class InternalPool(BackendPool):
         except BaseException:
             self._settle(eid, "released", detail="cancelled while queued")
             raise
+        await self._recheck_optional(s, eid)
         usage = {"pt": 0, "ct": 0, "status": "error", "detail": "stream did not complete"}
         cap = getattr(self, "capture", None)
         ctok = cap.begin_call() if cap is not None else None

@@ -386,6 +386,12 @@ class CoordReader:
         return self._q("SELECT review_id, reviewed_sha, role, persona, verdict, valid, error, ts FROM "
                        "reviews WHERE project_id=? AND task_id=? ORDER BY ts", (project_id, task_id))
 
+    def helper_units(self) -> list[dict]:
+        return self._q("SELECT unit_id, project_id, task_id, kind, responsibility, value, source, "
+                       "status, persona, backend, session_id, parent_session, reason, "
+                       "next_eligible, attempts, delivered_session, updated_ts FROM helper_units "
+                       "ORDER BY created_ts")
+
     def operator_messages(self) -> list[dict]:
         return self._q("SELECT msg_id, action_id, project_id, task_id, scope, delivery, status, "
                        "delivered_session, delivered_ts, created_ts FROM operator_messages")
@@ -596,8 +602,9 @@ class TelemetryBridge:
         for t in tasks:
             by_project.setdefault(t["project_id"], []).append(t)
         omsgs = self.reader.operator_messages()
+        units = self.reader.helper_units()
         now = self.clock()
-        om_sig = _h(omsgs)
+        om_sig = _h([omsgs, units])
         for t in tasks:
             P = self.projects.get(t["project_id"])
             if P is None:
@@ -613,6 +620,8 @@ class TelemetryBridge:
                 o = hit[2]
             else:
                 o = self._task_obs(P, t, by_project[t["project_id"]], omsgs)
+                o["helpers"] = [u for u in units if u["project_id"] == t["project_id"]
+                                and u["task_id"] == t["task_id"]][-30:]
                 self._task_cache[key] = (sig, now, o)
             self._emit(obs, commits, f"task:{t['project_id']}/{t['task_id']}", o)
         trs = self.reader.transitions_after(self.cursor_transitions)

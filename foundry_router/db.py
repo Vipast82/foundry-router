@@ -572,6 +572,12 @@ class Database:
             ("usage_events", "work_task_id", "TEXT"),
             ("usage_events", "run_id", "TEXT"),
             ("usage_events", "role", "TEXT"),
+            # Helper policy (quota_gate.py): the purpose a coordinator bound a
+            # session with, recorded on every ledger row for the audit.
+            ("usage_events", "purpose", "TEXT"),
+            ("work_sessions", "purpose", "TEXT"),
+            ("work_sessions", "assignment", "TEXT"),
+            ("work_sessions", "worker_client", "TEXT"),
             ("request_log", "project_id", "TEXT"),
             ("request_log", "work_task_id", "TEXT"),
             ("request_log", "run_id", "TEXT"),

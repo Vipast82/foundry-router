@@ -332,6 +332,42 @@ class SubscriptionUsageConfig(BaseModel):
     cache_seconds: float = 20.0
 
 
+class HelperPolicyConfig(BaseModel):
+    """Optional coding helpers (quota_gate.py, docs/HELPER_POLICY.md).
+
+    Applies ONLY to calls from sessions a coordinator bound with an optional
+    purpose (code_proposal, test_design, debug_advice, exploration). Required
+    work (implementer, planning, review, closeout, blocker diagnosis) and
+    unbound/manual traffic keep the existing guardrails unchanged."""
+    # Off until an operator turns it on: with it off, optional-purpose calls
+    # are refused (fail closed), never admitted unchecked.
+    optional_enabled: bool = False
+    # Admit optional work on an account only while EVERY applicable window
+    # (session, weekly, model-scoped) is below this percentage USED.
+    cutoff_pct: float = 70.0
+    # After a defer, resume only once every window is below cutoff - hysteresis
+    # and at least cooldown_seconds have passed since the defer.
+    hysteresis_pct: float = 5.0
+    cooldown_seconds: int = 600
+    # A reading whose upstream OBSERVATION is older than this is UNKNOWN
+    # (not zero), however recently Foundry fetched it.
+    max_observation_age_seconds: int = 1800
+    # Order in which coordinator helpers try backends (backend names).
+    backend_preference: list[str] = Field(default_factory=list)
+    # Backends used only for helper units marked value: high.
+    selective_backends: list[str] = Field(default_factory=list)
+    # Required helper calls allowed per run before further calls of that
+    # purpose count as optional (a model can't stretch "planning" forever).
+    required_helper_sessions_per_run: int = 2
+    # How a decision is cached per account (seconds).
+    decision_cache_seconds: float = 15.0
+    # Meridian's own quota endpoint doesn't say WHEN it observed usage. Only
+    # for backends listed here is its oauth-sourced reading taken as observed
+    # at fetch time (labelled as an assumption). The auth companion's live
+    # /api/oauth/usage source (meridian.usage_profile) needs no such setting.
+    trust_fetch_time_for: list[str] = Field(default_factory=list)
+
+
 class MeridianConfig(BaseModel):
     # Real per-profile usage-window data (buckets of five_hour/weekly
     # utilization). The old default "/telemetry" pointed at the HTML dashboard
@@ -770,6 +806,7 @@ class AppConfig(BaseModel):
     guardrails: GuardrailsConfig = Field(default_factory=GuardrailsConfig)
     meridian: MeridianConfig = Field(default_factory=MeridianConfig)
     subscription_usage: SubscriptionUsageConfig = Field(default_factory=SubscriptionUsageConfig)
+    helper_policy: HelperPolicyConfig = Field(default_factory=HelperPolicyConfig)
     registry: RegistryConfig = Field(default_factory=RegistryConfig)
     mcp_servers: list[MCPServerConfig] = Field(default_factory=list)
     tool_sync: ToolSyncConfig = Field(default_factory=ToolSyncConfig)

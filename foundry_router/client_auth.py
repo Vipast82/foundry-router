@@ -144,7 +144,7 @@ class ClientAuthMiddleware:
         headers = {k.decode("latin-1").lower(): v.decode("latin-1")
                    for k, v in scope.get("headers") or []}
         client, presented = identify(cfg, headers, self.get_agent_tokens())
-        corr = correlation(headers)
+        corr = correlation(headers, (client or {}).get("client_id") or "")
         mode = getattr(ca, "mode", "optional") if ca else "optional"
         protect_admin = bool(getattr(ca, "protect_admin", False)) if ca else False
         unknown = getattr(ca, "unknown_keys", "refuse") if ca else "refuse"
@@ -208,7 +208,7 @@ class ClientAuthMiddleware:
             _client.reset(token)
 
 
-def correlation(headers: dict) -> dict:
+def correlation(headers: dict, client_id: str = "") -> dict:
     """Correlation fields for a request: explicit x-foundry-* headers, else the
     client's own session header, plus what a registered work binding adds."""
     corr = {f: headers[h][:120] for h, f in CORRELATION_HEADERS.items() if headers.get(h)}
@@ -221,7 +221,7 @@ def correlation(headers: dict) -> dict:
         from .orchestration import get_registry
         reg = get_registry()
         if reg is not None:
-            for k, v in reg.correlation(corr["session_id"]).items():
+            for k, v in reg.correlation(corr["session_id"], client_id).items():
                 corr.setdefault(k, v)
     return corr
 

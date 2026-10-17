@@ -73,11 +73,23 @@ class FoundryClient:
     # -- bindings / state ----------------------------------------------------------
 
     def bind(self, session_id: str, project_id: str, task_id: str, run_id: str, role: str,
-             persona: str, parent: str = "", meta: Optional[dict] = None) -> dict:
-        return self._req("POST", "/v1/foundry/work/sessions", {
-            "session_id": session_id, "project_id": project_id, "task_id": task_id,
-            "run_id": run_id, "role": role, "persona": persona, "parent_session_id": parent,
-            "meta": meta or {}}, timeout=20)[0]
+             persona: str, parent: str = "", meta: Optional[dict] = None, purpose: str = "",
+             worker_client: str = "", assignment: Optional[dict] = None) -> dict:
+        body = {"session_id": session_id, "project_id": project_id, "task_id": task_id,
+                "run_id": run_id, "role": role, "persona": persona, "parent_session_id": parent,
+                "meta": meta or {}}
+        if purpose:
+            body["purpose"] = purpose
+        if worker_client:
+            body["worker_client"] = worker_client
+        if assignment:
+            body["assignment"] = assignment
+        return self._req("POST", "/v1/foundry/work/sessions", body, timeout=20)[0]
+
+    def helper_admission(self, persona: str) -> dict:
+        """Would optional helper work run on this persona now? (no inference)"""
+        return self._req("GET", "/v1/foundry/helpers/admission", query={"persona": persona},
+                         timeout=20)[0]
 
     def end(self, session_id: str, outcome: str) -> None:
         self._req("POST", f"/v1/foundry/work/sessions/{session_id}/end", {"outcome": outcome},

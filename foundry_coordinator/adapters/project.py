@@ -228,6 +228,18 @@ class GenericAdapter:
                 rules.append({"permission": name, "pattern": "*", "action": str(action)})
         return rules
 
+    def helper_permissions(self, spec: TaskSpec) -> list[dict]:
+        """A coordinator helper session is read-only: no edits, shell, delegation,
+        web or Studio. (The Kilo agent definition should deny the same; these
+        session rules are the second layer.)"""
+        rules = self.session_permissions(spec, "helper")
+        for perm in ("edit", "write", "patch", "multiedit", "bash", "task", "todowrite"):
+            rules.append({"permission": perm, "pattern": "*", "action": "deny"})
+        helpers = (getattr(self.p, "raw", None) or {}).get("helpers") or {}
+        for tool in helpers.get("deny_tools") or ["Roblox_Studio_*", "robloxstudio-mcp_*"]:
+            rules.append({"permission": tool, "pattern": "*", "action": "deny"})
+        return rules
+
     def doctor(self) -> list[tuple[str, str, str]]:
         """Read-only project diagnostics [(PASS|FAIL|WARN, check, detail)]."""
         out = []

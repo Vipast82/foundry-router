@@ -317,6 +317,96 @@ async def put_draft(request: Request):
     return {"ok": True}
 
 
+# --------------------------------------------------------------------------- helper policy
+
+HELPER_POLICY_FIELDS = ("optional_enabled", "cutoff_pct", "hysteresis_pct", "cooldown_seconds",
+                        "max_observation_age_seconds", "backend_preference",
+                        "selective_backends", "required_helper_sessions_per_run",
+                        "trust_fetch_time_for")
+
+
+def _helper_status(svc) -> dict:
+    gate = svc.quota_gate
+    out = gate.status()
+    caps = []
+    streams = {b["backend"]: b for b in svc.ledger.backend_streams()}
+    for name, s in (getattr(svc.pool, "backends", None) or {}).items():
+        c = s.config
+        st = streams.get(name) or {}
+        caps.append({"backend": name, "type": c.type, "flavor": c.effective_flavor,
+                     "enabled": bool(getattr(c, "enabled", True)),
+                     "helpers_allowed": c.helpers_allowed,
+                     "streams_allowed": None if c.helpers_allowed is None else c.helpers_allowed + 1,
+                     "max_concurrent": c.max_concurrent,
+                     "active_sessions": [{"session": a["session"][-12:], "persona": a["persona"],
+                                          "idle_s": a["idle_s"]} for a in st.get("active") or []],
+                     "in_flight": sum(1 for a in svc.ledger._active.values() if a.backend == name)})
+    out["capacity"] = caps
+    out["note"] = ("Capacity is a ceiling (helpers_allowed + 1 streams, max_concurrent calls), not "
+                   "current activity. Optional work is admitted only while every applicable "
+                   "window of the serving account is below the cutoff AND was observed "
+                   "recently; UNKNOWN is never admitted.")
+    return out
+
+
+@router.get("/control/api/helpers")
+@_guard
+async def helpers_status(request: Request):
+    _op(request)
+    return _helper_status(request.app.state.services)
+
+
+@router.post("/control/api/helpers/evaluate")
+@_guard
+async def helpers_evaluate(request: Request):
+    """Re-read the quota sources for one backend + model (non-inference)."""
+    _op(request, mutate=True)
+    b = await _body(request)
+    gate = request.app.state.services.quota_gate
+    gate._cache.pop(f"{b.get('backend')}|{b.get('model')}", None)
+    return await gate.evaluate(str(b.get("backend") or ""), str(b.get("model") or ""))
+
+
+@router.put("/control/api/helpers/policy")
+@_guard
+async def helpers_policy(request: Request):
+    """Edit helper_policy and per-backend helper ceilings (config.yaml; shows in
+    config history). Required-work guardrails are not edited here."""
+    s = _op(request, mutate=True)
+    b = await _body(request)
+    svc = request.app.state.services
+    pol = {k: v for k, v in (b.get("policy") or {}).items() if k in HELPER_POLICY_FIELDS}
+    caps = b.get("backends") or {}
+    if "cutoff_pct" in pol and not 1 <= float(pol["cutoff_pct"]) <= 99:
+        raise ControlError("cutoff_pct must be between 1 and 99")
+    for name, v in caps.items():
+        for k in ("helpers_allowed", "max_concurrent"):
+            if k in v and v[k] is not None and (int(v[k]) < 0 or int(v[k]) > 32):
+                raise ControlError(f"{name}.{k} must be 0..32 or empty")
+
+    def mutate(raw):
+        hp = raw.setdefault("helper_policy", {}) or {}
+        hp.update(pol)
+        raw["helper_policy"] = hp
+        for be in ((raw.get("backend_pool") or {}).get("internal") or {}).get("backends") or []:
+            v = caps.get(be.get("name"))
+            if not v:
+                continue
+            for k in ("helpers_allowed", "max_concurrent"):
+                if k in v:
+                    be[k] = None if v[k] in (None, "") else int(v[k])
+    try:
+        svc.config_store.save(mutate)
+    except Exception as e:                                       # noqa: BLE001
+        raise ControlError(f"not saved: {e}") from None
+    if caps:
+        await svc.rebuild_pool()
+    svc.quota_gate._cache.clear()
+    svc.db.log_event("info", "helper_policy", f"helper policy changed by {s['actor']}: "
+                     + json.dumps({"policy": pol, "backends": caps}, default=str)[:400])
+    return _helper_status(svc)
+
+
 # --------------------------------------------------------------------------- event stream
 
 class _Bump:

@@ -50,6 +50,9 @@ class Coordinator:
         # the control-center channel (control.py) applies operator actions here,
         # so nothing but this process ever changes the engine's state.
         self.after_tick: list[Callable[[], None]] = []
+        from .helpers import HelperManager
+        # optional coding helpers (profile [helpers]); inert unless enabled
+        self.helpers = HelperManager(self, clock=clock)
         for p in projects:
             store.register_project(p.id, p.profile.name, p.profile.path, p.profile.hash,
                                    p.profile.version, os.path.realpath(p.profile.workspace))
@@ -161,6 +164,12 @@ class Coordinator:
             S.APPROVED: self._approved, S.CLOSING: self._closing,
             S.AWAITING_HUMAN: self._awaiting, S.PAUSED: self._paused,
         }.get(st)
+        if st == S.IMPLEMENTING:
+            try:
+                self.helpers.tick(P, t)
+            except Exception as e:                                # noqa: BLE001
+                self.store.event(P.id, t["task_id"], "warning",
+                                 detail={"helpers": f"{type(e).__name__}: {e}"[:300]})
         if handler:
             handler(P, t)
 
@@ -317,8 +326,14 @@ class Coordinator:
         if not res.get("prompt_ts"):
             ts = self.clock()
             prompt, notes = self._with_operator_notes(P.id, tid, prompt, "")
+            units = (self.helpers.proposals_for(P.id, tid)
+                     if role == "implementer" and self.helpers.enabled(P) else [])
+            if units:
+                prompt += "\n\n" + self.helpers.integration_prompt(units)
             P.client.prompt(sid, prompt, directory=directory, persona=persona, agent=agent)
             self._notes_delivered(notes, sid)
+            if units:
+                self.helpers.mark_delivered(units, sid)
             self.store.op_update(key, "done", {"session_id": sid, "prompt_ts": ts})
             self.store.update_session(sid, status="prompted", prompt_ts=ts)
             self.store.event(P.id, tid, "session_started", session_id=sid,
@@ -327,11 +342,18 @@ class Coordinator:
         return sid
 
     def _bind(self, P: Project, sid: str, tid: str, run_id: str, role: str, persona: str,
-              parent: str = "") -> None:
+              parent: str = "", purpose: str = "") -> None:
         if P.foundry is None:
             return
+        # required purposes for the engine's own sessions (helper policy):
+        # recorded on every call; the optional-work gate never applies to them
+        purpose = purpose or ("review" if role in ("reviewer", "deep_reviewer", "visual_reviewer")
+                              else "closeout" if "-close" in (run_id or "")
+                              else "implementer" if role == "implementer" else "")
         try:
-            P.foundry.bind(sid, P.id, tid, run_id, role, persona, parent=parent)
+            P.foundry.bind(sid, P.id, tid, run_id, role, persona, parent=parent, purpose=purpose,
+                           worker_client=self.helpers.settings(P)["worker_client"]
+                           if role == "implementer" else "")
         except FoundryError as e:
             if P.profile.foundry.get("require_binding", True):
                 raise RuntimeError(f"Foundry binding failed ({e}); sessions are not started "
@@ -346,6 +368,8 @@ class Coordinator:
         if s is None:
             return
         pid, tid = P.id, t["task_id"]
+        if self._deliver_proposals(P, t):
+            return                       # the same session continues with the proposals
         head = P.ws.head()
         rep = s.report or {}
         data = self.store.merge_data(pid, tid, last_report=rep or None)
@@ -466,10 +490,13 @@ class Coordinator:
             self.store.add_session(kid, P.id, t["task_id"], t["run_id"], "helper", t["phase"] or "",
                                    t["attempt"], P.client.name,
                                    ((k.get("model") or {}).get("id")) or "", {"parent": sid})
+            purpose = self.helpers.child_purpose(P, k.get("title") or "")
             try:
                 if P.foundry is not None:
                     P.foundry.bind(kid, P.id, t["task_id"], t["run_id"], "helper",
-                                   ((k.get("model") or {}).get("id")) or "", parent=sid)
+                                   ((k.get("model") or {}).get("id")) or "", parent=sid,
+                                   purpose=purpose,
+                                   worker_client=self.helpers.settings(P)["worker_client"])
             except FoundryError:
                 pass
             self.store.event(P.id, t["task_id"], "helper_started", session_id=kid,
@@ -626,6 +653,16 @@ class Coordinator:
                 if any(matches_any(tag, [p]) for tag in spec.tags)]
         role = "deep_reviewer" if deep and "deep_reviewer" in P.profile.roles else "reviewer"
         persona = P.profile.persona(role)
+        authors = self.helpers.authors(pid, tid)
+        if persona in authors:
+            # a persona that proposed code integrated here can't be its sole reviewer
+            alt = next((r for r in ("deep_reviewer", "reviewer") if r in P.profile.roles
+                        and P.profile.persona(r) not in authors), None)
+            if alt is None:
+                return self._block(P, t, f"no independent reviewer: {persona} also authored helper "
+                                         f"proposals integrated into this revision; configure a "
+                                         f"different reviewer persona")
+            role, persona = alt, P.profile.persona(alt)
         if P.foundry is None:
             return self._block(P, t, "review needs Foundry ([foundry] url) and none is configured")
         key = f"review:{pid}:{tid}:{head}:{role}:{invalid}"
@@ -635,10 +672,16 @@ class Coordinator:
         base = t["data"].get("task_base") or t["base_sha"]
         diff, cut = P.ws.diff(base, head, int(P.profile.review.get("max_diff_bytes") or 60000))
         ver = self.store.verification(t["verification_id"], pid, tid)
+        extra = P.adapter.review_extra(spec, head)
+        if authors:
+            extra = (extra or "") + ("\n\n## Code authorship\nThe primary session integrated "
+                                     "proposals from read-only helpers using: "
+                                     + ", ".join(sorted(authors)) + ". Review the result "
+                                     "independently; their proposals are not evidence.")
         packet = R.build_packet(project_id=pid, task_id=tid, title=spec.title, spec=spec.spec,
                                 scope=spec.scope, base=base, head=head,
                                 commits=P.ws.commits(base, head), diff=diff, diff_truncated=cut,
-                                verification=ver, extra=P.adapter.review_extra(spec, head),
+                                verification=ver, extra=extra,
                                 question=P.profile.review.get("question") or "")
         rsid = f"review-{t['run_id']}-{invalid}"
         try:
@@ -1051,6 +1094,31 @@ class Coordinator:
         return self.store.transition(project_id, task_id,
                                      S.CLOSING if back == S.CLOSING else S.IMPLEMENTING,
                                      {"answered": answer}, actor=actor, data=data)
+
+    # ======================================================================= helper proposals
+
+    def _deliver_proposals(self, P: Project, t: dict) -> bool:
+        """The primary just went idle (a safe point: no concurrent prompt) and
+        helpers returned proposals it hasn't seen: send them to the same
+        session and keep implementing. Each proposal is delivered once."""
+        units = self.helpers.proposals_for(P.id, t["task_id"]) if self.helpers.enabled(P) else []
+        if not units:
+            return False
+        sid = t["session_id"]
+        spec = P.adapter.describe(t["task_id"])
+        text = (P.adapter.continue_prompt(spec, "helper proposals arrived") + "\n\n"
+                + self.helpers.integration_prompt(units))
+        ts = self.clock()
+        P.client.prompt(sid, text, directory=P.profile.workspace,
+                        persona=P.profile.persona("implementer"),
+                        agent=P.profile.client.get("agent") or "code")
+        self.helpers.mark_delivered(units, sid)
+        self.store.update_session(sid, status="prompted", prompt_ts=ts, ended_ts=None)
+        self._bind(P, sid, t["task_id"], t["run_id"], "implementer",
+                   P.profile.persona("implementer"))
+        self.store.event(P.id, t["task_id"], "helper_proposals_delivered", session_id=sid,
+                         detail={"units": [u["unit_id"] for u in units]})
+        return True
 
     # ======================================================================= operator notes
 

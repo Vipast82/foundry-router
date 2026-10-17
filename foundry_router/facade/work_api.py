@@ -95,6 +95,50 @@ async def usage(request: Request, project: str = "", task: str = "", run: str = 
     return _work(request).usage(project, task, run, session)
 
 
+@router.get("/v1/foundry/helpers/admission")
+async def helper_admission(request: Request, persona: str = "", backend: str = "",
+                           model: str = ""):
+    """Would optional helper work be admitted right now? For a coordinator
+    deciding whether to dispatch a helper unit: no inference, quota sources
+    only. A persona is checked on each reachable route of its chain (the call
+    gate re-checks every fallback when it actually runs)."""
+    svc = request.app.state.services
+    gate = svc.quota_gate
+    routes = []
+    if persona:
+        p = svc.personas.get(persona)
+        if p is None or not p.get("enabled"):
+            return JSONResponse({"admit": False, "state": "blocked",
+                                 "reason": f"persona {persona!r} missing or disabled"}, status_code=200)
+        from ..quota_gate import persona_routes
+        routes = persona_routes(svc, p)
+        if not routes:
+            return {"admit": False, "state": "blocked", "persona": persona, "routes": [],
+                    "reason": "no reachable route for this persona (strict routing refuses)"}
+    elif backend and model:
+        routes = [(backend, model)]
+    else:
+        return _bad(ValueError("give persona, or backend and model"))
+    out = []
+    for be, m in routes:
+        d = await gate.evaluate(be, m)
+        out.append(d)
+    streams = {b["backend"]: b for b in svc.ledger.backend_streams()}
+    first = out[0]
+    st = streams.get(first["backend"]) or {}
+    allowed = st.get("streams_allowed")
+    free = None if allowed is None else max(0, allowed - len(st.get("active") or []))
+    pol = svc.config_store.config.helper_policy
+    admit = pol.optional_enabled and first["state"] == "admit" and (free is None or free > 0)
+    reason = ("optional coding helpers are turned off" if not pol.optional_enabled else
+              first["reason"] if first["state"] != "admit" else
+              "no free helper stream on " + first["backend"] if free == 0 else first["reason"])
+    return {"admit": admit, "state": first["state"] if pol.optional_enabled else "blocked",
+            "reason": reason, "persona": persona, "backend": first["backend"],
+            "model": first["model"], "next_eligible": first.get("next_eligible"),
+            "streams_free": free, "routes": out}
+
+
 @router.get("/v1/foundry/work/denials")
 async def denials(request: Request, session: str = "", run: str = "", since: float = 0):
     """Refusals recorded by the budget ledger, so a coordinator can tell a

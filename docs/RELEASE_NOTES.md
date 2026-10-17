@@ -2,6 +2,37 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.117.0 — backend-aware optional coding helpers
+
+**What changes**
+
+- **Helper gate:** optional coding work (a purpose the coordinator's binding sets)
+  is admitted only while every applicable window of the serving account is below
+  `helper_policy.cutoff_pct` (70% used) and freshly observed. Unknown, stale or
+  unreadable quota is never admitted. Required work and unbound traffic keep the
+  existing guardrails. See docs/HELPER_POLICY.md.
+- **Coordinator helpers:** the profile's `[helpers]` section dispatches read-only frontier
+  helper units, each bound in Foundry before it runs. Units are deferred and resumed with
+  persisted reasons and handed to the idle primary. Review stays independent of helper
+  authors.
+- **Control center:** a Helper capacity & quota inspector section, Helper policy settings,
+  and a persistent, silent alert when a quota source fails.
+- **Engine fix:** sessions the engine binds now carry an explicit required purpose
+  (`implementer` / `closeout` / `review`).
+
+**Migration:** additive only.
+
+- New nullable columns: `work_sessions.purpose`, `assignment`, `worker_client`;
+  `usage_events.purpose`.
+- New tables: `helper_quota_state`, `helper_admissions`.
+- `helper_policy` defaults to off, so optional-purpose calls are refused until you enable
+  it. Nothing else changes.
+- Personas, client allowlists, endpoints, budgets, backend limits and credentials are not
+  touched. No inference or validation runs at startup.
+
+**Manual steps:** see docs/HELPER_POLICY.md → Rollout (Foundry policy, Kilo `au-helper`
+agent, two helper personas, coordinator `[helpers]` section).
+
 ## v0.116.0 — canonical default review persona
 
 **What changes**
