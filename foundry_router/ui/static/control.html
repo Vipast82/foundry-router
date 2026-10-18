@@ -917,8 +917,9 @@ function applyPaneFont(p) { if (p.el) p.el.querySelector(".transcript").style.fo
 // themselves on a BroadcastChannel, so this survives a reload of either page.
 /*popped-start*/
 const POP_TTL_MS = 7000;
-function popId(popoutParam) {
+function popId(popoutParam, session) {
   if (popoutParam === "graph") return "graph";
+  if (popoutParam === "pane") return session ? "pane:" + session : "";
   if (String(popoutParam || "").startsWith("section:")) return "sec:" + String(popoutParam).slice(8);
   return "";
 }
@@ -941,8 +942,8 @@ if (POP_CH && !POPOUT) {
   };
   POP_CH.postMessage({type: "who"});                 // pop-outs already open answer at once
 }
-if (POP_CH && popId(POPOUT)) {
-  const me = popId(POPOUT);
+if (POP_CH && popId(POPOUT, QS.get("session"))) {
+  const me = popId(POPOUT, QS.get("session"));
   const alive = () => POP_CH.postMessage({type: "alive", id: me});
   alive(); setInterval(alive, 2000);
   POP_CH.onmessage = ev => { if ((ev.data || {}).type === "who") alive(); };
@@ -960,7 +961,7 @@ setInterval(() => {
 function popout(params) {
   const url = "/ui/control?" + new URLSearchParams(params).toString();
   const w = window.open(url, "_blank", "popup=yes,width=900,height=1000");
-  const pid = popId(params.popout);
+  const pid = popId(params.popout, params.session);
   if (w && pid) { S.popWins = S.popWins || {}; S.popWins[pid] = w; S.popped.set(pid, Date.now()); S.poppedShown.delete(pid); poppedChanged(); }
   if (!w) toast(`Your browser blocked the pop-up. <a href="${esc(url)}" target="_blank" rel="noopener">Open it here</a>`, "warn", 15000);
 }
@@ -1177,12 +1178,14 @@ function renderInspector() {
         <span class="tools">${only ? "" : `<button class="ghost" data-mv="-1" title="Move up" aria-label="Move ${esc(SECTION_TITLES[name])} up">↑</button><button class="ghost" data-mv="1" title="Move down" aria-label="Move down">↓</button><button class="ghost" data-float="1" title="Float this card inside the page (drag, resize; saved per layout)" aria-label="Float ${esc(SECTION_TITLES[name])}">⇱</button><button class="ghost" data-pop="1" title="Pop out this section">⧉</button><button class="ghost" data-hide="1" title="Hide (Settings → Sidebar brings it back)" aria-label="Hide section">✕</button>`}</span></div>
       <div class="sec-body">${inner}</div></section>`;
   }).join("");
+  const poppedPanes = only ? [] : S.panes.filter(p => p.sid && isPopped("pane:" + p.sid));
+  const paneNote = poppedPanes.length ? `<div class="dim" style="padding:4px 8px" title="Open in its own window; it comes back when that window closes">Popped out: ${poppedPanes.map(p => `<button class="ghost" data-showpane="${esc(p.sid)}" title="Also show it here">${p.id === "main" ? "Worker transcript" : "Helper transcript"} ↩</button>`).join(" ")}</div>` : "";
   const popNote = popped.size ? `<div class="dim" style="padding:4px 8px" title="Shown in its own window; it comes back here when that window closes">Popped out: ${[...popped].map(h => `<button class="ghost" data-showhere="${h}" title="Also show it here">${esc(SECTION_TITLES[h])} ↩</button>`).join(" ")}</div>` : "";
   const floatNote = floated.size ? `<div class="dim" style="padding:4px 8px">Floating: ${[...floated].map(h => `<button class="ghost" data-dock="${h}" title="Dock back into the Inspector">${esc(SECTION_TITLES[h])} ⤓</button>`).join(" ")}</div>` : "";
   const hidden = P.sidebar.hidden.length ? `<div class="dim" style="padding:4px 8px">Hidden: ${P.sidebar.hidden.map(h => `<button class="ghost" data-unhide="${h}">${esc(SECTION_TITLES[h])}</button>`).join(" ")}</div>` : "";
   const sc = el.scrollTop;
   el.innerHTML = `<div class="ihead"><b>Inspector</b><span class="dim">${s ? esc(short(s.session_id, 18)) : "no session"}</span><span class="spacer"></span>
-    <button class="ghost" id="insp-collapse-all" title="Collapse all sections">⊟</button></div>${body}${popNote}${floatNote}${hidden}`;
+    <button class="ghost" id="insp-collapse-all" title="Collapse all sections">⊟</button></div>${body}${paneNote}${popNote}${floatNote}${hidden}`;
   el.scrollTop = sc;
   el.querySelectorAll(".sec").forEach(sec => {
     const name = sec.dataset.sec;
@@ -1206,6 +1209,7 @@ function renderInspector() {
   const ca = $("#insp-collapse-all"); if (ca) ca.onclick = () => { P.sidebar.collapsed = SECTIONS.slice(); savePrefs(); renderInspector(); };
   el.querySelectorAll("[data-dock]").forEach(b => b.onclick = () => dockFloat("sec:" + b.dataset.dock));
   el.querySelectorAll("[data-showhere]").forEach(b => b.onclick = () => { S.poppedShown.add("sec:" + b.dataset.showhere); renderInspector(); });
+  el.querySelectorAll("[data-showpane]").forEach(b => b.onclick = () => { S.poppedShown.add("pane:" + b.dataset.showpane); layout(); });
   renderFloatSections(s);
 }
 function kv(rows) { return `<div class="kv">${rows.filter(Boolean).map(([k, v]) => `<div>${esc(k)}</div><div>${v}</div>`).join("")}</div>`; }
@@ -2274,13 +2278,23 @@ function layout() {
     insp.hidden = tab !== "inspector"; graph.hidden = tab !== "graph";
     renderNarrowTabs();
   } else {
-    const cols = ["minmax(320px, 1fr)"]; const els = [main.el];
-    for (const h of helpers) { cols.push("5px", `minmax(260px, ${L.helperW || 480}px)`); els.push(resizer("col", "helperW", preset), h.el); }
+    // a pane popped out into its own window leaves the grid (it returns when
+    // that window closes); whatever comes first then takes the flexible column
+    const panePopped = p => !!(p && p.sid && isPopped("pane:" + p.sid));
+    const cols = [], els = [];
+    const addCol = (el, width, prop, flex) => {
+      if (!cols.length) { cols.push(flex || "minmax(300px, 1fr)"); els.push(el); return; }
+      cols.push("5px", width); els.push(resizer("col", prop, preset), el);
+    };
+    if (!panePopped(main)) addCol(main.el, "", "", "minmax(320px, 1fr)");
+    for (const h of helpers) if (!panePopped(h)) addCol(h.el, `minmax(260px, ${L.helperW || 480}px)`, "helperW");
     const below = L.inspectorPos === "below";
-    if (!inspHidden && !below) { cols.push("5px", `${clamp(L.inspectorW || 340, 220, 900)}px`); els.push(resizer("col", "inspectorW", preset), insp); }
     const gpos = L.graphPos || "bottom";
     const graphWanted = P.graph && !POPOUT && !S.graphHidden && !isPopped("graph");
-    if (graphWanted && gpos === "side") { cols.push("5px", `${clamp(L.graphW || 560, 260, 1400)}px`); els.push(resizer("col", "graphW", preset), graph); }
+    const showInsp = !inspHidden && !below;
+    if (!cols.length && !showInsp && !(graphWanted && gpos === "side")) addCol(poppedPlaceholder(), "", "", "1fr");
+    if (showInsp) addCol(insp, `${clamp(L.inspectorW || 340, 220, 900)}px`, "inspectorW");
+    if (graphWanted && gpos === "side") addCol(graph, `${clamp(L.graphW || 560, 260, 1400)}px`, "graphW");
     const rows = ["minmax(200px, 1fr)"];
     const extraRows = [];
     if (!inspHidden && below) extraRows.push(["inspectorH", insp, L.inspectorH || 300]);
@@ -2419,6 +2433,15 @@ function renderFloatSections(s) {
   }
 }
 addEventListener("resize", () => { clearTimeout(S.frz); S.frz = setTimeout(() => applyFloats(effectivePreset()), 150); });
+function poppedPlaceholder() {
+  const d = document.createElement("section");
+  d.className = "pane"; d.setAttribute("aria-label", "Transcript popped out");
+  const ids = S.panes.filter(p => p.sid && isPopped("pane:" + p.sid));
+  d.innerHTML = `<div class="dim" style="padding:16px">The transcript is open in its own window; it comes back here when that window closes.
+    ${ids.map(p => `<div style="margin-top:8px"><button data-showpane="${esc(p.sid)}">Show ${p.id === "main" ? "worker" : "helper"} transcript here too</button></div>`).join("")}</div>`;
+  d.querySelectorAll("[data-showpane]").forEach(b => b.onclick = () => { S.poppedShown.add("pane:" + b.dataset.showpane); layout(); });
+  return d;
+}
 function renderNarrowTabs() {
   const n = $("#narrowTabs");
   n.innerHTML = [["transcript", "Transcript"], ["inspector", "Inspector"], ["inbox", "Inbox"], ["graph", "Graph"]].map(([k, l]) => `<button role="tab" aria-selected="${S.narrow === k}" class="${S.narrow === k ? "on" : ""}" data-n="${k}">${l}</button>`).join("");

@@ -277,6 +277,7 @@ and they are saved in your browser's display preferences.
   default is side in landscape and bottom elsewhere.
 - **Pop-out.** ⧉ opens the graph in its own window, just as ⧉ already does for
   sections and panes.
+  - Transcript panes popped out with ⧉ leave the main page too (v0.121.1). The other panels take the space, and the pane returns when its window closes.
   - While a section or the graph is popped out, the main page leaves it out so
     the space can hold other sections. A "Popped out: … ↩" note lets you show
     it here too.

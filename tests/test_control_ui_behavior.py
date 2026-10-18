@@ -247,13 +247,15 @@ def test_popped_out_cards_leave_the_main_view_and_come_back(tmp_path):
     out = run_js(tmp_path, between(s, "/*popped-start*/", "/*popped-end*/") + """
 const m = new Map([["sec:lanes", 1000], ["graph", 9000]]);
 const changed = prunePopped(m, 9500);
-console.log(JSON.stringify({ids: [popId("section:lanes"), popId("graph"), popId("pane"), popId("")],
+console.log(JSON.stringify({ids: [popId("section:lanes"), popId("graph"), popId("pane"), popId(""),
+  popId("pane", "ses_1")],
   changed, left: [...m.keys()], again: prunePopped(m, 9600)}));
 """)
-    assert out["ids"] == ["sec:lanes", "graph", "", ""]
+    assert out["ids"] == ["sec:lanes", "graph", "", "", "pane:ses_1"]    # panes too (by session)
     assert out["changed"] is True and out["left"] == ["graph"] and out["again"] is False
     assert 'isPopped("graph")' in s and "data-showhere" in s and '"fr.cc.popouts"' in s
     assert 'addEventListener("pagehide"' in s
+    assert 'isPopped("pane:" + p.sid)' in s and "function poppedPlaceholder" in s
 
 
 def test_active_only_keeps_running_agents_and_their_whole_path(tmp_path):

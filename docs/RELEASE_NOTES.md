@@ -2,6 +2,15 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.121.1 — popped-out transcript panes leave the main page too
+
+**What changes:** a transcript pane popped out with ⧉ is now hidden from the main
+page while its window is open, like sections and the graph. The other panels take
+its space; if nothing else is shown, a placeholder says where the transcript is.
+It returns when the pop-out window closes. "Worker transcript ↩" shows it in the
+main page as well. If the main pane follows the coordinator to a new session, it
+shows again (the pop-out stays pinned to the old one).
+
 ## v0.121.0 — readable route graph, Active only, pop-outs and floating cards
 
 **What changes** (control center, presentation only):
