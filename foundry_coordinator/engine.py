@@ -2165,6 +2165,44 @@ class Coordinator:
         decs = [self._lc_final_decision(d) for d in ids]
         final_ids = [d["decision_id"] if d else i for i, d in zip(ids, decs)]
         pending = [d for d in decs if d and d["status"] == "open"]
+        # A previous engine version may have opened a no-progress/repeated-repair
+        # question before recognizing committed partial BUILD work. Re-run the
+        # deterministic continuation checks before handing that question to a
+        # person. This grants no new authority: the same gate, scope, history,
+        # and cleanliness checks used by decision_reevaluate still have to pass.
+        # Bound repeat scans while still noticing cleanup or other uncommitted
+        # work at the same HEAD. The 60-second retry catches content changes
+        # whose porcelain status line stays the same.
+        candidates = [d for d in pending
+                      if d["kind"] in ("no_progress", "recovery_escalation")]
+        if candidates:
+            checked = dict(data.get("auto_reevaluate_checked") or {})
+            head = P.ws.head()
+            marker = [head, [list(x) for x in P.ws.status()]]
+            changed = False
+            for d in candidates:
+                did = d["decision_id"]
+                prev = checked.get(did) or {}
+                if (isinstance(prev, dict) and prev.get("marker") == marker and
+                        self.clock() - float(prev.get("ts") or 0) < 60):
+                    continue
+                checked[did] = {"marker": marker, "ts": self.clock()}
+                changed = True
+                try:
+                    result = self._decision_reevaluate(
+                        did, "coordinator:auto", "committed partial BUILD re-check")
+                except Exception as e:  # keep the question open on uncertainty
+                    self.store.event(pid, tid, "warning", detail={
+                        "auto_reevaluate": did,
+                        "error": f"{type(e).__name__}: {e}"[:400]})
+                else:
+                    if result.get("withdrawn"):
+                        decs = [self._lc_final_decision(i) for i in ids]
+                        pending = [x for x in decs if x and x["status"] == "open"]
+            if changed:
+                current = self.store.task(pid, tid)
+                self.store.update_task(pid, tid, data={**current["data"],
+                    "auto_reevaluate_checked": checked})
         if pending:
             if final_ids != ids:
                 self._lc_rewait(P, t, final_ids)
@@ -3034,6 +3072,14 @@ class Coordinator:
 
     def decision_reevaluate(self, decision_id: str, actor: str, reason: str = "",
                             dry_run: bool = False) -> dict:
+        """Operator-facing reevaluation; a model cannot claim this authority."""
+        from .obligations import DecisionRefused, is_model_actor
+        if is_model_actor(actor) or not str(actor or "").strip():
+            raise DecisionRefused(f"actor {actor!r} may not re-evaluate decisions")
+        return self._decision_reevaluate(decision_id, actor, reason, dry_run)
+
+    def _decision_reevaluate(self, decision_id: str, actor: str, reason: str = "",
+                             dry_run: bool = False) -> dict:
         """Re-run the no-progress or premature-repair decision against the
         current committed partial-BUILD state.
 
@@ -3053,9 +3099,7 @@ class Coordinator:
           python -m foundry_coordinator decision reevaluate <decision-id> \\
               --by <operator> --reason "false no-progress ([~] + intermediate gate
               outputs), fixed in vX.Y.Z" [--dry-run]"""
-        from .obligations import DecisionRefused, is_model_actor
-        if is_model_actor(actor) or not str(actor or "").strip():
-            raise DecisionRefused(f"actor {actor!r} may not re-evaluate decisions")
+        from .obligations import DecisionRefused
         if not self.store.q("SELECT 1 FROM sqlite_master WHERE type='table' AND "
                             "name='decisions'"):
             raise DecisionRefused(f"unknown decision {decision_id}")

@@ -362,6 +362,61 @@ def test_reevaluate_premature_recovery_escalation_only_for_valid_build_continuat
     assert after["data"]["free_retry"] is True
 
 
+def test_blocked_engine_automatically_withdraws_false_recovery_escalation(tmp_path):
+    """A known-safe partial BUILD continuation needs no operator intervention."""
+    turns = []
+
+    def script(ctx):
+        turns.append(ctx)
+        if len(turns) > 1:
+            return None
+        _untracked(ctx["workspace"], [BASELINE, CAPTURE])
+        return {"writes": {"src/ui02/kit.lua": "-- partial build\n", PLAN: S1},
+                "commit": f"{TID}: c5b partial", "final": report(status="NOT DONE")}
+
+    c, client, ff, root = _game(tmp_path, script)
+    c.approve("game", TID, [], "victor")
+    assert run_until(c, lambda: _state(c) == S.CHANGES_REQUIRED, limit=25), _hist(c)
+    P = c.projects["game"]
+    t = c.store.task("game", TID)
+    did = c.obligations.open_decision("game", TID, "recovery_escalation",
+                                      "premature final checks repeated",
+                                      evidence={"repeats": []}, blocks=[TID])
+    c._lc_wait(P, t, [did], "findings repeat", S.READY)
+    c.tick()
+    assert c.obligations.decision(did)["status"] == "withdrawn", [
+        e["detail"] for e in c.store.events("game", 50) if e["kind"] == "warning"]
+    assert _state(c) == S.READY
+    after = c.store.task("game", TID)
+    assert after["attempt"] == t["attempt"] and after["sessions"] == t["sessions"]
+    assert after["data"]["free_retry"] is True
+    assert after["data"]["auto_reevaluate_checked"][did]["marker"][0] == P.ws.head()
+
+
+def test_blocked_engine_keeps_genuine_recovery_escalation_open(tmp_path):
+    turns = []
+
+    def script(ctx):
+        turns.append(ctx)
+        if len(turns) > 1:
+            return None
+        _untracked(ctx["workspace"], [BASELINE, CAPTURE])
+        return {"writes": {"src/ui02/kit.lua": "-- partial build\n", PLAN: S1},
+                "commit": f"{TID}: c5b partial", "final": report(status="NOT DONE")}
+
+    c, client, ff, root = _game(tmp_path, script)
+    c.approve("game", TID, [], "victor")
+    assert run_until(c, lambda: _state(c) == S.CHANGES_REQUIRED, limit=25), _hist(c)
+    _untracked(str(root), ["docs/progress/UI-01_gate_verdicts.json"])
+    P = c.projects["game"]
+    did = c.obligations.open_decision("game", TID, "recovery_escalation",
+                                      "real unrelated dirty file", evidence={}, blocks=[TID])
+    c._lc_wait(P, c.store.task("game", TID), [did], "findings repeat", S.READY)
+    c.tick()
+    assert c.obligations.decision(did)["status"] == "open"
+    assert _state(c) == S.BLOCKED
+
+
 def test_unrelated_untracked_files_still_block_the_continuation(tmp_path):
     """Task-owned unfinished work can continue BUILD, but another sprint's gate
     JSON and a near-miss name still stop it (normal verification reports them)."""
