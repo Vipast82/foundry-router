@@ -61,6 +61,7 @@ class SessionState:
     tokens: dict = field(default_factory=dict)
     children: list = field(default_factory=list)
     unanswered: bool = False                    # idle with no reply to the prompt yet
+    compaction: Optional[dict] = None           # turn ended on Kilo's compaction summary
 
 
 class CodingClient:

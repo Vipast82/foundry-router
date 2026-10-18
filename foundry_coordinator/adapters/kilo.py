@@ -125,6 +125,12 @@ class KiloClient(CodingClient):
                                 unanswered=True)
         if not (info.get("time") or {}).get("completed") and not info.get("error"):
             return SessionState(status="busy")
+        if _is_compaction(last):
+            # Kilo compacted the context; that summary is not the work's result.
+            # Kilo stays the compaction manager: the coordinator only waits for
+            # its continuation (and nudges the same session once if none comes)
+            return SessionState(status="busy", error="context compacted; waiting for Kilo "
+                                "to continue", compaction={"message_id": info.get("id") or ""})
         text = "\n".join(p.get("text") or "" for p in last.get("parts") or []
                          if p.get("type") == "text")
         err = info.get("error") or {}
@@ -250,6 +256,15 @@ class KiloClient(CodingClient):
         out.append(("PASS" if depth in (0, 1) else "WARN", "subagent_depth",
                     f"{depth!r} (1 = helpers can't start their own helpers)"))
         return out
+
+
+def _is_compaction(msg: dict) -> bool:
+    """A Kilo/opencode compaction summary turn: the message is flagged summary,
+    or runs as the compaction agent/mode, or carries a compaction part."""
+    info = (msg or {}).get("info") or {}
+    if info.get("summary") is True or "compaction" in (info.get("mode"), info.get("agent")):
+        return True
+    return any((p or {}).get("type") == "compaction" for p in (msg or {}).get("parts") or [])
 
 
 def foundry_denial(text: str) -> Optional[dict]:

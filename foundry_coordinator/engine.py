@@ -479,6 +479,8 @@ class Coordinator:
                 self._end_session(P, sid, "timeout")
                 return self._session_failed(P, t, f"session ran over {timeout} minutes and was "
                                                   f"stopped", phase)
+            if s.compaction:
+                return self._compacted(P, t, sid, phase, s.compaction)
             self._note(P, t, f"{phase} session working")
             return None
         if s.status == "attention":
@@ -506,6 +508,32 @@ class Coordinator:
         self._sync_children(P, t, sid)
         self._end_session(P, sid, "idle", tokens=s.tokens, report=s.report)
         return s
+
+    def _compacted(self, P: Project, t: dict, sid: str, phase: str, comp: dict):
+        """The turn ended on Kilo's compaction summary. It is never verified and
+        never costs an attempt: wait compaction_grace_seconds for Kilo's own
+        continuation, then send ONE journaled continue prompt to the same
+        session (Kilo still does all summarizing)."""
+        mid = comp.get("message_id") or ""
+        seen = t["data"].get("compaction_seen") or {}
+        now = self.clock()
+        if seen.get("message_id") != mid or seen.get("session_id") != sid:
+            self.store.merge_data(P.id, t["task_id"], compaction_seen={
+                "message_id": mid, "session_id": sid, "ts": now})
+            self.store.event(P.id, t["task_id"], "session_compacted", session_id=sid,
+                             detail={"phase": phase, "message": mid})
+            self._note(P, t, f"{phase} session compacted its context; waiting for Kilo to "
+                             "continue")
+            return None
+        grace = float(P.profile.client.get("compaction_grace_seconds") or 30)
+        if now - float(seen.get("ts") or now) < grace or sid != t["session_id"]:
+            return None
+        spec = P.adapter.describe(t["task_id"])
+        if self._prompt_primary(P, t, P.adapter.continue_prompt(
+                spec, "your context was compacted; continue from the summary"),
+                f"compaction:{mid}"):
+            self._note(P, t, f"{phase} session resumed after compaction")
+        return None
 
     def _session_failed(self, P: Project, t: dict, why: str, phase: str, free: bool = False):
         pid, tid = P.id, t["task_id"]

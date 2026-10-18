@@ -663,30 +663,63 @@ def _compaction_turn(kenv, sid):
 
 
 def test_s6_compaction_turn_is_never_mistaken_for_finished_work(kenv):
+    """v0.121.7: a turn ending on Kilo's compaction summary is not verified and
+    costs no attempt; the same session stays the writer."""
     sid = kenv.start()
     _compaction_turn(kenv, sid)
-    assert run_until(kenv.c, lambda: _state(kenv.c) == S.CHANGES_REQUIRED, limit=5)
+    for _ in range(3):
+        kenv.c.tick()
     t = kenv.c.store.task("game", "T1")
-    assert t["attempt"] == 1                                   # the attempt is consumed
-    assert any("no commit since the task started" in f for f in t["data"]["findings"])
-    assert kenv.c.store.session(sid)["outcome"] == "idle"      # the compacted session is ended
-    kenv.c.tick()
-    t = kenv.c.store.task("game", "T1")
-    assert t["state"] == S.IMPLEMENTING and t["session_id"] != sid and t["attempt"] == 2
+    assert t["state"] == S.IMPLEMENTING and t["session_id"] == sid and t["attempt"] == 1
+    assert not t["data"].get("findings")
+    assert len(kenv.prompts_to(sid)) == 1                      # within the grace: only waiting
 
 
-@pytest.mark.xfail(strict=True, reason=(
-    "GAP: no compaction handling exists (no 'compact'/'summary' logic in engine.py or "
-    "adapters/kilo.py:104-138). A turn that ends on a compaction summary is treated as a "
-    "finished session: ended, verified, and an attempt is spent on a fresh session that "
-    "loses the compacted context. Expected: detect it and continue the same session."))
+# fixed in v0.121.7: Kilo stays the compaction manager; after compaction_grace_seconds
+# without its own continuation the same session gets ONE journaled continue prompt
 def test_s6_compaction_turn_continues_the_same_session(kenv):
     sid = kenv.start()
     _compaction_turn(kenv, sid)
+    kenv.c.tick()                                              # first sighting: wait
+    kenv.clock[0] += 31
     kenv.c.tick()
     t = kenv.c.store.task("game", "T1")
     assert t["state"] == S.IMPLEMENTING and t["session_id"] == sid
     assert len(kenv.prompts_to(sid)) == 2 and t["attempt"] == 1
+    assert "compacted" in kenv.prompts_to(sid)[1]["text"]
+    for _ in range(3):                                         # never nudged twice
+        kenv.clock[0] += 31
+        kenv.c.tick()
+    assert len(kenv.prompts_to(sid)) == 2
+    kenv.commit("src/a.txt", "OK")
+    kenv.fake.finish(sid, REPORT_DONE)
+    assert run_until(kenv.c, lambda: _state(kenv.c) == S.COMPLETE, limit=10)
+    assert kenv.c.store.task("game", "T1")["attempt"] == 1
+
+
+def test_s6_kilo_continuing_by_itself_gets_no_extra_prompt(kenv):
+    sid = kenv.start()
+    _compaction_turn(kenv, sid)
+    kenv.c.tick()
+    # Kilo's own auto-continuation: a synthetic user turn, then the model works
+    kenv.fake.add_message(sid, "user", [{"type": "text", "text": "Continue if you have next "
+                                                                 "steps"}])
+    kenv.fake.set_status(sid, "busy")
+    for _ in range(3):
+        kenv.clock[0] += 31
+        kenv.c.tick()
+    assert len(kenv.prompts_to(sid)) == 1
+    assert _state(kenv.c) == S.IMPLEMENTING
+
+
+def test_s6_compaction_part_shape_is_recognised(kenv):
+    """Alternative shape: a compaction content part, no summary flag."""
+    sid = kenv.start()
+    kenv.fake.add_message(sid, "assistant", [{"type": "compaction", "text": "summary"}])
+    kenv.fake.set_status(sid, None)
+    kenv.c.tick()
+    t = kenv.c.store.task("game", "T1")
+    assert t["state"] == S.IMPLEMENTING and t["attempt"] == 1
 
 
 def test_s6_truncated_transcript_does_not_lose_committed_work(kenv):
