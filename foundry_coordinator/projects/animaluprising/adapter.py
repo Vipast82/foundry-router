@@ -516,12 +516,45 @@ Change no code or test file in this session; if one needs changing, stop and rep
                                      "at this revision; the last 40 raw lines are shown instead"))
         else:
             verdict_re = re.compile(r"^GATE %s (PASS|FAIL)\b" % re.escape(t))
+            # gate.ps1 may append the current session's Studio transcript between
+            # its FINISH rows and final verdict. Admit that one explicitly named
+            # transcript only when its task and HEAD agree with this gate; a
+            # generic/new session remains a boundary, never a source of a later
+            # verdict for an incomplete finish block.
+            preamble = max((i for i in range(start)
+                            if re.match(r"^=== GATE (?:RUN|START|FINISH)\b", lines[i])
+                            or re.match(r"^GATE RUN\b", lines[i])
+                            or re.match(r"^GATE \S+ (?:PASS|FAIL)\b", lines[i])), default=-1)
+            gate_heads = re.findall(r"^PASS: GATE HEAD ([0-9a-f]{7,40})",
+                                    "\n".join(lines[preamble + 1:start]), re.M)
+            inline_studio = re.compile(
+                r"^SESSION\s+\d+\s+studio lines\s+\(coordinator run "
+                + re.escape(t) + r"-a\d+-[\w-]+ attempt \d+\), HEAD ([0-9a-f]{7,40})\b")
+            admitted_studio = False
             end = min(len(lines) - 1, start + 300)
             for j in range(start + 1, end + 1):
                 if verdict_re.match(lines[j].strip()):
                     end = j
                     break
-                if lines[j].startswith("=== GATE") or _SESSION.match(lines[j]):
+                if _SESSION.match(lines[j]):
+                    # Inline Studio transcripts label quoted historical verdict
+                    # lines with dashed headings; those are attribution inside
+                    # the current transcript, not a new session/run boundary.
+                    if admitted_studio and re.match(r"^--- SESSION\b.*---\s*$", lines[j]):
+                        continue
+                    embedded = inline_studio.match(lines[j])
+                    named = embedded.group(1) if embedded else ""
+                    bound = gate_heads[-1] if gate_heads else ""
+                    if (not admitted_studio and named and bound
+                            and (named.startswith(bound) or bound.startswith(named))):
+                        admitted_studio = True
+                        continue
+                    end = j - 1
+                    break
+                if (lines[j].startswith("=== GATE")
+                        or re.match(r"^GATE RUN\b", lines[j])
+                        or re.match(r"^PASS: GATE HEAD\b", lines[j])
+                        or re.match(r"^GATE \S+ (?:PASS|FAIL)\b", lines[j])):
                     end = j - 1
                     break
             body, cut, omitted = bound_text(_numbered(lines, range(start, end + 1)), cap)

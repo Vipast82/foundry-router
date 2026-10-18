@@ -273,6 +273,102 @@ def test_a_gate_without_a_bound_head_is_unverified(repo):
     assert gate["status"] == "unverified" and "not bound" in gate["note"]
 
 
+def test_finish_includes_its_bound_inline_studio_session_before_final_verdict(repo):
+    a, w, ws, code = repo["a"], repo["w"], repo["ws"], repo["code"]
+    studio = (f"SESSION 38 studio lines (coordinator run {T}-a3-4559aa attempt 3), "
+              f"HEAD {code[:7]}; src/tests byte-identical.\n"
+              "--- SESSION 36 part 2 / SESSION 37 verdict lines (VMs at baseline) ---\n"
+              "SUITE UX_01 pass=193 fail=0 expect=193 designedFails=0 VERDICT PASS")
+    raw = _log(code[:10], extra_block=studio)
+    raw = raw.replace("=== GATE FINISH ===", "=== GATE lune ===\n"
+                      "SESSION 37 gate preparation\n=== GATE FINISH ===")
+    _write(ws, LOG_REL, raw)
+    rev = _commit(ws, f"{T}: inline Studio gate evidence")
+    gate = _by_title(a.review_evidence(a.describe_at(T, rev, w), rev, w),
+                     f"{T} last gate block")
+    assert gate["status"] == "ok" and not gate["truncated"]
+    assert studio.splitlines()[0] in gate["text"]
+    verdict_line = raw.splitlines().index(f"GATE {T} PASS") + 1
+    assert f"{verdict_line}: GATE {T} PASS" in gate["text"]
+    assert "no 'GATE" not in gate["note"]
+
+
+@pytest.mark.parametrize("boundary", [
+    "SESSION 39 (new unrelated run)",
+    "SESSION 39 studio lines (coordinator run OTHER-a3-4559aa attempt 3), HEAD {head}",
+    "SESSION 39 studio lines (coordinator run UX-01-a3-4559aa attempt 3), HEAD 1234567",
+    "PASS: GATE HEAD {head}",
+    "=== GATE START ===",
+    "GATE RUN sprint=UX-01",
+    "GATE OTHER PASS",
+])
+def test_incomplete_finish_never_borrows_later_runs_verdict(repo, boundary):
+    a, w, ws, code = repo["a"], repo["w"], repo["ws"], repo["code"]
+    raw = _log(code[:10], extra_block=boundary.format(head=code[:10]))
+    _write(ws, LOG_REL, raw)
+    rev = _commit(ws, f"{T}: incomplete finish before another run")
+    gate = _by_title(a.review_evidence(a.describe_at(T, rev, w), rev, w),
+                     f"{T} last gate block")
+    assert gate["status"] == "unverified"
+    assert "no 'GATE" in gate["note"]
+    assert f": GATE {T} PASS" not in gate["text"]
+
+
+def test_inline_studio_does_not_admit_a_second_session(repo):
+    a, w, ws, code = repo["a"], repo["w"], repo["ws"], repo["code"]
+    header = (f"SESSION 38 studio lines (coordinator run {T}-a3-4559aa attempt 3), "
+              f"HEAD {code[:7]}")
+    raw = _log(code[:10], extra_block=header + "\n" + header.replace("38", "39"))
+    _write(ws, LOG_REL, raw)
+    rev = _commit(ws, f"{T}: incomplete inline Studio gate")
+    gate = _by_title(a.review_evidence(a.describe_at(T, rev, w), rev, w),
+                     f"{T} last gate block")
+    assert gate["status"] == "unverified" and "no 'GATE" in gate["note"]
+    assert f": GATE {T} PASS" not in gate["text"]
+
+
+def test_bound_inline_studio_fail_verdict_is_preserved(repo):
+    a, w, ws, code = repo["a"], repo["w"], repo["ws"], repo["code"]
+    header = (f"SESSION 38 studio lines (coordinator run {T}-a3-4559aa attempt 3), "
+              f"HEAD {code[:7]}")
+    raw = _log(code[:10], extra_block=header).replace(f"GATE {T} PASS", f"GATE {T} FAIL")
+    raw += f"SESSION 39 later run\nGATE {T} PASS\n"
+    _write(ws, LOG_REL, raw)
+    rev = _commit(ws, f"{T}: failing bound gate before later success")
+    gate = _by_title(a.review_evidence(a.describe_at(T, rev, w), rev, w),
+                     f"{T} last gate block")
+    assert f": GATE {T} FAIL" in gate["text"]
+    assert f": GATE {T} PASS" not in gate["text"]
+
+
+def test_inline_studio_cannot_borrow_previous_finish_head(repo):
+    a, w, ws, code = repo["a"], repo["w"], repo["ws"], repo["code"]
+    raw = _log(code[:10]) + (
+        "=== GATE FINISH ===\nVERDICT PASS: GATE lune\n"
+        f"SESSION 39 studio lines (coordinator run {T}-a3-4559aa attempt 3), HEAD {code[:7]}\n"
+        f"GATE {T} PASS\n")
+    _write(ws, LOG_REL, raw)
+    rev = _commit(ws, f"{T}: unbound current finish after old success")
+    gate = _by_title(a.review_evidence(a.describe_at(T, rev, w), rev, w),
+                     f"{T} last gate block")
+    assert gate["status"] == "unverified" and "no 'GATE" in gate["note"]
+    assert f": GATE {T} PASS" not in gate["text"]
+
+
+def test_new_run_without_head_cannot_reuse_incomplete_previous_run_head(repo):
+    a, w, ws, code = repo["a"], repo["w"], repo["ws"], repo["code"]
+    raw = (f"PASS: GATE HEAD {code[:10]}\nGATE RUN sprint={T}\n"
+           "=== GATE FINISH ===\n"
+           f"SESSION 39 studio lines (coordinator run {T}-a3-4559aa attempt 3), HEAD {code[:7]}\n"
+           f"GATE {T} PASS\n")
+    _write(ws, LOG_REL, raw)
+    rev = _commit(ws, f"{T}: new run without a bound HEAD")
+    gate = _by_title(a.review_evidence(a.describe_at(T, rev, w), rev, w),
+                     f"{T} last gate block")
+    assert gate["status"] == "unverified" and "no 'GATE" in gate["note"]
+    assert f": GATE {T} PASS" not in gate["text"]
+
+
 def test_truncation_is_flagged_and_keeps_raw_lines(repo):
     a, w, ws, code = repo["a"], repo["w"], repo["ws"], repo["code"]
     many = ["SESSION 50 (2026-10-18)"] + [f"PASS S46 c{i} leg {'x' * 40}" for i in range(2000)]
