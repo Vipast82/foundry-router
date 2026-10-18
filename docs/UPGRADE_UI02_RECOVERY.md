@@ -2,6 +2,20 @@
 
 This applies when AnimalUprising is paused pending the update. Use only supported controls. Never edit the coordinator database by hand.
 
+## Follow-up: UI-02's next partial-BUILD block
+
+After the v0.122.6 restart, UI-02 committed additional code at `6ae11a3` but
+left its in-scope `UI-02_BASELINE.md` edit and `hud_desktop.png` capture
+uncommitted. The partial-BUILD clean check allowed only task gate JSONs, so it
+sent the open checklist to final verification and opened a repeat-strategy
+decision. The workstation follow-up permits task-owned uncommitted files in a
+*committed partial-BUILD continuation* and names them in the next worker prompt.
+Final verification and closeout still require a clean tree; pre-existing or
+out-of-scope dirty files still block. `decision reevaluate` also accepts a
+`recovery_escalation` decision **only** when that exact partial-BUILD
+continuation passes its safety checks. Dry-run first, then apply; no attempt or
+session counters are reset.
+
 ## 0. Before you start
 
 - AnimalUprising should already be paused (control center, **Pause**). Wait for the header to read **"PAUSED — safe to upgrade"**, meaning no active writer turn, helper, review or retry-guidance call.

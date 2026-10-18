@@ -37,9 +37,12 @@ LOG = f"docs/progress/{TID}_EVIDENCE_RAW.log"
 GATE_JSONS = [f"docs/progress/{TID}_gate_expect.json",
               f"docs/progress/{TID}_gate_expect_full.json",
               f"docs/progress/{TID}_gate_verdicts.json"]
+BASELINE = f"docs/progress/{TID}_BASELINE.md"
+CAPTURE = f"docs/evidence/{TID}/hud_desktop.png"
 TASK = {"id": TID, "title": "UI kit rollout", "tier": "B", "plan": PLAN,
         "spec": "Roll the UI kit out to the HUD screens, following the committed plan.",
-        "scope": ["src/ui02/kit.lua", "src/ui02/hud.lua", "src/ui02/legacy.lua", PLAN, LOG]
+        "scope": ["src/ui02/kit.lua", "src/ui02/hud.lua", "src/ui02/legacy.lua",
+                  PLAN, LOG, BASELINE, CAPTURE]
         + GATE_JSONS}
 
 STEPS = ["1 Kit module", "2 Theme tokens", "3 Alert primitive",
@@ -289,10 +292,74 @@ def test_true_stall_still_opens_a_no_progress_decision(tmp_path):
     assert c.obligations.decision(np_[0]["decision_id"])["status"] == "open"
 
 
+def test_partial_build_carries_own_baseline_and_capture_without_waiving_final_clean(tmp_path):
+    """The live v0.122.6 block: committed code plus an unfinished, in-scope
+    baseline and capture must continue BUILD, with both named in the next prompt.
+    Final verification still rejects either file while uncommitted."""
+    turns = []
+
+    def script(ctx):
+        turns.append(ctx)
+        if len(turns) > 1:
+            return None
+        ws = ctx["workspace"]
+        _untracked(ws, [BASELINE, CAPTURE])
+        return {"writes": {"src/ui02/kit.lua": "-- committed repair\n", PLAN: S1},
+                "commit": f"{TID}: c5b repair", "final": report(status="NOT DONE")}
+
+    c, client, ff, root = _game(tmp_path, script)
+    c.approve("game", TID, [], "victor")
+    assert run_until(c, lambda: _state(c) == S.CHANGES_REQUIRED, limit=25), _hist(c)
+    assert (S.IMPLEMENTING, S.VERIFYING) not in _hist(c)
+    hist = c.store.history("game", TID)
+    assert hist[-1]["evidence"].get("build_progress") is True
+    assert _decisions(c) == []
+    t = c.store.task("game", TID)
+    spec = c.projects["game"].adapter.describe(TID)
+    final = {r.check: r for r in c._generic_checks(c.projects["game"], t, spec,
+                                                    Workspace(root).head(), phase="verify")}
+    assert final["coordinator.clean"].result == FAIL
+    assert BASELINE in final["coordinator.clean"].detail
+    assert CAPTURE in final["coordinator.clean"].detail
+    assert run_until(c, lambda: len(turns) == 2, limit=12), _hist(c)
+    assert BASELINE in turns[1]["prompt"] and CAPTURE in turns[1]["prompt"]
+
+
+def test_reevaluate_premature_recovery_escalation_only_for_valid_build_continuation(tmp_path):
+    """An already-blocked task can withdraw the stale repair decision when
+    the committed plan is still in BUILD and only task-owned files are dirty."""
+    turns = []
+
+    def script(ctx):
+        turns.append(ctx)
+        if len(turns) > 1:
+            return None
+        _untracked(ctx["workspace"], [BASELINE, CAPTURE])
+        return {"writes": {"src/ui02/kit.lua": "-- committed repair\n", PLAN: S1},
+                "commit": f"{TID}: c5b repair", "final": report(status="NOT DONE")}
+
+    c, client, ff, root = _game(tmp_path, script)
+    c.approve("game", TID, [], "victor")
+    assert run_until(c, lambda: _state(c) == S.CHANGES_REQUIRED, limit=25), _hist(c)
+    P = c.projects["game"]
+    t = c.store.task("game", TID)
+    did = c.obligations.open_decision("game", TID, "recovery_escalation",
+                                      "premature final checks repeated",
+                                      evidence={"repeats": []}, blocks=[TID])
+    c._lc_wait(P, t, [did], "findings repeat", S.READY)
+    dry = c.decision_reevaluate(did, "operator", "partial BUILD", dry_run=True)
+    assert dry["withdrawn"] and dry["continuation"]["open_steps"]
+    assert c.obligations.decision(did)["status"] == "open"
+    out = c.decision_reevaluate(did, "operator", "partial BUILD")
+    assert out["withdrawn"] and c.obligations.decision(did)["status"] == "withdrawn"
+    after = c.store.task("game", TID)
+    assert after["attempt"] == t["attempt"] and after["sessions"] == t["sessions"]
+    assert after["data"]["free_retry"] is True
+
+
 def test_unrelated_untracked_files_still_block_the_continuation(tmp_path):
-    """Only the exact task-scoped gate outputs are tolerated: an in-scope file the
-    session forgot to commit, another sprint's gate JSON and a near-miss name all
-    still stop the continuation (normal final verification reports them)."""
+    """Task-owned unfinished work can continue BUILD, but another sprint's gate
+    JSON and a near-miss name still stop it (normal verification reports them)."""
     turns: list = []
 
     def script(ctx):

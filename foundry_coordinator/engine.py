@@ -861,9 +861,9 @@ class Coordinator:
     def _generic_checks(self, P: Project, t: dict, spec, head: str, phase: str,
                         intermediate: bool = False) -> list:
         """Scope / history / commits / clean / unrelated-dirty checks. With
-        intermediate=True (ONLY the committed partial-BUILD continuation) the
-        task's own untracked intermediate outputs (_intermediate_dirty) are
-        reported, not failed; final verification and closeout never pass it."""
+        intermediate=True (ONLY the committed partial-BUILD continuation),
+        task-owned unfinished files are carried into the next BUILD session.
+        Final verification and closeout never pass this flag."""
         base = t["data"].get("task_base") or t["base_sha"]
         exempt = P.adapter.exempt_paths(spec)
         out = []
@@ -913,13 +913,27 @@ class Coordinator:
         if intermediate and inter:
             add("intermediate_outputs", PASS, note, required=False)
             in_scope_dirty = [p for p in in_scope_dirty if p not in inter]
+        # A worker can commit valid BUILD progress and leave a task-scoped
+        # screenshot or baseline edit for the next session. It must be finished
+        # and committed before final verification, but must not turn an open
+        # checklist into a final-gate failure or a repeated-repair decision.
+        # Never carry pre-existing dirty files or anything outside task scope.
+        pending_task = ([p for p in in_scope_dirty if p not in baseline and
+                         p not in set(t["data"].get("task_baseline_dirty") or [])]
+                        if intermediate else [])
+        if pending_task:
+            add("pending_task_work", PASS,
+                "task-owned uncommitted BUILD work: " + ", ".join(pending_task[:10])
+                + " — inspect and commit it before final verification",
+                required=False)
+            in_scope_dirty = [p for p in in_scope_dirty if p not in pending_task]
         add("clean", FAIL if in_scope_dirty else PASS,
             ("uncommitted changes in task files: " + ", ".join(in_scope_dirty[:10])
              + (f"; {note}" if note and not intermediate else ""))
             if in_scope_dirty else "task files are committed and clean")
         touched = [p for p, h in baseline.items() if P.ws.file_hash(p) != h]
         new_dirty = [p for _, p in dirty if p not in baseline and p not in in_scope_dirty
-                     and not (intermediate and p in inter)]
+                     and not (intermediate and (p in inter or p in pending_task))]
         add("unrelated_preserved", FAIL if touched or new_dirty else PASS,
             "; ".join(x for x in (
                 ("pre-existing uncommitted changes were modified: " + ", ".join(touched[:8]))
@@ -3011,10 +3025,10 @@ class Coordinator:
 
     def decision_reevaluate(self, decision_id: str, actor: str, reason: str = "",
                             dry_run: bool = False) -> dict:
-        """Re-run the no-progress check behind an OPEN no_progress decision with
-        the current logic (committed BUILD progress, [~] checklist steps).
+        """Re-run the no-progress or premature-repair decision against the
+        current committed partial-BUILD state.
 
-        Still no progress: nothing changes (an event records the re-check).
+        A genuine stall or repair without a safe BUILD continuation stays open.
         Progress recognized: the decision is WITHDRAWN -- kept, never deleted --
         with a 'decision_reevaluated' event naming the actor, the reason, the
         decision's original evidence and the new result; the engine resumes the
@@ -3043,9 +3057,10 @@ class Coordinator:
         P = self._project(pid)
         if not self._lc(P, "recovery"):
             raise DecisionRefused(f"{pid} has no lifecycle recovery to re-evaluate")
-        if d["kind"] != "no_progress":
+        if d["kind"] not in ("no_progress", "recovery_escalation"):
             raise DecisionRefused(f"{decision_id} is a {d['kind']} decision; only no_progress "
-                                  f"decisions can be re-evaluated (answer it instead)")
+                                  "and premature BUILD recovery_escalation decisions can be "
+                                  "re-evaluated (answer it instead)")
         if d["status"] != "open":
             raise DecisionRefused(f"{decision_id} is {d['status']}; nothing to re-evaluate")
         t = self.store.task(pid, tid)
@@ -3057,7 +3072,7 @@ class Coordinator:
         out = {"decision_id": decision_id, "project": pid, "task": tid, "progress": pr,
                "previous_evidence": d.get("evidence"), "withdrawn": False,
                "continuation": None, "dry_run": bool(dry_run)}
-        if pr["no_progress"]:
+        if d["kind"] == "no_progress" and pr["no_progress"]:
             out["result"] = "still no progress: the decision stays open"
             if not dry_run:
                 self.store.event(pid, tid, "decision_reevaluated", detail={
@@ -3080,6 +3095,13 @@ class Coordinator:
                                 (r.detail for r in basics
                                  if r.check == "coordinator.intermediate_outputs"), ""),
                             "replaced_findings": list(t["data"].get("findings") or [])[:12]}
+        if d["kind"] == "recovery_escalation" and cont is None:
+            out["result"] = "no committed partial-BUILD continuation: decision stays open"
+            if not dry_run:
+                self.store.event(pid, tid, "decision_reevaluated", detail={
+                    "decision_id": decision_id, "by": actor, "reason": str(reason)[:500],
+                    "result": "unchanged", "progress": pr})
+            return out
         out.update(result="progress recognized: decision withdrawn", withdrawn=True,
                    continuation=cont)
         if dry_run:

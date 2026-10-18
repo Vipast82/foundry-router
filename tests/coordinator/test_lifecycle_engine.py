@@ -1017,7 +1017,7 @@ def test_recover_does_not_refetch_ended_fully_scanned_sessions(tmp_path):
 def test_cli_decision_reevaluate_keeps_the_audit_and_never_touches_counters(tmp_path, capsys):
     """`decision reevaluate <id>`: dry run changes nothing; a real run withdraws a
     no_progress decision only when progress is now recognized, with an event;
-    other kinds and a true stall are refused / left open."""
+    a recovery escalation without a valid partial BUILD continuation stays open."""
     from foundry_coordinator import cli
     from foundry_coordinator.obligations import DecisionRefused
     store_path = tmp_path / "state" / "coordinator.sqlite"
@@ -1032,8 +1032,9 @@ def test_cli_decision_reevaluate_keeps_the_audit_and_never_touches_counters(tmp_
     other = c.obligations.open_decision("game", "T1", "recovery_escalation", "repeats",
                                         options=opts, blocks=["T1"])
     before = c.store.task("game", "T1")
-    with pytest.raises(DecisionRefused):
-        c.decision_reevaluate(other, "victor", "not this kind")
+    unchanged = c.decision_reevaluate(other, "victor", "not partial BUILD")
+    assert not unchanged["withdrawn"]
+    assert c.obligations.decision(other)["status"] == "open"
     argv = ["--state", str(tmp_path / "state"), "--profiles", str(prof), "decision",
             "reevaluate", did, "--by", "victor", "--reason", "fixed in v0.122.5"]
     assert cli.main(argv + ["--dry-run"], clients={"game": client},
