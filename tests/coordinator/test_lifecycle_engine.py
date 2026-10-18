@@ -34,6 +34,43 @@ def _tables(c):
     return {r["name"] for r in c.store.q("SELECT name FROM sqlite_master WHERE type='table'")}
 
 
+def test_committed_partial_build_continues_without_spending_repair_attempt(tmp_path,
+                                                                          monkeypatch):
+    """An idle worker with real, in-scope progress does not submit an open BUILD."""
+    def pending(_self, _spec, revision, ws):
+        return ["- [ ] finish the UI"] if ws.show_at(revision, "src/ui.txt") is None else []
+
+    monkeypatch.setattr(LifecycleAdapter, "pending_build_steps", pending, raising=False)
+    turns = []
+
+    def script(ctx):
+        turns.append(ctx["session_id"])
+        if len(turns) == 1:
+            return {"writes": {"src/core.txt": "OK"}, "commit": "T1: partial core",
+                    "final": report(summary="more BUILD remains")}
+        return green_t1(ctx)
+
+    c, _, _, _, _ = _game(tmp_path, script)
+    c.approve("game", "T1", [], "victor")
+    assert run_until(c, lambda: _state(c) == S.CHANGES_REQUIRED, limit=30)
+    # An older worker could store the progress marker as a repair finding just
+    # before a safe coordinator reload. The new worker must treat it as BUILD.
+    c.store.merge_data("game", "T1", findings=[
+        "Continue the committed plan's open BUILD steps; "
+        "final gate and review remain required."])
+    assert run_until(c, lambda: _state(c) == S.COMPLETE, limit=60), (
+        _state(c), turns, [(h["from_state"], h["to_state"]) for h in
+                           c.store.history("game", "T1")[-5:]],
+        [dict(e) for e in c.store.q("SELECT kind, detail FROM events ORDER BY id DESC LIMIT 3")])
+    history = c.store.history("game", "T1")
+    progress = [h for h in history if h["evidence"].get("build_progress")]
+    assert len(progress) == 1 and progress[0]["to_state"] == S.CHANGES_REQUIRED
+    assert progress[0]["from_state"] == S.IMPLEMENTING
+    assert len(turns) == 2 and len(set(turns)) == 2
+    limits = c.obligations.effective_limits(c.projects["game"], c.store.task("game", "T1"))
+    assert limits["ordinary"]["used"] == 1 and limits["sessions"]["used"] == 2
+
+
 class Clock:
     def __init__(self):
         self.now = time.time()

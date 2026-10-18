@@ -116,6 +116,31 @@ class AnimalUprisingAdapter(GenericAdapter):
                          plan_blob=ws.blob_at(revision, rel))
         return spec
 
+    def pending_build_steps(self, spec: TaskSpec, revision: str, ws) -> list[str] | None:
+        """Open BUILD checklist rows at committed HEAD; the final row is CLOSE.
+
+        None means the plan has no structured checklist, so the engine must use
+        its normal verification path instead of guessing from model prose.
+        """
+        plan = ws.show_at(revision, spec.data.get("plan") or _plan_rel(spec.task_id))
+        if plan is None:
+            return None
+        rows = _checklist_lines(plan)
+        if not rows:
+            return None
+        pending = [line.strip()[:240] for _, line in rows[:-1]
+                   if re.match(r"^\s*-\s*\[\s\]", line)]
+        # Some older plans put the final BUILD gate and CLOSE documentation in
+        # one last checkbox. The checkbox remains reserved for CLOSE, but the
+        # gate itself is still mandatory BUILD work before final verification.
+        last = rows[-1][1]
+        if (re.match(r"^\s*-\s*\[\s\]", last)
+                and re.search(r"\bgate\b", last, re.I)
+                and spec.data.get("tier") in ("A", "B")
+                and self._gate_binding(spec, revision, ws).result != PASS):
+            pending.append("Run and commit the final BUILD gate at this revision")
+        return pending
+
     def _parse_plan(self, task_id: str, rel: str, plan: str) -> TaskSpec:
         """The plan text -> TaskSpec (done_check.py's own scope/tier parsing)."""
         dc = self._done_check_module()

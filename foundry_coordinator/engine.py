@@ -329,6 +329,12 @@ class Coordinator:
         run_id = (pend["run_id"] if pend.get("attempt") == attempt and pend.get("run_id")
                   else f"{tid}-a{attempt}-{uuid.uuid4().hex[:6]}")
         findings = list(t["data"].get("findings") or [])
+        # An in-flight worker from the first BUILD-checkpoint rollout may have
+        # persisted this progress marker as a repair finding. It is a normal
+        # continuation, not a repeated failure to escalate or assign for repair.
+        if free and findings == ["Continue the committed plan's open BUILD steps; "
+                                "final gate and review remain required."]:
+            findings = []
         if own:
             findings.append("the previous session left these task files uncommitted: "
                             + ", ".join(own[:8]) + " — check them and commit them")
@@ -516,6 +522,31 @@ class Coordinator:
             return self.store.transition(pid, tid, S.BLOCKED, {
                 "blocker": f"session reported {status}: {rep.get('blocker') or rep.get('summary')}",
                 "session_id": t["session_id"]}, blocker=str(rep.get("blocker") or status)[:500])
+        # A committed, partially ticked BUILD plan is progress, not a failed
+        # final submission. Keep final verification and every required check for
+        # the point when BUILD is actually complete. Only grant a free next
+        # session if HEAD advanced and the cheap scope/clean/history checks pass;
+        # otherwise the normal verifier handles the failure.
+        pending_fn = getattr(P.adapter, "pending_build_steps", None)
+        if self._lc(P) and callable(pending_fn) and head != t["base_sha"]:
+            spec = P.adapter.describe(tid)
+            pending = pending_fn(spec, head, P.ws)
+            if pending:
+                basics = self._generic_checks(P, t, spec, head, phase="verify")
+                if all(r.result == PASS for r in basics if r.required):
+                    findings = ["Continue the committed plan's open BUILD steps; "
+                                "final gate and review remain required."]
+                    self._release_session(P, t)
+                    return self.store.transition(pid, tid, S.CHANGES_REQUIRED, {
+                        "head_sha": head, "build_progress": True,
+                        "open_steps": pending[:12], "session_id": t["session_id"],
+                        "findings": findings},
+                        head_sha=head, next_action="continue BUILD from committed plan",
+                        # This is planned progress, not a repeated failed check.
+                        # The next session reads the committed NEXT/checklist;
+                        # stale gate findings must not open a recovery decision.
+                        data={**data, "findings": None, "build_progress": pending[:12],
+                              "free_retry": True})
         self._release_session(P, t)
         self.store.transition(pid, tid, S.VERIFYING, {
             "head_sha": head, "session_idle": True, "session_id": t["session_id"],
