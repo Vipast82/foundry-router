@@ -55,6 +55,51 @@ class Workspace:
             return out.encode()[:max_bytes].decode(errors="ignore"), True
         return out, False
 
+    # -- immutable reads at a revision (review packets never read the working tree) --
+
+    def show_at(self, revision: str, rel: str) -> Optional[str]:
+        """The file's text at `revision`, or None when it doesn't exist there."""
+        r = subprocess.run(["git", "-C", self.path, "show", f"{revision}:{rel}"],
+                           capture_output=True, text=True, encoding="utf-8", errors="replace",
+                           timeout=120)
+        return r.stdout if r.returncode == 0 else None
+
+    def blob_at(self, revision: str, rel: str) -> Optional[str]:
+        """The git blob id of the file at `revision` (provenance), or None."""
+        r = subprocess.run(["git", "-C", self.path, "rev-parse", f"{revision}:{rel}"],
+                           capture_output=True, text=True, timeout=60)
+        return r.stdout.strip() if r.returncode == 0 else None
+
+    def ls_tree_at(self, revision: str, rel_dir: str) -> list[tuple[str, str]]:
+        """[(path, blob)] of files under `rel_dir` at `revision` (recursive)."""
+        out = self.run("ls-tree", "-r", revision, "--", rel_dir.rstrip("/") + "/", check=False)
+        res = []
+        for line in out.splitlines():
+            meta, _, path = line.partition("\t")
+            parts = meta.split()
+            if len(parts) >= 3 and parts[1] == "blob":
+                res.append((path, parts[2]))
+        return res
+
+    def diff_files(self, base: str, head: str) -> list[dict]:
+        """Per-file change sizes base..head: [{path, added, deleted, binary}]."""
+        if base == head:
+            return []
+        out = self.run("diff", "--numstat", "--no-renames", f"{base}..{head}")
+        res = []
+        for line in out.splitlines():
+            parts = line.split("\t")
+            if len(parts) == 3:
+                a, d, path = parts
+                res.append({"path": path, "added": int(a) if a.isdigit() else 0,
+                            "deleted": int(d) if d.isdigit() else 0, "binary": a == "-"})
+        return res
+
+    def file_diff(self, base: str, head: str, rel: str) -> str:
+        """The patch for one file base..head."""
+        return self.run("diff", "--patch", "--no-color", "--no-renames", f"{base}..{head}",
+                        "--", rel)
+
     def status(self) -> list[tuple[str, str]]:
         """[(XY, path)] for modified/untracked files (porcelain v1)."""
         out = self.run("status", "--porcelain", "--untracked-files=all")

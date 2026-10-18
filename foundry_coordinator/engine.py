@@ -731,16 +731,21 @@ class Coordinator:
             return self.store.transition(pid, tid, S.VERIFYING, {
                 "invalidated": f"workspace moved from {head[:12]} to {P.ws.head()[:12]} "
                                f"before the review"})
-        spec = P.adapter.describe(tid)
+        spec, spec_from, spec_notes = self._reviewed_spec(P, tid, head)
         if not P.profile.review.get("required", True):
             return self.store.transition(pid, tid, S.APPROVED, {
                 "review_id": "policy:review-not-required", "reviewed_commit_sha": head},
                 reviewed_sha=head, review_id="policy:review-not-required")
         prior = self.store.reviews(pid, tid, head)
-        valid = [r for r in prior if r["valid"]]
+        # only a review made from the current packet format is this commit's review;
+        # one from an older format (possibly truncated, no phase contract) is kept in
+        # the audit trail and its findings carried forward, never reused as a verdict
+        valid = [r for r in prior if r["valid"] and R.packet_version(r) == R.PACKET_VERSION]
         if valid:
             return self._apply_review(P, t, valid[-1])
-        invalid = len(prior)
+        older = [r for r in prior if r["valid"]]
+        invalid = len([r for r in prior if not r["valid"]])
+        n = len(prior)                                  # call index at this head (op key)
         if invalid >= INVALID_REVIEWS_BEFORE_BLOCK:
             self.store.release(pid, tid)
             return self.store.transition(pid, tid, S.BLOCKED, {
@@ -773,31 +778,62 @@ class Coordinator:
             role, persona = alt, P.profile.persona(alt, tid)
         if P.foundry is None:
             return self._block(P, t, "review needs Foundry ([foundry] url) and none is configured")
-        key = f"review:{pid}:{tid}:{head}:{role}:{invalid}"
+        key = f"review:{pid}:{tid}:{head}:{role}:{n}:p{R.PACKET_VERSION}"
         if (self.store.op(key) or {}).get("status") == "done":
             return
-        self.store.op_begin(key, pid, tid, "review")
         base = t["data"].get("task_base") or t["base_sha"]
-        diff, cut = P.ws.diff(base, head, int(P.profile.review.get("max_diff_bytes") or 60000))
         ver = self.store.verification(t["verification_id"], pid, tid)
-        extra = P.adapter.review_extra(spec, head)
-        if authors:
-            extra = (extra or "") + ("\n\n## Code authorship\nThe primary session integrated "
-                                     "proposals from read-only helpers using: "
-                                     + ", ".join(sorted(authors)) + ". Review the result "
-                                     "independently; their proposals are not evidence.")
-        packet = R.build_packet(project_id=pid, task_id=tid, title=spec.title, spec=spec.spec,
-                                scope=spec.scope, base=base, head=head,
-                                commits=P.ws.commits(base, head), diff=diff, diff_truncated=cut,
-                                verification=ver, extra=extra,
-                                question=P.profile.review.get("question") or "")
-        rsid = f"review-{t['run_id']}-{invalid}"
+        limits, limits_from = self._reviewer_limits(P, persona)
+        budget = R.packet_budget(P.profile.review, limits, persona, limits_from)
+        contract = R.normalize_contract(self._adapter_call(
+            P, "review_contract", lambda *_: {"phase": "full", "reviewed": [], "deferred": []},
+            spec))
+        evidence = self._review_evidence(P, spec, head)
+        prio_fn = getattr(P.adapter, "diff_priority", None)
+
+        def priority(f):
+            if callable(prio_fn):
+                try:
+                    return int(prio_fn(f["path"], spec))
+                except Exception:                                 # noqa: BLE001
+                    pass
+            return R.default_diff_priority(f["path"], spec, f.get("binary", False))
+        earlier = [r for r in self.store.reviews(pid, tid) if r["valid"]
+                   and r["verdict"] != "APPROVED"
+                   and (r["reviewed_sha"] != head or R.packet_version(r) != R.PACKET_VERSION)]
+        packet, info = R.build_packet(
+            project_id=pid, task_id=tid, title=spec.title, spec=spec.spec, scope=spec.scope,
+            base=base, head=head, commits=P.ws.commits(base, head), verification=ver,
+            files=P.ws.diff_files(base, head), patch=lambda rel: P.ws.file_diff(base, head, rel),
+            priority=priority, evidence=evidence, contract=contract,
+            provenance={"spec_from": spec_from, "notes": spec_notes}, budget=budget,
+            earlier=earlier, authors=authors, question=P.profile.review.get("question") or "")
+        if info["insufficient"]:
+            # never a partial-code review: the reviewer isn't called at all
+            self.store.event(pid, tid, "review_insufficient", detail={
+                "reviewed_commit_sha": head, "packet_version": R.PACKET_VERSION,
+                **info["coverage"], "budget_source": budget["source"]})
+            return self._block(P, t, info["insufficient"])
+        if older:
+            self.store.event(pid, tid, "review_not_reused", detail={
+                "reviewed_commit_sha": head, "packet_version": R.PACKET_VERSION,
+                "older": [{"review_id": r["review_id"], "verdict": r["verdict"],
+                           "packet_version": R.packet_version(r)} for r in older]})
+        self._settle_stale_review_ops(P, t, key)
+        self.store.op_begin(key, pid, tid, "review")
+        cov = info["coverage"]
+        meta_packet = {"version": R.PACKET_VERSION, "phase": info["phase"], "spec_from": spec_from,
+                       "chars": info["chars"], "est_tokens": info["est_tokens"],
+                       "budget_source": budget["source"], "max_tokens": budget["max_tokens"],
+                       "code_bytes": cov["code_bytes"], "partial": cov["partial"][:50],
+                       "omitted": cov["omitted"][:50], "evidence": cov["evidence"][:30]}
+        rsid = f"review-{t['run_id']}-{n}"
         try:
             self._bind(P, rsid, tid, t["run_id"], role, persona)
             text, meta = P.foundry.chat(persona, [{"role": "system", "content": R.SYSTEM},
                                                   {"role": "user", "content": packet}],
                                         session_id=rsid, schema=R.SCHEMA,
-                                        max_tokens=int(P.profile.review.get("max_tokens") or 4000))
+                                        max_tokens=budget["max_tokens"])
         except FoundryDenied as e:
             self._end_review_binding(P, rsid, "denied")
             self.store.op_update(key, "denied", {"category": e.category, "code": e.code})
@@ -816,11 +852,12 @@ class Coordinator:
         self._end_review_binding(P, rsid, "done")
         try:
             res = R.validate(text, project_id=pid, task_id=tid, head_sha=head, scope=spec.scope)
+            res["packet"] = meta_packet
             rid = self.store.save_review(pid, tid, head, role, persona, res["verdict"], True, "",
                                          res, text)
         except R.ReviewInvalid as e:
-            rid = self.store.save_review(pid, tid, head, role, persona, "", False, str(e), {},
-                                         text)
+            rid = self.store.save_review(pid, tid, head, role, persona, "", False, str(e),
+                                         {"packet": meta_packet}, text)
             self.store.op_update(key, "done", {"review_id": rid, "valid": False})
             self.store.event(pid, tid, "review_invalid", detail={"error": str(e), "role": role})
             return self._note(P, t, f"review result rejected: {e}")
@@ -830,6 +867,94 @@ class Coordinator:
                                                      "served_model": meta.get("served_model"),
                                                      "reviewed_commit_sha": head})
         self._apply_review(P, t, self.store.review(rid, pid, tid))
+
+    def _adapter_call(self, P: Project, name: str, default: Callable, *args):
+        fn = getattr(P.adapter, name, None)
+        return fn(*args) if callable(fn) else default(*args)
+
+    def _reviewed_spec(self, P: Project, tid: str, head: str):
+        """(spec, where it was read, notes): from the reviewed commit when the
+        adapter can (describe_at), else the working tree, said as much."""
+        fn = getattr(P.adapter, "describe_at", None)
+        if callable(fn):
+            try:
+                spec = fn(tid, head, P.ws)
+                data = spec.data if isinstance(spec.data, dict) else {}
+                if data.get("spec_source") == "working tree":
+                    return spec, ("working tree (" + str(data.get("spec_note") or "not bound "
+                                  "to the reviewed revision") + ")"), []
+                blob = data.get("task_file_blob")
+                return spec, f"revision {head}" + (
+                    f" ({data.get('task_file')} blob {str(blob)[:12]})" if blob else ""), []
+            except Exception as e:                                # noqa: BLE001
+                return (P.adapter.describe(tid), "working tree (describe_at failed)",
+                        [f"describe_at({head[:12]}) failed: {str(e)[:200]}; the task spec and "
+                         f"scope were read from the working tree"])
+        return (P.adapter.describe(tid),
+                "working tree (the adapter has no describe_at; not bound to the reviewed "
+                "revision)", [])
+
+    def _review_evidence(self, P: Project, spec, head: str) -> list:
+        """Cited evidence items for the packet (adapter.review_evidence), or the
+        legacy review_extra text marked unverified."""
+        fn = getattr(P.adapter, "review_evidence", None)
+        try:
+            if callable(fn):
+                return list(fn(spec, head, P.ws) or [])
+            legacy = getattr(P.adapter, "review_extra", None)
+            return R.legacy_evidence(legacy(spec, head) if callable(legacy) else "")
+        except Exception as e:                                    # noqa: BLE001
+            return [{"title": "project evidence", "path": "", "revision": head, "blob": None,
+                     "lines": "", "text": "", "status": "missing", "truncated": False,
+                     "priority": 0, "note": f"the adapter could not read its evidence: "
+                                            f"{str(e)[:300]}"}]
+
+    def _reviewer_limits(self, P: Project, persona: str) -> tuple[Optional[dict], str]:
+        """The reviewer persona's advertised {context, output} token limits, when
+        the coordinator can read them: a Foundry persona catalog (persona_limits,
+        if the client offers one) or the coding client's effective config (Kilo
+        provider.<p>.models[persona].limit, the limits doctor reports).
+        (None, "") when neither is available."""
+        fn = getattr(P.foundry, "persona_limits", None)
+        if callable(fn):
+            try:
+                lim = fn(persona) or {}
+                ctx = lim.get("context") or lim.get("context_window")
+                if ctx:
+                    return ({"context": ctx, "output": lim.get("output")
+                             or lim.get("max_output_tokens")}, "Foundry persona catalog")
+            except Exception:                                     # noqa: BLE001
+                pass
+        cfg_fn = getattr(P.client, "effective_config", None)
+        if callable(cfg_fn):
+            try:
+                cfg = cfg_fn(P.profile.workspace) or {}
+                prov = getattr(P.client, "provider", "") or "foundry"
+                models = ((cfg.get("provider") or {}).get(prov) or {}).get("models") or {}
+                lim = (models.get(persona) or {}).get("limit") or {}
+                if lim.get("context"):
+                    return ({"context": lim.get("context"), "output": lim.get("output")},
+                            f"Kilo effective config provider.{prov}.models.{persona}.limit")
+            except Exception:                                     # noqa: BLE001
+                pass
+        return None, ""
+
+    def _settle_stale_review_ops(self, P: Project, t: dict, key: str) -> None:
+        """A review call left "started" by an older packet format (a crash or
+        restart mid-call): its result was never recorded, so whether it was sent
+        is uncertain. It is closed as uncertain and never resumed or waited on;
+        the current-format review has its own key."""
+        suffix = f":p{R.PACKET_VERSION}"
+        for op in self.store.q("SELECT * FROM ops WHERE kind='review' AND project_id=? AND "
+                               "task_id=? AND status='started'", (P.id, t["task_id"])):
+            if op["key"] == key or op["key"].endswith(suffix):
+                continue
+            self.store.op_update(op["key"], "done", {
+                "uncertain": True, "superseded_by": f"packet v{R.PACKET_VERSION}"})
+            self.store.event(P.id, t["task_id"], "review_call_uncertain", detail={
+                "op": op["key"], "packet_version": R.PACKET_VERSION,
+                "note": "an older-format review call may have been sent; no result was "
+                        "recorded, so it is not reused and the commit is reviewed again"})
 
     def _end_review_binding(self, P: Project, rsid: str, outcome: str) -> None:
         if P.foundry is not None:

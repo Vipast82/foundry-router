@@ -20,8 +20,8 @@ import os
 import tomllib
 from typing import Optional
 
-from .base import (FAIL, PASS, TaskSpec, VerificationResult, report_instructions, safe_rel,
-                   sha256_file)
+from .base import (FAIL, PASS, ReviewContractDefaults, TaskSpec, VerificationResult,
+                   duty_bullets, report_instructions, safe_rel, sha256_file)
 from .verify_cmd import run_check
 
 
@@ -78,7 +78,7 @@ Commit only closeout files with a message starting "{task}: ".
 """
 
 
-class GenericAdapter:
+class GenericAdapter(ReviewContractDefaults):
     def __init__(self, profile, state_dir: str):
         self.p = profile
         self.state_dir = state_dir
@@ -92,17 +92,19 @@ class GenericAdapter:
             raise AdapterError(f"task file {rel!r} not found in the workspace")
         with open(path, "rb") as f:
             blob = f.read()
-        data = tomllib.loads(blob.decode()) if path.endswith(".toml") else json.loads(blob)
-        items = data.get("tasks") if isinstance(data, dict) else data
-        if not isinstance(items, list):
-            raise AdapterError(f"{rel}: expected a list of tasks")
-        return items
+        return _parse_task_file(rel, blob.decode())
 
     def list_tasks(self) -> list[str]:
         return [str(t.get("id")) for t in self._task_file() if t.get("id")]
 
     def describe(self, task_id: str) -> TaskSpec:
-        item = next((t for t in self._task_file() if str(t.get("id")) == task_id), None)
+        def read_spec(rel):
+            with open(os.path.join(self.p.workspace, rel), encoding="utf-8") as f:
+                return f.read()
+        return self._spec_from_items(task_id, self._task_file(), read_spec)
+
+    def _spec_from_items(self, task_id: str, items: list[dict], read_spec) -> TaskSpec:
+        item = next((t for t in items if str(t.get("id")) == task_id), None)
         if item is None:
             raise AdapterError(f"task {task_id} is not in the task file")
         spec = str(item.get("spec") or "")
@@ -110,13 +112,38 @@ class GenericAdapter:
             rel = safe_rel(str(item["spec_file"]))
             if not rel or not self.p.in_workspace(rel):
                 raise AdapterError(f"{task_id}: spec_file leaves the workspace")
-            with open(os.path.join(self.p.workspace, rel), encoding="utf-8") as f:
-                spec = f.read()
+            spec = read_spec(rel)
         scope = [s for s in (safe_rel(str(x)) for x in item.get("scope") or []) if s]
         return TaskSpec(project_id=self.p.id, task_id=task_id, title=str(item.get("title") or ""),
                         spec=spec, scope=scope, tags=[str(t) for t in item.get("tags") or []],
                         deps=[str(d) for d in item.get("deps") or []],
                         allow_no_change=bool(item.get("allow_no_change")), data=dict(item))
+
+    def describe_at(self, task_id: str, revision: str, ws) -> TaskSpec:
+        """The task as the reviewed commit defines it: the task file (and its
+        spec_file) read with `git show <revision>:<path>`. A task file that
+        isn't tracked at that revision falls back to the working tree, marked
+        so (data["spec_source"] = "working tree")."""
+        rel = safe_rel(self.p.tasks.get("file") or "")
+        text = ws.show_at(revision, rel) if rel else None
+        if text is None:
+            spec = self.describe(task_id)
+            spec.data.update(spec_source="working tree",
+                             spec_note=f"task file {rel!r} is not tracked at {revision[:12]}")
+            return spec
+        blobs = {rel: ws.blob_at(revision, rel)}
+
+        def read_spec(srel):
+            body = ws.show_at(revision, srel)
+            if body is None:
+                raise AdapterError(f"{task_id}: spec_file {srel} does not exist at "
+                                   f"{revision[:12]}")
+            blobs[srel] = ws.blob_at(revision, srel)
+            return body
+        spec = self._spec_from_items(task_id, _parse_task_file(rel, text), read_spec)
+        spec.data.update(spec_source="revision", spec_revision=revision, task_file=rel,
+                         task_file_blob=blobs[rel], spec_blobs=blobs)
+        return spec
 
     def dependency_done(self, dep: str) -> bool:
         """A dependency finished outside the coordinator (before it existed, or
@@ -189,6 +216,11 @@ class GenericAdapter:
         commands that write closeout files), session (a fresh coding session)."""
         return self.p.closeout.get("mode", "none")
 
+    def closeout_duties(self, spec: TaskSpec) -> list[str]:
+        """The duties a session closeout performs (from [closeout] steps_text):
+        a BUILD review must neither require nor credit them."""
+        return duty_bullets(str(self.p.closeout.get("steps_text") or ""))
+
     def exempt_paths(self, spec: TaskSpec) -> list[str]:
         return self.p.exempt(spec.task_id)
 
@@ -249,6 +281,17 @@ class GenericAdapter:
         except AdapterError as e:
             out.append((FAIL, "task source", str(e)))
         return out
+
+
+def _parse_task_file(rel: str, text: str) -> list[dict]:
+    try:
+        data = tomllib.loads(text) if rel.endswith(".toml") else json.loads(text)
+    except ValueError as e:
+        raise AdapterError(f"{rel}: {e}") from None
+    items = data.get("tasks") if isinstance(data, dict) else data
+    if not isinstance(items, list):
+        raise AdapterError(f"{rel}: expected a list of tasks")
+    return items
 
 
 def failed_findings(results: list[VerificationResult]) -> list[str]:

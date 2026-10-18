@@ -34,8 +34,9 @@ import subprocess
 import sys
 import time
 
-from ...adapters.base import (FAIL, PASS, UNKNOWN, TaskSpec, VerificationResult,
-                              evidence_dir, report_instructions)
+from ...adapters.base import (FAIL, PASS, UNKNOWN, EVIDENCE_ITEM_CHARS, TaskSpec,
+                              VerificationResult, bound_text, evidence_dir, evidence_item,
+                              is_binary_path, report_instructions)
 from ...adapters.project import AdapterError, GenericAdapter
 from ...profile import matches_any
 
@@ -83,13 +84,30 @@ class AnimalUprisingAdapter(GenericAdapter):
         return sorted(n[:-len("_PLAN.md")] for n in os.listdir(d) if n.endswith("_PLAN.md"))
 
     def describe(self, task_id: str) -> TaskSpec:
-        if not re.match(r"^[A-Z][A-Za-z0-9.-]{1,30}$", task_id):
-            raise AdapterError(f"{task_id!r} is not a sprint id")
-        rel = f"docs/progress/{task_id}_PLAN.md"
+        rel = _plan_rel(task_id)
         if not os.path.isfile(os.path.join(self.p.workspace, rel)):
             raise AdapterError(f"{rel} does not exist; the Sprint Manager writes the plan first "
                                f"(or: py -3 tools\\guard\\plan_new.py {task_id})")
-        plan = self._read(rel)
+        spec = self._parse_plan(task_id, rel, self._read(rel))
+        spec.data["spec_source"] = "working tree"
+        return spec
+
+    def describe_at(self, task_id: str, revision: str, ws) -> TaskSpec:
+        """The sprint as the reviewed commit's plan defines it, never the working
+        tree: docs/progress/<ID>_PLAN.md read with `git show <revision>:<plan>`
+        and parsed by the same parser as describe()."""
+        rel = _plan_rel(task_id)
+        plan = ws.show_at(revision, rel)
+        if plan is None:
+            raise AdapterError(f"{rel} does not exist at {revision[:12]}; the review needs the "
+                               f"plan as committed")
+        spec = self._parse_plan(task_id, rel, plan)
+        spec.data.update(spec_source="revision", spec_revision=revision,
+                         plan_blob=ws.blob_at(revision, rel))
+        return spec
+
+    def _parse_plan(self, task_id: str, rel: str, plan: str) -> TaskSpec:
+        """The plan text -> TaskSpec (done_check.py's own scope/tier parsing)."""
         dc = self._done_check_module()
         scope = dc.plan_files(plan)
         tier = dc.plan_tier(plan) or "A"
@@ -121,7 +139,8 @@ class AnimalUprisingAdapter(GenericAdapter):
             "## Checklist", checklist, ("## Last NEXT line\n" + nxt[-1]) if nxt else ""] if x)
         return TaskSpec(project_id=self.p.id, task_id=task_id, title=_title(plan, task_id),
                         spec=spec, scope=scope, tags=tags, deps=deps,
-                        data={"tier": tier, "visual": visual, "plan": rel})
+                        data={"tier": tier, "visual": visual, "plan": rel,
+                              "close_step": _close_step(plan)})
 
     def preflight_task(self, spec: TaskSpec):
         if self.cfg.get("require_rule_amendment", True):
@@ -192,18 +211,96 @@ If the next step needs Victor (an ACTION NEEDED FROM VICTOR block, §22) or a de
 {items}
 """
 
-    def closeout_prompt(self, spec: TaskSpec, ctx: dict) -> str:
+    def _close_duties(self, spec: TaskSpec) -> list[dict]:
+        """The CLOSE session's duties, one structured source for both the CLOSE
+        prompt (step) and the BUILD review contract (duty: reserved for CLOSE,
+        never a BUILD blocker, never credited at BUILD)."""
+        t = spec.task_id
         status = "COMPLETE-PENDING-VISUAL-REVIEW" if spec.data.get("visual") else "DONE"
-        retry = (f"\nAn earlier CLOSE attempt was incomplete; the coordinator saw: "
+        last = spec.data.get("close_step") or ""
+        return [
+            {"id": "summary",
+             "step": f"docs/progress/{t}_SUMMARY.md from docs/progress/_SUMMARY_TEMPLATE.md, "
+                     f"written FROM THE SHIPPED CODE; status word {status} (R-A).",
+             "duty": f"docs/progress/{t}_SUMMARY.md (status word {status}), written from the "
+                     f"shipped code"},
+            {"id": "state",
+             "step": "The STATE.md ledger row (<= 600 characters, measure it), API-surface lines, "
+                     "docs/progress/state/* rows the plan names, the MASTER_ORDER status line if "
+                     "the plan lists it. Edit, never rewrite, state files.",
+             "duty": "The docs/progress/STATE.md ledger row, its API-surface lines and the "
+                     "docs/progress/state/* rows the plan names"},
+            {"id": "master_order",
+             "step": None,                    # part of step 2 in the prompt
+             "duty": "The docs/MASTER_ORDER.md status line (if the plan lists it)"},
+            {"id": "plan_close_step",
+             "step": "Tick the plan's last step with its evidence line.",
+             "duty": "Ticking the plan's final CLOSE step" + (f" ({last})" if last else "")
+                     + " with its evidence line"},
+            {"id": "done_check",
+             "step": f"py -3 tools\\guard\\done_check.py {t} until it prints DONE-CHECK {t} "
+                     f"PASS; paste its output into the evidence log.",
+             "duty": f"tools/guard/done_check.py {t} printing DONE-CHECK {t} PASS (its output "
+                     f"pasted into the evidence log)"},
+            {"id": "push",
+             "step": f'Commit only those closeout files by explicit path, message "{t}: '
+                     f'closeout"; then one plain `git push origin master` and confirm '
+                     f"`git ls-remote origin master` equals HEAD. No tags (the Sprint Manager "
+                     f"issues tags after DONE / Victor's approval).",
+             "duty": f'The "{t}: closeout" commit and the one plain `git push origin master`'},
+        ]
+
+    def closeout_duties(self, spec: TaskSpec) -> list[str]:
+        return [d["duty"] for d in self._close_duties(spec)]
+
+    def review_contract(self, spec: TaskSpec) -> dict:
+        """BUILD review (AGENT_RULES §34 BUILD/CLOSE): the CLOSE session runs only
+        after this review approves, so its duties are deferred, not missing."""
+        t = spec.task_id
+        last = spec.data.get("close_step") or ""
+        reviewed = [
+            f"The BUILD implementation: the code and test changes of {t} up to the reviewed commit",
+            "The completed BUILD checklist items in the plan as committed (ticked lines must be "
+            "backed by evidence; the final CLOSE step" + (f" ({last})" if last else "")
+            + " stays unticked at BUILD)",
+            f"Revision-bound tests and gate: GATE {t} PASS in docs/progress/{t}_EVIDENCE_RAW.log "
+            f"at the reviewed commit, with proper suite verdicts/tallies",
+            "Scope: only files in the plan's 'Files this sprint may change' list changed",
+        ]
+        if spec.data.get("visual") or any(s.startswith(f"docs/evidence/{t}/") for s in spec.scope):
+            reviewed.append(f"The required evidence captures under docs/evidence/{t}/ at the "
+                            f"reviewed commit (visual approval itself is Victor's, later)")
+        return {"phase": "build", "reviewed": reviewed, "deferred": self.closeout_duties(spec)}
+
+    def diff_priority(self, path: str, spec: TaskSpec) -> int:
+        """0 src, 1 tests, 2 the plan / tools / config in scope, 5 other docs,
+        8 evidence logs and docs/evidence, 9 binary."""
+        p = (path or "").replace("\\", "/")
+        if is_binary_path(p):
+            return 9
+        if (p.startswith("docs/progress/") and p.endswith(".log")) or p.startswith("docs/evidence/"):
+            return 8
+        if p.startswith("src/"):
+            return 0
+        if p.startswith("tests/"):
+            return 1
+        if p == spec.data.get("plan", f"docs/progress/{spec.task_id}_PLAN.md"):
+            return 2
+        if not p.startswith("docs/") and (p in spec.scope or p.startswith("tools/")):
+            return 2 if p in spec.scope else 3
+        if p.startswith("docs/") or p.endswith(".md"):
+            return 5
+        return 4
+
+    def closeout_prompt(self, spec: TaskSpec, ctx: dict) -> str:
+        retry =(f"\nAn earlier CLOSE attempt was incomplete; the coordinator saw: "
                  f"{ctx['retry_reason']}\n") if ctx.get("retry_reason") else ""
+        steps = "\n".join(f"{i}. {step}" for i, step in
+                          enumerate((d["step"] for d in self._close_duties(spec) if d["step"]), 1))
         return f"""CLOSE session for sprint {spec.task_id} — {spec.title}.
 {self.rules_text(spec)}
 The code is committed, the gate passed and a frontier review approved commit {ctx.get('base', '')[:12]}. Do only closeout (§9, §31, §34 CLOSE):
-1. docs/progress/{spec.task_id}_SUMMARY.md from docs/progress/_SUMMARY_TEMPLATE.md, written FROM THE SHIPPED CODE; status word {status} (R-A).
-2. The STATE.md ledger row (<= 600 characters, measure it), API-surface lines, docs/progress/state/* rows the plan names, the MASTER_ORDER status line if the plan lists it. Edit, never rewrite, state files.
-3. Tick the plan's last step with its evidence line.
-4. py -3 tools\\guard\\done_check.py {spec.task_id} until it prints DONE-CHECK {spec.task_id} PASS; paste its output into the evidence log.
-5. Commit only those closeout files by explicit path, message "{spec.task_id}: closeout"; then one plain `git push origin master` and confirm `git ls-remote origin master` equals HEAD. No tags (the Sprint Manager issues tags after DONE / Victor's approval).
+{steps}
 Change no code or test file in this session; if one needs changing, stop and report BLOCKED.{retry}
 
 {report_instructions()}
@@ -273,12 +370,10 @@ Change no code or test file in this session; if one needs changing, stop and rep
         except OSError:
             return VerificationResult("au.gate_bound_to_head", FAIL, True, "", f"{rel} missing",
                                       revision)
-        verdicts = list(re.finditer(r"^GATE %s (PASS|FAIL)\b" % re.escape(spec.task_id), ev, re.M))
-        if not verdicts:
+        last, heads = _gate_verdict_and_heads(ev, spec.task_id)
+        if last is None:
             return VerificationResult("au.gate_bound_to_head", FAIL, True, rel,
                                       f"no 'GATE {spec.task_id} PASS|FAIL' line", revision)
-        last = verdicts[-1]
-        heads = re.findall(r"^PASS: GATE HEAD ([0-9a-f]{7,40})", ev[:last.start()], re.M)
         if last.group(1) != "PASS":
             return VerificationResult("au.gate_bound_to_head", FAIL, True, rel,
                                       f"last gate verdict is {last.group(0)}", revision)
@@ -368,6 +463,201 @@ Change no code or test file in this session; if one needs changing, stop and rep
             parts.append(f"{rel}: missing")
         return "\n\n".join(parts)
 
+    # -- review evidence bound to the reviewed commit -----------------------------------
+
+    def review_evidence(self, spec: TaskSpec, revision: str, ws) -> list[dict]:
+        """Evidence for the BUILD review, read ONLY from `revision` (git show /
+        ls-tree), never the working tree: the last gate block and raw suite
+        verdict/tally lines of the evidence log, the captures the plan requires
+        vs. those committed, and the plan's BUILD checklist. Raw lines are quoted
+        with their line numbers; nothing is summarised into a verdict. Missing
+        files are explicit items, stale gate bindings are marked stale, and cut
+        text is flagged truncated."""
+        t = spec.task_id
+        cap = int(self.cfg.get("review_evidence_item_chars") or EVIDENCE_ITEM_CHARS)
+        items: list[dict] = []
+        plan_rel = spec.data.get("plan") or f"docs/progress/{t}_PLAN.md"
+        plan = ws.show_at(revision, plan_rel)
+        plan_blob = ws.blob_at(revision, plan_rel) if plan is not None else ""
+        items += self._log_evidence(spec, revision, ws, cap)
+        items += self._capture_evidence(spec, revision, ws, plan, cap)
+        if plan is None:
+            items.append(evidence_item(f"{t} plan BUILD checklist", path=plan_rel,
+                                       revision=revision, status="missing", priority=0,
+                                       note=f"{plan_rel} does not exist at {revision[:12]}"))
+        else:
+            items.append(self._checklist_evidence(spec, revision, plan_rel, plan_blob, plan, cap))
+        return items
+
+    def _log_evidence(self, spec: TaskSpec, revision: str, ws, cap: int) -> list[dict]:
+        t = spec.task_id
+        rel = f"docs/progress/{t}_EVIDENCE_RAW.log"
+        ev = ws.show_at(revision, rel)
+        if ev is None:
+            note = f"{rel} does not exist at {revision[:12]}: no gate or suite evidence"
+            return [evidence_item(f"{t} last gate block", path=rel, revision=revision,
+                                  status="missing", priority=0, note=note),
+                    evidence_item(f"{t} suite verdict lines", path=rel, revision=revision,
+                                  status="missing", priority=1, note=note)]
+        blob = ws.blob_at(revision, rel) or ""
+        lines = _lines(ev)
+        head = f"# {rel}@{revision} blob {blob} (raw lines, 1-based line numbers)"
+        out = []
+
+        # a. the last === GATE FINISH === block
+        start = max((i for i, l in enumerate(lines) if "=== GATE FINISH ===" in l), default=-1)
+        if start < 0:
+            body, cut, _ = bound_text(_numbered(lines, range(max(0, len(lines) - 40), len(lines))),
+                                      cap, keep="tail")
+            out.append(evidence_item(f"{t} last gate block", path=rel, revision=revision, blob=blob,
+                                     lines=f"{max(1, len(lines) - 39)}-{len(lines)}",
+                                     text=head + "\n" + body, status="missing", truncated=cut,
+                                     priority=0, note="no '=== GATE FINISH ===' marker in the log "
+                                     "at this revision; the last 40 raw lines are shown instead"))
+        else:
+            verdict_re = re.compile(r"^GATE %s (PASS|FAIL)\b" % re.escape(t))
+            end = min(len(lines) - 1, start + 300)
+            for j in range(start + 1, end + 1):
+                if verdict_re.match(lines[j].strip()):
+                    end = j
+                    break
+                if lines[j].startswith("=== GATE") or _SESSION.match(lines[j]):
+                    end = j - 1
+                    break
+            body, cut, omitted = bound_text(_numbered(lines, range(start, end + 1)), cap)
+            status, notes = self._gate_staleness(spec, ev, lines[start:end + 1], revision, ws)
+            if not verdict_re.match(lines[end].strip()):
+                notes.append(f"this block has no 'GATE {t} PASS|FAIL' line")
+                if status == "ok":
+                    status = "unverified"
+            if cut:
+                notes.append(f"{omitted} lines of the block cut")
+            out.append(evidence_item(f"{t} last gate block", path=rel, revision=revision, blob=blob,
+                                     lines=f"{start + 1}-{end + 1}", text=head + "\n" + body,
+                                     status=status, truncated=cut, priority=0,
+                                     note="; ".join(notes)))
+
+        # b. suite verdict / tally material, quoted raw
+        hits = [i for i, l in enumerate(lines) if _suite_line(l, t)]
+        max_lines = int(self.cfg.get("review_suite_lines") or 400)
+        kept = hits[-max_lines:]
+        body, cut, omitted = bound_text(_numbered(lines, kept), cap, keep="tail")
+        cut = cut or len(kept) < len(hits)
+        shown = len(kept) - omitted
+        note = (f"{len(hits)} SESSION / suite verdict / tally lines of {len(lines)} quoted raw; "
+                "no verdict is inferred from individual PASS lines")
+        if cut:
+            note += f"; only the last {shown} matching lines are shown"
+        out.append(evidence_item(f"{t} suite verdict lines", path=rel, revision=revision,
+                                 blob=blob,
+                                 lines=f"{kept[-shown] + 1}-{kept[-1] + 1}" if shown else "",
+                                 text=head + "\n" + body if shown else head,
+                                 status="ok" if hits else "missing", truncated=cut, priority=1,
+                                 note=note if hits else "no SESSION, suite verdict or tally "
+                                 "lines in the log at this revision"))
+        return out
+
+    def _gate_staleness(self, spec: TaskSpec, ev: str, block: list[str], revision: str,
+                        ws) -> tuple[str, list[str]]:
+        """Is the gate bound to the reviewed commit? The same rule as
+        _gate_binding (only closeout-exempt files may change since the gate's
+        HEAD), plus: every revision the gate names (GATE HEAD, a source /
+        baseline sha in the block) must be the reviewed commit or its ancestor."""
+        t = spec.task_id
+        last, heads = _gate_verdict_and_heads(ev, t)
+        notes = [f"last verdict line: {last.group(0)}" if last else
+                 f"no 'GATE {t} PASS|FAIL' verdict line in the log"]
+        named = ([("GATE HEAD", heads[-1])] if heads else [])
+        for line in block:
+            for m in _BASELINE.finditer(line):
+                if all(m.group(1) != s for _, s in named):
+                    named.append((m.group(0).split(m.group(1))[0].strip(" :=") or "baseline",
+                                  m.group(1)))
+        if not heads:
+            notes.append("no 'PASS: GATE HEAD <sha>' before the verdict: the gate is not bound "
+                         "to a revision")
+        status = "ok" if heads else "unverified"
+        exempt = self.exempt_paths(spec) + [f"docs/progress/{t}_*"]
+        for label, sha in named:
+            full = ws.run("rev-parse", "--verify", "--quiet", sha + "^{commit}",
+                          check=False).strip()
+            if not full:
+                status = "stale"
+                notes.append(f"{label} {sha} is not a commit in this repository")
+                continue
+            if full != revision and not ws.is_ancestor(full, revision):
+                status = "stale"
+                notes.append(f"{label} {sha} is not the reviewed commit {revision[:12]} or an "
+                             f"ancestor of it")
+                continue
+            code = [c for c in ws.changed_files(full, revision) if not matches_any(c, exempt)]
+            if code:
+                status = "stale"
+                notes.append(f"{label} {sha}: these files changed since: "
+                             f"{', '.join(code[:8])}" + (" ..." if len(code) > 8 else ""))
+            else:
+                notes.append(f"{label} {sha} is bound to {revision[:12]} (only closeout-exempt "
+                             f"files changed since)")
+        return status, notes
+
+    def _capture_evidence(self, spec: TaskSpec, revision: str, ws, plan, cap: int) -> list[dict]:
+        t = spec.task_id
+        d = f"docs/evidence/{t}"
+        present = dict(ws.ls_tree_at(revision, d))
+        required = [s for s in spec.scope if s.startswith(d + "/") and not _is_glob(s)
+                    and s.lower().endswith((".png", ".jpg", ".jpeg"))]
+        globs = [s for s in spec.scope if s.startswith(d + "/") and _is_glob(s)]
+        if plan:
+            for m in re.finditer(r"docs/evidence/%s/[\w./-]+\.(?:png|jpe?g)" % re.escape(t),
+                                 _section(plan, "Acceptance lines"), re.I):
+                if m.group(0) not in required:
+                    required.append(m.group(0))
+        missing = [r for r in required if r not in present]
+        listing = "\n".join(f"{p}  blob {b}" + ("  (required)" if p in required else "")
+                            for p, b in sorted(present.items()))
+        body, cut, omitted = bound_text(f"# {d}/ @ {revision}\n" + (listing or "(no files)"), cap)
+        notes = [f"{len(present)} files committed, {len(required)} required by the plan's file "
+                 f"list / acceptance lines, {len(missing)} missing"]
+        if globs:
+            notes.append("scope globs (not checked file by file): " + ", ".join(globs))
+        if cut:
+            notes.append(f"{omitted} listing lines cut")
+        status = "ok"
+        if not present and (required or spec.data.get("visual")):
+            status = "missing"
+        out = [evidence_item(f"{t} evidence captures", path=d + "/", revision=revision,
+                             text=body, status=status, truncated=cut, priority=2,
+                             note="; ".join(notes))]
+        for r in missing:
+            out.append(evidence_item(f"Required capture {r}", path=r, revision=revision,
+                                     status="missing", priority=0,
+                                     note=f"required by the plan; not in the tree at "
+                                          f"{revision[:12]}"))
+        return out
+
+    def _checklist_evidence(self, spec: TaskSpec, revision: str, rel: str, blob: str,
+                            plan: str, cap: int) -> dict:
+        main = _checklist_lines(plan)
+        section = bool(main)
+        if not main:
+            main = [(i, l) for i, l in enumerate(_lines(plan)) if _TICK.match(l)]
+        ticked = sum(1 for _, l in main if re.match(r"^\s*-\s\[x\]", l, re.I))
+        body, cut, omitted = bound_text(
+            f"# {rel}@{revision} blob {blob}\n" + "\n".join(f"{i + 1}: {l}" for i, l in main), cap)
+        notes = [f"{ticked} of {len(main)} items ticked"
+                 + ("" if section else " (no '## Checklist' section; all checkbox lines shown)")]
+        if main:
+            notes.append(f"the final item (line {main[-1][0] + 1}) is the CLOSE step, reserved for "
+                         "the CLOSE session; it is not expected ticked at BUILD")
+        if cut:
+            notes.append(f"{omitted} lines cut")
+        return evidence_item(f"{spec.task_id} plan BUILD checklist", path=rel, revision=revision,
+                             blob=blob,
+                             lines=f"{main[0][0] + 1}-{main[-1][0] + 1}" if main else "",
+                             text=body, status="ok" if main else "missing", truncated=cut,
+                             priority=1, note="; ".join(notes) if main else
+                             f"no checklist lines in {rel} at {revision[:12]}")
+
     def session_permissions(self, spec: TaskSpec, phase: str) -> list[dict]:
         rules = super().session_permissions(spec, phase)
         # never: credentials folder, force pushes, hooks bypass (also blocked by the hooks)
@@ -407,6 +697,70 @@ Change no code or test file in this session; if one needs changing, stop and rep
         out.append((PASS if shutil.which("lune") else "WARN", "lune",
                     shutil.which("lune") or "not on PATH (Lune checks will be UNKNOWN)"))
         return out
+
+
+_SPRINT_ID = re.compile(r"^[A-Z][A-Za-z0-9.-]{1,30}$")
+_SESSION = re.compile(r"^\W*SESSION\s+\d+")
+_TICK = re.compile(r"^\s*-\s\[[ xX]\]")
+_SUITE = re.compile(r"\bS\d{1,3}[a-z]?\b.*\b(?:PASS|FAIL|PASSED|FAILED)\b"
+                    r"|\b(?:PASS|FAIL)\b.*\bS\d{1,3}[a-z]?\b")
+_TALLY = re.compile(r"(?i)\b\d+\s+(?:passed|failed|errors?)\b|\b\d+\s*/\s*\d+\s+(?:PASS|FAIL)"
+                    r"|\b(?:passed|failed)\s*[:=]\s*\d+|\bLUNE\s+\d+/\d+|^PASS: GATE HEAD\b")
+_BASELINE = re.compile(r"(?i)\b(?:source|baseline)\b[^\n]{0,40}?\b(?=[0-9a-f]*\d)([0-9a-f]{7,40})\b")
+
+
+def _plan_rel(task_id: str) -> str:
+    if not _SPRINT_ID.match(task_id or ""):
+        raise AdapterError(f"{task_id!r} is not a sprint id")
+    return f"docs/progress/{task_id}_PLAN.md"
+
+
+def _lines(text: str) -> list[str]:
+    """Physical lines (\\n only, as grep / editors number them)."""
+    return [l.rstrip("\r") for l in (text or "").split("\n")]
+
+
+def _numbered(lines: list[str], idx) -> str:
+    return "\n".join(f"{i + 1}: {lines[i]}" for i in idx)
+
+
+def _is_glob(path: str) -> bool:
+    return any(c in path for c in "*?[")
+
+
+def _suite_line(line: str, task_id: str) -> bool:
+    return bool(_SESSION.match(line) or _SUITE.search(line) or _TALLY.search(line)
+                or re.search(r"\bGATE %s (?:PASS|FAIL)\b" % re.escape(task_id), line))
+
+
+def _gate_verdict_and_heads(ev: str, task_id: str):
+    """(last 'GATE <task> PASS|FAIL' match or None, ['PASS: GATE HEAD' shas before it])."""
+    verdicts = list(re.finditer(r"^GATE %s (PASS|FAIL)\b" % re.escape(task_id), ev, re.M))
+    if not verdicts:
+        return None, re.findall(r"^PASS: GATE HEAD ([0-9a-f]{7,40})", ev, re.M)
+    last = verdicts[-1]
+    return last, re.findall(r"^PASS: GATE HEAD ([0-9a-f]{7,40})", ev[:last.start()], re.M)
+
+
+def _checklist_lines(plan: str) -> list[tuple[int, str]]:
+    """[(0-based line index, line)] of the plan's main '## Checklist' section."""
+    out, on = [], False
+    for i, line in enumerate(_lines(plan)):
+        if re.match(r"^##\s+Checklist\b", line):
+            if out:                                 # first section only
+                break
+            on = True
+            continue
+        if on and line.startswith("## "):
+            break
+        if on and _TICK.match(line):
+            out.append((i, line))
+    return out
+
+
+def _close_step(plan: str) -> str:
+    main = _checklist_lines(plan)
+    return re.sub(r"^\s*-\s\[[ xX]\]\s*", "", main[-1][1]).strip()[:160] if main else ""
 
 
 def _section(text: str, name: str) -> str:

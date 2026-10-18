@@ -2,6 +2,72 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.121.8 — BUILD review packets: phase contract, revision-bound evidence, code-first diffs
+
+UI-01's BUILD review (rev-90fe3549c3eb) asked for CLOSE work before approving
+the step that starts CLOSE. It never saw the source changes, because the
+whole-task diff was cut in path order and the 545 KB evidence log came first.
+It also read evidence from the working tree. Review packet v2 fixes all
+three. Everything below is tested against fakes; it is not yet proven live.
+
+**Review phase contract**
+
+- Each adapter states what a review covers (`review_contract`).
+  - Projects with a separate CLOSE session (`closeout.mode = "session"`) get a
+    BUILD contract. The CLOSE duties are listed as deferred and verified later:
+    for AnimalUprising, SUMMARY, the STATE row and state lines, MASTER_ORDER,
+    the final plan step, done_check and the push.
+  - Reviewers may not demand those duties as BUILD blockers or treat them as
+    done. They go in `residual_risks`.
+  - Missing BUILD evidence still blocks, and an APPROVED verdict that lists
+    missing evidence is still refused.
+  - One-phase projects keep the whole-task contract.
+- AnimalUprising builds the deferred list and the CLOSE prompt from the same
+  structured source.
+
+**Evidence from the reviewed commit**
+
+- The task spec, scope and plan are read from the reviewed commit
+  (`describe_at`), not the working tree. The packet cites plan path,
+  revision and blob.
+- Evidence items (`review_evidence`) are read with `git show` at the revision:
+  - the last gate block, quoted raw with line numbers;
+  - suite verdict lines quoted raw, with nothing summarized as PASS;
+  - the BUILD checklist state;
+  - required captures, with their blobs.
+- Each item cites path@revision, blob and lines, and is marked ok, missing,
+  stale or unverified. A gate run on another baseline is marked stale, using
+  the same rule as gate binding.
+- Adapters without the new method fall back to their old evidence, marked
+  unverified.
+
+**Code-first diffs and an honest budget**
+
+- Diffs are assembled per file in priority order: source, tests,
+  plan/config, docs, then raw logs and evidence.
+- A `## Coverage` section lists every changed file as included, partial or
+  omitted, with its size, and says whether all source/test changes are
+  included.
+- The packet budget comes from the reviewer persona's advertised context and
+  output limits, as Kilo's effective config reports them. If those aren't
+  available it uses `[review] max_packet_chars` (default 200,000 characters).
+- If the source/test diff or essential evidence cannot fit, the reviewer is
+  not called. The task blocks as "insufficiently inspected" instead of getting
+  a partial review.
+- Findings from earlier reviews of the task are listed, so the repaired head
+  is checked against them. Historical reviews are untouched.
+
+**Journaling across the format change**
+
+- The review op key carries the packet version and a per-head review count.
+  An old v1 "done" key can't cause a skip loop.
+- An old v1 "started" op is closed as uncertain and never replayed.
+- An old-format approval at the same head is not reused (`review_not_reused`).
+  It stays in the audit trail and still counts toward `max_review_calls`.
+- Independent reviewer selection and verdict validation are unchanged.
+
+**Migration:** none. Deploy at a safe boundary; see the UI-01 recovery handoff.
+
 ## v0.121.7 — live-audit fixes: compaction, lost responses, stale images, guidance, operator notes, diagnostics
 
 Fixes for defects found in the live UI-01 audit, including the items still open
