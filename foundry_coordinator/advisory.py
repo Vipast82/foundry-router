@@ -38,9 +38,11 @@ OFFICIAL = ("https://create.roblox.com/", "https://luau.org/", "https://luau-lan
 def checklist(spec_text: str) -> list[dict]:
     out = []
     for line in (spec_text or "").splitlines():
-        m = re.match(r"^\s*-\s\[([ xX])\]\s*(.+)$", line)
+        m = re.match(r"^\s*-\s\[([ xX~])\]\s*(.+)$", line)
         if m:
-            out.append({"done": m.group(1).lower() == "x", "item": m.group(2).strip()[:300]})
+            # [~] = partly done, still open (same reading as the adapters)
+            out.append({"done": m.group(1).lower() == "x", "partial": m.group(1) == "~",
+                        "item": m.group(2).strip()[:300]})
     return out
 
 

@@ -268,6 +268,13 @@ def main(argv=None, clients=None, foundry=None) -> int:
     x.add_argument("--by", required=True); x.add_argument("--finding", action="append", required=True)
     x = sub.add_parser("answer"); x.add_argument("project"); x.add_argument("task")
     x.add_argument("text", nargs="+")
+    x = sub.add_parser("decision", help="lifecycle decisions")
+    xs = x.add_subparsers(dest="dcmd", required=True)
+    x1 = xs.add_parser("reevaluate", help="re-run the no-progress check of an open no_progress "
+                                          "decision; withdraws it (kept, with an event) only if "
+                                          "progress is now recognized")
+    x1.add_argument("decision_id"); x1.add_argument("--by", required=True)
+    x1.add_argument("--reason", required=True); x1.add_argument("--dry-run", action="store_true")
     for name in ("history", "reviews"):
         x = sub.add_parser(name); x.add_argument("project"); x.add_argument("task")
     x = sub.add_parser("events"); x.add_argument("project", nargs="?", default="")
@@ -384,6 +391,10 @@ def _dispatch(a, c: Coordinator) -> int:
         c.reject_human(a.project, a.task, a.finding, a.by)
     elif a.cmd == "answer":
         c.answer(a.project, a.task, [[" ".join(a.text)]])
+    elif a.cmd == "decision":
+        out = c.decision_reevaluate(a.decision_id, a.by, a.reason, dry_run=a.dry_run)
+        print(json.dumps(out, indent=1, default=str)[:6000])
+        return 0
     elif a.cmd == "history":
         for h in s.history(a.project, a.task):
             print(f"{time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(h['ts']))} "

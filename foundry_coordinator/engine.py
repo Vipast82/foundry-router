@@ -319,8 +319,14 @@ class Coordinator:
             return self._block(P, t, "uncommitted changes in this task's files "
                                      f"({', '.join(foreign[:8])}); commit or move them first — "
                                      "the coordinator never discards work")
-        own = [p for p in in_scope if p not in foreign]
-        baseline = {p: P.ws.file_hash(p) for _, p in dirty if p not in own}
+        # the task's own untracked intermediate gate outputs (exact adapter paths)
+        # are neither "left uncommitted -- commit them" repair findings nor
+        # pre-existing work to preserve byte-for-byte: the gate regenerates them,
+        # and final verification requires them committed
+        inter = [p for p in self._intermediate_dirty(P, t, spec, dirty) if p not in foreign] \
+            if self._lc(P) else []
+        own = [p for p in in_scope if p not in foreign and p not in inter]
+        baseline = {p: P.ws.file_hash(p) for _, p in dirty if p not in own and p not in inter}
         base = P.ws.head()
         # a start that died between Kilo accepting it and the IMPLEMENTING
         # transition is RESUMED (same run id -> same journaled session), never
@@ -361,6 +367,11 @@ class Coordinator:
         prompt = (P.adapter.repair_prompt(spec, findings, ctx) if findings
                   else P.adapter.implement_prompt(spec, ctx))
         prompt += lc_extra
+        if inter:
+            prompt += ("\n## Intermediate gate outputs\nThese task-owned files are untracked "
+                       "intermediate gate output: " + ", ".join(inter[:8]) + ". They do not "
+                       "block BUILD progress; commit them with the final gate run (or let the "
+                       "gate regenerate them). Final verification requires a clean tree.\n")
         if adopted:
             prompt += ("\n## Explicit existing-work handoff\nThe operator adopted these task-scope "
                        "files; original bytes are hash-verified and backed up outside the workspace:\n"
@@ -536,15 +547,25 @@ class Coordinator:
             spec = P.adapter.describe(tid)
             pending = pending_fn(spec, head, P.ws)
             if pending:
-                basics = self._generic_checks(P, t, spec, head, phase="verify")
+                # The project's own gate leaves this task's intermediate outputs
+                # (exact, task-scoped paths) untracked between gate runs: they
+                # don't stop a partial-BUILD continuation, and final verification
+                # still requires them committed. Anything else dirty still blocks.
+                basics = self._generic_checks(P, t, spec, head, phase="verify",
+                                              intermediate=True)
                 if all(r.result == PASS for r in basics if r.required):
+                    inter = next((r.detail for r in basics
+                                  if r.check == "coordinator.intermediate_outputs"), "")
                     findings = ["Continue the committed plan's open BUILD steps; "
                                 "final gate and review remain required."]
+                    total = self._build_total(P, spec, head)
                     self._release_session(P, t)
                     return self.store.transition(pid, tid, S.CHANGES_REQUIRED, {
                         "head_sha": head, "build_progress": True,
                         "open_steps": pending[:12], "session_id": t["session_id"],
-                        "findings": findings},
+                        **({"total_steps": total} if total is not None else {}),
+                        "findings": findings, **({"intermediate_outputs": inter} if inter
+                                                 else {})},
                         head_sha=head, next_action="continue BUILD from committed plan",
                         # This is planned progress, not a repeated failed check.
                         # The next session reads the committed NEXT/checklist;
@@ -811,7 +832,38 @@ class Coordinator:
             "verification_id": vid, "head_sha": head, "all_required_pass": True},
             verification_id=vid, head_sha=head, next_action="review")
 
-    def _generic_checks(self, P: Project, t: dict, spec, head: str, phase: str) -> list:
+    def _build_total(self, P: Project, spec, head: str) -> Optional[int]:
+        """BUILD checklist steps in the committed plan at `head` (the final,
+        CLOSE row excluded); None = no structured checklist."""
+        fn = getattr(P.adapter, "plan_progress", None)
+        try:
+            rows = fn(spec, head, P.ws) if callable(fn) else None
+        except Exception:                                         # noqa: BLE001
+            rows = None
+        return max(len(rows) - 1, 0) if rows else None
+
+    def _intermediate_dirty(self, P: Project, t: dict, spec, dirty: list) -> list[str]:
+        """Untracked files at EXACTLY the adapter's intermediate-output paths for
+        this task (intermediate_outputs(spec)), that were not already dirty
+        before the task started: the task's own regenerated gate outputs."""
+        fn = getattr(P.adapter, "intermediate_outputs", None)
+        try:
+            exact = set(fn(spec) or []) if callable(fn) else set()
+        except Exception:                                         # noqa: BLE001
+            exact = set()
+        if not exact:
+            return []
+        before = set(t["data"].get("task_baseline_dirty") or []) \
+            | set(t["data"].get("baseline_dirty") or {})
+        return [p for xy, p in dirty
+                if xy == "??" and p.replace("\\", "/") in exact and p not in before]
+
+    def _generic_checks(self, P: Project, t: dict, spec, head: str, phase: str,
+                        intermediate: bool = False) -> list:
+        """Scope / history / commits / clean / unrelated-dirty checks. With
+        intermediate=True (ONLY the committed partial-BUILD continuation) the
+        task's own untracked intermediate outputs (_intermediate_dirty) are
+        reported, not failed; final verification and closeout never pass it."""
         base = t["data"].get("task_base") or t["base_sha"]
         exempt = P.adapter.exempt_paths(spec)
         out = []
@@ -853,11 +905,21 @@ class Coordinator:
         baseline = t["data"].get("baseline_dirty") or {}
         in_scope_dirty = [p for _, p in dirty if matches_any(p, spec.scope)
                          or (matches_any(p, exempt) and (p not in baseline or p in changed))]
+        inter = [p for p in self._intermediate_dirty(P, t, spec, dirty)
+                 if p in in_scope_dirty]
+        note = ("intermediate gate output (task-owned, untracked): " + ", ".join(inter[:10])
+                + " — commit it (or regenerate it at the final gate) before final "
+                  "verification") if inter else ""
+        if intermediate and inter:
+            add("intermediate_outputs", PASS, note, required=False)
+            in_scope_dirty = [p for p in in_scope_dirty if p not in inter]
         add("clean", FAIL if in_scope_dirty else PASS,
-            ("uncommitted changes in task files: " + ", ".join(in_scope_dirty[:10]))
+            ("uncommitted changes in task files: " + ", ".join(in_scope_dirty[:10])
+             + (f"; {note}" if note and not intermediate else ""))
             if in_scope_dirty else "task files are committed and clean")
         touched = [p for p, h in baseline.items() if P.ws.file_hash(p) != h]
-        new_dirty = [p for _, p in dirty if p not in baseline and p not in in_scope_dirty]
+        new_dirty = [p for _, p in dirty if p not in baseline and p not in in_scope_dirty
+                     and not (intermediate and p in inter)]
         add("unrelated_preserved", FAIL if touched or new_dirty else PASS,
             "; ".join(x for x in (
                 ("pre-existing uncommitted changes were modified: " + ", ".join(touched[:8]))
@@ -2122,8 +2184,17 @@ class Coordinator:
                 "resolution": why, "decision_id": ",".join(dw.get("ids") or [])},
                 data=rest, next_action="verifying")
             return
-        self.store.transition(pid, tid, S.READY, {"resolution": why, "actor": "engine"},
-                              data=rest)
+        # a re-evaluated no-progress decision (decision_reevaluate) resumes as the
+        # BUILD continuation it should have been: the same evidence keys as the
+        # IMPLEMENTING -> CHANGES_REQUIRED continuation, for the control center
+        br = rest.pop("build_resume", None)
+        cont = {"build_progress": True, **{k: br[k] for k in ("head_sha", "open_steps",
+                                                             "total_steps") if k in br}} \
+            if isinstance(br, dict) and br.get("decision_id") in ids else {}
+        self.store.transition(pid, tid, S.READY, {"resolution": why, "actor": "engine",
+                                                  **cont},
+                              data=rest, **({"next_action": "continue BUILD from committed "
+                                                            "plan"} if cont else {}))
 
     def _lc_final_decision(self, did: str) -> Optional[dict]:
         d = self.obligations.decision(did)
@@ -2337,7 +2408,7 @@ class Coordinator:
         assignment = None
         if findings and self._lc(P, "recovery") and self._lc(P, "obligations"):
             strategy = ""
-            pr = self.recovery.progress(P, t)
+            pr = self._lc_progress(P, t, spec)
             if pr["no_progress"]:
                 q = (f"{pr['stalls']} sessions in a row made no progress (no newly verified "
                      f"obligation, same findings, {pr['summary_only_sessions']} summary-only); "
@@ -2480,6 +2551,46 @@ class Coordinator:
 
     # -- a session ended -------------------------------------------------------------
 
+    def _lc_build_progress(self, P: Project, tid: str, prev: str, head: str,
+                           spec=None) -> dict:
+        """Committed BUILD progress of one session, prev..head, read from git
+        only (never from the model's report):
+          work_files  in-scope files changed (code, tests, evidence, committed
+                      gate outputs), except the plan itself: a plan edit counts
+                      only through its checklist (a NEXT-line rewrite is not
+                      progress); None = unknown
+          checklist   {"before": plan rows at prev, "after": plan rows at head}
+                      (adapter.plan_progress; both None without a checklist)"""
+        out: dict = {}
+        try:
+            spec = spec or P.adapter.describe(tid)
+        except Exception:                                         # noqa: BLE001
+            return out
+        if prev and head:
+            try:
+                changed = P.ws.changed_files(prev, head) if prev != head else []
+                plan = str((getattr(spec, "data", None) or {}).get("plan") or "")
+                out["work_files"] = len([f for f in changed if matches_any(f, spec.scope)
+                                         and f != plan])
+            except Exception:                                     # noqa: BLE001
+                pass
+        fn = getattr(P.adapter, "plan_progress", None)
+        try:
+            after = fn(spec, head, P.ws) if callable(fn) and head else None
+            before = fn(spec, prev, P.ws) if callable(fn) and prev and after else None
+            # recorded even when empty, so a later progress() needn't resolve it again
+            out["checklist"] = {"before": before, "after": after}
+        except Exception:                                         # noqa: BLE001
+            pass
+        return out
+
+    def _lc_progress(self, P: Project, t: dict, spec=None) -> dict:
+        """recovery.progress with marks recorded before v0.122.5 (no committed
+        BUILD progress columns) resolved from git and the committed plan."""
+        tid = t["task_id"]
+        return self.recovery.progress(P, t, resolve=lambda m: self._lc_build_progress(
+            P, tid, m.get("prev_head") or "", m.get("head") or "", spec))
+
     def _lc_session_ended(self, P: Project, t: dict, sid: str, head: str, rep: dict) -> None:
         tid = t["task_id"]
         if self._lc(P, "obligations"):
@@ -2496,10 +2607,13 @@ class Coordinator:
 
             def mark():
                 cur = self.store.task(P.id, tid)
+                build = self._lc_build_progress(P, tid, prev, head)
                 self.recovery.mark_session(P, {**cur, "attempt": self._lc_attempt_no(P, cur)},
                                            sid, prev_head=prev,
                                            head=head, reported=bool(rep),
-                                           actions=str(rep.get("summary") or ""))
+                                           actions=str(rep.get("summary") or ""),
+                                           work_files=build.get("work_files"),
+                                           checklist=build.get("checklist"))
                 self.recovery.close_repair(P, t, self._lc_attempt_no(P, t), end_rev=head,
                                            diff_files=P.ws.changed_files(prev, head)
                                            if prev and prev != head else [])
@@ -2893,6 +3007,100 @@ class Coordinator:
         self.store.event(project_id, task_id, "decision_answered", detail={
             "decision_id": decision_id, "kind": d["kind"], "actor": actor,
             "note": str(note or "")[:300]})
+        return out
+
+    def decision_reevaluate(self, decision_id: str, actor: str, reason: str = "",
+                            dry_run: bool = False) -> dict:
+        """Re-run the no-progress check behind an OPEN no_progress decision with
+        the current logic (committed BUILD progress, [~] checklist steps).
+
+        Still no progress: nothing changes (an event records the re-check).
+        Progress recognized: the decision is WITHDRAWN -- kept, never deleted --
+        with a 'decision_reevaluated' event naming the actor, the reason, the
+        decision's original evidence and the new result; the engine resumes the
+        waiting task on its next tick (_lc_blocked: a withdrawn decision without
+        a successor is resolved). When the task's committed HEAD is exactly the
+        state the partial-BUILD continuation accepts (open plan steps; scope,
+        clean-but-for-intermediate-outputs and history checks pass), its stale
+        final-verification findings are replaced by that continuation, as the
+        fixed engine would have done at that session's end. Attempts, sessions
+        and the budget ledger are never touched. dry_run reports only.
+
+        Operator procedure (after deploying the fix):
+          python -m foundry_coordinator decision reevaluate <decision-id> \\
+              --by <operator> --reason "false no-progress ([~] + intermediate gate
+              outputs), fixed in vX.Y.Z" [--dry-run]"""
+        from .obligations import DecisionRefused, is_model_actor
+        if is_model_actor(actor) or not str(actor or "").strip():
+            raise DecisionRefused(f"actor {actor!r} may not re-evaluate decisions")
+        if not self.store.q("SELECT 1 FROM sqlite_master WHERE type='table' AND "
+                            "name='decisions'"):
+            raise DecisionRefused(f"unknown decision {decision_id}")
+        d = self.obligations.decision(decision_id)
+        if not d:
+            raise DecisionRefused(f"unknown decision {decision_id}")
+        pid, tid = d["project_id"], d["task_id"]
+        P = self._project(pid)
+        if not self._lc(P, "recovery"):
+            raise DecisionRefused(f"{pid} has no lifecycle recovery to re-evaluate")
+        if d["kind"] != "no_progress":
+            raise DecisionRefused(f"{decision_id} is a {d['kind']} decision; only no_progress "
+                                  f"decisions can be re-evaluated (answer it instead)")
+        if d["status"] != "open":
+            raise DecisionRefused(f"{decision_id} is {d['status']}; nothing to re-evaluate")
+        t = self.store.task(pid, tid)
+        try:
+            spec = P.adapter.describe(tid)
+        except AdapterError:
+            spec = None
+        pr = self._lc_progress(P, t, spec)
+        out = {"decision_id": decision_id, "project": pid, "task": tid, "progress": pr,
+               "previous_evidence": d.get("evidence"), "withdrawn": False,
+               "continuation": None, "dry_run": bool(dry_run)}
+        if pr["no_progress"]:
+            out["result"] = "still no progress: the decision stays open"
+            if not dry_run:
+                self.store.event(pid, tid, "decision_reevaluated", detail={
+                    "decision_id": decision_id, "by": actor, "reason": str(reason)[:500],
+                    "result": "unchanged", "progress": pr})
+            return out
+        cont = None
+        head = P.ws.head()
+        pending_fn = getattr(P.adapter, "pending_build_steps", None)
+        if spec is not None and callable(pending_fn) and t["state"] == S.BLOCKED \
+                and t.get("head_sha") == head and head != t["base_sha"]:
+            pending = pending_fn(spec, head, P.ws)
+            if pending:
+                basics = self._generic_checks(P, t, spec, head, phase="verify",
+                                              intermediate=True)
+                if all(r.result == PASS for r in basics if r.required):
+                    cont = {"head_sha": head, "open_steps": pending[:12],
+                            "total_steps": self._build_total(P, spec, head),
+                            "intermediate_outputs": next(
+                                (r.detail for r in basics
+                                 if r.check == "coordinator.intermediate_outputs"), ""),
+                            "replaced_findings": list(t["data"].get("findings") or [])[:12]}
+        out.update(result="progress recognized: decision withdrawn", withdrawn=True,
+                   continuation=cont)
+        if dry_run:
+            out["result"] = "progress recognized (dry run: nothing changed)"
+            return out
+        with self.store.tx():
+            if (self.obligations.decision(decision_id) or {}).get("status") != "open":
+                raise DecisionRefused(f"{decision_id} changed while it was re-evaluated")
+            self.store.x("UPDATE decisions SET status='withdrawn' WHERE decision_id=? AND "
+                         "status='open'", (decision_id,))
+            if cont:
+                self.store.merge_data(pid, tid, findings=None, build_progress=cont["open_steps"],
+                                      free_retry=True, build_resume={
+                                          k: cont[k] for k in ("head_sha", "open_steps",
+                                                               "total_steps")
+                                          if cont.get(k) is not None} | {
+                                          "decision_id": decision_id})
+            self.store.event(pid, tid, "decision_reevaluated", detail={
+                "decision_id": decision_id, "by": actor, "reason": str(reason)[:500],
+                "result": "withdrawn", "progress": pr,
+                "previous_evidence": d.get("evidence"), "continuation": cont})
         return out
 
     # ======================================================================= helpers

@@ -6,7 +6,8 @@ UI-01's: the parsers are generic."""
 
 import json
 
-from foundry_coordinator.adapters.base import FAIL, PASS, UNKNOWN, ReviewContractDefaults
+from foundry_coordinator.adapters.base import (FAIL, PASS, UNKNOWN, ReviewContractDefaults,
+                                              VerificationResult)
 from foundry_coordinator.profile import matches_any
 from foundry_coordinator.projects.animaluprising.adapter import (AnimalUprisingAdapter,
                                                                 _fnv1a32)
@@ -607,3 +608,84 @@ def test_readiness_reports_tooling_faults_instead_of_raising(repo, tmp_path):
                     ws=Workspace(str(bare)))
     assert _res(r, "au.studio.live_sync")["ok"] is None
     assert _res(r, "au.plan_at_head")["ok"] in (None, False)
+
+
+# -- [~] in-progress checklist rows and intermediate gate outputs (UI-02, v0.122.5) ---------
+
+PARTIAL_PLAN = PLAN.replace(
+    "- [x] 1 Kit module\n- [x] 2 Captures desktop + phone\n- [ ] 3 Regression subset + gate\n",
+    "- [x] 1 Kit module\n- [~] 2 Captures desktop + phone -- desktop done; phone remains\n"
+    "- [~] 3 S28 S39 regression subset + gate -- S28 green, S39 remains\n"
+    "- [x] 3b legacy deleted\n- [ ] 3c captures viewed + described\n").replace(
+    "## Acceptance lines\n", "## Acceptance lines\n- [~] NEXT: rerun S77 on phone\n")
+
+
+def test_in_progress_rows_are_open_build_steps_everywhere(repo):
+    a, w, ws = repo["a"], repo["w"], repo["ws"]
+    _write(ws, PLAN_REL, PARTIAL_PLAN)
+    rev = _commit(ws, f"{T}: steps 2-3 in progress")
+    spec = a.describe_at(T, rev, w)
+    # the spec the session reads shows the [~] rows with their notes
+    assert "- [~] 2 Captures desktop + phone -- desktop done; phone remains" in spec.spec
+    assert "- [~] 3 S28 S39 regression" in spec.spec
+    # pending BUILD steps: [~] and [ ] rows are open, [x] rows are done; CLOSE excluded
+    pending = a.pending_build_steps(spec, rev, w)
+    assert [p.split(" -- ")[0] for p in pending] == [
+        "- [~] 2 Captures desktop + phone", "- [~] 3 S28 S39 regression subset + gate",
+        "- [ ] 3c captures viewed + described"]
+    assert not any("1 Kit" in p or "3b legacy" in p or "4 Docs" in p for p in pending)
+    # the CLOSE row reserved for CLOSE is still the last checklist row
+    assert spec.data["close_step"].startswith("4 Docs + gate -Finish")
+    # plan_progress: marks per row, CLOSE row included
+    rows = a.plan_progress(spec, rev, w)
+    assert [m for m, _ in rows] == ["done", "partial", "partial", "done", "open", "open"]
+    assert rows[1][1].endswith("desktop done; phone remains")
+    # the review packet checklist: [~] counted as in progress, never ticked
+    item = next(i for i in a.review_evidence(spec, rev, w)
+                if i["title"] == f"{T} plan BUILD checklist")
+    assert "2 of 6 items ticked; 2 in progress ([~]: partly done, still open)" in item["note"]
+    assert "- [~] 2 Captures" in item["text"]
+    # requirements: a suite led by a [~] row is still required; NEXT under [~] is not
+    req = a._plan_requirements(spec, w)
+    assert {"S28", "S39"} <= set(req["suites"]) and "S77" not in req["suites"]
+    ids = {o["obligation_id"] for o in a.obligations(spec, w)}
+    assert {"build.suite.S28", "build.suite.S39", "build.gate"} <= ids
+    assert "build.suite.S77" not in ids
+    checks = {r["check_id"] for r in a.required_checks(spec, "BUILD", w)}
+    assert {"suite:S28", "suite:S39", f"gate:{T}"} <= checks
+
+
+def test_all_rows_ticked_but_the_gate_keeps_build_open_until_it_passes(repo, monkeypatch):
+    a, w, ws = repo["a"], repo["w"], repo["ws"]
+    done = PLAN.replace("- [ ] 3 Regression subset + gate", "- [x] 3 Regression subset + gate")
+    _write(ws, PLAN_REL, done)
+    rev = _commit(ws, f"{T}: BUILD rows ticked")
+    spec = a.describe_at(T, rev, w)
+    assert a.pending_build_steps(spec, rev, w) == []            # gate PASS bound to code
+    monkeypatch.setattr(a, "_gate_binding", lambda *_: VerificationResult(
+        "au.gate_bound_to_head", FAIL, True, "", "stale", rev))
+    assert a.pending_build_steps(spec, rev, w) == [
+        "Run and commit the final BUILD gate at this revision"]
+    # a [~] CLOSE row is still the CLOSE row, and the gate is still BUILD work
+    _write(ws, PLAN_REL, done.replace("- [ ] 4 Docs", "- [~] 4 Docs"))
+    rev2 = _commit(ws, f"{T}: close row in progress")
+    assert a.pending_build_steps(a.describe_at(T, rev2, w), rev2, w) == [
+        "Run and commit the final BUILD gate at this revision"]
+
+
+def test_intermediate_outputs_are_exact_task_scoped_gate_paths(repo):
+    a = repo["a"]
+    spec = a.describe(T)
+    assert a.intermediate_outputs(spec) == [
+        f"docs/progress/{T}_gate_expect.json", f"docs/progress/{T}_gate_expect_full.json",
+        f"docs/progress/{T}_gate_verdicts.json"]
+    out = a.intermediate_outputs(spec)
+    assert not any(ch in p for p in out for ch in "*?[")              # never a glob
+    assert all(T in p for p in out)                                     # this task only
+    # a profile may add exact '{task}' paths; globs and untemplated paths are refused
+    a.cfg["intermediate_outputs"] = ["docs/progress/{task}_gate_timing.json",
+                                     "docs/progress/*_gate*.json", "docs/progress/shared.json"]
+    assert a.intermediate_outputs(spec)[-1] == f"docs/progress/{T}_gate_timing.json"
+    assert len(a.intermediate_outputs(spec)) == 4
+    assert ReviewContractDefaults().intermediate_outputs(spec) == []
+    assert ReviewContractDefaults().plan_progress(spec, "HEAD", None) is None

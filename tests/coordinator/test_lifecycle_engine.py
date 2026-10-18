@@ -1010,3 +1010,47 @@ def test_recover_does_not_refetch_ended_fully_scanned_sessions(tmp_path):
     ended = [s for s in sessions if s.get("ended_ts")]
     assert ended and calls["n"] == len(sessions) - len(ended)
     assert len(c.ledger.records("game", "T1")) == n and rep["added"] == 0
+
+
+# -- decision reevaluate (UI-02, v0.122.5) ------------------------------------------------
+
+def test_cli_decision_reevaluate_keeps_the_audit_and_never_touches_counters(tmp_path, capsys):
+    """`decision reevaluate <id>`: dry run changes nothing; a real run withdraws a
+    no_progress decision only when progress is now recognized, with an event;
+    other kinds and a true stall are refused / left open."""
+    from foundry_coordinator import cli
+    from foundry_coordinator.obligations import DecisionRefused
+    store_path = tmp_path / "state" / "coordinator.sqlite"
+    c, client, ff, _, prof = _game(tmp_path, green_t1, store_path=store_path)
+    c.approve("game", "T1", [], "victor")
+    assert run_until(c, lambda: _state(c) == S.COMPLETE)
+    P = c.projects["game"]
+    opts = ["answer with a different strategy {strategy: ...}", "authorize more budget",
+            "stop the task"]
+    did = c.obligations.open_decision("game", "T1", "no_progress", "2 sessions no progress",
+                                      options=opts, blocks=["T1"])
+    other = c.obligations.open_decision("game", "T1", "recovery_escalation", "repeats",
+                                        options=opts, blocks=["T1"])
+    before = c.store.task("game", "T1")
+    with pytest.raises(DecisionRefused):
+        c.decision_reevaluate(other, "victor", "not this kind")
+    argv = ["--state", str(tmp_path / "state"), "--profiles", str(prof), "decision",
+            "reevaluate", did, "--by", "victor", "--reason", "fixed in v0.122.5"]
+    assert cli.main(argv + ["--dry-run"], clients={"game": client},
+                    foundry={"game": ff}) == 0
+    assert '"dry_run": true' in capsys.readouterr().out
+    assert c.obligations.decision(did)["status"] == "open"
+    assert cli.main(argv, clients={"game": client}, foundry={"game": ff}) == 0
+    assert '"withdrawn": true' in capsys.readouterr().out
+    d = c.obligations.decision(did)
+    assert d["status"] == "withdrawn" and d["question"] == "2 sessions no progress"
+    ev = [e for e in c.store.events("game", 20) if e["kind"] == "decision_reevaluated"]
+    assert ev[0]["detail"]["by"] == "victor" and ev[0]["detail"]["reason"] == \
+        "fixed in v0.122.5"
+    after = c.store.task("game", "T1")
+    assert (after["attempt"], after["sessions"], after["state"]) == \
+        (before["attempt"], before["sessions"], before["state"])
+    assert c.obligations.decision(other)["status"] == "open"
+    # a withdrawn decision can't be re-evaluated again
+    assert cli.main(argv, clients={"game": client}, foundry={"game": ff}) == 2
+    assert P.id == "game"

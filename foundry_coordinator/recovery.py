@@ -62,7 +62,11 @@ CREATE TABLE IF NOT EXISTS progress_marks (
   prev_head TEXT, head TEXT, verified TEXT, findings_fp TEXT, action_fp TEXT,
   reported INT, ts REAL, UNIQUE (project_id, task_id, session_id));
 """
-_STEPS: list = []
+# v2: committed BUILD progress per session -- work_files (in-scope, non-bookkeeping
+# files changed prev_head..head; NULL = unknown, an older row) and checklist
+# ({"before": rows at prev_head, "after": rows at head}, the adapter's plan_progress)
+_STEPS: list = [(2, [("progress_marks", "work_files", "INT"),
+                     ("progress_marks", "checklist", "TEXT")])]
 
 STOP = frozenset("""
 the and for with from since this that these those was were are is not has have had been
@@ -850,9 +854,19 @@ class Recovery:
 
     def mark_session(self, P, t, session_id: str, *, prev_head: str, head: str,
                      reported: bool = True, actions: str = "",
-                     verified: Optional[list[str]] = None) -> None:
-        """One row per ended session (idempotent on session_id): the head before
-        and after, the verified obligations and open finding set after it."""
+                     verified: Optional[list[str]] = None,
+                     work_files: Optional[int] = None,
+                     checklist: Optional[dict] = None) -> None:
+        """One row per session: the head before and after, the verified
+        obligations and open finding set after it, and its committed BUILD
+        progress (work_files: in-scope non-bookkeeping files changed
+        prev_head..head; checklist: {"before", "after"} plan rows).
+
+        A session can go idle more than once (a helper handoff, a continuation
+        turn): the row keeps the head and checklist it STARTED from and is
+        brought up to date at every later idle, so commits made after the first
+        idle are never lost (they were, before v0.122.5: the first idle's
+        INSERT OR IGNORE froze the row)."""
         task = _tid(t)
         attempt = int((t.get("attempt") if isinstance(t, dict) else 0) or 0)
         if verified is None:
@@ -860,27 +874,70 @@ class Recovery:
                         if o["status"] == "verified"]
         fps = sorted(r["fingerprint"] for r in self.findings(P.id, task)
                      if r["last_seen_attempt"] >= attempt)
-        self.store.x("INSERT OR IGNORE INTO progress_marks (project_id, task_id, session_id, "
-                     "attempt, prev_head, head, verified, findings_fp, action_fp, reported, ts) "
-                     "VALUES (?,?,?,?,?,?,?,?,?,?,?)",
-                     (P.id, task, session_id, attempt, prev_head or "", head or "",
-                      _j(sorted(verified)), _sha(_j(fps)), strategy_fp(actions) if actions
-                      else "", 1 if reported else 0, self.clock()))
+        row = (_j(sorted(verified)), _sha(_j(fps)),
+               strategy_fp(actions) if actions else "", 1 if reported else 0)
+        with self.store.tx():
+            old = self.store.q("SELECT id, checklist FROM progress_marks WHERE project_id=? "
+                               "AND task_id=? AND session_id=?", (P.id, task, session_id))
+            if not old:
+                self.store.x(
+                    "INSERT INTO progress_marks (project_id, task_id, session_id, attempt, "
+                    "prev_head, head, verified, findings_fp, action_fp, reported, ts, "
+                    "work_files, checklist) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                    (P.id, task, session_id, attempt, prev_head or "", head or "", *row,
+                     self.clock(), work_files, _j(checklist) if checklist else None))
+                return
+            # a later idle of the same session: keep where it started (prev_head,
+            # checklist "before") and its first reported actions (the repeat
+            # detector compares sessions, not turns); record where it is now
+            cl = _uj(old[0]["checklist"], None) if old[0]["checklist"] else None
+            if checklist and isinstance(cl, dict) and cl.get("before") is not None:
+                checklist = {**checklist, "before": cl["before"]}
+            self.store.x(
+                "UPDATE progress_marks SET head=?, verified=?, findings_fp=?, "
+                "action_fp=CASE WHEN action_fp='' THEN ? ELSE action_fp END, "
+                "reported=MAX(reported, ?), work_files=COALESCE(?, work_files), "
+                "checklist=COALESCE(?, checklist) WHERE id=?",
+                (head or "", *row, work_files, _j(checklist) if checklist else None,
+                 old[0]["id"]))
 
-    def progress(self, P, t) -> dict:
+    def progress(self, P, t, resolve: Optional[Callable[[dict], dict]] = None) -> dict:
+        """Stall detection over the session marks. A session STALLS when it
+        verified nothing new, made no committed BUILD progress, and either
+        committed nothing or left the same findings. Committed BUILD progress
+        is HEAD advancing with in-scope work files, or a plan checklist step
+        advancing ([ ] -> [~] -> [x]) or an in-progress step's notes changing.
+
+        resolve(mark) -> {"work_files", "checklist"} fills a mark recorded
+        before those columns existed (or with them unknown); without it such a
+        mark is judged by the older rule alone."""
+        from .adapters.base import checklist_transitions
         task = _tid(t)
         marks = self.store.q("SELECT * FROM progress_marks WHERE project_id=? AND task_id=? "
                              "ORDER BY id", (P.id, task))
         stalls = summary_only = repeated = 0
         delta = 0
         prev = None
+        last_build: dict = {}
         for m in marks:
             v = set(_uj(m["verified"], []))
             pv = set(_uj(prev["verified"], [])) if prev else set()
             d = len(v - pv) - len(pv - v)
             committed = bool(m["head"]) and m["head"] != m["prev_head"]
             same_findings = bool(prev) and prev["findings_fp"] == m["findings_fp"]
-            stall = d <= 0 and (not committed or same_findings)
+            work = m.get("work_files")
+            cl = _uj(m.get("checklist"), None) if m.get("checklist") else None
+            if resolve is not None and (work is None or cl is None):
+                try:
+                    got = resolve(dict(m)) or {}
+                except Exception:                                 # noqa: BLE001
+                    got = {}
+                work = got.get("work_files") if work is None else work
+                cl = got.get("checklist") if cl is None else cl
+            steps = checklist_transitions((cl or {}).get("before"), (cl or {}).get("after")) \
+                if isinstance(cl, dict) else []
+            build = (committed and bool(work)) or bool(steps)
+            stall = d <= 0 and not build and (not committed or same_findings)
             summ = bool(m["reported"]) and not committed and d <= 0
             rep = bool(prev) and bool(m["action_fp"]) and m["action_fp"] == prev["action_fp"] \
                 and m["head"] == prev["head"]
@@ -888,12 +945,14 @@ class Recovery:
             summary_only = summary_only + 1 if summ else 0
             repeated = repeated + 1 if rep else 0
             delta = d
+            last_build = {"committed": committed, "work_files": work, "plan_steps": steps[:8]}
             prev = m
         no_progress = stalls >= 2
         rec = "decision" if stalls >= 3 else "consult" if stalls >= 2 else "continue"
         return {"sessions": len(marks), "verified_delta": delta, "repeated_actions": repeated,
                 "summary_only_sessions": summary_only, "stalls": stalls,
-                "no_progress": no_progress, "recommendation": rec}
+                "no_progress": no_progress, "recommendation": rec,
+                "last_session_build": last_build}
 
 
 def _glob_match(path: str, ref: str) -> bool:

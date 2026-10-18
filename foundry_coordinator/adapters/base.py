@@ -24,6 +24,48 @@ from typing import Optional
 PASS, FAIL, UNKNOWN = "PASS", "FAIL", "UNKNOWN"
 REPORT_FENCE = "coordinator-report"
 
+# -- plan checklist marks ----------------------------------------------------------------
+# A plan checklist row is "- [x] ..." (complete), "- [~] ..." (in progress: partly
+# done, usually with notes on what remains) or "- [ ] ..." (open). "[~]" is NOT
+# completion: it is an open step that carries progress information.
+CHECK_ROW = re.compile(r"^\s*-\s\[([ xX~])\]\s*(.*)$")
+_MARK = {" ": "open", "~": "partial", "x": "done", "X": "done"}
+_RANK = {"open": 0, "partial": 1, "done": 2}
+
+
+def checklist_mark(line: str) -> Optional[str]:
+    """'done' | 'partial' | 'open' for a checklist row, None for any other line."""
+    m = CHECK_ROW.match(line or "")
+    return _MARK[m.group(1)] if m else None
+
+
+def checklist_transitions(before, after) -> list[str]:
+    """Plan progress between two checklist states ([[mark, row text], ...], as
+    an adapter's plan_progress() returns them): a step whose mark advanced
+    (open -> partial -> done) or an in-progress step whose notes changed.
+    Rows are matched by their leading step token when it is unique, else by
+    position. A newly added row, a regression (done -> partial) or an edit of a
+    complete row is not progress."""
+    if not before or not after:
+        return []
+
+    def keyed(rows):
+        toks = [((str(t).split() or [""])[0]) for _, t in rows]
+        if all(toks) and len(set(toks)) == len(toks):
+            return {k: (m, str(t)) for k, (m, t) in zip(toks, rows)}
+        return {f"#{i + 1}": (m, str(t)) for i, (m, t) in enumerate(rows)}
+    b, a = keyed(before), keyed(after)
+    out = []
+    for k, (mark, text) in a.items():
+        if k not in b:
+            continue
+        pmark, ptext = b[k]
+        if _RANK.get(mark, 0) > _RANK.get(pmark, 0):
+            out.append(f"step {k}: {pmark} -> {mark}")
+        elif mark == pmark == "partial" and text.strip() != ptext.strip():
+            out.append(f"step {k}: in-progress notes changed")
+    return out
+
 
 @dataclass
 class TaskSpec:
@@ -326,6 +368,22 @@ class ReviewContractDefaults:
                   ctx: Optional[dict] = None) -> list[dict]:
         """[{name, ok, cls, detail, blocking}] before a session; [] = none."""
         return []
+
+    # -- committed BUILD progress (v0.122.5) --------------------------------------------
+
+    def intermediate_outputs(self, spec: TaskSpec) -> list[str]:
+        """Exact workspace paths the project's own tools regenerate for THIS task
+        while BUILD is in progress (e.g. a gate's expectation/verdict files).
+        Untracked files at exactly these paths never block a committed
+        partial-BUILD continuation; final verification still requires them
+        committed (or absent). [] = none known."""
+        return []
+
+    def plan_progress(self, spec: TaskSpec, revision: str, ws) -> Optional[list]:
+        """The committed plan's checklist at `revision` as [[mark, row text]]
+        (mark: done | partial | open, see checklist_mark); None = no structured
+        checklist. Used only to recognize progress, never to pass a check."""
+        return None
 
 
 def evidence_dir(state_dir: str, project_id: str, task_id: str, revision: str) -> str:

@@ -418,3 +418,134 @@ def test_scope_globs_do_not_cross_a_slash():
                                "text": "wrong colour"}, ctx)[0] == "scope_decision"
     assert classify("review", {"severity": "major", "file": "src/ui/x.lua",
                                "text": "wrong colour"}, ctx)[0] == "product_defect"
+
+
+# -- committed BUILD progress (UI-02, v0.122.5) ----------------------------------------------
+
+ROWS0 = [["done", "1 kit"], ["open", "4 legs"], ["open", "5 screens"], ["open", "8 captures"],
+         ["open", "9 close"]]
+ROWS1 = [["done", "1 kit"], ["partial", "4 legs -- desktop green; c6 remains"],
+         ["partial", "5 screens -- Downed done"], ["open", "8 captures"], ["open", "9 close"]]
+ROWS2 = [["done", "1 kit"], ["partial", "4 legs -- desktop + c6 green; c7/c8 remain"],
+         ["partial", "5 screens -- Downed done"], ["open", "8 captures"], ["open", "9 close"]]
+ROWS3 = [["done", "1 kit"], ["done", "4 legs"], ["partial", "5 screens -- Downed done"],
+         ["open", "8 captures"], ["open", "9 close"]]
+
+
+def test_checklist_transitions_count_partial_steps_and_new_notes_only():
+    from foundry_coordinator.adapters.base import checklist_mark, checklist_transitions
+    assert [checklist_mark(x) for x in ("- [x] a", "- [X] a", "- [~] a -- n", "- [ ] a",
+                                        "- [-] a", "* [x] a", "text")] == \
+        ["done", "done", "partial", "open", None, None, None]
+    assert checklist_transitions(ROWS0, ROWS1) == ["step 4: open -> partial",
+                                                   "step 5: open -> partial"]
+    assert checklist_transitions(ROWS1, ROWS2) == ["step 4: in-progress notes changed"]
+    assert checklist_transitions(ROWS2, ROWS3) == ["step 4: partial -> done"]
+    assert checklist_transitions(ROWS3, ROWS3) == []                       # no change
+    assert checklist_transitions(ROWS3, ROWS2) == []                       # a regression
+    edited = [["done", "1 kit (reworded)"]] + ROWS3[1:]
+    assert checklist_transitions(ROWS3, edited) == []                      # a done row edit
+    added = ROWS3 + [["done", "10 extra"]]
+    assert checklist_transitions(ROWS3, added) == []                       # a new ticked row
+    assert checklist_transitions(None, ROWS1) == [] and checklist_transitions(ROWS1, None) == []
+
+
+def _same_findings(rec, P, t):
+    """The live UI-02 shape: the same unfinished-BUILD findings repeat."""
+    for a in (1, 2):
+        rec.record_findings(P, t, a, [{"class": "missing_evidence",
+                                       "check_id": "au.gate_bound_to_head",
+                                       "text": "no 'GATE UI-02 PASS|FAIL' line"}])
+
+
+def test_committed_build_progress_is_progress_despite_the_same_findings(store):
+    ob, rec, P, t = setup(store)
+    _same_findings(rec, P, t)
+    # HEAD advances with in-scope work every session, findings never change
+    for i, (a, b) in enumerate([(ROWS0, ROWS0), (ROWS0, ROWS1), (ROWS1, ROWS1)]):
+        rec.mark_session(P, t, f"s{i}", prev_head=f"c{i}", head=f"c{i + 1}",
+                         work_files=2, checklist={"before": a, "after": b})
+    p = rec.progress(P, t)
+    assert p["stalls"] == 0 and not p["no_progress"] and p["recommendation"] == "continue"
+    # only the plan changed, but a step advanced ([~] notes) -> progress
+    rec.mark_session(P, t, "s3", prev_head="c3", head="c4", work_files=0,
+                     checklist={"before": ROWS1, "after": ROWS2})
+    p = rec.progress(P, t)
+    assert p["stalls"] == 0 and p["last_session_build"]["plan_steps"] == [
+        "step 4: in-progress notes changed"]
+
+
+def test_a_true_stall_still_escalates_with_the_new_columns(store):
+    ob, rec, P, t = setup(store)
+    _same_findings(rec, P, t)
+    for i in range(3):          # no commit, no checklist change, the same findings
+        rec.mark_session(P, t, f"s{i}", prev_head="c1", head="c1", work_files=0,
+                         checklist={"before": ROWS1, "after": ROWS1})
+    p = rec.progress(P, t)
+    assert p["stalls"] == 3 and p["no_progress"] and p["recommendation"] == "decision"
+    # commits that touch only the plan's NEXT line (no work file, no step change)
+    # and leave the same findings are a stall too
+    for i in range(3, 5):
+        rec.mark_session(P, t, f"s{i}", prev_head=f"n{i}", head=f"n{i + 1}", work_files=0,
+                         checklist={"before": ROWS1, "after": ROWS1})
+    assert rec.progress(P, t)["stalls"] == 5
+
+
+def test_marks_from_before_the_columns_are_resolved_or_judged_by_the_old_rule(store):
+    ob, rec, P, t = setup(store)
+    _same_findings(rec, P, t)
+    for i in range(3):          # pre-v0.122.5 rows: no work_files / checklist
+        rec.mark_session(P, t, f"s{i}", prev_head=f"c{i}", head=f"c{i + 1}")
+    old = rec.progress(P, t)
+    assert old["stalls"] == 2 and old["no_progress"]        # the old rule: same findings
+    seen = []
+
+    def resolve(m):
+        seen.append(m["session_id"])
+        return {"work_files": 1, "checklist": {"before": ROWS0, "after": ROWS1}}
+    new = rec.progress(P, t, resolve=resolve)
+    assert new["stalls"] == 0 and not new["no_progress"] and seen == ["s0", "s1", "s2"]
+    # a resolver that fails leaves the old rule in force (never a crash)
+    assert rec.progress(P, t, resolve=lambda m: 1 / 0)["no_progress"]
+
+
+def test_a_later_idle_of_the_same_session_records_its_later_commits(store):
+    """Live UI-02: a session's first idle (a helper handoff) was frozen by INSERT
+    OR IGNORE, so commits it made afterwards never reached the progress marks."""
+    ob, rec, P, t = setup(store)
+    rec.mark_session(P, t, "s1", prev_head="c1", head="c1", actions="first turn",
+                     work_files=0, checklist={"before": ROWS0, "after": ROWS0})
+    rec.mark_session(P, t, "s1", prev_head="c1", head="c4", actions="later turn",
+                     work_files=3, checklist={"before": ROWS1, "after": ROWS3})
+    rows = store.q("SELECT * FROM progress_marks WHERE session_id='s1'")
+    assert len(rows) == 1
+    r = rows[0]
+    assert r["prev_head"] == "c1" and r["head"] == "c4" and r["work_files"] == 3
+    import json
+    cl = json.loads(r["checklist"])
+    assert cl["before"] == ROWS0 and cl["after"] == ROWS3          # started from ROWS0
+    assert r["action_fp"] == __import__("foundry_coordinator.recovery", fromlist=["x"]) \
+        .strategy_fp("first turn")                                  # the session's first
+    p = rec.progress(P, t)
+    assert p["stalls"] == 0 and p["last_session_build"]["committed"]
+
+
+def test_progress_marks_migrate_to_the_new_columns(tmp_path):
+    import sqlite3
+    path = str(tmp_path / "old.sqlite")
+    con = sqlite3.connect(path)
+    con.execute("CREATE TABLE progress_marks (id INTEGER PRIMARY KEY, project_id TEXT, "
+                "task_id TEXT, session_id TEXT, attempt INT, prev_head TEXT, head TEXT, "
+                "verified TEXT, findings_fp TEXT, action_fp TEXT, reported INT, ts REAL, "
+                "UNIQUE (project_id, task_id, session_id))")
+    con.execute("INSERT INTO progress_marks (project_id, task_id, session_id, attempt, "
+                "prev_head, head, verified, findings_fp, action_fp, reported, ts) VALUES "
+                "('game','UI-01','old',1,'a','b','[]','f','',1,0)")
+    con.commit()
+    con.close()
+    st = Store(path)
+    Recovery(st)
+    cols = {r["name"] for r in st.q("PRAGMA table_info(progress_marks)")}
+    assert {"work_files", "checklist"} <= cols
+    r = st.q("SELECT * FROM progress_marks WHERE session_id='old'")[0]
+    assert r["work_files"] is None and r["checklist"] is None       # unknown, not zero

@@ -36,8 +36,8 @@ import sys
 import time
 
 from ...adapters.base import (FAIL, PASS, UNKNOWN, EVIDENCE_ITEM_CHARS, TaskSpec,
-                              VerificationResult, bound_text, duty_bullets, evidence_dir,
-                              evidence_item, is_binary_path, report_instructions)
+                              VerificationResult, bound_text, checklist_mark, duty_bullets,
+                              evidence_dir, evidence_item, is_binary_path, report_instructions)
 from ...adapters.git import GitError
 from ...adapters.project import AdapterError, GenericAdapter
 from ...profile import matches_any
@@ -119,6 +119,8 @@ class AnimalUprisingAdapter(GenericAdapter):
     def pending_build_steps(self, spec: TaskSpec, revision: str, ws) -> list[str] | None:
         """Open BUILD checklist rows at committed HEAD; the final row is CLOSE.
 
+        Open means "[ ]" or "[~]": an in-progress row ("[~]" with notes on what
+        remains) is progress information, never completion; only "[x]" is done.
         None means the plan has no structured checklist, so the engine must use
         its normal verification path instead of guessing from model prose.
         """
@@ -129,17 +131,46 @@ class AnimalUprisingAdapter(GenericAdapter):
         if not rows:
             return None
         pending = [line.strip()[:240] for _, line in rows[:-1]
-                   if re.match(r"^\s*-\s*\[\s\]", line)]
+                   if checklist_mark(line) in ("open", "partial")]
         # Some older plans put the final BUILD gate and CLOSE documentation in
         # one last checkbox. The checkbox remains reserved for CLOSE, but the
         # gate itself is still mandatory BUILD work before final verification.
         last = rows[-1][1]
-        if (re.match(r"^\s*-\s*\[\s\]", last)
+        if (checklist_mark(last) in ("open", "partial")
                 and re.search(r"\bgate\b", last, re.I)
                 and spec.data.get("tier") in ("A", "B")
                 and self._gate_binding(spec, revision, ws).result != PASS):
             pending.append("Run and commit the final BUILD gate at this revision")
         return pending
+
+    def plan_progress(self, spec: TaskSpec, revision: str, ws) -> list | None:
+        """[[done|partial|open, row text]] of the committed plan's main
+        checklist at `revision` (CLOSE row included); None = no checklist."""
+        try:
+            plan = ws.show_at(revision, spec.data.get("plan") or _plan_rel(spec.task_id))
+        except Exception:                                         # noqa: BLE001
+            return None
+        rows = _checklist_lines(plan) if plan else []
+        return [[checklist_mark(l), _CHECK_PREFIX.sub("", l).strip()[:240]]
+                for _, l in rows] or None
+
+    # tools/gate.ps1 writes these per-sprint files beside the evidence log while a
+    # sprint is gated (the expected file hashes and the per-suite verdicts). Other
+    # sprints commit them as closeout evidence (GF-UI1, GF-UI1b, GF-FX3a, GF-REPO1,
+    # UI-01; see config/workstation/checkpoints/UI-01-*/UI-01_PLAN.md), and UI-02's
+    # coordinator findings name exactly these three. Exact, task-scoped paths only:
+    # never a glob over gate JSON files.
+    GATE_INTERMEDIATE = ("docs/progress/{task}_gate_expect.json",
+                         "docs/progress/{task}_gate_expect_full.json",
+                         "docs/progress/{task}_gate_verdicts.json")
+
+    def intermediate_outputs(self, spec: TaskSpec) -> list[str]:
+        """The exact gate.ps1 output paths of THIS sprint (GATE_INTERMEDIATE;
+        [animaluprising] intermediate_outputs may add exact '{task}' paths)."""
+        pats = list(self.GATE_INTERMEDIATE) + [
+            str(p) for p in (self.cfg.get("intermediate_outputs") or [])
+            if isinstance(p, str) and "{task}" in p and not _is_glob(p)]
+        return list(dict.fromkeys(p.replace("{task}", spec.task_id) for p in pats))
 
     def _parse_plan(self, task_id: str, rel: str, plan: str) -> TaskSpec:
         """The plan text -> TaskSpec (done_check.py's own scope/tier parsing)."""
@@ -165,7 +196,7 @@ class AnimalUprisingAdapter(GenericAdapter):
         goal = _section(plan, "Goal")
         acceptance = _accept_section(plan)
         nxt = [l for l in plan.splitlines() if l.startswith("NEXT:")]
-        checklist = "\n".join(l for l in plan.splitlines() if re.match(r"^\s*-\s\[[ x]\]", l))
+        checklist = "\n".join(l for l in plan.splitlines() if checklist_mark(l))
         spec = "\n".join(x for x in [
             f"Plan: {rel} (read it first; it is the sprint's memory, AGENT_RULES §34).",
             f"Tier: {tier}." + (" Visual sprint: status is at most COMPLETE-PENDING-VISUAL-REVIEW "
@@ -710,10 +741,12 @@ Change no code or test file in this session; if one needs changing, stop and rep
         section = bool(main)
         if not main:
             main = [(i, l) for i, l in enumerate(_lines(plan)) if _TICK.match(l)]
-        ticked = sum(1 for _, l in main if re.match(r"^\s*-\s\[x\]", l, re.I))
+        ticked = sum(1 for _, l in main if checklist_mark(l) == "done")
+        partial = sum(1 for _, l in main if checklist_mark(l) == "partial")
         body, cut, omitted = bound_text(
             f"# {rel}@{revision} blob {blob}\n" + "\n".join(f"{i + 1}: {l}" for i, l in main), cap)
         notes = [f"{ticked} of {len(main)} items ticked"
+                 + (f"; {partial} in progress ([~]: partly done, still open)" if partial else "")
                  + ("" if section else " (no '## Checklist' section; all checkbox lines shown)")]
         if main:
             notes.append(f"the final item (line {main[-1][0] + 1}) is the CLOSE step, reserved for "
@@ -1823,7 +1856,8 @@ def _kilo_mcp_studio(path: str) -> tuple:
 
 _SPRINT_ID = re.compile(r"^[A-Z][A-Za-z0-9.-]{1,30}$")
 _SESSION = re.compile(r"^\W*SESSION\s+\d+")
-_TICK = re.compile(r"^\s*-\s\[[ xX]\]")
+_TICK = re.compile(r"^\s*-\s\[[ xX~]\]")          # [~] = in progress: open, not done
+_CHECK_PREFIX = re.compile(r"^\s*-\s\[[ xX~]\]\s*")
 _SUITE = re.compile(r"\bS\d{1,3}[a-z]?\b.*\b(?:PASS|FAIL|PASSED|FAILED)\b"
                     r"|\b(?:PASS|FAIL)\b.*\bS\d{1,3}[a-z]?\b")
 _TALLY = re.compile(r"(?i)\b\d+\s+(?:passed|failed|errors?)\b|\b\d+\s*/\s*\d+\s+(?:PASS|FAIL)"
@@ -1861,7 +1895,7 @@ _READ_CMD = re.compile(r"(?i)^(?:&\s*)?(?:cat|type|more|less|head|tail|grep|egre
                        r"|Get-Content|gc|Select-String|sls|sed\s+-n|awk|wc|echo|printf"
                        r"|Write-Output|Write-Host|git\s+(?:show|log|diff|grep|blame))\b")
 # a NEXT: stop note, any case, plain / bulleted / numbered / checkbox / bold; group 1 = indent
-_NEXT = re.compile(r"(?i)^([ \t]*)(?:(?:[-*+]|\d+[.)])\s+)?(?:\[[ xX]\]\s*)?[*_]*NEXT[*_]*\s*:")
+_NEXT = re.compile(r"(?i)^([ \t]*)(?:(?:[-*+]|\d+[.)])\s+)?(?:\[[ xX~]\]\s*)?[*_]*NEXT[*_]*\s*:")
 _REQ_SECTION = re.compile(r"(?i)acceptance|checklist|regress|test|gate|verif|suite")
 _SUITE_ID = re.compile(r"\b(S\d{1,3}[a-z]?|[A-Z]{1,5}_[A-Z]?\d+[A-Za-z0-9]*)\b")
 # a suite id in prose is required only next to a run / verdict verb ...
@@ -1941,7 +1975,7 @@ def _checklist_lines(plan: str) -> list[tuple[int, str]]:
 
 def _close_step(plan: str) -> str:
     main = _checklist_lines(plan)
-    return re.sub(r"^\s*-\s\[[ xX]\]\s*", "", main[-1][1]).strip()[:160] if main else ""
+    return _CHECK_PREFIX.sub("", main[-1][1]).strip()[:160] if main else ""
 
 
 def _section(text: str, name: str) -> str:
@@ -1989,7 +2023,7 @@ def _required_suites(text: str) -> list[str]:
             out.append(sid)
 
     ids = r"S\d{1,3}[a-z]?|[A-Z]{1,5}_[A-Z]?\d+[A-Za-z0-9]*"          # as _SUITE_ID
-    lead = re.compile(r"^\s*(?:[-*+]|\d+[.)])\s+(?:\[[ xX]\]\s*)?((?:[`*_]*(?:%s)(?![\w])[`*_]*"
+    lead = re.compile(r"^\s*(?:[-*+]|\d+[.)])\s+(?:\[[ xX~]\]\s*)?((?:[`*_]*(?:%s)(?![\w])[`*_]*"
                       r"(?:\s*(?:,|/|\+|&|\band\b)\s*)?)+)" % ids)
     for line in _lines(text):
         m = lead.match(line)
