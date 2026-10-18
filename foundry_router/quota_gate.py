@@ -28,6 +28,7 @@ Accounts:
 
 from __future__ import annotations
 
+import json
 import logging
 import time
 from datetime import datetime
@@ -62,6 +63,7 @@ class QuotaGate:
         self.clock = clock
         self._cache: dict[str, tuple[float, dict]] = {}
         self._alerted: set[str] = set()
+        self._refresh_ts: dict[str, float] = {}
         db = svc.db
         db.execute("CREATE TABLE IF NOT EXISTS helper_quota_state (account TEXT PRIMARY KEY, "
                    "state TEXT, since REAL, reason TEXT, next_eligible REAL, updated REAL)")
@@ -187,28 +189,40 @@ class QuotaGate:
         threshold = pol.cutoff_pct - (pol.hysteresis_pct if deferred else 0.0)
         cooldown_end = (prior["since"] + pol.cooldown_seconds) if deferred else None
         problems = []
+        refreshable = True        # every problem is one a fresh request would clear
         if acct.get("unavailable"):
             return {"state": DEFER, "reason": "account marked unavailable (rate-limited or "
                                               "signed out)", "next_eligible": None}
         for kind in ("session", "weekly"):
             if not any(w["kind"] == kind for w in ws):
                 problems.append(f"no {kind}-window reading")
+                refreshable = False
         for w in ws:
             label = f"{w['name']} ({w['kind']})"
             if w.get("used") is None:
                 problems.append(f"{label}: no utilization figure")
+                refreshable = False
             elif w.get("observed_at") is None:
                 problems.append(f"{label}: {w.get('observation') or 'observation time unknown'}")
+                # headers from "the account's last request": a request refreshes them;
+                # Meridian's quota endpoint without an observation time does not
+                refreshable = refreshable and "last request" in str(w.get("observation") or "")
             elif now - w["observed_at"] > pol.max_observation_age_seconds:
                 problems.append(f"{label}: observed {int((now - w['observed_at']) // 60)} min ago "
                                 f"(limit {pol.max_observation_age_seconds // 60} min)")
+                # a stale reading already at/over the cutoff stays over until its
+                # window resets: refreshing it can't make the helper admissible
+                if w["used"] >= threshold and not w.get("rolled_over"):
+                    refreshable = False
             elif w.get("rolled_over"):
                 problems.append(f"{label}: window reset after the last observation; usage "
                                 f"since the reset is unknown")
             elif w.get("contradicted"):
                 problems.append(f"{label}: reading contradicted by a live call")
+                refreshable = False
         if problems:
-            return {"state": UNKNOWN, "reason": "; ".join(problems[:4]), "next_eligible": None}
+            return {"state": UNKNOWN, "reason": "; ".join(problems[:4]), "next_eligible": None,
+                    "refreshable": refreshable}
         over = [w for w in ws if w["used"] >= threshold]
         if over:
             resets = [w["resets_in_s"] for w in over if w.get("resets_in_s") is not None]
@@ -287,6 +301,10 @@ class QuotaGate:
             # every account that might serve must pass (CLIProxyAPI can't say which)
             worst = next((j for j in states if j["state"] == UNKNOWN), None) or \
                 next((j for j in states if j["state"] == DEFER), None)
+            # stale-only: unknown solely because idle readings aged out, nothing deferred
+            out["stale_only"] = bool(worst and worst["state"] == UNKNOWN and not any(
+                j["state"] == DEFER for j in states) and all(
+                j.get("refreshable") for j in states if j["state"] == UNKNOWN))
             if worst is None:
                 out.update(state=ADMIT, reason="; ".join(j["reason"] for j in states))
             else:
@@ -295,6 +313,82 @@ class QuotaGate:
                            next_eligible=max(nx) if nx else None)
         self._cache[key] = (now, out)
         return out
+
+    async def evaluate_fresh(self, backend: str, model: str) -> dict:
+        """evaluate(), and if the only problem is a reading that went stale while
+        the backend was idle, refresh it with one tiny probe and decide again.
+        Bounded: never while over the cutoff, never on a broken source or a
+        busy backend, at most once per refresh_probe_min_interval_seconds per
+        backend (a CLIProxyAPI pool may need one probe per stale account, cap 4)."""
+        d = await self.evaluate(backend, model)
+        pol = self.pol
+        if d.get("state") != UNKNOWN or not d.get("stale_only") or not getattr(
+                pol, "refresh_probe", False):
+            return d
+        now = self.clock()
+        last = self._refresh_ts.get(backend, 0.0)
+        if now - last < max(60, pol.refresh_probe_min_interval_seconds):
+            return {**d, "refresh": {"skipped": f"refresh probe already tried "
+                                                f"{int(now - last)} s ago"}}
+        s = (getattr(self.svc.pool, "backends", None) or {}).get(backend)
+        health = getattr(self.svc, "health", None)
+        if s is None or health is None or getattr(s, "busy", 0):
+            return {**d, "refresh": {"skipped": "backend busy or unknown"}}
+        # only when its state is actually unknown: a backend a real call or an
+        # earlier probe verified within health.fresh_minutes ("serving") is not
+        # probed again; a stale reading there is a usage-source problem a probe
+        # wouldn't fix
+        try:
+            hs = next((r for r in health.status() if r.get("backend") == backend), None)
+        except Exception:                                         # noqa: BLE001
+            hs = None
+        if hs and hs.get("status") == "serving":
+            return {**d, "refresh": {"skipped": "backend verified serving recently "
+                                                "(real call or probe); no probe needed"}}
+        self._refresh_ts[backend] = now
+        stale = sum(1 for a in d.get("accounts") or [] if a.get("state") == UNKNOWN) or 1
+        probes = []
+        for _ in range(min(4, stale)):
+            p = await health.probe(backend, model)
+            probes.append({k: p.get(k) for k in ("ok", "ms", "detail", "model")})
+            for k in [k for k in self._cache if k.startswith(backend + "|")]:
+                self._cache.pop(k, None)
+            self._drop_source_cache(backend)
+            d = await self.evaluate(backend, model)
+            if not p.get("ok") or d.get("state") != UNKNOWN or not d.get("stale_only"):
+                break
+        self._log_refresh(backend, model, probes, d)
+        return {**d, "refresh": {"probes": probes, "at": now}}
+
+    def _drop_source_cache(self, backend: str) -> None:
+        """Make the next evaluate() read the usage source again."""
+        s = (getattr(self.svc.pool, "backends", None) or {}).get(backend)
+        if s is None:
+            return
+        cfg = s.config
+        try:
+            if cfg.effective_flavor == "cliproxyapi":
+                cu = self.svc.cliproxy_usage
+                cu._cache.pop(cu._mgmt_root({"management_url": cfg.management_url,
+                                             "url": cfg.url}), None)
+            elif cfg.type == "anthropic-compatible":
+                self.svc.meridian_usage.clear_cache()
+        except Exception:                                         # noqa: BLE001
+            pass
+
+    def _log_refresh(self, backend: str, model: str, probes: list, d: dict) -> None:
+        try:
+            self.svc.db.execute(
+                "INSERT INTO helper_admissions (ts, session_id, run_id, project_id, task_id, "
+                "purpose, backend, model, account, decision, reason, next_eligible, detail) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (self.clock(), "", "", "", "", "refresh_probe", backend, model, "",
+                 d.get("state"), f"after {len(probes)} refresh probe(s): {d.get('reason')}"[:500],
+                 d.get("next_eligible"), json.dumps(probes)[:2000]))
+            self.svc.db.log_event("info", "helpers", f"{backend}: stale quota reading refreshed by "
+                                                     f"probe -> {str(d.get('state')).upper()}")
+        except Exception:                                         # noqa: BLE001
+            pass
 
     def _source_alert(self, backend: str, problem: Optional[str]) -> None:
         cc = getattr(self.svc, "control", None)

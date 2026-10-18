@@ -471,3 +471,99 @@ def test_admission_reports_image_modality_per_route(app, client):
         assert r.json()["routes"][0]["vision"] is False
     finally:
         svc.registry.get = real
+
+
+# ------------------------------------------------------------------ stale reading refresh
+
+class FakeHealth:
+    """Stands in for HealthMonitor.probe: a tiny request that, like a real one,
+    makes CLIProxyAPI's per-account usage headers fresh again."""
+
+    def __init__(self, fake, after=None, ok=True, status="unverified"):
+        self.fake, self.after, self.ok, self.calls = fake, after, ok, []
+        self.st = status
+
+    def status(self):
+        return [{"backend": "cpa", "status": self.st}]
+
+    async def probe(self, backend, model=None):
+        self.calls.append((backend, model))
+        if self.after is not None:
+            self.fake.cliproxy_usage.snap = self.after
+        return {"ok": self.ok, "ms": 300, "model": model, "detail": "" if self.ok else "boom"}
+
+
+def test_stale_idle_reading_is_refreshed_by_one_probe_then_admitted(app):
+    gate, fake, clock = make_gate(app)
+    fake.cliproxy_usage.snap = {"ok": True, "accounts": [codex_account("a", 10, 35, age_s=4000)]}
+    fake.health = FakeHealth(fake, after={"ok": True,
+                                          "accounts": [codex_account("a", 11, 35, age_s=5)]})
+    fake.pool.backends["cpa"].busy = 0
+    d = run(gate.evaluate_fresh("cpa", "gpt-6.1-sol"))
+    assert d["state"] == ADMIT and fake.health.calls == [("cpa", "gpt-6.1-sol")]
+    assert d["refresh"]["probes"][0]["ok"]
+    row = fake.db.query_one("SELECT * FROM helper_admissions WHERE purpose='refresh_probe'")
+    assert row and row["decision"] == ADMIT
+    # bounded: going stale again right away does not probe again within the interval
+    fake.cliproxy_usage.snap = {"ok": True, "accounts": [codex_account("a", 10, 35, age_s=4000)]}
+    gate._cache.clear()
+    clock[0] += 60
+    d = run(gate.evaluate_fresh("cpa", "gpt-6.1-sol"))
+    assert d["state"] == UNKNOWN and "already tried" in d["refresh"]["skipped"]
+    assert len(fake.health.calls) == 1
+
+
+@pytest.mark.parametrize("snap,why", [
+    ({"ok": True, "accounts": [codex_account("a", 72, 35, age_s=4000)]}, "over cutoff"),
+    ({"ok": True, "accounts": [codex_account("a", None, 35, age_s=4000)]}, "no session reading"),
+    ({"ok": False, "error": "HTTP 403", "accounts": []}, "broken source"),
+])
+def test_no_refresh_probe_when_a_probe_cannot_help(app, snap, why):
+    gate, fake, _ = make_gate(app)
+    fake.cliproxy_usage.snap = snap
+    fake.health = FakeHealth(fake)
+    fake.pool.backends["cpa"].busy = 0
+    d = run(gate.evaluate_fresh("cpa", "gpt-6.1-sol"))
+    assert d["state"] != ADMIT and fake.health.calls == [], why
+
+
+def test_no_refresh_probe_when_off_or_busy(app):
+    gate, fake, _ = make_gate(app, refresh_probe=False)
+    stale = {"ok": True, "accounts": [codex_account("a", 10, 35, age_s=4000)]}
+    fake.cliproxy_usage.snap = stale
+    fake.health = FakeHealth(fake)
+    fake.pool.backends["cpa"].busy = 0
+    assert run(gate.evaluate_fresh("cpa", "gpt-6.1-sol"))["state"] == UNKNOWN
+    gate2, fake2, _ = make_gate(app)
+    fake2.cliproxy_usage.snap = stale
+    fake2.health = FakeHealth(fake2)
+    fake2.pool.backends["cpa"].busy = 2
+    d = run(gate2.evaluate_fresh("cpa", "gpt-6.1-sol"))
+    assert d["state"] == UNKNOWN and "busy" in d["refresh"]["skipped"]
+    assert fake.health.calls == [] and fake2.health.calls == []
+
+
+def test_failed_refresh_probe_stays_unknown_and_never_admits(app):
+    gate, fake, _ = make_gate(app)
+    fake.cliproxy_usage.snap = {"ok": True, "accounts": [codex_account("a", 10, 35, age_s=4000)]}
+    fake.health = FakeHealth(fake, ok=False)
+    fake.pool.backends["cpa"].busy = 0
+    d = run(gate.evaluate_fresh("cpa", "gpt-6.1-sol"))
+    assert d["state"] == UNKNOWN and d["refresh"]["probes"][0]["ok"] is False
+
+
+def test_no_refresh_probe_when_the_backend_was_verified_recently(app):
+    """Only probe when the state is unknown: a real call or probe that succeeded
+    within health.fresh_minutes ("serving") means no probe on this request."""
+    gate, fake, _ = make_gate(app)
+    fake.cliproxy_usage.snap = {"ok": True, "accounts": [codex_account("a", 10, 35, age_s=4000)]}
+    fake.health = FakeHealth(fake, status="serving")
+    fake.pool.backends["cpa"].busy = 0
+    d = run(gate.evaluate_fresh("cpa", "gpt-6.1-sol"))
+    assert fake.health.calls == [] and "verified serving" in d["refresh"]["skipped"]
+    # a fresh reading never probes at all
+    fake.cliproxy_usage.snap = {"ok": True, "accounts": [codex_account("a", 10, 35, age_s=5)]}
+    fake.health.st = "unverified"
+    gate._cache.clear()
+    d = run(gate.evaluate_fresh("cpa", "gpt-6.1-sol"))
+    assert d["state"] == ADMIT and "refresh" not in d and fake.health.calls == []

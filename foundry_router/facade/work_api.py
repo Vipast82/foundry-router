@@ -121,8 +121,10 @@ async def helper_admission(request: Request, persona: str = "", backend: str = "
         return _bad(ValueError("give persona, or backend and model"))
     out = []
     from ..brain.agent import _model_has_vision
-    for be, m in routes:
-        d = dict(await gate.evaluate(be, m))
+    for i, (be, m) in enumerate(routes):
+        # the first route decides admission: refresh a reading that only went
+        # stale while idle (one tiny probe) instead of answering UNKNOWN
+        d = dict(await (gate.evaluate_fresh(be, m) if i == 0 else gate.evaluate(be, m)))
         # image modality per route, from the model registry (capabilities/tags):
         # a coordinator sending images refuses any route without it
         try:

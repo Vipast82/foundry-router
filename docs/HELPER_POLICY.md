@@ -283,3 +283,39 @@ Lane units are optional helper work under this same policy.
   image modality.
 
 See docs/PROACTIVE_LANES.md.
+
+## Refreshing a stale reading on demand (v0.120.0)
+
+An idle backend's usage reading ages out. CLIProxyAPI only reports usage
+headers from each account's last request, so after `max_observation_age_seconds`
+(default 30 min) without traffic the reading is UNKNOWN and helpers were
+deferred, even though the account was fine.
+
+Now, when a coordinator asks `/v1/foundry/helpers/admission` and the backend's
+state is unknown, Foundry sends one tiny probe to that backend and decides
+again. The probe is the same as "Can it serve?": 16 tokens, thinking off.
+Unknown means two things are both true:
+
+- No successful real call or probe within `health.fresh_minutes`, so the backend
+  is not "serving".
+- The reading went stale only because of idleness.
+
+It never probes:
+
+- when the backend was verified recently (status "serving")
+- when the reading is fresh
+- when a stale reading was already at or over the cutoff (it stays over until
+  its window resets)
+- when the usage source is broken or a window is missing
+- when the backend is busy
+- more than once per `refresh_probe_min_interval_seconds` per backend
+  (default 600)
+
+A CLIProxyAPI pool may get up to one probe per stale account (at most 4),
+because every account has to pass. Each refresh is logged in
+`helper_admissions` (purpose `refresh_probe`) and in Events.
+
+Settings: `helper_policy.refresh_probe` (default true) and
+`refresh_probe_min_interval_seconds`. Both are editable in the control center
+under ⚙ → Helper policy & capacity.
+

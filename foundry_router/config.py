@@ -366,6 +366,14 @@ class HelperPolicyConfig(BaseModel):
     # at fetch time (labelled as an assumption). The auth companion's live
     # /api/oauth/usage source (meridian.usage_profile) needs no such setting.
     trust_fetch_time_for: list[str] = Field(default_factory=list)
+    # When a coordinator asks whether a helper may run and the ONLY problem is
+    # that the usage reading went stale while the backend sat idle, send one
+    # tiny probe (the "Can it serve?" probe: 16 tokens, thinking off) to that
+    # backend to refresh its usage reading, then decide again. Never when a
+    # window is at/over the cutoff, the source is broken, or the backend is
+    # busy; at most once per refresh_probe_min_interval_seconds per backend.
+    refresh_probe: bool = True
+    refresh_probe_min_interval_seconds: int = 600
 
 
 class MeridianConfig(BaseModel):

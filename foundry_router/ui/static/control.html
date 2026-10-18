@@ -2329,6 +2329,8 @@ async function loadHelperSettings() {
       + row("max_observation_age_seconds", "Freshness: max observation age (s)", `<input type="number" id="hp-max_observation_age_seconds" min="60" max="86400" value="${p.max_observation_age_seconds}">`, "Older readings are UNKNOWN even if fetched just now.")
       + row("backend_preference", "Backend preference", `<input type="text" id="hp-backend_preference" value="${esc((p.backend_preference || []).join(", "))}">`, "Comma-separated backend names, first preferred.")
       + row("selective_backends", "High-value only backends", `<input type="text" id="hp-selective_backends" value="${esc((p.selective_backends || []).join(", "))}">`)
+      + row("refresh_probe", "Refresh a stale reading with a probe", `<input type="checkbox" id="hp-refresh_probe" ${p.refresh_probe ? "checked" : ""}>`, "When a helper is wanted and the backend's status is unknown (no successful call or probe within the Can-it-serve window, and its usage reading went stale while idle), send one tiny probe to refresh the reading, then decide. Never when over the cutoff or busy.")
+      + row("refresh_probe_min_interval_seconds", "Minimum seconds between refresh probes", `<input type="number" id="hp-refresh_probe_min_interval_seconds" min="60" max="86400" value="${p.refresh_probe_min_interval_seconds ?? 600}">`, "Per backend.")
       + row("required_helper_sessions_per_run", "Required helper sessions per run", `<input type="number" id="hp-required_helper_sessions_per_run" min="0" max="20" value="${p.required_helper_sessions_per_run}">`, "More planning/diagnosis helpers than this in one run count as optional.")
       + `<div class="sub dim">Per-backend ceilings</div><table class="t"><tr><th>backend</th><th>helpers beyond main</th><th>total calls</th></tr>${(h.capacity || []).filter(c => c.enabled).map(c => `<tr><td>${esc(c.backend)}</td>
           <td><input type="number" min="0" max="32" data-cap="${esc(c.backend)}|helpers_allowed" value="${c.helpers_allowed ?? ""}" style="width:70px"></td>
@@ -2341,7 +2343,9 @@ async function loadHelperSettings() {
       const policy = {optional_enabled: $("#hp-optional_enabled").checked, cutoff_pct: num("cutoff_pct"), hysteresis_pct: num("hysteresis_pct"),
         cooldown_seconds: num("cooldown_seconds"), max_observation_age_seconds: num("max_observation_age_seconds"),
         backend_preference: list("backend_preference"), selective_backends: list("selective_backends"),
-        required_helper_sessions_per_run: num("required_helper_sessions_per_run")};
+        required_helper_sessions_per_run: num("required_helper_sessions_per_run"),
+        refresh_probe: $("#hp-refresh_probe").checked,
+        refresh_probe_min_interval_seconds: num("refresh_probe_min_interval_seconds")};
       const backends = {};
       box.querySelectorAll("[data-cap]").forEach(i => { const [b, k] = i.dataset.cap.split("|"); (backends[b] = backends[b] || {})[k] = i.value === "" ? null : +i.value; });
       try { S.helperStatus = await api("helpers/policy", {method: "PUT", body: {policy, backends}}); S.helperStatusAt = nowS(); toast("Helper policy saved"); scheduleInspector(); }

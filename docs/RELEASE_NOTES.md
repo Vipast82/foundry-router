@@ -2,6 +2,24 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.120.0 — refresh a stale quota reading with a probe before deferring a helper
+
+**What changes**
+
+- **Fix for helpers deferred as UNKNOWN after idle periods.** When a coordinator
+  asks whether a helper may run and the backend's state is unknown, Foundry sends
+  one tiny "Can it serve?" probe to refresh the usage reading, then decides.
+  Unknown means no successful call or probe within `health.fresh_minutes`, and a
+  usage reading that went stale while idle.
+- **Never probes** when the backend was verified recently, the reading is fresh,
+  the last reading was at or over the cutoff, the source is broken, or the
+  backend is busy. At most once per 10 minutes per backend.
+- **Settings:** `helper_policy.refresh_probe` (default on) and
+  `refresh_probe_min_interval_seconds`, in the control center's helper policy
+  settings.
+
+**Migration:** none (new config keys with defaults).
+
 ## v0.119.1 — scoped source-snapshot ownership (v0.118.0 review fix)
 
 **What changes**

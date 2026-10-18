@@ -343,7 +343,8 @@ async def put_draft(request: Request):
 HELPER_POLICY_FIELDS = ("optional_enabled", "cutoff_pct", "hysteresis_pct", "cooldown_seconds",
                         "max_observation_age_seconds", "backend_preference",
                         "selective_backends", "required_helper_sessions_per_run",
-                        "trust_fetch_time_for")
+                        "trust_fetch_time_for", "refresh_probe",
+                        "refresh_probe_min_interval_seconds")
 
 
 def _helper_status(svc) -> dict:
