@@ -58,11 +58,232 @@ LANE_COLUMNS = ("lane TEXT", "priority INTEGER", "parent_unit TEXT", "depth INTE
                 "packet TEXT", "coalesce_key TEXT")
 _SUBAGENT_TITLE = re.compile(r"\(@([\w.-]+) subagent\)")
 
+# v0.122.0 status vocabulary (additive; `status` keeps its v0.117 meaning).
+# phase: what the unit is doing now, for the bridge and the UI. reason_code: WHY
+# it is in that phase, so a terminal `failed` is never ambiguous.
+STATUS_COLUMNS = ("phase TEXT", "reason_code TEXT", "investigation_key TEXT")
+PHASES = ("queued", "admitted", "executing", "waiting_provider", "timed_out", "completed",
+          "cancelled", "error")
+PHASE_LABELS = {"queued": "queued", "admitted": "admitted (starting)",
+                "executing": "executing", "waiting_provider": "waiting on provider",
+                "timed_out": "timed out", "completed": "completed", "cancelled": "cancelled",
+                "error": "error"}
+REASON_CODES = {
+    # failed / timed_out (terminal)
+    "startup_failed": "no reply to the prompt within the startup grace",
+    "timeout": "execution timed out",
+    "poll_unreadable": "session status unreadable until the timeout",
+    "handoff_timeout": "the idle primary stopped waiting (handoff wait over)",
+    "needs_input": "the helper asked for input; helpers can't wait",
+    "session_missing": "Kilo has no such session",
+    "provider_error": "the provider or Kilo returned an error",
+    "empty_result": "the session ended without proposal text",
+    "snapshot_unavailable": "the assignment's snapshot could not be read",
+    "interrupted": "the coordinator restarted mid-call; result unknown, not repeated",
+    "error": "failed (unclassified)",
+    # cancelled / skipped (terminal)
+    "primary_ready": "the primary was ready before this unit was admitted",
+    "primary_finished": "the primary finished first",
+    "task_paused": "task paused",
+    "task_cancelled": "task cancelled",
+    "session_ended": "the primary session ended",
+    "superseded": "superseded by newer work",
+    "skipped": "skipped",
+    "stopped": "stopped by the coordinator",
+    # deferred / waiting (not terminal)
+    "denied_deferred": "Foundry refused the helper mid-run; queued again",
+    "admission_denied": "Foundry did not admit optional work now (quota/window)",
+    "admission_unavailable": "the admission check failed",
+    "binding_failed": "Foundry binding failed",
+    "provider_retry": "Kilo is retrying the provider (no Foundry denial)",
+    "capacity_full": "helper capacity is full",
+    "model_config": "the Kilo model preflight failed",
+    "local_route": "the persona routes to the local backend",
+    "lane_admission": "the lane's admission requirements are not met",
+    "no_persona": "no helper persona configured",
+    # running (not terminal)
+    "abort_unconfirmed": "abort not confirmed by Kilo; retried on the next poll",
+}
+# phases each stored status may legitimately carry; anything else is stale
+# (a row written by another module) and is re-derived
+_PHASES_FOR = {"pending": ("queued",), "deferred": ("queued", "waiting_provider"),
+               "running": ("admitted", "executing", "waiting_provider"),
+               "done": ("completed",), "delivered": ("completed",),
+               "failed": ("timed_out", "error"), "timed_out": ("timed_out",),
+               "skipped": ("cancelled",), "cancelled": ("cancelled",)}
+_TIMEOUT_CODES = ("startup_failed", "timeout", "poll_unreadable", "handoff_timeout")
+_WAITING_CODES = ("denied_deferred", "admission_denied", "admission_unavailable",
+                  "binding_failed", "provider_retry")
+# a duplicate investigation is matched against units that are live or answered
+DUPLICATE_STATUSES = ("pending", "deferred", "running", "done", "delivered")
+DISPOSITIONS = ("integrated", "rejected", "superseded", "pending", "expired", "display_only")
+
 
 def child_agent(title: str) -> str:
     """Kilo names a task-tool child session '<description> (@<agent> subagent)'."""
     m = _SUBAGENT_TITLE.search(title or "")
     return m.group(1) if m else ""
+
+
+def infer_reason_code(status: str, reason: str) -> Optional[str]:
+    """Best reason code for a row whose writer set none (older rows, other
+    modules). Never returns None for a terminal failure."""
+    r = (reason or "").lower()
+    if status in ("failed", "timed_out"):
+        if "no reply to the prompt" in r or "startup failed" in r:
+            return "startup_failed"
+        if "status unreadable" in r:
+            return "poll_unreadable"
+        if status == "timed_out":
+            return "handoff_timeout"
+        if "timed out" in r:
+            return "timeout"
+        if "asked for input" in r:
+            return "needs_input"
+        if "no such session" in r or r.strip() == "missing":
+            return "session_missing"
+        if "no proposal text" in r:
+            return "empty_result"
+        if "snapshot unavailable" in r:
+            return "snapshot_unavailable"
+        if "restarted" in r:
+            return "interrupted"
+        if "failed" in r or "error" in r:
+            return "provider_error"
+        return "error"
+    if status in ("skipped", "cancelled"):
+        if "supersede" in r:
+            return "superseded"
+        if "task paused" in r:
+            return "task_paused"
+        if "task cancelled" in r:
+            return "task_cancelled"
+        if "primary finished" in r:
+            return "primary_finished"
+        if "primary was ready" in r or "before this unit was" in r:
+            return "primary_ready"
+        if "session ended" in r:
+            return "session_ended"
+        return "skipped" if status == "skipped" else "stopped"
+    if status == "deferred":
+        if "refused" in r and "mid-run" in r:
+            return "denied_deferred"
+        if "binding failed" in r:
+            return "binding_failed"
+        if "refused" in r or "quota" in r or "denied" in r or \
+                re.search(r": [A-Z_]+ — ", reason or ""):      # _dispatch: "<b>: STATE — why"
+            return "admission_denied"
+        if "admission check failed" in r:
+            return "admission_unavailable"
+        if "capacity" in r:
+            return "capacity_full"
+        if "preflight" in r:
+            return "model_config"
+        if "local backend" in r:
+            return "local_route"
+        if "no helper persona" in r:
+            return "no_persona"
+    return None
+
+
+def _phase_for(status: str, reason_code: Optional[str], u: Optional[dict] = None) -> str:
+    """The phase a status implies (when the row carries no consistent phase)."""
+    if status == "pending":
+        return "queued"
+    if status == "deferred":
+        if reason_code in _WAITING_CODES or (u or {}).get("next_eligible"):
+            return "waiting_provider"
+        return "queued"
+    if status == "running":
+        return "waiting_provider" if reason_code == "provider_retry" else "executing"
+    if status in ("done", "delivered"):
+        return "completed"
+    if status == "timed_out":
+        return "timed_out"
+    if status == "failed":
+        return "timed_out" if reason_code in _TIMEOUT_CODES else "error"
+    if status in ("skipped", "cancelled"):
+        return "cancelled"
+    return "queued"
+
+
+_RUNNING_CODES = (None, "", "provider_retry", "abort_unconfirmed", "poll_unreadable")
+
+
+def _consistent(u: dict) -> bool:
+    """Does the stored phase/reason_code still describe the stored status?"""
+    status, phase, code = str(u.get("status") or ""), u.get("phase"), u.get("reason_code")
+    if phase not in _PHASES_FOR.get(status, ()):
+        return False
+    if status == "running":
+        return code in _RUNNING_CODES and \
+            (phase != "waiting_provider" or code == "provider_retry")
+    if status in ("pending", "done", "delivered"):
+        return not code
+    if status in ("failed", "timed_out", "skipped", "cancelled"):
+        return bool(code) and code not in _RUNNING_CODES and code not in _WAITING_CODES
+    if status == "deferred":
+        return code not in ("abort_unconfirmed", "provider_retry", "poll_unreadable")
+    return True
+
+
+def disposition(u: dict) -> Optional[str]:
+    """What happened to a unit's result: integrated | rejected | superseded |
+    pending (answered, no claim yet) | expired | display_only. None while the
+    unit has no result."""
+    fb = u.get("feedback")
+    if fb in ("integrated", "rejected", "superseded", "expired", "display_only"):
+        return fb
+    if u.get("status") in ("done", "delivered"):
+        return "pending"
+    return None
+
+
+def unit_status(u: dict) -> dict:
+    """{phase, reason_code, disposition, label} for one helper_units row. The
+    stored phase is used when it agrees with the stored status; a row written
+    by a module that sets only `status` is re-derived, so this never lies."""
+    status = str(u.get("status") or "pending")
+    if _consistent(u):
+        phase, code = u["phase"], u.get("reason_code") or None
+    else:
+        code = infer_reason_code(status, u.get("reason") or "")
+        phase = _phase_for(status, code, u)
+    disp = disposition(u)
+    label = PHASE_LABELS.get(phase, phase) + (f": {code}" if code else "")
+    if disp:
+        label += f" ({disp})"
+    return {"phase": phase, "reason_code": code, "disposition": disp, "label": label}
+
+
+status_phase = unit_status
+
+
+def _norm_text(s: str) -> str:
+    return re.sub(r"[^a-z0-9]+", " ", (s or "").lower()).strip()
+
+
+def _norm_files(files) -> list[str]:
+    out = set()
+    for f in files or []:
+        f = str(f).strip().replace("\\", "/").lower()
+        while f.startswith("./"):
+            f = f[2:]
+        if f:
+            out.add(f)
+    return sorted(out)
+
+
+def investigation_key(responsibility: str, files, lane: Optional[str] = None) -> str:
+    """Cross-kind identity of an investigation: normalized responsibility plus
+    the normalized file set. A lane's responsibility is '<lane>:<key>' (maybe
+    '~<unit>' suffixed); the lane prefix and suffix are not part of it."""
+    resp = str(responsibility or "")
+    if lane and resp.startswith(f"{lane}:"):
+        resp = resp[len(lane) + 1:]
+    resp = re.sub(r"~hu-[0-9a-f]+$", "", resp)
+    body = json.dumps([_norm_text(resp), _norm_files(files)])
+    return hashlib.sha1(body.encode()).hexdigest()[:20]
 
 
 class HelperManager:
@@ -73,13 +294,50 @@ class HelperManager:
         self.store.conn.executescript(SCHEMA)
         # additive columns only (v0.117.0 -> requests; v0.118.0 -> proactive lanes);
         # existing rows keep their meaning (lane NULL = an ordinary helper unit)
-        for col in ("requests INTEGER DEFAULT 1", *LANE_COLUMNS):
+        # v0.122.0 -> phase / reason_code / investigation_key (status unchanged)
+        for col in ("requests INTEGER DEFAULT 1", *LANE_COLUMNS, *STATUS_COLUMNS):
             try:
                 self.store.conn.execute(f"ALTER TABLE helper_units ADD COLUMN {col}")
             except Exception:                                    # noqa: BLE001
                 pass
+        self._backfill_status()
         from .proactive import Proactive
         self.lanes = Proactive(self)
+
+    def _backfill_status(self, where: str = "phase IS NULL", args: tuple = ()) -> int:
+        """Rows from before v0.122.0 (or written by a module that sets only
+        `status`) get a derived phase/reason_code; never touches updated_ts."""
+        n = 0
+        for u in self.store.q(f"SELECT * FROM helper_units WHERE {where}", args):
+            s = unit_status(u)
+            self.store.x("UPDATE helper_units SET phase=?, reason_code=? WHERE unit_id=?",
+                         (s["phase"], s["reason_code"], u["unit_id"]))
+            n += 1
+        return n
+
+    def _mark(self, uid: str, phase: str, reason_code: Optional[str]) -> None:
+        """Record phase + reason_code (never updated_ts: timeouts run on it)."""
+        self.store.x("UPDATE helper_units SET phase=?, reason_code=? WHERE unit_id=? AND "
+                     "(COALESCE(phase,'') != ? OR COALESCE(reason_code,'') != ?)",
+                     (phase, reason_code, uid, phase, reason_code or ""))
+
+    def sync_status(self, pid: str, tid: str) -> int:
+        """Re-derive phase/reason_code for rows whose stored phase disagrees
+        with their status (lane/visual/advisory code writes `status` only)."""
+        n = 0
+        for u in self.store.q("SELECT * FROM helper_units WHERE project_id=? AND task_id=?",
+                              (pid, tid)):
+            if _consistent(u):
+                continue
+            s = unit_status(u)
+            self.store.x("UPDATE helper_units SET phase=?, reason_code=? WHERE unit_id=?",
+                         (s["phase"], s["reason_code"], u["unit_id"]))
+            n += 1
+        return n
+
+    @staticmethod
+    def unit_status(u: dict) -> dict:
+        return unit_status(u)
 
     # ------------------------------------------------------------------ settings
 
@@ -125,7 +383,8 @@ class HelperManager:
             r["files"] = json.loads(r["files"] or "[]")
         return rows
 
-    def _add(self, pid, tid, run_id, u: dict, source: str, h: dict) -> Optional[str]:
+    def _add(self, pid, tid, run_id, u: dict, source: str, h: dict,
+             head=None) -> Optional[str]:
         resp = re.sub(r"\s+", " ", str(u.get("responsibility") or "")).strip()[:200]
         kind = str(u.get("kind") or "code_proposal")
         if not resp or kind not in OPTIONAL_KINDS:
@@ -137,17 +396,25 @@ class HelperManager:
             p = prior[0]
             if p["status"] in REQUESTABLE_AGAIN and source == "report" and \
                     int(p["requests"] or 1) < int(h["max_unit_requests"]):
+                files = [str(f) for f in (u.get("files") or [])][:30]
                 self.store.x("UPDATE helper_units SET status='pending', kind=?, prompt=?, "
                              "files=?, run_id=?, requests=COALESCE(requests,1)+1, next_check=0, "
-                             "reason=?, session_id=NULL, updated_ts=? WHERE unit_id=?",
+                             "reason=?, session_id=NULL, updated_ts=?, phase='queued', "
+                             "reason_code=NULL, investigation_key=? WHERE unit_id=?",
                              (kind, str(u.get("prompt") or "")[:6000],
-                              json.dumps([str(f) for f in (u.get("files") or [])][:30]), run_id,
+                              json.dumps(files), run_id,
                               f"requested again (was {p['status']}: {p['reason'] or ''})"[:500],
-                              now, p["unit_id"]))
+                              now, investigation_key(resp, files), p["unit_id"]))
                 self.store.event(pid, tid, "helper_unit", detail={"unit": p["unit_id"],
                                                                   "requested_again": True})
                 return p["unit_id"]
             return None                       # one unit per responsibility
+        files = [str(f) for f in (u.get("files") or [])][:30]
+        ikey = investigation_key(resp, files)
+        dup = self.duplicate_of(pid, tid, run_id, resp, files, head=head)
+        if dup:
+            self._coalesce_duplicate(pid, tid, dup, resp, kind, source, ikey)
+            return None
         ordinary = [x for x in self.units(pid, tid) if not x.get("lane")]
         if len(ordinary) >= int(h["max_units_per_task"]):
             self.store.event(pid, tid, "helper_limit", detail={
@@ -157,24 +424,122 @@ class HelperManager:
         uid = f"hu-{uuid.uuid4().hex[:10]}"
         n = self.store.x("INSERT OR IGNORE INTO helper_units (unit_id, project_id, task_id, run_id, "
                          "responsibility, kind, value, prompt, files, source, status, created_ts, "
-                         "updated_ts, next_check) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                         "updated_ts, next_check, phase, investigation_key) VALUES "
+                         "(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                          (uid, pid, tid, run_id, resp, kind,
                           "high" if u.get("value") == "high" else "normal",
                           str(u.get("prompt") or "")[:6000],
-                          json.dumps([str(f) for f in (u.get("files") or [])][:30]), source,
-                          "pending", now, now, 0))
+                          json.dumps(files), source,
+                          "pending", now, now, 0, "queued", ikey))
         if n:
             self.store.event(pid, tid, "helper_unit", detail={"unit": uid, "kind": kind,
                                                               "responsibility": resp,
                                                               "source": source})
         return uid
 
+    def duplicate_of(self, pid: str, tid: str, run_id: str, responsibility: str, files,
+                     lane: Optional[str] = None, snapshot_id: str = "",
+                     head=None) -> Optional[dict]:
+        """A live or answered unit of this run, of ANY kind (ordinary or lane),
+        that investigates the same thing: same normalized responsibility and
+        the same normalized file set. Rejected/superseded/expired results
+        don't count; failed/skipped/cancelled/timed-out units produced nothing
+        to reuse. An ANSWERED (done/delivered) unit only counts when its result
+        is still about the requester's code: a lane result proactive would
+        reuse (structured, its own assignment, no base mismatch) of the SAME
+        snapshot_id, or an ordinary result recorded at the SAME head (`head`:
+        a str, or a callable read only when needed). When that can't be
+        determined, nothing is coalesced onto an answered unit."""
+        key = investigation_key(responsibility, files, lane)
+        head_cache: list = []
+
+        def cur_head() -> str:
+            if not head_cache:
+                try:
+                    head_cache.append(str((head() if callable(head) else head) or ""))
+                except Exception:                                # noqa: BLE001
+                    head_cache.append("")
+            return head_cache[0]
+
+        for x in self.store.q("SELECT * FROM helper_units WHERE project_id=? AND task_id=? AND "
+                              "run_id IS ? ORDER BY created_ts, rowid", (pid, tid, run_id)):
+            if x["status"] not in DUPLICATE_STATUSES or \
+                    x.get("feedback") in ("rejected", "superseded", "expired"):
+                continue
+            if x["status"] in ("done", "delivered") and not self._answer_reusable(
+                    x, snapshot_id, cur_head):
+                continue
+            xfiles = json.loads(x.get("files") or "[]")
+            if x.get("lane"):
+                resp = x.get("coalesce_key") or x["responsibility"]
+                xkey = investigation_key(resp, xfiles, x["lane"])
+            else:
+                xkey = x.get("investigation_key") or investigation_key(x["responsibility"],
+                                                                       xfiles)
+            if xkey == key:
+                return x
+        return None
+
+    @staticmethod
+    def _answer_reusable(x: dict, snapshot_id: str, cur_head: Callable[[], str]) -> bool:
+        """May a new request be coalesced onto this done/delivered unit?"""
+        if x.get("lane"):
+            try:
+                env = json.loads(x.get("envelope") or "{}")
+            except (TypeError, ValueError):
+                return False
+            if not isinstance(env, dict):
+                return False
+            mism = (env.get("checks") or {}).get("base_mismatch")
+            if mism and x.get("lane") == "visual":
+                try:
+                    from .visual import visual_identity_mismatch
+                    if not visual_identity_mismatch(x, env):
+                        mism = None      # pre-v0.121.7 row: base == artifact id was compliant
+                except Exception:                                # noqa: BLE001
+                    pass
+            if not (env.get("structured") and env.get("assignment") == x["unit_id"]
+                    and not mism):
+                return False             # proactive's usable() would refuse it too
+            return bool(snapshot_id) and x.get("snapshot_id") == snapshot_id
+        try:
+            det = json.loads(x.get("feedback_detail") or "{}")
+        except (TypeError, ValueError):
+            det = {}
+        at = (det.get("head") if isinstance(det, dict) else None) or ""
+        if not at:
+            return False                 # the result's head is unknown: don't reuse it
+        h = cur_head()
+        return bool(h) and h == at
+
+    def _coalesce_duplicate(self, pid, tid, dup: dict, resp: str, kind: str, source: str,
+                            ikey: str) -> None:
+        """Coalesce (never dispatch) a cross-kind duplicate, once per request:
+        a task-declared duplicate is re-collected every tick and must not
+        inflate the existing unit's coalesced count. The once-marker is an ops
+        row (primary key lookup), not a LIKE scan over the events table."""
+        mark = hashlib.sha1(f"{dup['unit_id']}|{source}|{kind}|{resp}".encode()).hexdigest()[:16]
+        if self.store.op_begin(f"helper_duplicate:{pid}:{tid}:{mark}", pid, tid,
+                               "helper_duplicate") is not None:
+            return
+        self.store.x("UPDATE helper_units SET coalesced=COALESCE(coalesced,0)+1 WHERE unit_id=?",
+                     (dup["unit_id"],))
+        why = (f"same investigation as {dup['unit_id']} ({dup.get('lane') or dup['kind']}, "
+               f"{dup['status']}): normalized responsibility and files match")
+        self.store.event(pid, tid, "helper_duplicate", detail={
+            "unit": dup["unit_id"], "existing_kind": dup["kind"], "existing_lane": dup.get("lane"),
+            "existing_status": dup["status"], "requested_kind": kind, "responsibility": resp,
+            "source": source, "investigation_key": ikey, "reason": why, "dedupe": mark})
+        self.store.op_update(f"helper_duplicate:{pid}:{tid}:{mark}", "done",
+                             {"unit": dup["unit_id"]})
+
     def collect(self, P, t: dict, spec) -> None:
         """Units declared by the task source (one per responsibility)."""
         h = self.settings(P)
         for u in (spec.data or {}).get("helpers") or []:
             if isinstance(u, dict):
-                self._add(P.id, t["task_id"], t["run_id"], u, "task", h)
+                self._add(P.id, t["task_id"], t["run_id"], u, "task", h,
+                          head=lambda: self._head(P))
 
     def collect_report(self, P, t: dict, spec, report: dict) -> list[str]:
         """Consume the helper_requests of a FRESH primary report, at the safe
@@ -199,7 +564,7 @@ class HelperManager:
             uid = self._add(P.id, t["task_id"], t["run_id"], {
                 "responsibility": u.get("responsibility"), "kind": kind,
                 "prompt": u.get("prompt") or u.get("question") or "", "files": files,
-                "value": "normal"}, "report", h)
+                "value": "normal"}, "report", h, head=lambda: self._head(P))
             if uid:
                 out.append(uid)
         self.store.merge_data(P.id, t["task_id"], helper_reports_seen=(seen + [sig])[-20:])
@@ -259,11 +624,14 @@ class HelperManager:
                     continue
             if self._dispatch(P, t, spec, u, h):
                 running = self.units(P.id, t["task_id"], "running")
+        # rows written by lane/visual/advisory code carry status only
+        self.sync_status(P.id, t["task_id"])
 
     def _skip(self, P, u: dict, why: str, feedback: str = "") -> None:
+        code = "superseded" if feedback == "superseded" else             (infer_reason_code("skipped", why) or "skipped")
         self.store.x("UPDATE helper_units SET status='skipped', reason=?, feedback=COALESCE(NULLIF(?,''),"
-                     " feedback), updated_ts=? WHERE unit_id=?", (why[:900], feedback, self.clock(),
-                                                                  u["unit_id"]))
+                     " feedback), updated_ts=?, phase='cancelled', reason_code=? WHERE unit_id=?",
+                     (why[:900], feedback, self.clock(), code, u["unit_id"]))
         self.store.event(P.id, u["task_id"], "helper_skipped", detail={"unit": u["unit_id"],
                                                                        "reason": why[:300]})
 
@@ -276,6 +644,7 @@ class HelperManager:
         pid, tid = P.id, t["task_id"]
         reasons, nexts = [], []
         open_ended = False          # a backend that could clear at any time (UNKNOWN, error)
+        codes = set()               # reason codes seen, most specific wins below
         cands = (self.lanes.candidates(P, u, h) if u.get("lane") else
                  [(b, h["personas"][b]) for b in self._order(P, u, h)])
         kcfg = None                 # Kilo's effective config, read once per dispatch
@@ -284,6 +653,7 @@ class HelperManager:
             if cap is not None and sum(u['backend'] == backend for u in
                     self.units(pid,tid,'running')) >= int(cap):
                 reasons.append(f'{backend}: coordinator backend helper capacity is full')
+                codes.add("capacity_full")
                 open_ended = True
                 continue
             # Kilo accepts prompt_async before resolving the model. A local
@@ -301,12 +671,14 @@ class HelperManager:
                     problem = f"Kilo model preflight failed: {e}"
                 if problem:
                     reasons.append(f"{backend}: {problem}")
+                    codes.add("model_config")
                     open_ended = True
                     continue
             fail = getattr(self, "_adm_fail", {}).get(persona)
             if fail:
                 reasons.append(f"{backend}: admission check failed ({fail}; not re-asked "
                                f"this tick)")
+                codes.add("admission_unavailable")
                 open_ended = True
                 continue
             try:
@@ -316,14 +688,17 @@ class HelperManager:
                 if hasattr(self, "_adm_fail"):
                     self._adm_fail[persona] = why[:200]
                 reasons.append(f"{backend}: admission check failed ({why[:300]})")
+                codes.add("admission_unavailable")
                 open_ended = True
                 continue
             if adm.get("routes") and any(r.get("source") == "local" for r in adm["routes"][:1]):
                 reasons.append(f"{backend}: {persona} routes to the local backend, which the "
                                f"primary holds; helpers use frontier backends only")
+                codes.add("local_route")
                 continue
             if not adm.get("admit"):
                 reasons.append(f"{backend}: {adm.get('state', '?').upper()} — {adm.get('reason')}")
+                codes.add("admission_denied")
                 if adm.get("next_eligible"):
                     nexts.append(float(adm["next_eligible"]))
                 else:
@@ -333,6 +708,7 @@ class HelperManager:
                 why = self.lanes.admission_problem(P, u, adm)
                 if why:
                     reasons.append(f"{backend}: {why}")
+                    codes.add("lane_admission")
                     open_ended = True
                     continue
                 if u.get("mode") == "direct":
@@ -341,6 +717,7 @@ class HelperManager:
         if not reasons:
             reasons.append("no helper persona configured for any allowed backend "
                            "([helpers] personas)")
+            codes.add("no_persona")
         now = self.clock()
         nxt = None if open_ended or not nexts else min(nexts)
         check = max(now + float(h["poll_seconds"]), nxt or 0)
@@ -349,9 +726,13 @@ class HelperManager:
             self.store.event(pid, tid, "helper_deferred", detail={"unit": u["unit_id"],
                                                                   "reason": reason,
                                                                   "next_eligible": nxt})
+        code = next((c for c in ("admission_denied", "admission_unavailable", "model_config",
+                                 "capacity_full", "local_route", "lane_admission", "no_persona")
+                     if c in codes), "admission_denied")
+        phase = "waiting_provider" if code in _WAITING_CODES else "queued"
         self.store.x("UPDATE helper_units SET status='deferred', reason=?, next_eligible=?, "
-                     "next_check=?, updated_ts=? WHERE unit_id=?",
-                     (reason, nxt, check, now, u["unit_id"]))
+                     "next_check=?, updated_ts=?, phase=?, reason_code=? WHERE unit_id=?",
+                     (reason, nxt, check, now, phase, code, u["unit_id"]))
         return False
 
     def _start(self, P, t: dict, spec, u: dict, h: dict, backend: str, persona: str) -> bool:
@@ -415,7 +796,8 @@ class HelperManager:
                 self.store.update_session(sid, status="ended", outcome="unbound",
                                           ended_ts=self.clock())
                 self.store.x("UPDATE helper_units SET status='deferred', reason=?, "
-                             "next_check=?, updated_ts=? WHERE unit_id=?",
+                             "next_check=?, updated_ts=?, phase='waiting_provider', "
+                             "reason_code='binding_failed' WHERE unit_id=?",
                              (f"binding failed: {e}"[:500], self.clock() + float(h["poll_seconds"]),
                               self.clock(), u["unit_id"]))
                 self.store.x("DELETE FROM ops WHERE key=?", (key,))
@@ -440,7 +822,8 @@ class HelperManager:
         now = self.clock()
         self.store.x("UPDATE helper_units SET status='running', persona=?, backend=?, "
                      "session_id=?, parent_session=?, attempts=attempts+1, reason=?, "
-                     "next_eligible=NULL, updated_ts=?, started_ts=? WHERE unit_id=?",
+                     "next_eligible=NULL, updated_ts=?, started_ts=?, phase='admitted', "
+                     "reason_code=NULL WHERE unit_id=?",
                      (persona, backend, sid, t["session_id"], f"admitted on {backend}", now, now,
                       u["unit_id"]))
         self.store.event(pid, tid, "helper_started", session_id=sid,
@@ -477,28 +860,43 @@ class HelperManager:
                 # retrying: stop now and defer, instead of holding it until timeout
                 return self._defer_running(P, u, h, st.denial)
             grace = float(h.get("startup_grace_seconds") or 180)
-            if getattr(st, "unanswered", False) and now - u["updated_ts"] > grace:
+            unanswered = bool(getattr(st, "unanswered", False))
+            # Kilo's own provider retry (429/5xx) with no Foundry denial: the
+            # session reports busy with the retry message and no compaction
+            retrying = bool(getattr(st, "retry", False)) or (
+                bool(st.error) and not unanswered and not getattr(st, "compaction", None))
+            if u.get("reason_code") != "abort_unconfirmed":
+                if retrying:
+                    self._mark(u["unit_id"], "waiting_provider", "provider_retry")
+                else:
+                    self._mark(u["unit_id"], "admitted" if unanswered else "executing", None)
+            if unanswered and now - u["updated_ts"] > grace:
                 self._stop(P, u, "failed",
                            f"no reply to the prompt after {int(grace)} s while Kilo reports "
                            "the session idle (startup failed: model, provider or auth); "
-                           "not held until the timeout")
+                           "not held until the timeout", "startup_failed")
                 return
             if now - u["updated_ts"] > float(h["timeout_minutes"]) * 60:
-                self._stop(P, u, "failed", f"timed out after {h['timeout_minutes']} min")
+                self._stop(P, u, "failed", f"timed out after {h['timeout_minutes']} min",
+                           "timeout")
             return
         if st.status == "attention":
             # a helper can't wait for a person; it ends without a result
-            self._stop(P, u, "failed", "the helper asked for input; helpers can't wait")
+            self._stop(P, u, "failed", "the helper asked for input; helpers can't wait",
+                       "needs_input")
             return
         if st.status in ("missing", "error"):
-            self._finish(P, u, "failed", (st.error or st.status)[:300], None)
+            self._finish(P, u, "failed", (st.error or st.status)[:300], None,
+                         reason_code="session_missing" if st.status == "missing"
+                         else "provider_error")
             return
         text = (st.final_text or "").strip()
         self._finish(P, u, "done" if text else "failed",
                      "proposal returned" if text else "no proposal text", text,
-                     tokens=st.tokens)
+                     tokens=st.tokens, reason_code=None if text else "empty_result")
 
-    def _stop(self, P, u: dict, status: str, reason: str) -> bool:
+    def _stop(self, P, u: dict, status: str, reason: str,
+              reason_code: Optional[str] = None) -> bool:
         """Abort a running helper, then finish it. If Kilo does not confirm the
         abort, the unit stays running WITH its Foundry binding (its calls stay
         gated as optional work) and the abort is retried on the next poll."""
@@ -509,10 +907,10 @@ class HelperManager:
                 self.store.event(P.id, u["task_id"], "helper_abort_unconfirmed",
                                  session_id=u["session_id"],
                                  detail={"unit": u["unit_id"], "reason": reason})
-            self.store.x("UPDATE helper_units SET reason=? WHERE unit_id=?",
-                         (note, u["unit_id"]))
+            self.store.x("UPDATE helper_units SET reason=?, reason_code='abort_unconfirmed' "
+                         "WHERE unit_id=?", (note, u["unit_id"]))
             return False
-        self._finish(P, u, status, reason, None)
+        self._finish(P, u, status, reason, None, reason_code=reason_code)
         return True
 
     def _defer_running(self, P, u: dict, h: dict, denial: dict) -> None:
@@ -523,7 +921,8 @@ class HelperManager:
         why = (f"Foundry refused the helper mid-run ({denial.get('category')}"
                f"{': ' + str(denial.get('code')) if denial.get('code') else ''})")
         if P.client.abort(u["session_id"], directory=P.profile.workspace) is False:
-            self.store.x("UPDATE helper_units SET reason=? WHERE unit_id=?",
+            self.store.x("UPDATE helper_units SET reason=?, reason_code='abort_unconfirmed' "
+                         "WHERE unit_id=?",
                          (f"{why}; abort not confirmed by Kilo, retrying"[:500], u["unit_id"]))
             return
         self.store.update_session(u["session_id"], status="ended", outcome="deferred",
@@ -540,7 +939,8 @@ class HelperManager:
                       f"{int(u.get('requests') or 1)}",))
         nxt = now + float(retry) if retry else None
         self.store.x("UPDATE helper_units SET status='deferred', reason=?, next_eligible=?, "
-                     "next_check=?, updated_ts=? WHERE unit_id=?",
+                     "next_check=?, updated_ts=?, phase='waiting_provider', "
+                     "reason_code='denied_deferred' WHERE unit_id=?",
                      (why[:500], nxt, max(now + float(h["poll_seconds"]), nxt or 0), now,
                       u["unit_id"]))
         self.store.event(P.id, u["task_id"], "helper_deferred", session_id=u["session_id"],
@@ -550,22 +950,33 @@ class HelperManager:
         now = self.clock()
         why = f"status unreadable: {type(e).__name__}: {e}"[:300]
         if now - u["updated_ts"] > float(h["timeout_minutes"]) * 60:
-            self._stop(P, u, "failed", f"timed out after {h['timeout_minutes']} min ({why})")
+            self._stop(P, u, "failed", f"timed out after {h['timeout_minutes']} min ({why})",
+                       "poll_unreadable")
             return
         if u.get("reason") != why:
             self.store.event(P.id, u["task_id"], "warning", session_id=u.get("session_id"),
                              detail={"unit": u["unit_id"], "helper_poll": why})
             self.store.x("UPDATE helper_units SET reason=? WHERE unit_id=?", (why, u["unit_id"]))
+        if u.get("reason_code") != "abort_unconfirmed":
+            self.store.x("UPDATE helper_units SET reason_code='poll_unreadable' WHERE unit_id=?",
+                         (u["unit_id"],))
 
     def _finish(self, P, u: dict, status: str, reason: str, text: Optional[str],
-                tokens: Optional[dict] = None, meta: Optional[dict] = None) -> None:
+                tokens: Optional[dict] = None, meta: Optional[dict] = None,
+                reason_code: Optional[str] = None) -> None:
         cap = int(self.settings(P)["max_result_chars"])
         if u.get("lane"):
             status, reason = self.lanes.on_finish(P, u, status, reason, text, tokens, meta or {})
+        # every terminal row names WHY (a bare "failed" is never the whole story)
+        if status in ("done", "delivered"):
+            reason_code = None
+        elif not reason_code:
+            reason_code = infer_reason_code(status, reason)
+        phase = _phase_for(status, reason_code)
         self.store.x("UPDATE helper_units SET status=?, reason=?, result=?, updated_ts=?, "
-                     "finished_ts=? WHERE unit_id=?",
+                     "finished_ts=?, phase=?, reason_code=? WHERE unit_id=?",
                      (status, reason, (text or "")[:cap] or None, self.clock(), self.clock(),
-                      u["unit_id"]))
+                      phase, reason_code, u["unit_id"]))
         self.store.update_session(u["session_id"], status="ended", outcome=status,
                                   ended_ts=self.clock())
         if P.foundry is not None:
@@ -592,7 +1003,10 @@ class HelperManager:
                     P.client.abort(u["session_id"], directory=P.profile.workspace)
                 except Exception:                                # noqa: BLE001
                     pass
-            self._finish(P, u, status, reason, None)
+            code = "handoff_timeout" if status == "timed_out" else \
+                (infer_reason_code(status, reason) if status in ("cancelled", "skipped",
+                                                                  "failed") else None)
+            self._finish(P, u, status, reason, None, reason_code=code)
             out.append(u["unit_id"])
         return out
 
@@ -603,8 +1017,9 @@ class HelperManager:
         for st in ("pending", "deferred"):
             for u in self.units(P.id, tid, st):
                 why = f"{reason}" + (f" (last: {u['reason']})" if u.get("reason") else "")
-                self.store.x("UPDATE helper_units SET status='skipped', reason=?, updated_ts=? "
-                             "WHERE unit_id=?", (why[:900], self.clock(), u["unit_id"]))
+                self.store.x("UPDATE helper_units SET status='skipped', reason=?, updated_ts=?, "
+                             "phase='cancelled', reason_code='primary_ready' WHERE unit_id=?",
+                             (why[:900], self.clock(), u["unit_id"]))
                 self.store.event(P.id, tid, "helper_skipped", detail={"unit": u["unit_id"],
                                                                       "reason": why[:300]})
                 out.append(u["unit_id"])
@@ -651,7 +1066,7 @@ class HelperManager:
                     P.client.abort(u["session_id"], directory=P.profile.workspace)
                 except Exception:                                # noqa: BLE001
                     pass
-            self._finish(P, u, "cancelled", reason, None)
+            self._finish(P, u, "cancelled", reason, None, reason_code="session_ended")
             out.append(u["unit_id"])
         return out
 
@@ -675,7 +1090,8 @@ class HelperManager:
         for u in units:
             self.store.x("UPDATE helper_units SET status='delivered', delivered_session=?, "
                          "updated_ts=?, delivered_ts=?, feedback=CASE WHEN lane IS NULL THEN "
-                         "feedback ELSE 'delivered' END WHERE unit_id=?",
+                         "COALESCE(feedback, 'delivered') ELSE 'delivered' END, "
+                         "phase='completed', reason_code=NULL WHERE unit_id=?",
                          (session_id, self.clock(), self.clock(), u["unit_id"]))
         self.lanes.note_delivery(units, session_id)
 
@@ -689,24 +1105,39 @@ class HelperManager:
                                                       "proposer", "test_design")]
 
     def record_feedback(self, P, t: dict, report: dict) -> list[str]:
-        """The primary's own account of what it did with delivered lane results
-        (report `helper_feedback`). Recorded as the primary's claim; it is not
-        evidence that a fix works (the gate, review and Victor decide that)."""
+        """The primary's own account of what it did with delivered results
+        (report `helper_feedback`), for lane AND ordinary units (v0.122.0).
+        Recorded as the primary's claim; it is not evidence that a fix works
+        (the gate, review and Victor decide that). A rejection must say why:
+        one without a reason is refused and the disposition stays pending."""
         out = []
         for f in (report or {}).get("helper_feedback") or []:
             if not isinstance(f, dict):
                 continue
             uid = str(f.get("unit") or "")
             st = str(f.get("status") or "").lower()
-            if st not in ("integrated", "rejected", "deferred"):
+            if st not in ("integrated", "rejected", "deferred", "superseded"):
                 continue
             u = self.store.q("SELECT * FROM helper_units WHERE unit_id=? AND project_id=? AND "
-                             "task_id=? AND lane IS NOT NULL AND status='delivered' AND "
+                             "task_id=? AND status='delivered' AND "
                              "COALESCE(feedback,'') != ?", (uid, P.id, t["task_id"], st))
             if not u:
                 continue
-            note = str(f.get("note") or f.get("reason") or "")[:500]
+            note = str(f.get("note") or f.get("reason") or "").strip()[:500]
             det = json.loads(u[0].get("feedback_detail") or "{}")
+            if st == "rejected" and not note:
+                det.update(pending_note="the primary said rejected without a reason; a "
+                                        "rejection must say why, so the disposition stays "
+                                        "pending", claimed_by="primary",
+                           session=t["session_id"])
+                self.store.x("UPDATE helper_units SET feedback_detail=? WHERE unit_id=?",
+                             (json.dumps(det), uid))
+                self.store.event(P.id, t["task_id"], "helper_feedback_refused",
+                                 session_id=t["session_id"],
+                                 detail={"unit": uid, "status": st,
+                                         "reason": "rejected without a reason"})
+                continue
+            det.pop("pending_note", None)
             det.update(note=note, claimed_by="primary", session=t["session_id"],
                        head=self._head(P))
             self.store.x("UPDATE helper_units SET feedback=?, feedback_detail=?, updated_ts=? "
@@ -715,6 +1146,17 @@ class HelperManager:
                              detail={"unit": uid, "status": st, "note": note[:200]})
             out.append(uid)
         return out
+
+    def disposition_pending(self, pid: str, tid: str) -> list[dict]:
+        """Delivered units (lane or ordinary) the primary has not yet said it
+        integrated, rejected (with a reason) or that were superseded."""
+        return [u for u in self.units(pid, tid, "delivered")
+                if disposition(u) == "pending"]
+
+    def statuses(self, pid: str, tid: str) -> list[dict]:
+        """unit_status() of every unit of a task, with its id, kind and lane."""
+        return [{"unit_id": u["unit_id"], "kind": u["kind"], "lane": u.get("lane"),
+                 "status": u["status"], **unit_status(u)} for u in self.units(pid, tid)]
 
     @staticmethod
     def _head(P) -> str:
@@ -758,7 +1200,8 @@ class HelperManager:
                               "artifact_id=?", (P.id, tid, old_artifact)):
             if u["status"] in ("pending", "deferred"):
                 self.store.x("UPDATE helper_units SET status='skipped', feedback='superseded', "
-                             "superseded_by=?, reason=?, updated_ts=? WHERE unit_id=?",
+                             "superseded_by=?, reason=?, updated_ts=?, phase='cancelled', "
+                             "reason_code='superseded' WHERE unit_id=?",
                              (new_artifact, f"superseded by newer capture {new_artifact}",
                               self.clock(), u["unit_id"]))
             elif u["status"] == "delivered":

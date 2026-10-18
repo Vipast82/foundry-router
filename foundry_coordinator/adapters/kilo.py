@@ -125,6 +125,7 @@ class KiloClient(CodingClient):
         if st.get("type") in ("busy", "retry"):
             s = SessionState(status="busy")
             if st.get("type") == "retry":
+                s.retry = True                    # even when Kilo sends no message
                 s.error = str(st.get("message") or "")[:300]
                 s.denial = foundry_denial(s.error)
             return s
