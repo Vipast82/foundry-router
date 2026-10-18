@@ -204,6 +204,23 @@ def test_repeat_with_adviser_is_consulted_once(store):
     assert "decision" in b and len(calls) == 1
 
 
+def test_transient_adviser_defers_without_operator_decision(store):
+    ob, rec, P, t = setup(store)
+    f = lambda text: [{"class": "missing_evidence", "check_id": "c", "text": text}]
+    rec.record_findings(P, t, 1, f(A2))
+    store.update_task("game", "UI-01", attempt=2)
+    rec.assignment(P, store.task("game", "UI-01"), obligations=ob, ws=P.ws)
+    rec.record_findings(P, t, 2, f(A3))
+    store.update_task("game", "UI-01", attempt=3)
+    a = rec.assignment(P, store.task("game", "UI-01"), obligations=ob, ws=P.ws,
+                       adviser=lambda _: {"action": "deferred", "summary": "usage HTTP 429"})
+    assert a["defer"] is True and not ob.active_decisions("game", "UI-01")
+    b = rec.assignment(P, store.task("game", "UI-01"), obligations=ob, ws=P.ws,
+                       adviser=lambda _: {"action": "repair", "summary": "different route",
+                                          "steps": ["Regenerate the current evidence"]})
+    assert "decision" not in b and "Regenerate" in b["strategy"]
+
+
 # -- submission gate ----------------------------------------------------------------------------------
 
 def test_gate_blocks_while_build_evidence_missing_then_passes(store):

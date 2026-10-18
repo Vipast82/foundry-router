@@ -4,6 +4,7 @@ import json
 import pytest
 
 from foundry_coordinator import states as S
+from foundry_coordinator.adapters.foundry import FoundryError
 from tests.coordinator.helpers import FakeFoundry, coordinator, make_repo, run_until, write_profile
 
 
@@ -91,6 +92,32 @@ def test_unavailable_quota_does_not_bypass_gate(tmp_path):
     t = c.store.task('game', 'T1')
     assert t['state'] == S.FAILED and not f.guidance_calls
     assert '75%' in t['data']['retry_guidance']['reason']
+
+
+def test_transient_usage_429_retries_adviser_without_spending_attempt(tmp_path):
+    c, f = setup(tmp_path)
+    admit = f.helper_admission
+    calls = 0
+
+    def temporarily_unavailable(persona):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise FoundryError('anthropic usage HTTP 429')
+        return admit(persona)
+
+    f.helper_admission = temporarily_unavailable
+    c.tick()
+    t = c.store.task('game', 'T1')
+    assert t['state'] == S.CHANGES_REQUIRED and t['attempt'] == 3
+    assert t['data']['retry_guidance']['status'] == 'deferred'
+    assert not f.guidance_calls
+    c.tick()
+    assert calls == 1  # bounded backoff, not a tight polling loop
+    c.store.merge_data('game', 'T1', retry_guidance={**t['data']['retry_guidance'],
+                                                     'retry_at': 0})
+    assert run_until(c, lambda: c.store.task('game', 'T1')['state'] == S.COMPLETE)
+    assert len(f.guidance_calls) == 1
 
 
 def test_restart_during_consultation_is_not_replayed(tmp_path):

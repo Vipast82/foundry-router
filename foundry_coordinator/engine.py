@@ -265,6 +265,9 @@ class Coordinator:
         elif attempt > lim.limit("max_attempts", 3) + self.retry_guidance.allowance(t):
             if self.retry_guidance.consult(P, t):
                 return
+            if ((self.store.task(pid, tid).get("data") or {}).get("retry_guidance") or {}).get(
+                    "status") == "deferred":
+                return
             return self.store.transition(pid, tid, S.FAILED, {
                 "reason": f"{t['attempt']} implementation attempts used "
                           f"(max_attempts {lim.limit('max_attempts', 3)}, "
@@ -1916,6 +1919,9 @@ class Coordinator:
             return "attempt_guided", False
         if self.retry_guidance.consult(P, t):
             return None, True             # one guided extra granted: next tick charges it
+        if ((self.store.task(pid, tid).get("data") or {}).get("retry_guidance") or {}).get(
+                "status") == "deferred":
+            return None, True             # quota reading may recover; spend no attempt
         self.store.transition(pid, tid, S.FAILED, {
             "reason": f"{L['ordinary']['used']} implementation attempts used (max_attempts "
                       f"{L['ordinary']['max']}, guided extra {L['guided_extra']['used']}/"
@@ -2005,6 +2011,26 @@ class Coordinator:
         if not dw:
             return
         ids = list(dw.get("ids") or [])
+        # Repair the older behavior that treated a transient usage-source 429
+        # as the only adviser consultation and opened an operator decision.
+        # This is safe only when admission failed before any adviser call.
+        rg = data.get("retry_guidance") or {}
+        if (len(ids) == 1 and rg.get("status") == "skipped" and
+                "429" in str(rg.get("reason") or "") and
+                (d := self.obligations.decision(ids[0])) and
+                d.get("kind") == "recovery_escalation" and d.get("status") == "open" and
+                (d.get("evidence") or {}).get("adviser") == "adviser:unavailable"):
+            with self.store.tx():
+                self.store.x("UPDATE decisions SET status='withdrawn' WHERE decision_id=? "
+                             "AND status='open'", (ids[0],))
+                self.store.update_task(pid, tid, data={**data, "retry_guidance": {
+                    **rg, "status": "deferred", "retry_at": self.clock(),
+                    "reason": str(rg.get("reason") or "")}})
+                self.store.event(pid, tid, "retry_guidance", detail={
+                    "status": "deferred", "reason": "transient usage 429 recovered by "
+                    "coordinator; no adviser inference was attempted",
+                    "decision_withdrawn": ids[0]})
+            data = (self.store.task(pid, tid).get("data") or {})
         # a superseded decision is followed to the decision that superseded it: the
         # task waits while THAT one is open (a withdrawn one without a successor is
         # resolved: the operator withdrew the question)
@@ -2327,6 +2353,10 @@ class Coordinator:
             except AssignmentInvariant as e:
                 self.store.event(pid, tid, "warning", detail={"assignment": str(e)[:400]})
                 a = None
+            if a and a.get("defer"):
+                # No adviser inference happened. Leave the task READY; the next
+                # tick retries admission after its bounded backoff.
+                return {"stopped": True}
             if a and a.get("decision"):
                 self._lc_wait(P, t, [a["decision"]], "findings repeat with no materially "
                               "different strategy (adviser consulted at most once)", S.READY)
@@ -2392,13 +2422,15 @@ class Coordinator:
                 return {"action": "unavailable", "summary": "retry guidance is not enabled",
                         "steps": []}
             t = self.store.task(P.id, tid)
-            if (t.get("data") or {}).get("retry_guidance"):
+            prior = (t.get("data") or {}).get("retry_guidance") or {}
+            if prior and prior.get("status") != "deferred":
                 return {"action": "unavailable", "summary": "the adviser was already "
                         "consulted for this task", "steps": []}
             self.retry_guidance.consult(P, t)
             rec = (self.store.task(P.id, tid).get("data") or {}).get("retry_guidance") or {}
             act = rec.get("status")
-            return {"action": act if act in ("repair", "needs_human", "stop") else "unavailable",
+            return {"action": act if act in ("repair", "needs_human", "stop", "deferred")
+                    else "unavailable",
                     "summary": rec.get("summary") or rec.get("reason") or "",
                     "steps": list(rec.get("steps") or [])}
         return adviser

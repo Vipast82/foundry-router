@@ -577,7 +577,10 @@ class Recovery:
             strategy = ("Repair the unresolved obligations " +
                         ", ".join(u["obligation_id"] for u in unresolved))
         sfp = strategy_fp(strategy)
-        adviser_used = any(r.get("adviser") for r in prior)
+        # A failed quota admission never contacted the adviser. Keep its audit
+        # row, but do not spend the one real consultation on that outage.
+        adviser_used = any(r.get("adviser") and r.get("adviser") != "adviser:unavailable"
+                           for r in prior)
         same = bool(prev and prev.get("strategy_fp") == sfp)
         max_count = max([r["count"] for r in reps] or [0])
         adviser_note = ""
@@ -622,6 +625,9 @@ class Recovery:
                                          "checks or move BUILD work to CLOSE"}) or {}
                 except Exception as e:                         # noqa: BLE001
                     g = {"action": "unavailable", "summary": str(e)[:200]}
+                if g.get("action") == "deferred":
+                    return {"defer": True, "reason": str(g.get("summary") or "quota source "
+                            "temporarily unavailable")[:300], "repeats": repeats}
                 if g.get("action") == "repair":
                     steps = [str(s) for s in g.get("steps") or []]
                     kept = []

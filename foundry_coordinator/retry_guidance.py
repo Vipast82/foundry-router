@@ -85,7 +85,12 @@ class RetryGuidance:
         if not cfg["enabled"]:
             return False
         prior = (t.get("data") or {}).get("retry_guidance")
-        if prior:
+        if prior and prior.get("status") == "deferred":
+            if self.c.clock() < float(prior.get("retry_at") or 0):
+                return False
+            # Admission is read-only. No model call was made, so it is safe to
+            # re-check after the source recovers without spending the adviser.
+        elif prior:
             if prior.get("status") == "calling":
                 self._record(P, t, {**prior, "status": "unknown",
                     "reason": "restart during guidance: outcome unknown; not repeated"})
@@ -104,10 +109,19 @@ class RetryGuidance:
         try:
             admission = P.foundry.helper_admission(cfg["persona"])
         except FoundryError as e:
-            self._record(P, t, {**base, "status": "skipped", "reason": str(e)[:400]})
+            reason = str(e)[:400]
+            transient = "429" in reason or "quota" in reason.lower()
+            self._record(P, t, {**base, "status": "deferred" if transient else "skipped",
+                                "retry_at": self.c.clock() + 60 if transient else None,
+                                "reason": reason})
             return False
         if not admission.get("admit"):
-            self._record(P, t, {**base, "status": "skipped",
+            state = admission.get("state")
+            transient = state in ("unknown", "defer")
+            self._record(P, t, {**base, "status": "deferred" if transient else "skipped",
+                               "retry_at": max(self.c.clock() + 60,
+                                               float(admission.get("next_eligible") or 0))
+                               if transient else None,
                                "reason": admission.get("reason") or "quota admission refused"})
             return False
         running = self.store.q("SELECT COUNT(*) AS n FROM helper_units WHERE status='running'")[0]["n"]

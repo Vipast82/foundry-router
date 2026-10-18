@@ -311,6 +311,23 @@ def test_pause_and_restart_during_recovery_never_duplicates_evidence(tmp_path):
     assert len(transcript) == n                    # re-scans after pause/restart add nothing
 
 
+def test_legacy_429_escalation_reopens_for_real_adviser_call(tmp_path):
+    c, _, _, _, _ = _game(tmp_path, green_t1)
+    c.approve("game", "T1", [], "victor")
+    did = c.obligations.open_decision("game", "T1", "recovery_escalation",
+                                      "repeat findings", evidence={"adviser":
+                                      "adviser:unavailable"})
+    t = c.store.task("game", "T1")
+    c.store.update_task("game", "T1", state=S.BLOCKED, data={**t["data"],
+        "retry_guidance": {"status": "skipped", "reason": "anthropic usage HTTP 429"},
+        "decision_wait": {"ids": [did], "resume": S.READY}})
+    c._lc_blocked(c.projects["game"], c.store.task("game", "T1"))
+    t = c.store.task("game", "T1")
+    assert t["state"] == S.READY
+    assert t["data"]["retry_guidance"]["status"] == "deferred"
+    assert c.obligations.decision(did)["status"] == "withdrawn"
+
+
 # -- 5. nested retry limits ------------------------------------------------------------
 
 def test_nested_limits_guided_allowance_and_ledger_reset(tmp_path):
