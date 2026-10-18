@@ -67,7 +67,7 @@ class RetryGuidance:
                  self.c.clock() - t["started_ts"] > P.profile.limit("max_task_minutes", 0) * 60)):
             self._record(P, t, {**base, "status": "skipped", "reason": "hard session/time limit reached"})
             return False
-        if not P.foundry or not cfg["persona"] or cfg["persona"] == P.profile.persona("implementer"):
+        if not P.foundry or not cfg["persona"] or cfg["persona"] == P.profile.persona("implementer", t["task_id"]):
             self._record(P, t, {**base, "status": "skipped", "reason": "frontier adviser unavailable"})
             return False
         # Guidance is optional paid work, never a required review/reserve bypass.

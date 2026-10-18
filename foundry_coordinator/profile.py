@@ -94,8 +94,11 @@ class Profile:
         except (TypeError, ValueError):
             return default
 
-    def persona(self, role: str) -> str:
+    def persona(self, role: str, task_id: str = "") -> str:
         p = self.roles.get(role) or ""
+        for override in (self.raw.get("role_overrides") or {}).values():
+            if task_id and task_id in override["tasks"]:
+                p = override.get(role, p)
         if not p:
             raise ProfileError(f"{self.id}: no persona mapped for role {role!r}")
         return p
@@ -174,6 +177,22 @@ def load(path: str) -> Profile:
         raise ProfileError(f"{path}: unknown roles {unknown} (known: {', '.join(ROLES)})")
     if "implementer" not in roles:
         raise ProfileError(f"{path}: roles.implementer is required")
+    overrides = raw.get("role_overrides") or {}
+    if not isinstance(overrides, dict):
+        raise ProfileError(f"{path}: role_overrides must be named tables")
+    assigned = set()
+    for name, override in overrides.items():
+        if not isinstance(override, dict) or set(override) - {"tasks", *ROLES}:
+            raise ProfileError(f"{path}: role_overrides.{name}: unknown roles or invalid table")
+        task_ids = override.get("tasks")
+        if not isinstance(task_ids, list) or not task_ids or any(
+                not isinstance(t, str) or not t or any(c in t for c in "*?[]") for t in task_ids):
+            raise ProfileError(f"{path}: role_overrides.{name}.tasks needs explicit task IDs")
+        if len(set(task_ids)) != len(task_ids) or assigned.intersection(task_ids):
+            raise ProfileError(f"{path}: overlapping role override task IDs")
+        assigned.update(task_ids)
+        if any(not isinstance(v, str) or not v for k, v in override.items() if k != "tasks"):
+            raise ProfileError(f"{path}: role_overrides.{name} personas must be nonempty strings")
     checks = []
     for c in (raw.get("verify") or {}).get("checks") or []:
         if not c.get("name") or not c.get("command"):

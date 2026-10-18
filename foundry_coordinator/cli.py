@@ -139,7 +139,12 @@ def doctor(c: Coordinator, project: str = "") -> int:
                         rows.append(('FAIL', 'worker inference', str(e)))
                 needed = {"implementer"} | ({"reviewer"} if P.profile.review.get("required", True)
                                             else set())
-                for role, persona in sorted(P.profile.roles.items()):
+                selections = [(role, persona, "") for role, persona in P.profile.roles.items()]
+                for name, override in (P.profile.raw.get("role_overrides") or {}).items():
+                    selections.extend((role, persona, name) for role, persona in override.items()
+                                      if role != "tasks")
+                for role, persona, override_name in sorted(selections):
+                    label = f"persona {role}" + (f" [{override_name}]" if override_name else "")
                     direct_review = role in ('reviewer', 'deep_reviewer')
                     m = (ids if direct_review else worker_ids).get(persona)
                     source = 'coordinator key' if direct_review else 'worker inference key'
@@ -154,7 +159,7 @@ def doctor(c: Coordinator, project: str = "") -> int:
                                     + (f" — {', '.join(legacy)} {'is' if len(legacy) == 1 else 'are'} "
                                        f"allowed but legacy aliases don't authorize {persona}"
                                        if legacy else ""))
-                        rows.append(("FAIL" if role in needed else "WARN", f"persona {role}",
+                        rows.append(("FAIL" if role in needed else "WARN", label,
                                      f"{persona} not offered to {source} (missing, disabled or not allowed)"
                                      + hint
                                      + ("" if role in needed else "; only needed when used")))
@@ -162,7 +167,7 @@ def doctor(c: Coordinator, project: str = "") -> int:
                         fm = m.get("foundry") or {}
                         val = fm.get("validation") or "not validated"
                         val = val.get("status") if isinstance(val, dict) else val
-                        rows.append(("PASS" if val == "pass" else "WARN", f"persona {role}",
+                        rows.append(("PASS" if val == "pass" else "WARN", label,
                                      f"{persona} -> {fm.get('backend') or '?'} / "
                                      f"{fm.get('served_model') or '?'} "
                                      f"(routing {fm.get('routing') or '?'}, {val}; {source})"))

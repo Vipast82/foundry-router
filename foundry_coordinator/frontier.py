@@ -80,7 +80,7 @@ class FrontierPhase:
         ph = self.phase(P.id, t["task_id"], ("active",))
         if ph and ph["session_id"] == t.get("session_id"):
             return ph["persona"]
-        return P.profile.persona("implementer")
+        return P.profile.persona("implementer", t["task_id"])
 
     def purpose(self, P, t: dict) -> str:
         ph = self.phase(P.id, t["task_id"], ("active",))
@@ -116,17 +116,17 @@ class FrontierPhase:
         last = max([p["ended_ts"] or p["created_ts"] for p in done] or [0])
         if last and self.clock() - last < f["cooldown_minutes"] * 60:
             raise ValueError("cooldown after the last phase has not passed")
-        if f["persona"] == P.profile.persona("implementer"):
+        if f["persona"] == P.profile.persona("implementer", tid):
             raise ValueError("the frontier persona must differ from the local implementer persona")
         for role in ("reviewer", "deep_reviewer"):
-            if P.profile.roles.get(role) == f["persona"]:
+            if role in P.profile.roles and P.profile.persona(role, tid) == f["persona"]:
                 raise ValueError(f"{f['persona']} is also the {role}: review independence would be lost")
         pid_ = f"fp-{uuid.uuid4().hex[:10]}"
         self.store.x("INSERT INTO primary_phases (phase_id, project_id, task_id, run_id, session_id, "
                      "state, persona, local_persona, requested_by, reason, conditions, created_ts) "
                      "VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
                      (pid_, pid, tid, t["run_id"], t["session_id"], "requested", f["persona"],
-                      P.profile.persona("implementer"), actor, reason[:500],
+                      P.profile.persona("implementer", tid), actor, reason[:500],
                       json.dumps({"max_turns": f["max_turns"], "max_minutes": f["max_minutes"],
                                   "return_on": ["DONE", "BLOCKED", "NEEDS_HUMAN", "refusal",
                                                 "new_session", "operator"]}), self.clock()))

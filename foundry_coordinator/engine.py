@@ -323,7 +323,7 @@ class Coordinator:
                        attempt: int, prompt: str) -> str:
         key = f"session:{P.id}:{tid}:{run_id}:{phase}"
         existing = self.store.op_begin(key, P.id, tid, "session")
-        persona = P.profile.persona(role)
+        persona = P.profile.persona(role, tid)
         agent = P.profile.client.get("agent") or "code"
         directory = P.profile.workspace
         res = (existing or {}).get("result") or {}
@@ -713,18 +713,22 @@ class Coordinator:
         deep = [p for p in P.profile.review.get("deep_when") or []
                 if any(matches_any(tag, [p]) for tag in spec.tags)]
         role = "deep_reviewer" if deep and "deep_reviewer" in P.profile.roles else "reviewer"
-        persona = P.profile.persona(role)
+        persona = P.profile.persona(role, tid)
         authors = (self.helpers.authors(pid, tid) | self.frontier.authors(pid, tid)
                    | self.retry_guidance.authors(t))
+        for session in self.store.sessions(pid, tid):
+            if session["role"] == "implementer":
+                authors.add(session["persona"])
+                authors.update(session["data"].get("persona_history", []))
         if persona in authors:
             # a persona that proposed code integrated here can't be its sole reviewer
             alt = next((r for r in ("deep_reviewer", "reviewer") if r in P.profile.roles
-                        and P.profile.persona(r) not in authors), None)
+                        and P.profile.persona(r, tid) not in authors), None)
             if alt is None:
                 return self._block(P, t, f"no independent reviewer: {persona} also authored helper "
                                          f"proposals integrated into this revision; configure a "
                                          f"different reviewer persona")
-            role, persona = alt, P.profile.persona(alt)
+            role, persona = alt, P.profile.persona(alt, tid)
         if P.foundry is None:
             return self._block(P, t, "review needs Foundry ([foundry] url) and none is configured")
         key = f"review:{pid}:{tid}:{head}:{role}:{invalid}"
@@ -1086,8 +1090,21 @@ class Coordinator:
                         project_id, task_id,
                         P.adapter.continue_prompt(spec, t["pause_reason"] or "paused"), sid)
                     try:
+                        persona = P.profile.persona("implementer", task_id)
+                        # The resumed turn may use a newly authorized task override.
+                        # Bind before inference, and retain every previous author.
+                        if P.foundry is not None:
+                            self._bind(P, sid, task_id, t["run_id"], "implementer", persona)
+                        session = self.store.session(sid)
+                        if session and session["persona"] != persona:
+                            history = set(session["data"].get("persona_history", []))
+                            history.add(session["persona"])
+                            self.store.update_session(sid, persona=persona,
+                                data={**session["data"], "persona_history": sorted(history)})
+                            self.store.event(project_id, task_id, "primary_persona_changed",
+                                session_id=sid, detail={"from": session["persona"], "to": persona})
                         P.client.prompt(sid, prompt, directory=P.profile.workspace,
-                                        persona=P.profile.persona("implementer"),
+                                        persona=persona,
                                         agent=P.profile.client.get("agent") or "code")
                     except Exception:
                         self.store.x("DELETE FROM ops WHERE key=?", (okey,))
@@ -1095,9 +1112,6 @@ class Coordinator:
                     self._notes_delivered(notes, sid)
                     self.store.op_update(okey, "done", {"prompt_ts": ts})
                 self.store.update_session(sid, status="prompted", prompt_ts=ts, ended_ts=None)
-                if P.foundry is not None:
-                    self._bind(P, sid, task_id, t["run_id"], "implementer",
-                               P.profile.persona("implementer"))
         return self.store.transition(project_id, task_id, target,
                                      {"resumed": note or f"resumed by {actor}"}, actor=actor,
                                      data=data)
