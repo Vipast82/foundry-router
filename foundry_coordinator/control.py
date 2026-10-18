@@ -76,13 +76,24 @@ class ControlChannel:
                 self._report(a, "failed", f"coordinator error: {type(e).__name__}: {e}"[:500])
         self.report_messages()
 
+    def _lifecycle_on(self) -> bool:
+        """At least one project has [lifecycle] enabled."""
+        lc = getattr(self.c, "_lc", None)
+        if not callable(lc):
+            return False
+        return any(lc(P) for P in (getattr(self.c, "projects", None) or {}).values())
+
     def _beat(self) -> dict:
         tasks = self.store.tasks()
         return {"source": {"id": self.source_id, "kind": "coordinator", "host": socket.gethostname(),
                            "version": _version(), "capabilities": {
                                "actions": ["answer_question", "reply_permission", "approve_review",
                                            "reject_review", "pause", "resume", "cancel", "unblock",
-                                           "instruction", "withdraw_instruction"]}},
+                                           "instruction", "withdraw_instruction",
+                                           "decision_answer"]}},
+                "contract": _contract(), "coordinator_version": _coordinator_version(),
+                # advertised only when some project actually runs the lifecycle
+                "features": (["decision_answer", "lifecycle"] if self._lifecycle_on() else []),
                 "sent_ts": self.clock(), "tick": self.ticks,
                 "uptime_s": round(self.clock() - self.started, 1),
                 "projects": sorted(self.c.projects),
@@ -136,7 +147,8 @@ class ControlChannel:
             return self._report(a, "rejected", f"unsupported action {a['kind']!r}")
         actor = f"{a.get('actor') or 'operator'} (control center)"
         if a["kind"] not in ("answer_question", "reply_permission", "instruction",
-                             "withdraw_instruction", "lanes") and exp.get("task_state") \
+                             "withdraw_instruction", "lanes", "decision_answer") \
+                and exp.get("task_state") \
                 and exp["task_state"] != t["state"]:
             return self._report(a, "rejected", f"{tid} is now {t['state']}, not "
                                                f"{exp['task_state']} as the operator saw it")
@@ -275,6 +287,36 @@ class ControlChannel:
                                reset_attempts=bool(p.get("reset_attempts")), actor=actor)
         return self._report(a, "applied", "back to READY", {"task_state": after["state"]})
 
+    def _do_decision_answer(self, a, t, actor):
+        """An operator's answer to an open coordinator decision (obligations.
+        decisions). Authority is always the operator; the engine refuses a
+        model/session actor, a non-open decision, a contradicting answer, or a
+        question that changed since the operator read it."""
+        from .obligations import DecisionConflict, DecisionRefused
+        p = a.get("payload") or {}
+        if p.get("authority") not in (None, "", "operator"):
+            return self._report(a, "rejected", "decisions are answered from the control center "
+                                               "with operator authority only")
+        did = str(p.get("decision_id") or "")
+        if not did:
+            return self._report(a, "rejected", "no decision_id given")
+        try:
+            res = self.c.decision_answer(a["project_id"], a["task_id"], did,
+                                         p.get("answer"), option=p.get("option") or "",
+                                         actor=actor, note=p.get("note") or "",
+                                         question_hash=p.get("question_hash") or "",
+                                         channel="control")
+        except (DecisionRefused, DecisionConflict) as e:
+            return self._report(a, "rejected", f"{type(e).__name__}: {e}"[:500],
+                                {"decision_id": did})
+        except ValueError as e:
+            return self._report(a, "rejected", str(e)[:500], {"decision_id": did})
+        return self._report(a, "applied", f"decision {did} answered by {actor}; the engine applies "
+                                          f"it on its next tick",
+                            {"decision_id": did, "status": res.get("status"),
+                             "task_state": (self.store.task(a["project_id"], a["task_id"]) or {}
+                                            ).get("state")})
+
     def _do_lanes(self, a, t, actor):
         """Operational kill switch for proactive helper lanes of this project.
         It can only stop new lane work (running units finish; their results
@@ -395,6 +437,24 @@ def _owner(store) -> Optional[dict]:
         return json.loads(store.meta("owner") or "null")
     except ValueError:
         return None
+
+
+def _contract() -> str:
+    """The control-center contract this coordinator speaks (the same string the
+    telemetry bridge sends), so the server's version gate can say ok."""
+    try:
+        from .telemetry import CONTRACT
+        return CONTRACT
+    except Exception:                                            # noqa: BLE001
+        return "foundry.cc.v1"
+
+
+def _coordinator_version() -> str:
+    try:
+        from . import __version__
+        return __version__
+    except Exception:                                            # noqa: BLE001
+        return ""
 
 
 def _version() -> str:

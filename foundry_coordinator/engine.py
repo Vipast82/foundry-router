@@ -58,6 +58,12 @@ class Coordinator:
         self.frontier = FrontierPhase(self, clock=clock)
         from .retry_guidance import RetryGuidance
         self.retry_guidance = RetryGuidance(self)
+        # [lifecycle] (v0.122): evidence ledger, obligations/decisions/budget
+        # ledger, recovery. Built lazily, and only used for projects whose
+        # profile enables them; a disabled project never touches their tables.
+        self._ledger = None
+        self._obligations = None
+        self._recovery = None
         for p in projects:
             store.register_project(p.id, p.profile.name, p.profile.path, p.profile.hash,
                                    p.profile.version, os.path.realpath(p.profile.workspace))
@@ -157,6 +163,8 @@ class Coordinator:
     def _step(self, P: Project, t: dict) -> None:
         st = t["state"]
         self._close_session_notes(P, t)
+        if st == S.BLOCKED and self._lc(P):
+            return self._lc_blocked(P, t)
         if st in S.TERMINAL or st in (S.BLOCKED, S.FAILED):
             return
         proj = self.store.project(P.id)
@@ -203,7 +211,7 @@ class Coordinator:
             return self._block(P, t, problem)
         undeclared = [d for d in spec.deps if d not in q["deps"]
                       and not self._dep_satisfied(P, self.store.task(P.id, d) or {})
-                      and not P.adapter.dependency_done(d)]
+                      and not self._dep_done_outside(P, d)]
         if undeclared:
             return self._block(P, t, f"the task source says {t['task_id']} needs "
                                      f"{', '.join(undeclared)}, which is not approved/complete")
@@ -220,6 +228,17 @@ class Coordinator:
             return bool(kinds) and all(k in P.profile.deps_accept_pending for k in kinds)
         return False
 
+    def _dep_done_outside(self, P: Project, dep: str) -> bool:
+        """A dependency the task source names but the queue doesn't declare,
+        finished outside the coordinator (adapter.dependency_done, e.g. a
+        STATE.md ledger row). With [lifecycle] on, a dependency the coordinator
+        owns (it has a tasks row) is satisfied only by the engine's own COMPLETE
+        or the deps_accept_pending policy (_dep_satisfied), never by a document
+        a CLOSE session wrote."""
+        if self._lc(P) and self.store.task(P.id, dep):
+            return False
+        return bool(P.adapter.dependency_done(dep))
+
     # -- READY / CHANGES_REQUIRED -> IMPLEMENTING ---------------------------------
 
     def _start_implementation(self, P: Project, t: dict) -> None:
@@ -227,14 +246,30 @@ class Coordinator:
         lim = P.profile
         free = bool(t["data"].get("free_retry"))
         attempt = t["attempt"] + (0 if free else 1)
-        if attempt > lim.limit("max_attempts", 3) + self.retry_guidance.allowance(t):
+        lc_budget = self._lc(P, "obligations")
+        charge = None
+        paid = False
+        if lc_budget:
+            # [lifecycle] limits come from the append-only budget ledger
+            # (ordinary + guided allowance + authorized extensions). A start whose
+            # run was already charged (rows under ANY attempt counter, e.g. written
+            # before a failed or interrupted start) resumes with the same run id
+            # and is never charged, or refused for that charge, again
+            pend0 = t["data"].get("pending_start") or {}
+            paid = bool(pend0.get("run_id") and pend0.get("attempt") == attempt
+                        and self._lc_run_paid(P, tid, pend0["run_id"]))
+            if not paid:
+                charge, stop = self._lc_budget(P, t, free)
+                if stop:
+                    return
+        elif attempt > lim.limit("max_attempts", 3) + self.retry_guidance.allowance(t):
             if self.retry_guidance.consult(P, t):
                 return
             return self.store.transition(pid, tid, S.FAILED, {
                 "reason": f"{t['attempt']} implementation attempts used "
                           f"(max_attempts {lim.limit('max_attempts', 3)}, "
                           f"guided extra {self.retry_guidance.allowance(t)})"})
-        if t["sessions"] >= lim.limit("max_sessions_per_task", 8):
+        if not lc_budget and t["sessions"] >= lim.limit("max_sessions_per_task", 8):
             return self.store.transition(pid, tid, S.FAILED, {
                 "reason": f"{t['sessions']} sessions used (max_sessions_per_task)"})
         minutes = lim.limit("max_task_minutes", 0)
@@ -249,6 +284,12 @@ class Coordinator:
                              writer=True)
         if held:
             return
+        if self._lc(P, "readiness"):
+            # [lifecycle] the environment/tooling must be ready before a session
+            # is started; a blocking failure consumes no attempt
+            r = self._lc_readiness(P, t, spec, {"attempt": attempt, "base": t["base_sha"]})
+            if r:
+                return self._lc_block_readiness(P, t, r)
         try:
             dirty = P.ws.status()
         except GitError as e:
@@ -289,8 +330,28 @@ class Coordinator:
             findings.append("the previous session left these task files uncommitted: "
                             + ", ".join(own[:8]) + " — check them and commit them")
         ctx = {"attempt": attempt, "run_id": run_id, "base": base}
+        lc_extra = ""
+        if self._lc(P):
+            # [lifecycle] recover evidence from every earlier session, seed and
+            # reconcile obligations, and (for a repair) build one bounded
+            # assignment; an escalation stops here without a session
+            try:
+                out = self._lc_before_session(P, t, spec, base, attempt, run_id, findings,
+                                              paid=paid)
+            except Exception:
+                # never hold the workspace / session / writer locks across ticks
+                # on an exception (the tick records the error; the next one retries)
+                self.store.release(pid, tid)
+                raise
+            if out.get("stopped"):
+                return
+            if out.get("assignment"):
+                ctx["assignment"] = out["assignment"]
+            lc_extra = out.get("prompt_extra") or ""
+            t = self.store.task(pid, tid)
         prompt = (P.adapter.repair_prompt(spec, findings, ctx) if findings
                   else P.adapter.implement_prompt(spec, ctx))
+        prompt += lc_extra
         if adopted:
             prompt += ("\n## Explicit existing-work handoff\nThe operator adopted these task-scope "
                        "files; original bytes are hash-verified and backed up outside the workspace:\n"
@@ -300,6 +361,7 @@ class Coordinator:
                        "Do not alter backups or unrelated work. Commit only verified task work.\n")
         data = dict(t["data"])
         data.pop("pending_start", None)
+        data.pop(self.LC_PENDING, None)          # a continuation belongs to its own session
         if before_task is None:
             data["task_baseline_dirty"] = sorted(p for _, p in dirty if p not in adopted)
         data.update(baseline_dirty=baseline, free_retry=None, findings=findings or None,
@@ -309,19 +371,27 @@ class Coordinator:
         self.store.merge_data(pid, tid, pending_start={"run_id": run_id, "attempt": attempt})
         try:
             sid = self._start_session(P, tid, spec, "implement", "implementer", run_id, attempt,
-                                      prompt)
+                                      prompt, meta=self._lc_session_meta(P, base))
         except Exception as e:                                    # noqa: BLE001
             self._release_session(P, t)
             return self._note(P, t, f"could not start a session: {e}")
-        self.store.transition(pid, tid, S.IMPLEMENTING, {
-            "session_id": sid, "base_sha": base, "run_id": run_id, "attempt": attempt,
-            "repair": bool(findings)},
-            attempt=attempt, sessions=t["sessions"] + 1, run_id=run_id, session_id=sid,
-            base_sha=base, phase="implement", started_ts=t["started_ts"] or self.clock(),
-            next_action="session working", data=data)
+        with self.store.tx():
+            if lc_budget:
+                # [lifecycle] charged with the IMPLEMENTING transition, keyed by run
+                # id: a session that never started consumes nothing, and a resumed
+                # start (same run id) is never charged twice
+                if charge:
+                    self._lc_charge(P, t, charge, f"attempt:{run_id}")
+                self._lc_charge(P, t, "sessions", f"session:{run_id}")
+            self.store.transition(pid, tid, S.IMPLEMENTING, {
+                "session_id": sid, "base_sha": base, "run_id": run_id, "attempt": attempt,
+                "repair": bool(findings)},
+                attempt=attempt, sessions=t["sessions"] + 1, run_id=run_id, session_id=sid,
+                base_sha=base, phase="implement", started_ts=t["started_ts"] or self.clock(),
+                next_action="session working", data=data)
 
     def _start_session(self, P: Project, tid: str, spec, phase: str, role: str, run_id: str,
-                       attempt: int, prompt: str) -> str:
+                       attempt: int, prompt: str, meta: Optional[dict] = None) -> str:
         key = f"session:{P.id}:{tid}:{run_id}:{phase}"
         existing = self.store.op_begin(key, P.id, tid, "session")
         persona = P.profile.persona(role, tid)
@@ -336,8 +406,12 @@ class Coordinator:
                                        "phase": phase, "attempt": attempt, "role": role},
                 permissions=P.adapter.session_permissions(spec, phase))
             self.store.op_update(key, "started", {"session_id": sid})
-            self.store.add_session(sid, P.id, tid, run_id, role, phase, attempt, P.client.name,
-                                   persona)
+            if meta:
+                self.store.add_session(sid, P.id, tid, run_id, role, phase, attempt,
+                                       P.client.name, persona, meta)
+            else:
+                self.store.add_session(sid, P.id, tid, run_id, role, phase, attempt,
+                                       P.client.name, persona)
             self._bind(P, sid, tid, run_id, role, persona)
         if not res.get("prompt_ts") and res.get("prompting_ts"):
             # died between sending and recording: Kilo may hold the prompt, so it
@@ -416,6 +490,8 @@ class Coordinator:
         head = P.ws.head()
         rep = s.report or {}
         data = self.store.merge_data(pid, tid, last_report=rep or None)
+        if self._lc(P):
+            self._lc_session_ended(P, t, t["session_id"], head, rep)
         status = str(rep.get("status") or "").upper()
         blocked = status in ("BLOCKED", "NEEDS_HUMAN") and head == t["base_sha"]
         if self.helpers.enabled(P) and rep.get("helper_feedback"):
@@ -462,9 +538,16 @@ class Coordinator:
             if op:
                 spec = P.adapter.describe(tid)
                 ctx = {"attempt": t["attempt"], "run_id": t["run_id"], "base": t["base_sha"]}
+                if phase != "closeout" and self._lc(P):
+                    a = self._lc_stored_assignment(P, t)
+                    if a:
+                        ctx["assignment"] = a
                 prompt = (P.adapter.closeout_prompt(spec, ctx) if phase == "closeout" else
                           P.adapter.repair_prompt(spec, t["data"].get("findings") or [], ctx)
                           if t["data"].get("findings") else P.adapter.implement_prompt(spec, ctx))
+                if phase != "closeout" and self._lc(P):
+                    prompt += self._lc_prompt_extra(P, t, spec, t["base_sha"],
+                                                    ctx.get("assignment"))
                 self._start_session(P, tid, spec, phase, sess.get("role") or "implementer",
                                     t["run_id"], t["attempt"], prompt)
             return None
@@ -570,6 +653,17 @@ class Coordinator:
             data["tokens"] = tokens
         if report:
             data["report"] = report
+        if self._lc(P) and data.get("head_start"):
+            # [lifecycle] the session's records are bound to the revision their
+            # tool calls ran at: a session that committed loses its single
+            # "head", so the ledger resolves each record by its own time
+            try:
+                end = P.ws.head()
+            except GitError:
+                end = ""
+            data["head_end"] = end
+            if end and end != data["head_start"]:
+                data.pop("head", None)
         self.store.update_session(sid, status="ended", outcome=outcome, ended_ts=self.clock(),
                                   data=data)
         if P.foundry is not None:
@@ -633,6 +727,8 @@ class Coordinator:
 
     def _verifying(self, P: Project, t: dict) -> None:
         pid, tid = P.id, t["task_id"]
+        if self._lc(P) and self._lc_resume_continuation(P, t):
+            return                       # a pending continuation at this head: never re-verified
         spec = P.adapter.describe(tid)
         head = P.ws.head()
         results = self._generic_checks(P, t, spec, head, phase="verify")
@@ -652,6 +748,11 @@ class Coordinator:
             "set": vid, "revision": head, "results": {r.check: r.result for r in results}})
         if fails:
             findings = failed_findings(fails)
+            if self._lc(P, "recovery"):
+                self._lc_safe(P, tid, "record_findings", lambda: self.recovery.record_findings(
+                    P, t, self._lc_attempt_no(P, t), [{"source": "check", "item": {
+                        "check": r.check, "result": r.result, "detail": r.detail}}
+                        for r in fails]))
             return self.store.transition(pid, tid, S.CHANGES_REQUIRED, {
                 "verification_id": vid, "findings": findings},
                 verification_id=vid, head_sha=head, data={**t["data"], "findings": findings})
@@ -662,6 +763,8 @@ class Coordinator:
                 "blocker": "required checks could not be run: " + ", ".join(
                     f"{r.check} ({(r.detail or '').splitlines()[0] if r.detail else 'unknown'})"
                     for r in unknown)}, verification_id=vid, head_sha=head)
+        if self._lc(P) and self._lc_submission_gate(P, t, spec, head, vid, results):
+            return                       # premature review refused: never submitted
         self.store.transition(pid, tid, S.REVIEWING, {
             "verification_id": vid, "head_sha": head, "all_required_pass": True},
             verification_id=vid, head_sha=head, next_action="review")
@@ -731,6 +834,8 @@ class Coordinator:
             return self.store.transition(pid, tid, S.VERIFYING, {
                 "invalidated": f"workspace moved from {head[:12]} to {P.ws.head()[:12]} "
                                f"before the review"})
+        if self._lc(P) and self._lc_resume_continuation(P, t):
+            return                       # a pending continuation at this head: never re-reviewed
         spec, spec_from, spec_notes = self._reviewed_spec(P, tid, head)
         if not P.profile.review.get("required", True):
             return self.store.transition(pid, tid, S.APPROVED, {
@@ -741,6 +846,11 @@ class Coordinator:
         # one from an older format (possibly truncated, no phase contract) is kept in
         # the audit trail and its findings carried forward, never reused as a verdict
         valid = [r for r in prior if r["valid"] and R.packet_version(r) == R.PACKET_VERSION]
+        if self._lc(P):
+            # [lifecycle] a review routed evidence_incomplete/access_blocked is kept
+            # for the audit but not reused: the commit is reviewed again
+            again = set(t["data"].get("lc_rereview") or [])
+            valid = [r for r in valid if r["review_id"] not in again]
         if valid:
             return self._apply_review(P, t, valid[-1])
         older = [r for r in prior if r["valid"]]
@@ -751,9 +861,16 @@ class Coordinator:
             return self.store.transition(pid, tid, S.BLOCKED, {
                 "blocker": f"the reviewer returned {invalid} invalid results for {head[:12]}: "
                            f"{prior[-1]['error']}"})
+        if self._lc(P):
+            proj = self.store.project(pid)
+            if proj and proj["paused"]:
+                # [lifecycle] a paused project starts no new paid review
+                return self._note(P, t, f"project paused (review waits): "
+                                        f"{proj.get('pause_note') or ''}")
         all_reviews = self.store.reviews(pid, tid)
         cap = P.profile.limit("max_review_calls", 4)
-        if len(all_reviews) >= cap:
+        lc_calls = self._lc(P, "obligations")
+        if not lc_calls and len(all_reviews) >= cap:
             self.store.release(pid, tid)
             return self.store.transition(pid, tid, S.BLOCKED, {
                 "blocker": f"review budget used ({len(all_reviews)}/{cap} review calls)"})
@@ -781,6 +898,16 @@ class Coordinator:
         key = f"review:{pid}:{tid}:{head}:{role}:{n}:p{R.PACKET_VERSION}"
         if (self.store.op(key) or {}).get("status") == "done":
             return
+        if lc_calls and not self._lc_charged(P, tid, "review_calls", key):
+            # [lifecycle] the budget ledger's limit (base + authorized extensions);
+            # a call already charged under this key (a retried error) is not refused
+            self._lc_backfill(P, t)
+            lim = self.obligations.effective_limits(P, t)["review_calls"]
+            if lim["remaining"] <= 0:
+                self.store.release(pid, tid)
+                return self.store.transition(pid, tid, S.BLOCKED, {
+                    "blocker": f"review budget used ({lim['used']}/{lim['max']} review calls, "
+                               f"budget ledger)"})
         base = t["data"].get("task_base") or t["base_sha"]
         ver = self.store.verification(t["verification_id"], pid, tid)
         limits, limits_from = self._reviewer_limits(P, persona)
@@ -789,6 +916,8 @@ class Coordinator:
             P, "review_contract", lambda *_: {"phase": "full", "reviewed": [], "deferred": []},
             spec))
         evidence = self._review_evidence(P, spec, head)
+        if self._lc(P, "evidence"):
+            evidence = self._lc_review_items(P, spec, head, evidence)
         prio_fn = getattr(P.adapter, "diff_priority", None)
 
         def priority(f):
@@ -821,6 +950,8 @@ class Coordinator:
                            "packet_version": R.packet_version(r)} for r in older]})
         self._settle_stale_review_ops(P, t, key)
         self.store.op_begin(key, pid, tid, "review")
+        if self._lc(P, "obligations"):
+            self._lc_charge(P, t, "review_calls", key)
         cov = info["coverage"]
         meta_packet = {"version": R.PACKET_VERSION, "phase": info["phase"], "spec_from": spec_from,
                        "chars": info["chars"], "est_tokens": info["est_tokens"],
@@ -844,11 +975,17 @@ class Coordinator:
             self.store.x("DELETE FROM ops WHERE key=?", (key,))
             n = int(t["data"].get("review_errors") or 0) + 1
             self.store.merge_data(pid, tid, review_errors=n)
-            if n >= REVIEW_ERRORS_BEFORE_BLOCK:
+            max_err = REVIEW_ERRORS_BEFORE_BLOCK
+            if self._lc(P, "obligations"):
+                # [lifecycle] recorded in the ledger; the per-attempt limit is the
+                # ledger's (profile max_review_errors + authorized extensions)
+                self._lc_charge(P, t, "review_errors", f"review_error:{t['run_id']}:{key}:{n}")
+                max_err = self.obligations.effective_limits(P, t)["review_errors"]["max"]
+            if n >= max_err:
                 self.store.release(pid, tid)
                 return self.store.transition(pid, tid, S.BLOCKED, {
                     "blocker": f"review call failed {n} times: {e}"})
-            return self._note(P, t, f"review call failed ({n}/{REVIEW_ERRORS_BEFORE_BLOCK}): {e}")
+            return self._note(P, t, f"review call failed ({n}/{max_err}): {e}")
         self._end_review_binding(P, rsid, "done")
         try:
             res = R.validate(text, project_id=pid, task_id=tid, head_sha=head, scope=spec.scope)
@@ -966,6 +1103,8 @@ class Coordinator:
     def _apply_review(self, P: Project, t: dict, rev: dict) -> None:
         pid, tid = P.id, t["task_id"]
         res = rev["result"]
+        if self._lc(P) and self._lc_apply_review(P, t, rev):
+            return
         if rev["verdict"] == "APPROVED":
             return self.store.transition(pid, tid, S.APPROVED, {
                 "review_id": rev["review_id"], "reviewed_commit_sha": rev["reviewed_sha"],
@@ -1036,9 +1175,13 @@ class Coordinator:
                 run_id = f"{t['run_id']}-close{int(t['data'].get('closeout_attempts') or 0)}"
                 ctx = {"attempt": t["attempt"], "run_id": run_id, "base": t["reviewed_sha"],
                        "retry_reason": t["data"].get("closeout_retry_reason")}
+                if self._lc(P, "obligations"):
+                    self._lc_charge(P, t, "sessions", f"session:{run_id}")
+                    self._lc_charge(P, t, "closeout", f"closeout:{run_id}")
                 try:
                     sid = self._start_session(P, tid, spec, "closeout", "implementer", run_id,
-                                              t["attempt"], P.adapter.closeout_prompt(spec, ctx))
+                                              t["attempt"], P.adapter.closeout_prompt(spec, ctx),
+                                              meta=self._lc_session_meta(P, P.ws.head()))
                 except Exception as e:                            # noqa: BLE001
                     self._release_session(P, t)
                     return self._note(P, t, f"could not start the closeout session: {e}")
@@ -1115,7 +1258,11 @@ class Coordinator:
         pid, tid = P.id, t["task_id"]
         t = self.store.task(pid, tid)
         n = int(t["data"].get("closeout_attempts") or 0) + 1
-        if P.adapter.closeout_mode() == "session" and n < P.profile.limit("max_closeout_attempts", 2):
+        max_close = P.profile.limit("max_closeout_attempts", 2)
+        if self._lc(P, "obligations"):
+            # [lifecycle] base + authorized extensions from the budget ledger
+            max_close = self.obligations.effective_limits(P, t)["closeout"]["max"]
+        if P.adapter.closeout_mode() == "session" and n < max_close:
             self.store.merge_data(pid, tid, closeout_attempts=n, closeout_session=None,
                                   closeout_done=None, closeout_retry_reason=why)
             return self._note(P, t, f"closeout incomplete, retrying with a fresh session: {why[:200]}")
@@ -1311,7 +1458,14 @@ class Coordinator:
                 actor: str = "operator") -> dict:
         t = self.store.task(project_id, task_id)
         fields = {"attempt": 0, "sessions": 0, "started_ts": None} if reset_attempts else {}
-        data = {k: v for k, v in t["data"].items() if k != "question"}
+        lc_on = project_id in self.projects and self._lc(self.projects[project_id])
+        # (the lifecycle's block markers go with the block an operator resolved, so a
+        # later, unrelated BLOCKED never auto-resumes on a stale decision/readiness;
+        # a project without [lifecycle] keeps every data key but the question)
+        drop = ("question", "decision_wait", "readiness_block", "readiness", "blocker_class",
+                self.LC_PENDING, "lc_stop") if lc_on else ("question",)
+        data = {k: v for k, v in t["data"].items() if k not in drop}
+        stop = (t["data"].get("lc_stop") or {}) if lc_on else {}
         if reset_attempts:
             # a fresh budget: see RetryGuidance.on_reset (guided extra not carried
             # over; a never-called, transiently skipped adviser re-armed, bounded)
@@ -1327,8 +1481,30 @@ class Coordinator:
                     f"internal:unblock:{project_id}:{task_id}:{n}", project_id, task_id, "",
                     "task", "next_session", actor,
                     f"Resolution of the block, from {actor}: {str(resolution).strip()[:2000]}")
-            return self.store.transition(project_id, task_id, S.READY, evidence,
-                                         actor=actor, data=data, **fields)
+            lc = reset_attempts and project_id in self.projects                 and self._lc(self.projects[project_id], "obligations")
+            if lc:
+                # [lifecycle] a reset is an authorized ledger row bound to this very
+                # unblock transition (its 0-based index), never an overwrite
+                P = self.projects[project_id]
+                n = self.store.q("SELECT COUNT(*) AS n FROM transitions WHERE project_id=? "
+                                 "AND task_id=?", (project_id, task_id))[0]["n"]
+                self._lc_backfill(P, t)
+            out = self.store.transition(project_id, task_id, S.READY, evidence,
+                                        actor=actor, data=data, **fields)
+            if stop.get("decision_id"):
+                # [lifecycle] the operator resolved a "stop" answer: it is withdrawn
+                # (kept for the audit), so the next escalation asks again instead of
+                # stopping on the same answer forever
+                self.store.x("UPDATE decisions SET status='withdrawn' WHERE decision_id=? AND "
+                             "status='answered'", (stop["decision_id"],))
+                self.store.event(project_id, task_id, "decision_withdrawn", detail={
+                    "decision_id": stop["decision_id"], "by": actor,
+                    "reason": "the operator unblocked a task stopped by this answer"})
+            if lc:
+                for counter in ("attempt_ordinary", "sessions"):
+                    self.obligations.reset(P, t, counter, f"unblock: {resolution}"[:300],
+                                           actor, f"unblock:{n}")
+            return out
 
     def approve_human(self, project_id: str, task_id: str, kind: str, approver: str,
                       note: str = "") -> str:
@@ -1514,6 +1690,9 @@ class Coordinator:
         about to send anyway (a safe point: never a second, concurrent prompt).
         They are the operator's words for this task, inside its existing scope
         and permissions: they don't widen scope or waive a check."""
+        P = self.projects.get(project_id)
+        if P is not None and self._lc(P):
+            prompt += self._lc_memory_blocks(P, task_id)
         try:
             notes = self.store.pending_operator_messages(project_id, task_id, session_id)
         except Exception:                                         # noqa: BLE001
@@ -1573,6 +1752,1073 @@ class Coordinator:
                                                   f"session {session_id} is gone; a "
                                                   f"session-specific instruction is not moved "
                                                   f"to another session")
+
+    # ======================================================================= lifecycle (v0.122)
+    #
+    # Everything in this section runs only for a project whose profile has
+    # [lifecycle] enabled = true (sub-switches evidence / obligations / recovery /
+    # readiness). A disabled project never reaches it and never creates its tables.
+    #
+    #   readiness   adapter.readiness() before a session; a blocking failure is
+    #               BLOCKED with its class, consumes no attempt, and environment /
+    #               runtime_sync blocks re-check themselves on a timer
+    #   evidence    the ledger recovers exact tool results from every session of
+    #               the task before a retry and before review; its blocks ride in
+    #               every implementation prompt and its items in the review packet
+    #   obligations seeded from the adapter, reconciled with the plan at HEAD; a
+    #               model's text that moves BUILD work to CLOSE opens a decision
+    #   recovery    repair assignments (adviser = RetryGuidance, at most once),
+    #               the submission gate (no paid review while BUILD evidence is
+    #               missing), same-session continuations, review routing, progress
+    #   decisions   typed operator answers (control.py decision_answer); a task
+    #               waiting on one is BLOCKED and resumes when it is answered
+    #   budget      the append-only ledger (ordinary, guided, sessions, review
+    #               calls, closeout, continuations); a reset is an authorized row
+
+    LC_AUTO_CLASSES = ("environment", "runtime_sync")
+    # task data key: a same-session continuation decided but not sent yet (waiting
+    # for the writer slot, a paused project, ...). Durable, so a later tick sends
+    # it without paying for another review or re-running the verification.
+    LC_PENDING = "lc_pending_continuation"
+    # decision kinds whose answer may be "stop the task" (Recovery._escalation_answer)
+    LC_STOP_KINDS = ("recovery_escalation", "no_progress", "review_access")
+    # the control center shows (and hashes) at most this much of a question
+    LC_UI_QUESTION_CHARS = 1500
+
+    @property
+    def ledger(self):
+        if self._ledger is None:
+            from .evidence import EvidenceLedger
+            self._ledger = EvidenceLedger(self.store, self.state_dir, clock=self.clock)
+        return self._ledger
+
+    @property
+    def obligations(self):
+        if self._obligations is None:
+            from .obligations import Obligations
+            self._obligations = Obligations(self.store, clock=self.clock)
+        return self._obligations
+
+    @property
+    def recovery(self):
+        if self._recovery is None:
+            from .recovery import Recovery
+            self._recovery = Recovery(self.store, clock=self.clock)
+        return self._recovery
+
+    @staticmethod
+    def _lc(P: Project, part: str = "") -> bool:
+        fn = getattr(P.profile, "lifecycle_on", None)
+        try:
+            return bool(fn(part)) if callable(fn) else False
+        except Exception:                                         # noqa: BLE001
+            return False
+
+    @staticmethod
+    def _lcv(P: Project, key: str, default):
+        v = (getattr(P.profile, "lifecycle", None) or {}).get(key, default)
+        return default if v is None else v
+
+    def _lc_safe(self, P: Project, tid: str, what: str, fn, default=None):
+        """Best-effort lifecycle work (recovery scans, promotions, prompt blocks):
+        a failure is an event, never a stuck task. Gates are NOT run through this."""
+        try:
+            return fn()
+        except Exception as e:                                    # noqa: BLE001
+            self.store.event(P.id, tid, "warning", detail={
+                "lifecycle": f"{what}: {type(e).__name__}: {e}"[:400]})
+            self.log(f"{P.id}/{tid}: lifecycle {what} failed: {type(e).__name__}: {e}")
+            return default
+
+    def _lc_session_meta(self, P: Project, head: str) -> Optional[dict]:
+        """Session data at start: the HEAD it began at (the ledger's source
+        revision for its tool results until the session commits)."""
+        if not self._lc(P) or not head:
+            return None
+        return {"head": head, "head_start": head}
+
+    # -- budget ledger -------------------------------------------------------------
+
+    def _lc_backfill(self, P: Project, t: dict) -> None:
+        """A task that ran before the ledger existed (DB migration) gets its
+        counters recorded once from the task row, so nothing is forgotten."""
+        tid = t["task_id"]
+        obs = self.obligations                  # creates the ledger tables on first use
+        if obs is not None and self.store.q(
+                "SELECT 1 FROM budget_ledger WHERE project_id=? AND task_id=? LIMIT 1",
+                        (P.id, tid)):
+            return
+        t = self.store.task(P.id, tid) or t
+        with self.store.tx():
+            if int(t.get("attempt") or 0):
+                self.obligations.charge(P.id, tid, "attempt_ordinary", int(t["attempt"]),
+                                        "migrated:attempt", "engine")
+            if int(t.get("sessions") or 0):
+                self.obligations.charge(P.id, tid, "sessions", int(t["sessions"]),
+                                        "migrated:sessions", "engine")
+            n = len(self.store.reviews(P.id, tid))
+            if n:
+                self.obligations.charge(P.id, tid, "review_calls", n, "migrated:reviews",
+                                        "engine")
+
+    def _lc_attempt_no(self, P: Project, t: dict) -> int:
+        """The task's implementation attempts so far, counted by the ledger
+        (ordinary + guided; never reset). t['attempt'] without the ledger."""
+        if not self._lc(P, "obligations"):
+            return int(t.get("attempt") or 0)
+        self._lc_backfill(P, t)
+        c = self.obligations.counters(P.id, t["task_id"])
+        return int(c.get("attempt_ordinary", 0)) + int(c.get("attempt_guided", 0))
+
+    def _lc_charged(self, P: Project, tid: str, counter: str, key: str) -> bool:
+        if not self.store.q("SELECT 1 FROM sqlite_master WHERE type='table' AND "
+                            "name='budget_ledger'"):
+            return False
+        return bool(self.store.q("SELECT 1 FROM budget_ledger WHERE project_id=? AND task_id=? "
+                                 "AND counter=? AND reason=?", (P.id, tid, counter, key)))
+
+    def _lc_run_paid(self, P: Project, tid: str, run_id: str) -> bool:
+        """The run's start was already charged (attempt and/or session row, under
+        any counter): resuming it must not charge, or refuse, it again."""
+        self.obligations                        # creates the ledger tables on first use
+        return bool(self.store.q(
+            "SELECT 1 FROM budget_ledger WHERE project_id=? AND task_id=? AND reason IN (?,?)",
+            (P.id, tid, f"attempt:{run_id}", f"session:{run_id}")))
+
+    def _lc_charge(self, P: Project, t: dict, counter: str, key: str, n: int = 1) -> bool:
+        """Charge a ledger counter once per key (restarts never charge twice)."""
+        self._lc_backfill(P, t)
+        tid = t["task_id"]
+        with self.store.tx():
+            if self.store.q("SELECT 1 FROM budget_ledger WHERE project_id=? AND task_id=? AND "
+                            "counter=? AND reason=?", (P.id, tid, counter, key)):
+                return False
+            self.obligations.charge(P.id, tid, counter, n, key, "engine")
+        return True
+
+    def _lc_budget(self, P: Project, t: dict, free: bool) -> tuple[Optional[str], bool]:
+        """(counter to charge for this attempt, stop). Nested limits: ordinary
+        attempts, then the guided allowance (RetryGuidance, at most one consult),
+        each extendable only by an authorized ledger row; sessions separately."""
+        pid, tid = P.id, t["task_id"]
+        self._lc_backfill(P, t)
+        L = self.obligations.effective_limits(P, t)
+        if L["sessions"]["remaining"] <= 0:
+            self.store.transition(pid, tid, S.FAILED, {
+                "reason": f"{L['sessions']['used']} sessions used (max_sessions_per_task "
+                          f"{L['sessions']['max']}, budget ledger)"})
+            return None, True
+        if free:
+            return None, False
+        if L["ordinary"]["remaining"] > 0:
+            return "attempt_ordinary", False
+        if L["guided_extra"]["remaining"] > 0:
+            return "attempt_guided", False
+        if self.retry_guidance.consult(P, t):
+            return None, True             # one guided extra granted: next tick charges it
+        self.store.transition(pid, tid, S.FAILED, {
+            "reason": f"{L['ordinary']['used']} implementation attempts used (max_attempts "
+                      f"{L['ordinary']['max']}, guided extra {L['guided_extra']['used']}/"
+                      f"{L['guided_extra']['max']}, budget ledger)"})
+        return None, True
+
+    # -- readiness -----------------------------------------------------------------
+
+    def _lc_readiness(self, P: Project, t: dict, spec, ctx: dict) -> Optional[dict]:
+        """None when nothing blocks; else {cls, classes, items, auto}."""
+        fn = getattr(P.adapter, "readiness", None)
+        if not callable(fn):
+            return None
+        try:
+            try:
+                items = fn(spec, "implement", ctx)
+            except TypeError:
+                items = fn(spec)
+        except Exception as e:                                    # noqa: BLE001
+            self.store.event(P.id, t["task_id"], "warning", detail={
+                "readiness": f"the adapter's readiness check failed: {type(e).__name__}: "
+                             f"{e}"[:400]})
+            return None
+        bad = [i for i in items or [] if isinstance(i, dict) and i.get("ok") is False
+               and bool(i.get("blocking", i.get("required", True)))]
+        if not bad:
+            return None
+        classes = sorted({str(i.get("cls") or "environment") for i in bad})
+        rows = [{"name": str(i.get("name") or i.get("check") or "?"),
+                 "cls": str(i.get("cls") or "environment"),
+                 "detail": str(i.get("detail") or "")[:300],
+                 "remedy": str(i.get("remedy") or "")[:200]} for i in bad]
+        return {"cls": rows[0]["cls"], "classes": classes, "items": rows,
+                "auto": all(c in self.LC_AUTO_CLASSES for c in classes)}
+
+    def _lc_readiness_text(self, r: dict) -> str:
+        return (f"readiness ({r['cls']}): " + "; ".join(
+            f"{i['name']}: {i['detail']}" + (f" (fix: {i['remedy']})" if i["remedy"] else "")
+            for i in r["items"]))[:1000]
+
+    def _lc_block_readiness(self, P: Project, t: dict, r: dict) -> None:
+        pid, tid = P.id, t["task_id"]
+        now = self.clock()
+        retry = int(self._lcv(P, "readiness_retry_seconds", 120))
+        text = self._lc_readiness_text(r)
+        cur = self.store.task(pid, tid)
+        data = {**cur["data"], "readiness": r["items"], "blocker_class": r["cls"],
+                "readiness_block": {**r, "since": now, "checks": 1, "retry_s": retry,
+                                    "retry_at": (now + retry) if r["auto"] else None}}
+        self.store.release(pid, tid)
+        self.store.transition(pid, tid, S.BLOCKED, {
+            "blocker": text, "blocker_class": r["cls"], "readiness": r["items"],
+            "attempt_consumed": "no"}, blocker=text, data=data)
+
+    # -- BLOCKED: readiness re-check, decision waits --------------------------------
+
+    def _lc_blocked(self, P: Project, t: dict) -> None:
+        pid, tid = P.id, t["task_id"]
+        data = t.get("data") or {}
+        rb = data.get("readiness_block")
+        if rb:
+            if not rb.get("retry_at") or self.clock() < float(rb["retry_at"]):
+                return                    # a person must fix it, or not time yet (no busy loop)
+            try:
+                spec = P.adapter.describe(tid)
+            except AdapterError:
+                return
+            r = self._lc_readiness(P, t, spec, {"attempt": t["attempt"] + 1,
+                                                "base": t["base_sha"], "recheck": True})
+            if r is None:
+                rest = {k: v for k, v in data.items()
+                        if k not in ("readiness_block", "readiness", "blocker_class")}
+                self.store.transition(pid, tid, S.READY, {
+                    "resolution": f"readiness re-check passed ({rb.get('cls')} cleared after "
+                                  f"{rb.get('checks', 1)} check(s))", "actor": "engine"},
+                    data=rest)
+                return
+            n = int(rb.get("checks") or 1) + 1
+            back = min(int(rb.get("retry_s") or 120) * (2 ** (n - 1)), 3600)
+            text = self._lc_readiness_text(r)
+            self.store.update_task(pid, tid, blocker=text, data={
+                **data, "readiness": r["items"], "blocker_class": r["cls"], "readiness_block": {
+                **r, "since": rb.get("since"), "checks": n, "retry_s": rb.get("retry_s"),
+                "retry_at": (self.clock() + back) if r["auto"] else None}})
+            return
+        dw = data.get("decision_wait")
+        if not dw:
+            return
+        ids = list(dw.get("ids") or [])
+        # a superseded decision is followed to the decision that superseded it: the
+        # task waits while THAT one is open (a withdrawn one without a successor is
+        # resolved: the operator withdrew the question)
+        decs = [self._lc_final_decision(d) for d in ids]
+        final_ids = [d["decision_id"] if d else i for i, d in zip(ids, decs)]
+        pending = [d for d in decs if d and d["status"] == "open"]
+        if pending:
+            if final_ids != ids:
+                self._lc_rewait(P, t, final_ids)
+            return
+        answered = [d for d in decs if d]
+        stop = self._lc_stop_answer(answered)
+        if stop:
+            d, val = stop
+            return self._lc_stop_block(P, t, d, val)
+        reopened = self._lc_apply_answers(P, t, answered)
+        if reopened:
+            # a malformed / refused typed answer: the task waits on the re-opened
+            # decision (which carries the error), never wedges or resumes on it
+            self._lc_rewait(P, self.store.task(pid, tid),
+                            [reopened.get(i, i) for i in final_ids])
+            return
+        resume = dw.get("resume") or S.READY
+        if resume == S.VERIFYING:
+            proj = self.store.project(pid)
+            if proj and proj["paused"]:
+                # VERIFYING leads to a paid review / continuation prompt: not while paused
+                return self._note(P, t, f"project paused (decision answered; resumes when "
+                                        f"unpaused): {proj.get('pause_note') or ''}")
+        rest = {k: v for k, v in (self.store.task(pid, tid)["data"] or {}).items()
+                if k not in ("decision_wait", "blocker_class")}
+        why = "decision(s) " + ", ".join(f"{d['decision_id']} {d['status']}" for d in answered)
+        if resume == S.VERIFYING:
+            head = P.ws.head()
+            if t.get("head_sha") and head != t["head_sha"]:
+                # the gate / review decision was about another commit: the normal
+                # path (READY -> a session) instead of verifying a moved head
+                self.store.transition(pid, tid, S.READY, {
+                    "resolution": f"{why}; the workspace moved from {t['head_sha'][:12]} to "
+                                  f"{head[:12]} while blocked", "actor": "engine"}, data=rest)
+                return
+            # the decision came from the gate or the review: verify the same head again
+            if self._acquire(P, t, self._workspace_locks(P)):
+                return
+            self.store.transition(pid, tid, S.VERIFYING, {
+                "resolution": why, "decision_id": ",".join(dw.get("ids") or [])},
+                data=rest, next_action="verifying")
+            return
+        self.store.transition(pid, tid, S.READY, {"resolution": why, "actor": "engine"},
+                              data=rest)
+
+    def _lc_final_decision(self, did: str) -> Optional[dict]:
+        d = self.obligations.decision(did)
+        seen = {did}
+        while d and d["status"] == "superseded" and d.get("superseded_by") \
+                and d["superseded_by"] not in seen:
+            seen.add(d["superseded_by"])
+            nxt = self.obligations.decision(d["superseded_by"])
+            if not nxt:
+                break
+            d = nxt
+        return d
+
+    def _lc_stop_answer(self, decisions: list) -> Optional[tuple]:
+        """(decision, reason) for the first answered decision whose answer is
+        "stop" (Recovery._escalation_answer), for every kind that offers it."""
+        from .recovery import Recovery
+        for d in decisions:
+            if d and d.get("status") == "answered" and d.get("kind") in self.LC_STOP_KINDS:
+                act, val = Recovery._escalation_answer(d)
+                if act == "stop":
+                    return d, val
+        return None
+
+    def _lc_stop_block(self, P: Project, t: dict, d: dict, reason: str) -> None:
+        """An operator's "stop": the task stays BLOCKED with the reason (an
+        operator unblock withdraws the answer and lets it continue)."""
+        pid, tid = P.id, t["task_id"]
+        did = d.get("decision_id") or ""
+        text = f"recovery stopped by operator decision {did}: {reason or 'stop'}"[:900]
+        cur = self.store.task(pid, tid)
+        data = {k: v for k, v in (cur["data"] or {}).items()
+                if k not in ("decision_wait", self.LC_PENDING)}
+        data.update(blocker_class="decision", lc_stop={"decision_id": did,
+                                                       "kind": d.get("kind") or ""})
+        self.store.event(pid, tid, "decision_stop", detail={"decision_id": did,
+                                                           "kind": d.get("kind"),
+                                                           "reason": str(reason)[:300]})
+        self.store.release(pid, tid)
+        if cur["state"] == S.BLOCKED:
+            self.store.update_task(pid, tid, blocker=text, next_action=text[:500], data=data)
+            return
+        self.store.transition(pid, tid, S.BLOCKED, {"blocker": text, "decision_id": did,
+                                                    "blocker_class": "decision"},
+                              blocker=text, data=data)
+
+    def _lc_rewait(self, P: Project, t: dict, ids: list) -> None:
+        """The task keeps waiting, now on these (current) decision ids."""
+        pid, tid = P.id, t["task_id"]
+        data = dict(t["data"] or {})
+        dw = dict(data.get("decision_wait") or {})
+        dw["ids"] = list(dict.fromkeys(i for i in ids if i))
+        dw["question_hashes"] = self._lc_question_hashes(dw["ids"])
+        data["decision_wait"] = dw
+        text = f"waiting for operator decision {', '.join(dw['ids'])}: {dw.get('why') or ''}"
+        self.store.update_task(pid, tid, data=data, blocker=text[:1000])
+
+    @staticmethod
+    def _lc_qhash(question) -> str:
+        import hashlib
+        import json as _json
+        return hashlib.sha256(_json.dumps(question, default=str, sort_keys=True)
+                              .encode()).hexdigest()[:24]
+
+    def _lc_question_hashes(self, ids: list) -> dict:
+        """decision id -> the engine's own question hash (what decision_answer
+        checks), so a bridge can send it back."""
+        out = {}
+        for i in ids:
+            d = self.obligations.decision(i)
+            if d:
+                out[i] = self._lc_qhash(d["question"])
+        return out
+
+    def _lc_reopen(self, P: Project, t: dict, d: dict, error: str) -> str:
+        """Supersede a decision whose typed answer could not be applied with a
+        re-opened one carrying the error text; the task waits on it."""
+        pid, tid = P.id, t["task_id"]
+        base = str(d.get("question") or "")[:1500]
+        ev = d.get("evidence") if isinstance(d.get("evidence"), dict) \
+            else {"evidence": d.get("evidence")}
+        new = ""
+        for n in range(8):
+            q = f"{base}\n[the answer to {d['decision_id']} was refused: {error}]" + \
+                (f" [re-ask {n}]" if n else "")
+            new = self.obligations.open_decision(
+                pid, tid, d["kind"], q,
+                evidence={**ev, "refused_answer": d.get("answer"), "error": error[:500],
+                          "refused_decision": d["decision_id"]},
+                options=d.get("options") or [], recommendation=d.get("recommendation") or "",
+                blocks=d.get("blocks") or [tid], scope=d.get("scope") or {},
+                supersedes=d["decision_id"])
+            if (self.obligations.decision(new) or {}).get("status") == "open":
+                break
+        with self.store.tx():
+            self.obligations._mark_superseded(d["decision_id"], new, pid, tid)
+        self.store.event(pid, tid, "warning", detail={
+            "decision": d["decision_id"], "answer_refused": error[:400], "reopened": new})
+        return new
+
+    def _lc_apply_answers(self, P: Project, t: dict, decisions: list) -> dict:
+        """Typed answers the engine acts on (once per decision). Returns
+        {refused decision id: re-opened decision id} for answers that could not
+        be applied (a malformed n, no counter, a refused authorization)."""
+        from .obligations import LIMITS, LedgerRefused
+        tid = t["task_id"]
+        reopened = {}
+        for d in decisions:
+            if d.get("status") != "answered":
+                continue
+            ans = d.get("answer") if isinstance(d.get("answer"), dict) else {}
+            if d["kind"] == "budget_extension" and isinstance(d.get("answer"), dict):
+                # (a plain-text answer such as "no" declines the extension)
+                if self.store.q("SELECT 1 FROM budget_ledger WHERE project_id=? AND task_id=? "
+                                "AND decision_id=?", (P.id, tid, d["decision_id"])):
+                    continue                      # applied already
+                try:
+                    raw = str(ans.get("counter") or "").strip()
+                    if not raw:
+                        raise ValueError("the answer names no counter")
+                    # effective_limits keys (ordinary, sessions, review_calls, ...)
+                    # name ledger counters (attempt_ordinary, ...)
+                    counter = LIMITS[raw][0] if raw in LIMITS else raw
+                    n = int(ans.get("n"))
+                    if n <= 0:
+                        raise ValueError(f"n must be a positive integer, not {ans.get('n')!r}")
+                    self.obligations.authorize(P.id, tid, counter, n,
+                                               f"decision:{d['decision_id']}",
+                                               d.get("actor") or "operator", d["decision_id"])
+                except (TypeError, ValueError, LedgerRefused) as e:
+                    reopened[d["decision_id"]] = self._lc_reopen(
+                        P, t, d, f"{type(e).__name__}: {e}"[:400])
+            elif d["kind"] == "obligation_phase" and ans.get("obligation") and ans.get("phase"):
+                try:
+                    self.obligations.set_phase(P, t, ans["obligation"], ans["phase"],
+                                               d["decision_id"])
+                except ValueError as e:
+                    self.store.event(P.id, tid, "warning", detail={
+                        "decision": d["decision_id"], "set_phase": str(e)[:300]})
+        return reopened
+
+    def _lc_wait(self, P: Project, t: dict, ids: list, why: str, resume: str,
+                 evidence: Optional[dict] = None) -> None:
+        """Stop for operator decisions: BLOCKED with the decision ids (no session,
+        no attempt); _lc_blocked resumes when every one is answered."""
+        pid, tid = P.id, t["task_id"]
+        ids = list(dict.fromkeys(i for i in ids if i))
+        text = f"waiting for operator decision {', '.join(ids)}: {why}"[:1000]
+        cur = self.store.task(pid, tid)
+        data = {**cur["data"], "blocker_class": "decision",
+                "decision_wait": {"ids": ids, "resume": resume, "since": self.clock(),
+                                  "why": why[:500],
+                                  "question_hashes": self._lc_question_hashes(ids)}}
+        data.pop(self.LC_PENDING, None)
+        self.store.release(pid, tid)
+        self.store.event(pid, tid, "decision_wait", detail={"decisions": ids, "why": why[:500],
+                                                            "resume": resume})
+        self.store.transition(pid, tid, S.BLOCKED, {
+            **(evidence or {}), "blocker": text, "blocker_class": "decision",
+            "decision_id": ",".join(ids)}, blocker=text, data=data)
+
+    def _lc_decided(self, did: str) -> bool:
+        d = self.obligations.decision(did)
+        return bool(d) and d["status"] != "open"
+
+    # -- before a session ------------------------------------------------------------
+
+    def _lc_plan_text(self, P: Project, tid: str, head: str, spec) -> str:
+        fn = getattr(P.adapter, "plan_text", None)
+        if callable(fn):
+            try:
+                return str(fn(spec, head, P.ws) or "")
+            except Exception:                                     # noqa: BLE001
+                pass
+        try:
+            return str(self._reviewed_spec(P, tid, head)[0].spec or "")
+        except Exception:                                         # noqa: BLE001
+            return str(getattr(spec, "spec", "") or "")
+
+    def _lc_recover(self, P: Project, t: dict) -> Optional[dict]:
+        if not self._lc(P, "evidence"):
+            return None
+        rep = self._lc_safe(P, t["task_id"], "recover", lambda: self.ledger.recover(
+            P, t, max_parts=int(self._lcv(P, "recover_max_parts", 400)),
+            max_seconds=float(self._lcv(P, "recover_max_seconds", 20))))
+        if rep and (rep.get("added") or rep.get("errors") or rep.get("stopped")):
+            self.store.event(P.id, t["task_id"], "evidence_recovered", detail={
+                k: rep.get(k) for k in ("scanned", "added", "duplicates", "excluded",
+                                        "truncated", "stopped")} | {
+                "errors": (rep.get("errors") or [])[:5],
+                "checks": {k: v.get("result") for k, v in (rep.get("checks") or {}).items()}})
+        return rep
+
+    def _lc_evaluate(self, P: Project, t: dict, spec, head: str) -> None:
+        if not (self._lc(P, "obligations") and self._lc(P, "evidence")):
+            return
+        cur = self.ledger.current(P, spec, head)
+        miss = self.ledger.missing(P, spec, head)
+        self.obligations.evaluate(P, self.store.task(P.id, t["task_id"]), head, cur, miss)
+
+    def _lc_before_session(self, P: Project, t: dict, spec, base: str, attempt: int,
+                           run_id: str, findings: list, paid: bool = False) -> dict:
+        """recover -> seed/reconcile -> (repair) progress escalation and the
+        assignment. {'stopped': True} when the task now waits on a decision."""
+        pid, tid = P.id, t["task_id"]
+        self._lc_recover(P, t)
+        if self._lc(P, "obligations"):
+            self.obligations.seed(P, spec)
+            self.obligations.reconcile(P, spec, self._lc_plan_text(P, tid, base, spec))
+            self._lc_safe(P, tid, "evaluate", lambda: self._lc_evaluate(P, t, spec, base))
+        assignment = None
+        if findings and self._lc(P, "recovery") and self._lc(P, "obligations"):
+            strategy = ""
+            pr = self.recovery.progress(P, t)
+            if pr["no_progress"]:
+                q = (f"{pr['stalls']} sessions in a row made no progress (no newly verified "
+                     f"obligation, same findings, {pr['summary_only_sessions']} summary-only); "
+                     f"another broad retry would repeat them")
+                did = self.obligations.open_decision(
+                    pid, tid, "no_progress", q, evidence=pr,
+                    options=["answer with a different strategy {strategy: ...}",
+                             "authorize more budget", "stop the task"],
+                    recommendation="give a materially different strategy or stop",
+                    blocks=[tid])
+                consulted = (t["data"].get("lc_stall_consult") or {}).get("stalls")
+                if not self._lc_decided(did) and pr["recommendation"] == "consult" \
+                        and consulted != pr["stalls"]:
+                    self.store.merge_data(pid, tid, lc_stall_consult={"stalls": pr["stalls"],
+                                                                      "decision": did})
+                    g = self._lc_adviser(P, tid)({"project": pid, "task": tid,
+                                                  "progress": pr, "findings": findings[-8:]})
+                    if g.get("action") == "repair" and g.get("steps"):
+                        strategy = (str(g.get("summary") or "") + "\n" +
+                                    "\n".join(str(s) for s in g["steps"])).strip()
+                if not strategy and not self._lc_decided(did):
+                    self._lc_wait(P, t, [did], "no progress across sessions", S.READY)
+                    return {"stopped": True}
+                d = self._lc_final_decision(did)
+                if d and d["status"] == "answered":
+                    # "stop the task" (option or typed text) stops; only a real
+                    # strategy becomes one (Recovery._escalation_answer)
+                    from .recovery import Recovery
+                    act, val = Recovery._escalation_answer(d)
+                    if act == "stop":
+                        self._lc_stop_block(P, t, d, val)
+                        return {"stopped": True}
+                    if act == "strategy" and val:
+                        strategy = str(val)
+            if self._lc(P, "evidence"):
+                items = self._lc_safe(P, tid, "review_items", lambda: self.ledger.review_items(
+                    P, spec, base, cap_chars=4000), []) or []
+            else:
+                items = []
+            items += self._review_evidence(P, spec, base)
+            rep = t["data"].get("last_report") or {}
+            last = " ".join(str(rep.get(k) or "") for k in ("summary", "next", "blocker"))
+            # recovery numbers attempts monotonically (ledger), so an operator reset
+            # never makes a new attempt reuse an old assignment or hide a repeat
+            free = bool(t["data"].get("free_retry"))
+            trow = {**self.store.task(pid, tid), "run_id": run_id,
+                    "attempt": self._lc_attempt_no(P, t) + (0 if free or paid else 1)
+                    if self._lc(P, "obligations") else attempt}
+            from .recovery import AssignmentInvariant
+            try:
+                a = self.recovery.assignment(
+                    P, trow, ledger=self.ledger if self._lc(P, "evidence") else None,
+                    obligations=self.obligations, ws=P.ws, strategy=strategy,
+                    adviser=self._lc_adviser(P, tid), evidence_items=items, last_report=last,
+                    spec=spec, cap=int(self._lcv(P, "prompt_cap", 6000)))
+            except AssignmentInvariant as e:
+                self.store.event(pid, tid, "warning", detail={"assignment": str(e)[:400]})
+                a = None
+            if a and a.get("decision"):
+                self._lc_wait(P, t, [a["decision"]], "findings repeat with no materially "
+                              "different strategy (adviser consulted at most once)", S.READY)
+                return {"stopped": True}
+            if a and a.get("stop"):
+                # the operator answered the escalation with "stop": no session starts
+                self._lc_stop_block(P, t, {"decision_id": a.get("decision_id") or "",
+                                           "kind": "recovery_escalation"},
+                                    a.get("reason") or "stop")
+                return {"stopped": True}
+            assignment = a
+            if a:
+                self.store.event(pid, tid, "repair_assignment", detail={
+                    "attempt": attempt, "repair_id": a.get("repair_id"),
+                    "unresolved": [u["obligation_id"] for u in a.get("unresolved") or []],
+                    "repeats": len(a.get("repeats") or []),
+                    "rerun": a.get("affected_checks_to_rerun")})
+        return {"assignment": assignment,
+                "prompt_extra": self._lc_prompt_extra(P, t, spec, base, assignment)}
+
+    def _lc_stored_assignment(self, P: Project, t: dict) -> Optional[dict]:
+        if not self._lc(P, "recovery"):
+            return None
+        for r in reversed(self.recovery.repairs(P.id, t["task_id"])):
+            if int(r.get("attempt") or 0) == self._lc_attempt_no(P, t) and r.get("assignment"):
+                return r["assignment"]
+        return None
+
+    def _lc_prompt_extra(self, P: Project, t: dict, spec, head: str,
+                         assignment: Optional[dict]) -> str:
+        """The assignment and the ledger's evidence block (memory and decisions
+        ride in every prompt through _with_operator_notes). Bounded."""
+        cap = int(self._lcv(P, "prompt_cap", 6000))
+        parts = []
+        if assignment and assignment.get("prompt_text"):
+            parts.append(str(assignment["prompt_text"])[:cap])
+        if self._lc(P, "evidence"):
+            block = self._lc_safe(P, t["task_id"], "prompt_block",
+                                  lambda: self.ledger.prompt_block(P, spec, head, cap=cap), "")
+            if block:
+                parts.append(block)
+        return ("\n\n" + "\n\n".join(parts) + "\n") if parts else ""
+
+    def _lc_memory_blocks(self, P: Project, tid: str) -> str:
+        parts = []
+        if self._lc(P, "evidence"):
+            parts.append(self._lc_safe(P, tid, "memory_block",
+                                       lambda: self.ledger.memory_block(P.id, tid, cap=4000), ""))
+        if self._lc(P, "obligations"):
+            parts.append(self._lc_safe(P, tid, "decisions_block",
+                                       lambda: self.obligations.decisions_block(P.id, tid,
+                                                                                cap=3000), ""))
+        parts = [p for p in parts if p]
+        return ("\n\n" + "\n\n".join(parts) + "\n") if parts else ""
+
+    def _lc_adviser(self, P: Project, tid: str):
+        """RetryGuidance as the assignment's adviser: consulted at most once per
+        task (its own record), with its re-arm and extra-attempt caps intact."""
+        from .retry_guidance import RetryGuidance
+
+        def adviser(packet: dict) -> dict:
+            if not RetryGuidance.settings(P)["enabled"]:
+                return {"action": "unavailable", "summary": "retry guidance is not enabled",
+                        "steps": []}
+            t = self.store.task(P.id, tid)
+            if (t.get("data") or {}).get("retry_guidance"):
+                return {"action": "unavailable", "summary": "the adviser was already "
+                        "consulted for this task", "steps": []}
+            self.retry_guidance.consult(P, t)
+            rec = (self.store.task(P.id, tid).get("data") or {}).get("retry_guidance") or {}
+            act = rec.get("status")
+            return {"action": act if act in ("repair", "needs_human", "stop") else "unavailable",
+                    "summary": rec.get("summary") or rec.get("reason") or "",
+                    "steps": list(rec.get("steps") or [])}
+        return adviser
+
+    # -- a session ended -------------------------------------------------------------
+
+    def _lc_session_ended(self, P: Project, t: dict, sid: str, head: str, rep: dict) -> None:
+        tid = t["task_id"]
+        if self._lc(P, "obligations"):
+            # a model's report is data: a move of BUILD work to CLOSE opens a
+            # decision and never moves an obligation
+            text = "\n".join(str(rep.get(k) or "") for k in ("summary", "next", "blocker",
+                                                             "notes"))
+            if text.strip():
+                self._lc_safe(P, tid, "screen_report", lambda: self.obligations.screen_text(
+                    P, tid, text, "model_report"))
+        if self._lc(P, "recovery"):
+            sess = self.store.session(sid) or {}
+            prev = (sess.get("data") or {}).get("head_start") or t.get("base_sha") or ""
+
+            def mark():
+                cur = self.store.task(P.id, tid)
+                self.recovery.mark_session(P, {**cur, "attempt": self._lc_attempt_no(P, cur)},
+                                           sid, prev_head=prev,
+                                           head=head, reported=bool(rep),
+                                           actions=str(rep.get("summary") or ""))
+                self.recovery.close_repair(P, t, self._lc_attempt_no(P, t), end_rev=head,
+                                           diff_files=P.ws.changed_files(prev, head)
+                                           if prev and prev != head else [])
+            self._lc_safe(P, tid, "mark_session", mark)
+
+    # -- VERIFYING: promotion and the submission gate --------------------------------
+
+    def _lc_promote(self, P: Project, t: dict, spec, head: str, vid: str, results: list) -> None:
+        """Record this verification set's verdicts for the required checks as
+        verified ledger records, and promote transcript records this set
+        confirmed (observed PASS of a check that passed here)."""
+        tid = t["task_id"]
+        req = {str(r.get("check_id")) for r in (self._adapter_call(
+            P, "required_checks", lambda *_: [], spec, "BUILD") or []) if isinstance(r, dict)}
+        for r in results:
+            if r.check not in req or r.result not in (PASS, FAIL):
+                continue
+            self.ledger.record(
+                project_id=P.id, task_id=tid, check_id=r.check,
+                idem_key=f"{P.id}|{tid}|verification|{vid}|{r.check}",
+                run_id=t.get("run_id") or "", source="coordinator", check_kind="verification",
+                exec_status="completed", result=r.result, tier="verified",
+                source_revision=head, started_ts=r.executed_ts, ended_ts=r.executed_ts,
+                provenance={"verification_id": vid, "evidence": r.evidence},
+                output=r.detail or r.result)
+        passed = {r.check for r in results if r.result == PASS}
+        for cid, rec in self.ledger.current(P, spec, head).items():
+            if cid in passed and rec["tier"] == "observed" and rec["result"] == "PASS" \
+                    and not rec["truncated"]:
+                try:
+                    self.ledger.promote(rec["record_id"], "verified", actor="engine",
+                                        ref_kind="verification", ref_id=vid)
+                except ValueError:
+                    pass
+
+    @staticmethod
+    def _lc_gate_lines(items: list) -> list[str]:
+        out = []
+        for g in items:
+            it = g.get("item") or {}
+            if it.get("obligation_id"):
+                line = f"obligation {it['obligation_id']} ({it.get('title') or ''}): " \
+                       f"{it.get('reason') or 'not verified at head'}"
+            elif it.get("check_id"):
+                line = f"check {it['check_id']}: {it.get('reason')} ({it.get('detail') or ''})"
+            else:
+                line = f"evidence {it.get('path') or it.get('title')}: {it.get('status')} " \
+                       f"{it.get('note') or ''}"
+            if line not in out:
+                out.append(line[:400])
+        return out
+
+    def _lc_submission_gate(self, P: Project, t: dict, spec, head: str, vid: str,
+                            results: list) -> bool:
+        """True when the review was refused (the task moved on): every BUILD
+        obligation verified at head, no missing/stale required evidence and no
+        open obligation conflict, or no paid review."""
+        pid, tid = P.id, t["task_id"]
+        if self._lc(P, "evidence"):
+            self._lc_recover(P, t)
+            self._lc_safe(P, tid, "promote",
+                          lambda: self._lc_promote(P, t, spec, head, vid, results))
+        if not (self._lc(P, "recovery") and self._lc(P, "obligations")
+                and self._lc(P, "evidence")):
+            return False
+        self.obligations.seed(P, spec)          # lazily, for a task that predates the ledger
+        gate = self.recovery.gate_submission(P, self.store.task(pid, tid), head, self.ledger,
+                                             self.obligations, spec=spec,
+                                             evidence_items=self._review_evidence(P, spec, head))
+        if not gate:
+            self.store.event(pid, tid, "submission_gate", detail={"head": head, "ok": True})
+            return False
+        self.store.event(pid, tid, "submission_refused", detail={
+            "head": head, "verification_id": vid, "items": gate[:20]})
+        decisions = [g["item"].get("decision_id") for g in gate if g["action"] == "decision"]
+        if decisions:
+            self._lc_wait(P, t, decisions, "an obligation conflict must be decided before "
+                          "review", S.VERIFYING, {"verification_id": vid})
+            return True
+        missing = [g for g in gate if g["class"] == "missing_evidence"]
+        lines = self._lc_gate_lines(missing or gate)
+        findings = ["missing evidence before review: " + x for x in lines] or \
+            ["the submission gate refused the review"]
+        fb = {"kind": "gate", "verification_id": vid, "head": head, "findings": findings,
+              "records": [{"class": "missing_evidence", "text": x,
+                           "check_id": (g["item"] or {}).get("check_id") or ""}
+                          for x, g in zip(lines, missing or gate)]}
+        if missing and all(g["action"] == "continue_same_session" for g in missing):
+            used = self.obligations.effective_limits(P, t)[
+                "missing_evidence_continuations"]["used"]
+            if self._lc_continue(P, t, spec, head, lines, f"submit:{head}:{used}",
+                                 {"verification_id": vid}, fb):
+                return True
+        self._lc_fallback(P, t, fb)
+        return True
+
+    def _lc_fallback(self, P: Project, t: dict, fb: dict) -> None:
+        """No continuation is possible (no session, it is gone, the prompt
+        failed): the gate's repair (CHANGES_REQUIRED) or the review's
+        evidence-only free retry. The pending marker goes with it."""
+        pid, tid = P.id, t["task_id"]
+        cur = self.store.task(pid, tid)
+        data = {k: v for k, v in (cur["data"] or {}).items() if k != self.LC_PENDING}
+        findings = list(fb.get("findings") or ["the coordinator found evidence missing"])
+        if fb.get("kind") == "review":
+            self.store.release(pid, tid)
+            self.store.transition(pid, tid, S.CHANGES_REQUIRED, {
+                "review_id": fb["review_id"], "findings": findings,
+                "verdict": "CHANGES_REQUIRED", "route": "evidence_incomplete"},
+                review_id=fb["review_id"],
+                data={**data, "findings": findings, "free_retry": True, "evidence_only": True})
+            return
+        records = list(fb.get("records") or [])
+        if records:
+            self._lc_safe(P, tid, "record_findings", lambda: self.recovery.record_findings(
+                P, cur, self._lc_attempt_no(P, cur), records))
+        self.store.transition(pid, tid, S.CHANGES_REQUIRED, {
+            "verification_id": fb["verification_id"], "findings": findings,
+            "submission_gate": "refused"},
+            verification_id=fb["verification_id"], head_sha=fb.get("head") or cur["head_sha"],
+            data={**data, "findings": findings})
+
+    def _lc_resume_continuation(self, P: Project, t: dict) -> bool:
+        """A continuation decided earlier (gate or review) and not sent yet: send
+        it now, at the same head and session, without verifying or reviewing
+        again. True when handled (sent, still waiting, or fell back)."""
+        m = (t.get("data") or {}).get(self.LC_PENDING)
+        if not m:
+            return False
+        pid, tid = P.id, t["task_id"]
+        head = P.ws.head()
+        if m.get("from_state") != t["state"] or m.get("head") != head \
+                or m.get("session_id") != t.get("session_id") or not m.get("fallback"):
+            self.store.merge_data(pid, tid, **{self.LC_PENDING: None})
+            self.store.event(pid, tid, "continuation_dropped", detail={
+                "key": m.get("key"), "from_state": m.get("from_state"),
+                "state": t["state"], "head": head, "marker_head": m.get("head")})
+            return False
+        spec = P.adapter.describe(tid)
+        if self._lc_continue(P, t, spec, head, list(m.get("lines") or []), m["key"],
+                             dict(m.get("evidence") or {}), m["fallback"]):
+            return True
+        self._lc_fallback(P, self.store.task(pid, tid), m["fallback"])
+        return True
+
+    def _lc_continue(self, P: Project, t: dict, spec, head: str, lines: list, key: str,
+                     evidence: dict, fallback: Optional[dict] = None) -> bool:
+        """ONE journaled continuation prompt to the same (idle) session listing the
+        exact missing evidence, then back to IMPLEMENTING. Charges
+        same_session_continuations, never an implementation attempt.
+
+        True = handled: sent, or waiting (writer slot, paused project) with a
+        durable pending marker that later ticks resume without paying for another
+        review or verification. False = no continuation is possible (no session,
+        Kilo lost it, the prompt failed): the marker is cleared, the locks this
+        took are released, and the caller falls back."""
+        pid, tid = P.id, t["task_id"]
+        sid = t.get("session_id")
+
+        def drop():
+            self.store.merge_data(pid, tid, **{self.LC_PENDING: None})
+        if not sid or not self.store.session(sid):
+            drop()
+            return False
+        try:
+            gone = P.client.state(sid, directory=P.profile.workspace,
+                                  since_ts=0).status == "missing"
+        except Exception:                                         # noqa: BLE001
+            gone = False                  # unknown: the prompt below decides
+        if gone:
+            self.store.event(pid, tid, "warning", session_id=sid, detail={
+                "continuation": f"session {sid} is gone; no continuation ({key})"})
+            drop()
+            return False
+        marker = {"key": key, "from_state": t["state"], "head": head, "session_id": sid,
+                  "review_id": evidence.get("review_id"),
+                  "verification_id": evidence.get("verification_id"),
+                  "lines": list(lines[:20]), "evidence": evidence, "fallback": fallback}
+        if (self.store.task(pid, tid)["data"] or {}).get(self.LC_PENDING) != marker:
+            self.store.merge_data(pid, tid, **{self.LC_PENDING: marker})
+        proj = self.store.project(pid)
+        if proj and proj["paused"]:
+            self._note(P, t, f"project paused (evidence continuation waits): "
+                             f"{proj.get('pause_note') or ''}")
+            return True
+        if self._acquire(P, t, self._session_locks(P), writer=True):
+            return True                   # waiting for the writer slot / resources
+        text = (P.adapter.continue_prompt(spec, "the coordinator found evidence missing "
+                                                "before review")
+                + "\n\n## Missing before review (checked by the coordinator; do it in this "
+                  "session)\n" + "\n".join("- " + x for x in lines[:20])
+                + "\nProduce exactly this evidence at the current code: rerun the listed checks "
+                  "(do not rerun what the ledger shows as verified), keep to the task scope, "
+                  "commit only task files, then report. Missing evidence is BUILD work; it is "
+                  "never deferred to closeout.\n")
+        if self._lc(P, "evidence"):
+            block = self._lc_safe(P, tid, "prompt_block", lambda: self.ledger.prompt_block(
+                P, spec, head, cap=int(self._lcv(P, "prompt_cap", 6000))), "")
+            if block:
+                text += "\n" + block + "\n"
+        try:
+            sent = self._prompt_primary(P, t, text, key)
+        except Exception as e:                                    # noqa: BLE001
+            # nothing was sent (_prompt_primary forgot its journal entry): never
+            # hold the session / writer locks across ticks on it
+            self._release_session(P, t)
+            self.store.event(pid, tid, "warning", session_id=sid, detail={
+                "continuation": f"prompt failed ({key}): {type(e).__name__}: {e}"[:400]})
+            drop()
+            return False
+        # the charge and the transition commit together: a restart before them
+        # finds the same key (journaled, not resent) and the pending marker;
+        # after them, IMPLEMENTING
+        try:
+            with self.store.tx():
+                self._lc_charge(P, t, "same_session_continuations", f"continuation:{sid}:{key}")
+                self.store.event(pid, tid, "same_session_continuation", session_id=sid, detail={
+                    "key": key, "sent": sent, "missing": lines[:20]})
+                drop()
+                self.store.transition(pid, tid, S.IMPLEMENTING, {
+                    **evidence, "session_id": sid, "continuation": key, "missing": lines[:20]},
+                    phase="implement", head_sha=head,
+                    next_action="session working (evidence continuation)")
+        except Exception:
+            # the prompt is journaled and the marker kept: the next tick takes the
+            # locks again and finishes the transition without resending
+            self._release_session(P, t)
+            raise
+        return True
+
+    # -- REVIEWING -------------------------------------------------------------------
+
+    def _lc_review_items(self, P: Project, spec, head: str, evidence: list) -> list:
+        """The ledger's exact stored outputs first (obligation-linked checks get
+        priority), then the adapter's items for paths the ledger doesn't cover."""
+        items = self._lc_safe(P, spec.task_id, "review_items", lambda: self.ledger.review_items(
+            P, spec, head, cap_chars=int(self._lcv(P, "prompt_cap", 6000)) * 2), []) or []
+        if not items:
+            return evidence
+        linked = set()
+        if self._lc(P, "obligations"):
+            linked = {str(e["ref"]) for o in self.obligations.all(P.id, spec.task_id)
+                      if o["phase"] == "BUILD" for e in o["required_evidence"]
+                      if e["kind"] == "check"}
+        for it in items:
+            if it["title"].split(":", 1)[0] in linked:
+                it["priority"] = min(int(it.get("priority", 2)), 1)
+        paths = {it["path"] for it in items if it.get("path")}
+        return items + [e for e in evidence if not e.get("path") or e["path"] not in paths]
+
+    def _lc_apply_review(self, P: Project, t: dict, rev: dict) -> bool:
+        """Route a review (True = handled here). APPROVED: promote and link,
+        then the normal path. CHANGES_REQUIRED: product_changes -> the normal
+        repair path (plus repeat fingerprints); evidence_incomplete -> recover
+        and re-review once, else a same-session continuation or an
+        evidence-only repair (no ordinary attempt); access_blocked -> a decision,
+        no session."""
+        pid, tid = P.id, t["task_id"]
+        res = rev["result"] or {}
+        rid, head = rev["review_id"], rev["reviewed_sha"]
+        if rev["verdict"] == "APPROVED":
+            def promote():
+                spec = P.adapter.describe(tid)
+                for rec in self.ledger.current(P, spec, head).values():
+                    if rec["tier"] in ("verified",) and not rec["truncated"]:
+                        self.ledger.promote(rec["record_id"], "reviewed", actor="engine",
+                                            ref_kind="review", ref_id=rid)
+                if self._lc(P, "obligations"):
+                    self.obligations.review_link(P, t, rid, "APPROVED", head)
+            if self._lc(P, "evidence"):
+                self._lc_safe(P, tid, "promote_reviewed", promote)
+            return False
+        if rev["verdict"] != "CHANGES_REQUIRED" or not self._lc(P, "recovery"):
+            return False
+        from .recovery import review_route
+        spec = P.adapter.describe(tid)
+        pk = res.get("packet") or {}
+        state = {}
+        if self._lc(P, "evidence"):
+            state["missing"] = self.ledger.missing(P, spec, head)
+        route = review_route(res, {"omitted": pk.get("omitted") or []}, state)
+        self.store.event(pid, tid, "review_routed", detail={"review_id": rid, "route": route,
+                                                            "reviewed_commit_sha": head})
+        if route == "product_changes":
+            items = [{"source": "review", "item": f if isinstance(f, dict) else {"text": str(f)}}
+                     for f in res.get("findings") or []]
+            items += [{"source": "review", "item": {"kind": "missing_evidence", "text": str(m)}}
+                      for m in res.get("missing_evidence") or []]
+            self._lc_safe(P, tid, "record_findings", lambda: self.recovery.record_findings(
+                P, t, self._lc_attempt_no(P, t), items))
+            if self._lc(P, "obligations"):
+                self._lc_safe(P, tid, "review_link", lambda: self.obligations.review_link(
+                    P, t, rid, "CHANGES_REQUIRED", head))
+            return False
+        again = list(dict.fromkeys([*(t["data"].get("lc_rereview") or []), rid]))
+        if route == "access_blocked":
+            did = self.obligations.open_decision(
+                pid, tid, "review_access",
+                f"The reviewer could not access the review packet or its evidence for "
+                f"{head[:12]} (review {rid})",
+                evidence={"review_id": rid, "findings": (res.get("findings") or [])[:5],
+                          "missing_evidence": (res.get("missing_evidence") or [])[:5]},
+                options=["access fixed: review again", "stop the task"],
+                recommendation="fix the reviewer's access, then review the same commit again",
+                blocks=[tid])
+            self.store.merge_data(pid, tid, lc_rereview=again)
+            self._lc_wait(P, self.store.task(pid, tid), [did], "the reviewer could not access "
+                          "the evidence; no session is started", S.VERIFYING, {"review_id": rid})
+            return True
+        # evidence_incomplete
+        self._lc_recover(P, t)
+        missing = self.ledger.missing(P, spec, head) if self._lc(P, "evidence") else []
+        heads = list(t["data"].get("lc_rereviewed") or [])
+        if not missing and head not in heads:
+            # the ledger has the evidence now: one re-review of the same commit
+            # (charges review_calls, never an attempt)
+            self.store.merge_data(pid, tid, lc_rereview=again, lc_rereviewed=heads + [head])
+            self.store.event(pid, tid, "review_again", detail={
+                "review_id": rid, "reason": "evidence_incomplete; the ledger now holds the "
+                                            "evidence", "reviewed_commit_sha": head})
+            self._note(P, t, "review asked for evidence the ledger holds; reviewing again")
+            return True
+        lines = [f"check {m['check_id']}: {m['reason']} ({m.get('detail') or ''})"[:400]
+                 for m in missing]
+        lines += [f"reviewer: {m}"[:400] for m in res.get("missing_evidence") or []]
+        lines = lines or ["the reviewer found the evidence incomplete"]
+        self.store.merge_data(pid, tid, lc_rereview=again)
+        t = self.store.task(pid, tid)
+        findings = ["evidence-only repair (the review asked for evidence, not product "
+                    "changes): " + x for x in lines]
+        fb = {"kind": "review", "review_id": rid, "head": head, "findings": findings}
+        lim = self.obligations.effective_limits(P, t)["missing_evidence_continuations"]
+        if lim["remaining"] > 0 and self._lc_continue(
+                P, t, spec, head, lines, f"review:{rid}:{lim['used']}", {"review_id": rid}, fb):
+            return True
+        self._lc_fallback(P, t, fb)
+        return True
+
+    # -- operator decisions ------------------------------------------------------------
+
+    def decision_answer(self, project_id: str, task_id: str, decision_id: str, answer,
+                        option: str = "", actor: str = "operator", note: str = "",
+                        question_hash: str = "", channel: str = "") -> dict:
+        """An operator's answer to an open decision (authority is always the
+        operator here). Raises DecisionRefused / DecisionConflict / ValueError;
+        the engine resumes a task waiting on it on its next tick."""
+        import json as _json
+        from .obligations import DecisionRefused
+        P = self._project(project_id)
+        if not self.store.q("SELECT 1 FROM sqlite_master WHERE type='table' AND "
+                            "name='decisions'"):
+            raise DecisionRefused(f"unknown decision {decision_id} (no lifecycle decisions in "
+                                  f"this coordinator)")
+        d = self.obligations.decision(decision_id)
+        if not d or d["project_id"] != P.id or d["task_id"] != task_id:
+            raise DecisionRefused(f"unknown decision {decision_id} for {project_id}/{task_id}")
+        if question_hash:
+            # the engine's hash of the stored question (decision_wait.question_hashes),
+            # or the control center's hash of the text it shows (the first
+            # LC_UI_QUESTION_CHARS characters), so a long question stays answerable
+            q = d["question"]
+            accepted = {self._lc_qhash(q)}
+            if isinstance(q, str):
+                accepted.add(self._lc_qhash(q[:self.LC_UI_QUESTION_CHARS]))
+            if str(question_hash) not in accepted:
+                raise ValueError("the question changed since the operator read it; nothing "
+                                 "was recorded")
+        text = str(answer if answer is not None else "").strip()
+        typed = None
+        if text.startswith("{"):
+            try:
+                typed = _json.loads(text)
+            except ValueError:
+                typed = None
+        if not isinstance(typed, dict):
+            typed = None
+        if typed is None and d["kind"] in ("recovery_escalation", "no_progress"):
+            from .recovery import Recovery
+            if Recovery._STOP.match(text) or Recovery._STOP.match(option or ""):
+                # "stop the task" (typed or chosen) is a stop, never a strategy
+                typed = {"stop": True, "option": option, "reason": text or option}
+            else:
+                typed = {"strategy": text, "option": option} if text else {"option": option}
+        value = typed if typed is not None else (text or option)
+        if value in ("", None, {}):
+            raise ValueError("an answer or an option is required")
+        import inspect
+        kw = {"channel": channel} if "channel" in inspect.signature(
+            self.obligations.answer).parameters else {}
+        out = self.obligations.answer(decision_id, value, actor, "operator", **kw)
+        self.store.event(project_id, task_id, "decision_answered", detail={
+            "decision_id": decision_id, "kind": d["kind"], "actor": actor,
+            "note": str(note or "")[:300]})
+        return out
 
     # ======================================================================= helpers
 

@@ -33,6 +33,12 @@ _SECRETY_VAL = re.compile(r"^(sk-[A-Za-z0-9_-]{12,}|[A-Fa-f0-9]{40,}|ghp_[A-Za-z
                           r"eyJ[A-Za-z0-9_-]{20,}\.)")
 
 
+LIFECYCLE_DEFAULTS = {"enabled": False, "evidence": True, "obligations": True, "recovery": True,
+                      "readiness": True, "readiness_retry_seconds": 120,
+                      "recover_max_parts": 400, "recover_max_seconds": 20,
+                      "prompt_cap": 6000}
+
+
 class ProfileError(ValueError):
     pass
 
@@ -87,6 +93,15 @@ class Profile:
     prompts: dict = field(default_factory=dict)
     artifacts: dict = field(default_factory=dict)
     commit: dict = field(default_factory=dict)
+    # [lifecycle] (v0.122): evidence ledger, obligations and recovery wiring in
+    # the engine. Off by default; the sub-switches apply only when enabled.
+    lifecycle: dict = field(default_factory=lambda: dict(LIFECYCLE_DEFAULTS))
+
+    def lifecycle_on(self, part: str = "") -> bool:
+        lc = self.lifecycle or {}
+        if not lc.get("enabled"):
+            return False
+        return bool(lc.get(part, True)) if part else True
 
     def limit(self, key: str, default: int) -> int:
         try:
@@ -226,6 +241,20 @@ def load(path: str) -> Profile:
         raise ProfileError(f"{path}: publish.mode must be none, push or verify_only")
     if publish.get("force") or publish.get("tags") == "all":
         raise ProfileError(f"{path}: force pushes and pushing all tags are never allowed")
+    lc_raw = raw.get("lifecycle") or {}
+    if not isinstance(lc_raw, dict):
+        raise ProfileError(f"{path}: [lifecycle] must be a table")
+    unknown_lc = sorted(set(lc_raw) - set(LIFECYCLE_DEFAULTS))
+    if unknown_lc:
+        raise ProfileError(f"{path}: unknown [lifecycle] keys {unknown_lc}")
+    lifecycle = dict(LIFECYCLE_DEFAULTS)
+    for k, v in lc_raw.items():
+        want = type(LIFECYCLE_DEFAULTS[k])
+        if want is bool and not isinstance(v, bool):
+            raise ProfileError(f"{path}: lifecycle.{k} must be true or false")
+        if want is int and (isinstance(v, bool) or not isinstance(v, int) or v < 0):
+            raise ProfileError(f"{path}: lifecycle.{k} must be a non-negative integer")
+        lifecycle[k] = v
     return Profile(
         id=pid, name=str(raw.get("name") or pid), version=str(raw.get("version") or "1"),
         path=path, hash=hashlib.sha256(blob).hexdigest()[:16], workspace=wpath,
@@ -237,7 +266,8 @@ def load(path: str) -> Profile:
         limits=dict(raw.get("limits") or {}),
         resources=list((raw.get("resources") or {}).get("exclusive") or []),
         closeout=dict(raw.get("closeout") or {}), prompts=dict(raw.get("prompts") or {}),
-        artifacts=dict(raw.get("artifacts") or {}), commit=dict(raw.get("commit") or {}))
+        artifacts=dict(raw.get("artifacts") or {}), commit=dict(raw.get("commit") or {}),
+        lifecycle=lifecycle)
 
 
 def check_isolation(profiles: list[Profile]) -> None:

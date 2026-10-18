@@ -55,6 +55,11 @@ TRANSITIONS: dict[tuple[str, str], object] = {
     (VERIFYING, REVIEWING): ("verification_id", "head_sha", "all_required_pass"),
     (VERIFYING, CHANGES_REQUIRED): ("verification_id", "findings"),
     (VERIFYING, BLOCKED): ("verification_id", "blocker"),
+    # [lifecycle] same-session continuation: the submission gate (or an
+    # evidence-incomplete review) sent ONE journaled prompt to the same session,
+    # listing the exact missing evidence; no implementation attempt is charged
+    (VERIFYING, IMPLEMENTING): ("verification_id", "session_id", "continuation"),
+    (REVIEWING, IMPLEMENTING): ("review_id", "session_id", "continuation"),
     (REVIEWING, APPROVED): ("review_id", "reviewed_commit_sha"),
     (REVIEWING, CHANGES_REQUIRED): ("review_id", "findings"),
     (REVIEWING, BLOCKED): ("blocker",),
@@ -76,6 +81,8 @@ TRANSITIONS: dict[tuple[str, str], object] = {
     (CLOSING, VERIFYING): ("invalidated",),
     (CLOSING, BLOCKED): ("blocker",),
     (BLOCKED, READY): ("resolution",),
+    # [lifecycle] a gate/review decision was answered: verify the same head again
+    (BLOCKED, VERIFYING): ("resolution", "decision_id"),
     (FAILED, READY): ("resolution",),
 }
 
