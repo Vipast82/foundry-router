@@ -75,6 +75,7 @@ CREATE TABLE IF NOT EXISTS operator_messages (
   session_id TEXT, scope TEXT, delivery TEXT, actor TEXT, text TEXT, status TEXT,
   created_ts REAL, delivered_session TEXT, delivered_ts REAL, detail TEXT,
   reported TEXT DEFAULT '');
+CREATE INDEX IF NOT EXISTS idx_opmsg_task ON operator_messages(project_id, task_id, status);
 """
 
 

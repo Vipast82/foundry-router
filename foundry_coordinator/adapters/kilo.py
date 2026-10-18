@@ -138,7 +138,7 @@ class KiloClient(CodingClient):
                                 unanswered=True)
         if not (info.get("time") or {}).get("completed") and not info.get("error"):
             return SessionState(status="busy")
-        if _is_compaction(last):
+        if _is_compaction(last) and not info.get("error"):
             # Kilo compacted the context; that summary is not the work's result.
             # Kilo stays the compaction manager: the coordinator only waits for
             # its continuation (and nudges the same session once if none comes)

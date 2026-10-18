@@ -371,6 +371,7 @@ class Coordinator:
             except Exception:
                 # refused, so nothing was sent: a retry may prompt this session again
                 self.store.op_update(key, "started", {"session_id": sid})
+                self._notes_requeue(notes)
                 raise
             self._notes_delivered(notes, sid)
             if units:
@@ -529,6 +530,18 @@ class Coordinator:
         grace = float(P.profile.client.get("compaction_grace_seconds") or 30)
         if now - float(seen.get("ts") or now) < grace or sid != t["session_id"]:
             return None
+        nudges = dict(t["data"].get("compaction_nudges") or {})
+        cap = int(P.profile.client.get("max_compaction_nudges") or 2)
+        if int(nudges.get(sid) or 0) >= cap:
+            # Kilo keeps compacting without progress: stop nudging (each nudge
+            # restarts the session timeout); end the session like a stall
+            P.client.abort(sid, directory=P.profile.workspace)
+            self._end_session(P, sid, "compaction_loop")
+            return self._session_failed(P, t, f"the session compacted its context {cap + 1} "
+                                              "times without finishing; a fresh session "
+                                              "continues from the recorded state", phase)
+        nudges[sid] = int(nudges.get(sid) or 0) + 1
+        self.store.merge_data(P.id, t["task_id"], compaction_nudges=nudges)
         spec = P.adapter.describe(t["task_id"])
         if self._prompt_primary(P, t, P.adapter.continue_prompt(
                 spec, "your context was compacted; continue from the summary"),
@@ -1137,6 +1150,7 @@ class Coordinator:
                                         agent=P.profile.client.get("agent") or "code")
                     except Exception:
                         self.store.x("DELETE FROM ops WHERE key=?", (okey,))
+                        self._notes_requeue(notes)
                         raise
                     self._notes_delivered(notes, sid)
                     self.store.op_update(okey, "done", {"prompt_ts": ts})
@@ -1177,14 +1191,19 @@ class Coordinator:
             # a fresh budget: see RetryGuidance.on_reset (guided extra not carried
             # over; a never-called, transiently skipped adviser re-armed, bounded)
             data = self.retry_guidance.on_reset(data)
-        if str(resolution or "").strip():
-            self.store.add_operator_message(
-                f"internal:unblock:{task_id}:{uuid.uuid4().hex[:8]}", project_id, task_id, "",
-                "task", "next_session", actor,
-                f"Resolution of the block, from {actor}: {str(resolution).strip()[:2000]}")
-        return self.store.transition(project_id, task_id, S.READY, {
-            "resolution": resolution, "reset_attempts": bool(reset_attempts)},
-                                     actor=actor, data=data, **fields)
+        evidence = {"resolution": resolution, "reset_attempts": bool(reset_attempts)}
+        S.check(t["state"], S.READY, evidence)        # a refused unblock leaves no note
+        with self.store.tx():
+            if str(resolution or "").strip():
+                # one note per unblock (keyed on the transition it belongs to)
+                n = self.store.q("SELECT COUNT(*) AS n FROM transitions WHERE project_id=? "
+                                 "AND task_id=?", (project_id, task_id))[0]["n"]
+                self.store.add_operator_message(
+                    f"internal:unblock:{project_id}:{task_id}:{n}", project_id, task_id, "",
+                    "task", "next_session", actor,
+                    f"Resolution of the block, from {actor}: {str(resolution).strip()[:2000]}")
+            return self.store.transition(project_id, task_id, S.READY, evidence,
+                                         actor=actor, data=data, **fields)
 
     def approve_human(self, project_id: str, task_id: str, kind: str, approver: str,
                       note: str = "") -> str:
@@ -1321,6 +1340,9 @@ class Coordinator:
             return False
         ts = self.clock()
         persona = self.frontier.persona(P, t)
+        # queued operator notes ride along (task-scoped, and session-scoped ones
+        # for exactly this session): this is a prompt the engine sends anyway
+        text, notes = self._with_operator_notes(P.id, t["task_id"], text, sid)
         # bind BEFORE the prompt: a frontier turn is gated as optional work
         try:
             self._bind(P, sid, t["task_id"], t["run_id"], "implementer", persona,
@@ -1328,11 +1350,13 @@ class Coordinator:
             P.client.prompt(sid, text, directory=P.profile.workspace, persona=persona,
                             agent=P.profile.client.get("agent") or "code")
         except Exception:
+            self._notes_requeue(notes)
             # nothing was sent: forget the journal entry so a later safe point
             # can send it, instead of "uncertain, not repeated" (and units being
             # marked delivered without ever reaching the primary)
             self.store.x("DELETE FROM ops WHERE key=?", (okey,))
             raise
+        self._notes_delivered(notes, sid)
         self.store.op_update(okey, "done", {"prompt_ts": ts, "persona": persona})
         self.store.update_session(sid, status="prompted", prompt_ts=ts, ended_ts=None)
         return True
@@ -1379,6 +1403,13 @@ class Coordinator:
         return (prompt + "\n\n## Operator instructions (from the control center)\n"
                 "Follow these within the task's approved scope and rules; they do not authorize "
                 "new scope, skipped checks or changed routing.\n\n" + body + "\n"), ids
+
+    def _notes_requeue(self, ids: list[str]) -> None:
+        """The prompt carrying these notes was refused (nothing sent): they wait
+        for the next prompt instead of staying 'delivering' forever."""
+        if ids:
+            self.store.mark_operator_messages(ids, "queued", "", "the prompt carrying it was "
+                                                                 "refused; waiting for the next")
 
     def _notes_delivered(self, ids: list[str], session_id: str) -> None:
         if ids:

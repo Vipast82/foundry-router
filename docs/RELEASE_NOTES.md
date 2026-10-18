@@ -92,6 +92,24 @@ review of code that an earlier run had already reviewed. A finished,
 non-rejected review in any run of the task now counts. A review that never
 ran, or whose result expired, still lets the new run review the same code.
 
+**Review fixes (before release)**
+
+- A refused unblock no longer leaves a resolution note behind. The note and the
+  transition are written together, once per unblock.
+- A compaction turn that ended in an error (overflow, budget refusal) is
+  handled as an error, not as "compacting".
+- Compaction nudges are capped per session (`[client] max_compaction_nudges`,
+  default 2). A session that keeps compacting without finishing is ended like a
+  stall, and a fresh session continues. Before, each nudge restarted the
+  session timeout.
+- Queued operator notes now go with every prompt the coordinator sends to their
+  session: the compaction nudge, helper hand-off, proposal delivery and frontier
+  turns. A refused prompt puts its notes back in the queue.
+- Each helper create attempt gets a unique reconcile marker, so a re-admitted
+  unit can never adopt a session that was aborted earlier.
+- New indexes for the operator-note and recovery-label lookups. A malformed
+  task no longer breaks the control-center overview.
+
 **Migration:** none; deploy at a safe boundary (no hot reload of a running worker).
 
 ## v0.121.6 — Sonnet primary for scoped UI tasks

@@ -96,6 +96,8 @@ SCHEMA = [
       created_ts REAL, expires_ts REAL, claimed_by TEXT, claimed_ts REAL, updated_ts REAL,
       result TEXT, seq INTEGER)""",
     "CREATE INDEX IF NOT EXISTS idx_cc_actions_status ON cc_actions(status, created_ts)",
+    "CREATE INDEX IF NOT EXISTS idx_cc_actions_task ON cc_actions(project_id, task_id, kind, "
+    "created_ts)",
     # one live action per pending request: two tabs can't both answer it
     "CREATE UNIQUE INDEX IF NOT EXISTS idx_cc_actions_live_request ON cc_actions(request_id) "
     "WHERE request_id != '' AND status IN ('accepted','claimed','queued','delivered','applied')",
@@ -958,7 +960,7 @@ class ControlCenter:
         for r in self.db.query(f"SELECT * FROM cc_tasks WHERE received_ts >= ?{pf} ORDER BY "
                                "received_ts DESC", (since, *pa)):
             r["data"] = _uj(r["data"], {})
-            r["verification_view"] = self.verification_view(r)
+            r["verification_view"] = self._safe_view(r)
             tasks.append(r)
         # Work-tab snapshots fill in tasks the bridge hasn't reported yet
         known = {(t["project_id"], t["task_id"]) for t in tasks}
@@ -1005,6 +1007,12 @@ class ControlCenter:
     # States in which the recorded checks/review cannot belong to the run in
     # progress: a new implementation round is under way (or about to start).
     _PRE_VERIFY = ("QUEUED", "READY", "IMPLEMENTING", "CHANGES_REQUIRED")
+
+    def _safe_view(self, task: dict) -> dict:
+        try:
+            return self.verification_view(task)
+        except Exception as e:                                    # noqa: BLE001
+            return {"error": f"verification view unavailable: {type(e).__name__}"}
 
     def verification_view(self, task: dict) -> dict:
         """What the Verification panel needs to be honest, derived from the
@@ -1530,7 +1538,7 @@ class ControlCenter:
             r = self.db.query_one("SELECT * FROM cc_tasks WHERE project_id=? AND task_id=?", (p, t))
             if r:
                 r["data"] = _uj(r["data"], {})
-                r["verification_view"] = self.verification_view(r)
+                r["verification_view"] = self._safe_view(r)
             return r
         if kind == "transition":
             p, t, n = eid.split("/", 2)
