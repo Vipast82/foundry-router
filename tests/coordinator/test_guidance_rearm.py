@@ -1,4 +1,4 @@
-"""v0.121.7: a transient pre-inference skip of retry guidance (quota 429,
+"""v0.121.7/v0.122.1: a transient pre-inference skip of retry guidance (quota 429,
 capacity full) no longer suppresses guidance forever. Only an operator reset
 re-arms it, bounded, with the old record kept; uncertain or completed
 consultations are never replayed. Fakes only, no inference."""
@@ -19,19 +19,39 @@ def _exhaust_again(c):
                               "findings": ["check project-check: FAIL"]})
 
 
-def test_transient_skip_is_rearmed_by_an_operator_reset_and_admission_is_asked_again(tmp_path):
+def test_transient_quota_defers_guidance_and_asks_again_when_quota_recovers(tmp_path):
+    """v0.122.1: a transient admission refusal (429/defer) defers guidance with a
+    bounded retry timer instead of failing the task; no adviser inference happens
+    while deferred, and the adviser is asked once when quota recovers."""
     c, ff, *_ = _exhausted(tmp_path)
+    t0 = [c.clock()]
+    c.clock = lambda: t0[0]
     ff.admission = {OPUS: REFUSED}
+    for _ in range(6):
+        c.tick()
+    t = c.store.task("game", "T1")
+    rg = t["data"]["retry_guidance"]
+    assert t["state"] != S.FAILED and rg["status"] == "deferred" and "429" in rg["reason"]
+    assert ff.guidance_calls == []                  # nothing paid while deferred
+    t0[0] += 30                                     # before retry_at: still waiting
+    c.tick()
+    assert ff.guidance_calls == [] and _state(c) != S.FAILED
+    ff.admission = {OPUS: {"admit": True}}          # quota recovered
+    t0[0] += 61
+    assert run_until(c, lambda: _state(c) == S.COMPLETE)
+    assert ff.guidance_calls == [OPUS]              # asked exactly once
+
+
+def test_hard_skip_still_fails_and_an_operator_reset_rearms_it(tmp_path):
+    """A non-transient skip (e.g. capacity full / adviser unavailable) still fails
+    the task; an operator reset re-arms guidance once, keeping the old record."""
+    c, ff, *_ = _exhausted(tmp_path)
+    ff.admission = {OPUS: {"admit": False, "state": "blocked", "reason": "persona disabled"}}
     assert run_until(c, lambda: _state(c) == S.FAILED)
     rg = c.store.task("game", "T1")["data"]["retry_guidance"]
-    assert rg["status"] == "skipped" and "429" in rg["reason"] and ff.guidance_calls == []
-    # without a reset the sticky record stays (no new budget was authorized)
-    c.unblock("game", "T1", "try again")
-    assert run_until(c, lambda: _state(c) == S.FAILED)
-    assert ff.guidance_calls == []
-    # an operator reset with quota recovered: guidance is asked again, once
+    assert rg["status"] == "skipped" and ff.guidance_calls == []
     ff.admission = {OPUS: {"admit": True}}
-    c.unblock("game", "T1", "quota recovered", reset_attempts=True)
+    c.unblock("game", "T1", "adviser re-enabled", reset_attempts=True)
     data = c.store.task("game", "T1")["data"]
     assert "retry_guidance" not in data
     assert data["retry_guidance_history"][0]["reason"] == rg["reason"]    # kept

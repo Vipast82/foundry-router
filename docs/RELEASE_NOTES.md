@@ -2,6 +2,21 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.122.2 — retry guidance waits out a temporary quota refusal (tests aligned)
+
+- **Behavior, from commit a408be0 (tagged with v0.122.1):** a temporary
+  admission refusal, such as a usage-endpoint HTTP 429 or a defer, no longer
+  fails the task. Retry guidance is "deferred" with a bounded retry timer
+  (about 60 s, or the refusal's next_eligible). It makes no adviser call and
+  spends no attempt while deferred, and asks the adviser once when quota
+  recovers.
+- **Tests:** the guidance tests now assert this, and an older
+  `recovery_escalation` opened by such a 429 is withdrawn automatically.
+- **Unchanged:** a hard skip (capacity full, persona disabled, adviser
+  unavailable) still fails the task; an operator reset still re-arms it once.
+
+**Migration:** none.
+
 ## v0.122.1 — the bell badge clears once alerts are acknowledged
 
 The 🔔 badge counted acknowledged alerts whenever there were no new ones, so it
