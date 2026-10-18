@@ -131,6 +131,17 @@ before the task blocks it before any session starts. A task's own leftovers
 
 ### Reviews
 
+AnimalUprising profiles may also map `roles.planner` to a frontier persona and
+configure a read-only Kilo subagent named `au-planner` using that persona. Each
+BUILD/repair kickoff asks the Code worker to consult it once, then integrate
+the advice and continue without a manual mode switch. The planner interprets
+the existing approved plan; it cannot widen scope, waive gates, or approve
+new queue entries. This is a model-executed delegation instruction, not a new
+engine planning phase or a guarantee that a worker invoked the helper. Helper
+sessions remain observable through Kilo and Foundry; mechanical checks and
+exact-commit review still control advancement. Profiles without a planner
+mapping keep their existing behavior.
+
 One reviewer per attempt (`roles.reviewer`, or `roles.deep_reviewer` when a
 task tag matches `review.deep_when`). No duplicate reviews from several
 models. The packet holds the task text and scope, the commits, the diff
@@ -164,6 +175,21 @@ top: `max_attempts`, `max_sessions_per_task`, `max_review_calls`,
 `max_task_minutes`, `session_timeout_minutes`.
 
 ### Locks, isolation, fairness
+
+Existing work blocks a task by default. To resume an explicitly approved handoff,
+repeat `queue approve ... --adopt-existing RELATIVE_PATH` for each dirty file the
+operator authorizes that task to finish. Only dirty files already in the task's
+declared scope qualify. The coordinator stores original bytes and SHA256 hashes
+under its state directory, outside the coding workspace; queue approval and the
+handoff record are saved atomically. Before the first session starts, the revision,
+scope, original files and backup bytes must still match. Changes block execution.
+Unselected task files still block; unrelated work remains hash-protected. Adoption
+does not accept old screenshots, waive a gate or widen task scope.
+
+Shared closeout exemptions permit commits without claiming pre-existing unrelated
+work. The engine checks unchanged baseline files separately, so an existing asset
+ledger cannot force another sprint to commit it; modifying that baseline still
+fails preservation. New or task-owned uncommitted closeout files still fail CLEAN.
 
 - A task holds `workspace:<path>` from start to completion, plus the
   profile's exclusive resources (e.g. `studio:victor-workstation`,

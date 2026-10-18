@@ -112,7 +112,9 @@ context_checkpoints = [140000, 190000]
 # Training-data capture (python -m foundry_training; docs/TRAINING_DATA.md).
 # The coordinator only writes a pointer manifest at closeout; the pipeline
 # ingests asynchronously. Foundry-side capture is enabled separately
-# (training_capture in Foundry's config). Nothing is uploaded or trained.
+# (training_capture in Foundry's config). With training.auto.upload enabled,
+# redacted datasets are uploaded to our Foundry router, not an external training
+# provider. The pipeline never starts model training.
 enabled = true
 sources = ["kilo", "foundry", "coordinator", "git"]
 artifact_roots = ["docs/evidence"]        # screenshots may be read only from here
