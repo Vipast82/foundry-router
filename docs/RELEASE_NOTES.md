@@ -2,6 +2,57 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.122.0 — sprint lifecycle: evidence memory, obligations, targeted recovery (opt-in)
+
+An opt-in layer, `[lifecycle] enabled = false` by default, that stops the
+evidence-loss loop seen on UI-01. Full operator documentation, settings,
+rollout, rollback and the live-pilot procedure are in docs/SPRINT_LIFECYCLE.md.
+
+- **Evidence ledger** (`evidence.py`):
+  - exact tool results are recovered idempotently from every session of a
+    task and stored as content-addressed blobs;
+  - each result moves up the tiers claim < observed < verified < reviewed <
+    approved;
+  - freshness comes from dependency hashes and runtime identity, never from
+    screenshot bytes alone;
+  - the newest execution decides.
+- **Obligations and decisions** (`obligations.py`):
+  - BUILD, REVIEW, CLOSE and APPROVAL obligations, under a phase lock: a NEXT
+    line or a summary can't move BUILD work to CLOSE;
+  - operator decisions answered only through the control-center channel;
+  - a budget ledger that only grows and records every authorization.
+- **Failure classes and targeted repair** (`recovery.py`): ten classes,
+  repeated-finding fingerprints, bounded assignments covering only the
+  unresolved work, and escalation to one adviser consult, then an operator
+  decision.
+- **Engine** (when enabled):
+  - readiness before a session: a block costs no attempt;
+  - a review-submission gate with a journaled same-session continuation;
+  - review outcomes routed as product changes, evidence incomplete or access
+    blocked;
+  - bounded evidence, memory and decision blocks in prompts;
+  - advancement only on the engine's own completion.
+- **AnimalUprising adapter:**
+  - verdicts parsed only from real gate or runtime executions, never from
+    reading a log;
+  - stateful chains and order;
+  - dependencies, runtime identity, obligations and readiness;
+  - `_gate_binding` now reads the evidence log at the verified revision.
+- **Helpers:** an explicit phase and reason vocabulary instead of a bare
+  "failed", a disposition for every unit, and cross-kind duplicate detection.
+- **Control center:**
+  - new sections: Readiness, Required work, Decisions (with Answer), Budgets,
+    Evidence, Recovered results, Repeated findings;
+  - batch-id dedupe for the bridge;
+  - a coordinator version and feature gate;
+  - project-isolation fixes;
+  - decision answers bound to the rendered question.
+- **Compatibility:** server v0.122.0 or later for the new views and decision
+  answers. Coordinator v0.122.0. Mixed versions degrade gracefully.
+
+**Migration:** additive tables only, created on first use when enabled. To
+roll back, set `enabled = false` or check out v0.121.10.
+
 ## v0.121.10 — quota-source alert no longer flaps
 
 Meridian's usage endpoint sometimes returns HTTP 429 while inference keeps
