@@ -374,6 +374,12 @@ class HelperPolicyConfig(BaseModel):
     # busy; at most once per refresh_probe_min_interval_seconds per backend.
     refresh_probe: bool = True
     refresh_probe_min_interval_seconds: int = 600
+    # A quota usage source that fails only now and then (the usage endpoint's own
+    # HTTP 429 while inference works) must not flap the operator alert: raise
+    # it only after the source has failed continuously this long, and resolve
+    # it only after readings have been good continuously this long.
+    source_alert_after_seconds: int = 600
+    source_resolve_after_seconds: int = 300
 
 
 class MeridianConfig(BaseModel):

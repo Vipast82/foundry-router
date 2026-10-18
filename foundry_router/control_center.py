@@ -163,6 +163,9 @@ ACTION_STATUSES = LIVE_ACTION + FINAL_ACTION
 PART_KINDS = ("text", "reasoning", "tool", "step-start", "step-finish", "file", "patch",
               "retry", "compaction", "agent", "subtask", "snapshot", "error", "unknown")
 SEVERITIES = ("info", "warning", "high", "critical")
+# an acknowledged alert that clears and comes back within this window reopens
+# still acknowledged instead of alerting again (flapping sources)
+REOPEN_QUIET_SECONDS = 6 * 3600
 PERMISSION_REPLIES = ("once", "reject")       # "always" creates a persistent rule: not offered
 
 
@@ -806,6 +809,7 @@ class ControlCenter:
     def raise_alert(self, key: str, kind: str, severity: str, title: str, detail: str,
                     ref: dict) -> Optional[dict]:
         now = self.clock()
+        reopened = False
         with self._tx() as c:
             row = self._rows(c, "SELECT * FROM cc_alerts WHERE dedupe_key=?", (key,))
             if row and row[0]["status"] in ("new", "acknowledged"):
@@ -814,10 +818,28 @@ class ControlCenter:
                 # it was resolved and happened again (a new occurrence)
                 aid = row[0]["alert_id"]
                 seq = self._feed(c, "alert", ref.get("project_id"), ref.get("session_id"), aid)
-                c.execute("UPDATE cc_alerts SET status='new', severity=?, title=?, detail=?, "
-                          "updated_ts=?, ack_by=NULL, ack_ts=NULL, resolved_ts=NULL, resolution=NULL, "
-                          "seq=? WHERE alert_id=?", (severity, title[:300], detail[:2000], now, seq,
-                                                     aid))
+                prev = row[0]
+                rank = {s: i for i, s in enumerate(SEVERITIES)}
+                quiet = (prev["status"] == "resolved" and prev.get("ack_ts")
+                         and now - float(prev.get("resolved_ts") or 0) < REOPEN_QUIET_SECONDS
+                         and rank.get(severity, 0) <= rank.get(prev["severity"], 0))
+                if quiet:
+                    # the same problem the operator already acknowledged came back
+                    # soon after clearing: reopen it still acknowledged (visible,
+                    # no new "new" badge or sound); a worse severity is new again
+                    c.execute("UPDATE cc_alerts SET status='acknowledged', title=?, detail=?, "
+                              "updated_ts=?, resolved_ts=NULL, resolution=NULL, seq=? WHERE "
+                              "alert_id=?", (title[:300], detail[:2000], now, seq, aid))
+                    c.execute("INSERT INTO cc_alert_log (alert_id, ts, event, actor, detail) "
+                              "VALUES (?,?,?,?,?)", (aid, now, "reopened", "foundry",
+                                                     f"{key} (still acknowledged by "
+                                                     f"{prev.get('ack_by') or 'operator'})"))
+                    reopened = True
+                if not reopened:
+                    c.execute("UPDATE cc_alerts SET status='new', severity=?, title=?, detail=?, "
+                              "updated_ts=?, ack_by=NULL, ack_ts=NULL, resolved_ts=NULL, "
+                              "resolution=NULL, seq=? WHERE alert_id=?",
+                              (severity, title[:300], detail[:2000], now, seq, aid))
             else:
                 aid = f"al-{uuid.uuid4().hex[:16]}"
                 seq = self._feed(c, "alert", ref.get("project_id"), ref.get("session_id"), aid)
@@ -828,8 +850,9 @@ class ControlCenter:
                            _s(ref.get("project_id"), 120), _s(ref.get("task_id"), 120),
                            _s(ref.get("session_id"), 160), _s(ref.get("request_id"), 160),
                            title[:300], detail[:2000], "new", now, now, seq))
-            c.execute("INSERT INTO cc_alert_log (alert_id, ts, event, actor, detail) VALUES "
-                      "(?,?,?,?,?)", (aid, now, "raised", "foundry", key))
+            if not reopened:
+                c.execute("INSERT INTO cc_alert_log (alert_id, ts, event, actor, detail) VALUES "
+                          "(?,?,?,?,?)", (aid, now, "raised", "foundry", key))
         self._notify()
         return self.alert(aid)
 

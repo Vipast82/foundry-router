@@ -63,6 +63,8 @@ class QuotaGate:
         self.clock = clock
         self._cache: dict[str, tuple[float, dict]] = {}
         self._alerted: set[str] = set()
+        self._src_fail_since: dict[str, float] = {}     # key -> first failure of this streak
+        self._src_ok_since: dict[str, float] = {}       # key -> first good reading of streak
         self._refresh_ts: dict[str, float] = {}
         self._bg: set = set()                  # background refresh probes in flight
         db = svc.db
@@ -414,6 +416,19 @@ class QuotaGate:
         if cc is None:
             return
         key = f"quota_source:{backend}"
+        now = self.clock()
+        after = float(getattr(self.pol, "source_alert_after_seconds", 0) or 0)
+        settle = float(getattr(self.pol, "source_resolve_after_seconds", 0) or 0)
+        if problem:
+            self._src_ok_since.pop(key, None)
+            first = self._src_fail_since.setdefault(key, now)
+            if now - first < after:
+                return                      # a blip (e.g. the usage endpoint's 429): wait
+        else:
+            self._src_fail_since.pop(key, None)
+            first = self._src_ok_since.setdefault(key, now)
+            if key in self._alerted and now - first < settle:
+                return                      # one good reading after an outage: wait
         try:
             if problem:
                 if key not in self._alerted:

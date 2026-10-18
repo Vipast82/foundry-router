@@ -560,3 +560,36 @@ def test_recovery_from_a_recorded_unblock_transition_and_retry_guidance(client, 
     assert vv["attempts"]["extra"] == 1 and vv["attempts"]["exhausted"] is False
     assert vv["recovery"]["kind"] == "retry_guidance_extra_attempt"
     assert "retry-guidance extra attempt" in vv["attempts"]["label"]
+
+
+def test_acknowledged_alert_that_comes_back_soon_stays_acknowledged(cc):
+    t = [1000.0]
+    cc.clock = lambda: t[0]
+    a = cc.raise_alert("quota_source:meridian", "quota_source", "warning", "Quota reading "
+                       "unavailable", "usage HTTP 429", {})
+    cc.acknowledge(a["alert_id"], "victor", [])
+    t[0] += 60
+    cc._resolve("quota_source:meridian", "available again")
+    t[0] += 600
+    b = cc.raise_alert("quota_source:meridian", "quota_source", "warning", "Quota reading "
+                       "unavailable", "usage HTTP 429", {})
+    assert b["status"] == "acknowledged" and b["ack_by"] == "victor"
+    log = [r["event"] for r in cc.alerts([], "open", include_log=True)[0]["log"]]
+    assert log[0] == "reopened"
+    # a worse severity is new again
+    cc._resolve("quota_source:meridian", "available again")
+    c = cc.raise_alert("quota_source:meridian", "quota_source", "high", "worse", "x", {})
+    assert c["status"] == "new"
+    # long after resolution: a new occurrence alerts again
+    cc.acknowledge(c["alert_id"], "victor", [])
+    cc._resolve("quota_source:meridian", "ok")
+    t[0] += 7 * 3600
+    d = cc.raise_alert("quota_source:meridian", "quota_source", "warning", "again", "x", {})
+    assert d["status"] == "new"
+
+
+def test_unacknowledged_alert_that_comes_back_is_new(cc):
+    a = cc.raise_alert("k:x", "quota_source", "warning", "t", "d", {})
+    cc._resolve("k:x", "ok")
+    b = cc.raise_alert("k:x", "quota_source", "warning", "t", "d", {})
+    assert b["status"] == "new" and b["alert_id"] == a["alert_id"]

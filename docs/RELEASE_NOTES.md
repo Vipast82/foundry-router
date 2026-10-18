@@ -2,6 +2,25 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.121.10 — quota-source alert no longer flaps
+
+Meridian's usage endpoint sometimes returns HTTP 429 while inference keeps
+working. Each 429 raised "Quota reading for meridian unavailable", and the next
+good reading resolved it. The alert re-opened as new every time, which also
+wiped the operator's acknowledgement.
+
+- **Debounce:** the alert is raised only after the usage source has failed
+  continuously for `helper_policy.source_alert_after_seconds` (default 600).
+  It resolves only after `source_resolve_after_seconds` (default 300) of good
+  readings. Admission itself is unchanged: an unreadable source still means
+  UNKNOWN, so helpers wait.
+- **Acknowledged alerts stay acknowledged:** an alert that was acknowledged,
+  cleared and comes back within 6 hours at the same or lower severity reopens
+  as acknowledged. It shows "reopened" in its history, with no new badge or
+  sound. A worse severity, or a return after 6 hours, alerts as new.
+
+**Migration:** none.
+
 ## v0.121.8 — BUILD review packets: phase contract, revision-bound evidence, code-first diffs
 
 UI-01's BUILD review (rev-90fe3549c3eb) asked for CLOSE work before approving

@@ -226,7 +226,8 @@ def test_metered_blocked_and_local_admitted(app):
 
 
 def test_source_failure_alert_is_persistent_and_not_repeated(app):
-    gate, fake, _ = make_gate(app, decision_cache_seconds=0)
+    gate, fake, _ = make_gate(app, decision_cache_seconds=0, source_alert_after_seconds=0,
+                              source_resolve_after_seconds=0)
     meridian_companion(fake, 11, 22)
     fake.meridian_usage.snap["fetch_error"] = "refused"
     for _ in range(3):
@@ -586,3 +587,34 @@ def test_admission_refresh_probe_runs_in_background_and_never_blocks(app):
         return await gate.evaluate("cpa", "gpt-6.1-sol")
     d2 = run(go())
     assert d2["state"] == ADMIT and fake.health.calls == [("cpa", "gpt-6.1-sol")]
+
+
+def test_flapping_usage_source_does_not_flap_the_alert(app):
+    """The usage endpoint's own HTTP 429 now and then (inference fine): no alert
+    until the failure persists; one good reading doesn't resolve a real outage."""
+    gate, fake, clock = make_gate(app, decision_cache_seconds=0)     # defaults: 600 s / 300 s
+    meridian_companion(fake, 11, 22)
+
+    def open_alerts():
+        return [a for a in fake.control.alerts([], "open") if a["kind"] == "quota_source"]
+    for _ in range(5):                        # 429, good, 429, good ... every 2 minutes
+        fake.meridian_usage.snap["fetch_error"] = "anthropic usage HTTP 429"
+        run(gate.evaluate("meridian", "claude-sonnet-5-5"))
+        clock[0] += 60
+        del fake.meridian_usage.snap["fetch_error"]
+        run(gate.evaluate("meridian", "claude-sonnet-5-5"))
+        clock[0] += 60
+    assert open_alerts() == []
+    # a real outage: continuous failure past the window raises it once
+    fake.meridian_usage.snap["fetch_error"] = "anthropic usage HTTP 429"
+    for _ in range(12):
+        run(gate.evaluate("meridian", "claude-sonnet-5-5"))
+        clock[0] += 60
+    assert len(open_alerts()) == 1
+    # one good reading doesn't resolve it; good for the settle window does
+    del fake.meridian_usage.snap["fetch_error"]
+    run(gate.evaluate("meridian", "claude-sonnet-5-5"))
+    assert len(open_alerts()) == 1
+    clock[0] += 301
+    run(gate.evaluate("meridian", "claude-sonnet-5-5"))
+    assert open_alerts() == []
