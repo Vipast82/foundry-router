@@ -27,6 +27,7 @@ never overridden silently.
 from __future__ import annotations
 
 import importlib.util
+import json
 import os
 import re
 import shutil
@@ -35,8 +36,9 @@ import sys
 import time
 
 from ...adapters.base import (FAIL, PASS, UNKNOWN, EVIDENCE_ITEM_CHARS, TaskSpec,
-                              VerificationResult, bound_text, evidence_dir, evidence_item,
-                              is_binary_path, report_instructions)
+                              VerificationResult, bound_text, duty_bullets, evidence_dir,
+                              evidence_item, is_binary_path, report_instructions)
+from ...adapters.git import GitError
 from ...adapters.project import AdapterError, GenericAdapter
 from ...profile import matches_any
 
@@ -51,6 +53,8 @@ class AnimalUprisingAdapter(GenericAdapter):
         super().__init__(profile, state_dir)
         self.cfg = dict(profile.raw.get("animaluprising") or {})
         self._dc = None
+        self._chain_plans: dict = {}        # (task, session, suite) -> GateRunner CALL plan
+        self.studio_probe = None            # optional live readiness hook (see readiness)
 
     # -- project tools ---------------------------------------------------------------
 
@@ -76,6 +80,12 @@ class AnimalUprisingAdapter(GenericAdapter):
     def _read(self, rel: str) -> str:
         with open(os.path.join(self.p.workspace, rel), encoding="utf-8", errors="replace") as f:
             return f.read()
+
+    def _ws(self):
+        """Revision reads for callers that don't pass the engine's Workspace
+        (verify() is called without one); same class, same workspace."""
+        from ...adapters.git import Workspace
+        return Workspace(self.p.workspace)
 
     # -- tasks ---------------------------------------------------------------------
 
@@ -117,7 +127,7 @@ class AnimalUprisingAdapter(GenericAdapter):
         # Tier B alone isn't visual (HK-G2 was tier B and closed DONE).
         visual = (any(s.startswith(f"docs/evidence/{task_id}/") and
                       s.lower().endswith((".png", ".jpg")) for s in scope)
-                  or "COMPLETE-PENDING-VISUAL-REVIEW" in _section(plan, "Acceptance lines"))
+                  or "COMPLETE-PENDING-VISUAL-REVIEW" in _accept_section(plan))
         if visual:
             tags.append("visual")
         if re.search(r"(?i)\brisk:\s*high\b|\bTier:\*\*\s*A\b.*server", plan):
@@ -128,7 +138,7 @@ class AnimalUprisingAdapter(GenericAdapter):
             deps = [d for d in re.findall(r"\b([A-Z]{1,5}[0-9]?-?[A-Za-z0-9.-]*[0-9][A-Za-z0-9]*)\b",
                                           m.group(1).split("**")[0]) if d != task_id]
         goal = _section(plan, "Goal")
-        acceptance = _section(plan, "Acceptance lines")
+        acceptance = _accept_section(plan)
         nxt = [l for l in plan.splitlines() if l.startswith("NEXT:")]
         checklist = "\n".join(l for l in plan.splitlines() if re.match(r"^\s*-\s\[[ x]\]", l))
         spec = "\n".join(x for x in [
@@ -308,11 +318,11 @@ Change no code or test file in this session; if one needs changing, stop and rep
 
     # -- verification ------------------------------------------------------------------
 
-    def verify(self, spec: TaskSpec, phase: str, revision: str, base: str) -> list:
+    def verify(self, spec: TaskSpec, phase: str, revision: str, base: str, ws=None) -> list:
         out = self._done_check(spec, phase, revision)
         if phase == "verify" and spec.data.get("tier") in ("A", "B"):
             # tier C has no gate (§30): its proof is the empty src/tests diff in done_check
-            out.append(self._gate_binding(spec, revision))
+            out.append(self._gate_binding(spec, revision, ws))
             out += self._lune(spec, revision)
         out += super().verify(spec, phase, revision, base)       # extra profile checks
         return out
@@ -360,16 +370,17 @@ Change no code or test file in this session; if one needs changing, stop and rep
                                           "done_check printed no rows: " + text[-300:], revision))
         return res
 
-    def _gate_binding(self, spec: TaskSpec, revision: str) -> VerificationResult:
+    def _gate_binding(self, spec: TaskSpec, revision: str, ws=None) -> VerificationResult:
         """The last gate verdict must be PASS and the gate must have run at the
         reviewed code: only closeout-exempt files (the evidence log itself,
-        studio lines) may change between the gate's HEAD and this revision."""
+        studio lines) may change between the gate's HEAD and this revision.
+        The log is read at `revision` (git show), never from the working tree:
+        a dirty, uncommitted log line can't make the committed code pass."""
         rel = f"docs/progress/{spec.task_id}_EVIDENCE_RAW.log"
-        try:
-            ev = self._read(rel)
-        except OSError:
-            return VerificationResult("au.gate_bound_to_head", FAIL, True, "", f"{rel} missing",
-                                      revision)
+        ev = (ws or self._ws()).show_at(revision, rel)
+        if ev is None:
+            return VerificationResult("au.gate_bound_to_head", FAIL, True, "",
+                                      f"{rel} missing at {revision[:12]}", revision)
         last, heads = _gate_verdict_and_heads(ev, spec.task_id)
         if last is None:
             return VerificationResult("au.gate_bound_to_head", FAIL, True, rel,
@@ -642,7 +653,7 @@ Change no code or test file in this session; if one needs changing, stop and rep
         globs = [s for s in spec.scope if s.startswith(d + "/") and _is_glob(s)]
         if plan:
             for m in re.finditer(r"docs/evidence/%s/[\w./-]+\.(?:png|jpe?g)" % re.escape(t),
-                                 _section(plan, "Acceptance lines"), re.I):
+                                 _accept_section(plan), re.I):
                 if m.group(0) not in required:
                     required.append(m.group(0))
         missing = [r for r in required if r not in present]
@@ -731,6 +742,1059 @@ Change no code or test file in this session; if one needs changing, stop and rep
                     shutil.which("lune") or "not on PATH (Lune checks will be UNKNOWN)"))
         return out
 
+    # -- evidence / lifecycle contract (v0.122; every hook optional, engine uses getattr) ----
+    #
+    # Check ids:   suite:<SUITE>       GateRunner.tally verdict (SUITE .. VERDICT) or the
+    #                                  explicit "PASS:|FAIL:|SKIP: GATE suite <SUITE>" line
+    #              regression:<SUITE>  "GATE regression <SUITE> - pass= skip= fail=" tally
+    #              gate:<TASK>         gate.ps1 "GATE <TASK> PASS|FAIL" (+ GATE HEAD before it)
+    #              boot:server|client  GateRunner.boot() "BOOT(vm) loaded= errors=" + PASS:/FAIL:
+    #              call:<SUITE>:<seq>  one GateRunner CALL of a stateful chain (seq from the
+    #                                  run(<SUITE>) CALL plan; call:<SUITE>:<fn> when unknown)
+    #              plan:<SUITE>        the run(<SUITE>) CALL plan itself (result NA)
+    #              runtime:verify_live GateRunner.verifyLive VERIFY tally (loaded source vs map)
+    #              lune                "LUNE n/m PASS|FAIL"
+    #              capture:<path>      capture-window.ps1 "Saved: <path>" (+ VALID=)
+    # A result comes only from such verdict / tally lines. Individual PASS:/FAIL: lines give
+    # UNKNOWN with counts, never PASS. A PASS its own counts contradict (fail > 0, or
+    # pass != expect) is UNKNOWN. Verdict sources (_source_exclusion): a Studio/runtime MCP
+    # tool, or a shell chain (&& ; | and powershell/pwsh/cmd/sh wrappers unwrapped) that
+    # ran tools/gate.ps1 (or `lune run`, for the lune tally only) and reads no file outside
+    # a pipe; anything else is read_only_command / not_verdict_source. A verdict line found
+    # in the input, verbatim or as string literals holding all its verdict words, is
+    # verdict_in_input. Boot and verifyLive use the last report in the output.
+
+    def classify_tool_result(self, view: dict, ctx: dict | None = None) -> list[dict]:
+        """One completed tool call -> check records (pure parsing; never infers a
+        verdict from prose or from individual PASS lines)."""
+        ctx = ctx or {}
+        view = view or {}
+        task = ctx.get("task_id") or ""
+        inp = _view_input(view)
+        tool = str(view.get("tool") or "")
+        lines, _structured = _decode_output(view.get("output"))
+        text = "\n".join(lines)
+        recs: list[dict] = []
+
+        def rec(check_id, kind, result=UNKNOWN, **kw):
+            r = {"check_id": check_id, "check_kind": kind, "chain_id": None, "seq": None,
+                 "prereqs": [], "result": result, "counts": None, "exclusion": None,
+                 "runtime_hint": None, "artifact_path": None, "lines": []}
+            r.update(kw)
+            if kind in ("suite", "regression", "lune"):          # counts must agree with it
+                r["result"], why = _count_check(r["result"], r["counts"])
+                if why:
+                    r["note"] = why
+            recs.append(r)
+            return r
+
+        # 1. explicit suite verdicts (GateRunner.tally) and GATE suite lines
+        suites: dict[str, dict] = {}
+        for i, l in enumerate(lines):
+            s = l.strip()
+            m = _SUITE_VERDICT.match(s)
+            if m:
+                counts = {"pass": int(m.group(2)), "fail": int(m.group(3))}
+                if m.group(4) is not None:
+                    counts["expect"] = int(m.group(4))
+                if m.group(5) is not None:
+                    counts["designed_fails"] = int(m.group(5))
+                suites[m.group(1)] = rec(f"suite:{m.group(1)}", "suite", m.group(6),
+                                         counts=counts, chain_id=m.group(1), lines=[s])
+                continue
+            m = _GATE_SUITE.match(s)
+            if m:
+                verdict = {"PASS": PASS, "FAIL": FAIL}.get(m.group(1), "NA")
+                r = suites.get(m.group(2))
+                if r is None:
+                    suites[m.group(2)] = rec(f"suite:{m.group(2)}", "suite", verdict,
+                                             chain_id=m.group(2), lines=[s])
+                else:
+                    r["lines"].append(s)
+                    if r["result"] != verdict:            # the two verdict lines disagree
+                        r["result"] = UNKNOWN
+                        r["note"] = "; ".join(x for x in (
+                            r.get("note"), "SUITE verdict and GATE suite line disagree") if x)
+                continue
+            m = _GATE_REGRESSION.match(s)
+            if m:
+                rec(f"regression:{m.group(1)}", "regression",
+                    _regression_verdict(lines, m.group(1)),
+                    counts={"pass": int(m.group(2)), "skip": int(m.group(3)),
+                            "fail": int(m.group(4))}, lines=[s])
+                continue
+            m = _SHORT_TALLY.match(s)
+            if m and m.group(1) not in suites:
+                suites[m.group(1)] = rec(f"suite:{m.group(1)}", "suite", m.group(2),
+                                         counts={"pass": int(m.group(3)),
+                                                 "expect": int(m.group(4))},
+                                         chain_id=m.group(1), lines=[s])
+                continue
+            m = _LUNE.match(s)
+            if m:
+                rec("lune", "lune", m.group(3),
+                    counts={"pass": int(m.group(1)), "expect": int(m.group(2))}, lines=[s])
+
+        # 2. the gate verdict (gate.ps1), bound to the GATE HEAD printed before it
+        verdicts = [(i, m) for i, l in enumerate(lines)
+                    for m in [_GATE_VERDICT.match(l.strip())]
+                    if m and m.group(1) not in _GATE_WORDS and (not task or m.group(1) == task)]
+        if verdicts:
+            i, m = verdicts[-1]
+            heads = [h.group(1) for h in (_GATE_HEAD.match(l.strip()) for l in lines[:i]) if h]
+            rec(f"gate:{m.group(1)}", "gate", m.group(2), lines=[m.group(0)],
+                gate_head=heads[-1] if heads else None,
+                note="" if heads else "no 'PASS: GATE HEAD <sha>' before the verdict")
+
+        # 3. boot (CALL 1-2 of every GateRunner plan); the LAST report in the output wins
+        for vm in ("server", "client"):
+            boot = ([m for m in (_BOOT.match(l.strip()) for l in lines)
+                     if m and m.group(1) == vm] or [None])[-1]
+            if not boot:
+                continue
+            verdict = ([v.group(1) for v in (_BOOT_VERDICT.match(l.strip()) for l in lines)
+                        if v and v.group(2) == vm] or [None])[-1]
+            rec(f"boot:{vm}", "boot", verdict or UNKNOWN, chain_id="boot",
+                seq=1 if vm == "server" else 2, prereqs=[] if vm == "server" else ["boot:server"],
+                counts={"loaded": int(boot.group(2)), "errors": int(boot.group(3))},
+                lines=[boot.group(0)])
+
+        # 4. the loaded-source check (GateRunner.verifyLive); the LAST report wins
+        vl = ([m for m in (_VERIFY_LIVE.match(l.strip()) for l in lines) if m] or [None])[-1]
+        if vl:
+            ok = int(vl.group(3)) == 0 and int(vl.group(4)) == 0 and vl.group(1) == vl.group(2)
+            rec("runtime:verify_live", "runtime", PASS if ok else FAIL,
+                counts={"matched": int(vl.group(1)), "total": int(vl.group(2)),
+                        "mismatched": int(vl.group(3)), "unresolved": int(vl.group(4)),
+                        "skipped": int(vl.group(5) or 0)}, lines=[vl.group(0)])
+
+        # 5. a GateRunner CALL plan (run(<SUITE>)): remembered for seq of later calls
+        plan = [m for m in (_CALL_PLAN.match(l.strip()) for l in lines) if m]
+        if plan:
+            suite = _plan_suite(inp, text)
+            steps = [{"seq": int(m.group(1)), "vm": m.group(2), "tool": m.group(4),
+                      "code": _norm_code(m.group(5))} for m in plan]
+            if suite:
+                self._chain_plans[(task, view.get("session_id") or "", suite)] = steps
+                rec(f"plan:{suite}", "plan", "NA", chain_id=suite, chain_plan=steps)
+
+        # 6. one CALL of a stateful chain (a <SUITE>_check module function)
+        step = _check_call(inp)
+        if step and not suites and not plan:
+            suite, fn = step
+            steps = ((ctx.get("chain_plans") or {}).get(suite)
+                     or self._chain_plans.get((task, view.get("session_id") or "", suite))
+                     or self._latest_plan(task, suite))
+            seq = _match_call(steps, inp, tool)
+            p_, f_ = _step_counts(lines)
+            rec(f"call:{suite}:{seq if seq else fn}", "call", UNKNOWN, chain_id=suite, seq=seq,
+                prereqs=([f"call:{suite}:{seq - 1}"] if seq and seq > 3 else
+                         ["boot:server", "boot:client"]),
+                counts={"pass": p_, "fail": f_}, step=fn,
+                note="individual PASS/FAIL lines: the suite verdict comes from GateRunner.tally")
+
+        # 7. captures (capture-window.ps1's own record)
+        from ...artifacts import parse_capture_output
+        for c in parse_capture_output(text):
+            path = self._rel_path(c["path"])
+            rec(f"capture:{path}", "capture",
+                PASS if c.get("valid") == "ok" else (FAIL if c.get("valid") == "invalid"
+                                                     else UNKNOWN),
+                artifact_path=path, lines=c.get("lines", [])[:10],
+                note=c.get("reason") or "")
+
+        # 8. individual PASS/FAIL lines with no verdict at all: UNKNOWN with counts
+        if not recs:
+            p_, f_ = _step_counts(lines)
+            tags = sorted({m.group(1) for m in (_TAGGED_STEP.match(l.strip()) for l in lines)
+                           if m})
+            if p_ or f_:
+                sid = tags[0] if len(tags) == 1 else None
+                rec(f"suite:{sid}" if sid else "unattributed", "steps", UNKNOWN,
+                    chain_id=sid, counts={"pass": p_, "fail": f_},
+                    note="individual PASS/FAIL lines without a suite verdict")
+        if not recs:
+            return []
+
+        # exclusions and runtime binding, applied to every record of this call
+        exclusion = self._exclusion(view, inp, tool, text, recs, ctx)
+        hint = self.runtime_identity(view) or ctx.get("runtime_hint")
+        for r in recs:
+            r["exclusion"] = exclusion or _source_exclusion(tool, inp, r["check_kind"])
+            r["runtime_hint"] = hint
+            r["truncated"] = bool(view.get("truncated"))
+            if r["truncated"] and r["check_kind"] != "capture":
+                r["note"] = ((r.get("note") or "") + "; output truncated: never credited above "
+                             "observed").lstrip("; ")
+            if r["lines"]:
+                r["lines"] = r["lines"][:20]
+        return recs
+
+    def _latest_plan(self, task: str, suite: str):
+        for (t, _s, su), steps in reversed(list(self._chain_plans.items())):
+            if t == task and su == suite:
+                return steps
+        return None
+
+    def _rel_path(self, path: str) -> str:
+        p = (path or "").replace("\\", "/").strip().strip('"')
+        root = (self.p.workspace or "").replace("\\", "/").rstrip("/")
+        if root and p.lower().startswith(root.lower() + "/"):
+            p = p[len(root) + 1:]
+        return p
+
+    def _exclusion(self, view, inp, tool, text, recs, ctx) -> str | None:
+        status = str(view.get("status") or "completed")
+        if status == "error":
+            return "tool_error"
+        if status not in ("completed",):
+            return "aborted"
+        if _read_only(tool, inp):
+            return "read_only_command"
+        if any(_built_in_input(l, inp) for r in recs if r["check_kind"] in _VERDICT_KINDS
+               for l in r["lines"]):
+            return "verdict_in_input"           # the "result" was typed / built in the input
+        if ctx.get("runtime_void") or self.void_runtime(view):
+            return "void_runtime"
+        if ctx.get("parallel") or _overlaps(view, ctx.get("concurrent") or []):
+            return "parallel"
+        if ctx.get("duplicate"):
+            return "duplicate"
+        return None
+
+    def void_runtime(self, view: dict) -> bool:
+        """This call reports that its Studio runtime is not a valid test VM: a
+        playtest that didn't start or tear down cleanly, a bridge/VM error, or no
+        player in the world. Calls made earlier in that VM are the ledger's to
+        void (it knows the session order); this answers for one view only."""
+        view = view or {}
+        tool = str(view.get("tool") or "")
+        if not re.search(r"(?i)studio|roblox|luau|runtime|playtest", tool):
+            return False
+        raw = view.get("output")
+        body = None
+        if isinstance(raw, dict):
+            body = raw
+        elif isinstance(raw, str) and raw.strip().startswith("{"):
+            try:
+                body = json.loads(raw)
+            except ValueError:
+                body = None
+        if isinstance(body, dict):
+            if body.get("timedOut") or body.get("playtestTaskPending") or \
+                    body.get("editModeReady") is False:
+                return True
+            if "playtest" in tool and body.get("success") is False:
+                return True
+            if body.get("bridge") not in (None, "ok") or (body.get("ok") is False and
+                                                          "bridge" in body):
+                return True
+        lines, _ = _decode_output(raw)
+        # quoted code (a CALL plan, a NOTE, an error("...") literal) is not a report
+        said = [l for l in lines if not re.match(r"^\s*(?:CALL|NOTE)\b", l)
+                and "error(" not in l]
+        text = "\n".join(said) + "\n" + str(view.get("error") or "")
+        return bool(_VOID_TEXT.search(text))
+
+    def runtime_identity(self, view_or_text) -> dict | None:
+        """What the Studio runtime reported about itself: BOOT counts per VM, the
+        place id, the GATE HEAD, and GateRunner.verifyLive's per-file live
+        source hashes (FNV-1a 32 of each ModuleScript's Source). `loaded_fp`
+        is a manifest hash over those live per-file hashes, i.e. a fingerprint of
+        the code the VM actually loaded, for the files it was asked about. None
+        when the text carries no runtime line."""
+        if isinstance(view_or_text, dict):
+            lines, _ = _decode_output(view_or_text.get("output"))
+        else:
+            lines, _ = _decode_output(view_or_text)
+        ident: dict = {}
+        boots = {}
+        for l in lines:
+            s = l.strip()
+            m = _BOOT.match(s)
+            if m:
+                boots[m.group(1)] = {"loaded": int(m.group(2)), "errors": int(m.group(3))}
+            m = _GATE_HEAD.match(s)
+            if m:
+                ident["gate_head"] = m.group(1)
+            m = _PLACE.search(s)
+            if m:
+                ident["place_id"] = m.group(1)
+        files, inconsistent = {}, []
+        for l in lines:
+            m = _LIVE_FILE.match(l.strip())
+            if m and m.group(1) in ("MATCH", "MISMATCH"):
+                vals = set(m.group(3).split("/"))
+                if len(vals) > 1:
+                    inconsistent.append(m.group(2))
+                files[m.group(2)] = m.group(3)
+        vl = next((m for m in (_VERIFY_LIVE.match(l.strip()) for l in lines) if m), None)
+        if boots:
+            ident["boot"] = boots
+        if vl:
+            ident["verify"] = {"matched": int(vl.group(1)), "total": int(vl.group(2)),
+                               "mismatched": int(vl.group(3)), "unresolved": int(vl.group(4))}
+        if files:
+            ident["files"] = files
+            ident["loaded_fp"] = None if inconsistent else _manifest_fp(files)
+            if inconsistent:
+                ident["inconsistent"] = inconsistent    # server and client VMs differ
+        if not ident:
+            return None
+        ident["kind"] = "roblox_studio"
+        # a stable id for the evidence ledger (ev_runtimes): what the VM loaded
+        # when known, else its place/boot identity; never a dict repr
+        import hashlib
+        if ident.get("loaded_fp"):
+            basis = "fp:" + str(ident["loaded_fp"])
+        else:
+            basis = "id:" + json.dumps({k: ident.get(k) for k in ("place_id", "boot", "gate_head")
+                                        if ident.get(k)}, sort_keys=True, default=str)
+        ident["runtime_id"] = "roblox_studio:" + hashlib.sha256(basis.encode()).hexdigest()[:16]
+        return ident
+
+    def runtime_expected_files(self, spec: TaskSpec, revision: str, ws=None,
+                               paths=None) -> dict | None:
+        """{path: fnv1a32 of the committed blob} for the runtime manifest (or
+        `paths`). Assumption, unconfirmed offline: GateRunner hashes the
+        ModuleScript Source bytes exactly as committed (no line-ending
+        rewrite). Callers must treat a mismatch caused by that assumption as
+        stale, never as fresh."""
+        ws = ws or self._ws()
+        paths = list(paths) if paths is not None else self._runtime_manifest(spec)
+        if not paths:
+            return None
+        out = {}
+        for rel in paths:
+            data = _blob_bytes(ws, revision, rel)
+            if data is not None:
+                out[rel] = "%08x" % _fnv1a32(data)
+        return out or None
+
+    def runtime_expected(self, spec: TaskSpec, revision: str) -> str | None:
+        """The loaded_fp `revision` should produce, over the runtime manifest
+        (the plan's non-glob src/ and tests/ Lua files + tests/GateRunner.lua).
+        Returned only when the profile opts in ([animaluprising]
+        runtime_fingerprint = "fnv1a32-blob"): the hash rule is not verifiable
+        offline, and it equals runtime_identity's loaded_fp only when the
+        agent's verifyLive map covered exactly that manifest. Otherwise None:
+        freshness then rests on the dependency fingerprint ("runtime
+        unverified"). Use runtime_matches for a per-file comparison."""
+        if self.cfg.get("runtime_fingerprint") != "fnv1a32-blob":
+            return None
+        files = self.runtime_expected_files(spec, revision)
+        return _manifest_fp(files) if files else None
+
+    def runtime_matches(self, identity: dict | None, spec: TaskSpec, revision: str,
+                        ws=None) -> tuple:
+        """(True|False|None, reason): every file the runtime reported hashes the
+        same as at `revision`. None when the runtime reported no files."""
+        files = (identity or {}).get("files") or {}
+        if not files:
+            return None, "the runtime reported no per-file source hashes (runtime unverified)"
+        want = self.runtime_expected_files(spec, revision, ws, paths=list(files)) or {}
+        bad = [p for p, live in files.items()
+               if p in want and want[p] not in str(live).split("/")]
+        absent = [p for p in files if p not in want]
+        if bad:
+            return False, "runtime loaded other code for: " + ", ".join(sorted(bad)[:8])
+        if absent:
+            return None, "not at the revision (cannot compare): " + ", ".join(sorted(absent)[:8])
+        return True, f"{len(files)} loaded files match {revision[:12]}"
+
+    def _runtime_manifest(self, spec: TaskSpec) -> list[str]:
+        out = [s for s in spec.scope if not _is_glob(s) and s.startswith(("src/", "tests/"))
+               and s.lower().endswith((".lua", ".luau"))]
+        if out and "tests/GateRunner.lua" not in out:
+            out.append("tests/GateRunner.lua")
+        return sorted(out)
+
+    # -- required checks / dependencies / obligations, from the plan at the revision ----
+
+    def _plan_text(self, spec: TaskSpec, ws=None) -> str | None:
+        rel = spec.data.get("plan") or f"docs/progress/{spec.task_id}_PLAN.md"
+        rev = spec.data.get("spec_revision")
+        if rev:
+            return (ws or self._ws()).show_at(rev, rel)
+        try:
+            return self._read(rel)
+        except OSError:
+            return None
+
+    def _plan_requirements(self, spec: TaskSpec, ws=None) -> dict:
+        """Suites, gate and captures the plan requires. Read from the plan's
+        Acceptance / Checklist / test-gate sections and its file list, with
+        every NEXT: line removed: a stop note never adds, drops or moves one."""
+        t = spec.task_id
+        plan = self._plan_text(spec, ws) or ""
+        body = _drop_next(plan)
+        secs = _sections(body)
+        wanted = "\n".join(v for k, v in secs if _REQ_SECTION.search(k))
+        own = re.sub(r"[-.]", "_", t)
+        # a suite is required by list / table structure or a run / verdict verb, never by a
+        # bare mention in prose (_required_suites has the rule)
+        suites = [s for s in _required_suites(wanted) if s != own]
+        if (re.search(r"\b%s\b" % re.escape(own), wanted)
+                or any(s.startswith(f"tests/{own}_check.") for s in spec.scope)):
+            suites.insert(0, own)
+        captures = self._required_captures(spec, body)
+        tier = spec.data.get("tier") or "A"
+        return {"suites": suites, "gate": tier in ("A", "B"), "captures": captures,
+                "acceptance": _accept_section(body), "plan": plan,
+                "lune": bool(re.search(r"\bLUNE\b|\blune\b", wanted))}
+
+    def _required_captures(self, spec: TaskSpec, plan_body: str) -> list[str]:
+        """The same rule as _capture_evidence: non-glob image paths under
+        docs/evidence/<task>/ in the file list, plus those the Acceptance lines name."""
+        t = spec.task_id
+        d = f"docs/evidence/{t}"
+        out = [s for s in spec.scope if s.startswith(d + "/") and not _is_glob(s)
+               and s.lower().endswith((".png", ".jpg", ".jpeg"))]
+        for m in re.finditer(r"docs/evidence/%s/[\w./-]+\.(?:png|jpe?g)" % re.escape(t),
+                             _accept_section(plan_body), re.I):
+            if m.group(0) not in out:
+                out.append(m.group(0))
+        return out
+
+    def required_checks(self, spec: TaskSpec, phase: str = "BUILD", ws=None) -> list[dict]:
+        """[{check_id, chain_id, seq, prereqs, runtime, min_tier}] for `phase`,
+        derived from the plan at the spec's revision (describe_at) and the
+        acceptance lines; never from NEXT lines or summaries."""
+        phase = (phase or "BUILD").upper()
+        t = spec.task_id
+        if phase == "CLOSE":
+            return [{"check_id": f"done_check:{t}", "chain_id": None, "seq": None,
+                     "prereqs": [], "runtime": False, "min_tier": "verified"}]
+        if phase != "BUILD":
+            return []
+        req = self._plan_requirements(spec, ws)
+        out: list[dict] = []
+        studio = [s for s in req["suites"]]
+        boot = ["boot:server", "boot:client"] if (studio or req["captures"]) else []
+        if boot:
+            out.append({"check_id": "boot:server", "chain_id": "boot", "seq": 1, "prereqs": [],
+                        "runtime": True, "min_tier": "verified"})
+            out.append({"check_id": "boot:client", "chain_id": "boot", "seq": 2,
+                        "prereqs": ["boot:server"], "runtime": True, "min_tier": "verified"})
+        for s in studio:
+            out.append({"check_id": f"suite:{s}", "chain_id": s, "seq": None,
+                        "prereqs": list(boot), "runtime": True, "min_tier": "verified"})
+        for c in req["captures"]:
+            out.append({"check_id": f"capture:{c}", "chain_id": None, "seq": None,
+                        "prereqs": list(boot), "runtime": True, "min_tier": "observed"})
+        if req["gate"]:
+            out.append({"check_id": f"gate:{t}", "chain_id": None, "seq": None,
+                        "prereqs": [f"suite:{s}" for s in studio], "runtime": False,
+                        "min_tier": "verified"})
+        return out
+
+    def check_dependencies(self, spec: TaskSpec, check_id: str) -> list[str] | None:
+        """Path globs whose content a check's result depends on (resolved at a
+        revision by the ledger). None = unknown (freshness 'unknown')."""
+        kind, _, ref = (check_id or "").partition(":")
+        code = ["src/**", "tests/**", "default.project.json"]
+        if kind in ("suite", "regression", "boot", "call", "plan", "runtime"):
+            return code
+        if kind == "lune":
+            return ["src/**", "tests/**"]
+        if kind == "gate":
+            return code + ["tools/gate.ps1"]
+        if kind == "capture":
+            src = [s for s in spec.scope if s.startswith("src/")]
+            ui = [s for s in src if re.search(r"(?i)/ui/|ui[^/]*\.lua", s)]
+            deps = ui or src
+            if not deps:
+                return None
+            own = [s for s in spec.scope if s.startswith("tests/") and "_check." in s]
+            return sorted(set(deps + own + ["default.project.json"]))
+        if kind == "done_check":
+            return None                    # reads the whole repo state: not path-bounded
+        return None
+
+    def obligations(self, spec: TaskSpec, ws=None) -> list[dict]:
+        """BUILD: acceptance lines, required captures, suites, gate. CLOSE: the
+        _close_duties (close.<id>). APPROVAL: Victor's visual approval for
+        visual sprints. Ids come from plan structure (paths, suite ids, duty
+        ids, explicit acceptance labels); unlabeled acceptance lines use a hash
+        of their text. A NEXT line never changes a phase."""
+        t = spec.task_id
+        req = self._plan_requirements(spec, ws)
+        plan_rel = spec.data.get("plan") or f"docs/progress/{t}_PLAN.md"
+        log_rel = f"docs/progress/{t}_EVIDENCE_RAW.log"
+        out: list[dict] = []
+
+        def ob(oid, phase, title, source, required_evidence, deps=(), acceptance="", **kw):
+            d = {"obligation_id": oid, "phase": phase, "title": title, "source": source,
+                 "deps": list(deps), "acceptance": acceptance,
+                 "required_evidence": list(required_evidence)}
+            d.update(kw)
+            out.append(d)
+
+        for s in req["suites"]:
+            ob(f"build.suite.{s}", "BUILD", f"Suite {s} verdict (GateRunner.tally) at the "
+               f"reviewed commit", f"plan:{plan_rel}", [{"kind": "check", "ref": f"suite:{s}"}],
+               acceptance=f"SUITE {s} ... VERDICT PASS")
+        for c in req["captures"]:
+            ob(f"build.capture.{c}", "BUILD", f"Capture {c} from the runtime at the reviewed "
+               f"code", f"plan:{plan_rel}",
+               [{"kind": "check", "ref": f"capture:{c}"}, {"kind": "path", "ref": c}],
+               acceptance=f"{c} committed, captured from a runtime bound to the revision")
+        for line in _acceptance_items(req["acceptance"]):
+            label = _accept_label(line)
+            refs = [{"kind": "check", "ref": f"suite:{s}"} for s in req["suites"]
+                    if re.search(r"\b%s\b" % re.escape(s), line)]
+            refs += [{"kind": "path", "ref": p} for p in req["captures"] if p in line]
+            deps = [f"build.capture.{p}" for p in req["captures"] if p in line]
+            ob(f"build.accept.{label}", "BUILD", line[:200], f"plan:{plan_rel}#Acceptance",
+               refs, deps=deps, acceptance=line[:600])
+        if req["gate"]:
+            ob("build.gate", "BUILD", f"GATE {t} PASS bound to the reviewed commit",
+               f"plan:{plan_rel}", [{"kind": "check", "ref": f"gate:{t}"},
+                                    {"kind": "log_marker", "ref": f"{log_rel}::GATE {t} PASS"}],
+               deps=[o["obligation_id"] for o in out if o["obligation_id"].startswith(
+                   ("build.suite.", "build.capture."))],
+               acceptance=f"GATE {t} PASS with 'PASS: GATE HEAD <sha>' bound to the commit")
+        evidence_for = {
+            "summary": [{"kind": "path", "ref": f"docs/progress/{t}_SUMMARY.md"}],
+            "state": [{"kind": "blob_changed", "ref": "docs/progress/STATE.md"}],
+            "master_order": [],
+            "plan_close_step": [{"kind": "blob_changed", "ref": plan_rel}],
+            "done_check": [{"kind": "check", "ref": f"done_check:{t}"},
+                           {"kind": "log_marker", "ref": f"{log_rel}::DONE-CHECK {t} PASS"}],
+            "push": [],
+        }
+        build_ids = [o["obligation_id"] for o in out]
+        for d in self._close_duties(spec):
+            ob(f"close.{d['id']}", "CLOSE", d["duty"], f"adapter:close.{d['id']}",
+               evidence_for.get(d["id"], []), deps=build_ids if d["id"] == "summary" else (),
+               acceptance=d["step"] or d["duty"])
+        if spec.data.get("visual"):
+            ob("approval.visual", "APPROVAL", f"Victor's visual approval of the {t} evidence "
+               f"images", "adapter:visual",
+               [{"kind": "path", "ref": c} for c in req["captures"]],
+               deps=[f"build.capture.{c}" for c in req["captures"]],
+               acceptance="COMPLETE-PENDING-VISUAL-REVIEW until Victor approves",
+               status="pending_human")
+        return out
+
+    # -- readiness (GAP_C design; read-only, offline-first) -------------------------------
+
+    def readiness(self, spec: TaskSpec, phase: str = "implement", ctx: dict | None = None,
+                  ws=None) -> list[dict]:
+        """[{name, check, ok, cls, detail, blocking, required, remedy}] before a
+        session. Classes: scope, tooling, environment, runtime_sync (never a
+        product failure, never an attempt). ok=None means not checkable here."""
+        ctx = ctx or {}
+        ws = ws or self._ws()
+        out: list[dict] = []
+
+        def res(name, cls, ok, detail, blocking=True, remedy=""):
+            out.append({"name": name, "check": name, "cls": cls, "ok": ok,
+                        "detail": str(detail)[:600], "blocking": bool(blocking),
+                        "required": bool(blocking), "remedy": remedy})
+
+        t = spec.task_id
+        rel = spec.data.get("plan") or f"docs/progress/{t}_PLAN.md"
+        try:
+            at_head = ws.show_at("HEAD", rel)
+            head_err = None
+        except Exception as e:                                    # noqa: BLE001 (not a repo)
+            at_head, head_err = None, e
+        if head_err is not None:
+            res("au.plan_at_head", "scope", None, f"HEAD not readable: {head_err}",
+                remedy="run in the AU workspace git repository")
+        elif at_head is None:
+            res("au.plan_at_head", "scope", False, f"{rel} is not committed at HEAD",
+                remedy="commit the approved plan before the sprint starts")
+        else:
+            try:
+                files = self._done_check_module().plan_files(at_head) if at_head else []
+            except Exception as e:                                # noqa: BLE001 (tooling)
+                files = None
+                res("au.plan_at_head", "scope", None,
+                    f"{rel} is committed at HEAD; its scope can't be parsed: {e}",
+                    blocking=False)
+                res("au.plan_scope_parser", "tooling", False,
+                    f"done_check.plan_files unavailable: {e}",
+                    remedy="restore tools/guard/done_check.py in the workspace")
+            if files is not None:
+                res("au.plan_at_head", "scope", bool(files),
+                    f"{rel} committed at HEAD with {len(files)} scope entries" if files else
+                    f"{rel} at HEAD has no 'Files this sprint may change' list")
+        why = self.preflight_task(spec)
+        res("au.rule_amendment_and_scope", "scope", why is None, why or "ok")
+        if spec.deps:
+            undone = [d for d in spec.deps if not self.dependency_done(d)]
+            res("au.deps_ledger", "scope", True if not undone else None,
+                "all dependencies DONE in STATE.md" if not undone else
+                "not DONE in the STATE.md ledger (the coordinator queue decides): "
+                + ", ".join(undone), blocking=False)
+        for tool in ("tools/gate.ps1", "tests/GateRunner.lua", "tests/lune/run.luau",
+                     "tools/guard/done_check.py"):
+            ok = os.path.isfile(os.path.join(self.p.workspace, tool))
+            res(f"au.tool.{tool}", "tooling", ok, "present" if ok else "missing",
+                remedy="" if ok else f"restore {tool} in the workspace")
+        try:
+            self._done_check_module()
+            res("au.done_check_importable", "tooling", True, "importable")
+        except Exception as e:                                    # noqa: BLE001
+            res("au.done_check_importable", "tooling", False, str(e))
+        lune = self.cfg.get("lune") or shutil.which("lune")
+        res("au.lune", "tooling", bool(lune), lune or "lune not on PATH",
+            blocking=spec.data.get("tier") in ("A", "B"), remedy="" if lune else "rokit install")
+        ok, detail = _kilo_mcp_studio(os.path.join(self.p.workspace, "kilo.jsonc"))
+        res("au.mcp.roblox_studio_configured", "environment", ok, detail,
+            remedy="" if ok else "add the Roblox Studio MCP server to kilo.jsonc")
+        probe = ctx.get("studio_probe") or self.studio_probe
+        if probe is None:
+            res("au.studio.live_sync", "runtime_sync", None,
+                "Studio/Rojo connection and the loaded-source hash cannot be checked offline; "
+                "the gate's VERIFY/GATE HEAD lines prove it after the fact", blocking=False)
+        else:
+            try:
+                live = probe(spec) or {}
+            except Exception as e:                                # noqa: BLE001
+                live = {"connected": None, "error": str(e)}
+            if not live.get("connected"):
+                res("au.studio.live_sync", "runtime_sync",
+                    None if live.get("connected") is None else False,
+                    live.get("error") or "Studio/Rojo not connected",
+                    remedy="open the AU place in Studio and start `rojo serve`")
+            else:
+                try:
+                    head = ws.head() if hasattr(ws, "head") else "HEAD"
+                    m, why = self.runtime_matches({"files": live.get("files") or {}}, spec,
+                                                  head, ws)
+                except GitError as e:                     # a probe, but no repository here
+                    m, why = None, f"HEAD not readable: {e}"
+                res("au.studio.live_sync", "runtime_sync", m, why,
+                    blocking=m is False)
+        return out
+
+
+def _view_input(view: dict) -> str:
+    inp = view.get("input")
+    if isinstance(inp, dict):
+        for k in ("command", "cmd", "code", "script", "filePath", "path", "pattern"):
+            if isinstance(inp.get(k), str):
+                return inp[k]
+        return json.dumps(inp, ensure_ascii=False)
+    return str(inp or view.get("command") or "")
+
+
+def _decode_output(out) -> tuple[list[str], bool]:
+    """A tool output as physical lines in source order: nested JSON envelopes
+    (returnValue | result | content | text | output | message, string -> JSON
+    again, arrays element by element) are unwrapped; nothing is sorted."""
+    lines: list[str] = []
+    structured = False
+
+    def walk(v, depth):
+        nonlocal structured
+        if depth > 6:
+            lines.extend(_lines(str(v)))
+            return
+        if isinstance(v, str):
+            s = v.strip()
+            if s[:1] in "[{" and s[-1:] in "]}":
+                try:
+                    parsed = json.loads(s)
+                except ValueError:
+                    parsed = None
+                if isinstance(parsed, (list, dict)):
+                    structured = True
+                    walk(parsed, depth + 1)
+                    return
+            lines.extend(_lines(v))
+        elif isinstance(v, list):
+            for x in v:
+                walk(x, depth + 1)
+        elif isinstance(v, dict):
+            for k in ("returnValue", "result", "content", "text", "output", "message", "logs"):
+                if v.get(k) not in (None, "", [], {}):
+                    walk(v[k], depth + 1)
+                    return
+        elif v is not None:
+            lines.append(str(v))
+
+    walk(out, 0)
+    return lines, structured
+
+
+def _regression_verdict(lines: list[str], suite: str) -> str:
+    for l in lines:
+        m = _GATE_REG_VERDICT.match(l.strip())
+        if m and m.group(2) == suite:
+            return {"PASS": PASS, "FAIL": FAIL}.get(m.group(1), "NA")
+    return UNKNOWN
+
+
+def _step_counts(lines: list[str]) -> tuple[int, int]:
+    p = f = 0
+    for l in lines:
+        m = _STEP_LINE.match(l.strip())
+        if m and not _GATE_SUITE.match(l.strip()) and not l.strip().startswith(
+                ("PASS: GATE", "FAIL: GATE", "PASS: BOOT", "FAIL: BOOT")):
+            if m.group(1) == "PASS":
+                p += 1
+            elif m.group(1) == "FAIL":
+                f += 1
+    return p, f
+
+
+def _norm_code(code: str) -> str:
+    return re.sub(r"\s+", " ", (code or "").replace('\\"', '"')).strip()
+
+
+def _check_call(code: str):
+    """(SUITE, function) when the call runs one function of a <SUITE>_check
+    module, else None."""
+    m = _CHECK_MODULE.search(code or "")
+    if not m:
+        return None
+    suite = m.group(1) or m.group(2)
+    var = re.search(r"local\s+(\w+)\s*=\s*require\([^\n]*?%s_check" % re.escape(suite), code)
+    fn = None
+    if var:
+        f = re.search(r"\b%s\s*[.:]\s*(\w+)\s*\(" % re.escape(var.group(1)), code)
+        fn = f.group(1) if f else None
+    if not fn:
+        f = re.search(r"%s_check\W*\)*\s*[.:]\s*(\w+)\s*\(" % re.escape(suite), code)
+        fn = f.group(1) if f else None
+    return (suite, fn) if fn else None
+
+
+def _plan_suite(code: str, text: str) -> str | None:
+    m = re.search(r"\.run\(\s*\\?[\"']([A-Za-z0-9_]+)\\?[\"']", code or "")
+    if m:
+        return m.group(1)
+    m = re.search(r"^REGRESSION PLAN\s+(\S+)", text or "", re.M)
+    return m.group(1) if m else None
+
+
+def _view_vm(tool: str, code_or_input) -> str | None:
+    if re.search(r"eval_server_runtime$", tool):
+        return "server"
+    if re.search(r"eval_client_runtime$", tool):
+        return "client"
+    if re.search(r"execute_luau$", tool):
+        if isinstance(code_or_input, dict):
+            return "edit" if code_or_input.get("target") == "edit" else None
+        return "edit" if re.search(r"[\"']?target[\"']?\s*[:=]\s*[\"']edit",
+                                   str(code_or_input or "")) else None
+    return None
+
+
+def _match_call(steps, code: str, tool: str):
+    if not steps:
+        return None
+    """The plan step this call ran: an exact code match, else the step whose
+    code is the longest prefix of the call's, else the one step whose code the
+    (truncated) call is a prefix of. Ambiguous -> None (never the first hit)."""
+    c = _norm_code(code)
+    if not c:
+        return None
+    vm = _view_vm(tool, "")
+    cand = [st for st in steps if st.get("code") and (vm is None or st.get("vm") in (None, vm))]
+    exact = {st.get("seq") for st in cand if st["code"] == c}
+    if exact:
+        return exact.pop() if len(exact) == 1 else None
+    longer = [st for st in cand if c.startswith(st["code"])]       # the call extends the step
+    shorter = [st for st in cand if st["code"].startswith(c)]      # the call is a prefix of it
+    if longer and shorter:
+        return None
+    if longer:
+        best = max(len(st["code"]) for st in longer)
+        seqs = {st.get("seq") for st in longer if len(st["code"]) == best}
+        return seqs.pop() if len(seqs) == 1 else None
+    seqs = {st.get("seq") for st in shorter}
+    return seqs.pop() if len(seqs) == 1 else None
+
+
+def _overlaps(view: dict, others: list) -> bool:
+    s, e = view.get("started_ts"), view.get("ended_ts")
+    if s is None or e is None:
+        return False
+    vm = _view_vm(str(view.get("tool") or ""), view.get("input"))
+    for o in others:
+        if o is view or (o.get("part_id") and o.get("part_id") == view.get("part_id")):
+            continue
+        os_, oe = o.get("started_ts"), o.get("ended_ts")
+        if os_ is None or oe is None or not re.search(r"(?i)runtime|luau",
+                                                     str(o.get("tool") or "")):
+            continue
+        ovm = _view_vm(str(o.get("tool") or ""), o.get("input"))
+        if (vm is None or ovm is None or vm == ovm) and os_ < e and s < oe:
+            return True
+    return False
+
+
+def _split_chain(cmd: str) -> list[tuple[str, str]]:
+    """[(separator before, segment)] of a shell command line, split on && || ;
+    | and newlines outside quotes."""
+    out, buf, q, sep, i, n = [], [], None, "", 0, len(cmd)
+
+    def flush(nsep):
+        nonlocal buf, sep
+        s = "".join(buf).strip()
+        if s:
+            out.append((sep, s))
+        buf, sep = [], nsep
+
+    while i < n:
+        c = cmd[i]
+        if q:
+            buf.append(c)
+            if c in "\\`" and i + 1 < n:
+                buf.append(cmd[i + 1])
+                i += 2
+                continue
+            if c == q:
+                q = None
+            i += 1
+            continue
+        if c in "\"'":
+            q = c
+            buf.append(c)
+        elif cmd.startswith(("&&", "||"), i):
+            flush(cmd[i:i + 2])
+            i += 2
+            continue
+        elif c in ";|\n\r":
+            flush(c if c != "\r" else "\n")
+        else:
+            buf.append(c)
+        i += 1
+    flush("")
+    return out
+
+
+def _unquote(s: str) -> str:
+    s = (s or "").strip()
+    if len(s) >= 2 and s[0] == s[-1] and s[0] in "\"'":
+        s = s[1:-1]
+    return s
+
+
+def _shell_segments(cmd: str, depth: int = 0) -> list[tuple[str, str]]:
+    """The chain's commands with wrappers unwrapped: powershell/pwsh -Command
+    and -File, cmd /c, sh/bash -c, '& { ... }' blocks and the & / . operators."""
+    out: list[tuple[str, str]] = []
+    for sep, seg in _split_chain(cmd or ""):
+        s = re.sub(r"^(?:&|\.)\s+", "", seg.strip())
+        b = re.match(r"^\{(.*)\}$", s, re.S)
+        if b and depth < 6:
+            out += _shell_segments(b.group(1), depth + 1)
+            continue
+        if depth < 6:
+            m = re.match(r"(?i)^[\"']?(?:[\w:.\\/ -]*?[\\/])?(?:powershell|pwsh)(?:\.exe)?[\"']?"
+                         r"(\s.*)?$", s, re.S)
+            if m:
+                rest = m.group(1) or ""
+                c = re.search(r"(?i)(?:^|\s)-(c|command|f|file)\s+(.*)$", rest, re.S)
+                if c and c.group(1).lower() in ("c", "command"):
+                    out += _shell_segments(_unquote(c.group(2)), depth + 1)
+                elif c:
+                    out.append((sep, c.group(2).strip()))
+                else:
+                    pos = re.sub(r"(?i)^(?:\s*-(?:ExecutionPolicy|WindowStyle|WorkingDirectory"
+                                 r"|OutputFormat|InputFormat|ConfigurationName|ep)\s+\S+"
+                                 r"|\s*-\w+)*", "", rest).strip()
+                    out += _shell_segments(pos, depth + 1) if pos else [(sep, s)]
+                continue
+            m = re.match(r"(?i)^(?:[\w:.\\/-]*[\\/])?cmd(?:\.exe)?\s+/[ck]\s+(.*)$", s, re.S)
+            if m:
+                out += _shell_segments(_unquote(m.group(1)), depth + 1)
+                continue
+            m = re.match(r"^(?:[\w./-]*/)?(?:ba|z|da)?sh\s+(?:-\w+\s+)*-c\s+(.*)$", s, re.S)
+            if m:
+                out += _shell_segments(_unquote(m.group(1)), depth + 1)
+                continue
+        out.append((sep, s))
+    return out
+
+
+def _shell_runs(cmd: str) -> set[str]:
+    """What a shell command line actually ran: 'gate' (tools/gate.ps1), 'lune'
+    (lune run), 'capture' (capture-window.ps1), plus 'read' when it also reads a
+    file outside a pipe (cat/Get-Content/git show ... <path>: old output)."""
+    runs: set[str] = set()
+    for sep, s in _shell_segments(cmd):
+        if _RUN_GATE.match(s):
+            runs.add("gate")
+        elif _RUN_LUNE.match(s):
+            runs.add("lune")
+        elif _RUN_CAPTURE.match(s):
+            runs.add("capture")
+        elif sep != "|" and _READ_CMD.match(s) and re.search(r"\s[^-\s][^\s]*[\\/.:]\S*", s):
+            runs.add("read")
+    return runs
+
+
+def _read_only(tool: str, cmd: str) -> bool:
+    """A read tool, or a shell command line that runs no gate / test runner /
+    capture anywhere in its chain (cd X && cat log, git -C . show, python -c ...)."""
+    t = (tool or "").lower()
+    if t in _READ_TOOLS:
+        return True
+    if t not in _SHELL_TOOLS:
+        return False
+    return not (_shell_runs(cmd) & {"gate", "lune", "capture"})
+
+
+def _source_exclusion(tool: str, cmd: str, kind: str) -> str | None:
+    """Gate / suite / regression / lune / boot / runtime verdicts come only from
+    a Studio/runtime MCP tool, or from a shell command line that actually ran
+    tools/gate.ps1 (any verdict) or `lune run` (the lune tally only) and reads
+    no file outside a pipe. Everything else is read_only_command (shell, read
+    tools) or not_verdict_source (any other tool)."""
+    if kind not in _VERDICT_KINDS:
+        return None
+    t = (tool or "").lower()
+    if t in _READ_TOOLS:
+        return "read_only_command"
+    if t in _SHELL_TOOLS:
+        runs = _shell_runs(cmd)
+        if "read" in runs:
+            return "read_only_command"
+        if "gate" in runs or ("lune" in runs and kind == "lune"):
+            return None
+        return "read_only_command"
+    if _STUDIO_TOOL.search(t):
+        return None
+    return "not_verdict_source"
+
+
+def _built_in_input(line: str, inp: str) -> bool:
+    """The verdict line is the input's own text: verbatim, or every verdict word
+    of it (SUITE / GATE / VERDICT / PASS / pass= ...) sits in the input's string
+    literals (built by concatenation or formatting)."""
+    if not line or not inp:
+        return False
+    if line in inp:
+        return True
+    words = {w.group(0) for w in _VERDICT_WORDS.finditer(line)}
+    if not words:
+        return False
+    lit = "\n".join(g for m in _LITERAL.finditer(inp) for g in (m.group(1), m.group(2),
+                                                                 m.group(4)) if g)
+    return bool(lit) and all(w in lit for w in words)
+
+
+def _count_check(verdict: str, counts: dict | None) -> tuple[str, str]:
+    """A PASS whose own counts contradict it is UNKNOWN: fail > 0, or pass !=
+    expect where expect is known. FAIL stays FAIL."""
+    if verdict != PASS or not counts:
+        return verdict, ""
+    p, f, e = counts.get("pass"), counts.get("fail"), counts.get("expect")
+    if f:
+        return UNKNOWN, f"verdict PASS with fail={f}"
+    if e is not None and p is not None and p != e:
+        return UNKNOWN, f"verdict PASS with pass={p} != expect={e}"
+    return verdict, ""
+
+
+def _manifest_fp(files: dict) -> str:
+    import hashlib
+    body = "\n".join(f"{p}={str(h).split('/')[0]}" for p, h in sorted(files.items()))
+    return "fnv1a32-manifest:" + hashlib.sha256(body.encode()).hexdigest()[:24]
+
+
+def _fnv1a32(data: bytes) -> int:
+    h = 2166136261
+    for b in data:
+        h = ((h ^ b) * 16777619) & 0xFFFFFFFF
+    return h
+
+
+def _blob_bytes(ws, revision: str, rel: str) -> bytes | None:
+    r = subprocess.run(["git", "-C", ws.path, "cat-file", "blob", f"{revision}:{rel}"],
+                       capture_output=True, timeout=60)
+    return r.stdout if r.returncode == 0 else None
+
+
+def _sections(text: str) -> list[tuple[str, str]]:
+    """[(heading, body)] of '## ' sections (deeper headings stay in their body)."""
+    out, name, buf = [], "", []
+    for l in _lines(text):
+        m = re.match(r"^##\s+(.+?)\s*$", l)
+        if m:
+            out.append((name, "\n".join(buf)))
+            name, buf = m.group(1), []
+        else:
+            buf.append(l)
+    out.append((name, "\n".join(buf)))
+    return [(k, v) for k, v in out if k]
+
+
+def _acceptance_items(text: str) -> list[str]:
+    """Acceptance lines as items: bullets / numbered lines when the section
+    has them (continuations folded in), else one item per non-empty line."""
+    lines = [l for l in _lines(text) if l.strip()]
+    if any(re.match(r"^\s*(?:[-*+]|\d+[.)])\s+", l) for l in lines):
+        return duty_bullets(text)
+    return [l.strip() for l in lines]
+
+
+def _accept_label(line: str) -> str:
+    m = re.match(r"^\W*([A-Za-z]{0,3}\d+[a-z]?)\s*[:.)\]—-]\s", line)
+    if m:
+        return m.group(1)
+    import hashlib
+    return "h" + hashlib.sha1(re.sub(r"\s+", " ", line.strip().lower()).encode()).hexdigest()[:10]
+
+
+def _strip_jsonc(text: str) -> str:
+    out, i, n, in_str = [], 0, len(text), False
+    while i < n:
+        c = text[i]
+        if in_str:
+            out.append(c)
+            if c == "\\" and i + 1 < n:
+                out.append(text[i + 1])
+                i += 2
+                continue
+            if c == '"':
+                in_str = False
+            i += 1
+        elif c == '"':
+            in_str = True
+            out.append(c)
+            i += 1
+        elif text.startswith("//", i):
+            j = text.find("\n", i)
+            i = n if j < 0 else j
+        elif text.startswith("/*", i):
+            j = text.find("*/", i + 2)
+            i = n if j < 0 else j + 2
+        else:
+            out.append(c)
+            i += 1
+    return re.sub(r",(\s*[}\]])", r"\1", "".join(out))
+
+
+def _kilo_mcp_studio(path: str) -> tuple:
+    """(ok, detail): kilo.jsonc lists an enabled Roblox Studio MCP server."""
+    try:
+        with open(path, encoding="utf-8", errors="replace") as f:
+            raw = f.read()
+    except OSError:
+        return False, "kilo.jsonc missing"
+    try:
+        cfg = json.loads(_strip_jsonc(raw))
+    except ValueError as e:
+        return False, f"kilo.jsonc does not parse: {e}"
+    mcp = cfg.get("mcp") if isinstance(cfg, dict) else None
+    if not isinstance(mcp, dict) or not mcp:
+        return False, "kilo.jsonc has no 'mcp' servers"
+    names = [k for k in mcp if re.search(r"(?i)roblox[\s_-]*studio", k)]
+    if not names:
+        return False, "no Roblox Studio server in kilo.jsonc mcp: " + ", ".join(sorted(mcp))[:300]
+    on = [k for k in names if not (isinstance(mcp[k], dict) and mcp[k].get("enabled") is False)]
+    if not on:
+        return False, "Roblox Studio MCP configured but disabled: " + ", ".join(names)
+    return True, "configured: " + ", ".join(on)
+
 
 _SPRINT_ID = re.compile(r"^[A-Z][A-Za-z0-9.-]{1,30}$")
 _SESSION = re.compile(r"^\W*SESSION\s+\d+")
@@ -740,6 +1804,65 @@ _SUITE = re.compile(r"\bS\d{1,3}[a-z]?\b.*\b(?:PASS|FAIL|PASSED|FAILED)\b"
 _TALLY = re.compile(r"(?i)\b\d+\s+(?:passed|failed|errors?)\b|\b\d+\s*/\s*\d+\s+(?:PASS|FAIL)"
                     r"|\b(?:passed|failed)\s*[:=]\s*\d+|\bLUNE\s+\d+/\d+|^PASS: GATE HEAD\b")
 _BASELINE = re.compile(r"(?i)\b(?:source|baseline)\b[^\n]{0,40}?\b(?=[0-9a-f]*\d)([0-9a-f]{7,40})\b")
+
+# evidence contract: explicit verdict / tally lines printed by gate.ps1 and GateRunner
+_SUITE_VERDICT = re.compile(r"^SUITE\s+(\S+)\s+pass=(\d+)\s+fail=(\d+)(?:\s+expect=(\d+))?"
+                            r"(?:\s+designedFails=(\d+))?\b.*?\bVERDICT\s+(PASS|FAIL)\b")
+_GATE_SUITE = re.compile(r"^(PASS|FAIL|SKIP):\s+GATE suite\s+(\S+)")
+_GATE_REGRESSION = re.compile(r"^GATE regression\s+(\S+)\b.*?\bpass=(\d+)\s+skip=(\d+)\s+"
+                              r"fail=(\d+)")
+_GATE_REG_VERDICT = re.compile(r"^(PASS|FAIL|SKIP):\s+GATE regression\s+(\S+)")
+_SHORT_TALLY = re.compile(r"^(S\d{1,3}[a-z]?|[A-Z]{1,5}_[A-Za-z0-9]+)\s+(PASS|FAIL)\s+(\d+)/(\d+)"
+                          r"\s*$")
+_LUNE = re.compile(r"^LUNE\s+(\d+)/(\d+)\s+(PASS|FAIL)\b")
+_GATE_VERDICT = re.compile(r"^GATE\s+(\S+)\s+(PASS|FAIL)\b")
+_GATE_WORDS = {"regression", "suite", "HEAD", "RUN", "FINISH", "START"}
+_GATE_HEAD = re.compile(r"^PASS: GATE HEAD ([0-9a-f]{7,40})")
+_BOOT = re.compile(r"^BOOT\((server|client)\)\s+loaded=(\d+)\s+errors=(\d+)")
+_BOOT_VERDICT = re.compile(r"^(PASS|FAIL):\s+BOOT\b.*?\((server|client)\b")
+_VERIFY_LIVE = re.compile(r"^VERIFY\s+matched=(\d+)/(\d+)\s+mismatched=(\d+)\s+unresolved=(\d+)"
+                          r"(?:\s+skipped=(\d+))?")
+_LIVE_FILE = re.compile(r"^(MATCH|MISMATCH|UNRESOLVED)\s+(\S+)\s+live=(\S+)(?:\s+head=(\S+))?")
+_STEP_LINE = re.compile(r"^(PASS|FAIL|SKIP):\s")
+_TAGGED_STEP = re.compile(r"^(?:PASS|FAIL):\s+(S\d{1,3}[a-z]?|[A-Z]{1,5}_[A-Za-z0-9]+)\b")
+_CALL_PLAN = re.compile(r"^CALL\s+(\d+)\s+\[vm=(\w+)\]\s+(\S+)\s+(\S+)\s+::\s+(.*)$")
+_CHECK_MODULE = re.compile(r"WaitForChild\(\s*[\"']([A-Za-z0-9]+(?:_[A-Za-z0-9]+)*?)_check[\"']"
+                           r"|\b([A-Za-z0-9]+(?:_[A-Za-z0-9]+)*?)_check\b")
+_PLACE = re.compile(r"placeId:\s*(\d+)")
+_VOID_TEXT = re.compile(r"(?i)teardown did not (?:complete|settle)|no player in world"
+                        r"|DataModel (?:was )?(?:reset|closed)|playtest (?:is )?not running"
+                        r"|\bVM (?:was )?(?:restarted|reset)\b|bridge (?:not connected|disconnected)")
+_READ_CMD = re.compile(r"(?i)^(?:&\s*)?(?:cat|type|more|less|head|tail|grep|egrep|rg|findstr"
+                       r"|Get-Content|gc|Select-String|sls|sed\s+-n|awk|wc|echo|printf"
+                       r"|Write-Output|Write-Host|git\s+(?:show|log|diff|grep|blame))\b")
+# a NEXT: stop note, any case, plain / bulleted / numbered / checkbox / bold; group 1 = indent
+_NEXT = re.compile(r"(?i)^([ \t]*)(?:(?:[-*+]|\d+[.)])\s+)?(?:\[[ xX]\]\s*)?[*_]*NEXT[*_]*\s*:")
+_REQ_SECTION = re.compile(r"(?i)acceptance|checklist|regress|test|gate|verif|suite")
+_SUITE_ID = re.compile(r"\b(S\d{1,3}[a-z]?|[A-Z]{1,5}_[A-Z]?\d+[A-Za-z0-9]*)\b")
+# a suite id in prose is required only next to a run / verdict verb ...
+_SUITE_VERB = re.compile(r"(?i)\b(?:re-?run|runs?|ran|execut(?:e|es|ed|ing)|pass(?:es|ed|ing)?"
+                         r"|green|verdict|tally|gate)\b")
+# ... and never right after a contrast / exclusion word ("unlike S9", "except S12")
+_SUITE_NEG = re.compile(r"(?i)\b(?:unlike|except|excluding|without|not|no|skip(?:ping|s)?"
+                        r"|besides|other\s+than|instead\s+of|vs\.?|versus)\s+(?:the\s+)?"
+                        r"(?:suites?\s+)?[`*_]*$")
+_ACCEPT_HEADING = re.compile(r"(?i)^acceptance(?:\s+(?:lines|criteria))?$")
+# shell tools: a gate / suite / boot verdict is credited only when the command ran a runner
+_SHELL_TOOLS = ("bash", "shell", "powershell", "pwsh", "cmd", "sh")
+_READ_TOOLS = ("read", "grep", "glob", "list", "ls", "view", "webfetch", "codesearch")
+_STUDIO_TOOL = re.compile(r"(?i)studio|roblox|luau|runtime|playtest")
+_VERDICT_KINDS = ("suite", "gate", "regression", "lune", "boot", "runtime")
+_RUN_GATE = re.compile(r"(?i)^[\"']?(?:\.?[\\/])?(?:[\w:.\\/ -]*?[\\/])?tools[\\/]gate\.ps1[\"']?"
+                       r"(?:\s|$)")
+_RUN_LUNE = re.compile(r"(?i)^[\"']?(?:[\w:.\\/ -]*?[\\/])?lune(?:\.exe)?[\"']?\s+run\b")
+_RUN_CAPTURE = re.compile(r"(?i)^[\"']?(?:\.?[\\/])?(?:[\w:.\\/ -]*?[\\/])?capture-window\.ps1"
+                          r"[\"']?(?:\s|$)")
+# the words a verdict line is made of: all of them in the input's string literals = typed in
+_VERDICT_WORDS = re.compile(r"\b(?:SUITE|GATE|LUNE|BOOT|VERIFY|VERDICT|PASS|FAIL)\b"
+                            r"|\b(?:pass|fail|expect|loaded|errors|matched|mismatched"
+                            r"|unresolved)=")
+_LITERAL = re.compile(r'"((?:[^"\\\n]|\\.)*)"|\'((?:[^\'\\\n]|\\.)*)\'|\[(=*)\[(.*?)\]\3\]',
+                      re.S)
 
 
 def _plan_rel(task_id: str) -> str:
@@ -799,6 +1922,67 @@ def _close_step(plan: str) -> str:
 def _section(text: str, name: str) -> str:
     m = re.search(r"^## %s\s*$(.*?)(?=^## |\Z)" % re.escape(name), text, re.M | re.S)
     return m.group(1).strip()[:3000] if m else ""
+
+
+def _accept_section(text: str) -> str:
+    """The acceptance section: '## Acceptance lines', '## Acceptance criteria' or
+    '## Acceptance' (exact heading, any case); the first one present."""
+    m = re.search(r"^##[ \t]+acceptance(?:[ \t]+(?:lines|criteria))?[ \t]*$(.*?)(?=^## |\Z)",
+                  text or "", re.M | re.S | re.I)
+    return m.group(1).strip()[:3000] if m else ""
+
+
+def _drop_next(text: str) -> str:
+    """The text without its NEXT blocks: each NEXT: line (any case; plain,
+    bulleted or numbered) and every following line indented deeper than it
+    (blank lines inside the block included)."""
+    out, depth = [], None
+    for l in _lines(text):
+        if depth is not None:
+            if not l.strip() or len(l.expandtabs(4)) - len(l.expandtabs(4).lstrip()) > depth:
+                continue
+            depth = None
+        m = _NEXT.match(l)
+        if m:
+            depth = len(m.group(1).expandtabs(4))
+            continue
+        out.append(l)
+    return "\n".join(out)
+
+
+def _required_suites(text: str) -> list[str]:
+    """Suite ids a requirement section requires. Rule: an id counts when it is
+    structural -- the leading id(s) of a bullet / numbered item, or a whole cell
+    of a table row -- or when its sentence has a run / verdict verb (run, rerun,
+    execute, pass, green, verdict, tally, gate) and the id isn't right after a
+    contrast word (unlike, except, without, not, skip, ...). A bare mention in
+    prose ("the layout differs, unlike S9") is not a requirement."""
+    out: list[str] = []
+
+    def add(sid):
+        if sid not in out:
+            out.append(sid)
+
+    ids = r"S\d{1,3}[a-z]?|[A-Z]{1,5}_[A-Z]?\d+[A-Za-z0-9]*"          # as _SUITE_ID
+    lead = re.compile(r"^\s*(?:[-*+]|\d+[.)])\s+(?:\[[ xX]\]\s*)?((?:[`*_]*(?:%s)(?![\w])[`*_]*"
+                      r"(?:\s*(?:,|/|\+|&|\band\b)\s*)?)+)" % ids)
+    for line in _lines(text):
+        m = lead.match(line)
+        if m:
+            for s in _SUITE_ID.finditer(m.group(1)):
+                add(s.group(1))
+        if line.lstrip().startswith("|"):
+            for cell in line.strip().strip("|").split("|"):
+                c = cell.strip().strip("`*_ ")
+                if _SUITE_ID.fullmatch(c):
+                    add(c)
+        for sentence in re.split(r"(?<=[.;!?])\s+", line):
+            if not _SUITE_VERB.search(sentence):
+                continue
+            for s in _SUITE_ID.finditer(sentence):
+                if not _SUITE_NEG.search(sentence[:s.start()]):
+                    add(s.group(1))
+    return out
 
 
 def _title(plan: str, task_id: str) -> str:

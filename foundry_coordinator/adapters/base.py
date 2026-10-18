@@ -61,6 +61,7 @@ class SessionState:
     tokens: dict = field(default_factory=dict)
     children: list = field(default_factory=list)
     unanswered: bool = False                    # idle with no reply to the prompt yet
+    retry: bool = False                         # the provider call is being retried (Kilo retry)
     compaction: Optional[dict] = None           # turn ended on Kilo's compaction summary
 
 
@@ -286,6 +287,45 @@ class ReviewContractDefaults:
 
     def diff_priority(self, path: str, spec: TaskSpec) -> int:
         return generic_diff_priority(path)
+
+    # -- evidence / lifecycle contract (v0.122). Safe "nothing known" defaults: a
+    # project without these hooks credits nothing from transcripts, has no
+    # dependency or runtime knowledge (freshness 'unknown' / 'runtime unverified'),
+    # and gets the callers' own obligation fallback (obligations() -> None).
+
+    def classify_tool_result(self, view: dict, ctx: Optional[dict] = None) -> list[dict]:
+        """[{check_id, chain_id, seq, prereqs, result, counts, exclusion,
+        runtime_hint, artifact_path}] parsed from one tool call; [] = nothing."""
+        return []
+
+    def required_checks(self, spec: TaskSpec, phase: str = "BUILD") -> list[dict]:
+        """[{check_id, chain_id, seq, prereqs, runtime, min_tier}] for a phase."""
+        return []
+
+    def check_dependencies(self, spec: TaskSpec, check_id: str) -> Optional[list[str]]:
+        """Path globs a check depends on; None = unknown."""
+        return None
+
+    def runtime_identity(self, view_or_text) -> Optional[dict]:
+        """What code a runtime reported it loaded; None = not reported."""
+        return None
+
+    def runtime_expected(self, spec: TaskSpec, revision: str) -> Optional[str]:
+        """The loaded fingerprint `revision` should produce; None = not derivable."""
+        return None
+
+    def void_runtime(self, view: dict) -> bool:
+        return False
+
+    def obligations(self, spec: TaskSpec) -> Optional[list[dict]]:
+        """None = no adapter obligation model (callers fall back to required
+        checks + review_contract()['deferred'])."""
+        return None
+
+    def readiness(self, spec: TaskSpec, phase: str = "implement",
+                  ctx: Optional[dict] = None) -> list[dict]:
+        """[{name, ok, cls, detail, blocking}] before a session; [] = none."""
+        return []
 
 
 def evidence_dir(state_dir: str, project_id: str, task_id: str, revision: str) -> str:
