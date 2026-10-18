@@ -372,3 +372,76 @@ console.log(JSON.stringify({{nodes: a.nodes.map(n => n.id).sort()}}));
 """)
     assert out["nodes"] == sorted(["coordinator", "s:main", "u:1", "u:2", "u:3"])
     assert "queued, waiting or deferred lane work" in s
+
+
+# ------------------------------------------------------------------ verification panel honesty
+
+def _verification_html(tmp_path, task: dict) -> str:
+    s = _script()
+    method = between(s, "  verification(s) {\n", "  capabilities(s) {")
+    out = run_js(tmp_path, """
+const S = {tasks: new Map()}; const taskKey = (p, t) => p + "/" + t;
+const tdata = t => (t && t.data) || {};
+const short = (s, n = 10) => s ? String(s).slice(0, n) : "";
+const NA = why => `<span class="dim">N/A</span>`;
+const kv = rows => rows.filter(Boolean).map(([k, v]) => `<div>${esc(k)}</div><div>${v}</div>`).join("");
+const fullTs = ts => ts ? "TS" + ts : ""; const approvalCard = () => "";
+const stateCls = st => ""; let TASK = """ + json.dumps(task) + """;
+const curTask = () => TASK;
+const R = {
+""" + method + """
+};
+// ASCII-only stdout: node writes UTF-8, the test reads with the locale codec
+console.log(JSON.stringify({html: R.verification(null)}).replace(/[^\x00-\x7f]/g,
+  c => String.fromCharCode(92) + "u" + c.charCodeAt(0).toString(16).padStart(4, "0")));
+""")
+    return out["html"]
+
+
+def test_verification_panel_labels_previous_run_and_older_revision(tmp_path):
+    h = _verification_html(tmp_path, {
+        "project_id": "proj", "task_id": "T-1", "state": "IMPLEMENTING",
+        "data": {"attempt": 2, "limits": {"max_attempts": 3}, "head_sha": "b" * 40,
+                 "workspace_head": "c" * 40, "reviewed_sha": "9" * 40,
+                 "verification": [{"check_name": "<b>unit</b>", "result": "PASS", "required": 1,
+                                   "evidence": "<img src=x onerror=alert(1)>"}],
+                 "reviews": [{"reviewed_sha": "9" * 40, "verdict": "CHANGES_REQUIRED", "valid": 1,
+                              "persona": "<script>x</script>", "ts": 900}]},
+        "verification_view": {
+            "current_sha": "c" * 40, "current_source": "workspace HEAD", "previous_run": True,
+            "checks": {"revision": "a" * 40, "executed_ts": 1010, "previous_run": True, "stale": True},
+            "review": {"reviewed_sha": "9" * 40, "ts": 900, "previous_run": True, "stale": True},
+            "attempts": {"label": "2/3 attempts used"}, "recovery": None}})
+    assert "Checks (previous run) @ <code>aaaaaaaaaaaa</code> · TS1010" in h
+    assert "Review (previous run)" in h and "TS900" in h
+    assert h.count("checks are for an older revision") == 2
+    assert "results below are from a previous run" in h
+    assert "<script>" not in h and "&lt;script&gt;" in h
+    assert "<img src=x" not in h and "<b>unit</b>" not in h
+
+
+def test_verification_panel_current_checks_have_no_older_revision_warning(tmp_path):
+    h = _verification_html(tmp_path, {
+        "project_id": "proj", "task_id": "T-1", "state": "REVIEWING",
+        "data": {"attempt": 1, "limits": {"max_attempts": 3}, "head_sha": "a" * 40,
+                 "workspace_head": "a" * 40,
+                 "verification": [{"check_name": "unit", "result": "PASS", "required": 1}]},
+        "verification_view": {"current_sha": "a" * 40, "previous_run": False,
+                              "checks": {"revision": "a" * 40, "executed_ts": 5,
+                                         "previous_run": False, "stale": False},
+                              "attempts": {"label": "1/3 attempts used"}}})
+    assert "older revision" not in h and "previous run" not in h
+    assert "Checks @ <code>aaaaaaaaaaaa</code>" in h
+
+
+def test_verification_panel_shows_operator_recovery_on_exhausted_budget(tmp_path):
+    h = _verification_html(tmp_path, {
+        "project_id": "proj", "task_id": "T-1", "state": "BLOCKED",
+        "data": {"attempt": 3, "limits": {"max_attempts": 3}, "blocker": "budget"},
+        "verification_view": {
+            "previous_run": False,
+            "attempts": {"label": "3/3 attempts used · operator recovery authorized (fresh budget)"},
+            "recovery": {"kind": "unblock", "reset_attempts": True, "by": "<victor>", "ts": 77,
+                         "status": "accepted", "resolution": "<fixed>"}}})
+    assert "3/3 attempts used · operator recovery authorized (fresh budget)" in h
+    assert "by &lt;victor&gt;" in h and "&lt;fixed&gt;" in h and "<victor>" not in h

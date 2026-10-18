@@ -958,6 +958,7 @@ class ControlCenter:
         for r in self.db.query(f"SELECT * FROM cc_tasks WHERE received_ts >= ?{pf} ORDER BY "
                                "received_ts DESC", (since, *pa)):
             r["data"] = _uj(r["data"], {})
+            r["verification_view"] = self.verification_view(r)
             tasks.append(r)
         # Work-tab snapshots fill in tasks the bridge hasn't reported yet
         known = {(t["project_id"], t["task_id"]) for t in tasks}
@@ -1000,6 +1001,108 @@ class ControlCenter:
         for r in rows:
             r["data"] = _uj(r["data"], {})
         return rows
+
+    # States in which the recorded checks/review cannot belong to the run in
+    # progress: a new implementation round is under way (or about to start).
+    _PRE_VERIFY = ("QUEUED", "READY", "IMPLEMENTING", "CHANGES_REQUIRED")
+
+    def verification_view(self, task: dict) -> dict:
+        """What the Verification panel needs to be honest, derived from the
+        bridge's task data plus recorded transitions and operator actions:
+        which revision the checks and the review were for and when, whether
+        those are from a previous run, whether the current head differs from
+        the checked revision, and whether an operator authorized recovery after
+        the attempt budget ran out. Observations only; it decides nothing."""
+        d = task.get("data") or {}
+        pid, tid, state = task.get("project_id"), task.get("task_id"), task.get("state") or ""
+        eff = (d.get("resume_state") or state) if state == "PAUSED" else state
+        previous = eff in self._PRE_VERIFY
+        current = d.get("workspace_head") or d.get("head_sha") or None
+        current_src = "workspace HEAD" if d.get("workspace_head") else "task head" if current else ""
+
+        def differs(sha):
+            return bool(sha and current and str(sha) != str(current))
+
+        ver = [v for v in (d.get("verification") or []) if isinstance(v, dict)]
+        checks = None
+        if ver:
+            # the newest executed row names the revision the set was run against
+            newest = max(ver, key=lambda v: _f(v.get("executed_ts")) or 0)
+            sha = newest.get("revision") or next(
+                (v["revision"] for v in reversed(ver) if v.get("revision")), None)
+            revs = list(dict.fromkeys(str(v["revision"]) for v in ver if v.get("revision")))
+            checks = {"revision": sha, "revisions": revs,
+                      "executed_ts": _f(newest.get("executed_ts")),
+                      # recorded checks predate a VERIFYING run in progress too
+                      "previous_run": previous or eff == "VERIFYING", "stale": differs(sha),
+                      "verification_id": d.get("verification_id")}
+        rv = next((r for r in reversed(d.get("reviews") or []) if isinstance(r, dict)), None)
+        review = None
+        if rv:
+            review = {"verdict": rv.get("verdict"), "valid": rv.get("valid"),
+                      "persona": rv.get("persona"), "reviewed_sha": rv.get("reviewed_sha"),
+                      "ts": _f(rv.get("ts")),
+                      "previous_run": previous or eff in ("VERIFYING", "REVIEWING"),
+                      "stale": differs(rv.get("reviewed_sha"))}
+        # --- attempt budget and operator recovery
+        lim = d.get("limits") or {}
+        used = int(d.get("attempt") or 0)
+        mx = int(lim.get("max_attempts") or 0) or None
+        rg = d.get("retry_guidance") if isinstance(d.get("retry_guidance"), dict) else {}
+        extra = 1 if rg.get("status") == "repair" and rg.get("extra_attempts") == 1 else 0
+        stops = self.db.query("SELECT MAX(ts) AS t FROM cc_transitions WHERE project_id=? AND "
+                              "task_id=? AND to_state IN ('BLOCKED','FAILED')", (pid, tid))
+        last_stop = (stops[0]["t"] if stops else None) or 0
+        recovery = None
+        acts = self.db.query("SELECT action_id, actor, status, payload, created_ts, updated_ts "
+                             "FROM cc_actions WHERE project_id=? AND task_id=? AND kind='unblock' "
+                             "AND status NOT IN ('rejected','failed','expired','cancelled') "
+                             "ORDER BY created_ts DESC LIMIT 1", (pid, tid))
+        if acts and (acts[0]["created_ts"] or 0) >= last_stop:
+            a = acts[0]
+            pl = _uj(a.get("payload"), {}) or {}
+            recovery = {"kind": "unblock", "reset_attempts": bool(pl.get("reset_attempts")),
+                        "by": a.get("actor"), "ts": a.get("created_ts"),
+                        "status": a.get("status"), "action_id": a.get("action_id"),
+                        "resolution": _s(pl.get("resolution"), 300)}
+        if recovery is None:
+            tr = self.db.query("SELECT ts, actor, from_state, data FROM cc_transitions WHERE "
+                               "project_id=? AND task_id=? AND to_state='READY' AND from_state IN "
+                               "('BLOCKED','FAILED') ORDER BY src_id DESC LIMIT 1", (pid, tid))
+            if tr and (tr[0]["ts"] or 0) >= last_stop:
+                ev = _uj(tr[0]["data"], {}) or {}
+                # v0.121.7 coordinators record it in the transition; older: unknown
+                recovery = {"kind": "unblock", "reset_attempts": ev.get("reset_attempts"),
+                            "by": tr[0]["actor"],
+                            "ts": tr[0]["ts"], "status": "applied", "action_id": None,
+                            "resolution": _s(ev.get("resolution"), 300)}
+        if recovery is None and (extra or rg.get("status") == "reset"):
+            # the bridge forwards retry_guidance only if it has it; never inferred
+            recovery = {"kind": "retry_guidance_" + ("extra_attempt" if extra else "reset"),
+                        "reset_attempts": not extra, "by": rg.get("persona"),
+                        "ts": None, "status": rg.get("status"), "action_id": None,
+                        "resolution": _s(rg.get("summary"), 300)}
+        budget = (mx + extra) if mx else None
+        exhausted = bool(budget and used >= budget)
+        if not mx:
+            label = f"{used} / ? attempts"
+        else:
+            label = f"{used}/{mx} attempts used" + (" (+1 guided extra attempt)" if extra else "")
+            if recovery and recovery.get("reset_attempts"):
+                label += " · operator recovery authorized (fresh budget)"
+            elif recovery and recovery["kind"].startswith("retry_guidance"):
+                label += " · recovery authorized (retry-guidance extra attempt)"
+            elif recovery:
+                label += " · operator unblocked (attempt count kept)"
+            elif exhausted and state in ("BLOCKED", "FAILED"):
+                label += " · budget exhausted, stopped"
+            elif exhausted:
+                label += " · final attempt in progress"
+        return {"current_sha": current, "current_source": current_src, "previous_run": previous,
+                "checks": checks, "review": review,
+                "attempts": {"used": used, "max": mx, "extra": extra, "exhausted": exhausted,
+                             "label": label},
+                "recovery": recovery}
 
     def session(self, session_id: str, projects: list) -> dict:
         r = self.db.query_one("SELECT * FROM cc_sessions WHERE session_id=?", (session_id,))
@@ -1427,6 +1530,7 @@ class ControlCenter:
             r = self.db.query_one("SELECT * FROM cc_tasks WHERE project_id=? AND task_id=?", (p, t))
             if r:
                 r["data"] = _uj(r["data"], {})
+                r["verification_view"] = self.verification_view(r)
             return r
         if kind == "transition":
             p, t, n = eid.split("/", 2)
@@ -1706,6 +1810,9 @@ class ControlCenter:
                            now + st["action_ttl_s"], now, seq))
                 c.execute("INSERT INTO cc_action_log (action_id, ts, status, actor, detail) VALUES "
                           "(?,?,?,?,?)", (aid, now, "accepted", actor, summary))
+                if kind == "unblock":
+                    # the task's derived recovery view changes with this action
+                    self._feed(c, "task", pid, "", f"{pid}/{tid}")
         except Exception as e:                                   # noqa: BLE001
             if "UNIQUE" in str(e) and "request" in str(e):
                 raise ControlError("another reply to this request is already in progress",
@@ -1774,8 +1881,8 @@ class ControlCenter:
                     result: Optional[dict] = None, claimed_by: str = "") -> Optional[dict]:
         now = self.clock()
         with self._tx() as c:
-            a = self._rows(c, "SELECT status, project_id, session_id FROM cc_actions WHERE "
-                              "action_id=?", (action_id,))
+            a = self._rows(c, "SELECT status, project_id, session_id, kind, task_id FROM "
+                              "cc_actions WHERE action_id=?", (action_id,))
             if not a:
                 return None
             if a[0]["status"] in FINAL_ACTION and a[0]["status"] != status:
@@ -1788,6 +1895,9 @@ class ControlCenter:
                        claimed_by, status, now, action_id))
             c.execute("INSERT INTO cc_action_log (action_id, ts, status, actor, detail) VALUES "
                       "(?,?,?,?,?)", (action_id, now, status, actor, detail[:1000]))
+            if a[0]["kind"] == "unblock":
+                self._feed(c, "task", a[0]["project_id"], "",
+                           f"{a[0]['project_id']}/{a[0]['task_id']}")
         self._notify()
         return self.action_view(action_id)
 

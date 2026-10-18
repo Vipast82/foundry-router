@@ -462,3 +462,101 @@ def test_thumbnail_malformed_base64_is_404_and_image_mimes_pass(client, cc):
     assert ok.content == b"RIFF....WEBPVP8 "
     html = client.get("/control/api/artifacts/art-html/thumbnail")
     assert html.headers["content-type"].startswith("application/octet-stream")
+
+
+# ------------------------------------------------------------------ honest verification view
+
+def _vv(client, tid="T-1"):
+    t = next(t for t in client.get("/control/api/overview").json()["tasks"] if t["task_id"] == tid)
+    return t["verification_view"]
+
+
+def test_verification_view_labels_previous_run_and_older_revision(client, cc):
+    """A task back in IMPLEMENTING still carries the last verification set and an
+    older review: they are labelled as a previous run, with their SHA and time,
+    and flagged when the current head differs from the checked revision."""
+    ingest(client, task_obs(
+        "IMPLEMENTING", attempt=2, head_sha="b" * 40, workspace_head="c" * 40,
+        verification_id="vs-1", limits={"max_attempts": 3},
+        verification=[{"check_name": "unit", "result": "PASS", "required": 1,
+                       "revision": "a" * 40, "executed_ts": 1000.0},
+                      {"check_name": "lint", "result": "FAIL", "required": 1,
+                       "revision": "a" * 40, "executed_ts": 1010.0}],
+        reviews=[{"review_id": "r1", "reviewed_sha": "9" * 40, "verdict": "CHANGES_REQUIRED",
+                  "valid": 1, "persona": "Foundry-Kilo-Review", "ts": 900.0}]))
+    login(client)
+    vv = _vv(client)
+    assert vv["previous_run"] is True
+    assert vv["current_sha"] == "c" * 40 and vv["current_source"] == "workspace HEAD"
+    assert vv["checks"]["revision"] == "a" * 40 and vv["checks"]["executed_ts"] == 1010.0
+    assert vv["checks"]["previous_run"] is True and vv["checks"]["stale"] is True
+    assert vv["review"]["reviewed_sha"] == "9" * 40 and vv["review"]["ts"] == 900.0
+    assert vv["review"]["previous_run"] is True and vv["review"]["stale"] is True
+    assert vv["attempts"]["label"] == "2/3 attempts used" and vv["recovery"] is None
+
+
+def test_verification_view_current_checks_are_not_previous_or_stale(client, cc):
+    ingest(client, task_obs(
+        "REVIEWING", attempt=1, head_sha="a" * 40, workspace_head="a" * 40,
+        limits={"max_attempts": 3},
+        verification=[{"check_name": "unit", "result": "PASS", "required": 1,
+                       "revision": "a" * 40, "executed_ts": 1000.0}]))
+    login(client)
+    vv = _vv(client)
+    assert vv["checks"]["previous_run"] is False and vv["checks"]["stale"] is False
+    assert vv["review"] is None
+
+
+def test_exhausted_budget_shows_operator_recovery_not_a_stopped_task(client, cc):
+    ingest(client, task_obs("IMPLEMENTING", attempt=3, limits={"max_attempts": 3}))
+    login(client)
+    assert _vv(client)["attempts"]["label"] == "3/3 attempts used · final attempt in progress"
+    ingest(client, task_obs("BLOCKED", attempt=3, limits={"max_attempts": 3},
+                            blocker="attempt budget exhausted"),
+           {"type": "transition", "project_id": "proj", "task_id": "T-1", "src_id": 7,
+            "ts": time.time() - 5, "from": "IMPLEMENTING", "to": "BLOCKED", "actor": "engine",
+            "evidence": {"blocker": "attempt budget exhausted"}})
+    vv = _vv(client)
+    assert vv["attempts"]["exhausted"] is True and vv["recovery"] is None
+    assert vv["attempts"]["label"] == "3/3 attempts used · budget exhausted, stopped"
+    h = login(client)
+    r = client.post("/control/api/actions", headers=h, json={
+        "kind": "unblock", "project_id": "proj", "task_id": "T-1", "resolution": "fixed the <env>",
+        "reset_attempts": True, "idempotency_key": "unblock-1234567"})
+    assert r.status_code == 200, r.text
+    vv = _vv(client)
+    assert vv["recovery"]["reset_attempts"] is True and vv["recovery"]["by"] == "victor"
+    assert vv["recovery"]["status"] == "accepted" and vv["recovery"]["resolution"] == "fixed the <env>"
+    assert vv["attempts"]["label"] == ("3/3 attempts used · operator recovery authorized "
+                                       "(fresh budget)")
+    # the unblock action re-sends the task on the live feed, view included
+    items, _ = cc.feed(0, [])
+    t = [i for i in items if i["kind"] == "task"][-1]["entity"]
+    assert t["verification_view"]["recovery"]["reset_attempts"] is True
+    # a cancelled authorization is no longer shown as recovery
+    client.post(f"/control/api/actions/{r.json()['action_id']}/cancel", headers=h)
+    assert _vv(client)["recovery"] is None
+
+
+def test_recovery_from_a_recorded_unblock_transition_and_retry_guidance(client, cc):
+    now = time.time()
+    ingest(client, task_obs("READY", attempt=3, limits={"max_attempts": 3}),
+           {"type": "transition", "project_id": "proj", "task_id": "T-1", "src_id": 1,
+            "ts": now - 60, "from": "IMPLEMENTING", "to": "BLOCKED", "actor": "engine",
+            "evidence": {"blocker": "x"}},
+           {"type": "transition", "project_id": "proj", "task_id": "T-1", "src_id": 2,
+            "ts": now - 30, "from": "BLOCKED", "to": "READY", "actor": "victor",
+            "evidence": {"resolution": "network back"}})
+    login(client)
+    rec = _vv(client)["recovery"]
+    assert rec["by"] == "victor" and rec["resolution"] == "network back"
+    assert rec["reset_attempts"] is None
+    assert "operator unblocked (attempt count kept)" in _vv(client)["attempts"]["label"]
+    ingest(client, {**task_obs("IMPLEMENTING", attempt=3, limits={"max_attempts": 3},
+                               retry_guidance={"status": "repair", "extra_attempts": 1,
+                                               "persona": "Foundry-Kilo-Planner"}),
+                    "task_id": "T-2"})
+    vv = _vv(client, "T-2")
+    assert vv["attempts"]["extra"] == 1 and vv["attempts"]["exhausted"] is False
+    assert vv["recovery"]["kind"] == "retry_guidance_extra_attempt"
+    assert "retry-guidance extra attempt" in vv["attempts"]["label"]

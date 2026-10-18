@@ -115,6 +115,18 @@ key_env = "FOUNDRY_TELEMETRY_KEY"        # bridge key; default: [foundry] key_en
 - **Cost**: $0 is labelled "reported $0 / unpriced". It doesn't prove the service is free.
 - **Quiet streams**: a long stretch with no new output on a busy session is labelled as
   such. It is not reported as a crash.
+- **Verification panel** (v0.121.7): each task carries a derived `verification_view`
+  (control_center.py). Checks and the latest review show the SHA and time they ran
+  against. They are labelled "previous run" while a new round is in progress
+  (READY/IMPLEMENTING/CHANGES_REQUIRED, and VERIFYING/REVIEWING for results not yet
+  replaced). When the workspace HEAD, or the task head if HEAD is not reported, differs
+  from the checked or reviewed SHA, the panel says "checks are for an older revision".
+  The attempts line shows any recovery authorized after the budget ran out, for example
+  "3/3 attempts used · operator recovery authorized (fresh budget)". Recovery comes from
+  a live or applied `unblock` action, a recorded BLOCKED/FAILED→READY operator
+  transition, or a retry-guidance extra attempt (only if the bridge forwards
+  `retry_guidance`). Without one, the line reads "final attempt in progress" or
+  "budget exhausted, stopped". The panel only reports these facts; it decides nothing.
 
 ## Alerts
 

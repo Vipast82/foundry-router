@@ -105,6 +105,46 @@ def _bridge(c: Coordinator, a):
                            use_events=not getattr(a, "no_events", False), log=c.log)
 
 
+# Foundry has reported validation as "pass" and, live, as "passed"; both (and
+# the generic ok/valid) mean the persona validated. Anything else is shown as-is.
+_VALIDATION_PASS = ("pass", "passed", "ok", "valid")
+# Roles served by Foundry's media adapter (/media/*), not the chat catalog
+# (/v1/models intentionally leaves media-only personas out).
+_MEDIA_ROLES = ("image_generator",)
+_MEDIA_NOT_CHECKED = ("media: not checked by doctor (media personas are served by the media "
+                      "adapter, not the chat catalog)")
+
+
+def _validation_status(val) -> str:
+    return "PASS" if isinstance(val, str) and val.strip().lower() in _VALIDATION_PASS else "WARN"
+
+
+def _media_row(P, persona: str, label: str, needed: bool, cache: dict) -> tuple:
+    """Diagnose a media persona through Foundry's read-only media catalog
+    (GET /media/models, what the media adapter's `check` reads). Never submits
+    a job. Unreachable or unrecognised -> INFO/WARN, never FAIL: a healthy
+    setup must not look broken because its media persona isn't a chat model."""
+    if "media" not in cache:
+        try:
+            m, _ = P.foundry._req("GET", "/media/models", timeout=15)
+            cache["media"] = (m if isinstance(m, dict) and "enabled" in m else None, "")
+        except Exception as e:                                    # noqa: BLE001
+            cache["media"] = (None, str(e)[:200])
+    m, err = cache["media"]
+    if m is None:
+        return (("WARN" if needed else "INFO"), label,
+                f"{persona}: {_MEDIA_NOT_CHECKED}" + (f"; /media/models: {err}" if err else ""))
+    models = ", ".join(str(x.get("id")) for x in m.get("models") or [] if isinstance(x, dict))
+    detail = (f"{persona} -> media adapter (backend {m.get('backend') or '?'}, "
+              f"models {models or 'none'}; resolved per job, not via the chat catalog)")
+    if not m.get("enabled"):
+        return ("WARN", label, f"{persona}: Foundry media is disabled"
+                + ("" if needed else "; only needed when used"))
+    if m.get("backend_error"):
+        return ("WARN", label, f"{persona}: media backend error: {str(m['backend_error'])[:200]}")
+    return ("PASS", label, detail)
+
+
 def doctor(c: Coordinator, project: str = "") -> int:
     bad = 0
     for pid, P in sorted(c.projects.items()):
@@ -143,8 +183,12 @@ def doctor(c: Coordinator, project: str = "") -> int:
                 for name, override in (P.profile.raw.get("role_overrides") or {}).items():
                     selections.extend((role, persona, name) for role, persona in override.items()
                                       if role != "tasks")
+                media_cache: dict = {}
                 for role, persona, override_name in sorted(selections):
                     label = f"persona {role}" + (f" [{override_name}]" if override_name else "")
+                    if role in _MEDIA_ROLES:
+                        rows.append(_media_row(P, persona, label, role in needed, media_cache))
+                        continue
                     direct_review = role in ('reviewer', 'deep_reviewer')
                     m = (ids if direct_review else worker_ids).get(persona)
                     source = 'coordinator key' if direct_review else 'worker inference key'
@@ -167,7 +211,7 @@ def doctor(c: Coordinator, project: str = "") -> int:
                         fm = m.get("foundry") or {}
                         val = fm.get("validation") or "not validated"
                         val = val.get("status") if isinstance(val, dict) else val
-                        rows.append(("PASS" if val == "pass" else "WARN", label,
+                        rows.append((_validation_status(val), label,
                                      f"{persona} -> {fm.get('backend') or '?'} / "
                                      f"{fm.get('served_model') or '?'} "
                                      f"(routing {fm.get('routing') or '?'}, {val}; {source})"))

@@ -1434,20 +1434,35 @@ const SECTION_RENDER = {
     const t = s ? S.tasks.get(taskKey(s.project_id, s.task_id)) : curTask();
     if (!t) return '<p class="dim">No coordinator task reported.</p>';
     const d = tdata(t); const lim = d.limits || {};
-    const rows = [["State", `<span class="pill ${stateCls(t.state)}">${esc(t.state)}</span>${d.stage ? " · stage " + esc(d.stage) : ""}`],
-      ["Attempts", `${esc(d.attempt ?? 0)} / ${esc(lim.max_attempts ?? "?")} · sessions ${esc(d.sessions ?? 0)} / ${esc(lim.max_sessions_per_task ?? "?")}`],
+    // derived by Foundry from the task data, transitions and operator actions (verification_view)
+    const vv = t.verification_view || {};
+    const at = vv.attempts || {};
+    const cur = vv.current_sha || d.workspace_head || d.head_sha || "";
+    const when = ts => ts ? ` · ${esc(fullTs(ts))}` : "";
+    const prevTag = on => on ? ' <span class="pill">previous run</span>' : "";
+    const olderWarn = (sha, what) => sha && cur && String(sha) !== String(cur)
+      ? ` <span class="pill warn" title="${esc(what)} ${esc(short(sha, 12))}; ${esc(vv.current_source || "current head")} ${esc(short(cur, 12))}">checks are for an older revision</span>` : "";
+    const rec = vv.recovery;
+    const recText = rec ? `<div class="dim">${rec.reset_attempts ? "operator recovery authorized (fresh budget)" : String(rec.kind || "").startsWith("retry_guidance") ? "recovery authorized (retry-guidance extra attempt)" : "operator unblocked (attempt count kept)"}${rec.by ? " by " + esc(rec.by) : ""}${when(rec.ts)}${rec.status ? " · " + esc(rec.status) : ""}${rec.resolution ? " · " + esc(rec.resolution) : ""}</div>` : "";
+    const attempts = at.label ? esc(at.label) : `${esc(d.attempt ?? 0)} / ${esc(lim.max_attempts ?? "?")}`;
+    const rows = [["State", `<span class="pill ${stateCls(t.state)}">${esc(t.state)}</span>${d.stage ? " · stage " + esc(d.stage) : ""}${vv.previous_run ? ' <span class="dim">(a new run is in progress; results below are from a previous run)</span>' : ""}`],
+      ["Attempts", `${attempts} · sessions ${esc(d.sessions ?? 0)} / ${esc(lim.max_sessions_per_task ?? "?")}${recText}`],
       ["Reviewed SHA", d.reviewed_sha ? `<code>${esc(short(d.reviewed_sha, 12))}</code>` : NA("no review yet")],
       ["Head SHA", d.head_sha ? `<code>${esc(short(d.head_sha, 12))}</code>` : NA()],
       ["Workspace HEAD", d.workspace_head ? `<code>${esc(short(d.workspace_head, 12))}</code>${d.reviewed_sha && d.workspace_head !== d.reviewed_sha ? ' <span class="pill warn">differs from reviewed</span>' : ""}` : NA()]];
     const rv = (d.reviews || []).slice(-1)[0];
-    if (rv) rows.push(["Review", `<span class="pill ${rv.verdict === "APPROVED" ? "ok" : rv.valid ? "warn" : "bad"}">${esc(rv.verdict || (rv.valid ? "?" : "invalid"))}</span> ${esc(rv.persona || "")} @ <code>${esc(short(rv.reviewed_sha))}</code>`]);
+    const rvv = vv.review || {};
+    if (rv) rows.push([rvv.previous_run ? "Review (previous run)" : "Review", `<span class="pill ${rv.verdict === "APPROVED" ? "ok" : rv.valid ? "warn" : "bad"}">${esc(rv.verdict || (rv.valid ? "?" : "invalid"))}</span> ${esc(rv.persona || "")} @ <code>${esc(short(rv.reviewed_sha))}</code>${when(rvv.ts || rv.ts)}${prevTag(rvv.previous_run)}${olderWarn(rv.reviewed_sha, "reviewed")}`]);
     if (d.blocker) rows.push(["Blocker", `<div class="errbox">${esc(d.blocker)}</div>`]);
     if (d.awaiting) rows.push(["Awaiting", esc(d.awaiting)]);
     const checks = (d.verification || []).map(v => `<tr><td><code>${esc(v.check_name)}</code>${v.required ? "" : ' <span class="dim">(advisory)</span>'}</td><td><span class="pill ${v.result === "PASS" ? "ok" : v.result === "FAIL" ? "bad" : "warn"}">${esc(v.result)}</span></td><td class="dim" title="${esc(v.detail || "")}">${esc((v.evidence || "").slice(0, 80))}</td></tr>`).join("");
+    const cv = vv.checks || {};
+    const csha = cv.revision || "";
+    const chead = `${cv.previous_run ? "Checks (previous run)" : "Checks"} @ ${csha ? `<code>${esc(short(csha, 12))}</code>` : '<span class="dim">revision not recorded</span>'}${when(cv.executed_ts)}${olderWarn(csha, "checked")}`;
     const ap = d.approval;
     const card = ap ? approvalCard(t) : "";
     const findings = (d.findings || []).length ? `<div class="sub dim">Findings</div><ul class="list">${d.findings.map(f => `<li>${esc(f)}</li>`).join("")}</ul>` : "";
-    return kv(rows) + (checks ? `<div class="sub dim" style="margin-top:6px">Checks @ ${esc(short(d.head_sha))}</div><table class="t">${checks}</table><div class="src">Evidence pointers are paths recorded by the coordinator; this page doesn't open workstation files.</div>` : "") + findings + card +
+    return kv(rows) + (checks ? `<div class="sub dim" style="margin-top:6px">${chead}</div><table class="t">${checks}</table><div class="src">Evidence pointers are paths recorded by the coordinator; this page doesn't open workstation files.</div>` : "") + findings + card +
       `<div class="src">Model-reported DONE (${esc(((d.last_report || {}).status) || "none")}) is advisory; only the coordinator's state above advances the task.</div>`;
   },
   capabilities(s) {
