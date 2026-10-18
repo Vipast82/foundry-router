@@ -60,6 +60,7 @@ class SessionState:
     report: Optional[dict] = None               # the model's own report: advisory only
     tokens: dict = field(default_factory=dict)
     children: list = field(default_factory=list)
+    unanswered: bool = False                    # idle with no reply to the prompt yet
 
 
 class CodingClient:

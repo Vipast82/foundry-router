@@ -2,6 +2,62 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.121.4 — crash-safe first start, honest helper stops
+
+Fixes for the P1 defect and the top P2 defects from the v0.121.3 scenario
+review. All are covered by tests against fakes.
+
+**Coordinator**
+
+- **P1 fix: no second writer session after a crash.** If the coordinator dies
+  after Kilo accepts the first prompt but before the task is recorded as
+  IMPLEMENTING, a restart now resumes the same session. Before, a restart
+  started and prompted a second writer session in the same workspace.
+  - The run id is kept in `pending_start` until the transition.
+  - The prompt is journaled as "prompting" before it is sent.
+- A prompt that may have been sent before the crash is never sent again. The
+  coordinator logs `session_prompt_uncertain`. A session that never answers
+  still ends by `session_timeout`.
+- A prompt Kilo refuses is retried on the same session. It no longer starts a
+  new one.
+- The continue prompt after an auto-resume is journaled once per pause, so a
+  crash no longer sends it twice.
+
+**Helpers**
+
+- **Silent startup failure:** a helper session that Kilo reports idle, with no
+  reply to its prompt, fails after `startup_grace_seconds` (default 180).
+  Before, it waited the full 30-minute timeout.
+- **Mid-run refusal:** when Foundry refuses a running helper (for example at the
+  quota cutoff) and Kilo goes into retry, the helper is aborted and deferred
+  until the refusal's retry time. It then starts in a new session without
+  using up one of its re-requests.
+- Foundry's `optional_deferred` code now maps to the `budget` category, on both
+  the server and the coordinator.
+- **Unconfirmed abort:** when Kilo does not confirm an abort, the unit stays
+  running with its Foundry binding, so its calls are still gated. The abort is
+  retried each poll and logged once as `helper_abort_unconfirmed`. Before,
+  the unit was marked failed and unbound while the session might still be
+  running.
+- **Admission outage:** a failed admission check is asked once per persona per
+  tick. Before, it was asked for every unit and backend, at 20 s each. Any
+  error now defers the unit with a reason; before, some errors left it
+  re-asked on every tick.
+- Foundry's client turns a non-JSON reply, a cut-off body or a reset into
+  `FoundryError`.
+- One helper session whose status can't be read no longer stops the rest of
+  the helper queue. Its timeout still runs.
+
+**Still open** (marked as expected-failure tests):
+
+- A lost response can cause a duplicate helper prompt or an orphan session.
+- No Kilo compaction recovery.
+- The unblock resolution never reaches the session.
+- A session-scoped note is left queued after its session ends.
+- Visual: the stale-image warning, and the `base` check.
+
+**Migration:** none. `[helpers] startup_grace_seconds` is optional.
+
 ## v0.121.3 — review fixes: lanes, delivery journal, training, quota probe, control center
 
 **Coordinator and lanes**

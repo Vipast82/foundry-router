@@ -92,6 +92,7 @@ worker_client = "kilo"                     # the Foundry client name Kilo's key 
 max_running = 3                            # never more than the backend's helper streams
 poll_seconds = 60                          # minimum gap between admission checks per unit
 timeout_minutes = 30                       # a helper session's own limit
+startup_grace_seconds = 180                # idle with no reply this long -> startup failed (v0.121.4)
 handoff_wait_minutes = 15                  # an idle primary waits this long for ADMITTED helpers
 max_unit_requests = 2                      # a skipped/timed-out unit may be asked for again once
 max_requests_per_report = 4

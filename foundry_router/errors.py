@@ -45,6 +45,7 @@ def describe_exception(e: BaseException, limit: int = 500) -> str:
 #   auth      the client key is missing, wrong or lacks the scope
 DENIAL_CATEGORIES = {
     "budget_denied": "budget", "usage_limit": "budget", "quota_exhausted": "budget",
+    "optional_deferred": "budget",    # helper policy: optional work over the quota cutoff
     "paused": "pause",
     "route_unavailable": "route", "queue_timeout": "route",
     "persona_disabled": "config", "image_persona": "config", "model_not_allowed": "config",

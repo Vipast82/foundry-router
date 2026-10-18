@@ -96,6 +96,7 @@ class HelperManager:
         h.setdefault("max_units_per_task", 8)
         h.setdefault("poll_seconds", 60)
         h.setdefault("timeout_minutes", 30)
+        h.setdefault("startup_grace_seconds", 180)  # idle with no reply -> startup failed
         h.setdefault("max_result_chars", 20000)
         # an idle primary waits this long for ADMITTED, running helpers before
         # verification; then they are stopped (timed_out). Units that were never
@@ -230,8 +231,14 @@ class HelperManager:
                     self.store.event(P.id, t["task_id"], "warning", detail={
                         "lanes": f"{step}: {type(e).__name__}: {e}"[:300]})
                 t = self.store.task(P.id, t["task_id"]) or t
+        self._adm_fail = {}          # persona -> admission transport failure, this tick
         for u in self.units(P.id, t["task_id"], "running"):
-            self._poll(P, u, h)
+            try:
+                self._poll(P, u, h)
+            except Exception as e:                               # noqa: BLE001
+                # one unreadable session never blocks the others; its timeout
+                # still runs on the clock
+                self._poll_failed(P, u, h, e)
         running = self.units(P.id, t["task_id"], "running")
         now = self.clock()
         waiting = [*self.units(P.id, t["task_id"], "pending"),
@@ -290,10 +297,19 @@ class HelperManager:
                     reasons.append(f"{backend}: {problem}")
                     open_ended = True
                     continue
+            fail = getattr(self, "_adm_fail", {}).get(persona)
+            if fail:
+                reasons.append(f"{backend}: admission check failed ({fail}; not re-asked "
+                               f"this tick)")
+                open_ended = True
+                continue
             try:
                 adm = P.foundry.helper_admission(persona)
-            except FoundryError as e:
-                reasons.append(f"{backend}: admission check failed ({e})")
+            except Exception as e:                               # noqa: BLE001
+                why = str(e) if isinstance(e, FoundryError) else f"{type(e).__name__}: {e}"
+                if hasattr(self, "_adm_fail"):
+                    self._adm_fail[persona] = why[:200]
+                reasons.append(f"{backend}: admission check failed ({why[:300]})")
                 open_ended = True
                 continue
             if adm.get("routes") and any(r.get("source") == "local" for r in adm["routes"][:1]):
@@ -420,14 +436,23 @@ class HelperManager:
         # message is the prompt itself, which already reads as busy
         st = P.client.state(sid, directory=directory, since_ts=0)
         if st.status == "busy":
+            if st.denial:
+                # Foundry refused this optional call (e.g. quota cutoff) and Kilo is
+                # retrying: stop now and defer, instead of holding it until timeout
+                return self._defer_running(P, u, h, st.denial)
+            grace = float(h.get("startup_grace_seconds") or 180)
+            if getattr(st, "unanswered", False) and now - u["updated_ts"] > grace:
+                self._stop(P, u, "failed",
+                           f"no reply to the prompt after {int(grace)} s while Kilo reports "
+                           "the session idle (startup failed: model, provider or auth); "
+                           "not held until the timeout")
+                return
             if now - u["updated_ts"] > float(h["timeout_minutes"]) * 60:
-                P.client.abort(sid, directory=directory)
-                self._finish(P, u, "failed", f"timed out after {h['timeout_minutes']} min", None)
+                self._stop(P, u, "failed", f"timed out after {h['timeout_minutes']} min")
             return
         if st.status == "attention":
             # a helper can't wait for a person; it ends without a result
-            P.client.abort(sid, directory=directory)
-            self._finish(P, u, "failed", "the helper asked for input; helpers can't wait", None)
+            self._stop(P, u, "failed", "the helper asked for input; helpers can't wait")
             return
         if st.status in ("missing", "error"):
             self._finish(P, u, "failed", (st.error or st.status)[:300], None)
@@ -436,6 +461,65 @@ class HelperManager:
         self._finish(P, u, "done" if text else "failed",
                      "proposal returned" if text else "no proposal text", text,
                      tokens=st.tokens)
+
+    def _stop(self, P, u: dict, status: str, reason: str) -> bool:
+        """Abort a running helper, then finish it. If Kilo does not confirm the
+        abort, the unit stays running WITH its Foundry binding (its calls stay
+        gated as optional work) and the abort is retried on the next poll."""
+        ok = P.client.abort(u["session_id"], directory=P.profile.workspace)
+        if ok is False:
+            note = f"abort not confirmed by Kilo; retrying ({reason})"[:500]
+            if u.get("reason") != note:
+                self.store.event(P.id, u["task_id"], "helper_abort_unconfirmed",
+                                 session_id=u["session_id"],
+                                 detail={"unit": u["unit_id"], "reason": reason})
+            self.store.x("UPDATE helper_units SET reason=? WHERE unit_id=?",
+                         (note, u["unit_id"]))
+            return False
+        self._finish(P, u, status, reason, None)
+        return True
+
+    def _defer_running(self, P, u: dict, h: dict, denial: dict) -> None:
+        """A running unit Foundry refused: abort it and queue it again for when
+        the refusal says it may clear (a fresh session on the next dispatch)."""
+        now = self.clock()
+        retry = denial.get("retry_after")
+        why = (f"Foundry refused the helper mid-run ({denial.get('category')}"
+               f"{': ' + str(denial.get('code')) if denial.get('code') else ''})")
+        if P.client.abort(u["session_id"], directory=P.profile.workspace) is False:
+            self.store.x("UPDATE helper_units SET reason=? WHERE unit_id=?",
+                         (f"{why}; abort not confirmed by Kilo, retrying"[:500], u["unit_id"]))
+            return
+        self.store.update_session(u["session_id"], status="ended", outcome="deferred",
+                                  ended_ts=now)
+        if P.foundry is not None:
+            try:
+                P.foundry.end(u["session_id"], "deferred")
+            except FoundryError:
+                pass
+        # the next dispatch starts a new session (never the aborted one) without
+        # using up one of the unit's re-requests
+        self.store.x("DELETE FROM ops WHERE key=?",
+                     (f"helper:{P.id}:{u['task_id']}:{u['unit_id']}:"
+                      f"{int(u.get('requests') or 1)}",))
+        nxt = now + float(retry) if retry else None
+        self.store.x("UPDATE helper_units SET status='deferred', reason=?, next_eligible=?, "
+                     "next_check=?, updated_ts=? WHERE unit_id=?",
+                     (why[:500], nxt, max(now + float(h["poll_seconds"]), nxt or 0), now,
+                      u["unit_id"]))
+        self.store.event(P.id, u["task_id"], "helper_deferred", session_id=u["session_id"],
+                         detail={"unit": u["unit_id"], "reason": why, "next_eligible": nxt})
+
+    def _poll_failed(self, P, u: dict, h: dict, e: Exception) -> None:
+        now = self.clock()
+        why = f"status unreadable: {type(e).__name__}: {e}"[:300]
+        if now - u["updated_ts"] > float(h["timeout_minutes"]) * 60:
+            self._stop(P, u, "failed", f"timed out after {h['timeout_minutes']} min ({why})")
+            return
+        if u.get("reason") != why:
+            self.store.event(P.id, u["task_id"], "warning", session_id=u.get("session_id"),
+                             detail={"unit": u["unit_id"], "helper_poll": why})
+            self.store.x("UPDATE helper_units SET reason=? WHERE unit_id=?", (why, u["unit_id"]))
 
     def _finish(self, P, u: dict, status: str, reason: str, text: Optional[str],
                 tokens: Optional[dict] = None, meta: Optional[dict] = None) -> None:

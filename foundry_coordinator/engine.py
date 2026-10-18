@@ -277,7 +277,12 @@ class Coordinator:
         own = [p for p in in_scope if p not in foreign]
         baseline = {p: P.ws.file_hash(p) for _, p in dirty if p not in own}
         base = P.ws.head()
-        run_id = f"{tid}-a{attempt}-{uuid.uuid4().hex[:6]}"
+        # a start that died between Kilo accepting it and the IMPLEMENTING
+        # transition is RESUMED (same run id -> same journaled session), never
+        # repeated with a second writer session
+        pend = t["data"].get("pending_start") or {}
+        run_id = (pend["run_id"] if pend.get("attempt") == attempt and pend.get("run_id")
+                  else f"{tid}-a{attempt}-{uuid.uuid4().hex[:6]}")
         findings = list(t["data"].get("findings") or [])
         if own:
             findings.append("the previous session left these task files uncommitted: "
@@ -293,12 +298,14 @@ class Coordinator:
                        "are not accepted evidence until the required validity and vision checks pass. "
                        "Do not alter backups or unrelated work. Commit only verified task work.\n")
         data = dict(t["data"])
+        data.pop("pending_start", None)
         if before_task is None:
             data["task_baseline_dirty"] = sorted(p for _, p in dirty if p not in adopted)
         data.update(baseline_dirty=baseline, free_retry=None, findings=findings or None,
                     task_base=data.get("task_base") or base, closeout_session=None,
                     closeout_attempts=0, review_errors=0)
         data = {k: v for k, v in data.items() if v is not None}
+        self.store.merge_data(pid, tid, pending_start={"run_id": run_id, "attempt": attempt})
         try:
             sid = self._start_session(P, tid, spec, "implement", "implementer", run_id, attempt,
                                       prompt)
@@ -331,7 +338,17 @@ class Coordinator:
             self.store.add_session(sid, P.id, tid, run_id, role, phase, attempt, P.client.name,
                                    persona)
             self._bind(P, sid, tid, run_id, role, persona)
-        if not res.get("prompt_ts"):
+        if not res.get("prompt_ts") and res.get("prompting_ts"):
+            # died between sending and recording: Kilo may hold the prompt, so it
+            # is never sent twice (an unanswered session ends by session_timeout)
+            ts = self.clock()
+            self.store.op_update(key, "done", {"session_id": sid, "prompt_ts": ts,
+                                               "uncertain": True})
+            self.store.update_session(sid, status="prompted", prompt_ts=ts)
+            self.store.event(P.id, tid, "session_prompt_uncertain", session_id=sid,
+                             detail={"phase": phase, "run_id": run_id,
+                                     "note": "restart after the prompt was sent; not repeated"})
+        elif not res.get("prompt_ts"):
             ts = self.clock()
             if role == "implementer":
                 self.frontier.on_new_session(P, tid)
@@ -347,7 +364,13 @@ class Coordinator:
                     prompt += "\n" + note
             else:
                 hu = ""
-            P.client.prompt(sid, prompt, directory=directory, persona=persona, agent=agent)
+            self.store.op_update(key, "prompting", {"session_id": sid, "prompting_ts": ts})
+            try:
+                P.client.prompt(sid, prompt, directory=directory, persona=persona, agent=agent)
+            except Exception:
+                # refused, so nothing was sent: a retry may prompt this session again
+                self.store.op_update(key, "started", {"session_id": sid})
+                raise
             self._notes_delivered(notes, sid)
             if units:
                 self.helpers.mark_delivered(units, sid)
@@ -1049,13 +1072,28 @@ class Coordinator:
             else:
                 spec = P.adapter.describe(task_id)
                 ts = self.clock()
-                prompt, notes = self._with_operator_notes(
-                    project_id, task_id, P.adapter.continue_prompt(spec, t["pause_reason"] or "paused"),
-                    sid)
-                P.client.prompt(sid, prompt, directory=P.profile.workspace,
-                                persona=P.profile.persona("implementer"),
-                                agent=P.profile.client.get("agent") or "code")
-                self._notes_delivered(notes, sid)
+                # one continue prompt per pause, journaled: a crash before the
+                # transition below must not send it again on the next resume
+                row = self.store.q("SELECT MAX(rowid) AS n FROM transitions WHERE project_id=? "
+                                   "AND task_id=? AND to_state=?", (project_id, task_id, S.PAUSED))
+                okey = f"resume:{project_id}:{task_id}:{sid}:{(row[0]['n'] if row else 0) or 0}"
+                if self.store.op_begin(okey, project_id, task_id, "resume_prompt"):
+                    self.store.event(project_id, task_id, "resume_prompt_uncertain",
+                                     session_id=sid, detail={"note": "continue prompt already "
+                                                             "sent (or uncertain); not repeated"})
+                else:
+                    prompt, notes = self._with_operator_notes(
+                        project_id, task_id,
+                        P.adapter.continue_prompt(spec, t["pause_reason"] or "paused"), sid)
+                    try:
+                        P.client.prompt(sid, prompt, directory=P.profile.workspace,
+                                        persona=P.profile.persona("implementer"),
+                                        agent=P.profile.client.get("agent") or "code")
+                    except Exception:
+                        self.store.x("DELETE FROM ops WHERE key=?", (okey,))
+                        raise
+                    self._notes_delivered(notes, sid)
+                    self.store.op_update(okey, "done", {"prompt_ts": ts})
                 self.store.update_session(sid, status="prompted", prompt_ts=ts, ended_ts=None)
                 if P.foundry is not None:
                     self._bind(P, sid, task_id, t["run_id"], "implementer",

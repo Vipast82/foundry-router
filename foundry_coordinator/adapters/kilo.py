@@ -121,7 +121,8 @@ class KiloClient(CodingClient):
         created = ((info.get("time") or {}).get("created") or 0) / 1000.0
         if not last or info.get("role") != "assistant" or created + 1 < since_ts:
             # Prompt sent but not admitted yet (Kilo reports idle for a moment).
-            return SessionState(status="busy", error="waiting for the prompt to be admitted")
+            return SessionState(status="busy", error="waiting for the prompt to be admitted",
+                                unanswered=True)
         if not (info.get("time") or {}).get("completed") and not info.get("error"):
             return SessionState(status="busy")
         text = "\n".join(p.get("text") or "" for p in last.get("parts") or []
@@ -151,11 +152,13 @@ class KiloClient(CodingClient):
                                 f"{', '.join(p.get('patterns') or [])}"[:2000], "options": []}
         return None
 
-    def abort(self, session_id, *, directory) -> None:
+    def abort(self, session_id, *, directory) -> bool:
+        """False when Kilo did not confirm the abort (the session may still run)."""
         try:
             self._req("POST", f"/session/{session_id}/abort", {}, {"directory": directory})
+            return True
         except KiloError:
-            pass
+            return False
 
     def answer(self, session_id, request_id, answers, *, directory, kind="question") -> None:
         if kind == "permission":
@@ -260,7 +263,8 @@ def foundry_denial(text: str) -> Optional[dict]:
             cat = c
             break
     if cat is None:
-        for code, c in (("budget_denied", "budget"), ("paused", "pause"),
+        for code, c in (("budget_denied", "budget"), ("optional_deferred", "budget"),
+                        ("paused", "pause"),
                         ("route_unavailable", "route"), ("persona_disabled", "config")):
             if code in text:
                 cat = c

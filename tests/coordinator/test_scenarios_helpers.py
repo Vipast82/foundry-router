@@ -203,11 +203,7 @@ def test_s1_async_startup_error_on_assistant_message_fails_fast(env, error):
     assert units(c)[GALLERY]["status"] == "running"     # the other unit is unaffected
 
 
-@pytest.mark.xfail(strict=True, reason=(
-    "DEFECT: a helper session that went idle with only the user prompt (Kilo emitted "
-    "session.error, e.g. model unresolvable, and wrote no assistant message) reads as "
-    "'busy: waiting for the prompt to be admitted' (kilo.py:121-124) and helpers._poll "
-    "waits the full timeout_minutes (helpers.py:421-426)"))
+# fixed in v0.121.4
 def test_s1_idle_session_without_any_reply_is_detected_early(env):
     fake, c = env["fake"], env["c"]
     u = start_both(env)
@@ -219,10 +215,7 @@ def test_s1_idle_session_without_any_reply_is_detected_early(env):
     assert units(c)[S45]["status"] == "failed"
 
 
-@pytest.mark.xfail(strict=True, reason=(
-    "DEFECT: a helper whose Kilo session is in 'retry' on a Foundry refusal (state.denial "
-    "set, kilo.py:113-116) is treated as plain busy by helpers._poll (helpers.py:422) and "
-    "held until timeout_minutes; the primary path aborts on s.denial (engine.py:451-453)"))
+# fixed in v0.121.4
 def test_s1_retry_on_foundry_denial_is_not_held_until_timeout(env):
     fake, c = env["fake"], env["c"]
     u = start_both(env)
@@ -374,11 +367,7 @@ def test_s3_bind_failure_aborts_session_and_defers(env):
     assert {x["status"] for x in units(c).values()} == {"running"}
 
 
-@pytest.mark.xfail(strict=True, reason=(
-    "DEFECT: FoundryClient._req maps only HTTPError/URLError/TimeoutError/ConnectionError "
-    "(adapters/foundry.py:46-71); a 200 with a non-JSON body (proxy/captive error page) "
-    "escapes as json.JSONDecodeError, so helpers._dispatch's `except FoundryError` "
-    "(helpers.py:295) doesn't catch it"))
+# fixed in v0.121.4
 def test_s3_foundry_client_non_json_200_is_a_foundry_error():
     class H(BaseHTTPRequestHandler):
         def log_message(self, *a):
@@ -403,11 +392,7 @@ def test_s3_foundry_client_non_json_200_is_a_foundry_error():
         srv.server_close()
 
 
-@pytest.mark.xfail(strict=True, reason=(
-    "DEFECT: an admission error that is not a FoundryError (e.g. JSONDecodeError, "
-    "http.client.IncompleteRead) propagates out of helpers.tick (helpers.py:294-298); "
-    "the unit stays 'pending' with next_check=0 and no reason, so it is re-asked on every "
-    "coordinator tick (busy loop) and the rest of the queue is not dispatched"))
+# fixed in v0.121.4
 def test_s3_unexpected_admission_error_defers_with_reason(env):
     c, ff, clock = env["c"], env["ff"], env["clock"]
     calls = []
@@ -426,12 +411,7 @@ def test_s3_unexpected_admission_error_defers_with_reason(env):
     assert len(calls) == n                              # no re-ask before next_check
 
 
-@pytest.mark.xfail(strict=True, reason=(
-    "DEFECT (capacity): when Foundry's admission endpoint hangs, every unit x candidate "
-    "backend waits its own 20 s timeout in the same tick (helpers.py:275-298, "
-    "foundry.py:92-93) and helpers.tick runs synchronously before the primary's handler "
-    "(engine.py:172-177); a transport failure on a backend should short-circuit the rest "
-    "of that tick"))
+# fixed in v0.121.4
 def test_s3_admission_outage_is_asked_once_per_backend_per_tick(env):
     c, ff = env["c"], env["ff"]
 
@@ -593,11 +573,7 @@ def test_s5_session_create_response_lost_leaves_no_orphan(env):
     assert orphans == []
 
 
-@pytest.mark.xfail(strict=True, reason=(
-    "DEFECT: KiloClient.abort swallows every KiloError (kilo.py:154-158) and the helper "
-    "timeout path then marks the unit failed and ENDS its Foundry binding "
-    "(helpers.py:424-425, 451-453); if the abort did not land, the still-running session's "
-    "calls become unbound (unmanaged: not gated as optional) and nothing records it"))
+# fixed in v0.121.4
 def test_s5_unconfirmed_abort_is_recorded_honestly(env):
     fake, c, ff, clock = env["fake"], env["c"], env["ff"], env["clock"]
     u = start_both(env)
@@ -628,10 +604,7 @@ def test_s5_reads_failing_keep_unit_running_honestly(env):
     assert units(c)[S45]["status"] == "done" and "S45 proposal" in units(c)[S45]["result"]
 
 
-@pytest.mark.xfail(strict=True, reason=(
-    "DEFECT: one running unit whose Kilo reads fail raises out of helpers._poll "
-    "(helpers.py:233-234, kilo.py:73) and aborts the whole helpers.tick, so other units are "
-    "never dispatched (and that unit's own timeout never fires) while the read fails"))
+# fixed in v0.121.4
 def test_s5_one_unreadable_session_does_not_block_other_dispatch(env):
     fake, c, ff, clock = env["fake"], env["c"], env["ff"], env["clock"]
     first = {"done": False}

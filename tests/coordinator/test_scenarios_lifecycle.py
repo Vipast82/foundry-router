@@ -578,13 +578,7 @@ def test_s5_pause_restart_resume_continues_the_same_session(game):
     assert c2.store.task("game", "T1")["attempt"] == 1
 
 
-@pytest.mark.xfail(strict=True, reason=(
-    "DEFECT: the READY/CHANGES_REQUIRED -> IMPLEMENTING transition is written only after "
-    "_start_session returns (engine.py:308), and the op-journal key embeds a fresh random "
-    "run_id per call (engine.py:280, 317). A crash after Kilo accepted the prompt but before "
-    "the transition leaves the task READY, so the restarted coordinator starts and prompts a "
-    "SECOND writer session in the same workspace; the orphan keeps running. Contradicts "
-    "docs/COORDINATOR.md 'Sessions and recovery'"))
+# fixed in v0.121.4
 def test_s5_crash_after_prompt_before_transition_does_not_start_a_second_session(game):
     tmp, _, _, prof = game
     client = Gated(write_ok("src/a.txt"))
@@ -601,10 +595,7 @@ def test_s5_crash_after_prompt_before_transition_does_not_start_a_second_session
     assert len(client.starts) == 1 and len(client.prompted()) == 1
 
 
-@pytest.mark.xfail(strict=True, reason=(
-    "DEFECT: resume() sends the continue prompt (engine.py:1055) before the PAUSED -> "
-    "resume_state transition (engine.py:1063) with no op-journal entry; after a crash in "
-    "between, the auto-resume in _paused (engine.py:1024) prompts the same session again"))
+# fixed in v0.121.4
 def test_s5_crash_during_auto_resume_does_not_repeat_the_continue_prompt(game):
     tmp, _, _, prof = game
     calls = []

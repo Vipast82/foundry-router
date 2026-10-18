@@ -9,6 +9,7 @@ pauses on a budget or pause instead of counting it as a failed attempt.
 
 from __future__ import annotations
 
+import http.client
 import json
 import urllib.error
 import urllib.parse
@@ -69,6 +70,9 @@ class FoundryClient:
             raise FoundryError(f"{method} {path}: HTTP {e.code} {code} {msg[:300]}") from None
         except (urllib.error.URLError, TimeoutError, ConnectionError) as e:
             raise FoundryError(f"{method} {path}: {e}") from None
+        except (ValueError, http.client.HTTPException, OSError) as e:
+            # a 200 that isn't JSON (proxy/captive page), a cut-off body, a reset
+            raise FoundryError(f"{method} {path}: {type(e).__name__}: {e}"[:400]) from None
 
     # -- bindings / state ----------------------------------------------------------
 
