@@ -391,6 +391,7 @@ const kv = rows => rows.filter(Boolean).map(([k, v]) => `<div>${esc(k)}</div><di
 const fullTs = ts => ts ? "TS" + ts : ""; const approvalCard = () => "";
 const stateCls = st => ""; let TASK = """ + json.dumps(task) + """;
 const curTask = () => TASK;
+""" + between(s, "/*build-start*/", "/*build-end*/") + """
 const R = {
 """ + method + """
 };
@@ -460,3 +461,83 @@ const r3 = bellCount([{status: "resolved"}], [{status: "answered"}]);
 console.log(JSON.stringify([r1.badge, r1.open.length, r2.badge, r3.badge]));
 """)
     assert out == [0, 1, 2, 0]    # acknowledged alone: no badge, still listed
+
+
+# ------------------------------------------------------------------ BUILD continuing
+
+BUILD_VIEW = {"open_steps": 4, "steps": ["- [ ] <b>wire</b> the shop UI", "- [ ] tests"],
+              "truncated": False, "head_sha": "d" * 40, "ts": 1200}
+MARKER = ("Continue the committed plan's open BUILD steps; "
+          "final gate and review remain required.")
+
+
+def _build_task(state="CHANGES_REQUIRED", build=BUILD_VIEW, findings=None, label="1/3 attempts used"):
+    return {"project_id": "proj", "task_id": "T-1", "state": state,
+            "data": {"attempt": 1, "limits": {"max_attempts": 3}, "head_sha": "d" * 40,
+                     "findings": findings or [], "next_action": "continue BUILD from committed plan"},
+            "verification_view": {"previous_run": True, "attempts": {"label": label},
+                                  "build": build},
+            "task_view": {"build": build}}
+
+
+def test_verification_panel_shows_build_continuing_as_info_not_a_failure(tmp_path):
+    h = _verification_html(tmp_path, _build_task(findings=[MARKER]))
+    # the engine's own record: info pill and box, never the red/warn treatment
+    assert 'class="pill info" data-build="continuing"' in h and ">BUILD continuing</span>" in h
+    assert "BUILD continuing — 4 checklist steps still open, progress committed at dddddddddddd" in h
+    assert 'class="infobox" data-build="continuing"' in h
+    assert "errbox" not in h and "warnbox" not in h and "pill bad" not in h and "pill warn" not in h
+    # not an attempt, not a decision; the progress marker is not listed as a finding
+    assert "1/3 attempts used" in h and "BUILD continuation: no attempt used" in h
+    assert "uses no attempt and needs no decision" in h
+    assert ">Findings<" not in h and MARKER.replace("'", "&#39;") not in h
+    # the CHANGES_REQUIRED state word is not shown as if checks failed
+    assert ">CHANGES_REQUIRED<" not in h
+    assert "&lt;b&gt;wire&lt;/b&gt;" in h and "<b>wire</b>" not in h
+
+
+def test_build_continuing_keeps_real_findings_and_the_live_state_visible(tmp_path):
+    # the next BUILD session is running: the state stays visible next to the note
+    h = _verification_html(tmp_path, _build_task(state="IMPLEMENTING",
+                                                 build={**BUILD_VIEW, "open_steps": 12,
+                                                        "truncated": True},
+                                                 findings=["a real failure"]))
+    assert ">IMPLEMENTING</span>" in h and ">BUILD continuing</span>" in h
+    assert "12+ checklist steps still open" in h
+    assert ">Findings<" in h and "a real failure" in h
+
+
+def test_no_build_record_means_a_normal_changes_required(tmp_path):
+    """Without the engine's record nothing says "continuing", whatever the text
+    of next_action or a finding says."""
+    t = _build_task(build=None, findings=[MARKER, "unit tests failed"])
+    t["data"]["last_report"] = {"status": "DONE", "summary": "BUILD continuing, 5/9 steps"}
+    h = _verification_html(tmp_path, t)
+    assert "BUILD continuing" not in h and "infobox" not in h
+    assert ">CHANGES_REQUIRED</span>" in h and "unit tests failed" in h
+    assert MARKER.replace("'", "&#39;") in h          # listed as the finding it is
+
+
+def test_task_state_pill_and_header_use_the_build_record(tmp_path):
+    s = _script()
+    out = run_js(tmp_path, """
+const stateCls = st => ({CHANGES_REQUIRED: "warn", IMPLEMENTING: "info"})[st] || "";
+const fullTs = ts => "TS" + ts;
+""" + between(s, "/*build-start*/", "/*build-end*/") + """
+const B = %s;
+console.log(JSON.stringify({
+  cont: taskStatePill({state: "CHANGES_REQUIRED", verification_view: {build: B}}),
+  viaView: taskStatePill({state: "CHANGES_REQUIRED", task_view: {build: B}}),
+  plain: taskStatePill({state: "CHANGES_REQUIRED", verification_view: {build: null}}),
+  paused: taskStatePill({state: "PAUSED", verification_view: {build: B}}),
+  one: buildContText({open_steps: 1}), none: buildContHtml(null), empty: taskStatePill(null)}));
+""" % json.dumps(BUILD_VIEW))
+    assert out["cont"].startswith('<span class="pill info" data-build="continuing"')
+    assert "pill warn" not in out["cont"] and out["viaView"] == out["cont"]
+    assert out["plain"] == '<span class="pill warn">CHANGES_REQUIRED</span>'
+    assert ">PAUSED</span>" in out["paused"] and "BUILD continuing" in out["paused"]
+    assert "1 checklist step still open" in out["one"]
+    assert out["none"] == "" and out["empty"] == ""
+    src = _script()
+    assert '$("#task-state").innerHTML = t ? taskStatePill(t) : "";' in src
+    assert '["Coordinator", t ? `${taskStatePill(t)} phase' in src

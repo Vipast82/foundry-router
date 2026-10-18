@@ -330,6 +330,65 @@ def pending_obs(q: dict, kind: str, ctx: dict) -> dict:
 
 PROJECT_PAUSE_META = "project_pause:"     # store meta key prefix: {mode, note, actor, since, tasks}
 REVIEW_STALE_S = 3600                     # a review op "started" longer than this is a crash leftover
+# store meta key prefix: the last automatic resume after an upgrade (control.py
+# _resume_after_upgrade): {ts, actor, authorized_by, from_version, to_version, ...}
+PROJECT_UPGRADE_RESUME = "project_upgrade_resume:"
+
+
+def upgrade_resume_record(q, project_id: str) -> Optional[dict]:
+    """The last "resumed after upgrade" record, bounded, or None."""
+    try:
+        r = q("SELECT value FROM meta WHERE key=?", (PROJECT_UPGRADE_RESUME + project_id,))
+        v = json.loads(r[0]["value"]) if r and r[0].get("value") else None
+    except Exception:                                            # noqa: BLE001
+        return None
+    if not isinstance(v, dict):
+        return None
+    return {"ts": v.get("ts") if isinstance(v.get("ts"), (int, float)) else None,
+            "actor": _cap(v.get("actor"), 200), "authorized_by": _cap(v.get("authorized_by"), 120),
+            "from_version": _cap(v.get("from_version"), 40),
+            "to_version": _cap(v.get("to_version"), 40),
+            "from_fingerprint": _cap(v.get("from_fingerprint"), 40),
+            "to_fingerprint": _cap(v.get("to_fingerprint"), 40),
+            "resumed": [_cap(x, 200) for x in (v.get("resumed") or [])[:20]],
+            "left_paused": [_cap(x, 120) for x in (v.get("left_paused") or [])[:20]],
+            "failed": [_cap(x, 300) for x in (v.get("failed") or [])[:10]]}
+
+
+# transitions that end or replace a BUILD continuation (anything but the
+# bookkeeping moves inside one: a new session, a pause, a question)
+_BUILD_LOOP = ("IMPLEMENTING", "PAUSED", "AWAITING_HUMAN")
+MAX_BUILD_STEPS = 12                      # the engine records at most 12 open steps
+
+
+def build_continuation(transitions: list) -> Optional[dict]:
+    """"BUILD continuing" for one task, from the engine's own record only
+    (engine.py, committed partial BUILD): the transition IMPLEMENTING ->
+    CHANGES_REQUIRED whose evidence has build_progress: true, head_sha and
+    open_steps (the plan's open checklist rows at that commit, at most 12).
+    It holds while that is the task's latest outcome transition: a later
+    verification, review, failed session, block or unblock replaces it. A
+    pause / resume, a question or the next session's start does not.
+    `transitions`: the task's rows in id order ({from_state, to_state,
+    evidence, ts}). None when the latest outcome isn't a BUILD continuation.
+    Model text is never read here."""
+    last = None
+    for r in transitions:
+        to, frm = r.get("to_state"), r.get("from_state")
+        if to in _BUILD_LOOP or frm == "PAUSED":
+            continue                       # bookkeeping inside the same outcome
+        last = r
+    if last is None:
+        return None
+    ev = last.get("evidence") or {}
+    if not (last.get("to_state") == "CHANGES_REQUIRED" and ev.get("build_progress") is True):
+        return None
+    steps = [s for s in (ev.get("open_steps") or []) if isinstance(s, str) and s.strip()]
+    return {"open_steps": len(steps), "steps": [_cap(s.strip(), 240) for s in steps[:MAX_BUILD_STEPS]],
+            # the engine keeps only the first 12 open rows: "12" may mean more
+            "truncated": len(steps) >= MAX_BUILD_STEPS,
+            "head_sha": _cap(ev.get("head_sha"), 64), "session_id": _cap(ev.get("session_id"), 120),
+            "ts": last.get("ts")}
 
 
 def project_pause_meta(q, project_id: str) -> dict:
@@ -365,15 +424,24 @@ def project_pause_status(q, project_id: str, now: Optional[float] = None) -> dic
         p = []
     paused = bool(p and p[0].get("paused"))
     m = project_pause_meta(q, project_id) if paused else {}
+    # A writer turn in flight (Studio / Rojo work runs inside it). A task held
+    # idle by the pause has its session ended at the turn's idle point
+    # (engine _end_session before the _held check), so its workspace
+    # reservation and writer lock, which persist between sessions, count 0.
     busy = one("SELECT COUNT(*) AS n FROM tasks t JOIN sessions s ON s.session_id=t.session_id "
                "WHERE t.project_id=? AND t.state IN ('IMPLEMENTING','CLOSING') AND "
                "s.ended_ts IS NULL AND s.prompt_ts IS NOT NULL", (project_id,))
+    # helper units running, plus a direct retry-guidance call in flight (a paid
+    # call made inside the tick; its session row is ended in a finally)
     helpers = one("SELECT COUNT(*) AS n FROM helper_units WHERE project_id=? AND "
-                  "status='running'", (project_id,))
+                  "status='running'", (project_id,)) + one(
+        "SELECT COUNT(*) AS n FROM sessions WHERE project_id=? AND client='foundry-direct' AND "
+        "phase='retry_guidance' AND ended_ts IS NULL AND created_ts >= ?",
+        (project_id, now - REVIEW_STALE_S))
     reviews = one("SELECT COUNT(*) AS n FROM ops WHERE project_id=? AND kind='review' AND "
                   "status='started' AND COALESCE(updated_ts, created_ts, 0) >= ?",
                   (project_id, now - REVIEW_STALE_S))
-    return {"paused": paused,
+    out = {"paused": paused,
             "mode": (m.get("mode") or "safe") if paused else None,
             "note": (m.get("note") if m.get("note") is not None
                      else (p[0].get("pause_note") or "")) if paused else "",
@@ -381,6 +449,14 @@ def project_pause_status(q, project_id: str, now: Optional[float] = None) -> dic
             "since": m.get("since") if paused else None,
             "busy_sessions": busy, "running_helpers": helpers, "running_reviews": reviews,
             "safe_to_upgrade": bool(paused and busy == 0 and helpers == 0 and reviews == 0)}
+    if paused and m:
+        ver = m.get("version") if isinstance(m.get("version"), dict) else {}
+        out["resume_after_upgrade"] = bool(m.get("resume_after_upgrade"))
+        out["paused_version"] = _cap(ver.get("version"), 40)
+    up = upgrade_resume_record(q, project_id)
+    if up:
+        out["upgrade_resume"] = up
+    return out
 
 
 class CoordReader:
@@ -420,6 +496,15 @@ class CoordReader:
         rows = self._q("SELECT * FROM sessions ORDER BY created_ts")
         for r in rows:
             r["data"] = _j(r.get("data"))
+        return rows
+
+    def task_transitions(self, project_id: str, task_id: str, limit: int = 60) -> list[dict]:
+        """One task's latest transitions, oldest first (id order)."""
+        rows = self._q("SELECT * FROM (SELECT id, ts, from_state, to_state, evidence FROM "
+                       "transitions WHERE project_id=? AND task_id=? ORDER BY id DESC LIMIT ?) "
+                       "ORDER BY id", (project_id, task_id, limit))
+        for r in rows:
+            r["evidence"] = _j(r.get("evidence"))
         return rows
 
     def transitions_after(self, last: int, limit: int = 500) -> list[dict]:
@@ -1197,7 +1282,10 @@ class TelemetryBridge:
                                      if k in ("reason", "blocker", "head_sha", "session_id", "run_id",
                                               "attempt", "verdict", "awaiting", "repair", "resumed",
                                               "invalidated", "reviewed_commit_sha", "published",
-                                              "blocker_class")}})
+                                              "blocker_class", "build_progress")}})
+            if ev.get("build_progress") is True:
+                obs[-1]["evidence"]["open_steps"] = len([x for x in ev.get("open_steps") or []
+                                                         if isinstance(x, str)])
         if trs:
             last = trs[-1]["id"]
             commits.append(lambda v=last: setattr(self, "cursor_transitions", v))
@@ -1312,6 +1400,8 @@ class TelemetryBridge:
                                       "started_ts", "updated_ts")},
              "source_ts": t.get("updated_ts"), "stage": d.get("stage"),
              "findings": (d.get("findings") or [])[:10], "last_report": d.get("last_report"),
+             "build_continuing": build_continuation(self.reader.task_transitions(
+                 t["project_id"], t["task_id"])),
              "limits": {k: P.profile.limit(k, v) for k, v in (
                  ("max_attempts", 3), ("max_sessions_per_task", 8), ("max_review_calls", 4),
                  ("max_closeout_attempts", 2), ("session_timeout_minutes", 0),

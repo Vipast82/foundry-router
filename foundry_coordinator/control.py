@@ -53,10 +53,20 @@ class ControlChannel:
         self._waiting: dict[str, float] = {}     # action id -> first seen (question not recorded yet)
         self.started = clock()
         self.ticks = 0
+        # a project paused with resume_after_upgrade is resumed once, at the
+        # first poll, when this process runs a different build than the pause
+        # recorded (see _resume_after_upgrade)
+        self._startup_checked = False
 
     # ------------------------------------------------------------------ loop
 
     def poll(self) -> None:
+        if not self._startup_checked:
+            self._startup_checked = True
+            try:
+                self._resume_after_upgrade()
+            except Exception as e:                               # noqa: BLE001
+                self.log(f"control: resume after upgrade: {type(e).__name__}: {e}")
         if self.foundry is None:
             return
         self.ticks += 1
@@ -312,7 +322,7 @@ class ControlChannel:
         lane dispatch); a running model turn finishes. "now": the same, and
         every task in a writing state is paused through the engine (its session
         aborted, its state kept) and the project's running helpers are stopped."""
-        from .telemetry import project_pause_meta
+        from .telemetry import PROJECT_UPGRADE_RESUME, project_pause_meta
         pid = a["project_id"]
         p = a.get("payload") or {}
         mode = p.get("mode") or "safe"
@@ -328,10 +338,18 @@ class ControlChannel:
                 "note": note or prev.get("note") or "",
                 "actor": prev.get("actor") or actor,
                 "since": prev.get("since") or self.clock(),
-                "tasks": list(prev.get("tasks") or [])}
+                "tasks": list(prev.get("tasks") or []),
+                # opt-in: resume by itself when the coordinator next starts on a
+                # different build than this one (the operator's upgrade)
+                "resume_after_upgrade": bool(p.get("resume_after_upgrade") is True
+                                             or prev.get("resume_after_upgrade")),
+                "version": prev.get("version") or build_identity()}
         # the record first, then the flag the engine checks: a crash in between
         # leaves a record without a pause, which a resume (or a new pause) clears
         self._set_pause_meta(pid, meta)
+        if not was:
+            # a new pause: the previous "resumed after upgrade" report is history
+            self.store.x("DELETE FROM meta WHERE key=?", (PROJECT_UPGRADE_RESUME + pid,))
         self.store.set_project_paused(pid, True, meta["note"])
         paused_now = []
         if mode == "now":
@@ -373,6 +391,19 @@ class ControlChannel:
                             and not any((t["data"] or {}).get("paused_by_project")
                                         for t in self.store.tasks(pid))):
             return self._report(a, "rejected", f"project {pid} is not paused")
+        resumed, left, failed = self._project_resume(pid, actor, f"project resumed by {actor}")
+        detail = (f"project {pid} resumed; new work starts again"
+                  + (f"; resumed {', '.join(resumed)}" if resumed else "")
+                  + (f"; left paused (paused individually): {', '.join(left)}" if left else "")
+                  + (f"; could not resume: {'; '.join(failed)}" if failed else ""))
+        return self._report(a, "applied", detail[:1500], {
+            "resumed": resumed, "left_paused": left, "failed": failed,
+            "project_pause": self._pause_status(pid)})
+
+    def _project_resume(self, pid: str, actor: str, note: str) -> tuple[list, list, list]:
+        """The one resume both the operator's action and the after-upgrade
+        resume use: clear the flag, resume only the tasks the project pause
+        paused, drop the pause record. (resumed, left_paused, failed)."""
         self.store.set_project_paused(pid, False)
         resumed, failed, left = [], [], []
         for t in self.store.tasks(pid):
@@ -385,20 +416,52 @@ class ControlChannel:
                 self.store.merge_data(pid, tid, paused_by_project=None)
                 continue
             try:
-                after = self.c.resume(pid, tid, actor=actor, note=f"project resumed by {actor}")
+                after = self.c.resume(pid, tid, actor=actor, note=note)
             except Exception as e:                               # noqa: BLE001
                 failed.append(f"{tid}: {type(e).__name__}: {e}"[:300])
                 continue
             self.store.merge_data(pid, tid, paused_by_project=None)
             resumed.append(f"{tid} -> {after['state']}")
         self._set_pause_meta(pid, None)
-        detail = (f"project {pid} resumed; new work starts again"
-                  + (f"; resumed {', '.join(resumed)}" if resumed else "")
-                  + (f"; left paused (paused individually): {', '.join(left)}" if left else "")
-                  + (f"; could not resume: {'; '.join(failed)}" if failed else ""))
-        return self._report(a, "applied", detail[:1500], {
-            "resumed": resumed, "left_paused": left, "failed": failed,
-            "project_pause": self._pause_status(pid)})
+        return resumed, left, failed
+
+    def _resume_after_upgrade(self) -> None:
+        """At startup (the first poll): a project paused with
+        resume_after_upgrade whose recorded build differs from the one now
+        running is resumed exactly as project_resume would, on the original
+        operator's authority. The same build (a plain restart), no recorded
+        build, or a pause without the option: it stays paused. The outcome is
+        kept in the store (meta project_upgrade_resume:<pid>) and reported in
+        the pause status, so the heartbeat and the bridge both carry it, and it
+        is recorded as an event."""
+        from .telemetry import PROJECT_UPGRADE_RESUME, project_pause_meta
+        cur = build_identity()
+        for pid in sorted(self.c.projects):
+            if not self._project_paused(pid):
+                continue
+            meta = project_pause_meta(self.store.q, pid)
+            if not meta.get("resume_after_upgrade"):
+                continue
+            rec = meta.get("version") if isinstance(meta.get("version"), dict) else {}
+            if not upgraded(rec, cur):
+                self.log(f"control: {pid} stays paused: same build as at the pause "
+                         f"(v{cur.get('version') or '?'})")
+                continue
+            by = meta.get("actor") or "operator"
+            actor = f"coordinator (after upgrade, authorized by {by})"
+            frm, to = rec.get("version") or "", cur.get("version") or ""
+            resumed, left, failed = self._project_resume(
+                pid, actor, f"project resumed after upgrade to v{to or '?'} (authorized by {by})")
+            rep = {"ts": self.clock(), "actor": actor, "authorized_by": by,
+                   "from_version": frm, "to_version": to,
+                   "from_fingerprint": rec.get("fingerprint") or "",
+                   "to_fingerprint": cur.get("fingerprint") or "",
+                   "note": meta.get("note") or "", "resumed": resumed[:50],
+                   "left_paused": left[:50], "failed": failed[:20]}
+            self.store.set_meta(PROJECT_UPGRADE_RESUME + pid, json.dumps(rep, sort_keys=True))
+            self.store.event(pid, "", "project_resumed_after_upgrade", detail=rep)
+            self.log(f"control: {pid} resumed after upgrade to v{to or '?'} "
+                     f"(authorized by {by}); resumed {len(resumed)} task(s)")
 
     def _do_cancel(self, a, t, actor):
         if t["state"] in S.TERMINAL:
@@ -561,6 +624,64 @@ class ControlChannel:
                     ((info.get("time") or {}).get("created") or 0) / 1000 >= (m["delivered_ts"] or 0):
                 return True
         return False
+
+
+def _git_head(root: str) -> str:
+    """The commit a checkout is at, read from its .git files (no git process):
+    "" when it is not a git checkout or the ref can't be read."""
+    import os
+    try:
+        git = os.path.join(root, ".git")
+        if os.path.isfile(git):                       # a worktree: "gitdir: <path>"
+            with open(git, encoding="utf-8") as f:
+                line = f.read().strip()
+            if not line.startswith("gitdir:"):
+                return ""
+            git = os.path.normpath(os.path.join(root, line[7:].strip()))
+        with open(os.path.join(git, "HEAD"), encoding="utf-8") as f:
+            head = f.read().strip()
+        if not head.startswith("ref:"):
+            return head[:40]
+        ref = head[4:].strip()
+        common = git
+        cd = os.path.join(git, "commondir")
+        if os.path.isfile(cd):
+            with open(cd, encoding="utf-8") as f:
+                common = os.path.normpath(os.path.join(git, f.read().strip()))
+        for base in (git, common):
+            p = os.path.join(base, *ref.split("/"))
+            if os.path.isfile(p):
+                with open(p, encoding="utf-8") as f:
+                    return f.read().strip()[:40]
+        packed = os.path.join(common, "packed-refs")
+        if os.path.isfile(packed):
+            with open(packed, encoding="utf-8") as f:
+                for line in f:
+                    parts = line.strip().split(" ")
+                    if len(parts) == 2 and parts[1] == ref:
+                        return parts[0][:40]
+    except OSError:
+        pass
+    return ""
+
+
+def build_identity() -> dict:
+    """The build this coordinator process runs: the release version
+    (foundry_router, bumped every release), the engine package version and,
+    when the code is a git checkout, its HEAD commit. Recorded with a project
+    pause; compared at startup for resume_after_upgrade."""
+    import os
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    return {"version": _version(), "coordinator_version": _coordinator_version(),
+            "fingerprint": _git_head(root)}
+
+
+def upgraded(recorded: dict, current: dict) -> bool:
+    """True when the running build differs from the recorded one in a field
+    both sides know. Nothing recorded (an older pause) is never an upgrade."""
+    keys = ("version", "coordinator_version", "fingerprint")
+    known = [k for k in keys if (recorded or {}).get(k) and (current or {}).get(k)]
+    return bool(known) and any(str(recorded[k]) != str(current[k]) for k in known)
 
 
 def _owner(store) -> Optional[dict]:

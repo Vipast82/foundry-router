@@ -193,6 +193,7 @@ pre.code.clip { max-height:calc(var(--long-lines, 14) * 1.45em + 12px); overflow
 .bar > b { position:absolute; top:-2px; bottom:-2px; width:2px; background:var(--think); }
 .warnbox { border:1px solid var(--warn); background:var(--warn-bg); padding:3px 6px; border-radius:3px; margin:4px 0; font-size:12px; }
 .errbox { border:1px solid var(--bad); background:var(--bad-bg); padding:3px 6px; border-radius:3px; margin:4px 0; font-size:12px; }
+.infobox { border:1px solid var(--info); background:var(--info-bg); padding:3px 6px; border-radius:3px; margin:4px 0; font-size:12px; }
 .list { list-style:none; margin:0; padding:0; }
 .list li { padding:3px 0; border-bottom:1px solid var(--line); }
 .tree li { padding:2px 0; }
@@ -370,6 +371,7 @@ body.noanim * { animation:none !important; transition:none !important; }
       <label class="opt"><input type="radio" name="pause-mode" value="safe" checked> At a safe point (finish the current step; nothing new starts)</label>
       <label class="opt"><input type="radio" name="pause-mode" value="now"> Now (abort running sessions and helpers; state kept)</label>
     </fieldset>
+    <label class="opt" id="pause-rau-l"><input type="checkbox" id="pause-rau"> Resume automatically when the coordinator restarts on a newer version</label>
     <label for="pause-note" id="pause-note-l">Note (required)</label>
     <textarea id="pause-note" maxlength="500" rows="2" placeholder="upgrading to v0.122.3"></textarea>
     <div id="pause-err" class="errbox" hidden></div>
@@ -1377,6 +1379,39 @@ function compatPill(src) {
   if (!c || c.state === "ok") return "";
   return `<span class="pill ${c.state === "refuse" ? "bad" : "warn"}" title="${esc(c.reason || "")} (server ${esc(c.server_version || "?")})">${esc((src.kind || "source") + " version " + c.state)}</span>`;
 }
+/*build-start*/
+// BUILD continuing: committed, partially ticked BUILD progress the engine
+// recorded itself (transition IMPLEMENTING -> CHANGES_REQUIRED with evidence
+// build_progress + open_steps; the bridge derives it, Foundry bounds it as
+// verification_view.build / task_view.build). Progress, not a verification
+// failure or a review finding: info style, never counted as an attempt or a
+// decision. Never derived from model text.
+const BUILD_MARKER = "Continue the committed plan's open BUILD steps; final gate and review remain required.";
+function buildCont(t) {
+  const b = t && (((t.verification_view || {}).build) || ((t.task_view || {}).build));
+  return b && typeof b === "object" ? b : null;
+}
+function buildContText(b) {
+  const n = Math.max(0, +b.open_steps || 0);
+  return `BUILD continuing — ${n}${b.truncated ? "+" : ""} checklist step${n === 1 ? "" : "s"} still open, progress committed${b.head_sha ? " at " + String(b.head_sha).slice(0, 12) : ""}`;
+}
+function taskStatePill(t) {
+  if (!t) return "";
+  const b = buildCont(t);
+  // CHANGES_REQUIRED here is the engine's way of starting the next BUILD session
+  if (b && t.state === "CHANGES_REQUIRED") return `<span class="pill info" data-build="continuing" title="${esc(buildContText(b))}">BUILD continuing</span>`;
+  return `<span class="pill ${stateCls(t.state)}">${esc(t.state)}</span>` + (b ? ` <span class="pill info" data-build="continuing" title="${esc(buildContText(b))}">BUILD continuing</span>` : "");
+}
+function buildContHtml(b) {
+  if (!b) return "";
+  const steps = (b.steps || []).map(x => `<li>${esc(x)}</li>`).join("");
+  return `<div class="infobox" data-build="continuing"><b>${esc(buildContText(b))}</b>${b.ts ? ` <span class="dim">· ${esc(fullTs(b.ts))}</span>` : ""}
+    <div class="dim">Planned progress, not a failed check or a review finding: it uses no attempt and needs no decision. Final verification and review run once BUILD is complete.</div>
+    ${steps ? `<details><summary class="dim">open checklist steps${b.truncated ? " (first " + esc((b.steps || []).length) + ")" : ""}</summary><ul class="list">${steps}</ul></details>` : ""}</div>`;
+}
+// findings to list as findings: the engine's own progress marker is not one
+function realFindings(fs, b) { return (fs || []).filter(f => !(b && String(f).trim() === BUILD_MARKER)); }
+/*build-end*/
 /*sprint-end*/
 const SECTION_RENDER = {
   /*sprint-render-start*/
@@ -1396,9 +1431,10 @@ const SECTION_RENDER = {
     const {v} = sprintView(s);
     const nr = notReported(v, "obligations", "The required-work checklist"); if (nr) return nr;
     const c = v.checklist || {}; const items = c.items || [];
-    if (!items.length) return `<p class="dim">No obligations recorded for this task.</p>`;
+    const bnote = buildContHtml(v.build && typeof v.build === "object" ? v.build : null);
+    if (!items.length) return bnote + `<p class="dim">No obligations recorded for this task.</p>`;
     const phases = [...new Set(items.map(x => x.phase || "?"))];
-    return `<div>${esc(c.open)} open of ${esc(c.total)}${c.next_action ? ` · <b>next:</b> ${esc(c.next_action)}` : ""}</div>` + phases.map(ph => `<div class="sub dim" style="margin-top:6px">${esc(ph)} (${esc(((c.by_phase || {})[ph] || {}).open ?? "?")} open)</div>
+    return bnote + `<div>${esc(c.open)} open of ${esc(c.total)}${c.next_action ? ` · <b>next:</b> ${esc(c.next_action)}` : ""}</div>` + phases.map(ph => `<div class="sub dim" style="margin-top:6px">${esc(ph)} (${esc(((c.by_phase || {})[ph] || {}).open ?? "?")} open)</div>
       <ul class="list">${items.filter(x => (x.phase || "?") === ph).map(x => `<li>${sprintPill(x.status || "?", OB_CLS[x.status] || "")} ${esc(x.title || x.id)} <code class="dim">${esc(x.id)}</code>
         ${x.blocking_reason ? `<div class="warnbox">${esc(x.blocking_reason)}</div>` : ""}${x.next_action ? `<div class="dim"><b>next</b> ${esc(x.next_action)}</div>` : ""}
         ${x.verified_rev ? `<div class="dim">verified at <code>${esc(short(x.verified_rev, 12))}</code>${x.verified_by ? " by " + esc(x.verified_by) : ""}</div>` : ""}
@@ -1470,7 +1506,7 @@ const SECTION_RENDER = {
     return kv([
       ["Project / task", `${esc(s.project_id || "?")} / <b>${esc(s.task_id || "?")}</b>`],
       ["Run", `<code>${esc(s.run_id || d.run_id || "")}</code>`],
-      ["Coordinator", t ? `<span class="pill ${stateCls(t.state)}">${esc(t.state)}</span> phase ${esc(d.phase || "?")} · attempt ${esc(d.attempt ?? "?")}${d.next_action ? `<div class="dim">${esc(d.next_action)}</div>` : ""}` : NA("coordinator task not reported")],
+      ["Coordinator", t ? `${taskStatePill(t)} phase ${esc(d.phase || "?")} · attempt ${esc(d.attempt ?? "?")}${d.next_action ? `<div class="dim">${esc(d.next_action)}</div>` : ""}` : NA("coordinator task not reported")],
       ["Role / agent", `${esc(s.role || "?")} / ${esc(s.agent || "?")}`],
       ["Session", `<code title="${esc(s.session_id)}">${esc(short(s.session_id, 22))}</code> ${statusPill(s)}`],
       s.parent_id ? ["Parent", `<code>${esc(short(s.parent_id, 22))}</code>`] : null,
@@ -1650,8 +1686,9 @@ const SECTION_RENDER = {
     const rec = vv.recovery;
     const recText = rec ? `<div class="dim">${rec.reset_attempts ? "operator recovery authorized (fresh budget)" : String(rec.kind || "").startsWith("retry_guidance") ? "recovery authorized (retry-guidance extra attempt)" : "operator unblocked (attempt count kept)"}${rec.by ? " by " + esc(rec.by) : ""}${when(rec.ts)}${rec.status ? " · " + esc(rec.status) : ""}${rec.resolution ? " · " + esc(rec.resolution) : ""}</div>` : "";
     const attempts = at.label ? esc(at.label) : `${esc(d.attempt ?? 0)} / ${esc(lim.max_attempts ?? "?")}`;
-    const rows = [["State", `<span class="pill ${stateCls(t.state)}">${esc(t.state)}</span>${d.stage ? " · stage " + esc(d.stage) : ""}${vv.previous_run ? ' <span class="dim">(a new run is in progress; results below are from a previous run)</span>' : ""}`],
-      ["Attempts", `${attempts} · sessions ${esc(d.sessions ?? 0)} / ${esc(lim.max_sessions_per_task ?? "?")}${recText}`],
+    const bc = buildCont(t);
+    const rows = [["State", `${taskStatePill(t)}${d.stage ? " · stage " + esc(d.stage) : ""}${vv.previous_run ? ' <span class="dim">(a new run is in progress; results below are from a previous run)</span>' : ""}`],
+      ["Attempts", `${attempts} · sessions ${esc(d.sessions ?? 0)} / ${esc(lim.max_sessions_per_task ?? "?")}${bc ? '<div class="dim">BUILD continuation: no attempt used</div>' : ""}${recText}`],
       ["Reviewed SHA", d.reviewed_sha ? `<code>${esc(short(d.reviewed_sha, 12))}</code>` : NA("no review yet")],
       ["Head SHA", d.head_sha ? `<code>${esc(short(d.head_sha, 12))}</code>` : NA()],
       ["Workspace HEAD", d.workspace_head ? `<code>${esc(short(d.workspace_head, 12))}</code>${d.reviewed_sha && d.workspace_head !== d.reviewed_sha ? ' <span class="pill warn">differs from reviewed</span>' : ""}` : NA()]];
@@ -1666,8 +1703,9 @@ const SECTION_RENDER = {
     const chead = `${cv.previous_run ? "Checks (previous run)" : "Checks"} @ ${csha ? `<code>${esc(short(csha, 12))}</code>` : '<span class="dim">revision not recorded</span>'}${when(cv.executed_ts)}${olderWarn(csha, "checked")}`;
     const ap = d.approval;
     const card = ap ? approvalCard(t) : "";
-    const findings = (d.findings || []).length ? `<div class="sub dim">Findings</div><ul class="list">${d.findings.map(f => `<li>${esc(f)}</li>`).join("")}</ul>` : "";
-    return kv(rows) + (checks ? `<div class="sub dim" style="margin-top:6px">${chead}</div><table class="t">${checks}</table><div class="src">Evidence pointers are paths recorded by the coordinator; this page doesn't open workstation files.</div>` : "") + findings + card +
+    const fl = realFindings(d.findings, bc);
+    const findings = fl.length ? `<div class="sub dim">Findings</div><ul class="list">${fl.map(f => `<li>${esc(f)}</li>`).join("")}</ul>` : "";
+    return kv(rows) + buildContHtml(bc) + (checks ? `<div class="sub dim" style="margin-top:6px">${chead}</div><table class="t">${checks}</table><div class="src">Evidence pointers are paths recorded by the coordinator; this page doesn't open workstation files.</div>` : "") + findings + card +
       `<div class="src">Model-reported DONE (${esc(((d.last_report || {}).status) || "none")}) is advisory; only the coordinator's state above advances the task.</div>`;
   },
   capabilities(s) {
@@ -2125,6 +2163,7 @@ function pauseBusy(st) { return (+(st || {}).busy_sessions || 0) + (+(st || {}).
 function pauseDetail(st) {
   if (!st || !st.paused) return "";
   return `Paused by ${st.actor || "?"}${st.since ? " since " + tsText(st.since, "datetime") : ""}${st.mode ? " (" + (PAUSE_MODE_TEXT[st.mode] || st.mode) + ")" : ""}${st.note ? ": " + st.note : ""}` +
+    (st.resume_after_upgrade ? ` · resumes automatically when the coordinator restarts on a newer version${st.paused_version ? " than v" + st.paused_version : ""}` : "") +
     ` · ${+st.busy_sessions || 0} session(s), ${+st.running_helpers || 0} helper(s), ${+st.running_reviews || 0} review(s) running`;
 }
 // What the header shows for one project: the button (Pause / Resume), whether
@@ -2140,6 +2179,7 @@ function projectPauseView(pid, statusMap, actions, sources) {
   if (live && live.kind === "project_resume") v.pill = {text: "resume requested…", cls: "info", title: `waiting for the coordinator to apply it (${live.status})`};
   else if (paused) v.pill = safe ? {text: "PAUSED — safe to upgrade", cls: "ok", title: pauseDetail(st)} : {text: `PAUSING — ${busy} running`, cls: "warn", title: pauseDetail(st)};
   else if (live) v.pill = {text: "pause requested…", cls: "info", title: `waiting for the coordinator to apply it (${live.status})`};
+  else if (upgradeResumeText(st)) v.pill = {text: "resumed after upgrade", cls: "ok", title: upgradeResumeText(st)};
   if (live) { v.disabled = true; v.title = `${live.kind === "project_pause" ? "pause" : "resume"} requested; waiting for the coordinator`; }
   if (!pid) { v.disabled = true; v.title = "select a project"; }
   else if (!v.supported) { v.disabled = true; v.title = PAUSE_UNSUPPORTED; }
@@ -2157,6 +2197,18 @@ function pauseFormError(kind, mode, note) {
   if (!["safe", "now"].includes(mode)) return "Choose when to pause.";
   if (!n.trim()) return "A note is required (e.g. upgrading to v0.122.3).";
   return "";
+}
+// the project_pause request; resume_after_upgrade only when the box is ticked
+function pauseBody(pid, task, mode, note, resumeAfterUpgrade) {
+  const b = {kind: "project_pause", project_id: pid, task_id: task || "", expected: {}, mode, note: String(note || "").trim()};
+  if (resumeAfterUpgrade === true) b.resume_after_upgrade = true;
+  return b;
+}
+// "resumed after upgrade to vX" (the coordinator's own record), while not paused again
+function upgradeResumeText(st) {
+  const u = st && !st.paused ? st.upgrade_resume : null;
+  if (!u || typeof u !== "object") return "";
+  return `resumed after upgrade to v${u.to_version || "?"}${u.from_version ? " (from v" + u.from_version + ")" : ""}${u.authorized_by ? ", authorized by " + u.authorized_by : ""}${u.ts ? " · " + tsText(u.ts, "datetime") : ""}`;
 }
 function pauseInboxHtml(statusMap) {
   const rows = Object.entries(statusMap || {}).filter(([, st]) => st && st.paused).sort(([a], [b]) => a < b ? -1 : 1);
@@ -2176,6 +2228,7 @@ function openPauseDialog(v) {
   $("#pause-h").textContent = pause ? "Pause project" : "Resume project";
   $("#pause-target").textContent = `Project ${v.pid}` + (pause ? "" : ` · ${v.pill ? v.pill.text : "paused"}`);
   $("#pause-modes").hidden = !pause;
+  $("#pause-rau-l").hidden = !pause; $("#pause-rau").checked = false;
   $("#pause-note-l").textContent = pause ? "Note (required)" : "Note (optional)";
   $("#pause-note").value = ""; $("#pause-err").hidden = true;
   d.showModal(); $("#pause-note").focus();
@@ -2188,7 +2241,7 @@ $("#pause-form").addEventListener("submit", async ev => {
   const mode = ($("input[name=pause-mode]:checked") || {}).value || "safe", note = $("#pause-note").value;
   const err = pauseFormError(kind, mode, note);
   if (err) { const e = $("#pause-err"); e.textContent = err; e.hidden = false; return; }
-  const body = kind === "project_pause" ? {kind, project_id: pid, task_id: S.task || "", expected: {}, mode, note: note.trim()}
+  const body = kind === "project_pause" ? pauseBody(pid, S.task, mode, note, $("#pause-rau").checked)
     : {kind, project_id: pid, task_id: S.task || "", expected: {}, note: note.trim()};
   const a = await submitAction(body, `${kind}:${pid}`);
   if (a) { d.close(); renderPauseCtl(); }
@@ -3155,7 +3208,7 @@ function renderTaskSelect() {
   }
   $("#sel-task").innerHTML = tasks.map(t => `<option value="${esc(t.task_id)}" ${t.task_id === S.task ? "selected" : ""}>${esc(t.task_id)} · ${esc(t.state)}</option>`).join("");
   const t = curTask();
-  $("#task-state").innerHTML = t ? `<span class="pill ${stateCls(t.state)}">${esc(t.state)}</span>` : "";
+  $("#task-state").innerHTML = t ? taskStatePill(t) : "";
   renderPauseCtl();
 }
 function selectTask(p, t) {

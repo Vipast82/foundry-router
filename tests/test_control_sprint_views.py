@@ -432,6 +432,7 @@ const S = {tasks: new Map(), project: "proj", task: "T-1", openProv: new Set(%s)
 const taskKey = (p, t) => p + "/" + t; const curTask = () => S.tasks.get("proj/T-1");
 const short = (s, n = 10) => s ? String(s).slice(0, n) : "";
 const tsText = t => t ? "T" + t : ""; const nowS = () => 1000;
+const fullTs = t => t ? "TS" + t : "";
 const NA = why => `<span class="dim">N/A</span>`;
 const kv = rows => rows.filter(Boolean).map(([k, v]) => `<div>${esc(k)}</div><div>${v}</div>`).join("");
 """ % json.dumps(extra and [extra] or []) + helpers + """
@@ -672,3 +673,26 @@ def test_overview_and_feed_send_task_view_not_the_raw_lifecycle_lists_too(client
     assert "decisions" not in ent["data"] and ent["task_view"]["checklist"]["total"] == 2
     # the per-task view route still serves the normalized view
     assert view(client)["view"]["evidence"]["counts"]["stale"] == 1
+
+
+@node
+def test_checklist_shows_build_continuing_from_the_server_view(tmp_path, client, cc):
+    """The bridge's build_continuing (the engine's record) is bounded by
+    Foundry into task_view.build and shown above the checklist as info; a
+    task that left the BUILD loop (BLOCKED) shows none even if the field lingers."""
+    b = {"open_steps": 3, "steps": ["- [ ] a", HOSTILE, "- [ ] c"] + ["x"] * 20,
+         "truncated": False, "head_sha": "d" * 90, "ts": 5}
+    ingest(client, task_obs("CHANGES_REQUIRED", build_continuing=b, **lifecycle()))
+    login(client)
+    t = client.get("/control/api/overview").json()["tasks"][0]
+    v = t["task_view"]["build"]
+    assert v["open_steps"] == 3 and len(v["steps"]) == 12 and len(v["head_sha"]) == 64
+    assert t["verification_view"]["build"] == v
+    h = _render(tmp_path, t, ["checklist"])["checklist"]
+    assert 'class="infobox" data-build="continuing"' in h and "3 checklist steps still open" in h
+    assert "<script>" not in h and "&lt;script&gt;" in h
+    assert h.index("data-build") < h.index("open of")
+    ingest(client, task_obs("BLOCKED", blocker="x", build_continuing=b, **lifecycle()))
+    t = client.get("/control/api/overview").json()["tasks"][0]
+    assert t["task_view"]["build"] is None and t["verification_view"]["build"] is None
+    assert "data-build" not in _render(tmp_path, t, ["checklist"])["checklist"]

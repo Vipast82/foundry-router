@@ -850,3 +850,103 @@ def test_bridge_reports_a_project_pause_observation_only_when_it_changes(env):
     assert o["busy_sessions"] == 1 and o["safe_to_upgrade"] is False
     from foundry_coordinator.telemetry import FEATURES
     assert "project_pause_status" in FEATURES
+
+
+# -- BUILD continuing (engine 9edd802: committed partial BUILD progress) ----------------------
+
+PROGRESS_MARKER = ("Continue the committed plan's open BUILD steps; "
+                   "final gate and review remain required.")
+
+
+def _build_progress(store, sid, steps, head="e" * 40):
+    """The engine's own record of committed partial BUILD progress, in the exact
+    shape engine.py writes it (transition evidence + task fields + data)."""
+    t = store.task("game", "T1")
+    return store.transition("game", "T1", "CHANGES_REQUIRED", {
+        "head_sha": head, "build_progress": True, "open_steps": steps[:12],
+        "session_id": sid, "findings": [PROGRESS_MARKER]},
+        head_sha=head, next_action="continue BUILD from committed plan",
+        data={**t["data"], "findings": None, "build_progress": steps[:12], "free_retry": True})
+
+
+def test_bridge_threads_build_continuing_from_the_engines_record(env):
+    cc, store, br, sid = env["cc"], env["store"], env["bridge"], env["sid"]
+    steps = [f"- [ ] step {i} <b>x</b>" for i in range(5)]
+    _build_progress(store, sid, steps)
+    store.update_session(sid, status="ended", ended_ts=time.time())
+    br.step()
+    d = _task_data(cc)
+    b = d["build_continuing"]
+    assert b["open_steps"] == 5 and b["steps"] == steps and b["truncated"] is False
+    assert b["head_sha"] == "e" * 40 and b["session_id"] == sid and b["ts"]
+    assert d["findings"] == []                    # nothing listed as a finding
+    # Foundry: bounded into both views; not an attempt, no decision
+    row = cc.task_row("game", "T1", [])
+    vv = cc.verification_view(row)
+    assert vv["build"] == {"open_steps": 5, "steps": steps, "truncated": False,
+                           "head_sha": "e" * 40, "ts": b["ts"]}
+    assert vv["attempts"]["used"] == store.task("game", "T1")["attempt"]
+    tv = cc.task_view_for("game", "T1", [])
+    assert tv["view"]["build"] == vv["build"] and tv["view"]["decisions"]["open"] == []
+    # the transition observation carries the marker (bool + count), not the step text
+    tr = cc.db.query("SELECT data FROM cc_transitions WHERE task_id='T1' AND "
+                     "to_state='CHANGES_REQUIRED'")
+    ev = json.loads(tr[-1]["data"])
+    assert ev["build_progress"] is True and ev["open_steps"] == 5
+    assert not [a for a in cc.alerts([], "open") if a["task_id"] == "T1"
+                and a["kind"] in ("blocker", "decision")]
+    # the next BUILD session starts (and is paused / resumed): still continuing
+    store.transition("game", "T1", "IMPLEMENTING", {"session_id": "ses_next", "base_sha": "e" * 40,
+                                                    "run_id": "T1-a1-next"})
+    br.step()
+    assert _task_data(cc)["build_continuing"]["open_steps"] == 5
+    assert cc.verification_view(cc.task_row("game", "T1", []))["build"]["open_steps"] == 5
+    # a real verification failure replaces it: a normal CHANGES_REQUIRED again
+    store.transition("game", "T1", "VERIFYING", {"head_sha": "f" * 40, "session_idle": True})
+    store.transition("game", "T1", "CHANGES_REQUIRED", {"verification_id": "v1",
+                                                        "findings": ["unit tests failed"]},
+                     data={**store.task("game", "T1")["data"], "findings": ["unit tests failed"]})
+    br.step()
+    d = _task_data(cc)
+    assert d["build_continuing"] is None and d["findings"] == ["unit tests failed"]
+    assert cc.verification_view(cc.task_row("game", "T1", []))["build"] is None
+
+
+def test_build_continuing_is_bounded_and_never_read_from_model_text():
+    from foundry_coordinator.telemetry import build_continuation
+    tr = lambda frm, to, **ev: {"from_state": frm, "to_state": to, "evidence": ev, "ts": 1.0}  # noqa: E731
+    many = [f"- [ ] {'s' * 400} {i}" for i in range(30)]
+    b = build_continuation([tr("IMPLEMENTING", "CHANGES_REQUIRED", build_progress=True,
+                               open_steps=many, head_sha="a" * 90)])
+    assert b["open_steps"] == 30 and len(b["steps"]) == 12 and b["truncated"]
+    assert all(len(s) <= 240 for s in b["steps"]) and len(b["head_sha"]) == 64
+    # only the engine's explicit flag: findings, next_action or a report saying so don't count
+    assert build_continuation([tr("IMPLEMENTING", "CHANGES_REQUIRED",
+                                  findings=[PROGRESS_MARKER], build_progress="yes")]) is None
+    assert build_continuation([]) is None
+    # pause / resume and a question inside the BUILD loop keep it; an unblock ends it
+    keep = [tr("IMPLEMENTING", "CHANGES_REQUIRED", build_progress=True, open_steps=["- [ ] a"]),
+            tr("CHANGES_REQUIRED", "PAUSED"), tr("PAUSED", "CHANGES_REQUIRED", resumed=True),
+            tr("CHANGES_REQUIRED", "IMPLEMENTING"), tr("IMPLEMENTING", "AWAITING_HUMAN"),
+            tr("AWAITING_HUMAN", "IMPLEMENTING")]
+    assert build_continuation(keep)["open_steps"] == 1
+    assert build_continuation(keep + [tr("IMPLEMENTING", "BLOCKED", blocker="x"),
+                                      tr("BLOCKED", "READY")]) is None
+
+
+def test_pause_readiness_ignores_held_locks_of_an_idle_task(env):
+    """safe_to_upgrade waits for a running writer turn only: a task held idle by
+    the pause keeps its workspace / writer locks, and that counts 0."""
+    ch, store, br, sid = env["ch"], env["store"], env["bridge"], env["sid"]
+    store.set_project_paused("game", True, "upgrade")
+    assert store.q("SELECT COUNT(*) AS n FROM locks WHERE project_id='game'")[0]["n"] >= 1
+    st = ch._beat()["project_pause"]["game"]
+    assert st["busy_sessions"] == 1 and not st["safe_to_upgrade"]    # the turn runs
+    store.update_session(sid, status="ended", outcome="idle", ended_ts=time.time())
+    assert store.task("game", "T1")["state"] == "IMPLEMENTING"
+    assert store.q("SELECT COUNT(*) AS n FROM locks WHERE project_id='game'")[0]["n"] >= 1
+    st = ch._beat()["project_pause"]["game"]
+    assert st["busy_sessions"] == 0 and st["safe_to_upgrade"] is True
+    obs = []
+    br._project_pause_facts(obs, [], time.time())
+    assert obs and obs[0]["safe_to_upgrade"] is True

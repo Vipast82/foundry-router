@@ -170,7 +170,10 @@ ACTION_KINDS = ("answer_question", "reply_permission", "approve_review", "reject
 # `project_pause` / `project_resume` (v0.123): an operator stops a whole
 # project for an upgrade and starts it again. Project-scoped: task_id may be
 # empty and there is no task-state stale check. Payloads:
-#   project_pause  {"mode": "safe" | "now", "note": str (required, <= 500)}
+#   project_pause  {"mode": "safe" | "now", "note": str (required, <= 500),
+#                   "resume_after_upgrade": true (optional, only sent when true:
+#                   the coordinator resumes the project by itself when it next
+#                   starts on a different build than the one that paused)}
 #   project_resume {"note": str (optional, <= 500)}
 # "safe" = finish the current step, start nothing new; "now" = abort running
 # sessions and helpers (state kept). Only handed to a source that declares the
@@ -183,7 +186,8 @@ MAX_PAUSE_NOTE = 500
 # ({pid: status}) or as a `project` observation (project_id + these fields, at
 # top level or under `status`)
 PROJECT_STATUS_FIELDS = ("paused", "mode", "note", "actor", "since", "busy_sessions",
-                         "running_helpers", "running_reviews", "safe_to_upgrade")
+                         "running_helpers", "running_reviews", "safe_to_upgrade",
+                         "resume_after_upgrade", "paused_version", "upgrade_resume")
 # `decision_answer` (v0.122): an operator's answer to an open coordinator
 # decision (obligations.decisions). Delivered through the existing claim route;
 # the coordinator's control channel applies it with Obligations.answer(). Payload:
@@ -327,7 +331,26 @@ def project_status(raw) -> Optional[dict]:
             "busy_sessions": _count(raw.get("busy_sessions")),
             "running_helpers": _count(raw.get("running_helpers")),
             "running_reviews": _count(raw.get("running_reviews")),
-            "safe_to_upgrade": raw.get("safe_to_upgrade") is True}
+            "safe_to_upgrade": raw.get("safe_to_upgrade") is True,
+            "resume_after_upgrade": raw.get("resume_after_upgrade") is True,
+            "paused_version": _s(raw.get("paused_version"), 40),
+            "upgrade_resume": _upgrade_resume(raw.get("upgrade_resume"))}
+
+
+def _upgrade_resume(raw) -> Optional[dict]:
+    """The coordinator's last automatic resume after an upgrade, bounded."""
+    if not isinstance(raw, dict):
+        return None
+    lst = lambda v, n, m: [_s(x, m) for x in (v if isinstance(v, list) else [])[:n]]  # noqa: E731
+    return {"ts": _f(raw.get("ts")), "actor": _s(raw.get("actor"), 200),
+            "authorized_by": _s(raw.get("authorized_by"), 120),
+            "from_version": _s(raw.get("from_version"), 40),
+            "to_version": _s(raw.get("to_version"), 40),
+            "from_fingerprint": _s(raw.get("from_fingerprint"), 40),
+            "to_fingerprint": _s(raw.get("to_fingerprint"), 40),
+            "resumed": lst(raw.get("resumed"), 20, 200),
+            "left_paused": lst(raw.get("left_paused"), 20, 120),
+            "failed": lst(raw.get("failed"), 10, 300)}
 
 
 def compat_state(payload: dict, server_version: str = "") -> tuple[str, str]:
@@ -1505,10 +1528,26 @@ class ControlCenter:
             elif exhausted:
                 label += " · final attempt in progress"
         return {"current_sha": current, "current_source": current_src, "previous_run": previous,
-                "checks": checks, "review": review,
+                "checks": checks, "review": review, "build": self._build_continuing(d, eff),
                 "attempts": {"used": used, "max": mx, "extra": extra, "exhausted": exhausted,
                              "label": label},
                 "recovery": recovery}
+
+    @staticmethod
+    def _build_continuing(d: dict, eff: str) -> Optional[dict]:
+        """BUILD continuing (committed partial BUILD progress, not a failure):
+        only what the bridge derived from the engine's own transition record
+        (build_continuing), bounded, and only while the task is still in the
+        BUILD loop. Not an attempt and not a decision."""
+        b = d.get("build_continuing")
+        if not isinstance(b, dict) or eff not in ("CHANGES_REQUIRED", "IMPLEMENTING",
+                                                  "AWAITING_HUMAN"):
+            return None
+        steps = [_s(x, 240) for x in (b.get("steps") if isinstance(b.get("steps"), list)
+                                      else [])[:12] if isinstance(x, str)]
+        n = _count(b.get("open_steps")) or len(steps)
+        return {"open_steps": n, "steps": steps, "truncated": b.get("truncated") is True,
+                "head_sha": _s(b.get("head_sha"), 64), "ts": _f(b.get("ts"))}
 
     def _safe_task_view(self, task: dict) -> dict:
         try:
@@ -1567,8 +1606,12 @@ class ControlCenter:
             x["question_hash"] = _hash(x.get("question") or "")
             if x.get("decision_id") in live:
                 x["answer_action"] = live[x["decision_id"]]
+        state = task.get("state") or ""
+        eff = (d.get("resume_state") or state) if state == "PAUSED" else state
         return {"reported": reported, "tables": d.get("lifecycle_tables") or [],
                 "blocker_class": d.get("blocker_class"),
+                # committed partial BUILD progress (not an attempt, not a decision)
+                "build": self._build_continuing(d, eff),
                 "readiness": {"items": ready,
                               "failing": sum(1 for r in ready if r.get("ok") is not True
                                              and r.get("blocking")),
@@ -2410,7 +2453,7 @@ class ControlCenter:
     def _project_pause_state(self, c, pid: str) -> tuple[Optional[dict], Optional[dict]]:
         """(the latest live-or-applied project_pause/resume action, the reported
         status) for one project."""
-        last = self._rows(c, "SELECT action_id, kind, status FROM cc_actions WHERE project_id=? AND "
+        last = self._rows(c, "SELECT action_id, kind, status, created_ts FROM cc_actions WHERE project_id=? AND "
                              "kind IN ('project_pause','project_resume') AND status IN ('accepted',"
                              "'claimed','queued','delivered','applied') ORDER BY created_ts DESC, "
                              "rowid DESC LIMIT 1", (pid,))
@@ -2439,7 +2482,12 @@ class ControlCenter:
                 raise ControlError("mode must be 'safe' or 'now'")
             if not note:
                 raise ControlError("a note is required (say why, e.g. 'upgrading to v0.122.3')")
+            rau = body.get("resume_after_upgrade", False)
+            if not isinstance(rau, bool):
+                raise ControlError("resume_after_upgrade must be true or false")
             payload = {"mode": mode, "note": note}
+            if rau:
+                payload["resume_after_upgrade"] = True
         else:
             payload = {"note": note}
         if not self.rate_ok(actor):
@@ -2453,6 +2501,12 @@ class ControlCenter:
             with self._tx() as c:
                 last, status = self._project_pause_state(c, pid)
                 paused = bool((status or {}).get("paused"))
+                up = (status or {}).get("upgrade_resume") or {}
+                if (last and last["kind"] == "project_pause" and last["status"] == "applied"
+                        and not paused and (up.get("ts") or 0) >= (last.get("created_ts") or 0)):
+                    # the coordinator resumed that pause itself after an upgrade:
+                    # it is no longer the project's current pause
+                    last = None
                 live_same = bool(last and last["kind"] == kind and last["status"] in LIVE_ACTION)
                 resuming = bool(last and last["kind"] == "project_resume"
                                 and last["status"] in LIVE_ACTION)
@@ -2494,7 +2548,8 @@ class ControlCenter:
         sensitive text); length only."""
         if kind == "project_pause":
             return (f"pause project {tid} ({'at a safe point' if p.get('mode') == 'safe' else 'now'})"
-                    f": {p.get('note') or ''}")[:300]
+                    + ("; resume automatically after an upgrade" if p.get("resume_after_upgrade")
+                       else "") + f": {p.get('note') or ''}")[:300]
         if kind == "project_resume":
             return (f"resume project {tid}" + (f": {p['note']}" if p.get("note") else ""))[:300]
         if kind == "lanes":

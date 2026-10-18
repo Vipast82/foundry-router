@@ -411,3 +411,84 @@ def test_the_coordinators_own_shapes_reach_the_overview(client, cc):
     assert st["safe_to_upgrade"] is True
     r = ingest(client, {"type": "project_pause", "project_id": "", **STATUS})
     assert r["skipped"].get("project_id_required") == 1        # project-scoped
+
+
+# ------------------------------------------------------------------ resume after an upgrade
+
+def test_resume_after_upgrade_is_accepted_and_passed_only_when_true(client, cc):
+    h = login(client)
+    r = _pause(client, h, resume_after_upgrade="yes")
+    assert r.status_code == 400 and "resume_after_upgrade" in r.json()["error"]
+    r = _pause(client, h, resume_after_upgrade=True)
+    assert r.status_code == 200, r.text
+    assert "resume automatically after an upgrade" in r.json()["summary"]
+    _beat(client)
+    got = _claim(client)
+    assert got[0]["payload"] == {"mode": "safe", "note": "upgrading to v0.122.3",
+                                 "resume_after_upgrade": True}
+
+
+def test_resume_after_upgrade_false_is_not_sent(client, cc):
+    h = login(client)
+    assert _pause(client, h, resume_after_upgrade=False).status_code == 200
+    _beat(client)
+    assert _claim(client)[0]["payload"] == {"mode": "safe", "note": "upgrading to v0.122.3"}
+
+
+def test_a_pause_the_coordinator_resumed_after_an_upgrade_no_longer_blocks_a_new_one(client, cc):
+    h = login(client)
+    a = _pause(client, h, resume_after_upgrade=True).json()
+    _beat(client)
+    _claim(client)
+    _report(client, a["action_id"])
+    _beat(client, projects={"proj": STATUS})
+    assert _pause(client, h, key="pause-blocked-12").status_code == 409
+    # the coordinator restarted on a newer build and resumed it by itself
+    up = {"ts": time.time() + 1, "actor": "coordinator (after upgrade, authorized by victor)",
+          "authorized_by": "victor", "from_version": "0.122.4", "to_version": "0.122.5",
+          "resumed": ["T1 -> IMPLEMENTING"], "left_paused": [], "failed": []}
+    _beat(client, projects={"proj": {**STATUS, "paused": False, "upgrade_resume": up}})
+    st = client.get("/control/api/overview").json()["project_status"]["proj"]
+    assert st["paused"] is False and st["upgrade_resume"]["to_version"] == "0.122.5"
+    assert st["upgrade_resume"]["authorized_by"] == "victor"
+    r = _pause(client, h, key="pause-after-upg-1")
+    assert r.status_code == 200 and r.json()["action_id"] != a["action_id"]
+
+
+def test_project_status_normalizer_bounds_the_upgrade_fields():
+    s = project_status({"paused": True, "resume_after_upgrade": "yes", "paused_version": "v" * 99,
+                        "upgrade_resume": {"to_version": "9" * 99, "resumed": ["x" * 999] * 50,
+                                           "ts": "bad", "failed": "nope"}})
+    assert s["resume_after_upgrade"] is False and len(s["paused_version"]) == 40
+    u = s["upgrade_resume"]
+    assert len(u["to_version"]) == 40 and len(u["resumed"]) == 20
+    assert all(len(x) <= 200 for x in u["resumed"]) and u["ts"] is None and u["failed"] == []
+    assert project_status({"paused": False, "upgrade_resume": "x"})["upgrade_resume"] is None
+    assert project_status({"resume_after_upgrade": True})["resume_after_upgrade"] is True
+
+
+@node
+def test_dialog_offers_resume_after_upgrade_and_the_pill_reports_it(tmp_path):
+    from tests.test_control_ui import PAGE
+    html = PAGE.read_text(encoding="utf-8")
+    assert ('<input type="checkbox" id="pause-rau"> Resume automatically when the coordinator '
+            'restarts on a newer version') in html
+    up = {"to_version": "0.122.5", "from_version": "0.122.4", "authorized_by": HOSTILE, "ts": 9}
+    out = _ui(tmp_path, """
+const UP = %s, SRC = %s;
+const on = pauseBody("proj", "T-1", "safe", " up ", true), off = pauseBody("proj", "", "now", "x", false);
+const resumed = projectPauseView("proj", {proj: {paused: false, upgrade_resume: UP}}, [], SRC);
+const pausedAgain = projectPauseView("proj", {proj: {paused: true, safe_to_upgrade: true, upgrade_resume: UP}}, [], SRC);
+const opt = pauseDetail({paused: true, resume_after_upgrade: true, paused_version: "0.122.4"});
+emit({on, off, resumed, html: pauseCtlHtml(resumed), pausedAgain, opt, txt: upgradeResumeText({paused: false, upgrade_resume: UP})});
+""" % (json.dumps(up), json.dumps(SRC_OK)))
+    assert out["on"] == {"kind": "project_pause", "project_id": "proj", "task_id": "T-1",
+                         "expected": {}, "mode": "safe", "note": "up", "resume_after_upgrade": True}
+    assert "resume_after_upgrade" not in out["off"]
+    assert out["resumed"]["pill"]["text"] == "resumed after upgrade"
+    assert out["resumed"]["pill"]["cls"] == "ok" and out["resumed"]["label"] == "Pause"
+    assert "resumed after upgrade to v0.122.5 (from v0.122.4)" in out["txt"] and "T9" in out["txt"]
+    assert "<script>" not in out["html"] and "&lt;script&gt;" in out["html"]
+    assert out["pausedAgain"]["pill"]["text"] == "PAUSED — safe to upgrade"
+    assert "resumes automatically when the coordinator restarts on a newer version than v0.122.4" \
+        in out["opt"]

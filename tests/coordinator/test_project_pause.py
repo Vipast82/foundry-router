@@ -7,6 +7,7 @@ resumes the same session afterwards. The status the control center shows
 the store. Real git repositories, the generic adapter, a scripted coding client
 (or the fake `kilo serve` for helpers) and a fake Foundry."""
 
+import json
 import time
 
 import pytest
@@ -456,3 +457,173 @@ def test_no_helper_dispatch_while_paused_and_now_stops_running_helpers(kilo):
     st = status(c)
     assert st["mode"] == "now" and st["running_helpers"] == 0 and st["busy_sessions"] == 0
     assert st["safe_to_upgrade"]
+
+
+# -- readiness: only active work counts ------------------------------------------------------
+
+def test_safe_to_upgrade_ignores_locks_held_by_an_idle_task_but_not_a_running_turn(game):
+    """A task held idle by the pause keeps its workspace reservation and writer
+    lock between sessions; only a running writer turn keeps the upgrade waiting."""
+    c, ch, sid = _implementing(game)
+    client = game["client"]
+    send(ch, "project_pause", note="upgrade")
+    locks = c.store.q("SELECT resource FROM locks WHERE project_id='game' AND task_id='T1'")
+    assert locks                                             # held by the running task
+    st = status(c)
+    assert st["busy_sessions"] == 1 and st["safe_to_upgrade"] is False
+    client.go = True                                         # the turn finishes
+    for _ in range(3):
+        c.tick()
+    t = c.store.task("game", "T1")
+    assert t["state"] == S.IMPLEMENTING and c.store.session(sid)["ended_ts"]
+    held = c.store.q("SELECT resource FROM locks WHERE project_id='game' AND task_id='T1'")
+    assert held == locks                                     # still reserved while idle
+    st = status(c)
+    assert st["busy_sessions"] == 0 and st["safe_to_upgrade"] is True
+    assert ch._beat()["project_pause"]["game"]["safe_to_upgrade"] is True
+
+
+def test_an_in_flight_retry_guidance_call_keeps_the_upgrade_waiting(game):
+    c, ch = game["make"]()
+    send(ch, "project_pause", note="upgrade")
+    assert status(c)["safe_to_upgrade"] is True
+    c.store.add_session("retry-guidance-x", "game", "T1", "r", "helper", "retry_guidance", 1,
+                        "foundry-direct", "Frontier")
+    st = status(c)
+    assert st["running_helpers"] == 1 and st["safe_to_upgrade"] is False
+    c.store.update_session("retry-guidance-x", status="ended", ended_ts=time.time())
+    assert status(c)["safe_to_upgrade"] is True
+
+
+# -- restart heartbeat and resume after an upgrade -------------------------------------------
+
+def _build(monkeypatch, version, fingerprint="f" * 40):
+    import foundry_coordinator.control as control
+    monkeypatch.setattr(control, "build_identity", lambda: {
+        "version": version, "coordinator_version": "0.122.0", "fingerprint": fingerprint})
+
+
+def test_first_heartbeat_after_a_restart_reports_the_pause(game, monkeypatch):
+    _build(monkeypatch, "0.122.4")
+    c, ch, sid = _implementing(game)
+    send(ch, "project_pause", mode="now", note="upgrade", resume_after_upgrade=True)
+    del c, ch
+    c2, ch2 = game["make"]()                                 # same store, new process
+    ch2.poll()
+    beat = ch2.foundry.beats[0]
+    assert "project_pause" in beat["features"]
+    assert {"project_pause", "project_resume"} <= set(beat["source"]["capabilities"]["actions"])
+    st = beat["project_pause"]["game"]
+    assert st["paused"] is True and st["mode"] == "now" and st["note"] == "upgrade"
+    assert st["actor"] == "victor (control center)" and st["since"]
+    assert st["safe_to_upgrade"] is True and st["resume_after_upgrade"] is True
+    assert st["paused_version"] == "0.122.4" and "upgrade_resume" not in st
+    assert state(c2) == S.PAUSED
+
+
+def test_restart_on_the_same_build_stays_paused(game, monkeypatch):
+    _build(monkeypatch, "0.122.4")
+    c, ch, sid = _implementing(game)
+    send(ch, "project_pause", mode="now", note="upgrade", resume_after_upgrade=True)
+    del c, ch
+    c2, ch2 = game["make"]()
+    ch2.poll()
+    for _ in range(3):
+        c2.tick()
+    assert status(c2)["paused"] and state(c2) == S.PAUSED
+    assert len(game["client"].prompts(sid)) == 1
+    assert c2.store.meta("project_upgrade_resume:game") is None
+    assert not [e for e in c2.store.events("game") if e["kind"] == "project_resumed_after_upgrade"]
+
+
+def test_restart_on_a_new_build_resumes_only_the_project_paused_tasks(game, monkeypatch):
+    _build(monkeypatch, "0.122.4")
+    c, ch, sid = _implementing(game)
+    c.approve("game", "T2", [], "victor")
+    c.tick()
+    if state(c, "T2") == S.QUEUED:
+        c.store.transition("game", "T2", S.READY, {"deps_satisfied": ["(none)"]})
+    c.pause("game", "T2", "operator hold", actor="victor")      # paused individually
+    r = send(ch, "project_pause", mode="now", note="upgrading", resume_after_upgrade=True)
+    assert r["result"]["paused_tasks"] == ["T1"]
+    meta = c.store.meta("project_pause:game")
+    assert '"resume_after_upgrade": true' in meta and '"0.122.4"' in meta
+    del c, ch
+    _build(monkeypatch, "0.122.5")                            # the operator upgraded
+    c2, ch2 = game["make"]()
+    ch2.poll()
+    assert not status(c2)["paused"] and c2.store.meta("project_pause:game") is None
+    t1 = c2.store.task("game", "T1")
+    assert t1["state"] == S.IMPLEMENTING and t1["session_id"] == sid
+    assert "paused_by_project" not in t1["data"]
+    assert len(game["client"].prompts(sid)) == 2              # continued, same session
+    assert state(c2, "T2") == S.PAUSED                        # left alone
+    actor = "coordinator (after upgrade, authorized by victor (control center))"
+    assert c2.store.history("game", "T1")[-1]["actor"] == actor
+    ev = [e for e in c2.store.events("game") if e["kind"] == "project_resumed_after_upgrade"]
+    assert len(ev) == 1 and ev[0]["detail"]["to_version"] == "0.122.5"
+    assert ev[0]["detail"]["from_version"] == "0.122.4"
+    assert ev[0]["detail"]["resumed"] == ["T1 -> IMPLEMENTING"]
+    assert ev[0]["detail"]["left_paused"] == ["T2"]
+    up = ch2.foundry.beats[0]["project_pause"]["game"]["upgrade_resume"]
+    assert up["to_version"] == "0.122.5" and up["actor"] == actor
+    assert up["authorized_by"] == "victor (control center)"
+    # only once: a later poll does nothing more
+    ch2.poll()
+    assert len(game["client"].prompts(sid)) == 2
+    # a new pause clears the old report
+    send(ch2, "project_pause", note="again")
+    assert "upgrade_resume" not in status(c2)
+
+
+def test_a_new_commit_on_the_same_version_counts_as_an_upgrade(game, monkeypatch):
+    _build(monkeypatch, "0.122.4", fingerprint="a" * 40)
+    c, ch = game["make"]()
+    send(ch, "project_pause", note="hotfix", resume_after_upgrade=True)
+    del c, ch
+    _build(monkeypatch, "0.122.4", fingerprint="b" * 40)
+    c2, ch2 = game["make"]()
+    ch2.poll()
+    assert not status(c2)["paused"]
+
+
+def test_restart_on_a_new_build_without_the_option_stays_paused(game, monkeypatch):
+    _build(monkeypatch, "0.122.4")
+    c, ch, sid = _implementing(game)
+    send(ch, "project_pause", mode="now", note="upgrade")
+    assert '"resume_after_upgrade": false' in c.store.meta("project_pause:game")
+    del c, ch
+    _build(monkeypatch, "0.122.5")
+    c2, ch2 = game["make"]()
+    ch2.poll()
+    for _ in range(3):
+        c2.tick()
+    assert status(c2)["paused"] and state(c2) == S.PAUSED
+    assert status(c2)["resume_after_upgrade"] is False
+    assert len(game["client"].prompts(sid)) == 1
+
+
+def test_a_cli_pause_or_an_older_record_is_never_auto_resumed(game, monkeypatch):
+    """No recorded build (a pause from before this feature, or the CLI's flag
+    alone): never an upgrade, even with the option set by hand."""
+    c, ch = game["make"]()
+    c.store.set_project_paused("game", True, "cli")
+    c.store.set_meta("project_pause:game", json.dumps({"mode": "safe",
+                                                       "resume_after_upgrade": True}))
+    _build(monkeypatch, "9.9.9")
+    c2, ch2 = game["make"]()
+    ch2.poll()
+    assert status(c2)["paused"]
+    from foundry_coordinator.control import upgraded
+    assert not upgraded({}, {"version": "1"}) and not upgraded({"version": "1"}, {"version": ""})
+    assert upgraded({"version": "1"}, {"version": "2"})
+    assert not upgraded({"version": "1", "fingerprint": "a"}, {"version": "1", "fingerprint": "a"})
+
+
+def test_build_identity_reads_the_checkout(tmp_path):
+    from foundry_coordinator.control import _git_head, build_identity
+    b = build_identity()
+    assert b["version"] and b["coordinator_version"]
+    assert _git_head(str(tmp_path)) == ""                    # not a checkout
+    root, _ = make_repo(tmp_path, "g2", [T1])
+    assert len(_git_head(str(root))) == 40
