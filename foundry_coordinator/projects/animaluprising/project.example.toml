@@ -1,0 +1,274 @@
+# AnimalUprising project profile for the Foundry development coordinator: EXAMPLE.
+#
+# How to use:
+#   1. Copy this file next to itself as `project.toml`. Git ignores that file;
+#      it is your local, machine-specific configuration.
+#   2. Change the lines marked `EDIT:` for your machine.
+#   3. Review the OPTIONAL sections. Each one is marked with what it costs or
+#      changes. Turn off what you don't want.
+#   4. Point the coordinator at it with --profiles, or FOUNDRY_COORD_PROFILES
+#      (a file or a folder of <project>/project.toml).
+#
+# Secrets are never stored here: only environment-variable NAMES (key_env,
+# password_env). This file mirrors a real working setup (Windows workstation,
+# Roblox Studio, Kilo serve and a Foundry router on the LAN).
+schema_version = 1
+id = "animaluprising"
+name = "Animal Uprising"
+version = "1"
+
+[workspace]
+path = "C:/Roblox/AnimalUprising"            # EDIT: your game repository checkout
+# Where sessions may write at all; each sprint's own scope (its plan's
+# "Files this sprint may change") is always narrower.
+allowed_dirs = ["src", "tests", "docs", "tools", "assets", "default.project.json"]
+branch = "master"
+remote = "origin"
+
+[adapter]
+module = "foundry_coordinator.projects.animaluprising.adapter:AnimalUprisingAdapter"
+
+[animaluprising]
+# Refuse to start a sprint until AGENT_RULES.md carries the coordinator
+# amendment (RULE_AMENDMENT.md). Never turn this off to "get going".
+require_rule_amendment = true
+# python = ["py", "-3"]                      # default: the coordinator's own Python
+# lune = "C:/Users/<you>/.rokit/bin/lune.exe"  # EDIT if lune isn't on PATH
+# runtime_fingerprint = "fnv1a32-blob"       # OPTIONAL (v0.122): runtime-vs-revision
+#   checks; enable only after confirming GateRunner's per-file hashes equal the
+#   committed blob hashes (line endings). See docs/SPRINT_LIFECYCLE.md.
+
+[client]
+kind = "kilo"
+url = "http://127.0.0.1:4096"                # EDIT: `kilo serve --port 4096` (docs/COORDINATOR.md)
+password_env = "KILO_SERVER_PASSWORD"        # env var holding the Kilo server password
+provider = "foundry"                         # the provider id in kilo.jsonc
+agent = "code"
+session_timeout_minutes = 240
+# compaction_grace_seconds = 30              # v0.121.7: wait for Kilo's own continuation
+# max_compaction_nudges = 2                  # then at most this many continue prompts
+
+[client.permissions.external_directory]
+# Read/transfer sources the coding session may reach outside the workspace.
+# Sprint writes still stay within the approved plan; the adapter's
+# C:/Roblox/_secrets deny stays in force regardless.
+"C:/Roblox" = "allow"                        # EDIT: your source root
+"C:/Roblox/*" = "allow"
+# OPTIONAL: let the primary run the coordinator's checkpoint/audit module from
+# this repository (only if your workflow uses it):
+# "C:/path/to/Foundry-Router" = "allow"      # EDIT
+# "C:/path/to/Foundry-Router/*" = "allow"
+
+[roles]
+# Foundry persona ids (Foundry → Setup → Personas). EDIT to the personas you have.
+implementer = "Foundry-Kilo-Local"           # the primary writer (local model here)
+planner = "Foundry-Kilo-Planner"
+researcher = "Foundry-Kilo-Research"
+reviewer = "Foundry-Kilo-Review"
+deep_reviewer = "Foundry-Kilo-Deep-Review"   # used when a task tag matches review.deep_when
+visual_reviewer = "Foundry-Kilo-Visual-Review"
+image_generator = "Foundry-Kilo-Images"
+
+# OPTIONAL: per-sprint model overrides. Here a frontier model writes the UI
+# sprints and everything else stays on the local model. This changes model
+# selection only, never queue approval or sprint scope.
+[role_overrides.ui]
+tasks = ["UI-01", "UI-02", "UI-03", "UI-04", "UI-05", "UI-06"]
+implementer = "Foundry-Kilo-Sonnet"
+reviewer = "Foundry-Kilo-Deep-Review"
+
+[foundry]
+url = "http://127.0.0.1:11435"               # EDIT: your Foundry router (e.g. http://<lan-host>:11435)
+key_env = "FOUNDRY_COORDINATOR_KEY"          # a clients: key with scopes [inference, orchestration]
+require_binding = true
+
+[review]
+required = true
+deep_when = ["risk:high"]
+max_diff_bytes = 80000
+max_tokens = 4000
+# max_packet_chars = 200000                  # v0.121.8: review packet budget fallback
+
+[approval]
+# MASTER_ORDER: a sprint may start when the one above it is DONE, or
+# COMPLETE-PENDING-VISUAL-REVIEW where only the operator's look is missing.
+deps_accept_pending = ["visual"]
+
+# OPTIONAL (v0.122): evidence memory, obligations and targeted recovery.
+# Off by default; see docs/SPRINT_LIFECYCLE.md for the pilot procedure.
+[lifecycle]
+enabled = true
+
+[[approval.rules]]
+match = "visual"
+kind = "visual"
+stage = "after_close"
+artifacts = ["docs/evidence/{task}/*.png"]
+
+[publish]
+# AGENT_RULES §9/§24: the CLOSE session runs one plain `git push origin master`;
+# the coordinator only verifies that origin/master equals HEAD. Never tags.
+mode = "verify_only"
+remote = "origin"
+branch = "master"
+
+[commit]
+prefix = "{task}:"
+require_prefix = true
+
+[limits]
+max_attempts = 3
+max_sessions_per_task = 8
+max_review_calls = 3
+max_closeout_attempts = 2
+session_timeout_minutes = 240
+max_task_minutes = 1440
+auto_resume_after_budget_reset = true
+
+[resources]
+# One process owns Studio play/stop and the Rojo serve at a time.
+exclusive = ["studio:my-workstation", "rojo:34872"]   # EDIT: a name for your machine; your Rojo port
+
+[closeout]
+mode = "session"
+# Files a CLOSE session writes; changing them after the review doesn't void it.
+exempt_paths = [
+  "docs/progress/{task}_*",
+  "docs/progress/STATE.md",
+  "docs/progress/state/*",
+  "docs/progress/STATE_ARCHIVE.md",
+  "docs/MASTER_ORDER.md",
+  "docs/design/ASSET_LEDGER.md",
+]
+
+[telemetry]
+# Operational checkpoint markers; Kilo/model context limits are shown separately.
+context_checkpoints = [140000, 190000]
+
+[training]
+# OPTIONAL: training-data capture (python -m foundry_training; docs/TRAINING_DATA.md).
+# The coordinator only writes a pointer manifest at closeout; the pipeline
+# ingests asynchronously. Foundry-side capture is enabled separately
+# (training_capture in Foundry's config). With training.auto.upload enabled,
+# redacted datasets are uploaded to your own Foundry router, not an external
+# training provider. The pipeline never starts model training.
+enabled = true
+sources = ["kilo", "foundry", "coordinator", "git"]
+artifact_roots = ["docs/evidence"]           # screenshots may be read only from here
+local_models = ["qwen3.8-flash-next-iq3_s"]  # EDIT: your local model id(s)
+local_personas = ["Foundry-Kilo-Local"]
+
+[training.policy.sft]
+require = ["verification_pass", "review_approved_at_revision", "complete_tool_sequence",
+           "system_and_tools_known", "local_author", "no_loop", "approval_if_required"]
+max_tokens = 32768
+
+[training.policy.correction]
+require = ["verification_pass", "review_approved_at_revision", "feedback_present",
+           "local_author", "approval_if_required"]
+
+[training.policy.multimodal]
+# visual sprints: the screenshot bytes must exist and the visual approval be recorded
+require = ["verification_pass", "artifacts_present", "approval_if_required"]
+
+[training.split]
+eval_fraction = 0.15
+seed = "au-v1"
+
+[training.retention]
+raw_days = 30
+normalized_days = 180
+
+[training.export]
+targets = ["canonical", "chatml-tools"]
+allow_frontier_targets = false               # reviewer/frontier text is never a training target
+include_reasoning = false
+
+[training.capture]
+on_failure = "warn"                          # ignore | warn | hold
+
+[training.auto]
+# OPTIONAL: export after each sprint; upload = false keeps everything local.
+enabled = true
+upload = true
+
+
+# OPTIONAL: read-only coding helpers on frontier subscriptions (uses their
+# quota; admitted only below helper_policy.cutoff_pct, see docs/HELPER_POLICY.md).
+[helpers]
+enabled = true
+order = ["meridian", "cliproxyapi"]          # EDIT: your Foundry backend names
+selective = ["cliproxyapi"]                  # used only for high-value units
+agent = "au-helper"
+worker_client = "kilo"
+max_running = 6
+backend_max_running = { meridian = 3, cliproxyapi = 3 }
+max_units_per_task = 24
+poll_seconds = 60
+timeout_minutes = 30
+# Fail an idle helper with no assistant response after three minutes. Active
+# inference still uses the execution timeout above.
+startup_grace_seconds = 180
+handoff_wait_minutes = 15
+max_unit_requests = 2
+max_requests_per_report = 4
+deny_tools = ["Roblox_Studio_*", "robloxstudio-mcp_*", "robloxstudio_mcp_*", "searxng_*", "crawl4ai_*", "playwright_*", "background_process", "schedule_wakeup", "cancel_wakeup", "cron_*", "link_pr"]
+
+[helpers.personas]
+meridian = "Foundry-Kilo-Helper-Claude"      # EDIT: backend -> helper persona
+cliproxyapi = "Foundry-Kilo-Helper-GPT"
+
+
+# OPTIONAL: proactive helper lanes (failure triage, incremental review, test
+# design, visual observation...). Uses helper quota; see docs/PROACTIVE_LANES.md.
+[lanes]
+enabled = true
+transcript_poll_seconds = 20
+max_lane_units_per_task = 48
+max_dispatches_per_task = 32
+high_value_lanes = ["failure_triage", "incremental_review", "test_design", "proposer"]
+max_cards_per_delivery = 6
+max_deliveries_per_session = 3
+min_delivery_severity = "medium"
+skill_dirs = [".kilo/skills"]
+# Local immutable snapshots only; helper prompts remain excerpted. A large
+# source/docs set needs more than the 400 KB default.
+snapshot_max_bytes = 2000000
+
+[lanes.failure_triage]
+enabled = true
+[lanes.incremental_review]
+enabled = true
+min_interval_seconds = 600
+[lanes.test_design]
+enabled = true
+[lanes.visual]
+enabled = true
+persona = "Foundry-Kilo-Visual-Review"
+capture_globs = ["docs/evidence/{task}/*.png", "docs/evidence/{task}/*.jpg"]
+reference_globs = []
+fs_fallback = false
+propose = true
+[lanes.proposer]
+enabled = true
+[lanes.research]
+enabled = true
+[lanes.evidence]
+enabled = true
+[lanes.handoff]
+enabled = true
+context_threshold = 140000
+[lanes.preflight]
+enabled = true
+
+[frontier_primary]
+enabled = false
+
+# OPTIONAL: one bounded frontier consultation before ordinary repair attempts
+# run out (scoped advice only; it never approves or widens scope).
+[retry_guidance]
+enabled = true
+persona = "Foundry-Kilo-Opus"                # EDIT: your adviser persona
+extra_attempts = 1
+max_tokens = 2000
+timeout_seconds = 60

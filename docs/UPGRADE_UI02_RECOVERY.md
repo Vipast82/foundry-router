@@ -25,7 +25,7 @@ This applies when AnimalUprising is paused pending the update. Use only supporte
    This restarts the router and interrupts in-flight calls. That's safe now, because nothing is running while paused.
 2. **Coordinator (workstation).** Stop the coordinator process, `git pull` (or check out the release tag), and start it again with the same profile and state directory.
    - Do not hot-reload a running worker.
-   - Your uncommitted `project.toml` stays as it is.
+   - Your local `project.toml` (git-ignored since v0.122.6) stays as it is.
 3. **Check the restart:**
    - The control center's source pill shows coordinator **0.122.5** and the version gate reads **ok**.
    - The project still shows **PAUSED**: a pause survives a restart.

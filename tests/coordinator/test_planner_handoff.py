@@ -48,7 +48,7 @@ def test_workstation_external_sources_do_not_remove_secret_or_publish_guards(tmp
     from pathlib import Path
     from foundry_coordinator.profile import load
     profile = load(str(Path(__file__).resolve().parents[2] /
-                       'foundry_coordinator/projects/animaluprising/project.toml'))
+                       'foundry_coordinator/projects/animaluprising/project.example.toml'))
     a = AnimalUprisingAdapter(profile, str(tmp_path))
     rules = a.session_permissions(spec(), 'implement')
     assert {'permission': 'external_directory', 'pattern': 'C:/Roblox/*', 'action': 'allow'} in rules

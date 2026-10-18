@@ -32,3 +32,6 @@ htmlcov/
 
 # Local Claude Code settings (per-machine tool permissions)
 .claude/settings.local.json
+
+# Coordinator project profiles are machine-specific; commit project.example.toml
+foundry_coordinator/projects/*/project.toml

@@ -517,7 +517,7 @@ def test_second_project_profile_changes_policy_not_code(world, tmp_path):
     fx = tmp / "fx.toml"
     fx.write_text(tpl.replace("@WORKSPACE@", ws.replace("\\", "/")).replace("@KILO_URL@", "http://k.invalid")
                   .replace("@FOUNDRY_URL@", "http://f.invalid"))
-    au = TC.load(str(root / "foundry_coordinator/projects/animaluprising/project.toml"))
+    au = TC.load(str(root / "foundry_coordinator/projects/animaluprising/project.example.toml"))
     fxc = TC.load(str(fx))
     assert (fxc.id, au.id) == ("fixture-game", "animaluprising")
     assert "system_and_tools_known" not in fxc.require("sft")

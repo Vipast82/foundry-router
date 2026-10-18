@@ -311,7 +311,14 @@ decides whether a failed manifest write is ignored, recorded as an event
 
 ## Registering another game
 
-Copy `contrib/coordinator-pilot/fixture-game/project.toml.template` to
+Project profiles are machine-specific (workspace paths, Foundry URL, model
+personas, which optional features run), so `projects/*/project.toml` is
+git-ignored and each project commits a `project.example.toml` instead. For
+AnimalUprising, copy `foundry_coordinator/projects/animaluprising/project.example.toml`
+to `project.toml` in the same folder and change the lines marked `EDIT:`;
+sections marked `OPTIONAL` say what they cost or change.
+
+For a new game, copy `contrib/coordinator-pilot/fixture-game/project.toml.template` to
 `foundry_coordinator/projects/<id>/project.toml` (or any folder in
 `FOUNDRY_COORD_PROFILES`) and fill in:
 

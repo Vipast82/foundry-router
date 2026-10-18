@@ -15,8 +15,11 @@ from foundry_coordinator.profile import load
 from tests.coordinator.helpers import GIT_ENV
 
 AU = os.environ.get("AU_REPO", "/home/user/animaluprising")
-PROFILE = os.path.join(os.path.dirname(__file__), "..", "..", "foundry_coordinator", "projects",
-                       "animaluprising", "project.toml")
+_AU_DIR = os.path.join(os.path.dirname(__file__), "..", "..", "foundry_coordinator", "projects",
+                       "animaluprising")
+# the local profile (git-ignored) when present, else the committed example
+PROFILE = next(p for p in (os.path.join(_AU_DIR, "project.toml"),
+                           os.path.join(_AU_DIR, "project.example.toml")) if os.path.exists(p))
 pytestmark = pytest.mark.skipif(
     not os.path.isfile(os.path.join(AU, "tools", "guard", "done_check.py")),
     reason="AnimalUprising clone not available")

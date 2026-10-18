@@ -2,6 +2,27 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.122.6 — AnimalUprising profile becomes an example; local profiles are git-ignored
+
+- New `foundry_coordinator/projects/animaluprising/project.example.toml`: a
+  complete, commented copy of a real working profile.
+  - Machine-specific values are marked `EDIT:` (workspace, Kilo and Foundry
+    URLs, source root, machine name, personas, backends).
+  - Paid or optional features are marked `OPTIONAL` with what they cost:
+    helpers, lanes, retry guidance, lifecycle and training auto-upload.
+- `foundry_coordinator/projects/*/project.toml` is now git-ignored and no
+  longer tracked, because each machine keeps its own copy.
+- Tests that read the AnimalUprising profile now validate the example.
+
+**Migration (important if you pull into another checkout):**
+- **This workstation:** your existing `project.toml` stays on disk and keeps
+  working; git simply stops tracking it.
+- **Any other checkout with an unmodified tracked `project.toml`:** pulling
+  this release deletes it there. Copy it aside first, or recreate it from
+  `project.example.toml`.
+- **A checkout where the file was locally modified:** git refuses the pull
+  until you move the file aside. Restore it after pulling.
+
 ## v0.122.5 — UI-02 false "no progress" fixed; pinned helper fallback route; BUILD continuing; upgrade resume
 
 **UI-02 false no-progress block (coordinator).** Four bugs in one path:
