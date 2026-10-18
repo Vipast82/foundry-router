@@ -292,6 +292,30 @@ def test_true_stall_still_opens_a_no_progress_decision(tmp_path):
     assert c.obligations.decision(np_[0]["decision_id"])["status"] == "open"
 
 
+@pytest.mark.parametrize("stop_status", ["BLOCKED", "NEEDS_HUMAN"])
+def test_committed_build_progress_does_not_override_explicit_stop(tmp_path, stop_status):
+    """A useful commit cannot authorize another session past a scope blocker."""
+    turns = []
+
+    def script(ctx):
+        turns.append(ctx)
+        return {"writes": {"src/ui02/kit.lua": "-- partial build\n", PLAN: S1},
+                "commit": f"{TID}: partial build before scope blocker",
+                "final": report(status=stop_status, summary="test pin outside plan scope",
+                                blocker="Sprint Manager must rule on adding a test file")}
+
+    c, client, ff, root = _game(tmp_path, script)
+    c.approve("game", TID, [], "victor")
+    assert run_until(c, lambda: _state(c) == S.BLOCKED, limit=30), _hist(c)
+    t = c.store.task("game", TID)
+    assert len(turns) == 1
+    assert t["head_sha"] != t["base_sha"]
+    assert "Sprint Manager must rule" in t["blocker"]
+    assert c.obligations.effective_limits(c.projects["game"], t)["sessions"]["used"] == 1
+    assert not [h for h in c.store.history("game", TID)
+                if h["evidence"].get("build_progress")]
+
+
 def test_partial_build_carries_own_baseline_and_capture_without_waiving_final_clean(tmp_path):
     """The live v0.122.6 block: committed code plus an unfinished, in-scope
     baseline and capture must continue BUILD, with both named in the next prompt.

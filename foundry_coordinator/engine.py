@@ -526,7 +526,13 @@ class Coordinator:
         if self._lc(P):
             self._lc_session_ended(P, t, t["session_id"], head, rep)
         status = str(rep.get("status") or "").upper()
-        blocked = status in ("BLOCKED", "NEEDS_HUMAN") and head == t["base_sha"]
+        # A session can commit legitimate BUILD progress and still hit a hard
+        # scope or operator blocker.  Do not reinterpret its explicit stop as
+        # permission to start another partial-BUILD session merely because
+        # HEAD advanced: that repeats the same blocker until the session
+        # budget is exhausted.  The blocked path records the completed commit
+        # and waits for the blocker to be resolved.
+        blocked = status in ("BLOCKED", "NEEDS_HUMAN")
         if self.helpers.enabled(P) and rep.get("helper_feedback"):
             self.helpers.record_feedback(P, self.store.task(pid, tid), rep)
         if self.frontier.on_idle(P, self.store.task(pid, tid), rep):
