@@ -205,7 +205,9 @@ def plan_target(cfg, save_as, prompt, job_id, index, count, mime, overwrite) -> 
         while os.path.exists(target):
             target = f"{base}-v{n}{ext}"
             n += 1
-    return target
+    # Tool replies and provenance use the platform's canonical separators,
+    # including when a Windows caller supplies a forward-slash save_as path.
+    return os.path.normpath(target)
 
 
 _state_lock = threading.Lock()

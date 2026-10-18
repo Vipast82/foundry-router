@@ -55,7 +55,7 @@ LANE_COLUMNS = ("lane TEXT", "priority INTEGER", "parent_unit TEXT", "depth INTE
                 "feedback TEXT", "feedback_detail TEXT", "superseded_by TEXT", "event_key TEXT",
                 "skills TEXT", "served_model TEXT", "tokens INTEGER", "started_ts REAL",
                 "finished_ts REAL", "delivered_ts REAL", "coalesced INTEGER DEFAULT 0",
-                "packet TEXT")
+                "packet TEXT", "coalesce_key TEXT")
 _SUBAGENT_TITLE = re.compile(r"\(@([\w.-]+) subagent\)")
 
 
@@ -280,6 +280,12 @@ class HelperManager:
                  [(b, h["personas"][b]) for b in self._order(P, u, h)])
         kcfg = None                 # Kilo's effective config, read once per dispatch
         for backend, persona in cands:
+            cap = (h.get('backend_max_running') or {}).get(backend)
+            if cap is not None and sum(u['backend'] == backend for u in
+                    self.units(pid,tid,'running')) >= int(cap):
+                reasons.append(f'{backend}: coordinator backend helper capacity is full')
+                open_ended = True
+                continue
             # Kilo accepts prompt_async before resolving the model. A local
             # filter failure otherwise leaves only a user message, which looks
             # busy until the full helper timeout. Direct lanes bypass Kilo.

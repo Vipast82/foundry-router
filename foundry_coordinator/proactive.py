@@ -85,12 +85,15 @@ class Proactive(VisualMixin, AdvisoryMixin):
                              detail={"error": f"{type(e).__name__}: {e}"[:300]})
             msgs = []
         last_info = None
+        floor = float(self.store.meta(f'lane_ingest_after:{P.id}:{sid}') or 0)
         for m in msgs:
             if not isinstance(m, dict):
                 continue
             info = m.get("info") or {}
             if info.get("role") == "assistant":
                 last_info = info
+            if (info.get('time') or {}).get('created',0)/1000 < floor:
+                continue
             for p in m.get("parts") or []:
                 tv = L.tool_view(p)
                 if not tv:
@@ -198,6 +201,31 @@ class Proactive(VisualMixin, AdvisoryMixin):
 
     # ------------------------------------------------------------------ units
 
+    def recover_current(self, P, t, spec, note):
+        """Explicit, idempotent infrastructure-repair recovery while paused.
+
+        Refresh only current test design and code review. Old failures/API
+        questions remain historical; new classifiers don't replay the backlog.
+        """
+        if t['state'] != 'PAUSED':
+            raise ValueError('Pause the task before repairing its helper queue')
+        key=f"lane_recovery:{P.id}:{t['task_id']}:{t['run_id']}"
+        prior=self.store.op_begin(key,P.id,t['task_id'],'lane_recovery')
+        if prior and prior['status']=='done':
+            return prior['result']
+        sid=t.get('session_id') or ''
+        if not self.store.meta(f'lane_ingest_after:{P.id}:{sid}'):
+            self.store.set_meta(f'lane_ingest_after:{P.id}:{sid}',str(self.clock()))
+        head=P.ws.head()
+        for kind,signature in [('run_start',t['run_id']),('commit',head)]:
+            self._event(P,t,{'kind':kind,'key':f'{key}:{kind}','signature':signature,
+                'detail':{'maintenance_recovery':note[:500],'to':head}},sid)
+        self.plan(P,t,spec,L.settings(P))
+        result={'note':note,'run':t['run_id'],'classification_floor':self.store.meta(f'lane_ingest_after:{P.id}:{sid}')}
+        self.store.op_update(key,'done',result)
+        self.store.event(P.id,t['task_id'],'lane_recovery',detail=result)
+        return result
+
     def add(self, P, t: dict, lane: str, key: str, packet: dict, ls: dict, *, files=None,
             parent_unit: str = "", depth: int = 0, artifact_id: str = "", snapshot_id: str = "",
             event_key: str = "", value: str = "normal", priority=None) -> tuple:
@@ -206,34 +234,61 @@ class Proactive(VisualMixin, AdvisoryMixin):
         kind, mode, prio = L.LANES[lane]
         resp = f"{lane}:{key}"[:200]
         pid, tid = P.id, t["task_id"]
-        prior = self.store.q("SELECT unit_id FROM helper_units WHERE project_id=? AND task_id=? AND "
-                             "responsibility=?", (pid, tid, resp))
+        prior = self.store.q("SELECT * FROM helper_units WHERE project_id=? AND task_id=? AND "
+                             "run_id=? AND (coalesce_key=? OR (coalesce_key IS NULL AND responsibility=?)) "
+                             "ORDER BY created_ts DESC, rowid DESC",(pid,tid,t['run_id'],resp,resp))
+        def usable(u):
+            if u.get('feedback') in ('rejected','superseded','expired'):
+                return False
+            if u['status'] in ('pending','deferred','running'):
+                return True
+            if u['status'] not in ('done','delivered'):
+                return False
+            try:
+                env = json.loads(u.get('envelope') or '{}')
+            except (ValueError,TypeError):
+                return False
+            return bool(env.get('structured') and env.get('assignment') == u['unit_id']
+                        and not (env.get('checks') or {}).get('base_mismatch'))
+        reusable = [u for u in prior if usable(u)]
+        if reusable:
+            u = reusable[0]
+            self.store.x("UPDATE helper_units SET coalesced=COALESCE(coalesced,0)+1 WHERE unit_id=?",
+                         (u['unit_id'],))
+            return u['unit_id'], 'coalesced'
         if prior:
-            self.store.x("UPDATE helper_units SET coalesced=COALESCE(coalesced,0)+1, updated_ts=? "
-                         "WHERE unit_id=?", (self.clock(), prior[0]["unit_id"]))
-            return prior[0]["unit_id"], "coalesced"
+            if len(prior) >= 1 + int(ls['max_retries']):
+                self.store.event(pid, tid, 'lane_limit', detail={'lane':lane,'key':key[:100],
+                                 'reason':'same-run assignment recovery budget exhausted'})
+                return None, 'limit'
         lane_n = self.store.q("SELECT COUNT(*) AS n FROM helper_units WHERE project_id=? AND "
-                              "task_id=? AND lane=?", (pid, tid, lane))[0]["n"]
+                              "task_id=? AND run_id=? AND lane=?", (pid, tid, t['run_id'], lane))[0]["n"]
         total = self.store.q("SELECT COUNT(*) AS n FROM helper_units WHERE project_id=? AND "
                              "task_id=? AND lane IS NOT NULL", (pid, tid))[0]["n"]
-        if lane_n >= int(ls["lanes"][lane]["max_per_task"]) or \
+        if lane_n >= int(ls["lanes"][lane].get('max_per_run',ls['lanes'][lane]['max_per_task'])) or \
                 total >= int(ls["max_lane_units_per_task"]):
             self.store.event(pid, tid, "lane_limit", detail={"lane": lane, "key": key[:100],
                                                              "lane_units": lane_n,
                                                              "total": total})
             return None, "limit"
         uid = f"hu-{uuid.uuid4().hex[:10]}"
+        stored_resp = resp
+        if self.store.q('SELECT unit_id FROM helper_units WHERE project_id=? AND task_id=? AND responsibility=?',
+                        (pid,tid,stored_resp)):
+            stored_resp = f'{resp[:180]}~{uid}'
+        if lane in ls['high_value_lanes']:
+            value = 'high'
         now = self.clock()
         self.store.x("INSERT INTO helper_units (unit_id, project_id, task_id, run_id, responsibility, "
                      "kind, value, prompt, files, source, status, created_ts, updated_ts, next_check, "
                      "lane, priority, parent_unit, depth, artifact_id, snapshot_id, mode, event_key, "
-                     "packet, coalesced, parent_session) VALUES "
-                     "(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,0,?)",
-                     (uid, pid, tid, t["run_id"], resp, kind, value, "", json.dumps(
+                     "packet, coalesced, parent_session, coalesce_key) VALUES "
+                     "(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,0,?,?)",
+                     (uid, pid, tid, t["run_id"], stored_resp, kind, value, "", json.dumps(
                          [str(f) for f in (files or [])][:30]), "lane", "pending", now, now, 0,
                       lane, prio if priority is None else priority, parent_unit or None, depth,
                       artifact_id or None, snapshot_id or None, mode, event_key or None,
-                      json.dumps(packet, default=str)[:60000], t.get("session_id")))
+                      json.dumps(packet, default=str)[:60000], t.get("session_id"),resp))
         self.store.event(pid, tid, "helper_unit", detail={"unit": uid, "kind": kind, "lane": lane,
                                                           "responsibility": resp, "source": "lane",
                                                           "parent_unit": parent_unit,
@@ -316,8 +371,8 @@ class Proactive(VisualMixin, AdvisoryMixin):
         cfg = ls["lanes"]["incremental_review"]
         pid, tid = P.id, t["task_id"]
         last = self.store.q("SELECT created_ts FROM helper_units WHERE project_id=? AND task_id=? "
-                            "AND lane='incremental_review' ORDER BY created_ts DESC LIMIT 1",
-                            (pid, tid))
+                            "AND run_id=? AND lane='incremental_review' ORDER BY created_ts DESC LIMIT 1",
+                            (pid, tid,t['run_id']))
         if last and self.clock() - last[0]["created_ts"] < float(cfg["min_interval_seconds"]):
             return self._set_event(ev["event_key"], "pending")      # coalesce into a later one
         snap = self._snap(P, t, spec)
@@ -326,8 +381,22 @@ class Proactive(VisualMixin, AdvisoryMixin):
                                    detail={**ev["detail"], "snapshot": snap["status"]})
         data = (self.store.task(pid, tid) or {}).get("data") or {}
         prev = data.get("lanes_reviewed") or {}
+        # Legacy versions recorded creation as review. Accept that checkpoint
+        # only if a successful, non-rejected review actually exists for it.
+        if prev and not self.store.q("SELECT unit_id FROM helper_units WHERE project_id=? AND task_id=? "
+                "AND run_id=? AND lane='incremental_review' AND snapshot_id=? AND status='done' "
+                "AND COALESCE(feedback,'') NOT IN ('rejected','superseded','expired')",
+                (pid,tid,t['run_id'],prev.get('snapshot') or '')):
+            prev = {}
         if prev.get("content") == snap["content_fp"] or prev.get("snapshot") == snap["snapshot_id"]:
             return self._set_event(ev["event_key"], "unchanged")    # never re-review same code
+        active=self.store.q("SELECT unit_id FROM helper_units WHERE project_id=? AND task_id=? "
+            "AND run_id=? AND lane='incremental_review' AND snapshot_id=? "
+            "AND status IN ('pending','deferred','running')",(pid,tid,t['run_id'],snap['snapshot_id']))
+        if active:
+            self.store.x('UPDATE helper_units SET coalesced=COALESCE(coalesced,0)+1 WHERE unit_id=?',
+                         (active[0]['unit_id'],))
+            return self._done_event(ev,active[0]['unit_id'],'coalesced')
         base = prev.get("head") or data.get("task_base") or t.get("base_sha") or ""
         try:
             diff, cut = P.ws.diff(base, snap["head"], 40000) if base and base != snap["head"] \
@@ -346,11 +415,16 @@ class Proactive(VisualMixin, AdvisoryMixin):
             "diff_truncated": cut, "snapshot": snap["snapshot_id"],
             "files": sorted(snap["manifest"])}, ls, files=spec.scope,
             snapshot_id=snap["snapshot_id"], event_key=ev["event_key"])
-        if how == "created":
-            self.store.merge_data(pid, tid, lanes_reviewed={"snapshot": snap["snapshot_id"],
-                                                            "content": snap["content_fp"],
-                                                            "head": snap["head"]})
         self._done_event(ev, uid, how)
+
+    def _after_incremental_review(self, P, u, env):
+        if not env.get('structured') or env.get('base') != u.get('snapshot_id') or \
+                env.get('assignment') != u['unit_id']:
+            return
+        snap = self.artifacts.snapshot(u['snapshot_id'],u['project_id'],u['task_id'])
+        if snap:
+            self.store.merge_data(u['project_id'],u['task_id'],lanes_reviewed={
+                'snapshot':snap['snapshot_id'],'content':snap['content_fp'],'head':snap['head']})
 
     # ------------------------------------------------------------------ queue
 

@@ -94,6 +94,7 @@ def settings(P) -> dict:
         "min_delivery_severity": str(raw.get("min_delivery_severity", "medium")),
         "aging_seconds": float(raw.get("aging_seconds", 900)),
         "max_retries": int(raw.get("max_retries", 1)),
+        "high_value_lanes": list(raw.get("high_value_lanes") or []),
         "skill_dirs": list(raw.get("skill_dirs") or [".kilo/skills"]),
         "snapshot_max_bytes": max(1, min(8_000_000, int(raw.get("snapshot_max_bytes", 400_000)))),
         "failure_commands": list(raw.get("failure_commands") or [
@@ -179,14 +180,31 @@ def classify(tv: dict, task_id: str, ls: dict) -> list[dict]:
     for m in re.finditer(r"^GATE %s (PASS|FAIL)\b.*$" % re.escape(task_id), text, re.M):
         ev.append({"kind": "gate", "key": f"gate:{pid}:{m.group(1)}", "signature": m.group(1),
                    "detail": {"line": m.group(0)[:300], "command": tv["command"][:300]}})
-    # failures of a test-like command
+    # Match execution, not a test filename mentioned in a read/search command.
+    command = tv["command"]
+    reading = bool(re.search(r"\boutline\.py\b",command,re.I) or re.search(
+        r"^\s*(?:&\s+)?(?:rg|grep|Select-String|Get-Content|cat|head|tail)\b",command,re.I))
     test_like = tv["tool"] in ("bash", "shell") and any(
-        c.lower() in tv["command"].lower() for c in ls["failure_commands"])
+        c.lower() in command.lower() for c in ls["failure_commands"]) and not reading
+    runtime = bool(re.search(r"(?:eval_(?:server|client)_runtime|execute_luau)$", tv["tool"]))
+    runtime_error = tv['status'] == 'error'
+    runtime_message = tv['error']
+    if runtime and not runtime_error:
+        try:
+            body = json.loads(tv['output'])
+            runtime_error = isinstance(body,dict) and (body.get('ok') is False or body.get('isError') is True)
+            if runtime_error:
+                runtime_message = str(body.get('error') or body.get('content') or body)
+        except (ValueError,TypeError):
+            pass
     failed_exit = tv["exit"] not in (None, 0, "0")
     lines = [l.strip() for l in text.splitlines() if _FAIL_LINE.match(l)][:40]
-    if test_like and (failed_exit or lines or tv["status"] == "error"):
+    # A Studio evaluation tool error is execution evidence; printed FAIL lines
+    # inside a successful negative-control evaluation alone are not.
+    if (test_like and (failed_exit or lines or tv["status"] == "error")) or \
+            (runtime and runtime_error):
         head = " ".join(tv["command"].split()[:3])
-        sig = normalize_failure([head] + (lines or [tv["error"] or f"exit {tv['exit']}"]))
+        sig = normalize_failure([head or tv['tool']] + (lines or [runtime_message or f"exit {tv['exit']}"]))
         ev.append({"kind": "failure", "key": f"failure:{pid}", "signature": sig,
                    "detail": {"command": tv["command"][:1000], "exit": tv["exit"],
                               "lines": lines[:20], "excerpt": _excerpt(text, lines)}})
