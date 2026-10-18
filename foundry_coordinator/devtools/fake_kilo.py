@@ -188,6 +188,8 @@ class FakeKilo:
                 return 200, {"enabled": False}
             if path == "/indexing/status":
                 return 200, {"state": "disabled"}
+            if path == "/session":
+                return 200, [s["info"] for s in self.sessions.values()]
             parts = path.strip("/").split("/")
             if len(parts) >= 2 and parts[0] == "session":
                 s = self.sessions.get(parts[1])

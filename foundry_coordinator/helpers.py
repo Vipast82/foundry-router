@@ -362,9 +362,27 @@ class HelperManager:
         res = dict((prior or {}).get("result") or {})
         sid = res.get("session_id")
         directory = P.profile.workspace
+        # every helper title carries this marker, so a create whose response was
+        # lost is found again instead of leaving an orphan and creating a twin
+        marker = f"[{u['unit_id']}#{int(u.get('requests') or 1)}]"
+        if not sid and res.get("creating"):
+            find = getattr(P.client, "find_session", None)
+            found = find(directory, marker) if callable(find) else ""
+            if found:
+                sid = found
+                res = {"session_id": sid, "reconciled": "create"}
+                self.store.op_update(key, "started", res)
+                self.store.add_session(sid, pid, tid, t["run_id"], "helper", "helper",
+                                       t["attempt"], P.client.name, persona,
+                                       {"parent": t["session_id"], "unit": u["unit_id"],
+                                        "purpose": u["kind"]})
+                self.store.event(pid, tid, "helper_reconciled", session_id=sid,
+                                 detail={"unit": u["unit_id"], "what": "session create "
+                                         "response was lost; existing session adopted"})
         if not sid:
+            self.store.op_update(key, "started", {**res, "creating": True})
             sid = P.client.start_session(
-                directory=directory, title=f"{pid} {tid} helper {u['kind']}: "
+                directory=directory, title=f"{marker} {pid} {tid} helper {u['kind']}: "
                                           f"{u['responsibility'][:60]}",
                 persona=persona, agent=h["agent"],
                 metadata={"project": pid, "task": tid, "run": t["run_id"], "role": "helper",
@@ -403,8 +421,19 @@ class HelperManager:
                 return False
             res["bound"] = True
             self.store.op_update(key, "bound", res)
+        if not res.get("prompted") and res.get("prompting"):
+            # the last send raised: Kilo may still have accepted it. Ask Kilo,
+            # never replay blind (no way to ask -> treat as sent)
+            check = getattr(P.client, "has_prompt", None)
+            if not callable(check) or check(sid, directory=directory):
+                res = {**res, "prompted": True, "reconciled": "prompt"}
+                self.store.op_update(key, "done", res)
+                self.store.event(pid, tid, "helper_reconciled", session_id=sid,
+                                 detail={"unit": u["unit_id"], "what": "prompt response was "
+                                         "lost; Kilo has the prompt, not resent"})
         if not res.get("prompted"):
             text = self.lanes.prompt(P, spec, u) if u.get("lane") else self.prompt(spec, u)
+            self.store.op_update(key, "bound", {**res, "prompting": True})
             P.client.prompt(sid, text, directory=directory, persona=persona, agent=h["agent"])
             self.store.op_update(key, "done", {**res, "prompted": True})
         now = self.clock()

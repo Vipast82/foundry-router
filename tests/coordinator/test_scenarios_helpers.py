@@ -528,10 +528,7 @@ def test_s5_prompt_refused_is_not_reported_running_and_retry_reuses_the_session(
         assert sum(p["session_id"] == s for p in fake.prompts) == 1
 
 
-@pytest.mark.xfail(strict=True, reason=(
-    "DEFECT: prompt_async accepted by Kilo but the response lost -> helpers._start re-sends "
-    "the prompt on the next tick (helpers.py:384-387 journals 'prompted' only after "
-    "success), so the helper session gets a duplicate turn (double optional spend)"))
+# fixed in v0.121.7 (journal + reconcile with Kilo, never a blind replay)
 def test_s5_prompt_accepted_but_response_lost_is_not_resent(env):
     fake, c, ff = env["fake"], env["c"], env["ff"]
     ff.admission = {CLAUDE: adm("admit")}
@@ -550,10 +547,7 @@ def test_s5_prompt_accepted_but_response_lost_is_not_resent(env):
         assert sum(p["session_id"] == s for p in fake.prompts) == 1
 
 
-@pytest.mark.xfail(strict=True, reason=(
-    "DEFECT: POST /session accepted but the response lost -> the op journal has no session "
-    "id (helpers.py:339-352), the retry creates a second Kilo session and the first is "
-    "orphaned (never bound, never aborted)"))
+# fixed in v0.121.7 (journal + reconcile with Kilo, never a blind replay)
 def test_s5_session_create_response_lost_leaves_no_orphan(env):
     fake, c, ff = env["fake"], env["c"], env["ff"]
     ff.admission = {CLAUDE: adm("admit")}
@@ -648,3 +642,44 @@ def test_s5_primary_delivery_failure_is_not_marked_delivered_and_retries_once(en
     assert {x["status"] for x in units(c).values()} == {"delivered"}
     assert sum("PROPOSAL-S45" in p["text"] for p in fake.prompts
                if p["session_id"] == primary) == 1
+
+
+def test_s5_reconciled_create_adopts_the_session_and_prompts_it_once(env):
+    fake, c, ff = env["fake"], env["c"], env["ff"]
+    ff.admission = {CLAUDE: adm("admit")}
+    once = {"n": 0}
+
+    def lose_first(p, b):
+        if p == "/session" and once["n"] == 0:
+            once["n"] += 1
+            return "after"
+        return None
+    fake.post_fault = lose_first
+    c.tick()
+    first = helper_sids(env)
+    env["clock"][0] += 1
+    c.tick()
+    live = {x["session_id"] for x in units(c).values() if x["status"] == "running"}
+    assert first[0] in live                                  # adopted, not replaced
+    assert sum(p["session_id"] == first[0] for p in fake.prompts) == 1
+    assert events(c, "helper_reconciled")
+
+
+def test_s5_refused_prompt_is_still_sent_after_reconciling(env):
+    """'before' (nothing reached Kilo): reconciliation finds no user turn and sends."""
+    fake, c, ff = env["fake"], env["c"], env["ff"]
+    ff.admission = {CLAUDE: adm("admit")}
+    once = {"n": 0}
+
+    def refuse_first(p, b):
+        if _helper_prompt(p, b) and once["n"] == 0:
+            once["n"] += 1
+            return "before"
+        return None
+    fake.post_fault = refuse_first
+    c.tick()
+    env["clock"][0] += 1
+    c.tick()
+    for s in helper_sids(env):
+        assert sum(p["session_id"] == s for p in fake.prompts) == 1
+    assert {x["status"] for x in units(c).values()} == {"running"}

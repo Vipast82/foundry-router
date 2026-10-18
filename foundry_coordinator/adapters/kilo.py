@@ -93,6 +93,19 @@ class KiloClient(CodingClient):
                   {"agent": agent, "model": {"providerID": self.provider, "modelID": persona},
                    "parts": [{"type": "text", "text": text}]}, {"directory": directory})
 
+    def find_session(self, directory: str, marker: str) -> str:
+        """Reconcile a create whose response was lost: the newest session whose
+        title carries `marker` (the coordinator puts one in every helper title)."""
+        rows = self._req("GET", "/session", query={"directory": directory}) or []
+        hits = [r for r in rows if isinstance(r, dict) and marker in str(r.get("title") or "")]
+        hits.sort(key=lambda r: ((r.get("time") or {}).get("created") or 0), reverse=True)
+        return str(hits[0].get("id") or "") if hits else ""
+
+    def has_prompt(self, session_id: str, *, directory: str) -> bool:
+        """Reconcile a prompt whose response was lost: did Kilo record a user turn?"""
+        return any(((m.get("info") or {}).get("role") == "user")
+                   for m in self.messages(session_id, directory))
+
     def exists(self, session_id: str, *, directory: str) -> bool:
         return self._req("GET", f"/session/{session_id}", query={"directory": directory},
                          ok404=True) is not None
