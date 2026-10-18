@@ -2,6 +2,142 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.121.7 — live-audit fixes: compaction, lost responses, stale images, guidance, operator notes, diagnostics
+
+Fixes for defects found in the live UI-01 audit, including the items still open
+after v0.121.4. All are covered by tests against fakes, not real models.
+
+**Compaction (stage 1)**
+
+- A turn that ends on Kilo's compaction summary now reads as busy, not
+  finished. Detected by the summary flag, a compaction mode or agent, or a
+  compaction part. Before, the summary looked like a finished turn and could be
+  sent to verification.
+- That turn is never verified and costs no attempt. The coordinator logs
+  `session_compacted` and waits.
+- If Kilo doesn't continue on its own within `compaction_grace_seconds`, the
+  same session gets one journaled continue prompt (once per compaction message,
+  so a restart doesn't resend it).
+
+**Lost helper responses (stage 2)**
+
+- Helper session create and prompt are journaled before they are sent.
+- Helper session titles now start with a `[unit#request]` marker. After a lost
+  create response the coordinator finds the session by that marker and adopts
+  it, so there is no orphan session and no twin.
+- After a lost prompt response, Kilo's own messages decide whether the prompt
+  arrived. A model call is never replayed blind. Both cases log
+  `helper_reconciled`.
+
+**Stale screenshots and visual base ids (stage 3)**
+
+- A capture is bound to the source snapshot it was planned against. If the code
+  changed before observation finished, observer and proposer results are marked
+  stale, and the card says to recapture or reassess.
+- The visual base check now uses separate `artifact_id` and
+  `source_snapshot_id` fields, with a compatibility path for older results.
+  This fixes `base_mismatch` on every visual result.
+
+**Retry guidance (stage 4)**
+
+- A guidance record skipped before any inference (quota 429, capacity full,
+  adviser unavailable) no longer turns guidance off for good.
+- `unblock --reset-attempts` moves it to `retry_guidance_history`. The next
+  exhaustion asks quota admission again, at most twice per task.
+- Consultations that are calling, unknown or completed are never re-armed or
+  replayed. The unblock transition now records `reset_attempts`.
+
+**Operator messages (stage 5)**
+
+- A session-scoped instruction whose session can no longer take a prompt (a new
+  session took over, or the task stopped) is rejected with that reason. Before,
+  it stayed queued forever.
+- The unblock resolution is queued as a task-scoped note. It is delivered once
+  with the next prompt, journaled like any note, and kept out of control-center
+  action reporting. Before, it never reached the session.
+
+**Diagnostics (stage 6)**
+
+- `doctor` accepts `pass`, `passed`, `ok` and `valid` as validation results.
+- `doctor` checks media personas through Foundry's media catalog. That check
+  never FAILs and never generates anything.
+- The Verification panel labels checks and reviews from a previous run, warns
+  when they are for an older revision, and shows an authorized operator
+  recovery (`reset_attempts`, read from the unblock transition) instead of a
+  bare 3/3.
+
+**Trade-offs**
+
+- **Kilo stays the only compaction manager.** The coordinator never summarizes
+  or trims context; it only waits and nudges once. If Kilo stalls after that
+  nudge, the session's normal timeout still applies.
+- **A lost helper prompt with no way to check is treated as sent, never
+  replayed.** If the client can't report whether Kilo has the prompt, the unit
+  may wait out its timeout with no reply. That costs time, not a duplicate
+  model call.
+- **Guidance re-arm happens only on an operator reset, at most twice.** A
+  transient skip still turns guidance off until an operator acts; nothing
+  retries it automatically.
+
+**Not in this release**
+
+- Delegated visual sign-off. That is a separate policy change.
+- Primary image input. That is persona and Kilo configuration.
+
+**Settings:** `[client] compaction_grace_seconds` is optional (default 30). It
+sits in the profile's `[client]` table, next to `kind`.
+
+**Also fixed:** a v0.121.5 regression. Every new run re-paid an incremental
+review of code that an earlier run had already reviewed. A finished,
+non-rejected review in any run of the task now counts. A review that never
+ran, or whose result expired, still lets the new run review the same code.
+
+**Migration:** none; deploy at a safe boundary (no hot reload of a running worker).
+
+## v0.121.6 — Sonnet primary for scoped UI tasks
+
+- A profile can now pick a different writer for named tasks with
+  `[role_overrides.<name>]` (`tasks`, `implementer`, `reviewer`). The
+  AnimalUprising workstation uses it to put `Foundry-Kilo-Sonnet` on UI-01 to
+  UI-06, with `Foundry-Kilo-Deep-Review` as reviewer.
+- The default `[roles] implementer` stays `Foundry-Kilo-Local`. Every other
+  task, including the security sprints in between, is unchanged.
+- The override covers implementation, repair, closeout, same-session resume and
+  helper feedback delivery. Resume registers the selected persona with Foundry
+  before inference.
+- Sessions keep earlier writer personas, so a writer can't become the
+  independent final reviewer after a model change.
+- Overrides never approve queue entries, widen scope, waive checks or change
+  publishing rules. Details and the hand-off procedure:
+  docs/UI_SPRINT_MODEL_POLICY.md.
+
+**Migration:** none. The override is optional and read at coordinator startup.
+
+## v0.121.5 — recover bounded helper work and use frontier capacity
+
+The UI-01 audit found no new helper starts after model access was repaired.
+Details: docs/HELPER_UTILIZATION_FIXES.md.
+
+- Coalescing is scoped to the current run and a stable `coalesce_key`. Failed,
+  cancelled, rejected or stale results are no longer reused. The new column is
+  additive; no history is deleted.
+- Replacements are bounded by `1 + lanes.max_retries` per assignment and run.
+  Lane allowances are per run (`max_per_run`, falling back to `max_per_task`);
+  the task-wide ceilings still apply.
+- A review checkpoint is recorded only after a structured result names its
+  assignment and source snapshot.
+- Real Studio evaluation errors trigger triage. Reading or searching a test
+  file no longer counts as a failed test.
+- New optional `helpers.backend_max_running` (per-backend cap) and
+  `lanes.high_value_lanes` (lanes eligible for selective fallback; Meridian
+  stays first). Foundry stays authoritative for routes, quota and capacity.
+- `Proactive.recover_current` rebuilds current test design and code review for
+  a paused task, once per run, without replaying old events.
+- Windows path fix in the image adapter.
+
+**Migration:** none on the Foundry server. Restart the workstation coordinator
+to load the changes.
+
 ## v0.121.4 — crash-safe first start, honest helper stops
 
 Fixes for the P1 defect and the top P2 defects from the v0.121.3 scenario

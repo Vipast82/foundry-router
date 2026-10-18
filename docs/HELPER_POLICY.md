@@ -178,9 +178,19 @@ Further rules:
   as delivered, so review stays independent of a possible author.
 - A helper session is journaled as `started → bound → done`, so a restart between creation
   and binding binds before the first prompt; it never runs unbound.
+- **Lost responses (v0.121.7).** Every helper session title starts with a
+  `[unit#request]` marker (the unit id and its request number, e.g.
+  `[<unit>#1] <project> <task> helper code_proposal: ...`). Create and prompt are journaled
+  before they are sent. If a create response is lost, the coordinator looks up the
+  session by that marker and adopts it, so there's no orphan and no twin. If a
+  prompt response is lost, Kilo's messages decide whether the prompt arrived; if
+  the client can't tell, the prompt is treated as sent and never replayed. Both
+  log `helper_reconciled`. Don't edit helper titles in Kilo; the marker is how
+  they're matched.
 - Events: `helper_requests`, `helper_unit`, `helper_deferred`, `helper_started`,
   `helper_handoff_wait`, `helper_proposals_delivered`, `helper_handoff_timeout`,
-  `helper_timed_out`, `helper_skipped`, `helper_outcome_delivered`, `helper_cancelled`.
+  `helper_timed_out`, `helper_skipped`, `helper_outcome_delivered`, `helper_cancelled`,
+  `helper_reconciled`.
 
 **Review independence:** if a persona that proposed code integrated into the revision is
 also the reviewer, the review moves to the other reviewer role. If no independent reviewer
