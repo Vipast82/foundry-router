@@ -2,6 +2,61 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.122.5 — UI-02 false "no progress" fixed; pinned helper fallback route; BUILD continuing; upgrade resume
+
+**UI-02 false no-progress block (coordinator).** Four bugs in one path:
+- `[~]` checklist rows were invisible to the AnimalUprising parser. `[~]` is
+  now an OPEN step everywhere the plan is parsed; `[x]` is done and `[ ]`
+  is open.
+- The three untracked gate files gate.ps1 writes for the task tripped
+  partial-BUILD's clean check:
+  - the files: `docs/progress/<task>_gate_expect.json`,
+    `<task>_gate_expect_full.json`, `<task>_gate_verdicts.json`;
+  - now only these exact task-owned paths are tolerated during partial BUILD,
+    reported as "intermediate gate output";
+  - final verification and closeout still require them committed;
+  - other sprints' gate files and unrelated dirty files still block.
+- No-progress detection counted committing sessions with repeated findings
+  as stalls. Committed in-scope work, and plan steps advancing (`[ ]`→`[~]`→`[x]`
+  or new `[~]` notes), now count as progress. A true stall (no commits, no
+  checklist change, same findings) still escalates.
+- Later commits in a session were lost because progress marks were written
+  only at the first idle. They are now updated on later idles.
+- New `python -m foundry_coordinator decision reevaluate <id> --by <operator>
+  --reason "..." [--dry-run]`. It re-runs the fixed check on an open
+  no_progress decision. If progress is now recognized it withdraws the
+  decision, keeping it with an audit event, and never touches attempts or
+  budgets.
+
+**Helper admission: pinned fallback route (Foundry plus coordinator).**
+- When a strict persona's first route is UNKNOWN or DEFER (e.g. a Meridian
+  usage 429), a later route may admit the helper if it passes all of these:
+  - ADMIT under the configured cutoff;
+  - not local;
+  - has image input when the helper needs it;
+  - within approved_models;
+  - a free helper stream.
+- The session is bound with `pinned_route`, and Foundry serves its calls
+  ONLY from that route.
+- The call-time check re-evaluates the pinned route. If it is no longer
+  admitted the call is refused (optional_deferred), never re-routed.
+- Required work is never pinned.
+
+**Control center.**
+- **BUILD continuing.** Committed partial-BUILD progress shows as "BUILD
+  continuing — N/M checklist steps open". It is neutral, not a finding, and
+  uses no attempt. It is derived only from the engine's transition evidence.
+- **Safe upgrade.** "Safe to upgrade" also waits for in-flight
+  retry-guidance calls. It does not wait for a task's workspace or writer
+  reservation held between sessions.
+- **Resume after upgrade.** An opt-in pause option, "Resume automatically
+  when the coordinator restarts on a newer version". Only tasks the project
+  pause stopped are resumed, recorded as authorized by the original
+  operator.
+
+**Migration:** additive schema (progress marks v2). Deploy Foundry and the
+coordinator together. See docs/UPGRADE_UI02_RECOVERY.md for the UI-02 steps.
+
 ## v0.122.4 — project Pause / Resume in the control center (for upgrades)
 
 - **Header control.** A **Pause** / **Resume** button for the selected
