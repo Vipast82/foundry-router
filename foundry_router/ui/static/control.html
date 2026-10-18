@@ -1309,7 +1309,7 @@ function budgetRow(name, c) {
   const pct = used !== null && max ? clamp(100 * used / max, 0, 100) : null;
   const over = used !== null && max && used >= max;
   const bar = pct === null ? "" : `<div class="bar" role="img" aria-label="${esc(name)} ${esc(used)} of ${esc(max)}"><i style="width:${pct}%;${over ? "background:var(--bad)" : ""}"></i></div>`;
-  return [name, `${used === null ? NA("not counted") : esc(used)} / ${max === null || max === undefined ? '<span class="dim">no cap</span>' : esc(max)}${over ? " " + sprintPill("used up", "bad") : ""}${bar}${c.explained ? `<div class="dim">${esc(c.explained)}</div>` : ""}<div class="src">${esc(c.source || "")}</div>`];
+  return [name, `${used === null ? NA("not counted") : esc(used)} / ${max === null || max === undefined ? '<span class="dim">no cap</span>' : esc(max)}${over ? " " + sprintPill("used up", "bad") : ""}${bar}${c.authorized ? `<div class="dim">${esc(c.base_max)} base + ${esc(c.authorized)} authorized by operator decisions</div>` : ""}${c.explained ? `<div class="dim">${esc(c.explained)}</div>` : ""}<div class="src">${esc(c.source || "")}</div>`];
 }
 function decisionDraft(id) { S.decDrafts = S.decDrafts || {}; return S.decDrafts[id] || (S.decDrafts[id] = {option: "", answer: "", note: ""}); }
 function decisionCard(t, d, withForm) {

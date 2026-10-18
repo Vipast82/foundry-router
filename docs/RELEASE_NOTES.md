@@ -2,6 +2,27 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.122.3 — Meridian usage 429s no longer pause helpers; budgets show authorized room
+
+- **Quota gate (Foundry).**
+  - **Before:** Meridian's usage endpoint sometimes rate-limits itself
+    (HTTP 429) while inference works. The gate then threw away all readings
+    and deferred optional helpers as UNKNOWN until a read succeeded.
+  - **Now:** a temporary fetch error (429, 5xx or timeout) falls back to the
+    last good reading, which keeps its original observation time.
+  - **Safety:** the normal freshness limit still decides, so an old reading
+    gives UNKNOWN and helpers are never admitted on stale data. An auth error
+    (401/403) never falls back.
+  - **Alert:** a persistent failure still raises the debounced
+    quota-source alert.
+- **Budgets panel.** It showed "4/3 used up" after an operator unblock had
+  authorized +3. The effective max now includes `authorized:<counter>` ledger
+  rows, shown as "3 base + 3 authorized by operator decisions". The engine
+  already enforced the right limit; only the display was wrong.
+
+**Migration:** none. Rebuild Foundry for the gate fix; restart the coordinator
+(bridge) for the budget view.
+
 ## v0.122.2 — retry guidance waits out a temporary quota refusal (tests aligned)
 
 - **Behavior, from commit a408be0 (tagged with v0.122.1):** a temporary

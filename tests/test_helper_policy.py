@@ -618,3 +618,30 @@ def test_flapping_usage_source_does_not_flap_the_alert(app):
     clock[0] += 301
     run(gate.evaluate("meridian", "claude-sonnet-5-5"))
     assert open_alerts() == []
+
+
+def test_transient_usage_429_falls_back_to_the_last_good_reading_while_fresh(app):
+    """Meridian's usage endpoint rate-limits itself now and then while inference
+    works: admission keeps using the last good reading, judged by its ORIGINAL
+    observation age; once that reading is too old, admission is UNKNOWN again."""
+    gate, fake, clock = make_gate(app, decision_cache_seconds=0)
+    meridian_companion(fake, 16, 45, fetched=clock[0])
+    assert run(gate.evaluate("meridian", "claude-sonnet-5-5"))["state"] == ADMIT
+    fake.meridian_usage.snap["fetch_error"] = "anthropic usage HTTP 429"
+    clock[0] += 120
+    d = run(gate.evaluate("meridian", "claude-sonnet-5-5"))
+    assert d["state"] == ADMIT and "last good reading" in d["source"]
+    clock[0] += 3 * 3600                      # the fallback reading is now far too old
+    d = run(gate.evaluate("meridian", "claude-sonnet-5-5"))
+    assert d["state"] == UNKNOWN              # never admitted on stale data
+    al = [a for a in fake.control.alerts([], "open") if a["kind"] == "quota_source"]
+    assert len(al) == 1                       # a persistent outage still alerts (debounced)
+
+
+def test_auth_failure_never_falls_back(app):
+    gate, fake, clock = make_gate(app, decision_cache_seconds=0)
+    meridian_companion(fake, 16, 45, fetched=clock[0])
+    assert run(gate.evaluate("meridian", "claude-sonnet-5-5"))["state"] == ADMIT
+    fake.meridian_usage.snap["fetch_error"] = "anthropic usage HTTP 401 unauthorized"
+    clock[0] += 60
+    assert run(gate.evaluate("meridian", "claude-sonnet-5-5"))["state"] == UNKNOWN

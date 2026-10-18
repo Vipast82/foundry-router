@@ -772,6 +772,26 @@ def budgets_view(t: dict, limits: dict, ledger: list, reviews: int, now: float,
     if t.get("started_ts") and limits.get("max_task_minutes"):
         out["task_minutes"] = {"used": round((now - float(t["started_ts"])) / 60, 1),
                                "max": limits.get("max_task_minutes"), "source": "task row"}
+    # authorized:<counter> rows (an operator unblock --reset-attempts or an
+    # answered budget_extension) raise the effective max: base + authorized
+    for name, counters in (("ordinary", ("attempt_ordinary", "ordinary")),
+                           ("sessions", ("sessions",)), ("review_calls", ("review_calls",)),
+                           ("closeout", ("closeout",)), ("review_errors", ("review_errors",)),
+                           ("transport_retries", ("transport_retries", "provider_retries")),
+                           ("missing_evidence_continuations",
+                            ("missing_evidence_continuations", "same_session_continuations"))):
+        extra = 0
+        for c in counters:
+            try:
+                extra += int(sums.get(f"authorized:{c}") or 0)
+            except (TypeError, ValueError):
+                pass
+        row = out.get(name)
+        if extra and row is not None:
+            base = row.get("max")
+            row["base_max"] = base
+            row["authorized"] = extra
+            row["max"] = (int(base) + extra) if base is not None else None
     return {"counters": out, "authorized": authorized[-10:],
             "ledger": {k: v for k, v in sorted(sums.items())},
             "source": "budget_ledger" if (ledger or sums) else "task row + profile limits"}

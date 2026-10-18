@@ -63,6 +63,10 @@ class QuotaGate:
         self.clock = clock
         self._cache: dict[str, tuple[float, dict]] = {}
         self._alerted: set[str] = set()
+        # last successful Meridian reading per backend: a transient usage-endpoint
+        # failure (its own HTTP 429/5xx/timeout) falls back to it, and the normal
+        # freshness rule judges its observation age (never admitted on old data)
+        self._last_good: dict[str, dict] = {}
         self._src_fail_since: dict[str, float] = {}     # key -> first failure of this streak
         self._src_ok_since: dict[str, float] = {}       # key -> first good reading of streak
         self._refresh_ts: dict[str, float] = {}
@@ -93,6 +97,15 @@ class QuotaGate:
                "fetched_at": fetched, "error": snap.get("fetch_error") or "",
                "accounts": []}
         if snap.get("fetch_error"):
+            err = str(snap.get("fetch_error"))
+            last = self._last_good.get(cfg.name)
+            transient = not any(x in err for x in ("401", "403", "invalid", "unauthor"))
+            if transient and last and all(w.get("observed_at") for a in last["accounts"]
+                                         for w in a["windows"]):
+                # same windows, original observation times: freshness decides
+                return {**last, "fallback_error": err,
+                        "source": f"{last.get('source')} (last good reading; usage endpoint: "
+                                  f"{err[:120]})"}
             return out
         if snap.get("oauth_ok") is False:
             out["error"] = "Meridian reports no Anthropic usage figures (sources.oauth null)"
@@ -128,6 +141,7 @@ class QuotaGate:
         out["accounts"].append({"account": f"{cfg.name}:claude" + (f":{prof}" if prof else ""),
                                 "label": "Claude" + (f" ({prof})" if prof else ""),
                                 "windows": windows, "unavailable": False})
+        self._last_good[cfg.name] = out
         return out
 
     async def _cliproxy_windows(self, cfg, info: dict, model: str, now: float) -> dict:
@@ -289,7 +303,9 @@ class QuotaGate:
             out.update(state=UNKNOWN, reason=src.get("error") or "no account readings")
             self._source_alert(backend, out["reason"])
         else:
-            self._source_alert(backend, None)
+            # a fallback reading still counts as a failing source for the
+            # (debounced) operator alert; admission is judged on its age below
+            self._source_alert(backend, src.get("fallback_error"))
             states = []
             for a in src["accounts"]:
                 skey = f"{a['account']}|{model}"

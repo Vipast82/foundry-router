@@ -801,3 +801,17 @@ def test_task_helpers_from_the_bridge_are_ordinary_units_only(env):
     assert ids.count(uid) == 1 and len(ids) == len(set(ids))
     lane = next(u for u in h["lanes"] if u["unit_id"] == uid)
     assert lane["phase"] in ("queued", "admitted", "executing", "waiting_provider")
+
+
+def test_budget_max_includes_operator_authorized_rows():
+    """UI-02 showed '4/3 used up' after an unblock authorized +3: the effective
+    max is base + authorized:<counter> rows, with the breakdown shown."""
+    from foundry_coordinator.telemetry import budgets_view
+    v = budgets_view({"attempt": 1, "sessions": 2, "data": {}},
+                     {"max_attempts": 3, "max_sessions_per_task": 8}, [], 0, 0.0,
+                     sums={"attempt_ordinary": 4, "authorized:attempt_ordinary": 3,
+                           "sessions": 5, "authorized:sessions": 3})
+    c = v["counters"]
+    assert (c["ordinary"]["used"], c["ordinary"]["max"]) == (4, 6)
+    assert (c["ordinary"]["base_max"], c["ordinary"]["authorized"]) == (3, 3)
+    assert (c["sessions"]["used"], c["sessions"]["max"]) == (5, 11)
