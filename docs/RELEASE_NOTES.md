@@ -2,6 +2,16 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.122.1 — the bell badge clears once alerts are acknowledged
+
+The 🔔 badge counted acknowledged alerts whenever there were no new ones, so it
+kept showing "1" after you acknowledged an alert. It now counts only what still
+needs you: unacknowledged alerts and open questions or permission requests.
+Acknowledged alerts stay in the inbox, marked "acknowledged", until they are
+resolved, and the bell's tooltip still lists them.
+
+**Migration:** none; reload the control-center page.
+
 ## v0.122.0 — sprint lifecycle: evidence memory, obligations, targeted recovery (opt-in)
 
 An opt-in layer, `[lifecycle] enabled = false` by default, that stops the

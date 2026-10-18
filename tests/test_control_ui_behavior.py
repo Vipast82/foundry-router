@@ -448,3 +448,15 @@ def test_verification_panel_shows_operator_recovery_on_exhausted_budget(tmp_path
                          "status": "accepted", "resolution": "<fixed>"}}})
     assert "3/3 attempts used · operator recovery authorized (fresh budget)" in h
     assert "by &lt;victor&gt;" in h and "&lt;fixed&gt;" in h and "<victor>" not in h
+
+
+def test_bell_badge_counts_only_what_still_needs_the_operator(tmp_path):
+    s = _script()
+    out = run_js(tmp_path, between(s, "/*bell-start*/", "/*bell-end*/") + """
+const ack = [{status: "acknowledged", severity: "info"}];
+const r1 = bellCount(ack, []);
+const r2 = bellCount([...ack, {status: "new", severity: "warning"}], [{status: "open"}]);
+const r3 = bellCount([{status: "resolved"}], [{status: "answered"}]);
+console.log(JSON.stringify([r1.badge, r1.open.length, r2.badge, r3.badge]));
+""")
+    assert out == [0, 1, 2, 0]    # acknowledged alone: no badge, still listed

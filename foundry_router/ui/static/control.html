@@ -2076,12 +2076,20 @@ $("#sound-btn").onclick = async () => {
   if (!AUDIO.ctx || AUDIO.ctx.state !== "running" || !P.sound.enabled) { const ok = await enableSound(); toast(ok ? "Sound enabled for this page" : "The browser blocked audio. Allow sound for this site and try again.", ok ? "" : "bad"); if (ok) playTone("question"); }
   else { P.sound.muted = !P.sound.muted; savePrefs(); renderSoundBtn(); }
 };
-function renderBell() {
-  const open = [...S.alerts.values()].filter(a => a.status === "new" || a.status === "acknowledged");
+/*bell-start*/
+// The badge counts only what still needs the operator: unacknowledged alerts and
+// open questions/permission requests. Acknowledged alerts stay in the inbox
+// (until resolved) but no longer light the badge.
+function bellCount(alerts, pending) {
+  const open = alerts.filter(a => a.status === "new" || a.status === "acknowledged");
   const fresh = open.filter(a => a.status === "new");
-  const pend = [...S.pending.values()].filter(p => p.status === "open");
-  const n = fresh.length || 0;
-  const c = $("#bell-count"); c.hidden = !(open.length || pend.length); c.textContent = n || open.length || pend.length;
+  const pend = pending.filter(p => p.status === "open");
+  return {open, fresh, pend, badge: fresh.length + pend.length};
+}
+/*bell-end*/
+function renderBell() {
+  const {open, fresh, pend, badge} = bellCount([...S.alerts.values()], [...S.pending.values()]);
+  const c = $("#bell-count"); c.hidden = !badge; c.textContent = badge;
   $("#bell").classList.toggle("critical", fresh.some(a => a.severity === "critical"));
   $("#bell").title = `Action required: ${fresh.length} new, ${open.length - fresh.length} acknowledged, ${pend.length} pending request(s)`;
   document.title = (fresh.length ? `(${fresh.length}) ` : "") + "Control center · Foundry";
