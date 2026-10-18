@@ -54,7 +54,10 @@ console.log(JSON.stringify({font: m.fontSize, order: m.sidebar.order, hidden: m.
     assert out["order"][:2] == ["helpers", "identity"] and "gone" not in out["order"]
     assert "lanes" in out["order"] and out["hidden"] == ["mcp"]          # new section appended
     assert out["lanes"] is False and out["badLanes"] is True              # user choice kept
-    assert out["portrait"] == 330 and out["v"] == 2 and out["badOrder"] >= 15
+    # PREF_VERSION 3 (v0.122): saved v2 orders get the sprint sections right after Identity
+    assert out["portrait"] == 330 and out["v"] == 3 and out["badOrder"] >= 22
+    assert out["order"][2:9] == ["readiness", "checklist", "decisions", "budgets", "evidence",
+                                 "recovered", "findings"]
 
 
 def test_following_the_coordinator_never_moves_a_pinned_view(tmp_path):

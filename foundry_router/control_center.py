@@ -123,6 +123,11 @@ SCHEMA = [
       sha256 TEXT, status TEXT, data TEXT, thumb TEXT, mime TEXT, received_ts REAL, seq INTEGER)""",
     """CREATE TABLE IF NOT EXISTS cc_lane_state (
       project_id TEXT PRIMARY KEY, paused INTEGER, data TEXT, received_ts REAL)""",
+    # batch ids a source already delivered (v0.122): a retried batch the server
+    # stored before the reply was lost is answered from here, not re-applied
+    """CREATE TABLE IF NOT EXISTS cc_batches (
+      source_id TEXT, batch_id TEXT, boot_id TEXT, ts REAL, result TEXT,
+      PRIMARY KEY (source_id, batch_id))""",
 ]
 LANE_STATUS_EDGE = {"pending": "queued", "deferred": "deferred", "running": "waiting",
                     "done": "completed", "delivered": "completed", "failed": "failed",
@@ -156,7 +161,37 @@ SETTING_LIMITS = {
 
 ACTION_KINDS = ("answer_question", "reply_permission", "approve_review", "reject_review",
                 "pause", "resume", "cancel", "unblock", "instruction", "withdraw_instruction",
-                "lanes")
+                "lanes", "decision_answer")
+# `decision_answer` (v0.122): an operator's answer to an open coordinator
+# decision (obligations.decisions). Delivered through the existing claim route;
+# the coordinator's control channel applies it with Obligations.answer(). Payload:
+#   {"decision_id": str, "decision_kind": str, "answer": str (<= max_instruction_chars),
+#    "option": str ("" = free-text answer only), "note": str (<= 2000),
+#    "authority": "operator", "actor": <the signed-in operator, from the session>,
+#    "question_hash": hash of the question the operator saw, "revision": str}
+# expected: {"decision_id", "decision_status": "open", "question_hash"}. The
+# authority is always "operator" (a request claiming any other authority is
+# refused); a delegated policy or a model never answers through this route.
+DECISION_AUTHORITY = "operator"
+# version-compatibility gate on heartbeats (ok | warn | refuse)
+SUPPORTED_CONTRACTS = (CONTRACT,)
+MIN_SOURCE_VERSION = "0.121.0"
+# the coordinator version a source declares (`coordinator_version`) is what the
+# gate compares; foundry_router's own version says nothing about the engine
+MIN_COORDINATOR_VERSION = "0.121.0"
+COORDINATOR_MAJOR = 0
+# action kinds a source must declare in its features/capabilities to be handed them
+FEATURE_GATED_ACTIONS = {"decision_answer": "decision_answer"}
+# observation types that only make sense inside a project: an empty project_id
+# would bypass the per-key project allowlist, so they are refused
+PROJECT_SCOPED_TYPES = ("task", "lane_unit", "artifact", "mcp", "config", "capabilities", "todo",
+                        "lane_state", "transition", "pending")
+BATCH_MEMORY = 200                                # batch ids kept per source
+# readiness classes that are not a product defect (the AU adapter's: scope,
+# tooling, environment, runtime_sync, capability, credentials, model, tests,
+# ownership, deps; "tools" kept for older adapters)
+ENV_BLOCKER_CLASSES = ("environment", "runtime_sync", "ownership", "tools", "tooling",
+                       "capability", "scope", "credentials", "model", "tests", "deps")
 LIVE_ACTION = ("accepted", "claimed", "queued", "delivered")
 FINAL_ACTION = ("applied", "rejected", "failed", "expired", "cancelled")
 ACTION_STATUSES = LIVE_ACTION + FINAL_ACTION
@@ -206,6 +241,113 @@ def _hash(v) -> str:
 def _cap(text, n: int) -> tuple[str, bool]:
     s = "" if text is None else str(text)
     return (s, False) if len(s) <= n else (s[:n], True)
+
+
+def _semver(v) -> Optional[tuple]:
+    import re
+    m = re.match(r"^\s*v?(\d+)\.(\d+)(?:\.(\d+))?", str(v or ""))
+    return tuple(int(x or 0) for x in m.groups()) if m else None
+
+
+def _server_version() -> str:
+    try:
+        from foundry_router import __version__
+        return __version__
+    except Exception:                                            # noqa: BLE001
+        return ""
+
+
+def source_features(payload: dict) -> Optional[list]:
+    """The features a heartbeat declares, under either name: `features` or
+    `capabilities` (top level or in `source`; a list, or a dict of flags), plus
+    `source.capabilities.actions`. None when the source declares none at all
+    (a legacy source)."""
+    src = payload.get("source") or {}
+    found, any_field = set(), False
+    for v in (payload.get("features"), payload.get("capabilities"), src.get("features")):
+        if isinstance(v, (list, tuple)):
+            any_field = True
+            found |= {str(x) for x in v if isinstance(x, (str, int))}
+        elif isinstance(v, dict):
+            any_field = True
+            found |= {str(k) for k, x in v.items() if x}
+    caps = src.get("capabilities")
+    if isinstance(caps, dict) and isinstance(caps.get("actions"), list):
+        any_field = True
+        found |= {str(x) for x in caps["actions"]}
+    return sorted(found) if any_field else None
+
+
+def compat_state(payload: dict, server_version: str = "") -> tuple[str, str]:
+    """ok | warn | refuse for one heartbeat. The contract is the hard gate. A
+    source that declares a contract is gated on its declared
+    `coordinator_version` (a different major, or one below
+    MIN_COORDINATOR_VERSION, is refused). A legacy source (no contract or no
+    coordinator_version) is compared on its own version and only ever warned."""
+    src = payload.get("source") or {}
+    contract = payload.get("contract") or src.get("contract")
+    if contract and contract not in SUPPORTED_CONTRACTS:
+        return "refuse", (f"contract {contract!r} is not supported (server speaks "
+                          f"{', '.join(SUPPORTED_CONTRACTS)})")
+    cv_raw = payload.get("coordinator_version") or src.get("coordinator_version")
+    cv = _semver(cv_raw)
+    if contract and cv_raw and not cv:
+        return "refuse", f"coordinator version {str(cv_raw)[:40]!r} is not a version"
+    if contract and cv:
+        if cv[0] != COORDINATOR_MAJOR:
+            return "refuse", (f"coordinator version {cv_raw} has major {cv[0]}; this server "
+                              f"speaks coordinator {COORDINATOR_MAJOR}.x")
+        if cv < _semver(MIN_COORDINATOR_VERSION):
+            return "refuse", (f"coordinator version {cv_raw} is below "
+                              f"{MIN_COORDINATOR_VERSION}")
+        feats = source_features(payload)
+        if src.get("kind") == "coordinator" and "decision_answer" not in (feats or []):
+            return "warn", ("the coordinator does not declare the decision_answer feature: "
+                            "decision answers are withheld from it")
+        return "ok", ""
+    ver = _semver(src.get("version"))
+    srv = _semver(server_version)
+    if ver and ver < _semver(MIN_SOURCE_VERSION):
+        return "warn", f"source version {src.get('version')} is below {MIN_SOURCE_VERSION}"
+    if ver and srv and ver[:2] != srv[:2]:
+        return "warn", f"source version {src.get('version')} differs from server {server_version}"
+    if not contract:
+        return "warn", "the source did not declare a contract (pre-0.122 heartbeat)"
+    return "ok", ""
+
+
+# helpers.PHASES / REASON_CODES vocabulary (foundry_coordinator.helpers); the
+# server keeps its own copy so it never imports the coordinator.
+# "execution_timeout" is accepted as a legacy spelling of "timeout".
+_TIMEOUT_CODES = ("startup_failed", "timeout", "poll_unreadable", "handoff_timeout",
+                  "execution_timeout")
+_WAITING_CODES = ("denied_deferred", "admission_denied", "admission_unavailable",
+                  "binding_failed", "provider_retry")
+
+
+def helper_phase(u: dict) -> str:
+    """The UI phase for a helper unit (GAP_C vocabulary) when the coordinator
+    didn't send one. Never the bare word 'failed'."""
+    if u.get("phase"):
+        return str(u["phase"])
+    st, rc = u.get("status") or "", u.get("reason_code") or ""
+    reason = str(u.get("reason") or "").lower()
+    if st == "pending":
+        return "queued"
+    if st == "deferred":
+        return "waiting_provider" if (u.get("next_eligible") or "quota" in reason
+                                      or "defer" in reason or rc in _WAITING_CODES) else "queued"
+    if st == "running":
+        return "executing"
+    if st == "timed_out" or (st == "failed" and rc in _TIMEOUT_CODES):
+        return "timed_out"
+    if st in ("done", "delivered"):
+        return "completed"
+    if st in ("skipped", "cancelled"):
+        return "cancelled"
+    if st == "failed":
+        return "error"
+    return st or "unknown"
 
 
 class ControlCenter:
@@ -329,9 +471,21 @@ class ControlCenter:
             raise ControlError("heartbeat needs source.id and source.kind (bridge|coordinator)")
         detail = self.redact({k: payload.get(k) for k in (
             "kilo", "coordinator_owner", "projects", "sessions_tracked", "tick", "uptime_s",
-            "backoff_s", "errors", "capture_boundary", "event_stream", "monotonic_s")
+            "backoff_s", "errors", "capture_boundary", "event_stream", "monotonic_s",
+            "contract", "coordinator_version", "foundry_version", "boot_id", "store_schema",
+            "features")
             if payload.get(k) is not None})
+        if src.get("boot_id") and not detail.get("boot_id"):
+            detail["boot_id"] = _s(src.get("boot_id"), 64)
+        feats = source_features(payload)
+        if feats is not None:
+            # normalized from `features` or `capabilities` (either name)
+            detail["features"] = [_s(f, 60) for f in feats][:64]
         now = self.clock()
+        server_version = _server_version()
+        compat, why = compat_state(payload, server_version)
+        detail["compat"] = {"state": compat, "reason": why, "server_version": server_version,
+                            "checked_ts": now}
         with self._tx() as c:
             c.execute("INSERT INTO cc_sources (source_id, kind, client_id, version, host, "
                       "capabilities, detail, first_seen, last_seen, last_source_ts) "
@@ -346,6 +500,17 @@ class ControlCenter:
             seq = self._feed(c, "source", "", "", sid)
             c.execute("UPDATE cc_sources SET seq=? WHERE source_id=?", (seq, sid))
         self._resolve(f"stale:{sid}", "heartbeat received again")
+        if compat == "refuse" or (compat == "warn" and "version" in why):
+            sev = "high" if compat == "refuse" else "warning"
+            cur = self.db.query_one("SELECT severity FROM cc_alerts WHERE dedupe_key=? AND status "
+                                    "IN ('new','acknowledged')", (f"version_mismatch:{sid}",))
+            if cur and cur["severity"] != sev:
+                # warn <-> refuse is a different problem: re-raise at the new severity
+                self._resolve(f"version_mismatch:{sid}", f"version gate now {compat}")
+            self.raise_alert(f"version_mismatch:{sid}", "version_mismatch", sev,
+                             f"{kind} {sid}: version gate {compat}", why, {})
+        else:
+            self._resolve(f"version_mismatch:{sid}", "versions compatible again")
         kilo = detail.get("kilo") or {}
         if kind == "bridge":
             if kilo and kilo.get("ok") is False:
@@ -365,7 +530,21 @@ class ControlCenter:
             elif owner.get("present") and beat is not None:
                 self._resolve(f"owner_stale:{sid}", "engine beat fresh again")
         self._notify()
-        return {"ok": True, "contract": CONTRACT, "server_ts": now}
+        return {"ok": True, "contract": CONTRACT, "server_ts": now, "compat": compat,
+                "compat_reason": why, "server_version": server_version}
+
+    def source_compat(self, source_id: str) -> Optional[str]:
+        r = self.db.query_one("SELECT detail FROM cc_sources WHERE source_id=?", (source_id,))
+        if not r:
+            return None
+        return ((_uj(r.get("detail"), {}) or {}).get("compat") or {}).get("state")
+
+    def source_feature_set(self, source_id: str) -> set:
+        """What the source declared in its last heartbeat (empty: unknown source
+        or a legacy one that declared nothing)."""
+        r = self.db.query_one("SELECT detail FROM cc_sources WHERE source_id=?", (source_id,))
+        d = (_uj(r.get("detail"), {}) or {}) if r else {}
+        return {str(x) for x in (d.get("features") or []) if isinstance(x, str)}
 
     def ingest(self, batch: dict, client: dict) -> dict:
         if not isinstance(batch, dict) or batch.get("contract") != CONTRACT:
@@ -375,6 +554,13 @@ class ControlCenter:
             raise ControlError("observations must be a list of at most 2000 items")
         allowed = client.get("projects") or []
         src = _s((batch.get("source") or {}).get("id"), 120)
+        bid = _s(batch.get("batch_id"), 120)
+        if bid and src:
+            seen = self.db.query_one("SELECT result FROM cc_batches WHERE source_id=? AND "
+                                     "batch_id=?", (src, bid))
+            if seen:
+                return {**(_uj(seen["result"], {}) or {}), "duplicate": True, "batch_id": bid,
+                        "server_ts": self.clock()}
         st = self.settings()
         counts: dict[str, int] = {}
         skipped: dict[str, int] = {}
@@ -389,6 +575,10 @@ class ControlCenter:
                 pid = _s(o.get("project_id"), 120)
                 if allowed and pid and pid not in allowed:
                     skipped["project_not_allowed"] = skipped.get("project_not_allowed", 0) + 1
+                    continue
+                if not pid and (allowed or t in PROJECT_SCOPED_TYPES):
+                    # an empty project id would slip past the allowlist
+                    skipped["project_id_required"] = skipped.get("project_id_required", 0) + 1
                     continue
                 fn = getattr(self, f"_in_{str(t).replace('-', '_')}", None)
                 if fn is None:
@@ -407,13 +597,24 @@ class ControlCenter:
                 counts[t] = counts.get(t, 0) + 1
             if src:
                 c.execute("UPDATE cc_sources SET last_seen=? WHERE source_id=?", (now, src))
+            if bid and src:
+                c.execute("INSERT OR IGNORE INTO cc_batches (source_id, batch_id, boot_id, ts, "
+                          "result) VALUES (?,?,?,?,?)",
+                          (src, bid, _s((batch.get("source") or {}).get("boot_id"), 64), now,
+                           _j({"ok": True, "accepted": counts, "skipped": skipped})))
+                c.execute("DELETE FROM cc_batches WHERE source_id=? AND batch_id NOT IN (SELECT "
+                          "batch_id FROM cc_batches WHERE source_id=? ORDER BY ts DESC LIMIT ?)",
+                          (src, src, BATCH_MEMORY))
         for args in derived:
             if args[0] == "raise":
                 self.raise_alert(*args[1:])
             else:
                 self._resolve(*args[1:])
         self._notify()
-        return {"ok": True, "accepted": counts, "skipped": skipped, "server_ts": now}
+        out = {"ok": True, "accepted": counts, "skipped": skipped, "server_ts": now}
+        if bid:
+            out["batch_id"] = bid
+        return out
 
     # each _in_<type>(conn, obs, settings, now, source) -> derived alert ops
 
@@ -451,8 +652,10 @@ class ControlCenter:
                                     old.get("last_activity_ts") or 0) or None,
             "updated_ts": now, "data": _j(data),
         }
-        seq = self._feed(c, "session", row["project_id"], sid, sid)
-        row["seq"] = seq
+        same = bool(old) and all(old.get(k) == v for k, v in row.items()
+                                 if k not in ("updated_ts", "status_ts"))
+        # an unchanged re-send (bridge restart, retry) writes no feed row: no SSE churn
+        row["seq"] = old.get("seq") if same else self._feed(c, "session", row["project_id"], sid, sid)
         cols = ", ".join(row)
         c.execute(f"INSERT INTO cc_sessions (session_id, {cols}) VALUES (?,{','.join('?' * len(row))}) "
                   f"ON CONFLICT(session_id) DO UPDATE SET "
@@ -470,7 +673,11 @@ class ControlCenter:
         if isinstance(data.get("error"), (dict, list, str)):
             data["error"] = _cap(_j(data["error"]) if not isinstance(data["error"], str)
                                  else data["error"], 4000)[0]
-        seq = self._feed(c, "message", o.get("project_id"), sid, mid)
+        prev = self._rows(c, "SELECT role, completed_ts, data, seq FROM cc_messages WHERE "
+                             "message_id=?", (mid,))
+        same = bool(prev) and prev[0]["role"] == _s(o.get("role"), 20) and \
+            prev[0]["completed_ts"] == _f(o.get("completed_ts")) and prev[0]["data"] == _j(data)
+        seq = prev[0]["seq"] if same else self._feed(c, "message", o.get("project_id"), sid, mid)
         c.execute("INSERT INTO cc_messages (message_id, session_id, project_id, role, created_ts, "
                   "completed_ts, data, seq) VALUES (?,?,?,?,?,?,?,?) ON CONFLICT(message_id) DO "
                   "UPDATE SET role=excluded.role, completed_ts=excluded.completed_ts, "
@@ -527,7 +734,10 @@ class ControlCenter:
                     data[k] = o[k] if not isinstance(o[k], str) else _cap(o[k], 4000)[0]
             if kind in ("retry", "error"):
                 text = _s(o.get("error") or o.get("text"), 4000)
-        seq = self._feed(c, "part", o.get("project_id"), sid, pid_)
+        prev = self._rows(c, "SELECT kind, text, data, seq FROM cc_parts WHERE part_id=?", (pid_,))
+        same = bool(prev) and prev[0]["kind"] == kind and prev[0]["text"] == text and \
+            prev[0]["data"] == _j(data)
+        seq = prev[0]["seq"] if same else self._feed(c, "part", o.get("project_id"), sid, pid_)
         ts = _f(o.get("ts")) or data["time"].get("start") or now
         c.execute("INSERT INTO cc_parts (part_id, message_id, session_id, project_id, kind, ts, text, "
                   "data, seq, received_ts) VALUES (?,?,?,?,?,?,?,?,?,?) ON CONFLICT(part_id) DO "
@@ -598,8 +808,11 @@ class ControlCenter:
         data = {k: o.get(k) for k in ("questions", "permission", "patterns", "tool", "always",
                                       "metadata", "blocking", "agent") if o.get(k) is not None}
         status = "resolved" if o.get("resolved") else "open"
-        old = self._rows(c, "SELECT status FROM cc_pending WHERE request_id=?", (rid,))
-        seq = self._feed(c, "pending", o.get("project_id"), o.get("session_id"), rid)
+        old = self._rows(c, "SELECT status, data, seq FROM cc_pending WHERE request_id=?", (rid,))
+        same = bool(old) and old[0]["status"] == status and (status != "open" or
+                                                             old[0]["data"] == _j(data))
+        seq = old[0]["seq"] if same else self._feed(c, "pending", o.get("project_id"),
+                                                    o.get("session_id"), rid)
         c.execute("INSERT INTO cc_pending (request_id, kind, project_id, task_id, session_id, status, "
                   "data, created_ts, resolved_ts, seq) VALUES (?,?,?,?,?,?,?,?,?,?) ON "
                   "CONFLICT(request_id) DO UPDATE SET status=excluded.status, data=CASE WHEN "
@@ -632,11 +845,12 @@ class ControlCenter:
         if not pid or not tid:
             raise ValueError("task ids")
         state = _s(o.get("state"), 30)
-        old = self._rows(c, "SELECT state, data FROM cc_tasks WHERE project_id=? AND task_id=?",
-                         (pid, tid))
+        old = self._rows(c, "SELECT state, data, seq FROM cc_tasks WHERE project_id=? AND "
+                            "task_id=?", (pid, tid))
         prev = old[0]["state"] if old else ""
         data = {k: v for k, v in o.items() if k not in ("type", "project_id", "task_id")}
-        seq = self._feed(c, "task", pid, o.get("session_id"), f"{pid}/{tid}")
+        same = bool(old) and prev == state and old[0]["data"] == _j(data)
+        seq = old[0]["seq"] if same else self._feed(c, "task", pid, o.get("session_id"), f"{pid}/{tid}")
         c.execute("INSERT INTO cc_tasks (project_id, task_id, state, data, source_ts, received_ts, seq) "
                   "VALUES (?,?,?,?,?,?,?) ON CONFLICT(project_id, task_id) DO UPDATE SET "
                   "state=excluded.state, data=excluded.data, source_ts=excluded.source_ts, "
@@ -651,8 +865,34 @@ class ControlCenter:
                         f"revision {str(ap.get('revision') or '')[:12]} — stage "
                         f"{ap.get('stage') or '?'}", ref))
         if state == "BLOCKED":
-            out.append(("raise", f"blocked:{pid}:{tid}:{_hash(o.get('blocker'))}", "blocker",
-                        "high", f"{tid} is BLOCKED", _s(o.get("blocker"), 600), ref))
+            bc = _s(o.get("blocker_class"), 40)
+            if bc in ENV_BLOCKER_CLASSES:
+                # an environment fault (Rojo down, MCP failed ...) is not a product
+                # defect: a typed readiness warning, same dedupe prefix
+                failing = [r for r in (o.get("readiness") or []) if isinstance(r, dict)
+                           and r.get("ok") is not True and r.get("blocking", True)]
+                out.append(("raise", f"blocked:{pid}:{tid}:{_hash(o.get('blocker'))}", "readiness",
+                            "warning", f"{tid} waits on its {bc} ({len(failing) or '?'} readiness "
+                                       f"check(s) failing)",
+                            _s(o.get("blocker"), 600) or ", ".join(
+                                _s(r.get("name"), 80) for r in failing[:6]), ref))
+            else:
+                out.append(("raise", f"blocked:{pid}:{tid}:{_hash(o.get('blocker'))}", "blocker",
+                            "high", f"{tid} is BLOCKED", _s(o.get("blocker"), 600), ref))
+        open_dec = {}
+        for dcn in (o.get("decisions") or []):
+            if isinstance(dcn, dict) and dcn.get("status") == "open" and dcn.get("decision_id"):
+                open_dec[_s(dcn["decision_id"], 120)] = dcn
+        for did, dcn in open_dec.items():
+            out.append(("raise", f"decision:{pid}:{tid}:{did}", "decision", "high",
+                        f"{tid}: decision needed ({_s(dcn.get('kind'), 40) or 'decision'})",
+                        _s(dcn.get("question"), 600), ref))
+        if o.get("decisions") is not None:
+            for a in self._rows(c, "SELECT dedupe_key FROM cc_alerts WHERE dedupe_key LIKE ? AND "
+                                   "status IN ('new','acknowledged')", (f"decision:{pid}:{tid}:%",)):
+                if a["dedupe_key"].split(":", 3)[3] not in open_dec:
+                    out.append(("resolve", a["dedupe_key"], "decision no longer open "
+                                "(answered, superseded or withdrawn)", "answered"))
         if state == "FAILED":
             out.append(("raise", f"failed:{pid}:{tid}:{o.get('attempt')}", "failure", "high",
                         f"{tid} FAILED", _s(o.get("reason") or o.get("next_action"), 600), ref))
@@ -705,7 +945,11 @@ class ControlCenter:
             raise ValueError("unit id")
         pid, tid = _s(o.get("project_id"), 120), _s(o.get("task_id"), 120)
         data = {k: v for k, v in o.items() if k not in ("type",)}
-        seq = self._feed(c, "lane_unit", pid, o.get("session_id") or "", uid)
+        prev = self._rows(c, "SELECT status, data, seq FROM cc_lane_units WHERE unit_id=?", (uid,))
+        same = bool(prev) and prev[0]["status"] == _s(o.get("status"), 20) and \
+            prev[0]["data"] == _j(data)
+        seq = prev[0]["seq"] if same else self._feed(c, "lane_unit", pid, o.get("session_id") or "",
+                                                     uid)
         c.execute("INSERT INTO cc_lane_units (unit_id, project_id, task_id, lane, status, session_id, "
                   "parent_session, parent_unit, artifact_id, data, updated_ts, received_ts, seq) "
                   "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(unit_id) DO UPDATE SET "
@@ -735,7 +979,13 @@ class ControlCenter:
             thumb = None
         data = {k: v for k, v in o.items() if k not in ("type", "thumbnail_b64")}
         data["thumbnail"] = bool(thumb)
-        seq = self._feed(c, "artifact", o.get("project_id"), "", aid)
+        prev = self._rows(c, "SELECT status, data, seq, thumb IS NOT NULL AS has FROM cc_artifacts "
+                             "WHERE artifact_id=?", (aid,))
+        if prev and not thumb and prev[0]["has"]:
+            data["thumbnail"] = True                       # the stored thumbnail is kept
+        same = bool(prev) and prev[0]["status"] == _s(o.get("status"), 20) and \
+            prev[0]["data"] == _j(data) and not (thumb and not prev[0]["has"])
+        seq = prev[0]["seq"] if same else self._feed(c, "artifact", o.get("project_id"), "", aid)
         c.execute("INSERT INTO cc_artifacts (artifact_id, project_id, task_id, rel_path, generation, "
                   "sha256, status, data, thumb, mime, received_ts, seq) VALUES (?,?,?,?,?,?,?,?,?,?,?,?) "
                   "ON CONFLICT(artifact_id) DO UPDATE SET status=excluded.status, data=excluded.data, "
@@ -751,12 +1001,14 @@ class ControlCenter:
         pid = _s(o.get("project_id"), 120)
         if not pid:
             raise ValueError("project")
+        data = _j({k: o.get(k) for k in ("enabled", "lanes", "settings") if o.get(k) is not None})
+        paused = 1 if o.get("paused") else 0
+        prev = self._rows(c, "SELECT paused, data FROM cc_lane_state WHERE project_id=?", (pid,))
         c.execute("INSERT INTO cc_lane_state (project_id, paused, data, received_ts) VALUES (?,?,?,?) "
                   "ON CONFLICT(project_id) DO UPDATE SET paused=excluded.paused, data=excluded.data, "
-                  "received_ts=excluded.received_ts",
-                  (pid, 1 if o.get("paused") else 0, _j({k: o.get(k) for k in (
-                      "enabled", "lanes", "settings") if o.get(k) is not None}), now))
-        self._feed(c, "lane_state", pid, "", pid)
+                  "received_ts=excluded.received_ts", (pid, paused, data, now))
+        if not (prev and prev[0]["paused"] == paused and prev[0]["data"] == data):
+            self._feed(c, "lane_state", pid, "", pid)
         return []
 
     # ------------------------------------------------------------------ lanes (reads)
@@ -949,13 +1201,18 @@ class ControlCenter:
                              "not claimed by the coordinator before it expired; nothing was sent")
         return out
 
-    def sources(self) -> list[dict]:
+    def sources(self, projects: Optional[list] = None) -> list[dict]:
+        """Every heart-beating source. A project-restricted operator sees only
+        sources that declared at least one of its projects (hosts and project
+        lists of other projects stay hidden)."""
         st = self.settings()
         now = self.clock()
         out = []
         for s in self.db.query("SELECT * FROM cc_sources ORDER BY kind, source_id"):
             limit = st["coordinator_expiry_s"] if s["kind"] == "coordinator" else st["bridge_expiry_s"]
             s["detail"] = _uj(s["detail"], {})
+            if projects and not set(s["detail"].get("projects") or []) & set(projects):
+                continue
             s["capabilities"] = _uj(s["capabilities"], {})
             s["age_s"] = round(now - (s["last_seen"] or 0), 1)
             s["fresh"] = s["age_s"] <= limit
@@ -983,8 +1240,7 @@ class ControlCenter:
         for r in self.db.query(f"SELECT * FROM cc_tasks WHERE received_ts >= ?{pf} ORDER BY "
                                "received_ts DESC", (since, *pa)):
             r["data"] = _uj(r["data"], {})
-            r["verification_view"] = self._safe_view(r)
-            tasks.append(r)
+            tasks.append(self._with_views(r))
         # Work-tab snapshots fill in tasks the bridge hasn't reported yet
         known = {(t["project_id"], t["task_id"]) for t in tasks}
         for r in self.db.query(f"SELECT * FROM work_tasks WHERE updated_ts >= ?{pf}", (since, *pa)):
@@ -1012,7 +1268,7 @@ class ControlCenter:
             p["data"] = _uj(p["data"], {})
         return {"contract": CONTRACT, "server_ts": self.clock(), "seq": self.last_seq(),
                 "tasks": tasks, "sessions": sessions, "pending": pend,
-                "sources": self.sources(), "projects": sorted(
+                "sources": self.sources(projects), "projects": sorted(
                     {t["project_id"] for t in tasks} | {s["project_id"] for s in sessions if
                                                          s.get("project_id")}),
                 "settings": {k: self.settings()[k] for k in ("min_refresh_s",
@@ -1134,6 +1390,128 @@ class ControlCenter:
                 "attempts": {"used": used, "max": mx, "extra": extra, "exhausted": exhausted,
                              "label": label},
                 "recovery": recovery}
+
+    def _safe_task_view(self, task: dict) -> dict:
+        try:
+            return self.task_view(task)
+        except Exception as e:                                    # noqa: BLE001
+            return {"error": f"task view unavailable: {type(e).__name__}"}
+
+    # raw lifecycle lists the task_view already normalizes: the overview and the
+    # live feed send task_view only (the /tasks/{p}/{t}/view route has both views)
+    RAW_LIFECYCLE_KEYS = ("readiness", "obligations", "evidence", "recovered",
+                          "finding_history", "budgets", "decisions", "memory")
+
+    def _with_views(self, r: dict) -> dict:
+        r["verification_view"] = self._safe_view(r)
+        r["task_view"] = self._safe_task_view(r)
+        if not r["task_view"].get("error"):
+            r["data"] = {k: v for k, v in (r.get("data") or {}).items()
+                         if k not in self.RAW_LIFECYCLE_KEYS}
+        return r
+
+    _OB_DONE = ("verified", "waived", "superseded", "done", "waived_by_human")
+
+    def task_view(self, task: dict) -> dict:
+        """The v0.122 sprint-management fields the bridge reported, normalized
+        for the page: readiness, the required-work checklist, evidence per
+        check, recovered results, repeated findings, budgets and decisions.
+        Absent fields are reported as such (`reported`), never invented."""
+        d = task.get("data") or {}
+        pid, tid = task.get("project_id"), task.get("task_id")
+        lst = lambda v: [x for x in v if isinstance(x, dict)] if isinstance(v, list) else []  # noqa: E731
+        reported = [k for k in ("readiness", "obligations", "evidence", "recovered",
+                                "finding_history", "budgets", "decisions") if k in d]
+        ready = lst(d.get("readiness"))
+        items = lst(d.get("obligations"))
+        open_items = [x for x in items if x.get("status") not in self._OB_DONE]
+        phases: dict[str, dict] = {}
+        for x in items:
+            ph = phases.setdefault(str(x.get("phase") or "?"), {"total": 0, "open": 0})
+            ph["total"] += 1
+            ph["open"] += x.get("status") not in self._OB_DONE
+        nxt = next((x for x in open_items if x.get("next_action")), None)
+        ev = d.get("evidence") if isinstance(d.get("evidence"), dict) else {}
+        fh = d.get("finding_history") if isinstance(d.get("finding_history"), dict) else {}
+        decs = lst(d.get("decisions"))
+        live = {}
+        for a in self.db.query("SELECT action_id, actor, status, payload, created_ts FROM cc_actions "
+                               "WHERE project_id=? AND task_id=? AND kind='decision_answer' AND "
+                               "status IN ('accepted','claimed','queued','delivered','applied') "
+                               "ORDER BY created_ts", (pid, tid)):
+            did = (_uj(a.get("payload"), {}) or {}).get("decision_id")
+            if did:
+                live[did] = {"action_id": a["action_id"], "status": a["status"], "by": a["actor"],
+                             "ts": a["created_ts"]}
+        for x in decs:
+            # the page sends this back with an answer (bound to what it rendered)
+            x["question_hash"] = _hash(x.get("question") or "")
+            if x.get("decision_id") in live:
+                x["answer_action"] = live[x["decision_id"]]
+        return {"reported": reported, "tables": d.get("lifecycle_tables") or [],
+                "blocker_class": d.get("blocker_class"),
+                "readiness": {"items": ready,
+                              "failing": sum(1 for r in ready if r.get("ok") is not True
+                                             and r.get("blocking")),
+                              "unknown": sum(1 for r in ready if r.get("ok") is None)},
+                "checklist": {"items": items, "total": len(items), "open": len(open_items),
+                              "by_phase": phases,
+                              "next_action": (nxt or {}).get("next_action") or d.get("next_action"),
+                              "blocking": [x for x in open_items if x.get("blocking_reason")][:10]},
+                "evidence": {"counts": ev.get("counts") or {}, "checks": lst(ev.get("checks")),
+                             "chains": lst(ev.get("chains")), "more": ev.get("more") or 0},
+                "recovered": lst(d.get("recovered")),
+                "findings": {"items": lst(fh.get("findings")), "repairs": lst(fh.get("repairs")),
+                             "repeated": fh.get("repeated") or 0,
+                             "approach_changed": fh.get("approach_changed")},
+                "budgets": d.get("budgets") if isinstance(d.get("budgets"), dict) else None,
+                "decisions": {"open": [x for x in decs if x.get("status") == "open"],
+                              "closed": [x for x in decs if x.get("status") != "open"][:15]},
+                "memory": lst(d.get("memory"))}
+
+    def task_row(self, project: str, task: str, projects: list) -> dict:
+        if projects and project not in projects:
+            raise ControlError("unknown task", "not_found", 404)
+        r = self.db.query_one("SELECT * FROM cc_tasks WHERE project_id=? AND task_id=?",
+                              (project, task))
+        if not r:
+            raise ControlError("unknown task", "not_found", 404)
+        r["data"] = _uj(r["data"], {})
+        return r
+
+    def task_view_for(self, project: str, task: str, projects: list) -> dict:
+        r = self.task_row(project, task, projects)
+        return {"project_id": project, "task_id": task, "state": r["state"],
+                "received_ts": r["received_ts"], "view": self.task_view(r),
+                "verification_view": self._safe_view(r), "server_ts": self.clock()}
+
+    def task_helpers(self, project: str, task: str, projects: list) -> dict:
+        """Ordinary and lane helper units of one task, with a display phase,
+        the reason code and the disposition. A superset of /lanes' units."""
+        r = self.task_row(project, task, projects)
+        units = []
+        for u in (r["data"].get("helpers") or []):
+            # lane units (lane set) are listed once, from the lane observations
+            if isinstance(u, dict) and not u.get("lane"):
+                units.append({**u, "phase": helper_phase(u),
+                              "disposition": u.get("feedback") or None, "kind_family": "ordinary"})
+        lanes = []
+        for x in self.db.query("SELECT unit_id, status, data FROM cc_lane_units WHERE project_id=? "
+                               "AND task_id=?", (project, task)):
+            dd = _uj(x["data"], {}) or {}
+            u = {k: dd.get(k) for k in ("unit_id", "lane", "kind", "responsibility", "persona",
+                                        "backend", "session_id", "reason", "reason_code",
+                                        "next_eligible", "feedback", "started_ts", "finished_ts",
+                                        "tokens")}
+            u["kind_family"] = "lane"
+            u.update(unit_id=x["unit_id"], status=x["status"])
+            u["phase"] = helper_phase({**u, "phase": dd.get("phase")})
+            u["disposition"] = u.get("feedback")
+            lanes.append(u)
+        pending = [u["unit_id"] for u in units + lanes
+                   if u.get("status") == "delivered" and u.get("disposition") in (None, "delivered")]
+        return {"units": units, "lanes": lanes, "disposition_pending": pending,
+                "server_ts": self.clock()}
 
     def session(self, session_id: str, projects: list) -> dict:
         r = self.db.query_one("SELECT * FROM cc_sessions WHERE session_id=?", (session_id,))
@@ -1540,6 +1918,9 @@ class ControlCenter:
             if k in ("part", "message") and r["session_id"] not in subs:
                 continue
             ent = self._entity(k, eid)
+            if k == "source" and projects and ent is not None and not set(
+                    (ent.get("detail") or {}).get("projects") or []) & set(projects):
+                continue
             if ent is not None:
                 out.append({"seq": r["seq"], "kind": k, "id": eid, "entity": ent})
         return out, last
@@ -1561,7 +1942,7 @@ class ControlCenter:
             r = self.db.query_one("SELECT * FROM cc_tasks WHERE project_id=? AND task_id=?", (p, t))
             if r:
                 r["data"] = _uj(r["data"], {})
-                r["verification_view"] = self._safe_view(r)
+                self._with_views(r)
             return r
         if kind == "transition":
             p, t, n = eid.split("/", 2)
@@ -1665,7 +2046,8 @@ class ControlCenter:
 
     # ------------------------------------------------------------------ actions
 
-    def create_action(self, actor: str, projects: list, body: dict) -> dict:
+    def create_action(self, actor: str, projects: list, body: dict,
+                      scopes: Optional[list] = None) -> dict:
         """Accept a typed operator action after checking it against what Foundry
         currently knows. The coordinator checks it again when it applies it."""
         kind = body.get("kind")
@@ -1688,13 +2070,13 @@ class ControlCenter:
                                "unknown_task", 404)
         tdata = _uj(task["data"], {})
         expected = dict(body.get("expected") or {})
-        if kind == "lanes":
-            # project-wide operational switch: the task id only routes the action,
-            # so its state is not compared (the coordinator skips it too)
+        if kind in ("lanes", "decision_answer"):
+            # lanes: a project-wide switch the task id only routes; decision_answer:
+            # bound to the decision itself (its open status), not the task state
             expected.pop("task_state", None)
         else:
             expected.setdefault("task_state", task["state"])
-        if kind != "lanes" and expected["task_state"] != task["state"]:
+        if kind not in ("lanes", "decision_answer") and expected["task_state"] != task["state"]:
             raise ControlError(f"{tid} is now {task['state']} (you saw {expected['task_state']}); "
                                "review the current state first", "stale_state", 409,
                                current=task["state"])
@@ -1806,6 +2188,52 @@ class ControlCenter:
             # (never enables a lane the profile has off)
             payload = {"paused": bool(body.get("paused", True)), "note": _s(body.get("note"), 500)}
             expected.pop("task_state", None)
+        elif kind == "decision_answer":
+            # authority is the operator, always: the signed-in session supplies the
+            # actor; a body claiming any other authority (a policy, a model) is refused
+            if scopes is not None and not {"operator", "admin"} & set(scopes or []):
+                raise ControlError("answering a decision needs an operator session", "forbidden", 403)
+            if body.get("authority") not in (None, "", DECISION_AUTHORITY):
+                raise ControlError("decisions are answered here with operator authority only",
+                                   "authority_not_operator", 403)
+            did = _s(body.get("decision_id"), 120)
+            dec = next((x for x in (tdata.get("decisions") or []) if isinstance(x, dict)
+                        and x.get("decision_id") == did), None) if did else None
+            if not dec:
+                raise ControlError(f"no decision {did!r} reported for {tid}", "unknown_decision", 404)
+            if dec.get("status") != "open":
+                raise ControlError(f"decision {did} is {dec.get('status')}, not open",
+                                   "stale_decision", 409, current=dec.get("status"))
+            # bound to the question the operator was shown: the page sends the
+            # hash it rendered (task_view decisions carry it); none, or another
+            # one, is refused, never filled in here
+            qh = _hash(dec.get("question") or "")
+            if not body.get("question_hash"):
+                raise ControlError("question_hash is required: answer from the rendered question",
+                                   "question_hash_required", 400)
+            if str(body["question_hash"]) != qh:
+                raise ControlError("the question changed since you opened it; read it again",
+                                   "stale_decision", 409, current_hash=qh)
+            option = _s(body.get("option"), 300)
+            opts = [str(x) for x in (dec.get("options") or [])]
+            if option and opts and option not in opts:
+                raise ControlError("option is not one of the decision's options")
+            answer = str(body.get("answer") or "").strip()
+            if not answer and not option:
+                raise ControlError("choose an option or write an answer")
+            if len(answer) > st["max_instruction_chars"]:
+                raise ControlError(f"answer is over {st['max_instruction_chars']} characters")
+            if self.db.query_one("SELECT action_id FROM cc_actions WHERE project_id=? AND task_id=? "
+                                 "AND kind='decision_answer' AND status IN ('accepted','claimed',"
+                                 "'queued','delivered','applied') AND json_extract(payload, "
+                                 "'$.decision_id')=?", (pid, tid, did)):
+                raise ControlError("an answer to this decision is already in progress or applied",
+                                   "duplicate_answer", 409)
+            payload = {"decision_id": did, "decision_kind": _s(dec.get("kind"), 60),
+                       "answer": answer, "option": option, "note": _s(body.get("note"), 2000),
+                       "authority": DECISION_AUTHORITY, "actor": actor, "question_hash": qh,
+                       "revision": _s(body.get("revision") or tdata.get("head_sha"), 64)}
+            expected.update(decision_id=did, decision_status="open", question_hash=qh)
         elif kind == "withdraw_instruction":
             target = _s(body.get("target_action_id"), 80)
             t = self.db.query_one("SELECT * FROM cc_actions WHERE action_id=? AND kind='instruction'",
@@ -1861,6 +2289,10 @@ class ControlCenter:
         sensitive text); length only."""
         if kind == "lanes":
             return f"proactive lanes {'paused' if p.get('paused') else 'un-paused'} ({tid})"
+        if kind == "decision_answer":
+            return (f"answer decision {p.get('decision_id')} ({p.get('decision_kind') or '?'}) as "
+                    f"{p.get('authority')}" + (" · option chosen" if p.get("option") else "")
+                    + f", {len(p.get('answer') or '')} chars")
         if kind == "answer_question":
             return f"answer {len(p.get('answers') or [])} question(s), " \
                    f"{sum(len(x) for a in p.get('answers') or [] for x in a)} chars"
@@ -1964,6 +2396,9 @@ class ControlCenter:
         coordinator keys every action in its own store)."""
         if not source_id or not projects:
             raise ControlError("source_id and projects are required")
+        if self.source_compat(source_id) == "refuse":
+            raise ControlError(f"{source_id} is refused by the version gate (see its heartbeat "
+                               "compat); no actions are handed out", "version_refused", 409)
         if allowed:
             projects = [p for p in projects if p in allowed]
         if not projects:
@@ -1971,16 +2406,37 @@ class ControlCenter:
         now = self.clock()
         q = ",".join("?" * len(projects))
         out = []
+        # an action kind the source never declared is not handed to it: it stays
+        # accepted (another, capable source may claim it) with the reason shown
+        feats = self.source_feature_set(source_id)
+        withheld = [k for k, f in FEATURE_GATED_ACTIONS.items() if f not in feats]
+        wq = (f" AND kind NOT IN ({','.join('?' * len(withheld))})") if withheld else ""
+        noted = False
         with self._tx() as c:
+            for k in withheld:
+                why = (f"waiting: {source_id} does not declare the {FEATURE_GATED_ACTIONS[k]} "
+                       f"feature (upgrade the coordinator); not handed out")
+                for r in self._rows(c, f"SELECT action_id, project_id, session_id, status_detail "
+                                       f"FROM cc_actions WHERE project_id IN ({q}) AND kind=? AND "
+                                       f"status='accepted' AND expires_ts >= ?",
+                                    (*projects, k, now)):
+                    if r["status_detail"] != why:
+                        c.execute("UPDATE cc_actions SET status_detail=?, updated_ts=? WHERE "
+                                  "action_id=?", (why, now, r["action_id"]))
+                        c.execute("INSERT INTO cc_action_log (action_id, ts, status, actor, detail) "
+                                  "VALUES (?,?,?,?,?)", (r["action_id"], now, "accepted", source_id,
+                                                         why))
+                        self._feed(c, "action", r["project_id"], r["session_id"], r["action_id"])
+                        noted = True
             # re-offered to the same source: claimed but never reported (it can
             # reconcile from its own store), and replies it is still waiting to
             # send because the engine hadn't recorded the question yet
             rows = self._rows(c, f"SELECT * FROM cc_actions WHERE project_id IN ({q}) AND ((status="
                                  f"'accepted' AND expires_ts >= ?) OR (claimed_by=? AND ((status="
                                  f"'claimed' AND claimed_ts < ?) OR (status='queued' AND kind IN "
-                                 f"('answer_question','reply_permission') AND expires_ts >= ?)))) "
+                                 f"('answer_question','reply_permission') AND expires_ts >= ?)))){wq} "
                                  f"ORDER BY created_ts LIMIT ?",
-                              (*projects, now, source_id, now - 60, now, limit))
+                              (*projects, now, source_id, now - 60, now, *withheld, limit))
             for r in rows:
                 if r["status"] == "accepted":
                     c.execute("UPDATE cc_actions SET status='claimed', claimed_by=?, claimed_ts=?, "
@@ -1995,7 +2451,7 @@ class ControlCenter:
                             "payload": _uj(r["payload"], {}), "expected": _uj(r["expected"], {}),
                             "created_ts": r["created_ts"], "expires_ts": r["expires_ts"],
                             "reoffered": r["status"] != "accepted"})
-        if out:
+        if out or noted:
             self._notify()
         return out
 
@@ -2009,6 +2465,11 @@ class ControlCenter:
         v = self._set_action(action_id, status, source_id, detail or status, result=result or {})
         if status == "applied" and a["request_id"]:
             self._resolve(f"pending:{a['request_id']}", f"answered by {a['actor']}", "answered")
+        if status == "applied" and a["kind"] == "decision_answer":
+            did = (_uj(a.get("payload"), {}) or {}).get("decision_id")
+            if did:
+                self._resolve(f"decision:{a['project_id']}:{a['task_id']}:{did}",
+                              f"answered by {a['actor']} (operator)", "answered")
         if status == "applied" and a["kind"] in ("approve_review", "reject_review"):
             for al in self.db.query("SELECT dedupe_key FROM cc_alerts WHERE dedupe_key LIKE ? AND "
                                     "status IN ('new','acknowledged')",
@@ -2042,7 +2503,8 @@ class ControlCenter:
                          ("DELETE FROM cc_op_sessions WHERE expires_ts < ?", self.clock()),
                          ("DELETE FROM cc_drafts WHERE updated_ts < ?", cut),
                          ("DELETE FROM cc_lane_units WHERE received_ts < ?", cut),
-                         ("DELETE FROM cc_artifacts WHERE received_ts < ?", cut)):
+                         ("DELETE FROM cc_artifacts WHERE received_ts < ?", cut),
+                         ("DELETE FROM cc_batches WHERE ts < ?", cut)):
             n += self.db.execute_count(sql, (arg,))
         return n
 

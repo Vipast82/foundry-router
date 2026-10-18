@@ -42,6 +42,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+import uuid
 from typing import Callable, Optional
 
 CONTRACT = "foundry.cc.v1"
@@ -386,21 +387,121 @@ class CoordReader:
         return self._q("SELECT review_id, reviewed_sha, role, persona, verdict, valid, error, ts FROM "
                        "reviews WHERE project_id=? AND task_id=? ORDER BY ts", (project_id, task_id))
 
+    HELPER_KEYS = ("unit_id", "project_id", "task_id", "kind", "responsibility", "value", "source",
+                   "status", "persona", "backend", "session_id", "parent_session", "reason",
+                   "next_eligible", "attempts", "delivered_session", "updated_ts",
+                   # v0.122 disposition / vocabulary (absent on older stores: left out)
+                   "lane", "feedback", "feedback_detail", "reason_code", "phase", "started_ts",
+                   "finished_ts", "tokens", "investigation_key")
+
     def helper_units(self) -> list[dict]:
-        return self._q("SELECT unit_id, project_id, task_id, kind, responsibility, value, source, "
-                       "status, persona, backend, session_id, parent_session, reason, "
-                       "next_eligible, attempts, delivered_session, updated_ts FROM helper_units "
-                       "ORDER BY created_ts")
+        # SELECT * so a store with or without the v0.122 columns both work
+        out = []
+        for r in self._q("SELECT * FROM helper_units ORDER BY created_ts"):
+            u = {k: r.get(k) for k in self.HELPER_KEYS if k in r}
+            if "feedback_detail" in u:
+                u["feedback_detail"] = _j(u["feedback_detail"]) if isinstance(
+                    u["feedback_detail"], str) else u["feedback_detail"]
+            for k in ("reason", "responsibility"):
+                if isinstance(u.get(k), str):
+                    u[k] = u[k][:600]
+            out.append(u)
+        return out
+
+    # ---- v0.122 lifecycle tables (evidence / obligations / recovery). Each may
+    # not exist yet (lifecycle off, or an older coordinator): a missing table
+    # reads as empty, never as an error.
+
+    LIFECYCLE_TABLES = ("ev_records", "ev_chains", "obligations", "findings", "decisions",
+                        "budget_ledger", "repairs", "task_memory")
+
+    def tables(self) -> set:
+        return {r["name"] for r in self._q("SELECT name FROM sqlite_master WHERE type='table'")}
+
+    def task_rows(self, table: str, project_id: str, task_id: str, limit: int = 400,
+                  where: str = "", args: tuple = ()) -> list[dict]:
+        """The NEWEST `limit` rows of one task (ORDER BY rowid DESC LIMIT n),
+        returned oldest first. A bounded read never drops the latest records."""
+        if table not in self.LIFECYCLE_TABLES:
+            raise ValueError(table)
+        try:
+            rows = self._q(f"SELECT * FROM {table} WHERE project_id=? AND task_id=?"
+                           f"{(' AND ' + where) if where else ''} ORDER BY rowid DESC LIMIT ?",
+                           (project_id, task_id, *args, int(limit)))
+        except Exception:                                        # noqa: BLE001
+            return []
+        return rows[::-1]
+
+    def budget_sums(self, project_id: str, task_id: str) -> dict:
+        """Per-counter totals, aggregated in SQL (never truncated by a row cap)."""
+        out = {}
+        for r in self._q("SELECT counter, SUM(CAST(delta AS INTEGER)) AS n FROM budget_ledger "
+                         "WHERE project_id=? AND task_id=? GROUP BY counter",
+                         (project_id, task_id)):
+            if r.get("counter") is not None:
+                out[str(r["counter"])] = int(r["n"] or 0)
+        return out
+
+    def latest_transition(self, project_id: str, task_id: str) -> dict:
+        """The task's newest transition ({to_state, evidence}; {} when none)."""
+        r = self._q("SELECT to_state, evidence FROM transitions WHERE project_id=? AND task_id=? "
+                    "ORDER BY id DESC LIMIT 1", (project_id, task_id))
+        return {"to_state": r[0]["to_state"], "evidence": _j(r[0]["evidence"])} if r else {}
+
+    # in-place UPDATEs don't move COUNT/MAX(rowid): a cheap per-table extra
+    # marker (a timestamp or a counter the writer bumps) catches them
+    _SIG_EXTRA = {"obligations": "MAX(updated_ts)", "ev_chains": "MAX(checked_ts)",
+                  "decisions": "MAX(COALESCE(answered_ts, opened_ts)), "
+                               "SUM(status='open')",
+                  "findings": "SUM(count)", "task_memory": "SUM(status='active')",
+                  "ev_records": "SUM(freshness='fresh'), SUM(superseded_by IS NOT NULL)"}
+
+    def lifecycle_signature(self) -> dict:
+        """Per task: a cheap change marker over the lifecycle tables (row count,
+        max rowid and, where the table has one, an in-place-update marker)."""
+        sig: dict = {}
+        present = self.tables()
+        for i, t in enumerate(self.LIFECYCLE_TABLES):
+            if t not in present:
+                continue
+            extra = self._SIG_EXTRA.get(t)
+            rows = self._q(f"SELECT project_id, task_id, COUNT(*) AS n, MAX(rowid) AS m"
+                           f"{', ' + extra if extra else ''} FROM {t} GROUP BY project_id, task_id")
+            if not rows and extra:          # an older table without the extra column
+                rows = self._q(f"SELECT project_id, task_id, COUNT(*) AS n, MAX(rowid) AS m "
+                               f"FROM {t} GROUP BY project_id, task_id")
+            for r in rows:
+                key = (r.pop("project_id"), r.pop("task_id"))
+                sig.setdefault(key, {})[t] = tuple(r.values())
+        return sig
+
+    def task_events(self, project_id: str, task_id: str, kinds: tuple, like: tuple = (),
+                    limit: int = 20) -> list[dict]:
+        cond = " OR ".join(["kind IN (" + ",".join("?" * len(kinds)) + ")"] +
+                           ["kind LIKE ?"] * len(like))
+        rows = self._q(f"SELECT event_id, ts, kind, session_id, detail FROM events WHERE "
+                       f"project_id=? AND task_id=? AND ({cond}) ORDER BY id DESC LIMIT ?",
+                       (project_id, task_id, *kinds, *like, int(limit)))
+        for r in rows:
+            r["detail"] = _j(r.get("detail"))
+        return rows[::-1]
+
+    LANE_COLS = ("unit_id, project_id, task_id, run_id, kind, lane, responsibility, value, "
+                 "status, persona, backend, session_id, parent_session, parent_unit, depth, "
+                 "artifact_id, snapshot_id, mode, reason, next_eligible, attempts, requests, "
+                 "coalesced, feedback, feedback_detail, envelope, skills, served_model, "
+                 "tokens, packet, created_ts, started_ts, finished_ts, delivered_ts, "
+                 "delivered_session, updated_ts")
 
     def lane_units(self) -> list[dict]:
-        """Proactive lane units (v0.118.0 columns; an older store has none)."""
-        return self._q("SELECT unit_id, project_id, task_id, run_id, kind, lane, responsibility, value, "
-                       "status, persona, backend, session_id, parent_session, parent_unit, depth, "
-                       "artifact_id, snapshot_id, mode, reason, next_eligible, attempts, requests, "
-                       "coalesced, feedback, feedback_detail, envelope, skills, served_model, "
-                       "tokens, packet, created_ts, started_ts, finished_ts, delivered_ts, "
-                       "delivered_session, updated_ts FROM helper_units WHERE lane IS NOT NULL "
-                       "ORDER BY created_ts")
+        """Proactive lane units (v0.118.0 columns; an older store has none),
+        with the v0.122 phase / reason_code when the store has them."""
+        rows = self._q(f"SELECT {self.LANE_COLS}, phase, reason_code FROM helper_units WHERE "
+                       f"lane IS NOT NULL ORDER BY created_ts")
+        if not rows:                     # a pre-0.122 store: no phase / reason_code columns
+            rows = self._q(f"SELECT {self.LANE_COLS} FROM helper_units WHERE lane IS NOT NULL "
+                           f"ORDER BY created_ts")
+        return rows
 
     def artifacts(self) -> list[dict]:
         return self._q("SELECT * FROM artifacts ORDER BY created_ts")
@@ -418,6 +519,328 @@ def _j(v):
         return json.loads(v) if v else {}
     except (TypeError, ValueError):
         return {}
+
+
+def _jl(v) -> list:
+    """A JSON list column (or an already-decoded list); anything else -> []."""
+    if isinstance(v, list):
+        return v
+    if isinstance(v, str) and v:
+        try:
+            x = json.loads(v)
+        except ValueError:
+            return []
+        return x if isinstance(x, list) else []
+    return []
+
+
+def _jv(v):
+    """A JSON column that may hold any value; undecodable text stays text."""
+    if isinstance(v, str) and v[:1] in ("[", "{", '"'):
+        try:
+            return json.loads(v)
+        except ValueError:
+            return v
+    return v
+
+
+# --------------------------------------------------------------------------- lifecycle fields
+# v0.122 sprint management: the bridge reads the evidence / obligations /
+# recovery tables (when they exist) and forwards a bounded per-task summary.
+# Nothing is inferred: a check is "reusable" only when the ledger itself says
+# it is fresh and at least verified; anything else names its reason.
+
+TIER_RANK = {"claim": 0, "observed": 1, "verified": 2, "reviewed": 3, "approved": 4}
+EVIDENCE_STATES = ("reusable", "stale", "missing", "disputed", "excluded")
+LIFECYCLE_MAX_BYTES = 120_000
+
+
+def _ref(r: dict) -> dict:
+    """Provenance of one evidence record: where its bytes came from."""
+    return {k: r.get(k) for k in ("record_id", "session_id", "message_id", "part_id", "call_id",
+                                  "tool", "source", "output_sha", "artifact_id", "artifact_sha",
+                                  "runtime_id", "source_revision") if r.get(k) not in (None, "")}
+
+
+def _rec_ts(r: dict) -> float:
+    try:
+        return float(r.get("ended_ts") or r.get("created_ts") or 0)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _best_record(usable: list) -> Optional[dict]:
+    """The record that decides a check. The NEWEST fresh execution (observed or
+    better: a prose claim is not an execution) decides the result, so a newer
+    FAIL beats an older PASS whatever their tiers; among the fresh PASSes newer
+    than the last fresh non-PASS the highest tier is shown. With no fresh
+    execution: the best tier, then the newest (it then explains why it can't
+    be reused: stale, unknown freshness, only a claim ...)."""
+    if not usable:
+        return None
+    # recency = (timestamp, read order): rows are read oldest first, so a tie on
+    # the timestamp goes to the later row
+    order = {id(r): (_rec_ts(r), i) for i, r in enumerate(usable)}
+    fresh = sorted((r for r in usable if r.get("freshness") == "fresh"
+                    and TIER_RANK.get(r.get("tier"), -1) >= TIER_RANK["observed"]),
+                   key=lambda r: order[id(r)], reverse=True)
+    if fresh:
+        newest = fresh[0]
+        if newest.get("result") != "PASS":
+            return newest
+        last_bad = max((order[id(r)] for r in fresh if r.get("result") != "PASS"), default=None)
+        passes = [r for r in fresh if r.get("result") == "PASS"
+                  and (last_bad is None or order[id(r)] > last_bad)]
+        return max(passes, key=lambda r: (TIER_RANK.get(r.get("tier"), -1), order[id(r)]))
+    return max(usable, key=lambda r: (TIER_RANK.get(r.get("tier"), -1), _rec_ts(r)))
+
+
+def evidence_summary(records: list, chains: list, required: list) -> dict:
+    """Per check: reusable | stale | missing | disputed | excluded, with the
+    reason it has to rerun (or may be reused) and the record's provenance."""
+    by: dict[str, list] = {}
+    for r in records:
+        cid = str(r.get("check_id") or "")
+        if cid:
+            by.setdefault(cid, []).append(r)
+    gaps: dict[str, str] = {}
+    for c in chains:
+        st = c.get("status")
+        if st in ("gap", "order_violation", "void"):
+            for g in _jl(c.get("gaps")):
+                gid = g.get("check_id") if isinstance(g, dict) else g
+                if gid:
+                    gaps[str(gid)] = f"chain {c.get('chain_id')}: {st}"
+    checks = []
+    for cid in list(dict.fromkeys(list(by) + [str(x) for x in required] + list(gaps))):
+        rows = by.get(cid, [])
+        live = [r for r in rows if not r.get("superseded_by")]
+        usable = [r for r in live if r.get("exec_status") != "excluded"]
+        excluded = [r for r in rows if r.get("exec_status") == "excluded"]
+        best = _best_record(usable)
+        e = {"check_id": cid, "records": len(rows), "excluded": len(excluded),
+             "excluded_reasons": list(dict.fromkeys(_cap(r.get("exclusion") or "excluded", 120)
+                                                    for r in excluded))[:5]}
+        if best is None:
+            if excluded and cid not in gaps:
+                e.update(state="excluded", reason="every recorded result is excluded ("
+                         + ", ".join(e["excluded_reasons"]) + ")")
+            else:
+                e.update(state="missing", reason=gaps.get(cid) or "no recorded result")
+            checks.append(e)
+            continue
+        e.update(result=best.get("result"), tier=best.get("tier"),
+                 revision=best.get("source_revision"), freshness=best.get("freshness"),
+                 chain_id=best.get("chain_id"), truncated=bool(best.get("truncated")),
+                 ts=best.get("ended_ts") or best.get("created_ts"), refs=_ref(best))
+        same_rev = {str(r.get("result")) for r in usable
+                    if r.get("source_revision") == best.get("source_revision")
+                    and r.get("result") in ("PASS", "FAIL")}
+        tier_ok = TIER_RANK.get(best.get("tier"), -1) >= TIER_RANK["verified"]
+        if same_rev == {"PASS", "FAIL"}:
+            e.update(state="disputed", reason="PASS and FAIL recorded for the same revision")
+        elif cid in gaps:
+            e.update(state="missing", reason=gaps[cid])
+        elif best.get("freshness") == "stale":
+            e.update(state="stale", reason=_cap(best.get("stale_reason") or "dependencies changed "
+                                                "since it ran", 300))
+        elif best.get("truncated"):
+            e.update(state="missing", reason="output was truncated; never credited above observed")
+        elif best.get("freshness") == "fresh" and tier_ok and best.get("result") == "PASS":
+            e.update(state="reusable", reason=f"fresh {best.get('tier')} PASS: do not rerun")
+        elif best.get("result") == "FAIL":
+            e.update(state="missing", reason="latest usable result is FAIL")
+        elif best.get("freshness") == "fresh" and best.get("result") not in (None, "", "PASS"):
+            e.update(state="missing", reason=f"latest usable result is {_cap(best.get('result'), 40)}")
+        elif not tier_ok:
+            e.update(state="missing", reason=f"only {best.get('tier') or 'unranked'} evidence "
+                                             f"(needs verified)")
+        else:
+            e.update(state="missing", reason=f"freshness {best.get('freshness') or 'unknown'}")
+        checks.append(e)
+    counts = {s: sum(1 for c in checks if c["state"] == s) for s in EVIDENCE_STATES}
+    return {"counts": counts, "checks": checks[:60], "more": max(0, len(checks) - 60),
+            "chains": [{"chain_id": c.get("chain_id"), "status": c.get("status"),
+                        "gaps": [g.get("check_id") if isinstance(g, dict) else g
+                                 for g in _jl(c.get("gaps"))][:20],
+                        "checked_ts": c.get("checked_ts")} for c in chains][:20]}
+
+
+def obligations_checklist(rows: list) -> list:
+    out = []
+    for r in rows[:80]:
+        req = _jl(r.get("required_evidence"))
+        out.append({"id": r.get("obligation_id"), "phase": r.get("phase"),
+                    "title": _cap(r.get("title"), 300), "source": _cap(r.get("source"), 120),
+                    "status": r.get("status"), "blocking_reason": _cap(r.get("blocking_reason"), 400),
+                    "next_action": _cap(r.get("next_action"), 400),
+                    "verified_rev": r.get("verified_rev"), "verified_by": _cap(r.get("verified_by"), 120),
+                    "findings": len(_jl(r.get("findings"))),
+                    "required_evidence": [{"kind": x.get("kind"), "ref": _cap(x.get("ref"), 200)}
+                                          for x in req if isinstance(x, dict)][:10],
+                    "updated_ts": r.get("updated_ts")})
+    return out
+
+
+def finding_history(findings: list, repairs: list) -> dict:
+    reps = sorted(repairs, key=lambda r: (int(r.get("attempt") or 0), float(r.get("ts") or 0)))
+    by_attempt = {int(r.get("attempt") or 0): r for r in reps}
+    fs = []
+    for f in sorted(findings, key=lambda f: -int(f.get("count") or 0))[:40]:
+        last = by_attempt.get(int(f.get("last_seen_attempt") or 0))
+        samples = _jl(f.get("samples"))
+        fs.append({"fingerprint": _cap(f.get("fingerprint"), 64), "class": f.get("class"),
+                   "check_id": f.get("check_id"), "path": _cap(f.get("path"), 300),
+                   "count": int(f.get("count") or 0),
+                   "first_seen_attempt": f.get("first_seen_attempt"),
+                   "last_seen_attempt": f.get("last_seen_attempt"),
+                   "obligation_id": f.get("obligation_id"),
+                   "sample": _cap(samples[0] if samples else "", 400),
+                   "last_strategy": _cap((last or {}).get("strategy"), 400) or None})
+    rs = [{"repair_id": r.get("repair_id"), "attempt": r.get("attempt"),
+           "strategy": _cap(r.get("strategy"), 600), "strategy_fp": _cap(r.get("strategy_fp"), 64),
+           "diagnosis": _cap(r.get("diagnosis"), 400), "outcome": r.get("outcome"),
+           "diff_files": len(_jl(r.get("diff_files"))), "start_rev": r.get("start_rev"),
+           "end_rev": r.get("end_rev"), "ts": r.get("ts")} for r in reps[-6:]]
+    fps = [r["strategy_fp"] for r in rs if r["strategy_fp"]]
+    return {"findings": fs, "repeated": sum(1 for f in fs if f["count"] >= 2), "repairs": rs,
+            "approach_changed": (fps[-1] != fps[-2]) if len(fps) >= 2 else None}
+
+
+def budgets_view(t: dict, limits: dict, ledger: list, reviews: int, now: float,
+                 sums: Optional[dict] = None) -> dict:
+    """Used/max per counter. The ledger (when present) is the source; otherwise
+    the task row's own counters. Guided extra is shown, never folded in.
+    `sums` (per-counter totals aggregated in SQL) wins over summing `ledger`,
+    which may be a bounded sample of the newest rows."""
+    d = t.get("data") or {}
+    summed = sums is not None
+    sums = dict(sums or {})
+    authorized = []
+    for r in ledger:
+        c = str(r.get("counter") or "")
+        if not summed:
+            try:
+                sums[c] = sums.get(c, 0) + int(r.get("delta") or 0)
+            except (TypeError, ValueError):
+                continue
+        if r.get("decision_id"):
+            authorized.append({"counter": c, "delta": r.get("delta"), "decision_id": r.get("decision_id"),
+                               "actor": _cap(r.get("actor"), 80), "reason": _cap(r.get("reason"), 200)})
+
+    def led(*names):
+        for n in names:
+            if n in sums:
+                return sums[n], "budget_ledger"
+        return None, None
+
+    rg = d.get("retry_guidance") if isinstance(d.get("retry_guidance"), dict) else {}
+    granted = 1 if rg.get("status") == "repair" and rg.get("extra_attempts") == 1 else 0
+    out = {}
+    v, src = led("attempt_ordinary", "ordinary", "attempts")
+    out["ordinary"] = {"used": v if v is not None else int(t.get("attempt") or 0),
+                       "max": limits.get("max_attempts"), "source": src or "task row"}
+    v, src = led("attempt_guided", "guided_extra")
+    out["guided_extra"] = {"used": v if v is not None else (1 if granted and int(
+        t.get("attempt") or 0) > int(limits.get("max_attempts") or 0) else 0),
+        "max": granted, "source": src or "retry_guidance",
+        "explained": ("retry guidance granted one extra attempt after the ordinary budget ran out"
+                      + (f" ({_cap(rg.get('persona'), 80)})" if rg.get("persona") else "")
+                      if granted else "no guided extra attempt granted")}
+    v, src = led("attempt_authorized", "authorized")
+    if v is not None:
+        out["authorized"] = {"used": v, "max": None, "source": src,
+                             "explained": "operator-authorized attempts (each backed by a decision)"}
+    v, src = led("sessions")
+    out["sessions"] = {"used": v if v is not None else int(t.get("sessions") or 0),
+                       "max": limits.get("max_sessions_per_task"), "source": src or "task row"}
+    v, src = led("review_calls")
+    out["review_calls"] = {"used": v if v is not None else reviews,
+                           "max": limits.get("max_review_calls"), "source": src or "reviews table"}
+    v, src = led("closeout")
+    out["closeout"] = {"used": v if v is not None else int(d.get("closeout_attempts") or 0),
+                       "max": limits.get("max_closeout_attempts"), "source": src or "task data"}
+    for name, keys in (("transport_retries", ("transport_retries", "provider_retries")),
+                       ("missing_evidence_continuations", ("missing_evidence_continuations",
+                                                           "same_session_continuations")),
+                       ("review_errors", ("review_errors",))):
+        v, src = led(*keys)
+        if v is None and name == "review_errors" and d.get("review_errors") is not None:
+            v, src = int(d.get("review_errors") or 0), "task data"
+        if v is not None:
+            out[name] = {"used": v, "max": None, "source": src}
+    if t.get("started_ts") and limits.get("max_task_minutes"):
+        out["task_minutes"] = {"used": round((now - float(t["started_ts"])) / 60, 1),
+                               "max": limits.get("max_task_minutes"), "source": "task row"}
+    return {"counters": out, "authorized": authorized[-10:],
+            "ledger": {k: v for k, v in sorted(sums.items())},
+            "source": "budget_ledger" if (ledger or sums) else "task row + profile limits"}
+
+
+def decisions_view(rows: list) -> list:
+    out = []
+    for r in rows:
+        ev = _jv(r.get("evidence"))
+        out.append({"decision_id": r.get("decision_id"), "kind": r.get("kind"),
+                    "status": r.get("status"), "question": _cap(r.get("question"), 1500),
+                    "evidence": [_cap(x, 600) for x in (ev if isinstance(ev, list) else
+                                                        [ev] if ev else [])][:10],
+                    "options": [_cap(x.get("label") if isinstance(x, dict) else x, 300)
+                                for x in _jl(r.get("options"))][:12],
+                    "recommendation": _cap(r.get("recommendation"), 800),
+                    "blocks": [_cap(x, 200) for x in _jl(r.get("blocks"))][:12],
+                    "answer": _cap(r.get("answer"), 1500), "authority": r.get("authority"),
+                    "actor": _cap(r.get("actor"), 120), "opened_ts": r.get("opened_ts"),
+                    "answered_ts": r.get("answered_ts"), "supersedes": r.get("supersedes"),
+                    "superseded_by": r.get("superseded_by")})
+    out.sort(key=lambda x: (x["status"] != "open", -(float(x.get("opened_ts") or 0))))
+    n_open = sum(1 for x in out if x["status"] == "open")
+    return out[:max(30, n_open)]                 # every open decision is kept
+
+
+def readiness_view(items, failing: bool = False) -> list:
+    """`failing`: the items come from the engine's readiness_block, which only
+    holds the failing blocking checks (they carry no `ok` of their own)."""
+    out = []
+    for x in (items if isinstance(items, list) else [])[:40]:
+        if isinstance(x, dict):
+            ok = x.get("ok", False if failing else None)
+            out.append({"name": _cap(x.get("name") or x.get("check"), 120),
+                        "ok": ok if ok in (True, False, None) else None,
+                        "cls": _cap(x.get("cls"), 40), "detail": _cap(x.get("detail"), 600),
+                        "blocking": bool(x.get("blocking", x.get("required", True))),
+                        "remedy": _cap(x.get("remedy"), 300) or None})
+    return out
+
+
+def _keep_min(path: str, lst: list) -> int:
+    """How many leading items of a list _bound must never drop: the open
+    decisions (decisions_view sorts them first) are what the operator answers."""
+    if path == "decisions":
+        return sum(1 for x in lst if isinstance(x, dict) and x.get("status") == "open")
+    return 1
+
+
+def _bound(o: dict, max_bytes: int = LIFECYCLE_MAX_BYTES) -> dict:
+    """Keep the lifecycle payload bounded: halve the longest lists until it
+    fits. Open decisions are never dropped."""
+    def size():
+        return len(json.dumps(o, default=str))
+    guard = 0
+    while size() > max_bytes and guard < 30:
+        guard += 1
+        best = None
+        for k, v in o.items():
+            for path, lst in ((k, v),) + (tuple((f"{k}.{kk}", vv) for kk, vv in v.items())
+                                           if isinstance(v, dict) else ()):
+                if isinstance(lst, list) and len(lst) > max(1, _keep_min(path, lst)) and (
+                        best is None or len(lst) > len(best[1])):
+                    best = (path, lst)
+        if best is None:
+            break
+        del best[1][max(len(best[1]) // 2, _keep_min(best[0], best[1])):]
+        o["truncated"] = True
+    return o
 
 
 # --------------------------------------------------------------------------- the bridge
@@ -468,6 +891,12 @@ class TelemetryBridge:
         self.mcp_names: dict[str, list[str]] = {}
         self.replayed = False
         self._task_cache: dict[tuple, tuple] = {}
+        self._tables: Optional[set] = None
+        # one id per bridge process: the server tells a restart from a retry
+        self.boot_id = uuid.uuid4().hex
+        # monotonically increasing per bridge process; part of every batch id
+        self.send_seq = 1
+        self.compat: dict = {}
 
     # ---------------------------------------------------------------- lifecycle
 
@@ -569,14 +998,22 @@ class TelemetryBridge:
         clean, _ = self.redactor.obj(obs)
         try:
             for i in range(0, len(clean), BATCH):
-                self.foundry.telemetry({"contract": CONTRACT, "source": {
-                    "id": self.source_id, "kind": "bridge"}, "sent_ts": self.clock(),
-                    "observations": clean[i:i + BATCH]})
+                chunk = clean[i:i + BATCH]
+                # the same chunk re-sent after a failure carries the same id, so a
+                # batch the server already stored is recognized, not re-applied
+                # the send sequence makes a NEW send unique even when a fact
+                # returns to an earlier value (A -> B -> A): it advances only
+                # after a whole send succeeded, so a retry keeps its ids
+                bid = f"{self.boot_id[:12]}-{self.send_seq}.{i // BATCH}-{_h(chunk)}"
+                self.foundry.telemetry({"contract": CONTRACT, "batch_id": bid, "source": {
+                    "id": self.source_id, "kind": "bridge", "version": _version(),
+                    "boot_id": self.boot_id}, "sent_ts": self.clock(), "observations": chunk})
         except Exception as e:                                   # noqa: BLE001
             self.errors += 1
             self.backoff = min(60.0, max(2.0, self.backoff * 2))
             self.log(f"bridge: Foundry ingest failed ({e}); retrying in {self.backoff:.0f}s")
             return False
+        self.send_seq += 1
         for c in commits:
             c()
         self.backoff = 0.0
@@ -584,9 +1021,13 @@ class TelemetryBridge:
 
     def _heartbeat(self) -> None:
         own = self.reader.owner() or {}
-        payload = {"source": {"id": self.source_id, "kind": "bridge", "host": socket.gethostname(),
-                              "version": _version(), "capabilities": {
+        payload = {"contract": CONTRACT,
+                   "source": {"id": self.source_id, "kind": "bridge", "host": socket.gethostname(),
+                              "version": _version(), "boot_id": self.boot_id, "capabilities": {
                                   pid: dict(o.caps) for pid, o in self.obs.items()}},
+                   "coordinator_version": _coord_version(), "foundry_version": _version(),
+                   "boot_id": self.boot_id, "store_schema": self._schema(),
+                   "features": list(FEATURES),
                    "sent_ts": self.clock(), "uptime_s": round(self.clock() - self.started, 1),
                    "kilo": {"ok": all(self.kilo_ok.values()) if self.kilo_ok else None,
                             "error": self.kilo_error if not all(self.kilo_ok.values() or [True])
@@ -599,9 +1040,26 @@ class TelemetryBridge:
                    "capture_boundary": {"bridge_started_ts": self.started,
                                         "replayed_sessions": self.replay_sessions}}
         try:
-            self.foundry.heartbeat(self.redactor.obj(payload)[0])
+            r = self.foundry.heartbeat(self.redactor.obj(payload)[0])
         except Exception as e:                                   # noqa: BLE001
             self.log(f"bridge: heartbeat failed: {e}")
+            return
+        comp = (r or {}).get("compat") if isinstance(r, dict) else None
+        if comp:
+            if comp != self.compat.get("state") and comp != "ok":
+                self.log(f"bridge: Foundry version gate says {comp}: "
+                         f"{(r or {}).get('compat_reason') or ''} (heart-beating continues)")
+            self.compat = {"state": comp, "reason": (r or {}).get("compat_reason"),
+                           "server_version": (r or {}).get("server_version")}
+
+    def _schema(self) -> dict:
+        out = {}
+        for r in self.reader.meta_like("schema"):
+            try:
+                out[r["key"]] = int(r["value"])
+            except (TypeError, ValueError):
+                out[r["key"]] = r["value"]
+        return out
 
     def _emit(self, obs: list, commits: list, key: str, o: dict, force: bool = False) -> None:
         h = _h(o)
@@ -620,13 +1078,24 @@ class TelemetryBridge:
         omsgs = self.reader.operator_messages()
         units = self.reader.helper_units()
         now = self.clock()
-        om_sig = _h([omsgs, units])
+        self._tables = self.reader.tables()
+        lsig = (self.reader.lifecycle_signature()
+                if set(CoordReader.LIFECYCLE_TABLES) & self._tables else {})
+        # per task: one task's operator message / helper / lifecycle change must
+        # not rebuild every other task's observation
+        om_by: dict = {}
+        for m in omsgs:
+            om_by.setdefault((m["project_id"], m["task_id"]), []).append(m)
+        units_by: dict = {}
+        for u in units:
+            units_by.setdefault((u["project_id"], u["task_id"]), []).append(u)
         for t in tasks:
             P = self.projects.get(t["project_id"])
             if P is None:
                 continue
             key = (t["project_id"], t["task_id"])
             hit = self._task_cache.get(key)
+            om_sig = _h([om_by.get(key, []), units_by.get(key, []), lsig.get(key, {})])
             sig = (t.get("updated_ts"), t["state"], om_sig,
                    tuple(x["state"] for x in by_project[t["project_id"]]))
             # an approval card is re-hashed every pass: artifact bytes can change
@@ -636,8 +1105,8 @@ class TelemetryBridge:
                 o = hit[2]
             else:
                 o = self._task_obs(P, t, by_project[t["project_id"]], omsgs)
-                o["helpers"] = [u for u in units if u["project_id"] == t["project_id"]
-                                and u["task_id"] == t["task_id"]][-30:]
+                # ordinary units only: lane units travel as lane_unit observations
+                o["helpers"] = [u for u in units_by.get(key, []) if not u.get("lane")][-30:]
                 self._task_cache[key] = (sig, now, o)
             self._emit(obs, commits, f"task:{t['project_id']}/{t['task_id']}", o)
         trs = self.reader.transitions_after(self.cursor_transitions)
@@ -652,7 +1121,8 @@ class TelemetryBridge:
                                          else _cap(v, 500)) for k, v in ev.items()
                                      if k in ("reason", "blocker", "head_sha", "session_id", "run_id",
                                               "attempt", "verdict", "awaiting", "repair", "resumed",
-                                              "invalidated", "reviewed_commit_sha", "published")}})
+                                              "invalidated", "reviewed_commit_sha", "published",
+                                              "blocker_class")}})
         if trs:
             last = trs[-1]["id"]
             commits.append(lambda v=last: setattr(self, "cursor_transitions", v))
@@ -799,7 +1269,105 @@ class TelemetryBridge:
             o["workspace_head"] = None
         if all(x["state"] in ("COMPLETE", "CANCELLED") for x in siblings):
             o["queue_exhausted"] = len(siblings)
+        rg = d.get("retry_guidance")
+        if isinstance(rg, dict) and rg:
+            o["retry_guidance"] = {k: (_cap(rg.get(k), 300) if isinstance(rg.get(k), str)
+                                       else rg.get(k)) for k in ("status", "extra_attempts",
+                                                                 "persona", "summary")
+                                   if rg.get(k) is not None}
+        try:
+            o.update(self._lifecycle(P, t, o["limits"], len(revs)))
+        except Exception as e:                                   # noqa: BLE001
+            o["lifecycle_error"] = f"{type(e).__name__}: {e}"[:300]
         return o
+
+    RECOVERED_EVENTS = ("helper_reconciled", "review_not_reused", "lane_reused", "helper_duplicate",
+                        "evidence_recovered", "recovery")
+
+    def _lifecycle(self, P, t: dict, limits: dict, n_reviews: int) -> dict:
+        """v0.122 task fields from the lifecycle tables. A table that doesn't
+        exist yet reads as empty; `lifecycle_tables` says which ones were there."""
+        pid, tid = t["project_id"], t["task_id"]
+        d = t.get("data") or {}
+        present = self._tables if self._tables is not None else self.reader.tables()
+        have = [x for x in CoordReader.LIFECYCLE_TABLES if x in present]
+
+        def rows(table, **kw):
+            return self.reader.task_rows(table, pid, tid, **kw) if table in present else []
+
+        recs = rows("ev_records", limit=600)
+        chains = rows("ev_chains", limit=50)
+        obls = rows("obligations", limit=200)
+        required = []
+        for ob in obls:
+            for x in _jl(ob.get("required_evidence")):
+                if isinstance(x, dict) and x.get("kind") == "check" and x.get("ref"):
+                    required.append(x["ref"])
+        # every open decision, then the newest closed ones (never bounded away)
+        decs = rows("decisions", limit=500, where="status='open'")
+        decs += rows("decisions", limit=100, where="COALESCE(status,'')!='open'")
+        sums = self.reader.budget_sums(pid, tid) if "budget_ledger" in present else None
+        ledger = rows("budget_ledger", limit=200)
+        if "budget_ledger" in present:
+            # authorized (decision-backed) rows are listed even when older than
+            # the newest-200 sample
+            seen = {r.get("id") for r in ledger}
+            ledger = [r for r in rows("budget_ledger", limit=10, where="decision_id IS NOT NULL "
+                                      "AND decision_id != ''") if r.get("id") not in seen] + ledger
+        readiness, blocker_class = self._readiness(t, d)
+        out = {"readiness": readiness, "blocker_class": blocker_class,
+               "obligations": obligations_checklist(obls),
+               "evidence": evidence_summary(recs, chains, required),
+               "finding_history": finding_history(rows("findings", limit=200),
+                                                  rows("repairs", limit=50)),
+               "budgets": budgets_view(t, limits, ledger, n_reviews, self.clock(),
+                                       sums=sums or None),
+               "decisions": decisions_view(decs),
+               "lifecycle_tables": have}
+        rec = []
+        for r in recs:
+            if r.get("source") == "recovery" and r.get("exec_status") != "excluded":
+                rec.append({"kind": "evidence", "check_id": r.get("check_id"),
+                            "result": r.get("result"), "tier": r.get("tier"),
+                            "freshness": r.get("freshness"), "ts": r.get("created_ts"),
+                            "detail": f"recovered from session {r.get('session_id') or '?'}",
+                            "refs": _ref(r)})
+        for e in self.reader.task_events(pid, tid, self.RECOVERED_EVENTS,
+                                         ("%reconciled%", "readiness_%")):
+            det = e.get("detail") or {}
+            rec.append({"kind": e.get("kind"), "ts": e.get("ts"), "session_id": e.get("session_id"),
+                        "detail": _cap(det.get("detail") or det.get("reason") or det.get("note")
+                                       or det, 400)})
+        out["recovered"] = sorted(rec, key=lambda x: float(x.get("ts") or 0))[-20:]
+        mem = rows("task_memory", limit=200)
+        out["memory"] = [{"mem_id": m.get("mem_id"), "kind": m.get("kind"),
+                          "authority": m.get("authority"), "status": m.get("status"),
+                          "text": _cap(m.get("text"), 400), "actor": _cap(m.get("actor"), 80),
+                          "created_ts": m.get("created_ts")}
+                         for m in mem if m.get("status") in (None, "", "active")][-15:]
+        return _bound(out)
+
+    def _readiness(self, t: dict, d: dict) -> tuple:
+        """(readiness items, blocker class). The engine stores the failing
+        readiness checks as task data `readiness_block: {cls, items, ...}` and
+        the class in the BLOCKED transition's evidence; older rows (or an
+        integrator that merged them) carry `readiness` / `blocker_class` keys."""
+        rb = d.get("readiness_block") if isinstance(d.get("readiness_block"), dict) else {}
+        if isinstance(rb.get("items"), list):
+            items = readiness_view(rb["items"], failing=True)
+        else:
+            items = readiness_view(d.get("readiness"))
+        bc = rb.get("cls") or d.get("blocker_class")
+        if not bc and isinstance(d.get("decision_wait"), dict) and t.get("state") == "BLOCKED":
+            bc = "decision"
+        if (not bc or not items) and t.get("state") == "BLOCKED":
+            tr = self.reader.latest_transition(t["project_id"], t["task_id"])
+            ev = tr.get("evidence") if tr.get("to_state") == "BLOCKED" else None
+            if isinstance(ev, dict):
+                bc = bc or ev.get("blocker_class")
+                if not items and isinstance(ev.get("readiness"), list):
+                    items = readiness_view(ev["readiness"], failing=True)
+        return items, (_cap(bc, 40) or None)
 
     # ---------------------------------------------------------------- Kilo facts
 
@@ -993,3 +1561,14 @@ def _version() -> str:
         return __version__
     except Exception:                                            # noqa: BLE001
         return ""
+
+
+def _coord_version() -> str:
+    try:
+        from foundry_coordinator import __version__
+        return __version__
+    except Exception:                                            # noqa: BLE001
+        return ""
+
+
+FEATURES = ("batch_id", "boot_id", "lifecycle_v1", "readiness", "decisions")

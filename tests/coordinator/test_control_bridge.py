@@ -394,3 +394,410 @@ def test_a_question_is_not_recorded_as_an_engine_error(env):
     t = store.task("game", "T1")
     assert t["state"] == "AWAITING_HUMAN" and not (t["next_action"] or "").startswith("error")
     assert not [e for e in store.events("game") if e["kind"] == "error"]
+
+
+# ------------------------------------------------------------------ v0.122 sprint fields
+
+LIFECYCLE_DDL = """
+CREATE TABLE IF NOT EXISTS ev_records (record_id TEXT PRIMARY KEY, idem_key TEXT UNIQUE, project_id TEXT,
+  task_id TEXT, run_id TEXT, session_id TEXT, message_id TEXT, part_id TEXT, call_id TEXT, tool TEXT,
+  source TEXT, check_id TEXT, check_kind TEXT, chain_id TEXT, seq INT, prereqs TEXT, started_ts REAL,
+  ended_ts REAL, exec_status TEXT, exclusion TEXT, result TEXT, counts TEXT, tier TEXT, output_sha TEXT,
+  output_bytes INT, excerpt TEXT, truncated INT, truncation_note TEXT, source_revision TEXT, deps TEXT,
+  deps_fp TEXT, runtime_id TEXT, artifact_id TEXT, artifact_sha TEXT, provenance TEXT, freshness TEXT,
+  stale_reason TEXT, fresh_at TEXT, supersedes TEXT, superseded_by TEXT, created_ts REAL);
+CREATE TABLE IF NOT EXISTS ev_chains (chain_id TEXT PRIMARY KEY, project_id TEXT, task_id TEXT,
+  runtime_id TEXT, spec TEXT, status TEXT, gaps TEXT, checked_ts REAL);
+CREATE TABLE IF NOT EXISTS obligations (obligation_id TEXT, project_id TEXT, task_id TEXT, phase TEXT,
+  title TEXT, source TEXT, deps TEXT, acceptance TEXT, required_evidence TEXT, status TEXT,
+  verified_by TEXT, verified_rev TEXT, findings TEXT, blocking_reason TEXT, next_action TEXT,
+  package TEXT, created_ts REAL, updated_ts REAL, PRIMARY KEY (project_id, task_id, obligation_id));
+CREATE TABLE IF NOT EXISTS findings (fingerprint TEXT, project_id TEXT, task_id TEXT, class TEXT,
+  check_id TEXT, path TEXT, tokens TEXT, first_seen_attempt INT, last_seen_attempt INT, count INT,
+  obligation_id TEXT, samples TEXT, PRIMARY KEY (project_id, task_id, fingerprint));
+CREATE TABLE IF NOT EXISTS repairs (repair_id TEXT PRIMARY KEY, project_id TEXT, task_id TEXT,
+  attempt INT, run_id TEXT, start_rev TEXT, preexisting_dirty TEXT, intended_files TEXT,
+  obligations TEXT, diagnosis TEXT, strategy TEXT, strategy_fp TEXT, validation_plan TEXT,
+  end_rev TEXT, diff_files TEXT, verification_id TEXT, unexpected TEXT, quarantined TEXT,
+  outcome TEXT, ts REAL);
+CREATE TABLE IF NOT EXISTS budget_ledger (id INTEGER PRIMARY KEY, project_id TEXT, task_id TEXT,
+  counter TEXT, delta INT, reason TEXT, decision_id TEXT, actor TEXT, ts REAL);
+CREATE TABLE IF NOT EXISTS decisions (decision_id TEXT PRIMARY KEY, project_id TEXT, task_id TEXT,
+  kind TEXT, question TEXT, evidence TEXT, options TEXT, recommendation TEXT, blocks TEXT,
+  status TEXT, answer TEXT, authority TEXT, actor TEXT, scope TEXT, supersedes TEXT,
+  superseded_by TEXT, opened_ts REAL, answered_ts REAL);
+CREATE TABLE IF NOT EXISTS task_memory (mem_id TEXT PRIMARY KEY, project_id TEXT, task_id TEXT,
+  kind TEXT, text TEXT, refs TEXT, revision TEXT, actor TEXT, authority TEXT, status TEXT,
+  superseded_by TEXT, created_ts REAL);
+"""
+
+
+def _rec(store, rid, check, **kw):
+    row = {"record_id": rid, "idem_key": rid, "project_id": "game", "task_id": "T1", "check_id": check,
+           "session_id": "ses_old", "part_id": f"prt_{rid}", "call_id": f"call_{rid}", "tool": "bash",
+           "source": "transcript", "exec_status": "completed", "result": "PASS", "tier": "verified",
+           "freshness": "fresh", "source_revision": "a" * 40, "output_sha": "e" * 64,
+           "created_ts": 100.0, **kw}
+    store.x(f"INSERT INTO ev_records ({', '.join(row)}) VALUES ({', '.join('?' * len(row))})",
+            tuple(row.values()))
+
+
+def _task_data(cc):
+    return json.loads(cc.db.query_one("SELECT data FROM cc_tasks WHERE task_id='T1'")["data"])
+
+
+def test_bridge_sprint_fields_with_the_tables_missing(env):
+    """Lifecycle off / an older coordinator: no lifecycle table exists. The task
+    observation still carries the fields, empty, and says no table was there."""
+    d = _task_data(env["cc"])
+    assert d["lifecycle_tables"] == []
+    assert d["readiness"] == [] and d["obligations"] == [] and d["decisions"] == []
+    assert d["evidence"]["counts"] == {s: 0 for s in ("reusable", "stale", "missing", "disputed",
+                                                       "excluded")}
+    assert d["recovered"] == [] and d["finding_history"]["findings"] == []
+    b = d["budgets"]["counters"]
+    assert b["ordinary"]["used"] == 1 and b["ordinary"]["max"] == 3
+    assert b["ordinary"]["source"] == "task row" and b["guided_extra"]["max"] == 0
+    assert "lifecycle_error" not in d
+
+
+def test_bridge_reads_the_lifecycle_tables_into_bounded_redacted_fields(env):
+    cc, store, br = env["cc"], env["store"], env["bridge"]
+    store.conn.executescript(LIFECYCLE_DDL)
+    _rec(store, "r1", "lune")                                              # reusable
+    _rec(store, "r2", "gate", freshness="stale", stale_reason="src/a.txt changed since it ran")
+    _rec(store, "r3", "studio", result="PASS", source_revision="b" * 40)  # disputed
+    _rec(store, "r4", "studio", result="FAIL", source_revision="b" * 40)
+    _rec(store, "r5", "boot", exec_status="excluded", exclusion="void_runtime")
+    _rec(store, "r6", "unit", tier="observed")                            # only observed
+    _rec(store, "r7", "lune", source="recovery", session_id="ses_older")  # a recovered result
+    store.x("INSERT INTO ev_chains (chain_id, project_id, task_id, status, gaps) VALUES "
+            "(?, ?, ?, ?, ?)", ("runtime", "game", "T1", "gap", json.dumps(["capture"])))
+    store.x("INSERT INTO obligations (obligation_id, project_id, task_id, phase, title, status, "
+            "required_evidence, blocking_reason, next_action) VALUES (?,?,?,?,?,?,?,?,?)",
+            ("build.gate", "game", "T1", "BUILD", "Gate passes", "open",
+             json.dumps([{"kind": "check", "ref": "gate"}, {"kind": "check", "ref": "never_ran"}]),
+             "gate stale", "rerun gate"))
+    store.x("INSERT INTO findings (fingerprint, project_id, task_id, class, check_id, count, "
+            "first_seen_attempt, last_seen_attempt, samples) VALUES (?,?,?,?,?,?,?,?,?)",
+            ("fp1", "game", "T1", "product_defect", "gate", 2, 1, 2, json.dumps(["S45 off by one"])))
+    for att, fp in ((1, "s1"), (2, "s1")):
+        store.x("INSERT INTO repairs (repair_id, project_id, task_id, attempt, strategy, strategy_fp, "
+                "outcome, ts) VALUES (?,?,?,?,?,?,?,?)", (f"rp{att}", "game", "T1", att,
+                                                          "patch the timer", fp, "failed", att))
+    for counter, delta, dec in (("attempt_ordinary", 1, None), ("attempt_ordinary", 1, None),
+                                ("attempt_authorized", 2, "dec-9"), ("review_calls", 1, None)):
+        store.x("INSERT INTO budget_ledger (project_id, task_id, counter, delta, reason, decision_id, "
+                "actor, ts) VALUES (?,?,?,?,?,?,?,?)", ("game", "T1", counter, delta, "r", dec,
+                                                        "victor", 1.0))
+    store.x("INSERT INTO decisions (decision_id, project_id, task_id, kind, question, evidence, "
+            "options, recommendation, blocks, status, opened_ts) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+            ("dec-1", "game", "T1", "scope_change", "Edit src/b.txt?", json.dumps(["plan line 4"]),
+             json.dumps(["allow", "refuse"]), "refuse", json.dumps(["build.gate"]), "open", 5.0))
+    store.x("INSERT INTO decisions (decision_id, project_id, task_id, kind, question, status) VALUES "
+            "(?, ?, ?, ?, ?, ?)", ("dec-other", "other", "T1", "scope_change", "not this project",
+                                   "open"))
+    store.merge_data("game", "T1", blocker_class="environment", readiness=[
+        {"name": "au.rojo.serving", "ok": False, "cls": "environment", "blocking": True,
+         "detail": "probe sent Authorization: Bearer abcdefghijklmnop123456 and got refused"}])
+    br.step()
+    d = _task_data(cc)
+    assert set(d["lifecycle_tables"]) >= {"ev_records", "obligations", "decisions", "budget_ledger"}
+    states = {c["check_id"]: c["state"] for c in d["evidence"]["checks"]}
+    assert states == {"lune": "reusable", "gate": "stale", "studio": "disputed", "boot": "excluded",
+                      "unit": "missing", "never_ran": "missing", "capture": "missing"}
+    by = {c["check_id"]: c for c in d["evidence"]["checks"]}
+    assert by["gate"]["reason"] == "src/a.txt changed since it ran"
+    assert by["capture"]["reason"] == "chain runtime: gap"
+    assert "needs verified" in by["unit"]["reason"]
+    assert by["boot"]["excluded_reasons"] == ["void_runtime"]
+    assert by["lune"]["refs"]["part_id"] in ("prt_r1", "prt_r7") and by["lune"]["refs"]["output_sha"]
+    assert d["evidence"]["counts"]["missing"] == 3
+    assert [r["check_id"] for r in d["recovered"] if r["kind"] == "evidence"] == ["lune"]
+    assert d["obligations"][0]["next_action"] == "rerun gate"
+    fh = d["finding_history"]
+    assert fh["repeated"] == 1 and fh["approach_changed"] is False
+    assert fh["findings"][0]["last_strategy"] == "patch the timer"
+    b = d["budgets"]["counters"]
+    assert b["ordinary"] == {"used": 2, "max": 3, "source": "budget_ledger"}
+    assert b["authorized"]["used"] == 2 and b["review_calls"]["source"] == "budget_ledger"
+    assert d["budgets"]["authorized"][0]["decision_id"] == "dec-9"
+    assert [x["decision_id"] for x in d["decisions"]] == ["dec-1"]       # project isolation
+    assert d["decisions"][0]["options"] == ["allow", "refuse"]
+    assert d["blocker_class"] == "environment" and d["readiness"][0]["ok"] is False
+    blob = dump_cc(env["app"])
+    assert "abcdefghijklmnop123456" not in blob                          # redacted both sides
+    v = cc.task_view_for("game", "T1", [])["view"]
+    assert v["decisions"]["open"][0]["decision_id"] == "dec-1"
+    assert any(a["kind"] == "decision" for a in cc.alerts([], "open"))
+
+
+def test_bridge_heartbeat_declares_contract_versions_and_boot(env):
+    cc, br = env["cc"], env["bridge"]
+    br._last["beat"] = 0
+    br.step()
+    src = next(s for s in cc.sources() if s["source_id"] == br.source_id)
+    assert src["detail"]["contract"] == "foundry.cc.v1"
+    assert src["detail"]["coordinator_version"] == "0.122.0"
+    assert src["detail"]["boot_id"] == br.boot_id and "batch_id" in src["detail"]["features"]
+    assert src["detail"]["compat"]["state"] == "ok" and br.compat["state"] == "ok"
+
+
+def test_retried_batch_is_recognized_and_a_restart_causes_no_feed_churn(env):
+    cc, store, br = env["cc"], env["store"], env["bridge"]
+    direct = br.foundry
+    real = direct.telemetry
+    results = []
+
+    def lost_reply(b):
+        results.append(real(b))
+        raise RuntimeError("reply lost")                 # stored by Foundry, but the bridge can't know
+
+    def ok(b):
+        results.append(real(b))
+        return results[-1]
+
+    store.merge_data("game", "T1", note="changed")
+    br._task_cache.clear()
+    direct.telemetry = lost_reply
+    br.step()
+    direct.telemetry = ok
+    br.step()                                            # the same chunk again: same batch id
+    assert results[0].get("duplicate") is not True and results[1]["duplicate"] is True
+    assert results[0]["batch_id"] == results[1]["batch_id"]
+    direct.telemetry = real
+
+    def feed_rows():
+        return cc.db.query_one("SELECT COUNT(*) AS n FROM cc_feed WHERE kind NOT IN "
+                               "('source','alert')")["n"]
+    br.step()
+    n = feed_rows()
+    # a bridge restart: in-memory cursors and fingerprints are gone, everything is re-sent
+    br2 = TelemetryBridge([env["c"].projects["game"]], store.path, direct,
+                          observers={"game": br.obs["game"]}, use_events=False, poll_s=0.0)
+    br2.step()
+    assert br2.boot_id != br.boot_id
+    assert feed_rows() == n                              # unchanged facts: no new feed rows
+    br2.stop()
+
+
+def test_evidence_summary_never_credits_prose_or_truncated_output():
+    from foundry_coordinator.telemetry import evidence_summary
+    out = evidence_summary([
+        {"check_id": "a", "result": "PASS", "tier": "claim", "freshness": "fresh"},
+        {"check_id": "b", "result": "PASS", "tier": "verified", "freshness": "fresh", "truncated": 1},
+        {"check_id": "c", "result": "PASS", "tier": "verified", "freshness": None},
+        {"check_id": "d", "result": "PASS", "tier": "verified", "freshness": "fresh",
+         "superseded_by": "x"}], [], ["e"])
+    st = {c["check_id"]: (c["state"], c["reason"]) for c in out["checks"]}
+    assert st["a"][0] == "missing" and "claim" in st["a"][1]
+    assert st["b"][0] == "missing" and "truncated" in st["b"][1]
+    assert st["c"] == ("missing", "freshness unknown")
+    assert st["d"][0] == "missing" and st["e"] == ("missing", "no recorded result")
+    assert out["counts"]["reusable"] == 0
+
+
+
+# ------------------------------------------------------------------ v0.122b review fixes
+
+def test_batch_ids_never_collide_when_a_fact_returns_to_an_earlier_value(env):
+    """A -> B -> A: the third send is a new fact, not a duplicate of the first
+    (the id carries a send sequence that only advances after a successful
+    send; a retry keeps its id)."""
+    cc, store, br = env["cc"], env["store"], env["bridge"]
+    sent = []
+    real = br.foundry.telemetry
+
+    def spy(b):
+        sent.append(b["batch_id"])
+        return real(b)
+    br.foundry.telemetry = spy
+    try:
+        for v in ("1", "0", "1"):
+            store.set_meta("lanes_paused:game", v)
+            br.step()
+            row = cc.db.query_one("SELECT paused FROM cc_lane_state WHERE project_id='game'")
+            assert row["paused"] == (1 if v == "1" else 0), v
+        assert len(sent) == len(set(sent)) == 3
+        # a failed send keeps the sequence: the retry re-uses the same id
+        store.set_meta("lanes_paused:game", "0")
+        seq = br.send_seq
+
+        def fail(b):
+            sent.append(b["batch_id"])
+            raise RuntimeError("network down")
+        br.foundry.telemetry = fail
+        br.step()
+        assert br.send_seq == seq
+        br.foundry.telemetry = spy
+        br.step()
+        assert sent[-1] == sent[-2] and br.send_seq == seq + 1
+        assert cc.db.query_one("SELECT paused FROM cc_lane_state WHERE project_id='game'")[
+            "paused"] == 0
+    finally:
+        br.foundry.telemetry = real
+
+
+def _block(store, data: dict, evidence: dict):
+    """Put T1 in BLOCKED the way the engine records it (task data + the BLOCKED
+    transition's evidence), directly in the store."""
+    t = store.task("game", "T1")
+    store.x("UPDATE tasks SET state='BLOCKED', blocker=?, data=?, updated_ts=? WHERE "
+            "project_id='game' AND task_id='T1'",
+            ("readiness (tooling): rojo missing", json.dumps({**(t["data"] or {}), **data}),
+             time.time()))
+    store.x("INSERT INTO transitions (ts, project_id, task_id, from_state, to_state, evidence, "
+            "actor) VALUES (?,?,?,?,?,?,?)", (time.time(), "game", "T1", t["state"], "BLOCKED",
+                                              json.dumps(evidence), "engine"))
+
+
+def test_bridge_reads_the_engines_readiness_block(env):
+    """The engine stores `readiness_block: {cls, items, ...}` in task data and the
+    class in the transition evidence: the bridge reports both, and the server
+    raises a readiness warning (not a product-defect blocker) for `tooling`."""
+    cc, store, br = env["cc"], env["store"], env["bridge"]
+    items = [{"name": "au.rojo.installed", "cls": "tooling", "detail": "rojo not on PATH",
+              "remedy": "install rojo"}]
+    _block(store, {"readiness_block": {"cls": "tooling", "classes": ["tooling"], "items": items,
+                                       "auto": False, "since": 1.0, "checks": 1}},
+           {"blocker": "readiness (tooling)", "blocker_class": "tooling", "readiness": items})
+    br._task_cache.clear()
+    br.step()
+    d = _task_data(cc)
+    assert d["blocker_class"] == "tooling"
+    assert d["readiness"] == [{"name": "au.rojo.installed", "ok": False, "cls": "tooling",
+                               "detail": "rojo not on PATH", "blocking": True,
+                               "remedy": "install rojo"}]
+    v = cc.task_view_for("game", "T1", [])["view"]
+    assert v["readiness"]["failing"] == 1 and v["blocker_class"] == "tooling"
+    al = {a["kind"]: a for a in cc.alerts([], "open") if a["task_id"] == "T1"}
+    assert "readiness" in al and "blocker" not in al
+    tr = cc.db.query("SELECT data FROM cc_transitions WHERE task_id='T1' AND to_state='BLOCKED'")
+    assert json.loads(tr[-1]["data"])["blocker_class"] == "tooling"
+
+
+def test_bridge_falls_back_to_the_transition_evidence_for_the_blocker_class(env):
+    cc, store, br = env["cc"], env["store"], env["bridge"]
+    _block(store, {}, {"blocker": "x", "blocker_class": "capability",
+                       "readiness": [{"name": "au.mcp", "cls": "capability", "detail": "no mcp"}]})
+    br._task_cache.clear()
+    br.step()
+    d = _task_data(cc)
+    assert d["blocker_class"] == "capability" and d["readiness"][0]["ok"] is False
+    assert any(a["kind"] == "readiness" for a in cc.alerts([], "open") if a["task_id"] == "T1")
+
+
+def test_bridge_keeps_the_newest_rows_sums_the_whole_ledger_and_every_open_decision(env):
+    cc, store, br = env["cc"], env["store"], env["bridge"]
+    store.conn.executescript(LIFECYCLE_DDL)
+    for i in range(650):                           # more than the 600-row evidence read
+        _rec(store, f"old{i}", f"c{i % 5}", created_ts=float(i))
+    _rec(store, "newest", "late_check", created_ts=10_000.0)
+    rows = [("game", "T1", "attempt_ordinary", 1, "r", None, "e", float(i)) for i in range(2500)]
+    store.conn.executemany("INSERT INTO budget_ledger (project_id, task_id, counter, delta, reason, "
+                           "decision_id, actor, ts) VALUES (?,?,?,?,?,?,?,?)", rows)
+    store.x("INSERT INTO budget_ledger (project_id, task_id, counter, delta, reason, decision_id, "
+            "actor, ts) VALUES (?,?,?,?,?,?,?,?)",
+            ("game", "T1", "attempt_authorized", 1, "r", "dec-auth", "victor", 0.5))
+    store.conn.executemany("INSERT INTO budget_ledger (project_id, task_id, counter, delta, reason, "
+                           "decision_id, actor, ts) VALUES (?,?,?,?,?,?,?,?)",
+                           [("game", "T1", "review_calls", 0, "r", None, "e", 1.0)] * 300)
+    for i in range(140):                           # 140 closed (older), then 40 open
+        store.x("INSERT INTO decisions (decision_id, project_id, task_id, kind, question, status, "
+                "opened_ts) VALUES (?,?,?,?,?,?,?)", (f"closed-{i}", "game", "T1", "scope_change",
+                                                      "old " * 400, "answered", float(i)))
+    for i in range(40):
+        store.x("INSERT INTO decisions (decision_id, project_id, task_id, kind, question, status, "
+                "opened_ts) VALUES (?,?,?,?,?,?,?)", (f"open-{i}", "game", "T1", "scope_change",
+                                                      "q " * 1000, "open", 1.0 + i))
+    br._task_cache.clear()
+    br.step()
+    d = _task_data(cc)
+    assert "late_check" in {c["check_id"] for c in d["evidence"]["checks"]}
+    assert d["budgets"]["counters"]["ordinary"]["used"] == 2500          # SQL sum, not 2000 rows
+    assert d["budgets"]["ledger"]["attempt_ordinary"] == 2500
+    assert any(a["decision_id"] == "dec-auth" for a in d["budgets"]["authorized"])
+    opened = {x["decision_id"] for x in d["decisions"] if x["status"] == "open"}
+    assert opened == {f"open-{i}" for i in range(40)}                    # none bounded away
+
+
+def test_bound_never_drops_open_decisions():
+    from foundry_coordinator.telemetry import _bound
+    o = {"decisions": [{"decision_id": f"o{i}", "status": "open", "question": "x" * 2000}
+                       for i in range(20)] +
+                      [{"decision_id": f"c{i}", "status": "answered", "question": "y" * 2000}
+                       for i in range(20)],
+         "memory": [{"text": "z" * 2000} for _ in range(5)]}
+    out = _bound(o, max_bytes=30_000)
+    assert out["truncated"] is True
+    assert [x["decision_id"] for x in out["decisions"] if x["status"] == "open"] == \
+        [f"o{i}" for i in range(20)]
+
+
+def test_in_place_lifecycle_updates_are_noticed_and_scoped_per_task(env):
+    """An obligation UPDATEd in place (same row count / max rowid) still makes
+    the task re-read; another task's change does not rebuild this one."""
+    cc, store, br = env["cc"], env["store"], env["bridge"]
+    store.conn.executescript(LIFECYCLE_DDL)
+    store.x("INSERT INTO obligations (obligation_id, project_id, task_id, phase, title, status, "
+            "updated_ts) VALUES (?,?,?,?,?,?,?)", ("build.gate", "game", "T1", "BUILD", "Gate",
+                                                    "open", 1.0))
+    br._task_cache.clear()
+    br.step()
+    assert _task_data(cc)["obligations"][0]["status"] == "open"
+    sig = br.reader.lifecycle_signature()[("game", "T1")]
+    store.x("UPDATE obligations SET status='verified', updated_ts=2.0 "
+            "WHERE obligation_id='build.gate'")
+    assert br.reader.lifecycle_signature()[("game", "T1")] != sig
+    br.step()                                       # within the 10 s cache window
+    assert _task_data(cc)["obligations"][0]["status"] == "verified"
+    # another task's lifecycle row: T1's signature is unchanged
+    before = br.reader.lifecycle_signature()[("game", "T1")]
+    store.x("INSERT INTO obligations (obligation_id, project_id, task_id, phase, title, status, "
+            "updated_ts) VALUES (?,?,?,?,?,?,?)", ("x", "game", "T9", "BUILD", "other", "open", 3.0))
+    assert br.reader.lifecycle_signature()[("game", "T1")] == before
+
+
+def test_evidence_newest_fresh_execution_decides():
+    from foundry_coordinator.telemetry import evidence_summary
+    base = {"check_id": "gate", "tier": "verified", "freshness": "fresh"}
+    out = evidence_summary([
+        {**base, "result": "PASS", "tier": "approved", "source_revision": "a", "created_ts": 1.0},
+        {**base, "result": "FAIL", "source_revision": "b", "created_ts": 2.0}], [], [])
+    c = out["checks"][0]
+    assert c["state"] == "missing" and c["result"] == "FAIL" and "FAIL" in c["reason"]
+    # a later PASS clears it again
+    out = evidence_summary([
+        {**base, "result": "FAIL", "source_revision": "b", "created_ts": 2.0},
+        {**base, "result": "PASS", "source_revision": "c", "created_ts": 3.0}], [], [])
+    assert out["checks"][0]["state"] == "reusable"
+    # a newer prose claim is not an execution: the verified FAIL still decides
+    out = evidence_summary([
+        {**base, "result": "FAIL", "source_revision": "b", "created_ts": 2.0},
+        {**base, "result": "PASS", "tier": "claim", "source_revision": "c", "created_ts": 3.0}],
+        [], [])
+    assert out["checks"][0]["result"] == "FAIL"
+
+
+def test_task_helpers_from_the_bridge_are_ordinary_units_only(env):
+    """Lane units reach Foundry as lane_unit observations; the task row's
+    helper list (and /helpers) carries only ordinary units, each once."""
+    from foundry_coordinator import lanes as L
+    cc, store, br, c = env["cc"], env["store"], env["bridge"], env["c"]
+    P = c.projects["game"]
+    t = store.task("game", "T1")
+    uid, how = c.helpers.lanes.add(P, t, "failure_triage", "S45 ordering", {}, L.settings(P),
+                                   files=["src/a.txt"])
+    assert how == "created"
+    c.helpers._add("game", "T1", t["run_id"], {"kind": "debug_advice",
+                                               "responsibility": "something else"}, "report",
+                   c.helpers.settings(P))
+    br._task_cache.clear()
+    br.step()
+    d = _task_data(cc)
+    assert d["helpers"] and not [u for u in d["helpers"] if u.get("lane")]
+    h = cc.task_helpers("game", "T1", [])
+    ids = [u["unit_id"] for u in h["units"]] + [u["unit_id"] for u in h["lanes"]]
+    assert ids.count(uid) == 1 and len(ids) == len(set(ids))
+    lane = next(u for u in h["lanes"] if u["unit_id"] == uid)
+    assert lane["phase"] in ("queued", "admitted", "executing", "waiting_provider")

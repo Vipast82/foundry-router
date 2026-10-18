@@ -170,6 +170,25 @@ async def transitions(request: Request, project_id: str, task_id: str, limit: in
     return {"transitions": _cc(request).transitions(project_id, task_id, limit)}
 
 
+@router.get("/control/api/tasks/{project_id}/{task_id}/view")
+@_guard
+async def task_view(request: Request, project_id: str, task_id: str):
+    """v0.122 sprint view of one task: readiness, required-work checklist,
+    evidence per check, recovered results, repeated findings, budgets and
+    decisions (control_center.task_view), plus the verification view."""
+    s = _op(request)
+    return _cc(request).task_view_for(project_id, task_id, s["projects"])
+
+
+@router.get("/control/api/tasks/{project_id}/{task_id}/helpers")
+@_guard
+async def task_helpers(request: Request, project_id: str, task_id: str):
+    """Ordinary and lane helper units of one task with phase, reason code and
+    disposition (a superset of /lanes' units; /lanes is unchanged)."""
+    s = _op(request)
+    return _cc(request).task_helpers(project_id, task_id, s["projects"])
+
+
 @router.get("/control/api/tasks/{project_id}/{task_id}/totals")
 @_guard
 async def task_totals(request: Request, project_id: str, task_id: str):
@@ -231,9 +250,10 @@ async def artifact_thumbnail(request: Request, artifact_id: str):
 @router.get("/control/api/capabilities")
 @_guard
 async def capabilities(request: Request):
-    _op(request)
+    s = _op(request)
     cc = _cc(request)
-    return {"contract": CONTRACT, "capture_boundary": cc.capture_boundary(), "sources": cc.sources(),
+    return {"contract": CONTRACT, "capture_boundary": cc.capture_boundary(),
+            "sources": cc.sources(s["projects"]),
             "delivery": {"visual": "in-page, while a control-center page is open",
                          "audio": "Web Audio in an open page after you press Enable sound",
                          "notification": "browser notifications from an open page after you "
@@ -293,7 +313,7 @@ async def action(request: Request, action_id: str):
 async def create_action(request: Request):
     s = _op(request, mutate=True)
     b = await _body(request)
-    return _cc(request).create_action(s["actor"], s["projects"], b)
+    return _cc(request).create_action(s["actor"], s["projects"], b, scopes=s["scopes"])
 
 
 @router.post("/control/api/actions/{action_id}/cancel")
@@ -395,6 +415,11 @@ async def helpers_policy(request: Request):
     """Edit helper_policy and per-backend helper ceilings (config.yaml; shows in
     config history). Required-work guardrails are not edited here."""
     s = _op(request, mutate=True)
+    if s["projects"]:
+        # the policy and backend ceilings are global: a project-restricted
+        # operator may read them but not change them for every project
+        raise ControlError("helper policy is global; it needs an operator session that is not "
+                           "restricted to projects", "forbidden", 403)
     b = await _body(request)
     svc = request.app.state.services
     pol = {k: v for k, v in (b.get("policy") or {}).items() if k in HELPER_POLICY_FIELDS}
@@ -506,7 +531,7 @@ async def stream(request: Request, after: int = 0, sessions: str = ""):
                 if idle >= 15:
                     idle = 0.0
                     yield (f"event: heartbeat\ndata: "
-                           f"{json.dumps({'server_ts': cc.clock(), 'seq': cursor, 'sources': cc.sources()}, default=str)}\n\n")
+                           f"{json.dumps({'server_ts': cc.clock(), 'seq': cursor, 'sources': cc.sources(s['projects'])}, default=str)}\n\n")
         finally:
             bump.waiters.discard(ev)
             _streams[actor] = max(0, _streams.get(actor, 1) - 1)

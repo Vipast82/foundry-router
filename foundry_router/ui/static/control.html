@@ -384,13 +384,17 @@ function fmtDur(s) {
 // Display preferences only (per browser, per layout preset). Never keys,
 // transcripts, drafts or answers. Version-migrated; Reset restores defaults.
 const PREF_KEY = "fr.cc.prefs";
-const PREF_VERSION = 2;
-const SECTIONS = ["identity", "context", "tokens", "speed", "routes", "mcp", "todo", "helpers",
+const PREF_VERSION = 3;
+// v3 (coordinator 0.122): sprint-management sections, placed right after Identity
+const SECTIONS_V3 = ["readiness", "checklist", "decisions", "budgets", "evidence", "recovered", "findings"];
+const SECTIONS = ["identity", ...SECTIONS_V3, "context", "tokens", "speed", "routes", "mcp", "todo", "helpers",
   "capacity", "lanes", "verification", "capabilities", "sessions", "search", "actions"];
 const SECTION_TITLES = {identity: "Identity & state", context: "Context", tokens: "Tokens", speed: "Speed & latency",
   routes: "Models & routes", mcp: "MCP servers", todo: "To-do", helpers: "Helpers",
   capacity: "Helper capacity & quota", lanes: "Proactive lanes", verification: "Verification",
-  capabilities: "Other capabilities", sessions: "Sessions & history", search: "Search", actions: "Operator actions"};
+  capabilities: "Other capabilities", sessions: "Sessions & history", search: "Search", actions: "Operator actions",
+  readiness: "Readiness", checklist: "Required work", decisions: "Decisions", budgets: "Budgets",
+  evidence: "Evidence", recovered: "Recovered results", findings: "Repeated findings & approach"};
 const DEFAULT_PREFS = {
   v: PREF_VERSION,
   theme: "dark", fontSize: 13, lineHeight: 1.5, codeWrap: false, density: "comfortable",
@@ -462,6 +466,11 @@ function migratePrefs(raw) {
   }
   const known = new Set(SECTIONS);
   out.sidebar.order = out.sidebar.order.filter(s => known.has(s));
+  if ((+raw.v || 0) < 3) {
+    // saved v1/v2 orders get the sprint sections early (after Identity), not at the bottom
+    const o = out.sidebar.order, at = o.indexOf("identity") + 1;
+    o.splice(at, 0, ...SECTIONS_V3.filter(x => !o.includes(x)));
+  }
   for (const s of SECTIONS) if (!out.sidebar.order.includes(s)) out.sidebar.order.push(s);
   out.v = PREF_VERSION;
   return out;
@@ -681,6 +690,7 @@ function renderConn() {
   parts.push(`<span class="pill ${cls}" title="Browser ↔ Foundry event stream. Last event ${S.conn.lastEvent ? fullTs(S.conn.lastEvent) : "never"}">${esc(label)}</span>`);
   const {bridge, coord} = sourceState();
   if (!bridge.length) parts.push(`<span class="pill warn" title="No workstation telemetry bridge has reported to Foundry yet (python -m foundry_coordinator bridge)">bridge: never seen</span>`);
+  for (const x of [...bridge, ...coord]) { const cp = compatPill(x); if (cp) parts.push(cp); }
   for (const b of bridge) {
     const k = (b.detail || {}).kilo || {};
     parts.push(`<span class="pill ${b.fresh ? "ok" : "bad"}" title="${esc(b.source_id)} last heartbeat ${esc(fullTs(b.last_seen))} (expiry ${b.expiry_s}s). Event stream: ${esc(JSON.stringify((b.detail || {}).event_stream || {}))}">bridge ${b.fresh ? relAge(b.age_s) : "STALE " + relAge(b.age_s)}</span>`);
@@ -1256,7 +1266,176 @@ function currentAction(sid) {
   if (s.status !== "busy" && s.status !== "retry") return `<span class="dim">last: ${esc(last.kind)} at ${esc(tsText(last.ts))}</span>`;
   return last.kind === "reasoning" ? "thinking (published reasoning)" : last.kind === "text" ? "writing a reply" : esc(last.kind);
 }
+/*sprint-start*/
+/* ======================================================================== sprint management (v0.122) */
+// Everything below renders the coordinator's own records (task_view, built by
+// Foundry from the bridge's task observation). Nothing is inferred here: a
+// field the coordinator didn't report says so. All text is escaped.
+const EV_ORDER = {missing: 0, disputed: 1, stale: 2, excluded: 3, reusable: 4};
+const EV_CLS = {reusable: "ok", stale: "warn", missing: "bad", disputed: "bad", excluded: ""};
+const OB_CLS = {verified: "ok", done: "ok", waived: "", waived_by_human: "", superseded: "", evidenced: "info", in_progress: "info", open: "warn"};
+function sprintTask(s) { return s ? S.tasks.get(taskKey(s.project_id || S.project, s.task_id || S.task)) || curTask() : curTask(); }
+function sprintView(s) {
+  const t = sprintTask(s);
+  return {t, v: (t && t.task_view) || null};
+}
+function notReported(v, field, what) {
+  if (!v) return `<p class="dim">No coordinator task reported.</p>`;
+  if (v.error) return `<div class="errbox">${esc(v.error)}</div>`;
+  if (!(v.reported || []).includes(field)) return `<p class="dim">${esc(what)} not reported by this coordinator (sprint management off, or a pre-0.122 bridge).</p>`;
+  return "";
+}
+function sprintPill(text, cls) { return `<span class="pill ${esc(cls || "")}">${esc(text)}</span>`; }
+// provenance (session / tool call / blob / artifact): collapsed by default
+function provRefs(key, refs) {
+  refs = refs || {};
+  const rows = [];
+  if (refs.session_id) rows.push(`session <a href="#" data-open="${esc(refs.session_id)}"><code>${esc(short(refs.session_id, 18))}</code></a>`);
+  if (refs.part_id && refs.session_id) rows.push(`tool call <a href="#" data-part="${esc(refs.part_id)}" data-sid="${esc(refs.session_id)}"><code>${esc(refs.tool || "tool")}</code> ${esc(short(refs.call_id || refs.part_id, 16))}</a>`);
+  else if (refs.call_id || refs.tool) rows.push(`tool <code>${esc(refs.tool || "?")}</code> ${esc(short(refs.call_id, 16))}`);
+  if (refs.message_id) rows.push(`message <code>${esc(short(refs.message_id, 16))}</code>`);
+  if (refs.output_sha) rows.push(`output blob <code title="${esc(refs.output_sha)}">${esc(short(refs.output_sha, 16))}</code>`);
+  if (refs.artifact_id) rows.push(`artifact <a href="/control/api/artifacts/${encodeURIComponent(refs.artifact_id)}/thumbnail" target="_blank" rel="noopener"><code>${esc(short(refs.artifact_id, 16))}</code></a>${refs.artifact_sha ? ` sha256 <code>${esc(short(refs.artifact_sha, 12))}</code>` : ""}`);
+  if (refs.source_revision) rows.push(`revision <code>${esc(short(refs.source_revision, 12))}</code>`);
+  if (refs.runtime_id) rows.push(`runtime <code>${esc(short(refs.runtime_id, 16))}</code>`);
+  if (refs.source) rows.push(`recorded from ${esc(refs.source)}`);
+  if (!rows.length) return "";
+  const open = (S.openProv || new Set()).has(key) ? " open" : "";
+  return `<details data-prov="${esc(key)}"${open}><summary class="dim">provenance</summary><div class="dim">${rows.join(" · ")}</div></details>`;
+}
+function budgetRow(name, c) {
+  if (!c) return null;
+  const used = c.used ?? null, max = c.max ?? null;
+  const pct = used !== null && max ? clamp(100 * used / max, 0, 100) : null;
+  const over = used !== null && max && used >= max;
+  const bar = pct === null ? "" : `<div class="bar" role="img" aria-label="${esc(name)} ${esc(used)} of ${esc(max)}"><i style="width:${pct}%;${over ? "background:var(--bad)" : ""}"></i></div>`;
+  return [name, `${used === null ? NA("not counted") : esc(used)} / ${max === null || max === undefined ? '<span class="dim">no cap</span>' : esc(max)}${over ? " " + sprintPill("used up", "bad") : ""}${bar}${c.explained ? `<div class="dim">${esc(c.explained)}</div>` : ""}<div class="src">${esc(c.source || "")}</div>`];
+}
+function decisionDraft(id) { S.decDrafts = S.decDrafts || {}; return S.decDrafts[id] || (S.decDrafts[id] = {option: "", answer: "", note: ""}); }
+function decisionCard(t, d, withForm) {
+  const id = d.decision_id;
+  const dr = decisionDraft(id);
+  const act = d.answer_action;
+  const opts = (d.options || []).map((o, i) => `<label style="display:block"><input type="radio" name="dopt-${esc(id)}" value="${esc(o)}" data-dopt="${esc(id)}" ${dr.option === o ? "checked" : ""}> ${esc(o)}${d.recommendation && d.recommendation === o ? ' <span class="pill info">recommended</span>' : ""}</label>`).join("");
+  const form = !withForm ? "" : act ? `<div class="dim">Answer ${esc(act.status)} by ${esc(act.by || "?")} ${esc(tsText(act.ts))}: waiting for the coordinator to apply it.</div>`
+    : `<form class="dec-form" data-decision="${esc(id)}" data-dtask="${esc(taskKey(t.project_id, t.task_id))}" data-dqh="${esc(d.question_hash || "")}">
+      ${opts ? `<div class="sub dim">Options</div>${opts}` : ""}
+      <textarea data-danswer="${esc(id)}" rows="3" style="width:100%" placeholder="${opts ? "Answer or conditions (optional when an option is chosen)" : "Your answer"}">${esc(dr.answer)}</textarea>
+      <input data-dnote="${esc(id)}" style="width:100%" placeholder="Note for the record (optional)" value="${esc(dr.note)}">
+      <div class="row"><button class="primary" data-dsubmit="${esc(id)}">Answer as operator</button>
+      <span class="dim">Recorded with authority <b>operator</b> and your sign-in as the actor.</span></div></form>`;
+  return `<div class="qcard" data-dec="${esc(id)}"><div style="display:flex;gap:5px;flex-wrap:wrap;align-items:center">${sprintPill(d.kind || "decision", "warn")}${sprintPill(d.status || "?", d.status === "open" ? "bad" : "")}<b>${esc(t.task_id)}</b><span class="dim">${esc(tsText(d.opened_ts, "datetime"))}</span></div>
+    <div style="white-space:pre-wrap">${esc(d.question)}</div>
+    ${(d.evidence || []).length ? `<div class="sub dim">Evidence</div><ul class="list">${d.evidence.map(e => `<li class="mono" style="white-space:pre-wrap">${esc(e)}</li>`).join("")}</ul>` : ""}
+    ${d.recommendation ? `<div><span class="dim">Recommendation:</span> ${esc(d.recommendation)}</div>` : ""}
+    ${(d.blocks || []).length ? `<div><span class="dim">Blocked until answered:</span> ${d.blocks.map(b => `<code>${esc(b)}</code>`).join(", ")}</div>` : ""}
+    ${d.status !== "open" && d.answer ? `<div><span class="dim">Answer (${esc(d.authority || "?")}, ${esc(d.actor || "?")}):</span> ${esc(d.answer)}</div>` : ""}
+    ${form}</div>`;
+}
+function openDecisions(tasks) {
+  const out = [];
+  for (const t of (tasks || new Map()).values()) {
+    const v = t.task_view || {};
+    for (const d of ((v.decisions || {}).open || [])) out.push({t, d});
+  }
+  return out.sort((a, b) => (b.d.opened_ts || 0) - (a.d.opened_ts || 0));
+}
+function decisionsInboxHtml(tasks) {
+  const list = openDecisions(tasks);
+  if (!list.length) return "";
+  return `<h4 style="margin:4px 0">Decisions (${list.length})</h4>` + list.map(({t, d}) => `<div class="alert sev-high"><div class="atitle">${esc(d.kind || "decision")} · ${esc(t.project_id)}/${esc(t.task_id)}</div>
+    <div style="white-space:pre-wrap">${esc(String(d.question || "").slice(0, 600))}</div>
+    ${(d.blocks || []).length ? `<div class="dim">blocks ${esc(d.blocks.join(", "))}</div>` : ""}
+    <div class="row">${d.answer_action ? `<span class="dim">answer ${esc(d.answer_action.status)}</span>` : `<button class="primary" data-decide-task="${esc(t.project_id)}/${esc(t.task_id)}" data-decide-id="${esc(d.decision_id)}">Answer</button>`}<button data-task="${esc(t.project_id)}/${esc(t.task_id)}">Open task</button></div></div>`).join("");
+}
+function compatPill(src) {
+  const c = ((src || {}).detail || {}).compat;
+  if (!c || c.state === "ok") return "";
+  return `<span class="pill ${c.state === "refuse" ? "bad" : "warn"}" title="${esc(c.reason || "")} (server ${esc(c.server_version || "?")})">${esc((src.kind || "source") + " version " + c.state)}</span>`;
+}
+/*sprint-end*/
 const SECTION_RENDER = {
+  /*sprint-render-start*/
+  readiness(s) {
+    const {v} = sprintView(s);
+    const nr = notReported(v, "readiness", "Readiness"); if (nr) return nr;
+    const r = v.readiness || {}; const items = r.items || [];
+    if (!items.length) return `<p class="dim">No readiness checks were run for this task yet (they run before an implementation session starts).</p>`;
+    const ok = x => x.ok === true ? sprintPill("ok", "ok") : x.ok === false ? sprintPill("failed", "bad") : sprintPill("unknown", "warn");
+    return `${v.blocker_class ? `<div class="warnbox">Blocked on <b>${esc(v.blocker_class)}</b>: an environment or sync problem, not a product defect. It uses no attempt.</div>` : ""}
+      <div>${esc(r.failing || 0)} blocking check(s) failing · ${esc(r.unknown || 0)} unknown</div>
+      <table class="t"><tr><th>check</th><th>class</th><th>result</th><th></th></tr>${items.map(x => `<tr><td><code>${esc(x.name)}</code></td><td>${esc(x.cls || "?")}</td><td>${ok(x)}</td><td>${x.blocking ? "" : '<span class="dim">advisory</span>'}</td></tr>
+      ${x.detail || x.remedy ? `<tr><td colspan="4" class="dim">${esc(x.detail || "")}${x.remedy ? `<div><b>remedy</b> ${esc(x.remedy)}</div>` : ""}</td></tr>` : ""}`).join("")}</table>
+      <div class="src">Reported by the coordinator's readiness step (names, never secret values). Unknown is not ok.</div>`;
+  },
+  checklist(s) {
+    const {v} = sprintView(s);
+    const nr = notReported(v, "obligations", "The required-work checklist"); if (nr) return nr;
+    const c = v.checklist || {}; const items = c.items || [];
+    if (!items.length) return `<p class="dim">No obligations recorded for this task.</p>`;
+    const phases = [...new Set(items.map(x => x.phase || "?"))];
+    return `<div>${esc(c.open)} open of ${esc(c.total)}${c.next_action ? ` · <b>next:</b> ${esc(c.next_action)}` : ""}</div>` + phases.map(ph => `<div class="sub dim" style="margin-top:6px">${esc(ph)} (${esc(((c.by_phase || {})[ph] || {}).open ?? "?")} open)</div>
+      <ul class="list">${items.filter(x => (x.phase || "?") === ph).map(x => `<li>${sprintPill(x.status || "?", OB_CLS[x.status] || "")} ${esc(x.title || x.id)} <code class="dim">${esc(x.id)}</code>
+        ${x.blocking_reason ? `<div class="warnbox">${esc(x.blocking_reason)}</div>` : ""}${x.next_action ? `<div class="dim"><b>next</b> ${esc(x.next_action)}</div>` : ""}
+        ${x.verified_rev ? `<div class="dim">verified at <code>${esc(short(x.verified_rev, 12))}</code>${x.verified_by ? " by " + esc(x.verified_by) : ""}</div>` : ""}
+        ${(x.required_evidence || []).length ? `<details data-prov="${esc("ob:" + x.id)}"${(S.openProv || new Set()).has("ob:" + x.id) ? " open" : ""}><summary class="dim">required evidence (${esc(x.required_evidence.length)})</summary><div class="dim">${x.required_evidence.map(e => `${esc(e.kind)} <code>${esc(e.ref)}</code>`).join(" · ")}</div><div class="dim">source ${esc(x.source || "?")}</div></details>` : ""}</li>`).join("")}</ul>`).join("")
+      + `<div class="src">Status changes only through recorded evidence or an answered decision; a model's summary never moves an item.</div>`;
+  },
+  evidence(s) {
+    const {v} = sprintView(s);
+    const nr = notReported(v, "evidence", "Evidence"); if (nr) return nr;
+    const e = v.evidence || {}; const n = e.counts || {};
+    const checks = (e.checks || []).slice().sort((a, b) => (EV_ORDER[a.state] ?? 9) - (EV_ORDER[b.state] ?? 9));
+    const head = `<div class="row" style="flex-wrap:wrap;gap:4px">${["reusable", "stale", "missing", "disputed", "excluded"].map(k => sprintPill(`${n[k] || 0} ${k}`, (n[k] || 0) ? EV_CLS[k] : "")).join("")}</div>`;
+    if (!checks.length) return head + `<p class="dim">No evidence recorded for this task.</p>`;
+    return head + `<ul class="list">${checks.map(c => `<li>${sprintPill(c.state, EV_CLS[c.state])} <code>${esc(c.check_id)}</code>${c.result ? ` ${sprintPill(c.result, c.result === "PASS" ? "ok" : c.result === "FAIL" ? "bad" : "warn")}` : ""}${c.tier ? ` <span class="dim">${esc(c.tier)}</span>` : ""}
+        <div class="${c.state === "reusable" ? "dim" : ""}">${c.state === "reusable" ? "" : "<b>must rerun:</b> "}${esc(c.reason || "")}</div>
+        ${c.excluded ? `<div class="dim">${esc(c.excluded)} excluded result(s): ${esc((c.excluded_reasons || []).join(", "))}</div>` : ""}
+        ${c.truncated ? '<div class="dim">output truncated (never credited above observed)</div>' : ""}
+        ${provRefs("ev:" + c.check_id, c.refs)}</li>`).join("")}</ul>${e.more ? `<div class="dim">${esc(e.more)} more checks not shown</div>` : ""}
+      ${(e.chains || []).filter(c => c.status && c.status !== "complete").map(c => `<div class="warnbox">chain <code>${esc(c.chain_id)}</code>: ${esc(c.status)}${(c.gaps || []).length ? " — missing " + esc(c.gaps.join(", ")) : ""}</div>`).join("")}
+      <div class="src">Reusable = fresh at this revision and at least verified (do not rerun). Prose is never evidence.</div>`;
+  },
+  recovered(s) {
+    const {v} = sprintView(s);
+    const nr = notReported(v, "recovered", "Recovered results"); if (nr) return nr;
+    const list = v.recovered || [];
+    if (!list.length) return `<p class="dim">Nothing recovered from earlier sessions for this task.</p>`;
+    return `<ul class="list">${list.slice().reverse().map((r, i) => `<li>${sprintPill(r.kind || "?", "info")}${r.check_id ? ` <code>${esc(r.check_id)}</code>` : ""}${r.result ? " " + sprintPill(r.result, r.result === "PASS" ? "ok" : "warn") : ""}${r.tier ? ` <span class="dim">${esc(r.tier)}</span>` : ""}${r.freshness ? ` <span class="dim">${esc(r.freshness)}</span>` : ""}
+      <span class="dim">${esc(tsText(r.ts, "datetime"))}</span><div>${esc(r.detail || "")}</div>${provRefs("rec:" + (r.check_id || r.kind) + ":" + i, r.refs || (r.session_id ? {session_id: r.session_id} : null))}</li>`).join("")}</ul>
+      <div class="src">Results credited from earlier sessions of this task (not repeated), and reconciled operations.</div>`;
+  },
+  findings(s) {
+    const {v} = sprintView(s);
+    const nr = notReported(v, "finding_history", "Finding history"); if (nr) return nr;
+    const f = v.findings || {}; const items = f.items || []; const reps = f.repairs || [];
+    if (!items.length && !reps.length) return `<p class="dim">No findings recorded for this task.</p>`;
+    const ap = f.approach_changed === true ? sprintPill("approach changed since the last attempt", "ok") : f.approach_changed === false ? sprintPill("same approach as the last attempt", "bad") : "";
+    return `<div>${esc(f.repeated || 0)} repeated finding(s) ${ap}</div>
+      <ul class="list">${items.map(x => `<li>${x.count >= 2 ? sprintPill("repeated ×" + x.count, "warn") : sprintPill("×" + (x.count || 1))} ${sprintPill(x.class || "?", "")} ${x.check_id ? `<code>${esc(x.check_id)}</code>` : ""} ${x.path ? `<code class="dim">${esc(x.path)}</code>` : ""}
+        <div>${esc(x.sample || "")}</div><div class="dim">attempts ${esc(x.first_seen_attempt ?? "?")}–${esc(x.last_seen_attempt ?? "?")} · fp <code>${esc(short(x.fingerprint, 12))}</code>${x.last_strategy ? ` · last strategy: ${esc(x.last_strategy)}` : ""}</div></li>`).join("")}</ul>
+      ${reps.length ? `<div class="sub dim">Repair attempts</div><ul class="list">${reps.map(r => `<li><b>attempt ${esc(r.attempt ?? "?")}</b> ${r.outcome ? sprintPill(r.outcome, r.outcome === "verified" || r.outcome === "pass" ? "ok" : "") : ""}<div>${esc(r.strategy || "")}</div>${r.diagnosis ? `<div class="dim">${esc(r.diagnosis)}</div>` : ""}<div class="dim">${esc(r.diff_files || 0)} file(s) changed${r.end_rev ? " · end <code>" + esc(short(r.end_rev, 12)) + "</code>" : ""}</div></li>`).join("")}</ul>` : ""}`;
+  },
+  budgets(s) {
+    const {v} = sprintView(s);
+    const nr = notReported(v, "budgets", "Budgets"); if (nr) return nr;
+    const b = v.budgets || {}; const c = b.counters || {};
+    const names = {ordinary: "Attempts", guided_extra: "Guided extra", authorized: "Operator-authorized", sessions: "Sessions", review_calls: "Review calls", closeout: "Closeout", transport_retries: "Transport retries", missing_evidence_continuations: "Evidence continuations", review_errors: "Review errors", task_minutes: "Task minutes"};
+    const rows = Object.keys(names).filter(k => c[k]).map(k => budgetRow(names[k], c[k]));
+    if (!rows.length) return `<p class="dim">No budget counters reported.</p>`;
+    return kv(rows) + ((b.authorized || []).length ? `<div class="sub dim">Authorized by decisions</div><ul class="list">${b.authorized.map(a => `<li>${esc(a.counter)} ${esc(a.delta > 0 ? "+" + a.delta : a.delta)} · decision <code>${esc(a.decision_id)}</code> · ${esc(a.actor || "")} ${esc(a.reason || "")}</li>`).join("")}</ul>` : "")
+      + `<div class="src">Source: ${esc(b.source || "?")}. The guided extra attempt is counted separately and never folded into the ordinary budget.</div>`;
+  },
+  decisions(s) {
+    const {t, v} = sprintView(s);
+    const nr = notReported(v, "decisions", "Decisions"); if (nr) return nr;
+    const dd = v.decisions || {}; const open = dd.open || [], closed = dd.closed || [];
+    if (!open.length && !closed.length) return `<p class="dim">No decisions for this task.</p>`;
+    return (open.length ? open.map(d => decisionCard(t, d, true)).join("") : `<p class="dim">No open decisions.</p>`)
+      + (closed.length ? `<details data-prov="dec-closed"${(S.openProv || new Set()).has("dec-closed") ? " open" : ""}><summary class="dim">${esc(closed.length)} answered / superseded</summary>${closed.map(d => decisionCard(t, d, false)).join("")}</details>` : "")
+      + `<div class="src">An answer is delivered to the coordinator as a typed action; it applies it and records it. A model or a delegated policy never answers here.</div>`;
+  },
+  /*sprint-render-end*/
   identity(s) {
     if (!s) return '<p class="dim">Select a session.</p>';
     const t = S.tasks.get(taskKey(s.project_id || S.project, s.task_id || S.task));
@@ -1276,6 +1455,8 @@ const SECTION_RENDER = {
       ["Now", currentAction(s.session_id)],
       ["Status source", `<span class="src">${esc(s.status_source || "none")}</span>`],
       ["Freshness", esc(fresh)],
+      bridge[0] && ((bridge[0].detail || {}).compat || {}).state && bridge[0].detail.compat.state !== "ok"
+        ? ["Version gate", `${compatPill(bridge[0])} <span class="dim">${esc(bridge[0].detail.compat.reason || "")}</span>`] : null,
     ]);
   },
   context(s) {
@@ -1637,7 +1818,43 @@ async function loadHelperStatus() {
   try { S.helperStatus = await api("helpers"); S.helperStatusAt = nowS(); } catch (e) { S.helperStatus = S.helperStatus || {warnings: [e.message]}; }
   S.helperLoading = false; scheduleInspector();
 }
+function wireSprint(sec) {
+  wireOpenButtons(sec);
+  sec.querySelectorAll("[data-part]").forEach(a => a.onclick = ev => { ev.preventDefault(); openInPane(paneById("main"), a.dataset.sid, {pin: true, part: a.dataset.part}); });
+  // provenance stays as the operator left it across re-renders (collapsed by default)
+  S.openProv = S.openProv || new Set();
+  sec.querySelectorAll("details[data-prov]").forEach(d => d.addEventListener("toggle", () => {
+    if (d.open) S.openProv.add(d.dataset.prov); else S.openProv.delete(d.dataset.prov);
+  }));
+}
+function wireDecisionForms(sec) {
+  sec.querySelectorAll("[data-dopt]").forEach(r => r.onchange = () => { decisionDraft(r.dataset.dopt).option = r.value; });
+  sec.querySelectorAll("[data-danswer]").forEach(a => a.oninput = () => { decisionDraft(a.dataset.danswer).answer = a.value; });
+  sec.querySelectorAll("[data-dnote]").forEach(a => a.oninput = () => { decisionDraft(a.dataset.dnote).note = a.value; });
+  sec.querySelectorAll("form.dec-form").forEach(f => f.onsubmit = ev => ev.preventDefault());
+  sec.querySelectorAll("[data-dsubmit]").forEach(b => b.onclick = async ev => {
+    ev.preventDefault();
+    const id = b.dataset.dsubmit; const f = b.closest("form"); const [p, t] = f.dataset.dtask.split("/");
+    const dr = decisionDraft(id);
+    if (!dr.option && !dr.answer.trim()) { toast("Choose an option or write an answer.", "warn"); return; }
+    // the hash of the question this form rendered: the server refuses a mismatch (stale_decision)
+    const qh = f.dataset.dqh || "";
+    if (!qh) { toast("This decision has no question hash; reload the task before answering.", "warn"); return; }
+    b.disabled = true;
+    const a = await submitAction({kind: "decision_answer", project_id: p, task_id: t, decision_id: id, option: dr.option,
+                                  answer: dr.answer, note: dr.note, question_hash: qh, expected: {}}, `decision:${p}/${t}:${id}`);
+    b.disabled = false;
+    if (a) { delete S.decDrafts[id]; scheduleInspector(); }
+  });
+}
 const SECTION_WIRE = {
+  readiness(sec) { wireSprint(sec); },
+  checklist(sec) { wireSprint(sec); },
+  evidence(sec) { wireSprint(sec); },
+  recovered(sec) { wireSprint(sec); },
+  findings(sec) { wireSprint(sec); },
+  budgets(sec) { wireSprint(sec); },
+  decisions(sec) { wireSprint(sec); wireDecisionForms(sec); },
   capacity(sec) {
     sec.querySelectorAll("[data-recheck]").forEach(b => b.onclick = async () => {
       const [backend, model] = b.dataset.recheck.split("|");
@@ -1884,7 +2101,7 @@ async function renderInbox() {
       <div class="dim">session <code>${esc(short(p.session_id, 16))}</code> · request <code>${esc(p.request_id)}</code> · waiting ${esc(relAge(nowS() - (p.created_ts || nowS())))}</div>
       <div style="white-space:pre-wrap">${esc(p.kind === "question" ? ((p.data.questions || [])[0] || {}).question || "" : `${p.data.permission || ""} ${(p.data.patterns || []).join(", ")}`)}</div>
       <div class="row"><button class="primary" data-answer="${esc(p.request_id)}">${p.kind === "question" ? "Answer" : "Decide"}</button><button data-view="${esc(p.session_id)}">Open session</button></div></div>`).join("") : "";
-  $("#inbox-body").innerHTML = pHtml + `<h4 style="margin:8px 0 4px">Alerts</h4>` + (list.map(a => `<div class="alert sev-${esc(a.severity)} st-${esc(a.status)}">
+  $("#inbox-body").innerHTML = decisionsInboxHtml(S.tasks) + pHtml + `<h4 style="margin:8px 0 4px">Alerts</h4>` + (list.map(a => `<div class="alert sev-${esc(a.severity)} st-${esc(a.status)}">
       <div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap"><span class="pill ${a.severity === "critical" ? "bad" : a.severity === "high" ? "warn" : "info"}">${esc(a.severity)}</span><span class="atitle">${esc(a.title)}</span>
       <span class="spacer"></span><span class="pill">${esc(a.status)}</span></div>
       <div>${esc(a.detail || "")}</div>
@@ -1898,6 +2115,12 @@ async function renderInbox() {
   const body = $("#inbox-body");
   body.querySelectorAll("[data-ack]").forEach(b => b.onclick = async () => { try { const a = await api(`alerts/${b.dataset.ack}/ack`, {method: "POST", body: {}}); S.alerts.set(a.alert_id, a); stopRepeat(a.alert_id); if (BC) BC.postMessage({type: "ack", id: a.alert_id}); renderBell(); renderInbox(); } catch (e) { toast(esc(e.message), "bad"); } });
   body.querySelectorAll("[data-answer]").forEach(b => b.onclick = () => { selectRequest(b.dataset.answer); $("#inbox").classList.remove("open"); });
+  body.querySelectorAll("[data-decide-task]").forEach(b => b.onclick = () => {
+    const [p, t] = b.dataset.decideTask.split("/"); selectTask(p, t);
+    P.sidebar.hidden = P.sidebar.hidden.filter(x => x !== "decisions"); P.sidebar.collapsed = P.sidebar.collapsed.filter(x => x !== "decisions"); savePrefs();
+    $("#inbox").classList.remove("open"); renderInspector();
+    const el = document.querySelector(`[data-dec="${CSS.escape(b.dataset.decideId)}"]`); if (el) el.scrollIntoView({block: "nearest"});
+  });
   body.querySelectorAll("[data-view]").forEach(b => b.onclick = () => { openInPane(paneById("main"), b.dataset.view, {pin: b.dataset.view !== tdata(curTask()).session_id}); $("#inbox").classList.remove("open"); });
   body.querySelectorAll("[data-task]").forEach(b => b.onclick = () => { const [p, t] = b.dataset.task.split("/"); selectTask(p, t); $("#inbox").classList.remove("open"); });
 }
