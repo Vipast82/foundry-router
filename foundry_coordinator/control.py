@@ -344,6 +344,8 @@ class ControlChannel:
 
     def report_messages(self) -> None:
         for m in self.store.operator_messages():
+            if str(m.get("action_id") or "").startswith("internal:"):
+                continue              # the coordinator's own (unblock resolution): no action
             done = m.get("reported") or ""
             try:
                 if m["status"] == "delivered" and done in ("", "queued"):

@@ -441,11 +441,7 @@ def test_s4_task_note_waits_for_the_next_prompt_and_is_delivered_once(game):
     assert not any("Prefer uppercase OK." in p for p in client.prompts(first))
 
 
-@pytest.mark.xfail(strict=True, reason=(
-    "DEFECT: a session-scoped operator instruction whose session ends normally (verify -> "
-    "repair in a new session) stays 'queued' forever; only resume() rejects it "
-    "(engine.py:1044/1300). pending_operator_messages never matches it again "
-    "(store.py:523) and control.report_messages never reports an outcome (control.py:345)"))
+# fixed in v0.121.7
 def test_s4_session_note_for_a_finished_session_is_rejected_not_stranded(game):
     tmp, _, _, prof = game
 
@@ -517,11 +513,7 @@ def test_s4_unblock_at_the_attempt_limit_fails_unless_reset(game):
     assert c.store.task("game", "T1")["attempt"] == 1
 
 
-@pytest.mark.xfail(strict=True, reason=(
-    "GAP: the operator's unblock resolution is recorded only as transition evidence "
-    "(engine.py:1098); the next session's prompt is built from findings/implement_prompt "
-    "(engine.py:286) and never carries it, so the session that asked for help never hears "
-    "the answer unless the operator also queues an instruction"))
+# fixed in v0.121.7
 def test_s4_unblock_resolution_reaches_the_next_session(game):
     tmp, _, _, prof = game
     seen = []
@@ -770,3 +762,31 @@ def test_s6_replaced_session_is_a_free_retry_and_task_notes_follow(kenv):
     kenv.commit("src/a.txt", "OK")
     kenv.fake.finish(new, REPORT_DONE)
     assert run_until(kenv.c, lambda: _state(kenv.c) == S.COMPLETE, limit=10)
+
+
+def test_s4_unblock_resolution_is_delivered_once_and_not_reported_as_an_action(game):
+    tmp, _, _, prof = game
+    seen = []
+    c = coordinator(tmp, [prof], {"game": Gated(_needs_human_then_ok(seen))})
+    c.approve("game", "T1", [], "victor")
+    assert run_until(c, lambda: _state(c) == S.BLOCKED)
+    c.unblock("game", "T1", "use green")
+    assert run_until(c, lambda: _state(c) == S.COMPLETE)
+    assert sum("use green" in p for p in seen) == 1
+    [m] = [m for m in c.store.operator_messages() if m["action_id"].startswith("internal:")]
+    assert m["status"] == "delivered" and m["scope"] == "task"
+
+
+def test_s4_session_note_for_the_live_session_is_kept(game):
+    tmp, _, _, prof = game
+    client = Gated(write_ok("src/a.txt"))
+    client.open = False
+    c = coordinator(tmp, [prof], {"game": client})
+    c.approve("game", "T1", [], "victor")
+    assert run_until(c, lambda: _state(c) == S.IMPLEMENTING)
+    sid = c.store.task("game", "T1")["session_id"]
+    c.store.add_operator_message("act-3", "game", "T1", sid, "session", "next_session",
+                                 "victor", "For you.")
+    for _ in range(3):
+        c.tick()
+    assert c.store.operator_message("act-3")["status"] == "queued"

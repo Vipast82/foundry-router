@@ -156,6 +156,7 @@ class Coordinator:
 
     def _step(self, P: Project, t: dict) -> None:
         st = t["state"]
+        self._close_session_notes(P, t)
         if st in S.TERMINAL or st in (S.BLOCKED, S.FAILED):
             return
         proj = self.store.project(P.id)
@@ -1176,6 +1177,11 @@ class Coordinator:
             # a fresh budget: see RetryGuidance.on_reset (guided extra not carried
             # over; a never-called, transiently skipped adviser re-armed, bounded)
             data = self.retry_guidance.on_reset(data)
+        if str(resolution or "").strip():
+            self.store.add_operator_message(
+                f"internal:unblock:{task_id}:{uuid.uuid4().hex[:8]}", project_id, task_id, "",
+                "task", "next_session", actor,
+                f"Resolution of the block, from {actor}: {str(resolution).strip()[:2000]}")
         return self.store.transition(project_id, task_id, S.READY, {
             "resolution": resolution, "reset_attempts": bool(reset_attempts)},
                                      actor=actor, data=data, **fields)
@@ -1378,6 +1384,31 @@ class Coordinator:
         if ids:
             self.store.mark_operator_messages(ids, "delivered", session_id,
                                               "included in the prompt Kilo accepted")
+
+    def _close_session_notes(self, P: Project, t: dict) -> None:
+        """A session-scoped instruction whose session can no longer receive a
+        prompt (a new session took over, or the task stopped) gets an explicit
+        outcome instead of waiting 'queued' forever."""
+        try:
+            rows = self.store.q("SELECT msg_id, session_id FROM operator_messages WHERE "
+                                "project_id=? AND task_id=? AND status='queued' AND "
+                                "scope='session'", (P.id, t["task_id"]))
+        except Exception:                                         # noqa: BLE001
+            return
+        if not rows:
+            return
+        st = t["state"]
+        live = set()
+        if st in (S.IMPLEMENTING, S.CLOSING, S.AWAITING_HUMAN) and t.get("session_id"):
+            live.add(t["session_id"])
+        if st == S.PAUSED and (t.get("data") or {}).get("resume_session"):
+            live.add(t["data"]["resume_session"])
+        for r in rows:
+            if r["session_id"] not in live:
+                self.store.mark_operator_messages(
+                    [r["msg_id"]], "rejected", "",
+                    f"session {r['session_id']} can no longer receive a prompt (task is "
+                    f"{st}); a session-specific instruction is not moved to another session")
 
     def _notes_undeliverable(self, project_id: str, task_id: str, session_id: str) -> None:
         for n in self.store.pending_operator_messages(project_id, task_id, session_id):
