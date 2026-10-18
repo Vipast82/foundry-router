@@ -45,6 +45,35 @@ class RetryGuidance:
         return ({record["persona"]} if record.get("status") in ("repair", "reset")
                 and record.get("persona") else set())
 
+    MAX_REARMS = 2
+
+    @classmethod
+    def on_reset(cls, data: dict) -> dict:
+        """An operator reset (unblock --reset-attempts) authorizes a fresh budget.
+
+        - repair: the guided extra attempt is not carried over, but the adviser
+          stays excluded from reviewing the work it guided (status "reset").
+        - skipped: the adviser was never called (quota 429, capacity full, no
+          adviser, hard limit). That is transient, so guidance is re-armed for
+          the new budget: the old record moves to retry_guidance_history and
+          the next exhaustion asks quota admission again. At most MAX_REARMS
+          times per task.
+        - calling / unknown / needs_human / stop / reset: never re-armed (an
+          uncertain or completed consultation is never replayed)."""
+        rg = data.get("retry_guidance")
+        if not rg:
+            return data
+        if rg.get("status") == "repair":
+            return {**data, "retry_guidance": {**rg, "status": "reset"}}
+        hist = list(data.get("retry_guidance_history") or [])
+        if rg.get("status") == "skipped" and len(hist) < cls.MAX_REARMS:
+            out = {k: v for k, v in data.items() if k != "retry_guidance"}
+            out["retry_guidance_history"] = hist + [
+                {**rg, "rearmed": "operator reset authorized a fresh budget; the adviser "
+                                  "was never called, so guidance may be asked again"}]
+            return out
+        return data
+
     def _record(self, P, t, record):
         current = self.store.task(P.id, t["task_id"])
         self.store.update_task(P.id, t["task_id"], data={**current["data"], "retry_guidance": record})
@@ -61,7 +90,8 @@ class RetryGuidance:
                 self._record(P, t, {**prior, "status": "unknown",
                     "reason": "restart during guidance: outcome unknown; not repeated"})
             return False
-        base = {"persona": cfg["persona"], "extra_attempts": 0, "attempt": t["attempt"]}
+        base = {"persona": cfg["persona"], "extra_attempts": 0, "attempt": t["attempt"],
+                "ts": self.c.clock()}
         if (t["sessions"] >= P.profile.limit("max_sessions_per_task", 8) or
                 (P.profile.limit("max_task_minutes", 0) and t.get("started_ts") and
                  self.c.clock() - t["started_ts"] > P.profile.limit("max_task_minutes", 0) * 60)):

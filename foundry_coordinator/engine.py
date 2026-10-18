@@ -1172,12 +1172,12 @@ class Coordinator:
         t = self.store.task(project_id, task_id)
         fields = {"attempt": 0, "sessions": 0, "started_ts": None} if reset_attempts else {}
         data = {k: v for k, v in t["data"].items() if k != "question"}
-        rg = data.get("retry_guidance")
-        if reset_attempts and rg and rg.get("status") == "repair":
-            # the budget starts over without the old guided extra attempt, but the
-            # adviser stays excluded from reviewing work it guided
-            data["retry_guidance"] = {**rg, "status": "reset"}
-        return self.store.transition(project_id, task_id, S.READY, {"resolution": resolution},
+        if reset_attempts:
+            # a fresh budget: see RetryGuidance.on_reset (guided extra not carried
+            # over; a never-called, transiently skipped adviser re-armed, bounded)
+            data = self.retry_guidance.on_reset(data)
+        return self.store.transition(project_id, task_id, S.READY, {
+            "resolution": resolution, "reset_attempts": bool(reset_attempts)},
                                      actor=actor, data=data, **fields)
 
     def approve_human(self, project_id: str, task_id: str, kind: str, approver: str,
