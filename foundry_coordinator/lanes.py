@@ -294,7 +294,10 @@ def parse_envelope(text: str) -> dict:
                    "region": str(f.get("region") or "")[:200],
                    "verify": str(f.get("verify") or "")[:1000]})
     lst = lambda k, n=30: [str(x)[:500] for x in (d.get(k) or [])[:n] if x]   # noqa: E731
-    return {"structured": True, "assignment": str(d.get("assignment") or "")[:60],
+    # v0.121.7: the visual observer names the image and the source separately
+    # (only present when the helper sent them; other lanes keep "base")
+    ident = {k: str(d.get(k))[:80] for k in ("artifact_id", "source_snapshot_id") if d.get(k)}
+    return {**ident, "structured": True, "assignment": str(d.get("assignment") or "")[:60],
             "base": str(d.get("base") or "")[:80], "summary": str(d.get("summary") or "")[:500],
             "findings": fs, "patch": str(d.get("patch") or "")[:60000],
             "affected_paths": lst("affected_paths"), "checks_run": lst("checks_run"),

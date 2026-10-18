@@ -242,6 +242,13 @@ refused. After the call, the served model must be one of those routes and the
 model must confirm `image_seen`. Otherwise the result reads **"Not
 inspected"**, and there are no findings and no proposal.
 
+**Image/source identity (v0.121.7).**
+
+- Each capture is bound, when its visual unit is planned, to the source snapshot it is judged against (`snapshot_id` and `content_fp` in the unit). The proposer reuses that snapshot instead of taking a new one when the observation finishes. Its drift check therefore measures from the code the image shows.
+- When the observation finishes, and again at delivery, that snapshot is compared with the current code. If they differ, or the comparison can't be made, both the observer and the proposer results carry `stale_image: {captured_at_snapshot, captured_fp, current_fp, reason, note}`. A capture taken at an older revision than its snapshot is also stale.
+- The card then says: "code changed since this image was captured; recapture or explicitly reassess before treating this as current". It never prints "the affected files still match the snapshot" for a stale image.
+- The observer request now names both ids, and the answer returns them in two fields: `artifact_id` (the image sha is accepted too) and `source_snapshot_id`. Both are validated for the visual lane, and a wrong value is recorded as `base_mismatch`. Older answers and stored rows that only have `base` are accepted when `base` is the artifact id. Other lanes keep the `base` == snapshot check.
+
 **Skills.**
 
 - Visual: the workspace `.kilo/skills/au-ui-review/SKILL.md` is inlined. Its path and sha are recorded.

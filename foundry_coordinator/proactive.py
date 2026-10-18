@@ -21,7 +21,7 @@ from typing import Optional
 from . import lanes as L
 from .artifacts import ArtifactStore
 from .advisory import AdvisoryMixin
-from .visual import VisualMixin
+from .visual import STALE_IMAGE_NOTE, VisualMixin, visual_identity_mismatch
 
 
 class Proactive(VisualMixin, AdvisoryMixin):
@@ -248,8 +248,11 @@ class Proactive(VisualMixin, AdvisoryMixin):
                 env = json.loads(u.get('envelope') or '{}')
             except (ValueError,TypeError):
                 return False
+            mism = (env.get('checks') or {}).get('base_mismatch')
+            if mism and u.get('lane') == 'visual' and not visual_identity_mismatch(u, env):
+                mism = None          # pre-v0.121.7 row: base == artifact id was compliant
             return bool(env.get('structured') and env.get('assignment') == u['unit_id']
-                        and not (env.get('checks') or {}).get('base_mismatch'))
+                        and not mism)
         reusable = [u for u in prior if usable(u)]
         if reusable:
             u = reusable[0]
@@ -600,10 +603,25 @@ class Proactive(VisualMixin, AdvisoryMixin):
             if u.get("snapshot_id") and v["paths"]:
                 checks["drift"] = self.artifacts.drift(u["snapshot_id"], P.profile.workspace,
                                                        v["paths"], u["project_id"], u["task_id"])
-        if env.get("structured") and u.get("snapshot_id") and env.get("base") and \
+        if u.get("lane") == "visual":
+            # v0.121.7: the observer names the image (artifact_id) and the source
+            # it was bound to (source_snapshot_id) separately; legacy base-only
+            # answers match on the artifact id
+            if env.get("structured"):
+                a = self.artifacts.get(u.get("artifact_id") or "") or {}
+                why = visual_identity_mismatch(u, env, a.get("sha256") or "")
+                if why:
+                    checks["base_mismatch"] = why
+        elif env.get("structured") and u.get("snapshot_id") and env.get("base") and \
                 env["base"] != u["snapshot_id"]:
             checks["base_mismatch"] = (f"result names base {env['base']}, assignment was "
                                        f"{u['snapshot_id']}")
+        if u.get("lane") in ("visual", "proposer"):
+            # the image is bound to its plan-time snapshot: findings judged on an
+            # older frame are never presented as matching newer code
+            stale = self.stale_image(P, u)
+            env = {**env, "stale_image": stale} if stale else \
+                {k: v for k, v in env.items() if k != "stale_image"}
         observed, violations = meta.get("skills_observed") or [], []
         if u.get("mode") != "direct":
             observed, violations = self._session_tools(P, u)
@@ -678,6 +696,7 @@ class Proactive(VisualMixin, AdvisoryMixin):
             return []
         floor = L.SEVERITY.get(ls["min_delivery_severity"], 2)
         out = []
+        cur_snap: dict = {}                       # one current-code snapshot per delivery
         for u in units:
             if (u.get("feedback") or "waiting") != "waiting":
                 continue
@@ -690,6 +709,8 @@ class Proactive(VisualMixin, AdvisoryMixin):
                     self._display_only(u, "its capture was superseded", "superseded")
                     continue
             env = json.loads(u.get("envelope") or "{}")
+            if u["lane"] in ("visual", "proposer"):
+                env = self._refresh_stale(P, t, u, env, cur_snap)
             sev = max([L.SEVERITY.get(f.get("severity"), 0) for f in env.get("findings") or []]
                       or [-1])
             has_patch = bool((env.get("checks") or {}).get("patch", {}).get("has_patch"))
@@ -716,6 +737,24 @@ class Proactive(VisualMixin, AdvisoryMixin):
             out.append((-max(sev, 0), u.get("created_ts") or 0, u))
         out.sort(key=lambda x: (x[0], x[1]))
         return [u for _, _, u in out[:int(ls["max_cards_per_delivery"])]]
+
+    def _refresh_stale(self, P, t: dict, u: dict, env: dict, cache: dict) -> dict:
+        # Re-check, at delivery, that the code still matches the snapshot the
+        # image was bound to (it may have moved since the result came back).
+        if "snap" not in cache:
+            try:
+                cache["snap"] = self._snap(P, t, P.adapter.describe(u["task_id"])) if t else {}
+            except Exception as e:                                # noqa: BLE001
+                cache["snap"] = {"status": f"error: {type(e).__name__}"}
+        stale = self.stale_image(P, u, cache["snap"])
+        if stale == env.get("stale_image") or (not stale and "stale_image" not in env):
+            return env
+        env = {**env, "stale_image": stale} if stale else \
+            {k: v for k, v in env.items() if k != "stale_image"}
+        u["envelope"] = json.dumps(env, default=str)
+        self.store.x("UPDATE helper_units SET envelope=? WHERE unit_id=?",
+                     (u["envelope"][:80000], u["unit_id"]))
+        return env
 
     def _display_only(self, u: dict, why: str, feedback: str = "display_only") -> None:
         self.store.x("UPDATE helper_units SET feedback=?, feedback_detail=? WHERE unit_id=?",
@@ -746,6 +785,12 @@ class Proactive(VisualMixin, AdvisoryMixin):
             lines.append(f"\n### [{top.upper()}] {u['unit_id']} — {u['lane'].replace('_', ' ')} "
                          f"(by {u.get('persona')}; base "
                          f"{u.get('snapshot_id') or u.get('artifact_id') or 'n/a'})")
+            stale = env.get("stale_image")
+            if stale:
+                lines.append(f"STALE IMAGE: {stale.get('note') or STALE_IMAGE_NOTE}. ({stale.get('reason') or ''}; "
+                             f"image bound to snapshot {stale.get('captured_at_snapshot') or 'none'}"
+                             f", current code {str(stale.get('current_fp') or 'unknown')[:12]}.) "
+                             "The findings below describe the older frame, not the current code.")
             if env.get("summary"):
                 lines.append(env["summary"])
             if u["lane"] == "proposer":
@@ -762,6 +807,8 @@ class Proactive(VisualMixin, AdvisoryMixin):
                 moved = [p for p, s in (chk.get("drift") or {}).items() if s != "unchanged"]
                 lines.append(("Base check: files changed since the snapshot (" + ", ".join(moved[:6])
                               + ") — rebase and review before applying.") if moved else
+                             ("Base check: the patched files are unchanged, but the image is stale "
+                              "(see above) — reassess before applying.") if stale else
                              "Base check: the affected files still match the snapshot.")
                 lines.append("```diff\n" + env["patch"][:12000] + "\n```")
             if env.get("checks_proposed"):

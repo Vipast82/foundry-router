@@ -37,14 +37,79 @@ from .adapters.foundry import FoundryDenied, FoundryError
 OBSERVER_SYSTEM = """You are a read-only visual observer for a Roblox UI sprint. You receive one captured frame (and, when available, the approved design reference) as images, plus the acceptance criteria and capture metadata.
 Report what is VISIBLE: defects against the criteria/reference (clipping, overlap, alignment, safe area, scale, missing or wrong elements, text). For each finding give severity, confidence (0-1), the image region, the observation, and separately any inferred code cause as a hypothesis with the likely file paths. Suggest how the primary should verify.
 If the expected subject is missing, the frame is invalid or occluded, or you cannot actually see an image, say so (image_seen false / validity) and report no defects. Never declare the UI approved: a person approves visual work.
+Copy artifact_id and source_snapshot_id exactly as the request gives them: the first names the image you judged, the second the source code it was bound to.
 Answer with ONE fenced block:
 ```helper-result
-{"assignment": "<id>", "base": "<artifact id>", "image_seen": true, "subject_present": true, "validity": "ok | invalid | occluded | missing_subject", "summary": "<one line>", "findings": [{"id": "V1", "severity": "high|medium|low|info", "confidence": 0.0, "region": "<where>", "observed": "<visible fact>", "hypothesis": "<inferred cause or empty>", "paths": ["<source path>"], "in_scope": true, "verify": "<how to check>"}], "limitations": "", "next_action": ""}
+{"assignment": "<id>", "artifact_id": "<artifact id from the request>", "source_snapshot_id": "<source snapshot id from the request>", "image_seen": true, "subject_present": true, "validity": "ok | invalid | occluded | missing_subject", "summary": "<one line>", "findings": [{"id": "V1", "severity": "high|medium|low|info", "confidence": 0.0, "region": "<where>", "observed": "<visible fact>", "hypothesis": "<inferred cause or empty>", "paths": ["<source path>"], "in_scope": true, "verify": "<how to check>"}], "limitations": "", "next_action": ""}
 ```"""
+
+
+STALE_IMAGE_NOTE = ("code changed since this image was captured; recapture or explicitly "
+                    "reassess before treating this as current")
+STALE_IMAGE_UNVERIFIED = ("the code may have changed since this image was captured (it could not "
+                          "be verified); recapture or explicitly reassess before treating this "
+                          "as current")
+
+
+def visual_identity_mismatch(u: dict, env: dict, sha256: str = "") -> str:
+    """'' when a visual observer's answer names the image and source it was
+    given (v0.121.7: distinct artifact_id / source_snapshot_id). A value that
+    is present and wrong is a mismatch; an absent one is not checked.
+
+    Legacy answers (and stored rows) carry only `base`: base == the artifact id
+    (or the snapshot id the old general check used) is a match."""
+    aid, sid = u.get("artifact_id") or "", u.get("snapshot_id") or ""
+    got_a, got_s = env.get("artifact_id") or "", env.get("source_snapshot_id") or ""
+    out = []
+    if got_a and aid:
+        sha = (sha256 or "").lower()
+        if got_a != aid and not (sha and len(got_a) >= 12 and sha.startswith(got_a.lower())):
+            out.append(f"result names artifact {got_a}, assignment was {aid}")
+    if got_s and sid and got_s != sid:
+        out.append(f"result names source snapshot {got_s}, assignment was {sid}")
+    if not (got_a or got_s) and env.get("base") and (aid or sid) and env["base"] not in (aid, sid):
+        out.append(f"result names base {env['base']}, assignment was artifact {aid or 'n/a'} "
+                   f"/ snapshot {sid or 'n/a'}")
+    return "; ".join(out)
 
 
 class VisualMixin:
     """Mixed into proactive.Proactive."""
+
+    # ------------------------------------------------------------------ identity
+
+    def stale_image(self, P, u: dict, current: Optional[dict] = None) -> Optional[dict]:
+        """None when the code still matches the source snapshot the image was
+        bound to at plan time; otherwise why it doesn't. Unverifiable counts
+        as stale: an older frame is never presented as matching newer code."""
+        try:
+            pk = json.loads(u.get("packet") or "{}")
+        except (TypeError, ValueError):
+            pk = {}
+        sid = u.get("snapshot_id") or ""
+        snap = self.artifacts.snapshot(sid, P.id, u["task_id"]) if sid else None
+        try:
+            if current is None:
+                t = self.store.task(P.id, u["task_id"])
+                current = self._snap(P, t, P.adapter.describe(u["task_id"])) if t else {}
+        except Exception as e:                                    # noqa: BLE001
+            current = {"status": f"error: {type(e).__name__}"}
+        out = {"captured_at_snapshot": sid or None,
+               "captured_fp": (snap or {}).get("content_fp"),
+               "current_fp": (current or {}).get("content_fp"),
+               "note": STALE_IMAGE_NOTE}
+        unverified = {**out, "note": STALE_IMAGE_UNVERIFIED}
+        if pk.get("capture_predates_snapshot"):
+            return {**out, "reason": pk["capture_predates_snapshot"]}
+        if not snap:
+            return {**unverified, "reason": "no source snapshot was bound to this image; "
+                                            "whether the code changed can't be verified"}
+        if (current or {}).get("status") != "consistent":
+            return {**unverified, "reason": "the current code could not be fingerprinted ("
+                                            f"{(current or {}).get('status') or 'unknown'})"}
+        same = (snap["content_fp"] == current.get("content_fp")) if snap.get("content_fp") \
+            else snap["snapshot_id"] == current.get("snapshot_id")       # legacy row
+        return None if same else {**out, "reason": "the source changed after the image's snapshot"}
 
     _pool: Optional[ThreadPoolExecutor] = None
 
@@ -82,14 +147,22 @@ class VisualMixin:
             if now - (a["created_ts"] or now) < float(v["debounce_seconds"]):
                 continue                                  # coalesce a burst of recaptures
             refs, ref_notes = self._references(P, t, v)
+            # v0.121.7: the image is bound to THIS source snapshot; every later
+            # staleness/drift check (observer and proposer) compares against it
             snap = self._snap(P, t, spec)
+            predates = ""
+            if a.get("revision") and snap.get("head") and a["revision"] != snap["head"]:
+                predates = (f"the image was captured at revision {a['revision'][:12]}, before "
+                            f"the source snapshot at {snap['head'][:12]}")
             uid, how = self.add(P, t, "visual", aid, {
                 "artifact": aid, "sha256": a["sha256"], "path": a["rel_path"],
                 "generation": a["generation"], "width": a["width"], "height": a["height"],
                 "revision": a["revision"], "subject": a["subject"], "viewport": v.get("viewport")
                 or f"{a['width']}x{a['height']} capture", "validity": a.get("validity") or {},
                 "capture_source": a["source"], "references": refs, "reference_notes": ref_notes,
-                "snapshot": snap.get("snapshot_id"), "previous": a.get("prev_artifact")},
+                "snapshot": snap.get("snapshot_id"), "snapshot_fp": snap.get("content_fp"),
+                "snapshot_status": snap["status"], "capture_predates_snapshot": predates,
+                "previous": a.get("prev_artifact")},
                 ls, files=[a["rel_path"]], depth=1, artifact_id=aid,
                 snapshot_id=snap.get("snapshot_id") or "", event_key=ev["event_key"])
             self._done_event(ev, uid, how)
@@ -164,7 +237,9 @@ class VisualMixin:
                  "role": "capture"}]
         loaded, missing, texts = self._skill_texts(P, ls, ls["lanes"]["visual"].get("skills") or [])
         text = (f"Assignment {u['unit_id']} — task {spec.task_id} ({spec.title}).\n"
-                f"Capture: {a['rel_path']} generation {a['generation']}, sha256 {a['sha256']}, "
+                f"Identity (copy exactly into your answer): artifact_id {a['artifact_id']}, "
+                f"source_snapshot_id {u.get('snapshot_id') or pk.get('snapshot') or 'none'}.\n"
+                f"Capture:{a['rel_path']} generation {a['generation']}, sha256 {a['sha256']}, "
                 f"{a['width']}x{a['height']}, captured at source revision {a['revision'][:12]} "
                 f"(capture record: {a['source']}).\nSubject: {pk.get('subject')}. Viewport/device: "
                 f"{pk.get('viewport')}.\nCapture validity lines:\n"
@@ -368,18 +443,30 @@ class VisualMixin:
         from .profile import matches_any
         paths = sorted({p.split(":")[0] for f in good for p in f.get("paths") or []
                         if matches_any(p.split(":")[0], spec.scope)})
-        snap = self._snap(P, t, spec)
+        # v0.121.7: the proposal targets the source the IMAGE was bound to (the
+        # observer's plan-time snapshot), never a fresh one taken now: drift
+        # and staleness are then measured from what the image actually shows
+        snap = self.artifacts.snapshot(u.get("snapshot_id") or "", P.id, u["task_id"]) or {}
         a = self.artifacts.get(u["artifact_id"]) or {}
         pk = json.loads(u.get("packet") or "{}")
+        stale = env.get("stale_image")
         evidence = (f"Capture {a.get('rel_path')} gen {a.get('generation')} sha256 {a.get('sha256')} "
-                    f"({a.get('width')}x{a.get('height')}) at revision {str(a.get('revision'))[:12]}; "
+                    f"({a.get('width')}x{a.get('height')}) at revision {str(a.get('revision'))[:12]}"
+                    f", bound to source snapshot {snap.get('snapshot_id') or 'none'}; "
                     f"observer {u['unit_id']} ({u.get('persona')}, served {env.get('served_model') or ''})"
-                    f": {env.get('summary') or ''}. References: {pk.get('references') or 'none'}.")
+                    f": {env.get('summary') or ''}. References: {pk.get('references') or 'none'}."
+                    + (f" STALE IMAGE: {STALE_IMAGE_NOTE} ({stale.get('reason')})." if stale else ""))
         manifest = sorted((snap.get("manifest") or {}))
         uid, how = self.add(P, t, "proposer", f"{u['unit_id']}", {
             "findings": good, "evidence": evidence, "ui": True, "snapshot": snap.get("snapshot_id"),
-            "snapshot_status": snap["status"], "files": manifest,
-            "excerpt_files": [p for p in paths if p in manifest][:4] or manifest[:2]},
+            "snapshot_status": "consistent" if snap else "missing", "files": manifest,
+            "excerpt_files": [p for p in paths if p in manifest][:4] or manifest[:2],
+            "capture_predates_snapshot": pk.get("capture_predates_snapshot") or "",
+            "stale_image": stale,
+            "notes": (f"The image predates the current code ({stale.get('reason')}): the findings "
+                      f"describe the snapshot above, not necessarily the live workspace. Say in "
+                      f"limitations whether each finding still applies to the current source."
+                      if stale else "")},
             ls, files=paths or spec.scope, parent_unit=u["unit_id"], depth=2,
             artifact_id=u.get("artifact_id") or "", snapshot_id=snap.get("snapshot_id") or "")
         if uid and how == "created":

@@ -216,10 +216,7 @@ def test_s2_capture_revision_and_snapshot_are_bound_to_the_observation(env):
     assert f"revision {head[:12]}" in text and a["sha256"] in text
 
 
-@pytest.mark.xfail(strict=True, reason="DEFECT: an image captured before a code change is judged "
-                   "and turned into a proposal against the NEW code; the proposer's snapshot is "
-                   "taken when the observation finishes (visual.py:371), so the card says the "
-                   "files 'still match the snapshot' and nothing says the image predates the code")
+# fixed in v0.121.7
 def test_s2_stale_capture_judged_after_the_code_changed_is_flagged(env):
     c = env["c"]
     env["ff"].admission[VISION] = admit("defer", "Session 71% used", routes=VROUTES)
@@ -247,10 +244,7 @@ def test_s2_stale_capture_judged_after_the_code_changed_is_flagged(env):
     assert any(w in card.lower() for w in ("changed since the capture", "stale", "rebase"))
 
 
-@pytest.mark.xfail(strict=True, reason="DEFECT: OBSERVER_SYSTEM asks for \"base\": \"<artifact id>\" "
-                   "(visual.py:42) but on_finish compares base with the unit's SOURCE snapshot id "
-                   "(proactive.py:529), so a compliant observation always records base_mismatch; "
-                   "the artifact id is not even in the observer's prompt")
+# fixed in v0.121.7
 def test_s2_compliant_observer_base_is_not_a_base_mismatch(env):
     capture(env)
     env["ff"].admission[VISION] = admit(routes=VROUTES)
