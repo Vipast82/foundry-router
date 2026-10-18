@@ -268,6 +268,19 @@ class HelperManager:
         cands = (self.lanes.candidates(P, u, h) if u.get("lane") else
                  [(b, h["personas"][b]) for b in self._order(P, u, h)])
         for backend, persona in cands:
+            # Kilo accepts prompt_async before resolving the model. A local
+            # filter failure otherwise leaves only a user message, which looks
+            # busy until the full helper timeout. Direct lanes bypass Kilo.
+            check_model = getattr(P.client, 'model_config_problem', None)
+            if u.get('mode') != 'direct' and callable(check_model):
+                try:
+                    problem = check_model(P.profile.workspace, persona)
+                except RuntimeError as e:
+                    problem = f"Kilo model preflight failed: {e}"
+                if problem:
+                    reasons.append(f"{backend}: {problem}")
+                    open_ended = True
+                    continue
             try:
                 adm = P.foundry.helper_admission(persona)
             except FoundryError as e:

@@ -2,6 +2,26 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.121.2 — helpers no longer hang 30 minutes on a model Kilo filters out
+
+**What changes**
+
+- **Fix:** before admitting a Kilo-run helper, the coordinator checks Kilo's
+  effective config for the helper's persona. If the `foundry` provider's
+  `whitelist` leaves the persona out, or its `blacklist` includes it, the unit
+  is deferred with that reason and no session is created.
+  - Before this, Kilo accepted the prompt and then silently refused the model.
+    The helper session held only the user message, looked busy, and was stopped
+    as "failed" after the 30-minute helper timeout ("model ?" in the control
+    center).
+- **Recovery:** after the config is fixed, the unit dispatches on its next
+  scheduled poll with no lost attempt.
+- **Scope:** direct (vision) lanes don't go through Kilo and are unaffected.
+
+**Migration:** none. If helpers were timing out, add the helper personas
+(`Foundry-Kilo-Helper-Claude`, `Foundry-Kilo-Helper-GPT`) to Kilo's provider
+whitelist, or remove them from the blacklist.
+
 ## v0.121.1 — popped-out transcript panes leave the main page too
 
 **What changes:** a transcript pane popped out with ⧉ is now hidden from the main

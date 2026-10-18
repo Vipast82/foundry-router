@@ -89,6 +89,28 @@ def helper_sessions(fake, primary):
     return [s for s in fake.sessions if s != primary]
 
 
+@pytest.mark.parametrize('filter_name', ['whitelist', 'blacklist'])
+def test_helper_model_filters_defer_before_admission_or_session_creation(env, filter_name):
+    fake, c, ff = env['fake'], env['c'], env['ff']
+    primary = c.store.task('game', 'T1')['session_id']
+    provider = fake.config['provider']['foundry']
+    provider[filter_name] = (['Foundry-Kilo-Local'] if filter_name == 'whitelist' else
+                            ['Foundry-Kilo-Helper-Claude', 'Foundry-Kilo-Helper-GPT'])
+    c.tick()
+    assert helper_sessions(fake, primary) == []
+    assert ff.asked == []
+    assert all(u['status'] == 'deferred' for u in units(c).values())
+    assert all(filter_name in u['reason'] for u in units(c).values())
+    # Fixing the config allows normal dispatch on the next scheduled poll;
+    # no attempt is lost to the original 30-minute timeout.
+    provider.pop(filter_name)
+    env['clock'][0] += 31
+    ff.admission['Foundry-Kilo-Helper-Claude'] = admit('admit')
+    c.tick()
+    assert len(helper_sessions(fake, primary)) == 2
+    assert all(u['attempts'] == 1 for u in units(c).values())
+
+
 def test_full_admission_defer_admit_deliver_cycle(env):
     fake, c, ff, clock = env["fake"], env["c"], env["ff"], env["clock"]
     primary = c.store.task("game", "T1")["session_id"]

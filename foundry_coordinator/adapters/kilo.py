@@ -174,6 +174,22 @@ class KiloClient(CodingClient):
 
     # -- configuration checks ------------------------------------------------------------
 
+    def model_config_problem(self, directory: str, persona: str) -> str:
+        """Catch local filters before prompt_async can silently reject a model.
+
+        A configured model and a Foundry catalog entry do not prove that Kilo
+        exposes it: its provider whitelist/blacklist are applied separately.
+        """
+        cfg = self._req('GET', '/config/effective', query={'directory': directory}) or {}
+        provider = (cfg.get('provider') or {}).get(self.provider)
+        if provider is None:
+            return f"Kilo provider {self.provider!r} is not configured"
+        if 'whitelist' in provider and persona not in (provider['whitelist'] or []):
+            return f"Kilo provider whitelist excludes {self.provider}/{persona}"
+        if persona in (provider.get('blacklist') or []):
+            return f"Kilo provider blacklist excludes {self.provider}/{persona}"
+        return ''
+
     def inference_models(self, directory: str) -> dict:
         """Read model visibility using Kilo's actual inference credential.
 
