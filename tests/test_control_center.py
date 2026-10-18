@@ -424,3 +424,41 @@ def test_snapshot_history_is_dated_not_today(client, cc):
     assert old["data"]["servers"][0]["status"] == "connected" and old["source_ts"] == 1000.0
     assert cc.snapshot("mcp", "proj", at=500.0) is None      # before capture began: unavailable
     assert cc.snapshot("mcp", "proj")["data"]["servers"][0]["status"] == "failed"
+
+
+def test_lanes_action_is_project_wide_and_skips_the_stale_state_check(client, cc):
+    """'Pause proactive lanes' routes through any task of the project; the task's
+    state is irrelevant, so a stale expected.task_state never refuses it."""
+    ingest(client, task_obs("IMPLEMENTING"))
+    h = login(client)
+    r = client.post("/control/api/actions", headers=h, json={
+        "kind": "lanes", "project_id": "proj", "task_id": "T-1", "paused": True,
+        "expected": {"task_state": "VERIFYING"}, "idempotency_key": "lanes-1234567"})
+    assert r.status_code == 200, r.text
+    r2 = client.post("/control/api/actions", headers=h, json={
+        "kind": "lanes", "project_id": "proj", "task_id": "T-1", "paused": False,
+        "idempotency_key": "lanes-2345678"})
+    assert r2.status_code == 200, r2.text
+
+
+def test_thumbnail_malformed_base64_is_404_and_image_mimes_pass(client, cc):
+    import base64
+    good = base64.b64encode(b"RIFF....WEBPVP8 ").decode()
+    ingest(client,
+           {"type": "artifact", "project_id": "proj", "task_id": "T-1", "artifact_id": "art-bad",
+            "rel_path": "docs/evidence/T-1/a.png", "generation": 1, "sha256": "a" * 64,
+            "status": "current", "mime": "image/png", "thumbnail_b64": "@@not*base64@@"},
+           {"type": "artifact", "project_id": "proj", "task_id": "T-1", "artifact_id": "art-webp",
+            "rel_path": "docs/evidence/T-1/b.webp", "generation": 1, "sha256": "b" * 64,
+            "status": "current", "mime": "image/webp", "thumbnail_b64": good},
+           {"type": "artifact", "project_id": "proj", "task_id": "T-1", "artifact_id": "art-html",
+            "rel_path": "docs/evidence/T-1/c.png", "generation": 1, "sha256": "c" * 64,
+            "status": "current", "mime": "text/html", "thumbnail_b64": good})
+    login(client)
+    bad = client.get("/control/api/artifacts/art-bad/thumbnail")
+    assert bad.status_code == 404 and "unreadable" in bad.json()["error"]
+    ok = client.get("/control/api/artifacts/art-webp/thumbnail")
+    assert ok.status_code == 200 and ok.headers["content-type"].startswith("image/webp")
+    assert ok.content == b"RIFF....WEBPVP8 "
+    html = client.get("/control/api/artifacts/art-html/thumbnail")
+    assert html.headers["content-type"].startswith("application/octet-stream")

@@ -912,57 +912,81 @@ function paneAction(pane, a) {
 function applyPaneFont(p) { if (p.el) p.el.querySelector(".transcript").style.fontSize = `calc(var(--fs) * ${P.fontScale[p.id === "main" ? "main" : "helper"]})`; }
 /* ======================================================================== popped-out cards */
 // While a section or the graph is open in its own pop-out window, the main page
-// leaves it out so the space can hold other sections; when that window closes
-// (or stops answering for ~7 s) it comes back. Pop-out windows announce
-// themselves on a BroadcastChannel, so this survives a reload of either page.
+// leaves it out so the space can hold other sections; when that window closes it
+// comes back. Pop-out windows announce themselves on a BroadcastChannel (so this
+// survives a reload of either page) with their project and a per-window token:
+// a tab showing another project is unaffected, and closing one of two windows
+// with the same card keeps it out while the other is open. The prompt return is
+// the explicit "closed" message (pagehide); the expiry is only a backstop and is
+// long because a minimized window's timers are throttled to about once a minute.
 /*popped-start*/
-const POP_TTL_MS = 7000;
+const POP_TTL_MS = 75000;
 function popId(popoutParam, session) {
   if (popoutParam === "graph") return "graph";
   if (popoutParam === "pane") return session ? "pane:" + session : "";
   if (String(popoutParam || "").startsWith("section:")) return "sec:" + String(popoutParam).slice(8);
   return "";
 }
+// map: token -> {id, project, seen}
 function prunePopped(map, now) {
   let changed = false;
-  for (const [id, seen] of [...map.entries()]) if (now - seen > POP_TTL_MS) { map.delete(id); changed = true; }
+  for (const [tok, e] of [...map.entries()]) if (now - ((e && e.seen) || 0) > POP_TTL_MS) { map.delete(tok); changed = true; }
   return changed;
+}
+function poppedHas(map, id, project) {
+  for (const e of map.values()) if (e && e.id === id && (!e.project || !project || e.project === project)) return true;
+  return false;
 }
 /*popped-end*/
 S.popped = S.popped || new Map();
 S.poppedShown = S.poppedShown || new Set();          // "show here too" chosen by the viewer
-function isPopped(id) { return !POPOUT && S.popped.has(id) && !S.poppedShown.has(id); }
+function isPopped(id) { return !POPOUT && poppedHas(S.popped, id, S.project) && !S.poppedShown.has(id); }
 function poppedChanged() { if (!S.booted) return; layout(); renderInspector(); }
 const POP_CH = ("BroadcastChannel" in window) ? new BroadcastChannel("fr.cc.popouts") : null;
 if (POP_CH && !POPOUT) {
   POP_CH.onmessage = ev => {
     const m = ev.data || {}; if (!m.id) return;
-    if (m.type === "alive") { const isNew = !S.popped.has(m.id); S.popped.set(m.id, Date.now()); if (isNew) poppedChanged(); }
-    else if (m.type === "closed") { S.popped.delete(m.id); S.poppedShown.delete(m.id); poppedChanged(); }
+    const tok = String(m.token || m.id);
+    if (m.type === "alive") {
+      const isNew = !S.popped.has(tok);
+      S.popped.set(tok, {id: m.id, project: String(m.project || ""), seen: Date.now()});
+      if (isNew) poppedChanged();
+    } else if (m.type === "closed") {
+      S.popped.delete(tok);
+      if (!poppedHas(S.popped, m.id, "")) S.poppedShown.delete(m.id);
+      poppedChanged();
+    }
   };
   POP_CH.postMessage({type: "who"});                 // pop-outs already open answer at once
 }
 if (POP_CH && popId(POPOUT, QS.get("session"))) {
   const me = popId(POPOUT, QS.get("session"));
-  const alive = () => POP_CH.postMessage({type: "alive", id: me});
+  const token = QS.get("poptoken") || ("w" + Math.random().toString(36).slice(2) + Date.now().toString(36));
+  const msg = type => ({type, id: me, token, project: S.project || QS.get("project") || ""});
+  const alive = () => POP_CH.postMessage(msg("alive"));
   alive(); setInterval(alive, 2000);
   POP_CH.onmessage = ev => { if ((ev.data || {}).type === "who") alive(); };
-  addEventListener("pagehide", () => POP_CH.postMessage({type: "closed", id: me}));
+  addEventListener("pagehide", () => POP_CH.postMessage(msg("closed")));
 }
 setInterval(() => {
   if (POPOUT) return;
   let changed = prunePopped(S.popped, Date.now());
-  for (const [id, w] of Object.entries(S.popWins || {})) {     // no BroadcastChannel: watch the handle
-    if (w && w.closed) { delete S.popWins[id]; if (!POP_CH && S.popped.delete(id)) changed = true; }
-    else if (!POP_CH && w) S.popped.set(id, Date.now());
+  for (const [tok, w] of Object.entries(S.popWins || {})) {     // no BroadcastChannel: watch the handle
+    if (w && w.closed) { delete S.popWins[tok]; if (S.popped.delete(tok)) changed = true; }
+    else if (!POP_CH && w) { const e = S.popped.get(tok); if (e) e.seen = Date.now(); }
   }
   if (changed) poppedChanged();
 }, 2000);
 function popout(params) {
-  const url = "/ui/control?" + new URLSearchParams(params).toString();
-  const w = window.open(url, "_blank", "popup=yes,width=900,height=1000");
   const pid = popId(params.popout, params.session);
-  if (w && pid) { S.popWins = S.popWins || {}; S.popWins[pid] = w; S.popped.set(pid, Date.now()); S.poppedShown.delete(pid); poppedChanged(); }
+  const token = pid ? "w" + Math.random().toString(36).slice(2) + Date.now().toString(36) : "";
+  const url = "/ui/control?" + new URLSearchParams(token ? {...params, poptoken: token} : params).toString();
+  const w = window.open(url, "_blank", "popup=yes,width=900,height=1000");
+  if (w && pid) {
+    S.popWins = S.popWins || {}; S.popWins[token] = w;
+    S.popped.set(token, {id: pid, project: String(params.project || S.project || ""), seen: Date.now()});
+    S.poppedShown.delete(pid); poppedChanged();
+  }
   if (!w) toast(`Your browser blocked the pop-up. <a href="${esc(url)}" target="_blank" rel="noopener">Open it here</a>`, "warn", 15000);
 }
 function openBeside(sid) {
@@ -1148,7 +1172,7 @@ function wireCards(pane, root) {
     const text = (((p || {}).data || {}).tool || {}).output || "";
     navigator.clipboard.writeText(text).then(() => toast("Copied the redacted result"), () => toast("Copy blocked by the browser", "warn"));
   });
-  root.querySelectorAll("[data-open]").forEach(b => b.onclick = () => openBeside(b.dataset.open));
+  root.querySelectorAll("[data-open]").forEach(b => b.onclick = ev => { ev.preventDefault(); openBeside(b.dataset.open); });
   root.querySelectorAll("[data-pop]").forEach(b => b.onclick = () => popout({popout: "pane", session: b.dataset.pop, project: S.project, task: S.task}));
 }
 
@@ -1471,8 +1495,9 @@ const SECTION_RENDER = {
   },
   lanes(s) {
     if (!P.showLanes) return '<p class="dim">Hidden in Settings (display only; lanes keep running per the profile).</p>';
-    if (!S.lanes || nowS() - (S.lanesAt || 0) > 15) loadLanes();
-    const L = S.lanes;
+    const lk = lanesKey(S.project, S.task);
+    if (!S.lanes || S.lanesKey !== lk || nowS() - (S.lanesAt || 0) > 15) loadLanes();
+    const L = S.lanesKey === lk ? S.lanes : null;            // never another project's/task's lanes
     if (!L) return '<p class="dim">Loading…</p>';
     if (L.error) return `<p class="dim">${esc(L.error)}</p>`;
     const st = L.state || null;
@@ -1516,7 +1541,7 @@ const SECTION_RENDER = {
         ${e.summary ? `<div>${esc(e.summary)}</div>` : ""}${e.not_inspected ? `<div class="warnbox">Not inspected: ${esc(u.reason || "no confirmed image input")}. No visual finding is reported.</div>` : ""}
         ${fs.length ? `<ul class="list">${fs.map(f => `<li>${pill(f.severity, f.severity === "high" || f.severity === "critical" ? "bad" : f.severity === "medium" ? "warn" : "")} <span class="dim">conf ${(+f.confidence || 0).toFixed(2)}${f.region ? " · " + esc(f.region) : ""}</span>
           <div><b>observed</b> ${esc(f.observed)}</div>${f.hypothesis ? `<div class="dim"><b>hypothesis</b> ${esc(f.hypothesis)}</div>` : ""}${(f.paths || []).length ? `<div class="dim">${esc(f.paths.join(", "))}</div>` : ""}</li>`).join("")}</ul>` : ""}
-        ${e.patch ? `<details><summary>Proposed diff${moved.length ? ` — base drifted (${esc(moved.join(", "))}): rebase needed` : ""}</summary>${diffHtml(e.patch)}</details>` : ""}
+        ${e.patch ? `<details data-diff="${esc(u.unit_id)}"${(S.openDiffs || new Set()).has(u.unit_id) ? " open" : ""}><summary>Proposed diff${moved.length ? ` — base drifted (${esc(moved.join(", "))}): rebase needed` : ""}</summary>${diffHtml(e.patch)}</details>` : ""}
         ${(e.checks_proposed || []).length ? `<div class="dim">checks proposed (not run): ${esc(e.checks_proposed.join("; "))}</div>` : ""}
         ${(e.sources || []).length ? `<div class="dim">sources: ${esc(e.sources.join("; "))}</div>` : ""}
         ${e.limitations ? `<div class="dim">limitations: ${esc(e.limitations)}</div>` : ""}
@@ -1569,12 +1594,29 @@ const SECTION_RENDER = {
       <div class="src">Accepted = stored by Foundry. Delivered = Kilo accepted it. Applied = the coordinator recorded the result.</div>`;
   },
 };
+/*lanes-load-start*/
+function lanesKey(project, task) { return String(project || "") + "|" + String(task || ""); }
+// The lanes response is kept with the project/task it was asked for; a reply
+// that arrives after the selection moved on is dropped, not shown as current.
 async function loadLanes() {
-  if (S.lanesLoading || !S.project) return; S.lanesLoading = true;
-  try { S.lanes = await api(`lanes?project=${encodeURIComponent(S.project)}&task=${encodeURIComponent(S.task || "")}`); S.lanesAt = nowS(); }
-  catch (e) { S.lanes = {error: e.message}; S.lanesAt = nowS(); }
-  S.lanesLoading = false; scheduleInspector();
+  if (!S.project) return;
+  const key = lanesKey(S.project, S.task);
+  if (S.lanesLoading === key) return; S.lanesLoading = key;
+  let r;
+  try { r = await api(`lanes?project=${encodeURIComponent(S.project)}&task=${encodeURIComponent(S.task || "")}`); }
+  catch (e) { r = {error: e.message}; }
+  if (S.lanesLoading === key) S.lanesLoading = "";
+  if (key !== lanesKey(S.project, S.task)) return;
+  S.lanes = r; S.lanesAt = nowS(); S.lanesKey = key; scheduleInspector();
 }
+// lanes are paused per project: any task of the project routes the action
+function lanesActionTask(project, task, tasks) {
+  if (task) return task;
+  const t = [...(tasks || new Map()).values()].filter(x => x.project_id === project)
+    .sort((a, b) => (b.received_ts || 0) - (a.received_ts || 0))[0];
+  return t ? t.task_id : "";
+}
+/*lanes-load-end*/
 async function loadHelperStatus() {
   if (S.helperLoading) return; S.helperLoading = true;
   try { S.helperStatus = await api("helpers"); S.helperStatusAt = nowS(); } catch (e) { S.helperStatus = S.helperStatus || {warnings: [e.message]}; }
@@ -1593,10 +1635,17 @@ const SECTION_WIRE = {
   helpers(sec) { wireOpenButtons(sec); },
   lanes(sec) {
     wireOpenButtons(sec);
+    // keep an opened diff open across re-renders (inspector and floating cards)
+    S.openDiffs = S.openDiffs || new Set();
+    sec.querySelectorAll("details[data-diff]").forEach(d => d.addEventListener("toggle", () => {
+      if (d.open) S.openDiffs.add(d.dataset.diff); else S.openDiffs.delete(d.dataset.diff);
+    }));
     sec.querySelectorAll("[data-lanes-pause]").forEach(b => b.onclick = async () => {
       const paused = b.dataset.lanesPause === "1";
       if (!confirm(paused ? "Pause proactive helper lanes for this project? New lane work stops; running units finish." : "Un-pause proactive lanes? Only lanes enabled in the profile resume.")) return;
-      const a = await submitAction({kind: "lanes", paused, note: paused ? "paused from the control center" : "un-paused from the control center"}, `lanes:${S.project}:${paused}`);
+      const tid = lanesActionTask(S.project, S.task, S.tasks);
+      if (!tid) { toast("No task of this project has been reported yet, so the action has nothing to route through.", "warn"); return; }
+      const a = await submitAction({kind: "lanes", task_id: tid, expected: {}, paused, note: paused ? "paused from the control center" : "un-paused from the control center"}, `lanes:${S.project}:${paused}`);
       if (a) { S.lanesAt = 0; scheduleInspector(); }
     });
   },
@@ -1633,7 +1682,7 @@ const SECTION_WIRE = {
   },
 };
 function wireOpenButtons(root) {
-  root.querySelectorAll("[data-open]").forEach(b => b.onclick = () => openBeside(b.dataset.open));
+  root.querySelectorAll("[data-open]").forEach(b => b.onclick = ev => { ev.preventDefault(); openBeside(b.dataset.open); });
   root.querySelectorAll("[data-pop]").forEach(b => { if (!b.closest(".sec-head")) b.onclick = () => popout({popout: "pane", session: b.dataset.pop, project: S.project, task: S.task}); });
 }
 function tokRows(i, o, r, cr, cw, src, cost) {
@@ -2148,9 +2197,12 @@ function graphLayout(nodes, hw, hh, vertical, zoom) {
 // "Active only": just what is running now and the path it uses. An edge is
 // active only from observed facts (busy Kilo session, in-flight ledger row,
 // running tool/job, running lane unit); every node on an active edge stays,
-// plus the chain that leads to it (coordinator -> session -> ...).
+// plus the chain that leads to it (coordinator -> session -> ...). Lane work
+// that is queued, waiting or deferred (lineage edges to helper units) stays too,
+// so pending helper work does not vanish from the view.
+const ACTIVE_LANE_STATES = ["waiting", "queued", "deferred"];
 function activeSubgraph(g) {
-  const act = (g.edges || []).filter(e => e.state === "active");
+  const act = (g.edges || []).filter(e => e.state === "active" || (e.kind === "lineage" && ACTIVE_LANE_STATES.includes(e.state)));
   const keep = new Set();
   for (const e of act) { keep.add(e.from); keep.add(e.to); }
   // include the parents that lead to an active node, so the path reads end to end
@@ -2166,19 +2218,38 @@ function activeSubgraph(g) {
   }
   return {...g, nodes: (g.nodes || []).filter(n => keep.has(n.id)), edges: (g.edges || []).filter(e => edges.has(e))};
 }
+// identity of a focusable graph element that survives a redraw (edge indexes shift)
+function graphFocusKey(ds) {
+  if (!ds) return "";
+  if (ds.node != null && ds.node !== "") return "n:" + ds.node;
+  if (ds.ekey != null && ds.ekey !== "") return "e:" + ds.ekey;
+  return "";
+}
+function edgeKey(e) { return `${e.from}>${e.to}>${e.kind}>${e.label || ""}`; }
 /*glayout-end*/
 function renderGraph() {
   const host = $("#graph"); if (!S.graph || !host) return;
+  // never redraw under a drag-pan (it would drop the pointer capture); catch up after
+  if (S.graphDragging) { S.graphRenderPending = true; return; }
+  S.graphRenderPending = false;
+  const fe = document.activeElement;
+  const focusKey = fe && fe !== host && host.contains(fe) ? graphFocusKey(fe.dataset) : "";
+  const restoreFocus = () => {
+    if (!focusKey) return;
+    const el = [...host.querySelectorAll("[data-node],[data-edge]")].find(x => graphFocusKey(x.dataset) === focusKey);
+    if (el) el.focus({preventScroll: true});
+  };
   const g = P.graphActiveOnly ? activeSubgraph(S.graph) : S.graph;
   if (P.graphActiveOnly && !g.nodes.length) {
-    host.innerHTML = `<p class="dim" style="padding:8px">Nothing is running right now (no busy session, in-flight call, running tool or helper). Untick <b>Active only</b> for the last ${esc(S.graphMin || 30)} min of history.</p>`;
+    host.innerHTML = `<p class="dim" style="padding:8px">Nothing is running or queued right now (no busy session, in-flight call, running tool or helper, and no queued, waiting or deferred lane work). Untick <b>Active only</b> for the last ${esc(S.graphMin || 30)} min of history.</p>`;
     const zl = $("#g-zoom"); if (zl) zl.textContent = "";
     return;
   }
   if (S.graphTable) {
-    host.innerHTML = `<table class="t"><tr><th>state</th><th>from</th><th>to</th><th>kind</th><th>count</th><th>open</th></tr>${g.edges.map((e, i) => `<tr><td><span class="pill ${e.state === "active" ? "ok" : e.state === "failed" ? "bad" : e.state === "fallback" ? "warn" : ""}">${esc(e.state)}</span></td><td>${esc(nodeLabel(e.from))}</td><td>${esc(nodeLabel(e.to))}</td><td>${esc(e.kind)}${e.label ? " · " + esc(e.label) : ""}</td><td>${e.count}</td><td><button data-edge="${i}">details</button></td></tr>`).join("")}</table>
+    host.innerHTML = `<table class="t"><tr><th>state</th><th>from</th><th>to</th><th>kind</th><th>count</th><th>open</th></tr>${g.edges.map((e, i) => `<tr><td><span class="pill ${e.state === "active" ? "ok" : e.state === "failed" ? "bad" : e.state === "fallback" ? "warn" : ""}">${esc(e.state)}</span></td><td>${esc(nodeLabel(e.from))}</td><td>${esc(nodeLabel(e.to))}</td><td>${esc(e.kind)}${e.label ? " · " + esc(e.label) : ""}</td><td>${e.count}</td><td><button data-edge="${i}" data-ekey="${esc(edgeKey(e))}">details</button></td></tr>`).join("")}</table>
       ${g.unassociated_media.length ? `<p class="dim">Unassociated media jobs (no session link captured): ${g.unassociated_media.map(j => esc(j.id)).join(", ")}</p>` : ""}<p class="src">${esc(g.note)}</p>`;
     host.querySelectorAll("[data-edge]").forEach(b => b.onclick = () => edgeDetails(g.edges[+b.dataset.edge]));
+    restoreFocus();
     return;
   }
   const vertical = P.graphVertical === "on" || (P.graphVertical === "auto" && host.clientHeight > host.clientWidth * 1.2);
@@ -2189,7 +2260,7 @@ function renderGraph() {
     const a = pos[e.from], b = pos[e.to]; if (!a || !b) return "";
     const x1 = vertical ? a.x + NW / 2 : a.x + NW, y1 = vertical ? a.y + NH : a.y + NH / 2, x2 = vertical ? b.x + NW / 2 : b.x, y2 = vertical ? b.y : b.y + NH / 2;
     const d = vertical ? `M${x1},${y1} C${x1},${(y1 + y2) / 2} ${x2},${(y1 + y2) / 2} ${x2},${y2}` : `M${x1},${y1} C${(x1 + x2) / 2},${y1} ${(x1 + x2) / 2},${y2} ${x2},${y2}`;
-    return `<path class="gedge ${esc(e.state)} kind-${esc(e.kind)}" d="${d}" data-edge="${i}" tabindex="0"><title>${esc(e.kind)} ${esc(e.state)} · ${e.count} event(s)${e.label ? " · " + esc(e.label) : ""}</title></path>`;
+    return `<path class="gedge ${esc(e.state)} kind-${esc(e.kind)}" d="${d}" data-edge="${i}" data-ekey="${esc(edgeKey(e))}" tabindex="0"><title>${esc(e.kind)} ${esc(e.state)} · ${e.count} event(s)${e.label ? " · " + esc(e.label) : ""}</title></path>`;
   }).join("");
   const nodes = g.nodes.map(n => { const p = pos[n.id]; return `<g class="gnode k-${esc(n.kind)}" transform="translate(${p.x},${p.y})" data-node="${esc(n.id)}" tabindex="0"><rect width="${NW}" height="${NH}"></rect><text x="6" y="16">${esc(String(n.label).slice(0, 24))}</text><title>${esc(n.kind)}: ${esc(n.label)}</title></g>`; }).join("");
   host.innerHTML = `<svg viewBox="0 0 ${W} ${H}" width="${Math.round(W * scale)}" height="${Math.round(H * scale)}" role="img" aria-label="Route and activity graph">${edges}${nodes}</svg>`;
@@ -2200,9 +2271,14 @@ function renderGraph() {
   // Ctrl/⌘+wheel zooms (never below the readable minimum); plain wheel scrolls
   svg.onwheel = e => { if (!e.ctrlKey && !e.metaKey) return; e.preventDefault(); graphZoom(e.deltaY > 0 ? 1 / 1.15 : 1.15, scale); };
   let drag = null;
-  svg.onpointerdown = e => { if (e.target.closest("[data-edge],[data-node]")) return; drag = {x: e.clientX, y: e.clientY, l: host.scrollLeft, t: host.scrollTop}; svg.setPointerCapture(e.pointerId); };
+  svg.onpointerdown = e => { if (e.target.closest("[data-edge],[data-node]")) return; drag = {x: e.clientX, y: e.clientY, l: host.scrollLeft, t: host.scrollTop}; S.graphDragging = true; svg.setPointerCapture(e.pointerId); };
   svg.onpointermove = e => { if (!drag) return; host.scrollLeft = drag.l - (e.clientX - drag.x); host.scrollTop = drag.t - (e.clientY - drag.y); };
-  svg.onpointerup = () => { drag = null; };
+  svg.onpointerup = svg.onpointercancel = svg.onlostpointercapture = () => {
+    if (!drag) return;
+    drag = null; S.graphDragging = false;
+    if (S.graphRenderPending) renderGraph();
+  };
+  restoreFocus();
   S.graphScale = scale;
   S.graphFit = () => { S.graphZoom = null; renderGraph(); };
 }
@@ -2271,7 +2347,9 @@ function layout() {
   const main = paneById("main");
   if (narrow) {
     const tab = S.narrow;
-    const show = tab === "transcript" ? (paneById(S.focused) || main).el : tab === "inspector" ? insp : tab === "graph" ? graph : null;
+    const tp = paneById(S.focused) || main;
+    const tpPopped = !!(tp && tp.sid && isPopped("pane:" + tp.sid));
+    const show = tab === "transcript" ? (tpPopped ? poppedPlaceholder() : tp.el) : tab === "inspector" ? insp : tab === "graph" ? graph : null;
     ws.style.gridTemplate = "1fr / 1fr";
     if (tab === "inbox") { openInbox(); S.narrow = "transcript"; return layout(); }
     if (show) { ws.appendChild(show); show.hidden = false; }
@@ -2729,6 +2807,7 @@ function renderTaskSelect() {
 }
 function selectTask(p, t) {
   S.project = p; S.task = t; renderTaskSelect();
+  S.lanes = null; S.lanesAt = 0; S.lanesKey = "";         // lanes belong to the old selection
   const main = paneById("main"); if (main) { main.pinned = false; }
   applyFollow(); renderComposer(true); scheduleInspector(); refreshGraph();
   const u = new URL(location.href); u.searchParams.set("project", p); u.searchParams.set("task", t); history.replaceState(null, "", u);

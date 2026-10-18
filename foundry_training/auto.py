@@ -154,17 +154,29 @@ class Library:
                 "upload": {"status": "pending"}}
 
 
+MAX_UPLOAD_BYTES = 190 * 1024 * 1024          # Foundry refuses bodies over 200 MB
+PERMANENT_HTTP = (409, 413, 422)               # conflict, too large, secret detected
+
+
 def upload(entry: dict, foundry_url: str, key: str, timeout: float = 120) -> dict:
-    """POST one dataset to Foundry. Returns the entry's new upload status."""
+    """POST one dataset to Foundry. Returns the entry's new upload status:
+    uploaded | failed (retried next run) | refused (permanent; not retried) |
+    not_configured | missing (its files were removed from the library)."""
     if not foundry_url:
         return {"status": "not_configured", "reason": "no Foundry URL in the profile"}
     if not key:
         return {"status": "not_configured", "reason": "no key (set FOUNDRY_TRAINING_KEY or the "
                                                       "profile's [foundry] key_env)"}
-    with open(entry["data"], encoding="utf-8") as f:
-        data = f.read()
-    with open(os.path.join(entry["path"], "manifest.json"), encoding="utf-8") as f:
-        manifest = json.load(f)
+    try:
+        if os.path.getsize(entry["data"]) > MAX_UPLOAD_BYTES:
+            return {"status": "refused", "at": time.time(),
+                    "reason": f"over {MAX_UPLOAD_BYTES // 2**20} MB; kept in the library only"}
+        with open(entry["data"], encoding="utf-8") as f:
+            data = f.read()
+        with open(os.path.join(entry["path"], "manifest.json"), encoding="utf-8") as f:
+            manifest = json.load(f)
+    except (OSError, ValueError) as e:
+        return {"status": "missing", "at": time.time(), "reason": f"library files: {e}"[:300]}
     body = json.dumps({"manifest": manifest, "data": data,
                        "sha256": hashlib.sha256(data.encode()).hexdigest()}).encode()
     req = urllib.request.Request(foundry_url.rstrip("/") + "/v1/foundry/training/datasets/"
@@ -181,7 +193,7 @@ def upload(entry: dict, foundry_url: str, key: str, timeout: float = 120) -> dic
             msg = json.loads(e.read() or b"{}").get("error")
         except ValueError:
             msg = ""
-        return {"status": "failed", "at": time.time(),
+        return {"status": "refused" if e.code in PERMANENT_HTTP else "failed", "at": time.time(),
                 "reason": f"HTTP {e.code}{': ' + str(msg)[:300] if msg else ''}"}
     except (urllib.error.URLError, TimeoutError, OSError) as e:
         return {"status": "failed", "at": time.time(), "reason": f"unreachable: {e}"[:300]}
@@ -233,13 +245,17 @@ def auto_run(pipeline, spool: str, override: Optional[dict] = None, log=print,
         except Exception as e:                                    # noqa: BLE001
             report["errors"].append(f"queue: {type(e).__name__}: {e}"[:400])
             break
-        if all(r.get("error") for r in report["queue"][-len(pending):]):
-            break                                                # failures stay in the spool
+        done_now = report["queue"][-len(pending):]
+        if all(r.get("error") or r.get("left") for r in done_now):
+            break                     # failures / other projects' manifests stay in the spool
     lib_root = first["library"] or str(Path(pipeline.store.root) / "library")
     lib = Library(Path(lib_root))
     idx = lib.load()
-    known = {(d["project_id"], d["kind"], d["target"]): d.get("episode_hash")
-             for d in idx["datasets"] if d.get("valid")}
+    # the NEWEST dataset per project/kind/format decides "same episodes" (INDEX
+    # is newest first); invalid ones count too, so a failing set isn't re-added
+    known: dict = {}
+    for d in sorted(idx["datasets"], key=lambda d: d.get("created") or "", reverse=True):
+        known.setdefault((d["project_id"], d["kind"], d["target"]), d.get("episode_hash"))
     for c in active:
         st = sets[c.id]
         for kind in st["kinds"]:
@@ -258,14 +274,13 @@ def auto_run(pipeline, spool: str, override: Optional[dict] = None, log=print,
                     continue
                 eh = m.get("lineage", {}).get("episode_ids_hash")
                 src = os.path.join(str(pipeline.store.root), "datasets", m["dataset_id"])
-                if known.get((c.id, kind, target)) == eh:
-                    shutil.rmtree(src, ignore_errors=True)       # same episodes: no new dataset
+                if known.get((c.id, kind, target)) == eh or not m["examples"]:
+                    # same episodes as the newest dataset, or nothing usable: no new dataset
+                    shutil.rmtree(src, ignore_errors=True)
                     pipeline.store.cur.x("DELETE FROM datasets WHERE dataset_id=?",
                                          (m["dataset_id"],))
                     pipeline.store.cur.x("DELETE FROM dataset_members WHERE dataset_id=?",
                                          (m["dataset_id"],))
-                    continue
-                if not m["examples"]:
                     continue
                 entry = lib.publish(m, src)
                 idx["datasets"].append(entry)
@@ -278,14 +293,20 @@ def auto_run(pipeline, spool: str, override: Optional[dict] = None, log=print,
     for d in idx["datasets"]:
         st = sets.get(d.get("project_id")) or first
         if not st.get("upload"):
-            d["upload"] = {"status": "disabled", "reason": "[training.auto] upload = false"}
+            # an upload-off run never erases what an earlier run recorded
+            if (d.get("upload") or {}).get("status") not in ("uploaded", "refused"):
+                d["upload"] = {"status": "disabled", "reason": "[training.auto] upload = false"}
             continue
         if not d.get("valid"):
             d["upload"] = {"status": "skipped", "reason": "dataset failed validation"}
             continue
-        if (d.get("upload") or {}).get("status") == "uploaded":
-            continue
-        d["upload"] = upload(d, st["foundry_url"], _key(st["key_env"]))
+        if (d.get("upload") or {}).get("status") in ("uploaded", "refused"):
+            continue                       # refused = permanent (conflict, too large, secret)
+        try:
+            d["upload"] = upload(d, st["foundry_url"], _key(st["key_env"]))
+        except Exception as e:                                    # noqa: BLE001
+            d["upload"] = {"status": "failed", "at": time.time(),
+                           "reason": f"{type(e).__name__}: {e}"[:300]}
         report["uploads"].append({"dataset_id": d["dataset_id"], **d["upload"]})
         log(f"upload {d['dataset_id']}: {d['upload']['status']} "
             f"{d['upload'].get('reason') or ''}")

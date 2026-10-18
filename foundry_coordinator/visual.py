@@ -61,7 +61,8 @@ class VisualMixin:
         v = ls["lanes"]["visual"]
         now = self.clock()
         evs = [e for e in self.events(P.id, t["task_id"])
-               if e["kind"] in ("capture", "artifact") and e["status"] == "artifact"]
+               if (e["kind"] == "capture" and e["status"] == "artifact")
+               or (e["kind"] == "artifact" and e["status"] in ("new", "artifact"))]
         for ev in evs:
             aid = ev["detail"].get("artifact_id")
             a = self.artifacts.get(aid) if aid else None
@@ -328,6 +329,14 @@ class VisualMixin:
             reject = "the model did not confirm it saw the image: no image inspection"
         if reject:
             env = {**env, "findings": [], "not_inspected": True}
+        elif (env.get("validity") and env["validity"] != "ok") or env.get("subject_present") is False:
+            # the model says the frame is invalid/occluded or the subject is missing:
+            # that is the result; defects "seen" in such a frame are not delivered
+            why = env.get("validity") if env.get("validity") not in (None, "", "ok") \
+                else "subject missing"
+            env = {**env, "findings": [], "frame_problem": why,
+                   "limitations": ((env.get("limitations") or "") + f" Frame not usable: {why}; "
+                                   "recapture before judging the UI.").strip()}
         usage = (meta or {}).get("usage") or {}
         self.mgr._finish(P, u, "done", reject or "observation returned", text,
                          tokens={"input": usage.get("prompt_tokens"),

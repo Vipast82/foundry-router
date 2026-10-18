@@ -64,6 +64,7 @@ class QuotaGate:
         self._cache: dict[str, tuple[float, dict]] = {}
         self._alerted: set[str] = set()
         self._refresh_ts: dict[str, float] = {}
+        self._bg: set = set()                  # background refresh probes in flight
         db = svc.db
         db.execute("CREATE TABLE IF NOT EXISTS helper_quota_state (account TEXT PRIMARY KEY, "
                    "state TEXT, since REAL, reason TEXT, next_eligible REAL, updated REAL)")
@@ -314,12 +315,15 @@ class QuotaGate:
         self._cache[key] = (now, out)
         return out
 
-    async def evaluate_fresh(self, backend: str, model: str) -> dict:
+    async def evaluate_fresh(self, backend: str, model: str, wait: bool = True) -> dict:
         """evaluate(), and if the only problem is a reading that went stale while
         the backend was idle, refresh it with one tiny probe and decide again.
         Bounded: never while over the cutoff, never on a broken source or a
         busy backend, at most once per refresh_probe_min_interval_seconds per
-        backend (a CLIProxyAPI pool may need one probe per stale account, cap 4)."""
+        backend (a CLIProxyAPI pool may need one probe per stale account, cap 4).
+        wait=False (helper admission): the probe runs in the background and this
+        returns UNKNOWN at once with refresh.started, so a slow probe never holds
+        the caller past its own timeout; the next admission poll sees the result."""
         d = await self.evaluate(backend, model)
         pol = self.pol
         if d.get("state") != UNKNOWN or not d.get("stale_only") or not getattr(
@@ -346,10 +350,25 @@ class QuotaGate:
             return {**d, "refresh": {"skipped": "backend verified serving recently "
                                                 "(real call or probe); no probe needed"}}
         self._refresh_ts[backend] = now
+        if not wait:
+            import asyncio
+            t = asyncio.get_running_loop().create_task(self._refresh(backend, model, d, now))
+            self._bg.add(t)
+            t.add_done_callback(self._bg.discard)
+            return {**d, "reason": f"{d.get('reason')}; refresh probe started, "
+                                   "ask again shortly",
+                    "refresh": {"started": True, "at": now}}
+        return await self._refresh(backend, model, d, now)
+
+    async def _refresh(self, backend: str, model: str, d: dict, now: float) -> dict:
+        health = self.svc.health
         stale = sum(1 for a in d.get("accounts") or [] if a.get("state") == UNKNOWN) or 1
         probes = []
         for _ in range(min(4, stale)):
-            p = await health.probe(backend, model)
+            try:
+                p = await health.probe(backend, model)
+            except Exception as e:                                # noqa: BLE001
+                p = {"ok": False, "detail": str(e)[:200]}
             probes.append({k: p.get(k) for k in ("ok", "ms", "detail", "model")})
             for k in [k for k in self._cache if k.startswith(backend + "|")]:
                 self._cache.pop(k, None)

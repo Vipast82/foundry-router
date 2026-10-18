@@ -192,7 +192,8 @@ def test_coordinator_launches_the_run_after_a_closeout(tmp_path, monkeypatch):
 def test_cli_auto_runs_once_at_a_time(sprint, monkeypatch, capsys):
     from foundry_training import cli
     p, spool, tmp, prof = sprint
-    open(os.path.join(spool, ".auto.lock"), "w").close()
+    with open(os.path.join(spool, ".auto.lock"), "w") as f:      # held by a LIVE process
+        f.write(str(os.getpid()))
     assert cli.main(["--store", str(p.store.root), "--allow-in-repo", "--profiles", prof, "auto",
                      "--spool", spool, "--no-upload"]) == 0
     assert "in progress" in capsys.readouterr().out
@@ -201,3 +202,61 @@ def test_cli_auto_runs_once_at_a_time(sprint, monkeypatch, capsys):
                      "--spool", spool, "--no-upload"]) == 0
     out = json.loads(capsys.readouterr().out)
     assert out["exports"] and not os.path.exists(os.path.join(spool, ".auto.lock"))
+
+
+def test_stale_lock_from_a_dead_process_is_taken_over(sprint, capsys):
+    from foundry_training import cli
+    p, spool, tmp, prof = sprint
+    with open(os.path.join(spool, ".auto.lock"), "w") as f:
+        f.write("999999")                                          # no such process
+    assert cli.main(["--store", str(p.store.root), "--allow-in-repo", "--profiles", prof, "auto",
+                     "--spool", spool, "--no-upload"]) == 0
+    out = json.loads(capsys.readouterr().out)
+    assert out["exports"] and not os.path.exists(os.path.join(spool, ".auto.lock"))
+
+
+def test_no_duplicate_dataset_after_several_distinct_exports(sprint, foundry, app):
+    """The newest dataset per key decides "same episodes" (INDEX is newest first)."""
+    p, spool, *_ = sprint
+    rep = run(p, spool)
+    lib = Path(rep["library"])
+    idx = json.loads((lib / "INDEX.json").read_text())
+    # simulate an older, different dataset for the same key sitting after the newest one
+    first = idx["datasets"][0]
+    idx["datasets"].append({**first, "dataset_id": "train-old-00000001", "episode_hash": "other",
+                            "created": "2000-01-01T00:00:00Z"})
+    (lib / "INDEX.json").write_text(json.dumps(idx))
+    n = len(idx["datasets"])
+    rep2 = run(p, spool)
+    assert not rep2["exports"]
+    assert len(json.loads((lib / "INDEX.json").read_text())["datasets"]) == n
+
+
+def test_missing_library_folder_does_not_break_the_index(sprint, foundry):
+    p, spool, *_ = sprint
+    foundry["down"] = True
+    rep = run(p, spool)
+    lib = Path(rep["library"])
+    idx = json.loads((lib / "INDEX.json").read_text())
+    import shutil
+    shutil.rmtree(idx["datasets"][0]["path"])                        # someone deleted it
+    foundry["down"] = False
+    run(p, spool)
+    idx = json.loads((lib / "INDEX.json").read_text())
+    assert idx["datasets"][0]["upload"]["status"] == "missing"
+    assert any(d["upload"]["status"] == "uploaded" for d in idx["datasets"][1:])
+
+
+def test_permanent_refusal_is_not_retried(sprint, foundry, app, monkeypatch):
+    p, spool, *_ = sprint
+    calls = []
+    real = A.upload
+    def refusing(entry, url, key, timeout=120):
+        calls.append(entry["dataset_id"])
+        return {"status": "refused", "reason": "HTTP 422: secret detected"}
+    monkeypatch.setattr(A, "upload", refusing)
+    run(p, spool)
+    n = len(calls)
+    run(p, spool)
+    assert len(calls) == n                                           # not re-sent
+    monkeypatch.setattr(A, "upload", real)

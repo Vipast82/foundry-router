@@ -87,7 +87,8 @@ class FoundryClient:
         return self._req("POST", "/v1/foundry/work/sessions", body, timeout=20)[0]
 
     def helper_admission(self, persona: str) -> dict:
-        """Would optional helper work run on this persona now? (no inference)"""
+        """Would optional helper work run on this persona now? (quota sources; Foundry
+        may start one bounded background refresh probe for a stale idle reading)"""
         return self._req("GET", "/v1/foundry/helpers/admission", query={"persona": persona},
                          timeout=20)[0]
 

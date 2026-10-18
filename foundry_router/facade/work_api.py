@@ -99,8 +99,10 @@ async def usage(request: Request, project: str = "", task: str = "", run: str = 
 async def helper_admission(request: Request, persona: str = "", backend: str = "",
                            model: str = ""):
     """Would optional helper work be admitted right now? For a coordinator
-    deciding whether to dispatch a helper unit: no inference, quota sources
-    only. A persona is checked on each reachable route of its chain (the call
+    deciding whether to dispatch a helper unit: quota sources only, except one
+    tiny refresh probe started IN THE BACKGROUND when a reading merely went
+    stale while idle and the backend is not verified serving (bounded per
+    backend by refresh_probe_min_interval_seconds); this call never waits on it. A persona is checked on each reachable route of its chain (the call
     gate re-checks every fallback when it actually runs)."""
     svc = request.app.state.services
     gate = svc.quota_gate
@@ -124,7 +126,7 @@ async def helper_admission(request: Request, persona: str = "", backend: str = "
     for i, (be, m) in enumerate(routes):
         # the first route decides admission: refresh a reading that only went
         # stale while idle (one tiny probe) instead of answering UNKNOWN
-        d = dict(await (gate.evaluate_fresh(be, m) if i == 0 else gate.evaluate(be, m)))
+        d = dict(await (gate.evaluate_fresh(be, m, wait=False) if i == 0 else gate.evaluate(be, m)))
         # image modality per route, from the model registry (capabilities/tags):
         # a coordinator sending images refuses any route without it
         try:
@@ -195,6 +197,13 @@ async def put_training_dataset(dataset_id: str, request: Request):
     from foundry_training.redact import scan
     if not _DATASET_ID.match(dataset_id):
         return _bad(ValueError("bad dataset id"))
+    try:
+        declared = int(request.headers.get("content-length") or 0)
+    except ValueError:
+        declared = 0
+    if declared > MAX_DATASET_BYTES + 1_000_000:          # refuse before reading the body
+        return JSONResponse({"error": f"dataset over {MAX_DATASET_BYTES // 2**20} MB",
+                             "code": "too_large"}, status_code=413)
     raw = await request.body()
     if len(raw) > MAX_DATASET_BYTES + 1_000_000:
         return JSONResponse({"error": f"dataset over {MAX_DATASET_BYTES // 2**20} MB",
@@ -232,7 +241,8 @@ async def put_training_dataset(dataset_id: str, request: Request):
                              "code": "conflict"}, status_code=409)
     pid = str((m.get("projects") or ["unknown"])[0] if len(m.get("projects") or []) == 1
               else "multi")
-    safe_pid = "".join(ch if ch.isalnum() or ch in "-_." else "_" for ch in pid)[:80]
+    safe_pid = "".join(ch if ch.isalnum() or ch in "-_." else "_" for ch in pid)[:80].strip(".")
+    safe_pid = safe_pid or "unknown"                      # never "." / ".." as a folder
     base = svc.capture.data_dir / "training" / "datasets" / safe_pid / dataset_id
     base.mkdir(parents=True, exist_ok=True)
     tmp = base / "data.jsonl.tmp"

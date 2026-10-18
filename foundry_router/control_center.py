@@ -789,8 +789,15 @@ class ControlCenter:
             raise ControlError("no thumbnail (image over the bridge's thumbnail size limit)",
                                "no_thumbnail", 404)
         import base64
-        return base64.b64decode(r["thumb"]), (r["mime"] if r["mime"] in ("image/png", "image/jpeg")
-                                              else "application/octet-stream")
+        import binascii
+        try:
+            raw = base64.b64decode("".join(str(r["thumb"]).split()), validate=True)
+        except (binascii.Error, ValueError, TypeError):
+            raw = b""
+        if not raw:
+            raise ControlError("thumbnail unreadable", "no_thumbnail", 404)
+        return raw, (r["mime"] if r["mime"] in ("image/png", "image/jpeg", "image/webp", "image/gif")
+                     else "application/octet-stream")
 
     # ------------------------------------------------------------------ alerts
 
@@ -1546,8 +1553,13 @@ class ControlCenter:
                                "unknown_task", 404)
         tdata = _uj(task["data"], {})
         expected = dict(body.get("expected") or {})
-        expected.setdefault("task_state", task["state"])
-        if expected["task_state"] != task["state"]:
+        if kind == "lanes":
+            # project-wide operational switch: the task id only routes the action,
+            # so its state is not compared (the coordinator skips it too)
+            expected.pop("task_state", None)
+        else:
+            expected.setdefault("task_state", task["state"])
+        if kind != "lanes" and expected["task_state"] != task["state"]:
             raise ControlError(f"{tid} is now {task['state']} (you saw {expected['task_state']}); "
                                "review the current state first", "stale_state", 409,
                                current=task["state"])

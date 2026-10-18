@@ -111,6 +111,19 @@ def test_helper_model_filters_defer_before_admission_or_session_creation(env, fi
     assert all(u['attempts'] == 1 for u in units(c).values())
 
 
+def test_kilo_config_is_read_once_per_dispatch_not_per_candidate(env, monkeypatch):
+    """A unit with several candidate backends reads /config/effective once."""
+    c = env['c']
+    reads = []
+    real = c.projects['game'].client.effective_config
+    monkeypatch.setattr(c.projects['game'].client, 'effective_config',
+                        lambda d: reads.append(d) or real(d))
+    env['fake'].config['provider']['foundry']['whitelist'] = ['Foundry-Kilo-Local']
+    c.tick()
+    n = len(units(c))
+    assert n and len(reads) == n           # one read per dispatched unit, whatever its chain
+
+
 def test_full_admission_defer_admit_deliver_cycle(env):
     fake, c, ff, clock = env["fake"], env["c"], env["ff"], env["clock"]
     primary = c.store.task("game", "T1")["session_id"]

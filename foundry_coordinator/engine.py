@@ -336,7 +336,7 @@ class Coordinator:
             if role == "implementer":
                 self.frontier.on_new_session(P, tid)
             prompt, notes = self._with_operator_notes(P.id, tid, prompt, "")
-            units = (self.helpers.proposals_for(P.id, tid)
+            units = (self.helpers.proposals_for(P.id, tid, sid, run_id=run_id)
                      if role == "implementer" and self.helpers.enabled(P) else [])
             if units:
                 prompt += "\n\n" + self.helpers.integration_prompt(units)
@@ -487,6 +487,10 @@ class Coordinator:
     def _session_failed(self, P: Project, t: dict, why: str, phase: str, free: bool = False):
         pid, tid = P.id, t["task_id"]
         self._release_session(P, t)
+        if self.helpers.enabled(P):
+            # this run is over: its lane work never reaches the next session
+            self.helpers.abort_lane_running(P, tid, f"the session ended: {why}"[:300])
+            self.helpers.expire_lane_results(P, tid, "the run ended before delivery")
         if phase == "closeout":
             return self._closeout_retry(P, t, why)
         self.store.transition(pid, tid, S.CHANGES_REQUIRED, {"findings": [why], "free": free},
@@ -1087,7 +1091,12 @@ class Coordinator:
                 actor: str = "operator") -> dict:
         t = self.store.task(project_id, task_id)
         fields = {"attempt": 0, "sessions": 0, "started_ts": None} if reset_attempts else {}
-        data = {k: v for k, v in t["data"].items() if k not in ("question",)}
+        data = {k: v for k, v in t["data"].items() if k != "question"}
+        rg = data.get("retry_guidance")
+        if reset_attempts and rg and rg.get("status") == "repair":
+            # the budget starts over without the old guided extra attempt, but the
+            # adviser stays excluded from reviewing work it guided
+            data["retry_guidance"] = {**rg, "status": "reset"}
         return self.store.transition(project_id, task_id, S.READY, {"resolution": resolution},
                                      actor=actor, data=data, **fields)
 
@@ -1227,10 +1236,17 @@ class Coordinator:
         ts = self.clock()
         persona = self.frontier.persona(P, t)
         # bind BEFORE the prompt: a frontier turn is gated as optional work
-        self._bind(P, sid, t["task_id"], t["run_id"], "implementer", persona,
-                   purpose=self.frontier.purpose(P, t))
-        P.client.prompt(sid, text, directory=P.profile.workspace, persona=persona,
-                        agent=P.profile.client.get("agent") or "code")
+        try:
+            self._bind(P, sid, t["task_id"], t["run_id"], "implementer", persona,
+                       purpose=self.frontier.purpose(P, t))
+            P.client.prompt(sid, text, directory=P.profile.workspace, persona=persona,
+                            agent=P.profile.client.get("agent") or "code")
+        except Exception:
+            # nothing was sent: forget the journal entry so a later safe point
+            # can send it, instead of "uncertain, not repeated" (and units being
+            # marked delivered without ever reaching the primary)
+            self.store.x("DELETE FROM ops WHERE key=?", (okey,))
+            raise
         self.store.op_update(okey, "done", {"prompt_ts": ts, "persona": persona})
         self.store.update_session(sid, status="prompted", prompt_ts=ts, ended_ts=None)
         return True

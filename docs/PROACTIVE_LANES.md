@@ -112,8 +112,19 @@ primary (Kilo, busy) --tool results--> ingest (GET transcript, rate-limited)
 
 ### Version
 
-`foundry_router` **0.118.0**. Both the server and the coordinator changed. The
-lanes need both sides; see the deployment checklist.
+`foundry_router` **0.118.0** introduced the lanes. Both the server and the
+coordinator changed, and the lanes need both sides; see the deployment
+checklist.
+
+Behaviour changed in **0.121.3** (see RELEASE_NOTES.md):
+
+- Pause holds queued lane work instead of dropping it.
+- Lane units don't count toward `max_units_per_task`.
+- A failed session cancels its running lane units and expires their
+  results.
+- Filesystem-fallback artifacts (`fs_fallback = true`) are observed.
+- Frames reported invalid deliver no findings.
+- Helper admission no longer waits on the quota refresh probe.
 
 ---
 
@@ -265,7 +276,7 @@ inspected"**, and there are no findings and no proposal.
 - **Graph.**
   - Artifact → observer → proposer → primary (delivery: delivered, integrated or rejected) → recapture.
   - An edge is "active" only while that unit's session has an in-flight ledger row or Kilo reports it busy. Otherwise it shows waiting, deferred or queued.
-- **Pause proactive lanes** button. This is operational: it is the `lanes` action, claimed by the coordinator, and only stops new lane work. Turning lanes **on** stays a profile change.
+- **Pause proactive lanes** button. This is operational: it is the `lanes` action, claimed by the coordinator, and only stops new lane work. Queued work is held (not dropped) and resumes on un-pause (v0.121.3). Turning lanes **on** stays a profile change.
 - **Settings → Sidebar → "Proactive lanes panel".** Presentation only.
 - **Alerts.**
   - New: `helper_violation` (high), raised when a helper tried a denied tool.

@@ -7,7 +7,8 @@ provenance-carrying records, reconstructs bounded episodes, selects the
 verified ones under a per-project policy, and exports model-neutral and
 target-specific datasets with separate evaluation sets.
 
-It never uploads data or starts training.
+It never starts training. Only `auto` uploads (redacted datasets, to your own
+Foundry router when configured); see docs/TRAINING_DATA.md.
 
 Layers:
   adapters/   capture: Kilo (export file, `kilo serve` API, read-only DB

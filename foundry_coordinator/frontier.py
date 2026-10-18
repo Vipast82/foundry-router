@@ -228,8 +228,15 @@ class FrontierPhase:
                       f"{ph['reason']}. When the hard part is done, report status NOT DONE with a "
                       f"summary; the local primary resumes. An independent reviewer checks the "
                       f"final revision.\n")
-            return self.c._prompt_primary(P, self.store.task(P.id, t["task_id"]), text,
-                                          f"frontier:{ph['phase_id']}:start")
+            try:
+                return self.c._prompt_primary(P, self.store.task(P.id, t["task_id"]), text,
+                                              f"frontier:{ph['phase_id']}:start")
+            except Exception:
+                # the start prompt never went out: ownership stays local (and the
+                # next idle check must not read a local turn as "unsupported")
+                self.store.x("UPDATE primary_phases SET state='requested', started_ts=NULL "
+                             "WHERE phase_id=?", (ph["phase_id"],))
+                raise
         # active: verify the turn that just ended, then decide whether to return
         served = self._served_model(P, t["session_id"])
         turns = int(ph["turns"] or 0) + 1

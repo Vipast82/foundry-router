@@ -8,8 +8,19 @@ outcome is proven by captured evidence become training candidates.
 AnimalUprising is the first project. Any other project joins through its
 `project.toml` profile; the engine does not change.
 
-**This pipeline never uploads data and never starts training.** It writes
-datasets to a local directory and stops there. Read the restrictions in
+**This pipeline never starts training, and never sends data to an external
+training provider.**
+
+- Every command writes datasets to a local directory.
+- The `auto` step, which runs after a sprint, can also upload. When
+  `[training.auto] upload = true` (the default once `[training]` is enabled),
+  it POSTs each valid, **redacted** dataset to your own Foundry router at
+  `[foundry] url`.
+- Foundry stores the datasets on its own disk and forwards them nowhere.
+- An upload contains redacted transcripts: prompts, tool calls and outputs,
+  and assistant turns. Secrets are removed, the content is not.
+- Use HTTPS or a trusted LAN for that URL.
+- Set `upload = false` to keep everything local. Read the restrictions in
 [Using captured outputs](#using-captured-outputs-for-training) before
 training on anything it exports.
 

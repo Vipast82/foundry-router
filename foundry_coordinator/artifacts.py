@@ -302,9 +302,28 @@ class ArtifactStore:
         prior = self.store.q("SELECT * FROM artifacts WHERE project_id=? AND task_id=? AND kind=? "
                              "AND rel_path=? ORDER BY generation", (project_id, task_id, kind, rel))
         same = [p for p in prior if p["sha256"] == sha]
-        if same:
+        if same and same[-1]["status"] == "current":
             return {"status": "duplicate", "artifact": self._out(same[-1]), "path": rel,
                     "reason": "same bytes as an existing generation"}
+        if same and same[-1]["status"] == "superseded":
+            # A -> B -> A: the file went back to earlier bytes. That earlier row
+            # becomes the newest generation again and B is superseded, so B's
+            # findings never reach the primary for an image that no longer shows.
+            back = same[-1]
+            cur = [p for p in prior if p["status"] == "current"]
+            gen = max(p["generation"] for p in prior) + 1
+            with self.store.tx():
+                self.store.x("UPDATE artifacts SET status='current', superseded_by=NULL, "
+                             "generation=?, prev_artifact=?, created_ts=?, run_id=?, session_id=? "
+                             "WHERE artifact_id=?",
+                             (gen, cur[-1]["artifact_id"] if cur else back["prev_artifact"],
+                              self.clock(), run_id, session_id, back["artifact_id"]))
+                for p in cur:
+                    self.store.x("UPDATE artifacts SET status='superseded', superseded_by=? WHERE "
+                                 "artifact_id=?", (back["artifact_id"], p["artifact_id"]))
+            return {"status": "recorded", "artifact": self.get(back["artifact_id"]), "path": rel,
+                    "superseded": [p["artifact_id"] for p in cur],
+                    "reason": "reverted to an earlier image (now the newest generation)"}
         ext = os.path.splitext(rel)[1].lower() or (".png" if img["mime"] == "image/png" else ".jpg")
         # short names keep deep state dirs under Windows MAX_PATH; the full sha256
         # is in the row and re-checked on every read
@@ -386,13 +405,15 @@ class ArtifactStore:
                 out.append(r)
         return out
 
-    def prune(self, retention_days: float) -> int:
+    def prune(self, retention_days: float, project_id: str = "") -> int:
         """Delete snapshot copies past retention (rows are kept as history,
         marked expired; Victor's approval artifacts in the workspace are untouched)."""
         cut = self.clock() - retention_days * 86400
         n = 0
-        for r in self.store.q("SELECT artifact_id, store_path FROM artifacts WHERE created_ts < ? "
-                              "AND status != 'expired'", (cut,)):
+        rows = self.store.q("SELECT artifact_id, store_path FROM artifacts WHERE created_ts < ? "
+                            "AND status != 'expired'" + (" AND project_id=?" if project_id else ""),
+                            (cut, project_id) if project_id else (cut,))
+        for r in rows:
             others = self.store.q("SELECT COUNT(*) AS n FROM artifacts WHERE store_path=? AND "
                                   "created_ts >= ?", (r["store_path"], cut))[0]["n"]
             if not others:
@@ -519,8 +540,12 @@ class ArtifactStore:
         """For each path: same as the snapshot, changed since, or not in it.
         An unknown or foreign snapshot compares as empty (absent / new file)."""
         s = self.snapshot(snapshot_id, project_id, task_id) or {"manifest": {}}
+        from .adapters.base import safe_rel
         out = {}
         for rel in paths:
+            if safe_rel(rel) != rel:
+                out[rel] = "outside the workspace"          # never opened
+                continue
             p = os.path.join(workspace, rel)
             cur = None
             if os.path.isfile(p):

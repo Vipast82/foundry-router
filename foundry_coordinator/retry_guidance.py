@@ -40,7 +40,10 @@ class RetryGuidance:
     @staticmethod
     def authors(t):
         record = (t.get("data") or {}).get("retry_guidance") or {}
-        return {record["persona"]} if record.get("status") == "repair" and record.get("persona") else set()
+        # "reset": an operator restarted the budget; the guided commits may still
+        # be in task_base..head, so their adviser stays out of reviewing them
+        return ({record["persona"]} if record.get("status") in ("repair", "reset")
+                and record.get("persona") else set())
 
     def _record(self, P, t, record):
         current = self.store.task(P.id, t["task_id"])

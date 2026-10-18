@@ -147,7 +147,11 @@ class HelperManager:
                                                                   "requested_again": True})
                 return p["unit_id"]
             return None                       # one unit per responsibility
-        if len(self.units(pid, tid)) >= int(h["max_units_per_task"]):
+        ordinary = [x for x in self.units(pid, tid) if not x.get("lane")]
+        if len(ordinary) >= int(h["max_units_per_task"]):
+            self.store.event(pid, tid, "helper_limit", detail={
+                "responsibility": resp, "source": source,
+                "reason": f"max_units_per_task ({h['max_units_per_task']}) reached"})
             return None
         uid = f"hu-{uuid.uuid4().hex[:10]}"
         n = self.store.x("INSERT OR IGNORE INTO helper_units (unit_id, project_id, task_id, run_id, "
@@ -267,6 +271,7 @@ class HelperManager:
         open_ended = False          # a backend that could clear at any time (UNKNOWN, error)
         cands = (self.lanes.candidates(P, u, h) if u.get("lane") else
                  [(b, h["personas"][b]) for b in self._order(P, u, h)])
+        kcfg = None                 # Kilo's effective config, read once per dispatch
         for backend, persona in cands:
             # Kilo accepts prompt_async before resolving the model. A local
             # filter failure otherwise leaves only a user message, which looks
@@ -274,8 +279,12 @@ class HelperManager:
             check_model = getattr(P.client, 'model_config_problem', None)
             if u.get('mode') != 'direct' and callable(check_model):
                 try:
-                    problem = check_model(P.profile.workspace, persona)
-                except RuntimeError as e:
+                    read = getattr(P.client, 'effective_config', None)
+                    if kcfg is None and callable(read):
+                        kcfg = read(P.profile.workspace)
+                    problem = (check_model(P.profile.workspace, persona, kcfg)
+                               if kcfg is not None else check_model(P.profile.workspace, persona))
+                except (RuntimeError, ValueError, OSError) as e:
                     problem = f"Kilo model preflight failed: {e}"
                 if problem:
                     reasons.append(f"{backend}: {problem}")
@@ -497,7 +506,8 @@ class HelperManager:
                 "skipped, so don't wait for one to make progress. Don't start au-helper through "
                 "your task tool, and don't ask helpers to review or approve your work.\n")
 
-    def proposals_for(self, pid: str, tid: str, session_id: str = "") -> list[dict]:
+    def proposals_for(self, pid: str, tid: str, session_id: str = "",
+                      run_id: str = "") -> list[dict]:
         """Results the primary hasn't seen. Ordinary units: as in v0.117.
         Lane units: only actionable, current, same-run results within the
         delivery budget (lanes.deliverable); the rest stay visible in the
@@ -505,7 +515,25 @@ class HelperManager:
         units = [u for u in self.units(pid, tid, "done") if not u["delivered_session"]]
         plain = [u for u in units if not u.get("lane")]
         lane = [u for u in units if u.get("lane")]
-        return plain + (self.lanes.deliverable(pid, tid, lane, session_id) if lane else [])
+        return plain + (self.lanes.deliverable(pid, tid, lane, session_id, run_id) if lane
+                        else [])
+
+    def abort_lane_running(self, P, tid: str, reason: str) -> list[str]:
+        """Stop running LANE units only (ordinary units keep their v0.117 hand-off)."""
+        out = []
+        for u in self.units(P.id, tid, "running"):
+            if not u.get("lane"):
+                continue
+            if u.get("mode") == "direct":
+                self.lanes.forget_direct(u["unit_id"])
+            else:
+                try:
+                    P.client.abort(u["session_id"], directory=P.profile.workspace)
+                except Exception:                                # noqa: BLE001
+                    pass
+            self._finish(P, u, "cancelled", reason, None)
+            out.append(u["unit_id"])
+        return out
 
     def integration_prompt(self, units: list[dict]) -> str:
         plain = [u for u in units if not u.get("lane")]

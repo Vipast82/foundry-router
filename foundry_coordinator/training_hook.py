@@ -98,11 +98,11 @@ def _spawn(cmd: list, log_path: str, env: dict):
         kw["creationflags"] = getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000)
     else:
         kw["start_new_session"] = True
-    log = open(log_path, "a", encoding="utf-8")
-    log.write(f"\n=== {time.strftime('%Y-%m-%d %H:%M:%S')} {' '.join(cmd)}\n")
-    log.flush()
-    return subprocess.Popen(cmd, stdout=log, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL,
-                            env=env, **kw)
+    with open(log_path, "a", encoding="utf-8") as log:   # the child keeps its own handle
+        log.write(f"\n=== {time.strftime('%Y-%m-%d %H:%M:%S')} {' '.join(cmd)}\n")
+        log.flush()
+        return subprocess.Popen(cmd, stdout=log, stderr=subprocess.STDOUT,
+                                stdin=subprocess.DEVNULL, env=env, **kw)
 
 
 def launch_auto(store, P, t: dict, state_dir: str) -> bool:

@@ -139,7 +139,10 @@ class Proactive(VisualMixin, AdvisoryMixin):
             return
         self.store.set_meta("lanes_pruned_ts", str(self.clock()))
         try:
-            self.artifacts.prune(float(ls["lanes"]["visual"].get("retention_days") or 30))
+            for pid, P in self.mgr.c.projects.items():
+                pls = L.settings(P)
+                self.artifacts.prune(float(pls["lanes"]["visual"].get("retention_days") or 30),
+                                     project_id=pid)
         except Exception as e:                                    # noqa: BLE001
             self.store.event("", "", "warning", detail={"lanes": f"prune: {e}"[:200]})
 
@@ -241,7 +244,10 @@ class Proactive(VisualMixin, AdvisoryMixin):
         """Lane events -> units. Deterministic; no model call."""
         pid, tid = P.id, t["task_id"]
         for ev in self.events(pid, tid):
-            if ev["status"] not in ("new", "pending") or ev["kind"] == "capture":
+            if ev["status"] not in ("new", "pending") or ev["kind"] in ("capture", "artifact"):
+                continue
+            if ev.get("run_id") and ev["run_id"] != t["run_id"]:
+                self._set_event(ev["event_key"], "expired")     # from an earlier run
                 continue
             fn = getattr(self, f"_plan_{ev['kind']}", None)
             if fn is None:
@@ -294,7 +300,8 @@ class Proactive(VisualMixin, AdvisoryMixin):
             return self._set_event(ev["event_key"], "pending",
                                    detail={**ev["detail"], "snapshot": "unstable; retrying"})
         d = ev["detail"]
-        uid, how = self.add(P, t, "failure_triage", ev["signature"], {
+        key = ev["signature"] + ":" + str(snap.get("content_fp") or "")[:12]
+        uid, how = self.add(P, t, "failure_triage", key, {
             "command": d.get("command"), "exit": d.get("exit"), "lines": d.get("lines"),
             "excerpt": d.get("excerpt"), "signature": ev["signature"],
             "snapshot": snap.get("snapshot_id"), "snapshot_status": snap["status"],
@@ -364,8 +371,10 @@ class Proactive(VisualMixin, AdvisoryMixin):
     def hold_reason(self, P, t, u: dict, ls: dict, running: list) -> str:
         """'' = dispatch now; 'wait:...' = later; 'skip:...' = never."""
         lane = u["lane"]
-        if not L.lane_on(ls, lane) or self.paused(P.id):
+        if not L.lane_on(ls, lane):
             return f"skip:lane {lane} is turned off"
+        if self.paused(P.id):
+            return "wait:proactive lanes are paused by an operator"
         if u.get("feedback") == "superseded":
             return "skip:superseded"
         if u.get("artifact_id"):
@@ -582,7 +591,8 @@ class Proactive(VisualMixin, AdvisoryMixin):
 
     # ------------------------------------------------------------------ delivery
 
-    def deliverable(self, pid: str, tid: str, units: list, session_id: str) -> list:
+    def deliverable(self, pid: str, tid: str, units: list, session_id: str,
+                    run_id: str = "") -> list:
         t = self.store.task(pid, tid) or {}
         P = self.mgr.c.projects.get(pid)
         if P is None:
@@ -597,7 +607,7 @@ class Proactive(VisualMixin, AdvisoryMixin):
         for u in units:
             if (u.get("feedback") or "waiting") != "waiting":
                 continue
-            if u.get("run_id") != t.get("run_id"):
+            if u.get("run_id") != (run_id or t.get("run_id")):
                 self._display_only(u, "result belongs to an earlier run", "expired")
                 continue
             if u.get("artifact_id"):

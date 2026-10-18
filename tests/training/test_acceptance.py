@@ -562,10 +562,11 @@ def test_closeout_manifest_is_processed_and_completeness_recorded(world, tmp_pat
     assert (tmp / "spool" / "done").glob("*.json")
     assert not list((tmp / "spool").glob("*.json"))
     assert any(g["kind"] == "session-not-captured" for g in p.store.gaps(PID))
-    # a project without training enabled is skipped, the manifest kept as processed
+    # another project's manifest in a shared spool is LEFT for a run that has
+    # that project's profile: never marked done unread (v0.121.3)
     st2 = coordinator(tmp / "b", "elsewhere", "T", "ses_b", base, head)
     P2 = SimpleNamespace(id="elsewhere", profile=SimpleNamespace(
         raw={"training": {"enabled": True, "spool": str(tmp / "spool")}}, review={}))
     training_hook.finalize(st2, P2, st2.task("elsewhere", "T"), "FAILED", str(tmp))
     res, = p.process_queue(str(tmp / "spool"))
-    assert res["skipped"]
+    assert res["left"] and list((tmp / "spool").glob("elsewhere__*.json"))

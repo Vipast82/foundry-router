@@ -1,5 +1,6 @@
-"""Command line for the training-data pipeline. Nothing here uploads data or
-starts training.
+"""Command line for the training-data pipeline. Nothing here starts training.
+`auto` uploads its redacted datasets to the configured Foundry router only
+(`[foundry] url`, `[training.auto] upload`); every other command is local.
 
   python -m foundry_training [--store DIR] [--profiles PATH ...] <command>
 
@@ -32,6 +33,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import time
 import sys
 
 from . import config as TC
@@ -125,6 +127,70 @@ def main(argv=None) -> int:
         return 2
 
 
+def _pid_alive(pid: int) -> bool:
+    if pid <= 0:
+        return False
+    if sys.platform == "win32":
+        import ctypes
+        h = ctypes.windll.kernel32.OpenProcess(0x1000, False, pid)   # QUERY_LIMITED_INFORMATION
+        if not h:
+            return False
+        code = ctypes.c_ulong()
+        ok = ctypes.windll.kernel32.GetExitCodeProcess(h, ctypes.byref(code))
+        ctypes.windll.kernel32.CloseHandle(h)
+        return bool(ok) and code.value == 259                        # STILL_ACTIVE
+    try:
+        os.kill(pid, 0)
+        return True
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+
+
+def _take_lock(lock: str):
+    """An O_EXCL lock file holding the owner's pid. A lock whose process is
+    gone (crash, reboot) is taken over at once; a live one is respected."""
+    for _ in range(2):
+        try:
+            return os.open(lock, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+        except FileExistsError:
+            try:
+                with open(lock) as f:
+                    pid = int((f.read() or "0").strip() or 0)
+            except (OSError, ValueError):
+                pid = 0
+            if pid and _pid_alive(pid):
+                return None
+            try:                          # empty and brand new: its owner is
+                young = not pid and time.time() - os.path.getmtime(lock) < 30
+            except OSError:               # still writing its pid (POSIX race)
+                young = False
+            if young:
+                return None
+            try:
+                os.remove(lock)
+            except OSError:
+                pass
+    return None
+
+
+def _own_pending(p: Pipeline, spool: str) -> bool:
+    """Manifests for this run's projects still waiting in the spool."""
+    if not os.path.isdir(spool):
+        return False
+    for name in os.listdir(spool):
+        if not name.endswith(".json"):
+            continue
+        try:
+            with open(os.path.join(spool, name)) as f:
+                if json.load(f).get("project_id") in p.projects:
+                    return True
+        except (OSError, ValueError):
+            continue
+    return False
+
+
 def _run(a, p: Pipeline) -> int:
     key = os.environ.get("FOUNDRY_TRAINING_KEY", "")
     out = None
@@ -205,22 +271,24 @@ def _run(a, p: Pipeline) -> int:
     elif a.cmd == "auto":
         from .auto import auto_run
         lock = a.lock or os.path.join(a.spool, ".auto.lock")
-        try:
-            fd = os.open(lock, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
-        except FileExistsError:
-            import time as _t
-            if _t.time() - os.path.getmtime(lock) < 6 * 3600:
-                print("another automatic run is in progress; its next pass picks this up")
-                return 0
-            os.remove(lock)                  # stale lock from a crashed run
-            fd = os.open(lock, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+        fd = _take_lock(lock)
+        if fd is None:
+            print("another automatic run is in progress; it re-checks the spool before it "
+                  "finishes, so this sprint is picked up")
+            return 0
         os.write(fd, str(os.getpid()).encode())
         os.close(fd)
         try:
-            out = auto_run(p, a.spool, {"foundry_url": a.foundry_url, "kilo_url": a.kilo_url,
-                                        "library": a.library,
-                                        "upload": False if a.no_upload else None},
-                           log=lambda m: print(m, file=sys.stderr, flush=True))
+            ov = {"foundry_url": a.foundry_url, "kilo_url": a.kilo_url, "library": a.library,
+                  "upload": False if a.no_upload else None}
+            log = lambda m: print(m, file=sys.stderr, flush=True)   # noqa: E731
+            out = auto_run(p, a.spool, ov, log=log)
+            # a manifest written while we exported/uploaded: run again before
+            # releasing the lock (a run that found the lock busy relied on this)
+            for _ in range(3):
+                if not _own_pending(p, a.spool):
+                    break
+                out = auto_run(p, a.spool, ov, log=log)
         finally:
             try:
                 os.remove(lock)

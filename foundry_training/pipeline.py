@@ -165,10 +165,23 @@ class Pipeline:
         out = []
         os.makedirs(os.path.join(spool, "done"), exist_ok=True)
         for path in sorted(glob.glob(os.path.join(spool, "*.json"))):
-            with open(path) as f:
-                m = json.load(f)
-            pid = m["project_id"]
-            res = {"manifest": os.path.basename(path), "project_id": pid, "task_id": m["task_id"]}
+            try:
+                with open(path, encoding="utf-8") as f:
+                    m = json.load(f)
+                pid, task = m["project_id"], m["task_id"]
+            except (OSError, ValueError, KeyError, TypeError) as e:
+                # one unreadable manifest never blocks the rest of the spool; it
+                # stays in place (never discarded) and is reported every pass
+                out.append({"manifest": os.path.basename(path), "error":
+                            f"unreadable manifest: {type(e).__name__}: {e}"[:300], "left": True})
+                continue
+            res = {"manifest": os.path.basename(path), "project_id": pid, "task_id": task}
+            if pid not in self.projects:
+                # another project's manifest in a shared spool: leave it for a run
+                # that has that project's profile (never mark it done unread)
+                res["left"] = "no profile for this project in this run"
+                out.append(res)
+                continue
             try:
                 if not self._allowed(pid, "coordinator"):
                     res["skipped"] = "training capture not enabled for this project"

@@ -107,7 +107,8 @@ const loadLanes = () => { loads++; };
 const NA = why => `<span class="dim" title="${esc(why || "")}">N/A</span>`;
 const kv = rows => rows.filter(Boolean).map(([k, v]) => `<div>${esc(k)}</div><div>${v}</div>`).join("");
 const relAge = s => Math.round(s) + "s"; const tsText = t => t ? "T" + t : "";
-const S = {lanesAt: 999, lanes: {state: {enabled: true, paused: false, lanes: {visual: true}},
+const lanesKey = (p, t) => String(p || "") + "|" + String(t || "");
+const S = {project: "proj", task: "T2", lanesKey: "proj|T2", openDiffs: new Set(["hu-2"]), lanesAt: 999, lanes: {state: {enabled: true, paused: false, lanes: {visual: true}},
   artifacts: [{artifact_id: "art 1", rel_path: "docs/evidence/T2/m.png", generation: 2, width: 6, height: 4,
                sha256: "abcdef0123456789abcdef", revision: "1234567890abcdef", status: "current", valid: "ok", has_thumb: 1}],
   units: [
@@ -133,6 +134,7 @@ console.log(JSON.stringify({html, loads}));
     assert ">N/A<" in h                                       # turnaround/tokens unavailable
     assert "/control/api/artifacts/art%201/thumbnail" in h   # id URL-encoded
     assert "Pause proactive lanes" in h and out["loads"] == 0
+    assert '<details data-diff="hu-2" open>' in h                 # an opened diff stays open
 
 
 # ------------------------------------------------------------------ graph fit, placement, floats
@@ -242,17 +244,18 @@ def PAGE_TEXT():
 
 def test_popped_out_cards_leave_the_main_view_and_come_back(tmp_path):
     """A section/graph open in its own window is left out of the main page;
-    when that window stops announcing itself (closed, ~7 s) it returns."""
+    when that window says it closed (or stops announcing itself for ~75 s) it returns."""
     s = _script()
     out = run_js(tmp_path, between(s, "/*popped-start*/", "/*popped-end*/") + """
-const m = new Map([["sec:lanes", 1000], ["graph", 9000]]);
-const changed = prunePopped(m, 9500);
+const m = new Map([["w1", {id: "sec:lanes", project: "A", seen: 1000}], ["w2", {id: "graph", project: "A", seen: 70000}]]);
+const changed = prunePopped(m, 77000);
 console.log(JSON.stringify({ids: [popId("section:lanes"), popId("graph"), popId("pane"), popId(""),
   popId("pane", "ses_1")],
-  changed, left: [...m.keys()], again: prunePopped(m, 9600)}));
+  changed, left: [...m.keys()], again: prunePopped(m, 77100), ttl: POP_TTL_MS}));
 """)
     assert out["ids"] == ["sec:lanes", "graph", "", "", "pane:ses_1"]    # panes too (by session)
-    assert out["changed"] is True and out["left"] == ["graph"] and out["again"] is False
+    assert out["changed"] is True and out["left"] == ["w2"] and out["again"] is False
+    assert out["ttl"] >= 60000      # a minimized window's throttled (~1/min) timer can't flap it
     assert 'isPopped("graph")' in s and "data-showhere" in s and '"fr.cc.popouts"' in s
     assert 'addEventListener("pagehide"' in s
     assert 'isPopped("pane:" + p.sid)' in s and "function poppedPlaceholder" in s
@@ -283,3 +286,89 @@ console.log(JSON.stringify({{nodes: a.nodes.map(n => n.id).sort(), edges: a.edge
                                    "m:qwen"])
     assert out["edges"] == 5 and out["none"] == 0
     assert 'id="g-active"' in s and "graphActiveOnly" in s
+
+
+def test_popouts_are_scoped_by_project_and_counted_per_window(tmp_path):
+    """Popping section X in project A leaves a tab showing project B alone; with
+    two windows of the same card, closing one keeps it out of the main page."""
+    s = _script()
+    out = run_js(tmp_path, between(s, "/*popped-start*/", "/*popped-end*/") + """
+const m = new Map([["w1", {id: "sec:lanes", project: "A", seen: 1}], ["w2", {id: "sec:lanes", project: "A", seen: 1}]]);
+const inA = poppedHas(m, "sec:lanes", "A"), inB = poppedHas(m, "sec:lanes", "B");
+m.delete("w1");                                    // one of the two windows closed
+const stillA = poppedHas(m, "sec:lanes", "A");
+m.delete("w2");
+console.log(JSON.stringify({inA, inB, stillA, gone: poppedHas(m, "sec:lanes", "A")}));
+""")
+    assert out == {"inA": True, "inB": False, "stillA": True, "gone": False}
+    # the messages carry project + a per-window token; main page keys by token
+    assert "token, project:" in s and "S.popped.set(tok," in s and "poptoken" in s
+
+
+def test_lanes_follow_the_selection_and_route_the_project_wide_action(tmp_path):
+    s = _script()
+    block = between(s, "/*lanes-load-start*/", "/*lanes-load-end*/")
+    out = run_js(tmp_path, """
+const S = {project: "A", task: "T1"}; const nowS = () => 5; let rendered = 0;
+const scheduleInspector = () => { rendered++; };
+let resolveApi; const api = url => new Promise(r => { resolveApi = () => r({url}); });
+""" + block + """
+(async () => {
+  const p = loadLanes();
+  S.project = "B"; S.task = "T9";                  // selection changed while the request was in flight
+  resolveApi(); await p;
+  const stale = S.lanes === undefined && rendered === 0;
+  const q = loadLanes(); resolveApi(); await q;
+  const tasks = new Map([["A/T1", {project_id: "A", task_id: "T1", received_ts: 1}],
+                         ["A/T2", {project_id: "A", task_id: "T2", received_ts: 5}],
+                         ["B/T9", {project_id: "B", task_id: "T9", received_ts: 9}]]);
+  console.log(JSON.stringify({stale, key: S.lanesKey, url: S.lanes.url,
+    pick: lanesActionTask("A", "", tasks), keep: lanesActionTask("A", "T1", tasks), none: lanesActionTask("Z", "", tasks)}));
+})();
+""")
+    assert out["stale"] is True                     # the old project's reply was dropped
+    assert out["key"] == "B|T9" and "project=B" in out["url"] and "task=T9" in out["url"]
+    assert out["pick"] == "T2" and out["keep"] == "T1" and out["none"] == ""
+    assert "S.lanes = null; S.lanesAt = 0; S.lanesKey = \"\"" in s      # reset on selection change
+    assert "task_id: tid, expected: {}" in s
+
+
+def test_open_links_do_not_jump_and_narrow_layout_respects_popped_panes():
+    s = _script()
+    fn = between(s, "function wireOpenButtons(root)", "function tokRows")
+    assert "ev.preventDefault(); openBeside(b.dataset.open)" in fn
+    assert "tpPopped ? poppedPlaceholder() : tp.el" in s
+    assert 'details[data-diff]' in s and '"toggle"' in s
+
+
+def test_graph_redraw_keeps_focus_and_never_interrupts_a_drag(tmp_path):
+    s = _script()
+    out = run_js(tmp_path, between(s, "/*glayout-start*/", "/*glayout-end*/") + """
+const e = {from: "s:a", to: "p:b", kind: "inference", label: ""};
+console.log(JSON.stringify({n: graphFocusKey({node: "s:a"}), e: graphFocusKey({edge: "3", ekey: edgeKey(e)}),
+  none: graphFocusKey({}), ek: edgeKey(e)}));
+""")
+    assert out["n"] == "n:s:a" and out["e"] == "e:" + out["ek"] and out["none"] == ""
+    fn = between(s, "function renderGraph()", "function graphZoom")
+    assert "if (S.graphDragging) { S.graphRenderPending = true; return; }" in fn
+    assert "restoreFocus();" in fn and 'data-ekey="${esc(edgeKey(e))}"' in fn
+
+
+def test_active_only_keeps_queued_and_deferred_lane_work(tmp_path):
+    g = {"nodes": [{"id": i, "kind": k} for i, k in (
+            ("coordinator", "coordinator"), ("s:main", "session"), ("u:1", "lane_unit"),
+            ("u:2", "lane_unit"), ("u:3", "lane_unit"), ("u:old", "lane_unit"), ("p:x", "persona"))],
+         "edges": [
+            {"from": "coordinator", "to": "s:main", "kind": "lifecycle", "state": "completed"},
+            {"from": "s:main", "to": "u:1", "kind": "lineage", "state": "queued"},
+            {"from": "s:main", "to": "u:2", "kind": "lineage", "state": "deferred"},
+            {"from": "s:main", "to": "u:3", "kind": "lineage", "state": "waiting"},
+            {"from": "s:main", "to": "u:old", "kind": "lineage", "state": "completed"},
+            {"from": "s:main", "to": "p:x", "kind": "inference", "state": "waiting"}]}
+    s = _script()
+    out = run_js(tmp_path, between(s, "/*glayout-start*/", "/*glayout-end*/") + f"""
+const a = activeSubgraph({json.dumps(g)});
+console.log(JSON.stringify({{nodes: a.nodes.map(n => n.id).sort()}}));
+""")
+    assert out["nodes"] == sorted(["coordinator", "s:main", "u:1", "u:2", "u:3"])
+    assert "queued, waiting or deferred lane work" in s

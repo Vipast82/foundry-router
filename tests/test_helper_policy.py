@@ -567,3 +567,22 @@ def test_no_refresh_probe_when_the_backend_was_verified_recently(app):
     gate._cache.clear()
     d = run(gate.evaluate_fresh("cpa", "gpt-6.1-sol"))
     assert d["state"] == ADMIT and "refresh" not in d and fake.health.calls == []
+
+
+def test_admission_refresh_probe_runs_in_background_and_never_blocks(app):
+    """wait=False (helper admission): returns UNKNOWN at once with refresh.started;
+    the probe finishes in the background and the NEXT evaluation admits."""
+    import asyncio
+    gate, fake, _ = make_gate(app)
+    fake.cliproxy_usage.snap = {"ok": True, "accounts": [codex_account("a", 10, 35, age_s=4000)]}
+    fake.health = FakeHealth(fake, after={"ok": True,
+                                          "accounts": [codex_account("a", 11, 35, age_s=5)]})
+    fake.pool.backends["cpa"].busy = 0
+
+    async def go():
+        d = await gate.evaluate_fresh("cpa", "gpt-6.1-sol", wait=False)
+        assert d["state"] == UNKNOWN and d["refresh"]["started"]
+        await asyncio.gather(*list(gate._bg))
+        return await gate.evaluate("cpa", "gpt-6.1-sol")
+    d2 = run(go())
+    assert d2["state"] == ADMIT and fake.health.calls == [("cpa", "gpt-6.1-sol")]

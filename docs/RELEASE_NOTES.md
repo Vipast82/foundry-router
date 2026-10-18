@@ -2,6 +2,88 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.121.3 — review fixes: lanes, delivery journal, training, quota probe, control center
+
+**Coordinator and lanes**
+
+- Lane units no longer use up `max_units_per_task`; hitting the cap now logs a
+  `helper_limit` event instead of dropping the unit silently.
+- When a session fails, its running lane units are cancelled and its undelivered
+  lane results expire. A new session only receives proposals for its own run, and
+  events from an earlier run expire.
+- A failed bind or prompt to the primary no longer leaves a journal entry that
+  blocks the delivery forever ("uncertain, not repeated"). A frontier start
+  prompt that fails reverts the phase to `requested`.
+- Failure triage coalesces per failure signature and code state: the same
+  failure after a code change is triaged again.
+- Pause now holds queued lane work (it resumes on unpause) instead of dropping
+  it. Visual retention prunes per project.
+- Filesystem-fallback artifacts are observed again (they were never planned).
+- A frame the vision model calls invalid, occluded or missing its subject
+  delivers no findings, only "recapture".
+- Artifacts: going back to earlier bytes (A→B→A) is the current generation
+  again. Drift checks never open paths outside the workspace.
+- The Kilo provider-filter preflight reads Kilo's config once per dispatch,
+  not once per candidate.
+- `unblock --reset-attempts` no longer carries over a guided extra retry. The
+  adviser stays excluded from reviewing the work it guided.
+
+**Quota refresh probe (Foundry)**
+
+- Helper admission no longer waits on the refresh probe. When a reading has
+  only gone stale while idle, admission answers UNKNOWN at once ("refresh probe
+  started"), the probe runs in the background, and the coordinator's next poll
+  sees the result. Before this, a slow probe could outlast the coordinator's
+  20-second admission timeout.
+- The "verified serving" rule is unchanged: no probe while a real call or probe
+  has succeeded within `health.fresh_minutes`.
+  - **Trade-off:** on a CLIProxyAPI pool, "serving" is per backend, not per
+    account. One account used recently keeps the whole backend "serving", so a
+    different account's stale reading is not probed. Admission stays UNKNOWN
+    (deferred, never admitted blind) until that window passes, the account is
+    used, or **re-check** is pressed. That is at most `health.fresh_minutes`,
+    15 minutes by default.
+
+**Training auto pipeline**
+
+- Duplicate detection uses the newest dataset for each project, kind and
+  target.
+- Duplicate or empty exports are removed.
+- One failed upload no longer stops the others.
+- Uploads Foundry refuses permanently are recorded as `refused` and not
+  retried: HTTP 409/413/422, or a dataset over 190 MB.
+- A manifest for a project this run doesn't know stays in the spool for the
+  run that does, instead of being marked done unread.
+- A lock left by a dead process is taken over.
+- The upload endpoint checks `Content-Length` before reading the body.
+- An unreadable or malformed manifest is reported and left in the spool. It
+  no longer stops every manifest after it.
+- A run with upload off no longer erases `uploaded` or `refused` statuses, so
+  the next upload-on run does not re-send those datasets.
+- A newly created lock whose owner has not yet written its pid is respected.
+  This closes a POSIX race.
+- **Docs corrected:** `auto` does upload. When upload is on, it POSTs the
+  redacted datasets to your own Foundry router (`[foundry] url`), never to an
+  external training provider. Set `[training.auto] upload = false` to keep
+  everything local. The comment at `project.toml` line 119 still says
+  "Nothing is uploaded"; that file is left for you to edit.
+
+**Control center**
+
+- Lanes **Pause** is project-wide. It no longer fails with "stale state" and
+  works without a selected task.
+- The lanes panel follows the selected project and task, and open diffs stay
+  open.
+- Pop-outs are tracked per project and per window, with a 75-second
+  heartbeat.
+- The narrow layout respects popped panes, and session links no longer jump the
+  page.
+- A malformed thumbnail returns 404 instead of 500.
+- A graph redraw keeps focus and never interrupts a drag.
+- **Active only** keeps queued, waiting and deferred lane work.
+
+**Migration:** none.
+
 ## v0.121.2 — helpers no longer hang 30 minutes on a model Kilo filters out
 
 **What changes**
