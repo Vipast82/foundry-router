@@ -383,6 +383,38 @@ Ready for a separately authorized pilot after review and merge to main (then tag
 
 ## 6. What is not built (missing or partial)
 
+### Staged retry-limit adviser (workstation follow-up)
+
+`[retry_guidance]` is an opt-in bounded consultation before an exhausted ordinary
+attempt budget becomes FAILED. It is disabled by default and is not yet enabled
+in the live AnimalUprising profile. Example:
+
+```toml
+[retry_guidance]
+enabled = true
+persona = "Foundry-Kilo-Opus" # must be available to the coordinator key
+extra_attempts = 1           # 0 = advice only; hard maximum 1
+max_tokens = 2000
+timeout_seconds = 60         # hard maximum 60
+```
+
+The adviser receives the task, scope, current revision, prior findings and failed
+checks. Its direct, tool-free call is bound as optional `debug_advice`, obeys quota
+admission and shared helper capacity, and is recorded in sessions/events/task data.
+There is one consultation per task; manual unblocking does not erase that record.
+A concrete `repair` response can authorize the explicitly configured extra attempt;
+it never resets the ordinary attempt counter, session/time limits, checks or review.
+Malformed, unavailable, stale or human-only guidance stops normally. A crash during
+the call is recorded as unknown and never causes automatic replay. The adviser is
+excluded from final review of a repair it guided. The synchronous consultation can
+delay control action processing for up to its configured timeout.
+
+Victor subsequently delegated core-aligned scope/test decisions to an Opus-class
+model and final visual approval to an independent vision-capable frontier model.
+Those broader delegation policies are **not implemented by this retry adviser**;
+they need the separately specified decision/approval workflow. The live profile
+continues to use its existing approval path until that workflow is built and tested.
+
 These are reported as not done, not marked done.
 
 - **Instant feedback at a tool boundary.** Not possible with the installed Kilo API. Feedback waits until the primary is idle. Documented; not simulated.

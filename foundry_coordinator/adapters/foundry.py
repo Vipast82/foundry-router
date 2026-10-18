@@ -135,7 +135,8 @@ class FoundryClient:
     # -- inference -----------------------------------------------------------------
 
     def chat(self, persona: str, messages: list, *, session_id: str = "",
-             max_tokens: int = 4000, schema: Optional[dict] = None) -> tuple[str, dict]:
+             max_tokens: int = 4000, schema: Optional[dict] = None,
+             timeout: Optional[float] = None) -> tuple[str, dict]:
         """One non-streaming completion. session_id is sent as x-session-id so
         the call is bound like any Kilo call (project/task/run/role)."""
         body = {"model": persona, "messages": messages, "stream": False,
@@ -144,7 +145,8 @@ class FoundryClient:
             body["response_format"] = {"type": "json_schema",
                                        "json_schema": {"name": "review", "schema": schema}}
         data, headers = self._req("POST", "/v1/chat/completions", body,
-                                  headers={"x-session-id": session_id} if session_id else None)
+                                  headers={"x-session-id": session_id} if session_id else None,
+                                  timeout=timeout)
         choice = (data.get("choices") or [{}])[0]
         text = ((choice.get("message") or {}).get("content")) or ""
         # HTTP field names are case-insensitive. Uvicorn/proxies commonly send

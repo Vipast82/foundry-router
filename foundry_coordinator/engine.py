@@ -56,6 +56,8 @@ class Coordinator:
         from .frontier import FrontierPhase
         # optional frontier-primary phase (profile [frontier_primary]); off by default
         self.frontier = FrontierPhase(self, clock=clock)
+        from .retry_guidance import RetryGuidance
+        self.retry_guidance = RetryGuidance(self)
         for p in projects:
             store.register_project(p.id, p.profile.name, p.profile.path, p.profile.hash,
                                    p.profile.version, os.path.realpath(p.profile.workspace))
@@ -224,10 +226,13 @@ class Coordinator:
         lim = P.profile
         free = bool(t["data"].get("free_retry"))
         attempt = t["attempt"] + (0 if free else 1)
-        if attempt > lim.limit("max_attempts", 3):
+        if attempt > lim.limit("max_attempts", 3) + self.retry_guidance.allowance(t):
+            if self.retry_guidance.consult(P, t):
+                return
             return self.store.transition(pid, tid, S.FAILED, {
                 "reason": f"{t['attempt']} implementation attempts used "
-                          f"(max_attempts {lim.limit('max_attempts', 3)})"})
+                          f"(max_attempts {lim.limit('max_attempts', 3)}, "
+                          f"guided extra {self.retry_guidance.allowance(t)})"})
         if t["sessions"] >= lim.limit("max_sessions_per_task", 8):
             return self.store.transition(pid, tid, S.FAILED, {
                 "reason": f"{t['sessions']} sessions used (max_sessions_per_task)"})
@@ -682,7 +687,8 @@ class Coordinator:
                 if any(matches_any(tag, [p]) for tag in spec.tags)]
         role = "deep_reviewer" if deep and "deep_reviewer" in P.profile.roles else "reviewer"
         persona = P.profile.persona(role)
-        authors = self.helpers.authors(pid, tid) | self.frontier.authors(pid, tid)
+        authors = (self.helpers.authors(pid, tid) | self.frontier.authors(pid, tid)
+                   | self.retry_guidance.authors(t))
         if persona in authors:
             # a persona that proposed code integrated here can't be its sole reviewer
             alt = next((r for r in ("deep_reviewer", "reviewer") if r in P.profile.roles
