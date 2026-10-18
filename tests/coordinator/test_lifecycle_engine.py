@@ -974,7 +974,8 @@ def test_heartbeat_advertises_lifecycle_only_when_a_project_enables_it(tmp_path)
     (tmp_path / "off").mkdir()
     (tmp_path / "on").mkdir()
     c, *_ = _game(tmp_path / "off", green_t1, lifecycle=False)
-    assert ControlChannel(c, foundry=Ctl())._beat()["features"] == []
+    # (project_pause is always declared: it doesn't depend on [lifecycle])
+    assert ControlChannel(c, foundry=Ctl())._beat()["features"] == ["project_pause"]
     c2, *_ = _game(tmp_path / "on", green_t1)
     assert "lifecycle" in ControlChannel(c2, foundry=Ctl())._beat()["features"]
 

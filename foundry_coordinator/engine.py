@@ -495,6 +495,10 @@ class Coordinator:
         s = self._poll(P, t, t["session_id"], phase="implement")
         if s is None:
             return
+        if self._held(P, t, "the idle session's next step"):
+            # the turn finished; its handoff (helper delivery, frontier turn,
+            # continuation, verification -> review) runs when the project resumes
+            return
         pid, tid = P.id, t["task_id"]
         head = P.ws.head()
         rep = s.report or {}
@@ -569,6 +573,8 @@ class Coordinator:
         if not prompt_ts:
             # Restarted between creating the session and prompting it.
             op = self.store.op(f"session:{pid}:{tid}:{t['run_id']}:{phase}")
+            if op and self._held(P, t, "the first prompt of a restarted session"):
+                return None
             if op:
                 spec = P.adapter.describe(tid)
                 ctx = {"attempt": t["attempt"], "run_id": t["run_id"], "base": t["base_sha"]}
@@ -646,6 +652,8 @@ class Coordinator:
             return None
         grace = float(P.profile.client.get("compaction_grace_seconds") or 30)
         if now - float(seen.get("ts") or now) < grace or sid != t["session_id"]:
+            return None
+        if self._held(P, t, f"{phase} compaction nudge"):
             return None
         nudges = dict(t["data"].get("compaction_nudges") or {})
         cap = int(P.profile.client.get("max_compaction_nudges") or 2)
@@ -895,12 +903,8 @@ class Coordinator:
             return self.store.transition(pid, tid, S.BLOCKED, {
                 "blocker": f"the reviewer returned {invalid} invalid results for {head[:12]}: "
                            f"{prior[-1]['error']}"})
-        if self._lc(P):
-            proj = self.store.project(pid)
-            if proj and proj["paused"]:
-                # [lifecycle] a paused project starts no new paid review
-                return self._note(P, t, f"project paused (review waits): "
-                                        f"{proj.get('pause_note') or ''}")
+        if self._held(P, t, "review"):
+            return                       # a paused project starts no new paid review
         all_reviews = self.store.reviews(pid, tid)
         cap = P.profile.limit("max_review_calls", 4)
         lc_calls = self._lc(P, "obligations")
@@ -1204,6 +1208,8 @@ class Coordinator:
         if mode == "session":
             sid = t["data"].get("closeout_session")
             if not sid:
+                if self._held(P, t, "closeout session start"):
+                    return
                 if self._acquire(P, t, self._session_locks(P), writer=True):
                     return
                 run_id = f"{t['run_id']}-close{int(t['data'].get('closeout_attempts') or 0)}"
@@ -1396,6 +1402,8 @@ class Coordinator:
 
     def _paused(self, P: Project, t: dict) -> None:
         if t["pause_until"] and self.clock() >= t["pause_until"]:
+            if self._held(P, t, "budget/route retry"):
+                return                   # the resume sends a continue prompt: not while paused
             self.resume(P.id, t["task_id"], actor="engine", note="budget/route retry time reached")
 
     # ======================================================================= operator
@@ -1664,6 +1672,10 @@ class Coordinator:
         key (journaled before sending). After a restart between journal and
         prompt it isn't repeated: False (treated as sent, logged uncertain)."""
         sid = t["session_id"]
+        if self._held(P, None, "prompt"):
+            # every caller checks the pause first; this only keeps a new
+            # caller from ever prompting a paused project's primary
+            return False
         okey = f"deliver:{P.id}:{t['task_id']}:{sid}:{key}"
         prior = self.store.op_begin(okey, P.id, t["task_id"], "helper_delivery")
         if prior is not None:
@@ -1703,8 +1715,8 @@ class Coordinator:
         restart left the delivery uncertain."""
         units = (self.helpers.proposals_for(P.id, t["task_id"], t["session_id"])
                  if self.helpers.enabled(P) else [])
-        if not units:
-            return False
+        if not units or self._held(P, t, "helper delivery"):
+            return False                 # (paused: kept undelivered for the resume)
         sid = t["session_id"]
         spec = P.adapter.describe(t["task_id"])
         text = (P.adapter.continue_prompt(spec, "helper proposals arrived") + "\n\n"
@@ -2931,6 +2943,20 @@ class Coordinator:
     def _note(self, P: Project, t: dict, text: str) -> None:
         if t.get("next_action") != text:
             self.store.update_task(P.id, t["task_id"], next_action=text[:500])
+
+    def _held(self, P: Project, t: Optional[dict], what: str) -> bool:
+        """True while an operator has the project paused (CLI `project pause`
+        or the control center's project_pause): the one check every point that
+        would START something new uses (a session, a prompt to a primary, a
+        review call, a helper/lane dispatch). A running turn is never touched
+        here; it finishes and is polled as usual. The flag is in the store, so
+        it holds across a coordinator restart."""
+        proj = self.store.project(P.id)
+        if not (proj and proj["paused"]):
+            return False
+        if t is not None:
+            self._note(P, t, f"project paused ({what} waits): {proj.get('pause_note') or ''}")
+        return True
 
     # ======================================================================= reporting
 

@@ -23,6 +23,7 @@ scope and permissions. Nothing here executes shell text.
 
 from __future__ import annotations
 
+import json
 import socket
 import time
 from typing import Callable, Optional
@@ -31,6 +32,9 @@ from . import states as S
 from .adapters.foundry import FoundryClient, FoundryError
 
 RETRY_UNRECORDED_S = 120      # wait this long for the engine to record a Kilo question
+# project-scoped actions (task_id may be empty): pause / resume a whole project
+# for an operator upgrade (payload {mode: "safe" | "now", note})
+PROJECT_KINDS = ("project_pause", "project_resume")
 
 
 class ControlChannel:
@@ -90,10 +94,15 @@ class ControlChannel:
                                "actions": ["answer_question", "reply_permission", "approve_review",
                                            "reject_review", "pause", "resume", "cancel", "unblock",
                                            "instruction", "withdraw_instruction",
-                                           "decision_answer"]}},
+                                           "decision_answer", *PROJECT_KINDS]}},
                 "contract": _contract(), "coordinator_version": _coordinator_version(),
-                # advertised only when some project actually runs the lifecycle
-                "features": (["decision_answer", "lifecycle"] if self._lifecycle_on() else []),
+                # lifecycle features advertised only when some project actually
+                # runs the lifecycle; project pause/resume always
+                "features": (["decision_answer", "lifecycle"] if self._lifecycle_on() else [])
+                + ["project_pause"],
+                # per project: {paused, mode, note, actor, since, busy_sessions,
+                # running_helpers, running_reviews, safe_to_upgrade}
+                "project_pause": {pid: self._pause_status(pid) for pid in sorted(self.c.projects)},
                 "sent_ts": self.clock(), "tick": self.ticks,
                 "uptime_s": round(self.clock() - self.started, 1),
                 "projects": sorted(self.c.projects),
@@ -133,11 +142,16 @@ class ControlChannel:
             return self._report(a, "failed", "outcome uncertain: the coordinator stopped while "
                                              "applying this action; check the task's history "
                                              "before repeating it")
+        pid, tid = a.get("project_id") or "", a.get("task_id") or ""
         if not prior:
-            self.store.op_begin(key, a["project_id"], a["task_id"], "control")
-        pid, tid = a["project_id"], a["task_id"]
+            self.store.op_begin(key, pid, tid, "control")
         if pid not in self.c.projects:
-            return self._report(a, "rejected", f"{pid} is not run by this coordinator")
+            return self._report(a, "rejected", f"{pid or '(no project)'} is not run by this "
+                                               f"coordinator")
+        if a["kind"] in PROJECT_KINDS:
+            # project-scoped: no task to look up or re-check
+            return getattr(self, f"_do_{a['kind']}")(
+                a, f"{a.get('actor') or 'operator'} (control center)")
         t = self.store.task(pid, tid)
         if not t:
             return self._report(a, "rejected", f"{pid}/{tid} is not on this coordinator's queue")
@@ -268,9 +282,123 @@ class ControlChannel:
     def _do_resume(self, a, t, actor):
         if t["state"] != S.PAUSED:
             return self._report(a, "rejected", f"{a['task_id']} is {t['state']}, not PAUSED")
+        if self._project_paused(a["project_id"]):
+            return self._report(a, "rejected", f"project {a['project_id']} is paused; nothing new "
+                                               f"starts until it is resumed (project_resume)")
         after = self.c.resume(a["project_id"], a["task_id"], actor=actor)
         return self._report(a, "applied", f"resumed to {after['state']}",
                             {"task_state": after["state"], "session_id": after.get("session_id")})
+
+    # ------------------------------------------------------------------ project pause
+
+    def _project_paused(self, pid: str) -> bool:
+        proj = self.store.project(pid)
+        return bool(proj and proj["paused"])
+
+    def _pause_status(self, pid: str) -> dict:
+        from .telemetry import project_pause_status
+        return project_pause_status(self.store.q, pid, self.clock())
+
+    def _set_pause_meta(self, pid: str, meta: Optional[dict]) -> None:
+        from .telemetry import PROJECT_PAUSE_META
+        if meta is None:
+            self.store.x("DELETE FROM meta WHERE key=?", (PROJECT_PAUSE_META + pid,))
+        else:
+            self.store.set_meta(PROJECT_PAUSE_META + pid, json.dumps(meta, sort_keys=True))
+
+    def _do_project_pause(self, a, actor):
+        """Pause the whole project for an operator upgrade. "safe": nothing
+        new starts (task, session, prompt to a primary, review call, helper or
+        lane dispatch); a running model turn finishes. "now": the same, and
+        every task in a writing state is paused through the engine (its session
+        aborted, its state kept) and the project's running helpers are stopped."""
+        from .telemetry import project_pause_meta
+        pid = a["project_id"]
+        p = a.get("payload") or {}
+        mode = p.get("mode") or "safe"
+        if mode not in ("safe", "now"):
+            return self._report(a, "rejected", f"mode must be 'safe' or 'now', not {mode!r}")
+        note = str(p.get("note") or "")[:500]
+        if self.store.project(pid) is None:
+            return self._report(a, "rejected", f"{pid} is not registered in this coordinator's "
+                                               f"store")
+        was = self._project_paused(pid)
+        prev = project_pause_meta(self.store.q, pid) if was else {}
+        meta = {"mode": "now" if "now" in (mode, prev.get("mode")) else "safe",
+                "note": note or prev.get("note") or "",
+                "actor": prev.get("actor") or actor,
+                "since": prev.get("since") or self.clock(),
+                "tasks": list(prev.get("tasks") or [])}
+        # the record first, then the flag the engine checks: a crash in between
+        # leaves a record without a pause, which a resume (or a new pause) clears
+        self._set_pause_meta(pid, meta)
+        self.store.set_project_paused(pid, True, meta["note"])
+        paused_now = []
+        if mode == "now":
+            P = self.c.projects[pid]
+            why = f"project paused now by {actor}" + (f": {meta['note']}" if meta["note"] else "")
+            for t in self.store.tasks(pid):
+                if t["state"] in S.WRITING:
+                    self.c.pause(pid, t["task_id"], why[:300], actor=actor)
+                    # only these are resumed by project_resume
+                    self.store.merge_data(pid, t["task_id"], paused_by_project=True)
+                    paused_now.append(t["task_id"])
+                    meta["tasks"] = sorted(set(meta["tasks"]) | {t["task_id"]})
+                    self._set_pause_meta(pid, meta)
+                elif t["state"] not in S.TERMINAL:
+                    self.c.helpers.abort_running(P, t["task_id"], "cancelled",
+                                                 f"project paused now: {why}"[:300])
+        status = self._pause_status(pid)
+        detail = (f"project {pid} paused ({meta['mode']}"
+                  + (", already paused" if was else "") + "): nothing new starts"
+                  + (f"; paused {len(paused_now)} running task(s): {', '.join(paused_now)}"
+                     if paused_now else "; running model turns finish")
+                  + ("; safe to upgrade" if status["safe_to_upgrade"] else
+                     f"; not yet safe to upgrade ({status['busy_sessions']} session(s), "
+                     f"{status['running_helpers']} helper(s), {status['running_reviews']} "
+                     f"review(s) still running)"))
+        return self._report(a, "applied", detail, {"project_pause": status,
+                                                   "paused_tasks": paused_now})
+
+    def _do_project_resume(self, a, actor):
+        """Resume the project: the engine starts new work again, and only the
+        tasks this project pause paused (paused_by_project) are resumed, each
+        continuing its own session. A task an operator paused by itself stays
+        paused."""
+        from .telemetry import project_pause_meta
+        pid = a["project_id"]
+        proj = self.store.project(pid)
+        meta = project_pause_meta(self.store.q, pid)
+        if proj is None or (not proj["paused"] and not meta
+                            and not any((t["data"] or {}).get("paused_by_project")
+                                        for t in self.store.tasks(pid))):
+            return self._report(a, "rejected", f"project {pid} is not paused")
+        self.store.set_project_paused(pid, False)
+        resumed, failed, left = [], [], []
+        for t in self.store.tasks(pid):
+            tid = t["task_id"]
+            if not (t["data"] or {}).get("paused_by_project"):
+                if t["state"] == S.PAUSED:
+                    left.append(tid)
+                continue
+            if t["state"] != S.PAUSED:          # resumed or moved meanwhile: only the mark goes
+                self.store.merge_data(pid, tid, paused_by_project=None)
+                continue
+            try:
+                after = self.c.resume(pid, tid, actor=actor, note=f"project resumed by {actor}")
+            except Exception as e:                               # noqa: BLE001
+                failed.append(f"{tid}: {type(e).__name__}: {e}"[:300])
+                continue
+            self.store.merge_data(pid, tid, paused_by_project=None)
+            resumed.append(f"{tid} -> {after['state']}")
+        self._set_pause_meta(pid, None)
+        detail = (f"project {pid} resumed; new work starts again"
+                  + (f"; resumed {', '.join(resumed)}" if resumed else "")
+                  + (f"; left paused (paused individually): {', '.join(left)}" if left else "")
+                  + (f"; could not resume: {'; '.join(failed)}" if failed else ""))
+        return self._report(a, "applied", detail[:1500], {
+            "resumed": resumed, "left_paused": left, "failed": failed,
+            "project_pause": self._pause_status(pid)})
 
     def _do_cancel(self, a, t, actor):
         if t["state"] in S.TERMINAL:
@@ -336,6 +464,10 @@ class ControlChannel:
         if t["state"] in S.TERMINAL:
             return self._report(a, "rejected", f"{tid} is {t['state']}")
         if delivery == "pause_and_steer":
+            if self._project_paused(pid):
+                return self._report(a, "rejected", f"project {pid} is paused: the steer would "
+                                                   f"send a new prompt; queue it for the next "
+                                                   f"session instead, or resume the project")
             if t["state"] not in S.WRITING or not t["session_id"]:
                 return self._report(a, "rejected", f"no running worker to steer ({tid} is "
                                                    f"{t['state']}); nothing was sent")

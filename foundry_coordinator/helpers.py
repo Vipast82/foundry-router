@@ -585,10 +585,14 @@ class HelperManager:
         h = self.settings(P)
         from . import lanes as L
         ls = L.settings(P)
+        # an operator's project pause: running units are still polled (they
+        # finish, or time out), but nothing new is planned or dispatched
+        is_held = getattr(self.c, "_held", None)
+        held = bool(is_held(P, None, "helper dispatch")) if callable(is_held) else False
         if ls["enabled"]:
             # lanes are optional: a lane error never stops ordinary helpers
             for step in ("ingest", "plan"):
-                if step == "plan" and self.lanes.paused(P.id):
+                if step == "plan" and (self.lanes.paused(P.id) or held):
                     break
                 try:
                     getattr(self.lanes, step)(P, t, spec, ls)
@@ -606,8 +610,8 @@ class HelperManager:
                 self._poll_failed(P, u, h, e)
         running = self.units(P.id, t["task_id"], "running")
         now = self.clock()
-        waiting = [*self.units(P.id, t["task_id"], "pending"),
-                   *self.units(P.id, t["task_id"], "deferred")]
+        waiting = [] if held else [*self.units(P.id, t["task_id"], "pending"),
+                                   *self.units(P.id, t["task_id"], "deferred")]
         # dependency-aware priority queue (lanes.py); ordinary units keep
         # their arrival order at the default priority, so with lanes off the
         # order is exactly the v0.117 order

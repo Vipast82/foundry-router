@@ -815,3 +815,38 @@ def test_budget_max_includes_operator_authorized_rows():
     assert (c["ordinary"]["used"], c["ordinary"]["max"]) == (4, 6)
     assert (c["ordinary"]["base_max"], c["ordinary"]["authorized"]) == (3, 3)
     assert (c["sessions"]["used"], c["sessions"]["max"]) == (5, 11)
+
+
+def test_coordinator_heartbeat_declares_project_pause_and_its_status(env):
+    """The control channel's heartbeat says it supports project_pause /
+    project_resume (features + capabilities.actions) and carries each
+    project's pause status."""
+    ch, store = env["ch"], env["store"]
+    beat = ch._beat()
+    assert "project_pause" in beat["features"]
+    assert {"project_pause", "project_resume"} <= set(beat["source"]["capabilities"]["actions"])
+    st = beat["project_pause"]["game"]
+    assert st["paused"] is False and st["busy_sessions"] == 1 and not st["safe_to_upgrade"]
+    store.set_project_paused("game", True, "upgrade")
+    st = ch._beat()["project_pause"]["game"]
+    assert st["paused"] and st["mode"] == "safe" and st["note"] == "upgrade"
+    assert st["busy_sessions"] == 1 and not st["safe_to_upgrade"]   # the turn still runs
+
+
+def test_bridge_reports_a_project_pause_observation_only_when_it_changes(env):
+    br, store = env["bridge"], env["store"]
+    assert "projpause:game" in br.fp                         # sent with the fixture's step
+    again = []
+    br._project_pause_facts(again, [], time.time())
+    assert again == []                                       # unchanged: not re-sent
+    store.set_project_paused("game", True, "upgrade")
+    obs = []
+    br._project_pause_facts(obs, [], time.time())
+    o, = obs
+    assert o["type"] == "project_pause" and o["project_id"] == "game"
+    assert set(o) == {"type", "project_id", "paused", "mode", "note", "actor", "since",
+                      "busy_sessions", "running_helpers", "running_reviews", "safe_to_upgrade"}
+    assert o["paused"] is True and o["mode"] == "safe" and o["note"] == "upgrade"
+    assert o["busy_sessions"] == 1 and o["safe_to_upgrade"] is False
+    from foundry_coordinator.telemetry import FEATURES
+    assert "project_pause_status" in FEATURES

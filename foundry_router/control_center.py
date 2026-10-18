@@ -125,6 +125,11 @@ SCHEMA = [
       project_id TEXT PRIMARY KEY, paused INTEGER, data TEXT, received_ts REAL)""",
     # batch ids a source already delivered (v0.122): a retried batch the server
     # stored before the reply was lost is answered from here, not re-applied
+    # project-wide pause status the coordinator reports (v0.123): heartbeat
+    # `projects: {pid: status}` or a `project` observation; one row per project
+    """CREATE TABLE IF NOT EXISTS cc_project_status (
+      project_id TEXT PRIMARY KEY, data TEXT, source_id TEXT, source_ts REAL, received_ts REAL,
+      seq INTEGER)""",
     """CREATE TABLE IF NOT EXISTS cc_batches (
       source_id TEXT, batch_id TEXT, boot_id TEXT, ts REAL, result TEXT,
       PRIMARY KEY (source_id, batch_id))""",
@@ -161,7 +166,24 @@ SETTING_LIMITS = {
 
 ACTION_KINDS = ("answer_question", "reply_permission", "approve_review", "reject_review",
                 "pause", "resume", "cancel", "unblock", "instruction", "withdraw_instruction",
-                "lanes", "decision_answer")
+                "lanes", "decision_answer", "project_pause", "project_resume")
+# `project_pause` / `project_resume` (v0.123): an operator stops a whole
+# project for an upgrade and starts it again. Project-scoped: task_id may be
+# empty and there is no task-state stale check. Payloads:
+#   project_pause  {"mode": "safe" | "now", "note": str (required, <= 500)}
+#   project_resume {"note": str (optional, <= 500)}
+# "safe" = finish the current step, start nothing new; "now" = abort running
+# sessions and helpers (state kept). Only handed to a source that declares the
+# `project_pause` feature. The coordinator reports the result as the project
+# status below (PROJECT_STATUS_FIELDS).
+PROJECT_ACTIONS = ("project_pause", "project_resume")
+PAUSE_MODES = ("safe", "now")
+MAX_PAUSE_NOTE = 500
+# the per-project status a coordinator reports, under heartbeat `projects`
+# ({pid: status}) or as a `project` observation (project_id + these fields, at
+# top level or under `status`)
+PROJECT_STATUS_FIELDS = ("paused", "mode", "note", "actor", "since", "busy_sessions",
+                         "running_helpers", "running_reviews", "safe_to_upgrade")
 # `decision_answer` (v0.122): an operator's answer to an open coordinator
 # decision (obligations.decisions). Delivered through the existing claim route;
 # the coordinator's control channel applies it with Obligations.answer(). Payload:
@@ -181,11 +203,12 @@ MIN_SOURCE_VERSION = "0.121.0"
 MIN_COORDINATOR_VERSION = "0.121.0"
 COORDINATOR_MAJOR = 0
 # action kinds a source must declare in its features/capabilities to be handed them
-FEATURE_GATED_ACTIONS = {"decision_answer": "decision_answer"}
+FEATURE_GATED_ACTIONS = {"decision_answer": "decision_answer", "project_pause": "project_pause",
+                         "project_resume": "project_pause"}
 # observation types that only make sense inside a project: an empty project_id
 # would bypass the per-key project allowlist, so they are refused
 PROJECT_SCOPED_TYPES = ("task", "lane_unit", "artifact", "mcp", "config", "capabilities", "todo",
-                        "lane_state", "transition", "pending")
+                        "lane_state", "transition", "pending", "project", "project_pause")
 BATCH_MEMORY = 200                                # batch ids kept per source
 # readiness classes that are not a product defect (the AU adapter's: scope,
 # tooling, environment, runtime_sync, capability, credentials, model, tests,
@@ -276,6 +299,35 @@ def source_features(payload: dict) -> Optional[list]:
         any_field = True
         found |= {str(x) for x in caps["actions"]}
     return sorted(found) if any_field else None
+
+
+def _count(v) -> int:
+    try:
+        return max(0, int(v or 0))
+    except (TypeError, ValueError):
+        return 0
+
+
+def project_status(raw) -> Optional[dict]:
+    """One reported project status, normalized (None: not a status object).
+    Unknown keys are dropped; counts are non-negative ints; `safe_to_upgrade`
+    is only true when the coordinator says so."""
+    if not isinstance(raw, dict):
+        return None
+    if isinstance(raw.get("status"), dict):
+        raw = {**raw, **raw["status"]}
+    if not any(k in raw for k in PROJECT_STATUS_FIELDS):
+        return None
+    mode = _s(raw.get("mode"), 10)
+    return {"paused": bool(raw.get("paused")),
+            "mode": mode if mode in PAUSE_MODES else "",
+            "note": _s(raw.get("note"), MAX_PAUSE_NOTE),
+            "actor": _s(raw.get("actor"), 120),
+            "since": _f(raw.get("since")),
+            "busy_sessions": _count(raw.get("busy_sessions")),
+            "running_helpers": _count(raw.get("running_helpers")),
+            "running_reviews": _count(raw.get("running_reviews")),
+            "safe_to_upgrade": raw.get("safe_to_upgrade") is True}
 
 
 def compat_state(payload: dict, server_version: str = "") -> tuple[str, str]:
@@ -481,6 +533,32 @@ class ControlCenter:
         if feats is not None:
             # normalized from `features` or `capabilities` (either name)
             detail["features"] = [_s(f, 60) for f in feats][:64]
+        # `projects` is a list of ids, or {pid: status} from a coordinator that
+        # reports project pause status: the ids stay in detail, statuses get a row
+        statuses: dict[str, dict] = {}
+        rawp = payload.get("projects")
+        if isinstance(rawp, dict):
+            allowed = client.get("projects") or []
+            for pid, v in list(rawp.items())[:200]:
+                pid = _s(pid, 120)
+                if not pid or (allowed and pid not in allowed):
+                    continue
+                stt = project_status(v)
+                if stt is not None:
+                    statuses[pid] = stt
+            detail["projects"] = [_s(p, 120) for p in rawp if not allowed or p in allowed][:200]
+        # the coordinator's own heartbeat reports the same status as {pid: status}
+        # under `project_pause` (the bridge sends `project_pause` observations)
+        rawpp = payload.get("project_pause")
+        if isinstance(rawpp, dict):
+            allowed = client.get("projects") or []
+            for pid, v in list(rawpp.items())[:200]:
+                pid = _s(pid, 120)
+                if not pid or (allowed and pid not in allowed):
+                    continue
+                stt = project_status(v)
+                if stt is not None:
+                    statuses[pid] = stt
         now = self.clock()
         server_version = _server_version()
         compat, why = compat_state(payload, server_version)
@@ -499,6 +577,9 @@ class ControlCenter:
                        _j(detail), now, now, _f(payload.get("sent_ts"))))
             seq = self._feed(c, "source", "", "", sid)
             c.execute("UPDATE cc_sources SET seq=? WHERE source_id=?", (seq, sid))
+            for pid, stt in statuses.items():
+                self._put_project_status(c, pid, self.redact(stt), sid,
+                                         _f(payload.get("sent_ts")), now)
         self._resolve(f"stale:{sid}", "heartbeat received again")
         if compat == "refuse" or (compat == "warn" and "version" in why):
             sev = "high" if compat == "refuse" else "warning"
@@ -1011,6 +1092,43 @@ class ControlCenter:
             self._feed(c, "lane_state", pid, "", pid)
         return []
 
+    def _in_project(self, c, o, st, now, src):
+        pid = _s(o.get("project_id"), 120)
+        stt = project_status(o)
+        if not pid or stt is None:
+            raise ValueError("project status")
+        self._put_project_status(c, pid, stt, src, _f(o.get("ts") or o.get("observed_ts")), now)
+        return []
+
+
+    # the coordinator bridge's observation type for the same status
+    _in_project_pause = _in_project
+
+    def _put_project_status(self, c, pid: str, stt: dict, src: str, source_ts, now) -> None:
+        """Store one project's pause status; a feed row only when it changed."""
+        data = _j(stt)
+        prev = self._rows(c, "SELECT data FROM cc_project_status WHERE project_id=?", (pid,))
+        changed = not (prev and prev[0]["data"] == data)
+        seq = self._feed(c, "project_status", pid, "", pid) if changed else None
+        c.execute("INSERT INTO cc_project_status (project_id, data, source_id, source_ts, "
+                  "received_ts, seq) VALUES (?,?,?,?,?,?) ON CONFLICT(project_id) DO UPDATE SET "
+                  "data=excluded.data, source_id=excluded.source_id, source_ts=excluded.source_ts, "
+                  "received_ts=excluded.received_ts, "
+                  "seq=COALESCE(excluded.seq, cc_project_status.seq)",
+                  (pid, data, _s(src, 120), source_ts, now, seq))
+
+    @staticmethod
+    def _project_status_out(r: dict) -> dict:
+        return {**(_uj(r.get("data"), {}) or {}), "project_id": r["project_id"],
+                "source_id": r.get("source_id") or "", "received_ts": r.get("received_ts"),
+                "source_ts": r.get("source_ts")}
+
+    def project_statuses(self, projects: list) -> dict:
+        """{pid: status} for the projects this operator may see."""
+        pf, pa = self._pfilter(projects)
+        return {r["project_id"]: self._project_status_out(r) for r in self.db.query(
+            f"SELECT * FROM cc_project_status WHERE 1=1{pf}", pa)}
+
     # ------------------------------------------------------------------ lanes (reads)
 
     def lanes(self, projects: list, project: str, task: str = "") -> dict:
@@ -1266,11 +1384,12 @@ class ControlCenter:
                              pa)
         for p in pend:
             p["data"] = _uj(p["data"], {})
+        pstat = self.project_statuses(projects)
         return {"contract": CONTRACT, "server_ts": self.clock(), "seq": self.last_seq(),
                 "tasks": tasks, "sessions": sessions, "pending": pend,
-                "sources": self.sources(projects), "projects": sorted(
+                "sources": self.sources(projects), "project_status": pstat, "projects": sorted(
                     {t["project_id"] for t in tasks} | {s["project_id"] for s in sessions if
-                                                         s.get("project_id")}),
+                                                         s.get("project_id")} | set(pstat)),
                 "settings": {k: self.settings()[k] for k in ("min_refresh_s",
                                                              "collect_reasoning",
                                                              "collect_tool_output",
@@ -1975,6 +2094,9 @@ class ControlCenter:
             r = self.db.query_one("SELECT * FROM cc_lane_state WHERE project_id=?", (eid,))
             return {"project_id": eid, "paused": bool(r["paused"]), **_uj(r["data"], {})} \
                 if r else None
+        if kind == "project_status":
+            r = self.db.query_one("SELECT * FROM cc_project_status WHERE project_id=?", (eid,))
+            return self._project_status_out(r) if r else None
         if kind == "source":
             for s in self.sources():
                 if s["source_id"] == eid:
@@ -2060,6 +2182,8 @@ class ControlCenter:
         if existing:
             return {**self.action_view(existing["action_id"]), "duplicate": True}
         pid, tid = _s(body.get("project_id"), 120), _s(body.get("task_id"), 120)
+        if kind in PROJECT_ACTIONS:
+            return self._create_project_action(actor, projects, body, scopes, kind, idem, pid, tid)
         if not pid or not tid:
             raise ControlError("project_id and task_id are required")
         if projects and pid not in projects:
@@ -2283,10 +2407,96 @@ class ControlCenter:
         self._notify()
         return self.action_view(aid)
 
+    def _project_pause_state(self, c, pid: str) -> tuple[Optional[dict], Optional[dict]]:
+        """(the latest live-or-applied project_pause/resume action, the reported
+        status) for one project."""
+        last = self._rows(c, "SELECT action_id, kind, status FROM cc_actions WHERE project_id=? AND "
+                             "kind IN ('project_pause','project_resume') AND status IN ('accepted',"
+                             "'claimed','queued','delivered','applied') ORDER BY created_ts DESC, "
+                             "rowid DESC LIMIT 1", (pid,))
+        st = self._rows(c, "SELECT data FROM cc_project_status WHERE project_id=?", (pid,))
+        return (last[0] if last else None), (_uj(st[0]["data"], {}) if st else None)
+
+    def _create_project_action(self, actor: str, projects: list, body: dict, scopes, kind: str,
+                               idem: str, pid: str, tid: str) -> dict:
+        """project_pause / project_resume: project-scoped (task id optional, no
+        task-state stale check), operator sessions only, one at a time. A second
+        request while one is in flight returns that one (duplicate: true); a
+        pause of a project that is already paused is 409 `duplicate`."""
+        if scopes is not None and not {"operator", "admin"} & set(scopes or []):
+            raise ControlError("pausing or resuming a project needs an operator session",
+                               "forbidden", 403)
+        if not pid:
+            raise ControlError("project_id is required")
+        if projects and pid not in projects:
+            raise ControlError("this operator may not act on that project", "forbidden", 403)
+        note = str(body.get("note") or "").strip()
+        if len(note) > MAX_PAUSE_NOTE:
+            raise ControlError(f"note is over {MAX_PAUSE_NOTE} characters")
+        if kind == "project_pause":
+            mode = body.get("mode") or "safe"
+            if mode not in PAUSE_MODES:
+                raise ControlError("mode must be 'safe' or 'now'")
+            if not note:
+                raise ControlError("a note is required (say why, e.g. 'upgrading to v0.122.3')")
+            payload = {"mode": mode, "note": note}
+        else:
+            payload = {"note": note}
+        if not self.rate_ok(actor):
+            raise ControlError("too many control actions; wait a minute", "rate_limited", 429)
+        st = self.settings()
+        now = self.clock()
+        aid = f"act-{uuid.uuid4().hex[:16]}"
+        summary = self._summary(kind, payload, pid)
+        dup = None
+        try:
+            with self._tx() as c:
+                last, status = self._project_pause_state(c, pid)
+                paused = bool((status or {}).get("paused"))
+                live_same = bool(last and last["kind"] == kind and last["status"] in LIVE_ACTION)
+                resuming = bool(last and last["kind"] == "project_resume"
+                                and last["status"] in LIVE_ACTION)
+                if live_same:
+                    dup = last["action_id"]                      # one in flight: that one
+                elif kind == "project_pause" and (
+                        (last and last["kind"] == kind) or (paused and not resuming)):
+                    raise ControlError(f"{pid} is already paused; resume it first", "duplicate",
+                                       409, current=last["action_id"] if last else "")
+                elif kind == "project_resume" and not paused and not (
+                        last and last["kind"] == "project_pause"):
+                    raise ControlError(f"{pid} is not paused", "not_paused", 409)
+                if dup is None:
+                    expected = {"project_paused": paused if status is not None else None}
+                    seq = self._feed(c, "action", pid, "", aid)
+                    c.execute("INSERT INTO cc_actions (action_id, idem_key, actor, kind, project_id, "
+                              "task_id, run_id, session_id, request_id, payload, summary, expected, "
+                              "status, status_detail, created_ts, expires_ts, updated_ts, seq) VALUES "
+                              "(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                              (aid, idem, actor, kind, pid, tid, "", "", "", _j(payload), summary,
+                               _j(expected), "accepted",
+                               "stored by Foundry; waiting for the coordinator to claim it", now,
+                               now + st["action_ttl_s"], now, seq))
+                    c.execute("INSERT INTO cc_action_log (action_id, ts, status, actor, detail) "
+                              "VALUES (?,?,?,?,?)", (aid, now, "accepted", actor, summary))
+        except Exception as e:                                   # noqa: BLE001
+            if "UNIQUE" in str(e) and "idem" in str(e):
+                ex = self.db.query_one("SELECT action_id FROM cc_actions WHERE idem_key=?", (idem,))
+                return {**self.action_view(ex["action_id"]), "duplicate": True}
+            raise
+        if dup:
+            return {**self.action_view(dup), "duplicate": True}
+        self._notify()
+        return self.action_view(aid)
+
     @staticmethod
     def _summary(kind: str, p: dict, tid: str) -> str:
         """What the audit log shows: no answer/instruction body (it may hold
         sensitive text); length only."""
+        if kind == "project_pause":
+            return (f"pause project {tid} ({'at a safe point' if p.get('mode') == 'safe' else 'now'})"
+                    f": {p.get('note') or ''}")[:300]
+        if kind == "project_resume":
+            return (f"resume project {tid}" + (f": {p['note']}" if p.get("note") else ""))[:300]
         if kind == "lanes":
             return f"proactive lanes {'paused' if p.get('paused') else 'un-paused'} ({tid})"
         if kind == "decision_answer":

@@ -2,6 +2,30 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.122.4 — project Pause / Resume in the control center (for upgrades)
+
+- **Header control.** A **Pause** / **Resume** button for the selected
+  project sits in the control-center header.
+  - **At a safe point** (default): nothing new starts. That covers task
+    starts, sessions, prompts, reviews, closeout and helper dispatch. A model
+    turn already running finishes. The pill reads "PAUSING — N running",
+    then "PAUSED — safe to upgrade" once no session, helper or review is
+    active.
+  - **Now:** also aborts running sessions and helpers through the existing
+    task pause. State is kept, and Resume continues the same sessions.
+  - **Resume** resumes only the tasks this pause stopped. Tasks paused
+    individually stay paused.
+- **Persistence.** The pause survives a coordinator restart; nothing starts
+  until Resume. While paused, an individual resume and a pause-and-steer
+  instruction are refused.
+- **Coordinator support.** The coordinator advertises the `project_pause`
+  feature and reports `project_pause` status in its heartbeat and through
+  the bridge. The server hands pause/resume actions only to coordinators
+  that declare the feature.
+
+**Migration:** none. Deploy Foundry and the coordinator together. An older
+coordinator shows the button disabled ("update it").
+
 ## v0.122.3 — Meridian usage 429s no longer pause helpers; budgets show authorized room
 
 - **Quota gate (Foundry).**

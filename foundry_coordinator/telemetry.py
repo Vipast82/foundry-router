@@ -328,6 +328,61 @@ def pending_obs(q: dict, kind: str, ctx: dict) -> dict:
 
 # --------------------------------------------------------------------------- coordinator store
 
+PROJECT_PAUSE_META = "project_pause:"     # store meta key prefix: {mode, note, actor, since, tasks}
+REVIEW_STALE_S = 3600                     # a review op "started" longer than this is a crash leftover
+
+
+def project_pause_meta(q, project_id: str) -> dict:
+    """The project-pause record the control channel writes (meta
+    project_pause:<pid>, JSON), or {}."""
+    try:
+        r = q("SELECT value FROM meta WHERE key=?", (PROJECT_PAUSE_META + project_id,))
+        v = json.loads(r[0]["value"]) if r and r[0].get("value") else {}
+        return v if isinstance(v, dict) else {}
+    except Exception:                                            # noqa: BLE001
+        return {}
+
+
+def project_pause_status(q, project_id: str, now: Optional[float] = None) -> dict:
+    """One project's pause status for operator upgrades, from the store only
+    (`q(sql, args) -> rows`; the engine's Store.q or the bridge's read-only
+    reader). busy_sessions: the task's current primary/closeout session,
+    prompted and not ended, while the task is IMPLEMENTING/CLOSING;
+    running_helpers: helper units running; running_reviews: review calls
+    started and not done (a start older than REVIEW_STALE_S is a crash
+    leftover, not a call in flight). safe_to_upgrade = paused and all three 0."""
+    now = time.time() if now is None else now
+
+    def one(sql, args=()):
+        try:
+            r = q(sql, args)
+            return int((r[0].get("n") if r else 0) or 0)
+        except Exception:                                        # noqa: BLE001
+            return 0      # a table an older/helper-less store doesn't have
+    try:
+        p = q("SELECT paused, pause_note FROM projects WHERE project_id=?", (project_id,))
+    except Exception:                                            # noqa: BLE001
+        p = []
+    paused = bool(p and p[0].get("paused"))
+    m = project_pause_meta(q, project_id) if paused else {}
+    busy = one("SELECT COUNT(*) AS n FROM tasks t JOIN sessions s ON s.session_id=t.session_id "
+               "WHERE t.project_id=? AND t.state IN ('IMPLEMENTING','CLOSING') AND "
+               "s.ended_ts IS NULL AND s.prompt_ts IS NOT NULL", (project_id,))
+    helpers = one("SELECT COUNT(*) AS n FROM helper_units WHERE project_id=? AND "
+                  "status='running'", (project_id,))
+    reviews = one("SELECT COUNT(*) AS n FROM ops WHERE project_id=? AND kind='review' AND "
+                  "status='started' AND COALESCE(updated_ts, created_ts, 0) >= ?",
+                  (project_id, now - REVIEW_STALE_S))
+    return {"paused": paused,
+            "mode": (m.get("mode") or "safe") if paused else None,
+            "note": (m.get("note") if m.get("note") is not None
+                     else (p[0].get("pause_note") or "")) if paused else "",
+            "actor": m.get("actor") if paused else None,
+            "since": m.get("since") if paused else None,
+            "busy_sessions": busy, "running_helpers": helpers, "running_reviews": reviews,
+            "safe_to_upgrade": bool(paused and busy == 0 and helpers == 0 and reviews == 0)}
+
+
 class CoordReader:
     """The coordinator's store, opened read-only (WAL: the live engine keeps
     writing undisturbed)."""
@@ -1156,6 +1211,7 @@ class TelemetryBridge:
             last_e = evs[-1]["id"]
             commits.append(lambda v=last_e: setattr(self, "cursor_events", v))
         self._lane_facts(obs, commits)
+        self._project_pause_facts(obs, commits, now)
         # direct Foundry calls (visual observer) are not Kilo sessions: never poll Kilo for them
         sessions = [s for s in self.reader.sessions() if s.get("client") != "foundry-direct"]
         recent = sessions[-self.replay_sessions:] if not self.replayed else sessions
@@ -1172,6 +1228,15 @@ class TelemetryBridge:
                         ended_ts=s["ended_ts"], created_ts=s["created_ts"],
                         active=t.get("session_id") == s["session_id"])
         self.replayed = True
+
+    def _project_pause_facts(self, obs: list, commits: list, now: float) -> None:
+        """Per project: {type: project_pause, project_id, paused, mode, note,
+        actor, since, busy_sessions, running_helpers, running_reviews,
+        safe_to_upgrade}; re-sent only when it changed."""
+        for pid in self.projects:
+            self._emit(obs, commits, f"projpause:{pid}", {
+                "type": "project_pause", "project_id": pid,
+                **project_pause_status(self.reader._q, pid, now)})
 
     THUMB_MAX_BYTES = 400_000
 
@@ -1591,4 +1656,5 @@ def _coord_version() -> str:
         return ""
 
 
-FEATURES = ("batch_id", "boot_id", "lifecycle_v1", "readiness", "decisions")
+FEATURES = ("batch_id", "boot_id", "lifecycle_v1", "readiness", "decisions",
+            "project_pause_status")

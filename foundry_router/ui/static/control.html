@@ -82,6 +82,11 @@ header { display:flex; align-items:center; gap:8px; padding:5px 10px; background
 header .brand { font-weight:600; color:var(--accent); white-space:nowrap; }
 header .grp { display:flex; align-items:center; gap:5px; flex-wrap:wrap; }
 #conn { display:flex; gap:4px; align-items:center; flex-wrap:wrap; }
+#pause-ctl { display:inline-flex; gap:4px; align-items:center; flex-wrap:wrap; }
+#pause-ctl .pill { white-space:nowrap; }
+#pause-dlg { width:min(520px, 94vw); }
+#pause-dlg label.opt { display:flex; gap:6px; align-items:flex-start; padding:2px 0; }
+#pause-dlg textarea { width:100%; box-sizing:border-box; }
 #bell { position:relative; }
 #bell .count { position:absolute; top:-6px; right:-6px; min-width:16px; height:16px; border-radius:8px;
                background:var(--bad); color:#fff; font-size:10px; line-height:16px; text-align:center; padding:0 3px; }
@@ -325,6 +330,7 @@ body.noanim * { animation:none !important; transition:none !important; }
   <div class="grp">
     <button id="bell" title="Action required (inbox)" aria-label="Action required inbox">🔔 <span class="count" id="bell-count" hidden>0</span></button>
     <button id="sound-btn" title="Sound alerts"></button>
+    <span id="pause-ctl" aria-live="polite"></span>
     <select id="layout-preset" title="Layout preset" class="hide-narrow">
       <option value="auto">Layout: auto</option><option value="portrait">Portrait</option>
       <option value="landscape">Landscape</option><option value="focus">Main worker focus</option>
@@ -356,6 +362,19 @@ body.noanim * { animation:none !important; transition:none !important; }
   <div class="dlg-body" id="settings-body"></div></dialog>
 <dialog id="detail"><div class="dlg-head"><b id="detail-title">Details</b><span class="spacer"></span>
   <button onclick="this.closest('dialog').close()">Close</button></div><div class="dlg-body" id="detail-body"></div></dialog>
+<dialog id="pause-dlg" aria-labelledby="pause-h"><div class="dlg-head"><b id="pause-h">Pause project</b><span class="spacer"></span>
+  <button type="button" id="pause-x">Close</button></div>
+  <form class="dlg-body" id="pause-form" autocomplete="off">
+    <div id="pause-target" class="dim"></div>
+    <fieldset id="pause-modes"><legend>When</legend>
+      <label class="opt"><input type="radio" name="pause-mode" value="safe" checked> At a safe point (finish the current step; nothing new starts)</label>
+      <label class="opt"><input type="radio" name="pause-mode" value="now"> Now (abort running sessions and helpers; state kept)</label>
+    </fieldset>
+    <label for="pause-note" id="pause-note-l">Note (required)</label>
+    <textarea id="pause-note" maxlength="500" rows="2" placeholder="upgrading to v0.122.3"></textarea>
+    <div id="pause-err" class="errbox" hidden></div>
+    <div class="row"><button class="primary" type="submit" id="pause-go">Confirm</button><button type="button" id="pause-cancel">Cancel</button></div>
+  </form></dialog>
 <div id="toasts" aria-live="polite"></div>
 
 <script>
@@ -609,6 +628,7 @@ const S = {
   sources: [], project: "", task: "", panes: [], focused: "main",
   conn: {stream: "connecting", lastEvent: 0, attempt: 0}, unseen: 0, idem: {}, lastAction: null,
   composerMode: "instruction", selectedRequest: "", narrow: "transcript", graph: null,
+  projectStatus: {},      // pid -> project pause status the coordinator reports
 };
 function taskKey(p, t) { return `${p}/${t}`; }
 function curTask() { return S.tasks.get(taskKey(S.project, S.task)); }
@@ -705,6 +725,7 @@ function renderConn() {
   if (!coord.length) parts.push(`<span class="pill" title="No coordinator has heart-beated with --control: operator actions will wait as 'accepted' until one does">control: off</span>`);
   if (S.unseen) parts.push(`<button class="pill info" id="unseen" title="New activity you haven't looked at">${S.unseen} new</button>`);
   $("#conn").innerHTML = parts.join(" ");
+  renderPauseCtl();
   const u = $("#unseen"); if (u) u.onclick = () => { S.unseen = 0; goLive(paneById("main")); renderConn(); };
 }
 
@@ -735,7 +756,7 @@ function resubscribeIfNeeded() { if (subscribedSessions().join(",") !== S.conn.s
 
 function onBatch(b) {
   const touched = new Set();
-  let tasksChanged = false, alertsChanged = false, actionsChanged = false;
+  let tasksChanged = false, alertsChanged = false, actionsChanged = false, pauseChanged = false;
   for (const it of b.items || []) {
     S.seq = Math.max(S.seq, it.seq);
     const e = it.entity;
@@ -759,8 +780,11 @@ function onBatch(b) {
       case "snapshot": S.snapshots.set(`${e.kind}|${e.project_id}|${e.session_id}`, e); touched.add("*snap"); break;
       case "source": S.sources = [...(S.sources || []).filter(s => s.source_id !== e.source_id), e]; renderConn(); break;
       case "lane_unit": case "artifact": case "lane_state": S.lanesAt = 0; touched.add("*lanes"); break;
+      case "project_status": S.projectStatus[e.project_id] = e; pauseChanged = true; break;
     }
   }
+  if (pauseChanged || actionsChanged) renderPauseCtl();
+  if (pauseChanged && $("#inbox").classList.contains("open")) renderInbox();
   if (tasksChanged) { renderTaskSelect(); applyFollow(); }
   for (const sid of touched) if (!sid.startsWith("*")) for (const p of S.panes) if (p.sid === sid) renderPane(p, true);
   if (touched.has("*sessions")) for (const p of S.panes) renderPaneHead(p);
@@ -2087,6 +2111,88 @@ function bellCount(alerts, pending) {
   return {open, fresh, pend, badge: fresh.length + pend.length};
 }
 /*bell-end*/
+/*pause-start*/
+// Project-wide pause for operator upgrades (project_pause / project_resume).
+// A paused project is information in the inbox, never a bell-badge count.
+const PAUSE_FEATURE = "project_pause";
+const PAUSE_UNSUPPORTED = "coordinator doesn't support project pause (update it)";
+const PAUSE_LIVE = ["accepted", "claimed", "queued", "delivered"];
+const PAUSE_MODE_TEXT = {safe: "at a safe point", now: "now"};
+function pauseSupported(sources) {
+  return (sources || []).some(s => ((s.detail || {}).features || []).includes(PAUSE_FEATURE));
+}
+function pauseBusy(st) { return (+(st || {}).busy_sessions || 0) + (+(st || {}).running_helpers || 0) + (+(st || {}).running_reviews || 0); }
+function pauseDetail(st) {
+  if (!st || !st.paused) return "";
+  return `Paused by ${st.actor || "?"}${st.since ? " since " + tsText(st.since, "datetime") : ""}${st.mode ? " (" + (PAUSE_MODE_TEXT[st.mode] || st.mode) + ")" : ""}${st.note ? ": " + st.note : ""}` +
+    ` · ${+st.busy_sessions || 0} session(s), ${+st.running_helpers || 0} helper(s), ${+st.running_reviews || 0} review(s) running`;
+}
+// What the header shows for one project: the button (Pause / Resume), whether
+// it is usable, and the status pill. Text only; pauseCtlHtml escapes it.
+function projectPauseView(pid, statusMap, actions, sources) {
+  const st = (statusMap || {})[pid] || null;
+  const live = (actions || []).filter(a => a && a.project_id === pid && (a.kind === "project_pause" || a.kind === "project_resume") && PAUSE_LIVE.includes(a.status))
+    .sort((a, b) => (b.created_ts || 0) - (a.created_ts || 0))[0] || null;
+  const paused = !!(st && st.paused), busy = pauseBusy(st), safe = !!(st && st.safe_to_upgrade);
+  const v = {pid, paused, busy, safe, supported: pauseSupported(sources), pending: live ? live.kind : "",
+             kind: paused ? "project_resume" : "project_pause", label: paused ? "Resume" : "Pause",
+             disabled: false, title: paused ? "Resume this project" : "Pause this project (for an upgrade)", pill: null};
+  if (live && live.kind === "project_resume") v.pill = {text: "resume requested…", cls: "info", title: `waiting for the coordinator to apply it (${live.status})`};
+  else if (paused) v.pill = safe ? {text: "PAUSED — safe to upgrade", cls: "ok", title: pauseDetail(st)} : {text: `PAUSING — ${busy} running`, cls: "warn", title: pauseDetail(st)};
+  else if (live) v.pill = {text: "pause requested…", cls: "info", title: `waiting for the coordinator to apply it (${live.status})`};
+  if (live) { v.disabled = true; v.title = `${live.kind === "project_pause" ? "pause" : "resume"} requested; waiting for the coordinator`; }
+  if (!pid) { v.disabled = true; v.title = "select a project"; }
+  else if (!v.supported) { v.disabled = true; v.title = PAUSE_UNSUPPORTED; }
+  return v;
+}
+function pauseCtlHtml(v) {
+  return `<span title="${esc(v.title)}"><button id="btn-pause" data-pkind="${esc(v.kind)}"${v.disabled ? " disabled" : ""} aria-label="${esc(v.label)} project ${esc(v.pid)}">${v.paused ? "▶" : "⏸"} ${esc(v.label)}</button></span>` +
+    (v.pill ? ` <span class="pill ${esc(v.pill.cls)}" id="pause-pill" title="${esc(v.pill.title || "")}">${esc(v.pill.text)}</span>` : "");
+}
+// "" when the dialog may be submitted, otherwise what is wrong
+function pauseFormError(kind, mode, note) {
+  const n = String(note || "");
+  if (n.length > 500) return "The note is over 500 characters.";
+  if (kind !== "project_pause") return "";
+  if (!["safe", "now"].includes(mode)) return "Choose when to pause.";
+  if (!n.trim()) return "A note is required (e.g. upgrading to v0.122.3).";
+  return "";
+}
+function pauseInboxHtml(statusMap) {
+  const rows = Object.entries(statusMap || {}).filter(([, st]) => st && st.paused).sort(([a], [b]) => a < b ? -1 : 1);
+  return rows.map(([pid, st]) => `<div class="alert sev-info" data-paused="${esc(pid)}"><div class="atitle">Project ${esc(pid)} paused by ${esc(st.actor || "?")} since ${esc(st.since ? tsText(st.since, "datetime") : "?")}, safe to upgrade: ${st.safe_to_upgrade ? "yes" : "no"}</div>
+      ${st.note ? `<div style="white-space:pre-wrap">${esc(st.note)}</div>` : ""}<div class="dim">${st.mode ? esc(PAUSE_MODE_TEXT[st.mode] || st.mode) + " · " : ""}${esc(pauseBusy(st))} still running</div></div>`).join("");
+}
+/*pause-end*/
+function renderPauseCtl() {
+  const el = $("#pause-ctl"); if (!el || POPOUT) return;
+  const v = projectPauseView(S.project, S.projectStatus, [...S.actions.values()], S.sources);
+  el.innerHTML = pauseCtlHtml(v);
+  const b = $("#btn-pause"); if (b && !v.disabled) b.onclick = () => openPauseDialog(v);
+}
+function openPauseDialog(v) {
+  const d = $("#pause-dlg"); d.dataset.kind = v.kind; d.dataset.project = v.pid;
+  const pause = v.kind === "project_pause";
+  $("#pause-h").textContent = pause ? "Pause project" : "Resume project";
+  $("#pause-target").textContent = `Project ${v.pid}` + (pause ? "" : ` · ${v.pill ? v.pill.text : "paused"}`);
+  $("#pause-modes").hidden = !pause;
+  $("#pause-note-l").textContent = pause ? "Note (required)" : "Note (optional)";
+  $("#pause-note").value = ""; $("#pause-err").hidden = true;
+  d.showModal(); $("#pause-note").focus();
+}
+$("#pause-x").onclick = () => $("#pause-dlg").close();
+$("#pause-cancel").onclick = () => $("#pause-dlg").close();
+$("#pause-form").addEventListener("submit", async ev => {
+  ev.preventDefault();
+  const d = $("#pause-dlg"), kind = d.dataset.kind, pid = d.dataset.project;
+  const mode = ($("input[name=pause-mode]:checked") || {}).value || "safe", note = $("#pause-note").value;
+  const err = pauseFormError(kind, mode, note);
+  if (err) { const e = $("#pause-err"); e.textContent = err; e.hidden = false; return; }
+  const body = kind === "project_pause" ? {kind, project_id: pid, task_id: S.task || "", expected: {}, mode, note: note.trim()}
+    : {kind, project_id: pid, task_id: S.task || "", expected: {}, note: note.trim()};
+  const a = await submitAction(body, `${kind}:${pid}`);
+  if (a) { d.close(); renderPauseCtl(); }
+});
 function renderBell() {
   const {open, fresh, pend, badge} = bellCount([...S.alerts.values()], [...S.pending.values()]);
   const c = $("#bell-count"); c.hidden = !badge; c.textContent = badge;
@@ -2109,7 +2215,7 @@ async function renderInbox() {
       <div class="dim">session <code>${esc(short(p.session_id, 16))}</code> · request <code>${esc(p.request_id)}</code> · waiting ${esc(relAge(nowS() - (p.created_ts || nowS())))}</div>
       <div style="white-space:pre-wrap">${esc(p.kind === "question" ? ((p.data.questions || [])[0] || {}).question || "" : `${p.data.permission || ""} ${(p.data.patterns || []).join(", ")}`)}</div>
       <div class="row"><button class="primary" data-answer="${esc(p.request_id)}">${p.kind === "question" ? "Answer" : "Decide"}</button><button data-view="${esc(p.session_id)}">Open session</button></div></div>`).join("") : "";
-  $("#inbox-body").innerHTML = decisionsInboxHtml(S.tasks) + pHtml + `<h4 style="margin:8px 0 4px">Alerts</h4>` + (list.map(a => `<div class="alert sev-${esc(a.severity)} st-${esc(a.status)}">
+  $("#inbox-body").innerHTML = pauseInboxHtml(S.projectStatus) + decisionsInboxHtml(S.tasks) + pHtml + `<h4 style="margin:8px 0 4px">Alerts</h4>` + (list.map(a => `<div class="alert sev-${esc(a.severity)} st-${esc(a.status)}">
       <div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap"><span class="pill ${a.severity === "critical" ? "bad" : a.severity === "high" ? "warn" : "info"}">${esc(a.severity)}</span><span class="atitle">${esc(a.title)}</span>
       <span class="spacer"></span><span class="pill">${esc(a.status)}</span></div>
       <div>${esc(a.detail || "")}</div>
@@ -3039,7 +3145,7 @@ $("#follow").onchange = e => { P.followCoordinator = e.target.checked; savePrefs
 
 /* ======================================================================== task selection */
 function renderTaskSelect() {
-  const projects = [...new Set([...S.tasks.values()].map(t => t.project_id))].sort();
+  const projects = [...new Set([...[...S.tasks.values()].map(t => t.project_id), ...Object.keys(S.projectStatus || {})])].sort();
   if (!S.project && projects.length) S.project = projects[0];
   $("#sel-project").innerHTML = projects.map(p => `<option ${p === S.project ? "selected" : ""}>${esc(p)}</option>`).join("") || "<option>(no projects reported)</option>";
   const tasks = [...S.tasks.values()].filter(t => t.project_id === S.project).sort((a, b) => (b.received_ts || 0) - (a.received_ts || 0));
@@ -3050,6 +3156,7 @@ function renderTaskSelect() {
   $("#sel-task").innerHTML = tasks.map(t => `<option value="${esc(t.task_id)}" ${t.task_id === S.task ? "selected" : ""}>${esc(t.task_id)} · ${esc(t.state)}</option>`).join("");
   const t = curTask();
   $("#task-state").innerHTML = t ? `<span class="pill ${stateCls(t.state)}">${esc(t.state)}</span>` : "";
+  renderPauseCtl();
 }
 function selectTask(p, t) {
   S.project = p; S.task = t; renderTaskSelect();
@@ -3075,6 +3182,7 @@ async function boot() {
     for (const s of S.ov.sessions) S.sessions.set(s.session_id, s);
     for (const p of S.ov.pending) S.pending.set(p.request_id, p);
     S.sources = S.ov.sources || [];
+    S.projectStatus = S.ov.project_status || {};
     S.seq = S.ov.seq || 0;
     const al = await api("alerts?status=open&limit=200"); for (const a of al.alerts) S.alerts.set(a.alert_id, a);
     const ac = await api("actions?limit=100"); for (const a of ac.actions) S.actions.set(a.action_id, a);
