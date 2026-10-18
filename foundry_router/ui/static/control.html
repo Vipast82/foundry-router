@@ -220,7 +220,20 @@ table.t th { color:var(--dim); font-weight:normal; }
 #graphPanel { background:var(--panel); border-top:1px solid var(--line); min-height:0; display:flex; flex-direction:column; }
 #graphPanel .ghead { display:flex; gap:6px; align-items:center; padding:3px 8px; border-bottom:1px solid var(--line); flex-wrap:wrap; }
 #graphPanel .gbody { flex:1; min-height:0; overflow:auto; position:relative; }
-#graph svg { width:100%; height:100%; display:block; cursor:grab; }
+#graph svg { display:block; margin:auto; cursor:grab; }
+#graphPanel .ghead select { font-size:11px; }
+#floatLayer { position:fixed; inset:0; pointer-events:none; z-index:40; }
+.floatwin { position:fixed; pointer-events:auto; display:flex; flex-direction:column; background:var(--panel);
+  border:1px solid var(--line-2); border-radius:6px; box-shadow:0 6px 24px rgba(0,0,0,.45); min-width:240px; min-height:140px; overflow:hidden; }
+.floatwin .fw-head { display:flex; align-items:center; gap:6px; padding:4px 8px; background:var(--panel-2); border-bottom:1px solid var(--line);
+  cursor:move; user-select:none; touch-action:none; }
+.floatwin .fw-head:focus-visible { outline:2px solid var(--accent); outline-offset:-2px; }
+.floatwin .fw-head button { padding:0 6px; font-size:11px; }
+.floatwin .fw-body { flex:1; min-height:0; overflow:auto; }
+.floatwin .fw-body > #graphPanel { height:100%; border-top:0; }
+.floatwin .fw-resize { position:absolute; right:0; bottom:0; width:16px; height:16px; cursor:nwse-resize; touch-action:none;
+  background:linear-gradient(135deg, transparent 50%, var(--line-2) 50%); }
+body.narrow-ui #floatLayer { display:none; }
 .gnode rect { fill:var(--panel-2); stroke:var(--line-2); rx:4; }
 .gnode text { fill:var(--fg); font-size:11px; font-family:var(--ui-font); }
 .gnode.k-coordinator rect { stroke:var(--accent); } .gnode.k-session rect { stroke:var(--info); }
@@ -389,18 +402,19 @@ const DEFAULT_PREFS = {
   events: {text: true, reasoning: true, tool: true, retry: true, compaction: true, file: true, step: false, agent: true},
   sidebar: {order: SECTIONS.slice(), hidden: [], collapsed: ["search", "capabilities", "actions"]},
   showDisabledMcp: true, showTokenDetails: true, showTiming: true, showTodo: true, showCapabilities: true, showHelpers: true, showLanes: true,
-  graph: true, graphVertical: "auto", routeAnimation: true, reducedMotion: "system",
+  graph: true, graphActiveOnly: false, graphVertical: "auto", routeAnimation: true, reducedMotion: "system",
   refreshS: 10, staleAfterS: 45,
   notify: {enabled: false, critical: true, high: true, completion: false, stale: true},
   sound: {enabled: true, volume: 0.6, muted: false, question: true, approval: true, failure: true,
           completion: true, stale: true, repeatCriticalS: 120, repeatMax: 5, snoozeUntil: 0,
           quiet: false, quietStart: "22:00", quietEnd: "07:00"},
   layout: {preset: "auto",
-           presets: {portrait: {inspectorW: 330, inspectorPos: "side", graphH: 200, helperW: 420, helpers: 0},
-                     landscape: {inspectorW: 380, inspectorPos: "side", graphH: 170, helperW: 520, helpers: 1},
-                     focus: {inspectorW: 0, inspectorPos: "hidden", graphH: 0, helperW: 0, helpers: 0},
-                     helpers: {inspectorW: 330, inspectorPos: "side", graphH: 0, helperW: 520, helpers: 2},
-                     overview: {inspectorW: 420, inspectorPos: "side", graphH: 300, helperW: 420, helpers: 1}}},
+           // graphPos: bottom | side | float (per preset); floats: detached cards {id: {x, y, w, h}}
+           presets: {portrait: {inspectorW: 330, inspectorPos: "side", graphH: 200, helperW: 420, helpers: 0, graphPos: "bottom", graphW: 520, floats: {}},
+                     landscape: {inspectorW: 380, inspectorPos: "side", graphH: 170, helperW: 520, helpers: 1, graphPos: "side", graphW: 560, floats: {}},
+                     focus: {inspectorW: 0, inspectorPos: "hidden", graphH: 0, helperW: 0, helpers: 0, graphPos: "bottom", graphW: 520, floats: {}},
+                     helpers: {inspectorW: 330, inspectorPos: "side", graphH: 0, helperW: 520, helpers: 2, graphPos: "bottom", graphW: 520, floats: {}},
+                     overview: {inspectorW: 420, inspectorPos: "side", graphH: 300, helperW: 420, helpers: 1, graphPos: "bottom", graphW: 640, floats: {}}}},
   fontScale: {main: 1, helper: 1}, composerCollapsed: false,
 };
 function deepMerge(base, over) {
@@ -412,6 +426,28 @@ function deepMerge(base, over) {
   }
   return over === undefined || over === null || typeof over !== typeof base ? base : over;
 }
+/*floats-start*/
+const FLOAT_IDS = /^(graph|sec:[a-z]+)$/;
+function sanitizeFloats(f) {
+  const out = {};
+  if (!f || typeof f !== "object") return out;
+  for (const [id, r] of Object.entries(f)) {
+    if (!FLOAT_IDS.test(id) || !r || typeof r !== "object") continue;
+    const n = v => (typeof v === "number" && isFinite(v)) ? Math.round(v) : undefined;
+    out[id] = {x: n(r.x), y: n(r.y), w: n(r.w), h: n(r.h)};
+  }
+  return out;
+}
+// keep a floating card on screen and usable: at least 240x140, fully inside the viewport
+function clampFloat(r, vw, vh) {
+  r = r || {};
+  const w = Math.round(Math.min(Math.max(r.w || 520, 240), Math.max(240, vw - 16)));
+  const h = Math.round(Math.min(Math.max(r.h || 340, 140), Math.max(140, vh - 16)));
+  const x = Math.round(Math.min(Math.max(r.x ?? (vw - w - 24), 8), Math.max(8, vw - w - 8)));
+  const y = Math.round(Math.min(Math.max(r.y ?? 72, 8), Math.max(8, vh - h - 8)));
+  return {x, y, w, h};
+}
+/*floats-end*/
 function migratePrefs(raw) {
   if (!raw || typeof raw !== "object") return deepMerge(DEFAULT_PREFS, {});
   if (raw.v === 1) {  // v1 kept a flat "inspectorWidth" and "thinking" flag
@@ -419,6 +455,11 @@ function migratePrefs(raw) {
            layout: {presets: {landscape: {inspectorW: raw.inspectorWidth || 380}}}};
   }
   const out = deepMerge(DEFAULT_PREFS, raw);
+  // floating cards are a free-form map: deepMerge keeps only default keys, so copy them
+  for (const [name, L] of Object.entries(out.layout.presets)) {
+    L.floats = sanitizeFloats(((((raw || {}).layout || {}).presets || {})[name] || {}).floats);
+    if (!["bottom", "side", "float"].includes(L.graphPos)) L.graphPos = DEFAULT_PREFS.layout.presets[name].graphPos;
+  }
   const known = new Set(SECTIONS);
   out.sidebar.order = out.sidebar.order.filter(s => known.has(s));
   for (const s of SECTIONS) if (!out.sidebar.order.includes(s)) out.sidebar.order.push(s);
@@ -869,9 +910,58 @@ function paneAction(pane, a) {
   else if (a === "close") { S.panes = S.panes.filter(p => p !== pane); layout(); resubscribeIfNeeded(); }
 }
 function applyPaneFont(p) { if (p.el) p.el.querySelector(".transcript").style.fontSize = `calc(var(--fs) * ${P.fontScale[p.id === "main" ? "main" : "helper"]})`; }
+/* ======================================================================== popped-out cards */
+// While a section or the graph is open in its own pop-out window, the main page
+// leaves it out so the space can hold other sections; when that window closes
+// (or stops answering for ~7 s) it comes back. Pop-out windows announce
+// themselves on a BroadcastChannel, so this survives a reload of either page.
+/*popped-start*/
+const POP_TTL_MS = 7000;
+function popId(popoutParam) {
+  if (popoutParam === "graph") return "graph";
+  if (String(popoutParam || "").startsWith("section:")) return "sec:" + String(popoutParam).slice(8);
+  return "";
+}
+function prunePopped(map, now) {
+  let changed = false;
+  for (const [id, seen] of [...map.entries()]) if (now - seen > POP_TTL_MS) { map.delete(id); changed = true; }
+  return changed;
+}
+/*popped-end*/
+S.popped = S.popped || new Map();
+S.poppedShown = S.poppedShown || new Set();          // "show here too" chosen by the viewer
+function isPopped(id) { return !POPOUT && S.popped.has(id) && !S.poppedShown.has(id); }
+function poppedChanged() { if (!S.booted) return; layout(); renderInspector(); }
+const POP_CH = ("BroadcastChannel" in window) ? new BroadcastChannel("fr.cc.popouts") : null;
+if (POP_CH && !POPOUT) {
+  POP_CH.onmessage = ev => {
+    const m = ev.data || {}; if (!m.id) return;
+    if (m.type === "alive") { const isNew = !S.popped.has(m.id); S.popped.set(m.id, Date.now()); if (isNew) poppedChanged(); }
+    else if (m.type === "closed") { S.popped.delete(m.id); S.poppedShown.delete(m.id); poppedChanged(); }
+  };
+  POP_CH.postMessage({type: "who"});                 // pop-outs already open answer at once
+}
+if (POP_CH && popId(POPOUT)) {
+  const me = popId(POPOUT);
+  const alive = () => POP_CH.postMessage({type: "alive", id: me});
+  alive(); setInterval(alive, 2000);
+  POP_CH.onmessage = ev => { if ((ev.data || {}).type === "who") alive(); };
+  addEventListener("pagehide", () => POP_CH.postMessage({type: "closed", id: me}));
+}
+setInterval(() => {
+  if (POPOUT) return;
+  let changed = prunePopped(S.popped, Date.now());
+  for (const [id, w] of Object.entries(S.popWins || {})) {     // no BroadcastChannel: watch the handle
+    if (w && w.closed) { delete S.popWins[id]; if (!POP_CH && S.popped.delete(id)) changed = true; }
+    else if (!POP_CH && w) S.popped.set(id, Date.now());
+  }
+  if (changed) poppedChanged();
+}, 2000);
 function popout(params) {
   const url = "/ui/control?" + new URLSearchParams(params).toString();
   const w = window.open(url, "_blank", "popup=yes,width=900,height=1000");
+  const pid = popId(params.popout);
+  if (w && pid) { S.popWins = S.popWins || {}; S.popWins[pid] = w; S.popped.set(pid, Date.now()); S.poppedShown.delete(pid); poppedChanged(); }
   if (!w) toast(`Your browser blocked the pop-up. <a href="${esc(url)}" target="_blank" rel="noopener">Open it here</a>`, "warn", 15000);
 }
 function openBeside(sid) {
@@ -1069,10 +1159,14 @@ function focusedSession() {
   return p ? S.sessions.get(p.sid) || (p.sid ? {session_id: p.sid} : null) : null;
 }
 function renderInspector() {
-  const el = $("#inspector"); if (!el || el.hidden) return;
+  const el = $("#inspector");
+  // floating cards stay live even while the Inspector itself is hidden
+  if (!el || el.hidden) { renderFloatSections(focusedSession()); return; }
   const only = POPOUT.startsWith("section:") ? POPOUT.slice(8) : "";
   const s = focusedSession();
-  const order = only ? [only] : P.sidebar.order.filter(x => !P.sidebar.hidden.includes(x));
+  const floated = new Set(only ? [] : floatedSections());
+  const popped = new Set(only ? [] : SECTIONS.filter(n => isPopped("sec:" + n)));
+  const order = only ? [only] : P.sidebar.order.filter(x => !P.sidebar.hidden.includes(x) && !floated.has(x) && !popped.has(x));
   const body = order.map(name => {
     if (name === "mcp" && false) return "";
     const col = !only && P.sidebar.collapsed.includes(name);
@@ -1080,13 +1174,15 @@ function renderInspector() {
     try { inner = col ? "" : (SECTION_RENDER[name] || (() => ""))(s); } catch (e) { inner = `<div class="errbox">${esc(e.message)}</div>`; }
     return `<section class="sec ${col ? "collapsed" : ""}" data-sec="${name}">
       <div class="sec-head" role="button" tabindex="0" aria-expanded="${!col}"><span class="chev">▸</span>${esc(SECTION_TITLES[name])}
-        <span class="tools">${only ? "" : `<button class="ghost" data-mv="-1" title="Move up" aria-label="Move ${esc(SECTION_TITLES[name])} up">↑</button><button class="ghost" data-mv="1" title="Move down" aria-label="Move down">↓</button><button class="ghost" data-pop="1" title="Pop out this section">⧉</button><button class="ghost" data-hide="1" title="Hide (Settings → Sidebar brings it back)" aria-label="Hide section">✕</button>`}</span></div>
+        <span class="tools">${only ? "" : `<button class="ghost" data-mv="-1" title="Move up" aria-label="Move ${esc(SECTION_TITLES[name])} up">↑</button><button class="ghost" data-mv="1" title="Move down" aria-label="Move down">↓</button><button class="ghost" data-float="1" title="Float this card inside the page (drag, resize; saved per layout)" aria-label="Float ${esc(SECTION_TITLES[name])}">⇱</button><button class="ghost" data-pop="1" title="Pop out this section">⧉</button><button class="ghost" data-hide="1" title="Hide (Settings → Sidebar brings it back)" aria-label="Hide section">✕</button>`}</span></div>
       <div class="sec-body">${inner}</div></section>`;
   }).join("");
+  const popNote = popped.size ? `<div class="dim" style="padding:4px 8px" title="Shown in its own window; it comes back here when that window closes">Popped out: ${[...popped].map(h => `<button class="ghost" data-showhere="${h}" title="Also show it here">${esc(SECTION_TITLES[h])} ↩</button>`).join(" ")}</div>` : "";
+  const floatNote = floated.size ? `<div class="dim" style="padding:4px 8px">Floating: ${[...floated].map(h => `<button class="ghost" data-dock="${h}" title="Dock back into the Inspector">${esc(SECTION_TITLES[h])} ⤓</button>`).join(" ")}</div>` : "";
   const hidden = P.sidebar.hidden.length ? `<div class="dim" style="padding:4px 8px">Hidden: ${P.sidebar.hidden.map(h => `<button class="ghost" data-unhide="${h}">${esc(SECTION_TITLES[h])}</button>`).join(" ")}</div>` : "";
   const sc = el.scrollTop;
   el.innerHTML = `<div class="ihead"><b>Inspector</b><span class="dim">${s ? esc(short(s.session_id, 18)) : "no session"}</span><span class="spacer"></span>
-    <button class="ghost" id="insp-collapse-all" title="Collapse all sections">⊟</button></div>${body}${hidden}`;
+    <button class="ghost" id="insp-collapse-all" title="Collapse all sections">⊟</button></div>${body}${popNote}${floatNote}${hidden}`;
   el.scrollTop = sc;
   el.querySelectorAll(".sec").forEach(sec => {
     const name = sec.dataset.sec;
@@ -1103,10 +1199,14 @@ function renderInspector() {
     });
     sec.querySelectorAll("[data-hide]").forEach(b => b.onclick = () => { P.sidebar.hidden.push(name); savePrefs(); renderInspector(); });
     sec.querySelectorAll("[data-pop]").forEach(b => b.onclick = () => popout({popout: "section:" + name, session: (s || {}).session_id || "", project: S.project, task: S.task}));
+    sec.querySelectorAll("[data-float]").forEach(b => b.onclick = () => floatSection(name));
     (SECTION_WIRE[name] || (() => {}))(sec, s);
   });
   el.querySelectorAll("[data-unhide]").forEach(b => b.onclick = () => { P.sidebar.hidden = P.sidebar.hidden.filter(x => x !== b.dataset.unhide); savePrefs(); renderInspector(); });
   const ca = $("#insp-collapse-all"); if (ca) ca.onclick = () => { P.sidebar.collapsed = SECTIONS.slice(); savePrefs(); renderInspector(); };
+  el.querySelectorAll("[data-dock]").forEach(b => b.onclick = () => dockFloat("sec:" + b.dataset.dock));
+  el.querySelectorAll("[data-showhere]").forEach(b => b.onclick = () => { S.poppedShown.add("sec:" + b.dataset.showhere); renderInspector(); });
+  renderFloatSections(s);
 }
 function kv(rows) { return `<div class="kv">${rows.filter(Boolean).map(([k, v]) => `<div>${esc(k)}</div><div>${v}</div>`).join("")}</div>`; }
 function NA(why) { return `<span class="dim" title="${esc(why || "not reported by any source")}">N/A</span>`; }
@@ -2000,22 +2100,87 @@ async function refreshGraph() {
   try { S.graph = await api(`graph?project=${encodeURIComponent(S.project)}&task=${encodeURIComponent(S.graphAll ? "" : S.task)}&minutes=${S.graphMin || 30}`); renderGraph(); }
   catch (e) { const b = $("#graph"); if (b) b.innerHTML = `<p class="dim">${esc(e.message)}</p>`; }
 }
+/*glayout-start*/
 const GCOL = {coordinator: 0, artifact: 0, session: 1, lane_unit: 2, persona: 2, mcp: 2, media_job: 2, backend: 3, model: 4};
+const G_NW = 160, G_NH = 24, G_MIN_SCALE = 0.95, G_MAX_SCALE = 1.6, G_MAX_ZOOM = 3;
+// Lay the graph out FOR the box it is shown in: a wide, short band gets more,
+// shorter columns (long columns split into sub-columns) instead of one tall
+// stack shrunk to fit. Labels never render below G_MIN_SCALE (11px text at
+// 0.95 = ~10.5px); what doesn't fit scrolls. zoom (if set) overrides fitting.
+function graphLayout(nodes, hw, hh, vertical, zoom) {
+  hw = Math.max(200, hw || 0); hh = Math.max(90, hh || 0);
+  const groups = {};
+  for (const n of nodes) { const c = GCOL[n.kind] ?? 2; (groups[c] = groups[c] || []).push(n); }
+  const keys = Object.keys(groups).map(Number).sort((a, b) => a - b);
+  const pos = {};
+  let W = 0, H = 0;
+  if (!vertical) {
+    const RH = 34, rowsFit = Math.max(1, Math.floor((hh / G_MIN_SCALE - 20) / RH));
+    const sub = keys.map(k => Math.max(1, Math.ceil(groups[k].length / rowsFit)));
+    const total = Math.max(1, sub.reduce((a, b) => a + b, 0));
+    const CW = Math.max(G_NW + 24, Math.floor((hw / G_MIN_SCALE - 20) / total));
+    let x = 10, maxRows = 1;
+    keys.forEach((k, i) => {
+      const per = Math.ceil(groups[k].length / sub[i]);
+      groups[k].forEach((n, j) => { pos[n.id] = {x: x + Math.floor(j / per) * CW, y: 10 + (j % per) * RH}; });
+      maxRows = Math.max(maxRows, per); x += sub[i] * CW;
+    });
+    W = Math.max(x - (CW - G_NW) + 10, 200); H = maxRows * RH + 20;
+  } else {
+    const CWv = G_NW + 14, perRow = Math.max(1, Math.floor((hw / G_MIN_SCALE - 20) / CWv));
+    let y = 10, maxCols = 1;
+    keys.forEach(k => {
+      groups[k].forEach((n, j) => { pos[n.id] = {x: 10 + (j % perRow) * CWv, y: y + Math.floor(j / perRow) * 34}; });
+      maxCols = Math.max(maxCols, Math.min(perRow, groups[k].length));
+      y += Math.ceil(groups[k].length / perRow) * 34 + 36;
+    });
+    W = maxCols * CWv + 20; H = Math.max(y, 90);
+  }
+  const fit = Math.min(hw / W, hh / H);
+  const scale = zoom ? Math.min(Math.max(zoom, G_MIN_SCALE), G_MAX_ZOOM)
+    : Math.min(Math.max(fit, G_MIN_SCALE), G_MAX_SCALE);
+  return {pos, W, H, scale, fits: W * scale <= hw + 1 && H * scale <= hh + 1};
+}
+// "Active only": just what is running now and the path it uses. An edge is
+// active only from observed facts (busy Kilo session, in-flight ledger row,
+// running tool/job, running lane unit); every node on an active edge stays,
+// plus the chain that leads to it (coordinator -> session -> ...).
+function activeSubgraph(g) {
+  const act = (g.edges || []).filter(e => e.state === "active");
+  const keep = new Set();
+  for (const e of act) { keep.add(e.from); keep.add(e.to); }
+  // include the parents that lead to an active node, so the path reads end to end
+  let grew = true;
+  const edges = new Set(act);
+  while (grew) {
+    grew = false;
+    for (const e of g.edges || []) {
+      if (!edges.has(e) && keep.has(e.to) && (e.kind === "lifecycle" || e.kind === "delegation" || e.kind === "lineage")) {
+        edges.add(e); if (!keep.has(e.from)) { keep.add(e.from); grew = true; }
+      }
+    }
+  }
+  return {...g, nodes: (g.nodes || []).filter(n => keep.has(n.id)), edges: (g.edges || []).filter(e => edges.has(e))};
+}
+/*glayout-end*/
 function renderGraph() {
-  const g = S.graph; const host = $("#graph"); if (!g || !host) return;
+  const host = $("#graph"); if (!S.graph || !host) return;
+  const g = P.graphActiveOnly ? activeSubgraph(S.graph) : S.graph;
+  if (P.graphActiveOnly && !g.nodes.length) {
+    host.innerHTML = `<p class="dim" style="padding:8px">Nothing is running right now (no busy session, in-flight call, running tool or helper). Untick <b>Active only</b> for the last ${esc(S.graphMin || 30)} min of history.</p>`;
+    const zl = $("#g-zoom"); if (zl) zl.textContent = "";
+    return;
+  }
   if (S.graphTable) {
     host.innerHTML = `<table class="t"><tr><th>state</th><th>from</th><th>to</th><th>kind</th><th>count</th><th>open</th></tr>${g.edges.map((e, i) => `<tr><td><span class="pill ${e.state === "active" ? "ok" : e.state === "failed" ? "bad" : e.state === "fallback" ? "warn" : ""}">${esc(e.state)}</span></td><td>${esc(nodeLabel(e.from))}</td><td>${esc(nodeLabel(e.to))}</td><td>${esc(e.kind)}${e.label ? " · " + esc(e.label) : ""}</td><td>${e.count}</td><td><button data-edge="${i}">details</button></td></tr>`).join("")}</table>
       ${g.unassociated_media.length ? `<p class="dim">Unassociated media jobs (no session link captured): ${g.unassociated_media.map(j => esc(j.id)).join(", ")}</p>` : ""}<p class="src">${esc(g.note)}</p>`;
     host.querySelectorAll("[data-edge]").forEach(b => b.onclick = () => edgeDetails(g.edges[+b.dataset.edge]));
     return;
   }
-  const vertical = P.graphVertical === "on" || (P.graphVertical === "auto" && host.clientHeight > host.clientWidth);
-  const cols = {}; const pos = {};
-  for (const n of g.nodes) { const c = GCOL[n.kind] ?? 2; (cols[c] = cols[c] || []).push(n); }
-  const CW = 190, RH = 34, NW = 160, NH = 24;
-  let maxRows = 0;
-  for (const [c, ns] of Object.entries(cols)) { ns.forEach((n, i) => { pos[n.id] = vertical ? {x: 10 + i * (NW + 14), y: 10 + c * 70} : {x: 10 + c * CW, y: 10 + i * RH}; }); maxRows = Math.max(maxRows, ns.length); }
-  const W = vertical ? Math.max(400, maxRows * (NW + 14) + 20) : 5 * CW + 20, H = vertical ? 5 * 70 + 40 : Math.max(120, maxRows * RH + 20);
+  const vertical = P.graphVertical === "on" || (P.graphVertical === "auto" && host.clientHeight > host.clientWidth * 1.2);
+  const NW = G_NW, NH = G_NH;
+  const lay = graphLayout(g.nodes, host.clientWidth - 4, host.clientHeight - 4, vertical, S.graphZoom);
+  const {pos, W, H, scale} = lay;
   const edges = g.edges.map((e, i) => {
     const a = pos[e.from], b = pos[e.to]; if (!a || !b) return "";
     const x1 = vertical ? a.x + NW / 2 : a.x + NW, y1 = vertical ? a.y + NH : a.y + NH / 2, x2 = vertical ? b.x + NW / 2 : b.x, y2 = vertical ? b.y : b.y + NH / 2;
@@ -2023,17 +2188,23 @@ function renderGraph() {
     return `<path class="gedge ${esc(e.state)} kind-${esc(e.kind)}" d="${d}" data-edge="${i}" tabindex="0"><title>${esc(e.kind)} ${esc(e.state)} · ${e.count} event(s)${e.label ? " · " + esc(e.label) : ""}</title></path>`;
   }).join("");
   const nodes = g.nodes.map(n => { const p = pos[n.id]; return `<g class="gnode k-${esc(n.kind)}" transform="translate(${p.x},${p.y})" data-node="${esc(n.id)}" tabindex="0"><rect width="${NW}" height="${NH}"></rect><text x="6" y="16">${esc(String(n.label).slice(0, 24))}</text><title>${esc(n.kind)}: ${esc(n.label)}</title></g>`; }).join("");
-  const vb = S.graphVB || [0, 0, W, H];
-  host.innerHTML = `<svg viewBox="${vb.join(" ")}" role="img" aria-label="Route and activity graph">${edges}${nodes}</svg>`;
+  host.innerHTML = `<svg viewBox="0 0 ${W} ${H}" width="${Math.round(W * scale)}" height="${Math.round(H * scale)}" role="img" aria-label="Route and activity graph">${edges}${nodes}</svg>`;
+  const zl = $("#g-zoom"); if (zl) zl.textContent = `${Math.round(scale * 100)}%${S.graphZoom ? "" : " fit"}${lay.fits ? "" : " · scroll"}`;
   const svg = host.querySelector("svg");
   svg.querySelectorAll("[data-edge]").forEach(p => { p.onclick = () => edgeDetails(g.edges[+p.dataset.edge]); p.onkeydown = e => { if (e.key === "Enter") edgeDetails(g.edges[+p.dataset.edge]); }; });
   svg.querySelectorAll("[data-node]").forEach(n => { const go = () => { const node = g.nodes.find(x => x.id === n.dataset.node); if (node && node.ref && node.ref.session) openBeside(node.ref.session); else if (node) edgeDetails({from: node.id, to: "", kind: node.kind, state: "", refs: [node.ref || {}], count: 0}); }; n.onclick = go; n.onkeydown = e => { if (e.key === "Enter") go(); }; });
-  svg.onwheel = e => { e.preventDefault(); const v = S.graphVB || [0, 0, W, H]; const k = e.deltaY > 0 ? 1.15 : 0.87; S.graphVB = [v[0], v[1], v[2] * k, v[3] * k]; svg.setAttribute("viewBox", S.graphVB.join(" ")); };
+  // Ctrl/⌘+wheel zooms (never below the readable minimum); plain wheel scrolls
+  svg.onwheel = e => { if (!e.ctrlKey && !e.metaKey) return; e.preventDefault(); graphZoom(e.deltaY > 0 ? 1 / 1.15 : 1.15, scale); };
   let drag = null;
-  svg.onpointerdown = e => { if (e.target.closest("[data-edge],[data-node]")) return; drag = {x: e.clientX, y: e.clientY, vb: (S.graphVB || [0, 0, W, H]).slice()}; svg.setPointerCapture(e.pointerId); };
-  svg.onpointermove = e => { if (!drag) return; const sc = drag.vb[2] / svg.clientWidth; S.graphVB = [drag.vb[0] - (e.clientX - drag.x) * sc, drag.vb[1] - (e.clientY - drag.y) * sc, drag.vb[2], drag.vb[3]]; svg.setAttribute("viewBox", S.graphVB.join(" ")); };
+  svg.onpointerdown = e => { if (e.target.closest("[data-edge],[data-node]")) return; drag = {x: e.clientX, y: e.clientY, l: host.scrollLeft, t: host.scrollTop}; svg.setPointerCapture(e.pointerId); };
+  svg.onpointermove = e => { if (!drag) return; host.scrollLeft = drag.l - (e.clientX - drag.x); host.scrollTop = drag.t - (e.clientY - drag.y); };
   svg.onpointerup = () => { drag = null; };
-  S.graphFit = () => { S.graphVB = [0, 0, W, H]; svg.setAttribute("viewBox", S.graphVB.join(" ")); };
+  S.graphScale = scale;
+  S.graphFit = () => { S.graphZoom = null; renderGraph(); };
+}
+function graphZoom(k, cur) {
+  S.graphZoom = Math.min(Math.max((S.graphZoom || cur || S.graphScale || 1) * k, G_MIN_SCALE), G_MAX_ZOOM);
+  renderGraph();
 }
 function nodeLabel(id) { const n = ((S.graph || {}).nodes || []).find(x => x.id === id); return n ? `${n.kind}: ${n.label}` : id; }
 async function edgeDetails(e) {
@@ -2066,6 +2237,7 @@ function effectivePreset() {
 }
 function isNarrow() { return innerWidth <= 760; }
 function layout() {
+  if (!S.panes.length) return;                     // not booted yet (e.g. a resize on the sign-in screen)
   const ws = $("#workspace");
   const preset = effectivePreset();
   const L = P.layout.presets[preset] || P.layout.presets.landscape;
@@ -2074,7 +2246,7 @@ function layout() {
   // keep pane elements (state) and only move them; nothing reloads
   for (const p of S.panes) if (!p.el) p.el = buildPaneEl(p);
   let insp = $("#inspector") || Object.assign(document.createElement("aside"), {id: "inspector"});
-  let graph = $("#graphPanel") || buildGraphPanel();
+  let graph = graphEl();
   // moving panes must not lose the reader's place
   const scroll = S.panes.map(p => { const t = p.el.querySelector(".transcript"); return [p, t.scrollTop, p.atBottom]; });
   const inspTop = insp.scrollTop;
@@ -2083,6 +2255,12 @@ function layout() {
     insp.scrollTop = inspTop;
   });
   ws.innerHTML = "";
+  if (POPOUT === "graph") {
+    ws.style.gridTemplate = "1fr / 1fr"; ws.style.gridTemplateColumns = "1fr"; ws.style.gridTemplateRows = "1fr";
+    graph.style.gridRow = graph.style.gridColumn = ""; ws.appendChild(graph); graph.hidden = false; insp.hidden = true;
+    refreshGraph(); return;
+  }
+  document.body.classList.toggle("narrow-ui", isNarrow());
   const only = POPOUT.startsWith("section:");
   if (only) { ws.style.gridTemplate = "1fr / 1fr"; ws.appendChild(insp); insp.hidden = false; scheduleInspector(); return; }
   const helpers = S.panes.filter(p => p.id !== "main");
@@ -2100,10 +2278,13 @@ function layout() {
     for (const h of helpers) { cols.push("5px", `minmax(260px, ${L.helperW || 480}px)`); els.push(resizer("col", "helperW", preset), h.el); }
     const below = L.inspectorPos === "below";
     if (!inspHidden && !below) { cols.push("5px", `${clamp(L.inspectorW || 340, 220, 900)}px`); els.push(resizer("col", "inspectorW", preset), insp); }
+    const gpos = L.graphPos || "bottom";
+    const graphWanted = P.graph && !POPOUT && !S.graphHidden && !isPopped("graph");
+    if (graphWanted && gpos === "side") { cols.push("5px", `${clamp(L.graphW || 560, 260, 1400)}px`); els.push(resizer("col", "graphW", preset), graph); }
     const rows = ["minmax(200px, 1fr)"];
     const extraRows = [];
     if (!inspHidden && below) extraRows.push(["inspectorH", insp, L.inspectorH || 300]);
-    const graphOn = P.graph && !POPOUT && L.graphH !== 0 && !S.graphHidden;
+    const graphOn = graphWanted && gpos === "bottom" && L.graphH !== 0;
     if (graphOn) extraRows.push(["graphH", graph, L.graphH || 220]);
     for (const [k, el, h] of extraRows) rows.push("5px", `${clamp(h, 90, 900)}px`);
     ws.style.gridTemplateColumns = cols.join(" ");
@@ -2114,13 +2295,130 @@ function layout() {
       const rz = resizer("row", k, preset); rz.style.gridColumn = "1 / -1"; rz.style.gridRow = String(r); ws.appendChild(rz);
       el.style.gridColumn = "1 / -1"; el.style.gridRow = String(r + 1); el.hidden = false; ws.appendChild(el); r += 2;
     }
-    insp.hidden = inspHidden; if (!graphOn) graph.hidden = true;
+    insp.hidden = inspHidden;
+    if (graphWanted && gpos === "float") { floatGraph(preset); }
+    else if (!graphOn && !(graphWanted && gpos === "side")) graph.hidden = true;
+    const gp = graph.querySelector("#g-pos"); if (gp) gp.value = gpos;
   }
+  applyFloats(preset);
   for (const p of S.panes) { renderPaneHead(p); p.el.classList.toggle("focused", p.id === S.focused && S.panes.length > 1); }
   $("#layout-preset").value = P.layout.preset;
   scheduleInspector();
   if (!graph.hidden) refreshGraph();
 }
+/* ======================================================================== floating cards */
+// Any inspector section, and the graph, can float as a draggable, resizable
+// card inside the page. Positions persist per layout preset. Narrow screens
+// show no floats (sections return to the Inspector, the graph to its tab).
+function floatLayer() {
+  let l = $("#floatLayer");
+  if (!l) { l = document.createElement("div"); l.id = "floatLayer"; document.body.appendChild(l); }
+  return l;
+}
+function curLayout() { return P.layout.presets[effectivePreset()] || P.layout.presets.landscape; }
+function floatedSections() {
+  if (POPOUT || isNarrow()) return [];
+  return Object.keys(curLayout().floats || {}).filter(k => k.startsWith("sec:") && !isPopped(k)).map(k => k.slice(4)).filter(n => SECTIONS.includes(n));
+}
+function floatWin(id, title, opts = {}) {
+  const domId = "fw-" + id.replace(/[^a-z0-9]/gi, "-");
+  let w = document.getElementById(domId);
+  if (!w) {
+    w = document.createElement("div");
+    w.className = "floatwin"; w.id = domId; w.dataset.fid = id;
+    w.setAttribute("role", "dialog"); w.setAttribute("aria-label", title + " (floating)");
+    w.innerHTML = `<div class="fw-head" tabindex="0" title="Drag to move · arrow keys move · Alt+arrows resize · Home resets"><b>${esc(title)}</b><span class="spacer"></span>
+      ${opts.pop ? `<button class="ghost" data-fw="pop" title="Pop out into its own window">⧉</button>` : ""}<button class="ghost" data-fw="dock" title="Dock back">Dock</button></div>
+      <div class="fw-body"></div><div class="fw-resize" title="Resize"></div>`;
+    floatLayer().appendChild(w);
+    const head = w.querySelector(".fw-head");
+    const save = () => { const L = curLayout(); L.floats = L.floats || {}; L.floats[id] = {x: w.offsetLeft, y: w.offsetTop, w: w.offsetWidth, h: w.offsetHeight}; savePrefs(); };
+    const front = () => { S.fz = (S.fz || 50) + 1; w.style.zIndex = S.fz; };
+    w.addEventListener("pointerdown", front);
+    head.onpointerdown = e => {
+      if (e.target.closest("button")) return;
+      e.preventDefault(); head.setPointerCapture(e.pointerId);
+      const sx = e.clientX - w.offsetLeft, sy = e.clientY - w.offsetTop;
+      head.onpointermove = ev => { const r = clampFloat({x: ev.clientX - sx, y: ev.clientY - sy, w: w.offsetWidth, h: w.offsetHeight}, innerWidth, innerHeight); w.style.left = r.x + "px"; w.style.top = r.y + "px"; };
+      head.onpointerup = () => { head.onpointermove = null; save(); };
+    };
+    const rz = w.querySelector(".fw-resize");
+    rz.onpointerdown = e => {
+      e.preventDefault(); rz.setPointerCapture(e.pointerId);
+      const sx = e.clientX, sy = e.clientY, w0 = w.offsetWidth, h0 = w.offsetHeight;
+      rz.onpointermove = ev => { const r = clampFloat({x: w.offsetLeft, y: w.offsetTop, w: w0 + ev.clientX - sx, h: h0 + ev.clientY - sy}, innerWidth, innerHeight); w.style.width = r.w + "px"; w.style.height = r.h + "px"; };
+      rz.onpointerup = () => { rz.onpointermove = null; save(); };
+    };
+    head.onkeydown = e => {
+      const step = e.shiftKey ? 64 : 16;
+      const d = {ArrowLeft: [-step, 0], ArrowRight: [step, 0], ArrowUp: [0, -step], ArrowDown: [0, step]}[e.key];
+      if (d) {
+        e.preventDefault();
+        const r = e.altKey ? {x: w.offsetLeft, y: w.offsetTop, w: w.offsetWidth + d[0], h: w.offsetHeight + d[1]}
+          : {x: w.offsetLeft + d[0], y: w.offsetTop + d[1], w: w.offsetWidth, h: w.offsetHeight};
+        placeFloat(w, clampFloat(r, innerWidth, innerHeight)); save();
+      } else if (e.key === "Home") { e.preventDefault(); placeFloat(w, clampFloat({}, innerWidth, innerHeight)); save(); }
+      else if (e.key === "Escape") { e.preventDefault(); const m = paneById("main"); if (m && m.el) m.el.querySelector(".transcript").focus(); }
+    };
+    w.querySelector('[data-fw="dock"]').onclick = () => dockFloat(id);
+    const pb = w.querySelector('[data-fw="pop"]'); if (pb) pb.onclick = opts.pop;
+    placeFloat(w, clampFloat((curLayout().floats || {})[id], innerWidth, innerHeight));
+    front();
+  }
+  return w;
+}
+function placeFloat(w, r) { w.style.left = r.x + "px"; w.style.top = r.y + "px"; w.style.width = r.w + "px"; w.style.height = r.h + "px"; }
+function dockFloat(id) {
+  const L = curLayout();
+  if (L.floats) delete L.floats[id];
+  if (id === "graph" && L.graphPos === "float") L.graphPos = "bottom";
+  const w = document.getElementById("fw-" + id.replace(/[^a-z0-9]/gi, "-"));
+  if (w) w.remove();
+  savePrefs(); layout();
+}
+function floatSection(name) {
+  const L = curLayout(); L.floats = L.floats || {};
+  L.floats["sec:" + name] = L.floats["sec:" + name] || {};
+  savePrefs(); renderInspector();
+}
+function setGraphPos(v) {
+  const L = curLayout();
+  L.graphPos = ["bottom", "side", "float"].includes(v) ? v : "bottom";
+  if (L.graphPos === "float") { L.floats = L.floats || {}; L.floats.graph = L.floats.graph || {}; }
+  else if (L.floats) { delete L.floats.graph; const w = $("#fw-graph"); if (w) { const g = $("#graphPanel"); if (g) document.body.appendChild(g); w.remove(); } }
+  if (L.graphPos === "bottom" && !L.graphH) L.graphH = 220;
+  S.graphHidden = false; savePrefs(); layout();
+}
+function floatGraph(preset) {
+  const g = graphEl();
+  const w = floatWin("graph", "Route / activity", {pop: () => popout({popout: "graph", project: S.project, task: S.task})});
+  const body = w.querySelector(".fw-body");
+  if (g.parentElement !== body) body.appendChild(g);
+  g.style.gridRow = g.style.gridColumn = ""; g.hidden = false;
+}
+function applyFloats(preset) {
+  const L = P.layout.presets[preset] || {};
+  const keep = new Set(isNarrow() || POPOUT ? [] : Object.keys(L.floats || {}).filter(id => !isPopped(id) && (id !== "graph" || (L.graphPos === "float" && P.graph && !S.graphHidden))));
+  for (const w of [...document.querySelectorAll(".floatwin")]) {
+    if (!keep.has(w.dataset.fid)) {
+      const g = w.querySelector("#graphPanel"); if (g) { g.hidden = true; document.body.appendChild(g); }
+      w.remove();
+    } else placeFloat(w, clampFloat((L.floats || {})[w.dataset.fid], innerWidth, innerHeight));
+  }
+}
+function renderFloatSections(s) {
+  for (const name of floatedSections()) {
+    const w = floatWin("sec:" + name, SECTION_TITLES[name], {pop: () => popout({popout: "section:" + name, session: (s || {}).session_id || "", project: S.project, task: S.task})});
+    const body = w.querySelector(".fw-body");
+    let inner = "";
+    try { inner = (SECTION_RENDER[name] || (() => ""))(s); } catch (e) { inner = `<div class="errbox">${esc(e.message)}</div>`; }
+    const sc = body.scrollTop;
+    body.innerHTML = `<section class="sec" data-sec="${name}"><div class="sec-body">${inner}</div></section>`;
+    body.scrollTop = sc;
+    (SECTION_WIRE[name] || (() => {}))(body.querySelector(".sec"), s);
+  }
+}
+addEventListener("resize", () => { clearTimeout(S.frz); S.frz = setTimeout(() => applyFloats(effectivePreset()), 150); });
 function renderNarrowTabs() {
   const n = $("#narrowTabs");
   n.innerHTML = [["transcript", "Transcript"], ["inspector", "Inspector"], ["inbox", "Inbox"], ["graph", "Graph"]].map(([k, l]) => `<button role="tab" aria-selected="${S.narrow === k}" class="${S.narrow === k ? "on" : ""}" data-n="${k}">${l}</button>`).join("");
@@ -2133,15 +2431,15 @@ function resizer(kind, prop, preset) {
   r.setAttribute("aria-label", `Resize (${prop}); arrow keys adjust, Home resets`);
   const L = P.layout.presets[preset] || (P.layout.presets[preset] = {...DEFAULT_PREFS.layout.presets.landscape});
   r.setAttribute("aria-valuenow", L[prop] || 0);
-  const sign = prop === "inspectorW" || prop === "graphH" || prop === "inspectorH" || prop === "helperW" ? -1 : 1;
-  const set = v => { L[prop] = Math.round(clamp(v, prop.endsWith("H") ? 90 : 220, prop.endsWith("H") ? 900 : 1100)); savePrefs(); layout(); };
+  const sign = prop === "inspectorW" || prop === "graphH" || prop === "inspectorH" || prop === "helperW" || prop === "graphW" ? -1 : 1;
+  const set = v => { L[prop] = Math.round(clamp(v, prop.endsWith("H") ? 90 : 220, prop.endsWith("H") ? 900 : 1400)); savePrefs(); layout(); };
   r.onpointerdown = e => {
     e.preventDefault(); r.classList.add("drag"); r.setPointerCapture(e.pointerId);
     const start = kind === "col" ? e.clientX : e.clientY; const v0 = L[prop] || (prop.endsWith("H") ? 220 : 340);
     const ws = $("#workspace");
     r.onpointermove = ev => {
       const v = v0 + sign * ((kind === "col" ? ev.clientX : ev.clientY) - start);
-      L[prop] = Math.round(clamp(v, prop.endsWith("H") ? 90 : 220, prop.endsWith("H") ? 900 : 1100));
+      L[prop] = Math.round(clamp(v, prop.endsWith("H") ? 90 : 220, prop.endsWith("H") ? 900 : 1400));
       if (prop === "inspectorW") ws.style.gridTemplateColumns = ws.style.gridTemplateColumns.replace(/\d+px$/, L[prop] + "px");
     };
     r.onpointerup = () => { r.classList.remove("drag"); r.onpointermove = null; savePrefs(); layout(); };
@@ -2169,19 +2467,36 @@ function buildPaneEl(p) {
   el.addEventListener("pointerdown", () => { if (S.focused !== p.id) { S.focused = p.id; for (const q of S.panes) q.el && q.el.classList.toggle("focused", q.id === p.id && S.panes.length > 1); scheduleInspector(); renderComposer(); } });
   return el;
 }
+// one graph panel for the whole page: it moves between bottom, side, floating
+// and the narrow tab (detached while moving, so never look it up by id here)
+function graphEl() { if (!S.graphEl) S.graphEl = buildGraphPanel(); return S.graphEl; }
 function buildGraphPanel() {
   const g = document.createElement("section");
   g.id = "graphPanel"; g.setAttribute("aria-label", "Route and activity graph");
   g.innerHTML = `<div class="ghead"><b>Route / activity</b>
     <select id="g-min" title="Window"><option value="10">10 min</option><option value="30" selected>30 min</option><option value="120">2 h</option><option value="1440">24 h</option></select>
     <label><input type="checkbox" id="g-all"> whole project</label>
-    <button id="g-table" title="Keyboard-accessible table view">Table</button><button id="g-fit">Fit</button><button id="g-refresh">Refresh</button>
-    <span class="spacer"></span><span class="src">Animated only for in-flight ledger rows / running jobs</span><button class="ghost" id="g-hide" aria-label="Hide graph">✕</button></div>
+    <label title="Show only agents that are working right now and the path they use (observed activity only); untick for history"><input type="checkbox" id="g-active"> <b>Active only</b></label>
+    <button id="g-table" title="Keyboard-accessible table view">Table</button>
+    <button id="g-zout" title="Zoom out (never below readable size)" aria-label="Zoom out">−</button><button id="g-fit" title="Fit the drawing to this box (labels stay readable; scrolls if it can't fit)">Fit</button><button id="g-zin" title="Zoom in" aria-label="Zoom in">+</button><span class="dim" id="g-zoom" aria-live="polite"></span>
+    <button id="g-refresh">Refresh</button>
+    <label class="dim" title="Where the graph sits in this layout preset (saved per preset)">place <select id="g-pos" aria-label="Graph placement for this layout"><option value="bottom">bottom</option><option value="side">side</option><option value="float">floating</option></select></label>
+    <span class="spacer"></span><span class="src">Animated only for in-flight ledger rows / running jobs</span>
+    <button class="ghost" id="g-pop" title="Pop out into its own window" aria-label="Pop out graph">⧉</button><button class="ghost" id="g-hide" aria-label="Hide graph">✕</button></div>
     <div class="gbody" id="graph"><p class="dim" style="padding:8px">Loading…</p></div>`;
   g.querySelector("#g-min").onchange = e => { S.graphMin = +e.target.value; refreshGraph(); };
   g.querySelector("#g-all").onchange = e => { S.graphAll = e.target.checked; refreshGraph(); };
+  const ga = g.querySelector("#g-active"); ga.checked = !!P.graphActiveOnly;
+  ga.onchange = e => { P.graphActiveOnly = e.target.checked; savePrefs(); S.graphZoom = null; renderGraph(); };
   g.querySelector("#g-table").onclick = () => { S.graphTable = !S.graphTable; renderGraph(); };
-  g.querySelector("#g-fit").onclick = () => { S.graphVB = null; if (S.graphFit) S.graphFit(); else renderGraph(); };
+  g.querySelector("#g-fit").onclick = () => { S.graphZoom = null; renderGraph(); };
+  g.querySelector("#g-zin").onclick = () => graphZoom(1.2);
+  g.querySelector("#g-zout").onclick = () => graphZoom(1 / 1.2);
+  g.querySelector("#g-pop").onclick = () => popout({popout: "graph", project: S.project, task: S.task});
+  g.querySelector("#g-pos").onchange = e => { setGraphPos(e.target.value); };
+  if (POPOUT === "graph") { g.querySelector("#g-pop").hidden = true; g.querySelector("#g-pos").parentElement.hidden = true; g.querySelector("#g-hide").hidden = true; }
+  // re-fit when the box changes size (dragged divider, floating resize, window resize)
+  if (window.ResizeObserver) new ResizeObserver(() => { clearTimeout(S.gro); S.gro = setTimeout(() => { if (S.graph && !S.graphTable && !g.hidden) renderGraph(); }, 120); }).observe(g.querySelector("#graph"));
   g.querySelector("#g-refresh").onclick = refreshGraph;
   g.querySelector("#g-hide").onclick = () => { S.graphHidden = true; layout(); };
   return g;
@@ -2423,7 +2738,7 @@ async function boot() {
   S.project = QS.get("project") || S.project; S.task = QS.get("task") || S.task;
   renderTaskSelect();
   S.panes = [newPane("main", "worker")];
-  if (POPOUT === "pane" || POPOUT.startsWith("section:")) document.body.classList.add("popout");
+  if (POPOUT === "pane" || POPOUT === "graph" || POPOUT.startsWith("section:")) document.body.classList.add("popout");
   if (POPOUT === "pane") S.inspectorHidden = true;     // transcript first; Inspector button shows it
   layout();
   const sid = QS.get("session");

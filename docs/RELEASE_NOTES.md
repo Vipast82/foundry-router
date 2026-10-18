@@ -2,6 +2,30 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.121.0 — readable route graph, Active only, pop-outs and floating cards
+
+**What changes** (control center, presentation only):
+
+- **Readable Route / activity graph:** it is laid out for its box. Wide strips
+  spread out instead of shrinking, labels stay readable, anything that doesn't
+  fit scrolls, and it re-fits on resize. Zoom with −, Fit, + and Ctrl+wheel.
+- **Active only:** a switch that shows just the agents working now and the
+  path they use. The history view is still available.
+- **Placement and pop-out:**
+  - The graph can sit at the bottom, at the side or floating, saved per layout
+    preset.
+  - The graph can be popped out into its own window.
+  - A popped-out section or graph is hidden from the main page until its window
+    closes.
+- **Floating cards:** any Inspector section (and the graph) can float as a card
+  you drag and resize. It has keyboard move/resize, positions saved per preset,
+  and is hidden on narrow screens.
+- **Fixes:** one shared graph panel (switching placement no longer duplicates
+  it), and no layout pass before the page has booted.
+
+**Migration:** display preferences only. Existing presets gain `graphPos`,
+`graphW` and `floats`; older saved preferences keep their sizes and order.
+
 ## v0.120.0 — refresh a stale quota reading with a probe before deferring a helper
 
 **What changes**

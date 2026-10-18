@@ -133,3 +133,151 @@ console.log(JSON.stringify({html, loads}));
     assert ">N/A<" in h                                       # turnaround/tokens unavailable
     assert "/control/api/artifacts/art%201/thumbnail" in h   # id URL-encoded
     assert "Pause proactive lanes" in h and out["loads"] == 0
+
+
+# ------------------------------------------------------------------ graph fit, placement, floats
+
+def _graph_js(tmp_path, body):
+    s = _script()
+    return run_js(tmp_path, between(s, "/*glayout-start*/", "/*glayout-end*/") + body)
+
+
+def _nodes(n_sessions=10):
+    nodes = [{"id": "coordinator", "kind": "coordinator"}]
+    nodes += [{"id": f"s{i}", "kind": "session"} for i in range(n_sessions)]
+    nodes += [{"id": f"p{i}", "kind": "persona"} for i in range(4)]
+    nodes += [{"id": f"b{i}", "kind": "backend"} for i in range(3)]
+    nodes += [{"id": f"m{i}", "kind": "model"} for i in range(3)]
+    return nodes
+
+
+def test_graph_fits_a_wide_short_band_without_shrinking_labels(tmp_path):
+    """Victor's case: a ~2000x170 strip. The old layout shrank a 970-wide,
+    ~400-tall drawing to fit 170 px (text ~5 px). Now long columns split into
+    sub-columns across the width and the scale never drops below readable."""
+    out = _graph_js(tmp_path, f"""
+const r = graphLayout({json.dumps(_nodes(10))}, 2000, 170, false, null);
+const ys = Object.values(r.pos).map(p => p.y), xs = Object.values(r.pos).map(p => p.x);
+console.log(JSON.stringify({{scale: r.scale, fits: r.fits, W: r.W, H: r.H, maxY: Math.max(...ys), maxX: Math.max(...xs)}}));
+""")
+    assert out["scale"] >= 0.95 and out["fits"]                    # readable AND inside the box
+    assert out["H"] * out["scale"] <= 170 and out["W"] * out["scale"] <= 2000
+    assert out["maxX"] > 1000                                       # spread across the width
+
+
+def test_graph_never_shrinks_below_readable_and_scrolls_instead(tmp_path):
+    out = _graph_js(tmp_path, f"""
+const r = graphLayout({json.dumps(_nodes(80))}, 400, 120, false, null);
+const z = graphLayout({json.dumps(_nodes(3))}, 900, 400, false, 0.1);
+const big = graphLayout({json.dumps(_nodes(3))}, 900, 400, false, 9);
+console.log(JSON.stringify({{scale: r.scale, fits: r.fits, zoomMin: z.scale, zoomMax: big.scale}}));
+""")
+    assert out["scale"] == 0.95 and out["fits"] is False            # floor holds; the box scrolls
+    assert out["zoomMin"] == 0.95 and out["zoomMax"] == 3           # zoom is clamped both ways
+
+
+def test_tall_box_uses_the_vertical_arrangement(tmp_path):
+    out = _graph_js(tmp_path, f"""
+const r = graphLayout({json.dumps(_nodes(6))}, 420, 1200, true, null);
+console.log(JSON.stringify({{fits: r.fits, scale: r.scale, W: r.W}}));
+""")
+    assert out["fits"] and out["scale"] >= 0.95 and out["W"] <= 420 / 0.95
+
+
+def test_floating_cards_stay_on_screen_and_usable(tmp_path):
+    s = _script()
+    out = run_js(tmp_path, between(s, "/*floats-start*/", "/*floats-end*/") + """
+console.log(JSON.stringify({
+  off: clampFloat({x: 5000, y: -300, w: 500, h: 300}, 1280, 720),
+  tiny: clampFloat({x: 10, y: 10, w: 20, h: 10}, 1280, 720),
+  huge: clampFloat({x: 0, y: 0, w: 9999, h: 9999}, 800, 600),
+  dflt: clampFloat(undefined, 1280, 720),
+  clean: sanitizeFloats({"graph": {x: 1.4, y: "bad", w: 300, h: 200}, "sec:lanes": {x: 1}, "evil<x>": {x: 1}, "sec:": {}}),
+}));
+""")
+    assert out["off"] == {"x": 772, "y": 8, "w": 500, "h": 300}
+    assert out["tiny"]["w"] == 240 and out["tiny"]["h"] == 140
+    assert out["huge"] == {"x": 8, "y": 8, "w": 784, "h": 584}
+    assert out["dflt"]["x"] + out["dflt"]["w"] <= 1280 - 8
+    assert set(out["clean"]) == {"graph", "sec:lanes"} and out["clean"]["graph"]["x"] == 1
+    assert "y" not in out["clean"]["graph"] or out["clean"]["graph"].get("y") is None
+
+
+def test_graph_placement_and_floats_persist_per_preset(tmp_path):
+    s = _script()
+    block = between(s, "const PREF_KEY", "function loadPrefs")     # includes the floats helpers
+    out = run_js(tmp_path, block + """
+const stored = {v: 2, layout: {preset: "landscape", presets: {
+  landscape: {inspectorW: 400, graphPos: "float", floats: {graph: {x: 100, y: 90, w: 700, h: 300},
+                                                           "sec:lanes": {x: 20, y: 30, w: 400, h: 500}}},
+  portrait: {graphPos: "nonsense"}}}};
+const m = migratePrefs(JSON.parse(JSON.stringify(stored)));
+const fresh = migratePrefs(null);
+const old = migratePrefs({v: 2, layout: {presets: {landscape: {inspectorW: 390, graphH: 150}}}});
+console.log(JSON.stringify({land: m.layout.presets.landscape, port: m.layout.presets.portrait,
+  freshLand: fresh.layout.presets.landscape.graphPos, freshPort: fresh.layout.presets.portrait.graphPos,
+  oldLand: old.layout.presets.landscape}));
+""")
+    land = out["land"]
+    assert land["graphPos"] == "float" and land["inspectorW"] == 400
+    assert land["floats"]["graph"] == {"x": 100, "y": 90, "w": 700, "h": 300}
+    assert land["floats"]["sec:lanes"]["h"] == 500
+    assert out["port"]["graphPos"] == "bottom" and out["port"]["floats"] == {}   # bad value -> default
+    assert out["freshLand"] == "side" and out["freshPort"] == "bottom"
+    assert out["oldLand"]["graphH"] == 150 and out["oldLand"]["floats"] == {}    # older prefs migrate
+
+
+def test_graph_popout_and_float_controls_exist():
+    s = _script()
+    assert 'popout({popout: "graph"' in s and 'POPOUT === "graph"' in s
+    assert 'id="g-pos"' in s and 'data-float="1"' in s and "function dockFloat" in s
+    assert 'head.onkeydown' in s and 'e.altKey' in s                     # keyboard move/resize
+    assert "body.narrow-ui #floatLayer { display:none; }" in PAGE_TEXT()
+
+
+def PAGE_TEXT():
+    from tests.test_control_ui import PAGE
+    return PAGE.read_text(encoding="utf-8")
+
+
+def test_popped_out_cards_leave_the_main_view_and_come_back(tmp_path):
+    """A section/graph open in its own window is left out of the main page;
+    when that window stops announcing itself (closed, ~7 s) it returns."""
+    s = _script()
+    out = run_js(tmp_path, between(s, "/*popped-start*/", "/*popped-end*/") + """
+const m = new Map([["sec:lanes", 1000], ["graph", 9000]]);
+const changed = prunePopped(m, 9500);
+console.log(JSON.stringify({ids: [popId("section:lanes"), popId("graph"), popId("pane"), popId("")],
+  changed, left: [...m.keys()], again: prunePopped(m, 9600)}));
+""")
+    assert out["ids"] == ["sec:lanes", "graph", "", ""]
+    assert out["changed"] is True and out["left"] == ["graph"] and out["again"] is False
+    assert 'isPopped("graph")' in s and "data-showhere" in s and '"fr.cc.popouts"' in s
+    assert 'addEventListener("pagehide"' in s
+
+
+def test_active_only_keeps_running_agents_and_their_whole_path(tmp_path):
+    g = {"nodes": [{"id": i, "kind": k} for i, k in (
+            ("coordinator", "coordinator"), ("s:busy", "session"), ("s:old", "session"),
+            ("s:child", "session"), ("p:Local", "persona"), ("b:strata", "backend"),
+            ("m:qwen", "model"), ("p:Old", "persona"), ("mcp:Roblox", "mcp"))],
+         "edges": [
+            {"from": "coordinator", "to": "s:busy", "kind": "lifecycle", "state": "active"},
+            {"from": "coordinator", "to": "s:old", "kind": "lifecycle", "state": "completed"},
+            {"from": "s:busy", "to": "s:child", "kind": "delegation", "state": "completed"},
+            {"from": "s:child", "to": "p:Local", "kind": "inference", "state": "active"},
+            {"from": "p:Local", "to": "b:strata", "kind": "inference", "state": "active"},
+            {"from": "b:strata", "to": "m:qwen", "kind": "inference", "state": "active"},
+            {"from": "s:old", "to": "p:Old", "kind": "inference", "state": "completed"},
+            {"from": "s:busy", "to": "mcp:Roblox", "kind": "tool", "state": "completed"}]}
+    s = _script()
+    out = run_js(tmp_path, between(s, "/*glayout-start*/", "/*glayout-end*/") + f"""
+const a = activeSubgraph({json.dumps(g)});
+const none = activeSubgraph({{nodes: [{{id: "x", kind: "session"}}], edges: [{{from: "coordinator", to: "x", kind: "lifecycle", state: "completed"}}]}});
+console.log(JSON.stringify({{nodes: a.nodes.map(n => n.id).sort(), edges: a.edges.length, none: none.nodes.length}}));
+""")
+    # the running child's chain reads end to end; finished work and idle tools are gone
+    assert out["nodes"] == sorted(["coordinator", "s:busy", "s:child", "p:Local", "b:strata",
+                                   "m:qwen"])
+    assert out["edges"] == 5 and out["none"] == 0
+    assert 'id="g-active"' in s and "graphActiveOnly" in s

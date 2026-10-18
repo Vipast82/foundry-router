@@ -253,6 +253,48 @@ that unit's session.
 **Pause proactive lanes** (action kind `lanes`) stops new lane work for the
 project. Enabling lanes stays a profile change. See docs/PROACTIVE_LANES.md.
 
+
+## Route graph, pop-outs and floating cards (v0.121.0)
+
+All of these are presentation only. They change nothing the coordinator does,
+and they are saved in your browser's display preferences.
+
+- **Fit that stays readable.** The graph is laid out for the box it is in. A
+  wide, short strip gets more, shorter columns: long columns split into
+  sub-columns across the width instead of being shrunk. Labels never render
+  below about 10.5 px. What doesn't fit scrolls.
+  - **−**, **+** and **Fit** zoom the graph; Ctrl/⌘+wheel zooms too.
+  - Dragging the background scrolls.
+  - The header shows the current scale.
+  - The graph re-fits whenever its box changes size.
+- **Active only.** This header switch shows only agents working right now
+  (busy session, in-flight call, running tool or job, running helper unit) and
+  the path they use: coordinator → session → persona → backend → model, tools
+  and helpers. Untick it for the history view (the time window selector).
+- **Placement per layout preset.** The header's *place* selector puts the graph
+  at the **bottom**, at the **side** (a resizable column) or **floating**, and
+  saves the choice for the current preset (portrait, landscape and so on). The
+  default is side in landscape and bottom elsewhere.
+- **Pop-out.** ⧉ opens the graph in its own window, just as ⧉ already does for
+  sections and panes.
+  - While a section or the graph is popped out, the main page leaves it out so
+    the space can hold other sections. A "Popped out: … ↩" note lets you show
+    it here too.
+  - When the pop-out window closes, or stops answering for about 7 s, the
+    section returns. Pop-out windows announce themselves on a
+    BroadcastChannel, so this survives reloading either page.
+- **Floating cards.** ⇱ on any Inspector section, or *place → floating* for the
+  graph, detaches it into a card inside the page.
+  - Drag a card by its title bar and resize it from the corner.
+  - Keyboard: focus the title bar, then use the arrow keys to move it
+    (Shift = bigger steps) and Alt+arrows to resize it. Home resets it; Escape
+    returns focus to the transcript.
+  - **Dock** puts the card back.
+  - Positions are saved per layout preset and kept inside the window.
+  - On narrow screens floating cards are hidden: sections return to the
+    Inspector and the graph to its tab.
+  - No animations are involved, so reduced-motion settings are respected.
+
 ## Settings
 
 Display settings are stored per browser and per layout preset (localStorage
