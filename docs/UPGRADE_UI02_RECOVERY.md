@@ -10,6 +10,8 @@ uncommitted. The partial-BUILD clean check allowed only task gate JSONs, so it
 sent the open checklist to final verification and opened a repeat-strategy
 decision. The workstation follow-up permits task-owned uncommitted files in a
 *committed partial-BUILD continuation* and names them in the next worker prompt.
+The carry-forward prompt does not classify those files as a failed repair or
+reopen historical repeat-strategy findings.
 Final verification and closeout still require a clean tree; pre-existing or
 out-of-scope dirty files still block. `decision reevaluate` also accepts a
 `recovery_escalation` decision **only** when that exact partial-BUILD

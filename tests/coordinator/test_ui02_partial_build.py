@@ -321,6 +321,11 @@ def test_partial_build_carries_own_baseline_and_capture_without_waiving_final_cl
     assert final["coordinator.clean"].result == FAIL
     assert BASELINE in final["coordinator.clean"].detail
     assert CAPTURE in final["coordinator.clean"].detail
+    # This is a BUILD continuation, not a repair assignment even if earlier
+    # attempts have accumulated repeated findings in the recovery ledger.
+    def no_repair(*args, **kwargs):
+        raise AssertionError("partial BUILD must not request a repair assignment")
+    c.recovery.assignment = no_repair
     assert run_until(c, lambda: len(turns) == 2, limit=12), _hist(c)
     assert BASELINE in turns[1]["prompt"] and CAPTURE in turns[1]["prompt"]
 

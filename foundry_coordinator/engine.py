@@ -341,7 +341,11 @@ class Coordinator:
         if free and findings == ["Continue the committed plan's open BUILD steps; "
                                 "final gate and review remain required."]:
             findings = []
-        if own:
+        # A free partial-BUILD continuation may carry this task's own
+        # unfinished files. Name them in the next prompt, but do not classify
+        # them as a failed repair and resurrect historical repeat findings.
+        carry_own = own if free and bool(t["data"].get("build_progress")) else []
+        if own and not carry_own:
             findings.append("the previous session left these task files uncommitted: "
                             + ", ".join(own[:8]) + " — check them and commit them")
         ctx = {"attempt": attempt, "run_id": run_id, "base": base}
@@ -372,6 +376,11 @@ class Coordinator:
                        "intermediate gate output: " + ", ".join(inter[:8]) + ". They do not "
                        "block BUILD progress; commit them with the final gate run (or let the "
                        "gate regenerate them). Final verification requires a clean tree.\n")
+        if carry_own:
+            prompt += ("\n## Unfinished task-owned BUILD work\nInspect and finish these "
+                       "files left by the prior UI-02 session: " + ", ".join(carry_own[:8])
+                       + ". Commit each only after its required evidence check. They remain "
+                       "unaccepted until final clean-tree verification.\n")
         if adopted:
             prompt += ("\n## Explicit existing-work handoff\nThe operator adopted these task-scope "
                        "files; original bytes are hash-verified and backed up outside the workspace:\n"
