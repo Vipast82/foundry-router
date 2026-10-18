@@ -97,16 +97,30 @@ async def usage(request: Request, project: str = "", task: str = "", run: str = 
 
 @router.get("/v1/foundry/helpers/admission")
 async def helper_admission(request: Request, persona: str = "", backend: str = "",
-                           model: str = ""):
+                           model: str = "", vision: bool = False, purpose: str = "",
+                           models: str = ""):
     """Would optional helper work be admitted right now? For a coordinator
     deciding whether to dispatch a helper unit: quota sources only, except one
     tiny refresh probe started IN THE BACKGROUND when a reading merely went
     stale while idle and the backend is not verified serving (bounded per
     backend by refresh_probe_min_interval_seconds); this call never waits on it. A persona is checked on each reachable route of its chain (the call
-    gate re-checks every fallback when it actually runs)."""
+    gate re-checks every fallback when it actually runs).
+
+    The first route decides. Only when it is not admitted (UNKNOWN / DEFER)
+    may a LATER route of a strict persona's reachable chain be admitted
+    instead, and only one that is ADMIT itself, not local, has a free helper
+    stream, can see images when the helper needs them (vision=1 or a
+    visual purpose) and is in `models` (the coordinator's approved models,
+    comma-separated) when given. That answer is PINNED: {route, pinned: true};
+    the coordinator binds the session with meta.pinned_route, Foundry then
+    serves that session only on that route and refuses (optional_deferred),
+    never re-routes, once it is no longer admitted. When the first route is
+    admitted nothing is pinned (route = the first route, pinned: false): the
+    chain and its call-time gating per route stay exactly as before."""
     svc = request.app.state.services
     gate = svc.quota_gate
     routes = []
+    p = None
     if persona:
         p = svc.personas.get(persona)
         if p is None or not p.get("enabled"):
@@ -123,6 +137,7 @@ async def helper_admission(request: Request, persona: str = "", backend: str = "
         return _bad(ValueError("give persona, or backend and model"))
     out = []
     from ..brain.agent import _model_has_vision
+    from ..quota_gate import ADMIT, DEFER, UNKNOWN
     for i, (be, m) in enumerate(routes):
         # the first route decides admission: refresh a reading that only went
         # stale while idle (one tiny probe) instead of answering UNKNOWN
@@ -135,19 +150,53 @@ async def helper_admission(request: Request, persona: str = "", backend: str = "
             d["vision"] = None
         out.append(d)
     streams = {b["backend"]: b for b in svc.ledger.backend_streams()}
+
+    def _free(be: str):
+        st = streams.get(be) or {}
+        allowed = st.get("streams_allowed")
+        return None if allowed is None else max(0, allowed - len(st.get("active") or []))
     first = out[0]
-    st = streams.get(first["backend"]) or {}
-    allowed = st.get("streams_allowed")
-    free = None if allowed is None else max(0, allowed - len(st.get("active") or []))
+    free = _free(first["backend"])
     pol = svc.config_store.config.helper_policy
     admit = pol.optional_enabled and first["state"] == "admit" and (free is None or free > 0)
     reason = ("optional coding helpers are turned off" if not pol.optional_enabled else
               first["reason"] if first["state"] != "admit" else
               "no free helper stream on " + first["backend"] if free == 0 else first["reason"])
-    return {"admit": admit, "state": first["state"] if pol.optional_enabled else "blocked",
-            "reason": reason, "persona": persona, "backend": first["backend"],
-            "model": first["model"], "next_eligible": first.get("next_eligible"),
-            "streams_free": free, "routes": out}
+    res = {"admit": admit, "state": first["state"] if pol.optional_enabled else "blocked",
+           "reason": reason, "persona": persona, "backend": first["backend"],
+           "model": first["model"], "next_eligible": first.get("next_eligible"),
+           "streams_free": free, "routes": out, "pinned": False,
+           "route": {"backend": first["backend"], "model": first["model"]}}
+    if admit or not pol.optional_enabled or first["state"] not in (UNKNOWN, DEFER):
+        return res
+    from .ollama_api import is_strict
+    if p is None or not is_strict(p):
+        return res                       # the pin is honoured by strict routing only
+    needs_vision = bool(vision) or purpose == "visual_observation"
+    approved = {m.strip() for m in (models or "").split(",") if m.strip()}
+    skipped = []
+    for d in out[1:]:
+        name = f"{d['backend']}/{d['model']}"
+        why = ("not admitted (" + str(d["state"]).upper() + ")" if d["state"] != ADMIT else
+               "local backend (held by the primary)" if d.get("source") == "local" else
+               "no image input" if needs_vision and d.get("vision") is not True else
+               "not in the approved models" if approved and d["model"] not in approved else
+               "no free helper stream" if _free(d["backend"]) == 0 else "")
+        if why:
+            skipped.append(f"{name}: {why}")
+            continue
+        res.update(admit=True, state=ADMIT, backend=d["backend"], model=d["model"],
+                   next_eligible=None, streams_free=_free(d["backend"]), pinned=True,
+                   route={"backend": d["backend"], "model": d["model"]},
+                   first_route={"backend": first["backend"], "model": first["model"],
+                                "state": first["state"], "reason": first["reason"]},
+                   reason=f"first route {first['backend']} {str(first['state']).upper()} "
+                          f"({first['reason']}); fallback {d['backend']} admitted: "
+                          f"{d['reason']}")
+        return res
+    if skipped:
+        res["fallbacks_ineligible"] = skipped
+    return res
 
 
 @router.get("/v1/foundry/work/denials")

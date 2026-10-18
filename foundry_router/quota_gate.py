@@ -482,6 +482,17 @@ class QuotaGate:
         """None to proceed; else a refusal {message, rule, code, reset_s}.
         Called before the ledger reserves a call and again after the backend
         queue lets it start."""
+        pin = self._pinned_route(ctx)
+        if pin and not _same_route(pin, ctx.backend, ctx.model):
+            # belt and braces: routing already serves a pinned session only on
+            # its pinned route; a call anywhere else is refused, never served
+            d = {"state": BLOCKED, "next_eligible": None, "accounts": [],
+                 "reason": f"session pinned to {pin['backend']}/{pin['model']} by helper "
+                           f"admission; {ctx.backend}/{ctx.model} would be a re-route"}
+            self._log(ctx, d)
+            return {"message": f"optional helper work ({ctx.purpose or 'pinned session'}) not "
+                               f"admitted on {ctx.backend}: BLOCKED — {d['reason']}",
+                    "rule": "helper-policy", "code": "optional_deferred", "reset_s": None}
         eff = self.effective_purpose(ctx)
         if eff != "optional":
             return None
@@ -499,6 +510,17 @@ class QuotaGate:
                            f"{ctx.backend}: {d['state'].upper()} — {d['reason']}",
                 "rule": "helper-policy", "code": "optional_deferred",
                 "reset_s": reset if reset and reset > 0 else None}
+
+    @staticmethod
+    def _pinned_route(ctx) -> Optional[dict]:
+        if not getattr(ctx, "session_id", ""):
+            return None
+        from .orchestration import get_registry
+        reg = get_registry()
+        try:
+            return reg.pinned_route(ctx.session_id) if reg is not None else None
+        except Exception:                                        # noqa: BLE001
+            return None
 
     def _log(self, ctx, d: dict) -> None:
         last = self.svc.db.query_one("SELECT decision, reason FROM helper_admissions WHERE "
@@ -556,6 +578,10 @@ class QuotaGate:
                                 (limit,))
         return {"policy": pol.model_dump(), "accounts": st, "admissions": adm,
                 "warnings": self.warnings(), "decisions": [v for _, v in self._cache.values()]}
+
+
+def _same_route(pin: dict, backend: str, model: str) -> bool:
+    return pin.get("backend") == backend and pin.get("model") == model
 
 
 def persona_routes(svc, persona: dict) -> list[tuple[str, str]]:

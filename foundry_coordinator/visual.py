@@ -32,7 +32,7 @@ from concurrent.futures import ThreadPoolExecutor
 from typing import Optional
 
 from . import lanes as L
-from .adapters.foundry import FoundryDenied, FoundryError
+from .adapters.foundry import FoundryDenied, FoundryError, admitted_routes, pinned_meta
 
 OBSERVER_SYSTEM = """You are a read-only visual observer for a Roblox UI sprint. You receive one captured frame (and, when available, the approved design reference) as images, plus the acceptance criteria and capture metadata.
 Report what is VISIBLE: defects against the criteria/reference (clipping, overlap, alignment, safe area, scale, missing or wrong elements, text). For each finding give severity, confidence (0-1), the image region, the observation, and separately any inferred code cause as a hypothesis with the likely file paths. Suggest how the primary should verify.
@@ -192,7 +192,9 @@ class VisualMixin:
     def admission_problem(self, P, u: dict, adm: dict) -> str:
         if u.get("mode") != "direct":
             return ""
-        routes = adm.get("routes") or []
+        # a pinned fallback (first route not admitted) is the only route that can
+        # serve this session, so only it must see images; otherwise every route
+        routes = admitted_routes(adm)
         if not routes:
             return "Foundry reported no routes for the visual persona: image modality unverifiable"
         allowed = set((L.settings(P)["lanes"]["visual"].get("approved_models") or []))
@@ -294,7 +296,7 @@ class VisualMixin:
             try:
                 P.foundry.bind(sid, pid, tid, t["run_id"], "helper", persona,
                                parent=t["session_id"] or "", purpose=u["kind"],
-                               worker_client="", assignment={
+                               meta=pinned_meta(adm) or None, worker_client="", assignment={
                                    "unit": uid, "lane": u["lane"], "kind": u["kind"],
                                    "artifact": u.get("artifact_id"), "depth": u.get("depth") or 0})
             except FoundryError as e:
@@ -315,12 +317,14 @@ class VisualMixin:
             self.mgr._finish(P, {**u, "session_id": sid}, "failed",
                              f"snapshot unavailable: {e}"[:300], None)
             return False
-        vision_routes = [f"{r.get('backend')}/{r.get('model')}" for r in adm.get("routes") or []
+        served_by = admitted_routes(adm)          # only the pinned route when pinned
+        vision_routes = [f"{r.get('backend')}/{r.get('model')}" for r in served_by
                          if r.get("vision")]
         pk.update(sent=sent, skills_loaded=loaded, skills_missing=missing,
                   vision_routes=vision_routes, vision_models=[r.get("model") for r in
-                                                              adm.get("routes") or []
-                                                              if r.get("vision")])
+                                                              served_by if r.get("vision")],
+                  **({"pinned_route": pinned_meta(adm)["pinned_route"]}
+                     if pinned_meta(adm) else {}))
         res["calling"] = True
         self.store.op_update(key, "calling", res)
         now = self.clock()

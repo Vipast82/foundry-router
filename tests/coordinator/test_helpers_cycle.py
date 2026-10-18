@@ -263,3 +263,62 @@ def test_helper_author_is_not_the_sole_reviewer(tmp_path):
     finally:
         fake.stop()
     _ = (json, uuid)
+
+
+def test_pinned_fallback_admission_binds_the_session_to_that_route(env):
+    """Foundry admitted a later route of the chain because the first was UNKNOWN:
+    the helper's binding carries meta.pinned_route, so Foundry serves its calls
+    only there. An ordinary (first-route) admission binds without a pin."""
+    fake, c, ff = env["fake"], env["c"], env["ff"]
+    primary = c.store.task("game", "T1")["session_id"]
+    pinned = {"admit": True, "state": "admit", "pinned": True,
+              "route": {"backend": "cliproxy", "model": "gpt-6.1-sol"},
+              "reason": "first route meridian UNKNOWN (usage endpoint HTTP 429); fallback "
+                        "cliproxy admitted: 5-hour 12%", "next_eligible": None,
+              "routes": [{"backend": "meridian", "model": "claude-sonnet-5-5",
+                          "state": "unknown", "source": "fixture"},
+                         {"backend": "cliproxy", "model": "gpt-6.1-sol", "state": "admit",
+                          "source": "fixture"}]}
+    ff.admission = {"Foundry-Kilo-Helper-Claude": pinned}
+    c.tick()
+    hs = helper_sessions(fake, primary)
+    assert len(hs) == 2
+    binds = [b for b in ff.binds if b["session_id"] in hs]
+    assert binds and all(b["meta"] == {"pinned_route": {"backend": "cliproxy",
+                                                        "model": "gpt-6.1-sol"}} for b in binds)
+    started = [u for u in units(c).values() if u["status"] == "running"]
+    assert started and all("pinned to cliproxy/gpt-6.1-sol" in u["reason"] for u in started)
+    ev = [e for e in c.store.events("game", 100) if e["kind"] == "helper_started"]
+    details = [e["detail"] if isinstance(e["detail"], dict) else json.loads(e["detail"] or "{}")
+               for e in ev]
+    assert details and all(d.get("pinned_route") == pinned["route"] for d in details)
+    # ordinary text helpers never ask for image/approved-model requirements
+    assert all(need == {} for _, need in ff.admission_asks)
+
+
+def test_first_route_admission_binds_without_a_pin(env):
+    fake, c, ff = env["fake"], env["c"], env["ff"]
+    primary = c.store.task("game", "T1")["session_id"]
+    ff.admission = {"Foundry-Kilo-Helper-Claude": {**admit("admit"), "pinned": False,
+                                                   "route": {"backend": "meridian",
+                                                             "model": "claude-sonnet-5-5"}}}
+    c.tick()
+    hs = helper_sessions(fake, primary)
+    assert len(hs) == 2
+    assert all(b["meta"] == {} for b in ff.binds if b["session_id"] in hs)
+
+
+def test_pinned_local_fallback_is_refused_by_the_coordinator(env):
+    """Foundry never pins a local route, but if an answer ever did, the
+    coordinator's own primary-held local check judges the pinned route."""
+    fake, c, ff = env["fake"], env["c"], env["ff"]
+    primary = c.store.task("game", "T1")["session_id"]
+    ff.admission = {"Foundry-Kilo-Helper-Claude": {
+        "admit": True, "state": "admit", "pinned": True, "reason": "x",
+        "route": {"backend": "strata", "model": "qwen"},
+        "routes": [{"backend": "meridian", "model": "claude", "source": "fixture"},
+                   {"backend": "strata", "model": "qwen", "source": "local"}]}}
+    c.tick()
+    assert helper_sessions(fake, primary) == []
+    assert all(u["status"] == "deferred" and "local backend" in u["reason"]
+               for u in units(c).values())

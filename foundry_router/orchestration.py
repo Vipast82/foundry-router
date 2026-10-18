@@ -59,6 +59,27 @@ def _clean(v, field: str, required: bool = False) -> str:
     return s
 
 
+def _clean_route(r) -> dict:
+    """A pinned route as {backend, model}; anything else is refused."""
+    if not isinstance(r, dict):
+        raise WorkError("meta.pinned_route must be {backend, model}")
+    return {"backend": _clean(r.get("backend"), "pinned_route.backend", required=True),
+            "model": _clean(r.get("model"), "pinned_route.model", required=True)}
+
+
+def current_pinned_route() -> Optional[dict]:
+    """The pinned route of the bound session the current request carries."""
+    reg = _REGISTRY
+    if reg is None:
+        return None
+    try:
+        from .client_auth import current
+        sid = current().get("session_id") or ""
+    except Exception:                                            # noqa: BLE001
+        return None
+    return reg.pinned_route(sid) if sid else None
+
+
 class WorkRegistry:
     """Session bindings (cached in memory: looked up on every request),
     task snapshots and coordinator events."""
@@ -89,7 +110,13 @@ class WorkRegistry:
             raise WorkError(f"session {sid} is bound to project {existing['project_id']!r}; "
                             f"start a new session for {row['project_id']!r}")
         now = time.time()
-        meta = json.dumps(data.get("meta") or {}, default=str)[:4000]
+        meta_d = data.get("meta") or {}
+        if isinstance(meta_d, dict) and meta_d.get("pinned_route") is not None:
+            # helper admission admitted a FALLBACK route of the persona's chain:
+            # this session's calls are served only there (strict_candidates)
+            # and refused, never re-routed, when it stops being admitted
+            meta_d = {**meta_d, "pinned_route": _clean_route(meta_d["pinned_route"])}
+        meta = json.dumps(meta_d, default=str)[:4000]
         self.db.execute(
             "INSERT INTO work_sessions (session_id, project_id, task_id, run_id, role, "
             "parent_session_id, persona, client_id, meta, created_ts, updated_ts, purpose, "
@@ -122,6 +149,19 @@ class WorkRegistry:
             return None
         with self._lock:
             return self._cache.get(session_id)
+
+    def pinned_route(self, session_id: str) -> Optional[dict]:
+        """{backend, model} the coordinator pinned this bound session to (a
+        helper admitted on a fallback route), or None."""
+        b = self.lookup(session_id)
+        if not b:
+            return None
+        try:
+            meta = json.loads(b.get("meta") or "{}")
+        except (TypeError, ValueError):
+            return None
+        r = meta.get("pinned_route") if isinstance(meta, dict) else None
+        return dict(r) if isinstance(r, dict) and r.get("backend") and r.get("model") else None
 
     def _row(self, sid: str) -> Optional[dict]:
         rows = self.db.query("SELECT * FROM work_sessions WHERE session_id=?", (sid,))

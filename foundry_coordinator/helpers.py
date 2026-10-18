@@ -33,7 +33,7 @@ import uuid
 from typing import Callable, Optional
 
 from . import states as S
-from .adapters.foundry import FoundryError
+from .adapters.foundry import FoundryError, admitted_routes, pinned_meta
 
 OPTIONAL_KINDS = ("code_proposal", "test_design", "debug_advice", "exploration")
 SCHEMA = """
@@ -686,7 +686,9 @@ class HelperManager:
                 open_ended = True
                 continue
             try:
-                adm = P.foundry.helper_admission(persona)
+                need = self._admission_needs(P, u)
+                adm = (P.foundry.helper_admission(persona, **need) if need
+                       else P.foundry.helper_admission(persona))
             except Exception as e:                               # noqa: BLE001
                 why = str(e) if isinstance(e, FoundryError) else f"{type(e).__name__}: {e}"
                 if hasattr(self, "_adm_fail"):
@@ -695,7 +697,8 @@ class HelperManager:
                 codes.add("admission_unavailable")
                 open_ended = True
                 continue
-            if adm.get("routes") and any(r.get("source") == "local" for r in adm["routes"][:1]):
+            # the route that will serve: the pinned fallback when Foundry pinned one
+            if any(r.get("source") == "local" for r in admitted_routes(adm)[:1]):
                 reasons.append(f"{backend}: {persona} routes to the local backend, which the "
                                f"primary holds; helpers use frontier backends only")
                 codes.add("local_route")
@@ -717,7 +720,7 @@ class HelperManager:
                     continue
                 if u.get("mode") == "direct":
                     return self.lanes.start_direct(P, t, spec, u, h, backend, persona, adm)
-            return self._start(P, t, spec, u, h, backend, persona)
+            return self._start(P, t, spec, u, h, backend, persona, adm)
         if not reasons:
             reasons.append("no helper persona configured for any allowed backend "
                            "([helpers] personas)")
@@ -739,8 +742,23 @@ class HelperManager:
                      (reason, nxt, check, now, phase, code, u["unit_id"]))
         return False
 
-    def _start(self, P, t: dict, spec, u: dict, h: dict, backend: str, persona: str) -> bool:
+    def _admission_needs(self, P, u: dict) -> dict:
+        """The helper's route requirements for Foundry's admission (so a later
+        chain route can be admitted and pinned when the first is not): image
+        input and the approved models for the visual lane. {} = none."""
+        if u.get("lane") != "visual":
+            return {}
+        try:
+            from . import lanes as L
+            approved = list(L.settings(P)["lanes"]["visual"].get("approved_models") or [])
+        except Exception:                                        # noqa: BLE001
+            approved = []
+        return {"vision": True, "models": approved, "purpose": u.get("kind") or ""}
+
+    def _start(self, P, t: dict, spec, u: dict, h: dict, backend: str, persona: str,
+               adm: Optional[dict] = None) -> bool:
         pid, tid = P.id, t["task_id"]
+        pin = pinned_meta(adm)
         # one operation per request of the unit (a re-request is a new session)
         key = f"helper:{pid}:{tid}:{u['unit_id']}:{int(u.get('requests') or 1)}"
         prior = self.store.op_begin(key, pid, tid, "helper")
@@ -784,7 +802,7 @@ class HelperManager:
             # binding before inference, also when a restart came between the two
             try:
                 P.foundry.bind(sid, pid, tid, t["run_id"], "helper", persona,
-                               parent=t["session_id"] or "",
+                               parent=t["session_id"] or "", meta=pin or None,
                                purpose=u["kind"], worker_client=h["worker_client"],
                                assignment={"unit": u["unit_id"],
                                            "responsibility": u["responsibility"],
@@ -828,11 +846,14 @@ class HelperManager:
                      "session_id=?, parent_session=?, attempts=attempts+1, reason=?, "
                      "next_eligible=NULL, updated_ts=?, started_ts=?, phase='admitted', "
                      "reason_code=NULL WHERE unit_id=?",
-                     (persona, backend, sid, t["session_id"], f"admitted on {backend}", now, now,
-                      u["unit_id"]))
+                     (persona, backend, sid, t["session_id"], f"admitted on {backend}" + (
+                         f" (pinned to {pin['pinned_route']['backend']}/"
+                         f"{pin['pinned_route']['model']}: {(adm or {}).get('reason')})"[:600]
+                         if pin else ""), now, now, u["unit_id"]))
         self.store.event(pid, tid, "helper_started", session_id=sid,
                          detail={"unit": u["unit_id"], "kind": u["kind"], "persona": persona,
-                                 "backend": backend, "parent": t["session_id"]})
+                                 "backend": backend, "parent": t["session_id"],
+                                 **({"pinned_route": pin["pinned_route"]} if pin else {})})
         return True
 
     @staticmethod

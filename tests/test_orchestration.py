@@ -183,3 +183,24 @@ def test_strict_persona_turn_assist_frontier_helpers_stay_off(ledgered, client):
         "messages": [{"role": "user", "content": "done?"}]})
     sent = [t["function"]["name"] for t in STATE["last_body"].get("tools") or []]
     assert any("consult" in n for n in sent), sent
+
+
+def test_pinned_route_binding_round_trip_and_rebind_clears_it(app):
+    """meta.pinned_route (helper admission on a fallback route) is validated,
+    looked up per session, and gone once the session is re-bound without it."""
+    import pytest
+    from foundry_router.orchestration import WorkError
+    work = app.state.services.work
+    pin = {"backend": "cliproxy", "model": "gpt-6.1-sol", "extra": "dropped"}
+    work.bind({"session_id": "h-pin", "project_id": "g", "purpose": "visual_observation",
+               "meta": {"pinned_route": pin, "note": "kept"}})
+    assert work.pinned_route("h-pin") == {"backend": "cliproxy", "model": "gpt-6.1-sol"}
+    assert json.loads(work.lookup("h-pin")["meta"])["note"] == "kept"
+    work.bind({"session_id": "h-pin", "project_id": "g", "purpose": "visual_observation"})
+    assert work.pinned_route("h-pin") is None
+    assert work.pinned_route("unbound") is None
+    for bad in ({"backend": "cliproxy"}, "cliproxy/gpt", {"backend": "x y", "model": "m"}):
+        with pytest.raises(WorkError):
+            work.bind({"session_id": "h-bad", "project_id": "g", "meta": {"pinned_route": bad}})
+    work.end("h-pin")
+    assert work.pinned_route("h-pin") is None             # ended sessions carry no pin

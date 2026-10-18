@@ -131,7 +131,20 @@ A request is always optional work, normalized as follows:
 **What happens to each unit**
 
 1. **Check.** Foundry's admission check (`GET /v1/foundry/helpers/admission`) reads quota
-   only; it makes no inference call.
+   only; it makes no inference call. The persona's first route decides. When it is not
+   admitted (UNKNOWN or DEFER, e.g. Meridian's usage endpoint returned 429), a later route
+   of a **strict** persona's reachable chain may be admitted instead, only if that route is
+   ADMIT itself (same `cutoff_pct`), not local, has a free helper stream, can see images
+   when the helper needs them (`vision=true` or a visual purpose; the coordinator sends
+   this for the visual lane) and is in `models` (the lane's `approved_models`) when given.
+   The answer is then `{admit: true, pinned: true, route: {backend, model}, reason: "first
+   route … ; fallback … admitted"}`. The coordinator binds the session with
+   `meta.pinned_route`, and Foundry serves that session **only** on that route: the call-time
+   gate re-checks it on every call and refuses (`optional_deferred`) instead of re-routing
+   once it stops being admitted. When the first route is admitted nothing is pinned
+   (`pinned: false`, `route` = the first route) and the chain behaves as before. With no
+   eligible fallback the answer is the first route's, as before (`fallbacks_ineligible`
+   says why each later route was not used).
 2. **Defer or start.** A deferred unit gets a recorded reason and is checked again after
    its next eligible time or the poll interval, so there's no retry storm. An admitted unit
    gets a fresh Kilo session, bound with its purpose, parent session, run and assignment

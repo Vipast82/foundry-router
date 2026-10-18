@@ -28,6 +28,27 @@ class FoundryDenied(FoundryError):
             category, code, message, retry_after
 
 
+def pinned_meta(adm: Optional[dict]) -> dict:
+    """Binding meta for a helper admitted on a pinned fallback route
+    (helper_admission answered pinned=true): Foundry then serves the bound
+    session only on that route. {} when nothing is pinned."""
+    r = (adm or {}).get("route") or {}
+    if (adm or {}).get("pinned") and r.get("backend") and r.get("model"):
+        return {"pinned_route": {"backend": r["backend"], "model": r["model"]}}
+    return {}
+
+
+def admitted_routes(adm: Optional[dict]) -> list:
+    """The routes a helper's calls may be served on: only the pinned route when
+    the admission pinned one, else every reported route of the chain."""
+    if pinned_meta(adm):
+        r = adm["route"]
+        hit = [x for x in adm.get("routes") or [] if x.get("backend") == r["backend"]
+               and x.get("model") == r["model"]]
+        return hit or [dict(r)]
+    return list((adm or {}).get("routes") or [])
+
+
 class FoundryClient:
     def __init__(self, url: str, key: str = "", timeout: float = 600):
         self.url = url.rstrip("/")
@@ -90,11 +111,22 @@ class FoundryClient:
             body["assignment"] = assignment
         return self._req("POST", "/v1/foundry/work/sessions", body, timeout=20)[0]
 
-    def helper_admission(self, persona: str) -> dict:
+    def helper_admission(self, persona: str, vision: bool = False,
+                         models: Optional[list] = None, purpose: str = "") -> dict:
         """Would optional helper work run on this persona now? (quota sources; Foundry
-        may start one bounded background refresh probe for a stale idle reading)"""
-        return self._req("GET", "/v1/foundry/helpers/admission", query={"persona": persona},
-                         timeout=20)[0]
+        may start one bounded background refresh probe for a stale idle reading)
+        vision / models / purpose are the helper's requirements: when the first
+        route is not admitted Foundry may admit (and pin) a later chain route
+        that meets them; the answer then has pinned=true and route={backend, model},
+        and the session must be bound with meta.pinned_route = that route."""
+        q = {"persona": persona}
+        if vision:
+            q["vision"] = "true"
+        if models:
+            q["models"] = ",".join(str(m) for m in models)
+        if purpose:
+            q["purpose"] = purpose
+        return self._req("GET", "/v1/foundry/helpers/admission", query=q, timeout=20)[0]
 
     def end(self, session_id: str, outcome: str) -> None:
         self._req("POST", f"/v1/foundry/work/sessions/{session_id}/end", {"outcome": outcome},

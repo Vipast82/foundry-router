@@ -140,12 +140,16 @@ class FakeFoundry:
              purpose="", worker_client="", assignment=None):
         self.binds.append(dict(session_id=session_id, project_id=project_id, task_id=task_id,
                                run_id=run_id, role=role, persona=persona, parent=parent,
-                               purpose=purpose))
+                               purpose=purpose, meta=meta or {}))
         return {}
 
-    def helper_admission(self, persona):
-        return (self.admission or {}).get(persona) or {"admit": False, "state": "unknown",
-                                                       "reason": "no fake admission set"}
+    def helper_admission(self, persona, **need):
+        # need: the helper's route requirements (vision, models, purpose), if any
+        self.admission_asks = getattr(self, "admission_asks", []) + [(persona, need)]
+        ans = (self.admission or {}).get(persona)
+        if callable(ans):
+            ans = ans(**need)
+        return ans or {"admit": False, "state": "unknown", "reason": "no fake admission set"}
 
     def end(self, session_id, outcome):
         self.ended.append((session_id, outcome))

@@ -132,7 +132,8 @@ class LaneFoundry(FakeFoundry):
             from foundry_coordinator.adapters.foundry import FoundryError
             raise FoundryError(f"purpose must be one of ... ({purpose} unknown)")
         self.bind_kw.append(dict(session_id=session_id, role=role, persona=persona,
-                                 purpose=purpose, parent=parent, assignment=assignment))
+                                 purpose=purpose, parent=parent, assignment=assignment,
+                                 meta=meta or {}))
         return super().bind(session_id, project_id, task_id, run_id, role, persona, parent,
                             meta, purpose, worker_client, assignment)
 

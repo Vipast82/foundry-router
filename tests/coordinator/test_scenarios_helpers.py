@@ -683,3 +683,156 @@ def test_s5_refused_prompt_is_still_sent_after_reconciling(env):
     for s in helper_sids(env):
         assert sum(p["session_id"] == s for p in fake.prompts) == 1
     assert {x["status"] for x in units(c).values()} == {"running"}
+
+
+# --------------------------------------------------------------------------------------
+# S6  multi-route admission: the first route UNKNOWN, a later vision route pinned
+# --------------------------------------------------------------------------------------
+
+S6_VIS = """
+[lanes]
+enabled = true
+transcript_poll_seconds = 0
+
+[lanes.visual]
+enabled = true
+debounce_seconds = 0
+capture_globs = ["docs/evidence/{task}/*.png"]
+%s
+"""
+S6_ROUTES = [{"backend": "meridian", "model": "claude-sonnet", "vision": True,
+              "state": "unknown", "source": "fixture"},
+             {"backend": "cpa", "model": "gpt-vision", "vision": True, "state": "admit",
+              "source": "fixture"}]
+
+
+def _s6_env(tmp_path, extra=""):
+    from tests.coordinator.lane_env import CLAUDE as LCLAUDE, VISION, admit as ladmit, setup
+    e = setup(tmp_path, lanes=S6_VIS % extra)
+    e["ff"].admission[LCLAUDE] = ladmit()
+
+    def visual_admission(vision=False, models=None, purpose=""):
+        # what Foundry answers: a vision helper gets the pinned vision fallback
+        # (only if approved), anything else the first route's UNKNOWN
+        if vision and (not models or "gpt-vision" in models):
+            return {"admit": True, "state": "admit", "pinned": True,
+                    "route": {"backend": "cpa", "model": "gpt-vision"},
+                    "reason": "first route meridian UNKNOWN (usage endpoint HTTP 429); "
+                              "fallback cpa admitted: 5-hour 12%", "next_eligible": None,
+                    "routes": S6_ROUTES, "streams_free": 1}
+        return {"admit": False, "state": "unknown", "reason": "usage endpoint HTTP 429",
+                "next_eligible": None, "routes": S6_ROUTES, "pinned": False}
+    e["ff"].admission[VISION] = visual_admission
+    return e, VISION
+
+
+def _s6_capture(env):
+    from tests.coordinator.lane_env import capture_output, png, primary_tool
+    data = png(6, 4, (10, 20, 30))
+    f = env["root"] / "docs/evidence/T2/menu.png"
+    f.write_bytes(data)
+    primary_tool(env, "pwsh tools/capture-window.ps1 -Out docs/evidence/T2/menu.png",
+                 capture_output(str(f), data, 6, 4, valid=True))
+
+
+def _s6_step(env, n=2):
+    for _ in range(n):
+        env["c"].tick()
+        env["c"].helpers.lanes.wait_direct()
+
+
+def _s6_visual(env):
+    return [u for u in env["c"].helpers.units("game", "T2") if u.get("lane") == "visual"]
+
+
+def _s6_says(env, served):
+    env["ff"].vision_answer = lambda messages: (
+        "```helper-result\n" + json.dumps({"image_seen": True, "subject_present": True,
+                                            "validity": "ok", "summary": "fine",
+                                            "findings": []}) + "\n```",
+        {"served_model": served})
+
+
+def test_s6_unknown_first_route_pins_the_vision_fallback_end_to_end(tmp_path):
+    env, VISION = _s6_env(tmp_path)
+    try:
+        _s6_says(env, "gpt-vision")
+        _s6_capture(env)
+        _s6_step(env)
+        [u] = _s6_visual(env)
+        ff = env["ff"]
+        # the coordinator told Foundry the helper needs images (visual lane)
+        asks = [need for p, need in ff.admission_asks if p == VISION]
+        assert asks and asks[0]["vision"] is True and asks[0]["purpose"] == "visual_observation"
+        # bound with the pinned route, so Foundry serves the session only there
+        b = [x for x in ff.bind_kw if x["session_id"] == u["session_id"]][0]
+        assert b["meta"] == {"pinned_route": {"backend": "cpa", "model": "gpt-vision"}}
+        pk = json.loads(u["packet"])
+        assert pk["vision_models"] == ["gpt-vision"] and pk["vision_routes"] == ["cpa/gpt-vision"]
+        assert pk["pinned_route"] == {"backend": "cpa", "model": "gpt-vision"}
+        assert u["status"] == "done" and u["feedback"] != "rejected"
+    finally:
+        env["fake"].stop()
+
+
+def test_s6_an_answer_from_the_unpinned_first_route_is_rejected(tmp_path):
+    """Pinned to the fallback: a reply served by the first route is not accepted
+    as image inspection (Foundry would refuse it anyway)."""
+    env, _ = _s6_env(tmp_path)
+    try:
+        _s6_says(env, "claude-sonnet")
+        _s6_capture(env)
+        _s6_step(env)
+        [u] = _s6_visual(env)
+        assert u["feedback"] == "rejected" and "not one of the vision-validated routes" in u["reason"]
+    finally:
+        env["fake"].stop()
+
+
+def test_s6_fallback_outside_approved_models_stays_deferred(tmp_path):
+    env, VISION = _s6_env(tmp_path, 'approved_models = ["claude-sonnet"]')
+    try:
+        _s6_capture(env)
+        _s6_step(env)
+        [u] = _s6_visual(env)
+        assert u["status"] == "deferred" and "UNKNOWN" in u["reason"]
+        assert env["ff"].chat_calls == []
+        asks = [need for p, need in env["ff"].admission_asks if p == VISION]
+        assert asks[0]["models"] == ["claude-sonnet"]
+    finally:
+        env["fake"].stop()
+
+
+def test_s6_pinned_route_without_image_input_never_gets_the_image(tmp_path):
+    """The coordinator's own visual-lane check judges the PINNED route."""
+    env, VISION = _s6_env(tmp_path)
+    try:
+        env["ff"].admission[VISION] = lambda **need: {
+            "admit": True, "state": "admit", "pinned": True, "reason": "x",
+            "route": {"backend": "cpa", "model": "gpt-text"},
+            "routes": [S6_ROUTES[0], {"backend": "cpa", "model": "gpt-text", "vision": False,
+                                      "state": "admit", "source": "fixture"}]}
+        _s6_capture(env)
+        _s6_step(env)
+        [u] = _s6_visual(env)
+        assert u["status"] == "deferred" and "has no image input" in u["reason"]
+        assert env["ff"].chat_calls == []
+    finally:
+        env["fake"].stop()
+
+
+def test_s6_call_time_refusal_on_the_pinned_route_defers(tmp_path):
+    """The pinned route stops being admitted between admission and the call:
+    Foundry refuses (optional_deferred); the unit waits, nothing re-routed."""
+    from foundry_coordinator.adapters.foundry import FoundryDenied
+    env, _ = _s6_env(tmp_path)
+    try:
+        env["ff"].deny = FoundryDenied("budget", "optional_deferred", "optional helper work "
+                                       "(visual_observation) not admitted on cpa: DEFER", 300)
+        _s6_capture(env)
+        _s6_step(env)
+        [u] = _s6_visual(env)
+        assert u["status"] == "deferred" and "refused at call time" in u["reason"]
+        assert len(env["ff"].chat_calls) == 1
+    finally:
+        env["fake"].stop()

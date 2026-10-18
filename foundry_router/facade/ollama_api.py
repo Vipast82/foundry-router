@@ -893,6 +893,15 @@ def strict_candidates(svc, persona) -> list[str]:
     pins = [str(p) for p in _jl_list((persona or {}).get("pinned_models"))]
     order = [p for p in pins if p in allow] + [a for a in allow if a not in pins]
     pinned_backend = ((persona or {}).get("backend") or "").strip()
+    # A bound helper session admitted on a FALLBACK route of this chain is
+    # served only by that one route (helper admission, quota_gate.py): never
+    # by the first route whose quota was unknown, never by another fallback.
+    from ..orchestration import current_pinned_route
+    route_pin = current_pinned_route()
+    if route_pin:
+        if pinned_backend and pinned_backend != route_pin["backend"]:
+            return []
+        pinned_backend = route_pin["backend"]
     if pinned_backend:
         # Exact backend identity: only what THAT backend serves, and only
         # while it's usable — never the same model id from another backend.
@@ -913,6 +922,8 @@ def strict_candidates(svc, persona) -> list[str]:
         if meta and meta.get("embedding"):
             continue
         out.append(hit)
+    if route_pin:
+        out = [h for h in out if h == route_pin["model"]]
     return out
 
 
@@ -1787,12 +1798,21 @@ async def _direct_dispatch_chat(svc, persona, model_name, messages, client_tools
         # From here on the pool may only use this persona's backend (or the
         # single best one when none is set): no cross-backend failover.
         from .. import request_context as _rc
-        _rc.pin_backend((persona.get("backend") or "").strip() or "*first")
+        from ..orchestration import current_pinned_route
+        _route_pin = current_pinned_route()
+        # a helper session pinned to an admitted fallback route: that backend only
+        _rc.pin_backend((_route_pin or {}).get("backend")
+                        or (persona.get("backend") or "").strip() or "*first")
         # STRICT: the allowlist (in pinned order) is the whole route. Each
         # candidate is budget-checked; a denial moves to the next listed model
         # (shown to the client), never outside the list. Nothing listed is
         # reachable / allowed -> a clear refusal, never a substitute.
         cands = strict_candidates(svc, persona)
+        if not cands and _route_pin:
+            return strict_refusal(svc, persona, logger, "route_unavailable",
+                                  f"this session is pinned by helper admission to "
+                                  f"{_route_pin['backend']}/{_route_pin['model']}, which is not "
+                                  f"a reachable route of this persona's chain (not re-routed)")
         if not cands:
             allow = _jl_list(persona.get("model_allowlist"))
             return strict_refusal(svc, persona, logger, "route_unavailable",
