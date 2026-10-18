@@ -152,7 +152,14 @@ def test_incremental_review_does_not_repeat_unchanged_code_across_runs(tmp_path)
         git(root, "commit", "-qam", "T2: step")
         c.tick()
         [u] = [x for x in c.helpers.units("game", "T2") if x["lane"] == "incremental_review"]
+        # v0.121.5+: only a review that actually ran (done, not rejected/expired)
+        # counts as "reviewed"; fixture state: it ran and was delivered
+        c.store.x("UPDATE helper_units SET status='done', feedback='integrated' WHERE unit_id=?",
+                  (u["unit_id"],))
         P = list(c.projects.values())[0]
+        c.helpers.lanes._after_incremental_review(P, u, {"structured": True,
+                                                         "base": u["snapshot_id"],
+                                                         "assignment": u["unit_id"]})
         t = c.store.task("game", "T2")
         # simulate a new run of the same task with the same code
         c.store.update_task("game", "T2", run_id=t["run_id"] + "-r2")
@@ -170,5 +177,39 @@ def test_incremental_review_does_not_repeat_unchanged_code_across_runs(tmp_path)
             == "unchanged"
         assert len([x for x in c.helpers.units("game", "T2")
                     if x["lane"] == "incremental_review"]) == 1
+    finally:
+        env["fake"].stop()
+
+
+def test_a_review_that_never_ran_does_not_block_the_next_runs_review(tmp_path):
+    """The other side of the no-repeat rule (v0.121.5): an earlier run's review
+    that never ran (deferred) can never be delivered to the new run, so the
+    same code gets its own review in the new run."""
+    from tests.coordinator.helpers import git
+    from tests.coordinator.lane_env import CLAUDE, admit, setup
+    env = setup(tmp_path, lanes="[lanes]\nenabled = true\ntranscript_poll_seconds = 0\n"
+                                "[lanes.incremental_review]\nenabled = true\n"
+                                "min_interval_seconds = 0\n")
+    try:
+        c, root = env["c"], env["root"]
+        env["ff"].admission[CLAUDE] = admit("defer", "weekly 80% used")
+        c.tick()
+        (root / "src/menu.luau").write_text("local M = {a=1}\nreturn M\n")
+        git(root, "commit", "-qam", "T2: step")
+        c.tick()
+        P = list(c.projects.values())[0]
+        t = c.store.task("game", "T2")
+        c.store.update_task("game", "T2", run_id=t["run_id"] + "-r2")
+        t2 = c.store.task("game", "T2")
+        c.store.x("INSERT INTO lane_events (event_key, project_id, task_id, kind, status, "
+                  "signature, detail, tries) VALUES ('k3','game','T2','commit','new','',"
+                  "'{}',0)")
+        from foundry_coordinator import lanes as L
+        c.helpers.lanes._plan_commit(P, t2, P.adapter.describe("T2"), L.settings(P),
+                                     {"event_key": "k3", "detail": {}, "tries": 0,
+                                      "signature": ""})
+        runs = {x["run_id"] for x in c.helpers.units("game", "T2")
+                if x["lane"] == "incremental_review"}
+        assert t2["run_id"] in runs and len(runs) == 2
     finally:
         env["fake"].stop()

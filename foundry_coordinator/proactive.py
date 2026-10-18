@@ -385,11 +385,14 @@ class Proactive(VisualMixin, AdvisoryMixin):
         data = (self.store.task(pid, tid) or {}).get("data") or {}
         prev = data.get("lanes_reviewed") or {}
         # Legacy versions recorded creation as review. Accept that checkpoint
-        # only if a successful, non-rejected review actually exists for it.
+        # only if a successful, non-rejected review actually exists for it, in
+        # ANY run of the task: identical code reviewed (and delivered) in an
+        # earlier run is not paid for again. An expired result (its run ended
+        # before delivery) does not count, so that code is reviewed again.
         if prev and not self.store.q("SELECT unit_id FROM helper_units WHERE project_id=? AND task_id=? "
-                "AND run_id=? AND lane='incremental_review' AND snapshot_id=? AND status='done' "
+                "AND lane='incremental_review' AND snapshot_id=? AND status='done' "
                 "AND COALESCE(feedback,'') NOT IN ('rejected','superseded','expired')",
-                (pid,tid,t['run_id'],prev.get('snapshot') or '')):
+                (pid,tid,prev.get('snapshot') or '')):
             prev = {}
         if prev.get("content") == snap["content_fp"] or prev.get("snapshot") == snap["snapshot_id"]:
             return self._set_event(ev["event_key"], "unchanged")    # never re-review same code
