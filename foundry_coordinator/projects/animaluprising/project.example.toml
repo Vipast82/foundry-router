@@ -279,7 +279,15 @@ max_running = 2
 steps_ahead = 2
 
 [frontier_primary]
-enabled = false
+# Manual only (`frontier request PROJECT TASK --reason ...`): never triggers itself,
+# so the local primary stays the default writer. Sonnet 5.5 (Claude Max) differs
+# from the implementer and every reviewer, as required.
+enabled = true
+persona = "Foundry-Kilo-Sonnet"
+max_turns = 3
+max_minutes = 120
+max_phases_per_task = 1
+cooldown_minutes = 60
 
 # OPTIONAL (v0.123): the lead sprint manager, the last automated recovery tier
 # before a blocker reaches the operator (docs/LEAD_SPRINT_MANAGER.md). OFF by
