@@ -2,6 +2,34 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.123.2 — idle Kilo session after a permission reply; unadmitted prompts
+
+UI-02 stalled after a tool-permission rejection. Two defects combined.
+
+**The permission reply reset the session timer.**
+- Cause: answering a session's question reset its `prompt_ts`, though no new
+  prompt was sent. Kilo's completed assistant turn then looked older than
+  the prompt, so an idle session was mistaken for one still waiting for
+  prompt admission.
+- Fix: a reply now keeps the original `prompt_ts`.
+- The Kilo adapter now compares the last assistant turn's completion time,
+  not only its creation time.
+- After a permission reply, the implementer gets one in-scope "continue"
+  prompt in the same session (`permission_reply_continued`). It is not
+  verified as an unfinished BUILD.
+
+**Unadmitted prompts waited out the full timeout.** A prompt Kilo never
+admitted waited out the 240-minute session execution timeout.
+- Fix: a session that reports idle with no assistant turn for its prompt is
+  now aborted after `[client] prompt_admission_timeout_seconds` (default 180).
+- The session ends as `prompt_not_admitted`, and a free retry resumes it from
+  recorded state.
+- A slow model call reports busy and is not affected.
+
+Tests:
+- tests/coordinator/test_engine.py
+- tests/coordinator/test_kilo_idle_after_reply.py
+
 ## v0.123.1 — UI-02 lead recovery loop: one fresh lead strategy, reconciled escalations
 
 UI-02 hit two defects in the path from the Lead Manager back to the implementer.
