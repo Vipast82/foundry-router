@@ -2,6 +2,17 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.126.4 — prework survives the session ending
+
+UI-02's primary session died on an ECONNRESET. That cancelled its in-flight
+prework, a failure triage and other lane units ("the session ended").
+Prework is bound to a commit, not to a session, so it is now exempt from
+the session-end lane abort, from the "primary is ready" skip of queued units
+and from the end-of-run expiry. Its PREWORK note serves the next session.
+Reactive lanes keep their old behaviour.
+
+Coordinator only.
+
 ## v0.126.3 — prohibitions are not violations (Lead report validation)
 
 The Lead's reports for `rc-6e288461f726c329` were rejected twice for text

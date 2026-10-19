@@ -250,3 +250,30 @@ def test_stale_prework_is_never_delivered(mk):
     assert c.helpers.lanes.deliverable("game", "T2", units, env["primary"]) == []
     fb = [x for x in prework(c) if x["unit_id"] == u["unit_id"]][0]["feedback"]
     assert fb in ("superseded", "delivered", "integrated")
+
+
+def test_prework_survives_the_session_ending(mk):
+    """UI-02: an ECONNRESET ended the primary and cancelled its in-flight
+    prework. Prework is bound to a commit, not a session: running units keep
+    running, queued ones stay queued, finished results do not expire."""
+    env = mk()
+    c = env["c"]
+    c.tick()
+    c.tick()
+    units = prework(c)
+    running = [u for u in units if u["status"] == "running"]
+    assert running
+    P = c.projects["game"]
+    t = c.store.task("game", "T2")
+    c._session_failed(P, t, "session ended with an error: ECONNRESET", "implement")
+    c.helpers.skip_waiting(P, "T2", "the primary finished")
+    after = {u["unit_id"]: u for u in prework(c)}
+    assert all(after[u["unit_id"]]["status"] == "running" for u in running)
+    u = running[0]
+    answer_helper(env, u["session_id"], {"assignment": u["unit_id"], "base": u["snapshot_id"],
+                                         "summary": "draft", "patch": PATCH})
+    for _ in range(3):
+        c.tick()
+    c.helpers.expire_lane_results(P, "T2", "the run ended")
+    done = {x["unit_id"]: x for x in prework(c)}[u["unit_id"]]
+    assert done["feedback"] != "expired"

@@ -1038,9 +1038,12 @@ class HelperManager:
     def skip_waiting(self, P, tid: str, reason: str) -> list[str]:
         """Units never admitted (pending / deferred) when the primary is ready:
         skipped, so optional work never holds required progress."""
+        from .lanes import OWN_BUDGET_LANES
         out = []
         for st in ("pending", "deferred"):
             for u in self.units(P.id, tid, st):
+                if u.get("lane") in OWN_BUDGET_LANES:
+                    continue          # prework waits for the next implementing session
                 why = f"{reason}" + (f" (last: {u['reason']})" if u.get("reason") else "")
                 self.store.x("UPDATE helper_units SET status='skipped', reason=?, updated_ts=?, "
                              "phase='cancelled', reason_code='primary_ready' WHERE unit_id=?",
@@ -1080,9 +1083,12 @@ class HelperManager:
 
     def abort_lane_running(self, P, tid: str, reason: str) -> list[str]:
         """Stop running LANE units only (ordinary units keep their v0.117 hand-off)."""
+        from .lanes import OWN_BUDGET_LANES
         out = []
         for u in self.units(P.id, tid, "running"):
-            if not u.get("lane"):
+            if not u.get("lane") or u.get("lane") in OWN_BUDGET_LANES:
+                # prework is bound to a commit, not to this session: it keeps
+                # running and its note serves the next session (v0.126.4)
                 continue
             if u.get("mode") == "direct":
                 self.lanes.forget_direct(u["unit_id"])
@@ -1196,7 +1202,7 @@ class HelperManager:
         out = []
         for u in self.store.q("SELECT unit_id FROM helper_units WHERE project_id=? AND task_id=? "
                               "AND lane IS NOT NULL AND status='done' AND delivered_session IS NULL "
-                              "AND COALESCE(feedback,'waiting') = 'waiting'",
+                              "AND COALESCE(feedback,'waiting') = 'waiting' AND lane <> 'prework'",
                               (P.id, tid)):
             self.store.x("UPDATE helper_units SET feedback='expired', feedback_detail=?, "
                          "updated_ts=? WHERE unit_id=?",
