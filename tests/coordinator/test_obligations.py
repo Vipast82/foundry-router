@@ -197,6 +197,9 @@ def test_guidance_lines_that_waive_or_substitute_are_detected():
     assert directive_violations("Defer the captures to the CLOSE session")
     assert directive_violations("The SUMMARY and done_check output count as the BUILD validation")
     assert directive_violations("Mark au.gate as optional")
+    assert not directive_violations("Never waive a check or change a baseline without raw runs.")
+    assert not directive_violations("Do not skip the gate; run every test.")
+    assert directive_violations("Never waive a check; skip the gallery capture test.")
     assert not directive_violations("Rerun the gate at the final commit and re-capture frame 3")
     assert not directive_violations("Remove the .kilo scratch file, then rerun the checks")
 

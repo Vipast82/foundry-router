@@ -275,7 +275,13 @@ def directive_violations(text: str) -> list[str]:
             continue
         # dotted ids and paths (au.gate, docs/x.png) would stop the [^.] windows
         flat = re.sub(r"[\w\-]+(?:[./\\][\w\-]+)+", "item", line)
-        if WAIVE.search(line) or WAIVE.search(flat):
+        def unsafe_waive(value: str) -> bool:
+            return any(not re.search(
+                r"\b(?:do not|don't|never|must not|should not|avoid|without|no)\s+"
+                r"(?:(?:\w+)\s+){0,2}$",
+                value[max(0, m.start() - 36):m.start()], re.I)
+                for m in WAIVE.finditer(value))
+        if unsafe_waive(line) or unsafe_waive(flat):
             out.append("waives_check: " + line[:240])
         if CLOSE_TARGET.search(line) and DEFER.search(line):
             out.append("moves_build_to_close: " + line[:240])
