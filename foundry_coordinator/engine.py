@@ -64,6 +64,11 @@ class Coordinator:
         self._ledger = None
         self._obligations = None
         self._recovery = None
+        # [lead_manager] (v0.123): the last automated recovery tier (lead.py).
+        # Built lazily and only when some project enables it; `lead` is None
+        # otherwise, and a disabled project never touches its tables.
+        self._lead = None
+        self._lead_assigned = False
         for p in projects:
             store.register_project(p.id, p.profile.name, p.profile.path, p.profile.hash,
                                    p.profile.version, os.path.realpath(p.profile.workspace))
@@ -163,6 +168,15 @@ class Coordinator:
     def _step(self, P: Project, t: dict) -> None:
         st = t["state"]
         self._close_session_notes(P, t)
+        if st == S.BLOCKED and (t.get("data") or {}).get("recovery_case") and self._lead_on(P):
+            return self._lead_blocked(P, t)
+        if (t.get("data") or {}).get("recovery_case") and not self._lead_on(P):
+            # [lead_manager] turned off while a case is live: the case is cancelled
+            # (sessions aborted, an unstarted upgrade cancelled) and the task
+            # keeps its original blocker for the operator
+            self._lead_disabled(P, t)
+            t = self.store.task(P.id, t["task_id"])
+            st = t["state"]
         if st == S.BLOCKED and self._lc(P):
             return self._lc_blocked(P, t)
         if st in S.TERMINAL or st in (S.BLOCKED, S.FAILED):
@@ -262,23 +276,29 @@ class Coordinator:
                 charge, stop = self._lc_budget(P, t, free)
                 if stop:
                     return
-        elif attempt > lim.limit("max_attempts", 3) + self.retry_guidance.allowance(t):
+        elif attempt > lim.limit("max_attempts", 3) + self.retry_guidance.allowance(t) \
+                + self._lead_allowance(t):
             if self.retry_guidance.consult(P, t):
                 return
             if ((self.store.task(pid, tid).get("data") or {}).get("retry_guidance") or {}).get(
                     "status") == "deferred":
                 return
-            return self.store.transition(pid, tid, S.FAILED, {
+            lead_extra = self._lead_allowance(t)
+            return self._stop(P, t, S.FAILED, {
                 "reason": f"{t['attempt']} implementation attempts used "
                           f"(max_attempts {lim.limit('max_attempts', 3)}, "
-                          f"guided extra {self.retry_guidance.allowance(t)})"})
-        if not lc_budget and t["sessions"] >= lim.limit("max_sessions_per_task", 8):
-            return self.store.transition(pid, tid, S.FAILED, {
-                "reason": f"{t['sessions']} sessions used (max_sessions_per_task)"})
+                          f"guided extra {self.retry_guidance.allowance(t)}"
+                          + (f", lead extra {lead_extra}" if lead_extra else "") + ")"},
+                cls="attempts_exhausted")
+        if not lc_budget and t["sessions"] >= lim.limit("max_sessions_per_task", 8) \
+                + self._lead_allowance(t):
+            return self._stop(P, t, S.FAILED, {
+                "reason": f"{t['sessions']} sessions used (max_sessions_per_task)"},
+                cls="sessions_exhausted")
         minutes = lim.limit("max_task_minutes", 0)
         if minutes and t["started_ts"] and self.clock() - t["started_ts"] > minutes * 60:
-            return self.store.transition(pid, tid, S.FAILED, {
-                "reason": f"over max_task_minutes ({minutes})"})
+            return self._stop(P, t, S.FAILED, {
+                "reason": f"over max_task_minutes ({minutes})"}, cls="task_minutes")
         try:
             spec = P.adapter.describe(tid)
         except AdapterError as e:
@@ -391,6 +411,9 @@ class Coordinator:
         data = dict(t["data"])
         data.pop("pending_start", None)
         data.pop(self.LC_PENDING, None)          # a continuation belongs to its own session
+        if data.get("lead_assignment"):
+            # [lead_manager] a lead assignment rides in exactly one session start
+            data["lead_assignment_used"] = {**data.pop("lead_assignment"), "run_id": run_id}
         if before_task is None:
             data["task_baseline_dirty"] = sorted(p for _, p in dirty if p not in adopted)
         data.update(baseline_dirty=baseline, free_retry=None, findings=findings or None,
@@ -549,9 +572,10 @@ class Coordinator:
         data = self.store.merge_data(pid, tid, helper_wait_since=None)
         if blocked:
             self.store.release(pid, tid)
-            return self.store.transition(pid, tid, S.BLOCKED, {
+            return self._stop(P, t, S.BLOCKED, {
                 "blocker": f"session reported {status}: {rep.get('blocker') or rep.get('summary')}",
-                "session_id": t["session_id"]}, blocker=str(rep.get("blocker") or status)[:500])
+                "session_id": t["session_id"]}, cls="session_" + status.lower(),
+                blocker=str(rep.get("blocker") or status)[:500])
         # A committed, partially ticked BUILD plan is progress, not a failed
         # final submission. Keep final verification and every required check for
         # the point when BUILD is actually complete. Only grant a free next
@@ -836,11 +860,12 @@ class Coordinator:
                 verification_id=vid, head_sha=head, data={**t["data"], "findings": findings})
         if unknown:
             self.store.release(pid, tid)
-            return self.store.transition(pid, tid, S.BLOCKED, {
+            return self._stop(P, t, S.BLOCKED, {
                 "verification_id": vid,
                 "blocker": "required checks could not be run: " + ", ".join(
                     f"{r.check} ({(r.detail or '').splitlines()[0] if r.detail else 'unknown'})"
-                    for r in unknown)}, verification_id=vid, head_sha=head)
+                    for r in unknown)}, cls="checks_unknown", verification_id=vid,
+                head_sha=head)
         if self._lc(P) and self._lc_submission_gate(P, t, spec, head, vid, results):
             return                       # premature review refused: never submitted
         self.store.transition(pid, tid, S.REVIEWING, {
@@ -991,9 +1016,9 @@ class Coordinator:
         n = len(prior)                                  # call index at this head (op key)
         if invalid >= INVALID_REVIEWS_BEFORE_BLOCK:
             self.store.release(pid, tid)
-            return self.store.transition(pid, tid, S.BLOCKED, {
+            return self._stop(P, t, S.BLOCKED, {
                 "blocker": f"the reviewer returned {invalid} invalid results for {head[:12]}: "
-                           f"{prior[-1]['error']}"})
+                           f"{prior[-1]['error']}"}, cls="review_invalid")
         if self._held(P, t, "review"):
             return                       # a paused project starts no new paid review
         all_reviews = self.store.reviews(pid, tid)
@@ -1001,8 +1026,9 @@ class Coordinator:
         lc_calls = self._lc(P, "obligations")
         if not lc_calls and len(all_reviews) >= cap:
             self.store.release(pid, tid)
-            return self.store.transition(pid, tid, S.BLOCKED, {
-                "blocker": f"review budget used ({len(all_reviews)}/{cap} review calls)"})
+            return self._stop(P, t, S.BLOCKED, {
+                "blocker": f"review budget used ({len(all_reviews)}/{cap} review calls)"},
+                cls="review_budget")
         deep = [p for p in P.profile.review.get("deep_when") or []
                 if any(matches_any(tag, [p]) for tag in spec.tags)]
         role = "deep_reviewer" if deep and "deep_reviewer" in P.profile.roles else "reviewer"
@@ -1034,9 +1060,9 @@ class Coordinator:
             lim = self.obligations.effective_limits(P, t)["review_calls"]
             if lim["remaining"] <= 0:
                 self.store.release(pid, tid)
-                return self.store.transition(pid, tid, S.BLOCKED, {
+                return self._stop(P, t, S.BLOCKED, {
                     "blocker": f"review budget used ({lim['used']}/{lim['max']} review calls, "
-                               f"budget ledger)"})
+                               f"budget ledger)"}, cls="review_budget")
         base = t["data"].get("task_base") or t["base_sha"]
         ver = self.store.verification(t["verification_id"], pid, tid)
         limits, limits_from = self._reviewer_limits(P, persona)
@@ -1112,8 +1138,8 @@ class Coordinator:
                 max_err = self.obligations.effective_limits(P, t)["review_errors"]["max"]
             if n >= max_err:
                 self.store.release(pid, tid)
-                return self.store.transition(pid, tid, S.BLOCKED, {
-                    "blocker": f"review call failed {n} times: {e}"})
+                return self._stop(P, t, S.BLOCKED, {
+                    "blocker": f"review call failed {n} times: {e}"}, cls="review_errors")
             return self._note(P, t, f"review call failed ({n}/{max_err}): {e}")
         self._end_review_binding(P, rsid, "done")
         try:
@@ -1245,9 +1271,10 @@ class Coordinator:
                 "review_id": rev["review_id"], "findings": findings, "verdict": "CHANGES_REQUIRED"},
                 review_id=rev["review_id"], data={**t["data"], "findings": findings})
         self.store.release(pid, tid)
-        self.store.transition(pid, tid, S.BLOCKED, {
+        self._stop(P, t, S.BLOCKED, {
             "blocker": "reviewer: " + ("; ".join(R.findings_for_repair(res)) or "BLOCKED"),
-            "review_id": rev["review_id"], "verdict": "BLOCKED"}, review_id=rev["review_id"])
+            "review_id": rev["review_id"], "verdict": "BLOCKED"}, cls="review_blocked",
+            review_id=rev["review_id"])
 
     # -- APPROVED / CLOSING ----------------------------------------------------------
 
@@ -1583,6 +1610,14 @@ class Coordinator:
             P.client.abort(t["session_id"], directory=P.profile.workspace)
             self._end_session(P, t["session_id"], "cancelled")
         self.helpers.abort_running(P, task_id, "cancelled", f"task cancelled: {reason}"[:300])
+        case_id = (t.get("data") or {}).get("recovery_case")
+        if case_id:
+            # [lead_manager] the case goes with the task: its lead / repair sessions
+            # are aborted, an upgrade no supervisor started is cancelled, its open
+            # escalation is withdrawn
+            L = self._lead_any()
+            if L is not None:
+                L.cancel(case_id, f"task cancelled by {actor}: {reason}"[:300], actor=actor, P=P)
         self.store.release(project_id, task_id)
         return self.store.transition(project_id, task_id, S.CANCELLED, {"reason": reason},
                                      actor=actor)
@@ -1597,6 +1632,10 @@ class Coordinator:
         # a project without [lifecycle] keeps every data key but the question)
         drop = ("question", "decision_wait", "readiness_block", "readiness", "blocker_class",
                 self.LC_PENDING, "lc_stop") if lc_on else ("question",)
+        case_id = (t["data"] or {}).get("recovery_case")
+        if case_id:
+            # [lead_manager] the operator resolved the block: the case goes with it
+            drop = drop + ("recovery_case", "lead_trigger")
         data = {k: v for k, v in t["data"].items() if k not in drop}
         stop = (t["data"].get("lc_stop") or {}) if lc_on else {}
         if reset_attempts:
@@ -1624,6 +1663,10 @@ class Coordinator:
                 self._lc_backfill(P, t)
             out = self.store.transition(project_id, task_id, S.READY, evidence,
                                         actor=actor, data=data, **fields)
+            lead = self._lead_any() if case_id else None
+            if lead is not None and hasattr(lead, "cancel"):
+                lead.cancel(case_id, f"operator unblock by {actor}: {resolution}"[:300],
+                                  actor=actor, P=self.projects.get(project_id))
             if stop.get("decision_id"):
                 # [lifecycle] the operator resolved a "stop" answer: it is withdrawn
                 # (kept for the audit), so the next escalation asks again instead of
@@ -1933,8 +1976,28 @@ class Coordinator:
     def obligations(self):
         if self._obligations is None:
             from .obligations import Obligations
-            self._obligations = Obligations(self.store, clock=self.clock)
+            self._obligations = Obligations(self.store, clock=self.clock,
+                                            unblock_validator=self._unblock_ref_ok)
         return self._obligations
+
+    def _unblock_ref_ok(self, project: str, task: str, ref: str, actor: str) -> bool:
+        """Obligations' check of an `unblock:<ref>` budget authorization. The
+        ordinary `unblock:<n>` (an applied operator reset unblock) is checked
+        exactly as without this hook; `unblock:lead:<case>` is the
+        [lead_manager] delegated policy (the operator's profile setting
+        extra_attempts), valid only for an open case of this very task whose
+        action is a lead game assignment (or Victor's answer to its question),
+        and only for the engine's policy actor."""
+        if ref.startswith(self.LEAD_REF):
+            P = self.projects.get(project)
+            if actor != self.LEAD_POLICY_ACTOR or P is None or not self._lead_on(P):
+                return False
+            case = self.lead.case(ref[len(self.LEAD_REF):])
+            from .lead import OPEN_STATES
+            return bool(case and case["project_id"] == project and case["task_id"] == task
+                        and case["state"] in OPEN_STATES and (case.get("proposed_action") or {})
+                        .get("kind") in ("assign_game_repair", "victor_answer"))
+        return self._obligations._unblock_applied(project, task, ref, actor)
 
     @property
     def recovery(self):
@@ -2041,9 +2104,9 @@ class Coordinator:
         self._lc_backfill(P, t)
         L = self.obligations.effective_limits(P, t)
         if L["sessions"]["remaining"] <= 0:
-            self.store.transition(pid, tid, S.FAILED, {
+            self._stop(P, t, S.FAILED, {
                 "reason": f"{L['sessions']['used']} sessions used (max_sessions_per_task "
-                          f"{L['sessions']['max']}, budget ledger)"})
+                          f"{L['sessions']['max']}, budget ledger)"}, cls="sessions_exhausted")
             return None, True
         if free:
             return None, False
@@ -2056,10 +2119,10 @@ class Coordinator:
         if ((self.store.task(pid, tid).get("data") or {}).get("retry_guidance") or {}).get(
                 "status") == "deferred":
             return None, True             # quota reading may recover; spend no attempt
-        self.store.transition(pid, tid, S.FAILED, {
+        self._stop(P, t, S.FAILED, {
             "reason": f"{L['ordinary']['used']} implementation attempts used (max_attempts "
                       f"{L['ordinary']['max']}, guided extra {L['guided_extra']['used']}/"
-                      f"{L['guided_extra']['max']}, budget ledger)"})
+                      f"{L['guided_extra']['max']}, budget ledger)"}, cls="attempts_exhausted")
         return None, True
 
     # -- readiness -----------------------------------------------------------------
@@ -2106,9 +2169,14 @@ class Coordinator:
                 "readiness_block": {**r, "since": now, "checks": 1, "retry_s": retry,
                                     "retry_at": (now + retry) if r["auto"] else None}}
         self.store.release(pid, tid)
-        self.store.transition(pid, tid, S.BLOCKED, {
-            "blocker": text, "blocker_class": r["cls"], "readiness": r["items"],
-            "attempt_consumed": "no"}, blocker=text, data=data)
+        ev = {"blocker": text, "blocker_class": r["cls"], "readiness": r["items"],
+              "attempt_consumed": "no"}
+        if r["auto"]:
+            # environment / runtime_sync re-check themselves on a timer: not a final stop
+            self.store.transition(pid, tid, S.BLOCKED, ev, blocker=text, data=data)
+        else:
+            self._stop(P, cur, S.BLOCKED, ev, cls="readiness_" + str(r["cls"]), blocker=text,
+                       data=data)
 
     # -- BLOCKED: readiness re-check, decision waits --------------------------------
 
@@ -2212,6 +2280,12 @@ class Coordinator:
         if pending:
             if final_ids != ids:
                 self._lc_rewait(P, t, final_ids)
+            stalls = [d for d in pending if d["kind"] in self.LEAD_WAIT_KINDS]
+            if stalls and self._lead_on(P):
+                # [lead_manager] the deterministic re-check above did not clear the
+                # no-progress / repeated-repair question: before it reaches Victor,
+                # the lead tier diagnoses it (one case per fingerprint)
+                self._lead_from_wait(P, self.store.task(pid, tid), stalls)
             return
         answered = [d for d in decs if d]
         stop = self._lc_stop_answer(answered)
@@ -2476,7 +2550,16 @@ class Coordinator:
         if findings and self._lc(P, "recovery") and self._lc(P, "obligations"):
             strategy = ""
             pr = self._lc_progress(P, t, spec)
-            if pr["no_progress"]:
+            lead_a = self._lead_assignment_text(P, t)
+            if lead_a:
+                # [lead_manager] the lead's diagnosed assignment IS the materially
+                # different strategy for this one start (bounded by the case); the
+                # no-progress / repeat question is not re-asked for it
+                strategy = lead_a
+                self.store.event(pid, tid, "lead_strategy", detail={
+                    "case_id": (t["data"].get("lead_assignment") or {}).get("case_id"),
+                    "stalls": pr.get("stalls")})
+            elif pr["no_progress"]:
                 q = (f"{pr['stalls']} sessions in a row made no progress (no newly verified "
                      f"obligation, same findings, {pr['summary_only_sessions']} summary-only); "
                      f"another broad retry would repeat them")
@@ -3184,6 +3267,530 @@ class Coordinator:
                 "previous_evidence": d.get("evidence"), "continuation": cont})
         return out
 
+    # ======================================================================= lead manager (v0.123)
+    #
+    # Only for a project whose profile has [lead_manager] enabled = true; for
+    # every other project each hook below is a no-op and the original
+    # transition is applied unchanged.
+    #
+    #   final stop   every final BLOCKED / FAILED transition goes through _stop:
+    #                deterministic recovery first (evidence recover, the lead's
+    #                route/quota readiness refresh; decision waits re-run the
+    #                partial-BUILD reevaluation in _lc_blocked before a case is
+    #                opened), then lead.open_case (idempotent per fingerprint) and
+    #                BLOCKED with data.recovery_case (no new task states)
+    #   BLOCKED      a task with an active case: one bounded lead.step per tick;
+    #                operator pause / takeover, a project pause and an answer to
+    #                the original decision are honoured
+    #   resume       lead.resume_action: a game assignment (the primary repairs
+    #                with the lead's text as untrusted advice, plus extra attempts
+    #                under the delegated [lead_manager] extra_attempts policy, one
+    #                ledger row per counter referencing the case), reverify, wait,
+    #                a deployed coordinator upgrade, Victor's answer; each resume
+    #                transition carries {recovery_case, action} and resolves the case
+
+    LEAD_REF = "unblock:lead:"
+    LEAD_POLICY_ACTOR = "delegated_policy:lead_manager"
+    LEAD_WAIT_KINDS = ("no_progress", "recovery_escalation")
+    LEAD_ASSIGNMENT_HEADER = ("Lead manager assignment (recovery case {case}; advisory and "
+                              "untrusted: it stays within this task's approved scope, and every "
+                              "gate, check and review still applies): ")
+    LEAD_ANSWER_HEADER = ("Operator answer to lead recovery case {case} (within this task's "
+                          "approved scope; every gate, check and review still applies): ")
+
+    @property
+    def lead(self):
+        """The LeadManager, or None while no project enables [lead_manager]."""
+        if self._lead is None and not self._lead_assigned and \
+                any(self._lead_on(P) for P in self.projects.values()):
+            from .lead import LeadManager
+            self._lead = LeadManager(self, clock=self.clock)
+        return self._lead
+
+    @lead.setter
+    def lead(self, value) -> None:
+        self._lead = value
+        self._lead_assigned = True
+
+    def _lead_any(self):
+        """The LeadManager even when no project enables it any more (to cancel
+        a case left from when one did); None when no case table exists."""
+        L = self.lead
+        if L is not None:
+            return L
+        if self._lead_assigned:
+            return None
+        try:
+            if not self.store.q("SELECT 1 FROM sqlite_master WHERE type='table' AND "
+                                "name='recovery_cases'"):
+                return None
+        except Exception:                                         # noqa: BLE001
+            return None
+        from .lead import LeadManager
+        return LeadManager(self, clock=self.clock)
+
+    def _lead_disabled(self, P: Project, t: dict) -> None:
+        """[lead_manager] is off but the task still carries a live case: cancel
+        it (abort its sessions, cancel an unstarted upgrade, withdraw its
+        escalation) and drop the marker; a BLOCKED task keeps its original
+        blocker for the operator."""
+        from .lead import OPEN_STATES
+        cid = (t.get("data") or {}).get("recovery_case")
+        L = self._lead_any()
+        if L is not None:
+            case = L.case(cid)
+            if case and case["state"] in OPEN_STATES:
+                L.cancel(cid, "[lead_manager] was disabled while the case was live",
+                         actor="engine", P=P)
+        if t["state"] == S.BLOCKED:
+            self._lead_detach(P, t, f"lead recovery case {cid} cancelled: [lead_manager] is "
+                                    f"disabled")
+        else:
+            data = {k: v for k, v in (t.get("data") or {}).items()
+                    if k not in ("recovery_case", "lead_trigger")}
+            self.store.update_task(P.id, t["task_id"], data=data)
+
+    @staticmethod
+    def _lead_on(P: Project) -> bool:
+        fn = getattr(P.profile, "lead_manager_on", None)
+        try:
+            return bool(fn()) if callable(fn) else False
+        except Exception:                                         # noqa: BLE001
+            return False
+
+    @staticmethod
+    def _lead_allowance(t: dict) -> int:
+        """Extra attempts/sessions the lead's delegated policy granted this task
+        (projects without the budget ledger; the ledger counts its own rows)."""
+        grants = ((t or {}).get("data") or {}).get("lead_grants") or {}
+        try:
+            return sum(max(0, int(v)) for v in grants.values())
+        except (TypeError, ValueError, AttributeError):
+            return 0
+
+    def _lead_assignment_text(self, P: Project, t: dict) -> str:
+        if not self._lead_on(P):
+            return ""
+        a = (t.get("data") or {}).get("lead_assignment") or {}
+        return str(a.get("assignment") or "")
+
+    def _stop(self, P: Project, t: dict, to: str, evidence: dict, cls: str = "",
+              **fields) -> Optional[dict]:
+        """A final BLOCKED / FAILED transition. With [lead_manager] on, a
+        recovery case is opened first and the task waits BLOCKED on it; when
+        the lead is off (or the case cannot be opened) the original transition
+        is applied unchanged."""
+        if self._lead_on(P):
+            try:
+                out = self._lead_open(P, t, to, evidence, cls, dict(fields))
+            except Exception as e:                                # noqa: BLE001
+                self.store.event(P.id, t["task_id"], "warning", detail={
+                    "lead_manager": f"open case failed: {type(e).__name__}: {e}"[:400]})
+                self.log(f"{P.id}/{t['task_id']}: lead open_case failed: {e}")
+                out = None
+            if out is not None:
+                return out
+        return self.store.transition(P.id, t["task_id"], to, evidence, **fields)
+
+    def _lead_recheck(self, P: Project, t: dict) -> dict:
+        """Deterministic recovery before a case: recover evidence (lifecycle) and
+        refresh the lead's route/quota readiness. Never a paid model call."""
+        out: dict = {}
+        if self._lc(P, "evidence"):
+            rep = self._lc_recover(P, t) or {}
+            out["evidence_recovered"] = int(rep.get("added") or 0)
+        try:
+            bad = [r["name"] for r in self.lead.readiness(P, fresh=True) if r.get("blocking")]
+            out["lead_readiness"] = "ok" if not bad else "not ready: " + ", ".join(bad)
+        except Exception as e:                                    # noqa: BLE001
+            out["lead_readiness"] = f"unavailable: {type(e).__name__}"
+        return out
+
+    def _lead_failed_checks(self, P: Project, tid: str, vid: str) -> list:
+        if not vid:
+            return []
+        try:
+            return [{"check_id": r["check_name"], "result": r["result"],
+                     "detail": str(r.get("detail") or "")[:300]}
+                    for r in self.store.verification(vid, P.id, tid) if r.get("result") != PASS]
+        except Exception:                                         # noqa: BLE001
+            return []
+
+    def _lead_open(self, P: Project, t: dict, to: str, evidence: dict, cls: str,
+                   fields: dict) -> Optional[dict]:
+        pid, tid = P.id, t["task_id"]
+        cur = self.store.task(pid, tid)
+        if cur is None or cur["state"] in S.TERMINAL or cur["state"] == S.BLOCKED:
+            return None
+        reason = str(evidence.get("blocker") or evidence.get("reason") or to)
+        trow = {**cur, **{k: fields[k] for k in ("verification_id", "head_sha", "review_id")
+                          if fields.get(k)}}
+        ev = {k: evidence[k] for k in ("verification_id", "review_id", "session_id",
+                                       "blocker_class", "decision_id") if evidence.get(k)}
+        ev.update(self._lead_recheck(P, trow))
+        try:
+            ev["revision"] = P.ws.head()
+        except GitError:
+            pass
+        # the deterministic recheck DECIDES: recovered evidence re-runs the gate,
+        # a cleared readiness block resumes, before any paid lead call
+        done = self._lead_recheck_resolves(P, cur, to, evidence, cls, ev, fields)
+        if done is not None:
+            return done
+        ev["failed_checks"] = self._lead_failed_checks(P, tid, trow.get("verification_id") or "")
+        if evidence.get("readiness"):
+            ev["readiness"] = evidence["readiness"]
+        trigger = {"state": to, "reason": reason[:1500], "class": cls}
+        case = self.lead.open_case(P, trow, trigger, ev)
+        if not case:
+            return None
+        cid = case["case_id"]
+        blocker = self._lead_blocker_text(case, to, reason)
+        ev2 = {**evidence, "blocker": blocker, "recovery_case": cid, "lead_trigger": to}
+        try:
+            S.check(cur["state"], S.BLOCKED, ev2)
+        except S.TransitionError:
+            # (no BLOCKED transition from this state): the original stop applies;
+            # the case stays for the operator's view
+            return None
+        data = dict(fields.pop("data", None) or cur["data"] or {})
+        data.update(recovery_case=cid, lead_trigger={"state": to, "reason": reason[:500],
+                                                     "class": cls})
+        fields.pop("blocker", None)
+        fields.setdefault("next_action", blocker[:500])
+        self.store.event(pid, tid, "lead_case", detail={
+            "case_id": cid, "state": case["state"], "trigger": to, "class": cls,
+            "fingerprint": case.get("fingerprint"), "reason": reason[:300]})
+        self.store.release(pid, tid)
+        return self.store.transition(pid, tid, S.BLOCKED, ev2, blocker=blocker, data=data,
+                                     **fields)
+
+    def _lead_recheck_resolves(self, P: Project, cur: dict, to: str, evidence: dict, cls: str,
+                               ev: dict, fields: dict) -> Optional[dict]:
+        """The deterministic recheck before a case decides (no paid call):
+          * a readiness stop whose readiness now passes: no stop, the start
+            retries on the next tick;
+          * evidence recovered for a committed head with no uncommitted work:
+            the task re-runs verification (BLOCKED -> VERIFYING) instead of
+            opening a case.
+        Once per (head, class): a repeat at the same head opens the case.
+        None when it does not resolve the stop."""
+        pid, tid = P.id, cur["task_id"]
+        data = dict(cur.get("data") or {})
+        head = str(ev.get("revision") or "")
+        mark = data.get("lead_recheck") or {}
+        if not head or (mark.get("head") == head and mark.get("cls") == cls):
+            return None
+        now = self.clock()
+        marked = {**data, "lead_recheck": {"head": head, "cls": cls, "ts": now}}
+        if str(cls or "").startswith("readiness_") and self._lc(P, "readiness"):
+            try:
+                spec = P.adapter.describe(tid)
+            except AdapterError:
+                spec = None
+            r = self._lc_readiness(P, cur, spec, {"attempt": cur["attempt"] + 1,
+                                                  "base": cur["base_sha"], "recheck": True}) \
+                if spec is not None else {"cls": "unknown"}
+            if r is None:
+                self.store.update_task(pid, tid, data=marked,
+                                       next_action="readiness re-check passed; retrying")
+                self.store.event(pid, tid, "lead_recheck", detail={
+                    "result": "readiness cleared", "class": cls, "head": head})
+                return self.store.task(pid, tid)
+            return None
+        rec = int(ev.get("evidence_recovered") or 0)
+        base = cur.get("base_sha") or ""
+        if rec <= 0 or not base or head == base or cur["state"] == S.BLOCKED:
+            return None
+        try:
+            if P.ws.status():
+                return None              # uncommitted work: not a pure re-verification
+        except GitError:
+            return None
+        vid = evidence.get("verification_id") or fields.get("verification_id") or \
+            cur.get("verification_id") or ""
+        blocker = (f"deterministic recheck: {rec} evidence record(s) recovered at "
+                   f"{head[:12]}; re-verifying before any paid lead call")
+        bev = {"blocker": blocker, "lead_recheck": True}
+        if vid:
+            bev["verification_id"] = vid
+        try:
+            S.check(cur["state"], S.BLOCKED, bev)
+        except S.TransitionError:
+            return None
+        self.store.release(pid, tid)
+        if self._acquire(P, cur, self._workspace_locks(P)):
+            return None                  # the workspace is busy: the case path applies
+        res = f"deterministic recheck recovered {rec} evidence record(s): verifying {head[:12]} " \
+              f"again (no paid call)"
+        with self.store.tx():
+            self.store.transition(pid, tid, S.BLOCKED, bev, blocker=blocker, data=marked)
+            out = self.store.transition(pid, tid, S.VERIFYING, {
+                "resolution": res, "decision_id": f"lead_recheck:{head[:12]}",
+                "evidence_recovered": rec}, next_action=res[:500])
+        self.store.event(pid, tid, "lead_recheck", detail={
+            "result": "re-verify", "evidence_recovered": rec, "head": head, "trigger": to,
+            "class": cls})
+        return out
+
+    @staticmethod
+    def _lead_blocker_text(case: dict, trigger: str = "", reason: str = "") -> str:
+        trig = case.get("trigger") or {}
+        trigger = trigger or trig.get("state") or ""
+        reason = reason or trig.get("reason") or ""
+        return (f"lead recovery: {case['state']} (case {case['case_id']}; would have been "
+                f"{trigger}: {reason})")[:1000]
+
+    def _lead_from_wait(self, P: Project, t: dict, decisions: list) -> None:
+        """A no-progress / repeated-repair decision still open after the
+        deterministic re-check: a lead case for it (the decision stays open
+        and an operator answer to it still wins)."""
+        pid, tid = P.id, t["task_id"]
+        data = t.get("data") or {}
+        if data.get("recovery_case"):
+            return
+        dw = data.get("decision_wait") or {}
+        d0 = decisions[0]
+        reason = f"decision {d0['decision_id']} ({d0['kind']}): {dw.get('why') or ''}: " \
+                 f"{str(d0.get('question') or '')[:600]}"
+        ev = {"decision_id": ",".join(d["decision_id"] for d in decisions),
+              "decision_evidence": d0.get("evidence")}
+        ev.update(self._lead_recheck(P, t))
+        try:
+            ev["revision"] = P.ws.head()
+        except GitError:
+            pass
+        ev["failed_checks"] = self._lead_failed_checks(P, tid, t.get("verification_id") or "")
+        case = self.lead.open_case(P, t, {"state": S.BLOCKED, "reason": reason[:1500],
+                                          "class": "decision_" + d0["kind"]}, ev)
+        if not case:
+            return
+        text = self._lead_blocker_text(case, S.BLOCKED, reason)
+        self.store.update_task(pid, tid, blocker=text, next_action=text[:500], data={
+            **data, "recovery_case": case["case_id"],
+            "lead_trigger": {"state": S.BLOCKED, "reason": reason[:500],
+                             "class": "decision_" + d0["kind"]}})
+        self.store.event(pid, tid, "lead_case", detail={
+            "case_id": case["case_id"], "state": case["state"], "trigger": "decision_wait",
+            "decisions": [d["decision_id"] for d in decisions]})
+
+    def _lead_detach(self, P: Project, t: dict, why: str) -> None:
+        """The case is over without a resume (cancelled / resolved elsewhere):
+        the task stays BLOCKED for the operator, without the case marker."""
+        data = {k: v for k, v in (t.get("data") or {}).items()
+                if k not in ("recovery_case", "lead_trigger")}
+        trig = (t.get("data") or {}).get("lead_trigger") or {}
+        text = f"{why}; the original blocker: {trig.get('reason') or t.get('blocker') or ''}"
+        self.store.update_task(P.id, t["task_id"], data=data, blocker=text[:1000],
+                               next_action=text[:500])
+        self.store.event(P.id, t["task_id"], "lead_case_detached", detail={"why": why[:300]})
+
+    def _lead_blocked(self, P: Project, t: dict) -> None:
+        """BLOCKED on a recovery case: one bounded lead step, then the resume."""
+        from .lead import OPEN_STATES
+        pid, tid = P.id, t["task_id"]
+        L = self.lead
+        data = t.get("data") or {}
+        cid = data["recovery_case"]
+        case = L.case(cid)
+        if case is None or case["state"] not in OPEN_STATES:
+            return self._lead_detach(P, t, f"lead recovery case {cid} is "
+                                           f"{(case or {}).get('state') or 'missing'}")
+        dw = data.get("decision_wait") or {}
+        # a question the case's own lead_escalation replaced (withdrawn by the
+        # lead, superseded once Victor answers the escalation) is not an
+        # operator decision: the case's NEEDS_VICTOR step handles that answer
+        replaced = set(((case.get("validation") or {}).get("superseded_decisions")) or [])
+        waits = [i for i in dw.get("ids") or [] if i not in replaced]
+        if waits and self._lc(P):
+            decs = [self._lc_final_decision(i) for i in waits]
+            if not any(d and d["status"] == "open" for d in decs):
+                # the operator answered (or withdrew) the original question: his
+                # decision wins; the case is cancelled and _lc_blocked resumes
+                L.cancel(cid, "the operator decided the original question", P=P)
+                data = {k: v for k, v in data.items() if k not in ("recovery_case",
+                                                                   "lead_trigger")}
+                self.store.update_task(pid, tid, data=data)
+                self.store.event(pid, tid, "lead_case_cancelled", detail={
+                    "case_id": cid, "reason": "operator answered the original decision"})
+                return
+        if case["paused"]:
+            takeover = (case.get("validation") or {}).get("takeover")
+            return self._note(P, t, f"lead recovery case {cid} "
+                                    + ("taken over by " + str(takeover.get("actor"))
+                                       if takeover else "paused by the operator")
+                                    + ": the task stays BLOCKED")
+        if case["state"] != "UPGRADING" and self._held(P, t, "lead recovery"):
+            return                       # a paused project starts no lead / repair call
+        case = L.step(P, t, case) or case
+        t = self.store.task(pid, tid)
+        text = self._lead_blocker_text(case)
+        if t["blocker"] != text:
+            self.store.update_task(pid, tid, blocker=text, next_action=text[:500])
+            t = self.store.task(pid, tid)
+        ra = L.resume_action(pid, tid)
+        if ra and ra.get("case_id") == cid:
+            if self._held(P, t, "lead recovery resume"):
+                return
+            self._lead_resume(P, t, L.case(cid), dict(ra.get("action") or {}))
+
+    def _lead_upgraded(self, case: dict, act: dict) -> bool:
+        """The case's coordinator upgrade is installed: the lead's UPGRADING
+        step saw the supervisor's request `done` (and set `upgraded`), and the
+        request still says so (supervisor.get_request). The supervisor never
+        moves the case itself."""
+        uid = act.get("upgrade_id") or case.get("upgrade_id")
+        if not act.get("upgraded") or not uid:
+            return False
+        try:
+            from .supervisor import get_request
+            req = get_request(self.store, uid)
+        except Exception:                                         # noqa: BLE001
+            return False
+        return bool(req and req["status"] == "done")
+
+    def _lead_grant(self, P: Project, t: dict, case: dict, n: int) -> dict:
+        """Extra ordinary attempts (and the sessions they need) under the
+        delegated [lead_manager] extra_attempts policy, at most once per case:
+        authorized ledger rows referencing the case (lifecycle budget ledger),
+        else the task's lead_grants allowance. Journaled on the case."""
+        pid, tid, cid = P.id, t["task_id"], case["case_id"]
+        cap = int(self.lead.settings(P).get("extra_attempts") or 0)
+        n = max(0, min(int(n or 0), cap))
+        out = {"n": n, "ref": self.LEAD_REF + cid, "policy": "[lead_manager] extra_attempts",
+               "counters": []}
+        if n <= 0:
+            return out
+        if self._lc(P, "obligations"):
+            from .obligations import LedgerRefused
+            self._lc_backfill(P, t)
+            for counter in ("attempt_ordinary", "sessions"):
+                try:
+                    self.obligations.authorize(pid, tid, counter, n,
+                                               f"lead case {cid}: delegated policy "
+                                               f"[lead_manager] extra_attempts={cap}",
+                                               self.LEAD_POLICY_ACTOR, out["ref"])
+                    out["counters"].append(counter)
+                except LedgerRefused as e:
+                    out.setdefault("refused", []).append(f"{counter}: {e}"[:200])
+        else:
+            out["counters"] = ["lead_grants"]
+        try:
+            self.lead._act(case, "authorize_attempts", result=f"{n} extra attempt(s)",
+                           detail=out, repo="game", actor=self.LEAD_POLICY_ACTOR,
+                           op_key=f"{cid}:grant")
+        except Exception as e:                                    # noqa: BLE001
+            self.store.event(pid, tid, "warning", detail={"lead_grant_journal": str(e)[:300]})
+        return out
+
+    def _lead_resume(self, P: Project, t: dict, case: dict, act: dict) -> None:
+        """Apply a RESUMING case's action. Each transition carries
+        {recovery_case, action}; the case is resolved in the same transaction."""
+        pid, tid, cid = P.id, t["task_id"], case["case_id"]
+        kind = str(act.get("kind") or "")
+        head = P.ws.head()
+        data = {k: v for k, v in (t["data"] or {}).items()
+                if k not in ("recovery_case", "lead_trigger", "decision_wait", "blocker_class",
+                             "readiness_block", "readiness", self.LC_PENDING)}
+        dw_ids = list(((t["data"] or {}).get("decision_wait") or {}).get("ids") or [])
+        ev = {"recovery_case": cid, "action": kind}
+        target, extra = S.READY, {}
+        text = ""
+        if kind == "victor_answer":
+            if act.get("how"):
+                # the lead classified the answer (stop / strategy); budget and
+                # unclear answers never reach the engine
+                how, val = str(act["how"]), str(act.get("text") or "")
+            else:
+                from .recovery import Recovery
+                d = self.obligations.decision(act.get("decision_id") or "") or \
+                    {"answer": act.get("answer")}
+                how, val = Recovery._escalation_answer(d)
+            if how == "stop":
+                with self.store.tx():
+                    self.lead.resolve(cid, f"operator stopped the task: {val}"[:300])
+                    stop = f"lead recovery stopped by operator decision " \
+                           f"{act.get('decision_id') or ''}: {val or 'stop'}"
+                    self.store.update_task(pid, tid, blocker=stop[:1000],
+                                           next_action=stop[:500], data=data)
+                    self.store.event(pid, tid, "lead_case_stopped", detail={
+                        "case_id": cid, "decision_id": act.get("decision_id")})
+                return
+            text = val if how == "strategy" else ""
+            ev["decision_id"] = act.get("decision_id") or ""
+        if kind == "assign_game_repair" or text:
+            assignment = str(act.get("assignment") or "") if kind == "assign_game_repair" \
+                else text
+            n = int(act.get("extra_attempts") or 0) if kind == "assign_game_repair" else \
+                int(self.lead.settings(P).get("extra_attempts") or 0)
+            grant = self._lead_grant(P, t, case, n)
+            if not self._lc(P, "obligations") and grant["n"]:
+                grants = dict(data.get("lead_grants") or {})
+                grants[cid] = grant["n"]
+                data["lead_grants"] = grants
+            finding = (self.LEAD_ASSIGNMENT_HEADER if kind == "assign_game_repair"
+                       else self.LEAD_ANSWER_HEADER).format(case=cid) + assignment
+            if act.get("files"):
+                finding += " (files: " + ", ".join(act["files"][:12]) + ")"
+            # the original failures stay: the assignment comes first, then what
+            # the checks / review actually reported
+            prior = [f for f in ((t["data"] or {}).get("findings") or [])
+                     if not isinstance(f, str) or not f.startswith((
+                         self.LEAD_ASSIGNMENT_HEADER.split("{")[0],
+                         self.LEAD_ANSWER_HEADER.split("{")[0]))]
+            data.update(findings=[finding[:4000]] + prior[:20], free_retry=None,
+                        lead_assignment={
+                "case_id": cid, "assignment": assignment[:4000],
+                "files": list(act.get("files") or [])[:20],
+                "tests": list(act.get("tests") or [])[:20], "extra_attempts": grant["n"],
+                "authorized": grant["counters"]})
+            data = {k: v for k, v in data.items() if v is not None}
+            ev["extra_attempts"] = grant["n"]
+            res = f"lead case {cid}: the primary repairs per the lead's assignment"
+        elif kind == "reverify" or (kind == "coordinator_repair" and
+                                    self._lead_upgraded(case, act)):
+            # committed work and nothing uncommitted on top: verify the current head
+            # again (no paid primary session), also when HEAD moved since the stop
+            try:
+                pending = [p for x, p in P.ws.status() if str(x).strip() != "??"]
+            except GitError:
+                pending = ["?"]
+            if head and t.get("base_sha") and head != t["base_sha"] and not pending:
+                if self._acquire(P, t, self._workspace_locks(P)):
+                    return
+                target = S.VERIFYING
+                extra["decision_id"] = f"lead_case:{cid}"
+                if head != t.get("head_sha"):
+                    ev["head_moved"] = f"{str(t.get('head_sha') or '')[:12]}..{head[:12]}"
+            if kind == "coordinator_repair":
+                ev["upgrade_id"] = case.get("upgrade_id") or act.get("upgrade_id") or ""
+                res = f"lead case {cid}: coordinator upgrade {ev['upgrade_id']} installed; " \
+                      f"{'verifying the same head again' if target == S.VERIFYING else 'retry'}"
+            else:
+                res = f"lead case {cid}: evidence re-verification (no paid call)"
+        elif kind == "wait":
+            res = f"lead case {cid}: the deferred {act.get('classification') or 'environment'}" \
+                  f" condition re-checked clear"
+        else:
+            return self._note(P, t, f"lead recovery case {cid} resuming with an action the "
+                                    f"engine does not apply ({kind or 'none'}); waiting")
+        with self.store.tx():
+            if dw_ids and self._lc(P):
+                for did in dw_ids:
+                    # the lead's resume answers the stall the question was about; the
+                    # decision is kept (withdrawn), never deleted
+                    if self.store.q("SELECT 1 FROM decisions WHERE decision_id=? AND "
+                                    "status='open'", (did,)):
+                        self.store.x("UPDATE decisions SET status='withdrawn' WHERE "
+                                     "decision_id=? AND status='open'", (did,))
+                        self.store.event(pid, tid, "decision_withdrawn", detail={
+                            "decision_id": did, "by": "lead_manager",
+                            "reason": f"resolved by lead recovery case {cid} ({kind})"})
+            self.store.transition(pid, tid, target, {"resolution": res, **ev, **extra},
+                                  data=data, next_action=res[:500])
+            self.lead.resolve(cid, f"resumed: {kind} -> {target}")
+        self.store.event(pid, tid, "lead_resume", detail={**ev, "to": target})
+
     # ======================================================================= helpers
 
     def _project(self, project_id: str) -> Project:
@@ -3227,7 +3834,7 @@ class Coordinator:
 
     def _block(self, P: Project, t: dict, why: str) -> None:
         self.store.release(P.id, t["task_id"])
-        self.store.transition(P.id, t["task_id"], S.BLOCKED, {"blocker": why}, blocker=why[:1000])
+        self._stop(P, t, S.BLOCKED, {"blocker": why}, blocker=why[:1000])
 
     def _note(self, P: Project, t: dict, text: str) -> None:
         if t.get("next_action") != text:

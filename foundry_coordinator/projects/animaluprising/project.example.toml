@@ -264,6 +264,50 @@ enabled = true
 [frontier_primary]
 enabled = false
 
+# OPTIONAL (v0.123): the lead sprint manager, the last automated recovery tier
+# before a blocker reaches the operator (docs/LEAD_SPRINT_MANAGER.md). OFF by
+# default: disabled, the coordinator behaves exactly as without it. When on, a
+# frontier lead session diagnoses a BLOCKED/FAILED task READ-ONLY in the game
+# workspace (the primary stays the only writer); it can hand the primary a
+# bounded repair assignment, repair the coordinator in an isolated Foundry-Router
+# worktree (reproducing test, review, supervisor upgrade), wait out a provider
+# or environment problem, ask for re-verification, or escalate with a precise
+# question. It never marks checks PASS, answers operator decisions or changes
+# acceptance tests without declaring them. Readiness fails closed unless the
+# persona is enabled, strict, granted to Kilo's key and served by exactly
+# expected_models (no local route); a call served by any other model is aborted.
+[lead_manager]
+enabled = false
+# persona = "Foundry-Kilo-Lead-Manager"
+# expected_models = ["claude-opus-5-5"]   # ordered; first = the primary route. Add the Astra
+#                                         # fallback model id exactly as Foundry reports it.
+# agent = "lead"                          # Kilo agent of the lead session (read-only tools)
+# kilo_client = "kilo"                    # Foundry client name of Kilo's worker key
+# repair_agent = ""                       # Kilo agent for a coordinator repair ("" = client.agent)
+# reviewer = ""                           # repair reviewer ("" = roles.deep_reviewer/reviewer)
+# max_diagnoses = 3                       # lead calls per case
+# max_candidates = 2                      # repair candidates per case
+# max_upgrades = 1                        # supervisor upgrades per case
+# max_fingerprint_repeats = 1             # returns to the lead after a deployed fix
+# max_case_minutes = 240                  # operator pause / takeover time is not counted
+# max_quota_calls = 12                    # paid calls per case (lead, repair, review)
+# max_fingerprint_repeats counts earlier RESOLVED and CANCELLED cases of the same blocker
+# at any revision (task, class, check and obligation ids; not HEAD).
+# max_cases_per_task = 3                  # per task, across all of its cases
+# max_lead_calls_per_task = 6             # per task, across all of its cases
+# max_extra_attempts_per_task = 2         # delegated extra attempts per task
+# max_upgrade_minutes = 120               # UPGRADING longer than this -> Victor
+# max_resuming_minutes = 60               # a RESUMING case the engine never applied -> Victor
+# lead_timeout_minutes = 45
+# extra_attempts = 1                      # ordinary attempts a lead game assignment may use
+# defer_seconds = 300                     # first DEFERRED backoff (doubles, capped at 1 h)
+# acceptance_tests = []                   # game test globs an assignment must declare to change
+#                                         # ([] = the adapter's test paths, else tests/**, ...)
+# repair_broader_tests = ["tests/coordinator"]  # broader suite of a coordinator repair
+# repair_root = ""                        # default <state_dir>/repairs
+# router_repo = ""                        # default: the running package's checkout
+# supervisor = "manual"                   # manual | supervisor
+
 # OPTIONAL: one bounded frontier consultation before ordinary repair attempts
 # run out (scoped advice only; it never approves or widens scope).
 [retry_guidance]

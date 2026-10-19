@@ -54,6 +54,215 @@ _LEGACY_ALIASES = ("Foundry-Kilo-Haiku", "Foundry-Kilo-Sonnet", "Foundry-Kilo-Op
                    "Foundry-Kilo-Luna", "Foundry-Kilo-Sol", "Foundry-Kilo-Astra")
 
 
+class _StopRequested(BaseException):
+    """Raised from the after-tick hook so `Coordinator.run` (which only catches
+    Exception in hooks) unwinds cleanly at a tick boundary."""
+
+
+class _ProcessFiles:
+    """Process files the upgrade supervisor (supervisor.py) reads: a pid file
+    (supervisor.write_pid_file when available: pid + creation time + exe), a
+    heartbeat after every tick ({pid, ts, ok, lead_ready, version}; ok is
+    False when the tick logged errors) and a stop-request file it creates to
+    ask for a graceful exit. A stop is honored only between ticks, so no tick
+    is cut short, and only when it is a real supervisor request: JSON naming
+    a known upgrade id, or naming this process / an upgrade id while a
+    supervisor is configured ([lead_manager] supervisor = "supervisor").
+    Garbage and stale (> STALE_S) stop files are removed and ignored."""
+
+    STALE_S = 600
+
+    def __init__(self, state_dir: str, coordinator):
+        from . import supervisor as SV
+        self.SV = SV
+        self.c = coordinator
+        self.pid_path = os.path.join(state_dir, SV.PID_FILE)
+        self.hb_path = os.path.join(state_dir, SV.HEARTBEAT_FILE)
+        self.stop_path = os.path.join(state_dir, SV.STOP_FILE)
+        self.ignored: list[str] = []
+        self._last_ts = time.time()
+        os.makedirs(state_dir, exist_ok=True)
+        self._drop_stale()
+        wp = getattr(SV, "write_pid_file", None)
+        if callable(wp):
+            try:
+                wp(self.pid_path)
+            except Exception:                                    # noqa: BLE001
+                self._write(self.pid_path, str(os.getpid()))
+        else:
+            self._write(self.pid_path, str(os.getpid()))
+
+    def _write(self, path: str, text: str) -> None:
+        tmp = path + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            f.write(text)
+        os.replace(tmp, path)
+
+    def _request_live(self, req: dict) -> bool:
+        """A JSON stop request {upgrade_id, supervisor_pid, pid, ts}: its
+        supervisor is alive and it names this process (when it names one)."""
+        spid = req.get("supervisor_pid")
+        if spid not in (None, ""):
+            alive = getattr(self.SV, "pid_alive", None)
+            try:
+                if callable(alive) and not alive(int(spid)):
+                    return False
+            except (TypeError, ValueError):
+                return False
+        pid = req.get("pid")
+        if pid not in (None, "") and str(pid) != str(os.getpid()):
+            return False
+        return True
+
+    def _drop_stale(self) -> None:
+        try:
+            if not os.path.exists(self.stop_path):
+                return
+            if os.path.getmtime(self.stop_path) < time.time() - self.STALE_S:
+                os.remove(self.stop_path)
+                self.ignored.append("stale")
+                return
+            with open(self.stop_path, encoding="utf-8") as f:
+                raw = f.read(4096)
+            try:
+                req = json.loads(raw)
+            except ValueError:
+                return
+            if isinstance(req, dict) and not self._request_live(req):
+                os.remove(self.stop_path)
+                self.ignored.append("dead supervisor")
+        except OSError:
+            pass
+
+    def _supervisor_configured(self) -> bool:
+        lead = getattr(self.c, "lead", None)
+        if lead is None:
+            return False
+        for P in (getattr(self.c, "projects", None) or {}).values():
+            try:
+                if lead.enabled(P) and lead.settings(P).get("supervisor") == "supervisor":
+                    return True
+            except Exception:                                    # noqa: BLE001
+                continue
+        return False
+
+    def _known_upgrade(self, uid: str) -> bool:
+        store = getattr(self.c, "store", None)
+        if not uid or store is None:
+            return False
+        try:
+            return bool(self.SV.get_request(store, uid))
+        except Exception:                                        # noqa: BLE001
+            return False
+
+    def _stop_requested(self) -> bool:
+        """Read (and consume) the stop file: True only for a valid request."""
+        self._drop_stale()
+        if not os.path.exists(self.stop_path):
+            return False
+        try:
+            with open(self.stop_path, encoding="utf-8") as f:
+                raw = f.read(4096).strip()
+        except OSError:
+            return False
+        req = None
+        try:
+            req = json.loads(raw)
+        except ValueError:
+            req = None
+        configured = self._supervisor_configured()
+        ok = False
+        if isinstance(req, dict) and not self._request_live(req):
+            req = "dead"                 # its supervisor is gone or it targets another pid
+        if isinstance(req, dict):
+            uid = str(req.get("upgrade_id") or "")
+            pid = req.get("pid", req.get("coordinator_pid"))
+            if uid and self._known_upgrade(uid):
+                ok = True
+            elif configured and (uid or str(pid) == str(os.getpid())
+                                 or req.get("supervisor_pid")):
+                ok = True
+        elif configured and raw == str(os.getpid()):
+            ok = True                    # an older supervisor writes the bare target pid
+        try:
+            os.remove(self.stop_path)
+        except OSError:
+            pass
+        if not ok:
+            self.ignored.append(raw[:80] or "(empty)")
+        return ok
+
+    def _tick_errors(self) -> int:
+        """Error events the engine logged since the last heartbeat."""
+        store = getattr(self.c, "store", None)
+        if store is None:
+            return 0
+        try:
+            r = store.q("SELECT COUNT(*) AS n FROM events WHERE kind='error' AND ts>?",
+                        (self._last_ts,))
+            return int(r[0]["n"] or 0)
+        except Exception:                                        # noqa: BLE001
+            return 0
+
+    def tick(self) -> None:
+        lead_ready, detail = None, ""
+        ok, problems = True, []
+        lead = getattr(self.c, "lead", None)
+        if lead is not None:
+            try:
+                on = [P for P in self.c.projects.values() if lead.enabled(P)]
+                if on:
+                    res = [r for P in on for r in lead.readiness(P)]
+                    bad = [r for r in res if r.get("blocking") and r.get("ok") is False]
+                    lead_ready = not bad
+                    detail = "; ".join(f"{r.get('name')}: {r.get('detail')}" for r in bad)[:500]
+            except Exception as e:                            # noqa: BLE001
+                lead_ready, detail = None, f"readiness error: {type(e).__name__}"
+        errs = self._tick_errors()
+        if errs:
+            ok = False
+            problems.append(f"{errs} engine error event(s) since the last heartbeat")
+        self._last_ts = time.time()
+        from . import __version__
+        try:
+            from foundry_router import __version__ as release
+        except Exception:                                        # noqa: BLE001
+            release = ""
+        self._write(self.hb_path, json.dumps({
+            "pid": os.getpid(), "ts": time.time(), "ok": ok, "errors": problems,
+            "release": release, "version": __version__, "lead_ready": lead_ready,
+            "lead_detail": detail}))
+        if self._stop_requested():
+            raise _StopRequested()
+
+    def close(self) -> None:
+        for p in (self.pid_path,):
+            try:
+                if not os.path.exists(p):
+                    continue
+                with open(p, encoding="utf-8") as f:
+                    raw = f.read().strip()
+                mine = raw == str(os.getpid())
+                rp = getattr(self.SV, "read_pid_file", None)
+                if not mine and callable(rp):
+                    try:
+                        v = rp(p)
+                        v = v.get("pid") if isinstance(v, dict) else \
+                            getattr(v, "pid", v[0] if isinstance(v, (tuple, list)) else v)
+                        mine = int(v or 0) == os.getpid()
+                    except Exception:                            # noqa: BLE001
+                        mine = False
+                if not mine:
+                    try:
+                        mine = int(json.loads(raw).get("pid")) == os.getpid()
+                    except (ValueError, TypeError, AttributeError):
+                        mine = False
+                if mine:
+                    os.remove(p)
+            except OSError:
+                pass
+
+
 def _state_dir(a) -> str:
     return os.path.abspath(os.path.expanduser(
         a.state or os.environ.get("FOUNDRY_COORD_STATE") or "~/.foundry-coordinator"))
@@ -217,6 +426,18 @@ def doctor(c: Coordinator, project: str = "") -> int:
                                      f"(routing {fm.get('routing') or '?'}, {val}; {source})"))
             except Exception as e:                                # noqa: BLE001
                 rows.append(("FAIL", "foundry", str(e)))
+        # [lead_manager]: the activation checks (persona, strict route chain,
+        # client grant, Kilo limits/filter/agent); only when the lead is enabled
+        lead = getattr(c, "lead", None)
+        if lead is not None:
+            try:
+                if lead.enabled(P):
+                    for r in lead.readiness(P, fresh=True):
+                        ok = r.get("ok")
+                        st = "PASS" if ok is True else ("FAIL" if r.get("blocking") else "WARN")
+                        rows.append((st, f"lead {r.get('name')}", str(r.get("detail") or "")[:300]))
+            except Exception as e:                                # noqa: BLE001
+                rows.append(("FAIL", "lead readiness", f"{type(e).__name__}: {e}"[:300]))
         for st, name, detail in rows:
             bad += st == "FAIL"
             print(f"  {st:<4} {name:<22} {detail}")
@@ -349,15 +570,25 @@ def _dispatch(a, c: Coordinator) -> int:
                 s.release_owner(me)
                 return 2
             threading.Thread(target=bridge.run, daemon=True, name="telemetry-bridge").start()
+        life = None
         try:
+            # inside the try: the owner record is released even if the process
+            # files cannot be written
+            life = _ProcessFiles(_state_dir(a), c)
+            c.after_tick.append(life.tick)
             c.run(poll_seconds=a.poll, max_ticks=a.max_ticks, until_settled=a.until_settled,
                   owner=me)
         except KeyboardInterrupt:
             print("stopped (state is saved; run again to resume)")
+        except _StopRequested:
+            print("stopped at a tick boundary on the supervisor's stop request "
+                  "(state is saved)")
         finally:
             if bridge is not None:
                 bridge.stop()
             s.release_owner(me)
+            if life is not None:
+                life.close()
         return 0
     if a.cmd == "bridge":
         br = _bridge(c, a)

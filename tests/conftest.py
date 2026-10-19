@@ -10,6 +10,24 @@ os.environ["FOUNDRY_TRAINING_AUTO"] = "0"
 
 import pytest
 
+if os.name == "nt":
+    # no test subprocess (git, pwsh, fake coordinators, venv launchers) may open
+    # a console window and steal focus from the desktop
+    import subprocess as _sp
+
+    _NO_WINDOW = getattr(_sp, "CREATE_NO_WINDOW", 0x08000000)
+    _DETACHED = getattr(_sp, "DETACHED_PROCESS", 0x00000008)
+    _CREATE_NEW_CONSOLE = getattr(_sp, "CREATE_NEW_CONSOLE", 0x00000010)
+    _real_popen_init = _sp.Popen.__init__
+
+    def _hidden_popen_init(self, *a, **kw):
+        flags = kw.get("creationflags", 0) or 0
+        flags &= ~(_DETACHED | _CREATE_NEW_CONSOLE)
+        kw["creationflags"] = flags | _NO_WINDOW
+        _real_popen_init(self, *a, **kw)
+
+    _sp.Popen.__init__ = _hidden_popen_init
+
 TEST_CONFIG = """
 server: {host: 127.0.0.1, port: 11435}
 agent_brain:

@@ -653,6 +653,61 @@ class CoordReader:
         return self._q("SELECT msg_id, action_id, project_id, task_id, scope, delivery, status, "
                        "delivered_session, delivered_ts, created_ts FROM operator_messages")
 
+    # ---- v0.123 lead recovery (lead.py: recovery_cases / recovery_actions;
+    # supervisor.py: upgrade_requests). Any of them may be missing (lead
+    # manager off, or an older coordinator): a missing table reads as nothing.
+
+    LEAD_TABLES = ("recovery_cases", "recovery_actions", "upgrade_requests")
+
+    def lead_case(self, project_id: str, task_id: str) -> Optional[dict]:
+        """The task's latest active case, else its latest case (None: none)."""
+        order = "ORDER BY COALESCE(updated_ts, created_ts, 0) DESC, rowid DESC LIMIT 1"
+        r = self._q(f"SELECT * FROM recovery_cases WHERE project_id=? AND task_id=? AND "
+                    f"COALESCE(state,'') NOT IN ({','.join('?' * len(LEAD_TERMINAL))}) {order}",
+                    (project_id, task_id, *LEAD_TERMINAL))
+        if not r:
+            r = self._q(f"SELECT * FROM recovery_cases WHERE project_id=? AND task_id=? {order}",
+                        (project_id, task_id))
+        return r[0] if r else None
+
+    def lead_actions(self, case_id: str, limit: int = 30) -> list[dict]:
+        """A case's newest `limit` journal rows, oldest first."""
+        rows = self._q("SELECT * FROM recovery_actions WHERE case_id=? ORDER BY "
+                       "COALESCE(seq, 0) DESC, rowid DESC LIMIT ?", (case_id, int(limit)))
+        return rows[::-1]
+
+    def lead_upgrade(self, case: dict) -> Optional[dict]:
+        r = []
+        if case.get("upgrade_id"):
+            r = self._q("SELECT * FROM upgrade_requests WHERE upgrade_id=?", (case["upgrade_id"],))
+        if not r:
+            r = self._q("SELECT * FROM upgrade_requests WHERE case_id=? ORDER BY "
+                        "COALESCE(updated_ts, created_ts, 0) DESC, rowid DESC LIMIT 1",
+                        (case.get("case_id"),))
+        return r[0] if r else None
+
+    def lead_signature(self) -> dict:
+        """Per task: a cheap change marker over the lead tables (in-place
+        UPDATEs move updated_ts / status counts)."""
+        sig: dict = {}
+        for r in self._q("SELECT project_id, task_id, COUNT(*) AS n, MAX(rowid) AS m, "
+                         "MAX(updated_ts) AS u, GROUP_CONCAT(state) AS s, SUM(paused) AS p "
+                         "FROM recovery_cases GROUP BY project_id, task_id"):
+            key = (r.pop("project_id"), r.pop("task_id"))
+            sig.setdefault(key, {})["c"] = tuple(r.values())
+        for r in self._q("SELECT c.project_id AS pid, c.task_id AS tid, COUNT(a.rowid) AS n, "
+                         "MAX(a.rowid) AS m, SUM(a.status='started') AS st, "
+                         "SUM(LENGTH(COALESCE(a.result,''))) AS rl FROM recovery_actions a JOIN "
+                         "recovery_cases c ON a.case_id=c.case_id GROUP BY c.project_id, c.task_id"):
+            key = (r.pop("pid"), r.pop("tid"))
+            sig.setdefault(key, {})["a"] = tuple(r.values())
+        for r in self._q("SELECT project_id, task_id, COUNT(*) AS n, MAX(updated_ts) AS u, "
+                         "GROUP_CONCAT(status) AS s FROM upgrade_requests GROUP BY project_id, "
+                         "task_id"):
+            key = (r.pop("project_id"), r.pop("task_id"))
+            sig.setdefault(key, {})["u"] = tuple(r.values())
+        return sig
+
 
 def _j(v):
     try:
@@ -973,6 +1028,117 @@ def readiness_view(items, failing: bool = False) -> list:
     return out
 
 
+# --------------------------------------------------------------------------- lead recovery
+# v0.123 Lead Sprint Manager: one bounded, redacted summary of a task's
+# recovery case (the latest active one, else the latest), its journal and its
+# supervisor upgrade. Read from the tables lead.py / supervisor.py migrate;
+# nothing here is inferred from model text.
+
+LEAD_STATES = ("DIAGNOSING", "REPAIRING", "UPGRADING", "RESUMING", "NEEDS_VICTOR", "RESOLVED",
+               "CANCELLED", "DEFERRED")
+LEAD_TERMINAL = ("RESOLVED", "CANCELLED")
+LEAD_MAX_ACTIONS = 30
+# counter name in recovery_cases.counters -> (profile [lead_manager] key, default)
+LEAD_BOUNDS = (("diagnoses", "max_diagnoses", 3), ("candidates", "max_candidates", 2),
+               ("upgrades", "max_upgrades", 1), ("repeats", "max_fingerprint_repeats", 1),
+               ("quota_calls", "max_quota_calls", 12))
+
+
+def _int(v) -> Optional[int]:
+    try:
+        return int(v) if v not in (None, "") and not isinstance(v, bool) else None
+    except (TypeError, ValueError):
+        return None
+
+
+def lead_settings(P) -> dict:
+    """The project's [lead_manager] bounds: the profile's normalized table when
+    it has one (profile.py), else the raw TOML table; missing keys use the
+    contract defaults in LEAD_BOUNDS."""
+    prof = getattr(P, "profile", None)
+    lm = getattr(prof, "lead_manager", None)
+    if isinstance(lm, dict):
+        return lm
+    raw = (getattr(prof, "raw", None) or {}).get("lead_manager")
+    return raw if isinstance(raw, dict) else {}
+
+
+def lead_view(case: Optional[dict], actions: list, upgrade: Optional[dict], settings: dict,
+              now: float) -> Optional[dict]:
+    """The bridge's `lead` task field (None: the task has no case)."""
+    if not case:
+        return None
+    counters = _jv(case.get("counters"))
+    counters = counters if isinstance(counters, dict) else {}
+    out_c = {}
+    for name, key, default in LEAD_BOUNDS:
+        mx = _int(settings.get(key, default))
+        out_c[name] = {"used": _int(counters.get(name)) or 0, "max": mx}
+    try:
+        start = float(case.get("created_ts") or 0)
+    except (TypeError, ValueError):
+        start = 0.0
+    state = _cap(case.get("state"), 30)
+    end = now
+    if state in LEAD_TERMINAL:
+        try:
+            end = float(case.get("updated_ts") or now)
+        except (TypeError, ValueError):
+            end = now
+    out_c["minutes"] = {"used": int(max(0.0, end - start) // 60) if start else None,
+                        "max": _int(settings.get("max_case_minutes", 240))}
+    acts = []
+    for a in (actions or [])[-LEAD_MAX_ACTIONS:]:
+        files = _jl(a.get("scope_files"))
+        acts.append({"seq": _int(a.get("seq")), "kind": _cap(a.get("kind"), 60),
+                     "actor": _cap(a.get("actor"), 120), "revision": _cap(a.get("revision"), 64),
+                     "repo": _cap(a.get("repo"), 200),
+                     "scope_files": [_cap(f, 300) for f in files[:40]],
+                     "scope_more": max(0, len(files) - 40),
+                     "result": _cap(a.get("result"), 800), "status": _cap(a.get("status"), 20),
+                     "ts": a.get("ts")})
+    cur = next((a for a in reversed(acts) if a["status"] == "started"), None)
+    if cur:
+        current = {"kind": cur["kind"], "status": "started", "seq": cur["seq"], "ts": cur["ts"],
+                   "source": "journal"}
+    else:
+        pa = _jv(case.get("proposed_action"))
+        pa = pa if isinstance(pa, dict) else {}
+        inner = pa.get("action") if isinstance(pa.get("action"), dict) else pa
+        kind = inner.get("kind") if isinstance(inner, dict) else None
+        current = ({"kind": _cap(kind, 60), "status": "proposed", "seq": None, "ts": None,
+                    "source": "case"} if kind else None)
+    up = None
+    if upgrade:
+        up = {"upgrade_id": _cap(upgrade.get("upgrade_id"), 120),
+              "status": _cap(upgrade.get("status"), 30),
+              "candidate_sha": _cap(upgrade.get("candidate_sha"), 64),
+              "prior_sha": _cap(upgrade.get("prior_sha"), 64),
+              "updated_ts": upgrade.get("updated_ts")}
+    instr = _jl(case.get("instructions"))
+    trig = _jv(case.get("trigger"))
+    if isinstance(trig, dict):           # lead.py stores {state, reason}
+        trig = ": ".join(_cap(trig.get(k), 300) for k in ("state", "reason") if trig.get(k))
+    paused = case.get("paused")
+    return {"case_id": _cap(case.get("case_id"), 120), "state": state,
+            "active": state not in LEAD_TERMINAL,
+            "classification": _cap(case.get("classification"), 40),
+            "trigger": _cap(trig, 600),
+            "decision_id": _cap(case.get("decision_id"), 120),
+            "needs_human": bool(case.get("needs_human")),
+            "fingerprint": _cap(case.get("fingerprint"), 120),
+            "source_revision": _cap(case.get("source_revision"), 64),
+            "lead_session_id": _cap(case.get("lead_session_id"), 160),
+            "lead_model": _cap(case.get("lead_model"), 120),
+            "current_action": current, "counters": out_c,
+            "actions": acts, "upgrade": up,
+            "paused": bool(paused) and str(paused) not in ("0", "false", "False"),
+            "instructions_count": len(instr),
+            "outcome": _cap(case.get("outcome"), 800),
+            "created_ts": case.get("created_ts"), "updated_ts": case.get("updated_ts"),
+            "deadline_ts": case.get("deadline_ts")}
+
+
 def _keep_min(path: str, lst: list) -> int:
     """How many leading items of a list _bound must never drop: the open
     decisions (decisions_view sorts them first) are what the operator answers."""
@@ -1187,7 +1353,8 @@ class TelemetryBridge:
                                   pid: dict(o.caps) for pid, o in self.obs.items()}},
                    "coordinator_version": _coord_version(), "foundry_version": _version(),
                    "boot_id": self.boot_id, "store_schema": self._schema(),
-                   "features": list(FEATURES),
+                   "features": list(FEATURES) + (
+                       ["lead_manager"] if "recovery_cases" in self.reader.tables() else []),
                    "sent_ts": self.clock(), "uptime_s": round(self.clock() - self.started, 1),
                    "kilo": {"ok": all(self.kilo_ok.values()) if self.kilo_ok else None,
                             "error": self.kilo_error if not all(self.kilo_ok.values() or [True])
@@ -1241,6 +1408,7 @@ class TelemetryBridge:
         self._tables = self.reader.tables()
         lsig = (self.reader.lifecycle_signature()
                 if set(CoordReader.LIFECYCLE_TABLES) & self._tables else {})
+        leadsig = (self.reader.lead_signature() if "recovery_cases" in self._tables else {})
         # per task: one task's operator message / helper / lifecycle change must
         # not rebuild every other task's observation
         om_by: dict = {}
@@ -1255,7 +1423,8 @@ class TelemetryBridge:
                 continue
             key = (t["project_id"], t["task_id"])
             hit = self._task_cache.get(key)
-            om_sig = _h([om_by.get(key, []), units_by.get(key, []), lsig.get(key, {})])
+            om_sig = _h([om_by.get(key, []), units_by.get(key, []), lsig.get(key, {}),
+                         leadsig.get(key, {}), "recovery_cases" in self._tables])
             sig = (t.get("updated_ts"), t["state"], om_sig,
                    tuple(x["state"] for x in by_project[t["project_id"]]))
             # an approval card is re-hashed every pass: artifact bytes can change
@@ -1454,7 +1623,23 @@ class TelemetryBridge:
             o.update(self._lifecycle(P, t, o["limits"], len(revs)))
         except Exception as e:                                   # noqa: BLE001
             o["lifecycle_error"] = f"{type(e).__name__}: {e}"[:300]
+        present = self._tables if self._tables is not None else self.reader.tables()
+        if "recovery_cases" in present:
+            # no recovery_cases table (lead manager off / older coordinator): no field
+            try:
+                o["lead"] = self._lead(P, t, present)
+            except Exception as e:                               # noqa: BLE001
+                o["lead_error"] = f"{type(e).__name__}: {e}"[:300]
         return o
+
+    def _lead(self, P, t: dict, present: set) -> Optional[dict]:
+        case = self.reader.lead_case(t["project_id"], t["task_id"])
+        if not case:
+            return None
+        acts = (self.reader.lead_actions(case.get("case_id"), LEAD_MAX_ACTIONS)
+                if "recovery_actions" in present else [])
+        up = self.reader.lead_upgrade(case) if "upgrade_requests" in present else None
+        return lead_view(case, acts, up, lead_settings(P), self.clock())
 
     RECOVERED_EVENTS = ("helper_reconciled", "review_not_reused", "lane_reused", "helper_duplicate",
                         "evidence_recovered", "recovery")

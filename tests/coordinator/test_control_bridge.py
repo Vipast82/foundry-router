@@ -538,7 +538,8 @@ def test_bridge_heartbeat_declares_contract_versions_and_boot(env):
     br.step()
     src = next(s for s in cc.sources() if s["source_id"] == br.source_id)
     assert src["detail"]["contract"] == "foundry.cc.v1"
-    assert src["detail"]["coordinator_version"] == "0.122.0"
+    from foundry_coordinator import __version__ as coord_version
+    assert src["detail"]["coordinator_version"] == coord_version
     assert src["detail"]["boot_id"] == br.boot_id and "batch_id" in src["detail"]["features"]
     assert src["detail"]["compat"]["state"] == "ok" and br.compat["state"] == "ok"
 
@@ -950,3 +951,233 @@ def test_pause_readiness_ignores_held_locks_of_an_idle_task(env):
     obs = []
     br._project_pause_facts(obs, [], time.time())
     assert obs and obs[0]["safe_to_upgrade"] is True
+
+
+# ------------------------------------------------------------------ v0.123 lead recovery
+
+LEAD_DDL = """
+CREATE TABLE IF NOT EXISTS recovery_cases (case_id TEXT PRIMARY KEY, project_id TEXT, task_id TEXT,
+  run_id TEXT, trigger TEXT, state TEXT, fingerprint TEXT, source_revision TEXT, dossier_sha TEXT,
+  lead_session_id TEXT, lead_model TEXT, classification TEXT, proposed_action TEXT, validation TEXT,
+  upgrade_id TEXT, rollback_result TEXT, outcome TEXT, counters TEXT, created_ts REAL,
+  updated_ts REAL, deadline_ts REAL, paused INTEGER, instructions TEXT);
+CREATE TABLE IF NOT EXISTS recovery_actions (action_id TEXT PRIMARY KEY, case_id TEXT, seq INTEGER,
+  kind TEXT, actor TEXT, revision TEXT, repo TEXT, scope_files TEXT, detail TEXT, result TEXT,
+  status TEXT, op_key TEXT UNIQUE, ts REAL);
+CREATE TABLE IF NOT EXISTS upgrade_requests (upgrade_id TEXT PRIMARY KEY, case_id TEXT,
+  project_id TEXT, task_id TEXT, candidate_ref TEXT, candidate_sha TEXT, manifest TEXT, status TEXT,
+  prior_sha TEXT, backup_path TEXT, log TEXT, created_ts REAL, updated_ts REAL);
+"""
+
+
+def _case(store, cid, state="DIAGNOSING", pid="game", tid="T1", **kw):
+    row = {"case_id": cid, "project_id": pid, "task_id": tid, "run_id": "T1-a1",
+           "trigger": "BLOCKED: recovery_escalation", "state": state, "fingerprint": f"fp-{cid}",
+           "source_revision": "a" * 40, "lead_session_id": f"ses_lead_{cid}",
+           "lead_model": "claude-opus-5-5", "classification": "coordinator",
+           "proposed_action": json.dumps({"action": {"kind": "coordinator_repair"}}),
+           "counters": json.dumps({"diagnoses": 2, "candidates": 1, "quota_calls": 5}),
+           "created_ts": time.time() - 600, "updated_ts": time.time(), "paused": 0,
+           "instructions": json.dumps(["look at telemetry.py"]), "outcome": "", **kw}
+    store.x(f"INSERT INTO recovery_cases ({', '.join(row)}) VALUES ({', '.join('?' * len(row))})",
+            tuple(row.values()))
+
+
+def _lead_act(store, cid, seq, **kw):
+    row = {"action_id": f"{cid}-a{seq}", "case_id": cid, "seq": seq, "kind": "diagnose",
+           "actor": "lead", "revision": "b" * 40, "repo": "foundry-router",
+           "scope_files": json.dumps(["foundry_coordinator/engine.py"]), "detail": "{}",
+           "result": f"step {seq}", "status": "done", "op_key": f"lead:{cid}:{seq}", "ts": float(seq),
+           **kw}
+    store.x(f"INSERT INTO recovery_actions ({', '.join(row)}) VALUES "
+            f"({', '.join('?' * len(row))})", tuple(row.values()))
+
+
+def _features(cc, br):
+    br._last["beat"] = 0
+    br.step()
+    return next(s for s in cc.sources() if s["source_id"] == br.source_id)["detail"]["features"]
+
+
+def test_bridge_lead_field_absent_without_the_lead_tables(env):
+    d = _task_data(env["cc"])
+    assert "lead" not in d and "lead_error" not in d
+    assert "lead_manager" not in _features(env["cc"], env["bridge"])
+    assert "lead_manager" not in env["ch"]._beat()["features"]        # engine has no lead
+
+
+def test_bridge_reads_the_lead_tables_into_a_bounded_redacted_field(env):
+    cc, store, br = env["cc"], env["store"], env["bridge"]
+    store.conn.executescript(LEAD_DDL)
+    br.step()
+    assert _task_data(cc)["lead"] is None                       # tables, but no case yet
+    assert "lead_manager" in _features(cc, br)
+    _case(store, "case-old", "RESOLVED", updated_ts=time.time() + 50)   # newer, but closed
+    _case(store, "case-1", "UPGRADING", upgrade_id="up-1")
+    _case(store, "case-x", "NEEDS_VICTOR", pid="other")         # another project, same task id
+    for i in range(1, 36):
+        _lead_act(store, "case-1", i)
+    _lead_act(store, "case-1", 36, status="started", kind="validate",
+              result="probe sent Authorization: Bearer abcdefghijklmnop123456",
+              scope_files=json.dumps([f"f{i}.py" for i in range(60)]))
+    store.x("INSERT INTO upgrade_requests (upgrade_id, case_id, project_id, task_id, candidate_sha, "
+            "status, prior_sha, created_ts, updated_ts) VALUES (?,?,?,?,?,?,?,?,?)",
+            ("up-1", "case-1", "game", "T1", "c" * 40, "verifying", "p" * 40, 1.0, 2.0))
+    br.step()
+    lv = _task_data(cc)["lead"]
+    assert lv["case_id"] == "case-1" and lv["state"] == "UPGRADING" and lv["active"] is True
+    assert lv["lead_session_id"] == "ses_lead_case-1" and lv["lead_model"] == "claude-opus-5-5"
+    assert lv["classification"] == "coordinator" and lv["trigger"].startswith("BLOCKED")
+    c = lv["counters"]
+    assert c["diagnoses"] == {"used": 2, "max": 3} and c["candidates"] == {"used": 1, "max": 2}
+    assert c["upgrades"] == {"used": 0, "max": 1} and c["quota_calls"] == {"used": 5, "max": 12}
+    assert c["minutes"]["max"] == 240 and c["minutes"]["used"] >= 9
+    seqs = [a["seq"] for a in lv["actions"]]
+    assert seqs == list(range(7, 37))                           # the newest 30, oldest first
+    last = lv["actions"][-1]
+    assert last["status"] == "started" and len(last["scope_files"]) == 40 and last["scope_more"] == 20
+    assert set(last) == {"seq", "kind", "actor", "revision", "repo", "scope_files", "scope_more",
+                         "result", "status", "ts"}
+    assert lv["current_action"]["kind"] == "validate" and lv["current_action"]["source"] == "journal"
+    assert lv["upgrade"]["upgrade_id"] == "up-1" and lv["upgrade"]["status"] == "verifying"
+    assert lv["upgrade"]["candidate_sha"] == "c" * 40 and lv["upgrade"]["prior_sha"] == "p" * 40
+    assert lv["paused"] is False and lv["instructions_count"] == 1
+    blob = dump_cc(env["app"])
+    assert "abcdefghijklmnop123456" not in blob                 # redacted before it left
+    # an in-place update (the case pauses, its state moves) is noticed
+    store.x("UPDATE recovery_cases SET paused=1, state='NEEDS_VICTOR', updated_ts=? WHERE "
+            "case_id='case-1'", (time.time() + 1,))
+    store.x("UPDATE recovery_actions SET status='done' WHERE case_id='case-1' AND seq=36")
+    br.step()
+    lv = _task_data(cc)["lead"]
+    assert lv["paused"] is True and lv["state"] == "NEEDS_VICTOR"
+    assert lv["current_action"] == {"kind": "coordinator_repair", "status": "proposed", "seq": None,
+                                    "ts": None, "source": "case"}
+    assert any(a["kind"] == "lead_needs_victor" and a["task_id"] == "T1"
+               for a in cc.alerts([], "open"))
+    # only closed cases left: the latest one is shown, not active
+    store.x("UPDATE recovery_cases SET state='RESOLVED', outcome='resumed' WHERE case_id='case-1'")
+    br.step()
+    lv = _task_data(cc)["lead"]
+    assert lv["case_id"] == "case-old" and lv["active"] is False
+    assert not any(a["kind"] == "lead_needs_victor" for a in cc.alerts([], "open"))
+
+
+class FakeLead:
+    def __init__(self, enabled=True, fail=None):
+        self.calls, self._enabled, self.fail = [], enabled, fail
+
+    def enabled(self, P):
+        return self._enabled
+
+    def pause_case(self, case_id, actor, note=""):
+        self.calls.append(("pause_case", case_id, actor, note))
+        return {"state": "DIAGNOSING", "paused": True}
+
+    def takeover(self, case_id, actor):
+        if self.fail:
+            raise self.fail
+        self.calls.append(("takeover", case_id, actor))
+        return {"state": "DIAGNOSING"}
+
+    def instruct(self, case_id, text, actor):
+        self.calls.append(("instruct", case_id, text, actor))
+        return None
+
+
+def _lead_env(env):
+    store = env["store"]
+    store.conn.executescript(LEAD_DDL)
+    _case(store, "case-1", "DIAGNOSING")
+    _case(store, "case-o", "DIAGNOSING", tid="T9")
+    env["bridge"].step()
+    return env["cc"], env["ch"], env["c"]
+
+
+def test_control_applies_lead_case_actions_through_engine_lead(env):
+    cc, ch, c = _lead_env(env)
+    fake = FakeLead()
+    c.lead = fake
+    beat = ch._beat()
+    assert "lead_manager" in beat["features"]
+    assert {"lead_case_pause", "lead_case_takeover",
+            "lead_case_instruct"} <= set(beat["source"]["capabilities"]["actions"])
+    a1 = act(cc, kind="lead_case_instruct", case_id="case-1", note="only touch telemetry.py")
+    a2 = act(cc, kind="lead_case_pause", case_id="case-1", note="wait for me")
+    a3 = act(cc, kind="lead_case_takeover", case_id="case-1")
+    ch._last_beat = 0
+    ch.poll()
+    assert fake.calls == [("instruct", "case-1", "only touch telemetry.py", "victor (control center)"),
+                          ("pause_case", "case-1", "victor (control center)", "wait for me"),
+                          ("takeover", "case-1", "victor (control center)")]
+    for a in (a1, a2, a3):
+        v = cc.action_view(a["action_id"])
+        assert v["status"] == "applied", v
+        assert v["result"]["case_id"] == "case-1"
+    assert cc.action_view(a2["action_id"])["result"]["case_state"] == "DIAGNOSING"
+    # applied once: a re-offered action reports the stored outcome, not a second call
+    ch.handle({"action_id": a1["action_id"], "kind": "lead_case_instruct", "project_id": "game",
+               "task_id": "T1", "payload": {"case_id": "case-1", "note": "x"}})
+    assert len(fake.calls) == 3
+
+
+def test_control_rejects_lead_actions_without_a_lead_or_for_another_task(env):
+    cc, ch, c = _lead_env(env)
+    reports = []
+    ch._report = lambda a, status, detail, result=None: reports.append((a["action_id"], status,
+                                                                        detail))
+    base = {"kind": "lead_case_pause", "project_id": "game", "task_id": "T1",
+            "payload": {"case_id": "case-1", "note": ""}}
+    ch.handle({**base, "action_id": "nolead-1"})                      # no engine.lead
+    assert reports[-1] == ("nolead-1", "rejected", "lead manager not available in this coordinator")
+    assert "lead_manager" not in ch._beat()["features"]
+    c.lead = FakeLead(enabled=False)
+    assert "lead_manager" not in ch._beat()["features"]                # no project enables it
+    fake = c.lead
+    ch.handle({**base, "action_id": "other-1", "payload": {"case_id": "case-o", "note": ""}})
+    assert reports[-1][1] == "rejected" and "another task" in reports[-1][2]
+    ch.handle({**base, "action_id": "empty-1", "kind": "lead_case_instruct",
+               "payload": {"case_id": "case-1", "note": " "}})
+    assert reports[-1][1] == "rejected" and "needs text" in reports[-1][2]
+    ch.handle({**base, "action_id": "long-1", "payload": {"case_id": "case-1", "note": "x" * 2001}})
+    assert reports[-1][1] == "rejected"
+    ch.handle({**base, "action_id": "nocase-1", "payload": {"note": ""}})
+    assert reports[-1][1] == "rejected" and "case_id" in reports[-1][2]
+    fake.fail = KeyError("no such case case-1")
+    ch.handle({**base, "action_id": "refused-1", "kind": "lead_case_takeover"})
+    assert reports[-1][1] == "rejected" and "no such case" in reports[-1][2]
+    assert fake.calls == []
+    # a lead object without the method: the same honest rejection
+    c.lead = object()
+    ch.handle({**base, "action_id": "nomethod-1"})
+    assert reports[-1] == ("nomethod-1", "rejected", "lead manager not available in this coordinator")
+
+
+def test_lead_controls_end_to_end_with_the_real_lead_manager(env):
+    """The real LeadManager's own tables and operator controls (engine.lead as
+    the integrator wires it): bridge field -> Foundry view -> typed action ->
+    control channel -> LeadManager, with the journal showing the result."""
+    lead_mod = pytest.importorskip("foundry_coordinator.lead")
+    cc, store, br, ch, c = env["cc"], env["store"], env["bridge"], env["ch"], env["c"]
+    lm = lead_mod.LeadManager(c)                    # migrates recovery_cases / recovery_actions
+    lm.enabled = lambda P: True                     # as if [lead_manager] enabled = true
+    c.lead = lm
+    _case(store, "rc-1", "DIAGNOSING", trigger=json.dumps({"state": "BLOCKED",
+                                                           "reason": "recovery_escalation"}))
+    br.step()
+    lv = cc.task_view_for("game", "T1", [])["view"]["lead"]
+    assert lv["case_id"] == "rc-1" and lv["trigger"] == "BLOCKED: recovery_escalation"
+    act(cc, kind="lead_case_instruct", case_id="rc-1", note="only touch telemetry.py")
+    ch._last_beat = 0
+    ch.poll()
+    assert "lead_manager" in ch._beat()["features"]
+    a = act(cc, kind="lead_case_takeover", case_id="rc-1", note="mine now")
+    ch.poll()
+    assert cc.action_view(a["action_id"])["status"] == "applied"
+    case = lm.case("rc-1")
+    assert case["paused"] and case["instructions"][-1]["text"] == "only touch telemetry.py"
+    br.step()
+    lv = cc.task_view_for("game", "T1", [])["view"]["lead"]
+    assert lv["paused"] is True and lv["instructions_count"] == 2      # the seeded one + ours
+    assert [x["kind"] for x in lv["actions"]][-2:] == ["instruct", "takeover"]
+    assert lv["actions"][-1]["actor"] == "victor (control center)"

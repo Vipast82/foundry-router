@@ -92,3 +92,19 @@ def test_disabled_media_is_warn_not_fail(tmp_path, capsys):
     assert doctor(c) == 0
     row = _row(capsys.readouterr().out, 'persona image_generator')
     assert row.split()[0] == 'WARN' and 'disabled' in row
+
+
+def test_doctor_reports_lead_readiness_only_when_enabled(tmp_path, capsys):
+    from types import SimpleNamespace
+    c, _ = _setup(tmp_path, validation="passed")
+    c.lead = SimpleNamespace(enabled=lambda P: False, readiness=lambda P, fresh=False: [])
+    doctor(c)
+    assert "lead " not in capsys.readouterr().out
+    c.lead = SimpleNamespace(enabled=lambda P: True, readiness=lambda P, fresh=False: [
+        {"name": "route_chain", "ok": False, "blocking": True,
+         "detail": "routes [astra] != expected [opus, astra]"},
+        {"name": "persona_strict", "ok": True, "blocking": True, "detail": "strict"}])
+    assert doctor(c) == 1
+    out = capsys.readouterr().out
+    assert _row(out, "lead route_chain").strip().startswith("FAIL")
+    assert _row(out, "lead persona_strict").strip().startswith("PASS")

@@ -38,6 +38,91 @@ LIFECYCLE_DEFAULTS = {"enabled": False, "evidence": True, "obligations": True, "
                       "recover_max_parts": 400, "recover_max_seconds": 20,
                       "prompt_cap": 6000}
 
+# [lead_manager] (v0.123): the last automated recovery tier (lead.py). Off by
+# default; disabled means the engine behaves exactly as without it.
+LEAD_MANAGER_DEFAULTS = {
+    "enabled": False,
+    "persona": "Foundry-Kilo-Lead-Manager",
+    "expected_models": ["claude-opus-5-5"],   # ordered route chain; first = primary route
+    "agent": "lead",                          # Kilo agent of the lead session (read-only tools)
+    "kilo_client": "kilo",                    # Foundry client name of Kilo's worker key (its
+                                              # grant of the lead persona is what readiness checks)
+    "repair_agent": "",                       # Kilo agent of a coordinator repair session
+                                              # ("" = the profile's client.agent)
+    "reviewer": "",                           # independent repair reviewer persona
+                                              # ("" = roles.deep_reviewer, else roles.reviewer)
+    "max_diagnoses": 3,
+    "max_candidates": 2,
+    "max_upgrades": 1,
+    "max_fingerprint_repeats": 1,
+    "max_case_minutes": 240,
+    "max_quota_calls": 12,
+    # per-TASK caps across all of its cases (a game repair commit moves HEAD,
+    # so a returning blocker is a repeat, never a fresh budget)
+    "max_cases_per_task": 3,
+    "max_lead_calls_per_task": 6,
+    "max_extra_attempts_per_task": 2,
+    "max_upgrade_minutes": 120,               # UPGRADING longer than this -> Victor
+    "max_resuming_minutes": 60,               # RESUMING the engine never applied -> Victor
+    "lead_timeout_minutes": 45,
+    "extra_attempts": 1,
+    "defer_seconds": 300,                     # first DEFERRED backoff (doubles, capped)
+    "acceptance_tests": [],                   # game globs a lead assignment may only change
+                                              # when its manifest declares them ([] = the
+                                              # adapter's test paths, else tests/**,
+                                              # *_test.*, *.spec.* ...)
+    "repair_broader_tests": ["tests/coordinator"],  # broader suite of a coordinator repair
+                                              # when the lead names none
+    "repair_root": "",
+    "router_repo": "",
+    "supervisor": "manual",                   # manual | supervisor
+}
+LEAD_SUPERVISOR_MODES = ("manual", "supervisor")
+
+
+def _lead_manager_table(path: str, raw) -> dict:
+    lm_raw = raw if raw is not None else {}
+    if not isinstance(lm_raw, dict):
+        raise ProfileError(f"{path}: [lead_manager] must be a table")
+    unknown = sorted(set(lm_raw) - set(LEAD_MANAGER_DEFAULTS))
+    if unknown:
+        raise ProfileError(f"{path}: unknown [lead_manager] keys {unknown}")
+    out = {k: (list(v) if isinstance(v, list) else v) for k, v in LEAD_MANAGER_DEFAULTS.items()}
+    for k, v in lm_raw.items():
+        want = type(LEAD_MANAGER_DEFAULTS[k])
+        if want is bool and not isinstance(v, bool):
+            raise ProfileError(f"{path}: lead_manager.{k} must be true or false")
+        if want is int and (isinstance(v, bool) or not isinstance(v, int) or v < 0):
+            raise ProfileError(f"{path}: lead_manager.{k} must be a non-negative integer")
+        if want is str and not isinstance(v, str):
+            raise ProfileError(f"{path}: lead_manager.{k} must be a string")
+        if want is list and (not isinstance(v, list) or
+                             any(not isinstance(x, str) or not x.strip() for x in v)):
+            raise ProfileError(f"{path}: lead_manager.{k} must be a list of non-empty strings")
+        out[k] = list(v) if isinstance(v, list) else v
+    if not out["expected_models"]:
+        raise ProfileError(f"{path}: lead_manager.expected_models must name the route chain "
+                           f"(first = the primary route)")
+    if len(set(out["expected_models"])) != len(out["expected_models"]):
+        raise ProfileError(f"{path}: lead_manager.expected_models has duplicates")
+    if not out["persona"].strip() or not out["agent"].strip() or not out["kilo_client"].strip():
+        raise ProfileError(f"{path}: lead_manager.persona, agent and kilo_client are required")
+    if out["supervisor"] not in LEAD_SUPERVISOR_MODES:
+        raise ProfileError(f"{path}: lead_manager.supervisor must be manual or supervisor")
+    if out["reviewer"] and out["reviewer"].strip().casefold() == out["persona"].strip().casefold():
+        raise ProfileError(f"{path}: lead_manager.reviewer must differ from the lead persona")
+    for k in ("max_diagnoses", "max_quota_calls", "max_case_minutes", "lead_timeout_minutes",
+              "max_cases_per_task", "max_lead_calls_per_task", "max_upgrade_minutes",
+              "max_resuming_minutes"):
+        if out[k] < 1:
+            raise ProfileError(f"{path}: lead_manager.{k} must be at least 1")
+    for x in out["repair_broader_tests"]:
+        x = x.strip().replace("\\", "/")
+        if x.startswith(("-", "/")) or ".." in x.split("/") or ":" in x.split("::")[0]:
+            raise ProfileError(f"{path}: lead_manager.repair_broader_tests: {x!r} must be a "
+                               f"relative test path or id (no options)")
+    return out
+
 
 class ProfileError(ValueError):
     pass
@@ -96,6 +181,18 @@ class Profile:
     # [lifecycle] (v0.122): evidence ledger, obligations and recovery wiring in
     # the engine. Off by default; the sub-switches apply only when enabled.
     lifecycle: dict = field(default_factory=lambda: dict(LIFECYCLE_DEFAULTS))
+    # [lead_manager] (v0.123): validated settings with defaults; off by default.
+    lead_manager: dict = field(default_factory=lambda: {
+        k: (list(v) if isinstance(v, list) else v) for k, v in LEAD_MANAGER_DEFAULTS.items()})
+
+    def lead_manager_on(self) -> bool:
+        return bool((self.lead_manager or {}).get("enabled"))
+
+    def lead_setting(self, key: str):
+        """One [lead_manager] setting (its default when the profile omits it)."""
+        if key not in LEAD_MANAGER_DEFAULTS:
+            raise KeyError(f"unknown [lead_manager] setting {key!r}")
+        return (self.lead_manager or {}).get(key, LEAD_MANAGER_DEFAULTS[key])
 
     def lifecycle_on(self, part: str = "") -> bool:
         lc = self.lifecycle or {}
@@ -255,6 +352,7 @@ def load(path: str) -> Profile:
         if want is int and (isinstance(v, bool) or not isinstance(v, int) or v < 0):
             raise ProfileError(f"{path}: lifecycle.{k} must be a non-negative integer")
         lifecycle[k] = v
+    lead_manager = _lead_manager_table(path, raw.get("lead_manager"))
     return Profile(
         id=pid, name=str(raw.get("name") or pid), version=str(raw.get("version") or "1"),
         path=path, hash=hashlib.sha256(blob).hexdigest()[:16], workspace=wpath,
@@ -267,7 +365,7 @@ def load(path: str) -> Profile:
         resources=list((raw.get("resources") or {}).get("exclusive") or []),
         closeout=dict(raw.get("closeout") or {}), prompts=dict(raw.get("prompts") or {}),
         artifacts=dict(raw.get("artifacts") or {}), commit=dict(raw.get("commit") or {}),
-        lifecycle=lifecycle)
+        lifecycle=lifecycle, lead_manager=lead_manager)
 
 
 def check_isolation(profiles: list[Profile]) -> None:

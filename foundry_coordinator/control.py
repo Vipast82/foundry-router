@@ -35,6 +35,11 @@ RETRY_UNRECORDED_S = 120      # wait this long for the engine to record a Kilo q
 # project-scoped actions (task_id may be empty): pause / resume a whole project
 # for an operator upgrade (payload {mode: "safe" | "now", note})
 PROJECT_KINDS = ("project_pause", "project_resume")
+# lead recovery case controls (v0.123; payload {case_id, note}): applied through
+# the engine's LeadManager (engine.lead) when this coordinator has one
+LEAD_KINDS = ("lead_case_pause", "lead_case_resume", "lead_case_takeover", "lead_case_instruct")
+LEAD_UNAVAILABLE = "lead manager not available in this coordinator"
+MAX_LEAD_NOTE = 2000
 
 
 class ControlChannel:
@@ -97,19 +102,43 @@ class ControlChannel:
             return False
         return any(lc(P) for P in (getattr(self.c, "projects", None) or {}).values())
 
+    def _lead(self):
+        """The engine's LeadManager, or None (wired by the integrator)."""
+        return getattr(self.c, "lead", None)
+
+    def _lead_on(self) -> bool:
+        """The engine exposes a lead manager and at least one project enables it."""
+        lead = self._lead()
+        enabled = getattr(lead, "enabled", None) if lead is not None else None
+        if not callable(enabled):
+            return False
+        for P in (getattr(self.c, "projects", None) or {}).values():
+            try:
+                if enabled(P):
+                    return True
+            except Exception:                                    # noqa: BLE001
+                continue
+        return False
+
     def _beat(self) -> dict:
         tasks = self.store.tasks()
+        lead_on = self._lead_on()
         return {"source": {"id": self.source_id, "kind": "coordinator", "host": socket.gethostname(),
                            "version": _version(), "capabilities": {
                                "actions": ["answer_question", "reply_permission", "approve_review",
                                            "reject_review", "pause", "resume", "cancel", "unblock",
                                            "instruction", "withdraw_instruction",
-                                           "decision_answer", *PROJECT_KINDS]}},
+                                           "decision_answer", *PROJECT_KINDS,
+                                           *(LEAD_KINDS if lead_on else ())]}},
                 "contract": _contract(), "coordinator_version": _coordinator_version(),
                 # lifecycle features advertised only when some project actually
-                # runs the lifecycle; project pause/resume always
-                "features": (["decision_answer", "lifecycle"] if self._lifecycle_on() else [])
-                + ["project_pause"],
+                # runs the lifecycle; project pause/resume always; lead_manager
+                # only when the engine has a lead manager some project enables
+                # (decision_answer also with the lead manager on: Victor answers its
+                # lead_escalation decisions even when no project runs the lifecycle)
+                "features": (["decision_answer", "lifecycle"] if self._lifecycle_on() else
+                             ["decision_answer"] if lead_on else [])
+                + ["project_pause"] + (["lead_manager"] if lead_on else []),
                 # per project: {paused, mode, note, actor, since, busy_sessions,
                 # running_helpers, running_reviews, safe_to_upgrade}
                 "project_pause": {pid: self._pause_status(pid) for pid in sorted(self.c.projects)},
@@ -171,7 +200,7 @@ class ControlChannel:
             return self._report(a, "rejected", f"unsupported action {a['kind']!r}")
         actor = f"{a.get('actor') or 'operator'} (control center)"
         if a["kind"] not in ("answer_question", "reply_permission", "instruction",
-                             "withdraw_instruction", "lanes", "decision_answer") \
+                             "withdraw_instruction", "lanes", "decision_answer", *LEAD_KINDS) \
                 and exp.get("task_state") \
                 and exp["task_state"] != t["state"]:
             return self._report(a, "rejected", f"{tid} is now {t['state']}, not "
@@ -508,6 +537,75 @@ class ControlChannel:
                              "task_state": (self.store.task(a["project_id"], a["task_id"]) or {}
                                             ).get("state")})
 
+    # ------------------------------------------------------------------ lead recovery cases
+
+    def _lead_case_row(self, case_id: str) -> Optional[dict]:
+        """The case row when the table exists (None: no table or no such case)."""
+        try:
+            r = self.store.q("SELECT case_id, project_id, task_id, state FROM recovery_cases "
+                             "WHERE case_id=?", (case_id,))
+        except Exception:                                        # noqa: BLE001
+            return None
+        return r[0] if r else None
+
+    def _lead_case(self, a, t, actor, method: str, verb: str, extra: Optional[dict] = None):
+        """pause / resume / take over / instruct one recovery case through engine.lead.
+        The case must belong to the action's task (project isolation); the
+        LeadManager itself refuses a case it doesn't hold."""
+        lead = self._lead()
+        fn = getattr(lead, method, None) if lead is not None else None
+        if not callable(fn) or any(not _accepts(fn, k) for k in (extra or {})):
+            return self._report(a, "rejected", LEAD_UNAVAILABLE)
+        p = a.get("payload") or {}
+        cid = str(p.get("case_id") or "")
+        note = str(p.get("note") or "")
+        if not cid:
+            return self._report(a, "rejected", "no case_id given")
+        if len(note) > MAX_LEAD_NOTE:
+            return self._report(a, "rejected", f"note is over {MAX_LEAD_NOTE} characters")
+        if method == "instruct" and not note.strip():
+            return self._report(a, "rejected", "an instruction needs text (note)")
+        row = self._lead_case_row(cid)
+        if row and (row.get("project_id") != a["project_id"] or row.get("task_id") != a["task_id"]):
+            return self._report(a, "rejected", f"case {cid} belongs to another task",
+                                {"case_id": cid})
+        try:
+            if method == "instruct":
+                res = fn(cid, note, actor)
+            else:
+                kw = dict(extra or {})
+                if note and _accepts(fn, "note"):
+                    kw["note"] = note
+                if _accepts(fn, "P"):
+                    # takeover stops the case's lead / repair sessions in the project
+                    kw["P"] = self.c.projects[a["project_id"]]
+                res = fn(cid, actor, **kw)
+        except (KeyError, LookupError, ValueError, PermissionError) as e:
+            return self._report(a, "rejected", f"{type(e).__name__}: {e}"[:500], {"case_id": cid})
+        res = res if isinstance(res, dict) else {}
+        after = self._lead_case_row(cid) or {}
+        state = res.get("state") or after.get("state")
+        return self._report(a, "applied", f"case {cid} {verb} by {actor}"
+                            + (f"; case is {state}" if state else ""),
+                            {"case_id": cid, "case_state": state,
+                             "task_state": (self.store.task(a["project_id"], a["task_id"]) or {}
+                                            ).get("state")})
+
+    def _do_lead_case_pause(self, a, t, actor):
+        return self._lead_case(a, t, actor, "pause_case", "paused")
+
+    def _do_lead_case_resume(self, a, t, actor):
+        """Unpause (also ends a takeover): the case continues where it was; the
+        paused time does not count toward max_case_minutes."""
+        return self._lead_case(a, t, actor, "pause_case", "resumed", extra={"paused": False})
+
+    def _do_lead_case_takeover(self, a, t, actor):
+        return self._lead_case(a, t, actor, "takeover", "taken over (the task stays BLOCKED for "
+                                                        "the operator)")
+
+    def _do_lead_case_instruct(self, a, t, actor):
+        return self._lead_case(a, t, actor, "instruct", "given an operator instruction")
+
     def _do_lanes(self, a, t, actor):
         """Operational kill switch for proactive helper lanes of this project.
         It can only stop new lane work (running units finish; their results
@@ -624,6 +722,15 @@ class ControlChannel:
                     ((info.get("time") or {}).get("created") or 0) / 1000 >= (m["delivered_ts"] or 0):
                 return True
         return False
+
+
+def _accepts(fn, name: str) -> bool:
+    import inspect
+    try:
+        ps = inspect.signature(fn).parameters
+    except (TypeError, ValueError):
+        return False
+    return name in ps or any(p.kind == p.VAR_KEYWORD for p in ps.values())
 
 
 def _git_head(root: str) -> str:

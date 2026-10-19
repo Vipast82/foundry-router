@@ -150,6 +150,53 @@ class FoundryClient:
                                                   ("since", since)) if v}, timeout=20)[0].get(
             "denials") or []
 
+    def _get_optional(self, path: str, query: Optional[dict] = None) -> Optional[dict]:
+        """GET that answers None when the endpoint/resource is missing (404, an
+        older Foundry) or Foundry can't be reached; other errors raise."""
+        url = self.url + path + ("?" + urllib.parse.urlencode(query) if query else "")
+        req = urllib.request.Request(url, method="GET")
+        req.add_header("content-type", "application/json")
+        if self.key:
+            req.add_header("authorization", f"Bearer {self.key}")
+        try:
+            with urllib.request.urlopen(req, timeout=20) as r:
+                raw = r.read()
+                data = json.loads(raw) if raw else {}
+        except urllib.error.HTTPError as e:
+            if e.code == 404:
+                return None
+            raw = e.read()
+            try:
+                body = json.loads(raw)
+            except ValueError:
+                body = {"error": raw[:300].decode(errors="replace")}
+            err = body.get("error") if isinstance(body, dict) else None
+            code = str((err.get("code") if isinstance(err, dict) else (body or {}).get("code"))
+                       or "")
+            msg = str((err.get("message") if isinstance(err, dict) else err) or "")
+            raise FoundryError(f"GET {path}: HTTP {e.code} {code} {msg[:300]}") from None
+        except (urllib.error.URLError, TimeoutError, ConnectionError):
+            return None
+        except (ValueError, http.client.HTTPException, OSError) as e:
+            raise FoundryError(f"GET {path}: {type(e).__name__}: {e}"[:400]) from None
+        if not isinstance(data, dict):
+            raise FoundryError(f"GET {path}: unexpected response {str(data)[:200]}")
+        return data
+
+    def served_models(self, session_id: str) -> Optional[dict]:
+        """{session_id, calls, served_models (first use first), backends, routes,
+        last_ts} from Foundry's ledger; None when unavailable (404 / unreachable)."""
+        return self._get_optional(
+            f"/v1/foundry/work/sessions/{urllib.parse.quote(session_id, safe='')}/served")
+
+    def persona_info(self, persona: str, client: str = "") -> Optional[dict]:
+        """{name, exists, enabled, strict, routes: [{backend, model, source, vision}],
+        client_allowed, reason}; `client` checks another configured client's
+        grant instead of this key's. None when unavailable (404 / unreachable)."""
+        return self._get_optional(
+            f"/v1/foundry/personas/{urllib.parse.quote(persona, safe='')}/routes",
+            {"client": client} if client else None)
+
     # -- control center (control_api.py) ----------------------------------------------
 
     def telemetry(self, batch: dict) -> dict:
