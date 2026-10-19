@@ -515,3 +515,17 @@ def test_operator_unblock_resolution_crosses_the_repeat_guard_once(tmp_path):
               and d["status"] == "open"]
     assert not reasks
     assert len(with_note()) == 1
+
+
+def test_negation_after_the_verb_is_a_prohibition_too():
+    """rc-5b39e448...: 'Edit nothing in src/ or tests/; do not touch
+    tests/S46_check.lua' was rejected as a test edit."""
+    from foundry_coordinator.lead import test_edit_directives
+    live = ("UI-02 BUILD evidence repair for the S46 suite only, at current HEAD (src/tests "
+            "identical to bee8500). Edit nothing in src/ or tests/; do not touch "
+            "tests/S46_check.lua. Nothing in tests/ changes and neither src/ nor the specs "
+            "are edited.")
+    assert test_edit_directives(live, ["tests/*"], []) == []
+    assert test_edit_directives("Edit the tests for the new widget.", ["tests/*"], [])
+    assert test_edit_directives("Change no assertions; update the tests/S46_check.lua setup.",
+                                ["tests/*"], [])

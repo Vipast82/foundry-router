@@ -299,7 +299,10 @@ def test_edit_directives(text: str, acceptance_globs=(), declared=()) -> list[st
             if acceptance_globs and _match(p, acceptance_globs) and p not in declared \
                     and not clause_negated(line, pm.start()):
                 named.append(p)
-        edits = [m for m in _TEST_EDIT.finditer(line) if not clause_negated(line, m.start())]
+        # "Edit nothing in src/ or tests/", "change no tests": the object of the
+        # verb is the negation itself
+        edits = [m for m in _TEST_EDIT.finditer(line) if not clause_negated(line, m.start())
+                 and not re.match(r"\w+\s+(?:nothing|none|no)\b", m.group(0), re.I)]
         if named or (edits and not declared):
             out.append(line)
     return out

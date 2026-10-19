@@ -272,7 +272,7 @@ CATEGORIES = {
 # inside a path like tests/x.lua), a parenthesis, or a numbered item "(2)"
 _CLAUSE_END = re.compile(r"[.;:!?](?=\s|$)|[()]")
 _NEGATION = re.compile(r"\b(?:do not|don't|never|must not|should not|may not|cannot|"
-                       r"avoid|without|no|not)\b", re.I)
+                       r"avoid|without|no|not|nothing|none|neither|nor)\b", re.I)
 
 
 def clause_negated(line: str, pos: int) -> bool:

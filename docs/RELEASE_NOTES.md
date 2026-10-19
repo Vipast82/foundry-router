@@ -2,6 +2,18 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.126.7 — "Edit nothing in tests/" is a prohibition
+
+The Lead's report for `rc-5b39e448db36eb6b` was rejected for "Edit nothing in
+src/ or tests/; do not touch tests/S46_check.lua", because the negation came
+after the verb.
+- A test-edit match whose object is `nothing`, `none` or `no` is a
+  prohibition.
+- The clause negation words now also include `nothing`, `none`, `neither`
+  and `nor`.
+- Real edits are still flagged, including after a negated clause ("Change no
+  assertions; update the tests/S46_check.lua setup").
+
 ## v0.126.6 — an operator unblock's resolution is the next strategy
 
 UI-02, 2026-10-19: an operator unblock with a reset and a written resolution
