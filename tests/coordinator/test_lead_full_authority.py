@@ -529,3 +529,41 @@ def test_negation_after_the_verb_is_a_prohibition_too():
     assert test_edit_directives("Edit the tests for the new widget.", ["tests/*"], [])
     assert test_edit_directives("Change no assertions; update the tests/S46_check.lua setup.",
                                 ["tests/*"], [])
+
+
+def test_a_deploy_between_create_and_prompt_is_not_a_guard_violation(tmp_path):
+    """v0.126.7 deploy: a lead call created before the deploy checkout moved to
+    the new tag and prompted after it was escalated as a guard violation. The
+    guard's baseline is the prompt, when the model can first act."""
+    from tests.coordinator.helpers import git as g
+    rep = lead_reply({"classification": "evidence",
+                      "hypothesis": "The evidence is current; only re-verification is needed.",
+                      "evidence_refs": ["verify.py:1"], "action": {"kind": "reverify"}})
+    e = make_game(tmp_path, scratch_primary([], scratch=""), lead=lambda ctx: rep,
+                  extra=full_toml(tmp_path))
+    c = e["c"]
+    c.approve("game", TID, [], "victor")
+    c.store.update_task("game", TID, state=S.BLOCKED, blocker="x", run_id="run-1")
+    case = c.lead.open_case(e["P"], task(e), {"state": "BLOCKED", "reason": "x",
+                                              "class": "check_failed"},
+                            {"failed_checks": ["au.x"]})
+    router = tmp_path / "router"
+    real = c.lead._guard_snapshot
+    calls = []
+
+    def snapshot_then_deploy(P, tid):
+        out = real(P, tid)
+        calls.append(1)
+        if len(calls) == 1:                    # right after the call was created
+            (router / "deploy_marker.txt").write_text("v-next\n")
+            g(router, "add", "-A")
+            g(router, "commit", "-qm", "deploy the next tag")
+        return out
+    c.lead._guard_snapshot = snapshot_then_deploy
+    for _ in range(20):
+        case = c.lead.step(e["P"], task(e), case)
+        if case["state"] != "DIAGNOSING":
+            break
+    kinds = [a["kind"] for a in acts(e, case["case_id"])]
+    assert "guard_violation" not in kinds, kinds
+    assert case["state"] == "RESUMING"

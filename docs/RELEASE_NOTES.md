@@ -2,6 +2,24 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.126.8 — the Lead's guard baseline is the prompt, not the session creation
+
+The v0.126.7 deploy checked out a new tag in the deploy checkout while Lead
+call #5 of `rc-5b39e448db36eb6b` was created but not yet prompted. The project
+pause had held it. After the restart the call was prompted, and the guard
+compared against its creation-time snapshot. It reported "router checkout
+head changed" and escalated to Victor (`dec-f09c25239da1a8cd`).
+
+- **Fix:** the guard re-takes its snapshot when the prompt is sent, the
+  first moment the model can act, so a deploy or any operator change before
+  that is not attributed to the Lead.
+- **Deploy script:** `deploy_release.ps1`'s safe-point probe now counts only
+  Lead and repair calls whose session was actually prompted. A call the
+  project pause held before sending no longer deadlocks a deploy.
+
+**Test:** `test_a_deploy_between_create_and_prompt_is_not_a_guard_violation`
+fails on v0.126.7 and passes now.
+
 ## v0.126.7 — "Edit nothing in tests/" is a prohibition
 
 The Lead's report for `rc-5b39e448db36eb6b` was rejected for "Edit nothing in

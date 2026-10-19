@@ -1757,7 +1757,11 @@ class LeadManager:
             with self.store.tx():
                 self._bump(case["case_id"], quota_calls=1, **({"diagnoses": 1} if diagnosis
                                                               else {}))
-                self._upd(key, phase="prompting", prompting_ts=self.clock())
+                # the guard's baseline is the moment the model gets its prompt:
+                # nothing before it can be the lead's doing (a deploy between
+                # create and prompt moved the router HEAD: v0.126.8)
+                self._upd(key, phase="prompting", prompting_ts=self.clock(),
+                          guard=self._guard_snapshot(P, t["task_id"]))
             try:
                 client.prompt(sid, text_fn(), directory=directory, persona=persona, agent=agent)
             except Exception as e:                               # noqa: BLE001
