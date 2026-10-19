@@ -2,6 +2,23 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.126.5 — every feature on in the Animal Uprising template; deploy checkout
+
+- **`[frontier_primary]` is enabled** in `project.example.toml`, with persona
+  `Foundry-Kilo-Sonnet`, 3 turns, 120 minutes, one phase per task. It stays
+  manual only (`frontier request`) and never triggers itself, so the local
+  primary remains the default game writer. Every other feature was already
+  enabled.
+- **The live coordinator runs from a separate deploy checkout**
+  (`C:\Users\shock\foundry-deploy`), pinned to a release tag. Deploys use
+  `config\workstation\deploy_release.ps1 -Tag vX.Y.Z`, which:
+  - checks out the tag and copies the live profile;
+  - waits for a safe point and backs up;
+  - stops the coordinator through its stop file, starts it hidden and checks
+    the heartbeat.
+
+  Dev edits and commits no longer touch the live code or the Lead's guard.
+
 ## v0.126.4 — prework survives the session ending
 
 UI-02's primary session died on an ECONNRESET. That cancelled its in-flight
