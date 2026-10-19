@@ -29,6 +29,8 @@ def test_build_delegates_planning_but_retains_execution_and_gates(tmp_path):
     assert "not acceptance evidence or permission to widen scope" in prompt
     assert "Do NOT write UI-01_SUMMARY.md" in prompt
     assert "GATE UI-01 PASS|FAIL" in prompt
+    assert "ButtonActions" in prompt and "Unbound()" in prompt
+    assert "actual mouse/touch/controller input" in prompt
 
 
 def test_repairs_include_findings_without_widening_scope(tmp_path):

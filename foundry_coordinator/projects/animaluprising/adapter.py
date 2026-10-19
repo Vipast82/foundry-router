@@ -270,6 +270,23 @@ class AnimalUprisingAdapter(GenericAdapter):
 
     def implement_prompt(self, spec: TaskSpec, ctx: dict) -> str:
         planning = ""
+        menu_actions = ""
+        if spec.task_id.startswith("UI-") or any(
+                path.startswith("src/client/UI/") for path in spec.scope):
+            menu_actions = """
+For Studio client menu setup and functional button tests, use
+`require(game.Players.LocalPlayer.PlayerScripts.Client.UI.ButtonActions)`:
+`List()` gives current names/paths, `Click(nameOrPath)` invokes the same handler,
+and `Unbound()` exposes buttons missing a callable handler. Open each relevant
+menu, inspect `List()` and require `Unbound()` to be empty; never guess an
+ambiguous path or bypass a hidden/disabled button. Every new menu click handler
+must use `ButtonActions.Bind` or the kit's `Widgets.button` callback, with a
+stable descriptive name. The headless ButtonActions spec guards this contract.
+Named handler calls are for setup and functional menu tests. They do not prove
+pointer hit testing, dragging, or actual mouse/touch/controller input. UI-02
+c11 PRESS and c12 input-mode acceptance still require real Studio input and raw
+evidence in each required mode.
+"""
         if self.p.roles.get("planner"):
             planning = """
 Before executing this attempt, invoke the read-only `au-planner` subagent once through the task tool. Give it this sprint's approved plan, current revision, latest NEXT/checklist, relevant observed results, and any repair findings below. It uses the configured Foundry planner persona to identify the next bounded steps and resolve routine procedure choices already covered by the plan. Keep this delegation bounded; do not re-plan every file or run duplicate planning calls.
@@ -282,6 +299,7 @@ Read docs/progress/STATE.md header + last 5 ledger rows, then docs/progress/{spe
 
 {spec.spec}
 {planning}
+{menu_actions}
 
 This session's job: the plan's remaining BUILD steps, each committed by explicit path with a message starting "{spec.task_id}: ", then the gate on committed code:
   pwsh -NoProfile -ExecutionPolicy Bypass -File tools/gate.ps1 -Sprint {spec.task_id} -Files <files under test> -Tier {spec.data.get('tier', 'A')} ...
