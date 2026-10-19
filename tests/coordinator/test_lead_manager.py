@@ -1040,6 +1040,19 @@ def test_repeat_key_ignores_the_revision_and_counts_cancelled_cases(env):
     assert "max_fingerprint_repeats" in q and "check" in q
 
 
+def test_lead_prompt_includes_current_project_recovery_policy(env):
+    env["P"].adapter.recovery_policy = lambda task_id: f"{task_id}: vision model approves"
+    case = open_case(env)
+    prompt = env["lm"]._lead_prompt(env["P"], task(env), case)
+    assert "Current project recovery policy" in prompt
+    assert "T1: vision model approves" in prompt
+    t = task(env)
+    t["data"]["lead_assignment"] = {"assignment": "Finish the captures"}
+    handoff = env["c"]._lead_assignment_text(env["P"], t)
+    assert "Finish the captures" in handoff
+    assert "T1: vision model approves" in handoff
+
+
 def test_explicit_budget_reset_starts_new_lead_recovery_round(env):
     lm = env["lm"]
     a = open_case(env)

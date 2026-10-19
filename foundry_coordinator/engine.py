@@ -3465,7 +3465,12 @@ class Coordinator:
         if not self._lead_on(P):
             return ""
         a = (t.get("data") or {}).get("lead_assignment") or {}
-        return str(a.get("assignment") or "")
+        assignment = str(a.get("assignment") or "")
+        policy_fn = getattr(getattr(P, "adapter", None), "recovery_policy", None)
+        if assignment and callable(policy_fn):
+            assignment += "\nCurrent project recovery policy overrides conflicting historical " \
+                          "handoff text: " + policy_fn(t["task_id"])
+        return assignment
 
     def _stop(self, P: Project, t: dict, to: str, evidence: dict, cls: str = "",
               **fields) -> Optional[dict]:

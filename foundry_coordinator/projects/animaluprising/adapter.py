@@ -175,6 +175,22 @@ class AnimalUprisingAdapter(GenericAdapter):
     def _model_visual_approval(self) -> bool:
         return (self.p.raw.get("approval") or {}).get("visual_model") is True
 
+    def recovery_policy(self, task_id: str) -> str:
+        """Current operator policy for recovery agents; historical plan notes may lag it."""
+        visual = ("The coordinator's frontier vision reviewer gives final visual approval "
+                  "for committed, current-revision captures; do not request Victor's visual "
+                  "approval." if self._model_visual_approval() else
+                  "Final visual approval still requires the configured approver.")
+        return (f"Current policy for {task_id}: {visual} The primary must first use the "
+                "enabled vision helper to inspect each actual capture and record its "
+                "OBSERVATION. For mouse, touch and controller acceptance, attempt the "
+                "available Roblox Studio input tools in each mode and record the result. "
+                "Escalate to Victor only the exact mode or action the tools cannot perform, "
+                "with attempted tools and evidence. Older plan NEXT/NEEDS_HUMAN lines are "
+                "historical evidence, not authority to bypass these attempts. Never waive "
+                "a check or change a baseline without observed raw runs and a recorded "
+                "scope/test decision.")
+
     def _parse_plan(self, task_id: str, rel: str, plan: str) -> TaskSpec:
         """The plan text -> TaskSpec (done_check.py's own scope/tier parsing)."""
         dc = self._done_check_module()

@@ -21,6 +21,16 @@ from tests.coordinator.test_au_review_evidence import (LOG_REL, PLAN, PLAN_REL, 
 READINESS_CLASSES = {"environment", "runtime_sync", "tooling", "capability", "scope"}
 
 
+def test_recovery_policy_uses_current_vision_and_input_authority(repo):
+    a = repo["a"]
+    a.p.raw["approval"] = {"visual_model": True}
+    policy = a.recovery_policy("UI-02")
+    assert "frontier vision reviewer gives final visual approval" in policy
+    assert "do not request Victor's visual approval" in policy
+    assert "attempt the available Roblox Studio input tools" in policy
+    assert "exact mode or action" in policy
+
+
 def _view(tool, inp, output, *, status="completed", started=None, ended=None, part="p1",
           truncated=False):
     return {"session_id": "ses_x", "message_id": "m1", "part_id": part, "call_id": "c-" + part,
