@@ -1551,6 +1551,8 @@ class Coordinator:
                         if t["state"] != S.AWAITING_HUMAN:
                             return
             if not self._approvals_needed(P, t, spec, "after_close", t["head_sha"]):
+                if self._lc(P, "obligations"):
+                    self.obligations.evaluate(P, t, t["head_sha"], phases=("APPROVAL",))
                 a = self.store.approvals(pid, tid)[-1]
                 return self.store.transition(pid, tid, S.COMPLETE, {
                     "approval_id": a["approval_id"], "closeout_id": t["closeout_id"]})

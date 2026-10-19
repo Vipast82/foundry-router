@@ -16,8 +16,8 @@ Verification  tools/guard/done_check.py (run, rows parsed), the gate verdict in
 Sessions      BUILD session(s) implement + run the gate; a CLOSE session writes
               the summary/STATE rows, runs done_check and the one plain
               `git push origin master` (AGENT_RULES §9, §24, §34 BUILD/CLOSE).
-Approval      tier-B / visual sprints stop at COMPLETE-PENDING-VISUAL-REVIEW
-              until Victor approves the evidence images (§19, §20, R-A).
+Approval      tier-B / visual sprints require revision-bound evidence image
+              approval; the configured vision reviewer may provide it.
 
 The coordinator refuses to start any sprint until AGENT_RULES.md carries the
 coordinator amendment (RULE_AMENDMENT.md): the one-sprint-per-session rule is
@@ -172,6 +172,9 @@ class AnimalUprisingAdapter(GenericAdapter):
             if isinstance(p, str) and "{task}" in p and not _is_glob(p)]
         return list(dict.fromkeys(p.replace("{task}", spec.task_id) for p in pats))
 
+    def _model_visual_approval(self) -> bool:
+        return (self.p.raw.get("approval") or {}).get("visual_model") is True
+
     def _parse_plan(self, task_id: str, rel: str, plan: str) -> TaskSpec:
         """The plan text -> TaskSpec (done_check.py's own scope/tier parsing)."""
         dc = self._done_check_module()
@@ -197,10 +200,14 @@ class AnimalUprisingAdapter(GenericAdapter):
         acceptance = _accept_section(plan)
         nxt = [l for l in plan.splitlines() if l.startswith("NEXT:")]
         checklist = "\n".join(l for l in plan.splitlines() if checklist_mark(l))
+        visual_gate = (" Visual sprint: final screenshot sign-off is by the "
+                       "coordinator's vision reviewer after closeout."
+                       if self._model_visual_approval() else
+                       " Visual sprint: status is at most COMPLETE-PENDING-VISUAL-REVIEW "
+                       "until Victor approves the evidence images.")
         spec = "\n".join(x for x in [
             f"Plan: {rel} (read it first; it is the sprint's memory, AGENT_RULES §34).",
-            f"Tier: {tier}." + (" Visual sprint: status is at most COMPLETE-PENDING-VISUAL-REVIEW "
-                                "until Victor approves the evidence images." if visual else ""),
+            f"Tier: {tier}." + (visual_gate if visual else ""),
             "## Goal", goal.strip(), "## Acceptance lines", acceptance.strip(),
             "## Checklist", checklist, ("## Last NEXT line\n" + nxt[-1]) if nxt else ""] if x)
         return TaskSpec(project_id=self.p.id, task_id=task_id, title=_title(plan, task_id),
@@ -283,6 +290,8 @@ Before reporting NEEDS_HUMAN for a visual or interaction step, use the enabled v
         never a BUILD blocker, never credited at BUILD)."""
         t = spec.task_id
         status = "COMPLETE-PENDING-VISUAL-REVIEW" if spec.data.get("visual") else "DONE"
+        approval_tail = ("recorded visual approval" if self._model_visual_approval()
+                         else "Victor's approval")
         last = spec.data.get("close_step") or ""
         return [
             {"id": "summary",
@@ -312,7 +321,7 @@ Before reporting NEEDS_HUMAN for a visual or interaction step, use the enabled v
              "step": f'Commit only those closeout files by explicit path, message "{t}: '
                      f'closeout"; then one plain `git push origin master` and confirm '
                      f"`git ls-remote origin master` equals HEAD. No tags (the Sprint Manager "
-                     f"issues tags after DONE / Victor's approval).",
+                     f"issues tags after DONE / {approval_tail}).",
              "duty": f'The "{t}: closeout" commit and the one plain `git push origin master`'},
         ]
 
@@ -334,8 +343,11 @@ Before reporting NEEDS_HUMAN for a visual or interaction step, use the enabled v
             "Scope: only files in the plan's 'Files this sprint may change' list changed",
         ]
         if spec.data.get("visual") or any(s.startswith(f"docs/evidence/{t}/") for s in spec.scope):
+            approver = ("the coordinator's vision reviewer" if self._model_visual_approval()
+                        else "Victor")
             reviewed.append(f"The required evidence captures under docs/evidence/{t}/ at the "
-                            f"reviewed commit (visual approval itself is Victor's, later)")
+                            f"reviewed commit (final visual approval is recorded later by "
+                            f"{approver})")
         return {"phase": "build", "reviewed": reviewed, "deferred": self.closeout_duties(spec)}
 
     def diff_priority(self, path: str, spec: TaskSpec) -> int:
@@ -1271,7 +1283,7 @@ Change no code or test file in this session; if one needs changing, stop and rep
 
     def obligations(self, spec: TaskSpec, ws=None) -> list[dict]:
         """BUILD: acceptance lines, required captures, suites, gate. CLOSE: the
-        _close_duties (close.<id>). APPROVAL: Victor's visual approval for
+        _close_duties (close.<id>). APPROVAL: recorded visual approval for
         visual sprints. Ids come from plan structure (paths, suite ids, duty
         ids, explicit acceptance labels); unlabeled acceptance lines use a hash
         of their text. A NEXT line never changes a phase."""
@@ -1327,12 +1339,14 @@ Change no code or test file in this session; if one needs changing, stop and rep
                evidence_for.get(d["id"], []), deps=build_ids if d["id"] == "summary" else (),
                acceptance=d["step"] or d["duty"])
         if spec.data.get("visual"):
-            ob("approval.visual", "APPROVAL", f"Victor's visual approval of the {t} evidence "
-               f"images", "adapter:visual",
+            model_approval = self._model_visual_approval()
+            approver = "Coordinator vision reviewer" if model_approval else "Victor"
+            ob("approval.visual", "APPROVAL", f"{approver}'s visual approval of the {t} "
+               f"evidence images", "adapter:visual",
                [{"kind": "path", "ref": c} for c in req["captures"]],
                deps=[f"build.capture.{c}" for c in req["captures"]],
-               acceptance="COMPLETE-PENDING-VISUAL-REVIEW until Victor approves",
-               status="pending_human")
+               acceptance=f"Final visual approval by {approver} on current committed images",
+               status="pending_model" if model_approval else "pending_human")
         return out
 
     # -- readiness (GAP_C design; read-only, offline-first) -------------------------------

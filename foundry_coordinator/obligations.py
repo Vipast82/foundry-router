@@ -441,13 +441,24 @@ class Obligations:
 
     def seed(self, P, spec) -> list[str]:
         """Idempotent on (task, obligation_id). An existing row keeps its status
-        and its phase (the adapter can't move a phase either; reconcile flags it)."""
+        and its phase (the adapter can't move a phase either; reconcile flags it).
+        The visual approver label may change under an explicit policy switch;
+        refresh only that display text without touching evidence or status."""
         task = spec.task_id
         added = []
         with self.store.tx():
             for ob in self._adapter_obligations(P, spec):
                 if self._put(P.id, task, ob):
                     added.append(str(ob["obligation_id"]))
+                elif ob.get("obligation_id") == "approval.visual" and \
+                        ob.get("source") == "adapter:visual":
+                    self.store.x(
+                        "UPDATE obligations SET title=?, acceptance=?, updated_ts=? "
+                        "WHERE project_id=? AND task_id=? AND obligation_id=? "
+                        "AND source='adapter:visual'",
+                        (str(ob.get("title") or "")[:500],
+                         str(ob.get("acceptance") or "")[:2000], self.clock(),
+                         P.id, task, "approval.visual"))
         return added
 
     def screen_text(self, P, task: str, text: str, source: str) -> list[dict]:
@@ -643,14 +654,36 @@ class Obligations:
             for ob in self.all(P.id, task):
                 if ob["status"] not in LIVE or (phases and ob["phase"] not in phases):
                     continue
-                if not ob["required_evidence"]:
+                if ob["obligation_id"] == "approval.visual":
+                    # Screenshot existence is a BUILD capture obligation. The
+                    # APPROVAL row needs a separately recorded, current verdict.
+                    candidates = [a for a in self.store.approvals(P.id, task, "visual")
+                                  if a["revision"] == revision]
+                    approved = False
+                    if candidates:
+                        rule = next((r for r in P.profile.approvals
+                                     if r.kind == "visual"), None)
+                        spec = P.adapter.describe(task) if rule else None
+                        arts = (P.adapter.approval_artifacts(spec, rule.artifacts)
+                                if rule else {})
+                        required = {e["ref"] for e in ob["required_evidence"]
+                                    if e["kind"] == "path"}
+                        committed = (bool(required) and
+                                     all(P.ws.blob_at(revision, path) for path in required) and
+                                     not (required & {path for _, path in P.ws.status()}))
+                        approved = (committed and required <= set(arts) and
+                                    any(a["artifacts"] == arts for a in candidates))
+                    unmet = [] if approved else ["no current revision-bound visual approval"]
+                elif not ob["required_evidence"]:
                     (verified if ob["status"] == "verified" else open_).append(ob["obligation_id"])
                     continue
-                unmet = []
-                for e in ob["required_evidence"]:
-                    ok, why = self._evidence_met(P, t, ob, e, revision, current, missing_ids)
-                    if not ok:
-                        unmet.append(why)
+                else:
+                    unmet = []
+                    for e in ob["required_evidence"]:
+                        ok, why = self._evidence_met(P, t, ob, e, revision, current,
+                                                      missing_ids)
+                        if not ok:
+                            unmet.append(why)
                 if not unmet:
                     verified.append(ob["obligation_id"])
                     self.store.x("UPDATE obligations SET status='verified', verified_rev=?, "

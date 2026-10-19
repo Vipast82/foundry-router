@@ -5,10 +5,14 @@ never the real game repository. Suite ids and counts are deliberately not
 UI-01's: the parsers are generic."""
 
 import json
+from types import SimpleNamespace
 
 from foundry_coordinator.adapters.base import (FAIL, PASS, UNKNOWN, ReviewContractDefaults,
                                               VerificationResult)
 from foundry_coordinator.profile import matches_any
+from foundry_coordinator.profile import ApprovalRule
+from foundry_coordinator.obligations import Obligations
+from foundry_coordinator.store import Store
 from foundry_coordinator.projects.animaluprising.adapter import (AnimalUprisingAdapter,
                                                                 _fnv1a32)
 from tests.coordinator.test_au_review_evidence import (LOG_REL, PLAN, PLAN_REL, T, _commit,
@@ -297,6 +301,59 @@ def test_obligations_keep_build_captures_in_build_despite_next(repo):
     rev2 = _commit(repo["ws"], f"{T}: acceptance line added above")
     ids2 = {o["obligation_id"] for o in a.obligations(a.describe_at(T, rev2, w))}
     assert set(by) <= ids2 and "build.accept.A2" in ids2
+
+
+def test_delegated_visual_review_updates_existing_inspector_label_without_waiver(repo):
+    a, w = repo["a"], repo["w"]
+    spec = a.describe_at(T, repo["head"], w)
+    project = SimpleNamespace(id=a.p.id, adapter=a)
+    store = Store(str(repo["ws"].parent / "visual-obligations.sqlite"))
+    obligations = Obligations(store)
+    obligations.seed(project, spec)
+    old = obligations.get(a.p.id, T, "approval.visual")
+    assert "Victor" in old["title"]
+
+    a.p.raw["approval"] = {"visual_model": True}
+    delegated = a.describe_at(T, repo["head"], w)
+    proposed = {o["obligation_id"]: o for o in a.obligations(delegated)}
+    assert proposed["approval.visual"]["status"] == "pending_model"
+    assert "coordinator's vision reviewer" in delegated.spec
+    obligations.seed(project, delegated)
+    current = obligations.get(a.p.id, T, "approval.visual")
+    assert "Coordinator vision reviewer" in current["title"]
+    assert current["status"] == old["status"] == "open"
+    assert current["phase"] == old["phase"] == "APPROVAL"
+    assert current["required_evidence"] == old["required_evidence"]
+
+
+def test_visual_obligation_needs_recorded_approval_not_just_images(repo):
+    a, w = repo["a"], repo["w"]
+    a.p.raw["approval"] = {"visual_model": True}
+    a.p.approvals = [ApprovalRule(match="visual", kind="visual", stage="after_close",
+                                artifacts=[f"docs/evidence/{T}/*.png"])]
+    spec = a.describe_at(T, repo["head"], w)
+    project = SimpleNamespace(id=a.p.id, adapter=a, profile=a.p, ws=w)
+    store = Store(str(repo["ws"].parent / "visual-evaluation.sqlite"))
+    obligations = Obligations(store)
+    obligations.seed(project, spec)
+    rev = repo["head"]
+    first = obligations.evaluate(project, {"task_id": T}, rev, phases=("APPROVAL",))
+    assert "approval.visual" in first["open"]
+    arts = a.approval_artifacts(spec, a.p.approvals[0].artifacts)
+    store.add_approval(a.p.id, T, "visual", rev, arts, "model:vision", "all frames seen")
+    second = obligations.evaluate(project, {"task_id": T}, rev, phases=("APPROVAL",))
+    assert "approval.visual" in second["open"]  # the third required frame is absent
+    _write(repo["ws"], f"docs/evidence/{T}/size_1366x768.png",
+           b"\x89PNG third-frame", binary=True)
+    rev = _commit(repo["ws"], f"{T}: third required frame")
+    spec = a.describe_at(T, rev, w)
+    arts = a.approval_artifacts(spec, a.p.approvals[0].artifacts)
+    store.add_approval(a.p.id, T, "visual", rev, arts, "model:vision", "all frames seen")
+    third = obligations.evaluate(project, {"task_id": T}, rev, phases=("APPROVAL",))
+    assert "approval.visual" in third["verified"]
+    _write(repo["ws"], f"docs/evidence/{T}/gallery_phone.png", b"\x89PNG changed", binary=True)
+    changed = obligations.evaluate(project, {"task_id": T}, rev, phases=("APPROVAL",))
+    assert "approval.visual" in changed["regressed"]
 
 
 def test_check_dependencies_docs_change_vs_src_change(repo):
