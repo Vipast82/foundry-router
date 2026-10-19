@@ -1,9 +1,66 @@
 # Lead sprint manager: last automated recovery tier
 
-Status: design for implementation. The automatic partial-BUILD reevaluation in
-`engine.py` is implemented on the current development branch; the lead manager,
-repository repair worker and deployment supervisor described below are **not**
-running yet. Do not describe the current `retry_guidance` adviser as this tier.
+Status (v0.123 development branch): implemented and wired, **off by default**
+(`[lead_manager] enabled = false`). With it off the engine behaves exactly as
+before (FAILED / BLOCKED as today, no lead tables created, `engine.lead` is
+None). It has only been exercised against fakes (tests/coordinator/
+test_lead_e2e.py); the controlled live pilot below has not happened yet. Do not
+describe the `retry_guidance` adviser as this tier.
+
+What is implemented:
+
+- `foundry_coordinator/lead.py` (`LeadManager`): readiness (persona enabled and
+  strict, route chain == `expected_models`, no local route, Kilo limits/filters,
+  lead agent), cases idempotent per fingerprint, the bounded redacted dossier,
+  the case state machine (DIAGNOSING, REPAIRING, UPGRADING, RESUMING, DEFERRED,
+  NEEDS_VICTOR), read-only lead permissions in the game workspace, served-model
+  verification after every call (mismatch aborts, never a fallback), journaled
+  `recovery_actions`, restart reconciliation (an uncertain prompt is never
+  resent), operator pause / takeover / instructions.
+- `foundry_coordinator/repair.py` (`RepairWorkspace`): isolated Foundry-Router
+  worktrees on `lead/<case>`, dirty-scope and test-expectation refusal, a
+  reproducing test (fails at base, passes at the candidate), focused/broader
+  pytest runs, an independent Foundry review and the manifest.
+- `foundry_coordinator/supervisor.py`: the out-of-process upgrade step machine
+  (waiting_safe_point -> verifying -> stopping -> backing_up -> installing ->
+  starting -> checking -> resuming, with ALL projects paused) with rollback of
+  the build and the DB. There is no `git reset --hard`: a rollback uses
+  `git reset --keep`, and only when HEAD is still the candidate.
+- Engine wiring (`engine.py`): `engine.lead` is built lazily, only when a
+  project enables it. Every final stop (`_block`; the FAILED budget stops in
+  `_start_implementation` / `_lc_budget`; review budget, invalid reviews and
+  review errors; a reviewer BLOCKED verdict; required checks that could not
+  run; a session's explicit BLOCKED / NEEDS_HUMAN report; a non-automatic
+  readiness block) goes through `Coordinator._stop`: deterministic recovery
+  first (evidence recover, the lead's route/quota readiness refresh), then
+  `lead.open_case` and BLOCKED with `data.recovery_case` and blocker text
+  `lead recovery: <state> ...` (no new task states). A no_progress /
+  recovery_escalation decision wait first runs the automatic partial-BUILD
+  reevaluation; only a question that survives it becomes a case (an operator
+  answer to that original question still wins and cancels the case). BLOCKED
+  tasks with an active case get one bounded `lead.step` per tick, honour a
+  project pause, an operator pause/takeover and an unblock, and resume from
+  `lead.resume_action`: a game assignment becomes the primary's repair findings
+  (marked as the lead's untrusted advice) with up to `extra_attempts` granted
+  under the delegated `[lead_manager]` policy (budget-ledger
+  `authorized:attempt_ordinary` / `authorized:sessions` rows referencing
+  `unblock:lead:<case>`, journaled on the case), reverify and an installed
+  upgrade re-verify the same head, a cleared wait retries, and Victor's answer
+  to a `lead_escalation` decision becomes his instruction (or stops the task).
+  Each resume transition carries `{recovery_case, action}` and resolves the case.
+- Control center: the bridge's `lead` task field, case controls
+  (`lead_case_pause` / `lead_case_takeover` / `lead_case_instruct`) and the
+  `lead_manager` heartbeat feature, gated on `engine.lead` and a project
+  enabling it.
+
+Known gaps (see the integrator report): the lead queues upgrade requests with a
+list journal the supervisor cannot read (the engine normalizes a `requested`
+row until lead.py queues through `supervisor.request_upgrade`); the supervisor
+moves the case to RESUMING / DIAGNOSING itself, bypassing the lead's
+`upgrade_result` journal row and its rollback-once rule (bounded instead by
+`max_upgrades` / `max_candidates`); lead session rows are never ended; and
+states.py has no BLOCKED -> CHANGES_REQUIRED edge, so a game assignment resumes
+as READY with the assignment as the repair findings.
 
 ## Goal and authority
 
@@ -38,12 +95,25 @@ cannot mark a test PASS, answer an undelegated decision or suppress a gate.
    coordinator defect; a game defect stays with the approved game primary. The
    lead may request coding help and independent review, but helpers cannot
    inherit its authority or write the active game checkout.
-4. **Upgrade supervisor** is outside the coordinator process. It can wait for
-   the single writer to reach a safe point, back up SQLite and evidence blobs,
-   verify tests and release identity, stop the old coordinator, install the
-   candidate, restart it, run readiness and state-migration checks, then resume
-   the original task. If health checks fail, it restores the prior build and
-   state. The coordinator cannot reliably restart and validate itself.
+4. **Upgrade supervisor** is outside the coordinator process. With ALL
+   projects paused it waits for a safe point, verifies tests and release
+   identity, stops the old coordinator, backs up SQLite and evidence blobs,
+   installs the candidate, restarts it, runs readiness and state-migration
+   checks, then resumes the original task. If health checks fail, it restores
+   the prior build (`git reset --keep`, only while HEAD is the candidate; never
+   `reset --hard`) and state. The coordinator cannot reliably restart and
+   validate itself.
+
+   Review A hardening (v0.123): a blocker's repeat key ignores HEAD, so repeat
+   cases count resolved and cancelled ones and per-task caps
+   (`max_cases_per_task` 3, `max_lead_calls_per_task` 6,
+   `max_extra_attempts_per_task` 2) bound a game-repair loop; repair sessions
+   may run only the venv `python -m pytest` and read-only git; every lead /
+   repair session holds the workspace lock and is checked against before /
+   after snapshots of the game, the router checkout and the task's
+   coordinator rows; UPGRADING (`max_upgrade_minutes` 120) and RESUMING
+   (`max_resuming_minutes` 60) time out to Victor; operator pause time is off
+   the case clock (`lead_case_resume` unpauses).
 
 ## Decision sequence
 
@@ -92,3 +162,112 @@ lead timeout or repeated failed candidates reaches Victor with a useful
 question. Then run a controlled live pilot on a paused, backed-up sprint.
 
 The current running worker must not load development-branch code mid-session.
+
+## Deployment, activation and the live pilot (v0.123.0)
+
+### Deployment order (each at a safe point, nothing hot-reloaded)
+
+1. **Foundry server.** It currently reports v0.122.0, so this also brings it
+   up to date with v0.122.1–v0.122.6: pinned fallback routes, pause support,
+   quota fixes, the new `/served` and `/personas/{name}/routes` endpoints and
+   the `lead_manager` purpose.
+
+   `git pull origin main && docker compose up -d --build`
+
+   Check: the control center shows Foundry v0.123.0.
+2. **Coordinator (workstation).**
+   1. Pause AnimalUprising in the control center (at a safe point) and wait
+      for "PAUSED — safe to upgrade".
+   2. Back up `~/.foundry-coordinator/coordinator.sqlite` (+ `-wal`/`-shm`)
+      and `evidence_blobs/`.
+   3. Stop the coordinator, pull, and start it with the same profiles and
+      state directory.
+   4. Leave `[lead_manager] enabled = false`.
+
+   Check: the heartbeat shows coordinator v0.123.0 and the version gate reads
+   "ok".
+3. **Resume** the project.
+
+Behavior is unchanged until you enable the lead.
+
+### Activation checklist (all must pass before `enabled = true`)
+
+- **Foundry persona `Foundry-Kilo-Lead-Manager`:**
+  - enabled;
+  - routing strict;
+  - model chain exactly Opus 5.5 first, then the Astra model (no local route);
+  - granted to the Kilo worker client key.
+  - Verify with `GET /v1/foundry/personas/Foundry-Kilo-Lead-Manager/routes?client=kilo`
+    (orchestration key): it must return `enabled: true`, `strict: true`,
+    `client_allowed: true`, the two routes in order, and no `source: local`.
+- **Kilo (`kilo.jsonc`):**
+  - `provider.foundry.models["Foundry-Kilo-Lead-Manager"]` with
+    `limit.context` / `limit.output`;
+  - the persona is not excluded by whitelist or blacklist;
+  - an agent named `lead` (read-only tools) exists.
+- **Profile (local `project.toml`):**
+
+  ```toml
+  [lead_manager]
+  enabled = true
+  persona = "Foundry-Kilo-Lead-Manager"
+  expected_models = ["claude-opus-5-5", "<Astra model id exactly as /routes reports it>"]
+  kilo_client = "kilo"
+  supervisor = "supervisor"     # or "manual"
+  ```
+
+  Keep `role_overrides.ui` (Sonnet stays the UI implementer).
+- **Readiness:** `python -m foundry_coordinator doctor` (and the heartbeat's
+  `lead_ready`) shows every lead check passing.
+- **Supervisor (only if `supervisor = "supervisor"`)** runs as its own
+  process:
+
+  `python -m foundry_coordinator.supervisor --state ~/.foundry-coordinator --repo <Foundry-Router checkout> --coordinator-cmd "<your coordinator start command>" --loop`
+
+### One backed-up live pilot
+
+1. Choose a paused task at a safe point, ideally one with a known, real,
+   non-visual blocker. Back up the state directory and note the task's
+   attempt and session counters.
+2. Enable the lead for the project and resume. The first stop should show
+   the lead recovery section going to DIAGNOSING.
+3. Verify a real Opus-first recovery:
+   - The lead session's served model (Lead recovery section → served model,
+     or `GET /v1/foundry/work/sessions/<lead session>/served`) is
+     `claude-opus-5-5` on the expected backend.
+   - The game checkout's HEAD and status are unchanged by the lead session
+     (journal: no `guard_violation`).
+   - The lead's action is journaled with revision, scope and result.
+   - Gates still decide: a lead assignment only re-enters normal verify and
+     review.
+4. Verify the Astra fallback without touching game state:
+   - With the task paused, make Opus unavailable to Foundry for a moment,
+     e.g. cool down or disable that route in Foundry.
+   - Readiness should report the chain as an ordered subset (a transient
+     DEFERRED, not a configuration escalation).
+   - When a call is made on the fallback, `/served` shows the Astra model and
+     the check passes because it is in `expected_models`.
+   - A model NOT in `expected_models` must fail closed: the case is DEFERRED
+     or NEEDS_VICTOR and no report is used.
+   - Restore the Opus route afterwards.
+5. Confirm bounds: the case counters stay within their maxima, and a repeated
+   blocker reaches one precise NEEDS_VICTOR question instead of looping.
+6. Roll back if needed:
+   - set `enabled = false` and restart the coordinator at a safe point;
+   - disable the persona in Foundry;
+   - the recovery tables stay for the audit trail.
+
+### Remaining risks (not proven live)
+
+- **Kilo enforcement.** The read-only and repair shells rely on Kilo
+  permission enforcement plus the mechanical before/after snapshots. A
+  command shape Kilo does not match could still run, but any change it makes
+  is detected after the session.
+- **Code under test.** Lead-written test code runs in-process during repair
+  validation, with a scrubbed environment but no OS sandbox.
+- **Supervisor process control.** It is tested with fake processes only.
+  Graceful stop needs a v0.123.0 coordinator writing the new pid and stop
+  files; an older coordinator is force-stopped only if the supervisor can
+  verify its identity.
+- **Astra model id.** It must be configured exactly as Foundry reports it.
+  Until then, readiness refuses activation.

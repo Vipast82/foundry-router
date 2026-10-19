@@ -2,6 +2,97 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.123.0 — Lead Sprint Manager (last automated recovery tier, off by default)
+
+Before an approved sprint asks Victor to resolve a blocker, the coordinator
+first runs deterministic recovery. It then escalates to a tool-capable frontier
+lead. Only after a bounded, journaled recovery does it ask Victor. Everything is
+behind `[lead_manager] enabled = false` and the persona
+`Foundry-Kilo-Lead-Manager`, which stays disabled until the safe-point
+deployment. Design and runbook: docs/LEAD_SPRINT_MANAGER.md.
+
+**Recovery cases (`lead.py`)**
+- Every final BLOCKED/FAILED stop runs deterministic recovery first: evidence
+  recovery, readiness, the stale-decision re-check (8809871), and re-verify
+  when it resolves the stop. Only then is a durable `recovery_cases` row
+  opened, deduplicated by a fingerprint without the revision.
+- The lead Kilo session gets a fresh dossier, bounded at 40k and redacted, with
+  model-written text marked as untrusted. It runs READ-ONLY in the game
+  workspace: an allowlisted shell, with no `--output`/`--pre`/redirects and
+  no `_secrets`. Snapshots before and after the session abort it if the game,
+  the router checkout or the coordinator DB changed.
+- It returns a validated `lead-report` classified as product, test_harness,
+  evidence, environment, provider_quota, coordinator, scope_core or external.
+  The report may never mark a check PASS, approve, answer a decision, waive a
+  check, move BUILD work to CLOSE or change undeclared acceptance tests.
+- The actions are: a game assignment to the sole primary (with bounded extra
+  attempts under delegated policy), an isolated coordinator repair, wait,
+  reverify, or ask Victor with one precise question that supersedes the
+  stall decision.
+- Bounds are enforced independently: diagnoses, candidates, upgrades,
+  fingerprint repeats, case/resume/upgrade minutes (paused time excluded),
+  quota calls, and per-task caps on cases, lead calls and extra attempts.
+- Journaled op keys mean a crash never repeats a possibly-made paid call
+  (uncertain is never resent), never double-grants and never half-applies.
+- Fail-closed routing: readiness requires the persona to be enabled and
+  strict, the Kilo worker key to be granted, the route chain to equal
+  `expected_models` in order with nothing local, and the Kilo model limits to
+  be present. Each call's served backend+model is checked through
+  `/served`; a mismatch aborts, and nothing ever falls back.
+- Operator controls: pause, resume, takeover and instruct on a case; cancel
+  and unblock cancel the case.
+
+**Isolated repairs and safe upgrades (`repair.py`, `supervisor.py`)**
+- Coordinator defects are fixed in a git worktree on `lead/<case>` outside
+  every protected checkout. Each candidate needs:
+  - a reproducing `path::test` that FAILS at base and PASSES at the candidate,
+    proven through junit;
+  - focused and broader suites passing, with test ids validated and no pytest
+    options;
+  - unchanged test expectations: conftest and ini edits, removed asserts,
+    early returns and duplicate tests are refused, and changes to existing
+    tests need an operator decision;
+  - an independent reviewer (never the lead persona) and a manifest.
+  - Tests run with a scrubbed environment.
+- `python -m foundry_coordinator.supervisor` runs outside the coordinator:
+  - it pauses ALL projects at a safe point, verifies the candidate (review
+    approved, manifest equals the diff, fast-forward, tests), and stops only
+    a verified coordinator process;
+  - it backs up the quiescent DB and evidence, installs with
+    `merge --ff-only`, starts the new build and checks its health (the same
+    pid, release and lead readiness);
+  - on failure it restores the prior build with `reset --keep`, only when
+    HEAD is the candidate, restores the DB only if it was migrated, and
+    restarts the old build;
+  - each step is journaled and resumable; `cancel_request` cancels an
+    unstarted upgrade.
+- The coordinator writes a pid file (pid + creation time) and a per-tick
+  heartbeat (release, lead readiness, errors). It stops at a tick boundary
+  only for a genuine supervisor stop request.
+
+**Foundry server**
+- `GET /v1/foundry/work/sessions/{id}/served`: served models, backends and
+  routes per session, from the ledger, including errors and pending calls.
+- `GET /v1/foundry/personas/{name}/routes[?client=]`: enabled, strict, the
+  route chain with sources, and the client grant. Readiness uses it; no
+  secrets are returned.
+- New required purpose `lead_manager`, with a per-run cap (default 20).
+
+**Control center**
+- A Lead recovery section: DIAGNOSING / REPAIRING / UPGRADING / RESUMING /
+  NEEDS_VICTOR / DEFERRED pills, the lead session, served model, current
+  action, journal, counters vs bounds and upgrade status.
+- Pause / Resume / Take over / Add instruction controls, and a high
+  `lead_needs_victor` alert.
+
+**Also:** commits 55ff628, bc0ddb6 and 8809871 (partial-BUILD carryover and
+the auto re-check of stale BUILD blockers) ship in this release.
+
+**Migration:** additive tables (`recovery_cases`, `recovery_actions`,
+`upgrade_requests`) created only when enabled. Foundry must be deployed before
+the coordinator. Keep `enabled = false` and the persona disabled until the
+pilot.
+
 ## v0.122.6 — AnimalUprising profile becomes an example; local profiles are git-ignored
 
 - New `foundry_coordinator/projects/animaluprising/project.example.toml`: a
