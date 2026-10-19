@@ -2,6 +2,29 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.126.3 — prohibitions are not violations (Lead report validation)
+
+The Lead's reports for `rc-6e288461f726c329` were rejected twice for text
+like "Do not edit any src/ or tests/ file, tests/UI_02_check.lua, closeout
+docs or the scope":
+- **Test-edit check.** Any acceptance path named in the line counted as an
+  edit, even inside a prohibition. Clause detection also split at the dot in
+  `tests/x.lua`.
+- **BUILD-to-CLOSE check.** `moves_build_to_close` tested the whole line, so
+  "closeout" in one clause plus a deferral word anywhere else was flagged.
+
+Fixes:
+- A new `obligations.clause_negated` finds clauses that end at `. ; : ! ?`
+  followed by a space, or at a parenthesis, never at a dot inside a path. A
+  prohibition earlier in the same clause covers every item of its list.
+- Named acceptance paths and test-edit verbs count only when not prohibited.
+- `moves_build_to_close` now looks per clause and only at an unprohibited
+  deferral.
+- Real instructions are still caught, including after a prohibition clause,
+  as are waivers. "known" no longer counts as "no".
+
+Coordinator only.
+
 ## v0.126.2 — helpers: per-run reactive budget, NEXT-first prework, CLOSE drafts
 
 These are findings from UI-02's first v0.126 run.

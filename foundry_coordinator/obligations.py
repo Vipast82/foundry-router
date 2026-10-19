@@ -268,6 +268,32 @@ CATEGORIES = {
 }
 
 
+# a sentence/clause boundary: . ; : ! ? followed by space or end (never the dot
+# inside a path like tests/x.lua), a parenthesis, or a numbered item "(2)"
+_CLAUSE_END = re.compile(r"[.;:!?](?=\s|$)|[()]")
+_NEGATION = re.compile(r"\b(?:do not|don't|never|must not|should not|may not|cannot|"
+                       r"avoid|without|no|not)\b", re.I)
+
+
+def clause_negated(line: str, pos: int) -> bool:
+    """True when a prohibition ("do not", "never", ...) appears earlier in the
+    same clause as position `pos`: "Do not edit src/, tests/x.lua or the
+    closeout docs" forbids every item of its list."""
+    start = 0
+    for m in _CLAUSE_END.finditer(line, 0, pos):
+        start = m.end()
+    return bool(_NEGATION.search(line[start:pos]))
+
+
+def _clause_spans(line: str) -> list:
+    spans, start = [], 0
+    for m in _CLAUSE_END.finditer(line):
+        spans.append((start, m.start()))
+        start = m.end()
+    spans.append((start, len(line)))
+    return [(a, b) for a, b in spans if line[a:b].strip()]
+
+
 def directive_violations(text: str) -> list[str]:
     """What a guidance step, strategy or assignment line may never say:
     waive/skip a check, move BUILD work to CLOSE, or treat CLOSE paperwork as
@@ -287,8 +313,14 @@ def directive_violations(text: str) -> list[str]:
                 for m in WAIVE.finditer(value))
         if unsafe_waive(line) or unsafe_waive(flat):
             out.append("waives_check: " + line[:240])
-        if CLOSE_TARGET.search(line) and DEFER.search(line):
-            out.append("moves_build_to_close: " + line[:240])
+        # per clause, and only when the deferral itself is not prohibited: "Do
+        # not edit src/, tests/ or the closeout docs" is not a phase move
+        for a, b in _clause_spans(line):
+            clause = line[a:b]
+            d = DEFER.search(clause)
+            if d and CLOSE_TARGET.search(clause) and not clause_negated(line, a + d.start()):
+                out.append("moves_build_to_close: " + line[:240])
+                break
         if SUBSTITUTE.search(line) or SUBSTITUTE.search(flat):
             out.append("close_substitutes_build: " + line[:240])
     return out

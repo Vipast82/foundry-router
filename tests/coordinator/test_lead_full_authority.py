@@ -465,3 +465,24 @@ def test_a_prohibition_covers_its_whole_clause():
     assert test_edit_directives(ok, ["tests/*"], []) == []
     assert test_edit_directives("Restore the logs. Then update the tests for the widget.",
                                 ["tests/*"], [])
+
+
+def test_prohibitions_naming_tests_or_closeout_are_not_violations():
+    """rc-6e288461...: the lead's 'do not edit ...' lines were rejected as
+    test edits (an acceptance path named in a prohibition) and as moving BUILD
+    to CLOSE (closeout named in a prohibition, a deferral word elsewhere)."""
+    from foundry_coordinator.lead import test_edit_directives
+    from foundry_coordinator.obligations import directive_violations
+    live = ("Evidence-only repair at current HEAD. Do not edit any src/ or tests/ file, "
+            "tests/UI_02_check.lua, closeout docs or the scope. Do not create untracked "
+            "files outside the scope; put scratch under .plan/tmp and leave nothing else.")
+    assert directive_violations(live) == []
+    assert test_edit_directives(live, ["tests/*"], []) == []
+    # real instructions are still caught, also after a prohibition clause
+    assert directive_violations("Do not edit src. Move the remaining gate run to the "
+                                "CLOSE session.")
+    assert test_edit_directives("Keep src as is. Update tests/UI_02_check.lua to expect "
+                                "3 rows.", ["tests/*"], [])
+    assert test_edit_directives("The known issue: update the tests for the widget.",
+                                ["tests/*"], [])                 # 'known' is not 'no'
+    assert directive_violations("Skip the au.gate check this time.")

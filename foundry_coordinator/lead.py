@@ -48,7 +48,7 @@ import uuid
 from typing import Any, Optional
 
 from .adapters.foundry import FoundryError
-from .obligations import directive_violations, is_model_actor, migrate_schema
+from .obligations import clause_negated, directive_violations, is_model_actor, migrate_schema
 
 SCHEMA_NAME = "schema:lead"
 
@@ -290,18 +290,16 @@ def test_edit_directives(text: str, acceptance_globs=(), declared=()) -> list[st
         line = raw.strip()
         if not line:
             continue
-        paths = [p.replace("\\", "/").strip("'\"`.,;:()") for p in
-                 re.findall(r"[\w\-./\\]+\.[A-Za-z0-9]+", line)]
-        named = [p for p in paths if acceptance_globs and _match(p, acceptance_globs)
-                 and p not in declared]
-        def negated(m) -> bool:
-            # a prohibition covers its whole clause ("do not change src/, tests,
-            # pins or update any expectation"), not only the 24 chars before
-            # the verb; clauses end at . ; : ! ? ( ) and numbered items
-            start = max([line.rfind(ch, 0, m.start()) for ch in ".;:!?()"] + [-1]) + 1
-            return bool(re.search(r"\b(?:do not|don't|never|must not|should not|avoid|no|"
-                                  r"without|not)\b", line[start:m.start()], re.I))
-        edits = [m for m in _TEST_EDIT.finditer(line) if not negated(m)]
+        # an acceptance path NAMED inside a prohibition ("do not edit
+        # tests/x.lua") is not an edit; a prohibition covers its whole clause
+        # (path dots never end a clause: obligations.clause_negated)
+        named = []
+        for pm in re.finditer(r"[\w\-./\\]+\.[A-Za-z0-9]+", line):
+            p = pm.group(0).replace("\\", "/").strip("'\"`.,;:()")
+            if acceptance_globs and _match(p, acceptance_globs) and p not in declared \
+                    and not clause_negated(line, pm.start()):
+                named.append(p)
+        edits = [m for m in _TEST_EDIT.finditer(line) if not clause_negated(line, m.start())]
         if named or (edits and not declared):
             out.append(line)
     return out
