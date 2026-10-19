@@ -283,7 +283,7 @@ def test_edit_directives(text: str, acceptance_globs=(), declared=()) -> list[st
         named = [p for p in paths if acceptance_globs and _match(p, acceptance_globs)
                  and p not in declared]
         edits = [m for m in _TEST_EDIT.finditer(line) if not re.search(
-            r"\b(?:do not|don't|never|must not|should not|avoid)\s+$",
+            r"\b(?:do not|don't|never|must not|should not|avoid|no|without)\s+$",
             line[max(0, m.start() - 24):m.start()], re.I)]
         if named or (edits and not declared):
             out.append(line)

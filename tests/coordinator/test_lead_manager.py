@@ -1226,6 +1226,9 @@ def test_acceptance_globs_default_to_test_paths_and_test_edits_need_declaring(en
     r = report(assignment="Do not edit tests; update the expected value in a spec.",
                files=["src/a.txt"])
     assert validate_report(r, scope=scope, acceptance_globs=globs)[0] is None
+    r = report(assignment="Procedure-only repair; no change to src/ or tests/. Re-run the existing test.",
+               files=["src/a.txt"])
+    assert validate_report(r, scope=scope, acceptance_globs=globs)[0] is not None
     # fail closed: no acceptance globs at all
     assert validate_report(report(), scope=scope, acceptance_globs=[])[0] is None
 
