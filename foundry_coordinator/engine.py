@@ -2612,6 +2612,7 @@ class Coordinator:
                 a = self.recovery.assignment(
                     P, trow, ledger=self.ledger if self._lc(P, "evidence") else None,
                     obligations=self.obligations, ws=P.ws, strategy=strategy,
+                    trusted_strategy=bool(lead_a),
                     adviser=self._lc_adviser(P, tid), evidence_items=items, last_report=last,
                     spec=spec, cap=int(self._lcv(P, "prompt_cap", 6000)))
             except AssignmentInvariant as e:

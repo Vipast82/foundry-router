@@ -179,6 +179,31 @@ def test_three_repeats_with_unchanged_strategy_escalate(store):
     assert "decision" not in a4b and "capture tool" in a4b["strategy"]
 
 
+def test_fresh_lead_strategy_crosses_repeat_guard_once(store):
+    ob, rec, P, t = setup(store)
+    finding = {"class": "missing_evidence", "check_id": "au.freshness", "text": A2}
+    for n in (1, 2, 3):
+        rec.record_findings(P, t, n, [finding])
+        store.update_task("game", "UI-01", attempt=n + 1)
+        if n < 3:
+            rec.assignment(P, store.task("game", "UI-01"), obligations=ob, ws=P.ws,
+                           strategy=f"Previous repair approach {n}")
+
+    lead = "Collect the raw gate tally before reviewing the captured evidence"
+    a = rec.assignment(P, store.task("game", "UI-01"), obligations=ob, ws=P.ws,
+                       strategy=lead, trusted_strategy=True)
+    assert "decision" not in a and a["strategy"] == lead
+    assert a["strategy_required_different"] and a["affected_checks_to_rerun"]
+
+    # An ordinary strategy cannot bypass the guard, and the same lead
+    # assignment cannot be replayed on the next attempt.
+    rec.record_findings(P, t, 4, [finding])
+    store.update_task("game", "UI-01", attempt=5)
+    next_a = rec.assignment(P, store.task("game", "UI-01"), obligations=ob, ws=P.ws,
+                            strategy=lead, trusted_strategy=True)
+    assert "decision" in next_a
+
+
 def test_repeat_with_adviser_is_consulted_once(store):
     ob, rec, P, t = setup(store)
     calls = []

@@ -487,7 +487,8 @@ class Recovery:
         return rows
 
     def assignment(self, P, t, *, ledger=None, obligations: Optional[Obligations] = None,
-                   ws=None, strategy: str = "", adviser: Optional[Callable] = None,
+                   ws=None, strategy: str = "", trusted_strategy: bool = False,
+                   adviser: Optional[Callable] = None,
                    evidence_items: Optional[list] = None, last_report: str = "",
                    spec=None, max_items: int = 3, cap: int = PROMPT_CAP) -> dict:
         """One bounded repair assignment for attempt t['attempt'], or
@@ -589,7 +590,14 @@ class Recovery:
         max_count = max([r["count"] for r in reps] or [0])
         adviser_note = ""
         esc_used = ""                  # the answered escalation this assignment acts on
-        if reps and (same or max_count >= 3):
+        # A lead case has already investigated the repeat and supplied one
+        # bounded, read-only-reviewed assignment. Let a genuinely new strategy
+        # reach the primary once instead of immediately asking the same
+        # recovery question again. Its fingerprint enters `prior` on this
+        # assignment, so a subsequent repeat cannot reuse this exception.
+        fresh_lead_strategy = (trusted_strategy and bool(strategy) and not rejected
+                               and sfp not in {r.get("strategy_fp") for r in prior})
+        if reps and (same or max_count >= 3) and not fresh_lead_strategy:
             base_q = self._escalation_question(reps)
             key = _sha(base_q, 16)
             chain = self._escalations(obs, P.id, task, base_q, key)
