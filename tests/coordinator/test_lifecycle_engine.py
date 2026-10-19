@@ -71,6 +71,30 @@ def test_committed_partial_build_continues_without_spending_repair_attempt(tmp_p
     assert limits["ordinary"]["used"] == 1 and limits["sessions"]["used"] == 2
 
 
+def test_unreported_open_build_gets_one_same_session_continuation(tmp_path, monkeypatch):
+    """Unfinished prose does not submit an open checklist as a final gate."""
+    monkeypatch.setattr(LifecycleAdapter, "pending_build_steps",
+                        lambda self, spec, revision, ws: ["finish UI"]
+                        if ws.show_at(revision, "src/ui.txt") is None else [],
+                        raising=False)
+    turns = []
+
+    def script(ctx):
+        turns.append((ctx["session_id"], ctx["prompt"]))
+        if len(turns) == 1:
+            return {"writes": {"src/core.txt": "OK"},
+                    "final": "The sprint is unfinished. Continue the UI and evidence."}
+        return green_t1(ctx)
+
+    c, _, _, _, _ = _game(tmp_path, script)
+    c.approve("game", "T1", [], "victor")
+    assert run_until(c, lambda: _state(c) == S.COMPLETE, limit=70)
+    assert len(turns) == 2 and turns[0][0] == turns[1][0]
+    assert "without a structured coordinator-report" in turns[1][1]
+    events = c.store.q("SELECT kind FROM events WHERE project_id='game' AND task_id='T1'")
+    assert any(e["kind"] == "open_build_continued" for e in events)
+
+
 def test_fresh_unblock_withdraws_old_recovery_wait_and_starts_new_session(tmp_path,
                                                                          monkeypatch):
     """A reset after partial BUILD progress must reach the new worker, not reblock."""

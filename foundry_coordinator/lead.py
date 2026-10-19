@@ -1084,12 +1084,21 @@ class LeadManager:
         return "rk-" + _sha(_j({k: parts.get(k) for k in ("task", "class", "obligations",
                                                           "checks")}))[:24]
 
+    def _budget_epoch(self, project_id: str, task_id: str) -> float:
+        """Only an explicit operator budget reset begins a new recovery round."""
+        resets = [r["ts"] for r in self.store.history(project_id, task_id)
+                  if r["to_state"] == "READY" and r["actor"] != "engine"
+                  and r["evidence"].get("reset_attempts") is True]
+        return max(resets, default=0.0)
+
     def task_totals(self, project_id: str, task_id: str) -> dict:
-        """What every case of the task used so far (the per-task caps):
+        """What cases in the current authorized budget round have used:
         cases (superseded ones excluded), charged lead calls, granted extra
-        attempts; plus the operator's raises of those caps."""
+        attempts; plus the operator's raises of those caps. Older cases remain
+        in the audit, but cannot exhaust a newly reset round."""
         rows = self.store.q("SELECT case_id, outcome, validation FROM recovery_cases WHERE "
-                            "project_id=? AND task_id=?", (project_id, task_id))
+                            "project_id=? AND task_id=? AND created_ts>=?",
+                            (project_id, task_id, self._budget_epoch(project_id, task_id)))
         ids = [r["case_id"] for r in rows]
         out = {"cases": sum(1 for r in rows if not str(r.get("outcome") or "")
                             .startswith("superseded")),
@@ -1156,8 +1165,10 @@ class LeadManager:
             # ones, and cancelled ones that were not just superseded
             repeats = len(self.store.q(
                 "SELECT 1 FROM recovery_cases WHERE project_id=? AND task_id=? AND "
+                "created_ts>=? AND "
                 "(repeat_key=? OR fingerprint=?) AND (state='RESOLVED' OR (state='CANCELLED' AND "
-                "COALESCE(outcome,'') NOT LIKE 'superseded%'))", (P.id, tid, rk, fp)))
+                "COALESCE(outcome,'') NOT LIKE 'superseded%'))",
+                (P.id, tid, self._budget_epoch(P.id, tid), rk, fp)))
             totals = self.task_totals(P.id, tid)
             now = self.clock()
             cid = "rc-" + _sha(f"{P.id}|{tid}|{fp}|{now}|{uuid.uuid4().hex}")[:16]

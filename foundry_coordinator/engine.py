@@ -719,6 +719,26 @@ class Coordinator:
                 return None
         if recovery.get("session_id") == sid:
             self.store.merge_data(pid, tid, permission_reply_recovery=None)
+        if phase == "implement" and not s.report and not self._held(
+                P, t, "an incomplete BUILD handoff"):
+            pending_fn = getattr(P.adapter, "pending_build_steps", None)
+            nudges = dict(t["data"].get("build_handoff_nudges") or {})
+            if callable(pending_fn) and not nudges.get(sid):
+                spec = P.adapter.describe(tid)
+                pending = pending_fn(spec, P.ws.head(), P.ws)
+                if pending:
+                    message = P.adapter.continue_prompt(
+                        spec, "your turn ended without a structured coordinator-report "
+                        "while the committed BUILD checklist is still open. Continue the "
+                        "remaining in-scope work, commit its evidence and run the final "
+                        "checks. Keep temporary evidence inside approved workspace paths. "
+                        "If a required step truly cannot be done, report the exact blocker")
+                    if self._prompt_primary(P, t, message, "open-build-no-report-v1"):
+                        nudges[sid] = 1
+                        self.store.merge_data(pid, tid, build_handoff_nudges=nudges)
+                        self.store.event(pid, tid, "open_build_continued", session_id=sid,
+                                         detail={"open_steps": pending[:8]})
+                        return None
         self._end_session(P, sid, "idle", tokens=s.tokens, report=s.report)
         return s
 

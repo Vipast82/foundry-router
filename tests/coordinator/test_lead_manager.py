@@ -1040,6 +1040,23 @@ def test_repeat_key_ignores_the_revision_and_counts_cancelled_cases(env):
     assert "max_fingerprint_repeats" in q and "check" in q
 
 
+def test_explicit_budget_reset_starts_new_lead_recovery_round(env):
+    lm = env["lm"]
+    a = open_case(env)
+    lm.cancel(a["case_id"], "operator unblock")
+    b = open_case(env, revision="1" * 40)
+    lm.resolve(b["case_id"], "repair completed")
+    assert lm.task_totals("game", "T1")["cases"] == 2
+
+    # The operator authorizes a fresh round. Historical cases stay stored,
+    # while this round's repeat and lead-call caps start from zero.
+    env["c"].unblock("game", "T1", "fresh recovery round", reset_attempts=True)
+    assert lm.task_totals("game", "T1")["cases"] == 0
+    c = open_case(env, revision="2" * 40)
+    assert c["state"] == "DIAGNOSING" and c["counters"]["repeats"] == 0
+    assert len(env["c"].store.q("SELECT 1 FROM recovery_cases WHERE task_id='T1'")) == 3
+
+
 def test_max_cases_per_task_reaches_victor(env):
     lm = env["lm"]
     for i in range(3):
