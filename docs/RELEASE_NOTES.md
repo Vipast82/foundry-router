@@ -2,6 +2,21 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.125.1 — operate ending in READY no longer re-asks the repeat question
+
+In the v0.125.0 live pilot, `rc-db6eef8a7a7e7f2f` resolved by `operate` and
+then `reverify`, which landed in READY because HEAD had not moved. The repeat
+guard then reopened `dec-96cec292c0994aee` before the implementer started. The
+automatic re-check withdrew it a tick later.
+
+**Fix.** When an `operate` ends in resume or reverify, its operations and
+diagnosis now ride with the task as the lead's strategy:
+- they cross the repeat guard once, as a lead assignment does;
+- they are the implementer's first finding;
+- they are consumed by exactly one session start.
+
+**Test:** `test_operate_resume_after_repeats_reaches_one_session_without_a_re_ask`.
+
 ## v0.125.0 — Lead manager: full delegated recovery authority (default when enabled)
 
 Victor's policy (docs/prompts/LEAD_MANAGER_FULL_AUTHORITY.md). It was

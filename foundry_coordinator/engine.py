@@ -3878,6 +3878,26 @@ class Coordinator:
         if then != "reverify":
             # the follow-up starts the primary (or waits): the lead's write step is over
             self.store.release(pid, tid, self._workspace_locks(P))
+        if then in ("resume", "reverify"):
+            # the applied operations ARE the lead's materially different strategy:
+            # it rides with the task for exactly one session start (like a lead
+            # assignment), so the repeat guard does not re-ask the question
+            # this case just answered when the task lands READY
+            ops = "; ".join(f"{o.get('op')}: {o.get('reason') or ''}"[:200]
+                            for o in act.get("operations") or [])
+            text = (f"Lead recovery case {cid} resolved the blocker by delegated operations "
+                    f"({ops}). Diagnosis: {str(act.get('hypothesis') or '')[:1500]} Continue "
+                    f"the approved plan from its NEXT line; every check still applies.")[:4000]
+            # the primary sees what the lead did (first finding, as for an assignment)
+            prior = [f for f in ((t["data"] or {}).get("findings") or [])
+                     if not isinstance(f, str) or not f.startswith((
+                         self.LEAD_ASSIGNMENT_HEADER.split("{")[0],
+                         self.LEAD_ANSWER_HEADER.split("{")[0]))]
+            self.store.merge_data(pid, tid, findings=[
+                (self.LEAD_ASSIGNMENT_HEADER.format(case=cid) + text)[:4000]] + prior[:20],
+                lead_assignment={"case_id": cid, "files": [], "tests": [], "extra_attempts": 0,
+                                 "authorized": [], "via": "operate", "assignment": text})
+            t = self.store.task(pid, tid)
         if then == "assign":
             nxt = {"kind": "assign_game_repair", "assignment": act.get("assignment") or "",
                    "files": list(act.get("files") or []), "tests": [], "extra_attempts": 0,

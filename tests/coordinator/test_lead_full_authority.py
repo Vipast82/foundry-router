@@ -374,3 +374,37 @@ def test_validation_requires_materially_different_actions_and_personal_questions
     tst["action"]["operations"][0]["paths"] = ["tests/test_gallery.py"]
     assert any("acceptance test" in x for x in
                validate_report(tst, acceptance_globs=["tests/*"], full_authority=True)[1])
+
+
+def test_operate_resume_after_repeats_reaches_one_session_without_a_re_ask(tmp_path):
+    """The v0.125.0 pilot: an operate that ends in READY must not let the
+    repeat guard re-ask the question the case just answered (dec-96cec...):
+    its operations ride as the lead's strategy for exactly one session."""
+    from tests.coordinator.test_lead_e2e import _lifecycle_game, make_router
+    rep = {"classification": "evidence",
+           "hypothesis": "The stall question is answered by the committed plan; the gate "
+                         "recheck only needs one more bounded diagnosis budget.",
+           "evidence_refs": ["docs/progress/UI-02_PLAN.md:7"],
+           "action": {"kind": "operate", "then": "resume", "operations": [
+               {"op": "raise_bound", "bound": "max_diagnoses", "by": 1,
+                "reason": "one more bounded diagnosis if the next attempt stalls"}]}}
+    c, client, ff, did, utid = _lifecycle_game(
+        tmp_path, lambda ctx: lead_reply(rep),
+        lead_kw={"full_authority": True, "router_repo": str(make_router(tmp_path))})
+    P = c.projects["game"]
+    f = {"class": "missing_evidence", "check_id": "au.gate_bound_to_head",
+         "text": "gate verdicts were recorded at an older commit than HEAD"}
+    for n in (1, 2, 3):
+        c.recovery.record_findings(P, c.store.task("game", utid), n, [f])
+
+    def lead_sessions():
+        return [x for x in client.sessions.values() if x["metadata"].get("role") != "lead"
+                and any("delegated operations" in p for p in x.get("prompts") or [])]
+    assert run_until(c, lambda: lead_sessions(), limit=30),         [(d["kind"], d["status"]) for d in c.obligations.all_decisions("game", utid)]
+    for _ in range(3):
+        c.tick()
+    assert len(lead_sessions()) == 1
+    reasks = [d for d in c.obligations.all_decisions("game", utid)
+              if d["kind"] == "recovery_escalation" and d["decision_id"] != did]
+    assert not reasks, [(d["decision_id"], d["status"]) for d in reasks]
+    assert "lead_assignment" not in (c.store.task("game", utid)["data"] or {})

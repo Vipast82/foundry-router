@@ -361,7 +361,7 @@ def test_false_blocker_resumes_by_deterministic_recovery_without_a_lead_call(tmp
     assert not [b for b in ff.binds if b["persona"] == LEAD]
 
 
-def _lifecycle_game(tmp_path, lead_script, answer_original=False):
+def _lifecycle_game(tmp_path, lead_script, answer_original=False, lead_kw=None):
     """The UI-02 partial-BUILD game with a genuine (not reevaluable) stall
     decision: an unrelated untracked file keeps the continuation closed."""
     from tests.coordinator.test_lifecycle_e2e import lifecycle_extra
@@ -386,7 +386,7 @@ def _lifecycle_game(tmp_path, lead_script, answer_original=False):
     body = lifecycle_extra().replace(
         'module = "tests.coordinator.test_lifecycle_e2e:LifecycleAdapter"',
         'module = "tests.coordinator.test_ui02_partial_build:UI02Adapter"')
-    prof = write_profile(tmp_path, "game", root, extra=body + lead_toml())
+    prof = write_profile(tmp_path, "game", root, extra=body + lead_toml(**(lead_kw or {})))
     client = ToolClient(script, project_id="game")
     holder["client"] = client
     for name in ("effective_config", "model_config_problem", "has_prompt", "find_session"):
