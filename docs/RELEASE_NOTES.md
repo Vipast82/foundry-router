@@ -2,6 +2,48 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.124.0 — opt-in model visual sign-off; fresh-session recovery after a reset
+
+**Model visual sign-off.** This is opt-in with `[approval] visual_model = true`,
+off by default; the profile accepts only true or false.
+
+- With it on, an `after_close` visual approval can be given by an
+  independent vision reviewer (`visual_reviewer` persona, called directly
+  through Foundry) instead of waiting for the operator. Every test, gate and
+  code review still applies.
+- Before the call, the coordinator checks:
+  - the closeout revision is exact and clean;
+  - every required frame named by the plan is committed, PNG/JPEG, 8 MB or
+    less, and still matches its hash;
+  - the persona is strict, allowed to the client, and every route model is
+    vision-capable.
+- The reply must account for every frame by path and SHA256, with
+  `image_seen`, a valid subject and an observation. The served model must be
+  one of the verified routes.
+- Any other reply, a stale revision, or a changed frame counts as
+  inconclusive and leaves the approval gate unsatisfied.
+- `changes_required` rejects the closeout with the findings. `approve`
+  records a revision- and artifact-bound approval by
+  `model:<persona>/<served model>`.
+- The call is journaled as a one-time op. A restart never pays for it
+  twice, and a deferred one retries after its backoff.
+
+**Fresh-session recovery.**
+- An operator unblock with `reset_attempts` now withdraws the task's open
+  `no_progress` / `recovery_escalation` questions, with an event. The next
+  READY tick no longer revives them before a new worker starts.
+- A task with partial BUILD progress gets a free retry, so the previous
+  session's unfinished files don't count as repeat failures.
+
+**Animal Uprising adapter.** The BUILD prompt sends required screenshot
+inspection to the read-only `au-visual-review` subagent and the Studio MCP
+tools before any NEEDS_HUMAN. It also tells the implementer to submit
+committed frames for the coordinator's visual sign-off.
+
+Tests:
+- tests/coordinator/test_visual_model_approval.py
+- tests/coordinator/test_lifecycle_engine.py
+
 ## v0.123.2 — idle Kilo session after a permission reply; unadmitted prompts
 
 UI-02 stalled after a tool-permission rejection. Two defects combined.
