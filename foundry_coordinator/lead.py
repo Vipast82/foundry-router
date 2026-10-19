@@ -294,9 +294,14 @@ def test_edit_directives(text: str, acceptance_globs=(), declared=()) -> list[st
                  re.findall(r"[\w\-./\\]+\.[A-Za-z0-9]+", line)]
         named = [p for p in paths if acceptance_globs and _match(p, acceptance_globs)
                  and p not in declared]
-        edits = [m for m in _TEST_EDIT.finditer(line) if not re.search(
-            r"\b(?:do not|don't|never|must not|should not|avoid|no|without)\s+$",
-            line[max(0, m.start() - 24):m.start()], re.I)]
+        def negated(m) -> bool:
+            # a prohibition covers its whole clause ("do not change src/, tests,
+            # pins or update any expectation"), not only the 24 chars before
+            # the verb; clauses end at . ; : ! ? ( ) and numbered items
+            start = max([line.rfind(ch, 0, m.start()) for ch in ".;:!?()"] + [-1]) + 1
+            return bool(re.search(r"\b(?:do not|don't|never|must not|should not|avoid|no|"
+                                  r"without|not)\b", line[start:m.start()], re.I))
+        edits = [m for m in _TEST_EDIT.finditer(line) if not negated(m)]
         if named or (edits and not declared):
             out.append(line)
     return out
@@ -2250,7 +2255,12 @@ class LeadManager:
                                   user_action=act.get("user_action") or "", report=rep)
         if kind in ("assign_game_repair", "coordinator_repair"):
             if self._bound_exhausted(case, s, "candidates"):
-                return self._escalate_bound(P, t, case, "candidates", report=rep)
+                raised = self._delegate_raise(P, case, BOUNDS["candidates"],
+                                              int(case["counters"].get("candidates", 0)),
+                                              self._limit(case, s, "candidates"))
+                if raised is None:
+                    return self._escalate_bound(P, t, case, "candidates", report=rep)
+                case = raised
             extra = int(s["extra_attempts"])
             if kind == "assign_game_repair" and extra > 0:
                 # the delegated extra attempts are capped per TASK (across cases)
@@ -2258,8 +2268,12 @@ class LeadManager:
                 lim = self.task_limit(s, totals, "extra_attempts")
                 left = max(0, lim - int(totals["extra_attempts"]))
                 if left <= 0:
-                    return self._escalate_task_bound(P, t, case, "extra_attempts", totals, lim,
-                                                     report=rep)
+                    raised = self._delegate_raise(P, case, TASK_BOUNDS["extra_attempts"],
+                                                  int(totals["extra_attempts"]), lim, by=extra)
+                    if raised is None:
+                        return self._escalate_task_bound(P, t, case, "extra_attempts", totals,
+                                                         lim, report=rep)
+                    case, left = raised, extra
                 extra = min(extra, left)
             case = self._bump(case["case_id"], candidates=1)
             proposed = {**act, "hypothesis": rep["hypothesis"], "classification": cls}
@@ -2282,7 +2296,12 @@ class LeadManager:
                                act.get("seconds") or None, back="RESUMING")
         if kind == "operate":
             if self._bound_exhausted(case, s, "candidates"):
-                return self._escalate_bound(P, t, case, "candidates", report=rep)
+                raised = self._delegate_raise(P, case, BOUNDS["candidates"],
+                                              int(case["counters"].get("candidates", 0)),
+                                              self._limit(case, s, "candidates"))
+                if raised is None:
+                    return self._escalate_bound(P, t, case, "candidates", report=rep)
+                case = raised
             case = self._bump(case["case_id"], candidates=1)
             proposed = {**act, "hypothesis": rep["hypothesis"], "classification": cls}
             self._act(case, "operate_planned",
@@ -2909,6 +2928,31 @@ class LeadManager:
                 f"reached ({bound[1]}/{bound[2]}); the lead continues with a materially "
                 f"different action",
             op_key=f"{case['case_id']}:delegated:{n + 1}")
+
+    def _delegate_raise(self, P, case, key: str, used: int, lim: int,
+                        by: int = 1) -> Optional[dict]:
+        """A bound reached while ROUTING an already validated (and materially
+        different) lead action: under full authority the bound is raised in a
+        journaled delegated round and that same action proceeds -- it is never
+        thrown away for a fresh diagnosis. None past the runaway guard."""
+        s = self.settings(P)
+        if not s.get("full_authority") or key not in DELEGABLE_BOUNDS:
+            return None
+        n = self._delegated_rounds(P, case["task_id"])
+        if n >= int(s.get("max_delegated_rounds") or 0):
+            return None
+        cid = case["case_id"]
+        v = case.get("validation") or {}
+        raised = dict(v.get("raised") or {})
+        raised[key] = int(raised.get(key, 0)) + max(1, int(by), int(used) - int(lim) + 1)
+        self._act(case, "delegated_round", actor="lead_manager",
+                  op_key=f"{cid}:delegated:{n + 1}",
+                  result=f"delegated round {n + 1}/{s.get('max_delegated_rounds')}: {key} "
+                         f"reached ({used}/{lim}); raised so the validated action proceeds",
+                  detail={"bound": [key, used, lim], "raised": raised, "to": case["state"],
+                          "reason": "routing a validated lead action"})
+        self._merge_validation(cid, raised=raised)
+        return self.case(cid)
 
     def _ceiling_question(self, P, case, reason: str, question: str) -> str:
         """Past the runaway guard Victor gets the facts, not a counter."""

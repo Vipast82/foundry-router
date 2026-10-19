@@ -2,6 +2,22 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.126.1 — the Lead stops burning calls on false rejections
+
+In live UI-02 case `rc-fa9340ea8134a007`, three of four Opus calls were
+wasted:
+- **Negation in long clauses.** A report saying "do not change src/, tests,
+  RegressionIndex pins or update any acceptance expectation" was rejected as
+  changing tests. Negation was only checked in the 24 characters before each
+  verb. A prohibition now covers its whole clause.
+- **Valid actions thrown away at a limit.** A validated `assign_game_repair`
+  that reached `max_extra_attempts_per_task` while being routed was thrown
+  away for another diagnosis. Under full authority the bound is now raised in
+  a journaled delegated round and the same action proceeds. The same applies
+  to `max_candidates`, for assignments, coordinator repairs and `operate`.
+
+Coordinator only, no server change.
+
 ## v0.126.0 — helper prework ahead of the implementer; shared task memory
 
 UI-02's helpers had been idle for hours. The task had used all 96 lane units

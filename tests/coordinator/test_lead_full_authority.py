@@ -425,3 +425,43 @@ def test_reverify_without_a_new_commit_resumes_the_primary_instead(tmp_path):
     assert done["result"].endswith("then resume")
     assert state(e) == S.READY
     assert task(e)["data"]["lead_assignment"]["via"] == "operate"
+
+
+def test_a_validated_action_proceeds_when_a_bound_is_reached_while_routing(tmp_path):
+    """rc-fa9340ea...: a valid assign_game_repair arrived after the task's extra
+    attempts were used; it must proceed under a delegated round, not be thrown
+    away for another paid diagnosis."""
+    rep = lead_reply({"classification": "evidence",
+                      "hypothesis": "Three evidence files were rewritten by an unneeded gate "
+                                    "rerun and left uncommitted; restoring them clears CLEAN.",
+                      "evidence_refs": ["docs/progress/UI-02_EVIDENCE_RAW.log:4611"],
+                      "action": {"kind": "assign_game_repair",
+                                 "assignment": "Run git restore on the three uncommitted "
+                                               "evidence files in src/a.txt scope, then stop.",
+                                 "files": ["src/a.txt"]}})
+    calls = []
+    e = make_game(tmp_path, scratch_primary([], scratch=""),
+                  lead=lambda ctx: calls.append(1) or rep,
+                  extra=full_toml(tmp_path, max_extra_attempts_per_task=0))
+    c = e["c"]
+    c.approve("game", TID, [], "victor")
+    c.store.update_task("game", TID, state=S.BLOCKED, blocker="x", run_id="run-1")
+    case = c.lead.open_case(e["P"], task(e), {"state": "BLOCKED", "reason": "x",
+                                              "class": "check_failed"},
+                            {"failed_checks": ["au.x"]})
+    for _ in range(20):
+        case = c.lead.step(e["P"], task(e), case)
+        if case["state"] != "DIAGNOSING":
+            break
+    assert case["state"] == "RESUMING" and len(calls) == 1
+    kinds = [a["kind"] for a in acts(e, case["case_id"])]
+    assert "delegated_round" in kinds and "assign_game_repair" in kinds
+
+
+def test_a_prohibition_covers_its_whole_clause():
+    from foundry_coordinator.lead import test_edit_directives
+    ok = ("Evidence-only repair; do not change src/, tests, RegressionIndex pins or update "
+          "any acceptance expectation. Then git restore the three logs and commit.")
+    assert test_edit_directives(ok, ["tests/*"], []) == []
+    assert test_edit_directives("Restore the logs. Then update the tests for the widget.",
+                                ["tests/*"], [])
