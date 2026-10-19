@@ -166,7 +166,18 @@ SETTING_LIMITS = {
 
 ACTION_KINDS = ("answer_question", "reply_permission", "approve_review", "reject_review",
                 "pause", "resume", "cancel", "unblock", "instruction", "withdraw_instruction",
-                "lanes", "decision_answer", "project_pause", "project_resume")
+                "lanes", "decision_answer", "project_pause", "project_resume",
+                "lead_case_pause", "lead_case_takeover", "lead_case_instruct", "lead_case_resume")
+# lead recovery case controls (v0.123): an operator pauses, takes over or adds an
+# instruction to the task's current recovery case (the bridge's `lead` field).
+# Payload {"case_id": str, "note": str (<= 2000; required for lead_case_instruct)};
+# expected {"case_id", "case_state"}. Operator sessions only; only handed to a
+# source that declares the `lead_manager` feature.
+LEAD_ACTIONS = ("lead_case_pause", "lead_case_takeover", "lead_case_instruct", "lead_case_resume")
+MAX_LEAD_NOTE = 2000
+LEAD_STATES = ("DIAGNOSING", "REPAIRING", "UPGRADING", "RESUMING", "NEEDS_VICTOR", "DEFERRED",
+               "RESOLVED", "CANCELLED")
+LEAD_TERMINAL = ("RESOLVED", "CANCELLED")
 # `project_pause` / `project_resume` (v0.123): an operator stops a whole
 # project for an upgrade and starts it again. Project-scoped: task_id may be
 # empty and there is no task-state stale check. Payloads:
@@ -208,7 +219,8 @@ MIN_COORDINATOR_VERSION = "0.121.0"
 COORDINATOR_MAJOR = 0
 # action kinds a source must declare in its features/capabilities to be handed them
 FEATURE_GATED_ACTIONS = {"decision_answer": "decision_answer", "project_pause": "project_pause",
-                         "project_resume": "project_pause"}
+                         "project_resume": "project_pause",
+                         **{k: "lead_manager" for k in LEAD_ACTIONS}}
 # observation types that only make sense inside a project: an empty project_id
 # would bypass the per-key project allowlist, so they are refused
 PROJECT_SCOPED_TYPES = ("task", "lane_unit", "artifact", "mcp", "config", "capabilities", "todo",
@@ -997,6 +1009,28 @@ class ControlCenter:
                 if a["dedupe_key"].split(":", 3)[3] not in open_dec:
                     out.append(("resolve", a["dedupe_key"], "decision no longer open "
                                 "(answered, superseded or withdrawn)", "answered"))
+        if "lead" in o:
+            # a recovery case that needs Victor: one alert per case, resolved when
+            # the case leaves NEEDS_VICTOR (or the task no longer has it)
+            lead = o.get("lead") if isinstance(o.get("lead"), dict) else {}
+            cid = _s(lead.get("case_id"), 120)
+            needs = cid if lead.get("state") == "NEEDS_VICTOR" and cid else ""
+            if needs:
+                out.append(("raise", f"lead_needs_victor:{pid}:{tid}:{needs}", "lead_needs_victor",
+                            "high", f"{tid}: lead recovery needs Victor",
+                            " · ".join(x for x in (_s(lead.get("classification"), 40),
+                                                   _s(lead.get("trigger"), 300),
+                                                   _s(lead.get("outcome"), 300)) if x)
+                            or f"case {needs}", ref))
+            for a in self._rows(c, "SELECT dedupe_key FROM cc_alerts WHERE dedupe_key LIKE ? AND "
+                                   "status IN ('new','acknowledged')",
+                                (f"lead_needs_victor:{pid}:{tid}:%",)):
+                old_case = a["dedupe_key"].split(":", 3)[3]
+                if old_case != needs:
+                    out.append(("resolve", a["dedupe_key"],
+                                f"recovery case is now {_s(lead.get('state'), 30) or 'gone'}"
+                                if old_case == cid else "the task's recovery case changed",
+                                "resolved"))
         if state == "FAILED":
             out.append(("raise", f"failed:{pid}:{tid}:{o.get('attempt')}", "failure", "high",
                         f"{tid} FAILED", _s(o.get("reason") or o.get("next_action"), 600), ref))
@@ -1558,7 +1592,7 @@ class ControlCenter:
     # raw lifecycle lists the task_view already normalizes: the overview and the
     # live feed send task_view only (the /tasks/{p}/{t}/view route has both views)
     RAW_LIFECYCLE_KEYS = ("readiness", "obligations", "evidence", "recovered",
-                          "finding_history", "budgets", "decisions", "memory")
+                          "finding_history", "budgets", "decisions", "memory", "lead")
 
     def _with_views(self, r: dict) -> dict:
         r["verification_view"] = self._safe_view(r)
@@ -1629,7 +1663,72 @@ class ControlCenter:
                 "budgets": d.get("budgets") if isinstance(d.get("budgets"), dict) else None,
                 "decisions": {"open": [x for x in decs if x.get("status") == "open"],
                               "closed": [x for x in decs if x.get("status") != "open"][:15]},
-                "memory": lst(d.get("memory"))}
+                "memory": lst(d.get("memory")),
+                # lead recovery (v0.123): None = no case for this task;
+                # lead_reported false = the coordinator has no lead tables
+                "lead": self._lead_view(pid, tid, d.get("lead")) if "lead" in d else None,
+                "lead_reported": "lead" in d}
+
+    def _lead_view(self, pid, tid, raw) -> Optional[dict]:
+        """The bridge's `lead` field, bounded and typed for the page, with the
+        operator's in-flight case actions."""
+        if not isinstance(raw, dict) or not raw.get("case_id"):
+            return None
+        num = lambda v: v if isinstance(v, (int, float)) and not isinstance(v, bool) else None  # noqa: E731
+        cid = _s(raw.get("case_id"), 120)
+        st = _s(raw.get("state"), 30)
+        cnt = {}
+        rc = raw.get("counters") if isinstance(raw.get("counters"), dict) else {}
+        for k, c in list(rc.items())[:12]:
+            if isinstance(c, dict):
+                cnt[_s(k, 40)] = {"used": num(c.get("used")), "max": num(c.get("max"))}
+        acts = []
+        for a in (raw.get("actions") if isinstance(raw.get("actions"), list) else [])[-30:]:
+            if not isinstance(a, dict):
+                continue
+            files = a.get("scope_files") if isinstance(a.get("scope_files"), list) else []
+            acts.append({"seq": num(a.get("seq")), "kind": _s(a.get("kind"), 60),
+                         "actor": _s(a.get("actor"), 120), "revision": _s(a.get("revision"), 64),
+                         "repo": _s(a.get("repo"), 200),
+                         "scope_files": [_s(f, 300) for f in files[:40]],
+                         "scope_more": _count(a.get("scope_more")),
+                         "result": _s(a.get("result"), 800), "status": _s(a.get("status"), 20),
+                         "ts": _f(a.get("ts"))})
+        ca = raw.get("current_action") if isinstance(raw.get("current_action"), dict) else None
+        up = raw.get("upgrade") if isinstance(raw.get("upgrade"), dict) else None
+        live = []
+        for a in self.db.query("SELECT action_id, kind, actor, status, created_ts FROM cc_actions "
+                               "WHERE project_id=? AND task_id=? AND kind IN ("
+                               + ",".join("?" * len(LEAD_ACTIONS)) + ") AND status IN "
+                               "('accepted','claimed','queued','delivered') AND "
+                               "json_extract(payload, '$.case_id')=? ORDER BY created_ts",
+                               (pid, tid, *LEAD_ACTIONS, cid)):
+            live.append({"action_id": a["action_id"], "kind": a["kind"], "status": a["status"],
+                         "by": a["actor"], "ts": a["created_ts"]})
+        return {"case_id": cid, "state": st, "known_state": st in LEAD_STATES,
+                "active": st not in LEAD_TERMINAL,
+                "classification": _s(raw.get("classification"), 40),
+                "trigger": _s(raw.get("trigger"), 600),
+                "fingerprint": _s(raw.get("fingerprint"), 120),
+                "source_revision": _s(raw.get("source_revision"), 64),
+                "decision_id": _s(raw.get("decision_id"), 120),
+                "needs_human": raw.get("needs_human") is True,
+                "lead_session_id": _s(raw.get("lead_session_id"), 160),
+                "lead_model": _s(raw.get("lead_model"), 120),
+                "current_action": {"kind": _s(ca.get("kind"), 60), "status": _s(ca.get("status"), 20),
+                                   "seq": num(ca.get("seq")), "ts": _f(ca.get("ts")),
+                                   "source": _s(ca.get("source"), 20)} if ca else None,
+                "counters": cnt, "actions": acts,
+                "upgrade": {"upgrade_id": _s(up.get("upgrade_id"), 120),
+                            "status": _s(up.get("status"), 30),
+                            "candidate_sha": _s(up.get("candidate_sha"), 64),
+                            "prior_sha": _s(up.get("prior_sha"), 64),
+                            "updated_ts": _f(up.get("updated_ts"))} if up else None,
+                "paused": raw.get("paused") is True,
+                "instructions_count": _count(raw.get("instructions_count")),
+                "outcome": _s(raw.get("outcome"), 800),
+                "created_ts": _f(raw.get("created_ts")), "updated_ts": _f(raw.get("updated_ts")),
+                "pending_actions": live}
 
     def task_row(self, project: str, task: str, projects: list) -> dict:
         if projects and project not in projects:
@@ -2237,13 +2336,15 @@ class ControlCenter:
                                "unknown_task", 404)
         tdata = _uj(task["data"], {})
         expected = dict(body.get("expected") or {})
-        if kind in ("lanes", "decision_answer"):
+        unbound = ("lanes", "decision_answer", *LEAD_ACTIONS)
+        if kind in unbound:
             # lanes: a project-wide switch the task id only routes; decision_answer:
-            # bound to the decision itself (its open status), not the task state
+            # bound to the decision itself (its open status), not the task state;
+            # lead case actions: bound to the recovery case (its id and state)
             expected.pop("task_state", None)
         else:
             expected.setdefault("task_state", task["state"])
-        if kind not in ("lanes", "decision_answer") and expected["task_state"] != task["state"]:
+        if kind not in unbound and expected["task_state"] != task["state"]:
             raise ControlError(f"{tid} is now {task['state']} (you saw {expected['task_state']}); "
                                "review the current state first", "stale_state", 409,
                                current=task["state"])
@@ -2401,6 +2502,10 @@ class ControlCenter:
                        "authority": DECISION_AUTHORITY, "actor": actor, "question_hash": qh,
                        "revision": _s(body.get("revision") or tdata.get("head_sha"), 64)}
             expected.update(decision_id=did, decision_status="open", question_hash=qh)
+        elif kind in LEAD_ACTIONS:
+            payload = self._lead_payload(kind, body, tdata, scopes, tid)
+            expected = {"case_id": payload["case_id"],
+                        "case_state": _s((tdata.get("lead") or {}).get("state"), 30)}
         elif kind == "withdraw_instruction":
             target = _s(body.get("target_action_id"), 80)
             t = self.db.query_one("SELECT * FROM cc_actions WHERE action_id=? AND kind='instruction'",
@@ -2436,7 +2541,7 @@ class ControlCenter:
                            now + st["action_ttl_s"], now, seq))
                 c.execute("INSERT INTO cc_action_log (action_id, ts, status, actor, detail) VALUES "
                           "(?,?,?,?,?)", (aid, now, "accepted", actor, summary))
-                if kind == "unblock":
+                if kind == "unblock" or kind in LEAD_ACTIONS:
                     # the task's derived recovery view changes with this action
                     self._feed(c, "task", pid, "", f"{pid}/{tid}")
         except Exception as e:                                   # noqa: BLE001
@@ -2449,6 +2554,38 @@ class ControlCenter:
             raise
         self._notify()
         return self.action_view(aid)
+
+    @staticmethod
+    def _lead_payload(kind: str, body: dict, tdata: dict, scopes, tid: str) -> dict:
+        """Check a lead case action against the case the bridge reported for
+        this task: operator sessions only, the task's own case (project
+        isolation is create_action's project check), still active."""
+        if scopes is not None and not {"operator", "admin"} & set(scopes or []):
+            raise ControlError("lead recovery controls need an operator session", "forbidden", 403)
+        cid = _s(body.get("case_id"), 120)
+        if not cid:
+            raise ControlError("case_id is required")
+        lead = tdata.get("lead") if isinstance(tdata.get("lead"), dict) else None
+        if not lead or _s(lead.get("case_id"), 120) != cid:
+            raise ControlError(f"no recovery case {cid!r} reported for {tid}", "unknown_case", 404,
+                               current=_s((lead or {}).get("case_id"), 120))
+        st = _s(lead.get("state"), 30)
+        if st in LEAD_TERMINAL:
+            raise ControlError(f"case {cid} is {st}", "stale_case", 409, current=st)
+        exp = (body.get("expected") or {}).get("case_state")
+        if exp and exp != st:
+            raise ControlError(f"case {cid} is now {st} (you saw {exp}); review it first",
+                               "stale_case", 409, current=st)
+        note = str(body.get("note") or "")
+        if len(note) > MAX_LEAD_NOTE:
+            raise ControlError(f"note is over {MAX_LEAD_NOTE} characters")
+        if kind == "lead_case_instruct" and not note.strip():
+            raise ControlError("write the instruction (note)")
+        if kind == "lead_case_pause" and lead.get("paused") is True:
+            raise ControlError(f"case {cid} is already paused", "duplicate", 409)
+        if kind == "lead_case_resume" and lead.get("paused") is not True:
+            raise ControlError(f"case {cid} is not paused", "not_paused", 409)
+        return {"case_id": cid, "note": note}
 
     def _project_pause_state(self, c, pid: str) -> tuple[Optional[dict], Optional[dict]]:
         """(the latest live-or-applied project_pause/resume action, the reported
@@ -2552,6 +2689,11 @@ class ControlCenter:
                        else "") + f": {p.get('note') or ''}")[:300]
         if kind == "project_resume":
             return (f"resume project {tid}" + (f": {p['note']}" if p.get("note") else ""))[:300]
+        if kind in LEAD_ACTIONS:
+            verb = {"lead_case_pause": "pause", "lead_case_takeover": "take over",
+                    "lead_case_instruct": "instruct", "lead_case_resume": "resume"}[kind]
+            return (f"{verb} recovery case {p.get('case_id')} ({tid})"
+                    + (f", note {len(p.get('note') or '')} chars" if p.get("note") else ""))[:300]
         if kind == "lanes":
             return f"proactive lanes {'paused' if p.get('paused') else 'un-paused'} ({tid})"
         if kind == "decision_answer":
@@ -2623,7 +2765,7 @@ class ControlCenter:
                        claimed_by, status, now, action_id))
             c.execute("INSERT INTO cc_action_log (action_id, ts, status, actor, detail) VALUES "
                       "(?,?,?,?,?)", (action_id, now, status, actor, detail[:1000]))
-            if a[0]["kind"] == "unblock":
+            if a[0]["kind"] == "unblock" or a[0]["kind"] in LEAD_ACTIONS:
                 self._feed(c, "task", a[0]["project_id"], "",
                            f"{a[0]['project_id']}/{a[0]['task_id']}")
         self._notify()

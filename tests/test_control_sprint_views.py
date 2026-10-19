@@ -546,7 +546,7 @@ def test_sprint_sections_are_registered_and_wired():
             "const SECTIONS_V3 =")[1].split("];")[0], n
         assert f"  {n}(s) {{" in s and f"  {n}(sec) {{" in s, n
         assert f"{n}:" in s.split("const SECTION_TITLES =")[1].split("};")[0], n
-    assert "const PREF_VERSION = 3;" in s
+    assert "const PREF_VERSION = 4;" in s
     assert 'kind: "decision_answer"' in s and "decisionsInboxHtml(S.tasks) + pHtml" in s
     assert "compatPill(" in s
 

@@ -74,6 +74,20 @@ a { color:var(--accent); }
 .pill.warn { color:var(--warn); border-color:var(--warn); background:var(--warn-bg); }
 .pill.info { color:var(--info); border-color:var(--info); background:var(--info-bg); }
 .pill.think { color:var(--think); border-color:var(--think); background:var(--think-bg); }
+/* lead recovery case states: each its own look (colour + border/weight), so
+   they stay distinguishable without colour too */
+.pill.lead { letter-spacing:.02em; }
+.pill.lead-diagnosing { color:var(--info); border-color:var(--info); background:var(--info-bg); }
+.pill.lead-repairing { color:var(--think); border-color:var(--think); background:var(--think-bg); }
+.pill.lead-upgrading { color:var(--warn); border-color:var(--warn); background:var(--warn-bg); border-style:dashed; }
+.pill.lead-resuming { color:var(--ok); border-color:var(--ok); background:transparent; border-style:dashed; }
+.pill.lead-needs_victor { color:#fff; border-color:var(--bad); background:var(--bad); font-weight:700; }
+.pill.lead-deferred { color:var(--dim); border-color:var(--line-2); border-style:dotted; }
+.pill.lead-resolved { color:var(--ok); border-color:var(--ok); background:var(--ok-bg); }
+.pill.lead-cancelled, .pill.lead-unknown { color:var(--dim); text-decoration:line-through; }
+.lead-journal details { border-top:1px solid var(--line); padding:2px 0; }
+.lead-journal summary { cursor:pointer; overflow-wrap:anywhere; }
+.lead-form textarea { width:100%; box-sizing:border-box; }
 .sr { position:absolute; width:1px; height:1px; overflow:hidden; clip:rect(0 0 0 0); }
 
 /* ---------------------------------------------------------------- header */
@@ -405,17 +419,20 @@ function fmtDur(s) {
 // Display preferences only (per browser, per layout preset). Never keys,
 // transcripts, drafts or answers. Version-migrated; Reset restores defaults.
 const PREF_KEY = "fr.cc.prefs";
-const PREF_VERSION = 3;
+const PREF_VERSION = 4;
 // v3 (coordinator 0.122): sprint-management sections, placed right after Identity
 const SECTIONS_V3 = ["readiness", "checklist", "decisions", "budgets", "evidence", "recovered", "findings"];
-const SECTIONS = ["identity", ...SECTIONS_V3, "context", "tokens", "speed", "routes", "mcp", "todo", "helpers",
+// v4 (coordinator 0.123): the lead recovery case, right after the sprint sections
+const SECTIONS_V4 = ["lead"];
+const SECTIONS = ["identity", ...SECTIONS_V3, ...SECTIONS_V4, "context", "tokens", "speed", "routes", "mcp", "todo", "helpers",
   "capacity", "lanes", "verification", "capabilities", "sessions", "search", "actions"];
 const SECTION_TITLES = {identity: "Identity & state", context: "Context", tokens: "Tokens", speed: "Speed & latency",
   routes: "Models & routes", mcp: "MCP servers", todo: "To-do", helpers: "Helpers",
   capacity: "Helper capacity & quota", lanes: "Proactive lanes", verification: "Verification",
   capabilities: "Other capabilities", sessions: "Sessions & history", search: "Search", actions: "Operator actions",
   readiness: "Readiness", checklist: "Required work", decisions: "Decisions", budgets: "Budgets",
-  evidence: "Evidence", recovered: "Recovered results", findings: "Repeated findings & approach"};
+  evidence: "Evidence", recovered: "Recovered results", findings: "Repeated findings & approach",
+  lead: "Lead recovery"};
 const DEFAULT_PREFS = {
   v: PREF_VERSION,
   theme: "dark", fontSize: 13, lineHeight: 1.5, codeWrap: false, density: "comfortable",
@@ -491,6 +508,13 @@ function migratePrefs(raw) {
     // saved v1/v2 orders get the sprint sections early (after Identity), not at the bottom
     const o = out.sidebar.order, at = o.indexOf("identity") + 1;
     o.splice(at, 0, ...SECTIONS_V3.filter(x => !o.includes(x)));
+  }
+  if ((+raw.v || 0) < 4) {
+    // saved v1-v3 orders get Lead recovery after the sprint sections (after the
+    // last of them the operator kept in order), not at the bottom
+    const o = out.sidebar.order;
+    const last = Math.max(o.indexOf("identity"), ...SECTIONS_V3.map(x => o.indexOf(x)));
+    o.splice(last + 1, 0, ...SECTIONS_V4.filter(x => !o.includes(x)));
   }
   for (const s of SECTIONS) if (!out.sidebar.order.includes(s)) out.sidebar.order.push(s);
   out.v = PREF_VERSION;
@@ -1398,9 +1422,11 @@ function buildContText(b) {
 function taskStatePill(t) {
   if (!t) return "";
   const b = buildCont(t);
+  // an active lead recovery case rides along with the task state (lead block below)
+  const lp = typeof leadHeadPill === "function" ? leadHeadPill(t) : "";
   // CHANGES_REQUIRED here is the engine's way of starting the next BUILD session
-  if (b && t.state === "CHANGES_REQUIRED") return `<span class="pill info" data-build="continuing" title="${esc(buildContText(b))}">BUILD continuing</span>`;
-  return `<span class="pill ${stateCls(t.state)}">${esc(t.state)}</span>` + (b ? ` <span class="pill info" data-build="continuing" title="${esc(buildContText(b))}">BUILD continuing</span>` : "");
+  if (b && t.state === "CHANGES_REQUIRED") return `<span class="pill info" data-build="continuing" title="${esc(buildContText(b))}">BUILD continuing</span>` + lp;
+  return `<span class="pill ${stateCls(t.state)}">${esc(t.state)}</span>` + (b ? ` <span class="pill info" data-build="continuing" title="${esc(buildContText(b))}">BUILD continuing</span>` : "") + lp;
 }
 function buildContHtml(b) {
   if (!b) return "";
@@ -1413,6 +1439,122 @@ function buildContHtml(b) {
 function realFindings(fs, b) { return (fs || []).filter(f => !(b && String(f).trim() === BUILD_MARKER)); }
 /*build-end*/
 /*sprint-end*/
+/*lead-start*/
+/* ======================================================================== lead recovery (v0.123) */
+// The task's recovery case as the coordinator journaled it (bridge `lead`
+// field -> Foundry task_view.lead). Nothing is inferred; every value is escaped.
+const LEAD_STATES = {DIAGNOSING: "diagnosing", REPAIRING: "repairing", UPGRADING: "upgrading",
+  RESUMING: "resuming", NEEDS_VICTOR: "needs_victor", DEFERRED: "deferred", RESOLVED: "resolved",
+  CANCELLED: "cancelled"};
+const LEAD_STATE_TEXT = {DIAGNOSING: "the lead is diagnosing the blocker", REPAIRING: "a repair is being prepared",
+  UPGRADING: "a coordinator upgrade is in progress", RESUMING: "the task is being resumed",
+  NEEDS_VICTOR: "the lead needs Victor: bounds exhausted or a question only you can answer",
+  DEFERRED: "waiting (environment or quota) and rechecked automatically", RESOLVED: "the case is resolved",
+  CANCELLED: "the case was cancelled"};
+const LEAD_COUNTERS = {diagnoses: "Lead diagnoses", candidates: "Repair candidates", upgrades: "Upgrades",
+  repeats: "Fingerprint repeats", quota_calls: "Paid calls", minutes: "Case minutes"};
+const LEAD_KINDS_TEXT = {lead_case_pause: "pause", lead_case_takeover: "take over", lead_case_instruct: "instruction", lead_case_resume: "resume"};
+function leadOf(t) { const l = t && (t.task_view || {}).lead; return l && typeof l === "object" && l.case_id ? l : null; }
+function leadStatePill(l) {
+  const st = String((l || {}).state || "");
+  const cls = LEAD_STATES[st] || "unknown";
+  return `<span class="pill lead lead-${esc(cls)}" data-lead-state="${esc(st)}" title="${esc(LEAD_STATE_TEXT[st] || "state not known to this page")}">${esc(st || "?")}</span>`;
+}
+// the header / Identity pill: active cases only (a resolved case is history)
+function leadHeadPill(t) {
+  const l = leadOf(t);
+  if (!l || l.active === false) return "";
+  return ` <span class="dim">lead</span> ${leadStatePill(l)}${l.paused ? ' <span class="pill warn">paused</span>' : ""}`;
+}
+function leadDraft(cid) { S.leadDrafts = S.leadDrafts || {}; return S.leadDrafts[cid] || (S.leadDrafts[cid] = {note: ""}); }
+function leadUpgradeCls(st) { return {done: "ok", rolled_back: "bad", failed: "bad", requested: "info"}[st] || "warn"; }
+function leadActionHtml(l, a, i) {
+  const key = `lead:${l.case_id}:${a.seq ?? i}`;
+  const open = (S.openProv || new Set()).has(key) ? " open" : "";
+  const scls = {done: "ok", failed: "bad", uncertain: "warn", started: "info"}[a.status] || "";
+  const files = (a.scope_files || []).map(f => `<code>${esc(f)}</code>`).join(", ");
+  return `<details data-prov="${esc(key)}"${open}><summary><span class="dim">#${esc(a.seq ?? "?")}</span> <b>${esc(a.kind || "?")}</b> ${sprintPill(a.status || "?", scls)} <span class="dim">${esc(a.actor || "")} · ${esc(tsText(a.ts))}</span></summary>
+    <div class="kv"><div>Revision</div><div>${a.revision ? `<code>${esc(short(a.revision, 12))}</code>` : NA("no revision recorded")}</div>
+    <div>Repo</div><div>${a.repo ? esc(a.repo) : NA("no repo recorded")}</div>
+    <div>Scope</div><div>${files || '<span class="dim">no files</span>'}${a.scope_more ? ` <span class="dim">+${esc(a.scope_more)} more</span>` : ""}</div>
+    <div>Result</div><div style="white-space:pre-wrap">${a.result ? esc(a.result) : '<span class="dim">none yet</span>'}</div></div></details>`;
+}
+function leadHtml(t, l) {
+  if (!l) return "";
+  const pend = l.pending_actions || [];
+  const busy = k => pend.some(p => p.kind === k);
+  const dr = leadDraft(l.case_id);
+  const cnt = l.counters || {};
+  const rows = Object.keys(LEAD_COUNTERS).filter(k => cnt[k]).map(k => budgetRow(LEAD_COUNTERS[k], cnt[k]));
+  const ca = l.current_action;
+  const up = l.upgrade;
+  const sid = l.lead_session_id;
+  const head = `<div class="row" style="flex-wrap:wrap;gap:4px;align-items:center" data-lead-case="${esc(l.case_id)}">${leadStatePill(l)}${l.paused ? sprintPill("paused by an operator", "warn") : ""}${l.classification ? sprintPill(l.classification, "") : ""}<code class="dim">${esc(short(l.case_id, 24))}</code></div>
+    <div class="dim">${esc(LEAD_STATE_TEXT[l.state] || "")}</div>
+    ${l.state === "NEEDS_VICTOR" ? `<div class="warnbox">This case needs you.${l.outcome ? " " + esc(l.outcome) : ""}</div>` : ""}`;
+  const facts = kv([
+    ["Trigger", l.trigger ? esc(l.trigger) : NA("no trigger recorded")],
+    ["Lead session", sid ? `<a href="#" data-open="${esc(sid)}"><code>${esc(short(sid, 18))}</code></a> <button class="ghost" data-pop="${esc(sid)}" title="Open the lead session in its own window">⧉</button>` : NA("no lead session started yet")],
+    ["Served model", l.lead_model ? `<code>${esc(l.lead_model)}</code>` : NA("no lead call has been served yet")],
+    ["Current action", ca ? `<b>${esc(ca.kind || "?")}</b> ${sprintPill(ca.status || "?", ca.status === "started" ? "info" : "")}${ca.source === "case" ? ' <span class="dim">(proposed)</span>' : ""}` : '<span class="dim">none</span>'],
+    l.decision_id ? ["Decision", `<code>${esc(l.decision_id)}</code> <span class="dim">answer it under Decisions${l.needs_human ? "; it names an action only you can take" : ""}</span>`] : null,
+    ["Fingerprint", l.fingerprint ? `<code>${esc(short(l.fingerprint, 16))}</code>` : NA()],
+    ["Instructions", `${esc(l.instructions_count || 0)} operator note(s)`],
+    l.outcome && l.state !== "NEEDS_VICTOR" ? ["Outcome", esc(l.outcome)] : null]);
+  const bounds = rows.length ? `<div class="sub dim">Counters vs bounds</div>${kv(rows)}` : "";
+  const upg = up ? `<div class="sub dim">Upgrade</div>${kv([["Status", sprintPill(up.status || "?", leadUpgradeCls(up.status))],
+    ["Upgrade", `<code>${esc(short(up.upgrade_id, 20))}</code>`],
+    ["Candidate", up.candidate_sha ? `<code>${esc(short(up.candidate_sha, 12))}</code>` : NA()],
+    ["Prior", up.prior_sha ? `<code>${esc(short(up.prior_sha, 12))}</code>` : NA()]])}` : "";
+  const acts = l.actions || [];
+  const journal = `<div class="sub dim">Journal (${esc(acts.length)}${acts.length >= 30 ? ", newest 30" : ""})</div>` + (acts.length
+    ? `<div class="lead-journal">${acts.slice().reverse().map((a, i) => leadActionHtml(l, a, i)).join("")}</div>`
+    : '<p class="dim">No lead actions journaled yet.</p>');
+  const pendHtml = pend.length ? `<div class="dim">${pend.map(p => `${esc(LEAD_KINDS_TEXT[p.kind] || p.kind)} ${esc(p.status)} by ${esc(p.by || "?")}`).join(" · ")}: waiting for the coordinator</div>` : "";
+  const controls = l.active === false ? '<div class="dim">The case is closed; no controls.</div>'
+    : `<form class="lead-form" data-lead-form="${esc(l.case_id)}" data-ltask="${esc(taskKey(t.project_id, t.task_id))}" data-lstate="${esc(l.state)}">
+      <div class="row" style="flex-wrap:wrap;gap:4px">
+        ${l.paused ? `<button type="button" class="primary" data-lead-act="lead_case_resume" ${busy("lead_case_resume") ? "disabled" : ""} title="Let the lead continue this case (also ends a takeover); paused time does not count toward its time bound">Resume case</button>`
+          : `<button type="button" data-lead-act="lead_case_pause" ${busy("lead_case_pause") ? "disabled" : ""} title="Stop the lead from taking further steps on this case">Pause case</button>`}
+        <button type="button" class="danger" data-lead-act="lead_case_takeover" ${busy("lead_case_takeover") ? "disabled" : ""} title="Pause the case and leave the task BLOCKED for you">Take over</button></div>
+      <textarea data-lead-note="${esc(l.case_id)}" rows="3" maxlength="2000" placeholder="Instruction for the lead (scope, a hint, what not to touch). Up to 2000 characters.">${esc(dr.note)}</textarea>
+      <div class="row"><button type="submit" class="primary" data-lead-act="lead_case_instruct" ${busy("lead_case_instruct") ? "disabled" : ""}>Add instruction</button>
+      <span class="dim">Recorded with your sign-in as the actor; the lead reads it in its next dossier.</span></div></form>`;
+  return head + facts + bounds + upg + journal + pendHtml + controls
+    + `<div class="src">The coordinator's recovery_cases / recovery_actions journal. The lead never marks a check passed; the engine's gates still decide.</div>`;
+}
+function leadFormError(kind, note) {
+  if (String(note || "").length > 2000) return "The note is over 2000 characters.";
+  if (kind === "lead_case_instruct" && !String(note || "").trim()) return "Write the instruction first.";
+  return "";
+}
+function leadBody(kind, p, t, cid, state, note) {
+  return {kind, project_id: p, task_id: t, case_id: cid, note: String(note || ""), expected: {case_state: state}};
+}
+function wireLead(sec) {
+  sec.querySelectorAll("[data-lead-note]").forEach(a => a.oninput = () => { leadDraft(a.dataset.leadNote).note = a.value; });
+  sec.querySelectorAll("form.lead-form").forEach(f => {
+    const send = async kind => {
+      const cid = f.dataset.leadForm; const [p, t] = f.dataset.ltask.split("/");
+      let note = leadDraft(cid).note;
+      if (kind !== "lead_case_instruct") {
+        const q = kind === "lead_case_takeover" ? "Take over this recovery case? The lead stops and the task stays BLOCKED for you. Note for the record (optional):"
+          : kind === "lead_case_resume" ? "Resume this recovery case? The lead continues from where it stopped. Note for the record (optional):"
+          : "Pause this recovery case? The lead takes no further steps until it is resumed. Note for the record (optional):";
+        const r = prompt(q, "");
+        if (r === null) return;
+        note = r;
+      }
+      const err = leadFormError(kind, note);
+      if (err) { toast(esc(err), "warn"); return; }
+      const a = await submitAction(leadBody(kind, p, t, cid, f.dataset.lstate, note), `lead:${kind}:${cid}`);
+      if (a && kind === "lead_case_instruct") { delete S.leadDrafts[cid]; scheduleInspector(); }
+    };
+    f.onsubmit = ev => { ev.preventDefault(); send("lead_case_instruct"); };
+    f.querySelectorAll("button[data-lead-act]").forEach(b => { if (b.type !== "submit") b.onclick = ev => { ev.preventDefault(); send(b.dataset.leadAct); }; });
+  });
+}
+/*lead-end*/
 const SECTION_RENDER = {
   /*sprint-render-start*/
   readiness(s) {
@@ -1496,6 +1638,16 @@ const SECTION_RENDER = {
       + `<div class="src">An answer is delivered to the coordinator as a typed action; it applies it and records it. A model or a delegated policy never answers here.</div>`;
   },
   /*sprint-render-end*/
+  /*lead-render-start*/
+  lead(s) {
+    const {t, v} = sprintView(s);
+    if (!v) return `<p class="dim">No coordinator task reported.</p>`;
+    if (v.error) return `<div class="errbox">${esc(v.error)}</div>`;
+    if (!v.lead_reported) return `<p class="dim">Lead recovery not reported by this coordinator (lead manager off, or a pre-0.123 bridge).</p>`;
+    if (!v.lead) return `<p class="dim">No recovery case for this task.</p>`;
+    return leadHtml(t, v.lead);
+  },
+  /*lead-render-end*/
   identity(s) {
     if (!s) return '<p class="dim">Select a session.</p>';
     const t = S.tasks.get(taskKey(s.project_id || S.project, s.task_id || S.task));
@@ -1917,6 +2069,7 @@ const SECTION_WIRE = {
   findings(sec) { wireSprint(sec); },
   budgets(sec) { wireSprint(sec); },
   decisions(sec) { wireSprint(sec); wireDecisionForms(sec); },
+  lead(sec) { wireSprint(sec); wireLead(sec); },
   capacity(sec) {
     sec.querySelectorAll("[data-recheck]").forEach(b => b.onclick = async () => {
       const [backend, model] = b.dataset.recheck.split("|");
@@ -2061,7 +2214,8 @@ const SOUNDS = {
 const WAVE = {question: "sine", approval: "triangle", failure: "square", completion: "sine", stale: "sawtooth"};
 function soundClass(a) {
   return {question: "question", permission: "question", approval: "approval", blocker: "failure", failure: "failure",
-          coordinator_error: "failure", source_stale: "stale", completion: "completion", queue_exhausted: "completion"}[a.kind] || "";
+          coordinator_error: "failure", source_stale: "stale", completion: "completion", queue_exhausted: "completion",
+          lead_needs_victor: "approval"}[a.kind] || "";
 }
 function inQuietHours() {
   if (!P.sound.quiet) return false;
@@ -2476,7 +2630,7 @@ async function submitAction(body, target) {
   } catch (e) {
     if (e.network) toast("Not sent: Foundry unreachable. Your text is kept; retrying reuses the same submission key, so it can't be applied twice.", "bad", 12000);
     else {
-      if (["stale_request", "stale_state", "stale_evidence", "stale_session", "duplicate_reply", "unknown_request"].includes(e.code)) delete S.idem[key];
+      if (["stale_request", "stale_state", "stale_evidence", "stale_session", "duplicate_reply", "unknown_request", "stale_case", "unknown_case"].includes(e.code)) delete S.idem[key];
       const cur = ((e.data || {}).current) || [];
       const tt = toast(`<b>Refused:</b> ${esc(e.message)}${Array.isArray(cur) && cur.length ? ` <button data-goreq="${esc(cur[0])}">Go to the current request</button>` : ""}`, "bad", 15000);
       const g = tt.querySelector("[data-goreq]"); if (g) g.onclick = () => selectRequest(g.dataset.goreq);
