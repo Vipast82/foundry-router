@@ -2,6 +2,33 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.124.1 — UI sprint recovery and visual-policy follow-ups
+
+Workstation commits `4a7c8a6`..`6903403`, plus one prompt fix:
+- **Visual obligations** route to the model visual approval when
+  `[approval] visual_model` is on. Lead recovery is kept aligned with the
+  current visual policy.
+- **Lead recovery:**
+  - unfinished builds continue;
+  - the recovery epoch resets after an operator reset;
+  - explicit "no test edit", "no change" and "no waiver" instructions are
+    honored as written.
+- **UI agents** are taught the named menu actions. Physical input tests move
+  to the game-test sprint, UI-GT1. The local primary is restored for the
+  remaining UI sprints.
+- **Prompt fix:** the Animal Uprising BUILD prompt says final screenshot
+  sign-off is delegated to the coordinator's vision reviewer only when
+  `visual_model` is on. With it off, the operator's visual approval still
+  closes the sprint.
+
+Tests:
+- test_au_evidence_contract
+- test_engine
+- test_lead_manager
+- test_lifecycle_engine
+- test_obligations
+- test_planner_handoff
+
 ## v0.124.0 — opt-in model visual sign-off; fresh-session recovery after a reset
 
 **Model visual sign-off.** This is opt-in with `[approval] visual_model = true`,

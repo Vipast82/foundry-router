@@ -5,14 +5,14 @@ from foundry_coordinator.profile import Profile
 from foundry_coordinator.projects.animaluprising.adapter import AnimalUprisingAdapter
 
 
-def adapter(tmp_path, planner=True):
+def adapter(tmp_path, planner=True, raw=None):
     roles = {"implementer": "Foundry-Kilo-Local"}
     if planner:
         roles["planner"] = "Foundry-Kilo-Planner"
     profile = Profile(id="animaluprising", name="Animal Uprising", version="1",
                       path="fixture.toml", hash="fixture", workspace=str(tmp_path),
                       allowed_dirs=["src", "tests", "docs"], branch="master",
-                      remote="origin", raw={}, roles=roles)
+                      remote="origin", raw=raw or {}, roles=roles)
     return AnimalUprisingAdapter(profile, str(tmp_path / "state"))
 
 
@@ -33,6 +33,14 @@ def test_build_delegates_planning_but_retains_execution_and_gates(tmp_path):
     assert "actual mouse/touch/controller input" in prompt
     assert "operator flows to required UI-GT1 after UI-06" in prompt
     assert "Do not request Victor's physical clicks here" in prompt
+
+
+def test_visual_sign_off_delegation_follows_the_profile_flag(tmp_path):
+    ctx = {"attempt": 1, "run_id": "r1"}
+    off = adapter(tmp_path).implement_prompt(spec(), ctx)
+    assert "{SIGN_OFF}" not in off and "delegated final screenshot sign-off" not in off
+    on = adapter(tmp_path, raw={"approval": {"visual_model": True}}).implement_prompt(spec(), ctx)
+    assert "delegated final screenshot sign-off to the coordinator vision reviewer" in on
 
 
 def test_game_test_phase_requires_real_input(tmp_path):
