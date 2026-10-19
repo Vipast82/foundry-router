@@ -79,6 +79,61 @@ The lead's authority is a project policy capability, not a model impersonating
 allowed repository and files, and verification result. A model conclusion alone
 cannot mark a test PASS, answer an undelegated decision or suppress a gate.
 
+## Full delegated recovery authority (v0.125.0, default when enabled)
+
+Victor's policy: an enabled lead manager is the final autonomous decision
+maker for routine recovery (`[lead_manager] full_authority = true`, the
+default). The lead's Kilo session is still read-only, so it never writes
+itself. It directs an `operate` action that the coordinator executes as the
+single writer of the game checkout: the task is BLOCKED, no primary session
+runs, and the workspace lock is held for the whole step.
+
+Operations:
+- `clean_untracked`: generated scratch files only. A file must be untracked,
+  outside the task scope, absent when the task began, not an acceptance test
+  and not a secret. Each one is backed up under
+  `<state>/lead_backups/<case>/`, verified, then removed.
+- `extend_budget`: authorized ledger rows referencing `unblock:lead:<case>`.
+- `resolve_decision`: routine decisions, under the `lead_policy` authority as
+  `lead_manager:<case>`. Scope, approval, expectation, quarantine, policy
+  decisions and the lead's own escalations stay with Victor.
+- `raise_bound`.
+- `approve_test_change`: a recorded `lead_test_change` decision. The change
+  must still be made and its tests re-run.
+
+Every operation is one journaled `lead_op` row with actor, case, source
+revision, paths, result and validation. It is idempotent by op key, so a
+crash resumes where it stopped. Any refused or failed operation sends the case
+back to DIAGNOSING, where a repeat of the same action is rejected. Only when
+every operation has verified does the follow-up run:
+- `assign`: the primary gets an assignment;
+- `reverify`: the same head is verified again;
+- `resume`: the task goes back to READY.
+
+Bounds no longer end in a question for Victor:
+- **Exhausted counters.** An exhausted counter (diagnoses, candidates,
+  quota calls, case time, cases, lead calls or extra attempts per task) becomes
+  a journaled `delegated_round`. The next lead action must be materially
+  different from every earlier action of the task (`action_fp`).
+- **Runaway guard.** `max_delegated_rounds` (12) is the only stop. When it
+  stops a case, Victor gets the blocker and the actions tried, not a counter.
+- **New concrete failures.** A failure such as a new untracked scratch file is
+  part of the fingerprint. A blocker the task has not had before opens its
+  own case regardless of earlier, exhausted cases.
+- **Legacy escalations.** A NEEDS_VICTOR case that a counter alone escalated
+  before this release is taken back by the lead: its question is withdrawn,
+  with a journal entry, and a delegated round starts.
+
+`ask_victor` is accepted only for input Victor must give personally
+(`user_action`), or for a scope_core/external change to the core game goal.
+
+Unchanged:
+- No model can mark a check PASS, create evidence, approve visuals or
+  suppress a gate. The engine's checks and reviews still decide.
+- Served-model, permission and guard failures still fail closed.
+
+`full_authority = false` restores the strict behaviour of v0.123/v0.124.
+
 ## Required topology
 
 1. **Engine** owns task state and remains the sole AnimalUprising writer. On a

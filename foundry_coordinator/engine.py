@@ -2086,7 +2086,8 @@ class Coordinator:
         if self._obligations is None:
             from .obligations import Obligations
             self._obligations = Obligations(self.store, clock=self.clock,
-                                            unblock_validator=self._unblock_ref_ok)
+                                            unblock_validator=self._unblock_ref_ok,
+                                            lead_validator=self._lead_authority_ok)
         return self._obligations
 
     def _unblock_ref_ok(self, project: str, task: str, ref: str, actor: str) -> bool:
@@ -2105,8 +2106,20 @@ class Coordinator:
             from .lead import OPEN_STATES
             return bool(case and case["project_id"] == project and case["task_id"] == task
                         and case["state"] in OPEN_STATES and (case.get("proposed_action") or {})
-                        .get("kind") in ("assign_game_repair", "victor_answer"))
+                        .get("kind") in ("assign_game_repair", "victor_answer", "operate"))
         return self._obligations._unblock_applied(project, task, ref, actor)
+
+    def _lead_authority_ok(self, project: str, task: str, actor: str) -> bool:
+        """`lead_manager:<case>` answers decisions only for an open case of this
+        very task whose project has [lead_manager] full_authority on."""
+        from .obligations import LEAD_ACTOR_PREFIX
+        P = self.projects.get(project)
+        if P is None or not self._lead_on(P) or                 not self.lead.settings(P).get("full_authority"):
+            return False
+        case = self.lead.case(str(actor or "")[len(LEAD_ACTOR_PREFIX):])
+        from .lead import OPEN_STATES
+        return bool(case and case["project_id"] == project and case["task_id"] == task
+                    and case["state"] in OPEN_STATES)
 
     @property
     def recovery(self):
@@ -3806,6 +3819,224 @@ class Coordinator:
                 "case_id": cid, "reason": reason[:300], "strategy_case": pend["case_id"]})
         return True
 
+    def _lead_operate(self, P: Project, t: dict, case: dict, act: dict) -> None:
+        """[lead_manager] full_authority: execute the lead's operations for it.
+        The lead session never writes; the coordinator is the single writer here:
+        the task is BLOCKED (no primary session runs) and the workspace lock is
+        held for the whole step. Every operation is one journaled action (actor,
+        case, source revision, paths, result, validation), idempotent by op key so
+        a crash resumes where it stopped. Any refused or failed operation sends
+        the case back to DIAGNOSING (a materially different action is then
+        required); only when all of them verified does the follow-up run."""
+        pid, tid, cid = P.id, t["task_id"], case["case_id"]
+        L = self.lead
+        actor = "lead_manager:" + cid
+        if self._acquire(P, t, self._workspace_locks(P)):
+            return                                     # another writer holds the workspace
+        rev = P.ws.head()
+        spec = L._spec(P, tid)
+        s = L.settings(P)
+        failures, results = [], []
+        for i, op in enumerate(act.get("operations") or []):
+            key = f"{cid}:op:{i}"
+            prior = L._action(key)
+            if prior and prior["status"] == "done":
+                results.append(prior.get("result") or "")
+                continue
+            if prior is None:
+                L._act(case, "lead_op", status="started", actor=actor, op_key=key,
+                       revision=rev, repo="game", scope_files=list(op.get("paths") or [])
+                       + ([op["path"]] if op.get("path") else []),
+                       result=f"{op['op']}: started",
+                       detail={"op": op, "case_id": cid, "source_revision": rev})
+            try:
+                ok, result, validation = self._lead_op(P, t, case, op, spec, s, actor)
+            except Exception as e:                                # noqa: BLE001
+                ok, result, validation = False, f"{type(e).__name__}: {e}"[:500], {}
+            L._upd(key, status="done" if ok else "failed", result=f"{op['op']}: {result}"[:2000],
+                   validation=validation)
+            results.append(result)
+            if not ok:
+                failures.append(f"{op['op']}: {result}")
+        t = self.store.task(pid, tid)
+        if failures:
+            self.store.release(pid, tid, self._workspace_locks(P))
+            L._act(case, "operate_failed", actor=actor, status="failed",
+                   result="; ".join(failures)[:1500],
+                   detail={"failures": failures, "results": results},
+                   op_key=f"{cid}:operate_failed:{len(L.actions(cid))}")
+            L._save(cid, state="DIAGNOSING", proposed_action={})
+            self.store.event(pid, tid, "lead_operate_failed", detail={
+                "case_id": cid, "failures": failures[:6]})
+            return
+        then = str(act.get("then") or "resume")
+        L._act(case, "operate_done", actor=actor, result=f"all operations verified; then {then}",
+               detail={"results": results}, op_key=f"{cid}:operate_done")
+        self.store.event(pid, tid, "lead_operate", detail={
+            "case_id": cid, "operations": [o.get("op") for o in act.get("operations") or []],
+            "then": then, "revision": rev})
+        if then != "reverify":
+            # the follow-up starts the primary (or waits): the lead's write step is over
+            self.store.release(pid, tid, self._workspace_locks(P))
+        if then == "assign":
+            nxt = {"kind": "assign_game_repair", "assignment": act.get("assignment") or "",
+                   "files": list(act.get("files") or []), "tests": [], "extra_attempts": 0,
+                   "via": "operate"}
+        elif then == "reverify":
+            nxt = {"kind": "reverify", "via": "operate"}
+        else:
+            nxt = {"kind": "resume", "via": "operate"}
+        return self._lead_resume(P, t, L.case(cid), nxt)
+
+    def _lead_op(self, P: Project, t: dict, case: dict, op: dict, spec, s: dict,
+                 actor: str) -> tuple:
+        """(ok, result, validation) of one delegated operation, checked after."""
+        import hashlib
+        import shutil
+        from .lead import _match, OPEN_STATES
+        from .obligations import DecisionConflict, DecisionRefused, OPERATOR_ONLY_KINDS
+        pid, tid, cid = P.id, t["task_id"], case["case_id"]
+        kind = op["op"]
+        data = t.get("data") or {}
+        if kind == "clean_untracked":
+            st = {str(p).replace("\\", "/"): str(x).strip() for x, p in P.ws.status()}
+            # only files dirty when the TASK began are the operator's; a session
+            # baseline already includes scratch an earlier session left behind
+            base = set(data.get("task_baseline_dirty") or [])
+            scope = list(getattr(spec, "scope", None) or [])
+            acc = self.lead._acceptance_globs(P, spec, s)
+            done, refused = [], []
+            for rel in op.get("paths") or []:
+                full = os.path.join(P.profile.workspace, rel)
+                bk = os.path.join(self.state_dir, "lead_backups", cid, rel)
+                if not os.path.lexists(full):
+                    if os.path.exists(bk):
+                        done.append({"path": rel, "backup": bk, "already_removed": True})
+                    else:
+                        refused.append(f"{rel}: not present")
+                    continue
+                why = ("leaves the workspace" if not P.profile.in_workspace(rel) else
+                       "not an untracked file" if st.get(rel) != "??" else
+                       "a directory or link" if os.path.isdir(full) or os.path.islink(full) else
+                       "was already there when the task began" if rel in base else
+                       "inside the task scope (task work, not scratch)"
+                       if scope and _match(rel, scope) else
+                       "an acceptance test" if acc and _match(rel, acc) else "")
+                if why:
+                    refused.append(f"{rel}: {why}")
+                    continue
+                with open(full, "rb") as fh:
+                    blob = fh.read()
+                sha = hashlib.sha256(blob).hexdigest()
+                os.makedirs(os.path.dirname(bk), exist_ok=True)
+                shutil.copy2(full, bk)
+                with open(bk, "rb") as fh:
+                    if hashlib.sha256(fh.read()).hexdigest() != sha:
+                        refused.append(f"{rel}: backup verification failed")
+                        continue
+                os.remove(full)
+                done.append({"path": rel, "sha256": sha, "backup": bk, "bytes": len(blob)})
+            after = {str(p).replace("\\", "/") for _, p in P.ws.status()}
+            still = [d["path"] for d in done if d["path"] in after]
+            # the session baseline recorded this task's own scratch; its journaled,
+            # backed-up removal is not "unrelated work modified" (files dirty when
+            # the task began were refused above and stay protected)
+            gone = {d["path"] for d in done if d["path"] not in still}
+            bd = (self.store.task(pid, tid)["data"] or {}).get("baseline_dirty")
+            if gone and isinstance(bd, dict):
+                self.store.merge_data(pid, tid, baseline_dirty={
+                    k: v for k, v in bd.items() if k not in gone})
+            elif gone and isinstance(bd, list):
+                self.store.merge_data(pid, tid, baseline_dirty=[x for x in bd if x not in gone])
+            ok = not refused and not still
+            return ok, (f"removed {len(done)} file(s) with backups"
+                        + (f"; refused {'; '.join(refused)}" if refused else "")
+                        + (f"; still present {still}" if still else "")), \
+                {"removed": done, "refused": refused, "still_present": still}
+        if kind == "extend_budget":
+            n = int(op.get("attempts") or 0)
+            ref = self.LEAD_REF + cid
+            counters, problems = [], []
+            if self._lc(P, "obligations"):
+                from .obligations import LedgerRefused
+                self._lc_backfill(P, t)
+                for counter in ("attempt_ordinary", "sessions"):
+                    try:
+                        self.obligations.authorize(pid, tid, counter, n,
+                                                   f"lead case {cid} (delegated authority): "
+                                                   f"{op.get('reason')}"[:500],
+                                                   self.LEAD_POLICY_ACTOR, ref)
+                        counters.append(counter)
+                    except LedgerRefused as e:
+                        if "already authorized" in str(e):
+                            counters.append(counter)          # idempotent after a crash
+                        else:
+                            problems.append(f"{counter}: {e}"[:200])
+            else:
+                grants = dict(data.get("lead_grants") or {})
+                grants[cid] = int(grants.get(cid, 0)) + n
+                self.store.merge_data(pid, tid, lead_grants=grants)
+                counters.append("lead_grants")
+            return not problems, f"{n} extra attempt(s) authorized ({', '.join(counters)})" + \
+                (f"; refused {problems}" if problems else ""), \
+                {"counters": counters, "ref": ref, "n": n, "problems": problems}
+        if kind == "resolve_decision":
+            did = op.get("decision_id") or ""
+            d = self.obligations.decision(did)
+            if not d or d["project_id"] != pid or d["task_id"] != tid:
+                return False, f"{did} is not a decision of {pid}/{tid}", {}
+            if d["status"] == "answered" and d.get("actor") == actor:
+                return True, f"{did} already resolved by this case", {"decision_id": did}
+            if d["status"] != "open":
+                return False, f"{did} is {d['status']}", {}
+            if d["kind"] in OPERATOR_ONLY_KINDS or d["kind"] == "lead_escalation":
+                return False, f"{did} ({d['kind']}) is reserved for Victor", {}
+            res = str(op.get("resolution") or "")
+            value = ({"strategy": res, "reason": op.get("reason"), "authority": "lead_policy"}
+                     if d["kind"] in ("recovery_escalation", "no_progress") else
+                     {"resolution": res, "reason": op.get("reason"), "authority": "lead_policy"})
+            if d["kind"] == "recovery_escalation":
+                from .recovery import link_prior_escalation
+                link_prior_escalation(self.obligations, pid, tid, did)
+            try:
+                self.obligations.answer(did, value, actor, "lead_policy")
+            except (DecisionRefused, DecisionConflict) as e:
+                return False, f"{type(e).__name__}: {e}"[:400], {}
+            after = self.obligations.decision(did) or {}
+            self.store.event(pid, tid, "decision_answered", detail={
+                "decision_id": did, "kind": d["kind"], "actor": actor, "authority": "lead_policy",
+                "note": str(op.get("reason") or "")[:300]})
+            return after.get("status") == "answered", f"{did} ({d['kind']}) resolved", \
+                {"decision_id": did, "status": after.get("status")}
+        if kind == "raise_bound":
+            v = (self.lead.case(cid) or {}).get("validation") or {}
+            raised = dict(v.get("raised") or {})
+            raised[op["bound"]] = int(raised.get(op["bound"], 0)) + int(op.get("by") or 1)
+            self.lead._merge_validation(cid, raised=raised)
+            return True, f"{op['bound']} raised by {op.get('by')}", {"raised": raised}
+        if kind == "approve_test_change":
+            path = op.get("path") or ""
+            q = f"[lead case {cid}] approve a change to acceptance test {path}"
+            did = self.obligations.open_decision(
+                pid, tid, "lead_test_change", q,
+                evidence={"case_id": cid, "path": path, "reason": op.get("reason")},
+                blocks=[f"lead_case:{cid}"])
+            d = self.obligations.decision(did) or {}
+            if d.get("status") == "open":
+                try:
+                    self.obligations.answer(did, {"approved": path, "reason": op.get("reason"),
+                                                  "authority": "lead_policy"},
+                                            actor, "lead_policy")
+                except (DecisionRefused, DecisionConflict) as e:
+                    return False, f"{type(e).__name__}: {e}"[:400], {}
+            v = (self.lead.case(cid) or {}).get("validation") or {}
+            prev = list(v.get("approved_test_changes") or [])
+            if path not in prev:
+                self.lead._merge_validation(cid, approved_test_changes=prev + [path])
+            return True, f"test change to {path} recorded as decision {did}; it must still be " \
+                         f"made and re-run", {"decision_id": did, "path": path}
+        return False, f"unknown operation {kind}", {}
+
     def _lead_upgraded(self, case: dict, act: dict) -> bool:
         """The case's coordinator upgrade is installed: the lead's UPGRADING
         step saw the supervisor's request `done` (and set `upgraded`), and the
@@ -3860,6 +4091,8 @@ class Coordinator:
         {recovery_case, action}; the case is resolved in the same transaction."""
         pid, tid, cid = P.id, t["task_id"], case["case_id"]
         kind = str(act.get("kind") or "")
+        if kind == "operate":
+            return self._lead_operate(P, t, case, act)
         head = P.ws.head()
         data = {k: v for k, v in (t["data"] or {}).items()
                 if k not in ("recovery_case", "lead_trigger", "decision_wait", "blocker_class",
@@ -3943,6 +4176,9 @@ class Coordinator:
         elif kind == "wait":
             res = f"lead case {cid}: the deferred {act.get('classification') or 'environment'}" \
                   f" condition re-checked clear"
+        elif kind == "resume":
+            res = f"lead case {cid}: delegated operations applied and verified; the primary " \
+                  f"resumes the sprint"
         else:
             return self._note(P, t, f"lead recovery case {cid} resuming with an action the "
                                     f"engine does not apply ({kind or 'none'}); waiting")

@@ -314,6 +314,12 @@ enabled = false
 # repair_root = ""                        # default <state_dir>/repairs
 # router_repo = ""                        # default: the running package's checkout
 # supervisor = "manual"                   # manual | supervisor
+# full_authority = true                   # Victor's policy: the lead resolves routine
+#                                         # recovery itself (operate actions, delegated
+#                                         # rounds); false = every bound asks Victor
+# max_delegated_rounds = 12               # runaway guard per task budget round
+# max_extend_attempts = 3                 # attempts one extend_budget may grant
+# max_clean_paths = 20                    # files one clean_untracked may remove
 
 # OPTIONAL: one bounded frontier consultation before ordinary repair attempts
 # run out (scoped advice only; it never approves or widens scope).

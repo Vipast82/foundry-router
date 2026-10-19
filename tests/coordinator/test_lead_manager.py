@@ -37,6 +37,7 @@ max_quota_calls = 8
 max_case_minutes = 240
 defer_seconds = 60
 acceptance_tests = ["src/tests/accept_*"]
+full_authority = {{full}}
 """
 T1 = {"id": "T1", "title": "Gallery", "spec": "Build the gallery.",
       "scope": ["src/a.txt", "src/tests/*"]}
@@ -149,9 +150,12 @@ def env(tmp_path):
             f.finish(sid, replies.pop(0))
     fake.on_prompt = on_prompt
 
-    def make(client_cls=None, enabled=True, extra=""):
+    def make(client_cls=None, enabled=True, extra="", full=False):
+        # strict mode by default here: these tests pin that a bound reaches
+        # Victor; the delegated (full_authority) mode has its own tests
         prof = load(str(write_profile(tmp_path, "game", root,
-                                      extra=LEAD_TOML.format(enabled=str(enabled).lower())
+                                      extra=LEAD_TOML.format(enabled=str(enabled).lower(),
+                                                             full=str(full).lower())
                                       + extra)))
         client = (client_cls or RecKilo)(url, password=fake.password)
         P = build_project(prof, state, client=client, foundry=ff)

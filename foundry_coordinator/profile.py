@@ -76,6 +76,17 @@ LEAD_MANAGER_DEFAULTS = {
     "repair_root": "",
     "router_repo": "",
     "supervisor": "manual",                   # manual | supervisor
+    # Delegated recovery authority (Victor's policy, on by default when the lead
+    # is enabled): the lead's `operate` actions -- executed, journaled and
+    # verified by the coordinator, never by the read-only lead session -- clean
+    # generated scratch files, extend budgets, resolve routine decisions, raise
+    # exhausted recovery bounds and record test-change decisions. A counter
+    # limit becomes a journaled delegated round that needs a materially
+    # different action, never a question for Victor by itself.
+    "full_authority": True,
+    "max_delegated_rounds": 12,               # runaway guard per task budget round
+    "max_extend_attempts": 3,                 # attempts one extend_budget op may grant
+    "max_clean_paths": 20,                    # files one clean_untracked op may remove
 }
 LEAD_SUPERVISOR_MODES = ("manual", "supervisor")
 

@@ -2,6 +2,42 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.125.0 — Lead manager: full delegated recovery authority (default when enabled)
+
+Victor's policy (docs/prompts/LEAD_MANAGER_FULL_AUTHORITY.md). It was
+demonstrated by UI-02 case `rc-db6eef8a7a7e7f2f`: the case stopped at
+`max_cases_per_task` before Opus was called, while the real blocker was a new
+untracked scratch file, `.plan/eFullVerify_call.lua`.
+
+- **`operate` action.** With `full_authority` (default true when the lead is
+  enabled), the read-only lead directs operations and the coordinator
+  executes, journals and verifies each one as the single writer:
+  `clean_untracked`, `extend_budget`, `resolve_decision`, `raise_bound` and
+  `approve_test_change`. The step ends with assign, reverify or resume.
+- **New authority `lead_policy`.** Decisions answered as `lead_manager:<case>`
+  are checked by the engine against an open case of the same task.
+  Operator-only kinds stay with Victor.
+- **Counter limits** become journaled delegated rounds. Each needs an action
+  materially different from every earlier one for the task. The runaway
+  guard `max_delegated_rounds` asks Victor with facts, not a counter.
+- **Legacy escalations.** Counter-only NEEDS_VICTOR escalations opened
+  before this release are taken back by the lead.
+- **New concrete failures** open their own case, because untracked
+  out-of-scope files are now part of the fingerprint. The dossier names the
+  stray files.
+- **`ask_victor`** is only for input Victor must give personally, or a
+  change to the core game goal.
+- **Scratch-file safety.** A journaled scratch removal updates the session
+  baseline. Files that were dirty when the task began are refused and stay
+  protected.
+- **Unchanged:** no model can mark PASS, create evidence or approve visuals.
+  Served-model, permission and guard failures still fail closed.
+  `full_authority = false` restores strict mode.
+
+Tests:
+- New: tests/coordinator/test_lead_full_authority.py (10 tests).
+- The existing lead tests pin strict mode.
+
 ## v0.124.1 — UI sprint recovery and visual-policy follow-ups
 
 Workstation commits `4a7c8a6`..`6903403`, plus one prompt fix:

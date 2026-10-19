@@ -58,7 +58,19 @@ OPEN_STATES = ("DIAGNOSING", "REPAIRING", "UPGRADING", "RESUMING", "NEEDS_VICTOR
 ACTIVE_STATES = ("DIAGNOSING", "REPAIRING", "UPGRADING", "DEFERRED")   # the case clock runs
 CLASSES = ("product", "test_harness", "evidence", "environment", "provider_quota",
            "coordinator", "scope_core", "external")
-ACTION_KINDS = ("assign_game_repair", "coordinator_repair", "wait", "reverify", "ask_victor")
+ACTION_KINDS = ("assign_game_repair", "coordinator_repair", "wait", "reverify", "ask_victor",
+                "operate")
+# [lead_manager] full_authority: operational steps the COORDINATOR executes for the
+# lead (the lead session itself stays read-only), each journaled and verified
+OPS = ("clean_untracked", "extend_budget", "resolve_decision", "raise_bound",
+       "approve_test_change")
+OPERATE_THEN = ("assign", "reverify", "resume")
+# bounds a delegated round may raise; a counter alone never goes to Victor
+DELEGABLE_BOUNDS = frozenset({"max_diagnoses", "max_candidates", "max_upgrades",
+                              "max_quota_calls", "max_fingerprint_repeats", "max_case_minutes",
+                              "max_upgrade_minutes", "max_resuming_minutes",
+                              "max_cases_per_task", "max_lead_calls_per_task",
+                              "max_extra_attempts_per_task"})
 ACTION_STATUSES = ("started", "done", "failed", "uncertain")
 COUNTER_NAMES = ("diagnoses", "candidates", "upgrades", "repeats", "quota_calls")
 BOUNDS = {"diagnoses": "max_diagnoses", "candidates": "max_candidates",
@@ -311,7 +323,38 @@ def parse_lead_report(text: str) -> tuple[Optional[dict], str]:
     return d, ""
 
 
-def report_contract() -> str:
+def action_fp(act: dict) -> str:
+    """What the lead proposes to DO, normalized: a delegated round past a bound
+    must propose a materially different action than any earlier one."""
+    a = dict(act or {})
+    body = {"kind": a.get("kind"),
+            "text": _norm_hyp(str(a.get("assignment") or a.get("plan") or "")),
+            "files": sorted(a.get("files") or []),
+            "ops": [(o.get("op"), sorted(o.get("paths") or []), o.get("decision_id"),
+                     o.get("bound"), o.get("path")) for o in a.get("operations") or []],
+            "then": a.get("then")}
+    return "act-" + _sha(_j(body))[:20]
+
+
+def report_contract(full_authority: bool = False) -> str:
+    extra = ""
+    if full_authority:
+        extra = (
+            "\nDELEGATED AUTHORITY (Victor's policy): you are the final decision maker for "
+            "routine recovery. Instead of asking Victor, use {\"kind\": \"operate\", "
+            "\"operations\": [...], \"then\": \"assign|reverify|resume\", \"assignment\": "
+            "\"<for then=assign>\", \"files\": [...]}; the coordinator executes, journals and "
+            "verifies each operation (you stay read-only). Operations, each with a "
+            "\"reason\" (10+ chars): {\"op\": \"clean_untracked\", \"paths\": [<untracked "
+            "generated files outside the task scope>]} (backed up, then removed); "
+            "{\"op\": \"extend_budget\", \"attempts\": N}; {\"op\": \"resolve_decision\", "
+            "\"decision_id\": \"dec-...\", \"resolution\": \"<the decision text>\"} (routine "
+            "decisions only, never scope/approval/policy); {\"op\": \"raise_bound\", "
+            "\"bound\": \"max_...\", \"by\": N}; {\"op\": \"approve_test_change\", "
+            "\"path\": \"<acceptance test>\"} (a recorded decision; the change must still be "
+            "made and re-run). ask_victor is only for input that needs Victor personally "
+            "(user_action) or a change to the core game goal you cannot reconcile. Propose an "
+            "action materially different from every earlier one in the dossier.")
     return (
         f"End your final message with exactly one fenced block ```{REPORT_FENCE} holding JSON:\n"
         f"```{REPORT_FENCE}\n"
@@ -332,11 +375,12 @@ def report_contract() -> str:
         "himself>\"}.\n"
         "You cannot mark checks PASS, create evidence, answer or approve decisions, waive "
         "checks or reset budgets: a report that tries is rejected. Changing an acceptance "
-        "test requires listing it in action.manifest.acceptance_tests.")
+        "test requires listing it in action.manifest.acceptance_tests." + extra)
 
 
 def validate_report(rep: Any, *, scope=None, allowed_dirs=None, acceptance_globs=None,
-                    prior_hypotheses=None) -> tuple[Optional[dict], list[str]]:
+                    prior_hypotheses=None, full_authority: bool = False, prior_actions=None,
+                    max_extend: int = 3, max_clean: int = 20) -> tuple[Optional[dict], list[str]]:
     """(clean report, errors). Errors make the report invalid (it counts a
     diagnosis and is retried within bounds)."""
     errs: list[str] = []
@@ -468,6 +512,106 @@ def validate_report(rep: Any, *, scope=None, allowed_dirs=None, acceptance_globs
         ua = str(act.get("user_action") or "").strip()
         if ua:
             clean_act["user_action"] = ua[:500]
+        if full_authority and not ua and cls not in ("scope_core", "external"):
+            errs.append("under delegated authority the lead resolves routine recovery itself: "
+                        "ask_victor needs a user_action only Victor can do, or a scope_core/"
+                        "external classification (a change to the core game goal)")
+    elif kind == "operate":
+        if not full_authority:
+            errs.append("operate needs [lead_manager] full_authority")
+        ops = act.get("operations")
+        if not isinstance(ops, list) or not ops or any(not isinstance(o, dict) for o in ops):
+            errs.append("action.operations must be a non-empty list of objects")
+            ops = []
+        clean_ops = []
+        for i, o in enumerate(ops[:12]):
+            op = str(o.get("op") or "")
+            reason = str(o.get("reason") or "").strip()
+            if op not in OPS:
+                errs.append(f"operations[{i}].op must be one of {', '.join(OPS)}")
+                continue
+            if len(reason) < 10:
+                errs.append(f"operations[{i}] needs a reason (10+ characters)")
+            c = {"op": op, "reason": reason[:600]}
+            if op == "clean_untracked":
+                ps = o.get("paths")
+                if not isinstance(ps, list) or not ps or len(ps) > max_clean or \
+                        any(not isinstance(x, str) for x in ps):
+                    errs.append(f"operations[{i}].paths must list 1..{max_clean} files")
+                    ps = []
+                rels = []
+                for x in ps:
+                    r = _safe_rel(x)
+                    if r is None or r.endswith("/"):
+                        errs.append(f"operations[{i}].paths: {x!r} is not a file in the repo")
+                    elif acceptance_globs and _match(r, acceptance_globs):
+                        errs.append(f"operations[{i}].paths: {r} is an acceptance test")
+                    elif _match(r, [_SECRET_PATTERN]):
+                        errs.append(f"operations[{i}].paths: {r} is protected")
+                    else:
+                        rels.append(r)
+                c["paths"] = rels
+            elif op == "extend_budget":
+                n = o.get("attempts")
+                if isinstance(n, bool) or not isinstance(n, int) or not 1 <= n <= max_extend:
+                    errs.append(f"operations[{i}].attempts must be 1..{max_extend}")
+                    n = 0
+                c["attempts"] = int(n or 0)
+            elif op == "resolve_decision":
+                did = str(o.get("decision_id") or "")
+                res = str(o.get("resolution") or "").strip()
+                if not re.match(r"^dec-[0-9a-f]{8,}$", did):
+                    errs.append(f"operations[{i}].decision_id must name a decision (dec-...)")
+                if len(res) < 5:
+                    errs.append(f"operations[{i}].resolution must say what is decided")
+                for v in directive_violations(res):
+                    errs.append(f"operations[{i}].resolution may not " +
+                                v.split(":", 1)[0].replace("_", " "))
+                c.update(decision_id=did, resolution=res[:2000])
+            elif op == "raise_bound":
+                b = str(o.get("bound") or "")
+                n = o.get("by", 1)
+                if b not in DELEGABLE_BOUNDS:
+                    errs.append(f"operations[{i}].bound must be one of "
+                                f"{', '.join(sorted(DELEGABLE_BOUNDS))}")
+                if isinstance(n, bool) or not isinstance(n, int) or not 1 <= n <= 3:
+                    errs.append(f"operations[{i}].by must be 1..3")
+                    n = 1
+                c.update(bound=b, by=int(n))
+            elif op == "approve_test_change":
+                r = _safe_rel(str(o.get("path") or ""))
+                if r is None:
+                    errs.append(f"operations[{i}].path must be a test path in the repo")
+                elif acceptance_globs is not None and not _match(r, acceptance_globs or ()):
+                    errs.append(f"operations[{i}].path: {r} is not an acceptance test")
+                c["path"] = r or ""
+            clean_ops.append(c)
+        then = str(act.get("then") or "")
+        if then not in OPERATE_THEN:
+            errs.append(f"action.then must be one of {', '.join(OPERATE_THEN)}")
+        clean_act.update(operations=clean_ops, then=then)
+        if then == "assign":
+            text = str(act.get("assignment") or "").strip()
+            if len(text) < 10:
+                errs.append("then=assign needs an assignment with concrete instructions")
+            for v in directive_violations(text):
+                errs.append("the assignment may not " + v.split(":", 1)[0].replace("_", " ")
+                            + ": " + v.split(":", 1)[1].strip()[:160])
+            approved = [o["path"] for o in clean_ops if o["op"] == "approve_test_change"]
+            for line in test_edit_directives(text, acceptance_globs or (), declared + approved):
+                errs.append("the assignment changes tests without an approve_test_change "
+                            "operation or a manifest entry: " + line[:160])
+            files = files_of(required=False)
+            limit = list(scope or []) or list(allowed_dirs or [])
+            for f in files:
+                if limit and not _match(f, limit):
+                    errs.append(f"action.files: {f} is outside the task scope")
+            clean_act.update(assignment=text[:4000], files=files,
+                             manifest={"acceptance_tests": declared + approved})
+    if full_authority and kind != "ask_victor" and prior_actions and \
+            action_fp(clean_act) in set(prior_actions):
+        errs.append("this action repeats an earlier lead action for the task: a materially "
+                    "different action is required")
     if cls in ("scope_core", "external") and kind != "ask_victor" and not question:
         errs.append(f"a {cls} problem goes to Victor: give a precise question")
     if errs:
@@ -1072,20 +1216,55 @@ class LeadManager:
             checks = [r["check_name"] for r in self.store.verification(
                 t["verification_id"], P.id, tid) if r.get("result") != "PASS"]
         inputs = evidence.get("input_hashes") or {}
+        stray = self._stray_untracked(P, t)
         parts = {"task": tid, "class": cls, "revision": revision,
                  "obligations": sorted({str(o) for o in obs}), "checks": sorted(set(checks)),
                  "inputs": sorted((str(k), str(v)) for k, v in (
                      inputs.items() if isinstance(inputs, dict) else
                      enumerate(inputs if isinstance(inputs, list) else [])))}
+        if stray:
+            # a NEW concrete failure (e.g. a generated scratch file outside the
+            # scope) is a new blocker, not a repeat of the earlier findings
+            parts["untracked"] = stray
         return "fp-" + _sha(_j(parts))[:24], parts
+
+    def _stray_untracked(self, P, t: dict) -> list[str]:
+        """Untracked files outside the task scope that were not already there when
+        the task began (task_baseline_dirty): generated scratch candidates."""
+        ws = getattr(P, "ws", None)
+        if ws is None or not callable(getattr(ws, "status", None)):
+            return []
+        try:
+            st = ws.status()
+        except Exception:                                        # noqa: BLE001
+            return []
+        data = t.get("data") or {}
+        # only what was dirty when the TASK began (a session's own baseline already
+        # holds the scratch an earlier session of this task left behind)
+        base = set(data.get("task_baseline_dirty") or [])
+        spec = None
+        try:
+            spec = self._spec(P, t["task_id"])
+        except Exception:                                        # noqa: BLE001
+            spec = None
+        scope = list(getattr(spec, "scope", None) or [])
+        out = []
+        for x, path in st:
+            rel = str(path).replace("\\", "/")
+            if str(x).strip() != "??" or rel in base or (scope and _match(rel, scope)):
+                continue
+            out.append(rel)
+        return sorted(out)[:40]
 
     @staticmethod
     def repeat_key(parts: dict) -> str:
         """The fingerprint without the revision (and input hashes): task,
         class, check ids and obligation ids. A game repair commit moves HEAD;
         the same blocker coming back after it is a REPEAT, not a new case."""
-        return "rk-" + _sha(_j({k: parts.get(k) for k in ("task", "class", "obligations",
-                                                          "checks")}))[:24]
+        key = {k: parts.get(k) for k in ("task", "class", "obligations", "checks")}
+        if parts.get("untracked"):
+            key["untracked"] = parts["untracked"]
+        return "rk-" + _sha(_j(key))[:24]
 
     def _budget_epoch(self, project_id: str, task_id: str) -> float:
         """Only an explicit operator budget reset begins a new recovery round."""
@@ -1195,6 +1374,16 @@ class LeadManager:
                           "repeats": repeats, "task_totals": totals},
                   repo="game", op_key=f"{cid}:open")
         t2 = self.store.task(P.id, tid) or t
+        if s.get("full_authority") and not self.store.q(
+                "SELECT 1 FROM recovery_cases WHERE project_id=? AND task_id=? AND case_id<>? "
+                "AND created_ts>=? AND repeat_key=?",
+                (P.id, tid, cid, self._budget_epoch(P.id, tid), rk)):
+            self._act(case, "new_failure", result="a blocker this task has not had before: "
+                      "it gets a repair opportunity regardless of earlier cases",
+                      detail={"repeat_key": rk, "untracked": parts.get("untracked") or [],
+                              "checks": parts.get("checks"), "task_totals": totals},
+                      op_key=f"{cid}:new_failure")
+            return case
         rep_lim = int(s["max_fingerprint_repeats"]) +             int(totals["raised"].get("max_fingerprint_repeats", 0))
         if repeats > rep_lim:
             return self._escalate(
@@ -1332,6 +1521,11 @@ class LeadManager:
             st = ws.status()
             out.append(f"status: {len(st)} changed/untracked")
             out += [f"  {x} {p}" for x, p in st[:30]]
+            stray = self._stray_untracked(P, t)
+            if stray:
+                out.append("untracked files OUTSIDE the task scope that were not there when the "
+                           "task began (generated scratch candidates; clean_untracked removes "
+                           "them with a backup): " + ", ".join(stray))
             base = t.get("base_sha")
             if base:
                 out.append(f"commits {base[:12]}..{head[:12]}:")
@@ -1468,7 +1662,7 @@ class LeadManager:
             "Give a materially different hypothesis than any earlier one in the dossier.",
             ("Current project recovery policy (higher priority than historical plan notes): "
              + policy) if policy else "",
-            report_contract(), "", text])
+            report_contract(bool(self.settings(P).get("full_authority"))), "", text])
 
     # ------------------------------------------------------------------ Kilo calls
 
@@ -1997,7 +2191,11 @@ class LeadManager:
                 rep, scope=list(getattr(spec, "scope", None) or []),
                 allowed_dirs=list(getattr(P.profile, "allowed_dirs", None) or []),
                 acceptance_globs=self._acceptance_globs(P, spec, s),
-                prior_hypotheses=self._prior_hypotheses(P, case))
+                prior_hypotheses=self._prior_hypotheses(P, case),
+                full_authority=bool(s.get("full_authority")),
+                prior_actions=self._prior_actions(P, case),
+                max_extend=int(s.get("max_extend_attempts") or 3),
+                max_clean=int(s.get("max_clean_paths") or 20))
         if clean is None:
             self._upd(key, status="failed", result="invalid lead-report", errors=errors[:12])
             self._end_session(P, key, "invalid_report")
@@ -2023,6 +2221,24 @@ class LeadManager:
             out += [a["detail"].get("hypothesis") or "" for a in self.actions(c["case_id"])
                     if a["kind"] == "diagnosis"]
         return [h for h in out if h]
+
+    def _prior_actions(self, P, case) -> list[str]:
+        """Action fingerprints of every earlier lead action of the task in the
+        current budget round (a delegated round must do something new)."""
+        out = []
+        epoch = self._budget_epoch(P.id, case["task_id"])
+        for c in self.cases(P.id, case["task_id"]):
+            if float(c.get("created_ts") or 0) < epoch:
+                continue
+            for a in self.actions(c["case_id"]):
+                d = a.get("detail") or {}
+                if d.get("action_fp"):
+                    out.append(d["action_fp"])
+                elif a["kind"] == "assign_game_repair" and isinstance(d.get("assignment"), dict):
+                    out.append(action_fp(d["assignment"]))
+                elif a["kind"] == "coordinator_repair" and isinstance(d.get("plan"), dict):
+                    out.append(action_fp(d["plan"]))
+        return out
 
     def _route(self, P, t, case, s, rep: dict):
         act = rep["action"]
@@ -2050,10 +2266,12 @@ class LeadManager:
             if kind == "assign_game_repair":
                 proposed["extra_attempts"] = extra
                 self._act(case, "assign_game_repair", result=_cut(act["assignment"], 300),
-                          repo="game", scope_files=act["files"], detail={"assignment": proposed})
+                          repo="game", scope_files=act["files"], detail={
+                              "assignment": proposed, "action_fp": action_fp(act)})
                 return self._save(case["case_id"], state="RESUMING", proposed_action=proposed)
             self._act(case, "coordinator_repair", result=_cut(act["plan"], 300),
-                      repo="foundry-router", scope_files=act["files"], detail={"plan": proposed})
+                      repo="foundry-router", scope_files=act["files"], detail={
+                          "plan": proposed, "action_fp": action_fp(act)})
             case = self._merge_validation(case["case_id"], repair={
                 "n": int(case["counters"]["candidates"]), "phase": "create"})
             return self._save(case["case_id"], state="REPAIRING", proposed_action=proposed)
@@ -2062,6 +2280,17 @@ class LeadManager:
             return self._defer(P, self.case(case["case_id"]), s,
                                f"lead: {cls} wait ({rep['hypothesis'][:200]})",
                                act.get("seconds") or None, back="RESUMING")
+        if kind == "operate":
+            if self._bound_exhausted(case, s, "candidates"):
+                return self._escalate_bound(P, t, case, "candidates", report=rep)
+            case = self._bump(case["case_id"], candidates=1)
+            proposed = {**act, "hypothesis": rep["hypothesis"], "classification": cls}
+            self._act(case, "operate_planned",
+                      result=", ".join(o["op"] for o in act["operations"]) + f" -> {act['then']}",
+                      repo="game", scope_files=sorted({p for o in act["operations"]
+                                                       for p in o.get("paths") or []}),
+                      detail={"operate": proposed, "action_fp": action_fp(act)})
+            return self._save(case["case_id"], state="RESUMING", proposed_action=proposed)
         if kind == "reverify":
             proposed = {"kind": "reverify", "hypothesis": rep["hypothesis"],
                         "classification": cls}
@@ -2504,6 +2733,28 @@ class LeadManager:
         did = case.get("decision_id")
         O = self._obligations()
         d = O.decision(did) if did and O is not None else None
+        esc = (case.get("validation") or {}).get("escalation") or {}
+        if d and d["status"] == "open" and s.get("full_authority") and \
+                esc.get("reason") in DELEGABLE_BOUNDS and esc.get("bound") and \
+                not case.get("needs_human"):
+            # a counter alone was put to Victor (before full authority): the lead
+            # takes its own question back and continues with a delegated round
+            n = self._delegated_rounds(P, case["task_id"])
+            if n < int(s.get("max_delegated_rounds") or 0):
+                with self.store.tx():
+                    self.store.x("UPDATE decisions SET status='withdrawn' WHERE decision_id=? "
+                                 "AND status='open'", (did,))
+                    self.store.event(P.id, case["task_id"], "decision_withdrawn", detail={
+                        "decision_id": did, "by": "lead_manager", "case_id": case["case_id"],
+                        "reason": f"counter-only escalation ({esc.get('reason')}) taken back "
+                                  f"under delegated authority"})
+                self._act(case, "withdraw_escalation", actor="lead_manager",
+                          result=f"{did}: {esc.get('reason')} is a counter, not a decision "
+                                 f"for Victor", op_key=f"{case['case_id']}:withdraw:{did}")
+                self._save(case["case_id"], decision_id=None)
+                return self._delegate_bound(P, t, self.case(case["case_id"]),
+                                            str(esc["reason"]), esc["bound"]) or \
+                    self.case(case["case_id"])
         if not d or d["status"] != "answered":
             return case
         how, text = self._answer_kind(d)
@@ -2533,7 +2784,9 @@ class LeadManager:
             f"Which of those should the coordinator do?",
             bound=tuple(esc["bound"]) if esc.get("bound") else None)
 
-    def _extra_round(self, P, case, s, did: str, esc: dict):
+    def _extra_round(self, P, case, s, did: str, esc: dict, *, actor: str = "operator",
+                     why: str = "operator authorized one more bounded round",
+                     op_key: str = ""):
         """One journaled extra bounded round: the bound the escalation named is
         raised once (by one unit; a time bound gets a fresh window), then the
         case goes back to work."""
@@ -2565,10 +2818,11 @@ class LeadManager:
                 if int(case["counters"].get(n, 0)) >= self._limit({**case, "validation": {
                         **v, "raised": raised}}, s, n):
                     raised[BOUNDS[n]] = int(raised.get(BOUNDS[n], 0)) + 1
-        self._act(case, "extra_round", actor="operator", op_key=f"{cid}:round:{did}",
-                  result=f"operator authorized one more bounded round"
-                         + (f" ({name} raised)" if name else "") + f"; -> {back}",
-                  detail={"decision_id": did, "bound": bound, "raised": raised, "to": back})
+        self._act(case, "extra_round" if actor == "operator" else "delegated_round",
+                  actor=actor, op_key=op_key or f"{cid}:round:{did}",
+                  result=why + (f" ({name} raised)" if name else "") + f"; -> {back}",
+                  detail={"decision_id": did, "bound": bound, "raised": raised, "to": back,
+                          "reason": why})
         self._merge_validation(cid, raised=raised)
         return self._save(cid, state=back, needs_human=False, **fields)
 
@@ -2629,8 +2883,56 @@ class LeadManager:
             paused += max(0.0, now - float(case["paused_ts"]))
         return max(0.0, now - float(case["created_ts"]) - paused) / 60
 
+    def _delegated_rounds(self, P, task_id: str) -> int:
+        epoch = self._budget_epoch(P.id, task_id)
+        n = 0
+        for c in self.cases(P.id, task_id):
+            if float(c.get("created_ts") or 0) >= epoch:
+                n += sum(1 for a in self.actions(c["case_id"]) if a["kind"] == "delegated_round")
+        return n
+
+    def _delegate_bound(self, P, t, case, reason: str, bound) -> Optional[dict]:
+        """[lead_manager] full_authority: an exhausted counter becomes one
+        journaled delegated round (the next lead action must be materially
+        different, enforced by validate_report). None past the runaway guard."""
+        s = self.settings(P)
+        if not s.get("full_authority") or reason not in DELEGABLE_BOUNDS or not bound:
+            return None
+        n = self._delegated_rounds(P, case["task_id"])
+        if n >= int(s.get("max_delegated_rounds") or 0):
+            return None
+        esc = {"bound": list(bound), "from": case["state"] if case["state"] != "NEEDS_VICTOR"
+               else ((case.get("validation") or {}).get("escalation") or {}).get("from")}
+        return self._extra_round(
+            P, case, s, "", esc, actor="lead_manager",
+            why=f"delegated round {n + 1}/{s.get('max_delegated_rounds')}: {bound[0]} "
+                f"reached ({bound[1]}/{bound[2]}); the lead continues with a materially "
+                f"different action",
+            op_key=f"{case['case_id']}:delegated:{n + 1}")
+
+    def _ceiling_question(self, P, case, reason: str, question: str) -> str:
+        """Past the runaway guard Victor gets the facts, not a counter."""
+        tried = []
+        for c in self.cases(P.id, case["task_id"]):
+            for a in self.actions(c["case_id"]):
+                if a["kind"] in ("assign_game_repair", "coordinator_repair", "operate_planned",
+                                 "lead_op"):
+                    tried.append(f"{a['kind']}: {_cut(a.get('result') or '', 160)}")
+        trig = (case.get("trigger") or {}).get("reason") or ""
+        return (f"The lead made {self._delegated_rounds(P, case['task_id'])} delegated "
+                f"recovery rounds with materially different actions and the blocker persists: "
+                f"{_cut(trig, 400)}. Actions tried: " + "; ".join(tried[-8:]) +
+                ". What has to change for this sprint (a product decision, an input only you "
+                "can give, or a change to the goal)?")
+
     def _escalate(self, P, t, case, reason: str, question: str, *, user_action: str = "",
                   bound=None, report: Optional[dict] = None):
+        if not user_action:
+            out = self._delegate_bound(P, t, case, reason, bound)
+            if out is not None:
+                return out
+            if self.settings(P).get("full_authority") and reason in DELEGABLE_BOUNDS:
+                question = self._ceiling_question(P, case, reason, question)
         self._abort_sessions(P, case, f"escalated: {reason}")
         self._end_case_sessions(P, case, "escalated")
         case = self.case(case["case_id"])

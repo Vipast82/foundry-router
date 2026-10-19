@@ -47,13 +47,14 @@ DONE = '```coordinator-report\n{"status": "DONE", "summary": "did it"}\n```'
 
 def lead_toml(enabled=True, expected=(OPUS, ASTRA), **kw) -> str:
     vals = {"max_diagnoses": 3, "max_candidates": 2, "max_upgrades": 1, "max_quota_calls": 12,
-            "defer_seconds": 60, "extra_attempts": 1, **kw}
+            "defer_seconds": 60, "extra_attempts": 1, "full_authority": False, **kw}
     lines = ["[lead_manager]", f"enabled = {str(bool(enabled)).lower()}",
              f'persona = "{LEAD}"', "expected_models = " + json.dumps(list(expected)),
              'agent = "lead"']
     for k, v in vals.items():
         lines.append(f"{k} = " + (json.dumps(str(v).replace(chr(92), "/"))
-                                  if isinstance(v, str) else str(v)))
+                                  if isinstance(v, str) else str(v).lower()
+                                  if isinstance(v, bool) else str(v)))
     return "\n" + "\n".join(lines) + "\n"
 
 

@@ -47,7 +47,11 @@ PHASES = ("BUILD", "REVIEW", "CLOSE", "APPROVAL")
 STATUSES = ("open", "in_progress", "evidenced", "verified", "waived", "superseded")
 LIVE = ("open", "in_progress", "evidenced", "verified")
 EVIDENCE_KINDS = ("check", "path", "blob_changed", "log_marker")
-AUTHORITIES = ("operator", "delegated_policy")
+AUTHORITIES = ("operator", "delegated_policy", "lead_policy")
+# lead_policy: the enabled lead manager's delegated recovery authority
+# ([lead_manager] full_authority), always checked by the engine's
+# lead_validator for an open recovery case of the same task.
+LEAD_ACTOR_PREFIX = "lead_manager:"
 # A delegated policy may never answer these (they need the operator).
 OPERATOR_ONLY_KINDS = frozenset({"scope_change", "approval", "expectation_change",
                                  "quarantine_check", "policy"})
@@ -319,7 +323,7 @@ def _ob_categories(ob: dict) -> set[str]:
 
 class Obligations:
     def __init__(self, store, clock=time.time, *, operator_actors: Optional[Iterable[str]] = None,
-                 unblock_validator=None):
+                 unblock_validator=None, lead_validator=None):
         """operator_actors: names allowed to carry `operator` authority outside
         the control channel (default none: only channel='control' answers
         carry it). unblock_validator(project, task, ref, actor) -> bool checks
@@ -329,6 +333,9 @@ class Obligations:
         self.operator_actors = frozenset(str(a).strip().lower() for a in operator_actors or ()
                                          if str(a).strip())
         self.unblock_validator = unblock_validator
+        # lead_validator(project, task, actor) -> bool: the engine's check that
+        # `actor` (lead_manager:<case>) is an open, full-authority case of the task
+        self.lead_validator = lead_validator
         migrate(store)
 
     # -- rows ---------------------------------------------------------------------
@@ -859,6 +866,18 @@ class Obligations:
         if authority == "operator" and not self.is_operator(actor, channel):
             raise DecisionRefused(f"operator authority needs the control channel's operator "
                                   f"session (channel={channel!r}, actor={actor!r})")
+        if authority == "lead_policy":
+            if d["kind"] in OPERATOR_ONLY_KINDS:
+                raise DecisionRefused(f"the lead manager cannot answer {d['kind']}")
+            ok = False
+            if str(actor or "").startswith(LEAD_ACTOR_PREFIX) and callable(self.lead_validator):
+                try:
+                    ok = bool(self.lead_validator(d["project_id"], d["task_id"], actor))
+                except Exception:                                 # noqa: BLE001
+                    ok = False
+            if not ok:
+                raise DecisionRefused(f"{actor!r} holds no delegated lead authority for "
+                                      f"{d['project_id']}/{d['task_id']}")
         if authority == "delegated_policy":
             if d["kind"] in OPERATOR_ONLY_KINDS:
                 raise DecisionRefused(f"a delegated policy cannot answer {d['kind']}")
