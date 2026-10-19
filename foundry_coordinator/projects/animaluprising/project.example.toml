@@ -69,12 +69,11 @@ deep_reviewer = "Foundry-Kilo-Deep-Review"   # used when a task tag matches revi
 visual_reviewer = "Foundry-Kilo-Visual-Review"
 image_generator = "Foundry-Kilo-Images"
 
-# OPTIONAL: per-sprint model overrides. Here a frontier model writes the UI
-# sprints and everything else stays on the local model. This changes model
-# selection only, never queue approval or sprint scope.
+# Victor 2026-10-19: Strata writes the remaining UI sprints; the UI reviewer
+# stays on the deep-review persona. Queue approval and sprint scope are unchanged.
 [role_overrides.ui]
-tasks = ["UI-01", "UI-02", "UI-03", "UI-04", "UI-05", "UI-06", "UI-GT1"]
-implementer = "Foundry-Kilo-Sonnet"
+tasks = ["UI-02", "UI-03", "UI-04", "UI-05", "UI-06", "UI-GT1"]
+implementer = "Foundry-Kilo-Local"
 reviewer = "Foundry-Kilo-Deep-Review"
 
 # Victor 2026-10-19: the required physical-input phase joins the queue when
