@@ -1220,6 +1220,12 @@ def test_acceptance_globs_default_to_test_paths_and_test_edits_need_declaring(en
     assert validate_report(r, scope=scope, acceptance_globs=globs)[0] is None
     r["action"]["manifest"] = {"acceptance_tests": ["tests/gallery_test.lua"]}
     assert validate_report(r, scope=scope, acceptance_globs=globs)[0] is not None
+    r = report(assignment="Do not edit any test, pin or acceptance line. Fix src/a.txt.",
+               files=["src/a.txt"])
+    assert validate_report(r, scope=scope, acceptance_globs=globs)[0] is not None
+    r = report(assignment="Do not edit tests; update the expected value in a spec.",
+               files=["src/a.txt"])
+    assert validate_report(r, scope=scope, acceptance_globs=globs)[0] is None
     # fail closed: no acceptance globs at all
     assert validate_report(report(), scope=scope, acceptance_globs=[])[0] is None
 
