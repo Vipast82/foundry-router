@@ -408,3 +408,20 @@ def test_operate_resume_after_repeats_reaches_one_session_without_a_re_ask(tmp_p
               if d["kind"] == "recovery_escalation" and d["decision_id"] != did]
     assert not reasks, [(d["decision_id"], d["status"]) for d in reasks]
     assert "lead_assignment" not in (c.store.task("game", utid)["data"] or {})
+
+
+def test_reverify_without_a_new_commit_resumes_the_primary_instead(tmp_path):
+    e, c, case = _blocked_case(tmp_path)
+    head = e["P"].ws.head()
+    c.store.update_task("game", TID, base_sha=head, head_sha=head)
+    p = e["root"] / "tmp" / "scratch.txt"
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text("scratch\n")
+    act = {"kind": "operate", "then": "reverify", "hypothesis": "only scratch was wrong",
+           "operations": [{"op": "clean_untracked", "paths": ["tmp/scratch.txt"],
+                           "reason": "generated scratch"}]}
+    c._lead_operate(e["P"], task(e), case, act)
+    done = c.lead._action(f"{case['case_id']}:operate_done")
+    assert done["result"].endswith("then resume")
+    assert state(e) == S.READY
+    assert task(e)["data"]["lead_assignment"]["via"] == "operate"

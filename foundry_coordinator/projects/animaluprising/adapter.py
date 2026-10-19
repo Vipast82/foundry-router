@@ -333,6 +333,7 @@ This session's job: the plan's remaining BUILD steps, each committed by explicit
 including its Studio steps and -Finish, so the evidence log ends with "GATE {spec.task_id} PASS|FAIL" (§21 boot lines first).
 Do NOT write {spec.task_id}_SUMMARY.md, the STATE.md row or the MASTER_ORDER status, and do NOT push: after the coordinator's checks and a frontier review, a separate CLOSE session does that.
 Never edit files outside the plan's "Files this sprint may change" list (§3, the commit hook enforces it). Never --no-verify, --force, rebase, amend or tag.
+Helper PREWORK notes in the coordinator memory below were prepared ahead of time for your next steps: when one matches the step you are on and its HEAD is current, `git apply --check` its draft patch, apply it, run the listed checks and commit, instead of re-deriving the change; verify it against the plan first (it is advisory, never authority). Put verification scratch and one-off generated files under `.plan/tmp/` (git-ignored), never elsewhere in the repo.
 Before reporting NEEDS_HUMAN for a visual or interaction step, use the enabled vision subagent and available Studio MCP tools as described above. If the step still needs Victor (an ACTION NEEDED FROM VICTOR block, §22) or a decision the plan doesn't settle (§10), stop and report NEEDS_HUMAN or BLOCKED with the exact attempted tools and blocker text.
 
 {report_instructions()}

@@ -2,6 +2,46 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.126.0 — helper prework ahead of the implementer; shared task memory
+
+UI-02's helpers had been idle for hours. The task had used all 96 lane units
+and 64 dispatches, 38 of them reactive failure triage. Only 6 of 96 results
+were integrated: the rest expired with their run or fell below the delivery
+threshold. No helper wrote to the task memory.
+
+- **New `prework` lane** (server: new optional purpose `prework`). At run
+  start and after every commit, helpers prepare the next `steps_ahead` (2)
+  open plan steps at the current HEAD. Each helper:
+  - writes ONE minimal unified diff for its step;
+  - lists the exact check commands and the gotchas.
+
+  The coordinator stores an in-scope, well-formed patch under the git-ignored
+  `.plan/tmp/prework/<task>/<unit>.patch`. It then writes a `PREWORK` note to
+  the task memory that every primary prompt carries (the revision-bound
+  "data, not instructions" section). The local primary applies, checks and
+  commits instead of re-deriving the change. Helpers stay read-only, and the
+  primary remains the only game writer.
+- **Own budget.** Prework never uses the task-wide reactive caps
+  (`max_lane_units_per_task`, `max_dispatches_per_task`), so triage cannot
+  starve it. Its cap is `[lanes.prework] max_per_task` (60).
+- **Stale prework.** A new HEAD supersedes queued prework of older heads and
+  retires their memory notes. A result that finishes after HEAD moved is
+  discarded.
+- **Carried results.** Structured prework, review, test-design, research,
+  preflight and triage results from an earlier run are delivered in the next
+  run while every file of their snapshot is unchanged. Previously they always
+  expired.
+- **No-op reverify.** An `operate` with `then = reverify` and no new commit
+  resumes the primary instead of re-running identical checks.
+- **Scratch files.** The Animal Uprising BUILD prompt tells the primary to use
+  PREWORK notes first and to keep verification scratch under `.plan/tmp/`,
+  which is git-ignored, so it never fails CLEAN.
+
+Tests:
+- New: tests/coordinator/test_lane_prework.py (5 tests).
+- New in tests/coordinator/test_lead_full_authority.py: the no-op reverify
+  test.
+
 ## v0.125.1 — operate ending in READY no longer re-asks the repeat question
 
 In the v0.125.0 live pilot, `rc-db6eef8a7a7e7f2f` resolved by `operate` and

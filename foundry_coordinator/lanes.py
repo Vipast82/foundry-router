@@ -56,7 +56,13 @@ LANES = {
     "visual": ("visual_observation", "direct", 3),
     "research": ("research", "kilo", 3),
     "preflight": ("preflight", "kilo", 4),
+    # v0.126: ahead-of-time work for the primary's next plan steps (draft patch,
+    # exact commands, gotchas) written to shared memory the primary reads
+    "prework": ("prework", "kilo", 1),
 }
+# lanes with their own budget: they never use the task-wide lane unit /
+# dispatch caps that reactive lanes share (so triage cannot starve them)
+OWN_BUDGET_LANES = ("prework",)
 KIND_LANE = {v[0]: k for k, v in LANES.items()}
 LANE_KINDS = tuple(v[0] for v in LANES.values())
 SEVERITY = {"info": 0, "low": 1, "medium": 2, "high": 3, "critical": 4}
@@ -79,6 +85,10 @@ LANE_DEFAULTS = {
                "retention_days": 30},
     "research": {"max_per_task": 4, "max_running": 1, "cache_hours": 168, "max_lookups": 6},
     "preflight": {"max_per_task": 1, "max_running": 1},
+    "prework": {"max_per_task": 60, "max_running": 2, "steps_ahead": 2,
+                "dir": ".plan/tmp/prework",
+                "skills": ["au-luau-development", "au-roblox-development"],
+                "ui_skills": ["au-roblox-ui-development"]},
 }
 
 

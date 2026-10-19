@@ -268,6 +268,16 @@ context_threshold = 140000
 [lanes.preflight]
 enabled = true
 
+# v0.126: helpers prepare the primary's next plan steps ahead of time (draft
+# patch under .plan/tmp/prework/, exact commands, gotchas) and write a PREWORK
+# note to the task memory every primary prompt carries. Own budget: never
+# starved by the reactive lanes' unit/dispatch caps.
+[lanes.prework]
+enabled = true
+max_per_task = 60
+max_running = 2
+steps_ahead = 2
+
 [frontier_primary]
 enabled = false
 

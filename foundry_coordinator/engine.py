@@ -3870,6 +3870,10 @@ class Coordinator:
                 "case_id": cid, "failures": failures[:6]})
             return
         then = str(act.get("then") or "resume")
+        if then == "reverify" and P.ws.head() == t.get("base_sha"):
+            # nothing was committed since the last verification: re-running the
+            # same checks proves nothing new, the primary continues instead
+            then = "resume"
         L._act(case, "operate_done", actor=actor, result=f"all operations verified; then {then}",
                detail={"results": results}, op_key=f"{cid}:operate_done")
         self.store.event(pid, tid, "lead_operate", detail={

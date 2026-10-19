@@ -197,6 +197,9 @@ def test_proposals_for_judges_lane_results_against_the_given_run(triage):
     run = c.store.task("game", "T2")["run_id"]
     assert [x["unit_id"] for x in c.helpers.proposals_for("game", "T2", "ses_new", run_id=run)] \
         == [u["unit_id"]]
+    # v0.126: a result is carried into another run only while its code is
+    # unchanged; once the snapshot's files changed it expires as before
+    (env["root"] / "src" / "menu.luau").write_text("local M = {changed = true}\nreturn M\n")
     assert c.helpers.proposals_for("game", "T2", "ses_new", run_id="run-next") == []
     u = unit(c, u["unit_id"])
     assert u["feedback"] == "expired" and "earlier run" in json.loads(u["feedback_detail"])["note"]

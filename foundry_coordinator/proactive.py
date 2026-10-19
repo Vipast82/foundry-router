@@ -14,6 +14,8 @@ Nothing here prompts the primary or runs a tool in the workspace.
 from __future__ import annotations
 
 import json
+import re
+import os
 import time
 import uuid
 from typing import Optional
@@ -266,10 +268,18 @@ class Proactive(VisualMixin, AdvisoryMixin):
                 return None, 'limit'
         lane_n = self.store.q("SELECT COUNT(*) AS n FROM helper_units WHERE project_id=? AND "
                               "task_id=? AND run_id=? AND lane=?", (pid, tid, t['run_id'], lane))[0]["n"]
-        total = self.store.q("SELECT COUNT(*) AS n FROM helper_units WHERE project_id=? AND "
-                             "task_id=? AND lane IS NOT NULL", (pid, tid))[0]["n"]
+        own = ",".join("?" * len(L.OWN_BUDGET_LANES))
+        if lane in L.OWN_BUDGET_LANES:
+            # its own budget: per task across runs, never the shared reactive cap
+            lane_n = self.store.q("SELECT COUNT(*) AS n FROM helper_units WHERE project_id=? "
+                                  "AND task_id=? AND lane=?", (pid, tid, lane))[0]["n"]
+            total = 0
+        else:
+            total = self.store.q("SELECT COUNT(*) AS n FROM helper_units WHERE project_id=? AND "
+                                 f"task_id=? AND lane IS NOT NULL AND lane NOT IN ({own})",
+                                 (pid, tid, *L.OWN_BUDGET_LANES))[0]["n"]
         if lane_n >= int(ls["lanes"][lane].get('max_per_run',ls['lanes'][lane]['max_per_task'])) or \
-                total >= int(ls["max_lane_units_per_task"]):
+                (lane not in L.OWN_BUDGET_LANES and total >= int(ls["max_lane_units_per_task"])):
             self.store.event(pid, tid, "lane_limit", detail={"lane": lane, "key": key[:100],
                                                              "lane_units": lane_n,
                                                              "total": total})
@@ -307,6 +317,12 @@ class Proactive(VisualMixin, AdvisoryMixin):
             if ev.get("run_id") and ev["run_id"] != t["run_id"]:
                 self._set_event(ev["event_key"], "expired")     # from an earlier run
                 continue
+            if ev["kind"] in ("run_start", "commit") and L.lane_on(ls, "prework"):
+                try:
+                    self._plan_prework(P, t, spec, ls)
+                except Exception as e:                            # noqa: BLE001
+                    self.store.event(pid, tid, "warning", detail={
+                        "prework": f"{type(e).__name__}: {e}"[:300]})
             fn = getattr(self, f"_plan_{ev['kind']}", None)
             if fn is None:
                 self._set_event(ev["event_key"], "ignored")
@@ -349,6 +365,106 @@ class Proactive(VisualMixin, AdvisoryMixin):
             planned = True
         if not planned:
             self._set_event(ev["event_key"], "ignored")
+
+    def _plan_prework(self, P, t, spec, ls) -> list:
+        """Ahead-of-time work for the next `steps_ahead` open plan steps at the
+        current HEAD: one unit per (head, step). A new HEAD supersedes waiting
+        units and memory notes of older heads (their code moved on)."""
+        from .advisory import checklist
+        pid, tid = P.id, t["task_id"]
+        cfg = ls["lanes"]["prework"]
+        head = P.ws.head()
+        open_steps = [c for c in checklist(spec.spec) if not c["done"]]
+        steps = open_steps[:max(1, int(cfg.get("steps_ahead") or 2))]
+        if not steps:
+            return []
+        for u in self.store.q("SELECT * FROM helper_units WHERE project_id=? AND task_id=? AND "
+                              "lane='prework' AND status IN ('pending','deferred')", (pid, tid)):
+            if json.loads(u.get("packet") or "{}").get("head") != head:
+                self.mgr._skip(P, u, f"superseded by HEAD {head[:12]}", feedback="superseded")
+        self._forget_prework(P, tid, keep_head=head)
+        snap = self._snap(P, t, spec)
+        out = []
+        for i, st in enumerate(steps):
+            key = f"{head[:12]}:{re.sub(r'[^a-z0-9]+', '-', st['item'].lower())[:60]}"
+            uid, how = self.add(P, t, "prework", key, {
+                "head": head, "step": st["item"], "step_index": i, "partial": st["partial"],
+                "snapshot": snap.get("snapshot_id"), "snapshot_status": snap["status"],
+                "files": sorted(snap.get("manifest") or {}),
+                "excerpt_files": sorted(snap.get("manifest") or {})[:6]},
+                ls, files=spec.scope, snapshot_id=snap.get("snapshot_id") or "",
+                value="high")
+            out.append((uid, how))
+        return out
+
+    def _forget_prework(self, P, tid: str, keep_head: str = "") -> int:
+        """Retire prework memory notes of other heads (stale once code moved)."""
+        led = self._ledger(P)
+        if led is None:
+            return 0
+        n = 0
+        for m in led.memories(P.id, tid):
+            if str(m.get("actor") or "").startswith("helper:") and \
+                    str(m.get("text") or "").startswith("PREWORK") and \
+                    (not keep_head or m.get("revision") != keep_head):
+                led.forget(P.id, m["mem_id"], "prework of an older HEAD")
+                n += 1
+        return n
+
+    def _ledger(self, P):
+        c = getattr(self.mgr, "c", None)
+        try:
+            if c is not None and c._lc(P, "evidence"):
+                return c.ledger
+        except Exception:                                        # noqa: BLE001
+            return None
+        return None
+
+    def _after_prework(self, P, u, env):
+        """A structured, in-scope prework result: its patch goes to the
+        git-ignored prework dir and a note to the task memory every primary
+        prompt carries. Advisory: the primary verifies, applies, tests, commits."""
+        if not env.get("structured") or env.get("assignment") != u["unit_id"]:
+            return
+        pk = json.loads(u.get("packet") or "{}")
+        if P.ws.head() != pk.get("head"):
+            return                                    # code moved while it ran: stale
+        ls = L.settings(P)
+        cfg = ls["lanes"]["prework"]
+        checks = (json.loads(u.get("envelope") or "{}").get("checks") or {})
+        rel = ""
+        pv = checks.get("patch") or {}
+        if env.get("patch") and pv.get("well_formed") and not pv.get("out_of_scope"):
+            d = str(cfg.get("dir") or ".plan/tmp/prework").strip("/").replace("\\", "/")
+            rel = f"{d}/{u['task_id']}/{u['unit_id']}.patch"
+            if not P.profile.in_workspace(rel):
+                rel = ""
+            else:
+                full = os.path.join(P.profile.workspace, rel)
+                os.makedirs(os.path.dirname(full), exist_ok=True)
+                with open(full, "w", encoding="utf-8", newline="\n") as f:
+                    f.write(str(env["patch"]).rstrip("\n") + "\n")
+        led = self._ledger(P)
+        if led is None:
+            return
+        gotchas = "; ".join(str(f.get("observed") or f.get("hypothesis") or "")[:160]
+                            for f in (env.get("findings") or [])[:3] if isinstance(f, dict))
+        cmds = ", ".join(str(x)[:120] for x in (env.get("checks_proposed") or [])[:4])
+        text = (f"PREWORK for step \"{str(pk.get('step') or '')[:200]}\" (helper "
+                f"{u['unit_id']}, HEAD {str(pk.get('head') or '')[:12]}): "
+                f"{str(env.get('summary') or '')[:300]}"
+                + (f" Draft patch: {rel} (git apply --check {rel}, then apply only if it "
+                   f"matches the plan)." if rel else " No patch.")
+                + (f" Verify with: {cmds}." if cmds else "")
+                + (f" Gotchas: {gotchas}." if gotchas else "")
+                + (f" Next: {str(env.get('next_action') or '')[:200]}"
+                   if env.get("next_action") else ""))
+        led.remember(P.id, u["task_id"], "note", text, actor=f"helper:{u['unit_id']}",
+                     authority="coordinator", refs=[u["unit_id"]] + ([rel] if rel else []),
+                     revision=str(pk.get("head") or ""))
+        self.store.event(P.id, u["task_id"], "prework_ready", detail={
+            "unit": u["unit_id"], "step": str(pk.get("step") or "")[:200], "patch": rel,
+            "head": pk.get("head")})
 
     def _plan_failure(self, P, t, spec, ls, ev):
         if not L.lane_on(ls, "failure_triage"):
@@ -471,10 +587,13 @@ class Proactive(VisualMixin, AdvisoryMixin):
         if sum(1 for r in running if r.get("lane") == lane) >= \
                 int(ls["lanes"][lane].get("max_running") or 1):
             return f"wait:lane {lane} at its running limit"
-        used = self.store.q("SELECT COUNT(*) AS n FROM helper_units WHERE project_id=? AND task_id=? "
-                            "AND lane IS NOT NULL AND attempts > 0", (P.id, t["task_id"]))[0]["n"]
-        if used >= int(ls["max_dispatches_per_task"]) and not u.get("attempts"):
-            return "skip:the task's lane dispatch budget is used"
+        own = ",".join("?" * len(L.OWN_BUDGET_LANES))
+        if lane not in L.OWN_BUDGET_LANES:
+            used = self.store.q("SELECT COUNT(*) AS n FROM helper_units WHERE project_id=? AND "
+                                f"task_id=? AND lane IS NOT NULL AND lane NOT IN ({own}) AND "
+                                "attempts > 0", (P.id, t["task_id"], *L.OWN_BUDGET_LANES))[0]["n"]
+            if used >= int(ls["max_dispatches_per_task"]) and not u.get("attempts"):
+                return "skip:the task's lane dispatch budget is used"
         if int(u.get("attempts") or 0) > int(ls["max_retries"]):
             return "skip:retry limit reached"
         return ""
@@ -519,7 +638,7 @@ class Proactive(VisualMixin, AdvisoryMixin):
     def skills_for(self, lane: str, ls: dict, spec, pk: dict) -> list:
         cfg = ls["lanes"].get(lane, {})
         base = list(cfg.get("skills") or ["au-luau-development", "au-roblox-development"])
-        if lane == "proposer" and pk.get("ui"):
+        if lane in ("proposer", "prework") and (pk.get("ui") or lane == "prework"):
             base += list(cfg.get("ui_skills") or [])
         if lane in ("evidence", "handoff", "preflight", "research") and "skills" not in cfg:
             base = []
@@ -550,6 +669,13 @@ class Proactive(VisualMixin, AdvisoryMixin):
                        "decisions, helper results in flight and the precise next step",
             "preflight": "bounded preflight of the approved plan: ordered next steps, specific risks "
                          "and missing prerequisites; no invented blockers, no scope change",
+            "prework": "prepare the primary's NEXT approved plan step ahead of time so it can "
+                       "apply instead of re-deriving: read the exact files, write ONE complete, "
+                       "minimal unified diff for this step against the snapshot (empty when the "
+                       "step needs Studio or runtime work you cannot draft), list the exact test/"
+                       "gate commands with their expected output in checks_proposed, and the "
+                       "gotchas (APIs, line numbers, ordering) as findings. Stay inside the "
+                       "approved scope and the step; never change acceptance tests",
         }.get(lane, "advisory help")
 
     def _packet_body(self, P, spec, u, pk: dict) -> str:
@@ -573,6 +699,10 @@ class Proactive(VisualMixin, AdvisoryMixin):
                        "\n" + json.dumps(pk.get("findings") or [], indent=1)[:8000])
             if pk.get("evidence"):
                 out.append("## Image evidence\n" + str(pk["evidence"])[:4000])
+        if lane == "prework":
+            out.append(f"## The ONE step to prepare (open plan step {int(pk.get('step_index') or 0) + 1}"
+                       f"{', partly done' if pk.get('partial') else ''}; HEAD "
+                       f"{str(pk.get('head') or '')[:12]})\n{pk.get('step')}")
         for k in ("question", "checklist", "evidence_files", "gate_line", "symbol", "plan_next",
                   "context_tokens", "helper_results", "notes"):
             if pk.get(k):
@@ -703,7 +833,8 @@ class Proactive(VisualMixin, AdvisoryMixin):
         for u in units:
             if (u.get("feedback") or "waiting") != "waiting":
                 continue
-            if u.get("run_id") != (run_id or t.get("run_id")):
+            if u.get("run_id") != (run_id or t.get("run_id")) and \
+                    not self._still_valid(P, u):
                 self._display_only(u, "result belongs to an earlier run", "expired")
                 continue
             if u.get("artifact_id"):
@@ -718,7 +849,7 @@ class Proactive(VisualMixin, AdvisoryMixin):
                       or [-1])
             has_patch = bool((env.get("checks") or {}).get("patch", {}).get("has_patch"))
             informational = u["lane"] in ("test_design", "research", "evidence", "handoff",
-                                          "preflight")
+                                          "preflight", "prework")
             if env.get("routed_to"):
                 # observer -> proposer: one card, not two. Hold the observation
                 # while its proposer can still answer; deliver it if the
@@ -740,6 +871,29 @@ class Proactive(VisualMixin, AdvisoryMixin):
             out.append((-max(sev, 0), u.get("created_ts") or 0, u))
         out.sort(key=lambda x: (x[0], x[1]))
         return [u for _, _, u in out[:int(ls["max_cards_per_delivery"])]]
+
+    CARRY_LANES = ("prework", "incremental_review", "test_design", "research", "preflight",
+                   "failure_triage")
+
+    def _still_valid(self, P, u: dict) -> bool:
+        """An earlier run's structured result is carried into this run while the
+        code it was about is unchanged (every file of its snapshot still hashes
+        the same); otherwise it expires as before."""
+        if u.get("lane") not in self.CARRY_LANES or not u.get("snapshot_id"):
+            return False
+        try:
+            env = json.loads(u.get("envelope") or "{}")
+        except (TypeError, ValueError):
+            return False
+        if not env.get("structured") or (env.get("checks") or {}).get("base_mismatch"):
+            return False
+        snap = self.artifacts.snapshot(u["snapshot_id"], u["project_id"], u["task_id"]) or {}
+        paths = sorted(snap.get("manifest") or {})
+        if not paths:
+            return False
+        drift = self.artifacts.drift(u["snapshot_id"], P.profile.workspace, paths,
+                                     u["project_id"], u["task_id"])
+        return all(v == "unchanged" for v in drift.values())
 
     def _refresh_stale(self, P, t: dict, u: dict, env: dict, cache: dict) -> dict:
         # Re-check, at delivery, that the code still matches the snapshot the

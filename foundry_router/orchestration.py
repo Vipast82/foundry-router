@@ -44,7 +44,9 @@ REQUIRED_PURPOSES = ("implementer", "planning", "review", "closeout", "blocker_d
 OPTIONAL_PURPOSES = ("code_proposal", "test_design", "debug_advice", "exploration",
                      # proactive lanes (coordinator v0.118.0): always optional work
                      "visual_observation", "failure_triage", "incremental_review", "research",
-                     "evidence_reconciliation", "handoff_prep", "preflight", "frontier_primary")
+                     "evidence_reconciliation", "handoff_prep", "preflight", "frontier_primary",
+                     # v0.126: helper pre-work for the primary's next plan steps
+                     "prework")
 PURPOSES = REQUIRED_PURPOSES + OPTIONAL_PURPOSES
 
 
