@@ -28,6 +28,20 @@ def _state(c, pid, tid):
     return c.store.task(pid, tid)["state"]
 
 
+def test_preapproved_followup_waits_for_parent(tmp_path):
+    root, _ = make_repo(tmp_path, "game", [T1, T2])
+    profile = write_profile(tmp_path, "game", root,
+                            extra='[auto_queue_followups]\nT1 = ["T2"]\n')
+    c = coordinator(tmp_path, [profile], {"game": write_ok("src/a.txt")})
+    c.approve("game", "T1", [], "Victor")
+    assert c.store.task("game", "T2") is None
+    c.tick()
+    assert c.store.queue_entry("game", "T2")["deps"] == ["T1"]
+    assert c.store.task("game", "T2")["state"] == S.QUEUED
+    c.tick()
+    assert len([q for q in c.store.queue("game") if q["task_id"] == "T2"]) == 1
+
+
 @pytest.fixture()
 def game(tmp_path):
     root, remote = make_repo(tmp_path, "game", [T1, T2])

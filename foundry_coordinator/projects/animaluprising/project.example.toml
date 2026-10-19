@@ -73,9 +73,14 @@ image_generator = "Foundry-Kilo-Images"
 # sprints and everything else stays on the local model. This changes model
 # selection only, never queue approval or sprint scope.
 [role_overrides.ui]
-tasks = ["UI-01", "UI-02", "UI-03", "UI-04", "UI-05", "UI-06"]
+tasks = ["UI-01", "UI-02", "UI-03", "UI-04", "UI-05", "UI-06", "UI-GT1"]
 implementer = "Foundry-Kilo-Sonnet"
 reviewer = "Foundry-Kilo-Deep-Review"
+
+# Victor 2026-10-19: the required physical-input phase joins the queue when
+# UI-06 is approved, then waits for UI-06 to complete before starting.
+[auto_queue_followups]
+UI-06 = ["UI-GT1"]
 
 [foundry]
 url = "http://127.0.0.1:11435"               # EDIT: your Foundry router (e.g. http://<lan-host>:11435)

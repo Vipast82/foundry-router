@@ -181,12 +181,18 @@ class AnimalUprisingAdapter(GenericAdapter):
                   "for committed, current-revision captures; do not request Victor's visual "
                   "approval." if self._model_visual_approval() else
                   "Final visual approval still requires the configured approver.")
+        physical = ("For UI-01 through UI-06, actual mouse, touch and controller operator "
+                    "flows are required in UI-GT1 after UI-06, not in this sprint. Use named "
+                    "ButtonActions clicks for functional handler checks here; never count them "
+                    "as physical-input proof or ask Victor to perform the deferred flows now. "
+                    if task_id in {f"UI-0{i}" for i in range(1, 7)} else
+                    "For UI-GT1 and other tasks with physical-input acceptance, attempt the "
+                    "available Roblox Studio input tools in each required mode and record the "
+                    "result. Escalate to Victor only the exact mode or action the tools cannot "
+                    "perform, with attempted tools and evidence. ")
         return (f"Current policy for {task_id}: {visual} The primary must first use the "
                 "enabled vision helper to inspect each actual capture and record its "
-                "OBSERVATION. For mouse, touch and controller acceptance, attempt the "
-                "available Roblox Studio input tools in each mode and record the result. "
-                "Escalate to Victor only the exact mode or action the tools cannot perform, "
-                "with attempted tools and evidence. Older plan NEXT/NEEDS_HUMAN lines are "
+                f"OBSERVATION. {physical}Older plan NEXT/NEEDS_HUMAN lines are "
                 "historical evidence, not authority to bypass these attempts. Never waive "
                 "a check or change a baseline without observed raw runs and a recorded "
                 "scope/test decision.")
@@ -283,14 +289,29 @@ ambiguous path or bypass a hidden/disabled button. Every new menu click handler
 must use `ButtonActions.Bind` or the kit's `Widgets.button` callback, with a
 stable descriptive name. The headless ButtonActions spec guards this contract.
 Named handler calls are for setup and functional menu tests. They do not prove
-pointer hit testing, dragging, or actual mouse/touch/controller input. UI-02
-c11 PRESS and c12 input-mode acceptance still require real Studio input and raw
-evidence in each required mode.
+pointer hit testing, dragging, or actual mouse/touch/controller input.
+"""
+            if spec.task_id in {f"UI-0{i}" for i in range(1, 7)}:
+                menu_actions += """
+Victor's 2026-10-19 phase decision transfers actual mouse, touch and
+controller operator flows to required UI-GT1 after UI-06. In this sprint,
+finish the named-handler, authoritative-state, input-mode-state, layout,
+Studio suite, visual, gate and closeout checks. UI-02 c11 handler results may
+use named actions; c11 physical target testing and c12 operator flows belong
+to UI-GT1. Do not request Victor's physical clicks here. Historical NEXT lines
+in pre-coded plans do not restore the old physical-input requirement.
+"""
+            elif spec.task_id == "UI-GT1":
+                menu_actions += """
+UI-GT1 is the required physical-input phase. Use actual Studio mouse, touch
+and controller input for every transferred matrix row, with raw before/after
+evidence. ButtonActions.Click may prepare state or isolate a handler, but it
+never satisfies a physical-input row.
 """
         if self.p.roles.get("planner"):
             planning = """
 Before executing this attempt, invoke the read-only `au-planner` subagent once through the task tool. Give it this sprint's approved plan, current revision, latest NEXT/checklist, relevant observed results, and any repair findings below. It uses the configured Foundry planner persona to identify the next bounded steps and resolve routine procedure choices already covered by the plan. Keep this delegation bounded; do not re-plan every file or run duplicate planning calls.
-The planner returns advice, not acceptance evidence or permission to widen scope. Integrate its result and continue the approved BUILD work in this Code session; do not stop merely to ask Victor to copy a planner response into another chat or switch modes. The primary alone writes and controls Studio. For required screenshot inspection, invoke the enabled read-only au-visual-review vision subagent with each actual capture, its expected subject and viewport; record its visible OBSERVATION separately from measured validity lines. An inability of this primary model to see images is not a human blocker. Recapture invalid, stale, occluded or wrong-subject frames. Use Studio MCP to attempt required input-mode tests before claiming an operator is needed. Victor delegated final screenshot sign-off to the coordinator vision reviewer; submit current committed frames for that review instead of waiting for his visual approval. Stop for Victor only for a genuinely unavailable human-only interaction, credentials/OS action, a product decision outside the plan, or an unresolved blocker after configured recovery. Never waive a failed/unknown gate or weaken a test to avoid a stop.
+The planner returns advice, not acceptance evidence or permission to widen scope. Integrate its result and continue the approved BUILD work in this Code session; do not stop merely to ask Victor to copy a planner response into another chat or switch modes. The primary alone writes and controls Studio. For required screenshot inspection, invoke the enabled read-only au-visual-review vision subagent with each actual capture, its expected subject and viewport; record its visible OBSERVATION separately from measured validity lines. An inability of this primary model to see images is not a human blocker. Recapture invalid, stale, occluded or wrong-subject frames. Use Studio MCP to attempt physical input tests only when this sprint's current plan requires them; UI-01 through UI-06 operator flows are deferred to UI-GT1. Victor delegated final screenshot sign-off to the coordinator vision reviewer; submit current committed frames for that review instead of waiting for his visual approval. Stop for Victor only for a genuinely unavailable human-only interaction, credentials/OS action, a product decision outside the plan, or an unresolved blocker after configured recovery. Never waive a failed/unknown gate or weaken a test to avoid a stop.
 """
         return f"""BUILD session for sprint {spec.task_id} — {spec.title} (coordinator run {ctx.get('run_id')}, attempt {ctx.get('attempt')}).
 

@@ -117,6 +117,7 @@ class Coordinator:
         self.store.set_meta("rr", str(rr + 1))
         for pid in order:
             P = self.projects[pid]
+            self._queue_approved_followups(P)
             for t in self.store.tasks(pid):
                 before = (t["state"], t["updated_ts"])
                 try:
@@ -135,6 +136,28 @@ class Coordinator:
                         self._training(P, after, after["state"])
         self.flush()
         return acted
+
+    def _queue_approved_followups(self, P: Project) -> None:
+        """Queue explicitly pre-approved successors once their parent is queued.
+
+        This preserves the normal dependency gate: a followup cannot run before
+        its parent completes, and no model can invent or approve a new task.
+        """
+        followups = P.profile.raw.get("auto_queue_followups") or {}
+        if not isinstance(followups, dict):
+            return
+        for parent, children in followups.items():
+            if not self.store.task(P.id, parent) or not isinstance(children, list):
+                continue
+            for task_id in children:
+                if not isinstance(task_id, str) or self.store.task(P.id, task_id):
+                    continue
+                try:
+                    self.approve(P.id, task_id, [parent], "Victor",
+                                 f"pre-approved followup after {parent}")
+                except Exception as exc:  # noqa: BLE001
+                    self.store.event(P.id, parent, "followup_queue_error",
+                                     detail={"followup": task_id, "error": str(exc)[:300]})
 
     def run(self, poll_seconds: float = 5, max_ticks: Optional[int] = None,
             until_settled: bool = False, owner: str = "") -> None:

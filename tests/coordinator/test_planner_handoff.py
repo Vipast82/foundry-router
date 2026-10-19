@@ -31,6 +31,21 @@ def test_build_delegates_planning_but_retains_execution_and_gates(tmp_path):
     assert "GATE UI-01 PASS|FAIL" in prompt
     assert "ButtonActions" in prompt and "Unbound()" in prompt
     assert "actual mouse/touch/controller input" in prompt
+    assert "operator flows to required UI-GT1 after UI-06" in prompt
+    assert "Do not request Victor's physical clicks here" in prompt
+
+
+def test_game_test_phase_requires_real_input(tmp_path):
+    game_test = TaskSpec(project_id="animaluprising", task_id="UI-GT1", title="Game input",
+                         spec="Transferred physical input matrix", scope=["tests/UI_GT1_check.lua"],
+                         data={"tier": "B"})
+    prompt = adapter(tmp_path).implement_prompt(game_test, {"attempt": 1, "run_id": "gt1"})
+    assert "actual Studio mouse, touch" in prompt
+    assert "never satisfies a physical-input row" in prompt
+    assert "actual mouse, touch and controller operator flows are required in UI-GT1" in \
+        adapter(tmp_path).recovery_policy("UI-02")
+    assert "attempt the available Roblox Studio input tools" in \
+        adapter(tmp_path).recovery_policy("UI-GT1")
 
 
 def test_repairs_include_findings_without_widening_scope(tmp_path):
