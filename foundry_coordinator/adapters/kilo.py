@@ -132,8 +132,10 @@ class KiloClient(CodingClient):
         msgs = self.messages(session_id, directory)
         last = msgs[-1] if msgs else None
         info = (last or {}).get("info") or {}
-        created = ((info.get("time") or {}).get("created") or 0) / 1000.0
-        if not last or info.get("role") != "assistant" or created + 1 < since_ts:
+        times = info.get("time") or {}
+        created = (times.get("created") or 0) / 1000.0
+        completed = (times.get("completed") or 0) / 1000.0
+        if not last or info.get("role") != "assistant" or max(created, completed) + 1 < since_ts:
             # Prompt sent but not admitted yet (Kilo reports idle for a moment).
             return SessionState(status="busy", error="waiting for the prompt to be admitted",
                                 unanswered=True)

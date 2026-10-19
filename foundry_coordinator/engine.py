@@ -659,6 +659,17 @@ class Coordinator:
             if s.denial:
                 P.client.abort(sid, directory=directory)
                 return self._on_denial(P, t, s.denial, s.error, resume=t["state"], session=sid)
+            if s.unanswered and self.clock() - prompt_ts > float(
+                    P.profile.client.get("prompt_admission_timeout_seconds") or 180):
+                # Kilo reports this session idle, with no assistant turn for the
+                # prompt. A normal (possibly slow) model call reports busy and
+                # does not enter this branch. Do not wait for the much longer
+                # session execution timeout when the prompt never started.
+                P.client.abort(sid, directory=directory)
+                self._end_session(P, sid, "prompt_not_admitted")
+                return self._session_failed(P, t, "Kilo did not admit the prompt within "
+                                            "the admission window; a fresh session resumes "
+                                            "from recorded state", phase, free=True)
             if timeout and self.clock() - prompt_ts > timeout * 60:
                 P.client.abort(sid, directory=directory)
                 self._end_session(P, sid, "timeout")
@@ -691,6 +702,23 @@ class Coordinator:
                                         phase)
         # idle
         self._sync_children(P, t, sid)
+        recovery = t["data"].get("permission_reply_recovery") or {}
+        if phase == "implement" and recovery.get("session_id") == sid and not s.report:
+            # Rejecting a tool permission can finish the assistant turn without
+            # a final report or a new Kilo turn. Continue once in the same
+            # session instead of verifying an unfinished BUILD or waiting for
+            # the long execution timeout.
+            key = f"permission-reply:{recovery.get('request_id') or 'unknown'}"
+            if self._prompt_primary(P, t, "The permission reply was applied. Continue the "
+                    "approved sprint using only in-scope paths. Preserve all required "
+                    "evidence and checks. If you cannot proceed, return a precise "
+                    "BLOCKED report; do not request broader access for scratch files.", key):
+                self.store.merge_data(pid, tid, permission_reply_recovery=None)
+                self.store.event(pid, tid, "permission_reply_continued", session_id=sid,
+                                 detail={"request_id": recovery.get("request_id")})
+                return None
+        if recovery.get("session_id") == sid:
+            self.store.merge_data(pid, tid, permission_reply_recovery=None)
         self._end_session(P, sid, "idle", tokens=s.tokens, report=s.report)
         return s
 
@@ -744,7 +772,8 @@ class Coordinator:
         if phase == "closeout":
             return self._closeout_retry(P, t, why)
         self.store.transition(pid, tid, S.CHANGES_REQUIRED, {"findings": [why], "free": free},
-                              data={**self.store.task(pid, tid)["data"], "findings": [why]})
+                              data={**self.store.task(pid, tid)["data"], "findings": [why],
+                                    "free_retry": bool(free)})
 
     def _end_session(self, P: Project, sid: str, outcome: str, tokens=None, report=None) -> None:
         sess = self.store.session(sid) or {}
@@ -1718,7 +1747,13 @@ class Coordinator:
         data = {k: v for k, v in t["data"].items() if k not in ("question", "question_phase",
                                                                 "question_from")}
         back = t["data"].get("question_from") or S.IMPLEMENTING
-        self.store.update_session(sid, status="prompted", prompt_ts=self.clock())
+        # A reply resumes the existing prompt; it is not a new prompt. Resetting
+        # prompt_ts makes Kilo's completed assistant turn look older than the
+        # prompt, so an idle session is mistaken for one awaiting admission.
+        if q.get("kind") == "permission":
+            data["permission_reply_recovery"] = {"session_id": sid,
+                                                 "request_id": q["request_id"]}
+        self.store.update_session(sid, status="prompted")
         # a closeout session is polled from CLOSING, an implementation one from IMPLEMENTING
         return self.store.transition(project_id, task_id,
                                      S.CLOSING if back == S.CLOSING else S.IMPLEMENTING,

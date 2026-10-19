@@ -405,6 +405,65 @@ def test_question_waits_for_a_human_answer(game):
     assert run_until(c, lambda: _state(c, "game", "T1") == S.COMPLETE)
 
 
+def test_permission_reply_without_new_kilo_turn_gets_one_continuation(game):
+    tmp, _, _, prof = game
+    from foundry_coordinator.adapters.base import SessionState
+
+    def agent(ctx):
+        if not ctx.get("answers"):
+            return {"question": {"text": "May I write a scratch file?"}}
+        return {"writes": {"src/a.txt": "OK"}, "commit": "T1: finish"}
+
+    class RejectedWrite(ScriptedClient):
+        def state(self, sid, *, directory, since_ts):
+            result = super().state(sid, directory=directory, since_ts=since_ts)
+            if result.status == "attention":
+                result.question["kind"] = "permission"
+            return result
+
+        def answer(self, sid, request_id, answers, *, directory, kind="question"):
+            self.answers[sid] = answers
+            # Kilo may finish the rejected tool turn with no final report and
+            # without starting a new assistant turn of its own.
+            self.sessions[sid]["pending"] = False
+            self.sessions[sid]["state"] = SessionState(status="idle")
+
+    client = RejectedWrite(agent)
+    c = coordinator(tmp, [prof], {"game": client})
+    c.approve("game", "T1", [], "victor")
+    assert run_until(c, lambda: _state(c, "game", "T1") == S.AWAITING_HUMAN)
+    sid = c.store.task("game", "T1")["session_id"]
+    prompt_ts = c.store.session(sid)["prompt_ts"]
+    c.answer("game", "T1", ["reject"])
+    assert c.store.session(sid)["prompt_ts"] == prompt_ts
+    c.tick()
+    assert _state(c, "game", "T1") == S.IMPLEMENTING
+    assert len(client.sessions[sid]["prompts"]) == 2
+    assert c.store.session(sid)["prompt_ts"] >= prompt_ts
+    assert run_until(c, lambda: _state(c, "game", "T1") == S.COMPLETE)
+
+
+def test_idle_unadmitted_prompt_recovers_before_session_timeout(game):
+    tmp, _, _, prof = game
+    from foundry_coordinator.adapters.base import SessionState
+
+    class NeverAdmitted(ScriptedClient):
+        def state(self, sid, *, directory, since_ts):
+            return SessionState(status="busy", unanswered=True,
+                                error="waiting for the prompt to be admitted")
+
+    client = NeverAdmitted(write_ok("src/a.txt"))
+    c = coordinator(tmp, [prof], {"game": client})
+    c.approve("game", "T1", [], "victor")
+    assert run_until(c, lambda: _state(c, "game", "T1") == S.IMPLEMENTING)
+    sid = c.store.task("game", "T1")["session_id"]
+    c.store.update_session(sid, prompt_ts=c.clock() - 200)
+    c.tick()
+    assert _state(c, "game", "T1") == S.CHANGES_REQUIRED
+    assert c.store.session(sid)["outcome"] == "prompt_not_admitted"
+    assert c.store.task("game", "T1")["data"]["free_retry"] is True
+
+
 def test_pause_resume_cancel(game):
     tmp, _, _, prof = game
 
