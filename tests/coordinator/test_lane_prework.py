@@ -155,3 +155,98 @@ def test_results_carry_into_the_next_run_while_their_code_is_unchanged(mk):
     assert lanes._still_valid(P, u)                       # same code: carried, not expired
     (env["root"] / "src/menu.luau").write_text("local M = {x = 1}\nreturn M\n")
     assert not lanes._still_valid(P, u)                   # its code changed: expires
+
+
+# ------------------------------------------------------------------ v0.126.2
+
+T_CLOSE = {**T2, "spec": "Fix the menu.\n- [x] scaffold\n- [~] 4 kit legs green PASS\n"
+                          "NEXT: CLOSE. done_check PASS; remaining rows = SUMMARY + STATE row"}
+T_NEXT = {**T2, "spec": "Fix the menu.\n- [~] 4 kit legs green\n- [ ] 5 rebuild HeroSelect\n"
+                         "- [ ] 6 docs\nNEXT: step 6 docs after the gate"}
+
+
+def make_task(tmp_path, task):
+    e = setup(tmp_path, lanes=LANES.format(units=96, dispatches=64), tasks=[task])
+    e["ff"].admission[CLAUDE] = admit()
+    return e
+
+
+def test_prework_starts_with_the_step_the_plan_next_line_names(tmp_path):
+    e = make_task(tmp_path, T_NEXT)
+    try:
+        e["c"].tick()
+        e["c"].tick()
+        units = sorted(prework(e["c"]), key=lambda u: json.loads(u["packet"])["step_index"])
+        assert json.loads(units[0]["packet"])["step"] == "6 docs"
+        assert json.loads(units[0]["packet"])["mode"] == "build"
+    finally:
+        e["fake"].stop()
+
+
+def test_build_done_prepares_close_drafts_kept_for_the_close_session(tmp_path):
+    e = make_task(tmp_path, T_CLOSE)
+    try:
+        c = e["c"]
+        c.tick()
+        c.tick()
+        [u] = prework(c)
+        pk = json.loads(u["packet"])
+        assert pk["mode"] == "close" and pk["step"].startswith("CLOSE drafts")
+        doc = (pk["close_paths"] or ["docs/progress/T2_SUMMARY.md"])[0]
+        draft = (f"--- /dev/null\n+++ b/{doc}\n@@ -0,0 +1,2 @@\n+# T2 summary\n"
+                 "+Status: DONE\n")
+        if not pk["close_paths"]:
+            pk["close_paths"] = [doc]
+            c.store.x("UPDATE helper_units SET packet=? WHERE unit_id=?",
+                      (json.dumps(pk), u["unit_id"]))
+        answer_helper(e, u["session_id"], {"assignment": u["unit_id"], "base": u["snapshot_id"],
+                                           "summary": "summary + ledger row drafted",
+                                           "patch": draft})
+        c.tick()
+        rel = f"work/prework/T2/close-{u['unit_id']}.patch"
+        assert (e["root"] / rel).exists()
+        [note] = [m for m in c.ledger.memories("game", "T2") if "PREWORK" in m["text"][:60]]
+        assert note["text"].startswith("PREWORK CLOSE draft for the CLOSE session only")
+        # never handed to the BUILD primary as a card
+        assert c.helpers.lanes.deliverable("game", "T2", [c.helpers.unit(u["unit_id"])
+                                                          if hasattr(c.helpers, "unit") else
+                                                          next(x for x in prework(c))],
+                                           e["primary"]) == []
+    finally:
+        e["fake"].stop()
+
+
+def test_reactive_lane_budget_is_per_run(mk):
+    """An earlier run's units no longer use up this run's reactive budget."""
+    env = mk(units=2, dispatches=2)
+    c = env["c"]
+    t = c.store.task("game", "T2")
+    for i in range(3):                     # three old-run reactive units
+        c.store.x("INSERT INTO helper_units (unit_id, project_id, task_id, run_id, "
+                  "responsibility, kind, status, lane, created_ts, updated_ts, attempts) "
+                  "VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                  (f"hu-old{i}", "game", "T2", "old-run", f"failure_triage:old{i}",
+                   "failure_triage", "done", "failure_triage", 1.0, 1.0, 1))
+    P = c.projects["game"]
+    from foundry_coordinator import lanes as L
+    ls = L.settings(P)
+    ls["lanes"]["failure_triage"]["enabled"] = True
+    uid, how = c.helpers.lanes.add(P, t, "failure_triage", "new-failure", {}, ls)
+    assert how == "created"
+
+
+def test_stale_prework_is_never_delivered(mk):
+    env = mk()
+    c = env["c"]
+    c.tick()
+    c.tick()
+    u = prework(c)[0]
+    answer_helper(env, u["session_id"], {"assignment": u["unit_id"], "base": u["snapshot_id"],
+                                         "summary": "draft", "patch": PATCH})
+    c.tick()
+    (env["root"] / "src/menu.luau").write_text("local M = {x = 2}\nreturn M\n")
+    git(env["root"], "commit", "-qam", "T2: moved")
+    units = [x for x in prework(c) if x["unit_id"] == u["unit_id"]]
+    assert c.helpers.lanes.deliverable("game", "T2", units, env["primary"]) == []
+    fb = [x for x in prework(c) if x["unit_id"] == u["unit_id"]][0]["feedback"]
+    assert fb in ("superseded", "delivered", "integrated")

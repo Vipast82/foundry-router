@@ -73,9 +73,16 @@ def test_coalescing_does_not_fabricate_progress(env):
     assert c.store.q('SELECT updated_ts FROM helper_units WHERE unit_id=?',(uid,))[0]['updated_ts']==before
 
 def test_global_task_budget_still_spans_runs(env):
-    *_,ls=context(env);ls['max_lane_units_per_task']=1
+    # v0.126.2: max_lane_units_per_task is per run; the lifetime ceiling spans runs
+    *_,ls=context(env);ls['max_lane_units_per_task']=1;ls['max_lane_units_lifetime']=1
     assert add(env,'a',run='old',ls=ls)[1]=='created'
     assert add(env,'b',ls=ls)==(None,'limit')
+
+
+def test_reactive_run_budget_refills_for_a_new_run(env):
+    *_,ls=context(env);ls['max_lane_units_per_task']=1;ls['max_lane_units_lifetime']=10
+    assert add(env,'a',run='old',ls=ls)[1]=='created'
+    assert add(env,'b',ls=ls)[1]=='created'
 
 def test_six_helpers_distribute_three_per_backend_and_retain_selective_policy(env):
     c,p,t,ls=context(env)

@@ -26,6 +26,42 @@ from .advisory import AdvisoryMixin
 from .visual import STALE_IMAGE_NOTE, VisualMixin, visual_identity_mismatch
 
 
+def next_line(spec_text: str) -> str:
+    """The plan's latest NEXT line ('' when it has none)."""
+    out = ""
+    for line in (spec_text or "").splitlines():
+        m = re.match(r"^\s*NEXT\s*[:\-]\s*(.+)$", line)
+        if m:
+            out = m.group(1).strip()
+    return out
+
+
+def rank_steps(steps: list, nxt: str) -> list:
+    """Open steps, the one the NEXT line names first: an explicit step number,
+    else the most shared words; fully open steps before partly done ones."""
+    words = set(re.findall(r"[a-z][a-z0-9_]{2,}", (nxt or "").lower()))
+    num = re.search(r"\bstep\s*(\d+)\b", nxt or "", re.I)
+
+    def score(ix):
+        i, st = ix
+        txt = st["item"].lower()
+        if num and re.match(rf"^\s*{num.group(1)}\b", txt):
+            return (0, 0, i)
+        shared = len(words & set(re.findall(r"[a-z][a-z0-9_]{2,}", txt)))
+        return (1, -shared, int(bool(st.get("partial"))), i)
+    return [st for _, st in sorted(enumerate(steps), key=score)]
+
+
+def close_paths(spec, P) -> list:
+    """Documents the CLOSE duties name (a CLOSE draft may touch only these)."""
+    try:
+        duties = " ".join(str(d) for d in P.adapter.closeout_duties(spec) or [])
+    except Exception:                                            # noqa: BLE001
+        duties = ""
+    paths = re.findall(r"[\w./\-]+\.md\b", duties)
+    return sorted(set(paths + (["docs/progress/state/*"] if "state/*" in duties else [])))
+
+
 class Proactive(VisualMixin, AdvisoryMixin):
     def __init__(self, mgr):
         self.mgr = mgr
@@ -275,9 +311,16 @@ class Proactive(VisualMixin, AdvisoryMixin):
                                   "AND task_id=? AND lane=?", (pid, tid, lane))[0]["n"]
             total = 0
         else:
+            # per RUN since v0.126.2: earlier runs of a long task keep their
+            # rows (audit) but no longer use up this run's reactive budget
             total = self.store.q("SELECT COUNT(*) AS n FROM helper_units WHERE project_id=? AND "
-                                 f"task_id=? AND lane IS NOT NULL AND lane NOT IN ({own})",
-                                 (pid, tid, *L.OWN_BUDGET_LANES))[0]["n"]
+                                 f"task_id=? AND run_id=? AND lane IS NOT NULL AND lane NOT IN "
+                                 f"({own})", (pid, tid, t["run_id"], *L.OWN_BUDGET_LANES))[0]["n"]
+            life = self.store.q("SELECT COUNT(*) AS n FROM helper_units WHERE project_id=? AND "
+                                f"task_id=? AND lane IS NOT NULL AND lane NOT IN ({own})",
+                                (pid, tid, *L.OWN_BUDGET_LANES))[0]["n"]
+            if life >= int(ls.get("max_lane_units_lifetime") or 0):
+                total = max(total, int(ls["max_lane_units_per_task"]))   # ceiling reached
         if lane_n >= int(ls["lanes"][lane].get('max_per_run',ls['lanes'][lane]['max_per_task'])) or \
                 (lane not in L.OWN_BUDGET_LANES and total >= int(ls["max_lane_units_per_task"])):
             self.store.event(pid, tid, "lane_limit", detail={"lane": lane, "key": key[:100],
@@ -374,8 +417,22 @@ class Proactive(VisualMixin, AdvisoryMixin):
         pid, tid = P.id, t["task_id"]
         cfg = ls["lanes"]["prework"]
         head = P.ws.head()
-        open_steps = [c for c in checklist(spec.spec) if not c["done"]]
-        steps = open_steps[:max(1, int(cfg.get("steps_ahead") or 2))]
+        nxt = next_line(spec.spec)
+        close = bool(re.match(r"^\s*CLOSE\b", nxt, re.I))
+        if close:
+            # BUILD is done: prepare the CLOSE session's drafts instead (summary,
+            # ledger row ...), kept for CLOSE, never applied during BUILD
+            duties = []
+            try:
+                duties = list(P.adapter.closeout_duties(spec) or [])
+            except Exception:                                    # noqa: BLE001
+                duties = []
+            steps = [{"item": "CLOSE drafts: " + "; ".join(str(d) for d in duties)[:1500]
+                      if duties else "CLOSE drafts for the task's closeout documents",
+                      "done": False, "partial": False, "close": True}]
+        else:
+            open_steps = [c for c in checklist(spec.spec) if not c["done"]]
+            steps = rank_steps(open_steps, nxt)[:max(1, int(cfg.get("steps_ahead") or 2))]
         if not steps:
             return []
         for u in self.store.q("SELECT * FROM helper_units WHERE project_id=? AND task_id=? AND "
@@ -387,8 +444,12 @@ class Proactive(VisualMixin, AdvisoryMixin):
         out = []
         for i, st in enumerate(steps):
             key = f"{head[:12]}:{re.sub(r'[^a-z0-9]+', '-', st['item'].lower())[:60]}"
+            if st.get("close"):
+                key = f"{head[:12]}:close"
             uid, how = self.add(P, t, "prework", key, {
                 "head": head, "step": st["item"], "step_index": i, "partial": st["partial"],
+                "mode": "close" if st.get("close") else "build", "next": nxt[:600],
+                "close_paths": close_paths(spec, P) if st.get("close") else [],
                 "snapshot": snap.get("snapshot_id"), "snapshot_status": snap["status"],
                 "files": sorted(snap.get("manifest") or {}),
                 "excerpt_files": sorted(snap.get("manifest") or {})[:6]},
@@ -405,7 +466,7 @@ class Proactive(VisualMixin, AdvisoryMixin):
         n = 0
         for m in led.memories(P.id, tid):
             if str(m.get("actor") or "").startswith("helper:") and \
-                    str(m.get("text") or "").startswith("PREWORK") and \
+                    "PREWORK" in str(m.get("text") or "")[:60] and \
                     (not keep_head or m.get("revision") != keep_head):
                 led.forget(P.id, m["mem_id"], "prework of an older HEAD")
                 n += 1
@@ -450,7 +511,15 @@ class Proactive(VisualMixin, AdvisoryMixin):
         gotchas = "; ".join(str(f.get("observed") or f.get("hypothesis") or "")[:160]
                             for f in (env.get("findings") or [])[:3] if isinstance(f, dict))
         cmds = ", ".join(str(x)[:120] for x in (env.get("checks_proposed") or [])[:4])
-        text = (f"PREWORK for step \"{str(pk.get('step') or '')[:200]}\" (helper "
+        if pk.get("mode") == "close" and rel:
+            # a CLOSE draft is for the CLOSE session, never the BUILD primary
+            new = rel.replace(f"/{u['unit_id']}.patch", f"/close-{u['unit_id']}.patch")
+            os.replace(os.path.join(P.profile.workspace, rel),
+                       os.path.join(P.profile.workspace, new))
+            rel = new
+        text = (("PREWORK CLOSE draft for the CLOSE session only (never apply during BUILD) "
+                 if pk.get("mode") == "close" else "") +
+                f"PREWORK for step \"{str(pk.get('step') or '')[:200]}\" (helper "
                 f"{u['unit_id']}, HEAD {str(pk.get('head') or '')[:12]}): "
                 f"{str(env.get('summary') or '')[:300]}"
                 + (f" Draft patch: {rel} (git apply --check {rel}, then apply only if it "
@@ -590,8 +659,10 @@ class Proactive(VisualMixin, AdvisoryMixin):
         own = ",".join("?" * len(L.OWN_BUDGET_LANES))
         if lane not in L.OWN_BUDGET_LANES:
             used = self.store.q("SELECT COUNT(*) AS n FROM helper_units WHERE project_id=? AND "
-                                f"task_id=? AND lane IS NOT NULL AND lane NOT IN ({own}) AND "
-                                "attempts > 0", (P.id, t["task_id"], *L.OWN_BUDGET_LANES))[0]["n"]
+                                f"task_id=? AND run_id=? AND lane IS NOT NULL AND lane NOT IN "
+                                f"({own}) AND attempts > 0",
+                                (P.id, t["task_id"], u.get("run_id") or t.get("run_id"),
+                                 *L.OWN_BUDGET_LANES))[0]["n"]
             if used >= int(ls["max_dispatches_per_task"]) and not u.get("attempts"):
                 return "skip:the task's lane dispatch budget is used"
         if int(u.get("attempts") or 0) > int(ls["max_retries"]):
@@ -730,6 +801,10 @@ class Proactive(VisualMixin, AdvisoryMixin):
             scope = []
         env = meta.get("envelope") or L.parse_envelope(text or "")
         checks = {}
+        if u.get("lane") == "prework":
+            pk0 = json.loads(u.get("packet") or "{}")
+            if pk0.get("mode") == "close":
+                scope = list(scope) + list(pk0.get("close_paths") or [])
         if env.get("patch"):
             v = L.validate_patch(env["patch"], scope)
             checks["patch"] = v
@@ -842,6 +917,13 @@ class Proactive(VisualMixin, AdvisoryMixin):
                 if not a or a["status"] != "current":
                     self._display_only(u, "its capture was superseded", "superseded")
                     continue
+            if u["lane"] == "prework":
+                pk = json.loads(u.get("packet") or "{}")
+                if pk.get("head") != P.ws.head():
+                    self._display_only(u, "prework of an older HEAD", "superseded")
+                    continue
+                if pk.get("mode") == "close" and t.get("phase") != "closeout":
+                    continue          # kept (memory note) for the CLOSE session
             env = json.loads(u.get("envelope") or "{}")
             if u["lane"] in ("visual", "proposer"):
                 env = self._refresh_stale(P, t, u, env, cur_snap)

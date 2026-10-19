@@ -99,6 +99,10 @@ def settings(P) -> dict:
         "transcript_poll_seconds": float(raw.get("transcript_poll_seconds", 20)),
         "max_lane_units_per_task": int(raw.get("max_lane_units_per_task", 24)),
         "max_dispatches_per_task": int(raw.get("max_dispatches_per_task", 16)),
+        # v0.126.2: the two caps above are per RUN; this lifetime ceiling still
+        # spans every run of the task (runaway guard), default 4x the run cap
+        "max_lane_units_lifetime": int(raw.get("max_lane_units_lifetime",
+                                               4 * int(raw.get("max_lane_units_per_task", 24)))),
         "max_cards_per_delivery": int(raw.get("max_cards_per_delivery", 6)),
         "max_deliveries_per_session": int(raw.get("max_deliveries_per_session", 3)),
         "min_delivery_severity": str(raw.get("min_delivery_severity", "medium")),

@@ -2,6 +2,29 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.126.2 — helpers: per-run reactive budget, NEXT-first prework, CLOSE drafts
+
+These are findings from UI-02's first v0.126 run.
+- **Per-run reactive budget.** Eight useful reactive units were refused by
+  the task's lifetime cap: 4 failure triages, 2 incremental reviews, a
+  research lookup and a handoff. That cap had been used by earlier runs.
+  `max_lane_units_per_task` and `max_dispatches_per_task` now count per RUN.
+  Older runs' rows stay for the audit. The new `max_lane_units_lifetime`
+  (default 4× the run cap) still spans every run as a runaway guard.
+- **NEXT-first prework.** Prework had prepared partly done steps 4 and 5
+  while the plan said `NEXT: CLOSE`. Steps are now ranked by the plan's NEXT
+  line: an explicit step number first, then shared words, with fully open
+  steps before partly done ones.
+- **CLOSE drafts.** When NEXT is CLOSE, one prework unit drafts the CLOSE
+  duties (summary, ledger row). The draft may touch only the documents those
+  duties name. It is stored as `close-<unit>.patch` with a "CLOSE session
+  only" memory note and is never delivered to the BUILD primary.
+- **Delivery.** Prework cards of an older HEAD are superseded, never
+  delivered. Current prework reaches the idle primary between turns through
+  the existing helper delivery.
+
+Coordinator only.
+
 ## v0.126.1 — the Lead stops burning calls on false rejections
 
 In live UI-02 case `rc-fa9340ea8134a007`, three of four Opus calls were
