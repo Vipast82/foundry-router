@@ -1540,6 +1540,16 @@ class Coordinator:
                 return self.store.transition(pid, tid, S.CLOSING, {"approval_id": a["approval_id"]},
                                              phase="closeout")
         elif stage == "after_close":
+            if "visual" in (t["data"].get("awaiting_kinds") or []):
+                from . import visual_approval
+                if visual_approval.enabled(P):
+                    rule = next((r for r in P.profile.approvals
+                                 if r.kind == "visual" and r.stage == "after_close"), None)
+                    if rule and not self._valid_approval(P, t, spec, rule, t["head_sha"]):
+                        visual_approval.step(self, P, t, spec, rule, t["head_sha"])
+                        t = self.store.task(pid, tid)
+                        if t["state"] != S.AWAITING_HUMAN:
+                            return
             if not self._approvals_needed(P, t, spec, "after_close", t["head_sha"]):
                 a = self.store.approvals(pid, tid)[-1]
                 return self.store.transition(pid, tid, S.COMPLETE, {
@@ -1671,9 +1681,28 @@ class Coordinator:
             # a fresh budget: see RetryGuidance.on_reset (guided extra not carried
             # over; a never-called, transiently skipped adviser re-armed, bounded)
             data = self.retry_guidance.on_reset(data)
+            # An operator-authorized fresh session must not feed the previous
+            # session's own unfinished files back into repeat-failure detection.
+            # The operator note and plan still carry the unfinished work, while
+            # its prior findings and decisions remain in the audit trail.
+            if data.get("build_progress"):
+                data["free_retry"] = True
         evidence = {"resolution": resolution, "reset_attempts": bool(reset_attempts)}
         S.check(t["state"], S.READY, evidence)        # a refused unblock leaves no note
         with self.store.tx():
+            if reset_attempts and lc_on:
+                # The old wait was explicitly resolved by this reset. Leaving
+                # its open recovery question behind makes the next READY tick
+                # revive that same question before a new worker can start.
+                for d in self.obligations.active_decisions(project_id, task_id):
+                    if d["status"] != "open" or d["kind"] not in (
+                            "no_progress", "recovery_escalation"):
+                        continue
+                    self.store.x("UPDATE decisions SET status='withdrawn' WHERE decision_id=? "
+                                 "AND status='open'", (d["decision_id"],))
+                    self.store.event(project_id, task_id, "decision_withdrawn", detail={
+                        "decision_id": d["decision_id"], "by": actor,
+                        "reason": "operator-authorized fresh-session budget reset"})
             if str(resolution or "").strip():
                 # one note per unblock (keyed on the transition it belongs to)
                 n = self.store.q("SELECT COUNT(*) AS n FROM transitions WHERE project_id=? "

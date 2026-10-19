@@ -319,6 +319,8 @@ def load(path: str) -> Profile:
                             timeout_seconds=int(c.get("timeout_seconds") or 900),
                             evidence=str(c.get("evidence") or "")))
     appr = raw.get("approval") or {}
+    if "visual_model" in appr and not isinstance(appr["visual_model"], bool):
+        raise ProfileError(f"{path}: approval.visual_model must be true or false")
     rules = []
     for r in appr.get("rules") or []:
         if r.get("stage", "after_close") not in ("before_close", "after_close"):

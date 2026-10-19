@@ -71,6 +71,31 @@ def test_committed_partial_build_continues_without_spending_repair_attempt(tmp_p
     assert limits["ordinary"]["used"] == 1 and limits["sessions"]["used"] == 2
 
 
+def test_fresh_unblock_withdraws_old_recovery_wait_and_starts_new_session(tmp_path,
+                                                                         monkeypatch):
+    """A reset after partial BUILD progress must reach the new worker, not reblock."""
+    monkeypatch.setattr(LifecycleAdapter, "pending_build_steps",
+                        lambda self, spec, revision, ws: ["finish current BUILD work"],
+                        raising=False)
+    c, client, _, _, _ = _game(tmp_path, lambda ctx: {
+        "writes": {"src/core.txt": "OK"}, "commit": "T1: partial core",
+        "final": report(summary="more BUILD remains")})
+    c.approve("game", "T1", [], "victor")
+    assert run_until(c, lambda: _state(c) == S.CHANGES_REQUIRED, limit=30)
+    t = c.store.task("game", "T1")
+    did = c.obligations.open_decision("game", "T1", "recovery_escalation",
+                                       "old repeat findings", blocks=["T1"])
+    c._lc_wait(c.projects["game"], t, [did], "old repeat findings", S.READY)
+    assert _state(c) == S.BLOCKED
+    c.unblock("game", "T1", "fresh session from committed BUILD work", reset_attempts=True)
+    t = c.store.task("game", "T1")
+    assert t["state"] == S.READY and t["data"]["free_retry"] is True
+    assert c.obligations.decision(did)["status"] == "withdrawn"
+    c.tick()
+    t = c.store.task("game", "T1")
+    assert t["state"] == S.IMPLEMENTING and t["session_id"]
+
+
 class Clock:
     def __init__(self):
         self.now = time.time()

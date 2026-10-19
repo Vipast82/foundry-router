@@ -93,6 +93,9 @@ max_tokens = 4000
 # MASTER_ORDER: a sprint may start when the one above it is DONE, or
 # COMPLETE-PENDING-VISUAL-REVIEW where only the operator's look is missing.
 deps_accept_pending = ["visual"]
+# Opt in after granting the coordinator key a strict, vision-capable persona.
+# Reviews current committed frames and records a revision-bound visual verdict.
+visual_model = false
 
 # OPTIONAL (v0.122): evidence memory, obligations and targeted recovery.
 # Off by default; see docs/SPRINT_LIFECYCLE.md for the pilot procedure.
