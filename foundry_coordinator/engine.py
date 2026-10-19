@@ -3154,6 +3154,12 @@ class Coordinator:
         import inspect
         kw = {"channel": channel} if "channel" in inspect.signature(
             self.obligations.answer).parameters else {}
+        if d["kind"] == "recovery_escalation":
+            # an escalation opened (before v0.123.1) without naming the older
+            # repeat set's answered escalation it replaces gets that link now,
+            # so the answer supersedes it instead of tripping the guard
+            from .recovery import link_prior_escalation
+            link_prior_escalation(self.obligations, P.id, task_id, decision_id)
         out = self.obligations.answer(decision_id, value, actor, "operator", **kw)
         self.store.event(project_id, task_id, "decision_answered", detail={
             "decision_id": decision_id, "kind": d["kind"], "actor": actor,
@@ -3603,6 +3609,8 @@ class Coordinator:
         # operator decision: the case's NEEDS_VICTOR step handles that answer
         replaced = set(((case.get("validation") or {}).get("superseded_decisions")) or [])
         waits = [i for i in dw.get("ids") or [] if i not in replaced]
+        if waits and self._lc(P) and self._lead_pending_strategy_supersedes(P, t, case, waits):
+            return                       # _lc_blocked resumes the task on the next tick
         if waits and self._lc(P):
             decs = [self._lc_final_decision(i) for i in waits]
             if not any(d and d["status"] == "open" for d in decs):
@@ -3634,6 +3642,55 @@ class Coordinator:
             if self._held(P, t, "lead recovery resume"):
                 return
             self._lead_resume(P, t, L.case(cid), dict(ra.get("action") or {}))
+
+    def _lead_pending_strategy_supersedes(self, P: Project, t: dict, case: dict,
+                                          waits: list) -> bool:
+        """A case opened on a repeat question while an EARLIER case's lead
+        strategy was still waiting for its one implementer session (before
+        v0.123.1 the repeat guard re-asked before the primary ever tried it):
+        that unused strategy is the answer. Only while the new case has done
+        no more than diagnose (no proposal, candidate or escalation), only for
+        open recovery_escalation waits, and only for a strategy that is new to
+        the task and waives nothing. The case is cancelled (its sessions are
+        ended) and the question withdrawn -- both kept and journaled -- so the
+        task resumes READY and the strategy reaches the primary once."""
+        from .lead import OPEN_STATES
+        pid, tid, cid = P.id, t["task_id"], case["case_id"]
+        data = t.get("data") or {}
+        pend = data.get("lead_assignment") or {}
+        text = str(pend.get("assignment") or "").strip()
+        if not text or not pend.get("case_id") or pend.get("case_id") == cid:
+            return False
+        prior = self.lead.case(pend["case_id"])
+        if not prior or prior["state"] in OPEN_STATES:
+            return False
+        if case["state"] != "DIAGNOSING" or case.get("decision_id") or                 (case.get("proposed_action") or {}) or                 int((case.get("counters") or {}).get("candidates") or 0):
+            return False
+        decs = [self.obligations.decision(i) for i in waits]
+        if not decs or any(not d or d["kind"] != "recovery_escalation" or d["status"] != "open"
+                           for d in decs):
+            return False
+        from .recovery import directive_violations, strategy_fp
+        if directive_violations(text):
+            return False
+        if strategy_fp(text) in {r.get("strategy_fp")
+                                 for r in self.recovery.repairs(pid, tid)}:
+            return False
+        reason = (f"lead case {pend['case_id']}'s strategy has not reached the implementer "
+                  f"yet; it answers {', '.join(waits)}")
+        self.lead.cancel(cid, reason, P=P)
+        with self.store.tx():
+            for did in waits:
+                self.store.x("UPDATE decisions SET status='withdrawn' WHERE decision_id=? AND "
+                             "status='open'", (did,))
+                self.store.event(pid, tid, "decision_withdrawn", detail={
+                    "decision_id": did, "by": "lead_manager", "case_id": pend["case_id"],
+                    "reason": reason[:300]})
+            self.store.update_task(pid, tid, data={
+                k: v for k, v in data.items() if k not in ("recovery_case", "lead_trigger")})
+            self.store.event(pid, tid, "lead_case_cancelled", detail={
+                "case_id": cid, "reason": reason[:300], "strategy_case": pend["case_id"]})
+        return True
 
     def _lead_upgraded(self, case: dict, act: dict) -> bool:
         """The case's coordinator upgrade is installed: the lead's UPGRADING

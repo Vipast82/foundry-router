@@ -435,6 +435,94 @@ def test_genuine_stall_decision_goes_to_the_lead_before_victor(tmp_path):
     assert any(d.get("decision_id") == did and d.get("by") == "lead_manager" for d in ev)
 
 
+def test_lead_strategy_after_three_repeats_reaches_exactly_one_primary_session(tmp_path):
+    """UI-02 rc-fef1...: the findings had repeated three times when the lead
+    case resolved. Its new strategy must start ONE implementer session instead
+    of reopening the repeated-strategy escalation; the same text afterwards is
+    not a free pass."""
+    hud = "Continue BUILD step 4 in src/ui02/hud.lua before any final gate run."
+    rep = {"classification": "product",
+           "hypothesis": "The primary keeps re-running final checks instead of building.",
+           "evidence_refs": ["docs/progress/UI-02_PLAN.md:7"],
+           "action": {"kind": "assign_game_repair", "assignment": hud,
+                      "files": ["src/ui02/hud.lua"]}}
+    c, client, ff, did, utid = _lifecycle_game(tmp_path, lambda ctx: lead_reply(rep))
+    P = c.projects["game"]
+    f = {"class": "missing_evidence", "check_id": "au.gate_bound_to_head",
+         "text": "gate verdicts were recorded at an older commit than HEAD"}
+    for n in (1, 2, 3):
+        c.recovery.record_findings(P, c.store.task("game", utid), n, [f])
+    assert max(r["count"] for r in c.recovery.repeats("game", utid)) >= 3
+
+    def with_lead():
+        return [s for s in client.sessions.values() if s["metadata"].get("role") != "lead"
+                and any(hud in p for p in s.get("prompts") or [])]
+    assert run_until(c, lambda: with_lead(), limit=25),         [d["question"][:80] for d in c.obligations.active_decisions("game", utid)]
+    for _ in range(4):
+        c.tick()
+    assert len(with_lead()) == 1
+    a = next(r["assignment"] for r in c.recovery.repairs("game", utid)
+             if (r.get("assignment") or {}).get("strategy") == hud)
+    assert a["lead_strategy"] is True
+    ev = [e["detail"] for e in c.store.events("game", 300) if e["kind"] == "lead_strategy"]
+    assert len(ev) == 1
+    # the lead text was consumed with the session start
+    assert "lead_assignment" not in (c.store.task("game", utid)["data"] or {})
+
+
+def test_case_opened_on_an_unused_lead_strategy_is_reconciled_after_the_upgrade(tmp_path):
+    """The live UI-02 state: an old coordinator re-asked the repeat question
+    (dec-d046...) before the resolved case's strategy ever ran, opening a
+    second case (rc-826...). After the upgrade that case is cancelled, the
+    question withdrawn (both kept), and the pending strategy reaches exactly
+    one implementer session -- no operator edit, no further lead call."""
+    hud = "Continue BUILD step 4 in src/ui02/hud.lua before any final gate run."
+    rep = {"classification": "product",
+           "hypothesis": "The primary keeps re-running final checks instead of building.",
+           "evidence_refs": ["docs/progress/UI-02_PLAN.md:7"],
+           "action": {"kind": "assign_game_repair", "assignment": hud,
+                      "files": ["src/ui02/hud.lua"]}}
+    c, client, ff, did, utid = _lifecycle_game(tmp_path, lambda ctx: lead_reply(rep))
+    P = c.projects["game"]
+    f = {"class": "missing_evidence", "check_id": "au.gate_bound_to_head",
+         "text": "gate verdicts were recorded at an older commit than HEAD"}
+    for n in (1, 2, 3):
+        c.recovery.record_findings(P, c.store.task("game", utid), n, [f])
+    real = c.recovery.assignment
+    c.recovery.assignment = lambda *a, **kw: real(*a, **{**kw, "trusted_strategy": False})
+    first = []
+
+    def second_case():
+        k = c.lead.active_case("game", utid)
+        if k and not first:
+            first.append(k["case_id"])
+        return bool(k and first and k["case_id"] != first[0])
+    assert run_until(c, second_case, limit=30)                # the old loop
+    old_case = c.lead.active_case("game", utid)
+    t = c.store.task("game", utid)
+    wait = t["data"]["decision_wait"]["ids"]
+    assert t["data"]["lead_assignment"]["assignment"] == hud
+    assert c.obligations.decision(wait[0])["kind"] == "recovery_escalation"
+    lead_calls = len(client.diag_prompts()) if hasattr(client, "diag_prompts") else None
+    c.recovery.assignment = real                              # the upgrade
+
+    def with_lead():
+        return [x for x in client.sessions.values() if x["metadata"].get("role") != "lead"
+                and any(hud in p for p in x.get("prompts") or [])]
+    assert run_until(c, lambda: with_lead(), limit=12)
+    for _ in range(4):
+        c.tick()
+    assert len(with_lead()) == 1
+    assert c.lead.case(old_case["case_id"])["state"] == "CANCELLED"
+    assert c.obligations.decision(wait[0])["status"] == "withdrawn"
+    assert not [s for s in client.sessions.values() if s["metadata"].get("role") == "lead"
+                and s["metadata"].get("case") == old_case["case_id"] and s.get("prompts")]
+    if lead_calls is not None:
+        assert len(client.diag_prompts()) == lead_calls
+    ev = [e["detail"] for e in c.store.events("game", 300) if e["kind"] == "lead_case_cancelled"]
+    assert ev and ev[0]["case_id"] == old_case["case_id"]
+
+
 def test_lead_escalation_replaces_the_stall_decision_with_one_question(tmp_path):
     """The lead cannot resolve a stall and asks Victor: the inbox shows ONE
     question (the lead_escalation, carrying the dossier reference and the

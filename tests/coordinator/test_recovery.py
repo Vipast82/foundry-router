@@ -204,6 +204,117 @@ def test_fresh_lead_strategy_crosses_repeat_guard_once(store):
     assert "decision" in next_a
 
 
+FB = {"class": "missing_evidence", "check_id": "au.gate_bound_to_head",
+      "text": "gate verdicts were recorded at an older commit than HEAD"}
+
+
+def _answer(ob, did, strategy):
+    return ob.answer(did, {"strategy": strategy}, "victor", "operator", channel="control")
+
+
+def _second_repeat_set(store):
+    """UI-02's history: repeat set A escalates and is answered (and re-asked
+    and answered again), then a new finding joins the repeats (set B)."""
+    ob, rec, P, t = setup(store)
+    fa = {"class": "missing_evidence", "check_id": "au.freshness", "text": A2}
+
+    def attempt(n, items, strategy, **kw):
+        rec.record_findings(P, t, n, items)
+        store.update_task("game", "UI-01", attempt=n + 1)
+        return rec.assignment(P, store.task("game", "UI-01"), obligations=ob, ws=P.ws,
+                              strategy=strategy, **kw)
+
+    attempt(1, [fa], "Re-capture the gallery from the running build")
+    attempt(2, [fa], "Re-capture the gallery after a clean Studio restart")
+    a = attempt(3, [fa], "Re-capture the gallery after a clean Studio restart")
+    _answer(ob, a["decision"], "Regenerate captures with the capture tool at head")
+    assert "decision" not in rec.assignment(P, store.task("game", "UI-01"), obligations=ob,
+                                            ws=P.ws)
+    a = attempt(4, [fa, FB], "Regenerate captures with the capture tool at head")
+    first = ob.decision(a["decision"])           # the same set again: re-asked in its chain
+    _answer(ob, first["decision_id"], "Commit the plan step first, then capture at head")
+    assert ob.decision(first["supersedes"])["status"] == "superseded"
+    assert "decision" not in rec.assignment(P, store.task("game", "UI-01"), obligations=ob,
+                                            ws=P.ws)
+    return ob, rec, P, t, first, attempt, fa
+
+
+def test_new_repeat_set_question_supersedes_the_older_answer(store):
+    """UI-02 dec-d046...: the new repeat set's question must name the older set's
+    answered escalation, so the operator's different answer replaces it instead
+    of tripping the contradiction guard."""
+    ob, rec, P, t, first, attempt, fa = _second_repeat_set(store)
+    b = attempt(5, [fa, FB], "Commit the plan step first, then capture at head")
+    d = ob.decision(b["decision"])
+    assert d["status"] == "open" and d["question"] != first["question"]
+    assert (d["scope"] or {}).get("escalation_key") != (first["scope"] or {}).get(
+        "escalation_key")
+    assert d["supersedes"] == first["decision_id"]
+    _answer(ob, d["decision_id"], "Collect the raw GateRunner tally, then run the gate")
+    assert ob.decision(first["decision_id"])["status"] == "superseded"
+    assert ob.decision(first["decision_id"])["superseded_by"] == d["decision_id"]
+    assert [x["decision_id"] for x in ob.active_decisions("game", "UI-01",
+                                                          "recovery_escalation")] ==         [d["decision_id"]]
+
+
+def test_legacy_unlinked_escalation_is_reconciled_without_weakening_the_guard(store):
+    """A row opened before the fix (no supersedes) still trips the guard; the
+    coordinator links it to the older answered escalation, and only that one."""
+    from foundry_coordinator.obligations import DecisionConflict
+    from foundry_coordinator.recovery import link_prior_escalation
+    ob, rec, P, t, first, attempt, fa = _second_repeat_set(store)
+    legacy = ob.open_decision("game", "UI-01", "recovery_escalation",
+                              "Findings repeat across attempts: legacy set B",
+                              blocks=["UI-01"], scope={"escalation_key": "legacy-b"})
+    with pytest.raises(DecisionConflict):
+        _answer(ob, legacy, "A different strategy")              # the guard is intact
+    # never linked: another kind, or a question that is not the newer one
+    other = ob.open_decision("game", "UI-01", "no_progress", "no progress", blocks=["UI-01"])
+    assert link_prior_escalation(ob, "game", "UI-01", other) == ""
+    assert link_prior_escalation(ob, "game", "UI-02", legacy) == ""
+    assert link_prior_escalation(ob, "game", "UI-01", first["decision_id"]) == ""  # answered
+    assert link_prior_escalation(ob, "game", "UI-01", legacy) == first["decision_id"]
+    assert link_prior_escalation(ob, "game", "UI-01", legacy) == ""                # once
+    assert ob.decision(first["decision_id"])["status"] == "answered"   # until answered
+    _answer(ob, legacy, "A different strategy")
+    assert ob.decision(first["decision_id"])["status"] == "superseded"
+    ev = [e["detail"] for e in store.events("game", 50) if e["kind"] == "decision_linked"]
+    assert ev and ev[0]["supersedes"] == first["decision_id"]
+
+
+def test_fresh_lead_strategy_withdraws_the_open_repeat_question(store):
+    """After a lead case resolves, its new strategy reaches the primary once:
+    no new escalation, and the still-open repeat question it answers is
+    withdrawn (kept for the audit). A repeated or waiving lead text escalates."""
+    ob, rec, P, t, first, attempt, fa = _second_repeat_set(store)
+    b = attempt(5, [fa, FB], "Commit the plan step first, then capture at head")
+    lead = "Run GateRunner.run then GateRunner.tally in Studio and keep the raw output"
+    a = rec.assignment(P, store.task("game", "UI-01"), obligations=ob, ws=P.ws,
+                       strategy=lead, trusted_strategy=True)
+    assert "decision" not in a and a["strategy"] == lead and a["lead_strategy"]
+    assert a["withdrawn_decisions"] == [b["decision"]]
+    assert ob.decision(b["decision"])["status"] == "withdrawn"
+    assert not [d for d in ob.active_decisions("game", "UI-01") if d["status"] == "open"]
+    # the same lead text on the next attempt: asks again (no second free pass)
+    again = attempt(6, [fa, FB], lead, trusted_strategy=True)
+    assert "decision" in again
+
+
+def test_waiving_or_repeated_lead_strategy_still_escalates(store):
+    ob, rec, P, t, first, attempt, fa = _second_repeat_set(store)
+    b = attempt(5, [fa, FB], "Commit the plan step first, then capture at head")
+    bad = rec.assignment(P, store.task("game", "UI-01"), obligations=ob, ws=P.ws,
+                         strategy="Skip the au.gate check and let the CLOSE session capture it",
+                         trusted_strategy=True)
+    assert bad["decision"] == b["decision"] and bad["rejected_guidance"]
+    assert ob.decision(b["decision"])["status"] == "open"
+    # a lead text that repeats an earlier strategy is not fresh either
+    old = rec.assignment(P, store.task("game", "UI-01"), obligations=ob, ws=P.ws,
+                         strategy="Commit the plan step first, then capture at head",
+                         trusted_strategy=True)
+    assert old["decision"] == b["decision"]
+
+
 def test_repeat_with_adviser_is_consulted_once(store):
     ob, rec, P, t = setup(store)
     calls = []

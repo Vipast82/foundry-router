@@ -595,18 +595,41 @@ class Recovery:
         # reach the primary once instead of immediately asking the same
         # recovery question again. Its fingerprint enters `prior` on this
         # assignment, so a subsequent repeat cannot reuse this exception.
+        # Only the lead's own text qualifies: a rejected (waiving) lead text was
+        # replaced by the default above and never counts as fresh.
         fresh_lead_strategy = (trusted_strategy and bool(strategy) and not rejected
                                and sfp not in {r.get("strategy_fp") for r in prior})
+        lead_withdrawn: list[str] = []
+        if reps and (same or max_count >= 3) and fresh_lead_strategy:
+            # the lead's strategy answers this repeat set's still-open question
+            # (kept as withdrawn for the audit, as the lead's resume does)
+            base_q = self._escalation_question(reps)
+            for d in self._escalations(obs, P.id, task, base_q, _sha(base_q, 16)):
+                if d["status"] == "open":
+                    self.store.x("UPDATE decisions SET status='withdrawn' WHERE "
+                                 "decision_id=? AND status='open'", (d["decision_id"],))
+                    self.store.event(P.id, task, "decision_withdrawn", detail={
+                        "decision_id": d["decision_id"], "by": "lead_manager",
+                        "reason": "answered by a fresh lead recovery strategy",
+                        "strategy_fp": sfp})
+                    lead_withdrawn.append(d["decision_id"])
         if reps and (same or max_count >= 3) and not fresh_lead_strategy:
             base_q = self._escalation_question(reps)
             key = _sha(base_q, 16)
             chain = self._escalations(obs, P.id, task, base_q, key)
             latest = chain[-1] if chain else None
             if latest and latest["status"] == "open":
+                link_prior_escalation(obs, P.id, task, latest["decision_id"])
                 # still waiting on the operator: block on THIS open decision
                 return {"decision": latest["decision_id"], "repeats": repeats,
                         "rejected_guidance": rejected}
             new, granted, supersedes = "", False, None
+            if latest is None:
+                # a new repeat set: its question replaces the task's previous
+                # answered escalation (an older repeat set), so answering it
+                # supersedes that answer instead of contradicting it
+                supersedes = (prior_answered_escalation(obs, P.id, task, key) or
+                              {}).get("decision_id")
             if latest is not None:                     # answered: act on the answer
                 supersedes = latest["decision_id"]
                 act, val = self._escalation_answer(latest)
@@ -687,6 +710,9 @@ class Recovery:
                "strategy_fp": sfp, "budget": budget, "affected_checks_to_rerun": affected,
                "escalation_decision": esc_used,
                "rejected_guidance": rejected}
+        if fresh_lead_strategy and reps and (same or max_count >= 3):
+            out["lead_strategy"] = True             # crossed the repeat guard once
+            out["withdrawn_decisions"] = lead_withdrawn
         out["prompt_text"] = self._prompt(out, cap)
         self._enforce(out, build_open)
         with self.store.tx():
@@ -965,3 +991,52 @@ class Recovery:
 
 def _glob_match(path: str, ref: str) -> bool:
     return glob_match(path, ref)
+
+
+def _blocks(d: dict) -> set:
+    b = d.get("blocks")
+    return set(b if isinstance(b, list) else [])
+
+
+def prior_answered_escalation(obs, project: str, task: str, key: str,
+                              before: Optional[dict] = None) -> Optional[dict]:
+    """The task's newest answered recovery_escalation of ANOTHER repeat set
+    (escalation key), opened before `before` when given: the answer a new
+    repeat set's question replaces. None when there is none."""
+    best = None
+    for d in obs.active_decisions(project, task, "recovery_escalation"):
+        if d["status"] != "answered" or (d.get("scope") or {}).get("escalation_key") == key:
+            continue
+        if before is not None:
+            if d["decision_id"] == before["decision_id"] or                     not (_blocks(d) & _blocks(before)) or                     (d.get("opened_ts") or 0) >= (before.get("opened_ts") or 0):
+                continue
+        if best is None or (d.get("opened_ts") or 0) >= (best.get("opened_ts") or 0):
+            best = d
+    return best
+
+
+def link_prior_escalation(obs, project: str, task: str, decision_id: str) -> str:
+    """Reconcile an OPEN recovery_escalation that was opened without
+    `supersedes` while an older repeat set's escalation still stands answered
+    (rows from before v0.123.1, or a repeat set that changed under it): record
+    that older answer as the one it supersedes, so the operator's answer
+    replaces it explicitly. Nothing else changes: the old decision becomes
+    `superseded` only when the operator answers this one, the question (and
+    its hash) is untouched, and a decision of another kind, task or blocked
+    item is never linked, so the contradiction guard stays as strict.
+    Returns the linked decision id ('' when nothing was linked)."""
+    d = obs.decision(decision_id)
+    if not d or d["kind"] != "recovery_escalation" or d["status"] != "open" or             d.get("supersedes") or d["project_id"] != project or d["task_id"] != task:
+        return ""
+    old = prior_answered_escalation(obs, project, task,
+                                    (d.get("scope") or {}).get("escalation_key"), before=d)
+    if not old:
+        return ""
+    n = obs.store.x("UPDATE decisions SET supersedes=? WHERE decision_id=? AND status='open' "
+                    "AND (supersedes IS NULL OR supersedes='')", (old["decision_id"], decision_id))
+    if n == 0 and (obs.decision(decision_id) or {}).get("supersedes") != old["decision_id"]:
+        return ""
+    obs.store.event(project, task, "decision_linked", detail={
+        "decision_id": decision_id, "supersedes": old["decision_id"], "by": "coordinator",
+        "reason": "a new repeat set's recovery question replaces the older answered one"})
+    return old["decision_id"]

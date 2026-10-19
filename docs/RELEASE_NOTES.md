@@ -2,6 +2,55 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.123.1 — UI-02 lead recovery loop: one fresh lead strategy, reconciled escalations
+
+UI-02 hit two defects in the path from the Lead Manager back to the implementer.
+
+- **The repeat guard swallowed the Lead's strategy.** After Lead case
+  `rc-fef1688cc851dd9c` resolved, `Recovery.assignment` saw findings that
+  had repeated three or more times. It reopened the repeated-strategy
+  escalation (`dec-d046f1082ccff01d`) before any implementer tried the Lead's
+  strategy, which opened another Lead case.
+  - Fix: a validated, never-before-used Lead strategy now reaches exactly one
+    implementer session.
+  - The repeat set's still-open question is withdrawn and kept for the audit.
+  - The assignment records `lead_strategy`.
+  - A repeated strategy, a waiving one, or an ordinary untrusted one still
+    escalates. The same Lead text gets no second pass.
+- **Recovery decisions contradicted each other.** A new repeat set opens a new
+  `recovery_escalation` with a new question. That escalation never named the
+  older set's still-answered escalation (`dec-27e25b94f297203a`) as the one it
+  replaces, so the operator's answer tripped the contradiction guard.
+  - Fix: a new set's question now records `supersedes` = the task's newest
+    answered escalation from another set. Answering it marks that one
+    `superseded`.
+  - Rows opened before this fix are reconciled the same way when they are
+    answered (`decision_linked` event). The link is set only for an open,
+    unlinked `recovery_escalation` of the same task that was opened after the
+    answered one, and only once.
+  - The guard itself is unchanged. No hand-editing of the database is needed.
+
+- **A second Lead case was opened before the first case's strategy ran.**
+  The old loop opened case `rc-826e3d9287aeb9c5` on the re-asked repeat
+  question while rc-fef1's strategy was still pending in the task.
+  - Fix: the engine now cancels such a case, journaled, with its sessions
+    ended. The conditions are strict: the case is still only DIAGNOSING; its
+    waits are open `recovery_escalation`s; the earlier case is resolved; the
+    pending strategy is new to the task and waives nothing.
+  - It also withdraws the question, kept for the audit. The task then resumes
+    READY, and the pending strategy reaches exactly one implementer session
+    with no extra Lead call.
+
+Tests:
+- tests/coordinator/test_recovery.py: new repeat set, legacy reconcile and
+  the guard, fresh Lead strategy, waiving/repeated Lead strategy.
+- tests/coordinator/test_lead_e2e.py:
+  - `test_lead_strategy_after_three_repeats_reaches_exactly_one_primary_session`
+  - `test_case_opened_on_an_unused_lead_strategy_is_reconciled_after_the_upgrade`
+
+Each new test fails on v0.123.0 (or on `9495063`, where that commit had not
+covered the case) and passes on v0.123.1.
+
 ## v0.123.0 — Lead Sprint Manager (last automated recovery tier, off by default)
 
 Before an approved sprint asks Victor to resolve a blocker, the coordinator
