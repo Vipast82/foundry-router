@@ -476,6 +476,17 @@ class QuotaGate:
                 (ctx.run_id, p, ctx.session_id))
             if n and n["n"] > self.pol.required_helper_sessions_per_run:
                 return "optional"
+        if p == "lead_manager" and ctx.run_id:
+            # a high per-run backstop for the coordinator's recovery lead (its
+            # own bounds are per case): past it the sessions are gated as
+            # optional work instead of always admitted
+            cap = int(getattr(self.pol, "lead_manager_sessions_per_run", 20) or 20)
+            n = self.svc.db.query_one(
+                "SELECT COUNT(*) AS n FROM work_sessions WHERE run_id=? AND purpose=? AND "
+                "created_ts <= (SELECT created_ts FROM work_sessions WHERE session_id=?)",
+                (ctx.run_id, p, ctx.session_id))
+            if n and n["n"] > cap:
+                return "optional"
         return "required"
 
     async def admit_call(self, ctx) -> Optional[dict]:

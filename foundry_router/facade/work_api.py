@@ -8,6 +8,8 @@ Needs a client key with the `orchestration` scope (or `admin`):
   POST /v1/foundry/work/events              lifecycle events (event_id dedupes resends)
   GET  /v1/foundry/work/usage?project=&task=&run=&session=   measured usage
   GET  /v1/foundry/work/denials?session=&since=   Foundry refusals for a session
+  GET  /v1/foundry/work/sessions/{id}/served   models/backends that served it (ledger)
+  GET  /v1/foundry/personas/{name}/routes      a persona's route chain + client grant
 
 The admin UI reads GET /admin/api/work (ui/routes.py).
 """
@@ -64,6 +66,156 @@ async def get_session(session_id: str, request: Request):
     if not rows:
         return JSONResponse({"error": "unknown session", "code": "not_found"}, status_code=404)
     return {"binding": dict(rows[0])}
+
+
+def _project_allowed(project_id: str) -> bool:
+    """A key restricted to some projects (ClientConfig.projects) sees only those."""
+    allowed = client_auth.current().get("projects") or []
+    return not allowed or project_id in allowed
+
+
+@router.get("/v1/foundry/work/sessions/{session_id}/served")
+async def session_served(session_id: str, request: Request):
+    """Which models and backends served (or were reached for) a session's
+    calls, from the budget ledger, oldest first, so a coordinator can verify a
+    session ran only on the route it expected. Every row except a denial
+    counts once it names a model: settled calls, errored calls (the backend
+    was reached) and calls still in flight (`pending`, ledger status
+    reserved; wait until it is 0 before trusting the answer). An unknown
+    session is an empty result, not an error. A key restricted to projects
+    sees only sessions bound to one of them."""
+    db = request.app.state.services.db
+    b = db.query_one("SELECT project_id FROM work_sessions WHERE session_id=?", (session_id,))
+    project = (b or {}).get("project_id") or ""
+    empty = {"session_id": session_id, "project_id": project, "calls": 0, "served_models": [],
+             "backends": [], "routes": [], "errors": 0, "denied": 0, "pending": 0,
+             "settled": 0, "last_ts": None}
+    if client_auth.current().get("projects"):
+        if not b:
+            return empty                 # unbound: nothing a restricted key may see
+        if not _project_allowed(project):
+            return JSONResponse({"error": f"session {session_id} belongs to a project this "
+                                          f"client key can't see", "code": "project_forbidden"},
+                                status_code=403)
+    rows = db.query("SELECT ts, backend, model, status FROM usage_events WHERE session_id=? "
+                    "ORDER BY ts, id", (session_id,))
+    out = dict(empty)
+    models, backends, routes = [], [], []
+    for r in rows:
+        st = r["status"] or ""
+        if st == "denied":
+            out["denied"] += 1
+            continue
+        if st == "error":
+            out["errors"] += 1
+        elif st == "reserved":
+            out["pending"] += 1
+        elif st == "settled":
+            out["settled"] += 1
+        if not (r["model"] or r["backend"]):
+            continue
+        out["calls"] += 1
+        out["last_ts"] = r["ts"]
+        m, be = r["model"] or "", r["backend"] or ""
+        if m and m not in models:
+            models.append(m)
+        if be and be not in backends:
+            backends.append(be)
+        if (be or m) and {"backend": be, "model": m} not in routes:
+            routes.append({"backend": be, "model": m})
+    out.update(served_models=models, backends=backends, routes=routes)
+    return out
+
+
+def _route_source(svc, backend: str) -> str:
+    """What kind of backend a route is on, from config only (no quota read):
+    subscription | metered | local | unknown."""
+    s = (getattr(svc.pool, "backends", None) or {}).get(backend)
+    if s is None:
+        return "unknown"
+    cfg = s.config
+    from ..budget import is_paid
+    if cfg.type == "anthropic-compatible" or cfg.effective_flavor == "cliproxyapi"             or cfg.is_subscription:
+        return "subscription"
+    return "metered" if is_paid(cfg) else "local"
+
+
+def _may_inspect_client(svc, client: str) -> bool:
+    """May the caller see another client's persona grant? An admin key or an
+    unrestricted (no `projects`) key: yes. A project-restricted key: only for
+    a configured client that is unrestricted or shares one of its projects
+    (an unknown client is refused, so existence isn't revealed either)."""
+    me = client_auth.current()
+    if "admin" in (me.get("scopes") or []):
+        return True
+    mine = set(me.get("projects") or [])
+    if not mine:
+        return True
+    c = next((c for c in svc.config_store.config.clients or [] if c.name == client), None)
+    if c is None:
+        return False
+    theirs = set(getattr(c, "projects", None) or [])
+    return not theirs or bool(mine & theirs)
+
+
+@router.get("/v1/foundry/personas/{name}/routes")
+async def persona_route_info(name: str, request: Request, client: str = ""):
+    """A persona's reachable route chain and whether a client may use it, for
+    a coordinator's readiness check. A missing, disabled or ungranted persona
+    is reported (exists/enabled/client_allowed false + reason), never a 404.
+    `client` names another configured client to check the grant for (default:
+    the calling key): allowed for an admin-scoped key, an unrestricted
+    caller, or a project-restricted caller asking about a client that serves
+    one of its projects; anything else is 403 (no probing of other projects'
+    clients). Config only: no quota read, no model call, no secrets."""
+    svc = request.app.state.services
+    if client and not _may_inspect_client(svc, client):
+        return JSONResponse({"error": f"this client key may not inspect client {client!r}",
+                             "code": "client_forbidden"}, status_code=403)
+    p = svc.personas.get(name)
+    res = {"name": name, "exists": p is not None, "enabled": bool(p and p.get("enabled")),
+           "strict": False, "routes": [], "client_allowed": False, "client": "", "reason": ""}
+    if client:
+        c = next((c for c in svc.config_store.config.clients or [] if c.name == client), None)
+        res["client"] = client
+        if c is None or not c.enabled:
+            allowed, why = False, f"client {client!r} is not configured or disabled"
+        else:
+            grant = list(c.personas or [])
+            allowed = not grant or name in grant or name.split(":")[0] in grant
+            why = "" if allowed else f"persona not granted to client {client!r}"
+    else:
+        res["client"] = client_auth.current().get("client_id") or ""
+        allowed = client_auth.persona_allowed(name)
+        why = "" if allowed else "persona not granted to the calling client key"
+    res["client_allowed"] = bool(allowed)
+    if p is None:
+        res["reason"] = f"persona {name!r} does not exist"
+        return res
+    res["name"] = p.get("virtual_name") or name
+    from .ollama_api import is_strict
+    from ..quota_gate import persona_routes
+    from ..brain.agent import _model_has_vision
+    res["strict"] = is_strict(p)
+    for be, m in persona_routes(svc, p):
+        try:
+            vision = bool(_model_has_vision(svc.registry, m))
+        except Exception:                                        # noqa: BLE001
+            vision = None
+        res["routes"].append({"backend": be, "model": m, "source": _route_source(svc, be),
+                              "vision": vision})
+    reasons = []
+    if not res["enabled"]:
+        reasons.append("persona is disabled")
+    if why:
+        reasons.append(why)
+    if not res["routes"]:
+        reasons.append("no reachable route" + (" (strict routing refuses)" if res["strict"]
+                                               else ""))
+    if not res["strict"]:
+        reasons.append("flexible routing: routes are candidates, not a fixed chain")
+    res["reason"] = "; ".join(reasons) or "ready"
+    return res
 
 
 @router.put("/v1/foundry/work/tasks/{project_id}/{task_id}")

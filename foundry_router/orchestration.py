@@ -36,7 +36,11 @@ FIELDS = ("project_id", "task_id", "run_id", "role", "parent_session_id", "perso
 # coordinator's orchestration-scoped binding: a client or model can't choose
 # it. Required work keeps the existing guardrails; optional work is admitted
 # only on fresh, below-cutoff quota for the account that serves it.
-REQUIRED_PURPOSES = ("implementer", "planning", "review", "closeout", "blocker_diagnosis")
+# lead_manager: the coordinator's recovery lead session (foundry_coordinator/lead.py),
+# required work like a blocker diagnosis but not counted against the per-run
+# helper allowance (quota_gate.effective_purpose caps planning/blocker_diagnosis only).
+REQUIRED_PURPOSES = ("implementer", "planning", "review", "closeout", "blocker_diagnosis",
+                     "lead_manager")
 OPTIONAL_PURPOSES = ("code_proposal", "test_design", "debug_advice", "exploration",
                      # proactive lanes (coordinator v0.118.0): always optional work
                      "visual_observation", "failure_triage", "incremental_review", "research",
