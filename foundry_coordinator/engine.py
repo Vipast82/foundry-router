@@ -1732,6 +1732,16 @@ class Coordinator:
             # its prior findings and decisions remain in the audit trail.
             if data.get("build_progress"):
                 data["free_retry"] = True
+        if lc_on and str(resolution or "").strip() and \
+                project_id in self.projects and self._lead_on(self.projects[project_id]):
+            # the operator's resolution IS the materially different strategy for the
+            # next start: it rides like a lead assignment (one session, crosses the
+            # repeat guard once), so the guard does not re-ask the question the
+            # operator just answered (UI-02, v0.126.6)
+            data["lead_assignment"] = {
+                "case_id": f"operator-unblock:{len(self.store.history(project_id, task_id))}",
+                "assignment": str(resolution).strip()[:4000], "files": [], "tests": [],
+                "extra_attempts": 0, "authorized": [], "via": "operator_unblock"}
         evidence = {"resolution": resolution, "reset_attempts": bool(reset_attempts)}
         S.check(t["state"], S.READY, evidence)        # a refused unblock leaves no note
         with self.store.tx():

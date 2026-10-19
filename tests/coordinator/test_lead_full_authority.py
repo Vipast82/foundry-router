@@ -486,3 +486,32 @@ def test_prohibitions_naming_tests_or_closeout_are_not_violations():
     assert test_edit_directives("The known issue: update the tests for the widget.",
                                 ["tests/*"], [])                 # 'known' is not 'no'
     assert directive_violations("Skip the au.gate check this time.")
+
+
+def test_operator_unblock_resolution_crosses_the_repeat_guard_once(tmp_path):
+    """UI-02 2026-10-19: an operator unblock (reset + written resolution) was
+    re-asked by the repeat guard within seconds (dec-a687...), opening yet
+    another lead case. The resolution is now the next start's strategy."""
+    from tests.coordinator.test_lead_e2e import _lifecycle_game, make_router
+    c, client, ff, did, utid = _lifecycle_game(
+        tmp_path, lambda ctx: {"final": "thinking"},
+        lead_kw={"full_authority": True, "router_repo": str(make_router(tmp_path))})
+    P = c.projects["game"]
+    f = {"class": "missing_evidence", "check_id": "au.gate_bound_to_head",
+         "text": "gate verdicts were recorded at an older commit than HEAD"}
+    for n in (1, 2, 3):
+        c.recovery.record_findings(P, c.store.task("game", utid), n, [f])
+    c.tick()                                  # the wait becomes a lead case first
+    note = "Victor: make only the S46 setup hermetic, then one tally over all suites."
+    c.unblock("game", utid, note, reset_attempts=True, actor="victor")
+
+    def with_note():
+        return [x for x in client.sessions.values() if x["metadata"].get("role") != "lead"
+                and any("S46 setup hermetic" in p for p in x.get("prompts") or [])]
+    assert run_until(c, lambda: with_note(), limit=20), \
+        [(d["kind"], d["status"]) for d in c.obligations.all_decisions("game", utid)]
+    reasks = [d for d in c.obligations.all_decisions("game", utid)
+              if d["kind"] == "recovery_escalation" and d["decision_id"] != did
+              and d["status"] == "open"]
+    assert not reasks
+    assert len(with_note()) == 1

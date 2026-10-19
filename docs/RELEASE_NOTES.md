@@ -2,6 +2,20 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.126.6 — an operator unblock's resolution is the next strategy
+
+UI-02, 2026-10-19: an operator unblock with a reset and a written resolution
+(Victor's S46 scope amendment) was re-asked by the repeat guard within
+seconds (`dec-a687daddaae7e248`), which opened another Lead case. The
+resolution reached the primary only as a note, not as the strategy the
+guard looks for.
+
+**Fix:** with `[lead_manager]` and lifecycle on, `unblock` stores the
+resolution as the next start's strategy. Like a Lead assignment, it is used
+for exactly one session and crosses the repeat guard once.
+
+**Test:** `test_operator_unblock_resolution_crosses_the_repeat_guard_once`.
+
 ## v0.126.5 — every feature on in the Animal Uprising template; deploy checkout
 
 - **`[frontier_primary]` is enabled** in `project.example.toml`, with persona
