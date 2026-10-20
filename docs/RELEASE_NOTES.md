@@ -2,6 +2,19 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.129.7 — reference renderer: viewport calibration diagnostic
+
+UI-D1's vision review flagged an empty band (96px at the bottom, 18px at the right) on every
+frame. It came from neither the UI nor the v0.129.3 flags: in the Kilo sessions' shell, headless
+Chrome lays the page out in a viewport smaller than the screenshot (headed-window insets), and
+the mock sized its stage from `clientWidth/clientHeight`. The session fixed the mock (UI-D1
+b8fd0e6). The coordinator's own gate runs and a hidden PowerShell window render correctly. The
+renderer now calibrates once per (browser, size) per process with a full-viewport test page,
+and the mock lane records `renderer.viewport@<size>` as a **non-required** check when that
+shell's viewport is short. This is a diagnostic, never a refusal. Tests:
+`test_png_pixels_reads_filtered_rows`, `test_calibration_catches_the_short_viewport`,
+`test_short_viewport_is_noted_on_each_frame`. Runner-side only.
+
 ## v0.129.6 — fast lane: the capture commit covers the whole capture folder
 
 On v0.129.5, UI-D1's session ran its own stories render, which re-rendered 463 frames

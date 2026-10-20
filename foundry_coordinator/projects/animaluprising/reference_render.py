@@ -197,6 +197,86 @@ def render_one(browser: str, url: str, out_png: str, w: int, h: int, *,
     return res
 
 
+def png_pixels(path: str, points: list) -> list:
+    """RGB at each (x, y) of an 8-bit RGB/RGBA PNG (pure Python: no PIL in the venv)."""
+    import struct
+    import zlib
+    data = open(path, "rb").read()
+    w, h = struct.unpack(">II", data[16:24])
+    if data[24] != 8 or data[25] not in (2, 6) or data[28] != 0:
+        raise RenderError(f"unsupported PNG format in {path}")
+    bpp = 4 if data[25] == 6 else 3
+    i, idat = 8, b""
+    while i < len(data):
+        n = struct.unpack(">I", data[i:i + 4])[0]
+        if data[i + 4:i + 8] == b"IDAT":
+            idat += data[i + 8:i + 8 + n]
+        i += 12 + n
+    raw, stride = zlib.decompress(idat), w * bpp + 1
+    need = max(y for _, y in points)
+    prev, rows = bytearray(w * bpp), {}
+    for r in range(need + 1):
+        f, line = raw[r * stride], bytearray(raw[r * stride + 1:(r + 1) * stride])
+        if f == 1:
+            for k in range(bpp, len(line)):
+                line[k] = (line[k] + line[k - bpp]) & 255
+        elif f == 2:
+            line = bytearray((a + b) & 255 for a, b in zip(line, prev))
+        elif f == 3:
+            for k in range(len(line)):
+                line[k] = (line[k] + ((line[k - bpp] if k >= bpp else 0) + prev[k]) // 2) & 255
+        elif f == 4:
+            for k in range(len(line)):
+                a = line[k - bpp] if k >= bpp else 0
+                b, c = prev[k], (prev[k - bpp] if k >= bpp else 0)
+                p = a + b - c
+                pa, pb, pc = abs(p - a), abs(p - b), abs(p - c)
+                line[k] = (line[k] + (a if pa <= pb and pa <= pc else b if pb <= pc else c)) & 255
+        rows[r] = line
+        prev = line
+    return [tuple(rows[y][x * bpp:x * bpp + 3]) for x, y in points]
+
+
+CALIBRATION_HTML = ("<!doctype html><html><head><style>html,body{margin:0;height:100%;"
+                    "background:#ff0000}#s{position:fixed;inset:0;background:#00ff00}</style>"
+                    "</head><body><div id=\"s\"></div></body></html>")
+_CALIBRATED: dict = {}
+
+
+def calibrate(browser: str, w: int, h: int, *, run: Callable = default_run) -> Optional[str]:
+    """None when a full-viewport page fills the whole WxH frame in this environment; else why.
+    Some shells (UI-D1's Kilo sessions, 2026-10-20) get Chrome frames whose page viewport is
+    18px narrower and 96px shorter than the screenshot (headed-window insets): every mock frame
+    then shows an empty band that vision reviewers flag as a UI bug. Checked once per
+    (browser, size) per process."""
+    key = (browser, w, h)
+    if key in _CALIBRATED:
+        return _CALIBRATED[key]
+    d = tempfile.mkdtemp(prefix="au-refcal-")
+    try:
+        page = os.path.join(d, "calibration.html")
+        with open(page, "w", encoding="utf-8") as f:
+            f.write(CALIBRATION_HTML)
+        why = None
+        for _ in range(2):                      # one retry: a launch can be transiently wrong
+            r = render_one(browser, Path(page).as_uri(), os.path.join(d, "cal.png"), w, h, run=run)
+            if not r["ok"]:
+                why = f"calibration render failed: {r['detail']}"
+                continue
+            pts = [(w - 1, h - 1), (w - 1, 0), (0, h - 1), (w // 2, h // 2)]
+            bad = [(p, c) for p, c in zip(pts, png_pixels(os.path.join(d, "cal.png"), pts))
+                   if c != (0, 255, 0)]
+            if not bad:
+                why = None
+                break
+            why = ("the page viewport does not fill the frame (not page colour at "
+                   + ", ".join(f"{x},{y}={c}" for (x, y), c in bad) + ")")
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+    _CALIBRATED[key] = why
+    return why
+
+
 def mapping_path(workspace: str) -> str:
     return os.path.join(workspace, REF_SUBDIR, MAPPING_NAME)
 
@@ -237,11 +317,17 @@ def render_references(workspace: str, stories: Optional[list] = None, sizes: Opt
     out_dir = out_dir or default_out_dir(workspace)
     base = os.path.dirname(os.path.abspath(mfile))
     urls = {s: page_url(p, base) for s, p in mapping.items()}       # fail before any render
+    # real browser: record whether this environment renders the true viewport (a diagnostic;
+    # a mock that sizes itself from the outer window still renders correctly, UI-D1 b8fd0e6)
+    notes = {(w, h): calibrate(exe, w, h, run=run) for w, h in sizes or SIZES} \
+        if run is default_run else {}
     results = []
     for story, url in urls.items():
         for w, h in sizes or SIZES:
             r = render_one(exe, url, os.path.join(out_dir, ref_filename(story, w, h)), w, h, run=run)
             r["story"] = story
+            if notes.get((w, h)):
+                r["viewport_note"] = notes[(w, h)]
             results.append(r)
             out(f"{'PASS' if r['ok'] else 'FAIL'}: REF {story}@{r['size']} - {r['detail']}")
     return results

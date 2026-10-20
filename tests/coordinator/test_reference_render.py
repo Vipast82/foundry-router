@@ -159,3 +159,68 @@ def test_live_render_390x844(tmp_path):
     assert res[0]["ok"], res[0]["detail"]
     assert RR.png_file_size(res[0]["path"]) == (390, 844)
     assert re.search(r"Live\.page@390x844\.png$", res[0]["path"])
+
+
+def solid_png(w, h, band=0, strip=0, page=(0, 255, 0), root=(255, 0, 0)) -> bytes:
+    """An RGB PNG of the page colour with `band` rows / `strip` columns of root colour at the
+    bottom / right (Up-filtered rows, like Chrome's encoder)."""
+    def chunk(t, d):
+        return struct.pack(">I", len(d)) + t + d + struct.pack(">I", zlib.crc32(t + d) & 0xFFFFFFFF)
+    rows, prev = [], bytes(w * 3)
+    for y in range(h):
+        line = b"".join(bytes(root if (y >= h - band or x >= w - strip) else page) for x in range(w))
+        rows.append(b"\x02" + bytes((a - b) & 255 for a, b in zip(line, prev)))
+        prev = line
+    return (b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", struct.pack(">IIBBBBB", w, h, 8, 2, 0, 0, 0))
+            + chunk(b"IDAT", zlib.compress(b"".join(rows))) + chunk(b"IEND", b""))
+
+
+class BandBrowser(FakeBrowser):
+    """UI-D1's broken shell: the frame is WxH but the page viewport is 18px/96px short."""
+
+    def __init__(self, band=96, strip=18, flaky=0):
+        super().__init__()
+        self.band, self.strip, self.flaky = band, strip, flaky
+
+    def __call__(self, argv, timeout):
+        self.calls.append(argv)
+        opt = {a.split("=", 1)[0]: a.split("=", 1)[1] for a in argv[1:-1] if "=" in a}
+        w, h = map(int, opt["--window-size"].split(","))
+        bad = self.flaky == 0 or len(self.calls) <= self.flaky
+        with open(opt["--screenshot"], "wb") as f:
+            f.write(solid_png(w, h, *((self.band, self.strip) if bad else (0, 0))))
+        return 0, ""
+
+
+def test_png_pixels_reads_filtered_rows(tmp_path):
+    p = tmp_path / "x.png"
+    p.write_bytes(solid_png(40, 30, band=5, strip=3))
+    assert RR.png_pixels(str(p), [(0, 0), (39, 0), (0, 29), (20, 10)]) == \
+        [(0, 255, 0), (255, 0, 0), (255, 0, 0), (0, 255, 0)]
+
+
+def test_calibration_catches_the_short_viewport(monkeypatch):
+    monkeypatch.setattr(RR, "_CALIBRATED", {})
+    why = RR.calibrate("chrome.exe", 120, 100, run=BandBrowser(band=10, strip=4))
+    assert why and "does not fill the frame" in why and "119,99" in why
+    monkeypatch.setattr(RR, "_CALIBRATED", {})
+    assert RR.calibrate("chrome.exe", 120, 100, run=BandBrowser(band=0, strip=0)) is None
+    monkeypatch.setattr(RR, "_CALIBRATED", {})
+    flaky = BandBrowser(band=10, strip=4, flaky=1)                # first launch only: retried
+    assert RR.calibrate("chrome.exe", 120, 100, run=flaky) is None and len(flaky.calls) == 2
+
+
+def test_short_viewport_is_noted_on_each_frame(tmp_path, monkeypatch):
+    """A diagnostic, never a refusal: a mock that sizes itself from the outer window
+    (UI-D1 b8fd0e6) still renders correctly in such a shell."""
+    ws = make_ws(tmp_path)
+    monkeypatch.setattr(RR, "_CALIBRATED", {})
+    band = BandBrowser(band=10, strip=4)
+    monkeypatch.setattr(RR, "default_run", band)
+    [r] = RR.render_references(str(ws), ["Hud.normal"], [(120, 100)], browser="chrome.exe",
+                               exists=always, run=band)
+    assert r["ok"] and "does not fill the frame" in r["viewport_note"]
+    monkeypatch.setattr(RR, "_CALIBRATED", {})
+    [r] = RR.render_references(str(ws), ["Hud.normal"], [(120, 100)], browser="chrome.exe",
+                               exists=always, run=FakeBrowser())       # fakes: no calibration
+    assert "viewport_note" not in r

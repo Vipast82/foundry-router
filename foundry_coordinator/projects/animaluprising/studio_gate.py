@@ -1295,6 +1295,7 @@ class Gate:
             self.add(check("story.none", "FAIL", "no mock stories selected (plan stories[] / --story)"))
             return
         out_dir = os.path.join(self.repo, "docs", "evidence", "UI-v3", self.sprint)
+        viewport_noted: set = set()
         for i, st in enumerate(picked, 1):
             self.status("mock", f"{i - 1}/{len(picked)}")
             name = st["name"]
@@ -1307,6 +1308,13 @@ class Gate:
                 continue
             for r in res:
                 size = r.get("size") or ""
+                if r.get("viewport_note") and size not in viewport_noted:
+                    # diagnostic, never required: this shell's headless viewport is short of
+                    # the frame, so a mock sized from clientWidth/Height leaves an empty band
+                    viewport_noted.add(size)
+                    self.add(check(f"renderer.viewport@{size}", "FAIL",
+                                   "headless viewport is short of the frame in this shell: "
+                                   + str(r["viewport_note"]), required=False))
                 path = r.get("path") or os.path.join(out_dir, RR.ref_filename(name, *RR.parse_size(size)))
                 ok = bool(r.get("ok"))
                 self.add(check(f"story.{name}@{size}", "PASS" if ok else "FAIL",
