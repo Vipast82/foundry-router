@@ -832,7 +832,8 @@ Change no code or test file in this session; if one needs changing, stop and rep
             notes.append("no 'PASS: GATE HEAD <sha>' before the verdict: the gate is not bound "
                          "to a revision")
         status = "ok" if heads else "unverified"
-        exempt = self.exempt_paths(spec) + [f"docs/progress/{t}_*"]
+        # the gate's own captures: the post-PASS capture commit always lands after the gate
+        exempt = self.exempt_paths(spec) + [f"docs/progress/{t}_*", f"docs/evidence/UI-v3/{t}/**"]
         for label, sha in named:
             full = ws.run("rev-parse", "--verify", "--quiet", sha + "^{commit}",
                           check=False).strip()
@@ -1379,8 +1380,10 @@ Change no code or test file in this session; if one needs changing, stop and rep
             # fast lane: the studio_gate verdict (one `fast_lane.gate` record bound to
             # the revision) is the BUILD evidence; the runner covers suites,
             # captures and boot itself
+            # runtime False: the runner verifies the live Studio fingerprint itself (a mock
+            # sprint has none) and the record never carries a ledger runtime identity
             return [{"check_id": "fast_lane.gate", "chain_id": None, "seq": None,
-                     "prereqs": [], "runtime": True, "min_tier": "verified"}]
+                     "prereqs": [], "runtime": False, "min_tier": "verified"}]
         if phase == "CLOSE":
             return [{"check_id": f"done_check:{t}", "chain_id": None, "seq": None,
                      "prereqs": [], "runtime": False, "min_tier": "verified"}]

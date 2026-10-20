@@ -2,6 +2,22 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.130.4 — fast lane: build.gate resolves from the studio_gate verdict
+
+UI-D1 passed its gate and had vision accepted, then the [lifecycle] submission check refused
+review. The `build.gate` obligation's `fast_lane.gate` record was never fresh: the ledger
+requires a runtime identity for it ("runtime check without a runtime identity"), and fast-lane
+records never carry one (a mock sprint runs no Studio at all). Every repair assignment today
+listed `build.gate` as unresolved.
+
+- **Ledger:** `fast_lane.gate` no longer needs a ledger runtime identity. The runner verifies
+  the live Studio fingerprint itself before it can pass. Freshness still requires its code
+  dependencies (`src/**`, `tests/**`, `default.project.json`) to be unchanged.
+- **Gate binding:** the evidence-log binding exempts the runner's capture folder
+  (`docs/evidence/UI-v3/<ID>/**`), which the post-PASS capture commit always changes.
+- **Tests:** fast-lane, evidence-ledger, AU adapter, lifecycle and obligation tests all pass
+  (218). Coordinator change; it needs a restart.
+
 ## v0.130.3 — fast lane: after an approval, vision reviews only changed frames
 
 Cost: every small UI-D1 commit re-sent all ~500 frames (26 image calls) to vision, even after

@@ -846,6 +846,12 @@ class EvidenceLedger:
             more = f" (+{len(changed) - 5} more)" if len(changed) > 5 else ""
             return "stale", "dependency changed since " + src[:12] + ": " + \
                 ", ".join(changed[:5]) + more
+        if r.get("check_id") == "fast_lane.gate":
+            # the studio_gate runner proves what Studio loaded (live hash) before it can
+            # pass, and a mock-lane sprint runs no Studio at all: the verdict is the runtime
+            # proof (UI-D1 2026-10-20: build.gate never resolved for a fast-lane task)
+            return "fresh", (f"dependencies unchanged ({len(m_rev)} files); verified by the "
+                             f"studio_gate runner")
         expected = _call(P.adapter, "runtime_expected", None, spec, revision)
         rid = r.get("runtime_id") or ""
         if expected is not None or needs_runtime:
