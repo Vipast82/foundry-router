@@ -2,6 +2,20 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.129.2 — fast lane: vision approval in batches
+
+UI-D1's gate passed with about 560 mock frames. The fast lane then asked the vision model to
+review all of them in one call and return a verdict row per frame. It came back "uncertain"
+twice ("did not account for every required frame"), and the task stopped BLOCKED.
+
+- **Batches:** frames go to the vision reviewer in batches of `[fast_lane] vision_batch_frames`
+  (default 20). There is one idempotent call per batch and at most one call per tick. Every
+  batch must approve; CHANGES findings from all batches merge, each prefixed with its batch. A
+  retry re-asks only the inconclusive batches, and approved or CHANGES batches are reused.
+- **Tests:** `test_vision_reviews_in_batches_and_retries_only_inconclusive`,
+  `test_vision_batch_changes_merge_findings`; fast-lane, engine and vision-approval tests 61
+  passed.
+
 ## v0.129.1 — studio gate: mock lane for design sprints; runner importable with `py`
 
 UI-D1's first session stopped BLOCKED on two gaps: its gate is an HTML mock, not Studio

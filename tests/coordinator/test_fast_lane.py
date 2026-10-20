@@ -478,3 +478,29 @@ def test_kill_stops_the_whole_tree_and_the_playtest(tmp_path, monkeypatch):
     seen.clear()
     lane._kill(P, "T1", {"head": "a" * 40, "pid": 9999}, "moved on")
     assert seen == []
+
+
+def test_vision_reviews_in_batches_and_retries_only_inconclusive(env):
+    """UI-D1 (2026-10-20): ~560 frames in one vision call came back uncertain. Frames
+    go in batches of [fast_lane] vision_batch_frames, one call per tick; every batch
+    must approve; a retry re-asks only the inconclusive batch."""
+    caps = [CAP.replace(".png", f"-{i}.png") for i in range(5)]
+    e = env([{"result": "PASS", "captures": caps}],
+            vision=["approve", "uncertain", "approve", "approve"])
+    e.c.projects["game"].profile.fast_lane["vision_batch_frames"] = 2
+    e.c.approve("game", "T1", [], "victor")
+    t = drive(e, lambda t: t["state"] == S.COMPLETE)
+    vision_calls = [x for x in e.ff.chats if x.get("packet") == "vision"]
+    assert len(vision_calls) == 4          # 3 batches + one retry of the uncertain batch
+    assert "b2of3" in vision_calls[-1]["session_id"] or vision_calls[-1]["session_id"].endswith("-1")
+    [a] = e.c.store.approvals("game", "T1", "visual")
+    assert set(a["artifacts"]) == set(caps)
+
+
+def test_vision_batch_changes_merge_findings(env):
+    caps = [CAP.replace(".png", f"-{i}.png") for i in range(3)]
+    e = env([{"result": "PASS", "captures": caps}],
+            vision=["approve", "changes_required"] + ["approve"] * 6)
+    e.c.projects["game"].profile.fast_lane["vision_batch_frames"] = 2
+    e.c.approve("game", "T1", [], "victor")
+    drive(e, lambda t: any("[batch 2/2]" in x[2] for x in e.client.log))

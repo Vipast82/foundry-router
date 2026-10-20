@@ -145,6 +145,7 @@ FAST_LANE_DEFAULTS = {
     "gate_timeout_minutes": 45,               # a run still going after this = red gate
     "max_red_gates_before_handoff": 2,        # local-primary tasks then auto-request frontier_primary
     "max_vision_rounds": 2,                   # CHANGES rounds before accept-with-notes
+    "vision_batch_frames": 20,                # frames per vision call (UI-D1 had ~560 frames)
     "lanes": ["prework", "test_design", "failure_triage", "incremental_review"],
 }
 

@@ -717,29 +717,70 @@ class FastLane:
         fl = self._fl(P, tid)
         fp = hashlib.sha256(json.dumps([run["head"], arts], sort_keys=True).encode()).hexdigest()
         tries = int((fl.get("vision_uncertain") or {}).get(fp, 0))
-        key = f"fast-lane-vision:{P.id}:{tid}:{fp}:{tries}"
-        prior = self.store.op_begin(key, P.id, tid, "visual_approval")
-        res = None
-        if prior:
-            r = prior.get("result") or {}
-            if prior["status"] == "done":
-                res = r
-            elif prior["status"] == "deferred" and self.clock() >= float(r.get("retry_at") or 0):
-                pass                     # retry the deferred call now
-            elif prior["status"] == "calling":
-                # a restart during the call: its outcome is unknown and never paid twice
-                res = {"verdict": "uncertain", "findings": ["call outcome unknown after a "
-                                                            "restart"], "served_model": ""}
-                self.store.op_update(key, "done", res)
-            else:
-                self.c._note(P, t, f"fast-lane vision approval deferred: {r.get('reason') or ''}"
-                             [:500])
-                return None
-        if res is None:
-            res = self._vision_call(P, t, spec, head, run, v, frames, arts, persona, routes, key)
+        # Batches (UI-D1, 2026-10-20: ~560 frames in ONE call came back "uncertain" because
+        # no model reliably returns a row per frame at that size). One idempotent call per
+        # batch, at most one call per tick; every batch must approve; findings merge.
+        size = max(1, int(settings(P).get("vision_batch_frames") or 20))
+        batches = [frames[i:i + size] for i in range(0, len(frames), size)]
+        results_b, served_all = [], set()
+        for bi, batch in enumerate(batches):
+            barts = {rel: arts[rel] for rel, _m, _b in batch}
+            suffix = f":b{bi + 1}of{len(batches)}" if len(batches) > 1 else ""
+            key = f"fast-lane-vision:{P.id}:{tid}:{fp}:{tries}{suffix}"
+            reused = None
+            for earlier in range(tries):     # a retry re-asks only the inconclusive batches
+                op = self.store.op(f"fast-lane-vision:{P.id}:{tid}:{fp}:{earlier}{suffix}")
+                r0 = (op or {}).get("result") or {}
+                if op and op.get("status") == "done" and r0.get("verdict") in ("approve",
+                                                                                "changes_required"):
+                    reused = r0
+            if reused is not None:
+                results_b.append(reused)
+                served_all.add(reused.get("served_model") or "unknown")
+                continue
+            prior = self.store.op_begin(key, P.id, tid, "visual_approval")
+            res = None
+            if prior:
+                r = prior.get("result") or {}
+                if prior["status"] == "done":
+                    res = r
+                elif prior["status"] == "deferred" and self.clock() >= float(r.get("retry_at") or 0):
+                    pass                 # retry the deferred call now
+                elif prior["status"] == "calling":
+                    # a restart during the call: its outcome is unknown and never paid twice
+                    res = {"verdict": "uncertain", "findings": ["call outcome unknown after a "
+                                                                "restart"], "served_model": ""}
+                    self.store.op_update(key, "done", res)
+                else:
+                    self.c._note(P, t, f"fast-lane vision approval deferred: "
+                                       f"{r.get('reason') or ''}"[:500])
+                    return None
             if res is None:
-                return None
-        verdict, findings = res.get("verdict"), list(res.get("findings") or [])
+                self.c._note(P, t, f"fast-lane vision review: batch {bi + 1}/{len(batches)} "
+                                   f"({len(batch)} frames)")
+                res = self._vision_call(P, t, spec, head, run, v, batch, barts, persona, routes,
+                                        key, batch_label=(bi + 1, len(batches)))
+                if res is None:
+                    return None
+                if bi + 1 < len(batches):
+                    return None          # one call per tick; the next tick takes the next batch
+            results_b.append(res)
+            served_all.add(res.get("served_model") or "unknown")
+        verdicts = [r.get("verdict") for r in results_b]
+        findings = []
+        for bi, r in enumerate(results_b):
+            pre = f"[batch {bi + 1}/{len(results_b)}] " if len(results_b) > 1 else ""
+            findings += [pre + str(f) for f in (r.get("findings") or [])
+                         if r.get("verdict") != "approve"]
+        if all(x == "approve" for x in verdicts):
+            verdict = "approve"
+        elif any(x == "changes_required" for x in verdicts) and \
+                not any(x not in ("approve", "changes_required") for x in verdicts):
+            verdict = "changes_required"
+        else:
+            verdict = "uncertain"
+        res = {"verdict": verdict, "findings": findings[:60],
+               "served_model": ",".join(sorted(served_all))}
         served = res.get("served_model") or "unknown"
         actor = f"model:{persona}/{served}"
         if verdict == "approve":
@@ -787,7 +828,7 @@ class FastLane:
         return None
 
     def _vision_call(self, P, t, spec, head, run, v, frames, arts, persona, routes,
-                     key) -> Optional[dict]:
+                     key, batch_label: tuple = (1, 1)) -> Optional[dict]:
         from . import visual_approval as VA
         tid = t["task_id"]
         sid = f"fast-lane-vision-{key.rsplit(':', 2)[-2][:16]}-{key.rsplit(':', 1)[-1]}"
@@ -800,8 +841,9 @@ class FastLane:
                    if isinstance(c, dict)}
         parts = [{"type": "text", "text": (
             f"Fast-lane vision approval for project {P.id}, sprint {tid}, revision {head} (the "
-            f"studio gate passed at {run['head'][:12]}). Review ALL {len(frames)} required "
-            "captures against the sprint and the rubric below. Do not infer pixels from "
+            f"studio gate passed at {run['head'][:12]}). This is batch {batch_label[0]} of "
+            f"{batch_label[1]}; every batch must approve. Review ALL {len(frames)} captures in "
+            "this batch against the sprint and the rubric below. Do not infer pixels from "
             "filenames or claim inspection without seeing each image. Return valid JSON with "
             'keys "verdict" (approve, changes_required or uncertain), "frames" (one object per '
             "image with path, sha256, image_seen, subject_present, validity, observation and "
