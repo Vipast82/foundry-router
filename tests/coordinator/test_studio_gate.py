@@ -991,3 +991,37 @@ def test_stop_playtest_command(fakes, repo):
     out = []
     assert G.main(["--repo", str(repo), "stop-playtest"], out=out.append) == 0
     assert out[-1].startswith("STOPPED") and calls()[-1]["args"] == {"action": "stop"}
+
+
+def test_mock_lane_renders_frames_as_checks_and_captures(tmp_path, monkeypatch):
+    """lane "mock" (UI-D1): reference-renderer frames become story checks + captures;
+    a failed frame is a FAIL check and no capture; no Studio call is made."""
+    from foundry_coordinator.projects.animaluprising import reference_render as RR
+    seen = []
+
+    def fake_render(workspace, stories, sizes, *, out_dir=None, out=print, **_):
+        seen.append((stories, sizes, out_dir))
+        res = []
+        for w, h in sizes or RR.SIZES:
+            ok = not (stories == ["hud.combat"] and (w, h) == (390, 844))
+            res.append({"path": os.path.join(out_dir, RR.ref_filename(stories[0], w, h)),
+                        "size": RR.size_name(w, h), "ok": ok, "detail": "ok" if ok else "PNG is 1x1"})
+        return res
+    monkeypatch.setattr(RR, "render_references", fake_render)
+    g = G.Gate(str(tmp_path), "UI-D1", "sprint", official=object(), community=object(),
+               run_cmd=lambda *a, **k: (0, ""))
+    g.run_mock([{"name": "hud.combat"}, {"name": "hud.pad", "sizes": ["1920x1080"]}, {"bad": 1}])
+    by = {c["id"]: c["result"] for c in g.checks}
+    assert by["story.hud.combat@1920x1080"] == "PASS"
+    assert by["story.hud.combat@390x844"] == "FAIL"
+    assert by["story.hud.pad@1920x1080"] == "PASS" and "story.hud.pad@390x844" not in by
+    assert len(g.captures) == 5 and all(c["source"] == "mock" for c in g.captures)
+    assert seen[1][1] == [(1920, 1080)]
+    assert seen[0][2].endswith(os.path.join("docs", "evidence", "UI-v3", "UI-D1"))
+
+
+def test_mock_lane_with_no_stories_fails(tmp_path):
+    g = G.Gate(str(tmp_path), "UI-D1", "stories", official=object(), community=object(),
+               run_cmd=lambda *a, **k: (0, ""))
+    g.run_mock([])
+    assert [c["result"] for c in g.checks if c["id"] == "story.none"] == ["FAIL"]

@@ -2,6 +2,23 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.129.1 — studio gate: mock lane for design sprints; runner importable with `py`
+
+UI-D1's first session stopped BLOCKED on two gaps: its gate is an HTML mock, not Studio
+stories, and `py -m foundry_coordinator...` was not importable from the game repo.
+
+- **Mock lane:** a gate file with `"lane": "mock"` renders each story through the reference
+  renderer (`docs/design/ui-overhaul/v3/references.json` maps story -> page) at its sizes into
+  `docs/evidence/UI-v3/<ID>/`. Each frame is a `story.<name>@<WxH>` check and a capture for the
+  vision approval. Studio, playtests and regression are skipped. Works in `sprint` and
+  `stories` modes.
+- **Workstation:** a per-user `foundry_deploy.pth` puts the deploy checkout on the default
+  Python's path, so `py -m foundry_coordinator.projects.animaluprising.studio_gate` works from
+  any folder (stdlib only).
+
+**Tests:** `test_mock_lane_renders_frames_as_checks_and_captures`,
+`test_mock_lane_with_no_stories_fails`; runner, fast-lane and renderer tests 73 passed.
+
 ## v0.129.0 — UI-T0: the studio gate runner and the coordinator fast lane
 
 UI-02 showed that building UI was not the slow part; proving it was. It ran

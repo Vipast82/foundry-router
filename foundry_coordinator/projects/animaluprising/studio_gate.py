@@ -1283,6 +1283,39 @@ class Gate:
             self.add(check("host.live_hash", "PASS", summary))
 
     # ---- stories ----------------------------------------------------------------
+    def run_mock(self, stories: list, only: Optional[list] = None):
+        """lane "mock" (UI-D1): render HTML mock pages through the reference renderer instead
+        of mounting Studio stories. Every (story, size) frame becomes a check and a capture,
+        so the coordinator's vision approval sees them like Studio captures. The page for each
+        story comes from docs/design/ui-overhaul/v3/references.json (committed by the sprint)."""
+        from . import reference_render as RR
+        picked = [s for s in stories if isinstance(s, dict) and s.get("name")
+                  and (not only or s["name"] in only)]
+        if not picked:
+            self.add(check("story.none", "FAIL", "no mock stories selected (plan stories[] / --story)"))
+            return
+        out_dir = os.path.join(self.repo, "docs", "evidence", "UI-v3", self.sprint)
+        for i, st in enumerate(picked, 1):
+            self.status("mock", f"{i - 1}/{len(picked)}")
+            name = st["name"]
+            sizes = [RR.parse_size(z) for z in (st.get("sizes") or [])] or None
+            try:
+                res = RR.render_references(self.repo, [name], sizes, out_dir=out_dir,
+                                           out=lambda m: self._raw.append(m + "\n"))
+            except Exception as e:                                    # noqa: BLE001
+                self.add(check(f"mock.{name}", "FAIL", f"render failed: {type(e).__name__}: {e}"[:300]))
+                continue
+            for r in res:
+                size = r.get("size") or ""
+                path = r.get("path") or os.path.join(out_dir, RR.ref_filename(name, *RR.parse_size(size)))
+                ok = bool(r.get("ok"))
+                self.add(check(f"story.{name}@{size}", "PASS" if ok else "FAIL",
+                               str(r.get("detail") or "")[:300], artifacts=[rel(self.repo, path)]))
+                if ok:
+                    self.captures.append({"story": name, "size": size, "path": rel(self.repo, path),
+                                          "geometry_defects": 0, "layout_lines": [], "source": "mock"})
+        self.status("mock", f"{len(picked)}/{len(picked)}")
+
     def run_stories(self, stories: list, only: Optional[list] = None):
         stories = [s for s in stories or [] if not only or (isinstance(s, dict) and s.get("name") in only)]
         if not stories:
@@ -2085,6 +2118,10 @@ def run_gate(a, out=print, official=None, community=None, run_cmd=default_run_cm
         release_lock(a.repo)
 
 
+class _MockDone(Exception):
+    """The mock lane finished the sprint branch early (not an error)."""
+
+
 def _run_gate(a, mode, sprint, run_id, out, official, community, run_cmd) -> int:
     g = Gate(a.repo, sprint, mode, place=a.place, official=official, community=community,
              run_cmd=run_cmd, call_timeout=a.timeout, out=out, run_id=run_id)
@@ -2110,6 +2147,13 @@ def _run_gate(a, mode, sprint, run_id, out, official, community, run_cmd) -> int
             for c in plan_checks(plan, files, explicit, affected):
                 g.add(c)
             meta = f"files=[{','.join(files)}] selection={selection or 'none'} tier={a.tier}"
+            if plan.get("lane") == "mock":
+                # UI-D1-style design sprint: HTML mock frames only; no Studio, no playtest,
+                # no regression (nothing under src/ or tests/ changes in a mock sprint)
+                meta += " lane=mock"
+                g.run_mock(plan.get("stories") or [])
+                g.add(check("regression.selection", "SKIP", "mock lane: no Studio suites", required=False))
+                raise _MockDone()
             g.preflight()
             g.console_base = g.console_lines()
             g.live_verify(expect)
@@ -2139,6 +2183,8 @@ def _run_gate(a, mode, sprint, run_id, out, official, community, run_cmd) -> int
             plan, problem = load_plan(g.repo, sprint, g.head or "HEAD")
             if problem:
                 g.add(check("host.gate_plan", "FAIL", problem))
+            elif plan.get("lane") == "mock":
+                g.run_mock(plan.get("stories") or [], a.story)
             else:
                 g.preflight()
                 g.console_base = g.console_lines()
@@ -2153,6 +2199,8 @@ def _run_gate(a, mode, sprint, run_id, out, official, community, run_cmd) -> int
             g.console_base = g.console_lines()
             g.regression_lane(a.selection)
             g.console_check()
+    except _MockDone:
+        pass
     except Exception as e:                                   # tooling failure -> ERROR, exit 2
         error = f"{type(e).__name__}: {e}"
     finally:
