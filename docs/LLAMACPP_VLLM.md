@@ -141,7 +141,7 @@ the only slot on `-np 1`, and model swaps under llama-swap.
 
 ## Performance advisor
 
-**Dashboard → Live** (top card, refreshed every 30 s) and **Performance** (for
+**Monitor → Live** (top card, refreshed every 30 s) and **Performance** (for
 the selected window) show the **🩺 Performance advisor**: every sign of a
 performance problem Foundry can see, in plain language. Click a finding for
 *why it matters*, *what to do* (numbered steps) and the *evidence* numbers.

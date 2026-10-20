@@ -1580,7 +1580,11 @@ class ControlCenter:
         steps = [_s(x, 240) for x in (b.get("steps") if isinstance(b.get("steps"), list)
                                       else [])[:12] if isinstance(x, str)]
         n = _count(b.get("open_steps")) or len(steps)
+        tot = b.get("total_steps")
+        # the plan's BUILD row count (bridge >= v0.128); None = not reported
+        tot = tot if isinstance(tot, int) and not isinstance(tot, bool) and 0 < tot <= 10000 else None
         return {"open_steps": n, "steps": steps, "truncated": b.get("truncated") is True,
+                "total_steps": tot,
                 "head_sha": _s(b.get("head_sha"), 64), "ts": _f(b.get("ts"))}
 
     def _safe_task_view(self, task: dict) -> dict:

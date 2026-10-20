@@ -211,7 +211,7 @@ fails preservation. New or task-owned uncommitted closeout files still fail CLEA
 
 ## Setting it up (Victor's workstation)
 
-1. **Foundry:** add a coordinator key. Setup → Clients & keys → preset
+1. **Foundry:** add a coordinator key. Access → Clients & keys → preset
    **coordinator** fills a role-based persona list: `reviewer` →
    `Foundry-Kilo-Review` (required for normal direct review) and
    `deep_reviewer` → `Foundry-Kilo-Deep-Review`. The key needs no admin scope and
@@ -288,7 +288,7 @@ The **control center** (Foundry `/ui/control`, reached from Work) shows live tra
 helpers, alerts and replies, and sends typed operator actions that this engine applies
 itself: [CONTROL_CENTER.md](CONTROL_CENTER.md).
 
-Foundry → Dashboard → **Work** shows tasks, bound sessions (persona asked for,
+Foundry → Monitor → **Coordinator work** shows tasks, bound sessions (persona asked for,
 backend/model that answered, calls, tokens, denials) and events.
 Foundry → Routing → **Routes** and **Usage Log → Budgets** show the same calls
 by route and by rule.

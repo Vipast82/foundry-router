@@ -49,7 +49,7 @@ Each backend sets how many sessions it serves at once with `helpers_allowed`
   the backend and who holds the slots (`rule: backend-helpers`).
 - Health probes don't take a slot. With `budgets.enabled: false` the limit is
   off too.
-- Dashboard → *Can it serve?* → **streams** shows `active/allowed` and, on
+- Backends → Backend pool → *Can it serve?* → **streams** shows `active/allowed` and, on
   hover, which persona or client holds each slot.
 
 This replaces the old default `one-frontier-helper` rule: config v4 turns it

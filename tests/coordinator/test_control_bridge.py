@@ -859,13 +859,14 @@ PROGRESS_MARKER = ("Continue the committed plan's open BUILD steps; "
                    "final gate and review remain required.")
 
 
-def _build_progress(store, sid, steps, head="e" * 40):
+def _build_progress(store, sid, steps, head="e" * 40, total=None):
     """The engine's own record of committed partial BUILD progress, in the exact
     shape engine.py writes it (transition evidence + task fields + data)."""
     t = store.task("game", "T1")
     return store.transition("game", "T1", "CHANGES_REQUIRED", {
         "head_sha": head, "build_progress": True, "open_steps": steps[:12],
-        "session_id": sid, "findings": [PROGRESS_MARKER]},
+        "session_id": sid, "findings": [PROGRESS_MARKER],
+        **({"total_steps": total} if total is not None else {})},
         head_sha=head, next_action="continue BUILD from committed plan",
         data={**t["data"], "findings": None, "build_progress": steps[:12], "free_retry": True})
 
@@ -873,18 +874,19 @@ def _build_progress(store, sid, steps, head="e" * 40):
 def test_bridge_threads_build_continuing_from_the_engines_record(env):
     cc, store, br, sid = env["cc"], env["store"], env["bridge"], env["sid"]
     steps = [f"- [ ] step {i} <b>x</b>" for i in range(5)]
-    _build_progress(store, sid, steps)
+    _build_progress(store, sid, steps, total=9)
     store.update_session(sid, status="ended", ended_ts=time.time())
     br.step()
     d = _task_data(cc)
     b = d["build_continuing"]
+    assert b["total_steps"] == 9                  # the plan's BUILD rows (engine._build_total)
     assert b["open_steps"] == 5 and b["steps"] == steps and b["truncated"] is False
     assert b["head_sha"] == "e" * 40 and b["session_id"] == sid and b["ts"]
     assert d["findings"] == []                    # nothing listed as a finding
     # Foundry: bounded into both views; not an attempt, no decision
     row = cc.task_row("game", "T1", [])
     vv = cc.verification_view(row)
-    assert vv["build"] == {"open_steps": 5, "steps": steps, "truncated": False,
+    assert vv["build"] == {"open_steps": 5, "steps": steps, "truncated": False, "total_steps": 9,
                            "head_sha": "e" * 40, "ts": b["ts"]}
     assert vv["attempts"]["used"] == store.task("game", "T1")["attempt"]
     tv = cc.task_view_for("game", "T1", [])
@@ -920,6 +922,12 @@ def test_build_continuing_is_bounded_and_never_read_from_model_text():
     b = build_continuation([tr("IMPLEMENTING", "CHANGES_REQUIRED", build_progress=True,
                                open_steps=many, head_sha="a" * 90)])
     assert b["open_steps"] == 30 and len(b["steps"]) == 12 and b["truncated"]
+    assert b["total_steps"] is None               # not reported: never guessed
+    for bad in (True, "9", -1, 0, 10 ** 6, 2.5):
+        assert build_continuation([tr("IMPLEMENTING", "CHANGES_REQUIRED", build_progress=True,
+                                      open_steps=["- [ ] a"], total_steps=bad)])["total_steps"] is None
+    assert build_continuation([tr("IMPLEMENTING", "CHANGES_REQUIRED", build_progress=True,
+                                  open_steps=["- [ ] a"], total_steps=24)])["total_steps"] == 24
     assert all(len(s) <= 240 for s in b["steps"]) and len(b["head_sha"]) == 64
     # only the engine's explicit flag: findings, next_action or a report saying so don't count
     assert build_continuation([tr("IMPLEMENTING", "CHANGES_REQUIRED",

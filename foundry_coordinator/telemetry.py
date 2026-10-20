@@ -361,6 +361,10 @@ _BUILD_LOOP = ("IMPLEMENTING", "PAUSED", "AWAITING_HUMAN")
 MAX_BUILD_STEPS = 12                      # the engine records at most 12 open steps
 
 
+def _total_steps(v) -> Optional[int]:
+    return v if isinstance(v, int) and not isinstance(v, bool) and 0 < v <= 10000 else None
+
+
 def build_continuation(transitions: list) -> Optional[dict]:
     """"BUILD continuing" for one task, from the engine's own record only
     (engine.py, committed partial BUILD): the transition IMPLEMENTING ->
@@ -387,6 +391,9 @@ def build_continuation(transitions: list) -> Optional[dict]:
     return {"open_steps": len(steps), "steps": [_cap(s.strip(), 240) for s in steps[:MAX_BUILD_STEPS]],
             # the engine keeps only the first 12 open rows: "12" may mean more
             "truncated": len(steps) >= MAX_BUILD_STEPS,
+            # BUILD rows in the committed plan (engine._build_total; CLOSE row
+            # excluded) when the plan has a structured checklist, else None
+            "total_steps": _total_steps(ev.get("total_steps")),
             "head_sha": _cap(ev.get("head_sha"), 64), "session_id": _cap(ev.get("session_id"), 120),
             "ts": last.get("ts")}
 

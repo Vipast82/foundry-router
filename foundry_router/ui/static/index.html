@@ -11,27 +11,34 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Foundry Router</title>
 <style>
-  /* Molten-metal palette (matches the Foundry Enterprises logo). Dark is the
-     default; [data-theme="light"] (set by the header toggle, remembered in
-     localStorage) swaps to the logo's white-field look. Pill backgrounds are
-     variables too, so status chips read correctly in both themes. */
+  /* Foundry palette, shared with the control center (/ui/control): "cast iron"
+     dark, a cool "mill scale" light (not cream), molten orange from the logo as
+     the accent and steel blue for information. Dark is the default; the header
+     toggle (remembered in localStorage) or the OS preference picks light. Pill
+     backgrounds are variables too, so status chips read in both themes. */
   :root {
     color-scheme: dark;
-    --bg:#15120e; --panel:#201b15; --line:#33291f; --fg:#e8e3da; --dim:#9a8f80;
-    --accent:#ff8a1e; --accent-2:#ffb347;
-    --ok:#66c06f; --bad:#e0574f; --warn:#e0a441;
-    --ok-bg:#1b3320; --bad-bg:#3a1e1c; --warn-bg:#38301a;
+    --bg:#14110e; --panel:#1c1814; --panel-2:#26201a; --line:#352c23; --fg:#ebe5db; --dim:#a39684;
+    --accent:#ff8a1e; --accent-2:#ffb347; --on-accent:#1a1206; --info:#7db4d8;
+    --ok:#6cc47c; --bad:#ef5d50; --warn:#e8aa3c;
+    --ok-bg:#183020; --bad-bg:#3c1a17; --warn-bg:#382c14; --info-bg:#172a37;
+    --ui-font: "Segoe UI Variable Text", "Segoe UI", system-ui, -apple-system, sans-serif;
+    /* numbers, headings and navigation: Bahnschrift ships with Windows (DIN
+       lineage, like stamped plate); the fallbacks keep the same narrow feel */
+    --num-font: Bahnschrift, "DIN Alternate", "Barlow Semi Condensed", "Arial Narrow", var(--ui-font);
+    --shadow: 0 1px 0 rgba(0,0,0,.25);
   }
   :root[data-theme="light"] {
     color-scheme: light;
-    --bg:#f6f2ec; --panel:#ffffff; --line:#e4ddd1; --fg:#2a2622; --dim:#6f675b;
-    --accent:#d9741a; --accent-2:#e8912f;
-    --ok:#2f8f43; --bad:#c23b32; --warn:#b07817;
-    --ok-bg:#e3f2e5; --bad-bg:#fbe4e2; --warn-bg:#faefd8;
+    --bg:#eef0ed; --panel:#ffffff; --panel-2:#e4e7e3; --line:#d3d7d1; --fg:#1d211e; --dim:#5a625b;
+    --accent:#b8560a; --accent-2:#d4761f; --on-accent:#ffffff; --info:#2b6890;
+    --ok:#25803d; --bad:#bf3328; --warn:#946200;
+    --ok-bg:#e1f1e4; --bad-bg:#fbe3e0; --warn-bg:#f8edd2; --info-bg:#e1edf5;
+    --shadow: 0 1px 2px rgba(30,40,30,.08);
   }
   * { box-sizing:border-box; }
   body { margin:0; background:var(--bg); color:var(--fg);
-         font:14px/1.45 system-ui, "Segoe UI", sans-serif;
+         font:14px/1.45 var(--ui-font); font-variant-numeric:tabular-nums;
          transition:background .15s ease, color .15s ease; }
   /* Header/nav/main share fluid side padding that grows with the viewport, so
      content fills an ultrawide screen instead of being capped at a fixed width. */
@@ -39,24 +46,26 @@
            padding:9px clamp(12px, 1.8vw, 44px);
            background:var(--panel); border-bottom:1px solid var(--line); }
   header .brand { display:flex; flex-direction:column; min-width:0; }
-  header h1 { font-size:16px; margin:0; color:var(--accent); font-weight:600; }
+  header h1 { font:600 18px/1.1 var(--num-font); margin:0; color:var(--accent); letter-spacing:.01em; }
   header .sub { color:var(--dim); font-size:12px; }
   #brand-logo { height:36px; width:auto; max-width:180px; border-radius:5px; }
   .hdr-tools { margin-left:auto; display:flex; gap:6px; align-items:center;
                flex-wrap:wrap; justify-content:flex-end; }
   nav { display:flex; flex-direction:column; padding:0 clamp(6px, 1.8vw, 40px);
-        background:var(--panel); border-bottom:1px solid var(--line); }
-  nav .navgroups { display:flex; gap:2px; flex-wrap:wrap; }
-  nav .navsubs { display:flex; gap:2px; flex-wrap:wrap; padding:3px 0 1px;
-                 border-top:1px solid var(--line); }
-  nav button { background:none; border:none; color:var(--dim); padding:9px 13px;
-               cursor:pointer; font-size:13px; border-bottom:2px solid transparent; }
+        background:var(--panel); border-bottom:1px solid var(--line);
+        position:sticky; top:0; z-index:8; box-shadow:var(--shadow); }
+  nav .navgroups, nav .navsubs { display:flex; gap:2px; overflow-x:auto; scrollbar-width:thin; }
+  nav .navsubs { padding:2px 0 0; border-top:1px solid var(--line); }
+  nav button { background:none; border:none; color:var(--dim); padding:9px 14px 8px;
+               cursor:pointer; font:500 14px/1.2 var(--num-font); letter-spacing:.02em;
+               border-bottom:3px solid transparent; white-space:nowrap; flex:none; }
   nav button:hover { color:var(--fg); }
   nav button.active { color:var(--fg); border-bottom-color:var(--accent); }
-  nav .navsubs button { font-size:12px; padding:6px 11px; }
-  nav .navsubs button.active { color:var(--accent); border-bottom-color:var(--accent); }
+  nav .navsubs button { font:13px/1.2 var(--ui-font); padding:7px 12px 6px; border-bottom-width:2px; }
+  nav .navsubs button.active { color:var(--accent); border-bottom-color:var(--accent); font-weight:600; }
+  :focus-visible { outline:2px solid var(--accent); outline-offset:2px; }
   main { padding:18px clamp(12px, 1.8vw, 44px); width:100%; }
-  h2 { font-size:14px; margin:18px 0 8px; color:var(--accent); }
+  h2 { font:600 17px/1.25 var(--num-font); margin:20px 0 8px; color:var(--fg); letter-spacing:.01em; }
   .hint { color:var(--dim); font-size:12px; margin:4px 0 10px; }
   table { border-collapse:collapse; width:100%; margin:6px 0 14px; font-size:13px; }
   th,td { text-align:left; padding:6px 9px; border-bottom:1px solid var(--line);
@@ -76,9 +85,13 @@
                border-radius:5px; padding:5px 11px; cursor:pointer; font-size:12px;
                white-space:nowrap; }
   button.act:hover { border-color:var(--accent); }
+  a.act { display:inline-block; text-decoration:none; color:var(--fg); background:var(--panel);
+          border:1px solid var(--accent); border-radius:5px; padding:5px 11px; font-size:12px; white-space:nowrap; }
+  a.act:hover { background:var(--accent); color:var(--on-accent); }
   button.act:disabled { opacity:.35; cursor:not-allowed; }
   button.act:disabled:hover { border-color:var(--line); }
-  button.primary { border-color:var(--accent); color:var(--accent); }
+  button.primary { border-color:var(--accent); background:var(--accent); color:var(--on-accent); font-weight:600; }
+  button.primary:hover { filter:brightness(1.08); }
   button.danger:hover { border-color:var(--bad); color:var(--bad); }
   input, select, textarea { background:var(--bg); color:var(--fg);
     border:1px solid var(--line); border-radius:5px; padding:5px 8px; font-size:13px; }
@@ -130,8 +143,8 @@
   .row .fld > label { min-width:0; margin-left:0; }
   .row.tight .fld { margin-left:12px; }   /* compact rows: label+field never split by a wrap */
   .row > .fld:first-child { margin-left:0; }
-  .card { background:var(--panel); border:1px solid var(--line); border-radius:8px;
-          padding:12px 14px; margin:10px 0; }
+  .card { background:var(--panel); border:1px solid var(--line); border-radius:6px;
+          padding:12px 14px; margin:10px 0; box-shadow:var(--shadow); }
   code, .mono { font-family:ui-monospace, Consolas, monospace; font-size:12px; }
   #toast { position:fixed; bottom:16px; right:16px; background:var(--panel);
            border:1px solid var(--accent); padding:9px 14px; border-radius:6px;
@@ -236,11 +249,11 @@
   .tile { min-width:118px; flex:1 1 118px; background:var(--bg);
           border:1px solid var(--line); border-radius:7px; padding:7px 10px; }
   .tile .t-lbl { color:var(--dim); font-size:11.5px; }
-  .tile .t-val { font-size:19px; font-weight:600; }
+  .tile .t-val { font:600 22px/1.15 var(--num-font); letter-spacing:.01em; }
   .tile .t-sub { color:var(--dim); font-size:11px; }
-  .card-h { display:flex; align-items:center; gap:6px; font-weight:600;
-            margin-bottom:6px; flex-wrap:wrap; }
-  .card-h .hint { font-weight:normal; margin:0; }
+  .card-h { display:flex; align-items:center; gap:6px; font:600 15px/1.3 var(--num-font);
+            letter-spacing:.01em; margin-bottom:8px; flex-wrap:wrap; }
+  .card-h .hint { font:12px/1.4 var(--ui-font); margin:0; }
   .card-h .grow { flex:1; }
   /* Horizontal meter (KV-cache fill, slot occupancy) */
   .meter { display:inline-block; width:110px; height:9px; border-radius:5px;
@@ -253,6 +266,79 @@
   .srv .k { color:var(--dim); font-size:11.5px; }
   .srv .v { font-weight:600; }
   .est { color:var(--warn); font-weight:700; margin-left:2px; }
+  /* -- Overview (landing page) ---------------------------------------------------
+     One sentence says whether things are fine; the list under it says what
+     isn't; the tiles give the headline numbers with a 24-hour trend; the cards
+     below are summaries that link to the tab with the detail. */
+  .ov-hero { display:flex; align-items:flex-start; gap:12px 20px; flex-wrap:wrap; margin:4px 0 12px; }
+  .ov-verdict { flex:1 1 420px; display:flex; gap:12px; align-items:flex-start;
+                font:500 clamp(18px, 1.6vw, 24px)/1.3 var(--num-font); letter-spacing:.005em; max-width:62ch; }
+  .ov-verdict b { font-weight:600; color:var(--warn); }
+  .ov-verdict.is-bad b { color:var(--bad); }
+  .ov-dot { flex:none; width:14px; height:14px; margin-top:.3em; border-radius:50%; background:var(--dim); }
+  .ov-verdict.is-ok .ov-dot { background:var(--ok); box-shadow:0 0 0 4px var(--ok-bg); }
+  .ov-verdict.is-warn .ov-dot { background:var(--warn); box-shadow:0 0 0 4px var(--warn-bg); }
+  .ov-verdict.is-bad .ov-dot { background:var(--bad); box-shadow:0 0 0 4px var(--bad-bg); }
+  .ov-meta { display:flex; gap:10px; align-items:center; }
+  .ov-attn { list-style:none; margin:0 0 14px; padding:0; display:grid; gap:4px; max-width:980px; }
+  .ov-attn li a { display:flex; gap:4px 12px; flex-wrap:wrap; align-items:baseline; padding:7px 12px;
+                  color:var(--fg); text-decoration:none; border:1px solid var(--line); border-left-width:4px;
+                  border-radius:5px; background:var(--panel); }
+  .ov-attn li.is-bad a { border-left-color:var(--bad); }
+  .ov-attn li.is-warn a { border-left-color:var(--warn); }
+  .ov-attn li a:hover { border-color:var(--accent); }
+  .ov-attn .hint { margin:0; }
+  .ov-kpis { display:grid; grid-template-columns:repeat(auto-fit, minmax(175px, 1fr)); gap:10px; margin:0 0 6px; }
+  .kpi { display:flex; flex-direction:column; gap:1px; padding:10px 12px 8px; border:1px solid var(--line);
+         border-radius:6px; background:var(--panel); color:var(--fg); text-decoration:none; min-width:0;
+         box-shadow:var(--shadow); }
+  .kpi:hover { border-color:var(--accent); }
+  .kpi-l { color:var(--dim); font-size:12.5px; }
+  .kpi-v { font:600 30px/1.1 var(--num-font); letter-spacing:.005em; white-space:nowrap; }
+  .kpi-v small { font:500 13px var(--num-font); color:var(--dim); margin-left:5px; letter-spacing:.02em; }
+  .kpi-s { color:var(--dim); font-size:12px; min-height:1.4em; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .spark { display:block; width:100%; height:30px; margin-top:4px; }
+  .spark-empty { height:30px; margin-top:4px; font-size:11px; color:var(--dim); display:flex; align-items:flex-end;
+                 border-bottom:1px dashed var(--line); }
+  .ov-grid { display:grid; grid-template-columns:repeat(auto-fit, minmax(min(100%, 380px), 1fr)); gap:0 12px; }
+  .ov-grid .card-h .grow { flex:1; }
+  .ov-more { font:13px var(--ui-font); color:var(--accent); text-decoration:none; }
+  .ov-more:hover { text-decoration:underline; }
+  .ov-backs, .ov-list, .ov-bars { list-style:none; margin:0; padding:0; display:grid; gap:4px; }
+  .ov-backs li, .ov-list li { display:flex; align-items:center; gap:8px; min-width:0; padding:3px 0;
+                              border-bottom:1px solid var(--line); }
+  .ov-backs li:last-child, .ov-list li:last-child { border-bottom:0; }
+  .ov-backs li .hint, .ov-list li .hint { margin:0; flex:1; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .ov-led { flex:none; width:9px; height:9px; border-radius:50%; background:var(--dim); }
+  .ov-led.is-ok { background:var(--ok); } .ov-led.is-bad { background:var(--bad); } .ov-led.is-warn { background:var(--warn); }
+  .ov-led.live { animation:ovpulse 1.6s ease-in-out infinite; }
+  @keyframes ovpulse { 50% { opacity:.35; } }
+  @media (prefers-reduced-motion: reduce) { .ov-led.live { animation:none; } }
+  .ov-acct { padding:4px 0 8px; border-bottom:1px solid var(--line); margin-bottom:6px; }
+  .ov-acct:last-child { border-bottom:0; margin-bottom:0; }
+  .ov-win { display:grid; grid-template-columns:minmax(70px, 140px) minmax(0, 1fr) 3.2em; gap:10px; align-items:center; margin:4px 0; }
+  .ov-win .meter { width:100%; }
+  .ov-win b { font-family:var(--num-font); text-align:right; }
+  .ov-bars li { display:grid; grid-template-columns:minmax(0, 1.3fr) minmax(60px, 1fr) 3em; gap:10px; align-items:center; }
+  .ov-bl { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .ov-bl .hint { margin:0; }
+  .ov-bt { height:8px; border-radius:4px; background:var(--panel-2); overflow:hidden; }
+  .ov-bt i { display:block; height:100%; background:var(--accent); border-radius:4px; }
+  .ov-bars b { font-family:var(--num-font); text-align:right; }
+  @media (max-width: 560px) {
+    .ov-kpis { grid-template-columns:repeat(2, minmax(0, 1fr)); gap:8px; }
+    .kpi { padding:8px 10px 6px; }
+    .kpi-v { font-size:24px; }
+    .kpi-s { white-space:normal; font-size:11.5px; }
+    .ov-verdict { font-size:18px; }
+  }
+  /* -- Charts: hover a column for its values (styled tooltip) */
+  .lc .hit { fill:transparent; }
+  .lc .hit:hover { fill:var(--accent); fill-opacity:.10; }
+  .jump { font-size:12.5px; color:var(--dim); margin:2px 0 6px; }
+  .jump a { color:var(--accent); }
+  h2[id] { scroll-margin-top:96px; }
+  .chart-grid { display:grid; grid-template-columns:repeat(auto-fit, minmax(min(100%, 520px), 1fr)); gap:0 12px; }
   /* -- Responsive: PC / tablet / phone ---------------------------------------- */
   @media (max-width: 900px) {
     header { flex-wrap:wrap; gap:4px 12px; padding:9px 12px; }
@@ -288,6 +374,7 @@
     <span class="sub" id="hdr-info">loading…</span>
   </div>
   <div class="hdr-tools">
+    <a class="act cc-link" href="/ui/control" title="Open the coordinator control center: live sprint progress, sessions and operator actions">Control center</a>
     <button class="act" id="logo-btn" title="Upload or change the header logo (PNG/SVG, under 512 KB)">Logo…</button>
     <button class="act" id="logo-clear" title="Remove the custom logo" hidden>✕</button>
     <button class="act" id="theme-btn" title="Toggle light / dark theme">🌙 Dark</button>
@@ -354,6 +441,15 @@ function clearLog(kind, label) {
     .then(r => { toast(`Cleared ${r.removed} row(s)`); render(); })
     .catch(e => toast(e.message, true));
 }
+
+// In-page "jump to" links scroll; they never touch the tab hash.
+document.addEventListener("click", e => {
+  const a = e.target.closest && e.target.closest("a[data-jump]");
+  if (!a) return;
+  e.preventDefault();
+  const t = document.querySelector(a.getAttribute("href"));
+  if (t) t.scrollIntoView({behavior: matchMedia("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth", block: "start"});
+});
 
 /* ------------------------------------------------------------ tooltips -- */
 // One global handler upgrades every title="" into the styled #tip tooltip on
@@ -912,6 +1008,7 @@ async function openClearDialog(pre) {
 // Leaf tab label -> render function. The label is what `current` holds and what
 // self-cleaning timers compare against, so keep these stable.
 const TABS = {
+  "Overview":       tabOverview,
   "Live":           tabLive,
   "Performance":    tabPerformance,
   "Cost":           tabCost,
@@ -938,31 +1035,68 @@ const TABS = {
   "Clients & Keys": tabClients,
   "Helpers & Limits": tabLimits,
 };
-// Primary nav groups -> their leaf tabs (the secondary row). Reorganizes the
-// former flat bar into logical sections without dropping anything.
+// Primary nav groups -> their leaf tabs (the secondary row): the overview
+// first, then watching (Monitor), then what you configure, then records.
 const GROUPS = [
-  ["Dashboard",   ["Live", "Work", "Performance", "Cost", "Scoreboard", "Compare"]],
-  ["Setup",       ["Clients & Keys", "Helpers & Limits"]],
+  ["Overview",    ["Overview"]],
+  ["Monitor",     ["Live", "Performance", "Cost", "Scoreboard", "Compare", "Work"]],
   ["Backends",    ["Pool", "Model Registry", "Host Admin"]],
   ["Routing",     ["Personas", "Guardrails", "Routes"]],
   ["Tools & MCP", ["Tools", "MCP Servers", "MCP Metrics", "Agents"]],
   ["Labs",        ["Research", "Evals"]],
   ["Logs",        ["Usage Log", "Events", "Dev Log", "Data", "Training"]],
+  ["Access",      ["Clients & Keys", "Helpers & Limits"]],
 ];
-const _groupOf = leaf => (GROUPS.find(g => g[1].includes(leaf)) || GROUPS[1])[0];
+// Shown names where the internal key is not the plainest wording (keys stay
+// stable: timers compare `current` against them).
+const TAB_LABEL = {"Work": "Coordinator work", "Pool": "Backend pool", "Usage Log": "Request log"};
+const GROUP_HELP = {
+  Overview: "Is everything healthy? Key numbers and anything that needs attention, on one page.",
+  Monitor: "Watch traffic as it happens: live activity, speed and latency history, cost and model comparisons.",
+  Backends: "The inference servers Foundry sends work to, the models they serve, and host administration.",
+  Routing: "How requests pick a model: personas, spending guardrails and the route map.",
+  "Tools & MCP": "Tools the models can call, the MCP servers behind them, and agents.",
+  Labs: "Research settings and evaluation runs for personas.",
+  Logs: "Every request, event and log line, plus data export and training capture.",
+  Access: "Client keys and who may use what; helper capacity and limits."};
+const TAB_HELP = {
+  Overview: "Health, throughput, latency, tokens and budget at a glance.",
+  Live: "What is generating right now, refreshed every 2 s.",
+  Performance: "Speed, latency and context history per call, with charts.",
+  Cost: "What the tokens would cost on paid APIs vs self-hosting.",
+  Scoreboard: "Which models win on quality and speed.", Compare: "Side-by-side model comparison.",
+  Work: "Coordinator tasks and sessions. Opens the control center for live control.",
+  Pool: "Backends, their health and the models they serve.", "Model Registry": "Every known model and its settings.",
+  "Host Admin": "Manage the inference hosts.", Personas: "Routing personas and their settings.",
+  Guardrails: "Spending and quota rules for paid backends.", Routes: "Map of which routes requests took.",
+  Tools: "Tools available to models.", "MCP Servers": "Connected MCP servers.", "MCP Metrics": "MCP call counts, errors and context cost.",
+  Agents: "Configured agents and their runs.", Research: "Web research settings.", Evals: "Persona evaluation runs and scores.",
+  "Usage Log": "Every request Foundry handled.", Events: "System events and warnings.", "Dev Log": "Application log lines.",
+  Data: "Export, prune or clear stored data.", Training: "Captured training data.",
+  "Clients & Keys": "Client keys and their scopes.", "Helpers & Limits": "Helper capacity, budgets and limits."};
+const tabLabel = leaf => TAB_LABEL[leaf] || leaf;
+const _groupOf = leaf => (GROUPS.find(g => g[1].includes(leaf)) || GROUPS[0])[0];
 const _lastLeaf = {};        // group name -> last leaf visited (remembered on switch)
-let current = "Pool";
+// The open tab rides in the URL hash (#Performance), so a reload, a bookmark or
+// the back button lands where you were; no hash = the overview.
+const _hashTab = () => { try { const h = decodeURIComponent(location.hash.slice(1)); return TABS[h] ? h : ""; } catch (e) { return ""; } };
+let current = _hashTab() || "Overview";
+window.addEventListener("hashchange", () => { const h = _hashTab(); if (h && h !== current) { current = h; render(); } });
 function render() {
   const nav = $("#nav"); nav.innerHTML = "";
   const activeGroup = _groupOf(current);
   _lastLeaf[activeGroup] = current;
+  if (_hashTab() !== current) history.replaceState(null, "", "#" + encodeURIComponent(current));
   // primary group row
   const groupRow = document.createElement("div");
   groupRow.className = "navgroups";
+  groupRow.setAttribute("role", "tablist");
   for (const [gname, leaves] of GROUPS) {
     const b = document.createElement("button");
     b.textContent = gname;
     b.className = gname === activeGroup ? "active" : "";
+    b.setAttribute("aria-selected", gname === activeGroup ? "true" : "false");
+    if (GROUP_HELP[gname]) b.title = GROUP_HELP[gname];
     b.onclick = () => { current = _lastLeaf[gname] || leaves[0]; render(); };
     groupRow.appendChild(b);
   }
@@ -974,8 +1108,9 @@ function render() {
     subRow.className = "navsubs";
     for (const leaf of leaves) {
       const b = document.createElement("button");
-      b.textContent = leaf;
+      b.textContent = tabLabel(leaf);
       b.className = leaf === current ? "active" : "";
+      if (TAB_HELP[leaf]) b.title = TAB_HELP[leaf];
       b.onclick = () => { current = leaf; render(); };
       subRow.appendChild(b);
     }
@@ -1200,6 +1335,183 @@ function renderServers(servers) {
   }).join("");
 }
 // =========================================================================
+// Overview tab — the landing page: is it healthy, how busy, how fast, how much
+// budget is left, and what needs attention. Overview first, details on demand:
+// every block links to the tab with the full picture.
+// =========================================================================
+/*overview-start*/
+function _parseTs(ts) {
+  if (typeof ts === "number") return new Date(ts * 1000);
+  let s = ts || ""; if (s.indexOf("T") < 0) s = s.replace(" ", "T");
+  if (!/(Z|[+-]\d\d:?\d\d)$/.test(s)) s += "Z";
+  return new Date(s);
+}
+// rows -> `n` equal time buckets ending now; fn(bucketRows) -> number|null
+function _buckets(rows, hours, n, fn, now) {
+  const end = now || Date.now(), span = hours * 3600e3 / n, out = Array.from({length: n}, () => []);
+  for (const r of rows || []) {
+    const t = _parseTs(r.ts).getTime(); if (isNaN(t)) continue;
+    const i = Math.floor((t - (end - hours * 3600e3)) / span);
+    if (i >= 0 && i < n) out[i].push(r);
+  }
+  return out.map(fn);
+}
+function _pct(vals, p) {
+  vals = (vals || []).filter(v => typeof v === "number" && isFinite(v)).sort((a, b) => a - b);
+  if (!vals.length) return null;
+  return vals[Math.min(vals.length - 1, Math.floor(p / 100 * vals.length))];
+}
+// A trend line that fills its tile (viewBox scaling); gaps for empty buckets.
+function trendSpark(vals, color, emptyText) {
+  const pts = vals.map((v, i) => [i, v]).filter(([, v]) => typeof v === "number" && isFinite(v));
+  if (pts.length < 2) return `<div class="spark-empty">${esc(emptyText || "trend appears with more traffic")}</div>`;
+  const W = 120, H = 30, lo = Math.min(0, ...pts.map(p => p[1])), hi = Math.max(...pts.map(p => p[1])) || 1;
+  const x = i => (i / Math.max(1, vals.length - 1)) * W, y = v => H - 2 - (v - lo) / ((hi - lo) || 1) * (H - 4);
+  let d = "", prev = -2;
+  for (const [i, v] of pts) { d += `${i === prev + 1 ? "L" : "M"}${x(i).toFixed(1)},${y(v).toFixed(1)}`; prev = i; }
+  const [li, lv] = pts[pts.length - 1];
+  return `<svg class="spark" viewBox="0 0 ${W} ${H}" preserveAspectRatio="none" aria-hidden="true">
+    <path d="${d}" fill="none" stroke="${color}" stroke-width="1.6" vector-effect="non-scaling-stroke" stroke-linejoin="round"/>
+    <circle cx="${x(li).toFixed(1)}" cy="${y(lv).toFixed(1)}" r="2" fill="${color}"/></svg>`;
+}
+// value + unit split, so the number reads large and the unit small
+function _fmtS(ms) {
+  if (ms == null) return ["—", ""];
+  return ms < 1000 ? [String(Math.round(ms)), "ms"] : [(ms / 1000).toFixed(ms < 10000 ? 1 : 0), "s"];
+}
+const _fmtK = n => n == null ? "—" : n >= 1e9 ? (n / 1e9).toFixed(2) + "B" : n >= 1e6 ? (n / 1e6).toFixed(1) + "M"
+  : n >= 1e4 ? Math.round(n / 1e3) + "k" : n >= 1e3 ? (n / 1e3).toFixed(1) + "k" : String(Math.round(n));
+function _dur(s) { s = Math.max(0, +s || 0); return s < 90 ? Math.round(s) + " s" : s < 5400 ? Math.round(s / 60) + " min" : (s / 3600).toFixed(s < 36000 ? 1 : 0) + " h"; }
+
+// The page's judgement, from the raw responses. Pure (no DOM), so it is
+// tested in node: tests/test_ui_overview.py.
+function overviewModel(st, ph, bu, adv, act) {
+  const rows = (ph && ph.series) || [], sm = (ph && ph.summary) || {};
+  const backs = ((st && st.backends) || []).filter(b => b.enabled !== false);
+  const down = backs.filter(b => b.healthy === false);
+  const brainDown = !!(st && st.brain && (st.brain.health || {}).healthy === false);
+  const tot = (bu && bu.totals) || {}, t24 = tot["24h"] || {}, t5 = tot["5h"] || {};
+  const calls24 = t24.calls != null ? t24.calls : (sm.samples != null ? sm.samples : null);
+  const p50 = _pct(rows.map(r => r.wall_ms), 50), p95 = _pct(rows.map(r => r.wall_ms), 95);
+  const attn = [];
+  for (const b of down) attn.push({sev: "bad", title: `Backend ${b.name} is down`, detail: b.last_error || "its health check is failing", tab: "Pool"});
+  if (brainDown) attn.push({sev: "bad", title: "The routing brain is down", detail: (st.brain.health || {}).error || "persona requests fall back to the static rule", tab: "Pool"});
+  for (const a of (bu && bu.accounts) || [])
+    for (const w of a.provider_windows || [])
+      if (+w.used_pct >= 85) attn.push({sev: +w.used_pct >= 98 ? "bad" : "warn", title: `${a.account}: ${w.name} window ${Math.round(w.used_pct)}% used`,
+        detail: w.resets_in_s ? `resets in ${_dur(w.resets_in_s)}` : w.resets_at ? `resets ${_tsLabel(w.resets_at)}` : "", tab: "Usage Log"});
+  for (const f of ((adv && adv.findings) || []).filter(f => f.severity === "critical" || f.severity === "warning").slice(0, 4))
+    attn.push({sev: f.severity === "critical" ? "bad" : "warn", title: f.title, detail: f.summary || "", tab: "Performance"});
+  if (t24.errors) attn.push({sev: "warn", title: `${t24.errors} failed call${t24.errors === 1 ? "" : "s"} in the last 24 h`,
+    detail: t24.quota_errors ? `${t24.quota_errors} of them quota errors` : "", tab: "Usage Log"});
+  attn.sort((a, b) => (a.sev === "bad" ? 0 : 1) - (b.sev === "bad" ? 0 : 1));
+  const health = !st ? "Foundry's status is unavailable." : !backs.length ? "No backends are configured."
+    : down.length ? `${down.length} of ${backs.length} backends ${down.length === 1 ? "is" : "are"} down.`
+    : `All ${backs.length} backend${backs.length === 1 ? " is" : "s are"} up.`;
+  const busy = calls24 ? `${_fmtK(calls24)} request${calls24 === 1 ? "" : "s"} in the last 24 h${p50 != null ? `, typically ${_fmtS(p50).join(" ")} each` : ""}.`
+    : "No requests in the last 24 h.";
+  const mood = !st || attn.some(a => a.sev === "bad") ? "bad" : attn.length || !backs.length ? "warn" : "ok";
+  return {rows, sm, backs, down, calls24, calls5: t5.calls, t24, p50, p95, attn, mood,
+          verdict: `${health} ${busy}`,
+          decode: _pct(rows.map(r => r.decode_tps), 50), ttft: _pct(rows.map(r => r.ttft_ms), 50),
+          capped: rows.length && sm.samples > rows.length ? rows.length : 0};
+}
+/*overview-end*/
+
+async function tabOverview() {
+  const go = (tab, text) => `<a href="#${encodeURIComponent(tab)}" class="ov-more" title="${esc(TAB_HELP[tab] || "")}">${esc(text)}</a>`;
+  $("#main").innerHTML = `
+    <section class="ov-hero" aria-live="polite">
+      <div id="ov-verdict" class="ov-verdict">Checking…</div>
+      <div class="ov-meta"><span id="ov-ts" class="hint"></span>
+        <button class="act" id="ov-refresh" title="Reload every number on this page">Refresh</button></div>
+    </section>
+    <div id="ov-attn"></div>
+    <div class="ov-kpis" id="ov-kpis"></div>
+    <div class="ov-grid">
+      <div class="card"><div class="card-h">Backends<span class="grow"></span>${go("Pool", "Backend pool")}</div><div id="ov-backends" class="hint">…</div></div>
+      <div class="card"><div class="card-h">Subscription windows<span class="grow"></span>${go("Usage Log", "Budget monitor")}</div><div id="ov-budget" class="hint">…</div></div>
+      <div class="card"><div class="card-h">Working right now<span class="grow"></span>${go("Live", "Live activity")}</div><div id="ov-now" class="hint">…</div></div>
+      <div class="card"><div class="card-h">Busiest models, last 24 h<span class="grow"></span>${go("Performance", "Performance")}</div><div id="ov-models" class="hint">…</div></div>
+    </div>`;
+  const load = async () => {
+    const get = p => api(p).catch(e => { if (e && e.stale) throw e; return null; });
+    const [st, ph, bu, adv, act] = await Promise.all([get("status"), get("perf-history?hours=24"),
+      get("budgets"), get("perf/advisor?hours=24"), get("activity")]);
+    if (!$("#ov-verdict")) return;                           // left the tab meanwhile
+    if (st) renderHeaderInfo(st);
+    const m = overviewModel(st, ph, bu, adv, act);
+    $("#ov-verdict").className = "ov-verdict is-" + m.mood;
+    $("#ov-verdict").innerHTML = `<span class="ov-dot" aria-hidden="true"></span><span>${esc(m.verdict)}${m.attn.length
+      ? ` <b>${m.attn.length} thing${m.attn.length === 1 ? " needs" : "s need"} a look.</b>` : ""}</span>`;
+    $("#ov-ts").textContent = "Updated " + new Date().toLocaleTimeString() + " · refreshes every 30 s";
+    $("#ov-attn").innerHTML = m.attn.length ? `<ul class="ov-attn" aria-label="Needs attention">${m.attn.map(a =>
+      `<li class="is-${a.sev}"><a href="#${encodeURIComponent(a.tab)}"><b>${esc(a.title)}</b>${a.detail ? `<span class="hint">${esc(a.detail)}</span>` : ""}</a></li>`).join("")}</ul>` : "";
+    // headline numbers, each with a 24-hour trend (hourly buckets of the timed calls)
+    const rows = m.rows, N = 24;
+    const cOk = _css("--ok", "#6cc47c"), cAcc = _css("--accent", "#ff8a1e"), cInfo = _css("--info", "#7db4d8"), cWarn = _css("--warn", "#e8aa3c");
+    const perH = _buckets(rows, 24, N, b => b.length);
+    const latH = _buckets(rows, 24, N, b => _pct(b.map(r => r.wall_ms), 50));
+    const ttH = _buckets(rows, 24, N, b => _pct(b.map(r => r.ttft_ms), 50));
+    const tpsH = _buckets(rows, 24, N, b => _pct(b.map(r => r.decode_tps), 50));
+    const outH = _buckets(rows, 24, N, b => b.length ? b.reduce((s, r) => s + (r.completion_tokens || 0), 0) : null);
+    const kpi = (label, [v, unit], sub, spark, tip, tab) => `<a class="kpi" href="#${encodeURIComponent(tab)}" title="${esc(tip)}">
+      <span class="kpi-l">${esc(label)}</span><span class="kpi-v">${esc(v)}${unit ? `<small>${esc(unit)}</small>` : ""}</span>
+      <span class="kpi-s">${sub}</span>${spark}</a>`;
+    const capped = m.capped ? ` (the newest ${m.capped} of them)` : "";
+    const sm = m.sm, t24 = m.t24;
+    $("#ov-kpis").innerHTML =
+      kpi("Requests", [m.calls24 == null ? "—" : _fmtK(m.calls24), "in 24 h"], m.calls5 != null ? `${esc(_fmtK(m.calls5))} in the last 5 h` : "",
+          trendSpark(perH, cAcc), "Calls Foundry sent to any backend in the last 24 hours (measured). The line is timed calls per hour" + capped + ".", "Usage Log")
+      + kpi("Response time", _fmtS(m.p50), m.p95 != null ? `slowest 5%: ${esc(_fmtS(m.p95).join(" "))}` : "",
+          trendSpark(latH, cWarn), "Median end-to-end time per call over 24 hours; the slowest 5% is the 95th percentile.", "Performance")
+      + kpi("First token", _fmtS(m.ttft), "median wait before text starts",
+          trendSpark(ttH, cInfo), "Median time to first token on streamed calls over 24 hours.", "Performance")
+      + kpi("Generation speed", [m.decode == null ? "—" : String(Math.round(m.decode)), m.decode == null ? "" : "tok/s"],
+          sm.eff_tps != null ? `${Math.round(sm.eff_tps)} tok/s including waits` : "",
+          trendSpark(tpsH, cOk), "Median decode speed once the model is producing tokens. The second figure includes prompt processing and queueing: the speed you feel.", "Performance")
+      + kpi("Tokens out", [_fmtK(t24.output_tokens != null ? t24.output_tokens : sm.out_tokens), ""], `${esc(_fmtK(t24.input_tokens != null ? t24.input_tokens : sm.in_tokens))} read in`,
+          trendSpark(outH, cAcc), "Tokens generated and read in the last 24 hours. The line is output tokens per hour.", "Cost");
+    // backends
+    $("#ov-backends").innerHTML = m.backs.length ? `<ul class="ov-backs">${m.backs.map(b => {
+      const s = b.healthy === false ? ["bad", "down"] : b.healthy === true ? ["ok", b.busy ? "busy" : "up"] : ["", "not checked"];
+      return `<li title="${esc((b.url || "") + (b.last_error ? "\n" + b.last_error : ""))}"><span class="ov-led is-${s[0]}" aria-hidden="true"></span>
+        <b>${esc(b.name)}</b><span class="hint">${esc(b.flavor || b.type || "")}${b.subscription ? " · subscription" : ""}</span>
+        <span class="pill ${s[0]}">${esc(s[1])}</span></li>`; }).join("")}</ul>`
+      : `<span class="hint">No backends yet. Add one under ${go("Pool", "Backend pool")}.</span>`;
+    // subscription windows (provider-reported) + measured use
+    const accts = ((bu && bu.accounts) || []).filter(a => (a.provider_windows || []).length || a.kind !== "local");
+    $("#ov-budget").innerHTML = !bu ? '<span class="hint">Budget monitor unavailable.</span>' : (accts.length
+      ? accts.map(a => `<div class="ov-acct"><div><b>${esc(a.account)}</b> <span class="hint">${esc(a.kind || "")}${a.plan ? " · " + esc(a.plan) : ""}${a.provider_age_s != null ? " · read " + esc(_dur(a.provider_age_s)) + " ago" : ""}</span></div>
+          ${(a.provider_windows || []).map(w => { const p = Math.max(0, Math.min(100, +w.used_pct || 0)); const c = p >= 85 ? "bad" : p >= 70 ? "warn" : "";
+            return `<div class="ov-win"><span>${esc(w.name)}</span><span class="meter ${c}" role="img" aria-label="${esc(w.name)} ${Math.round(p)}% used"><span style="width:${p}%"></span></span><b>${Math.round(p)}%</b></div>`; }).join("")
+            || `<div class="hint">${esc(a.provider_error || "No usage reading from the provider yet.")}</div>`}
+          <div class="hint">${a.measured_5h ? `${esc(_fmtK(a.measured_5h.calls || 0))} calls in 5 h` : ""}${a.measured_7d ? ` · ${esc(_fmtK(a.measured_7d.calls || 0))} in 7 days` : ""}</div></div>`).join("")
+      : `<span class="hint">Only local backends: no subscription windows to watch.</span>`)
+      + (bu && (bu.totals || {}).denied_24h ? `<div class="hint" style="margin-top:6px"><span class="pill warn">${esc(bu.totals.denied_24h)} denied</span> by budget rules in 24 h</div>` : "");
+    // in flight
+    const gen = (act && act.models) || [], calls = (act && act.calls) || [];
+    $("#ov-now").innerHTML = !act ? '<span class="hint">Live activity unavailable.</span>'
+      : (gen.length || calls.length) ? `<ul class="ov-list">${gen.map(g => `<li><span class="ov-led is-ok live" aria-hidden="true"></span><b>${esc(g.model)}</b><span class="hint">${g.count > 1 ? esc(g.count) + " calls · " : ""}${g.seconds != null ? esc(_dur(g.seconds)) : ""}</span></li>`).join("")}${calls.slice(0, 5).map(c => `<li><span class="ov-led" aria-hidden="true"></span>${esc(c.tool || c.name || c.model || "call")}<span class="hint">${c.seconds != null ? esc(_dur(c.seconds)) : ""}</span></li>`).join("")}</ul>`
+      : '<span class="hint">Idle: nothing is generating.</span>';
+    // busiest models
+    const bm = ((ph && ph.by_model) || []).slice().sort((a, b) => b.n - a.n).slice(0, 6);
+    const maxN = Math.max(1, ...bm.map(g => g.n));
+    $("#ov-models").innerHTML = bm.length ? `<ul class="ov-bars">${bm.map(g => `<li title="${esc(g.model)} on ${esc(g.backend || "?")}: ${esc(g.n)} calls, median decode ${g.p50_decode_tps != null ? Math.round(g.p50_decode_tps) + " tok/s" : "not reported"}">
+        <span class="ov-bl">${esc(g.model)} <span class="hint">${esc(g.backend || "")}</span></span>
+        <span class="ov-bt"><i style="width:${(100 * g.n / maxN).toFixed(1)}%"></i></span><b>${esc(g.n)}</b></li>`).join("")}</ul>`
+      : '<span class="hint">No timed calls in the last 24 h.</span>';
+  };
+  $("#ov-refresh").onclick = () => load().catch(() => {});
+  await load();
+  clearInterval(window._ovTimer);
+  window._ovTimer = setInterval(() => {
+    if (current !== "Overview") { clearInterval(window._ovTimer); return; }
+    if (!document.hidden) load().catch(() => {});
+  }, 30000);
+}
+
+// =========================================================================
 // Performance tab — historical charts + rich per-call table from perf_samples
 // =========================================================================
 const _PERF = { hours: 72, model: "", backend: "", run: "__all__" };   // filters (persisted)
@@ -1225,9 +1537,16 @@ function _num(v, unit) {
 // Multi-series time-series line chart (SVG, responsive via viewBox). `rows` are
 // chronological; each series reads one numeric key and breaks its line on nulls
 // so a metric a backend didn't report shows a gap, not a fake dip.
+// Drawing width for a chart: about its on-screen width, so the axis text
+// renders near its real size instead of shrinking with the viewBox.
+function _chartW(cols) {
+  const m = document.getElementById("main"), w = (m && m.clientWidth) || 800;
+  const per = cols > 1 && w > 1100 ? (w - 12) / cols : w;
+  return Math.round(Math.max(320, Math.min(1100, per - 34)));
+}
 function lineChart(rows, seriesDefs, opts) {
   opts = opts || {};
-  const W = 780, H = 210, padL = 46, padR = 12, padT = 12, padB = 26;
+  const W = opts.w || _chartW(2), H = 220, padL = 50, padR = 12, padT = 12, padB = 28;
   if (!rows || rows.length < 2)
     return '<div class="hint" style="padding:18px 0">Not enough data in this window yet.</div>';
   let vals = [];
@@ -1245,29 +1564,52 @@ function lineChart(rows, seriesDefs, opts) {
   for (let k = 0; k <= 4; k++) {
     const v = lo + (hi - lo) * k / 4, yy = y(v);
     g += `<line x1="${padL}" y1="${yy.toFixed(1)}" x2="${W - padR}" y2="${yy.toFixed(1)}" stroke="${grid}" stroke-width="0.5"/>`;
-    g += `<text x="${padL - 5}" y="${(yy + 3).toFixed(1)}" text-anchor="end" font-size="9" fill="${dim}">${_num(v, opts.yUnit)}</text>`;
+    g += `<text x="${padL - 5}" y="${(yy + 3).toFixed(1)}" text-anchor="end" font-size="11" fill="${dim}">${_num(v, opts.yUnit)}</text>`;
   }
   // x labels: first / middle / last timestamps
   const xl = [0, Math.floor((n - 1) / 2), n - 1].map(i =>
-    `<text x="${x(i).toFixed(1)}" y="${H - 8}" text-anchor="${i === 0 ? "start" : i === n - 1 ? "end" : "middle"}" font-size="9" fill="${dim}">${_tsLabel(rows[i].ts)}</text>`).join("");
-  // one polyline per series, split on null gaps
+    `<text x="${x(i).toFixed(1)}" y="${H - 8}" text-anchor="${i === 0 ? "start" : i === n - 1 ? "end" : "middle"}" font-size="11" fill="${dim}">${_tsLabel(rows[i].ts)}</text>`).join("");
+  // one polyline per series, split on null gaps; a single series also gets a
+  // faint area under it so its level reads at a glance
   let paths = "";
+  const base = y(Math.max(lo, 0)).toFixed(1);
   seriesDefs.forEach(s => {
     let seg = [];
-    const flush = () => { if (seg.length > 1) paths += `<polyline points="${seg.join(" ")}" fill="none" stroke="${s.color}" stroke-width="1.6" stroke-linejoin="round"/>`; seg = []; };
+    const flush = () => {
+      if (seg.length > 1) {
+        if (seriesDefs.length === 1)
+          paths += `<polygon points="${seg[0].split(",")[0]},${base} ${seg.join(" ")} ${seg[seg.length - 1].split(",")[0]},${base}" fill="${s.color}" fill-opacity="0.12" stroke="none"/>`;
+        paths += `<polyline points="${seg.join(" ")}" fill="none" stroke="${s.color}" stroke-width="1.8" stroke-linejoin="round"/>`;
+      } else if (seg.length === 1) {
+        const [cx, cy] = seg[0].split(",");
+        paths += `<circle cx="${cx}" cy="${cy}" r="2" fill="${s.color}"/>`;
+      }
+      seg = [];
+    };
     rows.forEach((r, i) => { if (r[s.key] == null) { flush(); } else { seg.push(`${x(i).toFixed(1)},${y(r[s.key]).toFixed(1)}`); } });
     flush();
   });
+  // hover columns: each shows its time and every series' value (styled #tip)
+  const step = Math.max(1, Math.ceil(n / 160));
+  let hits = "";
+  for (let i = 0; i < n; i += step) {
+    const j = Math.min(n - 1, i + step - 1);
+    const x0 = i === 0 ? padL : (x(i - 1) + x(i)) / 2, x1 = j === n - 1 ? W - padR : (x(j) + x(j + 1)) / 2;
+    const r = rows[j];
+    const vals = seriesDefs.map(sd => `${sd.label}: ${r[sd.key] == null ? "not reported" : _num(r[sd.key], opts.yUnit)}`).join("\n");
+    const who = r.model ? `\n${r.model}${r.backend ? " on " + r.backend : ""}` : "";
+    hits += `<rect class="hit" x="${x0.toFixed(1)}" y="${padT}" width="${Math.max(1, x1 - x0).toFixed(1)}" height="${H - padT - padB}" data-tip="${esc(_tsLabel(r.ts) + "\n" + vals + who)}"/>`;
+  }
   const legend = seriesDefs.map(s =>
     `<span style="margin-right:14px;white-space:nowrap"><span style="display:inline-block;width:10px;height:10px;background:${s.color};border-radius:2px;vertical-align:middle;margin-right:4px"></span>${esc(s.label)}</span>`).join("");
-  return `<div class="hint" style="margin:2px 0 4px">${legend}</div>`
-    + `<svg viewBox="0 0 ${W} ${H}" style="width:100%;height:auto;display:block"><rect x="${padL}" y="${padT}" width="${W - padL - padR}" height="${H - padT - padB}" fill="none" stroke="${grid}" stroke-width="0.5"/>${g}${xl}${paths}</svg>`;
+  return `<div class="hint" style="margin:2px 0 4px">${legend}<span style="opacity:.7">· hover the chart for values</span></div>`
+    + `<svg class="lc" viewBox="0 0 ${W} ${H}" style="width:100%;height:auto;display:block" role="img" aria-label="${esc(seriesDefs.map(sd => sd.label).join(", "))} over time"><rect x="${padL}" y="${padT}" width="${W - padL - padR}" height="${H - padT - padB}" fill="none" stroke="${grid}" stroke-width="0.5"/>${g}${xl}${paths}${hits}</svg>`;
 }
 // Scatter — correlate a metric (y) against context fill / any x. Reveals e.g.
 // "acceptance falls as prompt tokens climb toward the context cap".
 function scatterChart(rows, xKey, yKey, opts) {
   opts = opts || {};
-  const W = 780, H = 220, padL = 46, padR = 12, padT = 12, padB = 30;
+  const W = opts.w || _chartW(1), H = 230, padL = 50, padR = 12, padT = 12, padB = 30;
   const pts = (rows || []).filter(r => r[xKey] != null && r[yKey] != null);
   if (pts.length < 2) return '<div class="hint" style="padding:18px 0">Not enough paired data yet.</div>';
   const xs = pts.map(r => r[xKey]), ys = pts.map(r => r[yKey]);
@@ -1281,12 +1623,12 @@ function scatterChart(rows, xKey, yKey, opts) {
   for (let k = 0; k <= 4; k++) {
     const v = ylo + (yhi - ylo) * k / 4, yy = y(v);
     g += `<line x1="${padL}" y1="${yy.toFixed(1)}" x2="${W - padR}" y2="${yy.toFixed(1)}" stroke="${grid}" stroke-width="0.5"/>`;
-    g += `<text x="${padL - 5}" y="${(yy + 3).toFixed(1)}" text-anchor="end" font-size="9" fill="${dim}">${_num(v, opts.yUnit)}</text>`;
+    g += `<text x="${padL - 5}" y="${(yy + 3).toFixed(1)}" text-anchor="end" font-size="11" fill="${dim}">${_num(v, opts.yUnit)}</text>`;
   }
   let xl = "";
   for (let k = 0; k <= 4; k++) {
     const v = xlo + (xhi - xlo) * k / 4, xx = x(v);
-    xl += `<text x="${xx.toFixed(1)}" y="${H - 10}" text-anchor="middle" font-size="9" fill="${dim}">${_num(v, opts.xUnit)}</text>`;
+    xl += `<text x="${xx.toFixed(1)}" y="${H - 10}" text-anchor="middle" font-size="11" fill="${dim}">${_num(v, opts.xUnit)}</text>`;
   }
   // colour by recency: older points dimmer, newest brightest — so a drift over
   // the run reads as a direction, not just a cloud.
@@ -1328,13 +1670,18 @@ async function tabPerformance() {
       </div>
     </div>
     <div id="perf-summary"></div>
+    <div class="jump" role="navigation" aria-label="On this page">Jump to <a href="#perf-sec-charts" data-jump>charts over time</a> or <a href="#perf-sec-detail" data-jump>correlation and recent calls</a></div>
     <div class="card">${cardH("🩺 Performance advisor", "advisor", "possible problems in this window — click one for what to do")}<div id="perf-advisor" class="hint">…</div></div>
     <div class="card">${cardH("Per-model breakdown", "bymodel", "model × backend × run, every call in the window")}<div id="perf-bymodel"></div></div>
-    <div class="card">${cardH("Throughput — decode vs effective tok/s", "charts")}<div id="perf-c-tps"></div></div>
-    <div class="card">${cardH("Prefill speed (tok/s)", "charts")}<div id="perf-c-prefill"></div></div>
+    <h2 id="perf-sec-charts">Speed and latency over time</h2>
+    <div class="chart-grid">
+    <div class="card">${cardH("Generation speed (tok/s)", "charts", "decode vs effective, which includes waiting")}<div id="perf-c-tps"></div></div>
     <div class="card">${cardH("Time to first token", "charts", "streamed calls")}<div id="perf-c-ttft"></div></div>
-    <div class="card">${cardH("Speculative acceptance & KV-cache hit (%)", "charts")}<div id="perf-c-pct"></div></div>
-    <div class="card">${cardH("Context fill — prompt tokens per call", "charts", "watch it climb toward the cap, then drop on compaction")}<div id="perf-c-ctx"></div></div>
+    <div class="card">${cardH("Prompt processing speed (tok/s)", "charts")}<div id="perf-c-prefill"></div></div>
+    <div class="card">${cardH("Cache reuse and draft acceptance (%)", "charts", "KV prefix-cache hit, speculative decoding")}<div id="perf-c-pct"></div></div>
+    <div class="card">${cardH("Context fill: prompt tokens per call", "charts", "climbs toward the cap, drops on compaction")}<div id="perf-c-ctx"></div></div>
+    </div>
+    <h2 id="perf-sec-detail">Details</h2>
     <div class="card">${cardH("Correlation — does it degrade as context fills?", "charts")}
       <div id="perf-c-scatter1"></div><div style="height:8px"></div><div id="perf-c-scatter2"></div><div style="height:8px"></div><div id="perf-c-scatter3"></div></div>
     <div class="card">${cardH("Recent calls", null, "every metric, newest first (60 shown)")}<div id="perf-table"></div></div>`;
@@ -1658,9 +2005,9 @@ async function tabMcpMetrics() {
       : '<span class="hint">—</span>';
     $("#mcpm-chart").innerHTML = lineChart(d.series || [],
       [{ key: "calls", color: _css("--accent", "#e8833a"), label: "calls / hour" },
-       { key: "errors", color: _css("--bad", "#e0574f"), label: "errors / hour" }], {})
+       { key: "errors", color: _css("--bad", "#e0574f"), label: "errors / hour" }], {w: _chartW(1)})
       + lineChart(d.series || [], [{ key: "p50_ms", color: _css("--ok", "#3fb950"), label: "p50 ms" },
-                                   { key: "p95_ms", color: _css("--warn", "#e0a441"), label: "p95 ms" }], { yUnit: "ms" });
+                                   { key: "p95_ms", color: _css("--warn", "#e0a441"), label: "p95 ms" }], { yUnit: "ms", w: _chartW(1) });
     const rc = r.calls || [];
     $("#mcpm-recent").innerHTML = rc.length
       ? `<table><tr><th>time</th><th>source</th><th>caller</th><th>tool</th><th>result</th><th>duration</th><th title="connect ms (new session) · pacing wait">conn · pace</th><th title="session: reused / new / per-call">session</th><th>tokens</th><th>content</th></tr>`
@@ -2833,18 +3180,25 @@ window.probeBackend = async (name, paid) => {
   } catch (e) { toast(e.message, true); }
 };
 
-async function tabBackends() {
-  const st = await api("status");
+// Header line under the title: version, pool mode, brain health, routing and
+// backends up, refreshed by the Overview and Backend pool tabs and at load.
+function renderHeaderInfo(st) {
   const bh = st.brain.health || {};
   const bhCls = bh.healthy === true ? (bh.model_present === false ? "warn" : "ok")
               : bh.healthy === false ? "bad" : "";
   const bhTxt = bh.healthy === true ? (bh.model_present === false ? "model missing" : "healthy")
-              : bh.healthy === false ? "DOWN" : "…";
+              : bh.healthy === false ? "down" : "not checked";
+  const backs = (st.backends || []).filter(b => b.enabled !== false), down = backs.filter(b => b.healthy === false).length;
   $("#hdr-info").innerHTML =
-    `v${esc(st.version)} · pool: ${esc(st.pool_mode)} · brain: ${esc(st.brain.model)} `
-    + `(${esc(st.brain.provider)}) <span class="pill ${bhCls}" title="${esc(bh.error || "")}">brain: ${bhTxt}</span>`
+    `v${esc(st.version)} · ${esc(st.pool_mode)} pool · brain ${esc(st.brain.model)} (${esc(st.brain.provider)}) `
+    + `<span class="pill ${backs.length && !down ? "ok" : down ? "bad" : ""}" title="Backends answering their health check">${backs.length - down}/${backs.length} backends up</span>`
+    + ` <span class="pill ${bhCls}" title="${esc(bh.error || "The routing brain picks a model per persona request")}">brain ${bhTxt}</span>`
     + ` <span class="pill ${st.brain.active ? "" : "warn"}" title="${esc(st.brain.active ? "Persona requests are routed by the brain" : "Brain skipped: " + (st.brain.reason || ""))}">routing: ${st.brain.active ? "brain" : "passthrough"}${st.brain.routing_mode && st.brain.routing_mode !== "auto" ? "" : " (auto)"}</span>`
     + ` · ${st.tool_count} tools`;
+}
+async function tabBackends() {
+  const st = await api("status");
+  renderHeaderInfo(st);
   const rows = st.backends.map(b => `<tr>
       <td class="nw">${esc(b.name)}</td><td class="mono nw">${esc(b.type)}</td>
       <td class="mono">${esc(b.url)}</td><td>${b.priority}</td>
@@ -6127,6 +6481,8 @@ async function tabDevLog() {
 initTheme();
 initBranding();
 render();
+fetch("/admin/api/status", {headers: _adminKey() ? {Authorization: "Bearer " + _adminKey()} : {}})
+  .then(r => r.ok ? r.json() : null).then(st => { if (st) renderHeaderInfo(st); }).catch(() => {});
 </script>
 </body>
 </html>

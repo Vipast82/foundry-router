@@ -5,7 +5,7 @@ Give every client its own Foundry key so requests, budgets and the logs know
 
 ## Managing clients in the web UI (recommended)
 
-**Setup → Clients & keys** does all of this without editing files:
+**Access → Clients & keys** does all of this without editing files:
 
 - **Add a client.** Pick a preset (Cline, Kilo, coordinator, Open WebUI,
   training pipeline, admin) or custom, then set its name, scopes, an optional
@@ -27,7 +27,7 @@ Give every client its own Foundry key so requests, budgets and the logs know
   (placeholder, OpenAI-style, old Foundry key…), path, address and user
   agent.
 
-**Setup → Helpers & limits** sets each backend's `helpers_allowed`,
+**Access → Helpers & limits** sets each backend's `helpers_allowed`,
 `max_concurrent` and `queue_timeout_seconds` from a form, with the sessions
 holding slots right now.
 

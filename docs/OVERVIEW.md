@@ -59,13 +59,21 @@ Worker model (± MCP tools, ± tiered review) → response streamed back to the 
 
 ## The web UI, tab by tab
 
-- **Dashboard → Live / Performance / Cost** — live per-model speed, engine
+- **Overview** (the landing page, v0.128) — one sentence on whether
+  everything is healthy, a list of what needs a look (a backend down, a
+  subscription window at 85%+, advisor warnings, failed calls), headline
+  numbers with a 24-hour trend (requests, response time, first token,
+  generation speed, tokens), backend health, subscription windows, what is
+  generating now and the busiest models. Each block links to its detail tab.
+  The open tab is kept in the address (`/ui#Performance`), so reload and
+  bookmarks land where you were.
+- **Monitor → Live / Performance / Cost** — live per-model speed, engine
   load from llama.cpp/vLLM, per-call history with run labels (compare
   hardware runs) and a clear-data tool; see [LLAMACPP_VLLM.md](LLAMACPP_VLLM.md).
   Strata (Qwen3.8-Flash-Next on GPU + RAM): see [STRATA.md](STRATA.md).
   What each backend reports and how it reaches each client:
   [COMPATIBILITY.md](COMPATIBILITY.md).
-- **Setup → Clients & Keys / Helpers & Limits** — make, rotate and revoke a
+- **Access → Clients & Keys / Helpers & Limits** — make, rotate and revoke a
   key per program (shown once, stored hashed), access mode, unknown-key log,
   and per-backend helpers / concurrency ([CLIENTS.md](CLIENTS.md)).
 - **Backend Pool** — backends, health, the routing brain, and **Meridian
