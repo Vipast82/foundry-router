@@ -35,6 +35,7 @@ from __future__ import annotations
 import contextlib
 import hashlib
 import json
+import re
 import secrets
 import threading
 import time
@@ -1587,6 +1588,34 @@ class ControlCenter:
                 "total_steps": tot,
                 "head_sha": _s(b.get("head_sha"), 64), "ts": _f(b.get("ts"))}
 
+    @staticmethod
+    def _background_view(d: dict, eff: str) -> Optional[dict]:
+        """Background work the bridge reported (the fast lane's studio gate or
+        vision batches: not Kilo sessions), bounded and typed for the page.
+        Only while VERIFYING; None otherwise. `done`/`total` are parsed from the
+        gate's "84/110" progress counter when it has that shape."""
+        b = d.get("background")
+        if not isinstance(b, dict) or eff != "VERIFYING" or b.get("kind") not in ("gate", "vision"):
+            return None
+        num = lambda v: v if isinstance(v, (int, float)) and not isinstance(v, bool) and v >= 0 else None  # noqa: E731
+        out = {"kind": b["kind"], "head": _s(b.get("head"), 64), "started_ts": num(b.get("started_ts")),
+               "updated_ts": num(b.get("updated_ts"))}
+        if b["kind"] == "gate":
+            prog = _s(b.get("progress"), 40)
+            m = re.match(r"^\s*(\d{1,7})\s*/\s*(\d{1,7})\s*$", prog)
+            done, total = (int(m.group(1)), int(m.group(2))) if m else (None, None)
+            out.update(phase=_s(b.get("phase"), 60), progress=prog, done=done,
+                       total=total if total else None, limit_s=num(b.get("limit_s")),
+                       playing=b.get("playing") is True, log=_s(b.get("log"), 400),
+                       run_id=_s(b.get("run_id"), 120))
+        else:
+            out.update({k: num(b.get(k)) for k in ("batch", "batches", "frames", "total_frames",
+                                                    "done", "changes", "more_findings")})
+            out["findings"] = [_s(f, 300) for f in (b.get("findings") if isinstance(
+                b.get("findings"), list) else [])[:8] if isinstance(f, str)]
+            out["persona"] = _s(b.get("persona"), 120)
+        return out
+
     def _safe_task_view(self, task: dict) -> dict:
         try:
             return self.task_view(task)
@@ -1650,6 +1679,8 @@ class ControlCenter:
                 "blocker_class": d.get("blocker_class"),
                 # committed partial BUILD progress (not an attempt, not a decision)
                 "build": self._build_continuing(d, eff),
+                # the fast lane's gate / vision batches (v0.130): not Kilo sessions
+                "background": self._background_view(d, eff),
                 "readiness": {"items": ready,
                               "failing": sum(1 for r in ready if r.get("ok") is not True
                                              and r.get("blocking")),

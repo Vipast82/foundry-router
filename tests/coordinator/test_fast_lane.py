@@ -537,3 +537,42 @@ def test_capture_commit_covers_other_renders_in_the_capture_folder(env):
     [p] = [x[2] for x in e.client.log if "gate captures" in x[2]]
     assert "git add -A -- docs/evidence/UI-v3/T1" in p and "1 other re-rendered" in p
     assert other in p and "exactly the gate's capture files" not in p
+
+
+# ------------------------------------------------------- background work (v0.130)
+
+def test_running_gate_publishes_live_progress_for_the_control_center(env):
+    """UI-D1, 2026-10-20: the gate runner isn't a Kilo session, so the control
+    center looked idle while it ran. The fast lane keeps a structured record the
+    bridge passes on (phase, n/total, start time, limit, log); the elapsed note
+    reads m:ss, so it visibly moves within a minute."""
+    from foundry_coordinator.telemetry import background_work
+    e = env([{"result": "PASS", "sleep": 3, "captures": [CAP]}])
+    e.c.approve("game", "T1", [], "victor")
+    t = drive(e, lambda t: (fl(e).get("live") or {}).get("kind") == "gate", step=1)
+    live = fl(e)["live"]
+    assert live["phase"] == "stories" and live["progress"] == "1/3" and live["limit_s"] == 45 * 60
+    assert live["log"].endswith("fast_lane_gate.log") and live["started_ts"] > 1_700_000_000
+    assert live["head"] == t["head_sha"] or len(live["head"]) == 40
+    assert re.search(r"\d+:\d\d of 45 min$", t["next_action"]), t["next_action"]
+    bg = background_work(t)
+    assert bg["kind"] == "gate" and bg["progress"] == "1/3" and bg["log"] == live["log"]
+    # a record left from an earlier pass never shows once the task left VERIFYING
+    assert background_work({**t, "state": "IMPLEMENTING"}) is None
+    assert background_work({"state": "VERIFYING", "data": {"fast_lane": {"live": {"kind": "x"}}}}) is None
+
+
+def test_vision_batches_publish_done_of_total_and_findings_so_far(env):
+    caps = [CAP.replace(".png", f"-{i}.png") for i in range(5)]
+    e = env([{"result": "PASS", "captures": caps}],
+            vision=["changes_required", "approve", "approve"] + ["approve"] * 6)
+    e.c.projects["game"].profile.fast_lane["vision_batch_frames"] = 2
+    e.c.approve("game", "T1", [], "victor")
+    drive(e, lambda t: (fl(e).get("live") or {}).get("kind") == "vision"
+          and fl(e)["live"].get("done", 0) >= 1, step=1)
+    live = fl(e)["live"]
+    assert live["batches"] == 3 and live["batch"] == live["done"] + 1 and live["total_frames"] == 5
+    assert live["changes"] == 1 and live["findings"], live
+    from foundry_coordinator.telemetry import background_work
+    bg = background_work(task(e))
+    assert bg["kind"] == "vision" and bg["changes"] == 1 and bg["findings"] == live["findings"][:8]

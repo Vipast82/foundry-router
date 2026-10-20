@@ -398,6 +398,33 @@ def build_continuation(transitions: list) -> Optional[dict]:
             "ts": last.get("ts")}
 
 
+def background_work(task: dict) -> Optional[dict]:
+    """The fast lane's background work for one task (fast_lane.FastLane._live):
+    the studio gate run or the vision review batches. Neither is a Kilo
+    session, so the control center would otherwise show the task as idle.
+    Only while the task is VERIFYING (the fast lane acts only there): a record
+    left from an earlier pass never shows as running."""
+    if (task or {}).get("state") != "VERIFYING":
+        return None
+    live = (((task or {}).get("data") or {}).get("fast_lane") or {}).get("live")
+    if not isinstance(live, dict) or live.get("kind") not in ("gate", "vision"):
+        return None
+    num = lambda v: v if isinstance(v, (int, float)) and not isinstance(v, bool) else None  # noqa: E731
+    out = {"kind": live["kind"], "head": _cap(live.get("head"), 64),
+           "started_ts": num(live.get("started_ts")), "updated_ts": num(live.get("updated_ts"))}
+    if live["kind"] == "gate":
+        out.update(run_id=_cap(live.get("run_id"), 120), limit_s=num(live.get("limit_s")),
+                   phase=_cap(live.get("phase"), 60), progress=_cap(live.get("progress"), 40),
+                   playing=live.get("playing") is True, log=_cap(live.get("log"), 400))
+    else:
+        out.update({k: num(live.get(k)) for k in ("batch", "batches", "frames", "total_frames",
+                                                   "done", "changes", "more_findings")})
+        out["findings"] = [_cap(f, 300) for f in (live.get("findings") or [])[:8]
+                           if isinstance(f, str)]
+        out["persona"] = _cap(live.get("persona"), 120)
+    return out
+
+
 def project_pause_meta(q, project_id: str) -> dict:
     """The project-pause record the control channel writes (meta
     project_pause:<pid>, JSON), or {}."""
@@ -1578,6 +1605,7 @@ class TelemetryBridge:
              "findings": (d.get("findings") or [])[:10], "last_report": d.get("last_report"),
              "build_continuing": build_continuation(self.reader.task_transitions(
                  t["project_id"], t["task_id"])),
+             "background": background_work(t),
              "limits": {k: P.profile.limit(k, v) for k, v in (
                  ("max_attempts", 3), ("max_sessions_per_task", 8), ("max_review_calls", 4),
                  ("max_closeout_attempts", 2), ("session_timeout_minutes", 0),

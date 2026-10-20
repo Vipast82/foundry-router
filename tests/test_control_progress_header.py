@@ -109,3 +109,54 @@ def test_compact_header_keeps_the_phase_line_and_needs(tmp_path):
     assert 'class="pour"' in out["html"] and "Needs you" in out["html"]
     assert "Coordinator</div>" not in out["html"] and 'aria-expanded="false"' in out["html"]
     assert _model(tmp_path, None)["m"] is None
+
+
+# ----------------------------------------------------------- background work (v0.130)
+
+def test_foundry_bounds_the_background_record():
+    from foundry_router.control_center import ControlCenter
+    v = ControlCenter._background_view
+    g = v({"background": {"kind": "gate", "phase": "mock", "progress": "84/110", "started_ts": 100.0,
+                          "limit_s": 2700, "log": "C:/x/fast_lane_gate.log", "head": "a" * 90}}, "VERIFYING")
+    assert g["done"] == 84 and g["total"] == 110 and g["phase"] == "mock" and len(g["head"]) == 64
+    assert v({"background": {"kind": "gate", "progress": "starting"}}, "VERIFYING")["total"] is None
+    assert v({"background": {"kind": "gate"}}, "IMPLEMENTING") is None       # left VERIFYING
+    assert v({"background": {"kind": "shell"}}, "VERIFYING") is None
+    vi = v({"background": {"kind": "vision", "batch": 3, "batches": 26, "done": 2, "changes": True,
+                           "findings": ["x" * 900] * 20}}, "VERIFYING")
+    assert vi["batches"] == 26 and vi["changes"] is None and len(vi["findings"]) == 8
+    assert len(vi["findings"][0]) == 300
+
+
+def test_gate_and_vision_show_as_background_work_with_live_elapsed(tmp_path):
+    gate = {"kind": "gate", "phase": "mock", "progress": "84/110", "done": 84, "total": 110,
+            "started_ts": 1000.0, "updated_ts": 1300.0, "limit_s": 2700, "log": "C:/gate/" + HOSTILE}
+    t = task("VERIFYING", view={"background": gate})
+    out = _model(tmp_path, t, {"now": 1312.0})
+    m, h = out["m"], out["html"]
+    assert m["bg"]["done"] == 84 and round(m["bg"]["pct"]) == 76 and m["bg"]["elapsed"] == 312
+    assert m["doing"].startswith("Running the studio gate")
+    assert "Background work" in h and "84</b> of <b class=\"num\">110</b> done" in h
+    assert "5:12</b> elapsed of 45 min" in h and "Copy path" in h
+    assert "<img" not in h and "&lt;img" in h
+    # no update from the coordinator for over 10 minutes: said so
+    stale = _model(tmp_path, t, {"now": 2000.0})["html"]
+    assert "no update" in stale
+    vis = {"kind": "vision", "batch": 17, "batches": 26, "done": 16, "changes": 2, "frames": 20,
+           "findings": ["[batch 2/26] stage clipped " + HOSTILE], "more_findings": 3, "started_ts": 1000.0}
+    out = _model(tmp_path, task("VERIFYING", view={"background": vis}), {"now": 1100.0})
+    h = out["html"]
+    assert "16</b> of <b class=\"num\">26</b> batches done" in h and "now batch 17 (20 frames)" in h
+    assert "2 CHANGES" in h and "findings so far (4)" in h and "&lt;img" in h and "<img" not in h
+    assert out["m"]["doing"].startswith("Vision review")
+
+
+def test_helpers_in_progress_show_their_last_report(tmp_path):
+    helpers = [{"kind": "planner", "phase": "executing", "persona": "au-helper", "updated_ts": 950.0},
+               {"kind": "review", "phase": "completed", "updated_ts": 990.0},
+               {"kind": "triage", "status": "running", "updated_ts": 100.0}]
+    out = _model(tmp_path, task("IMPLEMENTING", helpers=helpers), {"now": 1000.0})
+    assert [x["kind"] for x in out["m"]["helpers"]] == ["planner", "triage"]
+    h = out["html"]
+    assert "last report 50 s ago" in h and "last report 15 min ago" in h and "warn-t" in h
+    assert "Background work" not in _model(tmp_path, task("IMPLEMENTING"))["html"]
