@@ -34,6 +34,7 @@ The capability and gap report, with live-run results, is
  Kilo (export / API / DB)  ─┤
  Cline session folders     ─┤   capture adapters        foundry_training/adapters/*
  coordinator store         ─┤   (read-only)
+ studio_gate verdicts      ─┤
  git                       ─┘
             │  redact → raw record → normalize → events   ingest.py, redact.py
             ▼
@@ -59,6 +60,13 @@ Package: `foundry_training` (Python standard library only). Command:
 | Cline | Session folders (`<id>.json`, `<id>.messages.json`) | Messages, tool_use / tool_result blocks, cwd | System prompt, tool definitions, image bytes; recorded as gaps |
 | Coordinator | Its SQLite store, read-only | Task transitions with evidence, sessions (run, role, phase, persona), verification results bound to a revision with evidence pointers, reviews bound to the reviewed commit, approvals bound to revision and artifact hashes, human corrections | — |
 | git | The project workspace | Commits the records reference, base..head diffs (capped) | Uncommitted state |
+| Studio gate | The runner's verdict files `<workspace>/.plan/tmp/gate/<SPRINT>/<head12>.json` (docs/STUDIO_GATE.md); `latest.json` and `status.json` are skipped | One `gate_verdict` label per verdict: result, every check, the failed required checks, captures (read only from `artifact_roots`), regression tally | Anything the runner did not write; a capture whose file is gone stays `missing` |
+
+The coordinator source also gives the UI v3 inputs, from optional tables read
+only when present: `task_memory` notes written by `helper:<unit>` (prework
+patches, with the patch text read from the workspace while it exists) and by
+`helper:precode-harvest`, `prework_ready` events, `model_visual_review` events
+(vision verdicts) and `operator_critique` / `playtest_critique` events.
 
 ## Event schema (version 1)
 
@@ -70,7 +78,7 @@ schema_version   1
 project_id       never empty; events of different projects never meet
 repository_id    the workspace
 task_id, session_id, parent_session_id, request_id, tool_call_id
-source_adapter   kilo | foundry | cline | coordinator | git
+source_adapter   kilo | foundry | cline | coordinator | git | gate
 source_record_id the source's own id (export session, capture record uid, ...)
 timestamp, event_type, actor_role, actor_model
 requested_persona, actual_backend, actual_model
@@ -87,7 +95,8 @@ raw_ref          pointer to the redacted raw record
 Event types include session_start, child_session, user_message,
 assistant_message, reasoning, tool_call, tool_result, file_edit, file_ref,
 compaction, model_request, model_call, task_transition, verification,
-review, approval, human_correction and commit.
+review, approval, human_correction, commit, label (gate verdict, vision
+verdict, critique) and authorship (helper code recorded for a task).
 
 **UNKNOWN stays UNKNOWN.** A missing verification is `unverified`, not
 `PASS`. A missing tool result is `missing`; a result is never invented. An
@@ -135,6 +144,70 @@ otherwise it is `non-local`. Reviewer feedback in a correction is
 `frontier`, a human rejection is `human`, and a failed mechanical check is
 `coordinator`.
 
+### Labels, tags and per-step authorship (UI v3 fast lane)
+
+`foundry_training/labels.py` adds three things to every episode. Plan:
+`docs/plans/AU_UI_REWORK_PLAN.md` section 14.
+
+**Labels** (`ep["labels"] = {gate, vision, critiques}`) are measurements at the
+episode's revisions, never text inside the episode. A label belongs to an
+episode when its task matches and its revision is one of the heads that
+session handed to VERIFYING (or the episode's head).
+
+| Label | From | Holds |
+|---|---|---|
+| `gate` | `ingest gate` (studio_gate verdict JSON) | `result` PASS / FAIL / UNKNOWN, `mode`, `summary_line`, every check, `failed_checks` (required checks not PASS: SKIP and UNKNOWN count), `captures` with story, size, geometry defects, layout lines, sha256 and status, `error` |
+| `vision` | coordinator `model_visual_review` events | `verdict` APPROVED / CHANGES / UNCERTAIN, numbered `findings`, persona, served model, `frames` (path, recorded and actual sha256, status) |
+| `critiques` | `operator_critique` / `playtest_critique` events and human rejections | who, numbered findings. A critique without a revision attaches to every later episode of the task. |
+
+Captures of gate and vision labels become `flags.label_artifacts`, so
+multimodal episodes get their images. A multimodal export skips an episode
+whose label artifact is not `present` (`missing_artifact`).
+
+**Tags** (`ep["tags"]`):
+
+| Tag | When |
+|---|---|
+| `fast_lane` | the task is in the profile's `[fast_lane] tasks` (nothing when `[fast_lane] enabled = false`) |
+| `ui_v3` | a label capture under `docs/evidence/UI-v3/`, or the sprint plan mentions UI-v3 / `au-ui-v3` |
+| `template:T1`…`template:T8` | named in `docs/progress/<ID>_PLAN.md`, or implied by a template widget (T1 ModalFrame, T2 CatalogGrid, T3 Showcase, T4 TreeView, T5 ListRows, T6 RewardTrack, T7 ResultsSummary, T8 ConfirmDialog) |
+| `widget:<Name>` | a known widget name in the plan (`labels.KNOWN_WIDGETS`, plus `[training.tags] widgets`) |
+| `device:<W>x<H>` | a capture size |
+| `helper_steps` | the episode has at least one helper step |
+
+**Per-step authorship.** A step is one assistant turn. A local turn that
+carried out frontier code is re-attributed as `{"kind": "helper", "model":
+"helper:<unit>", "written_by": <local model>, "basis": ...}`:
+
+- `helper:<unit>`: the turn applied a helper's prework patch
+  (`.plan/tmp/prework/<task>/<unit>.patch` named in its tool call), or its
+  written lines match the patch's added lines (at least 3 lines, 60 % overlap);
+- `helper:precode-harvest`: the turn wrote or copied a model harvested from a
+  frontier pre-code diff.
+
+Helper steps stay in the conversation as context and are never training
+targets. The local primary's own turns, including code written around a
+harvested model, stay eligible. Helper guidance that is not code (plans,
+interfaces, reviews, findings) is not authorship. `flags.helper_steps` lists
+each re-attributed turn.
+
+**Correction triples.** A correction pairs an attempt, the feedback the
+session received and the verified fix. Two new feedback sources:
+
+- `gate`: a red studio gate verdict at the failed attempt's head (author
+  `coordinator` / `studio_gate`);
+- `vision`: vision CHANGES findings (author `frontier`, the vision persona).
+  A vision CHANGES on the earlier attempt also makes it a correction even if
+  its code review approved.
+
+In the fast lane the findings go into the **same** session, so one session
+can hold the whole triple. `labels.inline_corrections` builds an inline
+correction for each red label at an earlier head whose findings reappear in a
+later user turn: the attempt and the findings are context (`context_until` =
+the findings turn), and the turns after it are the target. After a frontier
+hand-off the fix turns are non-local, so that triple is kept for the project
+but excluded from training under the default policy.
+
 ## Curation
 
 Each episode ends in exactly one status, with reasons:
@@ -150,7 +223,13 @@ Exclusion reasons:
 - Verification: `unverified`, `verification_failed`, `verification_unknown`.
 - Review and approval: `review_missing`, `review_not_approved`, `unresolved_findings`, `approval_missing`.
 - Tool sequence: `truncated_tool_output`, `missing_tool_result`, `broken_tool_sequence`.
-- Content: `missing_context`, `non_local_author`, `loop`, `no_feedback`, `missing_artifact`, `secret_exposure`.
+- Content: `missing_context`, `non_local_author`, `no_local_target`, `loop`, `no_feedback`, `missing_artifact`, `secret_exposure`.
+
+With `allow_frontier_targets = false` (the default) the authorship rule
+applies to every dataset kind, whether or not a policy lists `local_author`.
+A frontier or other non-local turn excludes the episode (`non_local_author`).
+Helper steps do not: they are weighted out at export. An episode whose every
+assistant turn is a helper step has nothing to train on (`no_local_target`).
 
 Failed episodes are kept. They never become positive training data, but
 remain available to evaluation sets and preference pairs.
@@ -176,6 +255,30 @@ different contexts is refused.
 | canonical | One JSON object per episode: messages with authorship, tools, revision, outcome, flags, provenance (event ids, sources), split, diff; corrections add original, feedback (with author) and accepted correction | The archival format |
 | chatml-tools | OpenAI-style `{"messages", "tools"}` JSONL, as read by TRL, Unsloth and Axolotl for tool-calling chat models | Checked against Qwen-family ChatML with Hermes `<tool_call>` conventions: system first, results follow their calls, ends on an assistant turn without open calls. Length is estimated at chars/3.2, or counted exactly with `--tokenizer tokenizer.json` (needs the optional `tokenizers` package). Long examples are cut only at a complete assistant turn; if no prefix fits, the example is left out. |
 | dpo | `{"prompt", "tools", "chosen", "rejected", "basis", "judge"}` | Preference pairs only |
+
+**Per-turn targets.** When an example has context-only turns (helper steps,
+or the turns up to the feedback in a correction), each assistant turn in
+`chatml-tools` carries `"weight": 1` (target) or `"weight": 0` (context), the
+per-message switch TRL and Axolotl chat datasets read, and `meta.context_only`
+lists the weighted-out turns. Without such turns the line is unchanged. An
+example left with no weight-1 turn is skipped (`no_target_turn`). `canonical`
+lines add `labels`, `tags` and `targets` (the indexes of the target turns).
+`validate` fails a line whose context-only turn is not weight 0, or whose
+frontier-authored turns are targets while frontier targets are off.
+
+**Tag filter.** `export --tag T` (repeatable) keeps only episodes carrying
+every given tag; the rest count as `tag_filter` in the skip counts, and the
+manifest records the tags. Example, the Roblox-UI subset:
+
+```sh
+python -m foundry_training ingest gate --project animaluprising
+python -m foundry_training curate --project animaluprising
+python -m foundry_training export --project animaluprising --kind sft --target chatml-tools --tag ui_v3
+python -m foundry_training export --project animaluprising --kind correction --target canonical --tag fast_lane --tag ui_v3
+```
+
+`queue` and `auto` run `ingest gate` for each project themselves, so after a
+sprint closes only the `export --tag` step is manual.
 
 Every dataset gets `manifest.json`: projects, policy hashes, split policy,
 episode ids, skip counts, validation result, token method,
@@ -253,7 +356,11 @@ Foundry: <data>/training/capture.sqlite   (0700 dir, 0600 file)
    seed = "au-v1"
    [training.capture]
    on_failure = "warn"           # coordinator: ignore | warn | hold
+   [training.tags]
+   widgets = []                  # extra widget names to tag (labels.KNOWN_WIDGETS)
    ```
+   The pipeline also reads `[fast_lane] tasks` from the same profile for the
+   `fast_lane` tag.
 3. **Coordinator.** Nothing to run. With `[training] enabled`, each task that
    closes (COMPLETE, closed awaiting approval, or FAILED) writes a pointer
    manifest to `<state>/training-spool/`. The manifest lists the task's
@@ -355,10 +462,12 @@ ingest foundry --url URL | --capture-db P  Foundry capture (incremental by recor
 ingest coordinator --db PATH               coordinator store, read-only
 ingest cline --sessions DIR
 ingest git --project P
+ingest gate --project P                    studio_gate verdict JSON (labels + captures)
 queue --spool DIR [--foundry-url U] [--kilo-url U]
 curate --project P [--map SESSION=TASK...]
 export --project P... --kind sft|correction|preference|multimodal
        --target canonical|chatml-tools|dpo [--purpose train|eval] [--tokenizer F]
+       [--tag T ...]
 validate DATASET_DIR --target T
 status [--json] | inspect EPISODE | gaps [--project P]
 prefer --project P --chosen EVENT --rejected EVENT --by NAME --note TEXT
@@ -407,7 +516,9 @@ The export manifest repeats these:
   CLIProxyAPI) are governed by those providers' terms, which restrict using
   outputs to develop competing models. Frontier-authored turns are
   therefore excluded as training targets (`non_local_author`) unless a
-  profile sets `allow_frontier_targets = true`. Reviewer findings appear only
+  profile sets `allow_frontier_targets = true`. Steps that applied a
+  frontier helper's code (`helper:<unit>`, `helper:precode-harvest`) are
+  context only (weight 0), never targets. Reviewer findings appear only
   as feedback inside correction records, attributed to their author. Decide
   with your own reading of the current terms before training on them.
 - Check the local base model's license before fine-tuning or distributing
@@ -430,6 +541,12 @@ The export manifest repeats these:
 - There is no application-level encryption at rest (see Storage).
 - The Kilo checkpoint check (`au.kilo_checkpoint`) still reads Kilo
   separately. Moving it onto this normalized adapter is future work.
+- Helper-step detection matches patch paths and added lines. Helper code the
+  local model retyped with heavy changes (under 60 % line overlap) counts as
+  local. Prework patches live in a git-ignored tmp dir; once deleted, only
+  path matching is left.
+- Nothing in the coordinator writes `operator_critique` / `playtest_critique`
+  events yet (TODO); until then critiques come only from human rejections.
 - Cline ingestion is implemented against the folder layout Foundry's replay
   harness and AnimalUprising's checkpoint script read. It has not been run
   against a live Cline in this work.

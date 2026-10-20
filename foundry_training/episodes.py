@@ -7,9 +7,17 @@ trajectory   one coding session (one coordinator attempt, a closeout, a
              Outcomes are labels on the episode, never text inside it, so
              later results, reviewer answers or future file state can't leak
              into an earlier prompt.
-correction   attempt k that failed (a check or the reviewer), the feedback the
-             repair session actually received, and the repair (attempt k+1)
-             that was verified; authorship kept per part.
+correction   attempt k that failed (a check, the reviewer, the studio gate or
+             the vision reviewer), the feedback the repair session actually
+             received, and the repair (attempt k+1) that was verified;
+             authorship kept per part. A fast-lane session that got its red
+             gate / vision findings in the SAME session yields an inline
+             correction (labels.inline_corrections).
+
+Labels (gate verdict, vision verdict, critiques), tags (fast_lane, ui_v3,
+templates, widgets, device sizes) and per-step authorship (helper prework
+patches / harvested pre-code models are context, never targets) come from
+labels.py.
 
 Context source, best first:
   foundry-capture     the session's last complete model_call: Foundry's
@@ -27,7 +35,7 @@ import json
 from collections import defaultdict
 from typing import Optional
 
-from . import correlate
+from . import correlate, labels as L
 from .messages import canonical_text, neutral, neutral_tools, pairing
 from .schema import content_hash, stable_id
 
@@ -266,6 +274,11 @@ def build(store, project_id: str, cfg, diff_fn=None) -> list[dict]:
         if built and (trunc or miss):
             # the Foundry context is what the model saw; still flag truncation Kilo recorded
             pass
+        # per-step authorship: a local turn that applied a helper's patch or
+        # wrote a harvested pre-code model is frontier-authored (context only)
+        attrs = L.attributions(ev, task_id, cfg.workspace)
+        helper_steps = L.attribute_steps(convo["messages"], attrs)
+        unverifiable = sorted({a["patch"] for a in attrs if not a["verifiable"]})
         compaction = any(e["event_type"] == "compaction" for e in sev) or \
             bool(convo.get("context_replaced"))
         phase = info.get("phase")
@@ -290,7 +303,8 @@ def build(store, project_id: str, cfg, diff_fn=None) -> list[dict]:
             "messages": msgs, "tools": convo["tools"],
             "context_source": convo["context_source"],
             "revision": {"base": base, "head": head},
-            "diff": {"patch": diff, "truncated": diff_cut},
+            "diff": {"patch": diff, "truncated": diff_cut,
+                     "helper_authored": bool(helper_steps) or L.diff_has_helper(diff, attrs)},
             "outcome": oc,
             "flags": {"complete_tool_sequence": pair["ok"] and not trunc and not miss
                       and not convo.get("final_open_tool_calls"),
@@ -309,9 +323,24 @@ def build(store, project_id: str, cfg, diff_fn=None) -> list[dict]:
                                                              "file_ref", "compaction")}),
             "first_ts": min(e["timestamp"] for e in sev),
         }
+        heads = (L.heads_of_session(ev, task_id, sid) if task_id else []) + \
+            ([head] if head else [])
+        ep["labels"] = L.episode_labels(ev, task_id, heads, ep["first_ts"])
+        ep["flags"]["label_artifacts"] = L.label_artifacts(ep["labels"])
+        ep["flags"]["helper_steps"] = helper_steps
+        # a helper patch whose content was never captured: which steps used it
+        # cannot be checked, so the episode is not trusted (fail closed)
+        ep["flags"]["helper_patch_unverifiable"] = unverifiable
+        ep["flags"]["gate_label_inconsistent"] = [g["event_id"] for g in ep["labels"]["gate"]
+                                                  if g.get("inconsistent")]
+        ep["tags"] = L.episode_tags(ep, cfg, ep["labels"], ep["flags"]["label_artifacts"])
         ep["content_hash"] = content_hash(canonical_text(msgs))
         episodes.append(ep)
+    inline = []
+    for ep in episodes:
+        inline += L.inline_corrections(ep, project_id, diff_fn)
     episodes += corrections(ev, episodes, cfg, project_id)
+    episodes += inline
     return episodes
 
 
@@ -327,8 +356,11 @@ def corrections(ev, episodes, cfg, project_id) -> list[dict]:
     for task_id, eps in by_task.items():
         eps.sort(key=lambda e: e["attempt"])
         for prev, nxt in zip(eps, eps[1:]):
+            vision_red = any(v.get("verdict") == "CHANGES"
+                             for v in (prev.get("labels") or {}).get("vision") or [])
             if prev["outcome"]["verification"]["status"] == "PASS" and \
-                    (prev["outcome"]["review"] or {}).get("verdict") == "APPROVED":
+                    (prev["outcome"]["review"] or {}).get("verdict") == "APPROVED" and \
+                    not vision_red:
                 continue
             fb = None
             for t in _transitions(ev, task_id):
@@ -338,9 +370,21 @@ def corrections(ev, episodes, cfg, project_id) -> list[dict]:
                     fb = {"findings": evd["findings"], "from": t["facts"]["from"],
                           "actor": t["facts"]["actor"], "review_id": evd.get("review_id")}
             if not fb:
+                # a red studio_gate verdict at the failed attempt's head (fast lane)
+                gl = [g for g in (prev.get("labels") or {}).get("gate") or []
+                      if g.get("result") == "FAIL" and g.get("head") ==
+                      prev["revision"].get("head")]
+                if gl:
+                    fb = {"findings": [f"{c['id']}: {c.get('result')} {c.get('detail') or ''}"
+                                       .strip() for c in gl[-1]["failed_checks"]],
+                          "from": "VERIFYING", "actor": "studio_gate", "review_id": None}
+            if not fb:
                 continue
+            actor = str(fb["actor"] or "")
             src = ("reviewer" if fb["from"] == "REVIEWING" else
-                   "human" if fb["actor"] not in ("engine", "operator") else "mechanical-checks")
+                   "gate" if actor == "studio_gate" else
+                   "vision" if actor.startswith("model:") else
+                   "human" if actor not in ("engine", "operator") else "mechanical-checks")
             rev = prev["outcome"].get("review") or {}
             out.append({
                 "episode_id": stable_id(project_id, "correction", prev["episode_id"],
@@ -356,6 +400,10 @@ def corrections(ev, episodes, cfg, project_id) -> list[dict]:
                 "feedback": {"source": src, "items": fb["findings"],
                              "author": ({"kind": "frontier", "model": rev.get("persona")}
                                         if src == "reviewer" else
+                                        {"kind": "frontier", "model": actor[6:] or None}
+                                        if src == "vision" else
+                                        {"kind": "coordinator", "model": "studio_gate"}
+                                        if src == "gate" else
                                         {"kind": "human" if src == "human" else "coordinator",
                                          "model": None})},
                 "correction": {"episode_id": nxt["episode_id"], "messages": nxt["messages"],
@@ -364,6 +412,7 @@ def corrections(ev, episodes, cfg, project_id) -> list[dict]:
                 "messages": nxt["messages"], "tools": nxt["tools"],
                 "context_source": nxt["context_source"], "revision": nxt["revision"],
                 "outcome": nxt["outcome"], "flags": dict(nxt["flags"]),
+                "labels": nxt.get("labels") or {}, "tags": nxt.get("tags") or [],
                 "sources": sorted(set(prev["sources"]) | set(nxt["sources"])),
                 "event_ids": sorted(set(prev["event_ids"]) | set(nxt["event_ids"])),
                 "first_ts": prev["first_ts"],

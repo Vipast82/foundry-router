@@ -69,11 +69,18 @@ deep_reviewer = "Foundry-Kilo-Deep-Review"   # used when a task tag matches revi
 visual_reviewer = "Foundry-Kilo-Visual-Review"
 image_generator = "Foundry-Kilo-Images"
 
-# Victor 2026-10-19: Strata writes the remaining UI sprints; the UI reviewer
-# stays on the deep-review persona. Queue approval and sprint scope are unchanged.
+# UI v3 fast-lane sprints (plan AU_UI_REWORK_PLAN.md 7.4, decided 2026-10-20):
+# local Strata/Qwen implements the template screens (training-eligible, D11);
+# the foundation and the v3 mock are frontier-built. The deep-review persona
+# reviews all of them. (The old UI-02...UI-GT1 ids were superseded by these.)
 [role_overrides.ui]
-tasks = ["UI-02", "UI-03", "UI-04", "UI-05", "UI-06", "UI-GT1"]
+tasks = ["UI-03a", "UI-04a", "UI-05a", "UI-06a", "UI-V1"]
 implementer = "Foundry-Kilo-Local"
+reviewer = "Foundry-Kilo-Deep-Review"
+
+[role_overrides.ui_frontier]
+tasks = ["UI-D1", "UI-02a"]
+implementer = "Foundry-Kilo-Sonnet"
 reviewer = "Foundry-Kilo-Deep-Review"
 
 # Victor 2026-10-19: the required physical-input phase joins the queue when
@@ -281,15 +288,36 @@ max_running = 2
 steps_ahead = 2
 
 [frontier_primary]
-# Manual only (`frontier request PROJECT TASK --reason ...`): never triggers itself,
-# so the local primary stays the default writer. Sonnet 5.5 (Claude Max) differs
-# from the implementer and every reviewer, as required.
+# Manual (`frontier request PROJECT TASK --reason ...`), plus ONE automatic trigger:
+# a [fast_lane] task with a local primary after max_red_gates_before_handoff red
+# studio gates (same session, same limits below). Nothing else triggers it, so the
+# local primary stays the default writer. Sonnet 5.5 (Claude Max) differs from the
+# local implementer and every reviewer, as required; UI-D1/UI-02a already use it
+# as their implementer, so they are never handed off.
 enabled = true
 persona = "Foundry-Kilo-Sonnet"
 max_turns = 3
 max_minutes = 120
 max_phases_per_task = 1
 cooldown_minutes = 60
+
+# OPTIONAL (UI-T0): fast-lane sprints. A listed task runs as ONE long Kilo session;
+# its verify step is the studio_gate runner (a background subprocess the coordinator
+# polls each tick via .plan/tmp/gate/<ID>/status.json), its BUILD prompt points at
+# docs/rules/FAST_LANE_RULES.md and the au-fast-lane skill. A red gate or vision
+# CHANGES goes back into the same session (no new session, no recovery case); the
+# verdict is recorded as a `fast_lane.gate` evidence record bound to the revision.
+# Only the listed lanes run for these tasks. Off by default; unlisted tasks are
+# unaffected. The vision approval uses [approval] visual_model and roles.visual_reviewer.
+# [fast_lane]
+# enabled = true
+# tasks = ["UI-D1", "UI-02a", "UI-03a", "UI-04a", "UI-05a", "UI-06a", "UI-V1"]
+# gate_module = "foundry_coordinator.projects.animaluprising.studio_gate"
+# gate_timeout_minutes = 45               # a run still going after this = red gate
+# max_red_gates_before_handoff = 2        # local-primary tasks then auto-request frontier_primary
+#                                         # (twice this many red gates = BLOCKED for the lead)
+# max_vision_rounds = 2                   # CHANGES rounds before accept-with-notes
+# lanes = ["prework", "test_design", "failure_triage", "incremental_review"]
 
 # OPTIONAL (v0.123): the lead sprint manager, the last automated recovery tier
 # before a blocker reaches the operator (docs/LEAD_SPRINT_MANAGER.md). OFF by

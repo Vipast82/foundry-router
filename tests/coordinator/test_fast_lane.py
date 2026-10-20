@@ -1,0 +1,480 @@
+"""UI-T0 fast lane: a [fast_lane] task's verify step is the studio_gate runner
+(a background subprocess polled per tick), red gates and vision CHANGES go
+back into the SAME primary session, two red gates on a local primary request
+the frontier primary automatically, a runner timeout is a red gate, vision
+CHANGES are accepted with notes after max_vision_rounds, only the configured
+lanes run, and a task outside [fast_lane] behaves exactly as before.
+
+The runner is a tiny fake script (written per test) that reads a JSON plan
+and writes status.json + the verdict JSON the real runner writes."""
+
+from __future__ import annotations
+
+import json
+import os
+import re
+import textwrap
+import time
+from types import SimpleNamespace
+
+import pytest
+
+from foundry_coordinator import lanes as L
+from foundry_coordinator import states as S
+from foundry_coordinator.adapters.scripted import ScriptedClient
+from foundry_coordinator.profile import ProfileError, load
+from tests.coordinator.helpers import FakeFoundry, coordinator, make_repo, write_profile
+
+LOCAL, FRONTIER, VISION = "Foundry-Kilo-Local", "Foundry-Kilo-Frontier", \
+    "Foundry-Kilo-Visual-Review"
+CAP = "docs/evidence/UI-v3/T1/Hud.normal@1920x1080.png"
+T1 = {"id": "T1", "title": "HUD", "spec": "Build the v3 HUD.",
+      "scope": ["src/a.txt", "docs/evidence/UI-v3/T1/*"]}
+T2 = {"id": "T2", "title": "Other", "spec": "Write src/b.txt containing OK.",
+      "scope": ["src/b.txt"]}
+
+FAKE_GATE = textwrap.dedent('''\
+    """Fake studio_gate: `--repo R sprint --sprint ID --files F`; behaviour per call
+    from the JSON plan named by FAKE_GATE_PLAN (a list, one entry per run)."""
+    import json, os, subprocess, sys, time
+    a = sys.argv[1:]
+    repo, sprint = a[a.index("--repo") + 1], a[a.index("--sprint") + 1]
+    plan_path = os.environ["FAKE_GATE_PLAN"]
+    calls = json.load(open(plan_path))
+    n_path = plan_path + ".n"
+    n = int(open(n_path).read()) if os.path.exists(n_path) else 0
+    open(n_path, "w").write(str(n + 1))
+    step = calls[min(n, len(calls) - 1)]
+    head = subprocess.run(["git", "-C", repo, "rev-parse", "HEAD"], capture_output=True,
+                          text=True).stdout.strip()
+    d = os.path.join(repo, ".plan", "tmp", "gate", sprint)
+    os.makedirs(d, exist_ok=True)
+    started = time.time()
+    json.dump({"sprint": sprint, "pid": os.getpid(), "started": started, "phase": "stories",
+               "progress": "1/3", "updated": started}, open(os.path.join(d, "status.json"), "w"))
+    time.sleep(step.get("sleep", 0))
+    caps = []
+    for c in step.get("captures", []):
+        p = os.path.join(repo, *c.split("/"))
+        os.makedirs(os.path.dirname(p), exist_ok=True)
+        open(p, "wb").write(b"\\x89PNG\\r\\n\\x1a\\n fake frame " + c.encode())
+        caps.append({"story": "Hud.normal", "size": "1920x1080", "path": c,
+                     "geometry_defects": 0, "layout_lines": []})
+    run_id = a[a.index("--run-id") + 1] if "--run-id" in a else ""
+    assert run_id and run_id == os.environ.get("FOUNDRY_GATE_RUN_ID"), (run_id, a)
+    if not step.get("no_verdict"):
+        v = {"schema": 1, "sprint": sprint, "head": head, "mode": step.get("mode", "sprint"),
+             "run_id": step.get("run_id", run_id), "started": started,
+             "finished": time.time(), "result": step["result"],
+             "checks": step.get("checks") or [{"id": "host.clean_tree", "result": "PASS",
+                                               "required": True, "detail": "clean",
+                                               "artifacts": []}],
+             "captures": caps, "regression": {}, "summary_line": f"GATE {sprint} {step['result']}",
+             "error": step.get("error")}
+        for name in (head[:12] + "." + v["mode"] + ".json", "latest.json"):
+            json.dump(v, open(os.path.join(d, name + ".tmp"), "w"))
+            os.replace(os.path.join(d, name + ".tmp"), os.path.join(d, name))
+    json.dump({"sprint": sprint, "pid": os.getpid(), "started": started, "phase": "done",
+               "progress": "3/3", "updated": time.time()}, open(os.path.join(d, "status.json"), "w"))
+    print(f"GATE {sprint} {step['result']}")
+    sys.exit(step.get("exit", 0 if step["result"] == "PASS" else 1))
+    ''')
+
+RED = {"result": "FAIL", "checks": [
+    {"id": "story.Hud.normal@390x844", "result": "FAIL", "required": True,
+     "detail": "FAIL: UI-LAYOUT VIEWPORT-CLIP Hud/TopBar - 12px off-screen", "artifacts": []}]}
+GREEN = {"result": "PASS", "captures": [CAP]}
+
+
+class Recorder(ScriptedClient):
+    """Scripted Kilo that records each prompt's persona and serves the turn
+    with the persona it was prompted with (a working per-prompt model switch)."""
+
+    def __init__(self, *a, **kw):
+        super().__init__(*a, **kw)
+        self.log = []                            # (session, persona, text)
+
+    def start_session(self, **kw):
+        sid = super().start_session(**kw)
+        self.sessions[sid]["served"] = kw.get("persona")
+        return sid
+
+    def prompt(self, session_id, text, *, directory, persona, agent) -> None:
+        self.log.append((session_id, persona, text))
+        self.sessions[session_id]["served"] = persona
+        super().prompt(session_id, text, directory=directory, persona=persona, agent=agent)
+
+    def transcript(self, session_id, *, directory) -> list:
+        s = self.sessions.get(session_id) or {}
+        return [{"info": {"role": "assistant", "modelID": s.get("served") or ""}, "parts": []}]
+
+
+def agent(ctx):
+    """The primary: initial work, gate-capture commits, red-gate / vision fixes."""
+    p = ctx["prompt"]
+    n = int(ctx.get("_n", 0))
+    done = '```coordinator-report\n{"status": "DONE", "summary": "ok"}\n```'
+    if "commit exactly the gate's capture files" in p:
+        return {"commit": f"{ctx['task_id']}: gate captures", "final": done}
+    if ctx["task_id"] == "T2":
+        return {"writes": {"src/b.txt": "OK"}, "commit": "T2: work", "final": done}
+    stamp = f"OK {time.time_ns()}"
+    return {"writes": {"src/a.txt": stamp}, "commit": f"T1: work {n}", "final": done}
+
+
+class VisionFoundry(FakeFoundry):
+    """Fake Foundry with a strict, vision-capable visual persona; vision
+    verdicts are taken from `self.vision` in order (approve by default)."""
+
+    def __init__(self):
+        super().__init__()
+        self.vision = []
+
+    def persona_info(self, persona, client=""):
+        return {"exists": True, "enabled": True, "strict": True,
+                "routes": [{"model": "vision-model", "vision": True}]}
+
+    def chat(self, persona, messages, *, session_id="", max_tokens=4000, schema=None):
+        if not session_id.startswith("fast-lane-vision"):
+            return super().chat(persona, messages, session_id=session_id,
+                                max_tokens=max_tokens, schema=schema)
+        verdict = self.vision.pop(0) if self.vision else "approve"
+        self.chats.append({"persona": persona, "session_id": session_id, "packet": "vision"})
+        frames = []
+        for part in messages[-1]["content"]:
+            m = re.match(r"Capture (\S+) .*SHA256 ([0-9a-f]{64})", part.get("text") or "")
+            if m:
+                frames.append({"path": m.group(1), "sha256": m.group(2), "image_seen": True,
+                               "subject_present": True, "validity": "ok",
+                               "observation": "HUD rendered",
+                               "findings": [] if verdict == "approve" else
+                               ["1. Hud.normal@390x844: the tab row overlaps the close button"]})
+        return json.dumps({"verdict": verdict, "frames": frames, "limitations": ""}), \
+            {"served_model": "vision-model"}
+
+
+VISUAL = "\n[approval]\nvisual_model = true\n"
+
+
+def vis_override(implementer=None):
+    return (f'\n[role_overrides.t1]\ntasks = ["T1"]\nvisual_reviewer = "{VISION}"\n'
+            + (f'implementer = "{implementer}"\n' if implementer else ""))
+
+
+def fl_profile(tmp_path, repo, runner, extra="", checks=None):
+    return write_profile(tmp_path, "game", repo, checks=checks, extra=textwrap.dedent(f'''\
+        [fast_lane]
+        enabled = true
+        tasks = ["T1"]
+        gate_module = "{str(runner).replace(chr(92), '/')}"
+        gate_timeout_minutes = 45
+        max_red_gates_before_handoff = 2
+        max_vision_rounds = 2
+        lanes = ["prework", "test_design", "failure_triage", "incremental_review"]
+
+        [frontier_primary]
+        enabled = true
+        persona = "{FRONTIER}"
+        max_turns = 3
+        cooldown_minutes = 60
+        ''') + textwrap.dedent(extra))
+
+
+@pytest.fixture
+def env(tmp_path, monkeypatch):
+    def build(plan, extra=None, vision=None, tasks=(T1,), checks=None):
+        extra = VISUAL + vis_override() if extra is None else extra
+        repo, _ = make_repo(tmp_path, "game", list(tasks), extra_files={".gitignore": ".plan/\n"})
+        runner = tmp_path / "fake_gate.py"
+        runner.write_text(FAKE_GATE)
+        plan_file = tmp_path / "gate_plan.json"
+        plan_file.write_text(json.dumps(plan))
+        monkeypatch.setenv("FAKE_GATE_PLAN", str(plan_file))
+        prof = fl_profile(tmp_path, repo, runner, extra, checks)
+        now = [1_000_000.0]
+        client = Recorder(agent, project_id="game")
+        ff = VisionFoundry()
+        ff.vision = list(vision or [])
+        c = coordinator(tmp_path, [prof], {"game": client}, foundry={"game": ff},
+                        clock=lambda: now[0])
+        return SimpleNamespace(c=c, client=client, ff=ff, now=now, repo=repo, prof=prof,
+                               plan=plan_file)
+    return build
+
+
+def task(e, tid="T1"):
+    return e.c.store.task("game", tid)
+
+
+def drive(e, pred, tid="T1", limit=400, step=5.0):
+    """Tick (the runner is a real background process) until pred(task)."""
+    for _ in range(limit):
+        e.c.tick()
+        e.now[0] += step
+        t = task(e, tid)
+        if pred(t):
+            return t
+        time.sleep(0.02)
+    raise AssertionError(f"timed out in {task(e, tid)['state']}: {task(e, tid)['next_action']}")
+
+
+def fl(e, tid="T1"):
+    return task(e, tid)["data"].get("fast_lane") or {}
+
+
+def events(e, kind):
+    return [r for r in e.c.store.q("SELECT * FROM events WHERE kind=? ORDER BY id", (kind,))]
+
+
+def red_gates_seen(n):
+    return lambda t: int((t["data"].get("fast_lane") or {}).get("red_gates") or 0) >= n \
+        and t["state"] == S.IMPLEMENTING
+
+
+# --------------------------------------------------------------------------- profile
+
+
+def test_profile_defaults_and_validation(tmp_path):
+    repo, _ = make_repo(tmp_path, "game", [T1])
+    p = load(str(write_profile(tmp_path, "game", repo)))
+    assert p.fast_lane["enabled"] is False and not p.fast_lane_task("T1")
+    assert p.fast_lane["max_red_gates_before_handoff"] == 2 and p.fast_lane["max_vision_rounds"] == 2
+    for bad in ('[fast_lane]\nfoo = 1\n', '[fast_lane]\ntasks = ["UI-*"]\n',
+                '[fast_lane]\nlanes = ["nope"]\n', '[fast_lane]\ngate_timeout_minutes = 0\n',
+                '[fast_lane]\ngate_module = "not a module"\n'):
+        with pytest.raises(ProfileError):
+            load(str(write_profile(tmp_path, "game", repo, extra=bad)))
+
+
+def test_lane_trimming_only_for_fast_lane_tasks(tmp_path):
+    repo, _ = make_repo(tmp_path, "game", [T1, T2])
+    lanes = "\n".join(f"[lanes.{x}]\nenabled = true" for x in L.LANES)
+    p = load(str(fl_profile(tmp_path, repo, tmp_path / "x.py", "[lanes]\nenabled = true\n"
+                            + lanes + "\n")))
+    P = SimpleNamespace(profile=p)
+    fast = L.settings(P, "T1")
+    on = {x for x in L.LANES if L.lane_on(fast, x)}
+    assert on == {"prework", "test_design", "failure_triage", "incremental_review"}
+    assert all(L.lane_on(L.settings(P, "T2"), x) for x in L.LANES)      # untouched
+    assert all(L.lane_on(L.settings(P), x) for x in L.LANES)            # no task: untouched
+
+
+# --------------------------------------------------------------------------- flows
+
+
+def test_pass_vision_review_close(env):
+    e = env([GREEN])
+    e.c.approve("game", "T1", [], "victor")
+    t = drive(e, lambda t: t["state"] == S.COMPLETE)
+    assert t["sessions"] == 1 and t["attempt"] == 1                   # one session, no repair
+    started = events(e, "fast_lane_gate_started")
+    assert len(started) == 1
+    [g] = events(e, "fast_lane_gate")
+    assert json.loads(g["detail"])["result"] == "PASS"
+    # the captures commit came from the same session, then vision approved at the revision
+    assert any("commit exactly the gate's capture files" in x[2] for x in e.client.log)
+    assert len({x[0] for x in e.client.log}) == 1
+    [a] = e.c.store.approvals("game", "T1", "visual")
+    assert a["approver"] == f"model:{VISION}/vision-model" and CAP in a["artifacts"]
+    rows = e.c.store.q("SELECT check_name, result, required FROM verifications WHERE set_id=?",
+                       (t["verification_id"],))
+    got = {r["check_name"]: r["result"] for r in rows}
+    assert got["fast_lane.gate"] == "PASS" and got["fast_lane.vision"] == "PASS"
+    assert "project-check" not in got                 # the runner is the verify step
+    assert e.c.store.reviews("game", "T1")[-1]["verdict"] == "APPROVED"
+    assert "au-fast-lane" not in e.client.log[0][2]   # generic adapter: its own prompt
+
+
+def test_red_gate_continues_the_same_session(env):
+    e = env([RED, GREEN])
+    e.c.approve("game", "T1", [], "victor")
+    t = drive(e, red_gates_seen(1))
+    sid = t["session_id"]
+    assert t["sessions"] == 1 and t["attempt"] == 1 and not t["data"].get("recovery_case")
+    last = e.client.log[-1]
+    assert last[0] == sid and last[1] == LOCAL
+    assert "Studio gate FAIL" in last[2] and "VIEWPORT-CLIP" in last[2]
+    hist = [(h["from_state"], h["to_state"]) for h in e.c.store.history("game", "T1")]
+    assert (S.VERIFYING, S.IMPLEMENTING) in hist and S.CHANGES_REQUIRED not in {b for _, b in hist}
+    t = drive(e, lambda t: t["state"] == S.COMPLETE)
+    assert t["sessions"] == 1 and fl(e)["red_gates"] == 1
+    assert len(events(e, "fast_lane_gate_started")) == 2
+
+
+def test_two_reds_on_local_primary_request_the_frontier(env):
+    e = env([RED, RED, GREEN])
+    e.c.approve("game", "T1", [], "victor")
+    drive(e, red_gates_seen(2))
+    [ph] = e.c.frontier.phases("game", "T1")
+    assert ph["state"] == "active" and ph["requested_by"] == "engine:fast_lane"
+    sid, persona, text = e.client.log[-1]
+    assert persona == FRONTIER and "handed this sprint to the frontier primary" in text
+    assert sid == task(e)["session_id"] and task(e)["sessions"] == 1
+    b = [x for x in e.ff.binds if x["session_id"] == sid][-1]
+    assert b["persona"] == FRONTIER and b["purpose"] == "frontier_primary"
+    t = drive(e, lambda t: t["state"] == S.COMPLETE)
+    assert e.c.frontier.phases("game", "T1")[0]["state"] == "returned"
+    assert FRONTIER in e.c.frontier.authors("game", "T1")              # not the sole reviewer
+
+
+def test_no_handoff_for_a_frontier_primary_task(env):
+    e = env([RED, RED, GREEN], extra=VISUAL + vis_override(FRONTIER))
+    e.c.approve("game", "T1", [], "victor")
+    drive(e, red_gates_seen(2))
+    assert e.c.frontier.phases("game", "T1") == []
+    assert not events(e, "frontier_requested")
+    drive(e, lambda t: t["state"] == S.COMPLETE)
+
+
+def test_red_gate_limit_blocks(env):
+    e = env([RED])
+    e.c.approve("game", "T1", [], "victor")
+    t = drive(e, lambda t: t["state"] == S.BLOCKED)
+    assert fl(e)["red_gates"] == 4 and "red studio gates" in t["blocker"]
+    assert t["sessions"] == 1
+
+
+def test_runner_timeout_is_a_red_gate(env):
+    e = env([{"result": "PASS", "sleep": 60}, GREEN])
+    e.c.approve("game", "T1", [], "victor")
+    drive(e, lambda t: bool((t["data"].get("fast_lane") or {}).get("run")), step=1)
+    proc = next(iter(e.c.fast_lane._procs.values()))
+    assert proc.poll() is None
+    e.now[0] += 46 * 60
+    t = drive(e, red_gates_seen(1), step=1)
+    assert proc.poll() is not None                                       # killed
+    assert "did not finish within 45 minutes" in e.client.log[-1][2]
+    assert t["session_id"] == e.client.log[-1][0]
+    drive(e, lambda t: t["state"] == S.COMPLETE)
+
+
+def test_runner_exit_without_verdict_blocks(env):
+    e = env([{"result": "FAIL", "no_verdict": True, "exit": 2}])
+    e.c.approve("game", "T1", [], "victor")
+    t = drive(e, lambda t: t["state"] == S.BLOCKED)
+    assert "without a verdict" in t["blocker"] and "not ready" in t["blocker"]
+
+
+def test_vision_changes_rounds_then_accept_with_notes(env):
+    e = env([GREEN], vision=["changes_required"] * 3)
+    e.c.approve("game", "T1", [], "victor")
+    t = drive(e, lambda t: t["state"] == S.COMPLETE)
+    assert t["sessions"] == 1
+    vision_prompts = [x for x in e.client.log if "Vision review: CHANGES" in x[2]]
+    assert len(vision_prompts) == 2 and "round 2/2" in vision_prompts[-1][2]
+    assert "tab row overlaps the close button" in vision_prompts[0][2]
+    assert fl(e)["vision_rounds"] == 2 and fl(e)["vision_notes"]
+    [acc] = events(e, "fast_lane_vision_accepted_with_notes")
+    assert json.loads(acc["detail"])["rounds"] == 2
+    apr = e.c.store.approvals("game", "T1", "visual")
+    assert apr and apr[-1]["note"].startswith("accepted with notes")
+    assert len(events(e, "model_visual_review")) == 3
+
+
+def test_non_fast_lane_task_unchanged(env):
+    e = env([GREEN], tasks=(T1, T2))
+    e.c.approve("game", "T2", [], "victor")
+    t = drive(e, lambda t: t["state"] == S.COMPLETE, tid="T2")
+    assert not events(e, "fast_lane_gate_started") and not t["data"].get("fast_lane")
+    rows = e.c.store.q("SELECT check_name FROM verifications WHERE set_id=?",
+                       (t["verification_id"],))
+    names = {r["check_name"] for r in rows}
+    assert "project-check" in names and not any(n.startswith("fast_lane") for n in names)
+    assert e.c.frontier.phases("game", "T2") == []
+    with pytest.raises(ValueError):                    # still manual-only and IMPLEMENTING-only
+        e.c.frontier.request("game", "T2", "victor", "x")
+
+
+def test_fast_lane_records_evidence_with_lifecycle(env):
+    # (a fast-lane profile's verify step is the runner: no [verify] checks whose
+    # obligations the runner would never satisfy)
+    e = env([GREEN], extra=VISUAL + vis_override() + "[lifecycle]\nenabled = true\n", checks="")
+    e.c.approve("game", "T1", [], "victor")
+    drive(e, lambda t: t["state"] in (S.COMPLETE, S.BLOCKED))
+    assert task(e)["state"] != S.BLOCKED, task(e)["blocker"]
+    recs = e.c.store.q("SELECT * FROM ev_records WHERE check_id='fast_lane.gate'")
+    assert recs and recs[0]["result"] == "PASS" and recs[0]["tier"] in ("verified", "reviewed")
+    gate_head = json.loads(events(e, "fast_lane_gate_started")[0]["detail"])["head"]
+    assert recs[0]["source_revision"] == gate_head
+
+
+def test_au_adapter_fast_lane_prompt_and_obligations(tmp_path):
+    from foundry_coordinator.adapters.base import TaskSpec
+    from foundry_coordinator.projects.animaluprising.adapter import AnimalUprisingAdapter
+    raw = {"fast_lane": {"enabled": True, "tasks": ["UI-03a"]},
+           "training": {"local_personas": [LOCAL]}, "frontier_primary": {"persona": FRONTIER}}
+    prof = SimpleNamespace(
+        id="animaluprising", workspace=str(tmp_path), raw=raw, roles={"implementer": LOCAL},
+        fast_lane={"enabled": True, "tasks": ["UI-03a"], "gate_module":
+                   "foundry_coordinator.projects.animaluprising.studio_gate"},
+        fast_lane_task=lambda t: t == "UI-03a", persona=lambda role, tid="": LOCAL,
+        exempt=lambda tid: [], deps_accept_pending=[])
+    a = AnimalUprisingAdapter.__new__(AnimalUprisingAdapter)
+    a.p, a.cfg, a.state_dir = prof, {}, str(tmp_path)
+    spec = TaskSpec(project_id="animaluprising", task_id="UI-03a", title="Hero build",
+                    spec="Goal: hero build screen.", scope=["src/client/UI/v3/**"], tags=[],
+                    deps=[], data={"tier": "B", "plan": "docs/progress/UI-03a_PLAN.md"})
+    p = a.implement_prompt(spec, {"run_id": "r1", "attempt": 1})
+    for want in ("au-fast-lane", "docs/rules/FAST_LANE_RULES.md", "docs/progress/UI-03a_PLAN.md",
+                 "docs/progress/UI-03a_gate.json", "studio_gate --repo", "stories --sprint UI-03a",
+                 "sprint --sprint UI-03a", "status --sprint UI-03a", "LOCAL"):
+        assert want in p, want
+    assert "AGENT_RULES.md (full)" not in p and "tools/gate.ps1" not in p
+    assert a.required_checks(spec, "BUILD")[0]["check_id"] == "fast_lane.gate"
+    a._plan_requirements = lambda s, ws=None: {"suites": ["S45"], "gate": True, "captures": [],
+                                               "acceptance": "", "plan": "", "lune": False}
+    obs = a.obligations(spec)
+    build = [o for o in obs if o["phase"] == "BUILD"]
+    assert [o["obligation_id"] for o in build] == ["build.gate"]
+    assert build[0]["required_evidence"] == [{"kind": "check", "ref": "fast_lane.gate"}]
+    assert a.check_dependencies(spec, "fast_lane.gate") == ["src/**", "tests/**",
+                                                             "default.project.json"]
+
+
+# --------------------------------------------------------------------------- verdict acceptance (H4)
+
+
+@pytest.mark.parametrize("step", [{"result": "PASS", "mode": "stories"},
+                                  {"result": "PASS", "run_id": "someone-else"}])
+def test_only_this_runs_sprint_verdict_counts(env, step):
+    """A stories/regression verdict, or a sprint verdict without this run's nonce, at
+    the same head never stands in for the coordinator's own sprint run."""
+    e = env([dict(step, exit=0)])
+    e.c.approve("game", "T1", [], "victor")
+    t = drive(e, lambda t: t["state"] in (S.BLOCKED, S.COMPLETE))
+    assert t["state"] == S.BLOCKED and "without a verdict" in t["blocker"]
+    assert not events(e, "fast_lane_gate")
+    [started] = events(e, "fast_lane_gate_started")
+    assert json.loads(started["detail"])["run_id"].startswith("T1-")
+
+
+def test_kill_stops_the_whole_tree_and_the_playtest(tmp_path, monkeypatch):
+    from foundry_coordinator import fast_lane as FL
+    ws = tmp_path / "ws"
+    d = ws / ".plan" / "tmp" / "gate" / "T1"
+    d.mkdir(parents=True)
+    (d / "status.json").write_text(json.dumps({"pid": 4242, "phase": "regression", "playing": True}))
+    seen, events_ = [], []
+    monkeypatch.setattr(FL.subprocess, "run", lambda argv, **kw: seen.append(("run", argv)))
+    monkeypatch.setattr(FL.subprocess, "Popen", lambda argv, **kw: seen.append(("popen", argv)))
+    monkeypatch.setattr(FL.os, "killpg", lambda *a: seen.append(("killpg", a)), raising=False)
+    monkeypatch.setattr(FL.os, "getpgid", lambda pid: pid, raising=False)
+    lane = FL.FastLane.__new__(FL.FastLane)
+    lane._procs = {}
+    lane.store = SimpleNamespace(event=lambda *a, **kw: events_.append((a, kw)))
+    P = SimpleNamespace(id="game", profile=SimpleNamespace(
+        workspace=str(ws), fast_lane={"gate_module": "foundry_coordinator.projects.animaluprising.studio_gate"}))
+    lane._kill(P, "T1", {"head": "a" * 40, "pid": 4242}, "timeout")      # after a restart: pid only
+    kinds = [k for k, _ in seen]
+    if os.name == "nt":
+        assert ("run", ["taskkill", "/T", "/F", "/PID", "4242"]) in seen
+    else:
+        assert "killpg" in kinds
+    popen = next(a for k, a in seen if k == "popen")
+    assert popen[-1] == "stop-playtest" and "--repo" in popen
+    stopped = next(kw for a, kw in events_ if a[2] == "fast_lane_gate_stopped")
+    assert stopped["detail"]["playtest_stop"] is True
+    # a status.json that is not this run's pid: nothing is killed or stopped
+    seen.clear()
+    lane._kill(P, "T1", {"head": "a" * 40, "pid": 9999}, "moved on")
+    assert seen == []

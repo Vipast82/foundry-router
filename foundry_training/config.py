@@ -32,6 +32,11 @@ allow_frontier_targets = false            # provider terms: see docs/TRAINING_DA
 include_reasoning = false
 [training.capture]
 on_failure = "warn"                       # coordinator: ignore | warn | hold
+[training.tags]
+widgets = []                              # extra widget names to tag (labels.KNOWN_WIDGETS)
+
+Read from outside [training]: `[fast_lane].tasks` (episodes of those tasks are
+tagged fast_lane; a fast_lane table with enabled = false tags nothing).
 """
 
 from __future__ import annotations
@@ -68,6 +73,8 @@ class TrainingProject:
     retention: dict = field(default_factory=dict)
     export: dict = field(default_factory=dict)
     capture: dict = field(default_factory=dict)
+    fast_lane_tasks: list = field(default_factory=list)
+    tags: dict = field(default_factory=dict)
 
     def require(self, kind: str) -> list[str]:
         return list((self.policy.get(kind) or {}).get("require") or DEFAULT_REQUIRE.get(kind, []))
@@ -89,6 +96,7 @@ def load(path: str) -> TrainingProject:
     ws = os.path.abspath(os.path.join(os.path.dirname(os.path.abspath(path)),
                                       os.path.expandvars(os.path.expanduser(ws))))
     roles = raw.get("roles") or {}
+    fl = raw.get("fast_lane") if isinstance(raw.get("fast_lane"), dict) else {}
     return TrainingProject(
         id=str(raw.get("id") or ""), workspace=ws, path=os.path.abspath(path),
         enabled=bool(t.get("enabled", False)),
@@ -100,7 +108,10 @@ def load(path: str) -> TrainingProject:
                                                           if roles.get("implementer") else [])),
         policy=dict(t.get("policy") or {}), split=dict(t.get("split") or {}),
         retention=dict(t.get("retention") or {}), export=dict(t.get("export") or {}),
-        capture=dict(t.get("capture") or {}))
+        capture=dict(t.get("capture") or {}),
+        fast_lane_tasks=[str(x) for x in (fl.get("tasks") or [])]
+        if fl.get("enabled", True) else [],
+        tags=dict(t.get("tags") or {}))
 
 
 def find(paths: list[str]) -> list[TrainingProject]:

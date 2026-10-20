@@ -38,6 +38,10 @@ EVENT_TYPES = (
     "approval",             # human approval bound to a revision / artifacts
     "human_correction",     # human feedback (reject findings, answers)
     "commit",               # git commit with changed files
+    "authorship",           # code attributed to a non-local author (helper prework patch,
+                            # harvested pre-code model): those steps are context, never targets
+    "label",                # an outcome label bound to a revision: studio_gate verdict JSON,
+                            # vision verdict, operator / playtest critique
     "capture_gap",          # something the source could not provide
 )
 CAPTURE = ("complete", "partial", "missing", "truncated")

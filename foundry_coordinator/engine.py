@@ -58,6 +58,10 @@ class Coordinator:
         self.frontier = FrontierPhase(self, clock=clock)
         from .retry_guidance import RetryGuidance
         self.retry_guidance = RetryGuidance(self)
+        from .fast_lane import FastLane
+        # [fast_lane] (UI-T0): studio_gate-verified one-session sprints; inert
+        # for every task the profile's [fast_lane] table doesn't name
+        self.fast_lane = FastLane(self, clock=clock)
         self._live_audit_ts: dict[str, float] = {}     # session -> last live checkpoint write
         self._q_missing_since: dict[str, float] = {}   # request id -> first seen withdrawn
         # [lifecycle] (v0.122): evidence ledger, obligations/decisions/budget
@@ -607,7 +611,9 @@ class Coordinator:
         # session if HEAD advanced and the cheap scope/clean/history checks pass;
         # otherwise the normal verifier handles the failure.
         pending_fn = getattr(P.adapter, "pending_build_steps", None)
-        if self._lc(P) and callable(pending_fn) and head != t["base_sha"]:
+        # ([fast_lane] tasks have no per-step plan ticking (rules card, §34 dropped):
+        # one session to the gate, never a partial-BUILD session hand-over)
+        if self._lc(P) and callable(pending_fn) and head != t["base_sha"]                 and not self.fast_lane.on(P, tid):
             spec = P.adapter.describe(tid)
             pending = pending_fn(spec, head, P.ws)
             if pending:
@@ -931,15 +937,28 @@ class Coordinator:
         spec = P.adapter.describe(tid)
         head = P.ws.head()
         results = self._generic_checks(P, t, spec, head, phase="verify")
-        results += P.adapter.verify(spec, "verify", head, t["data"].get("task_base") or t["base_sha"])
-        for sess in self.store.sessions(pid, tid):
-            if sess["run_id"] == t["run_id"] and sess["role"] == "implementer":
-                try:
-                    tr = P.client.transcript(sess["session_id"], directory=P.profile.workspace)
-                    results += P.adapter.session_audit(spec, sess["session_id"], tr, head)
-                except Exception as e:                            # noqa: BLE001
-                    results.append(VerificationResult("coordinator.session_audit", UNKNOWN, False,
-                                                      "", f"transcript unavailable: {e}", head))
+        if self.fast_lane.on(P, tid):
+            # [fast_lane] (UI-T0): the studio_gate runner is this task's verify step
+            # (a background run polled per tick), then the vision approval. Red
+            # gates and vision CHANGES go back into the same session (fast_lane.py);
+            # only a green, approved revision continues below to review.
+            extra = self.fast_lane.verifying(P, t, spec, head, results)
+            if extra is None:
+                return
+            results += extra
+        else:
+            results += P.adapter.verify(spec, "verify", head,
+                                        t["data"].get("task_base") or t["base_sha"])
+            for sess in self.store.sessions(pid, tid):
+                if sess["run_id"] == t["run_id"] and sess["role"] == "implementer":
+                    try:
+                        tr = P.client.transcript(sess["session_id"],
+                                                 directory=P.profile.workspace)
+                        results += P.adapter.session_audit(spec, sess["session_id"], tr, head)
+                    except Exception as e:                        # noqa: BLE001
+                        results.append(VerificationResult("coordinator.session_audit", UNKNOWN,
+                                                          False, "", f"transcript unavailable: "
+                                                          f"{e}", head))
         vid = self.store.save_verification(pid, tid, head, "verify", results)
         fails = [r for r in results if r.required and r.result == FAIL]
         unknown = [r for r in results if r.required and r.result == UNKNOWN]
@@ -1720,6 +1739,8 @@ class Coordinator:
             P.client.abort(t["session_id"], directory=P.profile.workspace)
             self._end_session(P, t["session_id"], "cancelled")
         self.helpers.abort_running(P, task_id, "cancelled", f"task cancelled: {reason}"[:300])
+        if self.fast_lane.on(P, task_id):
+            self.fast_lane.abort(P, task_id, f"task cancelled: {reason}"[:300])
         case_id = (t.get("data") or {}).get("recovery_case")
         if case_id:
             # [lead_manager] the case goes with the task: its lead / repair sessions

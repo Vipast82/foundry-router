@@ -92,7 +92,10 @@ LANE_DEFAULTS = {
 }
 
 
-def settings(P) -> dict:
+def settings(P, task_id: str = "") -> dict:
+    """The [lanes] settings. With `task_id` of a [fast_lane] task, every lane
+    the fast lane doesn't list is off for that task (UI-T0 lane trimming);
+    without it, or for any other task, exactly the profile's settings."""
     raw = dict((getattr(P.profile, "raw", None) or {}).get("lanes") or {})
     out = {
         "enabled": bool(raw.get("enabled", False)),
@@ -121,6 +124,12 @@ def settings(P) -> dict:
         merged = {**dflt, **sec}
         merged["enabled"] = bool(out["enabled"] and sec.get("enabled", False))
         out["lanes"][lane] = merged
+    fn = getattr(P.profile, "fast_lane_task", None)
+    if task_id and callable(fn) and fn(task_id):
+        keep = set((getattr(P.profile, "fast_lane", None) or {}).get("lanes") or [])
+        for lane, cfg in out["lanes"].items():
+            if lane not in keep:
+                cfg["enabled"] = False
     return out
 
 

@@ -17,6 +17,9 @@ Exclusion reasons (each a requirement that wasn't met):
   missing_context   system prompt / tool definitions unknown, or compaction inside
   secret_exposure   the export-time scan still finds something secret-looking
   non_local_author  assistant turns written by a model that isn't the local model
+                    (enforced for every kind while allow_frontier_targets = false)
+  no_local_target   every assistant turn is a helper step (frontier code the local
+                    model applied): nothing is left to train on
   loop              the same tool call repeated (blind retries)
   missing_artifact  a referenced image's bytes aren't available
   no_feedback       (correction) the repair prompt carried no feedback
@@ -110,9 +113,26 @@ def requirements(ep: dict, cfg, known_secrets=()) -> list[str]:
     if "system_and_tools_known" in need and (not f.get("system_and_tools_known")
                                              or f.get("compaction")):
         reasons.append("missing_context")
-    if "local_author" in need and not cfg.export.get("allow_frontier_targets", False):
-        if any(a[0] != "local" for a in f.get("authors") or []):
+    if not cfg.export.get("allow_frontier_targets", False):
+        # Enforced for every dataset kind, not only where a policy lists
+        # local_author: frontier text is never a training target. A "helper"
+        # step (a local turn that carried out a helper's prework patch or a
+        # harvested pre-code model) stays in the conversation as context and
+        # is weighted out at export; any other non-local turn excludes the
+        # episode, and an episode with no local turn left has no target.
+        kinds = {a[0] for a in f.get("authors") or []}
+        if kinds - {"local", "helper"}:
             reasons.append("non_local_author")
+        elif "helper" in kinds and "local" not in kinds:
+            reasons.append("no_local_target")
+    # fail closed, for every kind: a helper patch whose content was never
+    # captured (steps can't be checked against it) or a gate verdict whose
+    # `result` disagrees with its own checks excludes the episode
+    if f.get("helper_patch_unverifiable"):
+        reasons.append("helper_patch_unverifiable")
+    if f.get("gate_label_inconsistent") or any(
+            g.get("inconsistent") for g in (ep.get("labels") or {}).get("gate") or []):
+        reasons.append("gate_label_inconsistent")
     if "no_loop" in need and f.get("loop"):
         reasons.append("loop")
     if "feedback_present" in need and not (ep.get("feedback") or {}).get("items"):

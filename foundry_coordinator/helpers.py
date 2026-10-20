@@ -584,7 +584,8 @@ class HelperManager:
         self.collect(P, t, spec)
         h = self.settings(P)
         from . import lanes as L
-        ls = L.settings(P)
+        # (a [fast_lane] task runs only its configured lanes: lanes.settings)
+        ls = L.settings(P, t["task_id"])
         # an operator's project pause: running units are still polled (they
         # finish, or time out), but nothing new is planned or dispatched
         is_held = getattr(self.c, "_held", None)

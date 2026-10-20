@@ -45,6 +45,13 @@ PATTERNS: list[tuple[str, re.Pattern]] = [
         r"auth[_-]?token|token|aws_secret_access_key)[\"']?\s*[:=]\s*[\"']?)([^\s\"',;]{6,})")),
 ]
 EMAIL = re.compile(r"\b[A-Za-z0-9._%+\-]+@([A-Za-z0-9\-]+\.)+[A-Za-z]{2,}\b")
+# UI capture names (`Hud.normal@1920x1080.png`, studio_gate) look like emails;
+# a "domain" that starts with a WxH device size is a file name, not an address.
+# A capture file name such as `Inventory.normal@1920x1080.png` looks like an
+# address. Exempt only when the WHOLE token is such a file name (anchored,
+# known image extension): `x@1920x1080.example.com` is still an address.
+_CAPTURE_NAME = re.compile(r"[A-Za-z0-9_.\-]+@\d{2,5}x\d{2,5}\.(?:png|jpe?g|webp|gif|bmp)",
+                           re.I)
 # Placeholders that look like assignments but aren't secrets.
 _SAFE_VALUES = re.compile(r"^(\$\{?[A-Za-z_][A-Za-z0-9_]*\}?|<[^>]+>|\[REDACTED[^\]]*\]|x+|\*+|"
                           r"null|none|true|false|changeme|example|your[-_].*|\{env:[^}]+\})$",
@@ -103,6 +110,10 @@ class Redactor:
         if self.redact_emails:
             def esub(m):
                 dom = m.group(0).split("@", 1)[1].lower()
+                nxt = m.string[m.end():m.end() + 2]
+                if _CAPTURE_NAME.fullmatch(m.group(0)) and not (
+                        nxt[:1] in ("@", "-", "_") or (nxt[:1] == "." and nxt[1:2].isalnum())):
+                    return m.group(0)
                 if dom in self.allowed or any(dom.endswith("." + a) for a in self.allowed):
                     return m.group(0)
                 f.add("email", path)

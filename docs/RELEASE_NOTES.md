@@ -2,6 +2,124 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.129.0 — UI-T0: the studio gate runner and the coordinator fast lane
+
+UI-02 showed that building UI was not the slow part; proving it was. It ran
+about 37 hours, of which about 6 were coding. 16.2 hours went to 29 blocked
+periods, plus 31 sessions, 19 recovery cases, 28 Lead calls and 35
+decisions. Its final gate made the model hand-carry 40–80 printed MCP calls,
+honour timing windows by hand and paste raw output between tools; one bad
+paste invalidated a run. 57–63 % of UI-01/UI-02 commits were documentation
+and evidence only. This release automates the proof and keeps one session
+per sprint. Plan: `docs/plans/AU_UI_REWORK_PLAN.md`.
+
+**Studio gate runner** (docs/STUDIO_GATE.md)
+- New `foundry_coordinator/mcp_stdio.py`: a stdlib MCP stdio client for the
+  official Studio MCP server and the community `robloxstudio-mcp@3.2.1`
+  server. Fails closed: a timeout or dead server is an error, never an empty
+  success.
+- New `py -m foundry_coordinator.projects.animaluprising.studio_gate` with
+  `doctor`, `stories`, `sprint`, `regression` and `status`. It runs the host
+  checks ported from `gate.ps1`, Edit-mode story captures at the five `AU_*`
+  sizes with `UiLayoutCheck`, focus walks, the sprint's wiring and touch
+  checks in one solo playtest, the affected regression (executes
+  `GateRunner.run`'s CALL plan itself: bridge suites, DYNARG, tight pairs),
+  `GateRunner.tally` and a console-error check. It writes one verdict JSON
+  (schema 1) per revision and one evidence block, and prints `GATE <ID>
+  PASS|FAIL`. Exit 0 PASS, 1 FAIL, 2 not ready / tooling error.
+- `--background` plus `status --wait` (at most 9 minutes per call), so a full
+  gate fits Kilo's command limits.
+- File → suite map: shared config files, comment-only `Remotes.lua` edits
+  and unmapped UI files map to the `ui` subset, not to every suite.
+- New `reference_render` (headless Edge/Chrome renders the v3 HTML mocks at
+  the five sizes) and `review_sheet` (per-sprint HTML contact sheet: capture
+  next to reference, checker lines, vision findings). The runner builds the
+  sheet after every run with captures; it can never change a verdict.
+
+**Coordinator fast lane** (docs/FAST_LANE.md)
+- New `[fast_lane]` profile table, off by default: `enabled`, `tasks`,
+  `gate_module`, `gate_timeout_minutes` (45), `max_red_gates_before_handoff`
+  (2), `max_vision_rounds` (2), `lanes`. Unknown keys and bad values fail
+  profile loading. Unlisted tasks are unchanged.
+- The runner is the verify step: a background subprocess polled per tick
+  through `status.json`; a tick never waits for Studio. The runner holds the
+  project's exclusive locks.
+- A red gate sends the failed checks into the same session (no new session,
+  no recovery case, no attempt charged) and counts the red gate. The verdict
+  is a `fast_lane.gate` verification row and evidence record bound to the
+  revision; the AU adapter's only BUILD obligation for these tasks is that
+  record.
+- After a green gate: captures committed, then the revision-bound vision
+  approval with the plan's rubric. CHANGES findings go into the same
+  session; after `max_vision_rounds` the next CHANGES is accepted with its
+  notes recorded as follow-ups.
+- Automatic frontier hand-off: `max_red_gates_before_handoff` red gates on a
+  local-primary task request `[frontier_primary]` in the same session
+  (`frontier.auto_request`, same limits as a manual request). Twice that many
+  stops the task BLOCKED.
+- Lane trimming: fast-lane tasks run only the lanes in `[fast_lane] lanes`.
+- AU adapter: a fast-lane BUILD prompt (rules card, `au-fast-lane` skill, the
+  one-page plan, the gate file, the runner commands, no per-step ticking).
+- `project.example.toml`: `[role_overrides.ui]` (UI-03a…UI-06a, UI-V1, local
+  implementer) and `[role_overrides.ui_frontier]` (UI-D1, UI-02a,
+  `Foundry-Kilo-Sonnet`), Deep-Review reviewer for all; the commented
+  `[fast_lane]` block; `[frontier_primary]` notes the automatic trigger.
+- New AU Kilo skills `au-fast-lane` and `au-ui-v3` in
+  `projects/animaluprising/kilo_skills/`.
+
+**Training data** (docs/TRAINING_DATA.md)
+- New source `ingest gate --project P` (also run by `queue` / `auto`):
+  verdict JSON as `gate_verdict` labels with captures as artifacts.
+- Vision verdicts (APPROVED / CHANGES with numbered findings) and critiques
+  as labels; tags `fast_lane`, `ui_v3`, `template:T1…T8`, `widget:<Name>`,
+  `device:WxH`; `export --tag T`.
+- Per-step authorship: a local turn that applied a helper's prework patch
+  (`helper:<unit>`) or a harvested pre-code model (`helper:precode-harvest`)
+  is context only (`"weight": 0`), never a target. Local turns stay eligible.
+  `allow_frontier_targets = false` now applies to every dataset kind, and
+  `validate` checks the weights.
+- Corrections from red gates and vision CHANGES, including inline triples
+  inside one fast-lane session.
+
+**Not done yet:** the `leak.*` check (scene analysis), per-sprint lane caps
+fed from the plan's stories, critique events from the control center, and
+the Scene Analysis beta check in `doctor`.
+
+**Tests**: `tests/coordinator/test_mcp_stdio.py`,
+`tests/coordinator/test_studio_gate.py` (fake MCP server in
+`tests/coordinator/fixtures/`), `tests/coordinator/test_reference_render.py`,
+`tests/coordinator/test_review_sheet.py`, `tests/coordinator/test_fast_lane.py`,
+`tests/test_training_ui_labels.py`. Live: `doctor`, a sample story at five
+sizes and the `ui` regression at HEAD on the workstation (lead session).
+
+**Deploy**
+- **Coordinator** (workstation, `C:\Users\shock\foundry-deploy`, tag with
+  `deploy_release.ps1`), then restart it. The live `project.toml` needs
+  `[fast_lane]` enabled with the task ids, `[approval] visual_model = true`,
+  and the new role overrides. Nothing changes for other tasks.
+- **Kilo restart** after the `kilo.jsonc` changes: `"snapshot": false` (stops
+  the "snapshot system is slow" pop-up that stalled UI-02 for about 40
+  minutes), the pre-allowed runner, Lune, git and Studio MCP commands, and
+  the `au-ui-v3` / `au-fast-lane` skill allowlists per agent. Kilo reads its
+  config only at start.
+- **AU repo** (lead session): `tests/lib/StoryHarness.lua`,
+  `tests/lib/FocusWalk.lua`, the rules card, the skills and each sprint's
+  `<ID>_PLAN.md` / `<ID>_gate.json`, Rojo-synced. Run `studio_gate doctor`
+  until `DOCTOR READY`.
+- **Backend items for Victor** (router host, not in this release's code):
+  1. Raise the optional-helper cutoff to **95 %** (`helper_policy.cutoff_pct`;
+     hysteresis stays 5, so helpers resume below 90 %). Control center
+     helper-policy settings (operator session) or the backend `config.yaml`.
+     CLIProxyAPI's separate 85 % essential-work limit is unchanged.
+  2. Give `Foundry-Kilo-Sonnet` an ordered fallback: Sonnet 5.5 → **GPT-6.1
+     Sol**, so the frontier primary (UI-D1, UI-02a, the hand-off) is not
+     Claude-only.
+  3. Turn on the **Scene Analysis beta** in Studio (File → Beta Features) for
+     the leak check. `doctor` does not check it yet.
+- Before "begin": the live failover check with GPT out (one real call each
+  through Deep-Review and Research served by the Claude fallback; a
+  high-value helper unit still dispatches on Meridian).
+
 ## v0.128.0 — easier to read: an Overview page, better charts, a sprint progress header
 
 The web UI was hard to follow: no landing page, metrics spread over long

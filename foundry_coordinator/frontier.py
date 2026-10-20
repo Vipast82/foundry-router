@@ -1,4 +1,5 @@
-"""Optional frontier-primary phase (default OFF; manual request only).
+"""Optional frontier-primary phase (default OFF; manual request only, except the
+[fast_lane] automatic hand-off after red studio gates: auto_request).
 
 A frontier model may become the SOLE primary for a bounded, difficult coding
 phase when local reasoning is the bottleneck. It is not an advisory helper and
@@ -93,46 +94,91 @@ class FrontierPhase:
 
     # ------------------------------------------------------------------ requests
 
-    def request(self, pid: str, tid: str, actor: str, reason: str) -> dict:
-        P = self.c._project(pid)
-        f = self.settings(P)
+    def _refusal(self, P, pid: str, tid: str, t: Optional[dict], f: dict,
+                 states=("IMPLEMENTING",)) -> str:
+        """Why a phase may not be requested now ('' = it may). One rule set for
+        the manual request and the [fast_lane] automatic hand-off."""
         if not f["enabled"]:
-            raise ValueError("the frontier-primary phase is disabled ([frontier_primary] enabled = "
-                             "false, the default)")
+            return ("the frontier-primary phase is disabled ([frontier_primary] enabled = "
+                    "false, the default)")
         if not f["persona"]:
-            raise ValueError("[frontier_primary] persona is not set")
+            return "[frontier_primary] persona is not set"
         if (self.store.meta("frontier_unsupported") or "") not in ("", "0"):
-            raise ValueError("an earlier phase showed the installed Kilo does not serve a per-prompt "
-                             "model switch: " + (self.store.meta("frontier_unsupported") or ""))
-        t = self.store.task(pid, tid)
-        if not t or t["state"] != "IMPLEMENTING":
-            raise ValueError(f"{pid}/{tid} is not IMPLEMENTING (a phase starts only inside an "
-                             f"approved, running implementation)")
+            return ("an earlier phase showed the installed Kilo does not serve a per-prompt "
+                    "model switch: " + (self.store.meta("frontier_unsupported") or ""))
+        if not t or t["state"] not in states:
+            return (f"{pid}/{tid} is not IMPLEMENTING (a phase starts only inside an "
+                    f"approved, running implementation)")
         if self.phase(pid, tid):
-            raise ValueError("a frontier phase is already requested or active for this task")
+            return "a frontier phase is already requested or active for this task"
         done = self.phases(pid, tid)
         if len(done) >= f["max_phases_per_task"]:
-            raise ValueError(f"max_phases_per_task ({f['max_phases_per_task']}) reached")
+            return f"max_phases_per_task ({f['max_phases_per_task']}) reached"
         last = max([p["ended_ts"] or p["created_ts"] for p in done] or [0])
         if last and self.clock() - last < f["cooldown_minutes"] * 60:
-            raise ValueError("cooldown after the last phase has not passed")
+            return "cooldown after the last phase has not passed"
         if f["persona"] == P.profile.persona("implementer", tid):
-            raise ValueError("the frontier persona must differ from the local implementer persona")
+            return "the frontier persona must differ from the local implementer persona"
         for role in ("reviewer", "deep_reviewer"):
             if role in P.profile.roles and P.profile.persona(role, tid) == f["persona"]:
-                raise ValueError(f"{f['persona']} is also the {role}: review independence would be lost")
+                return f"{f['persona']} is also the {role}: review independence would be lost"
+        return ""
+
+    def _insert(self, P, t: dict, f: dict, actor: str, reason: str, state: str,
+                head: str = "") -> str:
         pid_ = f"fp-{uuid.uuid4().hex[:10]}"
+        tid = t["task_id"]
+        now = self.clock()
         self.store.x("INSERT INTO primary_phases (phase_id, project_id, task_id, run_id, session_id, "
-                     "state, persona, local_persona, requested_by, reason, conditions, created_ts) "
-                     "VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
-                     (pid_, pid, tid, t["run_id"], t["session_id"], "requested", f["persona"],
+                     "state, persona, local_persona, requested_by, reason, conditions, created_ts, "
+                     "started_ts, head) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                     (pid_, P.id, tid, t["run_id"], t["session_id"], state, f["persona"],
                       P.profile.persona("implementer", tid), actor, reason[:500],
                       json.dumps({"max_turns": f["max_turns"], "max_minutes": f["max_minutes"],
                                   "return_on": ["DONE", "BLOCKED", "NEEDS_HUMAN", "refusal",
-                                                "new_session", "operator"]}), self.clock()))
+                                                "new_session", "operator"]}), now,
+                      now if state == "active" else None, head or None))
+        return pid_
+
+    def request(self, pid: str, tid: str, actor: str, reason: str) -> dict:
+        """Manual request (operator / CLI). The phase starts at the next
+        verified idle safe point (on_idle)."""
+        P = self.c._project(pid)
+        f = self.settings(P)
+        t = self.store.task(pid, tid)
+        why = self._refusal(P, pid, tid, t, f)
+        if why:
+            raise ValueError(why)
+        pid_ = self._insert(P, t, f, actor, reason, "requested")
         self.store.event(pid, tid, "frontier_requested", detail={"phase": pid_, "by": actor,
                                                                  "persona": f["persona"]})
         return self.phase(pid, tid)
+
+    def auto_request(self, P, t: dict, reason: str, head: str) -> tuple[Optional[dict], str]:
+        """[fast_lane] automatic hand-off (UI-T0): after max_red_gates_before_handoff
+        red studio gates on a LOCAL-primary fast-lane task, the frontier persona
+        takes the same session. The only automatic trigger: every other task
+        keeps the manual-only request. Same limits as a manual request
+        (max_phases_per_task, cooldown, persona independence, unsupported).
+
+        Called while the task is VERIFYING with the primary idle (a verified safe
+        point: the coordinator itself is about to prompt it with the red-gate
+        findings), so the phase is recorded ACTIVE at once and that findings
+        prompt is the frontier's first turn (persona() / purpose() read it).
+        Returns (phase, "") or (None, why not)."""
+        f = self.settings(P)
+        tid = t["task_id"]
+        why = self._refusal(P, P.id, tid, t, f, states=("IMPLEMENTING", "VERIFYING"))
+        if why:
+            self.store.event(P.id, tid, "frontier_auto_refused", detail={"reason": why[:300]})
+            return None, why
+        pid_ = self._insert(P, t, f, "engine:fast_lane", reason, "active", head=head)
+        self.store.event(P.id, tid, "frontier_requested", detail={
+            "phase": pid_, "by": "engine:fast_lane", "persona": f["persona"], "auto": True})
+        self.store.event(P.id, tid, "frontier_active", session_id=t["session_id"],
+                         detail={"phase": pid_, "persona": f["persona"], "head": head,
+                                 "auto": True})
+        return self.phase(P.id, tid), ""
 
     def request_return(self, pid: str, tid: str, actor: str) -> Optional[dict]:
         ph = self.phase(pid, tid)

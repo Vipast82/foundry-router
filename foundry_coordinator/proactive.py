@@ -258,7 +258,7 @@ class Proactive(VisualMixin, AdvisoryMixin):
         for kind,signature in [('run_start',t['run_id']),('commit',head)]:
             self._event(P,t,{'kind':kind,'key':f'{key}:{kind}','signature':signature,
                 'detail':{'maintenance_recovery':note[:500],'to':head}},sid)
-        self.plan(P,t,spec,L.settings(P))
+        self.plan(P,t,spec,L.settings(P,t['task_id']))   # fast-lane lane trimming
         result={'note':note,'run':t['run_id'],'classification_floor':self.store.meta(f'lane_ingest_after:{P.id}:{sid}')}
         self.store.op_update(key,'done',result)
         self.store.event(P.id,t['task_id'],'lane_recovery',detail=result)

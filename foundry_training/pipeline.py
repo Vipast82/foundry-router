@@ -16,7 +16,7 @@ from collections import defaultdict
 from typing import Optional
 
 from . import correlate, curate as C, episodes as E
-from .adapters import cline, coordinator, foundry, git as G, kilo
+from .adapters import cline, coordinator, foundry, gate, git as G, kilo
 from .config import TrainingProject
 from .ingest import Ingestor
 from .store import TrainingStore
@@ -112,9 +112,30 @@ class Pipeline:
                             cursor_of=lambda rid, payload: payload.get("id") or 0)
 
     def ingest_coordinator(self, db: str) -> dict:
+        def norm(payload, pid, raw_ref, redaction):
+            cfg = self.projects[pid]
+            # vision-verdict frames are read only from the project's artifact roots
+            return coordinator.normalize(payload, pid, raw_ref, redaction, store=self.store,
+                                         workspace=cfg.workspace,
+                                         artifact_roots=cfg.artifact_dirs())
         return self.ing.run(f"coordinator:{db}", self._filter(coordinator.from_db(db),
-                                                              "coordinator"),
-                            coordinator.normalize)
+                                                              "coordinator"), norm)
+
+    def ingest_gate(self, pid: str) -> dict:
+        """studio_gate verdict JSON under <workspace>/.plan/tmp/gate (labels +
+        capture artifacts). Part of the coordinator source: the runner is the
+        coordinator's verification tool."""
+        cfg = self._cfg(pid)
+        if not os.path.isdir(cfg.workspace):
+            self.store.gap(pid, "", "gate", "workspace-missing", cfg.workspace)
+            return {"records": 0}
+
+        def norm(payload, p, raw_ref, redaction):
+            return gate.normalize(payload, p, raw_ref, redaction, store=self.store,
+                                  workspace=cfg.workspace, artifact_roots=cfg.artifact_dirs())
+        recs = ((rid, p, pay, prov) if self._allowed(p, "coordinator") else (rid, "", pay, prov)
+                for rid, p, pay, prov in gate.records(cfg.workspace, pid))
+        return self.ing.run(f"gate:{pid}", recs, norm)
 
     def ingest_cline(self, sessions_dir: str) -> dict:
         return self.ing.run(f"cline:{sessions_dir}", self._filter(
@@ -123,6 +144,7 @@ class Pipeline:
     def ingest_git(self, pid: str) -> dict:
         cfg = self._cfg(pid)
         shas = set()
+        bases, heads = {}, {}
         for e in self.store.events(pid, "event_type IN ('task_transition','verification',"
                                         "'review','approval')"):
             evd = e["facts"].get("evidence")
@@ -130,13 +152,28 @@ class Pipeline:
             for k in ("head_sha", "base_sha", "reviewed_commit_sha"):
                 if evd.get(k):
                     shas.add(evd[k])
+            if evd.get("base_sha"):
+                bases.setdefault(e["task_id"], set()).add(evd["base_sha"])
+            if evd.get("head_sha"):
+                heads.setdefault(e["task_id"], set()).add(evd["head_sha"])
             if e["source_revision"]:
                 shas.add(e["source_revision"])
         if not os.path.isdir(cfg.workspace):
             self.store.gap(pid, "", "git", "workspace-missing", cfg.workspace)
             return {"records": 0}
-        return self.ing.run(f"git:{pid}", self._filter(G.commits(cfg.workspace, pid, sorted(shas)),
-                                                       "git"), G.normalize)
+        # intermediate commits of each task (helper-tagged steps are committed
+        # on their own between base and head)
+        for tid, bs in bases.items():
+            for b in bs:
+                for h in heads.get(tid, ()):
+                    shas.update(G.range_shas(cfg.workspace, b, h))
+        res = self.ing.run(f"git:{pid}", self._filter(G.commits(cfg.workspace, pid, sorted(shas)),
+                                                      "git"), G.normalize)
+        # harvested frontier pre-code models (docs/progress/*_PRECODE/)
+        pre = self.ing.run(f"git-precode:{pid}", self._filter(
+            G.precode_records(cfg.workspace, pid), "git"), G.normalize)
+        res["precode_records"] = pre.get("records", 0)
+        return res
 
     # -- curation ------------------------------------------------------------------------
 
@@ -199,6 +236,7 @@ class Pipeline:
                     if foundry_url:
                         self.ingest_foundry(url=foundry_url, key=foundry_key)
                     self.ingest_git(pid)
+                    self.ingest_gate(pid)
                     res["curation"] = self.curate(pid)
                     have = {e["session_id"] for e in self.store.events(
                         pid, "event_type IN ('user_message','assistant_message','model_call')")}

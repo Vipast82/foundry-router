@@ -275,7 +275,62 @@ class AnimalUprisingAdapter(GenericAdapter):
                 "in full, including the coordinator amendment (marker "
                 f"{AMENDMENT_MARKER}). You run exactly one sprint in this session: {spec.task_id}.")
 
+    # -- fast lane (UI-T0, [fast_lane] in the profile) ---------------------------------
+
+    FAST_LANE_RULES = "docs/rules/FAST_LANE_RULES.md"
+
+    def _fast_lane(self, task_id: str) -> bool:
+        fn = getattr(self.p, "fast_lane_task", None)
+        return bool(fn(task_id)) if callable(fn) else False
+
+    def fast_lane_prompt(self, spec: TaskSpec, ctx: dict) -> str:
+        """The BUILD prompt of a fast-lane sprint: the rules card and the
+        au-fast-lane skill instead of the AGENT_RULES ceremony, the one-page plan,
+        the studio_gate runner loop. The coordinator runs the full gate itself as
+        the verify step and sends red gates / vision findings into this session."""
+        from types import SimpleNamespace
+        from ...fast_lane import is_local_primary, settings
+        t = spec.task_id
+        P = SimpleNamespace(profile=self.p)
+        gm = settings(P).get("gate_module") or "foundry_coordinator.projects.animaluprising.studio_gate"
+        runner = f"py -m {gm} --repo {self.p.workspace}"
+        local = is_local_primary(P, t)
+        authorship = (
+            "This sprint's primary is LOCAL (training-eligible): helpers give guidance, "
+            "interfaces, stories, fixtures, wiring checks, API notes and reviews; you write the "
+            "implementation. Never request, copy or paraphrase a helper's implementation. A "
+            "helper-drafted step (ladder step 3) is its own commit with `(helper:<unit>)` in the "
+            "message. After repeated red full gates the coordinator may hand the sprint to the "
+            "frontier primary in this same session; you never switch models yourself."
+            if local else
+            "This sprint's primary is FRONTIER: helper PREWORK patches may be applied after you "
+            "verify each one (plan files only, compiles at HEAD, its story/spec passes).")
+        return f"""BUILD session for fast-lane sprint {t} — {spec.title} (coordinator run {ctx.get('run_id')}, attempt {ctx.get('attempt')}).
+
+Fast lane: load the `au-fast-lane` skill first (plus `au-ui-v3` and `au-roblox-ui-development` for UI work). The rules card {self.FAST_LANE_RULES}, that skill and the one-page plan replace the AGENT_RULES ceremony for this task; AGENT_RULES.md still governs anything the card doesn't mention. You run exactly one sprint in this session: {t}.
+Plan (the whole spec, read all of it): docs/progress/{t}_PLAN.md. Gate manifest (stories, sizes, wiring checks): docs/progress/{t}_gate.json. Helper drafts and notes: .plan/tmp/prework/{t}/.
+
+{spec.spec}
+
+{authorship}
+
+Runner (flags fixed by UI-T0; run `--help` once if one is rejected):
+  {runner} doctor
+  {runner} stories --sprint {t} [--story NAME ...]      # Edit-mode stories, the fast inner loop
+  {runner} sprint --sprint {t} --files <a,b> --background   # full gate on committed code
+  {runner} status --sprint {t}                          # poll a background gate
+Inner loop: write code -> stories -> fix -> repeat; Lune specs for the models you touched. Commit by explicit path from the plan's file list, message starting "{t}: " (no --no-verify, force, rebase, amend or tag). You may run the full gate yourself; the coordinator runs it again as its verify step when you report DONE, reads the verdict JSON under .plan/tmp/gate/{t}/ and sends any red check or vision finding back into THIS session. The runner writes captures under docs/evidence/UI-v3/{t}/; commit them by explicit path when the coordinator asks.
+While a gate holds Studio, do not call Studio tools yourself. Put scratch files under `.plan/tmp/` (git-ignored).
+Do NOT write {t}_SUMMARY.md, the STATE.md row or the MASTER_ORDER status, and do NOT push: a short CLOSE session does that after a green gate, the vision approval and the review.
+The coordinator refreshes `{self.LIVE_CHECKPOINT}` (read-only) while you work; never call the Kilo server or port 4096 yourself.
+Stop with one question (BLOCKED) only for a contract the plan doesn't settle, a product decision, a needed file outside the file list, a doctor failure you can't fix, or a §24 safety stop. A routine red check is not a stop.
+
+{report_instructions()}
+"""
+
     def implement_prompt(self, spec: TaskSpec, ctx: dict) -> str:
+        if self._fast_lane(spec.task_id):
+            return self.fast_lane_prompt(spec, ctx)
         planning = ""
         menu_actions = ""
         if spec.task_id.startswith("UI-") or any(
@@ -1320,6 +1375,12 @@ Change no code or test file in this session; if one needs changing, stop and rep
         acceptance lines; never from NEXT lines or summaries."""
         phase = (phase or "BUILD").upper()
         t = spec.task_id
+        if phase == "BUILD" and self._fast_lane(t):
+            # fast lane: the studio_gate verdict (one `fast_lane.gate` record bound to
+            # the revision) is the BUILD evidence; the runner covers suites,
+            # captures and boot itself
+            return [{"check_id": "fast_lane.gate", "chain_id": None, "seq": None,
+                     "prereqs": [], "runtime": True, "min_tier": "verified"}]
         if phase == "CLOSE":
             return [{"check_id": f"done_check:{t}", "chain_id": None, "seq": None,
                      "prereqs": [], "runtime": False, "min_tier": "verified"}]
@@ -1351,6 +1412,8 @@ Change no code or test file in this session; if one needs changing, stop and rep
         revision by the ledger). None = unknown (freshness 'unknown')."""
         kind, _, ref = (check_id or "").partition(":")
         code = ["src/**", "tests/**", "default.project.json"]
+        if kind == "fast_lane.gate":
+            return code                    # captures/evidence commits don't stale it
         if kind in ("suite", "regression", "boot", "call", "plan", "runtime"):
             return code
         if kind == "lune":
@@ -1388,6 +1451,15 @@ Change no code or test file in this session; if one needs changing, stop and rep
             d.update(kw)
             out.append(d)
 
+        if self._fast_lane(t):
+            # fast lane: ONE BUILD obligation, the studio gate verdict at the
+            # reviewed code (the runner's own checks are its rows); CLOSE and the
+            # visual approval below are unchanged
+            ob("build.gate", "BUILD", f"GATE {t} PASS (studio_gate verdict) bound to the "
+               f"reviewed code", f"plan:{plan_rel}",
+               [{"kind": "check", "ref": "fast_lane.gate"}],
+               acceptance=f"studio_gate sprint --sprint {t} verdict PASS at the revision")
+            req = {**req, "suites": [], "captures": [], "acceptance": "", "gate": False}
         for s in req["suites"]:
             ob(f"build.suite.{s}", "BUILD", f"Suite {s} verdict (GateRunner.tally) at the "
                f"reviewed commit", f"plan:{plan_rel}", [{"kind": "check", "ref": f"suite:{s}"}],

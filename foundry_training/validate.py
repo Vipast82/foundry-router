@@ -43,6 +43,8 @@ def validate_dataset(path: str, target: str, known_secrets=(), eval_hashes=froze
             if target == "chatml-tools":
                 for p in check_chatml(ex):
                     errors.append(f"line {i}: {p}")
+                for p in _target_problems(ex):
+                    errors.append(f"line {i}: {p}")
                 ep = (ex.get("meta") or {}).get("episode_id")
             elif target == "dpo":
                 for k in ("prompt", "chosen", "rejected", "basis"):
@@ -54,6 +56,12 @@ def validate_dataset(path: str, target: str, known_secrets=(), eval_hashes=froze
                     errors.append(f"line {i}: schema_version {ex.get('schema_version')}")
                 if not (ex.get("provenance") or {}).get("event_ids"):
                     errors.append(f"line {i}: no provenance")
+                for where, d in (("diff", ex.get("diff")),
+                                 ("original.diff", (ex.get("original") or {}).get("diff")),
+                                 ("accepted_correction.diff",
+                                  (ex.get("accepted_correction") or {}).get("diff"))):
+                    if isinstance(d, dict) and d.get("helper_authored") and d.get("patch"):
+                        errors.append(f"line {i}: {where} carries helper-authored code")
                 ep = ex.get("episode_id")
             if ep and ep in eval_episodes:
                 errors.append(f"line {i}: episode {ep} belongs to an evaluation set (leakage)")
@@ -64,6 +72,25 @@ def validate_dataset(path: str, target: str, known_secrets=(), eval_hashes=froze
         warnings.append("dataset is empty")
     return {"ok": not errors, "examples": n, "errors": errors[:50], "warnings": warnings,
             "target": target, "file_hash": _file_hash(path)}
+
+
+def _target_problems(ex: dict) -> list[str]:
+    """allow_frontier_targets = false: no frontier-authored turn may be a
+    target. Helper steps and correction context must carry weight 0."""
+    meta = ex.get("meta") or {}
+    msgs = ex.get("messages") or []
+    p = []
+    for k in meta.get("context_only") or []:
+        if k >= len(msgs) or msgs[k].get("role") != "assistant" or msgs[k].get("weight") != 0:
+            p.append(f"message {k}: context-only turn is not weighted out")
+    if meta.get("frontier_targets_allowed") is False or (
+            "frontier_targets_allowed" not in meta and meta.get("authors")):
+        kinds = {a[0] for a in meta.get("authors") or [] if isinstance(a, (list, tuple)) and a}
+        if kinds - {"local", "helper"}:
+            p.append(f"frontier-authored turns as targets ({sorted(kinds)})")
+        if "helper" in kinds and not meta.get("context_only"):
+            p.append("helper steps present but not weighted out")
+    return p
 
 
 def _keys(o, prefix=""):

@@ -20,6 +20,14 @@ Training datasets go to <root>/datasets/<id>/, evaluation sets to
 training (and vice versa), checked by group and by content hash.
 Reasoning channels are never exported (include_reasoning has no effect
 until a target that supports them is added).
+
+Targets per turn: with allow_frontier_targets = false only the local model's
+own assistant turns are targets. A helper step (a local turn that carried out
+a helper's prework patch or a harvested pre-code model) and, in a correction,
+every turn up to the feedback stay in the conversation as context with
+"weight": 0 (the per-message training switch TRL / Axolotl chat datasets
+read); meta.context_only lists them. `tags` limits an export to episodes
+carrying all the given tags (e.g. ["ui_v3"] for the Roblox-UI subset).
 """
 
 from __future__ import annotations
@@ -33,6 +41,7 @@ from collections import defaultdict
 from typing import Optional
 
 from . import SCHEMA_VERSION
+from .labels import is_target
 from .messages import canonical_text, pairing
 from .schema import content_hash
 
@@ -95,9 +104,22 @@ def load_tokenizer(path: Optional[str]):
         return None
 
 
-def to_chatml(messages: list[dict], tools: list[dict]) -> dict:
+def weights(ep: dict, msgs: list[dict], allow_frontier: bool) -> Optional[list]:
+    """Per-message weight (assistant turns only), or None when every assistant
+    turn is a target (the dataset then looks exactly as before)."""
+    until = ep.get("context_until") if ep.get("kind") == "correction" else None
+    w = []
+    for i, m in enumerate(msgs):
+        if m["role"] != "assistant":
+            w.append(None)
+            continue
+        w.append(1 if is_target(m, allow_frontier) and (until is None or i > until) else 0)
+    return w if any(x == 0 for x in w) else None
+
+
+def to_chatml(messages: list[dict], tools: list[dict], weight: Optional[list] = None) -> dict:
     out = []
-    for m in messages:
+    for i, m in enumerate(messages):
         if m["role"] == "tool":
             out.append({"role": "tool", "tool_call_id": m.get("tool_call_id") or "",
                         "content": m.get("content") or ""})
@@ -109,6 +131,8 @@ def to_chatml(messages: list[dict], tools: list[dict]) -> dict:
                                              "arguments": json.dumps(tc["arguments"],
                                                                      ensure_ascii=False)}}
                                for tc in m["tool_calls"]]
+        if weight is not None and m["role"] == "assistant":
+            o["weight"] = weight[i]
         out.append(o)
     ex = {"messages": out}
     if tools:
@@ -190,7 +214,7 @@ def _eval_groups(store) -> set:
 
 
 def export(store, projects: list, kind: str, target: str, cfgs: dict, purpose: str = "train",
-           tokenizer_path: Optional[str] = None, known_secrets=()) -> dict:
+           tokenizer_path: Optional[str] = None, known_secrets=(), tags=None) -> dict:
     from .validate import validate_dataset
     if purpose not in ("train", "eval"):
         raise ExportError("purpose must be train or eval")
@@ -227,16 +251,28 @@ def export(store, projects: list, kind: str, target: str, cfgs: dict, purpose: s
                                           r["content_hash"] in train_guard):
                     skipped["already_in_training"] += 1
                     continue
-                if kind == "multimodal" and not any(a.get("refs") for a in
-                                                    ep["flags"].get("artifacts") or []):
-                    skipped["no_artifacts"] += 1
+                if tags and not set(tags) <= set(ep.get("tags") or []):
+                    skipped["tag_filter"] += 1
                     continue
+                if kind == "multimodal":
+                    la = ep["flags"].get("label_artifacts") or []
+                    if not any(a.get("refs") for a in (ep["flags"].get("artifacts") or []) + la):
+                        skipped["no_artifacts"] += 1
+                        continue
+                    if any(a.get("status") != "present" for a in la):
+                        skipped["missing_artifact"] += 1
+                        continue
+                allow = bool(cfg.export.get("allow_frontier_targets", False))
                 if target == "canonical":
-                    lines.append({"_episode": r["episode_id"], **canonical(ep, r)})
+                    lines.append({"_episode": r["episode_id"], **canonical(ep, r, allow)})
                     members[r["episode_id"]] += 1
                     continue
                 msgs, tools = ep["messages"], ep.get("tools") or []
-                ex = to_chatml(msgs, tools)
+                w = weights(ep, msgs, allow)
+                if w is not None and not any(x == 1 for x in w):
+                    skipped["no_target_turn"] += 1
+                    continue
+                ex = to_chatml(msgs, tools, w)
                 n, token_method = _tokens(_render_chatml(ex["messages"], tools), tok)
                 seg = False
                 if n > limit:
@@ -244,12 +280,19 @@ def export(store, projects: list, kind: str, target: str, cfgs: dict, purpose: s
                     if cut is None:
                         skipped["too_long"] += 1
                         continue
-                    ex, seg = to_chatml(cut, tools), True
+                    if w is not None and not any(x == 1 for x in w[:len(cut)]):
+                        skipped["no_target_turn"] += 1     # the cut kept only context turns
+                        continue
+                    ex, seg = to_chatml(cut, tools, w[:len(cut)] if w else None), True
                 ex["meta"] = {"episode_id": r["episode_id"], "project_id": pid,
                               "task_id": r["task_id"], "kind": r["kind"], "segmented": seg,
                               "tokens": n, "token_count": token_method,
                               "authors": ep["flags"].get("authors"),
-                              "context_source": ep["context_source"]}
+                              "context_source": ep["context_source"],
+                              "tags": ep.get("tags") or [],
+                              "frontier_targets_allowed": allow,
+                              "context_only": [i for i, x in enumerate(w or []) if x == 0
+                                               and i < len(ex["messages"])]}
                 lines.append({"_episode": r["episode_id"], **ex})
                 members[r["episode_id"]] += 1
     data_path = out_dir / "data.jsonl"
@@ -267,7 +310,7 @@ def export(store, projects: list, kind: str, target: str, cfgs: dict, purpose: s
         "projects": projects, "policy_hashes": {p: cfgs[p].policy_hash() for p in projects},
         "split_policy": {p: cfgs[p].split for p in projects}, "examples": len(lines),
         "episodes": sorted(members), "skipped": dict(skipped), "validation": val,
-        "token_count": token_method, "reasoning_included": False,
+        "token_count": token_method, "reasoning_included": False, "tags": list(tags or []),
         "restrictions": RESTRICTIONS,
         "lineage": {"episode_ids_hash": content_hash(sorted(members))},
     }
@@ -283,7 +326,23 @@ def export(store, projects: list, kind: str, target: str, cfgs: dict, purpose: s
     return manifest
 
 
-def canonical(ep: dict, row: dict) -> dict:
+WITHHELD = "helper-authored code: kept in the store for provenance, never a training target"
+
+
+def _safe_diff(d, helper: bool):
+    """A revision diff for the canonical export. A diff that contains (or
+    may contain) helper-authored code is withheld: its patch is dropped and
+    the record says why, so it can never be read as a target."""
+    if not isinstance(d, dict):
+        return d
+    if helper or d.get("helper_authored"):
+        return {"patch": "", "truncated": bool(d.get("truncated")), "helper_authored": True,
+                "withheld": WITHHELD, "target": False}
+    return d
+
+
+def canonical(ep: dict, row: dict, allow_frontier: bool = False) -> dict:
+    helper = bool(ep["flags"].get("helper_steps")) or         any(a and a[0] == "helper" for a in ep["flags"].get("authors") or [])
     base = {"schema_version": SCHEMA_VERSION, "episode_id": ep["episode_id"],
             "project_id": ep["project_id"], "task_id": ep["task_id"], "kind": ep["kind"],
             "split": row["split"], "status": row["status"], "group_id": row["group_id"],
@@ -292,12 +351,20 @@ def canonical(ep: dict, row: dict) -> dict:
             "outcome": ep["outcome"], "flags": ep["flags"],
             "eval_categories": ep.get("eval_categories") or [],
             "provenance": {"sources": ep["sources"], "event_ids": ep["event_ids"]},
-            "diff": ep.get("diff")}
+            "diff": _safe_diff(ep.get("diff"), helper), "labels": ep.get("labels") or {}, "tags": ep.get("tags") or [],
+            "targets": [i for i, x in enumerate(weights(ep, ep["messages"], allow_frontier) or
+                                                [1 if m["role"] == "assistant" else None
+                                                 for m in ep["messages"]]) if x == 1]}
     if ep["kind"] == "correction":
-        base.update(original=ep["original"], feedback=ep["feedback"],
+        orig = dict(ep["original"])
+        if "diff" in orig:
+            orig["diff"] = _safe_diff(orig["diff"], any(
+                a and a[0] == "helper" for a in orig.get("authors") or []))
+        base.update(original=orig, feedback=ep["feedback"],
+                    context_until=ep.get("context_until"),
                     accepted_correction={"episode_id": ep["correction"]["episode_id"],
                                          "revision": ep["correction"]["revision"],
-                                         "diff": ep["correction"]["diff"]})
+                                         "diff": _safe_diff(ep["correction"]["diff"], helper)})
     return base
 
 

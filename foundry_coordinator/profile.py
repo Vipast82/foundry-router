@@ -135,6 +135,58 @@ def _lead_manager_table(path: str, raw) -> dict:
     return out
 
 
+# [fast_lane] (UI-T0): named tasks run as one long session verified by the
+# project's studio_gate runner (fast_lane.py). Off by default; a task not in
+# `tasks` behaves exactly as without it.
+FAST_LANE_DEFAULTS = {
+    "enabled": False,
+    "tasks": [],                              # explicit task ids (no globs)
+    "gate_module": "foundry_coordinator.projects.animaluprising.studio_gate",
+    "gate_timeout_minutes": 45,               # a run still going after this = red gate
+    "max_red_gates_before_handoff": 2,        # local-primary tasks then auto-request frontier_primary
+    "max_vision_rounds": 2,                   # CHANGES rounds before accept-with-notes
+    "lanes": ["prework", "test_design", "failure_triage", "incremental_review"],
+}
+
+
+def _fast_lane_table(path: str, raw) -> dict:
+    fl_raw = raw if raw is not None else {}
+    if not isinstance(fl_raw, dict):
+        raise ProfileError(f"{path}: [fast_lane] must be a table")
+    unknown = sorted(set(fl_raw) - set(FAST_LANE_DEFAULTS))
+    if unknown:
+        raise ProfileError(f"{path}: unknown [fast_lane] keys {unknown}")
+    out = {k: (list(v) if isinstance(v, list) else v) for k, v in FAST_LANE_DEFAULTS.items()}
+    for k, v in fl_raw.items():
+        want = type(FAST_LANE_DEFAULTS[k])
+        if want is bool and not isinstance(v, bool):
+            raise ProfileError(f"{path}: fast_lane.{k} must be true or false")
+        if want is int and (isinstance(v, bool) or not isinstance(v, int) or v < 0):
+            raise ProfileError(f"{path}: fast_lane.{k} must be a non-negative integer")
+        if want is str and (not isinstance(v, str) or not v.strip()):
+            raise ProfileError(f"{path}: fast_lane.{k} must be a non-empty string")
+        if want is list and (not isinstance(v, list) or
+                             any(not isinstance(x, str) or not x.strip() for x in v)):
+            raise ProfileError(f"{path}: fast_lane.{k} must be a list of non-empty strings")
+        out[k] = list(v) if isinstance(v, list) else v
+    if any(c in t for t in out["tasks"] for c in "*?[]") or \
+            len(set(out["tasks"])) != len(out["tasks"]):
+        raise ProfileError(f"{path}: fast_lane.tasks needs explicit, distinct task IDs")
+    for k in ("gate_timeout_minutes", "max_red_gates_before_handoff"):
+        if out[k] < 1:
+            raise ProfileError(f"{path}: fast_lane.{k} must be at least 1")
+    from .lanes import LANES                       # (lanes imports profile: lazily)
+    bad = sorted(set(out["lanes"]) - set(LANES))
+    if bad:
+        raise ProfileError(f"{path}: fast_lane.lanes: unknown lanes {bad} "
+                           f"(known: {', '.join(sorted(LANES))})")
+    gm = out["gate_module"].strip()
+    if not (gm.endswith(".py") or re.match(r"^[A-Za-z_][\w]*(\.[A-Za-z_][\w]*)*$", gm)):
+        raise ProfileError(f"{path}: fast_lane.gate_module must be a dotted module name "
+                           f"(or a .py script path)")
+    return out
+
+
 class ProfileError(ValueError):
     pass
 
@@ -195,6 +247,14 @@ class Profile:
     # [lead_manager] (v0.123): validated settings with defaults; off by default.
     lead_manager: dict = field(default_factory=lambda: {
         k: (list(v) if isinstance(v, list) else v) for k, v in LEAD_MANAGER_DEFAULTS.items()})
+    # [fast_lane] (UI-T0): validated settings with defaults; off by default.
+    fast_lane: dict = field(default_factory=lambda: {
+        k: (list(v) if isinstance(v, list) else v) for k, v in FAST_LANE_DEFAULTS.items()})
+
+    def fast_lane_task(self, task_id: str) -> bool:
+        """True when [fast_lane] is enabled and names this task."""
+        fl = self.fast_lane or {}
+        return bool(fl.get("enabled")) and bool(task_id) and task_id in (fl.get("tasks") or [])
 
     def lead_manager_on(self) -> bool:
         return bool((self.lead_manager or {}).get("enabled"))
@@ -366,6 +426,7 @@ def load(path: str) -> Profile:
             raise ProfileError(f"{path}: lifecycle.{k} must be a non-negative integer")
         lifecycle[k] = v
     lead_manager = _lead_manager_table(path, raw.get("lead_manager"))
+    fast_lane = _fast_lane_table(path, raw.get("fast_lane"))
     return Profile(
         id=pid, name=str(raw.get("name") or pid), version=str(raw.get("version") or "1"),
         path=path, hash=hashlib.sha256(blob).hexdigest()[:16], workspace=wpath,
@@ -378,7 +439,7 @@ def load(path: str) -> Profile:
         resources=list((raw.get("resources") or {}).get("exclusive") or []),
         closeout=dict(raw.get("closeout") or {}), prompts=dict(raw.get("prompts") or {}),
         artifacts=dict(raw.get("artifacts") or {}), commit=dict(raw.get("commit") or {}),
-        lifecycle=lifecycle, lead_manager=lead_manager)
+        lifecycle=lifecycle, lead_manager=lead_manager, fast_lane=fast_lane)
 
 
 def check_isolation(profiles: list[Profile]) -> None:

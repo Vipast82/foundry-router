@@ -17,6 +17,7 @@ as the coordinator (only their [training] section and workspace are used);
   ingest coordinator --db PATH                  the coordinator's store, read-only
   ingest cline --sessions DIR                   Cline session folders
   ingest git --project P                        commits referenced by the project's records
+  ingest gate --project P                       studio_gate verdict JSON (labels + captures)
   queue --spool DIR [--foundry-url U] [--kilo-url U]   coordinator closeout manifests
   curate --project P [--map SESSION=TASK ...]
   export --project P [...] --kind sft|correction|preference|multimodal --target canonical|chatml-tools|dpo
@@ -67,7 +68,8 @@ def main(argv=None) -> int:
     ap.add_argument("--allow-in-repo", action="store_true")
     sub = ap.add_subparsers(dest="cmd", required=True)
     ing = sub.add_parser("ingest")
-    ing.add_argument("source", choices=["kilo", "foundry", "coordinator", "cline", "git"])
+    ing.add_argument("source", choices=["kilo", "foundry", "coordinator", "cline", "git",
+                                           "gate"])
     ing.add_argument("--export", nargs="*", default=[])
     ing.add_argument("--url")
     ing.add_argument("--session", nargs="*", default=[])
@@ -90,6 +92,8 @@ def main(argv=None) -> int:
     ex.add_argument("--target", required=True, choices=["canonical", "chatml-tools", "dpo"])
     ex.add_argument("--purpose", default="train", choices=["train", "eval"])
     ex.add_argument("--tokenizer")
+    ex.add_argument("--tag", action="append", default=[],
+                    help="only episodes carrying this tag (repeatable), e.g. ui_v3")
     va = sub.add_parser("validate")
     va.add_argument("dataset")
     va.add_argument("--target", required=True)
@@ -206,6 +210,8 @@ def _run(a, p: Pipeline) -> int:
             out = p.ingest_coordinator(a.db)
         elif a.source == "cline":
             out = p.ingest_cline(a.sessions)
+        elif a.source == "gate":
+            out = p.ingest_gate(a.project)
         else:
             out = p.ingest_git(a.project)
     elif a.cmd == "queue":
@@ -219,7 +225,7 @@ def _run(a, p: Pipeline) -> int:
         from .export import export
         cfgs = {pid: p._cfg(pid) for pid in a.project}
         man = export(p.store, a.project, a.kind, a.target, cfgs, a.purpose, a.tokenizer,
-                     p.known)
+                     p.known, tags=a.tag or None)
         out = {k: man[k] for k in ("dataset_id", "examples", "skipped", "validation")}
     elif a.cmd == "validate":
         from .validate import validate_dataset
