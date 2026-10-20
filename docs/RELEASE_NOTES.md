@@ -2,6 +2,39 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.130.0 — the control center shows background work: the gate, vision batches, helpers
+
+During UI-D1 the control center looked idle while the coordinator ran the studio gate and the
+vision review. Neither is a Kilo session, and the activity and session views only show
+sessions. The only sign was one grey line under the task state, e.g. "studio gate running at
+8408b696f3f4: phase mock 84/110, 5/45 min".
+
+- **Background work** block in the sprint progress header, while the task is VERIFYING:
+  - **Studio gate**: phase, stories done of total with a bar, a playtest marker, elapsed time
+    of the limit, and the log path (on the workstation) with a *Copy path* button.
+  - **Vision review**: batches done of total with a bar, the batch now running and its frame
+    count, how many batches asked for CHANGES, and the findings so far.
+  - **Helpers** still in progress (queued, starting, executing, waiting on the provider), with
+    the last time each reported. Older than 10 minutes is marked.
+  - The Coordinator line says what runs ("Running the studio gate (a script, not a Kilo
+    session)"), and a record older than 10 minutes says "no update".
+- **Elapsed time**: the page counts it from the run's start time, so it moves every few
+  seconds. The old line floored to whole minutes. UI-D1's gate ran 7.4 minutes in total, so
+  77/110 and 84/110 both fell in minute 5. It was never stuck, but it read that way. The
+  coordinator's line now reads `5:12 of 45 min`.
+- **Data**: the fast lane keeps a structured record (`fast_lane.live`: gate phase, progress,
+  start, limit, log; or vision batch, done, changes, findings so far). It is saved only when
+  something changes. The bridge sends it as `background` while the task is VERIFYING, and
+  Foundry bounds it into `task_view.background`, parsing "84/110" into done/total. Display
+  only; nothing reads it back.
+
+**Deploy**: the coordinator (fast lane + bridge) for the record, and Foundry (router host) for
+`task_view.background` and the page. Either alone is safe: without the other, the block simply
+doesn't appear.
+
+**Tests**: `test_running_gate_publishes_live_progress_for_the_control_center` and
+`test_vision_batches_publish_done_of_total_and_findings_so_far` in
+`tests/coordinator/test_fast_lane.py`; three new cases in `tests/test_control_progress_header.py`.
 ## v0.129.8 — vision approval: exact frame field values
 
 UI-D1's second vision round returned CHANGES on 25 of 26 batches, with 813 findings. Many read

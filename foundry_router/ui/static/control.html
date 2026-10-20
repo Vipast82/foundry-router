@@ -162,7 +162,15 @@ body.noanim .sp-bar i { transition:none; }
 #sprint .need { text-align:left; white-space:normal; overflow-wrap:anywhere; max-width:100%; }
 #sprint .need.bad { border-color:var(--bad); background:var(--bad-bg); color:var(--fg); font-weight:600; }
 #sprint .need.warn { border-color:var(--warn); background:var(--warn-bg); color:var(--fg); }
+#sprint .sp-bg { margin-top:6px; padding-top:5px; border-top:1px dashed var(--line-2); }
+#sprint .bg-row { display:flex; flex-wrap:wrap; align-items:center; gap:4px 12px; margin:3px 0; min-width:0; }
+#sprint .bg-k { min-width:84px; font:600 12.5px/1.3 var(--num-font); color:var(--info); }
+#sprint .sp-bar.bg i { background:var(--info); }
+#sprint .sp-path { overflow-wrap:anywhere; font-size:11.5px; color:var(--dim); }
+#sprint .bg-find { margin:2px 0 4px 96px; font-size:12px; }
+#sprint .bad-t { color:var(--bad); } #sprint .warn-t { color:var(--warn); }
 @media (max-width: 760px) {
+  #sprint .bg-find { margin-left:0; }
   #sprint.show { grid-template-columns:minmax(0, 1fr); padding:6px 8px; }
   .pour .ph { font-size:10.5px; letter-spacing:.03em; padding:4px 6px 4px 13px; }
   #sprint .sp-k { min-width:0; }
@@ -1703,8 +1711,36 @@ function sprintModel(t, ctx) {
   if (state === "AWAITING_HUMAN" && !pend.length && d.awaiting) needs.push({kind: "awaiting", sev: "warn", act: "answer", text: String(d.awaiting).slice(0, 240)});
   if (["BLOCKED", "FAILED"].includes(state)) needs.push({kind: "blocker", sev: "bad", act: "command", text: state === "FAILED" ? "Decide whether to retry or cancel" : "Clear the blocker, then unblock"});
   if (state === "PAUSED" && d.pause_reason) needs.push({kind: "paused", sev: "warn", act: "command", text: `Paused: ${String(d.pause_reason).slice(0, 160)}`});
+  // background work: the fast lane's studio gate or vision batches (not Kilo
+  // sessions, so the panes look quiet), and helper units still in progress
+  const now = ctx.now || Date.now() / 1000;
+  const bgv = v.background && typeof v.background === "object" ? v.background : null;
+  let bg = null;
+  if (bgv && bgv.kind === "gate") {
+    const total = Number.isInteger(bgv.total) && bgv.total > 0 ? bgv.total : null;
+    const done = total !== null && Number.isInteger(bgv.done) ? Math.min(bgv.done, total) : null;
+    bg = {kind: "gate", phase: bgv.phase || "starting", done, total, pct: total ? 100 * done / total : null,
+          progress: bgv.progress || "", elapsed: bgv.started_ts ? Math.max(0, now - bgv.started_ts) : null,
+          limit: bgv.limit_s || null, log: bgv.log || "", playing: !!bgv.playing, head: bgv.head || "",
+          age: bgv.updated_ts ? Math.max(0, now - bgv.updated_ts) : null};
+  } else if (bgv && bgv.kind === "vision") {
+    const batches = Number.isInteger(bgv.batches) && bgv.batches > 0 ? bgv.batches : null;
+    bg = {kind: "vision", batch: bgv.batch || null, batches, done: bgv.done || 0, changes: bgv.changes || 0,
+          pct: batches ? 100 * (bgv.done || 0) / batches : null, frames: bgv.frames || null,
+          totalFrames: bgv.total_frames || null, findings: (bgv.findings || []).slice(0, 8),
+          more: bgv.more_findings || 0, elapsed: bgv.started_ts ? Math.max(0, now - bgv.started_ts) : null,
+          age: bgv.updated_ts ? Math.max(0, now - bgv.updated_ts) : null, head: bgv.head || ""};
+  }
+  const LIVE_HELPER = ["queued", "admitted", "executing", "waiting_provider"];
+  const helpers = (Array.isArray(d.helpers) ? d.helpers : [])
+    .filter(u => u && (u.phase ? LIVE_HELPER.includes(u.phase) : ["pending", "running", "dispatched"].includes(u.status)))
+    .slice(-6).map(u => ({kind: String(u.kind || u.responsibility || "helper"), phase: String(u.phase || u.status || ""),
+      persona: String(u.persona || ""), age: u.updated_ts ? Math.max(0, now - u.updated_ts) : null}));
+  const bgDoing = bg && bg.kind === "gate" ? "Running the studio gate (a script, not a Kilo session)"
+    : bg && bg.kind === "vision" ? "Vision review of the captured frames (model calls, not a Kilo session)" : "";
   return {task: t.task_id, project: t.project_id, state, phase, mode, phases, build, obligations, todo, needs,
-    doing: STATE_DOING[state] || state || "No state reported",
+    bg, helpers,
+    doing: bgDoing || STATE_DOING[state] || state || "No state reported",
     detail: d.next_action && d.next_action !== STATE_DOING[state] ? String(d.next_action) : "",
     attempt: d.attempt ?? null, sessions: d.sessions ?? null,
     blocker: ["BLOCKED", "FAILED"].includes(state) ? String(d.blocker || "") : "",
@@ -1745,7 +1781,37 @@ function sprintHtml(m, compact) {
     const brief = B.known && !B.complete ? `<div class="sp-line"><span class="sp-k">BUILD steps</span><span>${B.total !== null ? `<b class="num">${B.atMost ? "≤ " : ""}${esc(B.done)}</b> of <b class="num">${esc(B.total)}</b> ticked` : `<b class="num">${esc(B.open)}${B.atMost ? "+" : ""}</b> open`}</span></div>` : "";
     return `<div class="sp-main">${head}${pour}${brief}</div><div class="sp-side">${needs}</div>`;
   }
-  return `<div class="sp-main">${head}${pour}${bar}${subs.length ? `<div class="sp-subs">${subs.join("")}</div>` : ""}</div><div class="sp-side">${doing}${needs}</div>`;
+  return `<div class="sp-main">${head}${pour}${bar}${subs.length ? `<div class="sp-subs">${subs.join("")}</div>` : ""}${backgroundHtml(m)}</div><div class="sp-side">${doing}${needs}</div>`;
+}
+const mmss = s => s === null || s === undefined ? "" : `${Math.floor(s / 60)}:${String(Math.floor(s % 60)).padStart(2, "0")}`;
+const agoText = s => s === null || s === undefined ? "" : s < 90 ? `${Math.round(s)} s ago` : s < 5400 ? `${Math.round(s / 60)} min ago` : `${(s / 3600).toFixed(1)} h ago`;
+// "Background work": what runs for the task outside a Kilo session. Elapsed time
+// is counted here from the start time, so it moves between coordinator updates.
+function backgroundHtml(m) {
+  const g = m.bg, rows = [];
+  const stale = a => a !== null && a > 600 ? ` <span class="pill warn" title="No progress update from the coordinator for a while">no update ${esc(agoText(a))}</span>` : "";
+  const bar = (pct, label) => pct === null || pct === undefined ? "" : `<span class="sp-bar bg" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${Math.round(pct)}" aria-label="${esc(label)}"><i style="width:${clamp(pct, 0, 100).toFixed(1)}%"></i></span>`;
+  if (g && g.kind === "gate") {
+    const over = g.limit && g.elapsed !== null && g.elapsed > g.limit;
+    rows.push(`<div class="bg-row"><span class="bg-k" title="The project's own gate script (stories, mocks, playtests) running for this revision${g.head ? " " + esc(String(g.head).slice(0, 12)) : ""}">Studio gate</span>
+      <span>phase <b>${esc(g.phase)}</b>${g.playing ? ' <span class="pill info" title="Studio is in a playtest">playtest</span>' : ""}</span>
+      ${bar(g.pct, "gate stories done")}
+      <span>${g.total !== null ? `<b class="num">${esc(g.done)}</b> of <b class="num">${esc(g.total)}</b> done` : g.progress ? esc(g.progress) : ""}</span>
+      <span class="${over ? "bad-t" : "dim"}">${g.elapsed !== null ? `<b class="num">${esc(mmss(g.elapsed))}</b> elapsed` : ""}${g.limit ? ` of ${esc(Math.round(g.limit / 60))} min` : ""}</span>${stale(g.age)}</div>`
+      + (g.log ? `<div class="bg-row bg-log"><span class="bg-k">Log</span><code class="sp-path" title="On the coordinator workstation">${esc(g.log)}</code><button class="ghost" data-copy="${esc(g.log)}" title="Copy the log path">Copy path</button></div>` : ""));
+  } else if (g && g.kind === "vision") {
+    const f = g.findings.length ? `<details class="bg-find" data-bgfind${g.changes ? " open" : ""}><summary>${esc(g.changes)} batch${g.changes === 1 ? "" : "es"} asked for changes · findings so far (${esc(g.findings.length + g.more)})</summary><ul class="list">${g.findings.map(x => `<li>${esc(x)}</li>`).join("")}</ul>${g.more ? `<div class="dim">and ${esc(g.more)} more</div>` : ""}</details>` : "";
+    rows.push(`<div class="bg-row"><span class="bg-k" title="The vision model reviews the gate's captured frames in batches; every batch must approve">Vision review</span>
+      ${bar(g.pct, "vision batches done")}
+      <span><b class="num">${esc(g.done)}</b> of <b class="num">${esc(g.batches ?? "?")}</b> batches done${g.batch ? ` <span class="dim">· now batch ${esc(g.batch)}${g.frames ? ` (${esc(g.frames)} frames)` : ""}</span>` : ""}</span>
+      ${g.changes ? `<span class="pill warn">${esc(g.changes)} CHANGES</span>` : '<span class="dim">no changes asked so far</span>'}
+      <span class="dim">${g.elapsed !== null ? `<b class="num">${esc(mmss(g.elapsed))}</b> elapsed` : ""}</span>${stale(g.age)}</div>${f}`);
+  }
+  for (const h of m.helpers || [])
+    rows.push(`<div class="bg-row"><span class="bg-k">Helper</span><span><b>${esc(h.kind)}</b> ${esc(h.phase.replace(/_/g, " "))}${h.persona ? ` <span class="dim">· ${esc(h.persona)}</span>` : ""}</span>
+      <span class="${h.age !== null && h.age > 600 ? "warn-t" : "dim"}">${h.age !== null ? "last report " + esc(agoText(h.age)) : "no report yet"}</span></div>`);
+  if (!rows.length) return "";
+  return `<div class="sp-bg" role="group" aria-label="Background work"><div class="sp-k">Background work <span class="dim">· runs outside a Kilo session, so the panes can look quiet</span></div>${rows.join("")}</div>`;
 }
 /*progress-end*/
 function renderSprint() {
@@ -1763,6 +1829,14 @@ function renderSprint() {
     if (narrow) S.sprintOpen = !S.sprintOpen; else { P.sprintCompact = !P.sprintCompact; savePrefs(); }
     renderSprint();
   };
+  // the findings list keeps the open/closed state you chose across the 5 s refresh
+  const fd = el.querySelector("details[data-bgfind]");
+  if (fd) { if (S.bgFindOpen !== undefined) fd.open = S.bgFindOpen; fd.addEventListener("toggle", () => { S.bgFindOpen = fd.open; }); }
+  el.querySelectorAll("[data-copy]").forEach(b => b.onclick = () => {
+    const txt = b.dataset.copy, done = () => toast("Log path copied", "info");
+    if (navigator.clipboard && window.isSecureContext) navigator.clipboard.writeText(txt).then(done, () => {});
+    else { const r = document.createRange(); r.selectNodeContents(b.previousElementSibling); getSelection().removeAllRanges(); getSelection().addRange(r); toast("Path selected: press Ctrl+C", "info"); }
+  });
   el.querySelectorAll("[data-need]").forEach(b => b.onclick = () => {
     const a = b.dataset.need;
     if (a === "inbox") openInbox();

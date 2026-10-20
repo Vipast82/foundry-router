@@ -178,6 +178,20 @@ class FastLane:
     def _save(self, P, tid: str, fl: dict) -> None:
         self.store.merge_data(P.id, tid, **{KEY: fl})
 
+    def _live(self, P, tid: str, rec: dict) -> None:
+        """The structured progress of the background work running for this task
+        (the studio gate or the vision batches), for the control center: neither
+        is a Kilo session, so without it the page looks idle. Saved only when
+        something but the timestamp changed; the page counts elapsed time itself
+        from `started_ts` (wall clock). Display only: nothing reads it back."""
+        fl = self._fl(P, tid)
+        old = dict(fl.get("live") or {})
+        old.pop("updated_ts", None)
+        if old == rec:
+            return
+        fl["live"] = {**rec, "updated_ts": time.time()}
+        self._save(P, tid, fl)
+
     def _gate_dir(self, P, tid: str) -> str:
         return os.path.join(P.profile.workspace, *GATE_DIR.split("/"), tid)
 
@@ -424,9 +438,16 @@ class FastLane:
                                        f"dialog in Studio, a wait without a timeout) before "
                                        f"the next gate", "artifacts": [run.get("log") or ""]}]}
             return self._consume(P, t, spec, head, generic, run, v)
+        self._live(P, tid, {"kind": "gate", "head": run["head"], "run_id": run.get("run_id") or "",
+                            "started_ts": float(run.get("wall") or run.get("started") or 0) or None,
+                            "limit_s": int(limit), "phase": str(st.get("phase") or "starting")[:60],
+                            "progress": str(st.get("progress") or "")[:40],
+                            "playing": bool(st.get("playing")), "log": str(run.get("log") or "")[:400]})
+        # m:ss, not floored minutes: "5/45 min" read the same for a whole minute
+        # and looked frozen while the phase counter moved
         self.c._note(P, t, f"studio gate running at {run['head'][:12]}: phase "
                            f"{st.get('phase') or 'starting'} {st.get('progress') or ''}, "
-                           f"{int(elapsed // 60)}/{int(limit // 60)} min")
+                           f"{int(elapsed // 60)}:{int(elapsed % 60):02d} of {int(limit // 60)} min")
         return None
 
     # -- verdicts ----------------------------------------------------------------
@@ -772,6 +793,17 @@ class FastLane:
                                        f"{r.get('reason') or ''}"[:500])
                     return None
             if res is None:
+                prev = self._fl(P, tid).get("live") or {}
+                so_far = [str(f) for r in results_b if r.get("verdict") != "approve"
+                          for f in (r.get("findings") or [])]
+                self._live(P, tid, {
+                    "kind": "vision", "head": head, "batch": bi + 1, "batches": len(batches),
+                    "frames": len(batch), "total_frames": len(frames), "done": len(results_b),
+                    "changes": sum(1 for r in results_b if r.get("verdict") == "changes_required"),
+                    "findings": [f[:300] for f in so_far[:8]], "more_findings": max(0, len(so_far) - 8),
+                    "persona": str(persona)[:120],
+                    "started_ts": prev.get("started_ts") if prev.get("kind") == "vision"
+                    and prev.get("head") == head else time.time()})
                 self.c._note(P, t, f"fast-lane vision review: batch {bi + 1}/{len(batches)} "
                                    f"({len(batch)} frames)")
                 res = self._vision_call(P, t, spec, head, run, v, batch, barts, persona, routes,

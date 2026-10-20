@@ -91,6 +91,14 @@ A band above the panes answers "where is this task, and does it need me?":
   decisions, a Lead case that needs Victor, a blocker to clear. Each button
   opens the right place (answer composer, inbox, coordinator command).
 
+- **Background work** (v0.130.0), while the task is VERIFYING: the studio
+  gate (phase, stories done of total, elapsed of the limit, log path) or the
+  vision review (batches done of total, CHANGES so far, findings), and helper
+  units still in progress with their last report. None of these is a Kilo
+  session, so without this block the panes look idle. Elapsed time is
+  counted in the page from the start time; a record not updated for 10
+  minutes says so.
+
 Fold it to one line with ▾ (remembered); on a phone it starts folded.
 Settings → Follow & history → *Sprint progress header* hides it.
 
