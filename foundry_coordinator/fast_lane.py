@@ -802,43 +802,46 @@ class FastLane:
                 results_b.append(reused)
                 served_all.add(reused.get("served_model") or "unknown")
                 continue
-            prior = self.store.op_begin(key, P.id, tid, "visual_approval")
-            res = None
-            if prior:
-                r = prior.get("result") or {}
-                if prior["status"] == "done":
-                    res = r
-                elif prior["status"] == "deferred" and self.clock() >= float(r.get("retry_at") or 0):
-                    pass                 # retry the deferred call now
-                elif prior["status"] == "calling":
-                    # a restart during the call: its outcome is unknown and never paid twice
-                    res = {"verdict": "uncertain", "findings": ["call outcome unknown after a "
-                                                                "restart"], "served_model": ""}
-                    self.store.op_update(key, "done", res)
-                else:
-                    self.c._note(P, t, f"fast-lane vision approval deferred: "
-                                       f"{r.get('reason') or ''}"[:500])
-                    return None
-            if res is None:
-                prev = self._fl(P, tid).get("live") or {}
-                so_far = [str(f) for r in results_b if r.get("verdict") != "approve"
-                          for f in (r.get("findings") or [])]
-                self._live(P, tid, {
-                    "kind": "vision", "head": head, "batch": bi + 1, "batches": len(batches),
-                    "frames": len(batch), "total_frames": len(frames), "done": len(results_b),
-                    "changes": sum(1 for r in results_b if r.get("verdict") == "changes_required"),
-                    "findings": [f[:300] for f in so_far[:8]], "more_findings": max(0, len(so_far) - 8),
-                    "persona": str(persona)[:120],
-                    "started_ts": prev.get("started_ts") if prev.get("kind") == "vision"
-                    and prev.get("head") == head else time.time()})
-                self.c._note(P, t, f"fast-lane vision review: batch {bi + 1}/{len(batches)} "
-                                   f"({len(batch)} frames)")
-                res = self._vision_call(P, t, spec, head, run, v, batch, barts, persona, routes,
-                                        key, batch_label=(bi + 1, len(batches)))
-                if res is None:
-                    return None
-                if bi + 1 < len(batches):
-                    return None          # one call per tick; the next tick takes the next batch
+            # a retry re-asks an inconclusive batch in small chunks: at 20 frames a model
+            # sometimes drops a frame row or mis-copies a sha256 (UI-D1: 2-4 of 26 batches per
+            # round), and two inconclusive rounds stopped the task
+            small = max(1, size // 4)
+            chunks = [batch] if tries == 0 else [batch[i:i + small]
+                                                 for i in range(0, len(batch), small)]
+            parts_r = []
+            for ci, chunk in enumerate(chunks):
+                ckey = key if len(chunks) == 1 else f"{key}.c{ci + 1}of{len(chunks)}"
+                carts = {rel: arts[rel] for rel, _m, _b in chunk}
+                kept = None              # only a failing chunk is asked again on a later try
+                for earlier in range(1, tries):
+                    op = self.store.op(f"fast-lane-vision:{P.id}:{tid}:{fp}:{earlier}{suffix}"
+                                       f".c{ci + 1}of{len(chunks)}")
+                    r0 = (op or {}).get("result") or {}
+                    if op and op.get("status") == "done" and \
+                            r0.get("verdict") in ("approve", "changes_required"):
+                        kept = r0
+                if kept is not None:
+                    parts_r.append(kept)
+                    continue
+                state, cres = self._vision_one(P, t, spec, head, run, v, chunk, carts, persona,
+                                               routes, ckey, (bi + 1, len(batches)), batches,
+                                               batch, frames, results_b)
+                if state != "done":
+                    return None          # waiting, or one call made: one call per tick
+                parts_r.append(cres)
+            if len(parts_r) == 1:
+                res = parts_r[0]
+            else:
+                vs = [r.get("verdict") for r in parts_r]
+                res = {"verdict": "approve" if all(x == "approve" for x in vs) else
+                       "uncertain" if any(x not in ("approve", "changes_required") for x in vs)
+                       else "changes_required",
+                       "findings": [f for r in parts_r if r.get("verdict") != "approve"
+                                    for f in (r.get("findings") or [])],
+                       "served_model": ",".join(sorted({r.get("served_model") or "unknown"
+                                                        for r in parts_r}))}
+                if self.store.op_begin(key, P.id, tid, "visual_approval") is None or                         (self.store.op(key) or {}).get("status") != "done":
+                    self.store.op_update(key, "done", res)   # later tries reuse the whole batch
             results_b.append(res)
             served_all.add(res.get("served_model") or "unknown")
         verdicts = [r.get("verdict") for r in results_b]
@@ -896,11 +899,53 @@ class FastLane:
         unc[fp] = tries + 1
         fl["vision_uncertain"] = unc
         self._save(P, tid, fl)
-        if tries + 1 >= 2:
-            return self._error(P, t, head, results, "vision approval inconclusive twice: "
+        if tries + 1 >= 3:
+            return self._error(P, t, head, results, "vision approval inconclusive 3 times: "
                                + "; ".join(findings[:3]))
         self.c._note(P, t, "fast-lane vision review inconclusive; asking again")
         return None
+
+    def _vision_one(self, P, t, spec, head, run, v, chunk, carts, persona, routes, key,
+                    label, batches, batch, frames, results_b) -> tuple:
+        """One journaled vision call: ("done", result) | ("wait", None) | ("called", None)."""
+        tid = t["task_id"]
+        prior = self.store.op_begin(key, P.id, tid, "visual_approval")
+        if prior:
+            r = prior.get("result") or {}
+            if prior["status"] == "done":
+                return "done", r
+            if prior["status"] == "deferred" and self.clock() >= float(r.get("retry_at") or 0):
+                pass                     # retry the deferred call now
+            elif prior["status"] == "calling":
+                # a restart during the call: its outcome is unknown and never paid twice
+                res = {"verdict": "uncertain", "findings": ["call outcome unknown after a "
+                                                            "restart"], "served_model": ""}
+                self.store.op_update(key, "done", res)
+                return "done", res
+            else:
+                self.c._note(P, t, f"fast-lane vision approval deferred: "
+                                   f"{r.get('reason') or ''}"[:500])
+                return "wait", None
+        prev = self._fl(P, tid).get("live") or {}
+        so_far = [str(f) for r in results_b if r.get("verdict") != "approve"
+                  for f in (r.get("findings") or [])]
+        self._live(P, tid, {
+            "kind": "vision", "head": head, "batch": label[0], "batches": label[1],
+            "frames": len(batch), "total_frames": len(frames), "done": len(results_b),
+            "changes": sum(1 for r in results_b if r.get("verdict") == "changes_required"),
+            "findings": [f[:300] for f in so_far[:8]], "more_findings": max(0, len(so_far) - 8),
+            "persona": str(persona)[:120],
+            "started_ts": prev.get("started_ts") if prev.get("kind") == "vision"
+            and prev.get("head") == head else time.time()})
+        self.c._note(P, t, f"fast-lane vision review: batch {label[0]}/{label[1]} "
+                           f"({len(chunk)} frames)")
+        res = self._vision_call(P, t, spec, head, run, v, chunk, carts, persona, routes,
+                                key, batch_label=label)
+        if res is None:
+            return "wait", None
+        if label[0] < label[1] or len(chunk) < len(batch):
+            return "called", None        # one call per tick; the next tick goes on
+        return "done", res
 
     def _vision_call(self, P, t, spec, head, run, v, frames, arts, persona, routes,
                      key, batch_label: tuple = (1, 1)) -> Optional[dict]:

@@ -2,6 +2,22 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.130.2 — fast lane: an inconclusive vision batch is re-asked in chunks
+
+UI-D1 stopped twice on "vision approval inconclusive twice". At 20 frames, the vision model
+sometimes leaves a frame out of its reply or mis-copies a sha256 (2-4 of 26 batches a round).
+When the same batch failed on both tries, the whole task stopped, although every other batch
+was done. Retries already reused approved and CHANGES batches; now:
+
+- **Chunked retry:** a retry re-asks an inconclusive batch in chunks of `vision_batch_frames
+  // 4` (5 frames by default).
+- **Per-chunk reuse:** a chunk that answered (approve or CHANGES) is kept, and only a failing
+  chunk is asked again on the next try.
+- **Three tries:** the task stops only after a third inconclusive try (it was two). An
+  inconclusive answer is still never a pass.
+- **Tests:** `test_vision_reviews_in_batches_and_retries_only_inconclusive` (updated) and
+  `test_inconclusive_batch_gets_three_tries_in_chunks`. Coordinator change; it needs a restart.
+
 ## v0.130.1 — fast lane: a consumed gate verdict is never lost
 
 UI-D1's gate passed at 10:13 and vision was accepted with notes. The session then made a small

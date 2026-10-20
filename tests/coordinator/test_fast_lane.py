@@ -496,8 +496,9 @@ def test_vision_reviews_in_batches_and_retries_only_inconclusive(env):
     e.c.approve("game", "T1", [], "victor")
     t = drive(e, lambda t: t["state"] == S.COMPLETE)
     vision_calls = [x for x in e.ff.chats if x.get("packet") == "vision"]
-    assert len(vision_calls) == 4          # 3 batches + one retry of the uncertain batch
-    assert "b2of3" in vision_calls[-1]["session_id"] or vision_calls[-1]["session_id"].endswith("-1")
+    # 3 batches + the uncertain batch re-asked in small chunks (v0.130.2: 1 frame each here)
+    assert len(vision_calls) == 5
+    assert [x["session_id"].rsplit("-", 1)[-1] for x in vision_calls[-2:]] ==         ["b2of3.c1of2", "b2of3.c2of2"]
     [a] = e.c.store.approvals("game", "T1", "visual")
     assert set(a["artifacts"]) == set(caps)
 
@@ -602,3 +603,23 @@ def test_consumed_verdict_survives_the_session_rewriting_the_workspace_file(tmp_
     (logdir / "verdict-T1-aaaa-1.json").write_text(json.dumps(ours))
     assert fl._verdict(P, "T1", run)["run_id"] == "T1-aaaa-1"   # the copy counts
     assert FL._verdict_copy(dict(run, run_id="../x")) == ""     # never a path from a bad id
+
+
+def test_inconclusive_batch_gets_three_tries_in_chunks(env):
+    """UI-D1 (2026-10-20 11:44): a batch inconclusive twice blocked the task. Retries now
+    re-ask it in chunks and a third try is allowed before the task stops."""
+    caps = [CAP.replace(".png", f"-{i}.png") for i in range(4)]
+    e = env([{"result": "PASS", "captures": caps}],
+            vision=["uncertain", "uncertain", "approve", "approve", "approve", "approve",
+                    "approve"])
+    e.c.projects["game"].profile.fast_lane["vision_batch_frames"] = 4
+    e.c.approve("game", "T1", [], "victor")
+    t = drive(e, lambda t: t["state"] in (S.COMPLETE, S.BLOCKED))
+    assert t["state"] == S.COMPLETE, t["blocker"]
+    calls = [x["session_id"] for x in e.ff.chats if x.get("packet") == "vision"]
+    # try 0: the whole batch (uncertain); try 1: 1-frame chunks, the first one uncertain;
+    # try 2: only that chunk again (the other three are kept), approve
+    assert ".c" not in calls[0] and any(".c1of4" in c for c in calls[1:])
+    assert len(calls) == 1 + 4 + 1          # try 2 re-asks only the failing chunk
+    [a] = e.c.store.approvals("game", "T1", "visual")
+    assert set(a["artifacts"]) == set(caps)
