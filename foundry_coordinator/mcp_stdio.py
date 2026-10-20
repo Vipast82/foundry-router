@@ -35,6 +35,7 @@ CLIENT_INFO = {"name": "foundry-studio-gate", "version": "1"}
 CREATE_NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000)
 _NO_WINDOW = {"creationflags": CREATE_NO_WINDOW} if os.name == "nt" else {}
 COMMUNITY_PACKAGE = "@chrrxs/robloxstudio-mcp@3.2.1"
+CONNECT_WAIT_S = 30.0          # how long a fresh community server waits for the Studio plugin
 NPX = r"C:\Program Files\nodejs\npx.cmd"
 
 
@@ -410,6 +411,13 @@ class CommunityStudio:
             self._resolved = True
             return None
         inst = self.instances(timeout)
+        # a freshly started server has no instance yet: the Studio plugin polls and
+        # connects a few seconds later (live 2026-10-20: 0 at start, connected at 8 s;
+        # every doctor/preflight checked at 0 s and failed after a Studio restart)
+        deadline = time.monotonic() + CONNECT_WAIT_S
+        while not inst and time.monotonic() < deadline:
+            time.sleep(2.0)
+            inst = self.instances(timeout)
         pick = inst
         if self.place:
             pick = [i for i in inst if self.place.lower() in str(i.get("placeName") or "").lower()]

@@ -2,6 +2,16 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.130.8 — studio_gate waits for the community Studio plugin
+
+After a Studio restart (or a reboot), `studio_gate doctor` and the gate preflight failed with
+"community: need exactly one Studio instance, found 0". They checked the moment the community
+MCP server started, but the Studio plugin connects to a fresh server only a few seconds later
+(8 s, live; longer once its retry has backed off). `CommunityStudio.resolve` now polls
+`get_connected_instances` for up to `CONNECT_WAIT_S` (30 s) while no instance is connected.
+Test: `test_community_resolve_waits_for_the_plugin_to_connect`. Runner-side only: it applies as
+soon as the deploy checkout is on the tag.
+
 ## v0.130.7 — doctor: every persona's fallback chain
 
 At Claude's weekly 95% cutoff (2026-10-20), two personas the coordinator depends on had a

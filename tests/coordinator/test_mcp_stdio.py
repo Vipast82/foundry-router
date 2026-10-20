@@ -206,3 +206,22 @@ def test_community_binding_one_instance_unscoped_several_need_place():
         M.CommunityStudio(_StubClient(two), place="sandbox").call_tool("eval_server_runtime", {})
     with pytest.raises(M.McpError, match="matching 'nope'"):
         M.CommunityStudio(_StubClient(two), place="nope").resolve()
+
+
+def test_community_resolve_waits_for_the_plugin_to_connect(monkeypatch):
+    """Live 2026-10-20: a fresh server lists no instance, the plugin connects ~8 s later."""
+    import json as _json
+    from foundry_coordinator import mcp_stdio as M
+    replies = [[], [], [{"id": "instance:a", "placeId": 1, "placeName": "Animal Uprising"}]]
+
+    class Stub:
+        def tool_names(self):
+            return ["get_connected_instances"]
+
+        def call_tool(self, name, args, timeout=30.0):
+            return {"is_error": False, "text": _json.dumps({"instances": replies.pop(0)})}
+
+    monkeypatch.setattr(M.time, "sleep", lambda s: None)
+    com = M.CommunityStudio(Stub())
+    com.resolve()
+    assert com.place_name == "Animal Uprising" and not replies
