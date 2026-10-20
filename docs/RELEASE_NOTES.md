@@ -2,6 +2,17 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.130.7 — doctor: every persona's fallback chain
+
+At Claude's weekly 95% cutoff (2026-10-20), two personas the coordinator depends on had a
+Claude-only route: `Foundry-Kilo-Sonnet` (frontier handoff) and `Foundry-Kilo-Opus` (retry
+guidance). Implementer calls were refused with nothing to fall back to. Both now pin a GPT
+fallback in the backend (`gpt-6.1-sol` and `gpt-6-astra`). `doctor` and the `run --control`
+startup check list every persona the profile uses: roles, role overrides, `frontier_primary`,
+`retry_guidance`, `lead_manager`, `lanes.visual` and the helper personas. Each line shows its
+full route chain, and a WARN marks any route with a single frontier provider. Doctor tests pass.
+Coordinator change; it needs a restart.
+
 ## v0.130.6 — evidence ledger: a fast-lane timeout is not a flaky FAIL
 
 With v0.130.5 everything for UI-D1 passed: coordinator checks, the gate, and vision (carried,

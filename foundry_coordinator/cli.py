@@ -438,10 +438,66 @@ def doctor(c: Coordinator, project: str = "") -> int:
                         rows.append((st, f"lead {r.get('name')}", str(r.get("detail") or "")[:300]))
             except Exception as e:                                # noqa: BLE001
                 rows.append(("FAIL", "lead readiness", f"{type(e).__name__}: {e}"[:300]))
+        if P.foundry is not None:
+            rows.extend(_fallback_rows(P))
         for st, name, detail in rows:
             bad += st == "FAIL"
             print(f"  {st:<4} {name:<22} {detail}")
     return 1 if bad else 0
+
+
+def _provider(model: str) -> str:
+    m = (model or "").lower()
+    return ("claude" if "claude" in m else "gpt" if m.startswith(("gpt", "o1", "o3", "o4"))
+            or "gpt" in m else "local" if any(x in m for x in ("qwen", "llama", "gemma", "local"))
+            else m.split("-")[0] or "?")
+
+
+def _fallback_rows(P) -> list:
+    """Every persona the coordinator can call, with its full route chain, WARN when the
+    chain has a single frontier provider (2026-10-20: at Claude's 95% cutoff the Sonnet
+    implementer, the vision reviewer and retry guidance had no GPT fallback and stalled)."""
+    used: dict = {}
+    for role, persona in P.profile.roles.items():
+        used.setdefault(persona, set()).add(role)
+    for _n, ov in (P.profile.raw.get("role_overrides") or {}).items():
+        for role, persona in ov.items():
+            if role != "tasks":
+                used.setdefault(persona, set()).add(role)
+    raw = P.profile.raw
+    for key, role in (("frontier_primary", "frontier_primary"), ("retry_guidance", "retry_guidance"),
+                      ("lead_manager", "lead")):
+        persona = (raw.get(key) or {}).get("persona")
+        if persona and (raw.get(key) or {}).get("enabled", True):
+            used.setdefault(persona, set()).add(role)
+    vis = ((raw.get("lanes") or {}).get("visual") or {}).get("persona")
+    if vis:
+        used.setdefault(vis, set()).add("lanes.visual")
+    for backend, persona in ((raw.get("helpers") or {}).get("personas") or {}).items():
+        used.setdefault(persona, set()).add(f"helper:{backend}")
+    out = []
+    for persona in sorted(used):
+        roles = ",".join(sorted(used[persona]))
+        try:
+            info = P.foundry.persona_info(persona) or {}
+        except Exception as e:                                    # noqa: BLE001
+            out.append(("WARN", f"fallback {persona}"[:22], f"routes unreadable: {e}"[:200]))
+            continue
+        models = [str(r.get("model") or "?") for r in info.get("routes") or []]
+        provs = {_provider(m) for m in models}
+        frontier = provs - {"local"}
+        chain = " -> ".join(models) or "(no routes)"
+        if "helper:" in roles and len(used[persona]) == 1:
+            st = "PASS"                       # helpers already span backends via [helpers] order
+        elif provs == {"local"}:
+            st = "PASS"                       # a local primary: the frontier handoff covers it
+        elif len(frontier) >= 2:
+            st = "PASS"
+        else:
+            st = "WARN"
+        note = "" if st == "PASS" else "  <- single provider: add a fallback model to this route"
+        out.append((st, f"fallback {persona}"[:40], f"[{roles}] {chain}{note}"))
+    return out
 
 
 def main(argv=None, clients=None, foundry=None) -> int:
