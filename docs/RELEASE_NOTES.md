@@ -2,7 +2,7 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
-## v0.127.0 (unreleased; held until UI-02 closes) — live Kilo checkpoint for the implementer; withdrawn questions resume
+## v0.127.0 — live Kilo checkpoint for the implementer; withdrawn questions resume
 
 The UI-02 primary tried to run `kilo_checkpoint` against `127.0.0.1:4096`
 and got a 401, because the Kilo server password is the coordinator's
@@ -20,7 +20,7 @@ server (other sessions, aborts, permission replies), so they don't get it.
 - **Prompt and rule:** the BUILD prompt tells the session to read that file
   and never call port 4096. `RULE_AMENDMENT.md` is updated to match. The
   matching AU `.kilo/rules/animaluprising-adapter.md` edit is a separate
-  patch, applied after UI-02 closes.
+  patch (AU_kilo_rule_live_checkpoint.patch), applied after UI-02 closes.
 - **Withdrawn session questions:** Kilo withdrew UI-02's snapshot question
   ("Disable for this project?") on its own while the session went on
   working. The coordinator stayed AWAITING_HUMAN with nothing to answer, and
