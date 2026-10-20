@@ -2,6 +2,14 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.130.5 — fast lane: no repair_changed check
+
+UI-D1's repair attempts 5 and 6 had nothing to change: the finding (`build.gate`) was a
+coordinator-side evidence bug, fixed in v0.130.4. `coordinator.repair_changed` ("the repair
+session committed nothing") still failed, and the fallback started a new attempt each time.
+Fast-lane tasks skip that check: the studio gate re-verifies every revision itself. Coordinator
+change; it needs a restart.
+
 ## v0.130.4 — fast lane: build.gate resolves from the studio_gate verdict
 
 UI-D1 passed its gate and had vision accepted, then the [lifecycle] submission check refused

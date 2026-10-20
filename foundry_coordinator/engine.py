@@ -1034,8 +1034,10 @@ class Coordinator:
             return out
         add("history", PASS, f"{base[:12]} is an ancestor of {head[:12]}")
         commits = P.ws.commits(base, head)
+        # [fast_lane]: the studio gate re-verifies every revision itself, and a repair whose
+        # findings were coordinator-side (UI-D1 attempt 5, build.gate) has nothing to commit
         if phase == "verify" and t["data"].get("findings") and t["base_sha"] == head \
-                and not spec.allow_no_change:
+                and not spec.allow_no_change and not self.fast_lane.on(P, spec.task_id):
             add("repair_changed", FAIL, "the repair session committed nothing; the earlier "
                                         "findings still apply")
         if phase == "verify":
