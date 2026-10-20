@@ -2,6 +2,18 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.129.6 — fast lane: the capture commit covers the whole capture folder
+
+On v0.129.5, UI-D1's session ran its own stories render, which re-rendered 463 frames
+besides the gate's 40 captures. The post-PASS prompt said to commit "exactly the gate's
+capture files ... nothing else", so the session left the 463 frames dirty, and
+`coordinator.clean` failed until the fallback started a new attempt. When other frames under
+`[fast_lane] runner_captures` are uncommitted, the prompt now asks for one commit of the
+capture folder (`git add -A -- docs/evidence/UI-v3/<ID>`) and says how many extra frames it
+holds. With only the gate's captures dirty, the prompt is unchanged. Test:
+`test_capture_commit_covers_other_renders_in_the_capture_folder`. Coordinator engine change:
+it needs a restart at a safe point.
+
 ## v0.129.5 — fast lane: the runner's own outputs don't trip the clean checks
 
 UI-D1 used up its attempts with the gate green. The studio_gate runner appends every run to

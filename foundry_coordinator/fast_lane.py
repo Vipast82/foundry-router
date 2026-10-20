@@ -504,9 +504,25 @@ class FastLane:
             vid = self.store.save_verification(P.id, tid, head, "verify", generic + rows)
             caps = [str(c.get("path")) for c in v.get("captures") or []
                     if isinstance(c, dict) and c.get("path")]
+            # the session's own stories runs re-render the task's other frames too: they are
+            # runner output in the task's capture folder, so they go in the same commit
+            # (UI-D1: 40 gate captures committed, 463 other renders left dirty, clean loop)
+            pats = [x.replace("{task}", tid) for x in settings(P).get("runner_captures") or []]
+            try:
+                other = sorted(p for _, p in P.ws.status()
+                               if matches_any(p, pats) and p not in set(caps))
+            except Exception:                                     # noqa: BLE001
+                other = []
+            dirs = sorted({x.split("*")[0].rstrip("/") for x in pats if x.split("*")[0]})
             lines = failed_findings(bad) + ([
                 "commit exactly the gate's capture files by explicit path (message "
-                f"\"{tid}: gate captures\"), nothing else: " + ", ".join(caps[:40])] if caps else [])
+                f"\"{tid}: gate captures\"), nothing else: " + ", ".join(caps[:40])]
+                if caps and not other else [
+                f"commit the runner's capture files in one commit (message \"{tid}: gate "
+                f"captures\"), nothing else: `git add -A -- {' '.join(dirs)}` then commit. "
+                f"That is the gate's {len(caps)} capture(s) plus {len(other)} other re-rendered "
+                f"frame(s) in the same folder (e.g. {', '.join(other[:5])})"] if caps or other
+                else [])
             return self._continue(P, t, spec, head, vid, f"fast-lane:commit:{head}",
                                   f"Studio gate PASS at {run['head'][:12]}: commit its captures",
                                   lines, "the studio gate passed; its captures must be committed")

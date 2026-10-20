@@ -54,6 +54,7 @@ FAKE_GATE = textwrap.dedent('''\
                "progress": "1/3", "updated": started}, open(os.path.join(d, "status.json"), "w"))
     time.sleep(step.get("sleep", 0))
     for rel, text in (step.get("append") or {}).items():       # runner-owned outputs
+        os.makedirs(os.path.dirname(os.path.join(repo, *rel.split("/"))), exist_ok=True)
         with open(os.path.join(repo, *rel.split("/")), "a") as f:
             f.write(text)
     caps = []
@@ -117,7 +118,7 @@ def agent(ctx):
     p = ctx["prompt"]
     n = int(ctx.get("_n", 0))
     done = '```coordinator-report\n{"status": "DONE", "summary": "ok"}\n```'
-    if "commit exactly the gate's capture files" in p:
+    if "commit exactly the gate's capture files" in p or "commit the runner's capture files" in p:
         return {"commit": f"{ctx['task_id']}: gate captures", "final": done}
     if ctx["task_id"] == "T2":
         return {"writes": {"src/b.txt": "OK"}, "commit": "T2: work", "final": done}
@@ -522,3 +523,17 @@ def test_runner_outputs_dirty_at_run_start_never_trip_the_clean_checks(env):
     assert t["state"] == S.COMPLETE, (t["blocker"], t["next_action"])
     assert t["sessions"] == 1 and t["attempt"] == 1
     assert "GATE T1 PASS" in (e.repo / log).read_text()           # the runner's line is kept
+
+
+def test_capture_commit_covers_other_renders_in_the_capture_folder(env):
+    """UI-D1 (2026-10-20): the session's own stories run re-rendered 463 frames besides the
+    gate's 40 captures; told to commit "exactly the gate's capture files, nothing else", it
+    left them dirty and coordinator.clean looped. The commit prompt now names the folder."""
+    other = "docs/evidence/UI-v3/T1/Other.normal@390x844.png"
+    e = env([dict(GREEN, append={other: "re-rendered"}), GREEN])
+    e.c.approve("game", "T1", [], "victor")
+    t = drive(e, lambda t: t["state"] in (S.COMPLETE, S.BLOCKED, S.CHANGES_REQUIRED))
+    assert t["state"] == S.COMPLETE, (t["blocker"], t["next_action"])
+    [p] = [x[2] for x in e.client.log if "gate captures" in x[2]]
+    assert "git add -A -- docs/evidence/UI-v3/T1" in p and "1 other re-rendered" in p
+    assert other in p and "exactly the gate's capture files" not in p
