@@ -2,7 +2,7 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
-## v0.127.0 (unreleased; held until UI-02 closes) — the coordinator hands the implementer its Kilo checkpoint
+## v0.127.0 (unreleased; held until UI-02 closes) — live Kilo checkpoint for the implementer; withdrawn questions resume
 
 The UI-02 primary tried to run `kilo_checkpoint` against `127.0.0.1:4096`
 and got a 401, because the Kilo server password is the coordinator's
@@ -21,10 +21,20 @@ server (other sessions, aborts, permission replies), so they don't get it.
   and never call port 4096. `RULE_AMENDMENT.md` is updated to match. The
   matching AU `.kilo/rules/animaluprising-adapter.md` edit is a separate
   patch, applied after UI-02 closes.
+- **Withdrawn session questions:** Kilo withdrew UI-02's snapshot question
+  ("Disable for this project?") on its own while the session went on
+  working. The coordinator stayed AWAITING_HUMAN with nothing to answer, and
+  replying gave a 404 (`QuestionNotFoundError`). Now, when Kilo has no longer
+  held the request for `[limits] question_withdrawn_grace_seconds` (default
+  60; 0 = never), the task returns to the state it came from and the
+  coordinator polls the session again, recording a `question_withdrawn`
+  event. An operator answer to a withdrawn request resumes the task instead
+  of failing. A failed reply to a request that is still pending still raises.
 
 **Tests:** `tests/coordinator/test_live_checkpoint.py` (rate limit, off
-switch, failure is advisory) and
-`test_live_checkpoint_file_is_read_only_and_ignored` (AU clone).
+switch, failure is advisory), `tests/coordinator/test_question_withdrawn.py`
+(grace period, off switch, answer after withdrawal, pending reply failure)
+and `test_live_checkpoint_file_is_read_only_and_ignored` (AU clone).
 
 ## v0.126.8 — the Lead's guard baseline is the prompt, not the session creation
 

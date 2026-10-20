@@ -59,6 +59,7 @@ class Coordinator:
         from .retry_guidance import RetryGuidance
         self.retry_guidance = RetryGuidance(self)
         self._live_audit_ts: dict[str, float] = {}     # session -> last live checkpoint write
+        self._q_missing_since: dict[str, float] = {}   # request id -> first seen withdrawn
         # [lifecycle] (v0.122): evidence ledger, obligations/decisions/budget
         # ledger, recovery. Built lazily, and only used for projects whose
         # profile enables them; a disabled project never touches their tables.
@@ -1594,7 +1595,8 @@ class Coordinator:
     def _awaiting(self, P: Project, t: dict) -> None:
         pid, tid = P.id, t["task_id"]
         if t["data"].get("question"):
-            return                       # answered through answer()
+            self._question_withdrawn(P, t)
+            return                       # answered through answer(), or resumed above
         spec = P.adapter.describe(tid)
         stage = t["data"].get("stage")
         if stage == "before_close":
@@ -1850,22 +1852,76 @@ class Coordinator:
         if t["state"] != S.AWAITING_HUMAN or not q:
             raise ValueError(f"{project_id}/{task_id} has no open question")
         sid = t["session_id"]
-        P.client.answer(sid, q["request_id"], answer, directory=P.profile.workspace,
-                        kind=q.get("kind", "question"))
+        try:
+            P.client.answer(sid, q["request_id"], answer, directory=P.profile.workspace,
+                            kind=q.get("kind", "question"))
+        except Exception:                                         # noqa: BLE001
+            # Kilo may have withdrawn the request (it times some out, e.g. its
+            # snapshot prompt): then there is nothing left to answer and the
+            # session goes on. A request still pending re-raises the failure.
+            if self._question_pending(P, t) is not False:
+                raise
+            return self._resume_from_question(P, t, {"answered": answer, "withdrawn": True},
+                                              actor, recovery=False)
+        return self._resume_from_question(P, t, {"answered": answer}, actor)
+
+    def _resume_from_question(self, P: Project, t: dict, evidence: dict, actor: str,
+                              recovery: bool = True) -> dict:
+        q = t["data"].get("question") or {}
+        sid = t["session_id"]
         data = {k: v for k, v in t["data"].items() if k not in ("question", "question_phase",
                                                                 "question_from")}
         back = t["data"].get("question_from") or S.IMPLEMENTING
         # A reply resumes the existing prompt; it is not a new prompt. Resetting
         # prompt_ts makes Kilo's completed assistant turn look older than the
         # prompt, so an idle session is mistaken for one awaiting admission.
-        if q.get("kind") == "permission":
+        if recovery and q.get("kind") == "permission":
             data["permission_reply_recovery"] = {"session_id": sid,
-                                                 "request_id": q["request_id"]}
+                                                 "request_id": q.get("request_id")}
         self.store.update_session(sid, status="prompted")
+        self._q_missing_since.pop(q.get("request_id") or "", None)
         # a closeout session is polled from CLOSING, an implementation one from IMPLEMENTING
-        return self.store.transition(project_id, task_id,
+        return self.store.transition(P.id, t["task_id"],
                                      S.CLOSING if back == S.CLOSING else S.IMPLEMENTING,
-                                     {"answered": answer}, actor=actor, data=data)
+                                     evidence, actor=actor, data=data)
+
+    def _question_pending(self, P: Project, t: dict):
+        """True while Kilo still holds the task's request, False once it has
+        withdrawn it, None when Kilo can't be asked (unknown: keep waiting)."""
+        q = t["data"].get("question") or {}
+        sess = self.store.session(t["session_id"]) or {}
+        try:
+            s = P.client.state(t["session_id"], directory=P.profile.workspace,
+                               since_ts=sess.get("prompt_ts") or 0)
+        except Exception:                                         # noqa: BLE001
+            return None
+        return s.status == "attention" and (s.question or {}).get("request_id") == \
+            q.get("request_id")
+
+    def _question_withdrawn(self, P: Project, t: dict) -> None:
+        """A session question Kilo no longer holds (timed out or answered in
+        Kilo itself) would otherwise leave the task AWAITING_HUMAN for good
+        while the session keeps working. After `question_withdrawn_grace_seconds`
+        of absence (default 60; 0 = never) the task returns to the state it
+        came from and the coordinator polls the session again."""
+        grace = P.profile.limit("question_withdrawn_grace_seconds", 60)
+        q = t["data"].get("question") or {}
+        rid = q.get("request_id") or ""
+        if not grace or not rid or not t.get("session_id"):
+            return
+        if self._question_pending(P, t) is not False:
+            self._q_missing_since.pop(rid, None)
+            return
+        first = self._q_missing_since.setdefault(rid, self.clock())
+        if self.clock() - first < float(grace):
+            return
+        self.store.event(P.id, t["task_id"], "question_withdrawn", session_id=t["session_id"],
+                         detail={"request_id": rid, "kind": q.get("kind"),
+                                 "text": (q.get("text") or "")[:300]})
+        self._resume_from_question(P, t, {"answered": "(withdrawn by Kilo)", "question_withdrawn": rid,
+                                          "note": "Kilo no longer holds the session's request; "
+                                                  "the session continues"}, "engine",
+                                   recovery=False)
 
     # ======================================================================= helper proposals
 
