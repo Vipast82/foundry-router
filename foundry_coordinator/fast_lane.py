@@ -45,6 +45,7 @@ import base64
 import hashlib
 import json
 import os
+import re
 import secrets
 import signal
 import subprocess
@@ -77,6 +78,14 @@ RUBRIC = """Rubric (all must hold; plan section 6.5):
 7. Overall it reads as close to production quality: no placeholder look, no debug text, nothing
    broken or embarrassing.
 Findings must be numbered and located (story, size, element) so the primary can fix them."""
+
+
+def _verdict_copy(run: dict) -> str:
+    """The coordinator's copy of a consumed verdict, next to the run's log."""
+    log, rid = str(run.get("log") or ""), str(run.get("run_id") or "")
+    if not log or not rid or not re.fullmatch(r"[\w.-]+", rid):
+        return ""
+    return os.path.join(os.path.dirname(log), f"verdict-{rid}.json")
 
 
 def settings(P) -> dict:
@@ -299,7 +308,14 @@ class FastLane:
         """The verdict of THIS run, or None (not written yet / not ours). Fail closed:
         a sprint-mode verdict for this sprint and head that carries this run's nonce;
         a stories/regression verdict, or any run's file without our nonce, never counts."""
-        v = _read_json(os.path.join(P.profile.workspace, *verdict_rel(tid, run["head"]).split("/")))
+        for path in (os.path.join(P.profile.workspace, *verdict_rel(tid, run["head"]).split("/")),
+                     _verdict_copy(run)):
+            v = self._check_verdict(tid, run, _read_json(path) if path else None)
+            if v is not None:
+                return v
+        return None
+
+    def _check_verdict(self, tid: str, run: dict, v) -> Optional[dict]:
         if not v:
             return None
         if v.get("schema") != 1 or v.get("sprint") != tid or v.get("head") != run["head"]:
@@ -504,6 +520,17 @@ class FastLane:
         consumed = dict(fl.get("consumed") or {})
         first = vkey not in consumed
         if first:
+            # keep our own copy: a later runner call (the session's) rewrites the workspace
+            # verdict for this head with another run id, and a carried run whose verdict
+            # vanished was polled as still running and timed out (UI-D1, 11:00)
+            cp = _verdict_copy(run)
+            if cp and not v.get("timeout"):
+                try:
+                    with open(cp + ".tmp", "w", encoding="utf-8") as f:
+                        json.dump(v, f)
+                    os.replace(cp + ".tmp", cp)
+                except OSError:
+                    pass
             self._record(P, t, run, v, vkey)
             consumed[vkey] = res
             fl["consumed"] = dict(list(consumed.items())[-20:])

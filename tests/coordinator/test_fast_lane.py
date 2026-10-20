@@ -576,3 +576,29 @@ def test_vision_batches_publish_done_of_total_and_findings_so_far(env):
     from foundry_coordinator.telemetry import background_work
     bg = background_work(task(e))
     assert bg["kind"] == "vision" and bg["changes"] == 1 and bg["findings"] == live["findings"][:8]
+
+
+def test_consumed_verdict_survives_the_session_rewriting_the_workspace_file(tmp_path):
+    """UI-D1 (2026-10-20 11:00): the gate passed and was consumed; the session then ran the
+    runner itself at the same head, which rewrote <head>.sprint.json with another run id.
+    The carried run looked unfinished and was timed out as a red gate. The coordinator's
+    own copy (next to the run log) is the fallback."""
+    from foundry_coordinator import fast_lane as FL
+    head = "a" * 40
+    ws = tmp_path / "ws"
+    vdir = ws / ".plan" / "tmp" / "gate" / "T1"
+    vdir.mkdir(parents=True)
+    logdir = tmp_path / "ev"
+    logdir.mkdir()
+    run = {"head": head, "run_id": "T1-aaaa-1", "log": str(logdir / "fast_lane_gate.log"),
+           "wall": 100.0}
+    ours = {"schema": 1, "sprint": "T1", "head": head, "mode": "sprint", "run_id": "T1-aaaa-1",
+            "result": "PASS", "finished": 200.0, "captures": []}
+    other = dict(ours, run_id="-", finished=300.0)
+    (vdir / f"{head[:12]}.sprint.json").write_text(json.dumps(other))
+    fl = FL.FastLane.__new__(FL.FastLane)
+    P = SimpleNamespace(profile=SimpleNamespace(workspace=str(ws)))
+    assert fl._verdict(P, "T1", run) is None                    # not ours, no copy yet
+    (logdir / "verdict-T1-aaaa-1.json").write_text(json.dumps(ours))
+    assert fl._verdict(P, "T1", run)["run_id"] == "T1-aaaa-1"   # the copy counts
+    assert FL._verdict_copy(dict(run, run_id="../x")) == ""     # never a path from a bad id

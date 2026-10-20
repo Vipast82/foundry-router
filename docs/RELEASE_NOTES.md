@@ -2,6 +2,18 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.130.1 — fast lane: a consumed gate verdict is never lost
+
+UI-D1's gate passed at 10:13 and vision was accepted with notes. The session then made a small
+plan-scope commit, and the carried gate run was polled again. Its workspace verdict
+(`<head>.sprint.json`) had since been rewritten by the session's own runner call, which carries
+another run id, and the consumed run no longer had a process handle. The coordinator timed it
+out 45 minutes after it started and sent the session a false "find what hangs" red gate. When
+the coordinator consumes a verdict it now keeps a copy next to the run log
+(`verdict-<run id>.json`), and the verdict lookup falls back to that copy. Test:
+`test_consumed_verdict_survives_the_session_rewriting_the_workspace_file`. Coordinator change;
+it needs a restart.
+
 ## v0.130.0 — the control center shows background work: the gate, vision batches, helpers
 
 During UI-D1 the control center looked idle while the coordinator ran the studio gate and the
