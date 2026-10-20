@@ -2,6 +2,15 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.130.3 — fast lane: after an approval, vision reviews only changed frames
+
+Cost: every small UI-D1 commit re-sent all ~500 frames (26 image calls) to vision, even after
+the look was accepted. Once a task has a visual approval (approved, or accepted with notes),
+a later revision sends only the frames whose bytes differ from that approval. If none differ,
+it carries the approval with no model call. Test:
+`test_vision_after_an_approval_reviews_only_changed_frames`. Coordinator change; it needs a
+restart.
+
 ## v0.130.2 — fast lane: an inconclusive vision batch is re-asked in chunks
 
 UI-D1 stopped twice on "vision approval inconclusive twice". At 20 frames, the vision model

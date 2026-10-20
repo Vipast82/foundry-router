@@ -623,3 +623,22 @@ def test_inconclusive_batch_gets_three_tries_in_chunks(env):
     assert len(calls) == 1 + 4 + 1          # try 2 re-asks only the failing chunk
     [a] = e.c.store.approvals("game", "T1", "visual")
     assert set(a["artifacts"]) == set(caps)
+
+
+def test_vision_after_an_approval_reviews_only_changed_frames(env):
+    """Token cost (UI-D1, 2026-10-20): every small commit re-sent all frames to vision.
+    After an approval, unchanged frames carry; only changed ones are reviewed."""
+    from foundry_coordinator.adapters.base import PASS as P_
+    caps = [CAP.replace(".png", f"-{i}.png") for i in range(4)]
+    e = env([{"result": "PASS", "captures": caps}])
+    e.c.approve("game", "T1", [], "victor")
+    drive(e, lambda t: t["state"] == S.COMPLETE)
+    n0 = len([x for x in e.ff.chats if x.get("packet") == "vision"])
+    fl = e.c.fast_lane
+    P = e.c.projects["game"]
+    t = task(e)
+    frames, arts, _ = fl._frames(P, [{"path": c} for c in caps])
+    r = fl._vision(P, t, None, t["head_sha"], {"head": t["head_sha"]},
+                   {"captures": [{"path": c} for c in caps]}, [])
+    assert r.result == P_ and "unchanged" in r.detail
+    assert len([x for x in e.ff.chats if x.get("packet") == "vision"]) == n0   # no new call

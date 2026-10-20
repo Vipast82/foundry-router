@@ -779,6 +779,21 @@ class FastLane:
                                "possible model")
             return None
         fl = self._fl(P, tid)
+        # once the look was accepted (approved, or accepted with notes after the CHANGES
+        # rounds), a later revision is reviewed only where its frames' bytes changed: UI-D1
+        # re-sent all ~500 frames (26 image calls) for every small commit
+        prior = self.store.approvals(P.id, tid, "visual")
+        if prior:
+            seen = prior[-1].get("artifacts") or {}
+            changed = [f for f in frames if seen.get(f[0]) != arts[f[0]]]
+            if not changed:
+                self.store.add_approval(P.id, tid, "visual", head, arts, prior[-1]["approver"],
+                                        f"carried: every frame is byte-identical to the "
+                                        f"visual approval at {str(prior[-1]['revision'])[:12]}")
+                return VerificationResult("fast_lane.vision", PASS, True, "",
+                                          f"carried: {len(frames)} frame(s) unchanged since the "
+                                          f"approval at {str(prior[-1]['revision'])[:12]}", head)
+            frames = changed
         fp = hashlib.sha256(json.dumps([run["head"], arts], sort_keys=True).encode()).hexdigest()
         tries = int((fl.get("vision_uncertain") or {}).get(fp, 0))
         # Batches (UI-D1, 2026-10-20: ~560 frames in ONE call came back "uncertain" because
