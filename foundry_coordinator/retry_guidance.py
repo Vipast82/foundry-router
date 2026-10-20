@@ -13,7 +13,11 @@ from .adapters.foundry import FoundryError
 
 SYSTEM = """You are the read-only recovery adviser for an approved coding task whose ordinary repair attempts are exhausted. Diagnose why the previous approach failed and propose a materially different, concrete repair within the existing scope. You cannot waive checks, change acceptance/test expectations, access credentials, grant permissions, approve visuals or expand scope. If any of those is needed, say needs_human. You have no tools. Missing evidence remains unknown. Return only JSON with action (repair|needs_human|stop), summary, and steps (1-6 concrete strings for repair; otherwise an empty array). Do not recommend repeating the same unsuccessful approach."""
 
-SCHEMA = {"type": "object", "required": ["action", "summary", "steps"], "properties": {
+# additionalProperties false + every property required: OpenAI strict json_schema rejects
+# anything else, and Foundry-Kilo-Opus falls back to gpt-6-astra at Claude's cutoff
+# (2026-10-20: "additionalProperties is required to be supplied and to be false")
+SCHEMA = {"type": "object", "additionalProperties": False,
+          "required": ["action", "summary", "steps"], "properties": {
     "action": {"type": "string", "enum": ["repair", "needs_human", "stop"]},
     "summary": {"type": "string"}, "steps": {"type": "array", "maxItems": 6,
                                                "items": {"type": "string"}}}}

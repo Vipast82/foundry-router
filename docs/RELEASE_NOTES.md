@@ -2,6 +2,20 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.130.9 — retry guidance works on its GPT fallback
+
+With Claude at its weekly cutoff, retry guidance (`Foundry-Kilo-Opus`, now falling back to
+`gpt-6-astra`) failed with HTTP 400. OpenAI strict `json_schema` requires
+`additionalProperties: false` on every object, and the guidance schema didn't set it. The
+schema now sets it, and all three properties were already required. Verified live: the old
+schema fails on the GPT route with the same 400, and the new one returns valid JSON. Retry
+guidance tests pass. Coordinator change; it needs a restart.
+
+Workstation (local, untracked `config/workstation/foundry-stack.ps1`): `start` now waits up to
+5 minutes for the Foundry backend (`/api/version` and a non-empty `/api/tags`) before starting
+Kilo. A Kilo server started at logon before the network was up aborted every turn
+(`MessageAbortedError`) and burned two UI-02a attempts.
+
 ## v0.130.8 — studio_gate waits for the community Studio plugin
 
 After a Studio restart (or a reboot), `studio_gate doctor` and the gate preflight failed with
