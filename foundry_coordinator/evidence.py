@@ -930,6 +930,12 @@ class EvidenceLedger:
         if decisive:
             newest = decisive[0]
             fails = [r for r in decisive if r["result"] == "FAIL"]
+            if cid == "fast_lane.gate" and newest["result"] == "PASS":
+                # a fast-lane timeout says the run never finished, not that the check
+                # failed: a later PASS on the same code is not flaky (UI-D1 2026-10-20: a
+                # coordinator bug timed out a finished run and blocked the submission)
+                fails = [r for r in fails if "(timeout)" not in
+                         str(r.get("provenance") or "") + str(r.get("excerpt") or "")]
             if newest["result"] == "FAIL":
                 e.update(rec=newest, reason="failed",
                          detail=f"newest fresh execution FAILed (record {newest['record_id']}, "

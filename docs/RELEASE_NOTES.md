@@ -2,6 +2,15 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.130.6 — evidence ledger: a fast-lane timeout is not a flaky FAIL
+
+With v0.130.5 everything for UI-D1 passed: coordinator checks, the gate, and vision (carried,
+no model calls). The submission was still refused: the ledger called `fast_lane.gate` flaky
+because a PASS came after a FAIL on unchanged code. That FAIL was the false 11:00 timeout
+fixed in v0.130.1. For `fast_lane.gate`, a FAIL whose verdict says `(timeout)` no longer makes
+a later PASS flaky; real FAILs still do. Ledger, fast-lane, AU evidence and lifecycle tests
+pass (139). Coordinator change; it needs a restart.
+
 ## v0.130.5 — fast lane: no repair_changed check
 
 UI-D1's repair attempts 5 and 6 had nothing to change: the finding (`build.gate`) was a
