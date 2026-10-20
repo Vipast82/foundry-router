@@ -5,7 +5,7 @@ and its helpers, published reasoning, tools, to-dos, MCP and routes; an action-r
 inbox with visual and audio alerts; detailed replies to questions; permission and visual
 approvals; operator instructions; and coordinator commands.
 
-Open it from **Dashboard → Work**: the **Open control center** button, a task's
+Open it from **Monitor → Coordinator work**: the **Open control center** button, a task's
 **live view ↗**, or a session's **open ↗**. You can also go to `/ui/control` directly.
 
 Looking is always read-only. Every change is a typed **operator action**. The
@@ -27,7 +27,7 @@ never runs model calls.
 
 ## Setup
 
-1. **Foundry** (after this version is deployed): Setup → Clients & keys.
+1. **Foundry** (after this version is deployed): Access → Clients & keys.
    - Make a person key with the **operator** preset (scope `operator`). Optional:
      restrict it to projects (`projects: [animaluprising]`).
    - Optional: make a **bridge** key (scope `telemetry`) for the bridge. If you skip it,
@@ -63,6 +63,36 @@ Optional profile settings:
 context_checkpoints = [140000, 190000]   # markers on the context bar (operational, not limits)
 key_env = "FOUNDRY_TELEMETRY_KEY"        # bridge key; default: [foundry] key_env
 ```
+
+## Sprint progress header (v0.128.0)
+
+A band above the panes answers "where is this task, and does it need me?":
+
+- **Phase line** `PLAN → BUILD → VERIFY → REVIEW → CLOSE`, from the task
+  state (QUEUED/READY = PLAN, IMPLEMENTING/CHANGES_REQUIRED = BUILD,
+  VERIFYING, REVIEWING, APPROVED/CLOSING = CLOSE). A waiting, paused or
+  blocked task keeps the phase its session was in and colours it (amber
+  waiting, red stopped). Hover a phase for what happens in it.
+- **BUILD steps**: ticked out of the plan's total, as a bar and in the BUILD
+  chevron itself. Both numbers are the engine's own record from the last
+  committed partial BUILD (`open_steps`, `total_steps` from
+  `engine._build_total`); never read from model text. The engine keeps at
+  most 12 open rows, so with more open the count says "≤ N" and "12+ open".
+  A coordinator older than v0.128 reports no total: the header shows the
+  open count only and says so.
+- **Next step**: the first open row of the committed checklist.
+- **Session to-do**: Kilo's own list for the current session (done/total and
+  the item in progress). It is the model's bookkeeping, not acceptance.
+- **Required work**: the obligations count, with the reminder that they close
+  together at the final gate, so "22 open of 24" mid-BUILD is expected.
+- **Coordinator**: what it is doing in plain words, the blocker text when
+  blocked or failed, attempt and session counts.
+- **Needs you**: pending questions/permissions for this task, unanswered
+  decisions, a Lead case that needs Victor, a blocker to clear. Each button
+  opens the right place (answer composer, inbox, coordinator command).
+
+Fold it to one line with ▾ (remembered); on a phone it starts folded.
+Settings → Follow & history → *Sprint progress header* hides it.
 
 ## What it shows, and where it comes from
 
@@ -437,7 +467,7 @@ background loop.
 
 1. **Foundry**: deploy this version on 192.168.0.112 and restart the service. The new
    tables are created automatically and are additive.
-2. **Keys**: make the operator key (and optionally a bridge key) in Setup → Clients &
+2. **Keys**: make the operator key (and optionally a bridge key) in Access → Clients &
    keys. The coordinator key's allowlist is not changed; the documented mismatch stays.
 3. **Bridge**: start it on the workstation (read-only; it doesn't disturb a running
    UI-01 session).

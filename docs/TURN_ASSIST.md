@@ -9,7 +9,7 @@ Cline change.
 
 Everything is configured per persona in the **turn assist (JSON obj)** field
 (Routing → Personas). `{}` turns it all off. Results show in
-**Dashboard → Scoreboard**.
+**Monitor → Scoreboard**.
 
 ## The settings
 
@@ -245,7 +245,7 @@ seeded `claude-cline-plan` has it on.
 
 ## Scoreboard and export
 
-**Dashboard → Scoreboard** shows, per conversation: sprint id (from the
+**Monitor → Scoreboard** shows, per conversation: sprint id (from the
 kickoff), turns, tool calls, errors per 100 calls, largest context, runaway
 outputs (≥ 30K tokens), interventions by kind and frontier calls; plus errors
 per 100 calls by context zone and the latest interventions.

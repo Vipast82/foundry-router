@@ -15,32 +15,37 @@
 <title>Control center · Foundry</title>
 <style>
 :root {
+  /* Foundry palette, shared with /ui: "cast iron" dark, cool "mill scale" light,
+     molten orange from the logo as the accent, steel blue for work in progress. */
   color-scheme: dark;
-  --bg:#1e1e1e; --panel:#252526; --panel-2:#2d2d30; --line:#3c3c3c; --line-2:#474747;
-  --fg:#d4d4d4; --fg-2:#cccccc; --dim:#9d9d9d; --accent:#3794ff; --focus:#007fd4;
-  --ok:#89d185; --bad:#f14c4c; --warn:#cca700; --think:#d7ba7d; --info:#75beff;
-  --ok-bg:#1e3a1e; --bad-bg:#4b1818; --warn-bg:#3d3414; --think-bg:#2b2618; --info-bg:#1b2b3d;
-  --sel:#264f78; --code-bg:#1a1a1a;
-  --syn-kw:#569cd6; --syn-ctl:#c586c0; --syn-str:#ce9178; --syn-num:#b5cea8; --syn-com:#6a9955;
-  --syn-fn:#dcdcaa; --syn-type:#4ec9b0; --syn-var:#9cdcfe; --syn-punc:#d4d4d4;
-  --ui-font: system-ui, "Segoe UI", -apple-system, sans-serif;
+  --bg:#14110e; --panel:#1c1814; --panel-2:#26201a; --line:#352c23; --line-2:#4a3e31;
+  --fg:#ebe5db; --fg-2:#d9d1c4; --dim:#a39684; --accent:#ff8a1e; --on-accent:#1a1206; --focus:#ffb35c;
+  --ok:#6cc47c; --bad:#ef5d50; --warn:#e8aa3c; --think:#d9b77a; --info:#7db4d8;
+  --ok-bg:#183020; --bad-bg:#3c1a17; --warn-bg:#382c14; --think-bg:#2d2618; --info-bg:#172a37;
+  --sel:#5a3a17; --code-bg:#100d0b;
+  --syn-kw:#7db4d8; --syn-ctl:#d59ad8; --syn-str:#e6a67a; --syn-num:#b9d39a; --syn-com:#7f8f6a;
+  --syn-fn:#e8d48f; --syn-type:#6fc9b5; --syn-var:#a8d4f0; --syn-punc:#ebe5db;
+  --ui-font: "Segoe UI Variable Text", "Segoe UI", system-ui, -apple-system, sans-serif;
+  /* numbers, phase names and headings: Bahnschrift ships with Windows (DIN
+     lineage, reads like stamped plate); the fallbacks keep the same narrow feel */
+  --num-font: Bahnschrift, "DIN Alternate", "Barlow Semi Condensed", "Arial Narrow", var(--ui-font);
   --code-font: "Cascadia Code", "Cascadia Mono", Consolas, "Courier New", monospace;
   --fs: 13px; --lh: 1.5; --pad: 8px;
 }
 :root[data-theme="light"] {
   color-scheme: light;
-  --bg:#ffffff; --panel:#f3f3f3; --panel-2:#e8e8e8; --line:#d4d4d4; --line-2:#c4c4c4;
-  --fg:#1f1f1f; --fg-2:#333; --dim:#616161; --accent:#005fb8; --focus:#0066bf;
-  --ok:#2e7d32; --bad:#c62828; --warn:#8a6d00; --think:#795e26; --info:#0b62a8;
-  --ok-bg:#e6f4e6; --bad-bg:#fde7e7; --warn-bg:#fff6d5; --think-bg:#faf3e3; --info-bg:#e5f0fb;
-  --sel:#add6ff; --code-bg:#f7f7f7;
-  --syn-kw:#0000ff; --syn-ctl:#af00db; --syn-str:#a31515; --syn-num:#098658; --syn-com:#008000;
-  --syn-fn:#795e26; --syn-type:#267f99; --syn-var:#001080; --syn-punc:#1f1f1f;
+  --bg:#eef0ed; --panel:#ffffff; --panel-2:#e4e7e3; --line:#d3d7d1; --line-2:#b9bfb7;
+  --fg:#1d211e; --fg-2:#2c312d; --dim:#5a625b; --accent:#b8560a; --on-accent:#ffffff; --focus:#b8560a;
+  --ok:#25803d; --bad:#bf3328; --warn:#946200; --think:#7a5c22; --info:#2b6890;
+  --ok-bg:#e1f1e4; --bad-bg:#fbe3e0; --warn-bg:#f8edd2; --think-bg:#f5eedf; --info-bg:#e1edf5;
+  --sel:#f6cf9f; --code-bg:#f6f7f5;
+  --syn-kw:#1d5f8e; --syn-ctl:#8a2a9a; --syn-str:#9a3b12; --syn-num:#2f7a37; --syn-com:#5f7a4a;
+  --syn-fn:#7a5c22; --syn-type:#1f7a70; --syn-var:#203f7a; --syn-punc:#1d211e;
 }
 :root[data-theme="hc"] {
   color-scheme: dark;
   --bg:#000; --panel:#0a0a0a; --panel-2:#111; --line:#6fc3df; --line-2:#6fc3df;
-  --fg:#fff; --fg-2:#fff; --dim:#d0d0d0; --accent:#f38518; --focus:#f38518;
+  --fg:#fff; --fg-2:#fff; --dim:#d0d0d0; --accent:#f38518; --on-accent:#000; --focus:#f38518;
   --ok:#7cfc00; --bad:#ff5f5f; --warn:#ffd700; --think:#ffd27f; --info:#7fd7ff;
   --ok-bg:#002200; --bad-bg:#330000; --warn-bg:#332b00; --think-bg:#2b2000; --info-bg:#001a33;
   --sel:#f38518; --code-bg:#000;
@@ -55,7 +60,7 @@ button, select, input, textarea { font:inherit; color:inherit; }
 button { background:var(--panel-2); border:1px solid var(--line-2); border-radius:3px; padding:3px 9px;
          cursor:pointer; color:var(--fg); }
 button:hover { border-color:var(--accent); }
-button.primary { background:var(--accent); border-color:var(--accent); color:#fff; }
+button.primary { background:var(--accent); border-color:var(--accent); color:var(--on-accent); font-weight:600; }
 button.danger { border-color:var(--bad); color:var(--bad); }
 button.ghost { background:none; border-color:transparent; }
 button.ghost:hover { border-color:var(--line-2); }
@@ -93,7 +98,8 @@ a { color:var(--accent); }
 /* ---------------------------------------------------------------- header */
 header { display:flex; align-items:center; gap:8px; padding:5px 10px; background:var(--panel);
          border-bottom:1px solid var(--line); flex-wrap:wrap; min-height:38px; }
-header .brand { font-weight:600; color:var(--accent); white-space:nowrap; }
+header .brand { font:600 15px/1 var(--num-font); color:var(--accent); white-space:nowrap; text-decoration:none; letter-spacing:.01em; }
+header .brand:hover { text-decoration:underline; }
 header .grp { display:flex; align-items:center; gap:5px; flex-wrap:wrap; }
 #conn { display:flex; gap:4px; align-items:center; flex-wrap:wrap; }
 #pause-ctl { display:inline-flex; gap:4px; align-items:center; flex-wrap:wrap; }
@@ -106,12 +112,61 @@ header .grp { display:flex; align-items:center; gap:5px; flex-wrap:wrap; }
                background:var(--bad); color:#fff; font-size:10px; line-height:16px; text-align:center; padding:0 3px; }
 #bell.critical { border-color:var(--bad); animation:pulse 1.6s infinite; }
 @keyframes pulse { 50% { box-shadow:0 0 0 3px var(--bad-bg); } }
-body.chrome-hidden header, body.chrome-hidden #banner, body.chrome-hidden #composer { display:none; }
+body.chrome-hidden header, body.chrome-hidden #banner, body.chrome-hidden #composer, body.chrome-hidden #sprint { display:none; }
 
 #banner { display:none; padding:5px 10px; background:var(--info-bg); border-bottom:1px solid var(--line);
           gap:8px; align-items:center; flex-wrap:wrap; }
 #banner.show { display:flex; }
 #banner.warn { background:var(--warn-bg); }
+
+/* ---------------------------------------------------------------- sprint progress header
+   The "pour line": PLAN → BUILD → VERIFY → REVIEW → CLOSE as chevrons, the
+   current one lit in the molten accent; during BUILD it fills with the share of
+   checklist steps ticked. Everything else in the header stays quiet. */
+#sprint { display:none; background:var(--panel); border-bottom:1px solid var(--line);
+          padding:8px 12px 9px; gap:6px 24px; }
+#sprint.show { display:grid; grid-template-columns:minmax(0, 1fr) minmax(220px, 32%); align-items:start; }
+#sprint .sp-head { display:flex; align-items:baseline; gap:8px; min-width:0; }
+#sprint .sp-task { font:600 16px/1.2 var(--num-font); letter-spacing:.01em; }
+#sprint .sp-k { color:var(--dim); font-size:11.5px; min-width:84px; }
+#sprint .num { font-family:var(--num-font); font-variant-numeric:tabular-nums; font-size:1.08em; }
+.pour { list-style:none; display:grid; grid-template-columns:repeat(5, minmax(0, 1fr)); gap:3px;
+        margin:6px 0 7px; padding:0; max-width:760px; }
+.pour .ph { --fill:0%; position:relative; padding:4px 10px 4px 16px; min-width:0;
+            font:600 12.5px/1.25 var(--num-font); letter-spacing:.07em; color:var(--dim);
+            background:var(--panel-2); white-space:nowrap; overflow:hidden; text-overflow:ellipsis;
+            clip-path:polygon(0 0, calc(100% - 9px) 0, 100% 50%, calc(100% - 9px) 100%, 0 100%, 9px 50%); }
+.pour .ph:first-child { clip-path:polygon(0 0, calc(100% - 9px) 0, 100% 50%, calc(100% - 9px) 100%, 0 100%); padding-left:10px; }
+.pour .ph span { position:relative; }
+.pour .ph.done { color:var(--ok); background:var(--ok-bg); }
+.pour .ph.now { color:var(--on-accent); background:var(--accent); }
+.pour .ph.now.filling { background:linear-gradient(90deg, var(--accent) var(--fill), color-mix(in srgb, var(--accent) 38%, var(--panel-2)) var(--fill)); }
+.pour .ph.now.waiting { background:var(--warn); color:var(--on-accent); }
+.pour .ph.now.paused { background:var(--warn-bg); color:var(--warn); }
+.pour .ph.now.stopped { background:var(--bad); color:#fff; }
+.pour .ph.todo { opacity:.8; }
+#sprint .sp-line { display:flex; align-items:center; gap:10px; margin:2px 0; min-width:0; flex-wrap:wrap; }
+.sp-bar { flex:0 1 260px; min-width:120px; height:8px; border-radius:4px; background:var(--panel-2);
+          overflow:hidden; box-shadow:inset 0 0 0 1px var(--line); }
+.sp-bar i { display:block; height:100%; background:var(--accent); border-radius:4px; transition:width .6s ease; }
+body.noanim .sp-bar i { transition:none; }
+#sprint .sp-next .sp-step { font-weight:600; min-width:0; flex:1; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+#sprint .sp-subs { display:flex; flex-wrap:wrap; gap:3px 22px; margin-top:4px; font-size:12px; }
+#sprint .sp-side { display:flex; flex-direction:column; gap:8px; min-width:0; }
+#sprint .sp-now { font-weight:600; }
+#sprint .sp-now.stopped { color:var(--bad); } #sprint .sp-now.waiting { color:var(--warn); }
+#sprint .sp-blocker { border-left:3px solid var(--bad); padding:2px 8px; margin:3px 0; background:var(--bad-bg);
+                      white-space:pre-wrap; overflow-wrap:anywhere; max-height:5.5em; overflow:auto; }
+#sprint .sp-needs { display:flex; flex-wrap:wrap; gap:5px; align-items:center; }
+#sprint .sp-needs .sp-k { flex-basis:100%; }
+#sprint .need { text-align:left; white-space:normal; overflow-wrap:anywhere; max-width:100%; }
+#sprint .need.bad { border-color:var(--bad); background:var(--bad-bg); color:var(--fg); font-weight:600; }
+#sprint .need.warn { border-color:var(--warn); background:var(--warn-bg); color:var(--fg); }
+@media (max-width: 760px) {
+  #sprint.show { grid-template-columns:minmax(0, 1fr); padding:6px 8px; }
+  .pour .ph { font-size:10.5px; letter-spacing:.03em; padding:4px 6px 4px 13px; }
+  #sprint .sp-k { min-width:0; }
+}
 
 /* ---------------------------------------------------------------- workspace */
 #workspace { flex:1; min-height:0; display:grid; overflow:hidden; }
@@ -165,7 +220,7 @@ pre.code.clip { max-height:calc(var(--long-lines, 14) * 1.45em + 12px); overflow
 .card.open > .card-head .chev { transform:rotate(90deg); }
 .card-body { display:none; padding:4px 8px 6px; border-top:1px solid var(--line); min-width:0; }
 .card.open > .card-body { display:block; }
-.card .sub { color:var(--dim); font-size:11px; margin-top:4px; text-transform:uppercase; letter-spacing:.05em; }
+.card .sub { color:var(--dim); font-size:11.5px; margin-top:4px; font-weight:600; }
 .card.tool { border-left-color:var(--info); }
 .card.tool.st-running, .card.tool.st-pending { border-left-color:var(--warn); }
 .card.tool.st-completed { border-left-color:var(--ok); }
@@ -190,7 +245,7 @@ pre.code.clip { max-height:calc(var(--long-lines, 14) * 1.45em + 12px); overflow
                     position:sticky; top:0; background:var(--panel); z-index:3; }
 .sec { border-bottom:1px solid var(--line); }
 .sec-head { display:flex; align-items:center; gap:4px; padding:4px 8px; cursor:pointer; user-select:none;
-            font-weight:600; font-size:12px; text-transform:uppercase; letter-spacing:.04em; color:var(--fg-2); }
+            font:600 13px/1.3 var(--num-font); letter-spacing:.01em; color:var(--fg-2); }
 .sec-head .chev { width:12px; color:var(--dim); transition:transform .1s; display:inline-block; }
 .sec:not(.collapsed) .sec-head .chev { transform:rotate(90deg); }
 .sec-head .tools { margin-left:auto; display:flex; gap:2px; }
@@ -224,7 +279,7 @@ table.t th { color:var(--dim); font-weight:normal; }
             overflow:auto; flex:none; }
 #composer.collapsed .cbody { display:none; }
 #composer .ctabs { display:flex; gap:4px; align-items:center; flex-wrap:wrap; }
-#composer .ctabs button.on { background:var(--accent); border-color:var(--accent); color:#fff; }
+#composer .ctabs button.on { background:var(--accent); border-color:var(--accent); color:var(--on-accent); }
 #composer .target { font-size:12px; margin:4px 0; }
 #composer textarea { min-height:64px; }
 #composer .row { display:flex; gap:8px; align-items:center; flex-wrap:wrap; margin:4px 0; }
@@ -306,7 +361,7 @@ legend { color:var(--accent); font-weight:600; padding:0 4px; }
 @media (max-width: 760px) {
   #narrowTabs { display:flex; gap:2px; border-top:1px solid var(--line); background:var(--panel); flex:none; }
   #narrowTabs button { flex:1; border-radius:0; }
-  #narrowTabs button.on { background:var(--accent); color:#fff; }
+  #narrowTabs button.on { background:var(--accent); color:var(--on-accent); }
   header .hide-narrow { display:none; }
   .pane-head .title { max-width:22ch; }
 }
@@ -331,7 +386,7 @@ body.noanim * { animation:none !important; transition:none !important; }
 </div>
 
 <header>
-  <span class="brand">Control center</span>
+  <a class="brand" href="/ui" title="Back to the Foundry dashboard (metrics, backends, routing)">Control center</a>
   <div class="grp">
     <label class="sr" for="sel-project">Project</label><select id="sel-project" title="Project"></select>
     <label class="sr" for="sel-task">Task</label><select id="sel-task" title="Task"></select>
@@ -359,6 +414,7 @@ body.noanim * { animation:none !important; transition:none !important; }
   </div>
 </header>
 <div id="banner" role="status"></div>
+<section id="sprint" aria-label="Sprint progress"></section>
 <div id="workspace"></div>
 <div id="narrowTabs" role="tablist"></div>
 <section id="composer" aria-label="Composer"></section>
@@ -433,6 +489,25 @@ const SECTION_TITLES = {identity: "Identity & state", context: "Context", tokens
   readiness: "Readiness", checklist: "Required work", decisions: "Decisions", budgets: "Budgets",
   evidence: "Evidence", recovered: "Recovered results", findings: "Repeated findings & approach",
   lead: "Lead recovery"};
+// One plain-language line per Inspector section (hover the section title).
+const SECTION_HELP = {identity: "Which task and session this is, and the coordinator's state for it.",
+  readiness: "Checks run before a session starts (tools, environment). A failing blocking check stops the task.",
+  checklist: "Everything the task must prove before it can close. These close together at the final gate.",
+  decisions: "Questions the coordinator needs a person to decide. Answer them here or from the bell.",
+  budgets: "Attempts, sessions and review calls used against the task's limits.",
+  evidence: "Proof recorded for each check: reusable, stale or missing.",
+  recovered: "Results from earlier sessions that the coordinator could reuse.",
+  findings: "Problems that keep coming back, and whether the approach changed.",
+  lead: "The Lead manager's recovery case when the task got stuck.",
+  context: "How full the model's context window is.", tokens: "Tokens read, written and cached by this session.",
+  speed: "Generation speed and response latency for this session.", routes: "Which models and backends served this session.",
+  mcp: "MCP tool servers the session can use and whether they are up.",
+  todo: "Kilo's own to-do list for the session. Ticked items are the model's notes, not acceptance.",
+  helpers: "Helper sessions started under this one.", capacity: "How many helpers may run and how much quota is left.",
+  lanes: "Background helper lanes (visual checks, failure triage) and what they found.",
+  verification: "The latest verification run: which checks passed or failed.",
+  sessions: "Every session this task has had, newest first.", search: "Search the captured transcripts.",
+  actions: "What operators sent to this task and whether it was delivered."};
 const DEFAULT_PREFS = {
   v: PREF_VERSION,
   theme: "dark", fontSize: 13, lineHeight: 1.5, codeWrap: false, density: "comfortable",
@@ -458,6 +533,7 @@ const DEFAULT_PREFS = {
                      helpers: {inspectorW: 330, inspectorPos: "side", graphH: 0, helperW: 520, helpers: 2, graphPos: "bottom", graphW: 520, floats: {}},
                      overview: {inspectorW: 420, inspectorPos: "side", graphH: 300, helperW: 420, helpers: 1, graphPos: "bottom", graphW: 640, floats: {}}}},
   fontScale: {main: 1, helper: 1}, composerCollapsed: false,
+  showSprint: true, sprintCompact: false,
 };
 function deepMerge(base, over) {
   if (Array.isArray(base)) return Array.isArray(over) ? over.slice() : base.slice();
@@ -705,7 +781,7 @@ function toast(html, cls = "", ms = 6000) {
 /* ======================================================================== apply display prefs */
 function applyDisplay() {
   const root = document.documentElement;
-  root.dataset.theme = P.theme;
+  root.dataset.theme = P.theme === "system" ? (matchMedia("(prefers-color-scheme: light)").matches ? "light" : "dark") : P.theme;
   root.style.setProperty("--fs", P.fontSize + "px");
   root.style.setProperty("--lh", P.lineHeight);
   root.style.setProperty("--long-lines", P.longLines);
@@ -1258,7 +1334,7 @@ function renderInspector() {
     let inner = "";
     try { inner = col ? "" : (SECTION_RENDER[name] || (() => ""))(s); } catch (e) { inner = `<div class="errbox">${esc(e.message)}</div>`; }
     return `<section class="sec ${col ? "collapsed" : ""}" data-sec="${name}">
-      <div class="sec-head" role="button" tabindex="0" aria-expanded="${!col}"><span class="chev">▸</span>${esc(SECTION_TITLES[name])}
+      <div class="sec-head" role="button" tabindex="0" aria-expanded="${!col}"${SECTION_HELP[name] ? ` title="${esc(SECTION_HELP[name])}"` : ""}><span class="chev">▸</span>${esc(SECTION_TITLES[name])}
         <span class="tools">${only ? "" : `<button class="ghost" data-mv="-1" title="Move up" aria-label="Move ${esc(SECTION_TITLES[name])} up">↑</button><button class="ghost" data-mv="1" title="Move down" aria-label="Move down">↓</button><button class="ghost" data-float="1" title="Float this card inside the page (drag, resize; saved per layout)" aria-label="Float ${esc(SECTION_TITLES[name])}">⇱</button><button class="ghost" data-pop="1" title="Pop out this section">⧉</button><button class="ghost" data-hide="1" title="Hide (Settings → Sidebar brings it back)" aria-label="Hide section">✕</button>`}</span></div>
       <div class="sec-body">${inner}</div></section>`;
   }).join("");
@@ -1555,6 +1631,145 @@ function wireLead(sec) {
   });
 }
 /*lead-end*/
+/*progress-start*/
+/* ======================================================================== sprint progress header */
+// One glance at the top of the task view: which phase the task is in, how far
+// BUILD has got, the next step, what the coordinator is doing and what needs
+// the operator. Read from the coordinator's own records only: task state and
+// phase, task_view.build (the engine's committed partial-BUILD record, with
+// the plan's BUILD row count from bridge v0.128), the required-work checklist,
+// decisions, pending requests, the lead case and Kilo's own to-do list.
+// Nothing is inferred from model text; a value that wasn't reported says so.
+const PHASES = ["PLAN", "BUILD", "VERIFY", "REVIEW", "CLOSE"];
+const PHASE_HELP = {
+  PLAN: "Queued or ready: no coding session has started on this task yet.",
+  BUILD: "Coding sessions work through the committed plan's BUILD checklist, one commit at a time.",
+  VERIFY: "The coordinator runs the project's own checks on the committed work.",
+  REVIEW: "A reviewer checks the verified commit against the task.",
+  CLOSE: "Approved: the closeout session updates the docs, then the final gate runs."};
+const STATE_PHASE = {QUEUED: "PLAN", READY: "PLAN", IMPLEMENTING: "BUILD", CHANGES_REQUIRED: "BUILD",
+  VERIFYING: "VERIFY", REVIEWING: "REVIEW", APPROVED: "CLOSE", CLOSING: "CLOSE", COMPLETE: "CLOSE"};
+const SESSION_PHASE = {implement: "BUILD", repair: "BUILD", build: "BUILD", plan: "PLAN", verify: "VERIFY",
+  review: "REVIEW", closeout: "CLOSE", close: "CLOSE"};
+const STATE_DOING = {
+  QUEUED: "Waiting for the tasks this one depends on", READY: "Ready to start the next coding session",
+  IMPLEMENTING: "A coding session is working on the task", CHANGES_REQUIRED: "Starting the next BUILD session",
+  VERIFYING: "Running the project's checks on the latest commit", REVIEWING: "Reviewing the verified commit",
+  APPROVED: "Approved, starting closeout", CLOSING: "Closeout session: docs and the final gate",
+  COMPLETE: "Finished", AWAITING_HUMAN: "Waiting for your answer", BLOCKED: "Stopped until the blocker is cleared",
+  FAILED: "Stopped: the task failed", PAUSED: "Paused", CANCELLED: "Cancelled"};
+const stepText = s => String(s || "").replace(/^\s*[-*]\s*\[[ xX]?\]\s*/, "").trim();
+function sprintModel(t, ctx) {
+  if (!t) return null;
+  ctx = ctx || {};
+  const d = t.data || {}, v = t.task_view || {}, state = t.state || "";
+  const eff = state === "PAUSED" ? (d.resume_state || "") : state;
+  const sessPhase = SESSION_PHASE[String(d.phase || "").toLowerCase()] || null;
+  const phase = STATE_PHASE[eff] || sessPhase || (["AWAITING_HUMAN", "BLOCKED", "FAILED"].includes(eff) ? "BUILD" : null);
+  const idx = phase ? PHASES.indexOf(phase) : -1;
+  const mode = state === "COMPLETE" ? "complete" : ["BLOCKED", "FAILED", "CANCELLED"].includes(state) ? "stopped"
+    : state === "AWAITING_HUMAN" ? "waiting" : state === "PAUSED" ? "paused" : "running";
+  const phases = PHASES.map((p, i) => ({name: p, help: PHASE_HELP[p],
+    status: mode === "complete" || i < idx ? "done" : i === idx ? "now" : "todo"}));
+  // BUILD steps: the engine's own record. open is capped at 12 by the engine.
+  const b = typeof buildCont === "function" ? buildCont(t) : null;
+  let build = {known: false};
+  if (b) {
+    const open = Math.max(0, +b.open_steps || 0);
+    const total = Number.isInteger(b.total_steps) && b.total_steps > 0 ? b.total_steps : null;
+    const done = total === null ? null : Math.max(0, total - open);
+    build = {known: true, open, total, done, atMost: !!b.truncated,
+             pct: total ? clamp(100 * done / total, 0, 100) : null,
+             next: stepText((b.steps || [])[0]), head: b.head_sha || ""};
+  } else if (idx > 1) {
+    build = {known: true, complete: true};                    // past BUILD: every step ticked
+  }
+  const cl = v.checklist || null;
+  const obligations = cl && cl.total ? {open: cl.open || 0, total: cl.total} : null;
+  const items = ((ctx.todo || {}).data || {}).items;
+  const todo = Array.isArray(items) ? {done: items.filter(i => i.status === "completed").length, total: items.length,
+    current: stepText((items.find(i => i.status === "in_progress") || {}).content)} : null;
+  // what needs the operator, most urgent first
+  const needs = [];
+  const lead = typeof leadOf === "function" ? leadOf(t) : null;
+  const pend = (ctx.pending || []).filter(p => (!p.status || p.status === "open") && p.task_id === t.task_id && (!p.project_id || p.project_id === t.project_id));
+  const kinds = {};
+  for (const p of pend) kinds[p.kind || "request"] = (kinds[p.kind || "request"] || 0) + 1;
+  for (const [k, n] of Object.entries(kinds))
+    needs.push({kind: "request", sev: "bad", act: "answer", text: n === 1 ? `Answer 1 ${k === "permission" ? "permission request" : k}` : `Answer ${n} ${k === "permission" ? "permission requests" : k + "s"}`});
+  const decs = ((v.decisions || {}).open || []).filter(x => !x.answer_action);
+  if (decs.length) needs.push({kind: "decision", sev: "bad", act: "inbox", text: decs.length === 1 ? "Make 1 decision" : `Make ${decs.length} decisions`});
+  if (lead && lead.needs_human) needs.push({kind: "lead", sev: "bad", act: "inspect", text: "The lead needs you on the recovery case"});
+  if (state === "AWAITING_HUMAN" && !pend.length && d.awaiting) needs.push({kind: "awaiting", sev: "warn", act: "answer", text: String(d.awaiting).slice(0, 240)});
+  if (["BLOCKED", "FAILED"].includes(state)) needs.push({kind: "blocker", sev: "bad", act: "command", text: state === "FAILED" ? "Decide whether to retry or cancel" : "Clear the blocker, then unblock"});
+  if (state === "PAUSED" && d.pause_reason) needs.push({kind: "paused", sev: "warn", act: "command", text: `Paused: ${String(d.pause_reason).slice(0, 160)}`});
+  return {task: t.task_id, project: t.project_id, state, phase, mode, phases, build, obligations, todo, needs,
+    doing: STATE_DOING[state] || state || "No state reported",
+    detail: d.next_action && d.next_action !== STATE_DOING[state] ? String(d.next_action) : "",
+    attempt: d.attempt ?? null, sessions: d.sessions ?? null,
+    blocker: ["BLOCKED", "FAILED"].includes(state) ? String(d.blocker || "") : "",
+    lead: lead && lead.active ? lead.state : ""};
+}
+function sprintHtml(m, compact) {
+  if (!m) return "";
+  const B = m.build;
+  const pour = `<ol class="pour" aria-label="Phase: ${esc(m.phase || "not reported")}">${m.phases.map(p => {
+    const cls = p.status + (p.status === "now" ? " " + m.mode : "");
+    const fill = p.name === "BUILD" && p.status === "now" && B.pct !== null && B.pct !== undefined ? ` style="--fill:${B.pct.toFixed(1)}%"` : "";
+    return `<li class="ph ${cls}${fill ? " filling" : ""}"${fill} title="${esc(p.help)}"${p.status === "now" ? ' aria-current="step"' : ""}><span>${p.status === "done" ? "✓ " : ""}${esc(p.name)}</span></li>`;
+  }).join("")}</ol>`;
+  let bar = "";
+  if (B.complete) bar = `<div class="sp-line"><span class="sp-k">BUILD steps</span><span>all ticked</span></div>`;
+  else if (B.known) {
+    const count = B.total !== null
+      ? `<b class="num">${B.atMost ? "≤ " : ""}${esc(B.done)}</b> of <b class="num">${esc(B.total)}</b> ticked <span class="dim">· ${esc(B.open)}${B.atMost ? "+" : ""} open</span>`
+      : `<b class="num">${esc(B.open)}${B.atMost ? "+" : ""}</b> open <span class="dim">· total not reported (coordinator older than v0.128)</span>`;
+    bar = `<div class="sp-line"><span class="sp-k" title="Rows of the committed plan's BUILD checklist, as the coordinator read them at the last commit${B.head ? " (" + esc(String(B.head).slice(0, 12)) + ")" : ""}">BUILD steps</span>
+      ${B.pct !== null ? `<span class="sp-bar" role="progressbar" aria-valuemin="0" aria-valuemax="${esc(B.total)}" aria-valuenow="${esc(B.done)}" aria-label="BUILD steps ticked"><i style="width:${B.pct.toFixed(1)}%"></i></span>` : ""}
+      <span>${count}</span></div>`
+      + (B.next ? `<div class="sp-line sp-next"><span class="sp-k">Next step</span><span class="sp-step" title="${esc(B.next)}">${esc(B.next)}</span></div>` : "");
+  } else if (m.phase === "BUILD")
+    bar = `<div class="sp-line dim"><span class="sp-k">BUILD steps</span><span>appear after the first commit of the plan's checklist</span></div>`;
+  const subs = [];
+  if (m.todo) subs.push(`<span title="Kilo's own to-do list for the current session. A ticked item is the model's bookkeeping, not coordinator acceptance.">Session to-do <b class="num">${esc(m.todo.done)}/${esc(m.todo.total)}</b>${m.todo.current ? ` <span class="dim">· now: ${esc(m.todo.current.slice(0, 90))}</span>` : ""}</span>`);
+  if (m.obligations) subs.push(`<span title="The Required work checklist (obligations) is closed by evidence at the final gate, all together. A high open count during BUILD is expected, not a problem.">Required work <b class="num">${esc(m.obligations.open)}</b> open of <b class="num">${esc(m.obligations.total)}</b> <span class="dim">· closes together at the final gate</span></span>`);
+  const needs = m.needs.length
+    ? `<div class="sp-needs" role="status"><div class="sp-k">Needs you</div>${m.needs.map(n => `<button class="need ${esc(n.sev)}" data-need="${esc(n.act)}">${esc(n.text)}</button>`).join("")}</div>`
+    : `<div class="sp-needs calm"><div class="sp-k">Needs you</div><span class="dim">Nothing right now</span></div>`;
+  const meta = [m.attempt !== null ? `attempt ${esc(m.attempt)}` : "", m.sessions !== null ? `${esc(m.sessions)} session${m.sessions === 1 ? "" : "s"}` : "", m.lead ? `lead case ${esc(String(m.lead).toLowerCase())}` : ""].filter(Boolean).join(" · ");
+  const doing = `<div class="sp-doing"><div class="sp-k">Coordinator</div><div class="sp-now ${esc(m.mode)}">${esc(m.doing)}</div>
+    ${m.detail ? `<div class="dim">${esc(m.detail)}</div>` : ""}${m.blocker ? `<div class="sp-blocker">${esc(m.blocker.slice(0, 400))}</div>` : ""}${meta ? `<div class="dim">${meta}</div>` : ""}</div>`;
+  const head = `<div class="sp-head"><span class="sp-task">${esc(m.task)}</span><span class="dim">${esc(m.project)}</span>
+    <span class="spacer"></span><button class="ghost" id="sprint-toggle" aria-expanded="${compact ? "false" : "true"}" title="${compact ? "Show the full progress header" : "Fold the progress header to one line"}">${compact ? "▸" : "▾"}</button></div>`;
+  if (compact) {
+    const brief = B.known && !B.complete ? `<div class="sp-line"><span class="sp-k">BUILD steps</span><span>${B.total !== null ? `<b class="num">${B.atMost ? "≤ " : ""}${esc(B.done)}</b> of <b class="num">${esc(B.total)}</b> ticked` : `<b class="num">${esc(B.open)}${B.atMost ? "+" : ""}</b> open`}</span></div>` : "";
+    return `<div class="sp-main">${head}${pour}${brief}</div><div class="sp-side">${needs}</div>`;
+  }
+  return `<div class="sp-main">${head}${pour}${bar}${subs.length ? `<div class="sp-subs">${subs.join("")}</div>` : ""}</div><div class="sp-side">${doing}${needs}</div>`;
+}
+/*progress-end*/
+function renderSprint() {
+  const el = $("#sprint"); if (!el) return;
+  const t = curTask();
+  if (!t || POPOUT || P.showSprint === false) { el.classList.remove("show"); el.innerHTML = ""; return; }
+  const sid = tdata(t).session_id;
+  const m = sprintModel(t, {todo: sid ? S.snapshots.get(`todo|${t.project_id}|${sid}`) : null, pending: [...S.pending.values()]});
+  // a phone starts folded (the panes need the room); the toggle opens it for this visit
+  const narrow = matchMedia("(max-width: 760px)").matches;
+  const html = sprintHtml(m, narrow ? !S.sprintOpen : !!P.sprintCompact);
+  if (el._html === html) return;                // unchanged: keep focus and hover state
+  el._html = html; el.innerHTML = html; el.classList.add("show");
+  $("#sprint-toggle").onclick = () => {
+    if (narrow) S.sprintOpen = !S.sprintOpen; else { P.sprintCompact = !P.sprintCompact; savePrefs(); }
+    renderSprint();
+  };
+  el.querySelectorAll("[data-need]").forEach(b => b.onclick = () => {
+    const a = b.dataset.need;
+    if (a === "inbox") openInbox();
+    else if (a === "inspect") { S.inspectorHidden = false; layout(); scheduleInspector(); }
+    else { setComposerMode(a === "command" ? "command" : "answer"); const c = $("#composer"); if (c) c.scrollIntoView({block: "nearest"}); }
+  });
+}
 const SECTION_RENDER = {
   /*sprint-render-start*/
   readiness(s) {
@@ -1576,7 +1791,8 @@ const SECTION_RENDER = {
     const bnote = buildContHtml(v.build && typeof v.build === "object" ? v.build : null);
     if (!items.length) return bnote + `<p class="dim">No obligations recorded for this task.</p>`;
     const phases = [...new Set(items.map(x => x.phase || "?"))];
-    return bnote + `<div>${esc(c.open)} open of ${esc(c.total)}${c.next_action ? ` · <b>next:</b> ${esc(c.next_action)}` : ""}</div>` + phases.map(ph => `<div class="sub dim" style="margin-top:6px">${esc(ph)} (${esc(((c.by_phase || {})[ph] || {}).open ?? "?")} open)</div>
+    return bnote + `<div>${esc(c.open)} open of ${esc(c.total)}${c.next_action ? ` · <b>next:</b> ${esc(c.next_action)}` : ""}</div>
+      <div class="src">Obligations close together, with evidence, at the final gate: a high open count during BUILD is expected.</div>` + phases.map(ph => `<div class="sub dim" style="margin-top:6px">${esc(ph)} (${esc(((c.by_phase || {})[ph] || {}).open ?? "?")} open)</div>
       <ul class="list">${items.filter(x => (x.phase || "?") === ph).map(x => `<li>${sprintPill(x.status || "?", OB_CLS[x.status] || "")} ${esc(x.title || x.id)} <code class="dim">${esc(x.id)}</code>
         ${x.blocking_reason ? `<div class="warnbox">${esc(x.blocking_reason)}</div>` : ""}${x.next_action ? `<div class="dim"><b>next</b> ${esc(x.next_action)}</div>` : ""}
         ${x.verified_rev ? `<div class="dim">verified at <code>${esc(short(x.verified_rev, 12))}</code>${x.verified_by ? " by " + esc(x.verified_by) : ""}</div>` : ""}
@@ -3177,7 +3393,7 @@ addEventListener("resize", () => { clearTimeout(S.rz); S.rz = setTimeout(() => {
 /* ======================================================================== settings */
 const SETTINGS = [
   ["Display", [
-    ["theme", "Theme", "select", [["dark", "Dark+ (editor dark)"], ["light", "Light"], ["hc", "High contrast"]]],
+    ["theme", "Theme", "select", [["system", "Match the system (light or dark)"], ["dark", "Dark"], ["light", "Light"], ["hc", "High contrast"]]],
     ["fontSize", "Font size (px)", "number", [10, 22]], ["lineHeight", "Line spacing", "number", [1.1, 2.2, 0.05]],
     ["density", "Density", "select", [["comfortable", "Comfortable"], ["compact", "Compact"]]],
     ["codeWrap", "Wrap long code lines", "check", "Off: long lines scroll inside their card, never the page."],
@@ -3202,6 +3418,7 @@ const SETTINGS = [
   ["Follow & history", [
     ["followCoordinator", "Follow coordinator", "check", "Main pane switches to the task's current session. A pinned/history view is never moved."],
     ["followScroll", "Follow-scroll at the bottom", "check", "Scrolling up always pauses it."],
+    ["showSprint", "Sprint progress header", "check", "The phase, BUILD steps, next step and what needs you, above the panes."],
     ["historyPageSize", "History page size", "number", [50, 500]],
   ]],
   ["Sidebar", [
@@ -3272,7 +3489,7 @@ function renderSettings() {
     const path = el.dataset.pref; let v = el.type === "checkbox" ? el.checked : el.type === "number" || el.type === "range" ? +el.value : el.value;
     if (el.type === "number") v = clamp(v, +el.min, +el.max);
     if (path === "refreshS") v = Math.max(v, ((S.ov || {}).settings || {}).min_refresh_s || 2);
-    setPath(P, path, v); savePrefs(); applyDisplay(); renderSoundBtn();
+    setPath(P, path, v); savePrefs(); applyDisplay(); renderSoundBtn(); renderSprint();
     if (path === "notify.enabled" && v && "Notification" in window && Notification.permission === "default") Notification.requestPermission().then(() => renderSettings());
     for (const p of S.panes) renderPane(p); scheduleInspector(); if (path.startsWith("graph")) layout(); setupGraphTimer();
   }));
@@ -3364,6 +3581,7 @@ function renderTaskSelect() {
   const t = curTask();
   $("#task-state").innerHTML = t ? taskStatePill(t) : "";
   renderPauseCtl();
+  renderSprint();
 }
 function selectTask(p, t) {
   S.project = p; S.task = t; renderTaskSelect();
@@ -3412,7 +3630,7 @@ async function boot() {
   if (POPOUT) { $("#composer").hidden = true; }
   S.booted = true;
   setupGraphTimer();
-  setInterval(() => { renderConn(); for (const p of S.panes) renderPaneHead(p); }, 5000);
+  setInterval(() => { renderConn(); renderSprint(); for (const p of S.panes) renderPaneHead(p); }, 5000);
   setInterval(() => { scheduleInspector(); }, 15000);
   if (P.sound.enabled) { try { AUDIO.ctx = new (window.AudioContext || window.webkitAudioContext)(); AUDIO.blocked = AUDIO.ctx.state !== "running"; } catch (e) { AUDIO.blocked = true; } renderSoundBtn(); }
 }

@@ -2,6 +2,63 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.128.0 — easier to read: an Overview page, better charts, a sprint progress header
+
+The web UI was hard to follow: no landing page, metrics spread over long
+pages, and in the control center the only progress signals were the
+obligations count (open until the final gate) and Kilo's to-do list.
+
+**Dashboard (`/ui`)**
+- **Overview** is the new landing page: one plain sentence on health
+  ("All 4 backends are up. 312 requests in the last 24 h, typically 5.9 s
+  each."), a *needs a look* list (backend down, brain down, a subscription
+  window at 85%+, advisor warnings, failed calls), five headline numbers with
+  24-hour trend lines (requests, response time with the slowest 5%, first
+  token, generation speed, tokens), backend health, subscription windows,
+  what is generating now and the busiest models. Refreshes every 30 s.
+- **Navigation**: Overview, Monitor (was Dashboard), Backends, Routing,
+  Tools & MCP, Labs, Logs, Access (was Setup). Every tab is still there;
+  each group and tab has a one-line tooltip; a few tabs got plainer names
+  (Coordinator work, Backend pool, Request log). The nav sticks to the top
+  and scrolls sideways on a phone instead of wrapping. The open tab is in the
+  address (`/ui#Performance`), so reload, bookmarks and Back work.
+- **Header**: a *Control center* link, and the status line (backends up,
+  brain, routing) now loads on every tab, not only on the Backend pool tab.
+- **Performance charts**: two per row on wide screens, drawn at their real
+  size so axis text stays readable, a soft area under single series, and
+  hover readouts (time, every series' value, model and backend). A *jump to*
+  line skips to the charts or the per-call detail.
+
+**Control center (`/ui/control`)**
+- **Sprint progress header** above the panes: the phase line PLAN → BUILD →
+  VERIFY → REVIEW → CLOSE, BUILD steps ticked of the plan's total (bar and a
+  filling BUILD chevron), the next step, Kilo's to-do count as a sub-line,
+  the Required-work count with "closes together at the final gate", what
+  the coordinator is doing, the blocker, and a *Needs you* list whose buttons
+  open the answer composer, the inbox or the command tab. Foldable; folded
+  by default on a phone; can be hidden in Settings. docs/CONTROL_CENTER.md.
+- Inspector sections have plain-language tooltips; section titles are
+  sentence case; the Required work section says why its open count is high
+  during BUILD.
+- New theme option *Match the system*.
+
+**Both**: one shared palette (dark "cast iron", cool light, the logo's
+orange as accent, steel blue for information) and type (Bahnschrift for
+numbers and headings, Segoe UI for text; no web fonts, works offline).
+
+**Data**: the bridge now passes the plan's BUILD row count
+(`build_continuing.total_steps`, from the engine's own transition record)
+and Foundry bounds it into `task_view.build.total_steps` (int or null). No
+API was removed or renamed.
+
+**Deploy**: Foundry (router host) for the pages and `total_steps` in the
+view; the coordinator (workstation, deploy checkout) for the bridge to send
+`total_steps`. Either alone is safe: an older bridge just leaves the total
+out, and the header shows the open count only.
+
+**Tests**: `tests/test_control_progress_header.py`, `tests/test_ui_overview.py`,
+`total_steps` cases in `tests/coordinator/test_control_bridge.py`.
+
 ## v0.127.0 — live Kilo checkpoint for the implementer; withdrawn questions resume
 
 The UI-02 primary tried to run `kilo_checkpoint` against `127.0.0.1:4096`

@@ -38,7 +38,7 @@ hard — predictable and cheap.
 thinking, repeated-read dedupe, a command pre-judge, a loop supervisor, a
 completion auditor and a `consult_senior` tool. The seeded Act persona has the
 free parts on and the rest in observe mode. See [TURN_ASSIST.md](TURN_ASSIST.md)
-and Dashboard → Scoreboard.
+and Monitor → Scoreboard.
 
 **Plan never silently runs on local.** The seeded Plan persona has
 `fallback_policy: refuse`: when the guardrail denies every Claude pin, Cline gets

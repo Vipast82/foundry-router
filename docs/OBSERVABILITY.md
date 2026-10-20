@@ -85,7 +85,7 @@ API: `GET /admin/api/routes?hours=24&all=0`,
 `GET /admin/api/routes/edge?kind=&src=&dst=&hours=`,
 `GET /admin/api/requests/{request_id}/trace`.
 
-## Work (Dashboard → Work)
+## Work (Monitor → Coordinator work)
 
 What a development coordinator (docs/COORDINATOR.md) is doing, next to the
 model calls Foundry measured for it:
@@ -105,7 +105,7 @@ API: `GET /admin/api/work?project=&hours=`, `GET /admin/api/work/usage?project=&
 Foundry only displays this state; the coordinator's own store decides. Local
 file edits and Roblox Studio operations are not visible to Foundry.
 
-## Compare (Dashboard → Compare)
+## Compare (Monitor → Compare)
 
 Kilo vs Cline (or persona vs persona) from Foundry's own records. Every
 client goes through the same router, so the numbers are comparable:
