@@ -2,6 +2,15 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.129.3 — deterministic mock renders
+
+Three headless renders of the same mock frame produced three different PNGs, so every gate run
+re-dirtied UI-D1's committed captures and cost a commit turn per cycle. The reference renderer
+now passes Chrome's determinism flags (`--virtual-time-budget`,
+`--run-all-compositor-stages-before-draw`, no LCD text or font hinting, `--deterministic-mode`).
+In a live check on UI-D1's mock, three renders were byte-identical. This change is runner-side
+only: it takes effect as soon as the deploy checkout is on the tag, with no coordinator restart.
+
 ## v0.129.2 — fast lane: vision approval in batches
 
 UI-D1's gate passed with about 560 mock frames. The fast lane then asked the vision model to

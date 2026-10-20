@@ -133,9 +133,14 @@ def page_url(page: str, base_dir: str) -> str:
 
 def browser_argv(browser: str, url: str, out_png: str, w: int, h: int, profile_dir: str) -> list:
     # Own throwaway profile: never attaches to (or disturbs) the user's running browser.
+    # Deterministic frames (live check 2026-10-20: without these flags three renders of
+    # the same page gave three different PNGs, so every gate re-dirtied the committed
+    # captures): finish virtual time and all compositor stages, no LCD/hinted text.
     return [browser, "--headless=new", "--disable-gpu", "--hide-scrollbars",
             "--no-first-run", "--no-default-browser-check", "--disable-extensions",
-            "--force-device-scale-factor=1", f"--user-data-dir={profile_dir}",
+            "--force-device-scale-factor=1", "--run-all-compositor-stages-before-draw",
+            "--virtual-time-budget=5000", "--disable-lcd-text", "--font-render-hinting=none",
+            "--disable-partial-raster", "--deterministic-mode", f"--user-data-dir={profile_dir}",
             f"--window-size={w},{h}", f"--screenshot={out_png}", url]
 
 
