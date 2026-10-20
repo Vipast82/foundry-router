@@ -2,6 +2,28 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.129.5 — fast lane: the runner's own outputs don't trip the clean checks
+
+UI-D1 used up its attempts with the gate green. The studio_gate runner appends every run to
+`docs/progress/<ID>_EVIDENCE_RAW.log`. That file was already uncommitted when the attempt
+started, so every gate run (and every commit of the log) failed
+`coordinator.unrelated_preserved` ("pre-existing uncommitted changes were modified"). The
+same-session continuation could not clear it, and each fallback started a new attempt.
+
+- **New `[fast_lane]` keys** (`{task}` = the task id):
+  - `runner_outputs` (default `["docs/progress/{task}_EVIDENCE_RAW.log"]`): files the runner
+    rewrites on every run. For fast-lane tasks they are left out of `coordinator.clean` and
+    `coordinator.unrelated_preserved` entirely.
+  - `runner_captures` (default `["docs/evidence/UI-v3/{task}/**"]`): capture files must still be
+    committed (the post-PASS capture commit). Re-rendering or committing one that was dirty at
+    run start no longer counts as touching a pre-existing change.
+- **Unchanged:** non-fast-lane tasks, and the start check that refuses to begin with
+  uncommitted files in the task's own scope.
+- **Test:** `test_runner_outputs_dirty_at_run_start_never_trip_the_clean_checks` (fails on
+  v0.129.4).
+- **Deploy:** coordinator engine change; needs a coordinator restart (`deploy_release.ps1`
+  waits for a safe point).
+
 ## v0.129.4 — studio_gate refuses a bad `--repo`
 
 A UI-D1 session ran the runner with `--repo C:\Roblox\AnimalUprising` through a POSIX shell,

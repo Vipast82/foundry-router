@@ -147,6 +147,14 @@ FAST_LANE_DEFAULTS = {
     "max_vision_rounds": 2,                   # CHANGES rounds before accept-with-notes
     "vision_batch_frames": 20,                # frames per vision call (UI-D1 had ~560 frames)
     "lanes": ["prework", "test_design", "failure_triage", "incremental_review"],
+    # files the runner rewrites on every run ({task} = the task id): never part of the
+    # coordinator's clean / unrelated_preserved checks (UI-D1 lost its last attempt to the
+    # evidence log, which was already dirty at run start and changed on every gate run)
+    "runner_outputs": ["docs/progress/{task}_EVIDENCE_RAW.log"],
+    # the runner's capture files: still must be committed (the post-PASS capture commit),
+    # but re-rendering or committing one that was dirty at run start is not "touching a
+    # pre-existing change"
+    "runner_captures": ["docs/evidence/UI-v3/{task}/**"],
 }
 
 

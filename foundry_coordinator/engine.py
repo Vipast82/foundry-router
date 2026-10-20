@@ -1059,6 +1059,15 @@ class Coordinator:
             else f"{len(changed)} changed file(s), all within scope")
         dirty = P.ws.status()
         baseline = t["data"].get("baseline_dirty") or {}
+        runner_out, runner_caps = [], []
+        if self.fast_lane.on(P, spec.task_id):
+            from .fast_lane import settings as _fl_settings
+            fls = _fl_settings(P)
+            runner_out = [x.replace("{task}", spec.task_id) for x in fls.get("runner_outputs") or []]
+            runner_caps = [x.replace("{task}", spec.task_id) for x in fls.get("runner_captures") or []]
+            # [fast_lane]: the studio_gate runner's own outputs are not session work
+            dirty = [(st, p) for st, p in dirty if not matches_any(p, runner_out)]
+            baseline = {p: h for p, h in baseline.items() if not matches_any(p, runner_out)}
         in_scope_dirty = [p for _, p in dirty if matches_any(p, spec.scope)
                          or (matches_any(p, exempt) and (p not in baseline or p in changed))]
         inter = [p for p in self._intermediate_dirty(P, t, spec, dirty)
@@ -1087,7 +1096,8 @@ class Coordinator:
             ("uncommitted changes in task files: " + ", ".join(in_scope_dirty[:10])
              + (f"; {note}" if note and not intermediate else ""))
             if in_scope_dirty else "task files are committed and clean")
-        touched = [p for p, h in baseline.items() if P.ws.file_hash(p) != h]
+        touched = [p for p, h in baseline.items() if P.ws.file_hash(p) != h
+                   and not matches_any(p, runner_caps)]
         new_dirty = [p for _, p in dirty if p not in baseline and p not in in_scope_dirty
                      and not (intermediate and (p in inter or p in pending_task))]
         add("unrelated_preserved", FAIL if touched or new_dirty else PASS,

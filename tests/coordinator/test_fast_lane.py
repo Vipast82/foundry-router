@@ -53,6 +53,9 @@ FAKE_GATE = textwrap.dedent('''\
     json.dump({"sprint": sprint, "pid": os.getpid(), "started": started, "phase": "stories",
                "progress": "1/3", "updated": started}, open(os.path.join(d, "status.json"), "w"))
     time.sleep(step.get("sleep", 0))
+    for rel, text in (step.get("append") or {}).items():       # runner-owned outputs
+        with open(os.path.join(repo, *rel.split("/")), "a") as f:
+            f.write(text)
     caps = []
     for c in step.get("captures", []):
         p = os.path.join(repo, *c.split("/"))
@@ -182,9 +185,10 @@ def fl_profile(tmp_path, repo, runner, extra="", checks=None):
 
 @pytest.fixture
 def env(tmp_path, monkeypatch):
-    def build(plan, extra=None, vision=None, tasks=(T1,), checks=None):
+    def build(plan, extra=None, vision=None, tasks=(T1,), checks=None, files=None):
         extra = VISUAL + vis_override() if extra is None else extra
-        repo, _ = make_repo(tmp_path, "game", list(tasks), extra_files={".gitignore": ".plan/\n"})
+        repo, _ = make_repo(tmp_path, "game", list(tasks),
+                            extra_files={".gitignore": ".plan/\n", **(files or {})})
         runner = tmp_path / "fake_gate.py"
         runner.write_text(FAKE_GATE)
         plan_file = tmp_path / "gate_plan.json"
@@ -504,3 +508,17 @@ def test_vision_batch_changes_merge_findings(env):
     e.c.projects["game"].profile.fast_lane["vision_batch_frames"] = 2
     e.c.approve("game", "T1", [], "victor")
     drive(e, lambda t: any("[batch 2/2]" in x[2] for x in e.client.log))
+
+
+def test_runner_outputs_dirty_at_run_start_never_trip_the_clean_checks(env):
+    """UI-D1 (2026-10-20): the runner's evidence log was already uncommitted when the run
+    started and the runner appends to it every gate run, so coordinator.unrelated_preserved
+    failed on every cycle until the task ran out of attempts."""
+    log = "docs/progress/T1_EVIDENCE_RAW.log"
+    e = env([dict(GREEN, append={log: "GATE T1 PASS\n"})], files={log: "old\n", CAP: "old"})
+    (e.repo / log).write_text("old\nGATE T1 FAIL\n")             # dirty before the task starts
+    e.c.approve("game", "T1", [], "victor")
+    t = drive(e, lambda t: t["state"] in (S.COMPLETE, S.BLOCKED, S.CHANGES_REQUIRED))
+    assert t["state"] == S.COMPLETE, (t["blocker"], t["next_action"])
+    assert t["sessions"] == 1 and t["attempt"] == 1
+    assert "GATE T1 PASS" in (e.repo / log).read_text()           # the runner's line is kept
