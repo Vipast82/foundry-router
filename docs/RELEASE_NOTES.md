@@ -2,6 +2,30 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.127.0 (unreleased; held until UI-02 closes) — the coordinator hands the implementer its Kilo checkpoint
+
+The UI-02 primary tried to run `kilo_checkpoint` against `127.0.0.1:4096`
+and got a 401, because the Kilo server password is the coordinator's
+credential and is not in the session's shell. It recorded a manual audit
+instead (AU 822e81c). Giving sessions that password would let them drive the
+server (other sessions, aborts, permission replies), so they don't get it.
+
+- **Live checkpoint:** while an implementer session is busy, the coordinator
+  fetches its transcript, runs the same `kilo_checkpoint` audit it already
+  runs at verification, and writes `.plan/tmp/kilo_checkpoint.txt`
+  (git-ignored, read-only, header with session, UTC time and HEAD). It
+  refreshes at most every `[limits] live_checkpoint_seconds` (default 120;
+  0 turns it off). This is advisory: a failed refresh is logged as a
+  `live_checkpoint_failed` event and never changes the task.
+- **Prompt and rule:** the BUILD prompt tells the session to read that file
+  and never call port 4096. `RULE_AMENDMENT.md` is updated to match. The
+  matching AU `.kilo/rules/animaluprising-adapter.md` edit is a separate
+  patch, applied after UI-02 closes.
+
+**Tests:** `tests/coordinator/test_live_checkpoint.py` (rate limit, off
+switch, failure is advisory) and
+`test_live_checkpoint_file_is_read_only_and_ignored` (AU clone).
+
 ## v0.126.8 — the Lead's guard baseline is the prompt, not the session creation
 
 The v0.126.7 deploy checked out a new tag in the deploy checkout while Lead

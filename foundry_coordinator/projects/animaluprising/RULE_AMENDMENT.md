@@ -39,8 +39,11 @@ sprint, then stops. In addition:
    image job automatically beyond its configured limits.
 6. **Tags** remain the Sprint Manager's (§33). The coordinator never creates or pushes tags.
 7. **Audit.** `checkpoint.py` reads Cline sessions only. Kilo sessions are audited with
-   `py -3 -m foundry_coordinator.projects.animaluprising.kilo_checkpoint` (same rules, same
-   verdicts); a Cline audit is never evidence about a Kilo session.
+   `foundry_coordinator.projects.animaluprising.kilo_checkpoint` (same rules, same
+   verdicts); a Cline audit is never evidence about a Kilo session. For a coordinator
+   session the coordinator runs that audit itself and refreshes `.plan/tmp/kilo_checkpoint.txt`
+   (read-only, git-ignored) while the session works; the session reads it and never calls
+   the authenticated Kilo server.
 
 ## .clinerules / CLINERULES_CORE.md one-liner
 
@@ -52,5 +55,6 @@ sprint, then stops. In addition:
 > When the kickoff comes from the coordinator (it names a coordinator run id), end your
 > final message with the `coordinator-report` block it asks for. The report is a record, not
 > a verdict; the coordinator decides completion from the gate, done_check and the review.
-> For §34 checkpoints in Kilo run
-> `py -3 -m foundry_coordinator.projects.animaluprising.kilo_checkpoint` (not checkpoint.py).
+> For §34 checkpoints in a coordinator session read `.plan/tmp/kilo_checkpoint.txt` (the
+> coordinator's own audit of this session, refreshed while you work; not checkpoint.py, and
+> never a call to the Kilo server on port 4096).

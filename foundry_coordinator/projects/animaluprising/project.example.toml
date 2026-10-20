@@ -131,6 +131,7 @@ max_closeout_attempts = 2
 session_timeout_minutes = 240
 max_task_minutes = 1440
 auto_resume_after_budget_reset = true
+live_checkpoint_seconds = 120     # coordinator refreshes .plan/tmp/kilo_checkpoint.txt; 0 = off
 
 [resources]
 # One process owns Studio play/stop and the Rojo serve at a time.

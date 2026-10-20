@@ -130,6 +130,27 @@ def test_kilo_transcript_is_audited_with_the_projects_checkpoint_rules(tmp_path)
     assert level in (0, 1) and "VERDICT" in text.splitlines()[-1]
 
 
+def test_live_checkpoint_file_is_read_only_and_ignored(tmp_path):
+    import stat
+    ws = _clone_at(tmp_path, _git(AU, "rev-parse", "HEAD"))
+    a = _adapter(tmp_path, ws)
+    turn = {"info": {"role": "assistant", "id": "m0", "time": {"created": 1792000000000},
+                     "tokens": {"input": 1000, "output": 10, "cache": {"read": 0}}},
+            "parts": [{"type": "tool", "tool": "read", "callID": "c0", "state": {
+                "status": "completed", "input": {"filePath": "docs/progress/STATE.md"},
+                "output": "x", "title": "read", "metadata": {}, "time": {"start": 1, "end": 2}}}]}
+    path = a.live_session_audit("ses_live", [turn], "abc123def4567890")
+    path2 = a.live_session_audit("ses_live", [turn, turn], "abc123def4567890")   # refresh in place
+    assert path == path2 and path.replace("\\", "/").endswith(".plan/tmp/kilo_checkpoint.txt")
+    text = open(path, encoding="utf-8").read()
+    assert "kilo:ses_live" in text and "HEAD abc123def456" in text
+    assert "VERDICT" in text.strip().splitlines()[-1]
+    assert not os.stat(path).st_mode & stat.S_IWRITE
+    assert _git(ws, "status", "--porcelain", "--untracked-files=all") == ""   # git-ignored
+    os.chmod(path, stat.S_IREAD | stat.S_IWRITE)                             # let tmp cleanup run
+    assert "kilo_checkpoint.txt" in a.implement_prompt(a.describe("UI-02"), {"run_id": "r"})
+
+
 def test_review_extra_quotes_the_gate_summary(tmp_path):
     ws = _clone_at(tmp_path, _closing_commit("HK-G2"))
     a = _adapter(tmp_path, ws)

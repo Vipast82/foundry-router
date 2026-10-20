@@ -58,6 +58,7 @@ class Coordinator:
         self.frontier = FrontierPhase(self, clock=clock)
         from .retry_guidance import RetryGuidance
         self.retry_guidance = RetryGuidance(self)
+        self._live_audit_ts: dict[str, float] = {}     # session -> last live checkpoint write
         # [lifecycle] (v0.122): evidence ledger, obligations/decisions/budget
         # ledger, recovery. Built lazily, and only used for projects whose
         # profile enables them; a disabled project never touches their tables.
@@ -648,6 +649,27 @@ class Coordinator:
         # session's state may reach the caller
         return s if isinstance(s, SessionState) else None
 
+    def _live_checkpoint(self, P: Project, t: dict, sid: str) -> None:
+        """Refresh the adapter's live checkpoint file for a working session, at
+        most every `live_checkpoint_seconds` (0 = off). The session reads the
+        file instead of calling the authenticated Kilo server itself."""
+        fn = getattr(P.adapter, "live_session_audit", None)
+        every = P.profile.limit("live_checkpoint_seconds", 120)
+        if not callable(fn) or not every:
+            return
+        last = self._live_audit_ts.get(sid, 0.0)
+        if self.clock() - last < float(every):
+            return
+        self._live_audit_ts[sid] = self.clock()
+        try:
+            tr = P.client.transcript(sid, directory=P.profile.workspace)
+            if tr:
+                fn(sid, tr, P.ws.head())
+        except Exception as e:                                    # noqa: BLE001
+            # advisory only: a failed refresh never changes the task
+            self.store.event(P.id, t["task_id"], "live_checkpoint_failed", session_id=sid,
+                             detail={"error": str(e)[:300]})
+
     def _poll_inner(self, P: Project, t: dict, sid: str, phase: str):
         pid, tid = P.id, t["task_id"]
         sess = self.store.session(sid) or {}
@@ -700,6 +722,8 @@ class Coordinator:
                                                   f"stopped", phase)
             if s.compaction:
                 return self._compacted(P, t, sid, phase, s.compaction)
+            if phase != "closeout":
+                self._live_checkpoint(P, t, sid)
             self._note(P, t, f"{phase} session working")
             return None
         if s.status == "attention":

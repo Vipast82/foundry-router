@@ -31,6 +31,7 @@ import json
 import os
 import re
 import shutil
+import stat
 import subprocess
 import sys
 import time
@@ -334,6 +335,7 @@ including its Studio steps and -Finish, so the evidence log ends with "GATE {spe
 Do NOT write {spec.task_id}_SUMMARY.md, the STATE.md row or the MASTER_ORDER status, and do NOT push: after the coordinator's checks and a frontier review, a separate CLOSE session does that.
 Never edit files outside the plan's "Files this sprint may change" list (§3, the commit hook enforces it). Never --no-verify, --force, rebase, amend or tag.
 Helper PREWORK notes in the coordinator memory below were prepared ahead of time for your next steps: when one matches the step you are on and its HEAD is current, `git apply --check` its draft patch, apply it, run the listed checks and commit, instead of re-deriving the change; verify it against the plan first (it is advisory, never authority). Put verification scratch and one-off generated files under `.plan/tmp/` (git-ignored), never elsewhere in the repo.
+§34 checkpoints: the coordinator audits this session itself and refreshes `{self.LIVE_CHECKPOINT}` (read-only) about every two minutes while you work; read it for the KILO-CHECKPOINT verdict and act on CONTINUE/STOP-AND-REPLAN. Do not run kilo_checkpoint against the Kilo server or call port 4096 (it needs credentials you don't have); if the file is missing or its header time is more than 10 minutes old, note "KILO-CHECKPOINT pending (coordinator audit)" and continue.
 Before reporting NEEDS_HUMAN for a visual or interaction step, use the enabled vision subagent and available Studio MCP tools as described above. If the step still needs Victor (an ACTION NEEDED FROM VICTOR block, §22) or a decision the plan doesn't settle (§10), stop and report NEEDS_HUMAN or BLOCKED with the exact attempted tools and blocker text.
 
 {report_instructions()}
@@ -589,6 +591,30 @@ Change no code or test file in this session; if one needs changing, stop and rep
         verdict = text.strip().splitlines()[-1] if text.strip() else "VERDICT UNKNOWN"
         return [VerificationResult("au.kilo_checkpoint", FAIL if level >= 2 else PASS, False, log,
                                    verdict + "\n" + "\n".join(text.splitlines()[1:8]), revision)]
+
+    LIVE_CHECKPOINT = ".plan/tmp/kilo_checkpoint.txt"
+
+    def live_session_audit(self, session_id: str, transcript: list, revision: str) -> str:
+        """The same audit while the session works, written for the implementer
+        to read (git-ignored, read-only): it never calls the Kilo server itself,
+        which needs the coordinator's password. Returns the path written."""
+        from .kilo_checkpoint import audit
+        text, _level = audit(self.p.workspace, session_id, transcript)
+        path = os.path.join(self.p.workspace, *self.LIVE_CHECKPOINT.split("/"))
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        stamp = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+        body = (f"# KILO-CHECKPOINT written by the coordinator for session kilo:{session_id}\n"
+                f"# at {stamp} (HEAD {revision[:12]}); refreshed while the session works.\n"
+                f"# Read-only: do not edit, and do not call the Kilo server for this.\n\n"
+                + text.rstrip() + "\n")
+        tmp = path + ".new"
+        with open(tmp, "w", encoding="utf-8") as f:
+            f.write(body)
+        if os.path.exists(path):
+            os.chmod(path, stat.S_IREAD | stat.S_IWRITE)   # Windows: a read-only file can't be replaced
+        os.replace(tmp, path)
+        os.chmod(path, stat.S_IREAD)
+        return path
 
     def closeout_mode(self) -> str:
         return "session"
