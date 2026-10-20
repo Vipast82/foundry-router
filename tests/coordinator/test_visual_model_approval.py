@@ -117,3 +117,26 @@ def test_visual_model_approval_sends_frame_and_records_bound_verdict(tmp_path):
                                     "revision", {rel: digest})
     step(coordinator, project, task, spec, rule, "revision")
     assert len(packet) == 1  # a completed call is never repeated
+
+
+def test_frame_validity_and_verdict_synonyms_are_understood():
+    """UI-D1 (2026-10-20): the prompt never named the allowed values, a model answered
+    validity "valid" (and a verdict "approved"), and every good frame became an
+    "invalid, occluded or wrong UI subject" CHANGES finding."""
+    from foundry_coordinator import visual_approval as VA
+    frames = [("a.png", "image/png", b"x"), ("b.png", "image/png", b"y")]
+    arts = {"a.png": "1" * 64, "b.png": "2" * 64}
+
+    def row(path, validity="ok", findings=()):
+        return {"path": path, "sha256": arts[path], "image_seen": True, "subject_present": True,
+                "validity": validity, "observation": "HUD visible", "findings": list(findings)}
+    for verdict, validity in (("approve", "ok"), ("approved", "valid"), ("Approve", "OK"),
+                              ("approve", True)):
+        ans = {"verdict": verdict, "frames": [row("a.png", validity), row("b.png", validity)]}
+        assert VA._valid_verdict(ans, frames, arts) == ("approve", []), (verdict, validity)
+    ans = {"verdict": "changes requested", "frames": [row("a.png"), row("b.png", "ok", ["clipped"])]}
+    assert VA._valid_verdict(ans, frames, arts) == ("changes_required", ["b.png: clipped"])
+    ans = {"verdict": "approve", "frames": [row("a.png"), row("b.png", "occluded")]}
+    got, findings = VA._valid_verdict(ans, frames, arts)
+    assert got == "changes_required" and "invalid, occluded or wrong UI subject" in findings[0]
+    assert '"ok", "invalid", "occluded", "missing_subject"' in VA.FRAME_FIELDS

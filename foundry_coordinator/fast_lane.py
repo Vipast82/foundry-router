@@ -863,8 +863,8 @@ class FastLane:
             "filenames or claim inspection without seeing each image. Return valid JSON with "
             'keys "verdict" (approve, changes_required or uncertain), "frames" (one object per '
             "image with path, sha256, image_seen, subject_present, validity, observation and "
-            'findings), and "limitations". Approve only if every frame is valid, actually seen '
-            f"and meets the rubric.\n\n{RUBRIC}\n\nSprint:\n{spec.spec[:8000]}")}]
+            'findings), and "limitations". ' + VA.FRAME_FIELDS + " Approve only if every frame "
+            f"is valid, actually seen and meets the rubric.\n\n{RUBRIC}\n\nSprint:\n{spec.spec[:8000]}")}]
         for rel, mime, blob in frames:
             c = by_path.get(rel) or {}
             layout = [str(x) for x in (c.get("layout_lines") or [])][:8]

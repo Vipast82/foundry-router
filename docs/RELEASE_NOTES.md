@@ -2,6 +2,24 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.129.8 — vision approval: exact frame field values
+
+UI-D1's second vision round returned CHANGES on 25 of 26 batches, with 813 findings. Many read
+"invalid, occluded or wrong UI subject" followed by an observation that the frame was fine.
+Both vision prompts (fast lane and model visual approval) named the per-frame fields but not
+their values. The model answered `validity: "valid"` for good frames, and the parser counts
+anything except exactly `"ok"` as an invalid frame. One batch was also "inconclusive" twice
+because its verdict word was off, and that blocked the task.
+
+- **Prompts:** both now carry `visual_approval.FRAME_FIELDS`, which gives the exact values
+  (`validity` is one of `ok | invalid | occluded | missing_subject`, `ok` even for a frame with
+  defects).
+- **Parser:** accepts `valid/good/pass/true` (any case) as `ok`, and `approved`, `changes
+  requested` and the like for the verdict. `occluded`, `invalid` and `missing_subject` are
+  still findings.
+- **Test:** `test_frame_validity_and_verdict_synonyms_are_understood`. Coordinator change; it
+  needs a restart.
+
 ## v0.129.7 — reference renderer: viewport calibration diagnostic
 
 UI-D1's vision review flagged an empty band (96px at the bottom, 18px at the right) on every

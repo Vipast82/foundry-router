@@ -65,8 +65,30 @@ def _required(P, spec, rule, arts: dict) -> tuple[list[tuple[str, str, bytes]], 
     return frames, ""
 
 
+# Exact per-frame field values (UI-D1, 2026-10-20: the prompt named the fields but not their
+# values, so a model answered validity "valid" for good frames and every one of them was
+# counted as an invalid frame: 800+ bogus CHANGES findings in one round)
+FRAME_FIELDS = (
+    'Each frame object: "path" and "sha256" exactly as given, "image_seen": true only if you '
+    'actually see the image, "subject_present": true when the expected UI is visible, '
+    '"validity": exactly one of "ok", "invalid", "occluded", "missing_subject" ("ok" for a '
+    'normal, readable capture, even one with defects), "observation": one line on what is '
+    'visible, "findings": a list of defect strings (empty when the frame is fine).')
+_OK_VALIDITY = {"ok", "valid", "good", "pass", "passed", "yes", "true"}
+
+
+def _validity_ok(row: dict) -> bool:
+    v = row.get("validity")
+    if v is True:
+        return True
+    return isinstance(v, str) and v.strip().lower() in _OK_VALIDITY
+
+
 def _valid_verdict(answer: dict, frames: list[tuple[str, str, bytes]], arts: dict) -> tuple[str, list[str]]:
-    verdict = str(answer.get("verdict") or "").lower()
+    verdict = str(answer.get("verdict") or "").strip().lower().replace("-", "_").replace(" ", "_")
+    verdict = {"approved": "approve", "approval": "approve", "changes": "changes_required",
+               "change_required": "changes_required", "request_changes": "changes_required",
+               "changes_requested": "changes_required", "unsure": "uncertain"}.get(verdict, verdict)
     if verdict not in ("approve", "changes_required", "uncertain"):
         return "uncertain", ["the vision model returned no valid verdict"]
     rows = answer.get("frames")
@@ -94,7 +116,7 @@ def _valid_verdict(answer: dict, frames: list[tuple[str, str, bytes]], arts: dic
             if not isinstance(finding, str) or not finding.strip():
                 return "uncertain", [f"{rel} has an invalid finding"]
             findings.append(f"{rel}: {finding[:300]}")
-        if row.get("subject_present") is not True or row.get("validity") != "ok":
+        if row.get("subject_present") is not True or not _validity_ok(row):
             findings.append(f"{rel}: invalid, occluded or wrong UI subject: "
                             f"{row.get('observation', '')[:300]}")
     if verdict == "approve" and findings:
@@ -172,7 +194,7 @@ def step(c, P, t: dict, spec, rule, revision: str) -> None:
         "from filenames or claim inspection without seeing each image. Return valid JSON "
         'with keys "verdict" (approve, changes_required or uncertain), "frames" (one '
         'object per image with path, sha256, image_seen, subject_present, validity, '
-        'observation and findings), and "limitations". '
+        'observation and findings), and "limitations". ' + FRAME_FIELDS + " "
         "Approve only if every required frame is valid, actually seen and has no visible "
         f"defect.\n\nSprint criteria:\n{spec.spec[:10000]}")}]
     for rel, mime, blob in frames:
