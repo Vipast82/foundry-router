@@ -1025,3 +1025,15 @@ def test_mock_lane_with_no_stories_fails(tmp_path):
                run_cmd=lambda *a, **k: (0, ""))
     g.run_mock([])
     assert [c["result"] for c in g.checks if c["id"] == "story.none"] == ["FAIL"]
+
+
+@pytest.mark.parametrize("bad", ["C:RobloxAnimalUprising", "relative/repo", "{missing}", "{nogit}"])
+def test_repo_must_be_the_absolute_game_repo_root(repo, tmp_path, bad):
+    nogit = tmp_path / "nogit"
+    nogit.mkdir()
+    (nogit / "default.project.json").write_text("{}")
+    bad = bad.format(missing=tmp_path / "missing", nogit=nogit)
+    out = []
+    assert G.main(["--repo", bad, "status", "--sprint", "UI-T0"], out=out.append) == 2
+    assert "ERROR: --repo" in out[-1] and "forward slashes" in out[-1]
+    assert not (repo / "RobloxAnimalUprising").exists()

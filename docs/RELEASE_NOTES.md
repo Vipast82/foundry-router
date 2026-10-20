@@ -2,6 +2,17 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.129.4 — studio_gate refuses a bad `--repo`
+
+A UI-D1 session ran the runner with `--repo C:\Roblox\AnimalUprising` through a POSIX shell,
+which turned the path into the drive-relative `C:RobloxAnimalUprising`. The runner then wrote its
+evidence log under a stray `RobloxAnimalUprising/` folder inside the game repo, and the stray
+file tripped `coordinator.unrelated_preserved`. The runner now refuses (exit 2) any `--repo`
+that is not an absolute path to a folder holding `.git` and `default.project.json`, and the
+message tells the session to use forward slashes (`--repo C:/Roblox/AnimalUprising`). This is
+runner-side only: it takes effect once the deploy checkout is on the tag, with no restart.
+Test: `test_repo_must_be_the_absolute_game_repo_root`.
+
 ## v0.129.3 — deterministic mock renders
 
 Three headless renders of the same mock frame produced three different PNGs, so every gate run

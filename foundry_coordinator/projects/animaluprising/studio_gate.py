@@ -2457,6 +2457,16 @@ def main(argv=None, out=print, **inject) -> int:
             setattr(a, k, None if k != "tier" else "B")
     if getattr(a, "sprint", None):
         safe_id(a.sprint)
+    # --repo must be the absolute game-repo root. A POSIX shell turns C:\Roblox\X into the
+    # drive-relative "C:RobloxX", and the runner then wrote evidence under a stray relative
+    # folder inside the repo (UI-D1, 2026-10-20). Refuse instead of guessing.
+    repo_arg = str(a.repo or "")
+    if not (os.path.isabs(repo_arg) and os.path.exists(os.path.join(repo_arg, ".git"))
+            and os.path.isfile(os.path.join(repo_arg, "default.project.json"))):
+        out(f"ERROR: --repo {repo_arg!r} is not the absolute game repo root (a folder with .git "
+            "and default.project.json). Use forward slashes, e.g. --repo C:/Roblox/AnimalUprising")
+        return 2
+    a.repo = os.path.abspath(repo_arg)
     if a.cmd == "doctor":
         busy = acquire_lock(a.repo, "doctor", "doctor")
         if busy:
