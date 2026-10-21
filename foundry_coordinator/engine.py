@@ -1453,6 +1453,14 @@ class Coordinator:
             pool = self._early_reviews = {}
         if k in pool:
             return True
+        tried = getattr(self, "_early_tried", None)
+        if tried is None:
+            tried = self._early_tried = set()
+        if k in tried:
+            return False             # tried once for this head: the normal path reviews it
+        tried.add(k)
+        if len(tried) > 500:
+            tried.clear()
         cur = self.store.task(pid, tid) or t
         tt = {**cur, "verification_id": vid, "head_sha": head}
         if self._lc(P, "recovery") and self._lc(P, "obligations") and self._lc(P, "evidence"):
@@ -1663,6 +1671,12 @@ class Coordinator:
             return f"reviewed commit {rs[:12]} is not an ancestor of {head[:12]}"
         changed = P.ws.changed_files(rs, head)
         code = [f for f in changed if not matches_any(f, P.adapter.exempt_paths(spec))]
+        if code:
+            # B7: the coordinator's own commits (templated closeout documents, runner
+            # outputs) never invalidate the review they followed
+            from . import bookkeeping as BK
+            mine = set(BK.only_coordinator(P, t, rs, head, code))
+            code = [f for f in code if f not in mine]
         if code:
             return "files changed after the review: " + ", ".join(code[:10])
         return None

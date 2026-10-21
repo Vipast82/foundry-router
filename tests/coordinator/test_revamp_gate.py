@@ -802,3 +802,36 @@ def test_au_template_finish_requires_done_check_pass(tmp_path):
     assert text.rstrip().endswith("DONE-CHECK UI-03 PASS")
     res[1].result = "FAIL"
     assert "did not pass" in CT.finish(adapter, spec, ctx)["error"]
+
+
+def test_a_refused_early_review_is_tried_once_per_head(env):
+    e = env([GREEN])
+    calls = []
+    e.c._review_prepare = lambda P, t, head, early=False: calls.append(head) and None
+    P = e.c.projects["game"]
+    t = {"task_id": "T1", "data": {}}
+    e.c.store.task = (lambda real: (lambda pid, tid: real(pid, tid) or {"task_id": tid,
+                                                                       "data": {}}))(e.c.store.task)
+    assert e.c.early_review_start(P, t, "h" * 40, "v1") is False
+    assert e.c.early_review_start(P, t, "h" * 40, "v1") is False
+    assert calls == ["h" * 40]                      # the packet is not rebuilt every tick
+    assert e.c.early_review_start(P, t, "k" * 40, "v1") is False and len(calls) == 2
+
+
+def test_coordinator_commits_never_invalidate_the_review(env):
+    e = env([GREEN])
+    e.c.approve("game", "T1", [], "victor")
+    t = drive(e, lambda t: t["state"] == S.COMPLETE)
+    P = e.c.projects["game"]
+    spec = P.adapter.describe("T1")
+    (e.repo / "docs" / "MASTER_ORDER.md").write_text("1. T1 DONE\n")
+    sha, err = BK.commit(e.c, P, task(e), ["docs/MASTER_ORDER.md"], "closeout", "closeout")
+    assert sha and not err
+    assert e.c._review_still_valid(P, task(e), spec, P.ws.head()) is None
+    (e.repo / "src").mkdir(exist_ok=True)
+    (e.repo / "src" / "a.txt").write_text("changed by someone else OK")
+    git(e.repo, "add", "src/a.txt")
+    git(e.repo, "commit", "-q", "-m", "T1: later")
+    why = e.c._review_still_valid(P, task(e), spec, P.ws.head())
+    assert why and "src/a.txt" in why and "MASTER_ORDER" not in why
+    assert t["reviewed_sha"]
