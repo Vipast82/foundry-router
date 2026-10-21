@@ -160,3 +160,13 @@ def test_a_session_over_the_context_ceiling_hands_off_free(tmp_path):
     [h] = events(c, "context_handoff")
     assert h["context"] == 170000
     assert "context ceiling" in n[1] and "half the HUD" in n[1]
+
+
+def test_a_blocked_report_over_the_ceiling_is_an_ordinary_stop():
+    from types import SimpleNamespace
+    P = SimpleNamespace(profile=SimpleNamespace(raw={}))
+    s = SimpleNamespace(context=190000)
+    assert infra.over_ceiling(P, s, {"status": "BLOCKED", "blocker": "which layout?"}) is None
+    assert infra.over_ceiling(P, s, {"status": "DONE"}) is None
+    assert infra.over_ceiling(P, s, {"status": "NOT DONE"}).startswith("context ceiling")
+    assert infra.over_ceiling(P, SimpleNamespace(context=1000), {"status": "NOT DONE"}) is None

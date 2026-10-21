@@ -185,8 +185,8 @@ def over_ceiling(P, s, rep: dict) -> Optional[str]:
     ctx = getattr(s, "context", None)
     if not ceil or ctx is None or int(ctx) < ceil:
         return None
-    if str((rep or {}).get("status") or "").upper() == "DONE":
-        return None
+    if str((rep or {}).get("status") or "").upper() in ("DONE", "BLOCKED", "NEEDS_HUMAN"):
+        return None                  # finished, or a real blocker: a fresh session won't help
     summary = str((rep or {}).get("summary") or (rep or {}).get("next") or "").strip()[:600]
     return (f"context ceiling: the previous session reached {int(ctx)} tokens (ceiling "
             f"{ceil}) and was handed off; continue from the committed state and the plan's "
