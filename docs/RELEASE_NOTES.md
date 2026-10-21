@@ -2,6 +2,15 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.130.12 — studio_gate: regression runs at 1920x1080
+
+UI-02a's UI_01 legs c21a–c25a failed with "the viewport is 1920x1080 — got 2531x1128 (device
+simulator)". The stories mode stops Studio's device simulator when it finishes, and Studio then
+uses its window size, which is 2531x1128 on a large monitor, while those regression legs expect
+1920x1080. The regression lane now starts by selecting the runner's `AU_1920x1080` device at
+actual resolution (created if missing). A failure to set it is logged in the raw log and does
+not stop the run. Runner tests pass (52). Runner-side only.
+
 ## v0.130.11 — studio_gate: playtest-start retry, Lune files aren't "unmounted"
 
 UI-02a's first full Studio gate had two runner-made failures:

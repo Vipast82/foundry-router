@@ -776,6 +776,17 @@ local ok, err = pcall(function() SDS:StopSimulationAsync() end)
 return ok and "SIM STOPPED" or ("SIM STOP FAILED " .. tostring(err))
 '''
 
+# Regression suites assume a 1920x1080 viewport (UI_01 c21a-c25a). With the simulator
+# stopped, Studio uses its window size (2531x1128 on a big monitor, UI-02a 2026-10-20), so
+# the regression lane starts on the AU_1920x1080 device at actual resolution.
+SET_DESKTOP_DEVICE = DEVICE_HELPER + r'''
+local id = findDevice("AU_1920x1080")
+if id == nil then id = SDS:CreateDeviceAsync({Name = "AU_1920x1080", Width = 1920, Height = 1080, PixelDensity = 96}) end
+SDS:SetDeviceAsync(id); task.wait(0.35)
+SDS:SetScalingModeAsync(Enum.DeviceSimulatorScalingMode.ActualResolution); task.wait(0.35)
+return "DEVICE AU_1920x1080"
+'''
+
 FOCUS_STORY = FRESH_LIB + r'''
 local H = __freshRequire("StoryHarness")
 local F = __freshRequire("FocusWalk")
@@ -1699,6 +1710,10 @@ class Gate:
         CALL 1-2 (must PASS, else the line stops), setup steps, its play steps, stop ->
         GateRunner.tally over the ORIGINAL CALL numbers."""
         self.regression = {"selection": selection, "suites": {}, "tally": ""}
+        try:
+            self.edit(SET_DESKTOP_DEVICE, "regression viewport AU_1920x1080")
+        except Exception as e:                                    # noqa: BLE001
+            self.raw("regression viewport", "", f"could not set AU_1920x1080: {e}")
         plan = self.plan(selection)
         if plan["error"]:
             self.add(check("regression.plan", "FAIL" if "FAIL:" in plan["error"] else "UNKNOWN",
