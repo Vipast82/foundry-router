@@ -1705,6 +1705,55 @@ class Gate:
                     return True
         return any(c["result"] == "FAIL" and ".setup" in c["id"] for c in att["chk"])
 
+    # ---- incremental sprint gate (2026-10-21) ------------------------------------------
+    # A sprint re-runs its gate many times. What passed at an earlier commit and depends on
+    # nothing that changed since is carried instead of re-run: a regression suite whose files
+    # (the runner's file -> suite map) are untouched, and the stories when no src/ file and no
+    # story input changed. Harness changes (index, runner, TestLib, project file, gate file)
+    # carry nothing. Carried checks stay in the verdict, marked CARRIED with their commit.
+    CARRY_INVALIDATORS = ("tests/RegressionIndex.lua", "tests/GateRunner.lua", "default.project.json")
+
+    def carry_plan(self, selection: str, plan_file: str) -> dict:
+        out = {"from": None, "suites": [], "stories": False, "changed": []}
+        head = self.head
+        if not head:
+            return out
+        prev = None
+        for name in sorted(os.listdir(self.gate_dir)) if os.path.isdir(self.gate_dir) else []:
+            if not name.endswith(".sprint.json") or name.startswith(head[:12]):
+                continue
+            v = _read_json_file(os.path.join(self.gate_dir, name))
+            if isinstance(v, dict) and v.get("head") and v.get("checks") and                     (prev is None or float(v.get("finished") or 0) > float(prev.get("finished") or 0)):
+                prev = v
+        if prev is None:
+            return out
+        base = prev["head"]
+        rc, _ = self.run_cmd(["git", "merge-base", "--is-ancestor", base, head], self.repo, 30)
+        if rc != 0:
+            return out
+        rc, txt = self.run_cmd(["git", "diff", "--name-only", base, head], self.repo, 60)
+        if rc != 0:
+            return out
+        changed = [f.strip() for f in txt.splitlines() if f.strip()]
+        out.update({"from": prev, "changed": changed})
+        if any(f in self.CARRY_INVALIDATORS or f.startswith("tests/lib/") or f == plan_file
+               for f in changed):
+            return out                       # the harness itself changed: re-run everything
+        code = [f for f in changed if f.startswith(("src/", "tests/"))]
+        passed = {c["id"][len("regression."):] for c in prev.get("checks") or []
+                  if isinstance(c, dict) and str(c.get("id", "")).startswith("regression.")
+                  and c.get("result") == "PASS" and c.get("required")
+                  and _SUITE_RE.search(str(c.get("detail") or ""))}
+        hit = affected_selection(code, self.index or {}, suite_text=suite_reader(self.repo, head))             if code else ""
+        if hit == "ui":
+            hit_ids = set((self.index or {}).get("subsets", {}).get("ui") or [])
+        else:
+            hit_ids = {x for x in hit.split(",") if x}
+        wanted = {e.get("id") for e in (select_entries(self.index or {}, selection) or [])}
+        out["suites"] = sorted((passed & wanted) - hit_ids)
+        out["stories"] = not any(f.startswith("src/") for f in changed)
+        return out
+
     def regression_lane(self, selection: str) -> None:
         """Plan (Edit) -> per suite group: its Edit steps, a fresh playtest, the boot gate
         CALL 1-2 (must PASS, else the line stops), setup steps, its play steps, stop ->
@@ -2269,9 +2318,23 @@ def _run_gate(a, mode, sprint, run_id, out, official, community, run_cmd) -> int
             g.console_base = g.console_lines()
             g.live_verify(expect)
             stories = plan.get("stories") or []
-            if stories:
-                g.run_stories(stories)
-            g.run_focus(plan.get("focus"), stories, in_play=False)
+            carry = g.carry_plan(selection, plan_rel(sprint)) if selection else                 g.carry_plan("", plan_rel(sprint))
+            prev = carry.get("from") or {}
+            tag = str(prev.get("head") or "")[:12]
+            prev_story = [c for c in prev.get("checks") or [] if isinstance(c, dict)
+                          and str(c.get("id", "")).startswith(("story.", "focus."))]
+            if stories and carry.get("stories") and prev_story and                     all(c.get("result") == "PASS" for c in prev_story if c.get("required")):
+                # no src/ file and no story input changed since the last sprint gate, and its
+                # stories all passed: their checks and committed captures carry
+                for c in prev_story:
+                    g.add(dict(c, detail=f"CARRIED from {tag} (no src/ or story change): "
+                                         + str(c.get("detail") or "")))
+                g.captures.extend(prev.get("captures") or [])
+                g.raw("carry", "", f"carried {len(prev_story)} story/focus check(s) from {tag}")
+            else:
+                if stories:
+                    g.run_stories(stories)
+                g.run_focus(plan.get("focus"), stories, in_play=False)
             live = plan.get("wiring") or plan.get("touch") or any(
                 not isinstance(x, dict) or not x.get("story") for x in plan.get("focus") or [])
             if live:
@@ -2284,7 +2347,20 @@ def _run_gate(a, mode, sprint, run_id, out, official, community, run_cmd) -> int
                     finally:
                         g.stop_playtest()
             if selection:
-                g.regression_lane(selection)
+                keep = set(carry.get("suites") or [])
+                for c in prev.get("checks") or []:
+                    if str(c.get("id", "")).startswith("regression.") and                             c["id"][len("regression."):] in keep:
+                        g.add(dict(c, detail=f"CARRIED from {tag} (no file it covers changed): "
+                                             + str(c.get("detail") or "")))
+                entries = [e.get("id") for e in (select_entries(g.index or {}, selection) or [])]
+                rest = [x for x in entries if x not in keep]
+                if keep:
+                    g.raw("carry", "", f"carried {len(keep)} suite(s) from {tag}: {','.join(sorted(keep))}")
+                if rest:
+                    g.regression_lane(",".join(rest) if keep else selection)
+                else:
+                    g.add(check("regression.selection", "PASS",
+                                f"every selected suite CARRIED from {tag}", required=False))
             else:
                 g.add(check("regression.selection", "SKIP", "no affected suites", required=False))
             g.console_check()

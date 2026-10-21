@@ -1074,3 +1074,51 @@ def test_baseline_keeps_worse_and_new_failures_blocking():
     assert all(c["required"] for c in checks)
     assert G.overall(checks) == "FAIL"
     assert G.apply_baseline([_rc("regression.S49", "FAIL", "x")], None) is None   # no baseline
+
+
+def _carry_gate(tmp_path, changed, prev_checks, index=None):
+    """A Gate with a fake git: HEAD descends from the previous sprint verdict's head and
+    `changed` files differ between them."""
+    gd = tmp_path / "gate"
+    gd.mkdir(exist_ok=True)
+    prev_head = "a" * 40
+    (gd / f"{prev_head[:12]}.sprint.json").write_text(json.dumps(
+        {"head": prev_head, "finished": 1.0, "checks": prev_checks, "captures": []}))
+
+    def run_cmd(argv, cwd, timeout):
+        if "merge-base" in argv:
+            return 0, ""
+        if "diff" in argv:
+            return 0, "\n".join(changed)
+        return 1, ""
+    g = G.Gate.__new__(G.Gate)
+    g.head, g.gate_dir, g.repo, g.run_cmd = "b" * 40, str(gd), str(tmp_path), run_cmd
+    g.index = index or {"entries": [{"id": "S45", "file": "S45_check"}, {"id": "S46", "file": "S46_check"}],
+                        "subsets": {"ui": ["S45", "S46"]}}
+    return g
+
+
+def test_carry_keeps_passed_suites_whose_files_did_not_change(tmp_path, monkeypatch):
+    """2026-10-21: every sprint gate re-ran every suite and story, even those that passed and
+    depend on nothing that changed. Passed suites with untouched files now carry."""
+    monkeypatch.setattr(G, "suite_reader", lambda repo, rev: (lambda f: ""))
+    passed = [_rc("regression.S45", "PASS", "SUITE S45 pass=12 fail=0 expect=12 VERDICT PASS"),
+              _rc("regression.S46", "PASS", "SUITE S46 pass=23 fail=0 expect=23 VERDICT PASS"),
+              _rc("story.Hud.normal@1920x1080", "PASS", "ok")]
+    g = _carry_gate(tmp_path, ["tests/S46_check.lua"], passed)
+    c = g.carry_plan("S45,S46", "docs/progress/UI-T0_gate.json")
+    assert c["suites"] == ["S45"]                       # S46's own file changed: re-run
+    assert c["stories"] is True                         # no src/ change: stories carry
+    g = _carry_gate(tmp_path, ["src/client/UI/v3/Screens/HeroSelect.lua"], passed)
+    assert g.carry_plan("S45,S46", "docs/progress/UI-T0_gate.json")["stories"] is False
+    g = _carry_gate(tmp_path, ["tests/RegressionIndex.lua"], passed)     # harness change
+    c = g.carry_plan("S45,S46", "docs/progress/UI-T0_gate.json")
+    assert c["suites"] == [] and c["stories"] is False
+
+
+def test_carry_never_carries_a_failed_suite(tmp_path, monkeypatch):
+    monkeypatch.setattr(G, "suite_reader", lambda repo, rev: (lambda f: ""))
+    prev = [_rc("regression.S45", "FAIL", "SUITE S45 pass=11 fail=1 expect=12 VERDICT FAIL"),
+            _rc("regression.S46", "PASS", "SUITE S46 pass=23 fail=0 expect=23 VERDICT PASS")]
+    g = _carry_gate(tmp_path, ["docs/progress/UI-T0_PLAN.md"], prev)
+    assert g.carry_plan("S45,S46", "docs/progress/UI-T0_gate.json")["suites"] == ["S46"]

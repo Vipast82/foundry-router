@@ -2,6 +2,26 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.130.16 — studio_gate: incremental sprint gates
+
+Every sprint gate re-ran every story at five sizes and every selected regression suite in its own
+playtest, even what had passed one commit earlier and depends on nothing that changed (7–10
+minutes of Studio per gate, many gates per sprint). Sprint mode now starts from the most recent
+sprint verdict whose head is an ancestor of HEAD:
+
+- **Regression suites:** a suite that passed there carries when no file it covers changed. This
+  uses the runner's file → suite map (`affected_selection`); only the rest run.
+- **Stories and focus checks:** they carry, with their committed captures, when no `src/` file
+  changed and every one of them passed.
+- **Harness changes carry nothing:** a change to `tests/RegressionIndex.lua`,
+  `tests/GateRunner.lua`, `tests/lib/**`, `default.project.json` or the sprint's gate file means a
+  full run. Failed suites are never carried.
+- **The verdict stays complete:** carried checks are marked `CARRIED from <commit>`, with the
+  raw log listing what carried. The boot check and console check still run whenever a playtest
+  runs.
+- **Tests:** `test_carry_keeps_passed_suites_whose_files_did_not_change`,
+  `test_carry_never_carries_a_failed_suite`. Runner-side only.
+
 ## v0.130.15 — vision: "uncertain" over clean, verified frames is an approval
 
 UI-02a stopped as "vision approval inconclusive 3 times". gpt-6-astra reviewed batch 1 (20
