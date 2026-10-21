@@ -645,3 +645,160 @@ def test_lead_repair_review_is_incremental(ws, router):
     assert r2["approved"] and r2["incremental_from"] == r1["reviewed_sha"]
     assert "incremental re-review" in pk and "also handle mul by zero" in pk
     assert "+follow-up" in pk and "return a + b" not in pk.split("## Diff", 1)[1]
+
+
+# ------------------------------------------------------------------------------- B7
+
+
+def _session_closeout(e, template=None, finish=None):
+    """The project closes out with a CLOSE session ([closeout] mode session); the
+    adapter optionally templates it. The scripted CLOSE session writes a marker."""
+    P = e.c.projects["game"]
+    P.adapter.closeout_mode = lambda: "session"
+    if template is not None:
+        P.adapter.closeout_template = template
+    if finish is not None:
+        P.adapter.closeout_template_finish = finish
+    real = e.client.script
+
+    def script(ctx):
+        if ctx.get("phase") == "closeout":
+            return {"writes": {"docs/progress/T1_SUMMARY.md": "by the CLOSE session\n"},
+                    "commit": "T1: closeout",
+                    "final": '```coordinator-report\n{"status": "DONE", "summary": "ok"}\n```'}
+        return real(ctx)
+    e.client.script = script
+    return P
+
+
+def test_closeout_is_templated_by_the_coordinator_without_a_session(env):
+    seen = []
+
+    def template(spec, ctx):
+        seen.append(ctx)
+        return {"files": {f"docs/progress/{spec.task_id}_SUMMARY.md":
+                          f"# {spec.task_id}\nDONE at {ctx['head'][:12]}, review "
+                          f"{ctx['review']['verdict']}\n"}, "notes": ["summary"]}
+    e = env([GREEN])
+    _session_closeout(e, template)
+    e.c.approve("game", "T1", [], "victor")
+    t = drive(e, lambda t: t["state"] in (S.COMPLETE, S.BLOCKED, S.CHANGES_REQUIRED))
+    assert t["state"] == S.COMPLETE, (t["blocker"], t["next_action"])
+    assert t["sessions"] == 1 and not t["data"].get("closeout_session")   # no CLOSE session
+    assert (e.repo / "docs/progress/T1_SUMMARY.md").read_text().startswith("# T1\nDONE at")
+    assert seen[0]["gate"]["result"] == "PASS" and seen[0]["review"]["verdict"] == "APPROVED"
+    kinds = [json.loads(x["detail"])["kind"] for x in events(e, "coordinator_commit")]
+    assert "closeout" in kinds and events(e, "closeout_templated")
+    head = git(e.repo, "rev-parse", "HEAD")
+    assert git(e.repo, "ls-remote", "origin", "main").split()[0] == head      # published
+
+
+def test_a_failed_template_hands_over_to_the_close_session(env):
+    e = env([GREEN])
+    _session_closeout(e, lambda spec, ctx: {"error": "STATE.md has no ledger table"})
+    e.c.approve("game", "T1", [], "victor")
+    t = drive(e, lambda t: t["state"] in (S.COMPLETE, S.BLOCKED, S.CHANGES_REQUIRED))
+    assert t["state"] == S.COMPLETE, (t["blocker"], t["next_action"])
+    assert t["sessions"] == 2 and t["data"].get("closeout_session")
+    assert (e.repo / "docs/progress/T1_SUMMARY.md").read_text() == "by the CLOSE session\n"
+    [f] = events(e, "closeout_template_failed")
+    assert "no ledger table" in json.loads(f["detail"])["reason"]
+
+
+def test_a_template_whose_finish_fails_hands_over_with_its_documents(env):
+    e = env([GREEN])
+    _session_closeout(e, lambda spec, ctx: {"files": {"docs/progress/T1_SUMMARY.md": "draft\n"}},
+                      lambda spec, ctx: {"error": "done_check did not pass"})
+    e.c.approve("game", "T1", [], "victor")
+    t = drive(e, lambda t: t["state"] in (S.COMPLETE, S.BLOCKED, S.CHANGES_REQUIRED))
+    assert t["state"] == S.COMPLETE and t["sessions"] == 2
+    assert t["data"]["closeout_template"]["status"] == "failed"
+
+
+def test_templated_closeout_pushes_even_when_publish_is_verify_only(env):
+    """verify_only expected the CLOSE session to push; with no session the coordinator
+    pushes once itself."""
+    e = env([GREEN])
+    P = _session_closeout(e, lambda spec, ctx: {"files": {"docs/progress/T1_SUMMARY.md": "x\n"}})
+    P.profile.publish["mode"] = "verify_only"
+    e.c.approve("game", "T1", [], "victor")
+    t = drive(e, lambda t: t["state"] in (S.COMPLETE, S.BLOCKED, S.CHANGES_REQUIRED))
+    assert t["state"] == S.COMPLETE, t["blocker"]
+    assert git(e.repo, "ls-remote", "origin", "main").split()[0] == t["head_sha"] or \
+        git(e.repo, "ls-remote", "origin", "main").split()[0] == git(e.repo, "rev-parse", "HEAD")
+
+
+def _au_spec(tmp_path, visual=False, plan_text=None):
+    from types import SimpleNamespace
+    root = tmp_path / "au"
+    (root / "docs" / "progress").mkdir(parents=True)
+    if plan_text is not None:
+        (root / "docs" / "progress" / "UI-03_PLAN.md").write_text(plan_text)
+    spec = SimpleNamespace(task_id="UI-03", title="Hero build", data={
+        "visual": visual, "plan": "docs/progress/UI-03_PLAN.md"})
+    adapter = SimpleNamespace(p=SimpleNamespace(workspace=str(root)))
+    ctx = {"head": "a" * 40, "base": "b" * 40, "reviewed_sha": "a" * 40, "date": "2026-10-21",
+           "changed": ["src/client/UI/v3/Hero.lua"], "commits": [["a" * 40, "UI-03: x"]],
+           "review": {"review_id": "rv-1", "verdict": "APPROVED", "persona": "Astra"},
+           "visual": None, "vision_notes": ["Hero@390x844: tighten spacing"],
+           "gate": {"head": "a" * 40, "verdict": "v.json", "summary": "GATE UI-03 PASS",
+                    "result": "PASS", "checks": 12, "captures": 5}}
+    return root, spec, adapter, ctx
+
+
+def test_au_template_edits_or_appends_the_ledger_row(tmp_path):
+    from foundry_coordinator.projects.animaluprising import closeout_template as CT
+    _root, spec, _a, ctx = _au_spec(tmp_path)
+    table = "# STATE\r\n| Sprint | Status | Date | Notes |\r\n|---|---|---|---|\r\n" \
+            "| UI-02 | DONE | 2026-10-20 | x |\r\n"
+    new, why = CT.state_row(table, spec, ctx)
+    last = next(ln for ln in new.split("\r\n") if ln.startswith("| UI-03"))
+    assert why == "appended a ledger row" and last.startswith("| UI-03 | DONE | 2026-10-21 | ")
+    assert last.count("|") == 5 and len(last) <= 600 and "\r\n" in new
+    again, why = CT.state_row(new.replace("| UI-03 | DONE", "| UI-03 | IN PROGRESS"), spec, ctx)
+    assert why == "edited the sprint's ledger row" and again.count("| UI-03 |") == 1
+    assert "| UI-03 | DONE |" in again
+    assert CT.state_row("no table here", spec, ctx)[0] is None
+    spec.data["visual"] = True
+    assert "COMPLETE-PENDING-VISUAL-REVIEW" in CT.state_row(table, spec, ctx)[0]
+
+
+def test_au_template_master_order_close_row_and_summary(tmp_path):
+    from foundry_coordinator.projects.animaluprising import closeout_template as CT
+    plan = ("# UI-03\n- [x] 1. Build\n- [ ] 2. CLOSE: summary, STATE row, MASTER_ORDER\n")
+    root, spec, adapter, ctx = _au_spec(tmp_path, plan_text=plan)
+    (root / "docs" / "progress" / "STATE.md").write_text("| UI-02 | DONE | d | n |\n")
+    (root / "docs" / "MASTER_ORDER.md").write_text("1. UI-02 DONE\n2. UI-03 IN PROGRESS\n")
+    (root / "docs" / "progress" / "_SUMMARY_TEMPLATE.md").write_text(
+        "# <ID>\n## What shipped\n## Evidence\n## Risks and follow-ups\n")
+    out = CT.build(adapter, spec, ctx)
+    f = out["files"]
+    assert f["docs/MASTER_ORDER.md"].splitlines()[1] == "2. UI-03 DONE"
+    assert f["docs/progress/UI-03_PLAN.md"].splitlines()[2].startswith(
+        "- [x] 2. CLOSE: summary, STATE row, MASTER_ORDER (verified by the coordinator: closed")
+    s = f["docs/progress/UI-03_SUMMARY.md"]
+    assert "**Status:** DONE" in s and "src/client/UI/v3/Hero.lua" in s
+    assert "GATE UI-03 PASS" in s and "tighten spacing" in s
+    assert s.index("## What shipped") < s.index("## Evidence") < s.index("## Risks")
+    # no STATE.md: the template refuses (the CLOSE session handles it)
+    os.remove(root / "docs" / "progress" / "STATE.md")
+    assert "error" in CT.build(adapter, spec, ctx)
+
+
+def test_au_template_finish_requires_done_check_pass(tmp_path):
+    from types import SimpleNamespace
+    from foundry_coordinator.projects.animaluprising import closeout_template as CT
+    root, spec, adapter, ctx = _au_spec(tmp_path)
+    log = tmp_path / "dc.log"
+    log.write_text("ROW PASS x\nDONE-CHECK UI-03 PASS\n")
+    res = [SimpleNamespace(check="au.done_check.SUMMARY", result="PASS", detail="", evidence=""),
+           SimpleNamespace(check="au.done_check", result="PASS", detail="DONE-CHECK UI-03 PASS",
+                           evidence=str(log))]
+    adapter._done_check = lambda spec_, phase, rev: res
+    (root / "docs" / "progress" / "UI-03_EVIDENCE_RAW.log").write_bytes(b"GATE UI-03 PASS\n")
+    out = CT.finish(adapter, spec, ctx)
+    text = out["files"]["docs/progress/UI-03_EVIDENCE_RAW.log"]
+    assert text.startswith("GATE UI-03 PASS\n=== DONE-CHECK UI-03 (coordinator closeout")
+    assert text.rstrip().endswith("DONE-CHECK UI-03 PASS")
+    res[1].result = "FAIL"
+    assert "did not pass" in CT.finish(adapter, spec, ctx)["error"]

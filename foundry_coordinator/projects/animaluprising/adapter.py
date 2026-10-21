@@ -672,6 +672,16 @@ Change no code or test file in this session; if one needs changing, stop and rep
     def closeout_mode(self) -> str:
         return "session"
 
+    # B7 (2026-10-21): the coordinator templates the CLOSE duties itself; the CLOSE
+    # session above runs only when this fails (closeout_template.py, engine._closing)
+    def closeout_template(self, spec: TaskSpec, ctx: dict) -> dict:
+        from . import closeout_template
+        return closeout_template.build(self, spec, ctx)
+
+    def closeout_template_finish(self, spec: TaskSpec, ctx: dict) -> dict:
+        from . import closeout_template
+        return closeout_template.finish(self, spec, ctx)
+
     def review_extra(self, spec: TaskSpec, revision: str) -> str:
         parts = []
         rel = f"docs/progress/{spec.task_id}_EVIDENCE_RAW.log"

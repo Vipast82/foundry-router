@@ -1696,7 +1696,17 @@ class Coordinator:
             t = self.store.task(pid, tid)
         spec = P.adapter.describe(tid)
         mode = P.adapter.closeout_mode()
-        if mode == "session":
+        templated = False
+        if mode == "session" and not t["data"].get("closeout_session"):
+            # B7 (2026-10-21): the coordinator writes the closeout documents from the task
+            # record itself (no model tokens); a CLOSE session only when it can't, or when
+            # the templated closeout fails its checks (closeout_attempts > 0)
+            got = self._closeout_template(P, t, spec)
+            if got == "wait":
+                return
+            templated = got == "done"
+            t = self.store.task(pid, tid)
+        if mode == "session" and not templated:
             sid = t["data"].get("closeout_session")
             if not sid:
                 if self._held(P, t, "closeout session start"):
@@ -1736,7 +1746,8 @@ class Coordinator:
                                                "closeout_done": None})
         results = self._generic_checks(P, t, spec, head, phase="closeout")
         results += P.adapter.verify(spec, "closeout", head, t["reviewed_sha"])
-        published = self._publish(P, t, head, results)
+        # a templated closeout has no session to push: the coordinator pushes (B7)
+        published = self._publish(P, t, head, results, push=templated)
         cid = self.store.save_verification(pid, tid, head, "closeout", results)
         bad = [r for r in results if r.required and r.result != PASS]
         if bad:
@@ -1785,6 +1796,124 @@ class Coordinator:
                 self.log(f"{P.id}/{t['task_id']}: training capture failed: {e}")
             return pol != "hold"
 
+    def _closeout_template(self, P: Project, t: dict, spec) -> str:
+        """B7: one deterministic closeout by the coordinator. "done" (documents
+        committed at this head; the normal closeout checks follow), "wait" (locks /
+        paused), "none" (no template, or it was tried: the CLOSE session runs). The
+        adapter's closeout_template(spec, ctx) returns {"files": {path: text}} (or
+        None when it can't); closeout_template_finish(spec, ctx) may return more
+        files to commit after the first commit (e.g. done_check output for the
+        evidence log), or {"error": why} to hand over to the session."""
+        from . import bookkeeping as BK
+        pid, tid = P.id, t["task_id"]
+        fn = getattr(P.adapter, "closeout_template", None)
+        if not callable(fn) or (P.profile.raw.get("closeout") or {}).get("template") is False:
+            return "none"
+        st = dict(t["data"].get("closeout_template") or {})
+        if int(t["data"].get("closeout_attempts") or 0) > 0 or st.get("status") == "failed":
+            return "none"
+        head = P.ws.head()
+        if st.get("status") == "done":
+            return "done" if st.get("head") == head else "none"
+        if self._held(P, t, "closeout"):
+            return "wait"
+        if self._acquire(P, t, self._session_locks(P), writer=True):
+            return "wait"
+
+        def failed(why: str) -> str:
+            self.store.merge_data(pid, tid, closeout_template={"status": "failed",
+                                                               "error": why[:500], "head": head})
+            self.store.event(pid, tid, "closeout_template_failed", detail={"reason": why[:500]})
+            self._release_session(P, t)
+            return "none"
+        ctx = self._closeout_facts(P, t, spec, head)
+        try:
+            out = fn(spec, ctx) or {}
+        except Exception as e:                                    # noqa: BLE001
+            return failed(f"template: {type(e).__name__}: {e}")
+        files = dict(out.get("files") or {})
+        if out.get("error") or not files:
+            return failed(str(out.get("error") or "the template produced no documents"))
+        sha, err = self._write_and_commit(P, t, files, "closeout (coordinator template)",
+                                          "closeout")
+        if err:
+            return failed(err)
+        fin = getattr(P.adapter, "closeout_template_finish", None)
+        if callable(fin):
+            try:
+                more = fin(spec, {**ctx, "head": P.ws.head(), "commit": sha}) or {}
+            except Exception as e:                                # noqa: BLE001
+                return failed(f"finish: {type(e).__name__}: {e}")
+            if more.get("error"):
+                return failed(str(more["error"]))
+            if more.get("files"):
+                sha2, err = self._write_and_commit(P, t, dict(more["files"]),
+                                                   "closeout evidence (coordinator template)",
+                                                   "closeout")
+                if err:
+                    return failed(err)
+                sha = sha2 or sha
+        head = P.ws.head()
+        self.store.merge_data(pid, tid, closeout_template={"status": "done", "head": head,
+                                                           "commit": sha,
+                                                           "files": sorted(files)[:20]})
+        self.store.event(pid, tid, "closeout_templated", detail={
+            "head": head, "files": sorted(files)[:20], "notes": list(out.get("notes") or [])[:10]})
+        self._release_session(P, t)
+        return "done"
+
+    def _write_and_commit(self, P: Project, t: dict, files: dict, text: str,
+                          kind: str) -> tuple[str, str]:
+        """Write the template's files (workspace paths only) and commit exactly them as
+        the coordinator. (sha or "", error or "")."""
+        from . import bookkeeping as BK
+        for rel, content in files.items():
+            rel = str(rel).replace("\\", "/")
+            if not P.profile.in_workspace(rel):
+                return "", f"template path {rel!r} leaves the workspace"
+            path = os.path.join(P.profile.workspace, *rel.split("/"))
+            try:
+                os.makedirs(os.path.dirname(path), exist_ok=True)
+                with open(path, "w", encoding="utf-8", newline="") as f:
+                    f.write(str(content))
+            except OSError as e:
+                return "", f"cannot write {rel}: {e}"
+        sha, err = BK.commit(self, P, t, list(files), text, kind)
+        return sha, err
+
+    def _closeout_facts(self, P: Project, t: dict, spec, head: str) -> dict:
+        """What the coordinator knows about the finished task, for templated documents."""
+        pid, tid = P.id, t["task_id"]
+        base = t["data"].get("task_base") or t["base_sha"]
+        try:
+            changed = P.ws.changed_files(base, head)
+            commits = P.ws.commits(base, head)
+        except Exception:                                         # noqa: BLE001
+            changed, commits = [], []
+        rev = self.store.review(t.get("review_id") or "", pid, tid) if t.get("review_id") else None
+        apr = self.store.approvals(pid, tid, "visual")
+        fl = (t["data"].get("fast_lane") or {}) if isinstance(t["data"], dict) else {}
+        gate = None
+        if self.fast_lane.on(P, tid) and fl.get("run"):
+            from .fast_lane import verdict_rel
+            run = fl["run"]
+            v = self.fast_lane._verdict(P, tid, run)
+            if v:
+                gate = {"head": run["head"], "verdict": verdict_rel(tid, run["head"]),
+                        "summary": v.get("summary_line"), "result": v.get("result"),
+                        "checks": len(v.get("checks") or []),
+                        "captures": len(v.get("captures") or [])}
+        return {"task_id": tid, "title": spec.title, "head": head, "base": base,
+                "reviewed_sha": t.get("reviewed_sha") or "", "attempt": t.get("attempt"),
+                "sessions": t.get("sessions"), "changed": changed[:200],
+                "commits": [list(c) for c in commits[:60]],
+                "review": {"review_id": rev["review_id"], "verdict": rev["verdict"],
+                           "persona": rev.get("persona")} if rev else None,
+                "visual": {"approver": apr[-1]["approver"], "note": apr[-1].get("note"),
+                           "revision": apr[-1]["revision"]} if apr else None,
+                "vision_notes": list(fl.get("vision_notes") or [])[:30], "gate": gate,
+                "date": time.strftime("%Y-%m-%d", time.localtime(self.clock()))}
+
     def _closeout_retry(self, P: Project, t: dict, why: str, cid: str = "") -> None:
         pid, tid = P.id, t["task_id"]
         t = self.store.task(pid, tid)
@@ -1803,11 +1932,16 @@ class Coordinator:
             data={**t["data"], "findings": [f"closeout: {why}"], "closeout_session": None,
                   "closeout_done": None, "closeout_attempts": 0})
 
-    def _publish(self, P: Project, t: dict, head: str, results: list) -> str:
+    def _publish(self, P: Project, t: dict, head: str, results: list,
+                 push: bool = False) -> str:
         """Push (or check the agent's push) exactly once per commit. A push is
-        a backup, not a verdict: it is the last step after every check."""
+        a backup, not a verdict: it is the last step after every check. push=True
+        (a coordinator-templated closeout, B7): verify_only pushes too, since no
+        session is there to push."""
         pub = P.profile.publish
         mode = pub.get("mode", "none")
+        if push and mode == "verify_only":
+            mode = "push"
         if mode == "none":
             return "not published (policy: none)"
         if any(r.required and r.result != PASS for r in results):
