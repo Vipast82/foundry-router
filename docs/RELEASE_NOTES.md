@@ -2,6 +2,18 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.130.18 — re-reviews and fix rounds re-run only what failed
+
+- **Incremental re-review:** after a CHANGES_REQUIRED review at an ancestor commit, the next
+  review packet holds only the diff since that review, plus its findings to verify. Files reviewed
+  there and unchanged since are listed but not re-sent. The setting is `[review] incremental`
+  (default true).
+- **Fix-round prompt:** the session re-runs only the failing stories (`stories --story`) and
+  failing suites (`regression --selection`). It never starts its own full `sprint` gate. The
+  coordinator's gate already carries passed work (v0.130.16).
+- **Tests:** the batch-retry vision test's session-id assertion is corrected (v0.130.17 shipped
+  with it failing; the code was right).
+
 ## v0.130.17 — fast lane: vision never re-sends a frame it already passed
 
 A vision CHANGES round re-sent every frame, including frames the reviewer had already passed.

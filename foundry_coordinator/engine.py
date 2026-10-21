@@ -1213,12 +1213,36 @@ class Coordinator:
         earlier = [r for r in self.store.reviews(pid, tid) if r["valid"]
                    and r["verdict"] != "APPROVED"
                    and (r["reviewed_sha"] != head or R.packet_version(r) != R.PACKET_VERSION)]
+        # Incremental re-review (2026-10-21, token cost): after a CHANGES_REQUIRED review at an
+        # ancestor commit, send only the files changed since that review, plus its findings.
+        # Files reviewed there and unchanged since are not sent again.
+        dbase, dnotes = base, []
+        last = next((r for r in reversed(earlier) if r["verdict"] == "CHANGES_REQUIRED"
+                     and R.packet_version(r) == R.PACKET_VERSION
+                     and r["reviewed_sha"] != head), None)
+        if last and P.profile.review.get("incremental", True):
+            try:
+                ok = P.ws.is_ancestor(last["reviewed_sha"], head)
+            except Exception:                                     # noqa: BLE001
+                ok = False
+            if ok:
+                dbase = last["reviewed_sha"]
+                kept = sorted({f["path"] for f in P.ws.diff_files(base, head)}
+                              - {f["path"] for f in P.ws.diff_files(dbase, head)})
+                dnotes = [f"incremental re-review: the diff below is {dbase[:12]}..{head[:12]} "
+                          f"(since review {last['review_id']}); the task diff from {base[:12]} "
+                          f"was reviewed there. Check that its findings (listed below) are "
+                          f"resolved and that the changes since are correct.",
+                          f"{len(kept)} file(s) reviewed at {dbase[:12]} and unchanged since "
+                          f"(not re-sent): " + ", ".join(kept[:40])
+                          + (" ..." if len(kept) > 40 else "")]
         packet, info = R.build_packet(
             project_id=pid, task_id=tid, title=spec.title, spec=spec.spec, scope=spec.scope,
-            base=base, head=head, commits=P.ws.commits(base, head), verification=ver,
-            files=P.ws.diff_files(base, head), patch=lambda rel: P.ws.file_diff(base, head, rel),
+            base=dbase, head=head, commits=P.ws.commits(dbase, head), verification=ver,
+            files=P.ws.diff_files(dbase, head), patch=lambda rel: P.ws.file_diff(dbase, head, rel),
             priority=priority, evidence=evidence, contract=contract,
-            provenance={"spec_from": spec_from, "notes": spec_notes}, budget=budget,
+            provenance={"spec_from": spec_from, "notes": list(spec_notes or []) + dnotes},
+            budget=budget,
             earlier=earlier, authors=authors, question=P.profile.review.get("question") or "")
         if info["insufficient"]:
             # never a partial-code review: the reviewer isn't called at all

@@ -345,6 +345,35 @@ def test_repaired_head_is_reviewed_with_the_earlier_findings_and_fresh_verificat
     assert c.store.review(revs[0]["review_id"], "game", "T1")["verdict"] == "CHANGES_REQUIRED"
 
 
+def test_re_review_sends_only_the_diff_since_the_last_review(game):
+    """Token cost (2026-10-21): every re-review re-sent the whole task diff. After a
+    CHANGES_REQUIRED review at an ancestor, only files changed since it are sent."""
+    tmp, root, _ = game
+    seen = []
+
+    def reviewer(packet):
+        seen.append(packet)
+        if len(seen) == 1:
+            return review_json(packet, "CHANGES_REQUIRED", findings=[
+                {"severity": "major", "file": "src/a.txt", "line": 1, "message": "say OK twice"}])
+        return review_json(packet)
+
+    def agent(ctx):
+        if "say OK twice" in ctx["prompt"]:
+            return {"writes": {"src/a.txt": "OK OK"}, "commit": "T1: per review",
+                    "final": '```coordinator-report\n{"status": "DONE", "summary": "x"}\n```'}
+        return _work()(ctx)
+    c, ff, _ = _build(game, script=agent, ff=RecordingFoundry(reviewer))
+    c.approve("game", "T1", [], "victor")
+    assert run_until(c, lambda: _state(c) == S.COMPLETE, limit=60)
+    revs = c.store.reviews("game", "T1")
+    assert "src/tests/test_a.py" in seen[0].split("## Diff", 1)[1]
+    second = seen[1].split("## Diff", 1)[1]
+    assert "src/a.txt" in second and "src/tests/test_a.py" not in second
+    assert "incremental re-review" in seen[1] and revs[0]["reviewed_sha"][:12] in seen[1]
+    assert "say OK twice" in seen[1]
+
+
 # -- 6. packet format version vs stored state ----------------------------------------------
 
 def test_old_format_approval_and_ops_are_not_reused_or_looped_on(game):

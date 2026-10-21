@@ -499,7 +499,7 @@ def test_vision_reviews_in_batches_and_retries_only_inconclusive(env):
     # 3 batches + the uncertain batch re-asked in small chunks (v0.130.2: 1 frame each here);
     # the approved batches' frames are remembered as clean, so only that batch is re-asked
     assert len(vision_calls) == 5
-    assert [x["session_id"].rsplit(":", 1)[-1] for x in vision_calls[-2:]] == ["1.c1of2", "1.c2of2"]
+    assert [x["session_id"].rsplit("-", 1)[-1] for x in vision_calls[-2:]] == ["1.c1of2", "1.c2of2"]
     [a] = e.c.store.approvals("game", "T1", "visual")
     assert set(a["artifacts"]) == set(caps)
 

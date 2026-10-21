@@ -688,9 +688,13 @@ class FastLane:
                 + f"\n\n## {pend['title']} (from the coordinator; fix it in this session)\n"
                 + "\n".join(f"{i}. {x}" for i, x in enumerate(pend["lines"], 1)) + "\n"
                 + (pend.get("extra") or "")
-                + "\nFix the cause within the plan's file list, re-run the affected stories, "
-                  "commit by explicit path, then report DONE: the coordinator runs the full "
-                  "studio gate again on the committed code. Never weaken a check, skip a story "
+                + "\nFix the cause within the plan's file list. Re-run ONLY what failed: "
+                  "`stories --sprint <ID> --story <name>` for each failing story, and "
+                  "`regression --selection <failing suite ids>` for each failing suite. Do not "
+                  "start `sprint` yourself and do not re-run checks that passed: passed work is "
+                  "recorded and carried. Commit by explicit path, then report DONE: the "
+                  "coordinator's gate re-runs only what failed or what your change touched. "
+                  "Never weaken a check, skip a story "
                   "or edit the runner to get PASS. If a finding needs a decision the plan "
                   "doesn't settle, report BLOCKED with one question.\n")
         try:
