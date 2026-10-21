@@ -23,6 +23,8 @@ from tests.coordinator.lane_env import CLAUDE, VISION, admit, answer_helper, cap
     finish_primary, jpeg, png, primary_tool, setup
 
 VIS = """
+[automation]
+helpers = "proactive"  # revamp B5: lanes are opt-in
 [lanes]
 enabled = true
 transcript_poll_seconds = 0

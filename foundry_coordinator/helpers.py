@@ -62,6 +62,11 @@ _SUBAGENT_TITLE = re.compile(r"\(@([\w.-]+) subagent\)")
 # phase: what the unit is doing now, for the bridge and the UI. reason_code: WHY
 # it is in that phase, so a terminal `failed` is never ambiguous.
 STATUS_COLUMNS = ("phase TEXT", "reason_code TEXT", "investigation_key TEXT")
+# revamp B5: who consumes a unit's result (declared when the unit is created), and
+# whether a commit of that consumer used it (measured from git, never self-report):
+# git_used 1 = a commit after delivery touched a path of the proposal, 0 = the
+# consumer finished without one, NULL = not measured yet
+CONSUMER_COLUMNS = ("consumer TEXT", "git_used INTEGER", "git_detail TEXT")
 PHASES = ("queued", "admitted", "executing", "waiting_provider", "timed_out", "completed",
           "cancelled", "error")
 PHASE_LABELS = {"queued": "queued", "admitted": "admitted (starting)",
@@ -295,7 +300,8 @@ class HelperManager:
         # additive columns only (v0.117.0 -> requests; v0.118.0 -> proactive lanes);
         # existing rows keep their meaning (lane NULL = an ordinary helper unit)
         # v0.122.0 -> phase / reason_code / investigation_key (status unchanged)
-        for col in ("requests INTEGER DEFAULT 1", *LANE_COLUMNS, *STATUS_COLUMNS):
+        for col in ("requests INTEGER DEFAULT 1", *LANE_COLUMNS, *STATUS_COLUMNS,
+                    *CONSUMER_COLUMNS):
             try:
                 self.store.conn.execute(f"ALTER TABLE helper_units ADD COLUMN {col}")
             except Exception:                                    # noqa: BLE001
@@ -384,7 +390,7 @@ class HelperManager:
         return rows
 
     def _add(self, pid, tid, run_id, u: dict, source: str, h: dict,
-             head=None) -> Optional[str]:
+             head=None, consumer: str = "") -> Optional[str]:
         resp = re.sub(r"\s+", " ", str(u.get("responsibility") or "")).strip()[:200]
         kind = str(u.get("kind") or "code_proposal")
         if not resp or kind not in OPTIONAL_KINDS:
@@ -432,6 +438,8 @@ class HelperManager:
                           json.dumps(files), source,
                           "pending", now, now, 0, "queued", ikey))
         if n:
+            self.store.x("UPDATE helper_units SET consumer=? WHERE unit_id=?",
+                         ((consumer or "primary (task-declared)")[:300], uid))
             self.store.event(pid, tid, "helper_unit", detail={"unit": uid, "kind": kind,
                                                               "responsibility": resp,
                                                               "source": source})
@@ -561,10 +569,13 @@ class HelperManager:
                 continue
             files = [str(f) for f in (u.get("files") or []) if matches_any(str(f), spec.scope)]
             kind = u.get("kind") if u.get("kind") in OPTIONAL_KINDS else "code_proposal"
+            use = str(u.get("consumer") or u.get("use") or "").strip()
             uid = self._add(P.id, t["task_id"], t["run_id"], {
                 "responsibility": u.get("responsibility"), "kind": kind,
                 "prompt": u.get("prompt") or u.get("question") or "", "files": files,
-                "value": "normal"}, "report", h, head=lambda: self._head(P))
+                "value": "normal"}, "report", h, head=lambda: self._head(P),
+                consumer=f"primary:{t.get('session_id') or ''}" + (f" ({use[:200]})"
+                                                                   if use else ""))
             if uid:
                 out.append(uid)
         self.store.merge_data(P.id, t["task_id"], helper_reports_seen=(seen + [sig])[-20:])
@@ -1063,7 +1074,10 @@ class HelperManager:
                 "your coordinator-report block, then stopping your turn:\n"
                 '"helper_requests": [{"kind": "code_proposal | test_design | debug_advice | '
                 'exploration", "responsibility": "<one distinct part, e.g. S45 ordering test>", '
-                '"prompt": "<what you need>", "files": ["<paths inside this task scope>"]}]\n'
+                '"prompt": "<what you need>", "files": ["<paths inside this task scope>"], '
+                '"consumer": "<the step or commit that will use the result>"}]\n'
+                "Ask only for help you will use: a helper's value is measured by whether a "
+                "later commit of yours touches the files of its proposal.\n"
                 "Helpers can only read; they return proposals that arrive later in this session as "
                 "advisory text. You still write, test and commit everything yourself. Helpers run "
                 "only if the subscription quota allows optional work; a request may be deferred or "
@@ -1120,12 +1134,113 @@ class HelperManager:
 
     def mark_delivered(self, units: list[dict], session_id: str) -> None:
         for u in units:
+            self._note_delivered_head(u)
             self.store.x("UPDATE helper_units SET status='delivered', delivered_session=?, "
                          "updated_ts=?, delivered_ts=?, feedback=CASE WHEN lane IS NULL THEN "
                          "COALESCE(feedback, 'delivered') ELSE 'delivered' END, "
                          "phase='completed', reason_code=NULL WHERE unit_id=?",
                          (session_id, self.clock(), self.clock(), u["unit_id"]))
         self.lanes.note_delivery(units, session_id)
+
+    def _note_delivered_head(self, u: dict) -> None:
+        """The workspace HEAD when a result reached its consumer: the git
+        measurement compares what the consumer committed after it."""
+        P = (getattr(self.c, "projects", None) or {}).get(u.get("project_id"))
+        head = self._head(P) if P is not None else ""
+        if not head:
+            return
+        row = self.store.q("SELECT feedback_detail FROM helper_units WHERE unit_id=?",
+                           (u["unit_id"],))
+        try:
+            det = json.loads((row[0]["feedback_detail"] if row else None) or "{}")
+        except (TypeError, ValueError):
+            det = {}
+        if not isinstance(det, dict):
+            det = {}
+        det["delivered_head"] = head
+        self.store.x("UPDATE helper_units SET feedback_detail=? WHERE unit_id=?",
+                     (json.dumps(det), u["unit_id"]))
+
+    @staticmethod
+    def proposal_paths(u: dict) -> list[str]:
+        """Every workspace path a unit's proposal names: its files, the paths of a
+        unified diff in its result, and (lane units) the envelope's affected paths
+        and finding paths (":line" stripped)."""
+        from .lanes import patch_paths
+        out: list[str] = []
+        files = u.get("files")
+        if isinstance(files, str):
+            try:
+                files = json.loads(files or "[]")
+            except ValueError:
+                files = []
+        out += [str(f) for f in files or []]
+        out += patch_paths(str(u.get("result") or ""))
+        try:
+            env = json.loads(u.get("envelope") or "{}")
+        except (TypeError, ValueError):
+            env = {}
+        if isinstance(env, dict):
+            out += [str(p) for p in env.get("affected_paths") or []]
+            out += patch_paths(str(env.get("patch") or ""))
+            for f in env.get("findings") or []:
+                if isinstance(f, dict):
+                    out += [str(p) for p in f.get("paths") or []]
+        clean = []
+        for p in out:
+            p = re.sub(r":\d+(?::\d+)?$", "", p.strip().replace("\\", "/"))
+            while p.startswith("./"):
+                p = p[2:]
+            if p and not p.startswith(("/", "../")) and ":" not in p:
+                clean.append(p)
+        return sorted(dict.fromkeys(clean))
+
+    def measure_git(self, P, tid: str, final: bool = False) -> list[str]:
+        """revamp B5: a delivered result counts as used only when a commit after
+        its delivery touched a path of the proposal (git, not the primary's
+        report). With final=True (the consumer finished) an unmatched result is
+        recorded unused. Returns the unit ids measured now."""
+        from .automation import get as auto_get
+        from .profile import matches_any
+        if not auto_get(P, "helper_git_measure"):
+            return []
+        head = self._head(P)
+        out = []
+        for u in self.store.q("SELECT * FROM helper_units WHERE project_id=? AND task_id=? AND "
+                              "status='delivered' AND git_used IS NULL", (P.id, tid)):
+            try:
+                det = json.loads(u.get("feedback_detail") or "{}")
+            except (TypeError, ValueError):
+                det = {}
+            base = (det if isinstance(det, dict) else {}).get("delivered_head") or ""
+            paths = self.proposal_paths(u)
+            touched: list[str] = []
+            if base and head and base != head and paths:
+                try:
+                    changed = P.ws.changed_files(base, head)
+                except Exception:                                # noqa: BLE001
+                    changed = []
+                touched = [f for f in changed if matches_any(f, paths)]
+            if touched:
+                used = 1
+            elif final:
+                used = 0
+            else:
+                continue
+            why = ("a commit touched " + ", ".join(touched[:6]) if used else
+                   "no proposal paths to measure" if not paths else
+                   "unknown delivery revision" if not base else
+                   "no commit after delivery touched " + ", ".join(paths[:6]))
+            self.store.x("UPDATE helper_units SET git_used=?, git_detail=? WHERE unit_id=?",
+                         (used, json.dumps({"head": head, "delivered_head": base,
+                                            "touched": touched[:20], "paths": paths[:20],
+                                            "why": why}), u["unit_id"]))
+            self.store.event(P.id, tid, "helper_git_used" if used else "helper_git_unused",
+                             detail={"unit": u["unit_id"], "lane": u.get("lane"),
+                                     "consumer": u.get("consumer"), "why": why[:300],
+                                     "claimed": u.get("feedback")})
+            out.append(u["unit_id"])
+        return out
 
     def holding(self, pid: str, tid: str) -> list[dict]:
         """Running units an idle primary waits for (bounded by

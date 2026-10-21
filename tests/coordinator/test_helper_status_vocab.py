@@ -20,7 +20,7 @@ from foundry_coordinator.helpers import HelperManager, unit_status
 from foundry_coordinator.store import Store
 from tests.coordinator.lane_env import setup
 
-ONLY = '[lanes]\nenabled=true\ntranscript_poll_seconds=0\n[lanes.failure_triage]\nenabled=true\n'
+ONLY = '[automation]\nhelpers = \"proactive\"\n[lanes]\nenabled=true\ntranscript_poll_seconds=0\n[lanes.failure_triage]\nenabled=true\n'
 
 
 @pytest.fixture

@@ -12,6 +12,8 @@ from tests.coordinator.lane_env import CLAUDE, admit, answer_helper, finish_prim
     helper_sessions, primary_tool, setup
 
 ONLY = """
+[automation]
+helpers = "proactive"  # revamp B5: lanes are opt-in
 [lanes]
 enabled = true
 transcript_poll_seconds = 0

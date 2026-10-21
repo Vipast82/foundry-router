@@ -254,7 +254,7 @@ def test_profile_defaults_and_validation(tmp_path):
 def test_lane_trimming_only_for_fast_lane_tasks(tmp_path):
     repo, _ = make_repo(tmp_path, "game", [T1, T2])
     lanes = "\n".join(f"[lanes.{x}]\nenabled = true" for x in L.LANES)
-    p = load(str(fl_profile(tmp_path, repo, tmp_path / "x.py", "[lanes]\nenabled = true\n"
+    p = load(str(fl_profile(tmp_path, repo, tmp_path / "x.py", "[automation]\nhelpers = \"proactive\"\n[lanes]\nenabled = true\n"
                             + lanes + "\n")))
     P = SimpleNamespace(profile=p)
     fast = L.settings(P, "T1")

@@ -13,6 +13,7 @@ Nothing here prompts the primary or runs a tool in the workspace.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 import os
@@ -299,8 +300,8 @@ class Proactive(VisualMixin, AdvisoryMixin):
             return u['unit_id'], 'coalesced'
         if prior:
             if len(prior) >= 1 + int(ls['max_retries']):
-                self.store.event(pid, tid, 'lane_limit', detail={'lane':lane,'key':key[:100],
-                                 'reason':'same-run assignment recovery budget exhausted'})
+                self._lane_limit(pid, tid, t['run_id'], lane, key, {
+                    'reason': 'same-run assignment recovery budget exhausted'})
                 return None, 'limit'
         lane_n = self.store.q("SELECT COUNT(*) AS n FROM helper_units WHERE project_id=? AND "
                               "task_id=? AND run_id=? AND lane=?", (pid, tid, t['run_id'], lane))[0]["n"]
@@ -323,9 +324,14 @@ class Proactive(VisualMixin, AdvisoryMixin):
                 total = max(total, int(ls["max_lane_units_per_task"]))   # ceiling reached
         if lane_n >= int(ls["lanes"][lane].get('max_per_run',ls['lanes'][lane]['max_per_task'])) or \
                 (lane not in L.OWN_BUDGET_LANES and total >= int(ls["max_lane_units_per_task"])):
-            self.store.event(pid, tid, "lane_limit", detail={"lane": lane, "key": key[:100],
-                                                             "lane_units": lane_n,
-                                                             "total": total})
+            self._lane_limit(pid, tid, t["run_id"], lane, key, {"lane_units": lane_n,
+                                                                "total": total})
+            return None, "limit"
+        misses = self._git_misses(pid, tid, lane, ls)
+        if misses:
+            self._lane_limit(pid, tid, t["run_id"], lane, "git-unused", {
+                "reason": f"lane off for this task: its last {misses} delivered results were "
+                          f"not used by any commit (git-measured)"})
             return None, "limit"
         uid = f"hu-{uuid.uuid4().hex[:10]}"
         stored_resp = resp
@@ -345,11 +351,39 @@ class Proactive(VisualMixin, AdvisoryMixin):
                       lane, prio if priority is None else priority, parent_unit or None, depth,
                       artifact_id or None, snapshot_id or None, mode, event_key or None,
                       json.dumps(packet, default=str)[:60000], t.get("session_id"),resp))
+        self.store.x("UPDATE helper_units SET consumer=? WHERE unit_id=?",
+                     (f"primary:{t.get('session_id') or ''} (proactive {lane} lane)", uid))
         self.store.event(pid, tid, "helper_unit", detail={"unit": uid, "kind": kind, "lane": lane,
                                                           "responsibility": resp, "source": "lane",
                                                           "parent_unit": parent_unit,
                                                           "depth": depth})
         return uid, "created"
+
+    def _lane_limit(self, pid: str, tid: str, run_id: str, lane: str, key: str,
+                    detail: dict) -> None:
+        """One `lane_limit` event per (run, lane, key): a lane at its cap is asked
+        again every tick, and an event per ask buried the log (7,608 rows on
+        UI-D1, revamp B5). The once-marker is an ops row, so a restart keeps it."""
+        mark = hashlib.sha1(f"{run_id}|{lane}|{key}".encode()).hexdigest()[:16]
+        if self.store.op_begin(f"lane_limit:{pid}:{tid}:{mark}", pid, tid,
+                               "lane_limit") is not None:
+            return
+        self.store.event(pid, tid, "lane_limit", detail={"lane": lane, "key": key[:100],
+                                                         **detail})
+        self.store.op_update(f"lane_limit:{pid}:{tid}:{mark}", "done", {"lane": lane})
+
+    def _git_misses(self, pid: str, tid: str, lane: str, ls: dict) -> int:
+        """N when the lane's last N git-measured results of this task were all
+        unused ([automation] helper_lane_misses; 0 = never turns a lane off)."""
+        from .automation import get as auto_get
+        P = (getattr(self.mgr.c, "projects", None) or {}).get(pid)
+        n = int(auto_get(P, "helper_lane_misses") or 0) if P is not None else 0
+        if n <= 0:
+            return 0
+        rows = self.store.q("SELECT git_used FROM helper_units WHERE project_id=? AND task_id=? "
+                            "AND lane=? AND git_used IS NOT NULL ORDER BY delivered_ts DESC, "
+                            "rowid DESC LIMIT ?", (pid, tid, lane, n))
+        return n if len(rows) >= n and all(int(r["git_used"]) == 0 for r in rows) else 0
 
     def plan(self, P, t: dict, spec, ls: dict) -> None:
         """Lane events -> units. Deterministic; no model call."""

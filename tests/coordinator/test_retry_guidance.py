@@ -176,3 +176,25 @@ def test_consultation_without_extra_allowance_reports_then_stops(tmp_path):
     c.tick()
     assert c.store.task('game', 'T1')['state'] == S.FAILED
     assert len(f.guidance_calls) == 1
+
+
+def test_guidance_is_skipped_when_the_lead_manager_is_on(tmp_path):
+    """revamp B8: the lead case that follows the same stop sees code, tests and
+    logs; the blind adviser first would be the same advice twice."""
+    from types import SimpleNamespace
+    from foundry_coordinator.retry_guidance import RetryGuidance
+    c, f = setup(tmp_path)
+    P = c.projects['game']
+    on = SimpleNamespace(profile=SimpleNamespace(raw=P.profile.raw, roles=P.profile.roles,
+                                                 lead_manager_on=lambda: True,
+                                                 limit=P.profile.limit,
+                                                 persona=P.profile.persona),
+                         foundry=P.foundry, id=P.id)
+    t = c.store.task('game', 'T1')
+    assert RetryGuidance(c).consult(on, t) is False
+    rec = c.store.task('game', 'T1')['data']['retry_guidance']
+    assert rec['status'] == 'skipped' and 'lead manager enabled' in rec['reason']
+    assert f.guidance_calls == []
+    # recorded once: a second exhaustion neither calls nor rewrites it
+    assert RetryGuidance(c).consult(on, c.store.task('game', 'T1')) is False
+    assert c.store.task('game', 'T1')['data']['retry_guidance']['ts'] == rec['ts']

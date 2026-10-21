@@ -155,7 +155,9 @@ FAST_LANE_DEFAULTS = {
     "max_red_gates_before_handoff": 2,        # local-primary tasks then auto-request frontier_primary
     "max_vision_rounds": 2,                   # CHANGES rounds before accept-with-notes
     "vision_batch_frames": 20,                # frames per vision call (UI-D1 had ~560 frames)
-    "lanes": ["prework", "test_design", "failure_triage", "incremental_review"],
+    # revamp B5 (Victor 2026-10-21): helpers start on demand only, so a fast-lane
+    # task runs no proactive lane unless the profile lists one here
+    "lanes": [],
     # files the runner rewrites on every run ({task} = the task id): never part of the
     # coordinator's clean / unrelated_preserved checks (UI-D1 lost its last attempt to the
     # evidence log, which was already dirty at run start and changed on every gate run)
@@ -268,6 +270,9 @@ class Profile:
     # [fast_lane] (UI-T0): validated settings with defaults; off by default.
     fast_lane: dict = field(default_factory=lambda: {
         k: (list(v) if isinstance(v, list) else v) for k, v in FAST_LANE_DEFAULTS.items()})
+    # [automation] (revamp B5-B13): validated settings with defaults (automation.py)
+    automation: dict = field(default_factory=lambda: __import__(
+        "foundry_coordinator.automation", fromlist=["defaults"]).defaults())
 
     def fast_lane_task(self, task_id: str) -> bool:
         """True when [fast_lane] is enabled and names this task."""
@@ -445,6 +450,11 @@ def load(path: str) -> Profile:
         lifecycle[k] = v
     lead_manager = _lead_manager_table(path, raw.get("lead_manager"))
     fast_lane = _fast_lane_table(path, raw.get("fast_lane"))
+    from .automation import AutomationError, table as _automation_table
+    try:
+        automation = _automation_table(path, raw.get("automation"))
+    except AutomationError as e:
+        raise ProfileError(str(e)) from None
     return Profile(
         id=pid, name=str(raw.get("name") or pid), version=str(raw.get("version") or "1"),
         path=path, hash=hashlib.sha256(blob).hexdigest()[:16], workspace=wpath,
@@ -457,7 +467,8 @@ def load(path: str) -> Profile:
         resources=list((raw.get("resources") or {}).get("exclusive") or []),
         closeout=dict(raw.get("closeout") or {}), prompts=dict(raw.get("prompts") or {}),
         artifacts=dict(raw.get("artifacts") or {}), commit=dict(raw.get("commit") or {}),
-        lifecycle=lifecycle, lead_manager=lead_manager, fast_lane=fast_lane)
+        lifecycle=lifecycle, lead_manager=lead_manager, fast_lane=fast_lane,
+        automation=automation)
 
 
 def check_isolation(profiles: list[Profile]) -> None:

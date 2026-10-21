@@ -40,6 +40,14 @@ class RetryGuidance:
                 "local_fallback": bool(cfg.get("local_fallback", False))}
 
     @staticmethod
+    def lead_on(P) -> bool:
+        fn = getattr(P.profile, "lead_manager_on", None)
+        try:
+            return bool(fn()) if callable(fn) else False
+        except Exception:                                        # noqa: BLE001
+            return False
+
+    @staticmethod
     def allowance(t):
         record = (t.get("data") or {}).get("retry_guidance") or {}
         return 1 if record.get("status") == "repair" and record.get("extra_attempts") == 1 else 0
@@ -92,6 +100,16 @@ class RetryGuidance:
         if not cfg["enabled"]:
             return False
         prior = (t.get("data") or {}).get("retry_guidance")
+        if self.lead_on(P):
+            # revamp B8: with the lead manager on, the same stop opens a lead case
+            # that sees the code, tests and logs; a blind adviser first is the
+            # same advice twice. Recorded once, never called.
+            if not prior or prior.get("status") == "deferred":
+                self._record(P, t, {"persona": cfg["persona"], "extra_attempts": 0,
+                                    "attempt": t["attempt"], "ts": self.c.clock(),
+                                    "status": "skipped", "reason": "lead manager enabled: the "
+                                    "lead case handles this stop (no duplicate advice)"})
+            return False
         if prior and prior.get("status") == "deferred":
             # a quota deferral waits for its reset, unless the local route can answer now
             if self.c.clock() < float(prior.get("retry_at") or 0) and not cfg["local_fallback"]:
