@@ -2,6 +2,17 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.130.14 — fast lane: a red gate never carries to a newer commit
+
+UI-02a's own sprint gate passed with the new baseline (v0.130.13) at 746db62. Only evidence files
+had changed since the coordinator's last gate at eb14163, which was red and recorded before the
+baseline existed. The carry rule, which lets a gate describe a later commit when only
+evidence or closeout files changed, re-used that red verdict. The coordinator reported "same
+findings" and opened a no-progress decision. Now only a green gate carries: a red or errored
+verdict always makes the coordinator run the gate again on the new commit. Test:
+`test_red_gate_never_carries_to_a_newer_commit`; fast-lane tests pass. Coordinator change; it
+needs a restart.
+
 ## v0.130.13 — studio_gate: baseline-relative regression
 
 UI-02a's sprint gate could never pass: six of its 14 regression suites (S45, S49, S50, UI_01,

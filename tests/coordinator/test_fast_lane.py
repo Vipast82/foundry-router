@@ -642,3 +642,20 @@ def test_vision_after_an_approval_reviews_only_changed_frames(env):
                    {"captures": [{"path": c} for c in caps]}, [])
     assert r.result == P_ and "unchanged" in r.detail
     assert len([x for x in e.ff.chats if x.get("packet") == "vision"]) == n0   # no new call
+
+
+def test_red_gate_never_carries_to_a_newer_commit():
+    """UI-02a (2026-10-21): only evidence files changed after a red gate, so the coordinator
+    re-consumed the red verdict instead of running the gate on the new commit (where the
+    session's own run passed)."""
+    from foundry_coordinator import fast_lane as FL
+    fl = FL.FastLane.__new__(FL.FastLane)
+    ws = SimpleNamespace(is_ancestor=lambda a, b: True,
+                         changed_files=lambda a, b: ["docs/evidence/UI-v3/T1/x.png"])
+    P = SimpleNamespace(ws=ws, adapter=SimpleNamespace(exempt_paths=lambda spec: ["docs/evidence/**"]))
+    green = {"result": "PASS", "checks": [], "captures": []}
+    red = {"result": "FAIL", "checks": [{"id": "x", "result": "FAIL", "required": True}],
+           "captures": []}
+    assert fl._carries(P, None, "a" * 40, "b" * 40, green) is True
+    assert fl._carries(P, None, "a" * 40, "b" * 40, red) is False
+    assert fl._carries(P, None, "a" * 40, "a" * 40, red) is True       # same commit: same run

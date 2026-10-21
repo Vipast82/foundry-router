@@ -338,6 +338,12 @@ class FastLane:
         closeout-exempt paths), like the old gate-binding rule (R-C)."""
         if gate_head == head:
             return True
+        # a red (or errored) gate never carries to a newer commit: the session may have fixed
+        # it, or the runner may judge differently now (UI-02a 2026-10-21: its own gate PASSed
+        # with the baseline at 746db62, but the coordinator re-consumed the red verdict from
+        # eb14163, saw "same findings" and opened a no-progress decision)
+        if v is not None and effective_result(v) != PASS:
+            return False
         try:
             if not P.ws.is_ancestor(gate_head, head):
                 return False
