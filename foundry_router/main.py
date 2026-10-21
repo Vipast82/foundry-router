@@ -99,6 +99,7 @@ class Services:
         self.guardrails = GuardrailEngine(cfg.guardrails, db, self.meridian_usage,
                                           pool_mode=cfg.backend_pool.mode)
         self.guardrails.cliproxy_usage = self.cliproxy_usage
+        self.guardrails.config_fn = lambda: self.config_store.config
         from .budget import Ledger
         # Backend limits come from the live pool (rebuilt whenever backends are saved).
         self.ledger = Ledger(lambda: self.config_store.config.budgets, db,

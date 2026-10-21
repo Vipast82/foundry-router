@@ -969,7 +969,7 @@ async def _failover_list(svc, persona, first: str, user_text: str, eff,
         info = svc.pool.backend_info(mid) or {}
         if _is_paid_backend(info):
             v = await svc.guardrails.check_paid_call(mid, info, svc.registry.get(mid),
-                                                     RequestGuardState(), eff)
+                                                     RequestGuardState(), eff, reserve=False)
             if not v.allowed:
                 continue
         out.append(mid)
@@ -2789,8 +2789,21 @@ async def _passthrough_chat(svc, model_name, messages, client_tools, options,
     with the backend's real stats (durations, done_reason) handed back and the
     call recorded in the Live / Performance telemetry."""
     logger = RequestLogger(svc.db, "", model_name, "passthrough", user_text)
-    request_context.note_route(served_model=model_name,
-                               backend=(svc.pool.backend_info(model_name) or {}).get("name"))
+    binfo = svc.pool.backend_info(model_name) or {}
+    request_context.note_route(served_model=model_name, backend=binfo.get("name"))
+    # A raw model name gets the same usage/spend gate as a persona route. The
+    # client named this model, so a denial is a clear 429 (never a silent swap).
+    if _is_paid_backend(binfo):
+        v = await svc.guardrails.check_paid_call(
+            model_name, binfo, svc.registry.get(model_name), RequestGuardState(),
+            svc.guardrails.effective(None))
+        if not v.allowed:
+            from ..budget import BudgetDenied
+            logger.record_guardrail(f"denied {model_name}: {v.reason}")
+            logger.finish("error", v.reason)
+            return _budget_denied_response(BudgetDenied(
+                v.reason, "usage_guardrail",
+                "paused" if v.code == "paused" else "budget_denied", v.retry_after))
     max_tokens = svc.config_store.config.agent_brain.worker_max_tokens
     t0 = time.monotonic_ns()
     client_messages = messages

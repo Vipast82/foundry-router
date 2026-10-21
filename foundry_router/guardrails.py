@@ -25,6 +25,21 @@ from .usage import MeridianUsage, spend_since
 log = logging.getLogger(__name__)
 
 
+def effective_cutoff(config, backend_name: str) -> float:
+    """THE usage cutoff (percent used) for one backend, resolved in one place:
+    backends.<name>.usage_limit_pct if set; else, for Meridian (Claude), the
+    legacy conserve_strong_at (the point Sonnet-class stops); else the global
+    subscription_usage.limit_pct. A backend-level value is a hard cutoff for
+    every tier (it replaces the conserve_* ladder)."""
+    cfg = next((b for b in config.backend_pool.internal.backends
+                if b.name == backend_name), None)
+    if cfg is not None and cfg.usage_limit_pct:
+        return float(cfg.usage_limit_pct)
+    if cfg is not None and cfg.type == "anthropic-compatible":
+        return float(config.meridian.conserve_strong_at) * 100.0
+    return float(config.subscription_usage.limit_pct)
+
+
 @dataclass
 class RequestGuardState:
     """Per-request counters, owned by the agent loop."""
@@ -61,6 +76,8 @@ class GuardrailEngine:
         self.pool_mode = pool_mode
         # CLIProxyAPI usage readings (set by Services); None in bare tests.
         self.cliproxy_usage = None
+        # Live AppConfig accessor (set by Services) for effective_cutoff().
+        self.config_fn = None
 
     def _defers(self) -> bool:
         # defer_to_pool is inert under mode: internal (§4.3) — there is no
@@ -89,13 +106,21 @@ class GuardrailEngine:
             return Verdict(False, msg)
         return Verdict(True)
 
+    def effective_cutoff(self, backend_name: str) -> Optional[float]:
+        """The usage cutoff (percent) in force for one backend — see the
+        module-level effective_cutoff. None without a live config."""
+        fn = self.config_fn
+        return effective_cutoff(fn(), backend_name) if fn else None
+
     async def check_paid_call(self, model_id: str, backend_info: Optional[dict],
                               model_meta: Optional[dict], state: RequestGuardState,
-                              effective: dict) -> Verdict:
+                              effective: dict, reserve: bool = True) -> Verdict:
         """Called before dispatching to any backend. 'Paid' covers two distinct
         things (§4.7, don't conflate): subscription-window models (Meridian —
         counts against max_paid_calls and the usage window, never dollar caps)
-        and metered models (counts against max_paid_calls and spend caps)."""
+        and metered models (counts against max_paid_calls and spend caps).
+        `reserve=False` is for a probe (a failover candidate that may never be
+        called): an allowed probe isn't counted as an in-flight call."""
         ledger = getattr(self, "ledger", None)
         if ledger is not None and backend_info:
             from .budget import context_from_info
@@ -133,7 +158,7 @@ class GuardrailEngine:
                 return v
             cu = self.cliproxy_usage
             if cu is not None and cu.configured(backend_info):
-                st = await cu.model_status(model_id, backend_info or {})
+                st = await cu.model_status(model_id, backend_info or {}, reserve=reserve)
                 if not st["available"]:
                     msg = f"{st['note']} — use another model or wait"
                     state.events.append(f"denied {model_id}: {msg}")
@@ -190,7 +215,23 @@ class GuardrailEngine:
             worst = None if state.user_approved_paid else snap.get("worst_used")
             if state.user_approved_paid:
                 fable_used = None
-            if (level >= 4 and fable_used is not None
+            # backends.<name>.usage_limit_pct replaces the conserve_* ladder
+            # with one cutoff for every tier (Fable's own bucket included).
+            override = (backend_info or {}).get("usage_limit_pct")
+            cutoff = float(override) / 100.0 if override else None
+            if cutoff is not None:
+                if level >= 4 and fable_used is not None and fable_used >= cutoff:
+                    msg = (f"Fable budget {fable_used:.0%} used (cutoff {cutoff:.0%}) — "
+                           f"use Opus for this task")
+                    state.events.append(f"denied {model_id}: {msg}")
+                    return Verdict(False, msg)
+                if worst is not None and worst >= cutoff:
+                    msg = (f"Claude window {worst:.0%} used (cutoff {cutoff:.0%}) — "
+                           f"use another route or wait for the reset")
+                    state.events.append(f"denied {model_id}: {msg}")
+                    return Verdict(False, msg)
+                worst = None            # tier ladder replaced by the cutoff
+            elif (level >= 4 and fable_used is not None
                     and fable_used >= mcfg.conserve_fable_at):
                 msg = (f"Fable budget {fable_used:.0%} used — conserving Fable; "
                        f"use Opus for this task (it handles complex debugging/"

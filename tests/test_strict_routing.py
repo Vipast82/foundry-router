@@ -15,7 +15,7 @@ from foundry_router.config import BackendConfig, BackendPoolConfig
 from foundry_router.pool.internal import InternalPool
 
 HITS: list = []
-STATE = {"local_fail": False, "gpt_used": 10}
+STATE = {"local_fail": False, "gpt_used": 10, "gpt_429": False}
 
 
 def _now_iso(offset_s: float = 0) -> str:
@@ -40,6 +40,8 @@ def _router(req: httpx.Request):
                 "X-Codex-Primary-Window-Minutes": "300",
                 "X-Codex-Primary-Reset-After-Seconds": "3000"}}}]})
     HITS.append(host)
+    if host == "cpa-host" and STATE["gpt_429"]:
+        return httpx.Response(429, json={"error": {"message": "usage limit reached"}})
     if host == "llm-host" and STATE["local_fail"]:
         return httpx.Response(500, text="boom")
     return _chat_ok("x", {"cpa-host": "gpt", "llm-host": "local", "alt-host": "other"}[host])
@@ -49,7 +51,7 @@ def _router(req: httpx.Request):
 def strict(app, client):
     svc = app.state.services
     HITS.clear()
-    STATE.update(local_fail=False, gpt_used=10)
+    STATE.update(local_fail=False, gpt_used=10, gpt_429=False)
     http = httpx.AsyncClient(transport=httpx.MockTransport(_router))
     pool = InternalPool([
         BackendConfig(name="cliproxy", type="openai-compatible", url="http://cpa-host:8317/v1",

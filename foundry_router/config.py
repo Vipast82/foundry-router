@@ -330,6 +330,21 @@ class SubscriptionUsageConfig(BaseModel):
     poll_seconds: int = 60
     # How long one read of the management API is reused.
     cache_seconds: float = 20.0
+    # Headroom before the cutoff. Readings are passive (they move only when a
+    # response completes), so a model whose worst window is within
+    # reserve_pct + 2 points of its cutoff bypasses cache_seconds and re-reads
+    # the management API before every decision. The call is denied at the cutoff.
+    reserve_pct: float = 3.0
+    # Calls admitted but not yet reflected in a reading count against the cutoff
+    # (points each) so concurrent requests can't all pass on one stale reading.
+    # A reservation ends when a newer reading arrives or after
+    # inflight_ttl_seconds. 0 disables the count.
+    inflight_pct: float = 0.5
+    inflight_ttl_seconds: float = 120.0
+    # false (default): an account whose usage can't be read (management API
+    # down, no reading yet) lets the call through, as before. true: unreadable
+    # usage is NOT available capacity and the model is denied.
+    fail_closed: bool = False
 
 
 class HelperPolicyConfig(BaseModel):

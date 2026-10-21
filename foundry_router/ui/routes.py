@@ -913,11 +913,104 @@ async def set_subscription_usage(request: Request):
             updates["poll_seconds"] = max(0, int(body["poll_seconds"]))
         except (TypeError, ValueError):
             return JSONResponse({"error": "poll_seconds must be an integer"}, status_code=400)
+    for k, hi in (("reserve_pct", 50.0), ("inflight_pct", 20.0),
+                  ("inflight_ttl_seconds", 3600.0), ("cache_seconds", 3600.0)):
+        if k in body:
+            try:
+                updates[k] = max(0.0, min(hi, float(body[k])))
+            except (TypeError, ValueError):
+                return JSONResponse({"error": f"{k} must be a number"}, status_code=400)
+    if "fail_closed" in body:
+        updates["fail_closed"] = bool(body["fail_closed"])
 
     def mutate(raw):
         raw.setdefault("subscription_usage", {}).update(updates)
     cfg = svc.config_store.save(mutate)
     return {"ok": True, "subscription_usage": cfg.subscription_usage.model_dump()}
+
+
+def _cutoff_rows(svc) -> list[dict]:
+    from ..guardrails import effective_cutoff
+    cfg = svc.config_store.config
+    rows = []
+    for b in cfg.backend_pool.internal.backends:
+        kind = ("claude" if b.type == "anthropic-compatible"
+                else "gpt" if b.effective_flavor == "cliproxyapi" else None)
+        if kind is None:
+            continue
+        rows.append({"name": b.name, "kind": kind, "enabled": b.enabled,
+                     "cutoff_pct": effective_cutoff(cfg, b.name),
+                     "override": b.usage_limit_pct,
+                     "source": ("backend" if b.usage_limit_pct else
+                                "meridian.conserve_strong_at" if kind == "claude"
+                                else "subscription_usage.limit_pct")})
+    return rows
+
+
+@router.get("/admin/api/config/cutoffs")
+async def get_cutoffs(request: Request):
+    """The usage cutoff (percent used) per backend — one place for Claude and
+    GPT. `claude` / `gpt` are the headline values: the first Claude (Meridian)
+    backend's cutoff and the GPT default every CLIProxyAPI backend without its
+    own override uses."""
+    svc = _svc(request)
+    cfg = svc.config_store.config
+    rows = _cutoff_rows(svc)
+    claude = next((r["cutoff_pct"] for r in rows if r["kind"] == "claude"),
+                  cfg.meridian.conserve_strong_at * 100.0)
+    su = cfg.subscription_usage
+    return {"claude": claude, "gpt": su.limit_pct, "backends": rows,
+            "reserve_pct": su.reserve_pct, "inflight_pct": su.inflight_pct,
+            "fail_closed": su.fail_closed}
+
+
+@router.post("/admin/api/config/cutoffs")
+async def set_cutoffs(request: Request):
+    """{"claude": 90, "gpt": 95, "backends": {"<name>": 80 | null}}. `claude`
+    sets the cutoff on every Meridian backend (null clears it back to the
+    conserve_* ladder); `gpt` sets the global default for CLIProxyAPI backends
+    (subscription_usage.limit_pct); `backends` sets/clears one backend's own."""
+    svc = _svc(request)
+    body = await request.json()
+    cfg = svc.config_store.config
+    per: dict[str, Optional[float]] = {}
+
+    def _pct(v):
+        if v is None:
+            return None
+        f = float(v)                              # ValueError/TypeError -> 400 below
+        if not 1.0 <= f <= 100.0:
+            raise ValueError("cutoff must be between 1 and 100")
+        return f
+    try:
+        if "claude" in body:
+            for b in cfg.backend_pool.internal.backends:
+                if b.type == "anthropic-compatible":
+                    per[b.name] = _pct(body["claude"])
+        known = {b.name for b in cfg.backend_pool.internal.backends}
+        for name, v in (body.get("backends") or {}).items():
+            if name not in known:
+                return JSONResponse({"error": f"no backend named {name!r}"}, status_code=404)
+            per[name] = _pct(v)
+        gpt = _pct(body["gpt"]) if body.get("gpt") is not None else None
+    except (TypeError, ValueError) as e:
+        return JSONResponse({"error": f"invalid cutoff: {e}"}, status_code=400)
+
+    def mutate(raw):
+        for b in raw.setdefault("backend_pool", {}).setdefault("internal", {}).get("backends", []):
+            if b.get("name") in per:
+                if per[b["name"]] is None:
+                    b.pop("usage_limit_pct", None)
+                else:
+                    b["usage_limit_pct"] = per[b["name"]]
+        if gpt is not None:
+            raw.setdefault("subscription_usage", {})["limit_pct"] = gpt
+    svc.config_store.save(mutate)
+    # The pool's live backend configs feed backend_info(): update in place.
+    for name, st in (getattr(svc.pool, "backends", None) or {}).items():
+        if name in per:
+            st.config.usage_limit_pct = per[name]
+    return await get_cutoffs(request)
 
 
 # --------------------------------------------------------------------------- #

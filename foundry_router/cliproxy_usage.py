@@ -23,7 +23,9 @@ The readings are passive: they refresh whenever a request goes through
 CLIProxyAPI, so each carries its age, and a window whose reset time has
 passed counts as reset. A model is usable while at least one account that can
 serve it is under the limit (default 85%) on every window covering it; with no
-readings yet it is allowed (the call budgets, if set, still apply).
+readings yet it is allowed (the call budgets, if set, still apply) unless
+subscription_usage.fail_closed is on. Near the limit the cached reading is
+bypassed and calls admitted since the last reading count against the limit.
 """
 
 from __future__ import annotations
@@ -206,6 +208,8 @@ class CliproxyUsage:
         self.db = db
         self._cache: dict[str, tuple[float, dict]] = {}
         self._denied: set[str] = set()       # backends/providers already logged at limit
+        self._inflight: dict[tuple, list[float]] = {}    # (mgmt root, provider) -> admit times
+        self._obs_seen: dict[tuple, float] = {}          # newest reading seen per key
 
     @property
     def cfg(self) -> SubscriptionUsageConfig:
@@ -249,33 +253,85 @@ class CliproxyUsage:
         self._cache[root] = (time.monotonic(), snap)
         return snap
 
-    async def model_status(self, model_id: str, info: dict) -> dict:
-        """{available, known, worst, note, reset_s} for one model."""
-        provider = provider_of(model_id)
-        out = {"available": True, "known": False, "worst": None, "note": "", "reset_s": None,
-               "provider": provider}
-        if not provider or not self.configured(info):
-            return out
-        snap = await self.snapshot(info)
-        if not snap["ok"]:
-            out["note"] = f"usage unavailable ({snap['error']})"
-            return out
-        limit = self.limit_for(info)
-        accounts = [a for a in snap["accounts"] if a["provider"] == provider and not a["disabled"]]
-        best = None                     # (worst %, account, worst window)
+    # -- in-flight accounting ---------------------------------------------------
+    # A reading moves only when a response completes, so calls admitted since
+    # the last reading are invisible to it. Each admitted call is held as a
+    # reservation (admit time) per (management root, provider); a newer reading
+    # retires the oldest, and none outlives inflight_ttl_seconds.
+
+    def _inflight_count(self, key: tuple, accounts: list[dict]) -> int:
+        now = time.time()
+        q = [t for t in self._inflight.get(key, []) if now - t < self.cfg.inflight_ttl_seconds]
+        obs = max((o for o in (_parse_ts(a.get("observed_at")) for a in accounts) if o),
+                  default=None)
+        if obs is not None:
+            seen = self._obs_seen.get(key)
+            if seen is not None and obs > seen and q:
+                q.pop(0)
+            self._obs_seen[key] = max(obs, seen or 0.0)
+        self._inflight[key] = q
+        return len(q)
+
+    @staticmethod
+    def _pick(accounts: list[dict], model_id: str, extra: float):
+        """The least-used readable account: (pct incl. extra, account, window,
+        raw pct), plus how many accounts have no reading."""
+        best, unknown = None, 0
         for a in accounts:
             ws = [w for w in a["windows"] if _applies(w, model_id)]
             if not ws and not a["unavailable"]:
-                continue                # no readings for this account yet
+                unknown += 1            # no readings for this account yet
+                continue
             worst = max(ws, key=lambda w: w["used"]) if ws else None
-            pct = 100.0 if a["unavailable"] else (worst["used"] if worst else 0.0)
+            raw = 100.0 if a["unavailable"] else (worst["used"] if worst else 0.0)
+            pct = min(100.0, raw + extra)
             if best is None or pct < best[0]:
-                best = (pct, a, worst)
+                best = (pct, a, worst, raw)
+        return best, unknown
+
+    async def model_status(self, model_id: str, info: dict, reserve: bool = False) -> dict:
+        """{available, known, worst, note, reset_s} for one model. `reserve`
+        counts an allowed call as in flight until a newer reading arrives."""
+        provider = provider_of(model_id)
+        out = {"available": True, "known": False, "worst": None, "note": "", "reset_s": None,
+               "provider": provider, "inflight": 0}
+        if not provider or not self.configured(info):
+            return out
+        cfg = self.cfg
+        closed = bool(cfg.fail_closed)
+        snap = await self.snapshot(info)
+        if not snap["ok"]:
+            out["note"] = f"usage unavailable ({snap['error']})"
+            if closed:
+                out["available"] = False
+                out["note"] += " — refused (fail_closed)"
+            return out
+        limit = self.limit_for(info)
+        rk = (self._mgmt_root(info), provider)
+
+        def _read(s: dict):
+            accts = [a for a in s["accounts"] if a["provider"] == provider and not a["disabled"]]
+            n = self._inflight_count(rk, accts) if cfg.inflight_pct > 0 else 0
+            return (*self._pick(accts, model_id, n * cfg.inflight_pct), n)
+
+        best, unknown, n = _read(snap)
+        # Near the cutoff the cached reading may predate the crossing: re-read.
+        if best is not None and best[0] >= limit - (cfg.reserve_pct + 2.0):
+            snap = await self.snapshot(info, force=True)
+            if snap["ok"]:
+                best, unknown, n = _read(snap)
+            elif closed:
+                out["available"] = False
+                out["note"] = f"usage unavailable ({snap['error']}) — refused (fail_closed)"
+                return out
         if best is None:
             out["note"] = f"{provider}: no usage reading yet"
+            if closed:
+                out["available"] = False
+                out["note"] += " — refused (fail_closed)"
             return out
-        pct, acct, worst = best
-        out.update(known=True, worst=pct, reset_s=(worst or {}).get("resets_in_s"))
+        pct, acct, worst, raw = best
+        out.update(known=True, worst=raw, reset_s=(worst or {}).get("resets_in_s"), inflight=n)
         label = f"{'ChatGPT' if provider == 'codex' else 'Claude'}" + \
                 (f" {acct['plan']}" if acct.get("plan") else "")
         parts = ", ".join(f"{w['name']} {w['used']:.0f}%" for w in
@@ -285,6 +341,7 @@ class CliproxyUsage:
             out["available"] = False
             why = (worst or {}).get("name") or "account unavailable"
             out["note"] = (f"{label} {why} at {pct:.0f}% (limit {limit:.0f}%)"
+                           f"{f', incl. {n} call(s) in flight' if pct > raw else ''}"
                            f"{_fmt_reset((worst or {}).get('resets_in_s'))}")
             key = f"{snap['backend']}:{provider}:{why}"
             if key not in self._denied and self.db is not None:
@@ -298,4 +355,6 @@ class CliproxyUsage:
         else:
             self._denied = {k for k in self._denied
                             if not k.startswith(f"{snap['backend']}:{provider}:")}
+            if reserve and cfg.inflight_pct > 0:
+                self._inflight.setdefault(rk, []).append(time.time())
         return out
