@@ -105,6 +105,7 @@ class SessionState:
     unanswered: bool = False                    # idle with no reply to the prompt yet
     retry: bool = False                         # the provider call is being retried (Kilo retry)
     compaction: Optional[dict] = None           # turn ended on Kilo's compaction summary
+    context: Optional[int] = None               # context tokens of the last turn (B12)
 
 
 class CodingClient:

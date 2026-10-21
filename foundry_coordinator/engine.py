@@ -342,9 +342,16 @@ class Coordinator:
             spec = P.adapter.describe(tid)
         except AdapterError as e:
             return self._block(P, t, f"task description unavailable: {e}")
+        from . import infra                        # revamp B12: infra before a session
+        note = infra.waiting(self, P, t)
+        if note:
+            return self._note(P, t, note)
         held = self._acquire(P, t, self._workspace_locks(P) + self._session_locks(P),
                              writer=True)
         if held:
+            return
+        if infra.preflight_blocks(self, P, t, P.profile.persona("implementer", tid)):
+            self.store.release(pid, tid)
             return
         if self._lc(P, "readiness"):
             # [lifecycle] the environment/tooling must be ready before a session
@@ -587,6 +594,16 @@ class Coordinator:
         data = self.store.merge_data(pid, tid, last_report=rep or None)
         if self._lc(P):
             self._lc_session_ended(P, t, t["session_id"], head, rep)
+        from . import infra
+        infra.session_ok(self, P, tid)
+        handoff = infra.over_ceiling(P, s, rep)
+        if handoff:
+            # revamp B12: a fresh session continues instead of compacting until Kilo
+            # gives up (UI-02b lost 85 min that way); no attempt is charged
+            self.store.event(pid, tid, "context_handoff", session_id=t["session_id"],
+                             detail={"context": getattr(s, "context", None),
+                                     "why": handoff[:300]})
+            return self._session_failed(P, t, handoff, "implement", free=True)
         status = str(rep.get("status") or "").upper()
         # A session can commit legitimate BUILD progress and still hit a hard
         # scope or operator blocker.  Do not reinterpret its explicit stop as
@@ -868,6 +885,9 @@ class Coordinator:
 
     def _session_failed(self, P: Project, t: dict, why: str, phase: str, free: bool = False):
         pid, tid = P.id, t["task_id"]
+        if phase != "closeout":
+            from . import infra                    # revamp B12: infra failures are free
+            free = infra.session_failure(self, P, t, why, free)
         self._release_session(P, t)
         if self.helpers.enabled(P):
             # this run is over: its lane work never reaches the next session

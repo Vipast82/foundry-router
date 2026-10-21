@@ -31,6 +31,9 @@ anything with a `.profile` / `.raw`), which never raises.
   infra_backoff_seconds      first infra retry delay (doubles, capped at 15 min)
   preflight                  check Kilo / Rojo / Studio MCP / local model before a
                              session starts (an infra failure costs no attempt)
+  preflight_endpoints        extra endpoints the preflight probes, "name=url" with
+                             url tcp://host:port or http(s)://... (e.g. Rojo, the
+                             local model server); default none
   context_ceiling_tokens     a session over this context hands off to a fresh one
                              (0 = off)
   memory_delta               send operator notes / memory blocks once per session,
@@ -76,6 +79,7 @@ AUTOMATION_DEFAULTS: dict[str, Any] = {
     "infra_retry_max": 5,
     "infra_backoff_seconds": 60,
     "preflight": True,
+    "preflight_endpoints": [],
     "context_ceiling_tokens": 160000,
     "memory_delta": True,
     "transcript_poll_seconds": 120,
