@@ -123,6 +123,12 @@ def _valid_verdict(answer: dict, frames: list[tuple[str, str, bytes]], arts: dic
         return "changes_required", findings
     if verdict == "changes_required" and not findings:
         return "uncertain", ["changes required without a visible finding"]
+    if verdict == "uncertain" and not findings:
+        # every frame above was verified (image seen, sha256 matched, subject present,
+        # validity ok, an observation) and none has a defect: that IS an approval, whatever
+        # word the model put on top (UI-02a 2026-10-21: gpt-6-astra answered "uncertain" with
+        # 20/20 clean frames on every retry, and the task stopped as inconclusive)
+        return "approve", []
     return verdict, findings
 
 

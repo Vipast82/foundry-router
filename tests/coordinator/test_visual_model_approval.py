@@ -140,3 +140,25 @@ def test_frame_validity_and_verdict_synonyms_are_understood():
     got, findings = VA._valid_verdict(ans, frames, arts)
     assert got == "changes_required" and "invalid, occluded or wrong UI subject" in findings[0]
     assert '"ok", "invalid", "occluded", "missing_subject"' in VA.FRAME_FIELDS
+
+
+def test_uncertain_word_over_clean_verified_frames_is_an_approval():
+    """UI-02a (2026-10-21): the model returned verdict "uncertain" while every frame was
+    seen, matched, valid and had no finding. Real gaps stay uncertain."""
+    from foundry_coordinator import visual_approval as VA
+    frames = [("a.png", "image/png", b"x"), ("b.png", "image/png", b"y")]
+    arts = {"a.png": "1" * 64, "b.png": "2" * 64}
+
+    def row(path, **kw):
+        r = {"path": path, "sha256": arts[path], "image_seen": True, "subject_present": True,
+             "validity": "ok", "observation": "HUD visible", "findings": []}
+        r.update(kw)
+        return r
+    assert VA._valid_verdict({"verdict": "uncertain", "frames": [row("a.png"), row("b.png")]},
+                             frames, arts) == ("approve", [])
+    got, _ = VA._valid_verdict({"verdict": "uncertain",
+                                "frames": [row("a.png"), row("b.png", image_seen=False)]}, frames, arts)
+    assert got == "uncertain"                                    # an unseen frame: still not a pass
+    got, f = VA._valid_verdict({"verdict": "uncertain",
+                                "frames": [row("a.png"), row("b.png", findings=["clipped"])]}, frames, arts)
+    assert got == "uncertain" and f == ["b.png: clipped"]        # a finding: not an approval

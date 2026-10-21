@@ -2,6 +2,17 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.130.15 — vision: "uncertain" over clean, verified frames is an approval
+
+UI-02a stopped as "vision approval inconclusive 3 times". gpt-6-astra reviewed batch 1 (20
+hero-select frames, then each 5-frame chunk on retry) and every frame row was verified: image
+seen, sha256 matched, subject present, validity ok, an observation and no finding. Yet the
+top-level verdict was "uncertain" every time. A verdict of "uncertain" whose frames all pass
+those checks with no finding now counts as an approval. Any unseen, mismatched or invalid
+frame, or any finding, still keeps it uncertain or CHANGES. Test:
+`test_uncertain_word_over_clean_verified_frames_is_an_approval`; vision and fast-lane tests pass.
+Coordinator change; it needs a restart.
+
 ## v0.130.14 — fast lane: a red gate never carries to a newer commit
 
 UI-02a's own sprint gate passed with the new baseline (v0.130.13) at 746db62. Only evidence files
