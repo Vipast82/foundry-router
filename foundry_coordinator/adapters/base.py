@@ -164,7 +164,11 @@ def report_instructions() -> str:
             f"coordinator decides completion only from the verification checks):\n"
             f"```{REPORT_FENCE}\n"
             '{"status": "DONE | NOT DONE | BLOCKED | NEEDS_HUMAN", "summary": "<one line>", '
-            '"blocker": "<what you need, if BLOCKED or NEEDS_HUMAN>"}\n```')
+            '"blocker": "<what you need, if BLOCKED or NEEDS_HUMAN>"}\n```\n'
+            "Need a file outside the task's file list (e.g. a harness row)? Don't edit it: "
+            "add a ```SCOPE_REQUEST``` block with {\"path\": \"<file>\", \"reason\": "
+            "\"<one line>\"} and stop; the coordinator grants allow-listed harness lines "
+            "itself and continues this session.")
 
 
 def safe_rel(path: str) -> Optional[str]:

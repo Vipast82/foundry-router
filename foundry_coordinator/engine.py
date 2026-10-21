@@ -197,6 +197,11 @@ class Coordinator:
     def _step(self, P: Project, t: dict) -> None:
         st = t["state"]
         self._close_session_notes(P, t)
+        if st == S.BLOCKED and (t.get("data") or {}).get("auto_heal"):
+            from . import autoheal                        # revamp B9: a scheduled retry
+            if autoheal.step(self, P, t):
+                return
+            t = self.store.task(P.id, t["task_id"])
         if st == S.BLOCKED and (t.get("data") or {}).get("recovery_case") and self._lead_on(P):
             return self._lead_blocked(P, t)
         if (t.get("data") or {}).get("recovery_case") and not self._lead_on(P):
@@ -585,14 +590,20 @@ class Coordinator:
         # budget is exhausted.  The blocked path records the completed commit
         # and waits for the blocker to be resolved.
         blocked = status in ("BLOCKED", "NEEDS_HUMAN")
+        if self.helpers.enabled(P):
+            # revamp B5: delivered helper results are judged by the consumer's commits
+            self.helpers.measure_git(P, tid)
         if self.helpers.enabled(P) and rep.get("helper_feedback"):
             self.helpers.record_feedback(P, self.store.task(pid, tid), rep)
+        if self._scope_requests(P, tid, s, rep):
+            return                       # revamp B10: granted and continued, or a decision waits
         if self.frontier.on_idle(P, self.store.task(pid, tid), rep):
             return                       # a frontier phase started, continued or handed back
         if not blocked and self.helpers.enabled(P) and \
                 self._helper_handoff(P, self.store.task(pid, tid), rep):
             return                       # the primary continues, or waits for its helpers
         if self.helpers.enabled(P):
+            self.helpers.measure_git(P, tid, final=True)
             self.helpers.abort_running(P, tid, "cancelled", "the primary finished first")
             self.helpers.skip_waiting(P, tid, "the primary finished before this unit was "
                                               "admitted")
@@ -647,6 +658,20 @@ class Coordinator:
             "head_sha": head, "session_idle": True, "session_id": t["session_id"],
             "model_report": rep or "none (advisory only)"},
             head_sha=head, next_action="verifying", data=data)
+
+    def _scope_requests(self, P: Project, tid: str, s, rep: dict) -> bool:
+        """revamp B10: typed scope requests of an idle primary (scope.py). True
+        when the session was continued after a grant (or a decision waits)."""
+        from . import scope as SC
+        reqs = SC.parse_requests(getattr(s, "final_text", "") or "", rep)
+        if not reqs:
+            return False
+        try:
+            spec = P.adapter.describe(tid)
+        except AdapterError:
+            return False
+        return SC.handle(self, P, self.store.task(P.id, tid), spec, reqs) in (
+            "continued", "waiting")
 
     def _poll(self, P: Project, t: dict, sid: str, phase: str):
         """Poll a session. Returns the idle SessionState, or None after
@@ -841,6 +866,7 @@ class Coordinator:
         self._release_session(P, t)
         if self.helpers.enabled(P):
             # this run is over: its lane work never reaches the next session
+            self.helpers.measure_git(P, tid, final=True)
             self.helpers.abort_lane_running(P, tid, f"the session ended: {why}"[:300])
             self.helpers.expire_lane_results(P, tid, "the run ended before delivery")
         if phase == "closeout":
@@ -1054,11 +1080,18 @@ class Coordinator:
                  + "; ".join(f"{c[0][:10]} {c[1][:60]}" for c in bad[:5])) if bad
                 else f"all {len(commits)} commit message(s) start with {prefix!r}")
         changed = P.ws.changed_files(base, head)
-        outside = [f for f in changed if not matches_any(f, spec.scope + exempt)]
+        # (revamp B10: the task-source file a coordinator scope grant edited is not
+        # the session's change)
+        granted_src = [g.get("file") for g in (t.get("data") or {}).get("scope_grants") or []
+                       if g.get("file")]
+        outside = [f for f in changed if not matches_any(f, spec.scope + exempt + granted_src)]
         add("scope", FAIL if outside else PASS,
             ("changed outside the task's files: " + ", ".join(outside[:12])
-             + " — the coordinator never widens scope") if outside
+             + " — ask for a harness line with a SCOPE_REQUEST block; the coordinator "
+               "grants only allow-listed paths itself") if outside
             else f"{len(changed)} changed file(s), all within scope")
+        from . import scope as _scope           # revamp B10: granted files keep to their rule
+        out += _scope.grant_checks(P, t, spec, base, head)
         dirty = P.ws.status()
         baseline = t["data"].get("baseline_dirty") or {}
         runner_out, runner_caps = [], []
@@ -3662,6 +3695,12 @@ class Coordinator:
         the lead is off (or the case cannot be opened) the original transition
         is applied unchanged."""
         if self._lead_on(P):
+            # revamp B9: tooling / infrastructure stops are retried deterministically
+            # (bounded, with backoff) before any paid lead case
+            from . import autoheal
+            healed = autoheal.try_heal(self, P, t, to, evidence, cls, dict(fields))
+            if healed is not None:
+                return healed
             try:
                 out = self._lead_open(P, t, to, evidence, cls, dict(fields))
             except Exception as e:                                # noqa: BLE001

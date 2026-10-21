@@ -273,7 +273,8 @@ def test_exhausted_counter_is_a_delegated_round_not_a_question(tmp_path):
     log = []
     e = make_game(tmp_path, scratch_primary(log, scratch=""),
                   lead=lambda ctx: replies.pop(0) if replies else {"final": "thinking"},
-                  extra=full_toml(tmp_path, max_diagnoses=2))
+                  # revamp B9: no same-session report repair here (bound exhaustion)
+                  extra=full_toml(tmp_path, max_diagnoses=2) + "\n[automation]\nlead_report_repairs = 0\n")
     c = e["c"]
     c.approve("game", TID, [], "victor")
     c.store.update_task("game", TID, state=S.BLOCKED, blocker="x", run_id="run-1")

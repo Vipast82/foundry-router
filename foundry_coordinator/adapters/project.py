@@ -258,7 +258,35 @@ class GenericAdapter(ReviewContractDefaults):
                     rules.append({"permission": name, "pattern": pattern, "action": act})
             else:
                 rules.append({"permission": name, "pattern": "*", "action": str(action)})
+        rules += subagent_rules(self.p)
         return rules
+
+    def grant_scope(self, spec: TaskSpec, path: str, reason: str) -> str:
+        """revamp B10: add `path` to this task's scope in the task source (a JSON
+        task file) for a coordinator scope grant. Returns the edited file's
+        workspace-relative path ('' when it already lists it). The caller
+        commits it. TOML task files are not rewritten (AdapterError)."""
+        rel = self.p.tasks.get("file") or ""
+        if not rel.endswith(".json"):
+            raise AdapterError(f"scope grants need a JSON task file (not {rel!r})")
+        full = os.path.join(self.p.workspace, rel)
+        with open(full, encoding="utf-8") as f:
+            raw = f.read()
+        data = json.loads(raw)
+        items = data.get("tasks") if isinstance(data, dict) else data
+        item = next((t for t in items or [] if str(t.get("id")) == spec.task_id), None)
+        if item is None:
+            raise AdapterError(f"task {spec.task_id} is not in {rel}")
+        scope = list(item.get("scope") or [])
+        if path in scope:
+            return ""
+        item["scope"] = scope + [path]
+        notes = dict(item.get("scope_grants") or {})
+        notes[path] = reason[:300]
+        item["scope_grants"] = notes
+        with open(full, "w", encoding="utf-8", newline="") as f:
+            f.write(json.dumps(data, indent=1) + ("\n" if raw.endswith("\n") else ""))
+        return rel
 
     def helper_permissions(self, spec: TaskSpec) -> list[dict]:
         """A coordinator helper session is read-only: no edits, shell, delegation,
@@ -281,6 +309,17 @@ class GenericAdapter(ReviewContractDefaults):
         except AdapterError as e:
             out.append((FAIL, "task source", str(e)))
         return out
+
+
+def subagent_rules(profile) -> list[dict]:
+    """revamp B6: a session may not spawn its own subagents (Kilo `task` tool)
+    except the read-only ones [automation] subagents_allowed names (default
+    `explore`). Appended last, so a profile's own `task` allow can't widen it
+    (Kilo: the last matching rule wins)."""
+    from ..automation import get as auto_get
+    allowed = list(auto_get(profile, "subagents_allowed") or [])
+    return ([{"permission": "task", "pattern": "*", "action": "deny"}]
+            + [{"permission": "task", "pattern": a, "action": "allow"} for a in allowed])
 
 
 def _parse_task_file(rel: str, text: str) -> list[dict]:

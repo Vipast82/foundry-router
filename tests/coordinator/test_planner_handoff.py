@@ -24,9 +24,12 @@ def spec():
 
 def test_build_delegates_planning_but_retains_execution_and_gates(tmp_path):
     prompt = adapter(tmp_path).implement_prompt(spec(), {"attempt": 1, "run_id": "r1"})
-    assert "invoke the read-only `au-planner` subagent once" in prompt
-    assert "continue the approved BUILD work in this Code session" in prompt
-    assert "not acceptance evidence or permission to widen scope" in prompt
+    # revamp B6: no per-attempt au-planner call and no model-spawned vision children
+    # (the coordinator plans and runs its own vision approval); only `explore` remains
+    assert "au-planner" not in prompt and "au-visual-review" not in prompt
+    assert "do not spawn planner or vision subagents" in prompt
+    assert "approved BUILD work in this Code session" in prompt
+    assert "never acceptance evidence or permission to widen scope" in prompt
     assert "Do NOT write UI-01_SUMMARY.md" in prompt
     assert "GATE UI-01 PASS|FAIL" in prompt
     assert "ButtonActions" in prompt and "Unbound()" in prompt
@@ -58,7 +61,8 @@ def test_game_test_phase_requires_real_input(tmp_path):
 
 def test_repairs_include_findings_without_widening_scope(tmp_path):
     prompt = adapter(tmp_path).repair_prompt(spec(), ["S46 still failed"], {"attempt": 2})
-    assert "au-planner" in prompt and "S46 still failed" in prompt
+    # revamp B6: the repair prompt no longer asks for an au-planner call either
+    assert "au-planner" not in prompt and "S46 still failed" in prompt
     assert "never permission to change scope" in prompt
 
 

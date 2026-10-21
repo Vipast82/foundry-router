@@ -1030,8 +1030,10 @@ def test_quota_and_readiness_deferral_wait_without_paid_calls_then_resume(tmp_pa
 
 def test_bounds_exhausted_reach_victor_with_a_precise_decision_and_alert(tmp_path):
     log = []
+    # revamp B9: an invalid report first goes back into the same session; this test
+    # is about exhausting the bound with invalid reports, so that repair is off
     e = make_game(tmp_path, primary_script(log), lead=lambda ctx: {"final": "I could not tell."},
-                  extra=lead_toml(max_diagnoses=2))
+                  extra=lead_toml(max_diagnoses=2) + "\n[automation]\nlead_report_repairs = 0\n")
     c = e["c"]
     c.approve("game", TID, [], "victor")
     assert run_until(c, lambda: (case(e) or {}).get("state") == "NEEDS_VICTOR", limit=60), \
@@ -1310,11 +1312,13 @@ def test_write_access_permissions_allow_everything_but_secrets_and_questions(tmp
     rules = lead_write_permissions(e["P"], e["P"].adapter.describe(TID))
     assert not is_read_only(rules)
     for perm, val in (("bash", "git commit -m x -- src/a.txt"), ("edit", "src/a.txt"),
-                      ("task", "au-helper"), ("robloxstudio-mcp_run_code", "*"),
+                      ("task", "explore"), ("robloxstudio-mcp_run_code", "*"),
                       ("external_directory", "C:/elsewhere/x")):
         assert kilo_decision(rules, perm, val) == "allow", (perm, val)
     for perm, val in (("read", "config/_secrets.toml"), ("read", "app.env"),
-                      ("edit", "my_secret_key.txt"), ("question", "anything")):
+                      ("edit", "my_secret_key.txt"), ("question", "anything"),
+                      # revamp B6: no subagents of its own beyond explore
+                      ("task", "au-helper"), ("task", "au-planner")):
         assert kilo_decision(rules, perm, val) == "deny", (perm, val)
 
 
@@ -1322,8 +1326,10 @@ def test_victor_authorizing_another_round_runs_one_more_bounded_round(tmp_path):
     """Review A #4: 'authorize another bounded round' raises the exhausted
     bound once (journaled) and diagnoses again; it never wedges in RESUMING."""
     log = []
+    # revamp B9: an invalid report first goes back into the same session; this test
+    # is about exhausting the bound with invalid reports, so that repair is off
     e = make_game(tmp_path, primary_script(log), lead=lambda ctx: {"final": "I could not tell."},
-                  extra=lead_toml(max_diagnoses=1))
+                  extra=lead_toml(max_diagnoses=1) + "\n[automation]\nlead_report_repairs = 0\n")
     c = e["c"]
     c.approve("game", TID, [], "victor")
     assert run_until(c, lambda: (case(e) or {}).get("state") == "NEEDS_VICTOR", limit=60), hist(e)
