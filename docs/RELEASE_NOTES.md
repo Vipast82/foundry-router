@@ -2,6 +2,26 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.130.13 — studio_gate: baseline-relative regression
+
+UI-02a's sprint gate could never pass: six of its 14 regression suites (S45, S49, S50, UI_01,
+GF_UI1, GF_UI1b) and 15 calls (the dynarg calls 50–71, three UI_01 tool errors) were already red
+on its base commit. A baseline run at a1b298b showed identical counts. The gate required every
+selected suite to pass.
+
+- **Baseline file:** when `.plan/tmp/gate/<sprint>/baseline.json` holds a regression verdict
+  recorded at the sprint's base commit, sprint mode compares each red regression check with it.
+- **Suite rule:** a suite that was red at base and is not worse (passes not fewer, failures
+  not more) becomes non-required, with its detail prefixed `PRE-EXISTING at <base>`.
+- **Call rule:** a call failure whose text, with the call number removed, appears at base becomes
+  non-required. Sprints renumber calls when they retire suites.
+- **Verdict:** new or worse failures stay required, so the gate stays red. The verdict records
+  `baseline: {head, pre_existing, new_or_worse}`. Without a baseline file nothing changes.
+- **Making a baseline:** check out the base commit, run `studio_gate regression --selection ...
+  --sprint BASE<id>`, then copy the verdict to the sprint's `baseline.json`.
+- **Tests:** `test_baseline_marks_pre_existing_regression_failures_non_required`,
+  `test_baseline_keeps_worse_and_new_failures_blocking`. Runner-side only.
+
 ## v0.130.12 — studio_gate: regression runs at 1920x1080
 
 UI-02a's UI_01 legs c21a–c25a failed with "the viewport is 1920x1080 — got 2531x1128 (device

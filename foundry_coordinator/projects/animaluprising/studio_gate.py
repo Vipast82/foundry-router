@@ -1836,6 +1836,9 @@ class Gate:
     def finish(self, error: Optional[str] = None, *, evidence: bool = False, meta: str = "") -> dict:
         """<head12>.<mode>.json (a stories/regression run can never overwrite or stand in
         for the sprint verdict; H4), latest.json + latest/<mode>.json, the raw log."""
+        baseline = None
+        if self.mode == "sprint" and not error:
+            baseline = apply_baseline(self.checks, load_baseline(self.gate_dir))
         result = overall(self.checks, error)
         head = self.head or "0" * 40
         v = {"schema": 1, "sprint": self.sprint, "head": head, "mode": self.mode,
@@ -1843,6 +1846,8 @@ class Gate:
              "checks": self.checks, "captures": self.captures,
              "regression": self.regression, "summary_line": summary_line(self.sprint, result),
              "error": error}
+        if baseline:
+            v["baseline"] = baseline
         path = os.path.join(self.gate_dir, verdict_name(head, self.mode))
         self.verdict_path = path
         self.raw_path = os.path.join(self.gate_dir, f"{head[:12]}.{self.mode}.raw.log")
@@ -1866,6 +1871,77 @@ class Gate:
             append_evidence(self.repo, self.sprint, v, rel(self.repo, path), meta)
         self.status("done", "")
         return v
+
+
+# ---- baseline-relative regression (UI-02a, 2026-10-20) ------------------------------
+# A sprint's regression selection can hold suites that are already red on its base commit
+# (UI-02a: six suites and 15 calls failed identically at a1b298b). Requiring them all to pass
+# made the gate impossible. With a baseline (a regression verdict recorded at the base
+# commit, `.plan/tmp/gate/<sprint>/baseline.json`), a red regression check that is no worse
+# than the baseline becomes a non-required "PRE-EXISTING" check; new or worse failures stay
+# required. Without a baseline nothing changes.
+_SUITE_RE = re.compile(r"pass=(\d+) fail=(\d+)")
+_CALL_NO = re.compile(r"\bCALL \d+\b|\bcall\d+\b")
+
+
+def load_baseline(gate_dir: str) -> Optional[dict]:
+    v = _read_json_file(os.path.join(gate_dir, "baseline.json"))
+    if not isinstance(v, dict) or not isinstance(v.get("checks"), list):
+        return None
+    return v
+
+
+def _read_json_file(path: str):
+    try:
+        with open(path, encoding="utf-8") as f:
+            return json.load(f)
+    except (OSError, ValueError):
+        return None
+
+
+def _call_key(c: dict) -> str:
+    return c.get("result", "") + "|" + _CALL_NO.sub("CALL #", str(c.get("detail") or "")).strip()
+
+
+def apply_baseline(checks: list, base: Optional[dict]) -> Optional[dict]:
+    """Mark regression failures that the baseline already had as non-required. Returns a
+    summary for the verdict, or None without a baseline."""
+    if not base:
+        return None
+    bchecks = [c for c in base.get("checks") or [] if isinstance(c, dict)]
+    b_suite = {c["id"]: c for c in bchecks if str(c.get("id", "")).startswith("regression.")
+               and _SUITE_RE.search(str(c.get("detail") or ""))}
+    b_calls = {_call_key(c) for c in bchecks if c.get("result") in ("FAIL", "UNKNOWN")
+               and str(c.get("id", "")).startswith("regression.")}
+    tag = str(base.get("head") or "")[:12] or "baseline"
+    pre, new = [], []
+    verdict = None
+    for c in checks:
+        cid = str(c.get("id") or "")
+        if not cid.startswith("regression.") or c.get("result") == "PASS" or not c.get("required"):
+            continue
+        if cid == "regression.verdict":
+            verdict = c
+            continue
+        m = _SUITE_RE.search(str(c.get("detail") or ""))
+        ok = False
+        if m and cid in b_suite:
+            bm = _SUITE_RE.search(str(b_suite[cid].get("detail") or ""))
+            if bm and b_suite[cid].get("result") != "PASS":
+                ok = int(m.group(1)) >= int(bm.group(1)) and int(m.group(2)) <= int(bm.group(2))
+        elif not m:
+            ok = _call_key(c) in b_calls
+        if ok:
+            c["required"] = False
+            c["detail"] = f"PRE-EXISTING at {tag} (not worse than the baseline): " + str(c.get("detail"))
+            pre.append(cid)
+        else:
+            new.append(cid)
+    if verdict is not None and not new:
+        verdict["required"] = False
+        verdict["detail"] = (f"PRE-EXISTING at {tag}: every failing regression check is no worse "
+                             f"than the baseline; " + str(verdict.get("detail")))
+    return {"head": base.get("head"), "pre_existing": pre, "new_or_worse": new}
 
 
 def verdict_name(head: str, mode: str) -> str:

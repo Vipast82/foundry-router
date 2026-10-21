@@ -1037,3 +1037,40 @@ def test_repo_must_be_the_absolute_game_repo_root(repo, tmp_path, bad):
     assert G.main(["--repo", bad, "status", "--sprint", "UI-T0"], out=out.append) == 2
     assert "ERROR: --repo" in out[-1] and "forward slashes" in out[-1]
     assert not (repo / "RobloxAnimalUprising").exists()
+
+
+def _rc(cid, result, detail, required=True):
+    return {"id": cid, "result": result, "required": required, "detail": detail, "artifacts": []}
+
+
+def test_baseline_marks_pre_existing_regression_failures_non_required():
+    """UI-02a (2026-10-20): six suites and 15 calls were red identically at the base commit,
+    so the all-green gate could never pass. A baseline makes them non-blocking."""
+    base = {"head": "a1b298bc9a4b" + "0" * 28, "checks": [
+        _rc("regression.S49", "FAIL", "SUITE S49 pass=89 fail=20 expect=147 VERDICT FAIL"),
+        _rc("regression.call50", "FAIL", "FAIL: GATE dynarg CALL 50 unresolved <unitId>"),
+        _rc("regression.verdict", "FAIL", "FAIL: GATE regression 6 suite(s) failing")]}
+    checks = [_rc("regression.S49", "FAIL", "SUITE S49 pass=89 fail=20 expect=147 VERDICT FAIL"),
+              # renumbered call (the sprint retired suites): matched by text, not number
+              _rc("regression.call47", "FAIL", "FAIL: GATE dynarg CALL 47 unresolved <unitId>"),
+              _rc("regression.verdict", "FAIL", "FAIL: GATE regression 6 suite(s) failing"),
+              _rc("story.Hud.normal@1920x1080", "PASS", "ok")]
+    summary = G.apply_baseline(checks, base)
+    assert summary["new_or_worse"] == [] and len(summary["pre_existing"]) == 2
+    assert all(not c["required"] for c in checks if c["id"].startswith("regression."))
+    assert "PRE-EXISTING at a1b298bc9a4b" in checks[0]["detail"]
+    assert G.overall(checks) == "PASS"
+
+
+def test_baseline_keeps_worse_and_new_failures_blocking():
+    base = {"head": "b" * 40, "checks": [
+        _rc("regression.S49", "FAIL", "SUITE S49 pass=89 fail=20 expect=147 VERDICT FAIL")]}
+    checks = [_rc("regression.S49", "FAIL", "SUITE S49 pass=88 fail=21 expect=147 VERDICT FAIL"),
+              _rc("regression.S50", "FAIL", "SUITE S50 pass=1 fail=1 expect=2 VERDICT FAIL"),
+              _rc("regression.call9", "FAIL", "FAIL: something new CALL 9"),
+              _rc("regression.verdict", "FAIL", "FAIL: GATE regression")]
+    summary = G.apply_baseline(checks, base)
+    assert set(summary["new_or_worse"]) == {"regression.S49", "regression.S50", "regression.call9"}
+    assert all(c["required"] for c in checks)
+    assert G.overall(checks) == "FAIL"
+    assert G.apply_baseline([_rc("regression.S49", "FAIL", "x")], None) is None   # no baseline
