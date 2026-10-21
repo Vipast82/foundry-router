@@ -2,6 +2,20 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.130.11 — studio_gate: playtest-start retry, Lune files aren't "unmounted"
+
+UI-02a's first full Studio gate had two runner-made failures:
+
+- **Playtest start:** Studio answered "Wait for Studio to finish its current playtest
+  transition" (a playtest still stopping), and the runner gave up at once. The suites that never
+  started then left their dynamic arguments unresolved for later calls. The runner now retries
+  the start every 3 s for about 30 s while Studio reports a transition.
+- **Live hash:** it was UNKNOWN because `tests/lune/**` files were "not mounted anywhere in
+  Studio". Those run headless in Lune and are never mounted, so they no longer count; every
+  mountable file still has to match.
+
+Runner tests pass (52). Runner-side only.
+
 ## v0.130.10 — closeout files are never an "outside the task scope" decision
 
 Every sprint opened three operator decisions ("required evidence docs/progress/<ID>_PLAN.md /

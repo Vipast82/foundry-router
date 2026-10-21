@@ -1269,7 +1269,9 @@ class Gate:
                 else:
                     mism += 1
                     detail.append(f"MISMATCH {p} live={'/'.join(lives)} head={want}")
-        studio = [p for p in unmounted if p.startswith(("src/", "tests/"))]
+        # tests/lune/** run headless in Lune and are never mounted in Studio (UI-02a, 2026-10-20)
+        studio = [p for p in unmounted if p.startswith(("src/", "tests/"))
+                  and not p.startswith("tests/lune/")]
         summary = f"matched={matched}/{total} mismatched={mism} unresolved={unres}"
         if mism or unres:
             self.add(check("host.live_hash", "FAIL", "; ".join([summary] + detail[1:])))
@@ -1467,8 +1469,18 @@ class Gate:
             r = self.community.call_tool("solo_playtest", {"action": "start", "mode": "play"},
                                          timeout=self.call_timeout)
             self.raw("solo_playtest start", "{}", r["text"])
+            # Studio still leaving the previous playtest: "Wait for Studio to finish its current
+            # playtest transition" (UI-02a, 2026-10-20). Nothing started; retry for ~30 s.
+            for _ in range(10):
+                if not (r["is_error"] or "not ready" in r["text"]) or "transition" not in r["text"]:
+                    break
+                time.sleep(3.0)
+                r = self.community.call_tool("solo_playtest", {"action": "start", "mode": "play"},
+                                             timeout=self.call_timeout)
+                self.raw("solo_playtest start (retry)", "{}", r["text"])
             self._playing = True
-            if r["is_error"]:
+            if r["is_error"] or ('"success":false' in r["text"].replace(" ", "")
+                                 and "transition" in r["text"]):
                 add(check(cid, "UNKNOWN", "solo_playtest start: " + r["text"][:200]))
                 self.stop_playtest()
                 return False
