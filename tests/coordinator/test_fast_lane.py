@@ -496,9 +496,10 @@ def test_vision_reviews_in_batches_and_retries_only_inconclusive(env):
     e.c.approve("game", "T1", [], "victor")
     t = drive(e, lambda t: t["state"] == S.COMPLETE)
     vision_calls = [x for x in e.ff.chats if x.get("packet") == "vision"]
-    # 3 batches + the uncertain batch re-asked in small chunks (v0.130.2: 1 frame each here)
+    # 3 batches + the uncertain batch re-asked in small chunks (v0.130.2: 1 frame each here);
+    # the approved batches' frames are remembered as clean, so only that batch is re-asked
     assert len(vision_calls) == 5
-    assert [x["session_id"].rsplit("-", 1)[-1] for x in vision_calls[-2:]] ==         ["b2of3.c1of2", "b2of3.c2of2"]
+    assert [x["session_id"].rsplit(":", 1)[-1] for x in vision_calls[-2:]] == ["1.c1of2", "1.c2of2"]
     [a] = e.c.store.approvals("game", "T1", "visual")
     assert set(a["artifacts"]) == set(caps)
 
@@ -642,6 +643,20 @@ def test_vision_after_an_approval_reviews_only_changed_frames(env):
                    {"captures": [{"path": c} for c in caps]}, [])
     assert r.result == P_ and "unchanged" in r.detail
     assert len([x for x in e.ff.chats if x.get("packet") == "vision"]) == n0   # no new call
+
+
+def test_vision_never_resends_a_frame_already_judged_clean(env):
+    """Token cost (2026-10-21): a CHANGES round re-sent every frame, even ones the reviewer
+    already passed. A frame judged clean at the same bytes is never reviewed again."""
+    caps = [CAP.replace(".png", f"-{i}.png") for i in range(3)]
+    e = env([{"result": "PASS", "captures": caps}],
+            vision=["approve", "approve", "changes_required"])
+    e.c.projects["game"].profile.fast_lane["vision_batch_frames"] = 1
+    e.c.approve("game", "T1", [], "victor")
+    t = drive(e, lambda t: t["state"] == S.COMPLETE)
+    calls = [x for x in e.ff.chats if x.get("packet") == "vision"]
+    assert len(calls) == 4, [x["session_id"] for x in calls]    # 3 + only the CHANGES frame
+    assert len(fl(e)["vision_clean"]) == 3          # round 2 approved the last one
 
 
 def test_red_gate_never_carries_to_a_newer_commit():

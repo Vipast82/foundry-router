@@ -2,6 +2,20 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.130.17 — fast lane: vision never re-sends a frame it already passed
+
+A vision CHANGES round re-sent every frame, including frames the reviewer had already passed.
+The fast lane now remembers, per task, the sha256 of every frame judged clean (`vision_clean`
+in the task's fast-lane state). Later rounds send only frames that changed or had findings.
+
+- **A frame counts as clean** when its batch approved, or when its batch asked for changes, every
+  finding names a frame, and none names this one. A finding that cannot be placed never lets a
+  frame skip review.
+- **When every frame is remembered clean,** the approval is recorded as
+  `coordinator:vision-memory` and no model call is made.
+- **Inconclusive retries** re-ask only the batch that was unsure, because the approved batches'
+  frames are already remembered.
+
 ## v0.130.16 — studio_gate: incremental sprint gates
 
 Every sprint gate re-ran every story at five sizes and every selected regression suite in its own

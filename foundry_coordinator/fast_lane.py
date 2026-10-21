@@ -800,6 +800,20 @@ class FastLane:
                                           f"carried: {len(frames)} frame(s) unchanged since the "
                                           f"approval at {str(prior[-1]['revision'])[:12]}", head)
             frames = changed
+        # vision memory (2026-10-21): a frame the reviewer already judged clean (seen, valid, no
+        # finding) at these exact bytes is never sent again, in any round. Only frames that
+        # changed or had findings are reviewed.
+        clean = set(fl.get("vision_clean") or [])
+        if clean:
+            todo = [f for f in frames if arts[f[0]] not in clean]
+            if not todo:
+                self.store.add_approval(P.id, tid, "visual", head, arts, "coordinator:vision-memory",
+                                        f"every frame was judged clean at these bytes in an earlier "
+                                        f"round ({len(frames)} frame(s))")
+                return VerificationResult("fast_lane.vision", PASS, True, "",
+                                          f"remembered: {len(frames)} frame(s) already judged clean "
+                                          f"at these bytes", head)
+            frames = todo
         fp = hashlib.sha256(json.dumps([run["head"], arts], sort_keys=True).encode()).hexdigest()
         tries = int((fl.get("vision_uncertain") or {}).get(fp, 0))
         # Batches (UI-D1, 2026-10-20: ~560 frames in ONE call came back "uncertain" because
@@ -866,6 +880,22 @@ class FastLane:
             results_b.append(res)
             served_all.add(res.get("served_model") or "unknown")
         verdicts = [r.get("verdict") for r in results_b]
+        # remember the frames this round judged clean (approved batch, or no finding names them)
+        # A CHANGES batch only clears its unnamed frames when every finding names a frame,
+        # so a finding we cannot place never lets a frame skip review.
+        newly = []
+        for batch, r in zip(batches, results_b):
+            rels = [rel for rel, _m, _b in batch]
+            notes = [str(f) for f in (r.get("findings") or [])]
+            placed = r.get("verdict") == "changes_required" and notes and                 all(any(rel in n for rel in rels) for n in notes)
+            for rel in rels:
+                if r.get("verdict") == "approve" or (placed and not any(rel in n for n in notes)):
+                    newly.append(arts[rel])
+        if newly:
+            fl2 = self._fl(P, tid)
+            mem = list(dict.fromkeys(list(fl2.get("vision_clean") or []) + newly))[-4000:]
+            fl2["vision_clean"] = mem
+            self._save(P, tid, fl2)
         findings = []
         for bi, r in enumerate(results_b):
             pre = f"[batch {bi + 1}/{len(results_b)}] " if len(results_b) > 1 else ""
