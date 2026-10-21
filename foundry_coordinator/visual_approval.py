@@ -77,6 +77,68 @@ FRAME_FIELDS = (
 _OK_VALIDITY = {"ok", "valid", "good", "pass", "passed", "yes", "true"}
 
 
+# B3 (2026-10-21): the structured retry of an inconclusive batch asks for this exact shape
+# (Foundry passes it on as a json_schema response format)
+VISION_SCHEMA = {
+    "type": "object",
+    "required": ["verdict", "frames", "limitations"],
+    "additionalProperties": False,
+    "properties": {
+        "verdict": {"type": "string", "enum": ["approve", "changes_required", "uncertain"]},
+        "limitations": {"type": "string"},
+        "frames": {"type": "array", "items": {
+            "type": "object", "additionalProperties": False,
+            "required": ["path", "sha256", "image_seen", "subject_present", "validity",
+                         "observation", "findings"],
+            "properties": {
+                "path": {"type": "string"}, "sha256": {"type": "string"},
+                "image_seen": {"type": "boolean"}, "subject_present": {"type": "boolean"},
+                "validity": {"type": "string",
+                             "enum": ["ok", "invalid", "occluded", "missing_subject"]},
+                "observation": {"type": "string"},
+                "findings": {"type": "array", "items": {"type": "string"}}}}}},
+}
+
+
+# ---- clean-frame memory (v0.130.17, shared by every vision path since B3) ------------
+# A frame the reviewer judged clean (seen, valid, no finding) at exact bytes is never sent
+# to a vision model again for the task. The fast lane keeps its list under
+# data.fast_lane.vision_clean; other paths use data.vision_clean. Both are read.
+
+def clean_memory(t: dict) -> set:
+    data = (t or {}).get("data") or {}
+    return set(data.get("vision_clean") or []) | set(
+        ((data.get("fast_lane") or {}).get("vision_clean")) or [])
+
+
+def _task(store, pid: str, tid: str, default=None):
+    fn = getattr(store, "task", None)
+    return (fn(pid, tid) if callable(fn) else None) or default or {}
+
+
+def remember_clean(store, pid: str, tid: str, hashes) -> None:
+    hashes = [h for h in hashes if h]
+    if not hashes or not callable(getattr(store, "merge_data", None)):
+        return
+    t = _task(store, pid, tid)
+    mem = list(dict.fromkeys(list((t.get("data") or {}).get("vision_clean") or [])
+                             + hashes))[-4000:]
+    store.merge_data(pid, tid, vision_clean=mem)
+
+
+def clean_frames(verdict: str, findings: list, rels: list) -> list:
+    """The frames a verdict judged clean: all of them on approve; on changes_required only
+    those no finding names, and only when every finding names a frame (a finding we can't
+    place never lets a frame skip review)."""
+    if verdict == "approve":
+        return list(rels)
+    notes = [str(f) for f in findings or []]
+    if verdict != "changes_required" or not notes or \
+            not all(any(rel in n for rel in rels) for n in notes):
+        return []
+    return [rel for rel in rels if not any(rel in n for n in notes)]
+
+
 def _validity_ok(row: dict) -> bool:
     v = row.get("validity")
     if v is True:
@@ -151,6 +213,18 @@ def step(c, P, t: dict, spec, rule, revision: str) -> None:
     if problem:
         c.store.update_task(pid, tid, next_action=f"visual approval: {problem[:350]}")
         return
+    # B3: frames already judged clean at these exact bytes (by this path or the fast lane)
+    # are never sent again; when none is left the memory itself is the approval
+    mem = clean_memory(_task(c.store, pid, tid, t))
+    todo = [f for f in frames if arts.get(f[0]) not in mem]
+    if not todo:
+        c.store.add_approval(pid, tid, "visual", revision, arts, "coordinator:vision-memory",
+                             f"every required frame was judged clean at these bytes earlier "
+                             f"({len(frames)} frame(s)); no model call")
+        c.store.event(pid, tid, "visual_approval_from_memory", detail={
+            "revision": revision, "frames": len(frames)})
+        return
+    frames = todo
     persona = P.profile.persona("visual_reviewer", tid)
     try:
         info = P.foundry.persona_info(persona)
@@ -238,6 +312,8 @@ def step(c, P, t: dict, spec, rule, revision: str) -> None:
     c.store.event(pid, tid, "model_visual_review", session_id=sid, detail={
         "verdict": verdict, "persona": persona, "served_model": served,
         "revision": revision, "artifacts": arts, "findings": findings[:10]})
+    remember_clean(c.store, pid, tid, [arts[r] for r in clean_frames(
+        verdict, findings, [rel for rel, _, _ in frames])])
     if (P.ws.head() != revision or
             P.adapter.approval_artifacts(spec, rule.artifacts) != arts or
             any(path in {p for _, p in P.ws.status()} for path in arts)):

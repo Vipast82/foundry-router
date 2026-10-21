@@ -317,9 +317,7 @@ Plan (the whole spec, read all of it): docs/progress/{t}_PLAN.md. Gate manifest 
 Runner (flags fixed by UI-T0; run `--help` once if one is rejected):
   {runner} doctor
   {runner} stories --sprint {t} [--story NAME ...]      # Edit-mode stories, the fast inner loop
-  {runner} sprint --sprint {t} --files <a,b> --background   # full gate on committed code
-  {runner} status --sprint {t}                          # poll a background gate
-Inner loop: write code -> stories -> fix -> repeat; Lune specs for the models you touched. Commit by explicit path from the plan's file list, message starting "{t}: " (no --no-verify, force, rebase, amend or tag). You may run the full gate yourself; the coordinator runs it again as its verify step when you report DONE, reads the verdict JSON under .plan/tmp/gate/{t}/ and sends any red check or vision finding back into THIS session. The runner writes captures under docs/evidence/UI-v3/{t}/; commit them by explicit path when the coordinator asks.
+Inner loop: write code -> stories -> fix -> repeat; Lune specs for the models you touched. Run stories and Lune only: never run `sprint` (or `regression`) yourself. The coordinator runs the one full gate when you report DONE, re-runs only checks whose inputs changed, reads the verdict JSON under .plan/tmp/gate/{t}/ and sends any red check or vision finding back into THIS session. Commit by explicit path from the plan's file list, message starting "{t}: " (no --no-verify, force, rebase, amend or tag). The runner writes captures under docs/evidence/UI-v3/{t}/ and its evidence log; the coordinator commits those itself, so leave them uncommitted.
 While a gate holds Studio, do not call Studio tools yourself. Put scratch files under `.plan/tmp/` (git-ignored).
 Do NOT write {t}_SUMMARY.md, the STATE.md row or the MASTER_ORDER status, and do NOT push: a short CLOSE session does that after a green gate, the vision approval and the review.
 The coordinator refreshes `{self.LIVE_CHECKPOINT}` (read-only) while you work; never call the Kilo server or port 4096 yourself.

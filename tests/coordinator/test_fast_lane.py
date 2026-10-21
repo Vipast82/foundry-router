@@ -39,6 +39,19 @@ FAKE_GATE = textwrap.dedent('''\
     import json, os, subprocess, sys, time
     a = sys.argv[1:]
     repo, sprint = a[a.index("--repo") + 1], a[a.index("--sprint") + 1]
+    if "baseline" in a:              # B2: the automatic baseline (never a plan step)
+        head = subprocess.run(["git", "-C", repo, "rev-parse", "HEAD"], capture_output=True,
+                              text=True).stdout.strip()
+        d = os.path.join(repo, ".plan", "tmp", "gate", sprint)
+        os.makedirs(d, exist_ok=True)
+        now = time.time()
+        v = {"schema": 1, "sprint": sprint, "head": head, "mode": "baseline",
+             "run_id": a[a.index("--run-id") + 1], "started": now, "finished": now,
+             "result": os.environ.get("FAKE_BASELINE_RESULT", "PASS"),
+             "checks": json.loads(os.environ.get("FAKE_BASELINE_CHECKS", "[]")), "captures": []}
+        for name in (head[:12] + ".baseline.json", "baseline.json"):
+            json.dump(v, open(os.path.join(d, name), "w"))
+        sys.exit(0)
     plan_path = os.environ["FAKE_GATE_PLAN"]
     calls = json.load(open(plan_path))
     n_path = plan_path + ".n"
@@ -174,6 +187,9 @@ def fl_profile(tmp_path, repo, runner, extra="", checks=None):
         gate_timeout_minutes = 45
         max_red_gates_before_handoff = 2
         max_vision_rounds = 2
+        # these tests script vision verdicts in call order: one batch call at a time
+        # (B3's concurrent batches are covered in test_revamp_gate.py)
+        vision_parallel = 1
         lanes = ["prework", "test_design", "failure_triage", "incremental_review"]
 
         [frontier_primary]
@@ -243,7 +259,10 @@ def test_profile_defaults_and_validation(tmp_path):
     repo, _ = make_repo(tmp_path, "game", [T1])
     p = load(str(write_profile(tmp_path, "game", repo)))
     assert p.fast_lane["enabled"] is False and not p.fast_lane_task("T1")
-    assert p.fast_lane["max_red_gates_before_handoff"] == 2 and p.fast_lane["max_vision_rounds"] == 2
+    # max_vision_rounds default 1 (revamp decision 2026-10-21: one fix round, then accept
+    # with notes); vision_parallel 4, auto_baseline and early_review on (B2-B4)
+    assert p.fast_lane["max_red_gates_before_handoff"] == 2 and p.fast_lane["max_vision_rounds"] == 1
+    assert p.fast_lane["vision_parallel"] == 4 and p.fast_lane["auto_baseline"] is True
     for bad in ('[fast_lane]\nfoo = 1\n', '[fast_lane]\ntasks = ["UI-*"]\n',
                 '[fast_lane]\nlanes = ["nope"]\n', '[fast_lane]\ngate_timeout_minutes = 0\n',
                 '[fast_lane]\ngate_module = "not a module"\n'):
@@ -276,9 +295,13 @@ def test_pass_vision_review_close(env):
     assert len(started) == 1
     [g] = events(e, "fast_lane_gate")
     assert json.loads(g["detail"])["result"] == "PASS"
-    # the captures commit came from the same session, then vision approved at the revision
-    assert any("commit exactly the gate's capture files" in x[2] for x in e.client.log)
-    assert len({x[0] for x in e.client.log}) == 1
+    # B1 (2026-10-21): the coordinator commits the gate's captures itself (UI-D1 spent
+    # attempts 3-7 on "commit its captures" turns); the session got only its first prompt
+    assert not any("capture files" in x[2] for x in e.client.log), [x[2][-600:] for x in e.client.log[1:]]
+    assert len(e.client.log) == 1
+    [cc] = events(e, "coordinator_commit")
+    assert CAP in json.loads(cc["detail"])["paths"]
+    assert json.loads(cc["detail"])["sha"] in t["data"]["coord_commits"]
     [a] = e.c.store.approvals("game", "T1", "visual")
     assert a["approver"] == f"model:{VISION}/vision-model" and CAP in a["artifacts"]
     rows = e.c.store.q("SELECT check_name, result, required FROM verifications WHERE set_id=?",
@@ -422,8 +445,11 @@ def test_au_adapter_fast_lane_prompt_and_obligations(tmp_path):
     p = a.implement_prompt(spec, {"run_id": "r1", "attempt": 1})
     for want in ("au-fast-lane", "docs/rules/FAST_LANE_RULES.md", "docs/progress/UI-03a_PLAN.md",
                  "docs/progress/UI-03a_gate.json", "studio_gate --repo", "stories --sprint UI-03a",
-                 "sprint --sprint UI-03a", "status --sprint UI-03a", "LOCAL"):
+                 "never run `sprint`", "LOCAL"):
         assert want in p, want
+    # B2 (2026-10-21): the session runs stories + Lune only; the coordinator owns the one
+    # full gate (UI-02a: session and coordinator both ran it at the same head)
+    assert "sprint --sprint UI-03a" not in p and "status --sprint" not in p
     assert "AGENT_RULES.md (full)" not in p and "tools/gate.ps1" not in p
     assert a.required_checks(spec, "BUILD")[0]["check_id"] == "fast_lane.gate"
     a._plan_requirements = lambda s, ws=None: {"suites": ["S45"], "gate": True, "captures": [],
@@ -499,7 +525,10 @@ def test_vision_reviews_in_batches_and_retries_only_inconclusive(env):
     # 3 batches + the uncertain batch re-asked in small chunks (v0.130.2: 1 frame each here);
     # the approved batches' frames are remembered as clean, so only that batch is re-asked
     assert len(vision_calls) == 5
-    assert [x["session_id"].rsplit("-", 1)[-1] for x in vision_calls[-2:]] == ["1.c1of2", "1.c2of2"]
+    # B3: a round's batches are frozen when it starts (memory no longer re-cuts them), so the
+    # retry names the inconclusive batch itself: batch 2 of 3, in two 1-frame chunks
+    assert [x["session_id"].rsplit("-", 1)[-1] for x in vision_calls[-2:]] == [
+        "b2of3.c1of2", "b2of3.c2of2"]
     [a] = e.c.store.approvals("game", "T1", "visual")
     assert set(a["artifacts"]) == set(caps)
 
@@ -529,16 +558,18 @@ def test_runner_outputs_dirty_at_run_start_never_trip_the_clean_checks(env):
 
 def test_capture_commit_covers_other_renders_in_the_capture_folder(env):
     """UI-D1 (2026-10-20): the session's own stories run re-rendered 463 frames besides the
-    gate's 40 captures; told to commit "exactly the gate's capture files, nothing else", it
-    left them dirty and coordinator.clean looped. The commit prompt now names the folder."""
+    gate's 40 captures and coordinator.clean looped. B1 (2026-10-21): the coordinator commits
+    the whole runner capture folder itself; no model turn is spent on it."""
     other = "docs/evidence/UI-v3/T1/Other.normal@390x844.png"
     e = env([dict(GREEN, append={other: "re-rendered"}), GREEN])
     e.c.approve("game", "T1", [], "victor")
     t = drive(e, lambda t: t["state"] in (S.COMPLETE, S.BLOCKED, S.CHANGES_REQUIRED))
     assert t["state"] == S.COMPLETE, (t["blocker"], t["next_action"])
-    [p] = [x[2] for x in e.client.log if "gate captures" in x[2]]
-    assert "git add -A -- docs/evidence/UI-v3/T1" in p and "1 other re-rendered" in p
-    assert other in p and "exactly the gate's capture files" not in p
+    assert not [x[2] for x in e.client.log if "gate captures" in x[2]]
+    [cc] = events(e, "coordinator_commit")
+    d = json.loads(cc["detail"])
+    assert other in d["paths"] and CAP in d["paths"] and d["message"].startswith("T1:")
+    assert len(events(e, "fast_lane_gate_started")) == 1          # the commit carried the gate
 
 
 # ------------------------------------------------------- background work (v0.130)
@@ -606,9 +637,10 @@ def test_consumed_verdict_survives_the_session_rewriting_the_workspace_file(tmp_
     assert FL._verdict_copy(dict(run, run_id="../x")) == ""     # never a path from a bad id
 
 
-def test_inconclusive_batch_gets_three_tries_in_chunks(env):
-    """UI-D1 (2026-10-20 11:44): a batch inconclusive twice blocked the task. Retries now
-    re-ask it in chunks and a third try is allowed before the task stops."""
+def test_inconclusive_batch_gets_one_structured_retry_then_notes(env):
+    """UI-D1 (2026-10-20 11:44): a batch inconclusive twice blocked the task. Revamp B3
+    (decision 2026-10-21): one structured retry in chunks, then the frames still
+    inconclusive are accepted with notes; vision never stops a sprint."""
     caps = [CAP.replace(".png", f"-{i}.png") for i in range(4)]
     e = env([{"result": "PASS", "captures": caps}],
             vision=["uncertain", "uncertain", "approve", "approve", "approve", "approve",
@@ -619,11 +651,13 @@ def test_inconclusive_batch_gets_three_tries_in_chunks(env):
     assert t["state"] == S.COMPLETE, t["blocker"]
     calls = [x["session_id"] for x in e.ff.chats if x.get("packet") == "vision"]
     # try 0: the whole batch (uncertain); try 1: 1-frame chunks, the first one uncertain;
-    # try 2: only that chunk again (the other three are kept), approve
+    # no third try: accepted with notes
     assert ".c" not in calls[0] and any(".c1of4" in c for c in calls[1:])
-    assert len(calls) == 1 + 4 + 1          # try 2 re-asks only the failing chunk
+    assert len(calls) == 1 + 4
     [a] = e.c.store.approvals("game", "T1", "visual")
-    assert set(a["artifacts"]) == set(caps)
+    assert set(a["artifacts"]) == set(caps) and "inconclusive" in a["note"]
+    [acc] = events(e, "fast_lane_vision_accepted_with_notes")
+    assert json.loads(acc["detail"])["inconclusive"] == 1
 
 
 def test_vision_after_an_approval_reviews_only_changed_frames(env):

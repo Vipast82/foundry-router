@@ -342,6 +342,10 @@ class Coordinator:
             r = self._lc_readiness(P, t, spec, {"attempt": attempt, "base": t["base_sha"]})
             if r:
                 return self._lc_block_readiness(P, t, r)
+        if self.fast_lane.on(P, tid):
+            if self.fast_lane.baseline_hold(P, t):
+                return   # B2: the sprint's automatic baseline runs before its first session
+            t = self.store.task(pid, tid)        # keep the baseline record it just saved
         try:
             dirty = P.ws.status()
         except GitError as e:
@@ -1054,22 +1058,31 @@ class Coordinator:
                  + "; ".join(f"{c[0][:10]} {c[1][:60]}" for c in bad[:5])) if bad
                 else f"all {len(commits)} commit message(s) start with {prefix!r}")
         changed = P.ws.changed_files(base, head)
-        outside = [f for f in changed if not matches_any(f, spec.scope + exempt)]
+        runner_out, runner_caps = [], []
+        if self.fast_lane.on(P, spec.task_id):
+            from .fast_lane import runner_patterns
+            runner_out, runner_caps = runner_patterns(P, spec.task_id)
+        # B1 (2026-10-21): scope blames the agent only for files it changed. Runner outputs
+        # and files only the coordinator's own commits touched are never "outside scope".
+        outside = [f for f in changed if not matches_any(f, spec.scope + exempt + runner_out
+                                                         + runner_caps)]
+        if outside:
+            from . import bookkeeping as BK
+            mine = set(BK.only_coordinator(P, t, base, head, outside))
+            outside = [f for f in outside if f not in mine]
         add("scope", FAIL if outside else PASS,
             ("changed outside the task's files: " + ", ".join(outside[:12])
              + " — the coordinator never widens scope") if outside
             else f"{len(changed)} changed file(s), all within scope")
         dirty = P.ws.status()
         baseline = t["data"].get("baseline_dirty") or {}
-        runner_out, runner_caps = [], []
-        if self.fast_lane.on(P, spec.task_id):
-            from .fast_lane import settings as _fl_settings
-            fls = _fl_settings(P)
-            runner_out = [x.replace("{task}", spec.task_id) for x in fls.get("runner_outputs") or []]
-            runner_caps = [x.replace("{task}", spec.task_id) for x in fls.get("runner_captures") or []]
-            # [fast_lane]: the studio_gate runner's own outputs are not session work
-            dirty = [(st, p) for st, p in dirty if not matches_any(p, runner_out)]
-            baseline = {p: h for p, h in baseline.items() if not matches_any(p, runner_out)}
+        if runner_out or runner_caps:
+            # [fast_lane] B1: the studio_gate runner's own outputs (evidence log, captures)
+            # are the coordinator's to commit after a green gate, never session work: they
+            # can't fail clean or unrelated_preserved
+            own = runner_out + runner_caps
+            dirty = [(st, p) for st, p in dirty if not matches_any(p, own)]
+            baseline = {p: h for p, h in baseline.items() if not matches_any(p, own)}
         in_scope_dirty = [p for _, p in dirty if matches_any(p, spec.scope)
                          or (matches_any(p, exempt) and (p not in baseline or p in changed))]
         inter = [p for p in self._intermediate_dirty(P, t, spec, dirty)

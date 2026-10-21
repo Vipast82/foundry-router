@@ -153,8 +153,16 @@ FAST_LANE_DEFAULTS = {
     "gate_module": "foundry_coordinator.projects.animaluprising.studio_gate",
     "gate_timeout_minutes": 45,               # a run still going after this = red gate
     "max_red_gates_before_handoff": 2,        # local-primary tasks then auto-request frontier_primary
-    "max_vision_rounds": 2,                   # CHANGES rounds before accept-with-notes
+    # CHANGES fix rounds before accept-with-notes (revamp decision 2026-10-21: vision blocks
+    # only on changed frames, one fix round, then accept with notes)
+    "max_vision_rounds": 1,
     "vision_batch_frames": 20,                # frames per vision call (UI-D1 had ~560 frames)
+    "vision_parallel": 4,                     # vision batch calls in flight at once (B3)
+    # B2: run the sprint's regression once at its base commit before the first session and
+    # record it as baseline.json (pre-existing reds never block; passed suites carry)
+    "auto_baseline": True,
+    # B4: start the code review while vision runs, once the gate is green
+    "early_review": True,
     "lanes": ["prework", "test_design", "failure_triage", "incremental_review"],
     # files the runner rewrites on every run ({task} = the task id): never part of the
     # coordinator's clean / unrelated_preserved checks (UI-D1 lost its last attempt to the
