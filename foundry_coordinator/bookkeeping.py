@@ -85,29 +85,31 @@ def only_coordinator(P, t: dict, base: str, head: str, files: list) -> list:
 # ---- plan checklist ticks (B4) --------------------------------------------------------
 
 _BOX = re.compile(r"^(\s*(?:[-*+]|\d+[.)])\s*)\[( |~|-|/)\](\s*)(.*)$")
+_DONE = re.compile(r"^\s*(?:[-*+]|\d+[.)])\s*\[[xX]\]")
 
 
 def tick_lines(text: str, verified: dict) -> tuple[str, list]:
     """Tick open checklist rows of `text` whose wording matches one of `verified`
     ({regex: evidence line}). The final CLOSE row (the last row) is never ticked:
-    it belongs to closeout. Returns (new text, [ticked row texts])."""
+    it belongs to closeout. CRLF files keep their line ends. Returns (new text,
+    [ticked row texts])."""
     lines = text.split("\n")
-    rows = [i for i, ln in enumerate(lines) if _BOX.match(ln) or re.match(
-        r"^\s*(?:[-*+]|\d+[.)])\s*\[[xX]\]", ln)]
+    bare = [ln[:-1] if ln.endswith("\r") else ln for ln in lines]
+    rows = [i for i, ln in enumerate(bare) if _BOX.match(ln) or _DONE.match(ln)]
     if not rows:
         return text, []
     last = rows[-1]
     ticked = []
     for i in rows:
-        if i == last:
-            continue
-        m = _BOX.match(lines[i])
-        if not m:
+        m = _BOX.match(bare[i])
+        if i == last or not m:
             continue
         body = m.group(4)
         for pat, ev in verified.items():
             if re.search(pat, body, re.I):
-                lines[i] = f"{m.group(1)}[x]{m.group(3)}{body} (verified by the coordinator: {ev})"
+                end = lines[i][len(bare[i]):]
+                lines[i] = (f"{m.group(1)}[x]{m.group(3)}{body} (verified by the coordinator: "
+                            f"{ev}){end}")
                 ticked.append(body[:160])
                 break
     return "\n".join(lines), ticked

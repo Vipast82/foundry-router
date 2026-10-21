@@ -467,11 +467,13 @@ class FastLane:
             rest = [f for f in rest if f not in mine]
         return not rest
 
-    def _commit_runner_files(self, P, t: dict, v: dict) -> tuple[str, str]:
+    def _commit_runner_files(self, P, t: dict, v: dict, spec=None,
+                             run: Optional[dict] = None) -> tuple[str, str]:
         """B1 (2026-10-21): the coordinator commits the runner's outputs itself (the
         verdict's captures, the task's runner_captures folder, its runner_outputs such as
         the evidence log) instead of asking the session to. UI-D1 spent attempts 3-7 on
-        "commit its captures" turns. (sha, "") | ("", "") nothing dirty | ("", error)."""
+        "commit its captures" turns. B4: the same commit ticks the plan checklist rows the
+        green gate verifies. (sha, "") | ("", "") nothing to commit | ("", error)."""
         from . import bookkeeping as BK
         tid = t["task_id"]
         outs, caps = runner_patterns(P, tid)
@@ -483,10 +485,56 @@ class FastLane:
             return "", str(e)[:300]
         paths = [p for p in BK.runner_paths(dirty, outs + caps, exact)
                  if P.profile.in_workspace(p)]
+        ticked = self._tick_plan(P, t, spec, v, run or {}, dirty, exact)
+        if ticked:
+            paths.append(ticked)
         if not paths:
             return "", ""
-        return BK.commit(self.c, P, t, paths, "gate captures and runner outputs (coordinator)",
-                         "runner_outputs")
+        what = "gate captures and runner outputs" + (
+            ", verified checklist ticks" if ticked else "")
+        return BK.commit(self.c, P, t, paths, f"{what} (coordinator)",
+                         "runner_outputs" + ("+checklist" if ticked else ""))
+
+    def _tick_plan(self, P, t: dict, spec, v: dict, run: dict, dirty: list,
+                   caps: set) -> str:
+        """B4 (2026-10-21): tick the plan checklist rows a green gate verifies (rows about
+        the gate, and about captures when the gate made some), each with its evidence;
+        never the final CLOSE row, never a plan with uncommitted edits. UI-D1's three
+        Deep-Reviews blocked on unticked BUILD rows. Returns the plan path when changed."""
+        from . import bookkeeping as BK
+        if spec is None or not settings(P).get("tick_checklist", True):
+            return ""
+        plan = str((getattr(spec, "data", None) or {}).get("plan") or "").replace("\\", "/")
+        if not plan or not P.profile.in_workspace(plan) or \
+                plan in {p.replace("\\", "/") for _, p in dirty}:
+            return ""
+        path = os.path.join(P.profile.workspace, *plan.split("/"))
+        try:
+            with open(path, encoding="utf-8", newline="") as f:
+                text = f.read()
+        except OSError:
+            return ""
+        tid = t["task_id"]
+        full = str(run.get("head") or v.get("head") or "")
+        gh = full[:12]
+        verified = {r"\bgate\b(?!\.json)": f"GATE {tid} PASS at {gh}, {verdict_rel(tid, full)}"}
+        if caps:
+            verified[r"\b(?:captures?|screenshots?)\b"] = (
+                f"{len(caps)} capture(s) from the gate at {gh}, committed by the coordinator")
+        new, rows = BK.tick_lines(text, verified)
+        if not rows:
+            return ""
+        try:
+            with open(path, "w", encoding="utf-8", newline="") as f:
+                f.write(new)
+        except OSError:
+            return ""
+        fl = self._fl(P, tid)
+        fl["ticked"] = (list(fl.get("ticked") or []) + rows)[-40:]
+        self._save(P, tid, fl)
+        self.store.event(P.id, tid, "checklist_ticked", detail={"plan": plan, "rows": rows[:20],
+                                                                 "gate_head": gh})
+        return plan
 
     def _proc(self, P, tid: str, run: dict):
         return self._procs.get((P.id, tid, run.get("head")))
@@ -691,7 +739,7 @@ class FastLane:
             return self._red(P, t, spec, head, generic + rows, v, vkey, first)
         # PASS: the runner's own outputs are committed by the coordinator (B1), then this
         # verdict is re-read at the new head next tick (a coordinator commit carries it)
-        sha, cerr = self._commit_runner_files(P, t, v)
+        sha, cerr = self._commit_runner_files(P, t, v, spec, run)
         if sha:
             self.c._note(P, t, f"studio gate PASS at {run['head'][:12]}; the coordinator "
                                f"committed its captures and outputs at {sha[:12]}")
@@ -736,6 +784,12 @@ class FastLane:
             return self._continue(P, t, spec, head, vid, f"fast-lane:commit:{head}",
                                   f"Studio gate PASS at {run['head'][:12]}: commit its captures",
                                   lines, "the studio gate passed; its captures must be committed")
+        if settings(P).get("early_review", True):
+            # B4: the code review needs only the green gate, not the look: it starts now and
+            # runs while the vision batches do; both feed ONE fix round
+            if (P.id, tid, head) not in self.c._early_reviews:
+                vid0 = self.store.save_verification(P.id, tid, head, "verify", generic + rows)
+                self.c.early_review_start(P, self.store.task(P.id, tid) or t, head, vid0)
         vision = self._vision(P, t, spec, head, run, v, generic + rows)
         if vision is None:
             return None
@@ -811,16 +865,18 @@ class FastLane:
     # -- same-session continuation -----------------------------------------------------
 
     def _continue(self, P, t: dict, spec, head: str, vid: str, key: str, title: str,
-                  lines: list, reason: str, extra: str = "") -> Optional[list]:
+                  lines: list, reason: str, extra: str = "",
+                  review_id: str = "") -> Optional[list]:
         tid = t["task_id"]
         sid = t.get("session_id") or ""
         if sid and self.store.op(f"deliver:{P.id}:{tid}:{sid}:{key}"):
             # this exact prompt already went to this session and it came back
             # unchanged: no loop, the ordinary repair path takes over
-            return self._fallback(P, t, vid, lines)
+            return self._fallback(P, t, vid, lines, review_id)
         fl = self._fl(P, tid)
         fl["pending"] = {"key": key, "head": head, "vid": vid, "title": title,
-                         "lines": list(lines)[:30], "reason": reason, "extra": extra}
+                         "lines": list(lines)[:30], "reason": reason, "extra": extra,
+                         "review_id": review_id}
         self._save(P, tid, fl)
         return self._send(P, self.store.task(P.id, tid), spec, head, fl["pending"])
 
@@ -828,14 +884,14 @@ class FastLane:
         tid = t["task_id"]
         sid = t.get("session_id") or ""
         if not sid or not self.store.session(sid):
-            return self._fallback(P, t, pend["vid"], pend["lines"])
+            return self._fallback(P, t, pend["vid"], pend["lines"], pend.get("review_id") or "")
         try:
             gone = P.client.state(sid, directory=P.profile.workspace,
                                   since_ts=0).status == "missing"
         except Exception:                                         # noqa: BLE001
             gone = False                 # unknown: the prompt decides
         if gone:
-            return self._fallback(P, t, pend["vid"], pend["lines"])
+            return self._fallback(P, t, pend["vid"], pend["lines"], pend.get("review_id") or "")
         if self.c._held(P, t, "fast-lane continuation"):
             return None                  # kept pending for the resume
         if self.c._acquire(P, t, self.c._session_locks(P), writer=True):
@@ -860,20 +916,22 @@ class FastLane:
             self.c._release_session(P, t)
             self.store.event(P.id, tid, "warning", session_id=sid, detail={
                 "fast_lane": f"continuation failed ({pend['key']}): {type(e).__name__}: {e}"[:400]})
-            return self._fallback(P, t, pend["vid"], pend["lines"])
+            return self._fallback(P, t, pend["vid"], pend["lines"], pend.get("review_id") or "")
         fl = self._fl(P, tid)
         fl.pop("pending", None)
         self._save(P, tid, fl)
         self.store.event(P.id, tid, "fast_lane_continuation", session_id=sid, detail={
             "key": pend["key"], "sent": sent, "resumed": resumed, "title": pend["title"],
             "findings": pend["lines"][:10]})
-        self.store.transition(P.id, tid, S.IMPLEMENTING, {
-            "verification_id": pend["vid"], "session_id": sid, "continuation": pend["key"],
-            "fast_lane": pend["title"]}, phase="implement", head_sha=head,
+        ev = {"verification_id": pend["vid"], "session_id": sid, "continuation": pend["key"],
+              "fast_lane": pend["title"]}
+        if pend.get("review_id"):
+            ev["review_id"] = pend["review_id"]          # (REVIEWING -> IMPLEMENTING, B4)
+        self.store.transition(P.id, tid, S.IMPLEMENTING, ev, phase="implement", head_sha=head,
             next_action=f"session working (fast lane: {pend['title']})"[:500])
         return None
 
-    def _fallback(self, P, t: dict, vid: str, lines: list) -> None:
+    def _fallback(self, P, t: dict, vid: str, lines: list, review_id: str = "") -> None:
         tid = t["task_id"]
         fl = self._fl(P, tid)
         fl.pop("pending", None)
@@ -882,9 +940,13 @@ class FastLane:
         self.c._release_session(P, cur)
         findings = list(lines) or ["fast lane: the studio gate did not pass"]
         self.store.event(P.id, tid, "fast_lane_fallback", detail={"findings": findings[:10]})
-        self.store.transition(P.id, tid, S.CHANGES_REQUIRED, {
-            "verification_id": vid, "findings": findings}, verification_id=vid,
-            data={**cur["data"], "findings": findings})
+        ev = {"verification_id": vid, "findings": findings}
+        kw = {"verification_id": vid} if vid else {}
+        if review_id:
+            ev["review_id"] = review_id
+            kw["review_id"] = review_id
+        self.store.transition(P.id, tid, S.CHANGES_REQUIRED, ev,
+                              data={**cur["data"], "findings": findings}, **kw)
         return None
 
     # -- vision approval ---------------------------------------------------------------
@@ -1041,13 +1103,21 @@ class FastLane:
             rounds = int(fl.get("vision_rounds") or 0)
             mx = int(settings(P)["max_vision_rounds"])
             if rounds < mx:
+                # B4: a code review running alongside joins this fix round (one round, one
+                # warm session); wait for it rather than send two rounds
+                merged = self._review_for_merge(P, t, head)
+                if merged == "wait":
+                    self.c._note(P, t, "vision asks for changes; waiting for the code review in "
+                                       "flight to send one merged fix round")
+                    return None
+                fl = self._fl(P, tid)
                 fl["vision_rounds"] = rounds + 1
                 self._save(P, tid, fl)
                 vid = self.store.save_verification(P.id, tid, head, "verify", results + [
                     VerificationResult("fast_lane.vision", FAIL, True, "",
                                        "CHANGES: " + " | ".join(findings[:6]), head)])
                 return self._vision_changes(P, t, spec, head, vid, fp, rounds + 1, mx,
-                                            findings[:60] + unsure_notes)
+                                            findings[:60] + unsure_notes, merged)
         # accept with notes: CHANGES after the fix rounds, or batches still inconclusive after
         # the one structured retry (never a stop: the operator decided 2026-10-21)
         fl = self._fl(P, tid)
@@ -1068,12 +1138,119 @@ class FastLane:
                                   + " | ".join(notes[:8]), head)
 
     def _vision_changes(self, P, t: dict, spec, head: str, vid: str, fp: str, rnd: int, mx: int,
-                        findings: list) -> Optional[VerificationResult]:
-        """Vision CHANGES go back into the same session (one fix round)."""
-        return self._continue(P, t, spec, head, vid, f"fast-lane:vision:{fp}",
-                              f"Vision review: CHANGES (round {rnd}/{mx})",
-                              findings or ["changes required"],
-                              "the vision reviewer asked for changes")
+                        findings: list, review: Optional[dict] = None) -> Optional[VerificationResult]:
+        """Vision CHANGES go back into the same session (one fix round); with a code
+        review's CHANGES at the same head, both in ONE prompt (B4)."""
+        lines = list(findings or ["changes required"])
+        title = f"Vision review: CHANGES (round {rnd}/{mx})"
+        key = f"fast-lane:vision:{fp}"
+        if review:
+            lines = [f"vision: {x}" for x in lines] + review["lines"]
+            title += f" + code review {review['review_id']}: CHANGES_REQUIRED"
+            key += f":review:{review['review_id']}"
+        return self._continue(P, t, spec, head, vid, key, title, lines[:60],
+                              "the vision reviewer" + (" and the code reviewer" if review else "")
+                              + " asked for changes")
+
+    def _review_for_merge(self, P, t: dict, head: str):
+        """B4: "wait" while the early review of `head` runs; its CHANGES_REQUIRED (lines,
+        id) once done; None when there is nothing to merge."""
+        from . import review as R
+        tid = t["task_id"]
+        got = self.c.early_review_collect(P, t, head)
+        if got == "running":
+            return "wait"
+        revs = [r for r in self.store.reviews(P.id, tid, head) if r["valid"]
+                and r["verdict"] == "CHANGES_REQUIRED" and R.packet_version(r) == R.PACKET_VERSION]
+        if not revs:
+            return None
+        rev = revs[-1]
+        lines = ["code review: " + x for x in (R.findings_for_repair(rev["result"] or {})
+                                              or ["the reviewer asked for changes"])]
+        self.store.event(P.id, tid, "fast_lane_merged_fix_round", detail={
+            "head": head, "review_id": rev["review_id"], "review_findings": lines[:10]})
+        return {"review_id": rev["review_id"], "lines": lines[:30]}
+
+    def review_changes(self, P, t: dict, rev: dict, findings: list) -> bool:
+        """B4: a code review's CHANGES_REQUIRED goes back into the same warm session
+        (fast lane), like a red gate or vision CHANGES, instead of a cold repair
+        session. False = not handled here (no session): the caller's repair path."""
+        tid = t["task_id"]
+        if not t.get("session_id") or not settings(P).get("early_review", True):
+            return False
+        spec = P.adapter.describe(tid)
+        self._continue(P, t, spec, rev["reviewed_sha"], t.get("verification_id") or "",
+                       f"fast-lane:review:{rev['review_id']}",
+                       f"Code review {rev['review_id']}: CHANGES_REQUIRED",
+                       findings or ["the reviewer asked for changes"],
+                       "the code reviewer asked for changes", review_id=rev["review_id"])
+        return True
+
+    def review_evidence(self, P, t: dict, spec, head: str) -> list:
+        """B4: the coordinator's own evidence for the review packet, built from what it
+        verified itself: the gate verdict (with carried and pre-existing checks), the
+        captures and vision state, and its bookkeeping commits (runner outputs,
+        checklist ticks), which are never review findings."""
+        from . import bookkeeping as BK
+        tid = t["task_id"]
+        fl = self._fl(P, tid)
+        run = fl.get("run") or {}
+        v = self._verdict(P, tid, run) if run.get("head") else None
+        items = []
+        if v:
+            checks = [c for c in v.get("checks") or [] if isinstance(c, dict)]
+            res = effective_result(v)
+            carried = [c.get("id") for c in checks if "CARRIED from" in str(c.get("detail") or "")]
+            pre = [c.get("id") for c in checks if "PRE-EXISTING" in str(c.get("detail") or "")]
+            lines = [f"{v.get('summary_line') or ''} at {run['head']} (run {run.get('run_id')}, "
+                     f"mode {v.get('mode')})",
+                     f"effective result {res}: {len(checks)} check(s), "
+                     f"{sum(1 for c in checks if c.get('result') == 'PASS')} PASS, "
+                     f"{len(carried)} carried from earlier verdicts (inputs unchanged), "
+                     f"{len(pre)} pre-existing at the sprint's baseline"]
+            for c in checks[:80]:
+                ln = f"- {c.get('id')}: {c.get('result')}"
+                if not c.get("required", True):
+                    ln += " (advisory)"
+                if c.get("result") != "PASS" or c.get("id") in pre:
+                    ln += f" - {str(c.get('detail') or '')[:160]}"
+                lines.append(ln)
+            same = run["head"] == head
+            items.append({"title": f"{tid} studio gate verdict (read by the coordinator)",
+                          "path": verdict_rel(tid, run["head"]), "revision": run["head"],
+                          "text": "\n".join(lines), "status": "ok", "priority": 1,
+                          "note": "the coordinator ran this gate itself; " + (
+                              "at the reviewed commit" if same else
+                              f"at {run['head'][:12]}; only coordinator-committed or evidence "
+                              f"files changed since")})
+            caps = [c for c in v.get("captures") or [] if isinstance(c, dict) and c.get("path")]
+            if caps:
+                apr = self.store.approvals(P.id, tid, "visual")
+                vis = (f"visual approval at {str(apr[-1]['revision'])[:12]} by "
+                       f"{apr[-1]['approver']}: {str(apr[-1].get('note') or '')[:300]}"
+                       if apr else "vision review not finished when this packet was built "
+                                   "(it runs alongside this review)")
+                items.append({"title": f"{tid} gate captures and vision (coordinator)",
+                              "path": "", "revision": head, "status": "ok", "priority": 3,
+                              "text": f"{len(caps)} capture(s) from the gate, committed by the "
+                                      f"coordinator: " + ", ".join(str(c['path']) for c in caps[:30])
+                                      + ("" if len(caps) <= 30 else f" and {len(caps) - 30} more")
+                                      + f"\n{vis}"})
+        mine = BK.commits(self.store.task(P.id, tid) or t)
+        ticked = list(fl.get("ticked") or [])
+        if mine or ticked:
+            text = ["Bookkeeping the coordinator does itself (verified by it; not the "
+                    "implementer's work and never a review finding):"]
+            if mine:
+                text.append(f"- {len(mine)} coordinator commit(s) of runner outputs "
+                            f"(captures, evidence log) and checklist ticks")
+            text += [f"- ticked by the coordinator: {r}" for r in ticked[:20]]
+            text.append("- closeout documents (summary, state row) are written by the "
+                        "coordinator after approval")
+            items.append({"title": "coordinator bookkeeping (not for review)", "path": "",
+                          "revision": head, "status": "ok", "priority": 4,
+                          "text": "\n".join(text)})
+        return items
 
     def _vision_state(self, P, tid: str, fp: str, tries: int, batches: list, arts: dict,
                       size: int):
