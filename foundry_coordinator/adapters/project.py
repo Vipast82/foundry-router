@@ -258,6 +258,14 @@ class GenericAdapter(ReviewContractDefaults):
                     rules.append({"permission": name, "pattern": pattern, "action": act})
             else:
                 rules.append({"permission": name, "pattern": "*", "action": str(action)})
+        # role rules from the router (C1 config store), after the profile's own:
+        # only when deployed role rules are part of the applied profile
+        role_rules = (getattr(self.p, "raw", None) or {}).get("role_rules")
+        if isinstance(role_rules, dict):
+            from foundry_automation.role_rules import session_rules
+            role = {"helper": "helper", "lead": "lead", "repair": "coordinator"}.get(
+                phase, "implementer")
+            rules += session_rules(role, role_rules.get(role), self.p.workspace)
         return rules
 
     def helper_permissions(self, spec: TaskSpec) -> list[dict]:

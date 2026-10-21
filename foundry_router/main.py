@@ -132,6 +132,8 @@ class Services:
         set_registry(self.work)
         from .control_center import ControlCenter
         self.control = ControlCenter(db, secrets_fn=lambda: secret_values(self))
+        from .automation_store import AutomationStore
+        self.automation = AutomationStore(db)
         from .quota_gate import QuotaGate
         self.quota_gate = QuotaGate(self)
         self.ledger.gate = self.quota_gate
@@ -652,5 +654,7 @@ def create_app(config_path: Optional[Path] = None,
     app.include_router(work_router)
     from .control_api import router as control_router
     app.include_router(control_router)
+    from .automation_api import router as automation_router
+    app.include_router(automation_router)
     app.include_router(ui_router)
     return app
