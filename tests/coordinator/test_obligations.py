@@ -600,3 +600,19 @@ def test_obligation_globs_do_not_cross_a_slash(store):
     ob, P = Obligations(store), project(adapter=GateOnly(obs), ws=ws)
     files = ob._files_at(ws, "h2", "docs/evidence/UI-01/*.png")
     assert files == [("docs/evidence/UI-01/a.png", "b1")]
+
+
+def test_closeout_files_are_never_an_outside_scope_conflict(store):
+    """UI-D1 / UI-02a (2026-10-20): the plan, SUMMARY and STATE.md are written by the CLOSE
+    session for every task; their obligations asked the operator every sprint."""
+    class CloseoutAdapter(AUAdapter):
+        def exempt_paths(self, spec):
+            return ["docs/evidence/UI-01/*"]          # here: the capture's folder
+    ob, P = Obligations(store), project(adapter=CloseoutAdapter())
+    ob.seed(P, spec(scope=["src/**"]))
+    kinds = {x["kind"] for x in ob.reconcile(P, spec(scope=["src/**"]), "")}
+    assert "evidence_outside_scope" not in kinds
+    # without the exemption the same evidence is still a conflict
+    ob2, P2 = Obligations(store), project(pid="other")
+    ob2.seed(P2, spec(scope=["src/**"]))
+    assert "evidence_outside_scope" in {x["kind"] for x in ob2.reconcile(P2, spec(scope=["src/**"]), "")}

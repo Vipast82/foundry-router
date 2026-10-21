@@ -2,6 +2,17 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.130.10 — closeout files are never an "outside the task scope" decision
+
+Every sprint opened three operator decisions ("required evidence docs/progress/<ID>_PLAN.md /
+<ID>_SUMMARY.md / STATE.md is outside the task scope"). The close session writes those files
+for every task, and they are already the profile's `[closeout] exempt_paths`. The coordinator's
+scope check honored that list; the obligation reconciliation didn't. It now does, so these
+decisions no longer open, and real out-of-scope evidence still does. Test:
+`test_closeout_files_are_never_an_outside_scope_conflict`; obligation, lifecycle and AU
+evidence tests pass. Coordinator change; it needs a restart. Decisions already open stay open
+until answered.
+
 ## v0.130.9 — retry guidance works on its GPT fallback
 
 With Claude at its weekly cutoff, retry guidance (`Foundry-Kilo-Opus`, now falling back to

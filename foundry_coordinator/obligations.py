@@ -557,12 +557,19 @@ class Obligations:
                          f"{cur['phase']} for {cur['obligation_id']}",
                          {"obligation_id": cur["obligation_id"], "adapter_phase": want,
                           "phase": cur["phase"]}, [cur["obligation_id"]])
-        # required evidence the task may not even write
+        # required evidence the task may not even write. Closeout files (the profile's
+        # [closeout] exempt_paths: the plan, SUMMARY, STATE.md) are written by the CLOSE
+        # session for every task: never a conflict (UI-D1/UI-02a asked the operator about
+        # them every sprint)
+        try:
+            closeout = list(P.adapter.exempt_paths(spec) or [])
+        except Exception:                                         # noqa: BLE001
+            closeout = []
         if scope:
             for ob in stored.values():
                 for e in ob["required_evidence"]:
                     if e["kind"] in ("path", "blob_changed") and not _is_glob(e["ref"]) \
-                            and not matches_any(e["ref"], scope):
+                            and not matches_any(e["ref"], scope + closeout):
                         conflict("evidence_outside_scope",
                                  f"required evidence {e['ref']} of {ob['obligation_id']} is "
                                  f"outside the task scope",
