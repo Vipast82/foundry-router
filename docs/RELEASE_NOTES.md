@@ -2,6 +2,24 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.130.19 — lead write access and a local last-resort route
+
+- **`[lead_manager] write_access`** (default false): the lead session gets full Kilo access
+  (every tool, shell, git, Studio MCP, subagents, outside directories) through
+  `lead_write_permissions`. Reading or editing secrets and `.env` files stays denied, and the lead
+  never asks a question. It still holds the game workspace lock, so no primary writes at the same
+  time. A change to the game workspace is recorded as a `lead_fix` action and event instead of a
+  guard violation; the router checkout and the coordinator DB stay guarded. In this mode the
+  prompt tells the lead to fix blockers itself: harness or tooling faults, plan file-list gaps for
+  legitimate harness lines, and stale state. It commits by explicit path with the task prefix,
+  then reports `reverify`.
+- **`[lead_manager] allow_local_route`** (default false): a local model may be the lead chain's
+  last route. The `no_local_route` readiness check passes and names it. List the local model in
+  `expected_models` too.
+- **Animal Uprising profile:** both settings are on; local Qwen is added to the lead's
+  `expected_models`. The implementer role maps to the generic `Foundry-Kilo-Implementer` persona
+  (Sonnet, then GPT-6.1 Sol, then local Qwen).
+
 ## v0.130.18 — re-reviews and fix rounds re-run only what failed
 
 - **Incremental re-review:** after a CHANGES_REQUIRED review at an ancestor commit, the next

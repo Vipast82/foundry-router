@@ -84,6 +84,15 @@ LEAD_MANAGER_DEFAULTS = {
     # limit becomes a journaled delegated round that needs a materially
     # different action, never a question for Victor by itself.
     "full_authority": True,
+    # Victor 2026-10-21: write_access gives the lead session full Kilo access to
+    # the game workspace (edit, shell, git, Studio MCP, subagents) while it holds
+    # the workspace lock, so no primary writes at the same time. It fixes blockers
+    # itself, commits with the task prefix, and the coordinator re-verifies.
+    # Secrets stay unreadable; the router checkout and coordinator DB stay guarded.
+    "write_access": False,
+    # Victor 2026-10-21: every role must keep working when paid models are gone, so
+    # a local model may be the lead chain's last route (also list it in expected_models).
+    "allow_local_route": False,
     "max_delegated_rounds": 12,               # runaway guard per task budget round
     "max_extend_attempts": 3,                 # attempts one extend_budget op may grant
     "max_clean_paths": 20,                    # files one clean_untracked op may remove

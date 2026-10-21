@@ -1258,9 +1258,9 @@ class _Hanging(E2EClient):
         return super().state(session_id, directory=directory, since_ts=since_ts)
 
 
-def _game_with(tmp_path, client):
+def _game_with(tmp_path, client, **lead_kw):
     root, _ = make_repo(tmp_path, "game", [TASK], extra_files={"src/a.txt": "start\n"})
-    prof = write_profile(tmp_path, "game", root, extra=UI_OVERRIDE + lead_toml())
+    prof = write_profile(tmp_path, "game", root, extra=UI_OVERRIDE + lead_toml(**lead_kw))
     ff = E2EFoundry()
     c = coordinator(tmp_path, [prof], {"game": client}, foundry={"game": ff},
                     store_path=tmp_path / "state" / "coordinator.sqlite")
@@ -1284,6 +1284,38 @@ def test_lead_session_that_changes_the_game_is_discarded(tmp_path):
     assert "changed what it must never touch" in c.obligations.decision(k["decision_id"])["question"]
     # the workspace lock was held for the session and released after it
     assert not [lk for lk in c.store.locks() if lk["task_id"] == TID]
+
+
+def test_write_access_lead_may_change_the_game_and_its_report_is_used(tmp_path):
+    """Victor 2026-10-21: with [lead_manager] write_access the lead fixes blockers
+    itself. A game-workspace change is recorded as a lead_fix, not a guard
+    violation, and the report is used."""
+    client = _GameWriter(primary_script([]), lambda ctx: lead_reply(game_assignment()))
+    e = _game_with(tmp_path, client, write_access=True)
+    c = e["c"]
+    c.approve("game", TID, [], "victor")
+
+    def fixed():
+        k = case(e)
+        return bool(k) and any(a["kind"] == "lead_fix" for a in acts(e, k["case_id"]))
+    assert run_until(c, fixed, limit=60), hist(e)
+    k = case(e)
+    assert not [a for a in acts(e, k["case_id"]) if a["kind"] == "guard_violation"]
+    assert "lead was here" in (e["root"] / "src" / "a.txt").read_text()
+
+
+def test_write_access_permissions_allow_everything_but_secrets_and_questions(tmp_path):
+    from foundry_coordinator.lead import kilo_decision, lead_write_permissions, is_read_only
+    e = make_game(tmp_path, primary_script([]), extra=lead_toml(write_access=True))
+    rules = lead_write_permissions(e["P"], e["P"].adapter.describe(TID))
+    assert not is_read_only(rules)
+    for perm, val in (("bash", "git commit -m x -- src/a.txt"), ("edit", "src/a.txt"),
+                      ("task", "au-helper"), ("robloxstudio-mcp_run_code", "*"),
+                      ("external_directory", "C:/elsewhere/x")):
+        assert kilo_decision(rules, perm, val) == "allow", (perm, val)
+    for perm, val in (("read", "config/_secrets.toml"), ("read", "app.env"),
+                      ("edit", "my_secret_key.txt"), ("question", "anything")):
+        assert kilo_decision(rules, perm, val) == "deny", (perm, val)
 
 
 def test_victor_authorizing_another_round_runs_one_more_bounded_round(tmp_path):
