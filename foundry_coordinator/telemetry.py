@@ -1041,7 +1041,12 @@ def decisions_view(rows: list) -> list:
                     "answer": _cap(r.get("answer"), 1500), "authority": r.get("authority"),
                     "actor": _cap(r.get("actor"), 120), "opened_ts": r.get("opened_ts"),
                     "answered_ts": r.get("answered_ts"), "supersedes": r.get("supersedes"),
-                    "superseded_by": r.get("superseded_by")})
+                    "superseded_by": r.get("superseded_by"),
+                    # revamp B11: decision vs defect, the default and when it applies
+                    "decision_class": r.get("decision_class"),
+                    "recommended": _cap(r.get("recommended"), 800),
+                    "timeout_minutes": r.get("timeout_minutes"),
+                    "deadline_ts": r.get("deadline_ts")})
     out.sort(key=lambda x: (x["status"] != "open", -(float(x.get("opened_ts") or 0))))
     n_open = sum(1 for x in out if x["status"] == "open")
     return out[:max(30, n_open)]                 # every open decision is kept

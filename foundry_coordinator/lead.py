@@ -371,7 +371,10 @@ def report_contract(full_authority: bool = False) -> str:
         ' "action": {"kind": "assign_game_repair", "assignment": "<concrete instructions for '
         'the primary>", "files": ["<game paths within the task scope>"], "tests": [], '
         '"manifest": {"acceptance_tests": []}}\n'
-        ' , "question": "<only for ask_victor: one precise question>"}\n```\n'
+        ' , "question": "<only for ask_victor: one precise question>",\n'
+        ' "options": ["<only for ask_victor: 2-4 concrete answers>"], '
+        '"recommended": "<the option you recommend; applied if Victor does not answer in '
+        'time>"}\n```\n'
         "Other action kinds: {\"kind\": \"coordinator_repair\", \"plan\": \"...\", \"files\": "
         "[\"<Foundry-Router paths>\"], \"reproducing_test\": \"tests/...::test_x\", "
         "\"focused_tests\": [...], \"broader_tests\": [...], \"manifest\": "
@@ -620,11 +623,28 @@ def validate_report(rep: Any, *, scope=None, allowed_dirs=None, acceptance_globs
                     "different action is required")
     if cls in ("scope_core", "external") and kind != "ask_victor" and not question:
         errs.append(f"a {cls} problem goes to Victor: give a precise question")
+    # revamp B11: a question for Victor may carry its options and a recommended one
+    # (applied after the decision timeout); both optional, both validated
+    options, recommended = [], ""
+    if kind == "ask_victor" and (rep.get("options") or rep.get("recommended")):
+        options = rep.get("options")
+        if not isinstance(options, list) or not 2 <= len(options) <= 4 or any(
+                not isinstance(o, str) or not 3 <= len(o.strip()) <= 300 for o in options):
+            errs.append("options must be 2-4 answers of 3-300 characters")
+            options = []
+        recommended = str(rep.get("recommended") or "").strip()
+        if recommended and recommended not in [o.strip() for o in options]:
+            errs.append("recommended must be one of the options")
     if errs:
         return None, errs
-    return {"classification": cls, "hypothesis": hyp[:2000],
-            "evidence_refs": [r[:300] for r in refs][:40], "action": clean_act,
-            "question": question[:1500]}, []
+    out = {"classification": cls, "hypothesis": hyp[:2000],
+           "evidence_refs": [r[:300] for r in refs][:40], "action": clean_act,
+           "question": question[:1500]}
+    if options:
+        out["options"] = [o.strip() for o in options]
+        if recommended:
+            out["recommended"] = recommended
+    return out, []
 
 
 # -- permissions --------------------------------------------------------------------------
@@ -3186,14 +3206,17 @@ class LeadManager:
                               "bounds": {k: int(s[v]) for k, v in BOUNDS.items()},
                               "bound": list(bound) if bound else None,
                               "user_action": user_action,
+                              "recommended": (report or {}).get("recommended") or "",
                               "supersedes": [d["decision_id"] for d in originals],
                               "original_decisions": [
                                   {"decision_id": d["decision_id"], "kind": d["kind"],
                                    "question": self.redact(P, _cut(d.get("question") or "", 600))}
                                   for d in originals]},
-                    options=["give a specific instruction and resume the case",
-                             "authorize another bounded round", "stop the task"],
-                    recommendation="", blocks=[f"lead_case:{case['case_id']}"],
+                    options=list((report or {}).get("options") or []) or [
+                        "give a specific instruction and resume the case",
+                        "authorize another bounded round", "stop the task"],
+                    recommendation=(report or {}).get("recommended") or "",
+                    blocks=[f"lead_case:{case['case_id']}"],
                     supersedes=prior_answer or (originals[0]["decision_id"] if originals
                                                 else None))
                 if originals:

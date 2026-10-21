@@ -41,13 +41,16 @@ from .evidence import glob_match
 from .profile import matches_any
 
 SCHEMA_NAME = "schema:obligations"
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 PHASES = ("BUILD", "REVIEW", "CLOSE", "APPROVAL")
 STATUSES = ("open", "in_progress", "evidenced", "verified", "waived", "superseded")
 LIVE = ("open", "in_progress", "evidenced", "verified")
 EVIDENCE_KINDS = ("check", "path", "blob_changed", "log_marker")
-AUTHORITIES = ("operator", "delegated_policy", "lead_policy")
+AUTHORITIES = ("operator", "delegated_policy", "lead_policy", "timeout_default")
+# timeout_default (revamp B11): the decision's own recommended option, applied by
+# the engine when its timeout passed (decision_policy.sweep); only that exact
+# answer, only for kinds a delegated policy may answer
 # lead_policy: the enabled lead manager's delegated recovery authority
 # ([lead_manager] full_authority), always checked by the engine's
 # lead_validator for an open recovery case of the same task.
@@ -125,6 +128,12 @@ _STEPS = [
          "CREATE INDEX IF NOT EXISTS idx_dec_task ON decisions(project_id, task_id, status)",
          "CREATE INDEX IF NOT EXISTS idx_ledger_task ON budget_ledger(project_id, task_id)",
          "CREATE INDEX IF NOT EXISTS idx_find_task ON findings(project_id, task_id)"]),
+    # revamp B11: decision vs defect, the recommended answer and its deadline
+    (3, [("decisions", "decision_class", "TEXT"),
+         ("decisions", "recommended", "TEXT"),
+         ("decisions", "timeout_minutes", "INTEGER"),
+         ("decisions", "deadline_ts", "REAL"),
+         "CREATE INDEX IF NOT EXISTS idx_dec_deadline ON decisions(status, deadline_ts)"]),
 ]
 
 
@@ -355,7 +364,7 @@ def _ob_categories(ob: dict) -> set[str]:
 
 class Obligations:
     def __init__(self, store, clock=time.time, *, operator_actors: Optional[Iterable[str]] = None,
-                 unblock_validator=None, lead_validator=None):
+                 unblock_validator=None, lead_validator=None, decision_policy=None):
         """operator_actors: names allowed to carry `operator` authority outside
         the control channel (default none: only channel='control' answers
         carry it). unblock_validator(project, task, ref, actor) -> bool checks
@@ -368,6 +377,9 @@ class Obligations:
         # lead_validator(project, task, actor) -> bool: the engine's check that
         # `actor` (lead_manager:<case>) is an open, full-authority case of the task
         self.lead_validator = lead_validator
+        # decision_policy(project, task, kind, evidence, options) -> {decision_class,
+        # recommended (JSON text | None), timeout_minutes} for a new decision (B11)
+        self.decision_policy = decision_policy
         migrate(store)
 
     # -- rows ---------------------------------------------------------------------
@@ -875,14 +887,25 @@ class Obligations:
                 if r["status"] in ("open", "answered"):
                     return r["decision_id"]
             did = "dec-" + _sha(f"{project}|{task}|{kind}|{qhash}|{len(rows)}", 16)
+            meta = {}
+            if callable(self.decision_policy):
+                try:
+                    meta = self.decision_policy(project, task, kind, evidence or {},
+                                                list(options or [])) or {}
+                except Exception:                                 # noqa: BLE001
+                    meta = {}
+            now = self.clock()
+            minutes = int(meta.get("timeout_minutes") or 0)
             self.store.x(
                 "INSERT INTO decisions (decision_id, project_id, task_id, kind, question, "
                 "evidence, options, recommendation, blocks, status, scope, supersedes, qhash, "
-                "opened_ts) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                "opened_ts, decision_class, recommended, timeout_minutes, deadline_ts) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (did, project, task, kind, str(question)[:2000], _j(evidence or {}),
                  _j(list(options or [])), str(recommendation or "")[:1000],
                  _j(list(blocks or [])), "open", _j(scope or {}), supersedes, qhash,
-                 self.clock()))
+                 now, meta.get("decision_class"), meta.get("recommended"), minutes or None,
+                 (now + minutes * 60) if minutes and meta.get("recommended") else None))
         return did
 
     def is_operator(self, actor: str, channel: Optional[str]) -> bool:
@@ -917,6 +940,13 @@ class Obligations:
             if not ok:
                 raise DecisionRefused(f"{actor!r} holds no delegated lead authority for "
                                       f"{d['project_id']}/{d['task_id']}")
+        if authority == "timeout_default":
+            if d["kind"] in OPERATOR_ONLY_KINDS or d.get("decision_class") == "defect" or \
+                    d.get("recommended") in (None, ""):
+                raise DecisionRefused(f"{d['decision_id']} has no recommended option a "
+                                      f"timeout may apply")
+            if d.get("deadline_ts") is None or self.clock() < float(d["deadline_ts"]):
+                raise DecisionRefused(f"{d['decision_id']} has not timed out")
         if authority == "delegated_policy":
             if d["kind"] in OPERATOR_ONLY_KINDS:
                 raise DecisionRefused(f"a delegated policy cannot answer {d['kind']}")
@@ -943,6 +973,8 @@ class Obligations:
         if not d:
             raise DecisionRefused(f"unknown decision {decision_id}")
         self._check_authority(d, actor, authority, policy_id, channel)
+        if authority == "timeout_default" and _j(answer) != d.get("recommended"):
+            raise DecisionRefused("a timeout applies only the decision's recommended option")
         if d["status"] != "open":
             raise DecisionRefused(f"decision {decision_id} is {d['status']}; open a "
                                   f"superseding decision instead")

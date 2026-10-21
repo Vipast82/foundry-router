@@ -118,6 +118,11 @@ class Coordinator:
         ids = sorted(self.projects)
         if not ids:
             return acted
+        try:
+            from . import decision_policy       # revamp B11: decisions past their timeout
+            decision_policy.sweep(self)
+        except Exception as e:                                    # noqa: BLE001
+            self.log(f"decision timeout sweep failed: {type(e).__name__}: {e}")
         rr = int(self.store.meta("rr") or 0) % len(ids)
         order = ids[rr:] + ids[:rr]
         self.store.set_meta("rr", str(rr + 1))
@@ -2267,8 +2272,16 @@ class Coordinator:
             from .obligations import Obligations
             self._obligations = Obligations(self.store, clock=self.clock,
                                             unblock_validator=self._unblock_ref_ok,
-                                            lead_validator=self._lead_authority_ok)
+                                            lead_validator=self._lead_authority_ok,
+                                            decision_policy=self._decision_meta)
         return self._obligations
+
+    def _decision_meta(self, project: str, task: str, kind: str, evidence: dict,
+                       options: list) -> dict:
+        """revamp B11: class, recommended option and timeout of a new decision."""
+        from . import decision_policy
+        P = self.projects.get(project)
+        return decision_policy.meta(P, kind, evidence, options) if P is not None else {}
 
     def _unblock_ref_ok(self, project: str, task: str, ref: str, actor: str) -> bool:
         """Obligations' check of an `unblock:<ref>` budget authorization. The

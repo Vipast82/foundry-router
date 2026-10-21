@@ -949,11 +949,26 @@ class Recovery:
         task = _tid(t)
         marks = self.store.q("SELECT * FROM progress_marks WHERE project_id=? AND task_id=? "
                              "ORDER BY id", (P.id, task))
+        # revamp B11: a session that died on infrastructure (Kilo did not admit the
+        # prompt, a 5xx, Rojo/Studio down) says nothing about the sprint's progress,
+        # and an operator resolution (unblock, answered decision) between two
+        # sessions starts a fresh count: before, both raised false no-progress stops
+        infra = self._infra_sessions(P.id, task, [m["session_id"] for m in marks])
+        resets = self._progress_resets(P.id, task)
+        need = self._stall_limit(P)
+        skipped = 0
         stalls = summary_only = repeated = 0
         delta = 0
         prev = None
         last_build: dict = {}
         for m in marks:
+            if m["session_id"] in infra:
+                skipped += 1
+                continue
+            if prev is not None and any(float(prev["ts"] or 0) < r <= float(m["ts"] or 0)
+                                        for r in resets):
+                stalls = summary_only = repeated = 0
+                prev = None
             v = set(_uj(m["verified"], []))
             pv = set(_uj(prev["verified"], [])) if prev else set()
             d = len(v - pv) - len(pv - v)
@@ -981,12 +996,68 @@ class Recovery:
             delta = d
             last_build = {"committed": committed, "work_files": work, "plan_steps": steps[:8]}
             prev = m
-        no_progress = stalls >= 2
-        rec = "decision" if stalls >= 3 else "consult" if stalls >= 2 else "continue"
-        return {"sessions": len(marks), "verified_delta": delta, "repeated_actions": repeated,
-                "summary_only_sessions": summary_only, "stalls": stalls,
-                "no_progress": no_progress, "recommendation": rec,
-                "last_session_build": last_build}
+        no_progress = stalls >= need
+        rec = "decision" if stalls >= need + 1 else "consult" if stalls >= need else "continue"
+        out = {"sessions": len(marks), "verified_delta": delta, "repeated_actions": repeated,
+               "summary_only_sessions": summary_only, "stalls": stalls,
+               "no_progress": no_progress, "recommendation": rec,
+               "last_session_build": last_build}
+        if skipped:
+            out["infra_sessions_skipped"] = skipped
+        return out
+
+    # revamp B11 ---------------------------------------------------------------------------
+    INFRA_OUTCOMES = ("prompt_not_admitted", "lost", "error", "compaction_loop", "unbound",
+                      "refused")
+
+    @staticmethod
+    def _stall_limit(P) -> int:
+        try:
+            from .automation import get as auto_get
+            return max(1, int(auto_get(P, "no_progress_sessions") or 2))
+        except Exception:                                        # noqa: BLE001
+            return 2
+
+    def _infra_sessions(self, project_id: str, task_id: str, sids: list) -> set:
+        """Sessions whose end was an infrastructure failure: their outcome, or a
+        BLOCKED report whose blocker carries a known infra signature."""
+        from .autoheal import infra_signature
+        out = set()
+        for sid in set(sids):
+            try:
+                s = self.store.session(sid) or {}
+            except Exception:                                    # noqa: BLE001
+                s = {}
+            if str(s.get("outcome") or "") in self.INFRA_OUTCOMES:
+                out.add(sid)
+                continue
+            rep = ((s.get("data") or {}).get("report") or {}) if isinstance(
+                s.get("data"), dict) else {}
+            if isinstance(rep, dict) and str(rep.get("status") or "").upper() in (
+                    "BLOCKED", "NEEDS_HUMAN") and infra_signature(
+                    f"{rep.get('blocker') or ''} {rep.get('summary') or ''}"):
+                out.add(sid)
+        return out
+
+    def _progress_resets(self, project_id: str, task_id: str) -> list[float]:
+        """When an operator (or the decision timeout) resolved something for the
+        task: a BLOCKED/FAILED -> READY transition not made by the engine, or an
+        answered decision."""
+        out = []
+        try:
+            for h in self.store.history(project_id, task_id):
+                if h["to_state"] == "READY" and h["from_state"] in ("BLOCKED", "FAILED") \
+                        and h.get("actor") not in ("engine", None, ""):
+                    out.append(float(h["ts"] or 0))
+        except Exception:                                        # noqa: BLE001
+            pass
+        try:
+            out += [float(r["answered_ts"]) for r in self.store.q(
+                "SELECT answered_ts FROM decisions WHERE project_id=? AND task_id=? AND "
+                "answered_ts IS NOT NULL", (project_id, task_id))]
+        except Exception:                                        # noqa: BLE001
+            pass
+        return out
 
 
 def _glob_match(path: str, ref: str) -> bool:
