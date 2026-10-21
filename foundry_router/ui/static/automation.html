@@ -1,0 +1,1606 @@
+<!doctype html>
+<!--
+  Foundry automation (/ui/automation): one place to manage the coordinator's
+  roles, routes, backends, settings, role rules and queue.
+  One static page, vanilla JS, no build step. The one external script is
+  SortableJS (pinned, SRI) for drag handles; without it the arrow keys and the
+  move buttons still reorder everything.
+  Data: /control/api/* behind the control center's operator session (HttpOnly
+  cookie, CSRF header on every write). Config edits go to a draft; Deploy makes
+  it live through the C1 config store (/control/api/config*). Until C1 is
+  merged the page runs on a STUB: today's settings, read from the router, with
+  the draft kept in this browser and Deploy turned off.
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Automation · Foundry</title>
+<script src="https://cdn.jsdelivr.net/npm/sortablejs@1.15.6/Sortable.min.js"
+        integrity="sha384-HZZ/fukV+9G8gwTNjN7zQDG0Sp7MsZy5DDN6VfY3Be7V9dvQpEpR2jF2HlyFUUjU"
+        crossorigin="anonymous" referrerpolicy="no-referrer" async
+        onload="window.__sortableReady && window.__sortableReady()"></script>
+<style>
+  /* Foundry palette, shared with /ui and /ui/control: "cast iron" dark, cool
+     "mill scale" light, molten orange accent, steel blue for information. */
+  :root {
+    color-scheme: dark;
+    --bg:#14110e; --panel:#1c1814; --panel-2:#26201a; --line:#352c23; --line-2:#4a3e31; --fg:#ebe5db; --dim:#a39684;
+    --accent:#ff8a1e; --on-accent:#1a1206; --info:#7db4d8;
+    --ok:#6cc47c; --bad:#ef5d50; --warn:#e8aa3c;
+    --ok-bg:#183020; --bad-bg:#3c1a17; --warn-bg:#382c14; --info-bg:#172a37;
+    --claude:#e08a5b; --chatgpt:#5fb89a; --local:#8fa4d6; --other:#a39684;
+    --ui-font: "Segoe UI Variable Text", "Segoe UI", system-ui, -apple-system, sans-serif;
+    --num-font: Bahnschrift, "DIN Alternate", "Barlow Semi Condensed", "Arial Narrow", var(--ui-font);
+    --code-font: "Cascadia Code", "Cascadia Mono", Consolas, monospace;
+    --shadow: 0 1px 0 rgba(0,0,0,.25);
+  }
+  :root[data-theme="light"] {
+    color-scheme: light;
+    --bg:#eef0ed; --panel:#ffffff; --panel-2:#e4e7e3; --line:#d3d7d1; --line-2:#b9bfb7; --fg:#1d211e; --dim:#5a625b;
+    --accent:#b8560a; --on-accent:#ffffff; --info:#2b6890;
+    --ok:#25803d; --bad:#bf3328; --warn:#946200;
+    --ok-bg:#e1f1e4; --bad-bg:#fbe3e0; --warn-bg:#f8edd2; --info-bg:#e1edf5;
+    --claude:#b4572a; --chatgpt:#1f7a5c; --local:#3d5a9e; --other:#5a625b;
+    --shadow: 0 1px 2px rgba(30,40,30,.08);
+  }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); color:var(--fg); font:14px/1.45 var(--ui-font); font-variant-numeric:tabular-nums; }
+  button, select, input, textarea { font:inherit; color:inherit; }
+  :focus-visible { outline:2px solid var(--accent); outline-offset:2px; }
+  a { color:var(--accent); }
+  code, .mono { font-family:var(--code-font); font-size:12px; }
+  .hint { color:var(--dim); font-size:12px; margin:4px 0 8px; }
+  .sr-only { position:absolute; width:1px; height:1px; overflow:hidden; clip:rect(0 0 0 0); white-space:nowrap; }
+  header { display:flex; align-items:center; gap:10px 14px; flex-wrap:wrap; padding:9px clamp(12px, 1.8vw, 44px);
+           background:var(--panel); border-bottom:1px solid var(--line); }
+  header .brand { display:flex; flex-direction:column; min-width:0; text-decoration:none; }
+  header h1 { font:600 18px/1.1 var(--num-font); margin:0; color:var(--accent); letter-spacing:.01em; }
+  header .sub { color:var(--dim); font-size:12px; }
+  .hdr-tools { margin-left:auto; display:flex; gap:6px; align-items:center; flex-wrap:wrap; justify-content:flex-end; }
+  nav { display:flex; gap:2px; padding:0 clamp(6px, 1.8vw, 40px); background:var(--panel); border-bottom:1px solid var(--line);
+        overflow-x:auto; position:sticky; top:0; z-index:8; box-shadow:var(--shadow); }
+  nav button { background:none; border:none; color:var(--dim); padding:9px 14px 8px; cursor:pointer;
+               font:500 14px/1.2 var(--num-font); letter-spacing:.02em; border-bottom:3px solid transparent; white-space:nowrap; }
+  nav button:hover { color:var(--fg); }
+  nav button[aria-selected="true"] { color:var(--fg); border-bottom-color:var(--accent); }
+  main { padding:14px clamp(12px, 1.8vw, 44px) 80px; width:100%; }
+  h2 { font:600 17px/1.25 var(--num-font); margin:18px 0 4px; letter-spacing:.01em; }
+  h3 { font:600 15px/1.25 var(--num-font); margin:0; letter-spacing:.01em; }
+  .card { background:var(--panel); border:1px solid var(--line); border-radius:6px; padding:12px 14px; margin:8px 0; box-shadow:var(--shadow); min-width:0; }
+  .act, .btn { background:var(--panel); color:var(--fg); border:1px solid var(--line); border-radius:5px; padding:5px 11px;
+               cursor:pointer; font-size:12.5px; white-space:nowrap; text-decoration:none; display:inline-flex; align-items:center; gap:5px; }
+  .act:hover, .btn:hover { border-color:var(--accent); }
+  .act:disabled, .btn:disabled { opacity:.4; cursor:not-allowed; }
+  .act.primary { border-color:var(--accent); background:var(--accent); color:var(--on-accent); font-weight:600; }
+  .act.danger:hover { border-color:var(--bad); color:var(--bad); }
+  .ic { background:none; border:1px solid transparent; border-radius:4px; color:var(--dim); cursor:pointer; padding:2px 6px; font-size:12px; line-height:1.2; }
+  .ic:hover:not(:disabled) { border-color:var(--line-2); color:var(--fg); }
+  .ic:disabled { opacity:.25; cursor:default; }
+  .ic.danger:hover:not(:disabled) { color:var(--bad); border-color:var(--bad); }
+  input, select, textarea { background:var(--bg); border:1px solid var(--line); border-radius:5px; padding:5px 8px; font-size:13px; max-width:100%; }
+  input[aria-invalid="true"], textarea[aria-invalid="true"] { border-color:var(--bad); }
+  textarea { width:100%; font-family:var(--code-font); font-size:12px; }
+  .row { display:flex; gap:8px; align-items:center; flex-wrap:wrap; margin:6px 0; }
+  .fld { display:inline-flex; align-items:center; gap:6px; color:var(--dim); font-size:12.5px; }
+  .grow { flex:1; }
+  .pill { display:inline-block; padding:0 8px; border-radius:9px; font-size:11px; line-height:18px; white-space:nowrap;
+          border:1px solid var(--line-2); color:var(--dim); vertical-align:middle; }
+  .pill.ok { background:var(--ok-bg); color:var(--ok); border-color:transparent; }
+  .pill.bad { background:var(--bad-bg); color:var(--bad); border-color:transparent; }
+  .pill.warn { background:var(--warn-bg); color:var(--warn); border-color:transparent; }
+  .pill.info { background:var(--info-bg); color:var(--info); border-color:transparent; }
+  .dot { display:inline-block; width:9px; height:9px; border-radius:50%; background:var(--dim); flex:none; }
+  .dot.ok { background:var(--ok); } .dot.bad { background:var(--bad); } .dot.warn { background:var(--warn); }
+  /* switch: a checkbox that reads as on/off, text included (not colour alone) */
+  .sw { display:inline-flex; align-items:center; gap:6px; cursor:pointer; font-size:12px; color:var(--fg); user-select:none; }
+  .sw input { appearance:none; -webkit-appearance:none; width:30px; height:17px; border-radius:9px; background:var(--line-2);
+              position:relative; cursor:pointer; margin:0; padding:0; border:0; flex:none; transition:background .12s; }
+  .sw input::after { content:""; position:absolute; top:2px; left:2px; width:13px; height:13px; border-radius:50%; background:var(--fg); transition:left .12s; }
+  .sw input:checked { background:var(--ok); }
+  .sw input:checked::after { left:15px; }
+  .sw input:disabled { opacity:.4; cursor:not-allowed; }
+  @media (prefers-reduced-motion: reduce) { .sw input, .sw input::after { transition:none; } }
+  /* family chip: Claude / ChatGPT / Local */
+  .fam { font:600 10.5px/1 var(--num-font); letter-spacing:.06em; text-transform:uppercase; padding:4px 6px; border-radius:4px;
+         border:1px solid currentColor; white-space:nowrap; flex:none; }
+  .fam-claude { color:var(--claude); } .fam-chatgpt { color:var(--chatgpt); } .fam-local { color:var(--local); } .fam-other { color:var(--other); }
+  /* banners */
+  .banner { border:1px solid var(--line); border-left:4px solid var(--info); background:var(--panel); border-radius:5px; padding:8px 12px; margin:8px 0; font-size:13px; }
+  .banner.warn { border-left-color:var(--warn); } .banner.bad { border-left-color:var(--bad); }
+  .banner b { font-weight:600; }
+  /* draft bar */
+  #draftbar { display:flex; align-items:center; gap:8px 12px; flex-wrap:wrap; padding:7px clamp(12px, 1.8vw, 44px);
+              background:var(--panel-2); border-bottom:1px solid var(--line); position:sticky; top:41px; z-index:7; font-size:13px; }
+  #draftbar[hidden] { display:none; }
+  #draftbar .state { display:flex; align-items:center; gap:8px; min-width:0; }
+  #draftbar.dirty { border-bottom-color:var(--accent); }
+  /* usage bars: fill = used, tick = cutoff, hatched = unknown (never 0%) */
+  .ub { display:grid; grid-template-columns:3.6em minmax(60px, 1fr) 4.6em; gap:6px; align-items:center; font-size:11.5px; }
+  .ub-l { color:var(--dim); white-space:nowrap; }
+  .ub-t { position:relative; height:8px; border-radius:4px; background:var(--panel-2); overflow:visible; }
+  .ub-t i { position:absolute; left:0; top:0; bottom:0; border-radius:4px; background:var(--ok); }
+  .ub.near .ub-t i { background:var(--warn); } .ub.over .ub-t i { background:var(--bad); }
+  .ub.unknown .ub-t { background:repeating-linear-gradient(135deg, var(--line-2) 0 4px, transparent 4px 8px); }
+  .ub-t .tick { position:absolute; top:-3px; bottom:-3px; width:2px; margin-left:-1px; background:var(--fg); border-radius:1px; }
+  .ub-v { font-family:var(--num-font); text-align:right; white-space:nowrap; }
+  .ub.over .ub-v { color:var(--bad); font-weight:600; } .ub.unknown .ub-v { color:var(--dim); font-style:italic; }
+  .stale { color:var(--warn); font-size:10.5px; font-style:normal; }
+  .bars { display:grid; gap:3px; min-width:0; }
+  /* backends */
+  .be-grid { display:grid; grid-template-columns:repeat(auto-fill, minmax(min(100%, 300px), 1fr)); gap:10px; }
+  .be-grid .card { margin:0; display:grid; gap:8px; }
+  .be-h { display:flex; align-items:center; gap:8px; flex-wrap:wrap; }
+  .be-h h3 { flex:1; min-width:0; overflow-wrap:anywhere; }
+  .be.off { opacity:.62; }
+  .cut { display:flex; align-items:center; gap:8px; flex-wrap:wrap; font-size:12.5px; color:var(--dim); }
+  .cut input[type=range] { flex:1; min-width:100px; accent-color:var(--accent); padding:0; border:0; background:none; }
+  .cut input[type=number] { width:4.6em; }
+  /* roles */
+  .role-grid { display:grid; grid-template-columns:repeat(auto-fill, minmax(min(100%, 430px), 1fr)); gap:10px; align-items:start; }
+  .role-grid .card { margin:0; }
+  .role-h { display:flex; align-items:baseline; gap:8px; flex-wrap:wrap; margin-bottom:6px; }
+  .now { font-size:12.5px; margin:6px 0; padding:5px 8px; border-radius:4px; background:var(--bg); border:1px solid var(--line); }
+  .now b { font-weight:600; }
+  .now.bad { border-color:var(--bad); color:var(--bad); }
+  ol.routes { list-style:none; margin:6px 0; padding:0; display:grid; gap:4px; }
+  li.route { display:grid; grid-template-columns:auto auto minmax(0, 1fr) auto; grid-template-areas:"drag fam name ctl" "drag bars bars bars";
+             gap:4px 8px; align-items:center; padding:6px 8px; border:1px solid var(--line); border-radius:5px; background:var(--bg); }
+  li.route.off { opacity:.55; } li.route.off .rname b { text-decoration:line-through; }
+  li.route.over { border-color:color-mix(in srgb, var(--bad) 55%, var(--line)); }
+  li.route.sortable-ghost { opacity:.35; border-style:dashed; }
+  li.route.sortable-chosen { border-color:var(--accent); }
+  .drag { grid-area:drag; align-self:stretch; cursor:grab; background:none; border:1px solid transparent; border-radius:4px; color:var(--dim);
+          font-size:15px; padding:0 4px; display:flex; flex-direction:column; align-items:center; justify-content:center; gap:2px; touch-action:none; }
+  .drag:hover, .drag:focus-visible { color:var(--accent); border-color:var(--line-2); }
+  .drag .pos { font:600 11px var(--num-font); color:var(--dim); }
+  li.route .fam { grid-area:fam; justify-self:start; }
+  .rname { grid-area:name; min-width:0; display:flex; flex-direction:column; }
+  .rname b { font:600 13px var(--code-font); overflow-wrap:anywhere; }
+  .rname .hint { margin:0; }
+  .rctl { grid-area:ctl; display:flex; align-items:center; gap:2px; }
+  li.route .bars { grid-area:bars; }
+  .addroute { display:flex; gap:6px; flex-wrap:wrap; align-items:center; margin-top:6px; }
+  .addroute select { flex:1; min-width:120px; }
+  .warns { list-style:none; margin:6px 0 0; padding:0; display:grid; gap:3px; font-size:12px; }
+  .warns li { padding-left:16px; position:relative; }
+  .warns li::before { content:"!"; position:absolute; left:3px; font-weight:700; color:var(--warn); }
+  .warns li.bad::before { color:var(--bad); }
+  /* graph */
+  .graph-wrap { overflow-x:auto; }
+  svg.graph { display:block; min-width:760px; width:100%; font:12px var(--ui-font); }
+  svg.graph .col { fill:var(--dim); font:600 11px var(--num-font); letter-spacing:.08em; text-transform:uppercase; }
+  svg.graph .nb { fill:var(--panel-2); stroke:var(--line-2); }
+  svg.graph .nt { fill:var(--fg); }
+  svg.graph .ns { fill:var(--dim); font-size:10.5px; }
+  svg.graph .e { fill:none; stroke:var(--info); stroke-width:1.6; }
+  svg.graph .e.fb { stroke-dasharray:5 4; stroke:var(--dim); }
+  svg.graph .off .nb { stroke-dasharray:3 3; } svg.graph .off { opacity:.38; }
+  svg.graph .e.off { opacity:.25; stroke:var(--dim); }
+  svg.graph .over .nb { stroke:var(--bad); }
+  svg.graph .famb { stroke-width:3; }
+  .legend { display:flex; gap:14px; flex-wrap:wrap; font-size:12px; color:var(--dim); margin-top:6px; }
+  .legend svg { vertical-align:middle; }
+  /* dry run */
+  .dr-res { display:grid; gap:8px; margin-top:8px; }
+  .dr-res .r { border:1px solid var(--line); border-radius:5px; padding:8px 10px; background:var(--bg); }
+  .dr-res ol { margin:6px 0 0; padding-left:20px; font-size:12.5px; }
+  .dr-res li { margin:2px 0; }
+  .whatif { display:grid; grid-template-columns:repeat(auto-fill, minmax(min(100%, 260px), 1fr)); gap:8px; margin:8px 0; }
+  .whatif .card { margin:0; padding:8px 10px; }
+  .whatif input { width:5em; }
+  /* settings */
+  .set-grid { display:grid; grid-template-columns:repeat(auto-fill, minmax(min(100%, 520px), 1fr)); gap:10px; align-items:start; }
+  .set-grid .card { margin:0; }
+  .sf { display:grid; grid-template-columns:minmax(0, 1fr) auto; gap:2px 10px; padding:8px 0; border-bottom:1px solid var(--line); }
+  .sf:last-child { border-bottom:0; }
+  .sf label.k { font-weight:600; font-size:13px; display:flex; gap:6px; align-items:center; flex-wrap:wrap; }
+  .sf .ctl { grid-row:span 2; display:flex; align-items:center; gap:6px; align-self:start; }
+  .sf .d { color:var(--dim); font-size:12px; }
+  .sf .err { grid-column:1 / -1; color:var(--bad); font-size:12px; }
+  .sf.mod label.k::before { content:""; width:6px; height:6px; border-radius:50%; background:var(--accent); }
+  .sf input[type=number] { width:7em; } .sf input[type=text] { width:min(260px, 52vw); }
+  .sf textarea { width:min(300px, 60vw); min-height:58px; }
+  /* role rules */
+  .matrix-wrap { overflow-x:auto; }
+  table.matrix { border-collapse:collapse; width:100%; min-width:640px; font-size:13px; }
+  table.matrix th, table.matrix td { border-bottom:1px solid var(--line); padding:4px; text-align:left; }
+  table.matrix thead th { color:var(--dim); font-weight:500; font-size:12px; white-space:nowrap; padding:6px 4px; }
+  table.matrix tbody th { font-weight:600; white-space:nowrap; padding-right:10px; }
+  .cell { width:100%; min-width:76px; display:flex; flex-direction:column; align-items:flex-start; gap:1px; padding:5px 8px; border-radius:5px;
+          border:1px solid var(--line); background:var(--bg); cursor:pointer; text-align:left; }
+  .cell:hover { border-color:var(--accent); }
+  .cell .st { font-weight:600; font-size:12.5px; }
+  .cell .sc { font-size:10.5px; color:var(--dim); }
+  .cell.allow .st { color:var(--ok); } .cell.ask .st { color:var(--warn); } .cell.deny .st { color:var(--bad); }
+  .cell.allow { background:var(--ok-bg); } .cell.ask { background:var(--warn-bg); }
+  .cell[aria-current="true"] { outline:2px solid var(--accent); }
+  .tester { display:flex; gap:6px; flex-wrap:wrap; align-items:center; }
+  .tester input { flex:1; min-width:220px; font-family:var(--code-font); }
+  .verdict { margin-top:6px; font-size:13px; }
+  .verdict b { font:600 14px var(--num-font); letter-spacing:.03em; text-transform:uppercase; }
+  .verdict.allow b { color:var(--ok); } .verdict.ask b { color:var(--warn); } .verdict.deny b { color:var(--bad); }
+  .chips { display:flex; flex-wrap:wrap; gap:4px; margin:4px 0; }
+  .chip { display:inline-flex; align-items:center; gap:3px; border:1px solid var(--line-2); border-radius:12px; padding:1px 3px 1px 9px;
+          font:12px var(--code-font); background:var(--bg); max-width:100%; }
+  .chip span { overflow-wrap:anywhere; }
+  .chip.locked { padding-right:9px; border-style:dashed; color:var(--dim); }
+  .chip.deny { border-color:color-mix(in srgb, var(--bad) 60%, var(--line)); }
+  /* drawer */
+  #drawer { position:fixed; top:0; right:0; bottom:0; width:min(480px, 100vw); background:var(--panel); border-left:1px solid var(--line-2);
+            z-index:30; overflow-y:auto; padding:14px 16px 24px; box-shadow:-10px 0 30px rgba(0,0,0,.35); }
+  #drawer[hidden] { display:none; }
+  #drawer h3 { color:var(--accent); margin-right:30px; }
+  #drawer .x { position:absolute; top:10px; right:10px; }
+  #drawer fieldset { border:1px solid var(--line); border-radius:5px; margin:10px 0; padding:8px 10px; }
+  #drawer legend { color:var(--dim); font-size:12px; padding:0 4px; }
+  .seg { display:flex; gap:0; border:1px solid var(--line-2); border-radius:5px; overflow:hidden; width:max-content; max-width:100%; }
+  .seg label { padding:5px 12px; cursor:pointer; font-size:13px; border-right:1px solid var(--line-2); display:flex; gap:5px; align-items:center; }
+  .seg label:last-child { border-right:0; }
+  .seg input { position:absolute; opacity:0; width:1px; height:1px; }
+  .seg label:has(input:checked) { background:var(--accent); color:var(--on-accent); font-weight:600; }
+  .seg label:has(input:focus-visible) { outline:2px solid var(--accent); outline-offset:-2px; }
+  /* queue */
+  table.q { border-collapse:collapse; width:100%; font-size:13px; }
+  table.q th, table.q td { border-bottom:1px solid var(--line); padding:6px 6px; text-align:left; vertical-align:middle; }
+  table.q th { color:var(--dim); font-weight:500; font-size:12px; white-space:nowrap; }
+  table.q td.acts { white-space:nowrap; text-align:right; }
+  table.q tr.sortable-ghost { opacity:.35; }
+  .qwrap { overflow-x:auto; }
+  .deps { display:flex; flex-wrap:wrap; gap:3px; align-items:center; }
+  .deps code { border:1px solid var(--line-2); border-radius:9px; padding:0 6px; }
+  .dec { border:1px solid var(--line); border-left:4px solid var(--warn); border-radius:5px; padding:10px 12px; background:var(--panel); margin:8px 0; }
+  .dec .opts { display:flex; gap:6px; flex-wrap:wrap; margin-top:8px; }
+  .countdown { font:600 13px var(--num-font); color:var(--warn); }
+  /* modal */
+  .modal { position:fixed; inset:0; z-index:40; background:rgba(0,0,0,.55); display:flex; align-items:flex-start; justify-content:center; padding:6vh 12px; overflow-y:auto; }
+  .modal[hidden] { display:none; }
+  .modal-box { background:var(--panel); border:1px solid var(--line-2); border-radius:8px; padding:16px 18px; width:min(760px, 100%); position:relative; box-shadow:0 12px 40px rgba(0,0,0,.45); }
+  .modal-box h3 { color:var(--accent); margin:0 30px 10px 0; }
+  .modal-box .x { position:absolute; top:10px; right:10px; }
+  .diff { list-style:none; margin:0; padding:0; display:grid; gap:6px; max-height:56vh; overflow:auto; }
+  .diff li { border:1px solid var(--line); border-radius:5px; padding:6px 9px; background:var(--bg); font-size:12.5px; }
+  .diff .p { font:600 12px var(--code-font); overflow-wrap:anywhere; }
+  .diff .b { color:var(--bad); overflow-wrap:anywhere; } .diff .a { color:var(--ok); overflow-wrap:anywhere; }
+  /* login + toasts */
+  #login { position:fixed; inset:0; background:var(--bg); z-index:80; display:none; align-items:center; justify-content:center; padding:16px; }
+  #login.show { display:flex; }
+  #login .box { background:var(--panel); border:1px solid var(--line-2); border-radius:6px; padding:18px; width:min(460px, 100%); }
+  #toasts { position:fixed; right:14px; bottom:14px; display:grid; gap:6px; z-index:90; max-width:min(440px, calc(100vw - 28px)); }
+  .toast { background:var(--panel); border:1px solid var(--accent); border-radius:6px; padding:8px 12px; box-shadow:0 6px 20px rgba(0,0,0,.35); font-size:13px; }
+  .toast.bad { border-color:var(--bad); }
+  [hidden] { display:none !important; }
+  @media (max-width: 560px) {
+    header h1 { font-size:15px; }
+    nav button { padding:8px 10px; font-size:13px; }
+    #draftbar { position:static; }
+    #draftbar .state { flex:1 1 100%; flex-wrap:wrap; }
+    li.route { grid-template-columns:auto minmax(0, 1fr) auto; grid-template-areas:"drag name ctl" "drag fam fam" "drag bars bars"; }
+    li.route .fam { justify-self:start; }
+    .sf { grid-template-columns:1fr; } .sf .ctl { grid-row:auto; }
+  }
+</style>
+</head>
+<body>
+<header>
+  <a class="brand" href="/ui" title="Back to the Foundry dashboard">
+    <h1>Automation</h1><span class="sub">Foundry Router · roles, routes, rules, queue</span>
+  </a>
+  <div class="hdr-tools">
+    <span id="who" class="hint" style="margin:0"></span>
+    <a class="act" href="/ui" title="Metrics, backends, personas">Dashboard</a>
+    <a class="act" href="/ui/control" title="Live sprint progress, sessions and operator actions">Control center</a>
+    <button class="act" id="theme-btn" type="button">Theme</button>
+    <button class="act" id="logout-btn" type="button" title="Sign out of the operator session">Sign out</button>
+  </div>
+</header>
+<nav id="nav" role="tablist" aria-label="Automation sections">
+  <button role="tab" id="tab-routing" aria-controls="v-routing" data-view="routing">Routing</button>
+  <button role="tab" id="tab-settings" aria-controls="v-settings" data-view="settings">Settings</button>
+  <button role="tab" id="tab-rules" aria-controls="v-rules" data-view="rules">Role rules</button>
+  <button role="tab" id="tab-queue" aria-controls="v-queue" data-view="queue">Queue</button>
+</nav>
+<div id="draftbar" role="region" aria-label="Draft">
+  <div class="state grow" id="draft-state" aria-live="polite"></div>
+  <button class="act" id="btn-history" type="button">History</button>
+  <button class="act danger" id="btn-discard" type="button">Discard draft</button>
+  <button class="act primary" id="btn-review" type="button">Review &amp; deploy</button>
+</div>
+<main id="main">
+  <div id="stubnote"></div>
+  <section id="v-routing" role="tabpanel" aria-labelledby="tab-routing" hidden></section>
+  <section id="v-settings" role="tabpanel" aria-labelledby="tab-settings" hidden></section>
+  <section id="v-rules" role="tabpanel" aria-labelledby="tab-rules" hidden></section>
+  <section id="v-queue" role="tabpanel" aria-labelledby="tab-queue" hidden></section>
+</main>
+<aside id="drawer" role="dialog" aria-modal="false" aria-labelledby="drawer-h" hidden></aside>
+<div class="modal" id="modal" hidden><div class="modal-box" role="dialog" aria-modal="true" aria-labelledby="modal-h"></div></div>
+<div id="login" role="dialog" aria-modal="true" aria-labelledby="login-h">
+  <div class="box">
+    <h2 id="login-h" style="margin-top:0;color:var(--accent)">Sign in to Automation</h2>
+    <p class="hint">Same sign-in as the control center: a client key with the <b>operator</b> scope. The key is exchanged for a session cookie and not kept in this browser.</p>
+    <form id="login-form" autocomplete="off">
+      <label for="login-key">Operator key</label>
+      <input id="login-key" type="password" style="width:100%;margin:6px 0" autocomplete="off" spellcheck="false">
+      <div class="row"><button class="act primary" type="submit">Sign in</button><span id="login-msg" class="hint" style="margin:0"></span></div>
+    </form>
+  </div>
+</div>
+<div id="toasts" aria-live="polite"></div>
+<div id="sr" class="sr-only" aria-live="assertive"></div>
+
+<script>
+"use strict";
+/* ======================================================================== basics */
+const $ = (s, el = document) => el.querySelector(s);
+const $$ = (s, el = document) => [...el.querySelectorAll(s)];
+const ESC_MAP = {"&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;"};
+const esc = s => String(s ?? "").replace(/[&<>"']/g, c => ESC_MAP[c]);
+const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
+const clone = o => JSON.parse(JSON.stringify(o));
+const fmt = n => (Math.round(n * 10) / 10).toString();
+function debounce(fn, ms) { let t; return (...a) => { clearTimeout(t); t = setTimeout(() => fn(...a), ms); }; }
+function toast(text, bad = false, ms = 5000) {
+  const d = document.createElement("div");
+  d.className = "toast" + (bad ? " bad" : ""); d.textContent = text; d.setAttribute("role", bad ? "alert" : "status");
+  $("#toasts").appendChild(d); setTimeout(() => d.remove(), ms);
+}
+function announce(text) { const s = $("#sr"); s.textContent = ""; setTimeout(() => { s.textContent = text; }, 30); }
+function store(k, v) { try { if (v === undefined) return localStorage.getItem(k); if (v === null) localStorage.removeItem(k); else localStorage.setItem(k, v); } catch (e) { return null; } }
+function idem() { return (crypto.randomUUID ? crypto.randomUUID() : String(Date.now()) + Math.random().toString(16).slice(2)); }
+
+const ROLE_HELP = {
+  implementer: "Writes the code for a task (one warm session per sprint).",
+  lead: "Last-resort recovery: diagnoses blockers, returns typed actions or fixes with write access.",
+  reviewer: "Reviews each change at its exact commit.",
+  deep_reviewer: "Reviews high-risk changes.",
+  visual_reviewer: "Judges Studio captures for visual regressions.",
+  planner: "Plans and replans tasks on request.",
+  researcher: "Looks things up (docs, web) for other roles.",
+  coordinator: "The coordinator's own model calls (retry guidance, closeout notes).",
+};
+const FAM_LABEL = {claude: "Claude", chatgpt: "ChatGPT", local: "Local", other: "Other"};
+// role -> the settings field naming its persona (foundry_automation role_binding);
+// helper personas are per backend (Settings), the coordinator runs none
+const ROLE_BINDING = {implementer: "roles.implementer", planner: "roles.planner", researcher: "roles.researcher",
+  reviewer: "roles.reviewer", deep_reviewer: "roles.deep_reviewer", visual_reviewer: "roles.visual_reviewer",
+  lead: "lead_manager.persona"};
+function getPath(o, path) { let c = o; for (const k of path.split(".")) { if (c === null || typeof c !== "object") return undefined; c = c[k]; } return c; }
+function setPath(o, path, v) { const ks = path.split("."); let c = o; for (const k of ks.slice(0, -1)) { if (!c[k] || typeof c[k] !== "object" || Array.isArray(c[k])) c[k] = {}; c = c[k]; } c[ks[ks.length - 1]] = v; }
+function delPath(o, path) { const ks = path.split("."); let c = o; for (const k of ks.slice(0, -1)) { if (!c || typeof c !== "object") return; c = c[k]; } if (c && typeof c === "object") delete c[ks[ks.length - 1]]; }
+const STATE_ICON = {allow: "✓", ask: "?", deny: "✕"};
+
+/* ======================================================================== state */
+const S = {
+  me: null, csrf: "", view: "routing",
+  deployed: null, draft: null, revision: null, deployedRevision: null, stub: false, stubNote: "",
+  usage: {}, usageTs: 0, dry: {}, changes: [], draftErrors: [], warnings: [], schema: null,
+  cfgProject: store("fr.auto.project") || "", c1: null,
+  queue: null, ov: null, project: "", qStub: false, qOps: false, workspace: store("fr.auto.ws") || "",
+  ruleSel: null, decTick: null,
+};
+const doc = () => S.draft || S.deployed;
+
+/* ======================================================================== api */
+async function api(path, opts = {}) {
+  const o = {method: opts.method || "GET", credentials: "same-origin", headers: {"accept": "application/json"}};
+  if (opts.body !== undefined) { o.body = JSON.stringify(opts.body); o.headers["content-type"] = "application/json"; }
+  if (o.method !== "GET") o.headers["x-foundry-csrf"] = S.csrf;
+  let r;
+  try { r = await fetch("/control/api/" + path, o); }
+  catch (e) { const err = new Error("Foundry unreachable"); err.network = true; throw err; }
+  let data = {};
+  try { data = await r.json(); } catch (e) {}
+  if (r.status === 401 && data.code === "login_required") showLogin();
+  if (!r.ok) {
+    const err = new Error((data && (data.error && (data.error.message || data.error))) || data.detail || ("HTTP " + r.status));
+    err.status = r.status; err.code = data.code; err.data = data; throw err;
+  }
+  return data;
+}
+
+/* ======================================================================== C1 adapter
+   Every call to the C1 config store goes through here (contract: notes
+   revamp/config_api.md; proposal revamp/C2_gui_needs.md). When C1 answers 404
+   the page falls back to the STUB: a document seeded from today's router
+   settings, a draft kept in this browser, Deploy / Rollback off. */
+const LOCAL_DRAFT = "fr.auto.draft";
+/* C1 keeps one document per project ({format, project, settings, role_rules})
+   and a router-wide one ("_router": backends.<name>.cutoff_pct). The page
+   shows them together with the live personas and backends (seed): compose()
+   builds that view, split() turns it back into the two documents. Persona
+   route order and backend on/off are stored only once C1's schema has fields
+   for them (personas.*.routes, backends.*.enabled); until then the diff marks
+   those changes as not deployable instead of dropping them silently. */
+function compose(base, proj, router) {
+  const d = clone(base);
+  d.settings = clone((proj || {}).settings || {});
+  if (proj && proj.role_rules) d.role_rules = clone(proj.role_rules);
+  const rs = (router || {}).settings || {};
+  for (const [n, v] of Object.entries(rs.backends || {})) d.backends[n] = {...(d.backends[n] || {}), ...v};
+  for (const [n, v] of Object.entries(rs.personas || {})) if (v && Array.isArray(v.routes)) d.personas[n] = {...(d.personas[n] || {}), routes: clone(v.routes)};
+  d.format = (proj || {}).format; d.project = (proj || {}).project;
+  return d;
+}
+function split(d) {
+  const p = S.c1.cfg.doc || {}, r = (S.c1.rtr && S.c1.rtr.doc) || {};
+  const proj = {format: p.format, project: p.project, settings: clone(d.settings || {}), role_rules: clone(d.role_rules || {})};
+  // a cutoff goes into the router document when it was there already or the
+  // operator changed it; live values stay where they are
+  const had = (r.settings || {}).backends || {}, dep = S.deployed.backends || {};
+  const backends = {};
+  for (const [n, v] of Object.entries(d.backends || {})) {
+    const o = {};
+    const changed = (dep[n] || {}).cutoff_pct !== v.cutoff_pct;
+    if (v.cutoff_pct !== null && v.cutoff_pct !== undefined && (changed || (had[n] || {}).cutoff_pct !== undefined)) o.cutoff_pct = v.cutoff_pct;
+    if (hasField("backends.*.enabled")) o.enabled = v.enabled !== false;
+    if (hasField("backends.*.fail_closed") && v.fail_closed !== undefined) o.fail_closed = !!v.fail_closed;
+    if (Object.keys(o).length) backends[n] = o;
+  }
+  const router = {format: r.format || p.format, project: "_router", settings: {...clone(r.settings || {}), backends}};
+  if (hasField("personas.*.routes")) router.settings.personas = Object.fromEntries(Object.entries(d.personas || {}).map(([n, x]) => [n, {routes: x.routes}]));
+  return {proj, router};
+}
+function notStored(path) {
+  if (S.stub) return false;
+  if (/^personas\./.test(path)) return !hasField("personas.*.routes");
+  if (/^backends\.[^.]+(\.enabled)?$/.test(path) && !/cutoff_pct/.test(path)) return !hasField("backends.*.enabled");
+  return false;
+}
+const C1 = {
+  q(path, project) {
+    const p = project === undefined ? (S.cfgProject || "") : project;
+    return p ? path + (path.includes("?") ? "&" : "?") + "project=" + encodeURIComponent(p) : path;
+  },
+  async load() {
+    const seed = await api("automation/seed");          // live personas, backends, role list
+    let cfg = null;
+    try { cfg = await api(this.q("config")); } catch (e) { if (e.status !== 404 && e.status !== 405) throw e; }
+    if (!cfg) {
+      // STUB: C1 not merged on this router
+      S.stub = true; S.stubNote = seed.note || ""; S.c1 = null;
+      S.deployed = seed.doc; S.revision = 0; S.deployedRevision = 0;
+      let local = null;
+      try { local = JSON.parse(store(LOCAL_DRAFT) || "null"); } catch (e) {}
+      S.draft = local && local.doc ? local.doc : null;
+      return;
+    }
+    let rtr = null;
+    try { rtr = await api(this.q("config", "_router")); } catch (e) { if (e.status !== 404) throw e; }
+    S.stub = false; S.c1 = {cfg, rtr};
+    S.deployed = compose(seed.doc, cfg.doc, rtr && rtr.doc);
+    const hasDraft = cfg.draft || (rtr && rtr.draft);
+    S.draft = hasDraft ? compose(seed.doc, cfg.draft || cfg.doc, rtr && (rtr.draft || rtr.doc)) : null;
+    S.revision = cfg.revision; S.deployedRevision = cfg.deployed_revision ?? cfg.revision;
+  },
+  async saveDraft(d) {
+    if (S.stub) { store(LOCAL_DRAFT, JSON.stringify({doc: d, saved: Date.now()})); return {ok: true, errors: []}; }
+    const {proj, router} = split(d);
+    const a = await api(this.q("config/draft"), {method: "PUT", body: {doc: proj, base_revision: S.revision}});
+    let b = {errors: []};
+    if (S.c1.rtr) b = await api(this.q("config/draft", "_router"), {method: "PUT", body: {doc: router, base_revision: S.c1.rtr.revision}});
+    return {ok: true, errors: [...((a && a.errors) || []), ...((b && b.errors) || [])]};
+  },
+  async diff() {
+    if (!S.draft) return [];
+    // one diff over the whole view (settings, rules, cutoffs, routes), marked
+    // where the config store cannot keep a change yet
+    const d = await api("automation/diff", {method: "POST", body: {before: S.deployed, after: S.draft}});
+    return (d.changes || []).map(c => ({...c, not_stored: notStored(c.path)}));
+  },
+  async deploy(note) {
+    if (S.stub) throw new Error("Deploy needs the C1 config store, which is not merged on this router yet.");
+    const r = await api(this.q("config/deploy"), {method: "POST", body: {base_revision: S.revision, note}});
+    if (S.c1.rtr && S.changes.some(c => /^backends\./.test(c.path) && !c.not_stored))
+      await api(this.q("config/deploy", "_router"), {method: "POST", body: {base_revision: S.c1.rtr.revision, note}});
+    return r;
+  },
+  async discard() {
+    if (S.stub) { store(LOCAL_DRAFT, null); return; }
+    await api(this.q("config/discard"), {method: "POST", body: {}});
+    if (S.c1.rtr) await api(this.q("config/discard", "_router"), {method: "POST", body: {}});
+  },
+  async versions() { if (S.stub) return []; return (await api(this.q("config/versions"))).versions || []; },
+  async rollback(rev) {
+    if (S.stub) throw new Error("Rollback needs the C1 config store.");
+    return api(this.q("config/rollback"), {method: "POST", body: {revision: rev}});
+  },
+  async schema() {
+    if (!S.stub) { try { return await api("config/schema"); } catch (e) { if (e.status !== 404) throw e; } }
+    return STUB_SCHEMA;
+  },
+  async queue(project) {
+    try { const d = await api("queue?project=" + encodeURIComponent(project)); S.qStub = false; S.qOps = true; return d.tasks || []; }
+    catch (e) { if (e.status !== 404 && e.status !== 405) throw e; }
+    S.qStub = true; S.qOps = false;
+    return null;
+  },
+  // queue writes that have no typed action today (approve, re-queue a
+  // cancelled task, reorder, dependencies): C1 typed actions queue_*
+  queueOp(kind, t, extra) { return action(kind, t, extra); },
+};
+
+/* STUB settings schema, in the C1 schema_json format (foundry_automation.schema):
+   a starter subset with C1's own keys, defaults and apply values. C1 serves the
+   full list (about 140 fields) once it is on this router. */
+const _F = (key, type, dflt, description, group, extra = {}) => ({key, type, default: dflt, description, group, table: key.split(".")[0], apply: "live", scope: "project", ...extra});
+const STUB_SCHEMA = {stub: true,
+  groups: [{id: "roles", label: "Roles & personas", order: 40}, {id: "lead", label: "Lead manager", order: 60},
+           {id: "fast_lane", label: "Fast lane, gate & vision", order: 70}, {id: "helpers", label: "Helpers & lanes", order: 80},
+           {id: "recovery", label: "Retry, frontier & lifecycle", order: 90}, {id: "limits", label: "Limits", order: 100},
+           {id: "decisions", label: "Scope requests & decisions", order: 110}],
+  tables: [{table: "roles", label: "Role personas", group: "roles", description: "Foundry persona per coordinator role."},
+           {table: "lead_manager", label: "Lead manager", group: "lead"}, {table: "fast_lane", label: "Fast lane", group: "fast_lane"},
+           {table: "helpers", label: "Helpers", group: "helpers"}, {table: "retry_guidance", label: "Retry guidance", group: "recovery"},
+           {table: "limits", label: "Limits", group: "limits"}, {table: "scope_policy", label: "Scope requests", group: "decisions"},
+           {table: "decisions", label: "Product decisions", group: "decisions"}],
+  fields: [
+    ...["implementer", "planner", "researcher", "reviewer", "deep_reviewer", "visual_reviewer"].map(r =>
+      _F(`roles.${r}`, "str", "", `Foundry persona for the ${r.replace(/_/g, " ")}.`, "roles", {apply: "next_session", role_binding: r})),
+    _F("lead_manager.enabled", "bool", false, "Run the Lead as the last automated recovery tier.", "lead"),
+    _F("lead_manager.persona", "str", "Foundry-Kilo-Lead-Manager", "Lead persona.", "lead", {role_binding: "lead"}),
+    _F("lead_manager.write_access", "bool", false, "The Lead may edit, run the shell and commit in the game workspace while it holds the lock.", "lead"),
+    _F("lead_manager.allow_local_route", "bool", false, "A local model may be the Lead chain's last route.", "lead"),
+    _F("lead_manager.full_authority", "bool", true, "Delegated recovery actions (clean scratch files, extend budgets, routine decisions).", "lead"),
+    _F("lead_manager.supervisor", "enum", "manual", "Who restarts the coordinator after an upgrade.", "lead", {apply: "restart", enum: ["manual", "supervisor"]}),
+    _F("lead_manager.max_diagnoses", "int", 3, "Diagnoses per recovery case.", "lead", {min: 1}),
+    _F("lead_manager.max_lead_calls_per_task", "int", 6, "Lead calls per task across all its cases.", "lead", {min: 1}),
+    _F("lead_manager.lead_timeout_minutes", "int", 45, "Minutes before a Lead session is given up.", "lead", {min: 1}),
+    _F("fast_lane.enabled", "bool", false, "Run listed tasks as one long session checked by the Studio gate.", "fast_lane"),
+    _F("fast_lane.tasks", "list", [], "Task ids (exact, no globs).", "fast_lane", {item_type: "str"}),
+    _F("fast_lane.gate_timeout_minutes", "int", 45, "A gate run longer than this counts as red.", "fast_lane", {min: 1}),
+    _F("fast_lane.max_vision_rounds", "int", 2, "Vision fix rounds before accepting with notes.", "fast_lane", {min: 0}),
+    _F("fast_lane.vision_batch_frames", "int", 20, "Frames per vision call.", "fast_lane", {min: 1}),
+    _F("helpers.enabled", "bool", false, "Read-only coding helpers on frontier quota.", "helpers"),
+    _F("helpers.on_demand", "bool", true, "Start a helper only on demand, with a declared consumer.", "helpers", {since: "revamp"}),
+    _F("helpers.max_running", "int", 6, "Helpers running at once.", "helpers", {min: 0}),
+    _F("helpers.personas.*", "str", "", "Helper persona per backend.", "helpers", {apply: "next_session", role_binding: "helper"}),
+    _F("retry_guidance.enabled", "bool", false, "One bounded frontier consultation before repair attempts run out.", "recovery"),
+    _F("retry_guidance.local_fallback", "bool", false, "Fall back to the local model when paid quota is refused.", "recovery"),
+    _F("limits.max_attempts", "int", 3, "Attempts per task.", "limits", {min: 1}),
+    _F("limits.max_sessions_per_task", "int", 8, "Sessions per task.", "limits", {min: 1}),
+    _F("limits.max_review_calls", "int", 3, "Review calls per task.", "limits", {min: 1}),
+    _F("limits.max_task_minutes", "int", 1440, "Wall time per task.", "limits", {min: 1}),
+    _F("scope_policy.auto_approve", "list", [], "Harness lines / paths a sprint may change without asking (e.g. tests/GateRunner.lua:EXPECTED_BOOT, default.project.json).", "decisions", {item_type: "str", since: "revamp"}),
+    _F("decisions.timeout_minutes", "int", 30, "Product decisions take their recommended default after this.", "decisions", {min: 1, since: "revamp"}),
+    _F("decisions.apply_default_on_timeout", "bool", true, "Apply and log the default when the timeout passes.", "decisions", {since: "revamp"}),
+    _F("backends.*.cutoff_pct", "float", 95, "Stop using this backend's subscription at this usage %.", "router", {scope: "router", min: 1, max: 100}),
+  ]};
+
+/* ======================================================================== login */
+function showLogin(msg) { $("#login").classList.add("show"); $("#login-msg").textContent = msg || ""; $("#login-key").focus(); }
+$("#login-form").addEventListener("submit", async ev => {
+  ev.preventDefault();
+  const key = $("#login-key").value.trim();
+  $("#login-key").value = "";
+  if (!key) return showLogin("Paste an operator key.");
+  try {
+    const r = await fetch("/control/api/login", {method: "POST", credentials: "same-origin",
+      headers: {"content-type": "application/json"}, body: JSON.stringify({key})});
+    const d = await r.json().catch(() => ({}));
+    if (!r.ok) return showLogin(d.error || "Refused");
+    $("#login").classList.remove("show");
+    boot();
+  } catch (e) { showLogin("Foundry unreachable"); }
+});
+$("#logout-btn").onclick = async () => { try { await api("logout", {method: "POST", body: {}}); } catch (e) {} location.reload(); };
+
+/* ======================================================================== theme */
+function applyTheme(t) {
+  document.documentElement.dataset.theme = t;
+  store("fr-theme", t);
+  $("#theme-btn").textContent = t === "light" ? "☀ Light" : "🌙 Dark";
+}
+$("#theme-btn").onclick = () => applyTheme(document.documentElement.dataset.theme === "light" ? "dark" : "light");
+applyTheme(store("fr-theme") || (matchMedia("(prefers-color-scheme: light)").matches ? "light" : "dark"));
+
+/* ======================================================================== views */
+const VIEWS = ["routing", "settings", "rules", "queue"];
+function setView(v, push = true) {
+  if (!VIEWS.includes(v)) v = "routing";
+  S.view = v;
+  for (const b of $$("#nav button")) {
+    const on = b.dataset.view === v;
+    b.setAttribute("aria-selected", on ? "true" : "false"); b.tabIndex = on ? 0 : -1;
+  }
+  for (const x of VIEWS) $("#v-" + x).hidden = x !== v;
+  $("#draftbar").hidden = v === "queue";
+  if (push && location.hash.slice(1) !== v) history.replaceState(null, "", "#" + v);
+  closeDrawer();
+  renderView();
+}
+$("#nav").addEventListener("click", e => { const b = e.target.closest("button[data-view]"); if (b) setView(b.dataset.view); });
+$("#nav").addEventListener("keydown", e => {
+  if (!["ArrowLeft", "ArrowRight", "Home", "End"].includes(e.key)) return;
+  const i = VIEWS.indexOf(S.view);
+  const n = e.key === "Home" ? 0 : e.key === "End" ? VIEWS.length - 1 : (i + (e.key === "ArrowRight" ? 1 : -1) + VIEWS.length) % VIEWS.length;
+  setView(VIEWS[n]); $("#tab-" + VIEWS[n]).focus(); e.preventDefault();
+});
+window.addEventListener("hashchange", () => { const h = location.hash.slice(1); if (h && h !== S.view) setView(h, false); });
+function renderView() {
+  if (!S.deployed) return;
+  renderStubNote();
+  if (S.view === "routing") renderRouting();
+  else if (S.view === "settings") renderSettings();
+  else if (S.view === "rules") renderRules();
+  else renderQueue();
+}
+function renderStubNote() {
+  const notes = [];
+  if (S.stub && S.view !== "queue") notes.push(`<div class="banner warn"><b>Preview (C1 not merged).</b> This page shows today's personas and backends read from the router. Edits are a draft kept in this browser; <b>Deploy and Rollback are off</b> until the config store (C1) is on this router.</div>`);
+  if (S.view === "settings" && S.schema && S.schema.stub) notes.push(`<div class="banner">Showing a <b>starter set</b> of coordinator settings. The full list, grouped by component, comes from the shared schema once C1 is merged.</div>`);
+  $("#stubnote").innerHTML = notes.join("");
+}
+
+/* ======================================================================== draft */
+const saveSoon = debounce(async () => {
+  if (!S.draft) return;
+  try {
+    const r = await C1.saveDraft(S.draft);
+    S.draftErrors = (r && r.errors) || [];
+  } catch (e) { S.draftErrors = [{path: "", message: e.message}]; toast("Draft not saved: " + e.message, true); }
+  await refreshChanges();
+}, 500);
+const refreshSoon = debounce(() => { refreshDry(); refreshWarnings(); }, 350);
+function edit(mut, rerender = true) {
+  if (!S.draft) S.draft = clone(S.deployed);
+  mut(S.draft);
+  saveSoon();
+  refreshSoon();
+  if (rerender) renderView();
+  renderDraftBar();
+}
+async function refreshChanges() {
+  try { S.changes = await C1.diff(); } catch (e) { S.changes = []; }
+  renderDraftBar();
+}
+function renderDraftBar() {
+  const n = S.changes.length;
+  const errs = S.draftErrors.length;
+  $("#draftbar").classList.toggle("dirty", !!S.draft && n > 0);
+  const live = S.stub ? `<span class="pill warn">preview</span> Live settings from the router` : `<span class="pill ok">live</span> Revision <b>${esc(S.deployedRevision)}</b>`;
+  const dr = !S.draft || !n ? `<span class="hint" style="margin:0">No draft changes</span>`
+    : `<span class="pill info">draft</span> <b>${n}</b> change${n === 1 ? "" : "s"} not deployed${errs ? ` · <span style="color:var(--bad)">${errs} problem${errs === 1 ? "" : "s"}</span>` : ""}`;
+  const pj = (S.projects || []).length > 1 ? `<label class="sr-only" for="cfg-project">Project</label><select id="cfg-project">${S.projects.map(p => `<option ${p === S.cfgProject ? "selected" : ""}>${esc(p)}</option>`).join("")}</select>` : S.cfgProject ? `<span class="hint mono" style="margin:0">${esc(S.cfgProject)}</span>` : "";
+  $("#draft-state").innerHTML = `${pj} ${live} <span aria-hidden="true">·</span> ${dr}`;
+  const ps = $("#cfg-project");
+  if (ps) ps.onchange = async () => {
+    if (S.draft && S.stub && !confirm("The preview draft belongs to this browser, not a project. Switch anyway?")) { ps.value = S.cfgProject; return; }
+    S.cfgProject = ps.value; store("fr.auto.project", S.cfgProject); await reload();
+  };
+  $("#btn-discard").disabled = !S.draft;
+  $("#btn-review").disabled = !S.draft || !n;
+  $("#btn-review").textContent = S.stub ? "Review changes" : "Review & deploy";
+}
+$("#btn-discard").onclick = async () => {
+  if (!S.draft || !confirm("Throw away the draft and go back to the live settings?")) return;
+  try { await C1.discard(); S.draft = null; S.changes = []; S.draftErrors = []; renderView(); renderDraftBar(); refreshDry(); refreshWarnings(); toast("Draft discarded"); }
+  catch (e) { toast(e.message, true); }
+};
+$("#btn-review").onclick = () => openDiff();
+$("#btn-history").onclick = () => openHistory();
+
+/* ======================================================================== modal */
+let _modalReturn = null;
+function openModal(html) {
+  _modalReturn = document.activeElement;
+  const m = $("#modal"); $(".modal-box", m).innerHTML = `<button class="ic x" type="button" data-close aria-label="Close">✕</button>` + html;
+  m.hidden = false;
+  const f = $("[autofocus], button.primary, button", $(".modal-box", m)); if (f) f.focus();
+}
+function closeModal() { $("#modal").hidden = true; if (_modalReturn && _modalReturn.focus) _modalReturn.focus(); }
+$("#modal").addEventListener("click", e => { if (e.target.id === "modal" || e.target.closest("[data-close]")) closeModal(); });
+document.addEventListener("keydown", e => {
+  if (e.key !== "Escape") return;
+  if (!$("#modal").hidden) closeModal(); else if (!$("#drawer").hidden) closeDrawer();
+});
+function short(v) {
+  if (v === null || v === undefined) return "—";
+  if (Array.isArray(v) && v.every(x => x && typeof x === "object" && "model" in x))
+    return v.map(r => `${r.model}@${r.backend}${r.enabled === false ? " (off)" : ""}`).join(" → ") || "(none)";
+  const s = typeof v === "string" ? v : JSON.stringify(v);
+  return s.length > 400 ? s.slice(0, 400) + "…" : s;
+}
+async function openDiff() {
+  await refreshChanges();
+  const ch = S.changes;
+  const errs = S.draftErrors;
+  openModal(`<h3 id="modal-h">${S.stub ? "Draft changes" : "Deploy these changes?"}</h3>
+    ${errs.length ? `<div class="banner bad"><b>Fix before deploying:</b><ul>${errs.map(e => `<li><code>${esc(e.path)}</code> ${esc(e.message)}</li>`).join("")}</ul></div>` : ""}
+    ${ch.some(c => c.not_stored) ? `<div class="banner warn">Changes marked <b>not stored yet</b> (route order, backend on/off) have no place in the config store yet: Deploy leaves them out and they are dropped. Keep editing if you want to note them first.</div>` : ""}
+    ${ch.length ? `<ul class="diff">${ch.map(c => `<li><div class="p">${esc(c.path)}${c.not_stored ? ` <span class="pill warn">not stored yet</span>` : ""}${c.apply === "restart" ? ` <span class="pill warn">restart needed</span>` : ""}</div><div class="b">− ${esc(short(c.before))}</div><div class="a">+ ${esc(short(c.after))}</div></li>`).join("")}</ul>` : `<p class="hint">No changes.</p>`}
+    <div class="row" style="margin-top:12px">
+      ${S.stub ? `<span class="hint grow" style="margin:0">Deploy needs the C1 config store (not merged on this router).</span>` : `<input id="dep-note" class="grow" placeholder="Note for the history (optional)" aria-label="Deploy note">`}
+      <button class="act" type="button" data-close>Keep editing</button>
+      <button class="act primary" type="button" id="dep-go" ${S.stub || errs.length || !ch.length ? "disabled" : ""}>Deploy</button>
+    </div>`);
+  const go = $("#dep-go");
+  if (go) go.onclick = async () => {
+    go.disabled = true;
+    try {
+      const r = await C1.deploy(($("#dep-note") || {}).value || "");
+      toast(`Deployed revision ${r.revision ?? ""}. The coordinator picks it up at its next safe point.`);
+      closeModal(); await reload();
+    } catch (e) {
+      go.disabled = false;
+      toast(e.status === 409 ? "Someone deployed meanwhile. Reload, check the new live settings, then deploy again." : e.message, true);
+    }
+  };
+}
+async function openHistory() {
+  let vs = [];
+  try { vs = await C1.versions(); } catch (e) { toast(e.message, true); }
+  openModal(`<h3 id="modal-h">Deployed versions</h3>
+    ${S.stub ? `<p class="hint">History and rollback come with the C1 config store (not merged on this router).</p>` : ""}
+    ${vs.length ? `<ul class="diff">${vs.map(v => `<li class="row" style="margin:0"><span class="grow"><b>Revision ${esc(v.revision)}</b> <span class="hint">${esc(v.ts ? new Date(v.ts * 1000).toLocaleString() : "")} · ${esc(v.actor || "")}</span>${v.note ? `<div>${esc(v.note)}</div>` : ""}</span>${String(v.revision) === String(S.deployedRevision) ? `<span class="pill ok">live</span>` : `<button class="act" type="button" data-rollback="${esc(v.revision)}">Roll back to this</button>`}</li>`).join("")}</ul>` : (S.stub ? "" : `<p class="hint">No versions yet.</p>`)}`);
+  for (const b of $$("[data-rollback]")) b.onclick = async () => {
+    if (!confirm(`Make revision ${b.dataset.rollback} live again? A new revision is recorded.`)) return;
+    try { await C1.rollback(b.dataset.rollback); toast("Rolled back"); closeModal(); await reload(); } catch (e) { toast(e.message, true); }
+  };
+}
+
+/* ======================================================================== usage + dry run */
+async function refreshUsage() {
+  try { const d = await api("automation/usage"); S.usage = d.usage || {}; S.usageTs = d.ts; }
+  catch (e) { if (!e.status) toast("Usage not readable: " + e.message, true); }
+}
+async function refreshDry() {
+  if (!doc()) return;
+  try {
+    const d = await api("automation/dry-run", {method: "POST", body: {doc: routingDoc(), usage: S.usage}});
+    S.dry = Object.fromEntries((d.results || []).map(r => [r.role, r]));
+  } catch (e) { S.dry = {}; }
+  if (S.view === "routing") for (const r of rolesView().filter(x => x.bindable)) { const el = $(`[data-now="${CSS.escape(r.id)}"]`); if (el) el.outerHTML = nowLine(r); }
+}
+async function refreshWarnings() {
+  if (!doc()) return;
+  try { S.warnings = (await api("automation/check", {method: "POST", body: {doc: doc()}})).warnings || []; } catch (e) { S.warnings = []; }
+  if (S.view === "rules") { const w = $("#rule-warns"); if (w) w.innerHTML = ruleWarningsHtml(); }
+}
+function cutoffOf(be) {
+  const p = (doc().backends || {})[be];
+  if (p && p.cutoff_pct !== undefined && p.cutoff_pct !== null) return Number(p.cutoff_pct);
+  const u = S.usage[be]; return u && u.cutoff_pct != null ? Number(u.cutoff_pct) : null;
+}
+function famOf(be) { const u = S.usage[be]; if (u) return u.family; const s = String(be).toLowerCase();
+  return /meridian|claude|anthropic/.test(s) ? "claude" : /cliproxy|chatgpt|codex/.test(s) ? "chatgpt" : /llama|ollama|strata|local/.test(s) ? "local" : "other"; }
+function isOver(be) {
+  const u = S.usage[be], c = cutoffOf(be);
+  if (!u || !u.subscription || c === null) return false;
+  return ["5h", "weekly"].some(k => { const w = (u.windows || {})[k]; return w && w.used_pct != null && w.used_pct >= c; });
+}
+function beOff(be) { const p = (doc().backends || {})[be]; const u = S.usage[be]; return (p && p.enabled === false) || (u && u.enabled === false); }
+function ubar(w, cutoff, label) {
+  if (!w) return "";
+  const u = w.used_pct, known = u !== null && u !== undefined;
+  const cls = !known ? "unknown" : cutoff !== null && u >= cutoff ? "over" : cutoff !== null && u >= cutoff - 10 ? "near" : "";
+  const aria = `${label}: ${known ? fmt(u) + "% used" : "usage unknown"}${cutoff !== null ? `, cutoff ${fmt(cutoff)}%` : ""}${w.stale ? ", reading is old" : ""}${w.resets ? ", resets " + w.resets : ""}`;
+  return `<div class="ub ${cls}" role="img" aria-label="${esc(aria)}" title="${esc(aria)}"><span class="ub-l">${esc(label)}</span><span class="ub-t">${known ? `<i style="width:${clamp(u, 0, 100)}%"></i>` : ""}${cutoff !== null ? `<b class="tick" style="left:${clamp(cutoff, 0, 100)}%"></b>` : ""}</span><span class="ub-v">${known ? fmt(u) + "%" : "unknown"}${w.stale ? ` <span class="stale">old</span>` : ""}</span></div>`;
+}
+function bars(be) {
+  const u = S.usage[be];
+  if (!u) return `<div class="bars hint" style="margin:0">Not in the backend pool</div>`;
+  if (!u.subscription) return `<div class="bars hint" style="margin:0">Local: no usage cutoff</div>`;
+  const c = cutoffOf(be);
+  return `<div class="bars">${ubar(u.windows["5h"], c, "5-hour")}${ubar(u.windows.weekly, c, "Weekly")}</div>`;
+}
+
+/* ======================================================================== routing view */
+function personaDefault(path) { const f = ((S.schema || {}).fields || []).find(x => x.key === path); return f ? f.default : ""; }
+function personaOf(id) { const b = ROLE_BINDING[id]; if (!b) return ""; const v = getPath(doc().settings || {}, b); return v === undefined || v === "" ? (personaDefault(b) || "") : v; }
+// the roles the Routing page shows (helper personas are per backend: Settings)
+function rolesView() { return (doc().roles || []).filter(r => r.id !== "helper").map(r => ({...r, persona: personaOf(r.id), bindable: !!ROLE_BINDING[r.id]})); }
+// what the dry run reads: roles with their personas resolved
+function routingDoc() { return {...doc(), roles: rolesView()}; }
+function personaNames() { return Object.keys(doc().personas || {}).sort((a, b) => a.localeCompare(b)); }
+function backendNames() {
+  const s = new Set([...Object.keys(S.usage), ...Object.keys(doc().backends || {})]);
+  return [...s].sort((a, b) => ((S.usage[a] || {}).enabled === false) - ((S.usage[b] || {}).enabled === false) || a.localeCompare(b));
+}
+function roleWarnings(r) {
+  const d = doc(), out = [];
+  if (!r.bindable) return out;
+  if (!r.persona) { out.push(["bad", "No persona bound: this role cannot run."]); return out; }
+  const p = (d.personas || {})[r.persona];
+  if (!p) { out.push(["bad", `Persona ${r.persona} does not exist on this router.`]); return out; }
+  const on = (p.routes || []).filter(x => x.enabled !== false && !beOff(x.backend));
+  if (!on.length) out.push(["bad", "No enabled route: calls for this role fail."]);
+  else if (famOf(on[on.length - 1].backend) !== "local") out.push(["warn", "No local last resort: when Claude and ChatGPT are over their cutoffs this role pauses."]);
+  for (const x of p.routes || []) {
+    const u = S.usage[x.backend];
+    if (u && u.models && u.models.length && !u.models.includes(x.model)) out.push(["warn", `${x.backend} does not list ${x.model}.`]);
+  }
+  return out;
+}
+function nowLine(r) {
+  const d = S.dry[r.id];
+  if (!d) return `<div class="now" data-now="${esc(r.id)}"><span class="hint" style="margin:0">Working out the route…</span></div>`;
+  if (!d.chosen) return `<div class="now bad" data-now="${esc(r.id)}">Now: <b>no route can serve this role</b> — the work would pause.</div>`;
+  const sk = d.hops.filter(h => h.outcome === "skipped");
+  return `<div class="now" data-now="${esc(r.id)}" title="${esc(sk.map(h => `#${h.position} ${h.model}: ${h.reason}`).join("\n"))}">Now: <b class="mono">${esc(d.chosen.model)}</b> on ${esc(d.chosen.backend)}${sk.length ? ` <span class="hint" style="margin:0">· skipped ${sk.map(h => `#${h.position} (${esc(h.reason)})`).join(", ")}</span>` : ""}${d.chosen.reason && /unknown/.test(d.chosen.reason) ? ` <span class="pill warn">usage unknown</span>` : ""}</div>`;
+}
+function routeRow(persona, rt, k, n, primary) {
+  const fam = famOf(rt.backend), off = rt.enabled === false || beOff(rt.backend), over = isOver(rt.backend);
+  const role = k === primary ? "primary" : "fallback";
+  const why = rt.enabled === false ? " · turned off" : beOff(rt.backend) ? " · backend off" : over ? " · over cutoff" : "";
+  const pa = esc(persona);
+  return `<li class="route${off ? " off" : ""}${over ? " over" : ""}" data-k="${k}">
+    <button class="drag" type="button" data-act="route-key" data-persona="${pa}" data-k="${k}" aria-label="Route ${k + 1} of ${n}: ${esc(rt.model)} on ${esc(rt.backend)}. Drag, or press arrow up or down to move." title="Drag, or focus and press ↑ ↓"><span aria-hidden="true">⠿</span><span class="pos" aria-hidden="true">${k + 1}</span></button>
+    <span class="fam fam-${fam}">${FAM_LABEL[fam]}</span>
+    <span class="rname"><b>${esc(rt.model)}</b><span class="hint">${esc(rt.backend || "no backend")} · ${role}${why}</span></span>
+    <span class="rctl">
+      <label class="sw" title="Use this route"><input type="checkbox" data-act="route-toggle" data-persona="${pa}" data-k="${k}" ${rt.enabled === false ? "" : "checked"} aria-label="Route ${k + 1} ${esc(rt.model)} on"></label>
+      <button class="ic" type="button" data-act="route-move" data-dir="-1" data-persona="${pa}" data-k="${k}" ${k === 0 ? "disabled" : ""} aria-label="Move ${esc(rt.model)} up">▲</button>
+      <button class="ic" type="button" data-act="route-move" data-dir="1" data-persona="${pa}" data-k="${k}" ${k === n - 1 ? "disabled" : ""} aria-label="Move ${esc(rt.model)} down">▼</button>
+      <button class="ic danger" type="button" data-act="route-remove" data-persona="${pa}" data-k="${k}" aria-label="Remove ${esc(rt.model)}">✕</button>
+    </span>
+    ${bars(rt.backend)}
+  </li>`;
+}
+function roleCard(r) {
+  const d = doc(), p = (d.personas || {})[r.persona], routes = (p && p.routes) || [];
+  const primary = routes.findIndex(x => x.enabled !== false && !beOff(x.backend));
+  const shared = rolesView().filter(x => x.persona && x.persona === r.persona && x.id !== r.id).map(x => x.label || x.id);
+  const names = personaNames();
+  if (r.persona && !names.includes(r.persona)) names.unshift(r.persona);
+  const ws = roleWarnings(r);
+  const rid = esc(r.id);
+  const beOpts = backendNames().map(b => `<option value="${esc(b)}">${esc(b)} (${FAM_LABEL[famOf(b)]})</option>`).join("");
+  return `<section class="card role" data-role="${rid}" aria-labelledby="rh-${rid}">
+    <div class="role-h"><h3 id="rh-${rid}">${esc(r.label || r.id)}</h3><span class="hint mono" style="margin:0">${rid}</span></div>
+    <div class="hint" style="margin-top:0">${esc(ROLE_HELP[r.id] || "")}</div>
+    ${r.bindable ? `<div class="row"><label class="fld" for="rp-${rid}">Persona</label>
+      <select id="rp-${rid}" data-act="role-persona" data-role="${rid}" class="grow"><option value="">— none —</option>${names.map(n => `<option ${n === r.persona ? "selected" : ""}>${esc(n)}</option>`).join("")}</select></div>
+      <div class="hint" style="margin:0">Saved as <code>${esc(ROLE_BINDING[r.id])}</code>.</div>` : `<div class="hint">Runs no model of its own: coordinator repair sessions follow these role rules, and retry guidance uses the Planner's persona unless Settings names another.</div>`}
+    ${shared.length ? `<div class="hint">Shared with ${esc(shared.join(", "))}: route edits apply to every role on this persona.</div>` : ""}
+    ${r.bindable ? nowLine(r) : ""}
+    ${r.persona && p ? `<ol class="routes" data-persona="${esc(r.persona)}" aria-label="${esc(r.label)} routes, tried in this order">${routes.map((x, k) => routeRow(r.persona, x, k, routes.length, primary)).join("") || `<li class="hint">No routes yet.</li>`}</ol>
+    <div class="addroute"><label class="sr-only" for="ab-${rid}">Backend for a new route</label><select id="ab-${rid}" data-act="add-be" data-role="${rid}">${beOpts}</select>
+      <label class="sr-only" for="am-${rid}">Model for a new route</label><select id="am-${rid}" data-role="${rid}">${modelOpts(backendNames()[0])}</select>
+      <button class="act" type="button" data-act="route-add" data-role="${rid}">Add route</button></div>` : ""}
+    ${ws.length ? `<ul class="warns">${ws.map(([c, t]) => `<li class="${c}">${esc(t)}</li>`).join("")}</ul>` : ""}
+  </section>`;
+}
+function modelOpts(be) {
+  const ms = ((S.usage[be] || {}).models || []);
+  return ms.length ? ms.map(m => `<option>${esc(m)}</option>`).join("") : `<option value="">(no models listed)</option>`;
+}
+function hasField(key) { return ((S.schema || {}).fields || []).some(f => f.key === key); }
+function backendCard(name) {
+  const u = S.usage[name] || {}, p = (doc().backends || {})[name] || {};
+  const fam = famOf(name), enabled = p.enabled !== false && u.enabled !== false, n = esc(name);
+  const c = cutoffOf(name), sub = u.subscription || (p.cutoff_pct !== null && p.cutoff_pct !== undefined);
+  const health = u.healthy === true ? `<span class="dot ok" aria-hidden="true"></span><span class="hint" style="margin:0">healthy</span>` : u.healthy === false ? `<span class="dot bad" aria-hidden="true"></span><span class="hint" style="margin:0">unhealthy</span>` : `<span class="dot" aria-hidden="true"></span><span class="hint" style="margin:0">not probed</span>`;
+  const used = rolesView().filter(r => (((doc().personas || {})[r.persona] || {}).routes || []).some(x => x.backend === name)).map(r => r.label || r.id);
+  return `<section class="card be${enabled ? "" : " off"}" aria-labelledby="bh-${n}">
+    <div class="be-h"><span class="fam fam-${fam}">${FAM_LABEL[fam]}</span><h3 id="bh-${n}">${n}</h3>${health}
+      <label class="sw"><input type="checkbox" data-act="be-toggle" data-be="${n}" ${enabled ? "checked" : ""} ${u.enabled === false && p.enabled !== false ? "disabled title=\"Turned off in the backend pool\"" : ""} aria-label="Use backend ${n}">${enabled ? "On" : "Off"}</label></div>
+    ${sub ? `<div class="cut"><label for="bc-${n}">Stop at</label>
+      <input type="range" id="bcr-${n}" min="50" max="100" step="1" value="${c ?? 95}" data-act="be-cut-range" data-be="${n}" aria-label="${n} usage cutoff percent">
+      <input type="number" id="bc-${n}" min="1" max="100" step="1" value="${c ?? ""}" data-act="be-cut" data-be="${n}"><span>%</span></div>
+      ${bars(name)}
+      ${hasField("backends.*.fail_closed") ? `<label class="sw" title="When usage can't be read, refuse this backend instead of using it"><input type="checkbox" data-act="be-failclosed" data-be="${n}" ${p.fail_closed ? "checked" : ""}>Refuse when usage is unknown</label>` : ""}`
+      : `<div class="hint" style="margin:0">Local backend: no usage cutoff. ${(u.models || []).length} model${(u.models || []).length === 1 ? "" : "s"}.</div>`}
+    ${u.note ? `<div class="hint" style="margin:0">${esc(u.note)}</div>` : ""}
+    <div class="hint" style="margin:0">${used.length ? "Used by " + esc(used.join(", ")) : "No role routes through it"}</div>
+  </section>`;
+}
+function renderRouting() {
+  const d = doc();
+  const ago = S.usageTs ? Math.round((Date.now() / 1000 - S.usageTs)) : null;
+  $("#v-routing").innerHTML = `
+    <h2>Roles</h2>
+    <p class="hint">Each role runs on a persona; the persona tries its routes top to bottom and skips a route whose backend is off, unhealthy or over its cutoff. Drag the handle (or focus it and press ↑ ↓) to change the order.</p>
+    <div class="role-grid">${rolesView().map(roleCard).join("")}</div>
+    <h2>Backends</h2>
+    <p class="hint">Turn a backend off or set where its usage stops it. Bars: fill = used, tick = cutoff, striped = no reading (never shown as 0%).${ago !== null ? ` Usage read ${ago < 60 ? "just now" : Math.round(ago / 60) + " min ago"}.` : ""} <button class="ic" type="button" data-act="usage-refresh">Refresh</button></p>
+    <div class="be-grid">${backendNames().map(backendCard).join("")}</div>
+    <h2>Overview</h2>
+    <p class="hint">Read-only map of the draft: roles → personas → models → backends. Solid = first choice, dashed = fallback, faded = off or over cutoff.</p>
+    <div class="card graph-wrap">${graphSvg()}</div>
+    <h2>Dry run</h2>
+    <p class="hint">Where would a call go right now? Uses the draft above and live usage, or usage you type in.</p>
+    <div class="card" id="dry">${dryPanel()}</div>`;
+  attachSortables();
+}
+function moveRoute(persona, from, to) {
+  if (from === to) return;
+  edit(dd => { const rs = dd.personas[persona].routes; const [x] = rs.splice(from, 1); rs.splice(to, 0, x); });
+  const rs = doc().personas[persona].routes;
+  announce(`${rs[to].model} moved to position ${to + 1} of ${rs.length}`);
+}
+function attachSortables() {
+  if (!window.Sortable) return;
+  for (const ol of $$("ol.routes")) {
+    if (ol._sortable) continue;
+    ol._sortable = window.Sortable.create(ol, {
+      handle: ".drag", forceFallback: true, animation: matchMedia("(prefers-reduced-motion: reduce)").matches ? 0 : 140, draggable: "li.route",
+      onEnd: e => moveRoute(ol.dataset.persona, e.oldIndex, e.newIndex),
+    });
+  }
+  const tb = $("#qbody");
+  if (tb && !tb._sortable && S.qOps) tb._sortable = window.Sortable.create(tb, {handle: ".drag", forceFallback: true, draggable: "tr", onEnd: e => queueMove(e.oldIndex, e.newIndex)});
+}
+window.__sortableReady = attachSortables;
+
+$("#main").addEventListener("change", e => {
+  const t = e.target, a = t.dataset.act;
+  if (!a) return;
+  if (a === "role-persona") edit(dd => { dd.settings = dd.settings || {}; setPath(dd.settings, ROLE_BINDING[t.dataset.role], t.value); });
+  else if (a === "route-toggle") edit(dd => { dd.personas[t.dataset.persona].routes[+t.dataset.k].enabled = t.checked; });
+  else if (a === "add-be") { const m = $(`#am-${CSS.escape(t.dataset.role)}`); if (m) m.innerHTML = modelOpts(t.value); }
+  else if (a === "be-toggle") edit(dd => { (dd.backends[t.dataset.be] = dd.backends[t.dataset.be] || {}).enabled = t.checked; });
+  else if (a === "be-failclosed") edit(dd => { (dd.backends[t.dataset.be] = dd.backends[t.dataset.be] || {}).fail_closed = t.checked; });
+  else if (a === "be-cut" || a === "be-cut-range") {
+    const v = Number(t.value);
+    if (!Number.isFinite(v) || v < 1 || v > 100) { t.setAttribute("aria-invalid", "true"); toast("Cutoff must be 1–100 %", true); return; }
+    edit(dd => { (dd.backends[t.dataset.be] = dd.backends[t.dataset.be] || {}).cutoff_pct = v; });
+  }
+  else if (a === "dr-whatif") { $("#dr-whatif-box").hidden = !t.checked; }
+  else if (a === "set") setField(t);
+  else if (a === "q-project") { S.project = t.value; S.queue = null; renderQueue(); }
+});
+$("#main").addEventListener("input", e => {
+  const t = e.target;
+  if (t.dataset.act === "be-cut-range") { const n = $(`#bc-${CSS.escape(t.dataset.be)}`); if (n) n.value = t.value; }
+  if (t.dataset.act === "set") validateField(t);
+});
+$("#main").addEventListener("click", e => {
+  const b = e.target.closest("[data-act]");
+  if (!b || b.tagName === "SELECT" || (b.tagName === "INPUT" && b.type !== "button")) return;
+  const a = b.dataset.act;
+  if (a === "route-move") { const k = +b.dataset.k; moveRoute(b.dataset.persona, k, k + (+b.dataset.dir)); focusHandle(b.dataset.persona, k + (+b.dataset.dir)); }
+  else if (a === "route-remove") {
+    const rs = doc().personas[b.dataset.persona].routes, k = +b.dataset.k;
+    if (rs.length === 1 && !confirm("This is the persona's only route. Remove it anyway?")) return;
+    edit(dd => { dd.personas[b.dataset.persona].routes.splice(k, 1); }); announce("Route removed");
+  }
+  else if (a === "route-add") addRoute(b.dataset.role);
+  else if (a === "usage-refresh") refreshUsage().then(() => { renderView(); refreshDry(); });
+  else if (a === "dry-run") runDry();
+  else if (a === "cell") openCell(b.dataset.role, b.dataset.col);
+  else if (a === "role-rules") openCell(b.dataset.role, "_role");
+  else if (a === "test-path") testPath($("#pt-role").value, $("#pt-op").value, $("#pt-path").value, $("#pt-out"));
+  else if (a === "set-reset") resetField(b.dataset.key);
+  else if (a) queueClick(a, b);
+});
+$("#main").addEventListener("keydown", e => {
+  const b = e.target.closest && e.target.closest("[data-act=route-key]");
+  if (!b || !["ArrowUp", "ArrowDown"].includes(e.key)) return;
+  e.preventDefault();
+  const k = +b.dataset.k, to = k + (e.key === "ArrowUp" ? -1 : 1), n = doc().personas[b.dataset.persona].routes.length;
+  if (to < 0 || to >= n) return;
+  moveRoute(b.dataset.persona, k, to); focusHandle(b.dataset.persona, to);
+});
+function focusHandle(persona, k) {
+  requestAnimationFrame(() => {
+    const ol = $$("ol.routes").find(x => x.dataset.persona === persona);
+    const h = ol && $$("[data-act=route-key]", ol)[k]; if (h) h.focus();
+  });
+}
+function addRoute(role) {
+  const r = rolesView().find(x => x.id === role);
+  const be = $(`#ab-${CSS.escape(role)}`).value, model = $(`#am-${CSS.escape(role)}`).value;
+  if (!be || !model) return toast("Pick a backend that lists models", true);
+  const rs = doc().personas[r.persona].routes;
+  if (rs.some(x => x.backend === be && x.model === model)) return toast(`${model} on ${be} is already a route`, true);
+  edit(dd => { dd.personas[r.persona].routes.push({backend: be, model, enabled: true}); });
+  announce(`${model} added as route ${rs.length + 1}`);
+}
+
+/* ---------------------------------------------------------------- overview graph */
+function graphSvg() {
+  const d = doc();
+  const roles = rolesView().filter(r => r.bindable);
+  const personas = [...new Set(roles.map(r => r.persona).filter(Boolean))];
+  const models = [], mIdx = {}, bes = [];
+  for (const p of personas) for (const rt of (((d.personas || {})[p] || {}).routes || [])) {
+    const k = rt.backend + "|" + rt.model;
+    if (!(k in mIdx)) { mIdx[k] = models.length; models.push(rt); }
+    if (!bes.includes(rt.backend)) bes.push(rt.backend);
+  }
+  const W = 1100, NW = 210, NH = 36, GAP = 12, TOP = 34;
+  const cols = [roles, personas, models, bes];
+  const H = TOP + Math.max(...cols.map(c => c.length), 1) * (NH + GAP) + 10;
+  const xs = [10, 300, 590, 880];
+  const ys = cols.map(c => { const tot = c.length * (NH + GAP) - GAP, off = TOP + ((H - TOP - 10) - tot) / 2; return i => off + i * (NH + GAP); });
+  const edge = (x1, y1, x2, y2, cls, title) => { const mx = (x1 + x2) / 2; return `<path class="e ${cls}" d="M${x1},${y1} C${mx},${y1} ${mx},${y2} ${x2},${y2}"><title>${esc(title)}</title></path>`; };
+  let edges = "", nodes = "";
+  const node = (x, y, title, sub, cls = "", fam = "") => `<g class="${cls}"><title>${esc(title + (sub ? " — " + sub : ""))}</title><rect class="nb" x="${x}" y="${y}" width="${NW}" height="${NH}" rx="5"/>${fam ? `<rect class="famb" x="${x}" y="${y + 4}" width="3" height="${NH - 8}" fill="var(--${fam})"/>` : ""}<text class="nt" x="${x + 10}" y="${y + 15}">${esc(title.length > 28 ? title.slice(0, 27) + "…" : title)}</text>${sub ? `<text class="ns" x="${x + 10}" y="${y + 29}">${esc(sub.length > 34 ? sub.slice(0, 33) + "…" : sub)}</text>` : ""}</g>`;
+  roles.forEach((r, i) => {
+    nodes += node(xs[0], ys[0](i), r.label || r.id, r.persona ? "" : "no persona", r.persona ? "" : "off");
+    const pi = personas.indexOf(r.persona);
+    if (pi >= 0) edges += edge(xs[0] + NW, ys[0](i) + NH / 2, xs[1], ys[1](pi) + NH / 2, "", `${r.label} uses ${r.persona}`);
+  });
+  personas.forEach((p, i) => {
+    const rs = (((d.personas || {})[p] || {}).routes || []);
+    const primary = rs.findIndex(x => x.enabled !== false && !beOff(x.backend) && !isOver(x.backend));
+    nodes += node(xs[1], ys[1](i), p, `${rs.length} route${rs.length === 1 ? "" : "s"}`, (d.personas || {})[p] ? "" : "off");
+    rs.forEach((rt, k) => {
+      const mi = mIdx[rt.backend + "|" + rt.model];
+      const dead = rt.enabled === false || beOff(rt.backend) || isOver(rt.backend);
+      edges += edge(xs[1] + NW, ys[1](i) + NH / 2, xs[2], ys[2](mi) + NH / 2, (k === primary ? "" : "fb") + (dead ? " off" : ""), `${p} route #${k + 1}: ${rt.model}${dead ? " (unavailable)" : k === primary ? " (first choice now)" : " (fallback)"}`);
+    });
+  });
+  models.forEach((m, i) => {
+    const dead = beOff(m.backend) || isOver(m.backend), fam = famOf(m.backend);
+    nodes += node(xs[2], ys[2](i), m.model, m.backend, dead ? "off" : "", fam);
+    edges += edge(xs[2] + NW, ys[2](i) + NH / 2, xs[3], ys[3](bes.indexOf(m.backend)) + NH / 2, dead ? "off" : "", `${m.model} runs on ${m.backend}`);
+  });
+  bes.forEach((b, i) => {
+    const u = S.usage[b] || {}, w = u.windows || {}, fam = famOf(b);
+    const pct = k => (w[k] && w[k].used_pct != null) ? fmt(w[k].used_pct) + "%" : "?";
+    const sub = beOff(b) ? "off" : u.subscription ? `5h ${pct("5h")} · wk ${pct("weekly")} · stop ${cutoffOf(b) ?? "?"}%` : "local";
+    nodes += node(xs[3], ys[3](i), b, sub, (beOff(b) ? "off " : "") + (isOver(b) ? "over" : ""), fam);
+  });
+  const heads = ["Roles", "Personas", "Models", "Backends"].map((h, i) => `<text class="col" x="${xs[i]}" y="16">${h}</text>`).join("");
+  return `<svg class="graph" viewBox="0 0 ${W} ${H}" role="img" aria-labelledby="g-t g-d" preserveAspectRatio="xMinYMin meet"><title id="g-t">Routing overview</title><desc id="g-d">${esc(roles.map(r => { const dr = S.dry[r.id]; return `${r.label}: ${r.persona || "no persona"}${dr && dr.chosen ? ", now " + dr.chosen.model : ""}`; }).join("; "))}</desc>${heads}${edges}${nodes}</svg>
+  <div class="legend"><span><svg width="34" height="8"><path d="M0,4 H34" stroke="var(--info)" stroke-width="2"/></svg> first choice</span><span><svg width="34" height="8"><path d="M0,4 H34" stroke="var(--dim)" stroke-width="2" stroke-dasharray="5 4"/></svg> fallback</span><span><svg width="34" height="8"><path d="M0,4 H34" stroke="var(--dim)" stroke-width="2" opacity=".3"/></svg> off / over cutoff</span></div>`;
+}
+
+/* ---------------------------------------------------------------- dry run panel */
+function dryPanel() {
+  const subs = backendNames().filter(b => (S.usage[b] || {}).subscription);
+  return `<div class="row"><label class="fld" for="dr-role">Role</label>
+      <select id="dr-role"><option value="">All roles</option>${rolesView().filter(r => r.bindable).map(r => `<option value="${esc(r.id)}">${esc(r.label || r.id)}</option>`).join("")}</select>
+      <label class="sw"><input type="checkbox" id="dr-whatif-cb" data-act="dr-whatif">What if usage were…</label>
+      <button class="act primary" type="button" data-act="dry-run">Run</button></div>
+    <div class="whatif" id="dr-whatif-box" hidden>${subs.map(b => { const w = (S.usage[b] || {}).windows || {}; const v = k => w[k] && w[k].used_pct != null ? w[k].used_pct : ""; return `<div class="card"><b>${esc(b)}</b><div class="row"><label class="fld">5-hour <input type="number" min="0" max="100" data-wi="${esc(b)}" data-win="5h" value="${v("5h")}" placeholder="unknown">%</label><label class="fld">Weekly <input type="number" min="0" max="100" data-wi="${esc(b)}" data-win="weekly" value="${v("weekly")}" placeholder="unknown">%</label></div></div>`; }).join("") || `<p class="hint">No subscription backends.</p>`}</div>
+    <div class="dr-res" id="dr-out" aria-live="polite"></div>`;
+}
+async function runDry() {
+  let usage = S.usage;
+  if ($("#dr-whatif-cb").checked) {
+    usage = clone(S.usage);
+    for (const i of $$("[data-wi]")) {
+      const w = ((usage[i.dataset.wi] || {}).windows || {})[i.dataset.win];
+      if (w) { w.used_pct = i.value === "" ? null : clamp(Number(i.value), 0, 100); w.stale = false; }
+    }
+  }
+  const out = $("#dr-out"); out.innerHTML = `<p class="hint">Running…</p>`;
+  try {
+    const role = $("#dr-role").value;
+    const d = await api("automation/dry-run", {method: "POST", body: {doc: routingDoc(), usage, ...(role ? {role} : {roles: rolesView().filter(r => r.bindable).map(r => r.id)})}});
+    const lbl = {chosen: ["ok", "serves"], skipped: ["bad", "skipped"], not_reached: ["", "not tried"]};
+    out.innerHTML = (d.results || []).map(r => `<div class="r"><div><b>${esc(r.summary)}</b> <span class="hint" style="margin:0">(${esc(r.persona || "no persona")})</span></div>
+      <ol>${r.hops.map(h => `<li><span class="pill ${lbl[h.outcome][0]}">${lbl[h.outcome][1]}</span> <span class="mono">${esc(h.model)}</span> on ${esc(h.backend)} — ${esc(h.reason)}</li>`).join("")}</ol></div>`).join("") || `<p class="hint">No roles.</p>`;
+  } catch (e) { out.innerHTML = `<p class="hint">${esc(e.message)}</p>`; }
+}
+
+/* ======================================================================== settings view
+   Forms from the shared schema (foundry_automation.schema.schema_json, C1):
+   groups -> tables -> fields with type, default, limits, description and
+   when a change applies. Values live in the document at the field's dotted
+   path under `settings`. Workstation-only (scope local) fields are not in the
+   document; router-wide ones (backends.*) are on the Routing page. */
+function schemaFields() {
+  if (S._fields) return S._fields;
+  const all = (S.schema && S.schema.fields) || [];
+  const explicit = new Set(all.filter(f => !f.key.includes("*")).map(f => f.key));
+  const out = [], seen = new Set();
+  for (const f of all) {
+    if (f.scope === "local" || f.scope === "router") continue;
+    if (!f.key.includes("*")) { out.push({...f, label: f.label || f.key.split(".").pop().replace(/_/g, " ")}); continue; }
+    // "helpers.personas.*" -> one name -> value map at "helpers.personas"
+    const prefix = f.key.slice(0, f.key.indexOf(".*"));
+    if (!prefix || seen.has(prefix) || [...explicit].some(k => k.startsWith(prefix + "."))) continue;
+    seen.add(prefix);
+    out.push({...f, key: prefix, type: "map", item_type: f.type, default: {}, table: prefix.split(".")[0],
+              label: prefix.split(".").pop().replace(/_/g, " ") + " (by name)"});
+  }
+  S._fields = out;
+  S._fieldIndex = Object.fromEntries(out.map(f => [f.key, f]));
+  return out;
+}
+function settingVal(f, d = doc()) { const v = getPath(d.settings || {}, f.key); return v === undefined ? f.default : v; }
+function fieldHtml(f) {
+  const v = settingVal(f), id = "sf-" + f.key.replace(/[^a-zA-Z0-9_-]/g, "-");
+  const mod = JSON.stringify(v) !== JSON.stringify(settingVal(f, S.deployed));
+  const isDef = JSON.stringify(v) === JSON.stringify(f.default);
+  const dis = f.locked ? "disabled" : "";
+  const common = `id="${esc(id)}" data-act="set" data-key="${esc(f.key)}" aria-describedby="${esc(id)}-d" ${dis}`;
+  const opts = f.enum || f.options;
+  let ctl;
+  if (f.type === "bool") ctl = `<label class="sw"><input type="checkbox" ${common} ${v ? "checked" : ""}>${v ? "On" : "Off"}</label>`;
+  else if (opts) ctl = `<select ${common}>${opts.map(o => `<option value="${esc(o)}" ${o === v ? "selected" : ""}>${esc(o === "" ? "(none)" : o)}</option>`).join("")}</select>`;
+  else if (f.type === "int" || f.type === "float") ctl = `<input type="number" ${common} value="${esc(v ?? "")}" ${f.min != null ? `min="${f.min}"` : ""} ${f.max != null ? `max="${f.max}"` : ""} step="${f.type === "int" ? 1 : "any"}">`;
+  else if (f.type === "list") ctl = `<textarea ${common} rows="3" aria-label="${esc(f.label)}, one per line">${esc((Array.isArray(v) ? v : []).join("\n"))}</textarea>`;
+  else if (f.type === "str" && f.role_binding) {
+    const names = personaNames(); if (v && !names.includes(v)) names.unshift(v);
+    ctl = `<select ${common}><option value="">(default)</option>${names.map(n => `<option ${n === v ? "selected" : ""}>${esc(n)}</option>`).join("")}</select>`;
+  }
+  else if (f.type === "str") ctl = `<input type="text" ${common} value="${esc(v ?? "")}">`;
+  else ctl = `<textarea ${common} rows="3" aria-label="${esc(f.label)} as JSON">${esc(JSON.stringify(v ?? f.default ?? {}, null, 1))}</textarea>`;
+  const dflt = Array.isArray(f.default) ? (f.default.join(", ") || "empty") : (f.default && typeof f.default === "object") ? (JSON.stringify(f.default) === "{}" ? "empty" : JSON.stringify(f.default)) : String(f.default === "" ? "(none)" : f.default);
+  const apply = f.apply === "restart" ? `<span class="pill warn" title="Takes effect when the coordinator restarts">restart needed</span>`
+    : f.apply === "next_session" ? `<span class="pill info" title="Takes effect for the next session the coordinator starts">next session</span>` : "";
+  return `<div class="sf${mod ? " mod" : ""}" data-sf="${esc(f.key)}">
+    <label class="k" for="${esc(id)}">${esc(f.label)} <code class="hint" style="margin:0;font-weight:400">${esc(f.key)}</code>${f.locked ? " 🔒" : ""}${apply}${f.since === "revamp" ? ` <span class="pill ok">new</span>` : ""}${mod ? ` <span class="pill info">changed</span>` : ""}</label>
+    <div class="ctl">${ctl}${isDef || f.locked ? "" : `<button class="ic" type="button" data-act="set-reset" data-key="${esc(f.key)}" title="Back to the default (${esc(dflt)})" aria-label="Reset ${esc(f.label)} to default">↺</button>`}</div>
+    <div class="d" id="${esc(id)}-d">${esc(f.description || "")}${f.role_binding ? ` Also set on the Routing page (${esc(f.role_binding.replace(/_/g, " "))}).` : ""} <span class="hint">Default: ${esc(dflt)}.</span></div>
+    <div class="err" role="alert" hidden></div></div>`;
+}
+function parseField(t, f) {
+  if (f.type === "bool") return {v: t.checked};
+  if (f.enum || f.options) { const o = f.enum || f.options; return o.includes(t.value) ? {v: t.value} : {err: "Pick one of the options."}; }
+  if (f.type === "list") {
+    const items = t.value.split(/\r?\n/).map(x => x.trim()).filter(Boolean);
+    if (f.item_type === "int") { const n = items.map(Number); if (n.some(x => !Number.isInteger(x))) return {err: "Whole numbers, one per line."}; return {v: n}; }
+    return {v: items};
+  }
+  if (f.type === "int" || f.type === "float") {
+    if (t.value.trim() === "") return {err: "Required."};
+    const n = Number(t.value);
+    if (!Number.isFinite(n) || (f.type === "int" && !Number.isInteger(n))) return {err: f.type === "int" ? "Whole number." : "Number."};
+    if (f.min != null && n < f.min) return {err: `At least ${f.min}.`};
+    if (f.max != null && n > f.max) return {err: `At most ${f.max}.`};
+    return {v: n};
+  }
+  if (f.type === "str") return {v: t.value};
+  try { const o = JSON.parse(t.value || "{}"); if (!o || typeof o !== "object" || Array.isArray(o)) return {err: "A JSON object, e.g. {\"name\": \"value\"}."}; return {v: o}; }
+  catch (e) { return {err: "Not valid JSON."}; }
+}
+function validateField(t) {
+  const f = (S._fieldIndex || {})[t.dataset.key]; if (!f) return null;
+  const r = parseField(t, f);
+  const box = t.closest(".sf"), err = $(".err", box);
+  err.hidden = !r.err; err.textContent = r.err || "";
+  t.setAttribute("aria-invalid", r.err ? "true" : "false");
+  return r;
+}
+function setField(t) {
+  const r = validateField(t); if (!r || r.err) return;
+  const f = S._fieldIndex[t.dataset.key];
+  edit(dd => { dd.settings = dd.settings || {}; setPath(dd.settings, f.key, r.v); }, false);
+  // update the row around the input in place, so Tab moves on normally
+  const box = t.closest(".sf");
+  const tmp = document.createElement("div"); tmp.innerHTML = fieldHtml(f);
+  const nb = tmp.firstElementChild;
+  box.className = nb.className;
+  $("label.k", box).innerHTML = $("label.k", nb).innerHTML;
+  const oldR = $("[data-act=set-reset]", box), newR = $("[data-act=set-reset]", nb);
+  if (oldR && !newR) oldR.remove(); else if (!oldR && newR) $(".ctl", box).appendChild(newR);
+  if (f.type === "bool") t.parentElement.lastChild.textContent = r.v ? "On" : "Off";
+}
+function resetField(key) {
+  edit(dd => { delPath(dd.settings || {}, key); });
+  announce(`${key} back to its default`);
+}
+async function ensureSchema() {
+  if (!S.schema) { S.schema = await C1.schema(); S._fields = null; }
+  schemaFields();
+}
+async function renderSettings() {
+  const el = $("#v-settings");
+  if (!S.schema) { el.innerHTML = `<p class="hint">Loading the settings schema…</p>`; try { await ensureSchema(); } catch (e) { el.innerHTML = `<p class="hint">${esc(e.message)}</p>`; return; } renderStubNote(); }
+  const q = (S.setFilter || "").toLowerCase();
+  const fields = schemaFields().filter(f => !q || `${f.key} ${f.label} ${f.description || ""}`.toLowerCase().includes(q));
+  const tables = Object.fromEntries(((S.schema.tables) || []).map(t => [t.table, t]));
+  const groups = ((S.schema.groups) || []).slice().sort((a, b) => (a.order || 0) - (b.order || 0));
+  const local = ((S.schema.fields) || []).filter(f => f.scope === "local").length;
+  let html = `<div class="row" style="margin-top:12px"><label class="fld" for="set-q">Find a setting</label><input id="set-q" type="search" class="grow" placeholder="e.g. attempts, vision, lead, decisions" value="${esc(S.setFilter || "")}"></div>`;
+  for (const g of groups) {
+    const gf = fields.filter(f => f.group === g.id);
+    if (!gf.length) continue;
+    const byTable = {};
+    for (const f of gf) (byTable[f.table || ""] = byTable[f.table || ""] || []).push(f);
+    html += `<h2>${esc(g.label)}</h2><div class="set-grid">` + Object.entries(byTable).map(([t, fs]) => {
+      const tb = tables[t] || {};
+      return `<section class="card" aria-label="${esc(tb.label || t || g.label)}"><h3>${esc(tb.label || (t ? t.replace(/_/g, " ") : g.label))}${t ? ` <span class="hint mono">[${esc(t)}]</span>` : ""}</h3>${tb.description ? `<p class="hint">${esc(tb.description)}</p>` : ""}${fs.map(fieldHtml).join("")}</section>`;
+    }).join("") + `</div>`;
+  }
+  if (!fields.length) html += `<p class="hint">No setting matches.</p>`;
+  if (local) html += `<p class="hint">${local} workstation-only settings (paths, URLs, the names of secret environment variables) stay in the coordinator's project.toml and are not edited here.</p>`;
+  el.innerHTML = html;
+  const qi = $("#set-q");
+  qi.oninput = debounce(() => { S.setFilter = qi.value; renderSettings().then(() => { const n = $("#set-q"); n.focus(); n.setSelectionRange(n.value.length, n.value.length); }); }, 250);
+}
+
+/* ======================================================================== role rules view
+   Rules in foundry_automation.role_rules form (C1): per category allow / ask /
+   deny, read and edit path globs, shell command patterns and the subagents a
+   role may start. Kilo uses the last matching rule; hard denies come last, so
+   nothing here can loosen them. */
+const COLS = ["read", "edit", "write", "bash", "git", "task", "webfetch", "studio_mcp", "external_directory"];
+const COL_LABEL = {read: "Read", edit: "Edit", write: "Create files", bash: "Shell", git: "Git", task: "Subagents",
+                   webfetch: "Web", studio_mcp: "Studio", external_directory: "Outside workspace"};
+const COL_HELP = {
+  read: "Reading files is allowed by default; deny globs block paths, and absolute allow globs also open folders outside the workspace.",
+  edit: "Editing existing files (edit, patch, multiedit). Limited by the edit globs, which Create files shares.",
+  write: "Creating or overwriting files (write). Limited by the same edit globs as Edit.",
+  bash: "Shell commands. Command patterns below refine it; a shell can reach files outside the edit scope.",
+  git: "git commands through the shell. Force push, tag push or deletion and --no-verify stay denied.",
+  task: "Starting subagents. Plan rule B6: only explore.",
+  webfetch: "webfetch and websearch.",
+  studio_mcp: "Roblox Studio MCP tools (run tests, set script source, capture).",
+  external_directory: "Folders outside the workspace. Folders named by absolute read/edit globs are opened automatically.",
+};
+const RULE_PERMS = {read: ["read", "list", "grep", "glob"], edit: ["edit", "patch", "multiedit", "apply_patch"], write: ["write"],
+                    bash: ["bash"], git: ["bash"], external_directory: ["external_directory"]};
+const LIST_OF = {read: "read_paths", edit: "edit_paths", write: "edit_paths", bash: "bash", git: "bash"};
+function ruleRoles() { return doc().roles || []; }
+function defaultsOf(role) {
+  const d = ((S.schema || {}).role_rules || {}).defaults || {};
+  return d[role] || ((S.deployed.role_rules || {})[role]) || {permissions: {}};
+}
+function rulesOf(role) {
+  // C1 normalize: the role's defaults overlaid with what the document sets
+  const out = clone(defaultsOf(role));
+  out.permissions = out.permissions || {};
+  for (const k of ["read_paths", "edit_paths", "bash"]) out[k] = out[k] || {allow: [], deny: []};
+  for (const k of ["task_agents", "deny_tools", "extra"]) out[k] = out[k] || [];
+  const raw = (doc().role_rules || {})[role] || {};
+  for (const [k, v] of Object.entries(raw)) {
+    if (k === "permissions" && v && typeof v === "object") Object.assign(out.permissions, v);
+    else if (["read_paths", "edit_paths", "bash"].includes(k) && v && typeof v === "object") out[k] = {allow: [...(v.allow || [])], deny: [...(v.deny || [])]};
+    else out[k] = clone(v);
+  }
+  return out;
+}
+function stateOf(rr, col) { return col === "read" ? "allow" : (rr.permissions[col] || "deny"); }
+function hardFor(col) { const ps = RULE_PERMS[col] || []; return (doc().hard_denies || []).filter(h => ps.includes(h.permission) && (col !== "git" || /^git/.test(h.pattern))); }
+function cellSummary(rr, col) {
+  const st = stateOf(rr, col);
+  if (col === "read") { const n = rr.read_paths.deny.length, a = rr.read_paths.allow.length; return [n ? `${n} denied` : "everywhere", a ? `+${a} outside` : ""].filter(Boolean).join(" · "); }
+  if ((col === "edit" || col === "write") && st !== "deny") { const a = rr.edit_paths.allow; return a.length ? (a.length === 1 ? a[0] : `${a.length} paths`) : "whole workspace"; }
+  if (col === "bash" && st !== "deny") { const n = rr.bash.allow.length + rr.bash.deny.length; return n ? `${n} pattern${n === 1 ? "" : "s"}` : ""; }
+  if (col === "task") return rr.task_agents.length ? rr.task_agents.join(", ") : "";
+  return "";
+}
+function cellHtml(r, col) {
+  const rr = rulesOf(r.id), st = stateOf(rr, col), sc = cellSummary(rr, col), hd = hardFor(col).length;
+  const sel = S.ruleSel && S.ruleSel.role === r.id && S.ruleSel.col === col;
+  return `<td><button class="cell ${st}" type="button" data-act="cell" data-role="${esc(r.id)}" data-col="${col}" ${sel ? `aria-current="true"` : ""} aria-label="${esc(r.label)}, ${COL_LABEL[col]}: ${st}${sc ? ", " + esc(sc) : ""}. Open details"><span class="st">${STATE_ICON[st]} ${st}</span>${sc ? `<span class="sc mono">${esc(sc.length > 24 ? "…" + sc.slice(-23) : sc)}</span>` : ""}${hd ? `<span class="sc">🔒 ${hd} locked</span>` : ""}</button></td>`;
+}
+function ruleWarningsHtml() {
+  if (!S.warnings.length) return "";
+  const bad = S.warnings.some(w => w.severity === "bad");
+  return `<div class="banner ${bad ? "bad" : "warn"}" role="status"><b>Check these rules:</b><ul style="margin:4px 0 0;padding-left:18px">${S.warnings.map(w => `<li>${esc(w.message)}</li>`).join("")}</ul></div>`;
+}
+function hardList() {
+  const by = {};
+  for (const h of doc().hard_denies || []) { const k = h.pattern; (by[k] = by[k] || {why: h.why || h.reason || "", perms: []}).perms.push(h.permission); }
+  return Object.entries(by).map(([pat, x]) => `<span class="chip locked" title="${esc(x.why)} (${esc(x.perms.join(", "))})">🔒 <span>${esc(pat)}</span></span>`).join("");
+}
+function renderRules() {
+  const roles = ruleRoles();
+  const ro = roles.map(r => `<option value="${esc(r.id)}">${esc(r.label || r.id)}</option>`).join("");
+  $("#v-rules").innerHTML = `
+    <h2>Permissions by role</h2>
+    <p class="hint">Allow, ask (the session waits for an operator answer) or deny, per role. The coordinator turns these into each session's Kilo rules and the kilo.jsonc agent blocks; hard denies (🔒) always come last, so nothing here loosens them. Click a cell for its paths and patterns, or a role name for its agent settings.</p>
+    <div id="rule-warns">${ruleWarningsHtml()}</div>
+    <div class="card matrix-wrap"><table class="matrix"><caption class="sr-only">Role permissions: rows are roles, columns are permission categories</caption>
+      <thead><tr><th scope="col">Role</th>${COLS.map(c => `<th scope="col" title="${esc(COL_HELP[c])}">${COL_LABEL[c]}</th>`).join("")}</tr></thead>
+      <tbody>${roles.map(r => `<tr><th scope="row"><button class="ic" type="button" data-act="role-rules" data-role="${esc(r.id)}" style="color:var(--fg);font-weight:600" aria-label="${esc(r.label)} agent settings">${esc(r.label || r.id)}</button></th>${COLS.map(c => cellHtml(r, c)).join("")}</tr>`).join("")}</tbody></table></div>
+    <h2>Tester</h2>
+    <div class="card"><div class="tester">
+      <label class="sr-only" for="pt-role">Role</label><select id="pt-role">${ro}</select>
+      <label class="sr-only" for="pt-op">Action</label><select id="pt-op"><option value="edit">may edit</option><option value="write">may create</option><option value="read">may read</option><option value="bash">may run</option></select>
+      <label class="sr-only" for="pt-path">Path or command</label><input id="pt-path" placeholder="C:\\Roblox\\AnimalUprising\\src\\x.lua   or   git push origin" spellcheck="false">
+      <button class="act primary" type="button" data-act="test-path">Test</button></div>
+      <div class="row"><label class="fld" for="pt-ws">Workspace (for relative globs)</label><input id="pt-ws" class="grow mono" value="${esc(S.workspace || "")}" placeholder="C:\\Roblox\\AnimalUprising" spellcheck="false"></div>
+      <div id="pt-out" aria-live="polite"></div></div>
+    <h2>Hard denies</h2>
+    <p class="hint">Denied for every role, always (secret files, force push, tag push or deletion, skipped hooks). Hover for which permissions each covers.</p>
+    <div class="card"><div class="chips">${hardList()}</div></div>`;
+  $("#pt-path").addEventListener("keydown", e => { if (e.key === "Enter") $("[data-act=test-path]").click(); });
+  $("#pt-ws").addEventListener("change", e => { S.workspace = e.target.value.trim(); store("fr.auto.ws", S.workspace); });
+}
+async function testPath(role, op, path, out) {
+  if (!path.trim()) { out.innerHTML = `<p class="hint">Type a path or a command.</p>`; return; }
+  try {
+    const r = await api("automation/path-test", {method: "POST", body: {doc: doc(), role, op, path, workspace: S.workspace || ""}});
+    const lbl = (ruleRoles().find(x => x.id === role) || {}).label || role;
+    const verb = {allow: "Yes", ask: "Asks first", deny: "No"}[r.decision] || r.decision;
+    const what = op === "bash" ? "run" : op === "write" ? "create" : op;
+    out.innerHTML = `<div class="verdict ${esc(r.decision)}"><b>${verb}</b> — ${esc(lbl)} ${r.decision === "deny" ? "may not" : "may"} ${what} <code>${esc(path)}</code>${r.locked ? " 🔒" : ""}<div class="hint" style="margin:2px 0 0">Decided by <code>${esc(r.rule)}</code>: ${esc(r.reason)}.${r.exact === false ? " (Close approximation: the shared rules engine arrives with C1.)" : ""}</div></div>`;
+  } catch (e) { out.innerHTML = `<p class="hint">${esc(e.message)}</p>`; }
+}
+/* drawer: one role x category, or one role's agent settings */
+let _drawerReturn = null;
+function openCell(role, col) {
+  _drawerReturn = document.activeElement;
+  S.ruleSel = {role, col};
+  for (const c of $$(".cell")) c.toggleAttribute("aria-current", c.dataset.role === role && c.dataset.col === col);
+  renderDrawer();
+  $("#drawer").hidden = false;
+  const f = $("#drawer input:checked") || $("#drawer input, #drawer button"); if (f) f.focus();
+}
+function closeDrawer() {
+  if ($("#drawer").hidden) return;
+  $("#drawer").hidden = true; S.ruleSel = null;
+  for (const c of $$(".cell")) c.removeAttribute("aria-current");
+  if (_drawerReturn && document.contains(_drawerReturn)) _drawerReturn.focus();
+}
+function chipList(listKey, side, items, placeholder, mono = true) {
+  const id = `g-${listKey}-${side || "list"}`;
+  return `<div class="chips">${items.map((g, i) => `<span class="chip${side === "deny" ? " deny" : ""}"><span>${esc(g)}</span><button class="ic" type="button" data-chip-rm="${listKey}" data-side="${side}" data-i="${i}" aria-label="Remove ${esc(g)}">✕</button></span>`).join("") || `<span class="hint" style="margin:0">none</span>`}</div>
+    <div class="row"><label class="sr-only" for="${id}">Add to ${esc(listKey)} ${esc(side)}</label><input id="${id}" class="grow${mono ? " mono" : ""}" placeholder="${esc(placeholder)}" spellcheck="false"><button class="act" type="button" data-chip-add="${listKey}" data-side="${side}">Add</button></div>`;
+}
+function renderDrawer() {
+  const {role, col} = S.ruleSel, rr = rulesOf(role);
+  const r = ruleRoles().find(x => x.id === role) || {label: role};
+  if (col === "_role") return renderRoleDrawer(r, rr);
+  const st = stateOf(rr, col);
+  const bypass = (col === "edit" || col === "write") && st !== "deny" && ["allow", "ask"].includes(rr.permissions.bash) && rr.edit_paths.allow.length;
+  const seg = col === "read" ? "" : `<fieldset><legend>Permission</legend><div class="seg" role="radiogroup" aria-label="${esc(COL_LABEL[col])} permission">
+      ${["allow", "ask", "deny"].map(s => `<label><input type="radio" name="cellst" value="${s}" ${s === st ? "checked" : ""}>${STATE_ICON[s]} ${s}</label>`).join("")}</div>
+      ${st === "ask" ? `<p class="hint">Unattended sessions wait for an operator answer on every "ask".</p>` : ""}</fieldset>`;
+  let body = "";
+  if (col === "read") body = `<fieldset><legend>Denied paths (deny wins)</legend>${chipList("read_paths", "deny", rr.read_paths.deny, "C:\\Roblox\\AnimalUprising\\build\\*")}</fieldset>
+      <fieldset><legend>Also readable outside the workspace</legend>${chipList("read_paths", "allow", rr.read_paths.allow, "C:\\Roblox\\*")}</fieldset>`;
+  else if (col === "edit" || col === "write") body = `<fieldset ${st === "deny" ? "disabled" : ""}><legend>Where it may ${col === "edit" ? "edit" : "create files"} (shared by Edit and Create files)</legend>${chipList("edit_paths", "allow", rr.edit_paths.allow, "C:\\Roblox\\AnimalUprising\\*")}<p class="hint">Empty = the whole workspace. <code>*</code> matches any characters, folders included. Absolute Windows paths are fine; relative ones are inside the workspace.</p></fieldset>
+      <fieldset ${st === "deny" ? "disabled" : ""}><legend>Never (deny wins)</legend>${chipList("edit_paths", "deny", rr.edit_paths.deny, "*.rbxl")}</fieldset>`;
+  else if (col === "bash" || col === "git") body = `<fieldset><legend>Commands always allowed</legend>${chipList("bash", "allow", rr.bash.allow, "npm test*")}</fieldset>
+      <fieldset><legend>Commands denied (deny wins)</legend>${chipList("bash", "deny", rr.bash.deny, "git tag*")}</fieldset>`;
+  else if (col === "task") body = `<fieldset><legend>Subagents it may start</legend>${chipList("task_agents", "", rr.task_agents, "explore", false)}<p class="hint">Allowed even when Subagents is deny.</p></fieldset>`;
+  const op = {read: "read", edit: "edit", write: "write", bash: "bash", git: "bash"}[col];
+  const hd = hardFor(col);
+  $("#drawer").innerHTML = `<button class="ic x" type="button" id="drawer-x" aria-label="Close">✕</button>
+    <h3 id="drawer-h">${esc(r.label)} · ${COL_LABEL[col]}</h3>
+    <p class="hint">${esc(COL_HELP[col])}</p>
+    ${seg}
+    ${bypass ? `<div class="banner warn">The shell is <b>${esc(rr.permissions.bash)}</b> for this role, so commands can write outside this scope. The scope check after the run catches that.</div>` : ""}
+    ${body}
+    ${op ? `<fieldset><legend>Test</legend><div class="tester"><label class="sr-only" for="dt-path">${op === "bash" ? "Command" : "Path"}</label><input id="dt-path" placeholder="${op === "bash" ? "git push origin main" : "C:\\Roblox\\AnimalUprising\\src\\x.lua"}" spellcheck="false"><button class="act" type="button" id="dt-go">Test</button></div><div id="dt-out" aria-live="polite"></div></fieldset>` : ""}
+    ${hd.length ? `<fieldset><legend>Hard denies (locked)</legend><div class="chips">${[...new Set(hd.map(h => h.pattern))].map(p => `<span class="chip locked">🔒 <span>${esc(p)}</span></span>`).join("")}</div></fieldset>` : ""}`;
+  wireDrawer(role, op);
+}
+function renderRoleDrawer(r, rr) {
+  $("#drawer").innerHTML = `<button class="ic x" type="button" id="drawer-x" aria-label="Close">✕</button>
+    <h3 id="drawer-h">${esc(r.label)} · agent</h3>
+    <p class="hint">${esc(ROLE_HELP[r.id] || "")}</p>
+    <fieldset><legend>Kilo agent</legend><div class="row"><label class="sr-only" for="ra-agent">Agent name</label><input id="ra-agent" class="grow mono" value="${esc(rr.agent || "")}" placeholder="(no kilo.jsonc block)"><button class="act" type="button" id="ra-agent-save">Save</button></div>
+      <p class="hint">The kilo.jsonc agent whose permission block is generated from these rules. Empty = no block.</p></fieldset>
+    <fieldset><legend>Anything not listed (agent block "*")</legend><div class="seg" role="radiogroup" aria-label="Default action">${["allow", "ask", "deny"].map(s => `<label><input type="radio" name="rdef" value="${s}" ${s === (rr.default || "deny") ? "checked" : ""}>${STATE_ICON[s]} ${s}</label>`).join("")}</div></fieldset>
+    <fieldset><legend>Tools always denied</legend>${chipList("deny_tools", "", rr.deny_tools, "searxng_*")}</fieldset>
+    ${rr.extra.length ? `<fieldset><legend>Extra Kilo rules (read-only here)</legend><ul class="warns">${rr.extra.map(x => `<li class="mono">${esc(x.permission)} ${esc(x.pattern || "*")} → ${esc(x.action)}</li>`).join("")}</ul></fieldset>` : ""}`;
+  wireDrawer(r.id, "");
+  $("#ra-agent-save").onclick = () => { const v = $("#ra-agent").value.trim(); editRules(rr2 => { rr2.agent = v; }); announce("Agent saved"); };
+  for (const i of $$("input[name=rdef]", $("#drawer"))) i.onchange = () => { editRules(rr2 => { rr2.default = i.value; }); const n = $(`#drawer input[name=rdef][value=${i.value}]`); if (n) n.focus(); };
+}
+function wireDrawer(role, op) {
+  $("#drawer-x").onclick = closeDrawer;
+  for (const i of $$("input[name=cellst]", $("#drawer"))) i.onchange = () => setCellState(i.value);
+  for (const b of $$("[data-chip-add]", $("#drawer"))) b.onclick = () => addChip(b.dataset.chipAdd, b.dataset.side);
+  for (const i of $$("[id^=g-]", $("#drawer"))) i.onkeydown = e => { if (e.key === "Enter") { const b = i.parentElement.querySelector("[data-chip-add]"); if (b) b.click(); } };
+  for (const b of $$("[data-chip-rm]", $("#drawer"))) b.onclick = () => rmChip(b.dataset.chipRm, b.dataset.side, +b.dataset.i);
+  const go = $("#dt-go");
+  if (go) { go.onclick = () => testPath(role, op, $("#dt-path").value, $("#dt-out")); $("#dt-path").onkeydown = e => { if (e.key === "Enter") go.click(); }; }
+}
+function editRules(mut) {
+  const {role} = S.ruleSel;
+  edit(dd => { dd.role_rules = dd.role_rules || {}; const rr = rulesOf(role); mut(rr); dd.role_rules[role] = rr; }, false);
+  rerenderRulesKeepDrawer();
+}
+function rerenderRulesKeepDrawer() {
+  const sel = S.ruleSel; renderRules(); S.ruleSel = sel;
+  if (sel) { for (const c of $$(".cell")) c.toggleAttribute("aria-current", c.dataset.role === sel.role && c.dataset.col === sel.col); renderDrawer(); }
+}
+function setCellState(v) {
+  const {col} = S.ruleSel;
+  editRules(rr => { rr.permissions[col] = v; });
+  const i = $(`#drawer input[name=cellst][value=${v}]`); if (i) i.focus();
+  announce(`${COL_LABEL[col]} set to ${v}`);
+}
+function validChip(listKey, g) {
+  if (!g) return "Type a value.";
+  if (g.length > 300) return "At most 300 characters.";
+  if (/[\r\n\t]/.test(g)) return "No line breaks or tabs.";
+  if ((listKey === "read_paths" || listKey === "edit_paths") && !/^([a-zA-Z]:[\\/]|[\\/]{2}|\/)/.test(g) && /(^|[\\/])\.\.([\\/]|$)/.test(g)) return "A relative path may not leave the workspace: give the absolute path instead.";
+  return "";
+}
+function addChip(listKey, side) {
+  const inp = $(`#g-${listKey}-${side || "list"}`), g = inp.value.trim();
+  const err = validChip(listKey, g);
+  if (err) { inp.setAttribute("aria-invalid", "true"); toast(err, true); return; }
+  const cur = side ? rulesOf(S.ruleSel.role)[listKey][side] : rulesOf(S.ruleSel.role)[listKey];
+  if (cur.some(x => x.toLowerCase() === g.toLowerCase())) { toast("Already listed", true); return; }
+  editRules(rr => { (side ? rr[listKey][side] : rr[listKey]).push(g); });
+  const n = $(`#g-${listKey}-${side || "list"}`); if (n) n.focus();
+  announce(`${g} added`);
+}
+function rmChip(listKey, side, i) {
+  editRules(rr => { (side ? rr[listKey][side] : rr[listKey]).splice(i, 1); });
+  const n = $(`#g-${listKey}-${side || "list"}`); if (n) n.focus();
+}
+
+/* ======================================================================== queue view (C4) */
+const STATE_CLS = {COMPLETE: "ok", CANCELLED: "", FAILED: "bad", BLOCKED: "bad", AWAITING_HUMAN: "warn", PAUSED: "warn",
+                   QUEUED: "info", READY: "info", IMPLEMENTING: "info", VERIFYING: "info", REVIEWING: "info", CLOSING: "info", CHANGES_REQUIRED: "warn"};
+const RUNNING = ["IMPLEMENTING", "VERIFYING", "REVIEWING", "CLOSING", "CHANGES_REQUIRED", "READY"];
+async function loadQueue() {
+  S.ov = await api("overview?hours=720");
+  const projects = S.ov.projects || [];
+  if (!S.project || !projects.includes(S.project)) S.project = projects[0] || "";
+  const q = S.project ? await C1.queue(S.project) : null;
+  const tasks = (S.ov.tasks || []).filter(t => t.project_id === S.project);
+  const byId = Object.fromEntries(tasks.map(t => [t.task_id, t]));
+  if (q) S.queue = q.map(x => ({...x, live: byId[x.task_id] || null, state: (byId[x.task_id] || {}).state || x.state}));
+  else S.queue = tasks.slice().sort((a, b) => (b.received_ts || 0) - (a.received_ts || 0))
+    .map(t => ({task_id: t.task_id, state: t.state, deps: (t.data || {}).deps || [], approved_by: (t.data || {}).approved_by || "", note: (t.data || {}).next_action || "", live: t}));
+}
+function decisionsOf() {
+  const out = [];
+  for (const t of (S.ov && S.ov.tasks) || []) {
+    if (t.project_id !== S.project) continue;
+    for (const d of (((t.task_view || {}).decisions || {}).open || [])) out.push({t, d});
+  }
+  return out;
+}
+function deadline(d) { const v = d.timeout_ts ?? d.expires_ts ?? d.deadline_ts ?? d.default_at; return v ? Number(v) : null; }
+function countdown(ts) {
+  const s = Math.round(ts - Date.now() / 1000);
+  if (s <= 0) return "default due now";
+  const h = Math.floor(s / 3600), m = Math.floor(s % 3600 / 60), sec = s % 60;
+  return `default in ${h ? h + "h " : ""}${String(m).padStart(h ? 2 : 1, "0")}m ${String(sec).padStart(2, "0")}s`;
+}
+function decisionHtml({t, d}) {
+  const def = d.default_option || d.recommendation || "";
+  const dl = deadline(d), id = esc(d.decision_id);
+  const opts = d.options || [];
+  return `<section class="dec" aria-labelledby="dh-${id}">
+    <div class="row" style="margin:0"><span class="pill warn">${esc(d.kind || "decision")}</span><b id="dh-${id}">${esc(t.task_id)}</b><span class="grow"></span>${dl ? `<span class="countdown" data-deadline="${dl}" title="When the timeout passes the coordinator applies the recommended default and logs it">${esc(countdown(dl))}</span>` : `<span class="hint" style="margin:0">no timeout</span>`}</div>
+    <div style="white-space:pre-wrap;margin-top:4px">${esc(d.question || "")}</div>
+    ${def ? `<div style="margin-top:4px"><span class="hint" style="margin:0">Recommended default:</span> <b>${esc(def)}</b></div>` : ""}
+    ${d.answer_action ? `<div class="hint">Answer ${esc(d.answer_action.status)} by ${esc(d.answer_action.by || "?")}: waiting for the coordinator.</div>`
+      : `<div class="opts">${(opts.length ? opts : def ? [def] : []).map(o => `<button class="act${o === def ? " primary" : ""}" type="button" data-act="q-decide" data-task="${esc(t.task_id)}" data-dec="${id}" data-opt="${esc(o)}">${o === def ? "Accept default: " : ""}${esc(o)}</button>`).join("")}
+        <a class="act" href="/ui/control" title="Answer with your own words in the control center">Other answer…</a></div>`}
+  </section>`;
+}
+function depsHtml(x) {
+  return `<span class="deps">${(x.deps || []).map(d => `<code>${esc(d)}</code>`).join("") || `<span class="hint" style="margin:0">none</span>`}${S.qOps ? ` <button class="ic" type="button" data-act="q-deps" data-task="${esc(x.task_id)}" aria-label="Edit dependencies of ${esc(x.task_id)}">✎</button>` : ""}</span>`;
+}
+function rowActions(x) {
+  const st = x.state || "", b = [], tid = esc(x.task_id);
+  const btn = (act, label, title, cls = "") => `<button class="act ${cls}" type="button" data-act="${act}" data-task="${tid}" title="${esc(title)}">${label}</button>`;
+  if (S.qOps && !x.approved_by && st === "QUEUED") b.push(btn("q-approve", "Approve", "Approve into the queue", "primary"));
+  if (["BLOCKED", "FAILED"].includes(st)) b.push(btn("q-unblock", "Re-queue", "Say what was fixed and put it back in line"));
+  else if (S.qOps && ["CANCELLED", "COMPLETE"].includes(st)) b.push(btn("q-requeue", "Re-queue", "Run this task again"));
+  if (st === "PAUSED") b.push(btn("q-resume", "Resume", "Resume this task"));
+  else if (RUNNING.includes(st) || st === "QUEUED") b.push(btn("q-pause", "Pause", "Pause this task"));
+  if (!["COMPLETE", "CANCELLED"].includes(st)) b.push(btn("q-cancel", "Cancel", "Cancel for good", "danger"));
+  return b.join(" ");
+}
+async function renderQueue() {
+  const el = $("#v-queue");
+  if (!S.queue) {
+    el.innerHTML = `<p class="hint">Loading the queue…</p>`;
+    try { await loadQueue(); } catch (e) { el.innerHTML = `<p class="hint">${esc(e.message)}</p>`; return; }
+  }
+  const projects = (S.ov && S.ov.projects) || [];
+  const decs = decisionsOf();
+  const ps = (S.ov.project_status || {})[S.project] || {};
+  el.innerHTML = `
+    <div class="row" style="margin-top:12px"><label class="fld" for="q-project">Project</label>
+      <select id="q-project" data-act="q-project">${projects.map(p => `<option ${p === S.project ? "selected" : ""}>${esc(p)}</option>`).join("") || "<option value=''>none reported</option>"}</select>
+      ${ps.paused ? `<span class="pill warn">paused (${esc(ps.mode || "")})</span>` : ""}
+      <span class="grow"></span><button class="act" type="button" data-act="q-refresh">Refresh</button></div>
+    ${S.qStub ? `<div class="banner warn"><b>Queue order and dependencies live in the coordinator.</b> Until the C1 queue API is on this router, this list shows the tasks the bridge reported (newest first): pause, resume, cancel and re-queue a blocked task work; approve, reorder and dependencies are off.</div>` : ""}
+    <h2>Decisions waiting${decs.length ? ` (${decs.length})` : ""}</h2>
+    ${decs.length ? decs.map(decisionHtml).join("") : `<p class="hint">Nothing waits on you.</p>`}
+    <h2>Tasks</h2>
+    <div class="card qwrap"><table class="q"><caption class="sr-only">Queue for ${esc(S.project)}</caption>
+      <thead><tr>${S.qOps ? `<th scope="col"><span class="sr-only">Order</span></th>` : ""}<th scope="col">Task</th><th scope="col">State</th><th scope="col">Depends on</th><th scope="col">Note</th><th scope="col"><span class="sr-only">Actions</span></th></tr></thead>
+      <tbody id="qbody">${(S.queue || []).map((x, i) => `<tr data-task="${esc(x.task_id)}">
+        ${S.qOps ? `<td><button class="drag" type="button" data-act="q-key" data-i="${i}" aria-label="${esc(x.task_id)}, position ${i + 1} of ${S.queue.length}. Drag, or press arrow up or down to move."><span aria-hidden="true">⠿</span><span class="pos" aria-hidden="true">${i + 1}</span></button></td>` : ""}
+        <td><b class="mono">${esc(x.task_id)}</b>${x.approved_by ? `<div class="hint" style="margin:0">approved by ${esc(x.approved_by)}</div>` : ""}</td>
+        <td><span class="pill ${STATE_CLS[x.state] || ""}">${esc(x.state || "?")}</span></td>
+        <td>${depsHtml(x)}</td>
+        <td class="hint" style="margin:0;max-width:340px">${esc(String(x.note || "").slice(0, 200))}</td>
+        <td class="acts">${rowActions(x)}</td></tr>`).join("") || `<tr><td colspan="6" class="hint">No tasks reported for this project.</td></tr>`}</tbody></table></div>`;
+  attachSortables();
+  startTick();
+}
+function startTick() {
+  if (S.decTick) return;
+  S.decTick = setInterval(() => {
+    const els = $$("[data-deadline]");
+    if (!els.length || S.view !== "queue") { clearInterval(S.decTick); S.decTick = null; return; }
+    for (const c of els) c.textContent = countdown(Number(c.dataset.deadline));
+  }, 1000);
+}
+function qTask(id) { return (S.queue || []).find(x => x.task_id === id); }
+async function action(kind, x, extra = {}) {
+  const body = {kind, project_id: S.project, task_id: x.task_id, idempotency_key: idem(), ...extra};
+  if (x.state && !["decision_answer"].includes(kind)) body.expected = {task_state: x.state, ...(extra.expected || {})};
+  const r = await api("actions", {method: "POST", body});
+  toast(`${kind.replace(/_/g, " ")} for ${x.task_id}: ${r.status || "accepted"}. The coordinator applies it and re-checks the task first.`);
+  return r;
+}
+function wouldCycle(task, deps) {
+  const graph = Object.fromEntries((S.queue || []).map(x => [x.task_id, x.task_id === task ? deps : (x.deps || [])]));
+  const seen = new Set(), stack = [...deps];
+  while (stack.length) { const n = stack.pop(); if (n === task) return true; if (seen.has(n)) continue; seen.add(n); stack.push(...(graph[n] || [])); }
+  return false;
+}
+async function queueMove(from, to) {
+  if (from === to) return;
+  const x = S.queue[from];
+  const [m] = S.queue.splice(from, 1); S.queue.splice(to, 0, m);
+  renderQueue();
+  try { await C1.queueOp("queue_reorder", x, {position: to + 1}); }
+  catch (e) { toast(e.message, true); S.queue = null; renderQueue(); }
+}
+function formModal(title, fields, submitLabel, onSubmit, danger = false) {
+  openModal(`<h3 id="modal-h">${esc(title)}</h3><form id="mform">${fields}<div class="row" style="margin-top:12px"><span class="grow"></span><button class="act" type="button" data-close>Back</button><button class="act ${danger ? "danger" : "primary"}" type="submit">${esc(submitLabel)}</button></div></form>`);
+  $("#mform").onsubmit = async ev => {
+    ev.preventDefault();
+    const sb = $("#mform button[type=submit]"); sb.disabled = true;
+    try { await onSubmit(new FormData($("#mform"))); closeModal(); S.queue = null; renderQueue(); }
+    catch (e) { sb.disabled = false; toast(e.message, true); }
+  };
+}
+async function queueClick(a, b) {
+  const x = b.dataset.task ? qTask(b.dataset.task) : null;
+  if (a === "q-refresh") { S.queue = null; return renderQueue(); }
+  if (!x && a !== "q-key") return;
+  if (a === "q-approve") formModal(`Approve ${x.task_id}`, `<label class="fld" for="f-deps">Depends on (task ids, comma-separated)</label><input id="f-deps" name="deps" style="width:100%" value="${esc((x.deps || []).join(", "))}"><label class="fld" for="f-note" style="margin-top:8px">Note</label><input id="f-note" name="note" style="width:100%">`, "Approve", f => {
+    const deps = String(f.get("deps") || "").split(/[,\s]+/).filter(Boolean);
+    if (wouldCycle(x.task_id, deps)) throw new Error("Those dependencies make a loop.");
+    return C1.queueOp("queue_approve", x, {deps, note: f.get("note") || ""});
+  });
+  else if (a === "q-deps") formModal(`Dependencies of ${x.task_id}`, `<p class="hint">Tasks that must be COMPLETE before ${esc(x.task_id)} starts.</p><div class="chips">${(S.queue || []).filter(y => y.task_id !== x.task_id).map(y => `<label class="sw" style="border:1px solid var(--line);border-radius:12px;padding:2px 8px"><input type="checkbox" name="dep" value="${esc(y.task_id)}" ${(x.deps || []).includes(y.task_id) ? "checked" : ""}>${esc(y.task_id)}</label>`).join("")}</div>`, "Save dependencies", f => {
+    const deps = f.getAll("dep").map(String);
+    if (wouldCycle(x.task_id, deps)) throw new Error("Those dependencies make a loop.");
+    return C1.queueOp("queue_deps", x, {deps});
+  });
+  else if (a === "q-requeue") formModal(`Re-queue ${x.task_id}`, `<label class="fld" for="f-why">Why (kept in the log)</label><input id="f-why" name="reason" style="width:100%" required>`, "Re-queue", f => C1.queueOp("queue_requeue", x, {reason: f.get("reason")}));
+  else if (a === "q-unblock") formModal(`Re-queue ${x.task_id}`, `<label class="fld" for="f-res">What was fixed?</label><input id="f-res" name="resolution" style="width:100%" required><label class="sw" style="margin-top:8px"><input type="checkbox" name="reset">Start a fresh attempt budget</label>`, "Re-queue", f => action("unblock", x, {resolution: f.get("resolution"), reset_attempts: !!f.get("reset")}));
+  else if (a === "q-pause") formModal(`Pause ${x.task_id}`, `<label class="fld" for="f-why">Reason</label><input id="f-why" name="reason" style="width:100%" required>`, "Pause", f => action("pause", x, {reason: f.get("reason")}));
+  else if (a === "q-resume") action("resume", x).then(() => { S.queue = null; renderQueue(); }).catch(e => toast(e.message, true));
+  else if (a === "q-cancel") formModal(`Cancel ${x.task_id} for good?`, `<label class="fld" for="f-why">Reason</label><input id="f-why" name="reason" style="width:100%" required><label class="fld" for="f-conf" style="margin-top:8px">Type <code>cancel ${esc(x.task_id)}</code> to confirm</label><input id="f-conf" name="confirm" style="width:100%" autocomplete="off" required>`, "Cancel task", f => {
+    if (f.get("confirm") !== `cancel ${x.task_id}`) throw new Error(`Type: cancel ${x.task_id}`);
+    return action("cancel", x, {reason: f.get("reason"), confirm: f.get("confirm")});
+  }, true);
+  else if (a === "q-decide") {
+    const {d} = decisionsOf().find(o => o.t.task_id === x.task_id && o.d.decision_id === b.dataset.dec) || {};
+    if (!d) return toast("That decision is no longer open", true);
+    if (!confirm(`Answer ${x.task_id}'s decision with:\n${b.dataset.opt}`)) return;
+    try {
+      await action("decision_answer", x, {decision_id: d.decision_id, option: (d.options || []).includes(b.dataset.opt) ? b.dataset.opt : "", answer: b.dataset.opt, note: "", question_hash: d.question_hash || ""});
+      S.queue = null; renderQueue();
+    } catch (e) { toast(e.message, true); }
+  }
+}
+$("#main").addEventListener("keydown", e => {
+  const b = e.target.closest && e.target.closest("[data-act=q-key]");
+  if (!b || !["ArrowUp", "ArrowDown"].includes(e.key)) return;
+  e.preventDefault();
+  const i = +b.dataset.i, to = i + (e.key === "ArrowUp" ? -1 : 1);
+  if (to < 0 || to >= S.queue.length) return;
+  queueMove(i, to).then(() => { const h = $$("[data-act=q-key]")[to]; if (h) h.focus(); });
+  announce(`${S.queue[to] ? S.queue[to].task_id : ""} moved to position ${to + 1}`);
+});
+
+/* ======================================================================== boot */
+async function reload() {
+  await C1.load();
+  S.schema = null; S._fields = null;
+  try { await ensureSchema(); } catch (e) { toast("Settings schema not readable: " + e.message, true); }
+  const hd = ((S.schema || {}).role_rules || {}).hard_denies;
+  if (hd) for (const d of [S.deployed, S.draft]) if (d) d.hard_denies = clone(hd);
+  await refreshChanges();
+  renderView();
+  refreshDry(); refreshWarnings();
+}
+async function boot() {
+  try { const s = await api("session"); S.csrf = s.csrf; S.me = s; }
+  catch (e) { if (e.status === 401) return showLogin(); toast(e.message, true); return; }
+  $("#who").textContent = "Signed in as " + (S.me.actor || "?");
+  $("#login").classList.remove("show");
+  await refreshUsage();
+  // settings and rules are per project: the first reported one unless picked
+  try { const ov = await api("overview?hours=720"); S.projects = ov.projects || []; } catch (e) { S.projects = []; }
+  if (!S.cfgProject || !S.projects.includes(S.cfgProject)) S.cfgProject = S.projects[0] || S.cfgProject || "";
+  try { await reload(); } catch (e) { $("#v-" + S.view).innerHTML = `<p class="hint">Could not load the settings: ${esc(e.message)}</p>`; }
+  setView(location.hash.slice(1) || "routing", false);
+  // background refreshes never repaint a view the operator is typing or tabbing in
+  const busy = id => $("#" + id).contains(document.activeElement) || !$("#modal").hidden;
+  setInterval(async () => { if (document.hidden) return; await refreshUsage(); if (S.view === "routing" && !busy("v-routing")) { renderRouting(); refreshDry(); } }, 60000);
+  setInterval(() => { if (!document.hidden && S.view === "queue" && !busy("v-queue")) { S.queue = null; renderQueue(); } }, 20000);
+}
+boot();
+</script>
+</body>
+</html>

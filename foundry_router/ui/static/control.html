@@ -364,6 +364,8 @@ legend { color:var(--accent); font-weight:600; padding:0 4px; }
 #login.show { display:flex; }
 #login .box { background:var(--panel); border:1px solid var(--line-2); border-radius:6px; padding:18px; width:min(460px, 100%); }
 #narrowTabs { display:none; }
+a.btnlink { display:inline-block; background:var(--panel-2); border:1px solid var(--line-2); border-radius:3px; padding:3px 9px; color:var(--fg); text-decoration:none; }
+a.btnlink:hover { border-color:var(--accent); }
 
 /* ---------------------------------------------------------------- narrow */
 @media (max-width: 760px) {
@@ -417,6 +419,7 @@ body.noanim * { animation:none !important; transition:none !important; }
     <button id="btn-graph" class="hide-narrow" title="Show/hide the route graph">Graph</button>
     <button id="btn-inspector" title="Show/hide the inspector sidebar">Inspector</button>
     <button id="btn-chrome" class="hide-narrow" title="Focus mode: hide the header, composer and banners (Esc restores)">Focus</button>
+    <a id="btn-automation" class="btnlink" href="/ui/automation#queue" title="Queue editor, routing, settings and role rules (same sign-in)">Automation</a>
     <button id="btn-settings" title="Settings">⚙</button>
     <button id="btn-logout" title="Sign out" class="ghost">⎋</button>
   </div>
