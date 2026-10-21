@@ -235,8 +235,44 @@ meridian = "Foundry-Kilo-Helper-Claude"      # EDIT: backend -> helper persona
 cliproxyapi = "Foundry-Kilo-Helper-GPT"
 
 
+# Revamp B5-B13 (2026-10-21): the coordinator's own policy knobs, one table the
+# Foundry-Router GUI edits. Every key is optional; these are the defaults.
+[automation]
+helpers = "on_demand"             # "on_demand": no proactive lane runs; a helper starts only
+                                  # when the primary asks (helper_requests). "proactive": [lanes]
+helper_git_measure = true         # a helper result counts as used only if a later commit
+                                  # touches a path of its proposal
+helper_lane_misses = 2            # proactive mode: unused results in a row that turn a lane off
+subagents_allowed = ["explore"]   # Kilo task subagents a session may spawn; all others denied
+scope_unlisted_default = "deny"   # recommended answer of a scope decision ("deny" | "approve")
+decision_timeout_minutes = 30     # product decisions apply their recommended option after this
+no_progress_sessions = 2          # sessions in a row without commit / verified delta / plan step
+auto_heal_retries = 2             # deterministic retries of a tooling/infra stop before the lead
+lead_hard_max_calls = 8           # absolute lead calls per task (never raised by delegation)
+lead_report_repairs = 1           # invalid lead reports sent back into the same session
+infra_retry_max = 5               # free infra retries in a row (then an ordinary attempt)
+infra_backoff_seconds = 60        # first infra retry delay; doubles, capped at 15 min
+preflight = true                  # check Kilo / endpoints / adapter before a session starts
+preflight_endpoints = []          # e.g. ["rojo=tcp://127.0.0.1:34872", "local=http://127.0.0.1:8080/health"]
+context_ceiling_tokens = 160000   # a session over this that stopped before DONE hands off
+memory_delta = true               # memory blocks go to a session once, then only changes
+transcript_poll_seconds = 120     # lane transcript ingest interval
+generic_checks_cache = true       # reuse per-tick coordinator checks while nothing changed
+# The scope allow-list: harness lines a sprint may need, added to the plan's file
+# list by the coordinator itself (scope.py). path is a glob ({task} = sprint id);
+# blocks / lines / json_paths_in_plan constrain how the granted file may change.
+# Leaving the key out keeps these defaults; setting it replaces the whole list.
+# scope_auto_approve = [
+#   {name = "gate_runner_boot_and_mounted_rows", path = "tests/GateRunner.lua",
+#    blocks = ["EXPECTED_BOOT", "MOUNTED_TESTS"]},
+#   {name = "sprint_gate_manifest", path = "docs/progress/{task}_gate.json"},
+#   {name = "rojo_mapping_for_plan_files", path = "default.project.json",
+#    json_paths_in_plan = true},
+# ]
+
 # OPTIONAL: proactive helper lanes (failure triage, incremental review, test
 # design, visual observation...). Uses helper quota; see docs/PROACTIVE_LANES.md.
+# They run only with [automation] helpers = "proactive" (revamp B5).
 [lanes]
 enabled = true
 transcript_poll_seconds = 20
@@ -317,7 +353,7 @@ cooldown_minutes = 60
 # max_red_gates_before_handoff = 2        # local-primary tasks then auto-request frontier_primary
 #                                         # (twice this many red gates = BLOCKED for the lead)
 # max_vision_rounds = 2                   # CHANGES rounds before accept-with-notes
-# lanes = ["prework", "test_design", "failure_triage", "incremental_review"]
+# lanes = []                              # revamp B5: no proactive lane by default
 
 # OPTIONAL (v0.123): the lead sprint manager, the last automated recovery tier
 # before a blocker reaches the operator (docs/LEAD_SPRINT_MANAGER.md). OFF by

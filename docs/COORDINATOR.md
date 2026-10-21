@@ -209,6 +209,34 @@ fails preservation. New or task-owned uncommitted closeout files still fail CLEA
   long as the dependencies allow it and the waiting task has closed (after-close
   approvals release the workspace).
 
+### Automation policy (`[automation]`, revamp B5-B13)
+
+One validated table (`foundry_coordinator/automation.py`) with every revamp knob;
+the Foundry-Router GUI edits it. All keys are optional; the defaults are what
+Victor decided on 2026-10-21.
+
+| Key | Default | What it does |
+|---|---|---|
+| `helpers` | `"on_demand"` | No proactive lane runs; a helper starts only from the primary's `helper_requests` (consumer recorded). `"proactive"` restores `[lanes]`. |
+| `helper_git_measure` | `true` | A delivered result is "used" only when a later commit touches a path of its proposal (`helper_units.git_used`). |
+| `helper_lane_misses` | `2` | Proactive mode: unused results in a row that turn a lane off for the task. |
+| `subagents_allowed` | `["explore"]` | Kilo `task` subagents a session may spawn; all others are denied (appended last). |
+| `scope_auto_approve` | GateRunner `EXPECTED_BOOT`/`MOUNTED_TESTS` rows, `docs/progress/{task}_gate.json`, `default.project.json` mappings for plan files | Harness lines the coordinator adds to a sprint's file list itself (`SCOPE_REQUEST` channel, `scope.py`). |
+| `scope_unlisted_default` | `"deny"` | Recommended answer of a `scope_request` decision for any other path. |
+| `decision_timeout_minutes` | `30` | A decision with a recommended option applies it after this (authority `timeout_default`, journaled, `operator_notice`). Defects never time out. |
+| `no_progress_sessions` | `2` | Sessions in a row with no commit, verified delta or plan step before a no-progress stop (infra sessions don't count; an operator resolution resets). |
+| `auto_heal_retries` | `2` | Deterministic retries of a tooling / infra stop (per head and class) before a lead case. |
+| `lead_hard_max_calls` | `8` | Absolute lead calls per task; delegation never raises it. |
+| `lead_report_repairs` | `1` | Invalid lead reports sent back into the same session. |
+| `infra_retry_max` | `5` | Free infra retries in a row; then an ordinary attempt (and one operator notice for a failing preflight). |
+| `infra_backoff_seconds` | `60` | First infra retry delay; doubles, capped at 15 min. |
+| `preflight` | `true` | Kilo / endpoints / adapter checks before a session starts; a failure costs nothing. |
+| `preflight_endpoints` | `[]` | `"name=tcp://host:port"` or `"name=http(s)://..."` (Rojo, the local model...). |
+| `context_ceiling_tokens` | `160000` | A session above this that stopped before DONE hands off to a fresh one (free). |
+| `memory_delta` | `true` | Memory blocks reach a session once, then only changed paragraphs. |
+| `transcript_poll_seconds` | `120` | Lane transcript ingest interval (an explicit `[lanes]` value wins). |
+| `generic_checks_cache` | `true` | Reuse the per-tick coordinator checks while HEAD / tree / inputs are unchanged. |
+
 ## Setting it up (Victor's workstation)
 
 1. **Foundry:** add a coordinator key. Access → Clients & keys → preset
