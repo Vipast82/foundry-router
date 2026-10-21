@@ -2,6 +2,15 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.130.20 — retry guidance can fall back to local
+
+- **`[retry_guidance] local_fallback`** (default false): when Foundry's quota admission refuses
+  the guidance persona's paid routes, the coordinator still asks. The persona's strict chain ends
+  in a local model, which answers. The record carries a `route_note`. A quota deferral recorded
+  earlier no longer waits for the paid reset.
+- **Animal Uprising:** on for retry guidance. Helpers stay paid-only (Victor 2026-10-21); their
+  personas are back to their single paid route.
+
 ## v0.130.19 — lead write access and a local last-resort route
 
 - **`[lead_manager] write_access`** (default false): the lead session gets full Kilo access

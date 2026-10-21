@@ -34,7 +34,10 @@ class RetryGuidance:
                 "persona": str(cfg.get("persona") or P.profile.roles.get("planner") or ""),
                 "extra_attempts": max(0, min(1, int(cfg.get("extra_attempts", 0)))),
                 "max_tokens": max(128, min(3000, int(cfg.get("max_tokens", 2000)))),
-                "timeout_seconds": max(5, min(60, float(cfg.get("timeout_seconds", 60))))}
+                "timeout_seconds": max(5, min(60, float(cfg.get("timeout_seconds", 60)))),
+                # Victor 2026-10-21: when quota admission refuses every paid route, still
+                # ask: the persona's strict chain ends in a local model, which serves it.
+                "local_fallback": bool(cfg.get("local_fallback", False))}
 
     @staticmethod
     def allowance(t):
@@ -90,7 +93,8 @@ class RetryGuidance:
             return False
         prior = (t.get("data") or {}).get("retry_guidance")
         if prior and prior.get("status") == "deferred":
-            if self.c.clock() < float(prior.get("retry_at") or 0):
+            # a quota deferral waits for its reset, unless the local route can answer now
+            if self.c.clock() < float(prior.get("retry_at") or 0) and not cfg["local_fallback"]:
                 return False
             # Admission is read-only. No model call was made, so it is safe to
             # re-check after the source recovers without spending the adviser.
@@ -119,6 +123,11 @@ class RetryGuidance:
                                 "retry_at": self.c.clock() + 60 if transient else None,
                                 "reason": reason})
             return False
+        if not admission.get("admit") and cfg["local_fallback"]:
+            base["route_note"] = ("quota admission refused the paid routes ("
+                                  + str(admission.get("reason") or admission.get("state"))[:300]
+                                  + "); asking anyway: the chain's local route serves it")
+            admission = {**admission, "admit": True, "local_fallback": True}
         if not admission.get("admit"):
             state = admission.get("state")
             transient = state in ("unknown", "defer")

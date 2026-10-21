@@ -25,7 +25,7 @@ REPAIR = json.dumps({'action': 'repair', 'summary': 'Use the known correct outpu
                      'steps': ['Write the required OK result, then run the existing project check.']})
 
 
-def setup(tmp_path, answer=REPAIR, enabled=True, succeeds=True, extra=1):
+def setup(tmp_path, answer=REPAIR, enabled=True, succeeds=True, extra=1, local=False):
     task = {'id': 'T1', 'title': 'Make the thing', 'spec': 'Write src/a.txt containing OK.',
             'scope': ['src/a.txt']}
     root, _ = make_repo(tmp_path, 'game', [task])
@@ -34,6 +34,7 @@ def setup(tmp_path, answer=REPAIR, enabled=True, succeeds=True, extra=1):
         enabled = {str(enabled).lower()}
         persona = "Foundry-Kilo-Opus"
         extra_attempts = {extra}
+        local_fallback = {str(local).lower()}
     ''')
     def script(ctx):
         return {'writes': {'src/a.txt': 'OK' if succeeds else 'bad'}, 'commit': 'T1: repair'}
@@ -92,6 +93,18 @@ def test_unavailable_quota_does_not_bypass_gate(tmp_path):
     t = c.store.task('game', 'T1')
     assert t['state'] == S.FAILED and not f.guidance_calls
     assert '75%' in t['data']['retry_guidance']['reason']
+
+
+def test_local_fallback_asks_even_when_paid_quota_is_refused(tmp_path):
+    """Victor 2026-10-21: guidance may fall back to local. A refused quota
+    admission no longer stops the consultation; the chain's local route answers."""
+    c, f = setup(tmp_path, local=True)
+    f.admission['Foundry-Kilo-Opus'] = {'admit': False, 'state': 'defer',
+                                        'reason': 'weekly 100.0% used'}
+    c.tick()
+    assert f.guidance_calls
+    rec = c.store.task('game', 'T1')['data']['retry_guidance']
+    assert 'asking anyway' in rec.get('route_note', '')
 
 
 def test_transient_usage_429_retries_adviser_without_spending_attempt(tmp_path):
