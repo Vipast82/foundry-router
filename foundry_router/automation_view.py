@@ -1,19 +1,19 @@
-"""Read-side helpers for the Automation area (/ui/automation).
+"""Read-side helpers for the Automation page (/ui/automation).
 
-Pure functions over one "automation document" (roles -> persona -> ordered
-routes -> backend, backend policy, settings, role rules; the shape the C1
-config store serves; role rules in foundry_automation.role_rules form). Nothing here writes config,
-calls a model or reaches a backend:
+Pure functions over the page's view of the automation settings: roles and the
+persona each is bound to (C1 settings fields), persona route lists and backend
+on/off (live router state), per-backend cutoffs and role rules
+(foundry_automation). Nothing here writes config, calls a model or reaches a
+backend:
 
-  normalize_usage   one usage row per backend (5-hour + weekly windows, cutoff,
-                    unknown kept unknown) from the readings Foundry already has
+  normalize_usage   one usage row per backend (5-hour + weekly windows, the
+                    cutoff in force, unknown kept unknown)
   dry_run           "with this usage, a call for role X goes to ...", with the
                     skipped hops and why
-  path_test         may role X read/edit/write this path or run this command?
-                    (foundry_automation.role_rules.test when C1 is present)
-  rule_warnings     C1 validation plus the shell-with-a-scope bypass warning
-  diff_docs         flat list of changed paths between two documents
-  seed_document     STUB until C1 is merged: today's settings as a document
+  rule_warnings     the config store's role-rule validation plus the shell
+                    bypass warning (shell allowed while edits are scoped)
+  diff_docs         flat list of changed paths between two views
+  seed_document     today's live routing state as the page's base view
 """
 
 from __future__ import annotations
@@ -21,6 +21,8 @@ from __future__ import annotations
 import json
 import re
 from typing import Any, Iterable, Optional
+
+from foundry_automation import role_rules as _RR
 
 ROLES = (
     ("implementer", "Implementer"), ("lead", "Lead"), ("reviewer", "Reviewer"),
@@ -34,44 +36,11 @@ ROLE_BINDING = {"implementer": "roles.implementer", "planner": "roles.planner",
                 "deep_reviewer": "roles.deep_reviewer", "visual_reviewer": "roles.visual_reviewer",
                 "lead": "lead_manager.persona"}
 STATES = ("allow", "ask", "deny")
+CATEGORIES = _RR.CATEGORIES
+HARD_DENIES = tuple(_RR.HARD_DENIES)
 STALE_AFTER_S = 1800          # a passive usage reading older than this is shown as stale
 WINDOW_KEYS = ("5h", "weekly")
 
-try:                           # the shared schema and rules (C1); absent until merged
-    from foundry_automation import role_rules as _RR
-except ImportError:            # pragma: no cover - depends on the C1 merge
-    _RR = None
-
-# ---- STUB copies of foundry_automation.role_rules (C1), used only while that
-# package is not on this router. Same shapes and values; delete with the stub.
-CATEGORIES = ("edit", "write", "bash", "git", "task", "webfetch", "studio_mcp",
-              "external_directory")
-EDIT_PERMS = ("edit", "patch", "multiedit", "apply_patch")
-READ_PERMS = ("read", "list")
-_SECRET_FILES = (".env", ".env.*", "*.env", "*.env.*", "*_secrets*", "*secret*")
-_GIT_HARD = ("git push*--force*", "git push*-f", "git push*-f *", "git push*--tags*",
-             "git push*--delete*", "git push*:refs/tags/*", "git tag -d*", "git tag*--delete*",
-             "git commit*--no-verify*")
-
-
-def _hard() -> list[dict]:
-    out = []
-    for perm in READ_PERMS + EDIT_PERMS + ("write",):
-        for pat in _SECRET_FILES:
-            out.append({"permission": perm, "pattern": pat, "action": "deny",
-                        "why": "secret files are never readable or editable"})
-    for perm in ("grep", "glob", "external_directory"):
-        out.append({"permission": perm, "pattern": "*_secrets*", "action": "deny",
-                    "why": "secret store"})
-    for pat in _GIT_HARD:
-        out.append({"permission": "bash", "pattern": pat, "action": "deny",
-                    "why": "force push, tag push/deletion and hook bypass are never allowed"})
-    out.append({"permission": "bash", "pattern": "*_secrets*", "action": "deny",
-                "why": "secret store"})
-    return out
-
-
-HARD_DENIES = tuple(_RR.HARD_DENIES) if _RR else tuple(_hard())
 
 # --------------------------------------------------------------------------- usage
 
@@ -137,7 +106,7 @@ def _cliproxy_windows(snap: dict) -> dict:
 
 def normalize_usage(backends: Iterable[dict], meridian: Iterable[dict] = (),
                     cliproxy: Iterable[dict] = (), cutoffs: Optional[dict] = None,
-                    default_cutoff: float = 95.0) -> dict:
+                    default_cutoff: float = 95.0, fail_closed: bool = False) -> dict:
     """{backend: {family, enabled, healthy, subscription, cutoff_pct,
     windows: {"5h": {...}, "weekly": {...}}, unknown, note}}. A window with no
     reading has used_pct None (drawn hatched, never as 0%)."""
@@ -169,6 +138,7 @@ def normalize_usage(backends: Iterable[dict], meridian: Iterable[dict] = (),
             for k in WINDOW_KEYS:
                 row["windows"].setdefault(k, _window(None, label=k))
         row["unknown"] = sub and any(row["windows"][k]["used_pct"] is None for k in WINDOW_KEYS)
+        row["fail_closed"] = bool(fail_closed and fam == "chatgpt")
         out[name] = row
     return out
 
@@ -213,6 +183,8 @@ def dry_run(doc: dict, role: str, usage: dict) -> dict:
         cutoff = pol.get("cutoff_pct", (u or {}).get("cutoff_pct"))
         if rt.get("enabled") is False:
             hop["reason"] = "route turned off"
+        elif not be:
+            hop["reason"] = f"no backend lists {model} right now"
         elif u is None:
             hop["reason"] = f"backend {be!r} is not in the pool"
         elif pol.get("enabled") is False or not u.get("enabled", True):
@@ -233,7 +205,7 @@ def dry_run(doc: dict, role: str, usage: dict) -> dict:
                         over.append(f"{w.get('label') or k} {w['used_pct']:g}% ≥ cutoff {float(cutoff):g}%")
             if over:
                 hop["reason"] = "; ".join(over)
-            elif unknown and pol.get("fail_closed"):
+            elif unknown and (pol.get("fail_closed") or u.get("fail_closed")):
                 hop["reason"] = f"usage unknown ({', '.join(unknown)}) and the backend fails closed"
             else:
                 hop["outcome"] = "chosen"
@@ -254,156 +226,17 @@ def dry_run(doc: dict, role: str, usage: dict) -> dict:
 
 # --------------------------------------------------------------------------- role rules
 
-def _norm(p: str) -> str:
-    p = str(p or "").strip().replace("\\", "/")
-    p = re.sub(r"/+", "/", p)
-    return p.casefold()
-
-
-def glob_to_regex(pattern: str) -> re.Pattern:
-    p = _norm(pattern)
-    out, i = [], 0
-    while i < len(p):
-        c = p[i]
-        if c == "*":
-            if p[i:i + 2] == "**":
-                i += 2
-                if p[i:i + 1] == "/":            # "**/" = any number of folders, also none
-                    out.append("(?:.*/)?")
-                    i += 1
-                else:
-                    out.append(".*")
-                continue
-            out.append("[^/]*")
-        elif c == "?":
-            out.append("[^/]")
-        else:
-            out.append(re.escape(c))
-        i += 1
-    return re.compile("^" + "".join(out) + "$")
-
-
-def glob_match(pattern: str, path: str) -> bool:
-    """`**` crosses folders, `*` and `?` stay inside one. Case-insensitive,
-    `\\` and `/` are the same (Windows paths). A relative pattern also matches
-    at any depth below an absolute path's folder (`src/**` matches
-    `C:\\Repo\\src\\a.lua`) because relative scopes are workspace-relative."""
-    rx = glob_to_regex(pattern)
-    n = _norm(path)
-    if rx.match(n):
-        return True
-    pn = _norm(pattern)
-    if pn and not re.match(r"^([a-z]:/|/|\*\*)", pn):
-        return any(rx.match(n[m.end():]) for m in re.finditer("/", n))
-    return False
-
-
 def _rules(doc: dict, role: str) -> dict:
     """The role's rules over its defaults (C1 normalize)."""
     raw = (doc.get("role_rules") or {}).get(role)
-    if _RR:
-        try:
-            return _RR.normalize(role, raw)
-        except Exception:                                        # noqa: BLE001
-            pass
-    out = default_role_rules().get(role) or _base("", "deny")
-    for k, v in (raw or {}).items():
-        if k == "permissions" and isinstance(v, dict):
-            out["permissions"].update(v)
-        elif k in ("read_paths", "edit_paths", "bash") and isinstance(v, dict):
-            out[k] = {"allow": list(v.get("allow") or []), "deny": list(v.get("deny") or [])}
-        else:
-            out[k] = v
-    return out
+    try:
+        return _RR.normalize(role, raw)
+    except Exception:                                            # noqa: BLE001
+        return _RR.normalize(role, None)
 
 
-def _kilo(value: str, pattern: str) -> bool:
-    """Kilo's wildcard (* any run, slashes too); for paths the file name alone
-    is tried as well, so ".env" also catches C:/x/.env."""
-    rx = "".join(".*" if c == "*" else "." if c == "?" else re.escape(c) for c in pattern)
-    if re.fullmatch(rx, value, re.S | re.I):
-        return True
-    return "/" in value and bool(re.fullmatch(rx, value.rsplit("/", 1)[-1], re.S | re.I))
-
-
-def _scope_match(glob: str, path: str, workspace: str = "") -> bool:
-    """A role scope entry the way Kilo reads it: * runs across folders, a
-    relative entry sits inside the workspace (C1 _path_forms)."""
-    g = str(glob).strip().replace("\\", "/")
-    if _kilo(path, g):
-        return True
-    if not re.match(r"^([A-Za-z]:/|/)", g) and workspace:
-        return _kilo(path, workspace.strip().replace("\\", "/").rstrip("/") + "/" + g)
-    return False
-
-
-_OP_PERMS = {"read": READ_PERMS + ("grep", "glob", "external_directory"), "edit": EDIT_PERMS,
-             "write": ("write",), "bash": ("bash",)}
-
-
-def _res(decision: str, rule: str, reason: str, locked: bool = False) -> dict:
-    return {"decision": decision, "rule": rule, "reason": reason, "locked": locked,
-            "exact": False}
-
-
-def path_test(doc: dict, role: str, op: str, value: str, workspace: str = "") -> dict:
-    """What Kilo would decide for role/op/value: allow | ask | deny, the rule
-    that decided it and whether it is a hard (locked) deny. With C1 present
-    this is foundry_automation.role_rules.test itself (exact=True); without
-    it, a close approximation over the same rules (exact=False)."""
-    op = op if op in _OP_PERMS else "edit"
-    raw = (doc.get("role_rules") or {}).get(role)
-    if _RR:
-        out = _RR.test(role, raw, op, value, workspace)
-        r = out.get("rule") or {}
-        # generated rules drop "why": a hard deny is recognised by its pattern
-        hard = next((h for h in HARD_DENIES if r and r.get("action") == "deny" and
-                     (h["permission"], h["pattern"]) == (r.get("permission"), r.get("pattern"))),
-                    None)
-        return {"decision": out.get("decision") or "deny", "exact": True,
-                "locked": hard is not None,
-                "rule": f"{r.get('permission')} {r.get('pattern')} → {r.get('action')}" if r
-                else "no rule matched",
-                "reason": (hard or {}).get("why") or r.get("why") or
-                ("Kilo uses the last matching rule" if r else "nothing allows it")}
-    rules = _rules(doc, role)
-    v = str(value).strip()
-    if op != "bash":
-        v = v.replace("\\", "/")
-    for h in doc.get("hard_denies") or HARD_DENIES:
-        if h.get("permission") in _OP_PERMS[op] and _kilo(v, h.get("pattern", "")):
-            return _res("deny", f"hard deny {h['permission']} {h['pattern']}",
-                        h.get("why") or "hard deny", True)
-    perms = rules.get("permissions") or {}
-    if op == "bash":
-        for pat in (rules.get("bash") or {}).get("deny") or []:
-            if _kilo(v, pat):
-                return _res("deny", f"bash deny {pat}", "a denied command pattern")
-        for pat in (rules.get("bash") or {}).get("allow") or []:
-            if _kilo(v, pat):
-                return _res("allow", f"bash allow {pat}", "an allowed command pattern")
-        cat = "git" if v == "git" or v.startswith("git ") else "bash"
-        act = perms.get(cat, "deny")
-        return _res(act, f"{cat} → {act}", f"the role's {cat} permission")
-    if op == "read":
-        for g in (rules.get("read_paths") or {}).get("deny") or []:
-            if _scope_match(g, v, workspace):
-                return _res("deny", f"read deny {g}", "matches a deny glob (deny wins)")
-        return _res("allow", "read * → allow", "reads are allowed unless a deny glob matches")
-    act = perms.get(op, "deny")
-    if act == "deny":
-        return _res("deny", f"{op} → deny", f"{op} is denied for this role")
-    scope = rules.get("edit_paths") or {}
-    for g in scope.get("deny") or []:
-        if _scope_match(g, v, workspace):
-            return _res("deny", f"{op} deny {g}", "matches a deny glob (deny wins)")
-    allow = scope.get("allow") or []
-    if not allow:
-        return _res(act, f"{op} * → {act}", "no edit scope set: the whole workspace")
-    for g in allow:
-        if _scope_match(g, v, workspace):
-            return _res(act, f"{op} allow {g}", "inside the edit scope")
-    return _res("deny", "no allow glob matches", "outside the role's edit scope")
+def _norm(p: str) -> str:
+    return re.sub(r"/+", "/", str(p or "").strip().replace("\\", "/")).casefold()
 
 
 def _restricted(globs: list) -> bool:
@@ -416,17 +249,17 @@ def _role_of(path: str) -> str:
 
 
 def rule_warnings(doc: dict) -> list[dict]:
-    """C1's own validation (errors and warnings) when present, plus the shell
-    bypass warning: shell allowed while edits are limited to a scope."""
-    out = []
+    """The config store's own role-rule validation (errors and warnings), plus
+    the shell bypass warning: shell allowed while edits are limited to a scope."""
     rr = doc.get("role_rules") or {}
-    if _RR:
-        errors, warns = _RR.validate(rr)
-        out += [{"role": _role_of(e["path"]), "severity": "bad",
-                 "message": f"{e['path']}: {e['message']}"} for e in errors]
-        out += [{"role": _role_of(w["path"]), "severity": "warn",
-                 "message": f"{w['path']}: {w['message']}"} for w in warns]
+    errors, warns = _RR.validate(rr)
+    out = [{"role": _role_of(e["path"]), "severity": "bad", "message": f"{e['path']}: {e['message']}"}
+           for e in errors]
+    out += [{"role": _role_of(w["path"]), "severity": "warn", "message": f"{w['path']}: {w['message']}"}
+            for w in warns]
     for role in rr:
+        if role not in _RR.RULE_ROLES:
+            continue
         rules = _rules(doc, role)
         p = rules.get("permissions") or {}
         if p.get("bash") in ("allow", "ask") and p.get("edit", "deny") != "deny" and \
@@ -435,12 +268,6 @@ def rule_warnings(doc: dict) -> list[dict]:
                         "message": f"{role}: shell is {p['bash']}ed while edits are limited to a "
                                    f"scope. Shell commands can write outside it; the scope check "
                                    f"after the run is what catches that."})
-        if not _RR:
-            for t, st in p.items():
-                if st not in STATES or t not in CATEGORIES:
-                    out.append({"role": role, "severity": "bad",
-                                "message": f"role_rules.{role}.permissions.{t}: {st!r} is not "
-                                           f"a known category with allow, ask or deny"})
     return out
 
 
@@ -472,65 +299,36 @@ def diff_docs(before: Any, after: Any, path: str = "") -> list[dict]:
     return []
 
 
-# --------------------------------------------------------------------------- stub seed
-
-def _base(agent: str, default: str, **perms) -> dict:
-    p = {c: "deny" for c in CATEGORIES}
-    p.update(perms)
-    return {"agent": agent, "default": default, "permissions": p,
-            "read_paths": {"allow": [], "deny": []}, "edit_paths": {"allow": [], "deny": []},
-            "bash": {"allow": [], "deny": []}, "task_agents": [], "deny_tools": [], "extra": []}
-
+# --------------------------------------------------------------------------- live base view
 
 def default_role_rules() -> dict:
-    """Ready-to-use rules per role: C1's defaults when present, else the STUB
-    copy of them (same values)."""
-    if _RR:
-        return _RR.all_defaults()
-    ro = [{"permission": "question", "pattern": "*", "action": "deny"}]
-    impl = _base("code", "allow", edit="allow", write="allow", bash="allow", git="allow",
-                 studio_mcp="allow")
-    impl.update(task_agents=["explore"], bash={"allow": [], "deny": ["git tag*"]},
-                deny_tools=["searxng_*", "crawl4ai_*"])
-    lead = _base("lead", "allow", edit="allow", write="allow", bash="allow", git="allow",
-                 task="allow", studio_mcp="allow", external_directory="allow")
-    lead["extra"] = [dict(x) for x in ro]
-    out = {"implementer": impl, "lead": lead}
-    for role, agent in (("reviewer", "au-review"), ("deep_reviewer", "au-deep-review"),
-                        ("visual_reviewer", "au-visual-review"), ("planner", "au-planner"),
-                        ("researcher", "au-research"), ("helper", "au-helper")):
-        r = _base(agent, "deny")
-        r["extra"] = [dict(x) for x in ro]
-        if role == "researcher":
-            r["permissions"]["webfetch"] = "allow"
-        if role == "helper":
-            r["deny_tools"] = ["background_process", "schedule_wakeup", "cancel_wakeup",
-                               "cron_*", "link_pr", "todowrite"]
-        out[role] = r
-    coord = _base("", "deny", edit="allow", write="allow")
-    coord["extra"] = [dict(x) for x in ro]
-    out["coordinator"] = coord
-    return out
+    return _RR.all_defaults()
 
 
-def _persona_routes(p: dict, models_by_backend: dict) -> list[dict]:
-    def parse(v):
-        if isinstance(v, list):
-            return v
-        try:
-            x = json.loads(v or "[]")
-        except (TypeError, ValueError):
-            return []
-        return x if isinstance(x, list) else []
-    chain = parse(p.get("pinned_models")) or parse(p.get("model_allowlist"))
+def _jlist(v) -> list:
+    if isinstance(v, list):
+        return v
+    try:
+        x = json.loads(v or "[]")
+    except (TypeError, ValueError):
+        return []
+    return x if isinstance(x, list) else []
+
+
+def persona_routes(p: dict, models_by_backend: dict) -> list[dict]:
+    """A persona's route list the way the router reads it: pinned_models is the
+    order, model_allowlist the models it may use. A pinned model left out of a
+    non-empty allowlist is a route turned off (kept in place); allowed models
+    that aren't pinned follow the pinned ones."""
+    pins = [m for m in _jlist(p.get("pinned_models")) if isinstance(m, str) and m]
+    allow = [m for m in _jlist(p.get("model_allowlist")) if isinstance(m, str) and m]
+    order = pins + [m for m in allow if m not in pins]
     out = []
-    for m in chain:
-        if not isinstance(m, str) or not m:
-            continue
+    for m in order:
         be = p.get("backend") if p.get("backend") and m in models_by_backend.get(p["backend"], ()) else ""
         if not be:
             be = next((b for b, ms in models_by_backend.items() if m in ms), p.get("backend") or "")
-        out.append({"backend": be, "model": m, "enabled": True})
+        out.append({"backend": be, "model": m, "enabled": not allow or m in allow})
     return out
 
 
@@ -543,28 +341,28 @@ def _set_path(d: dict, path: str, value) -> None:
 
 def seed_document(personas: list, backends: list, role_personas: dict, cutoffs: dict,
                   default_cutoff: float = 95.0) -> dict:
-    """STUB (until C1's config store is on this router): today's personas,
-    backends and role bindings as one GUI document. Role personas sit where C1
-    keeps them (settings roles.<role>, lead_manager.persona)."""
+    """Today's live routing state as the page's base view: persona routes,
+    backend on/off and the cutoff in force. The versioned settings and role
+    rules come from the config store and replace `settings`/`role_rules`;
+    `role_personas` (what recent sessions ran with) is only a hint for roles
+    the settings don't bind yet."""
     models_by_backend = {b["name"]: list(b.get("models") or []) for b in backends if b.get("name")}
     pmap = {}
     for p in personas or []:
         name = p.get("virtual_name") or p.get("name")
         if name:
-            pmap[name] = {"routes": _persona_routes(p, models_by_backend),
+            pmap[name] = {"routes": persona_routes(p, models_by_backend),
                           "description": p.get("description") or ""}
     bpol = {}
     for b in backends or []:
         fam = backend_family(b.get("name", ""), b.get("flavor") or "", b.get("type") or "")
         sub = bool(b.get("subscription")) or fam in ("claude", "chatgpt")
         bpol[b["name"]] = {"enabled": b.get("enabled", True) is not False,
-                           "cutoff_pct": (cutoffs.get(b["name"]) or default_cutoff) if sub else None,
-                           "fail_closed": False}
+                           "cutoff_pct": (cutoffs.get(b["name"]) or default_cutoff) if sub else None}
     settings: dict = {}
     for role, path in ROLE_BINDING.items():
         if role_personas.get(role):
             _set_path(settings, path, role_personas[role])
-    return {"revision": 0, "stub": True,
-            "roles": [{"id": rid, "label": label} for rid, label in ROLES],
+    return {"roles": [{"id": rid, "label": label} for rid, label in ROLES],
             "personas": pmap, "backends": bpol, "settings": settings,
             "role_rules": default_role_rules(), "hard_denies": [dict(h) for h in HARD_DENIES]}

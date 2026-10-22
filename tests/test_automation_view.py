@@ -112,51 +112,10 @@ def test_dry_run_draft_cutoff_beats_live_cutoff_and_unknown_role():
     assert av.dry_run(d, "nobody", usage())["error"]
 
 
-def test_glob_match_windows_and_relative():
-    assert av.glob_match("C:\\Roblox\\**", "c:/roblox/AnimalUprising/src/x.lua")
-    assert av.glob_match("C:/Roblox/AnimalUprising/**", "C:\\Roblox\\AnimalUprising\\a.lua")
-    assert not av.glob_match("C:\\Roblox\\AnimalUprising\\**", "C:\\Roblox\\Other\\a.lua")
-    assert av.glob_match("**/.env", "C:\\x\\y\\.env")
-    assert av.glob_match("src/**", "C:\\Repo\\src\\a\\b.lua")         # workspace-relative
-    assert not av.glob_match("src/*.lua", "C:\\Repo\\src\\a\\b.lua")  # * stays in one folder
-    assert av.glob_match("src/?.lua", "src/a.lua") and not av.glob_match("src/?.lua", "src/ab.lua")
-
-
 def _scoped():
     d = _doc()
     d["role_rules"]["implementer"]["edit_paths"]["allow"] = [r"C:\Roblox\AnimalUprising\**"]
     return d
-
-
-def test_path_test_hard_denies_are_locked():
-    d = _scoped()
-    sec = av.path_test(d, "implementer", "read", r"C:\Roblox\_secrets\key.txt")
-    assert sec["decision"] == "deny" and sec["locked"] is True
-    env = av.path_test(d, "implementer", "edit", "C:/Roblox/AnimalUprising/.env")
-    assert env["decision"] == "deny" and env["locked"] is True
-    fp = av.path_test(d, "implementer", "bash", "git push --force origin main")
-    assert fp["decision"] == "deny" and fp["locked"] is True
-
-
-def test_path_test_scope_deny_wins_and_outside_is_denied():
-    d = _scoped()
-    ok = av.path_test(d, "implementer", "edit", r"C:\Roblox\AnimalUprising\src\x.lua")
-    assert ok["decision"] == "allow"
-    d["role_rules"]["implementer"]["edit_paths"]["deny"] = ["C:/Roblox/AnimalUprising/build/**"]
-    assert av.path_test(d, "implementer", "edit",
-                        "C:/Roblox/AnimalUprising/build/out.lua")["decision"] == "deny"
-    assert av.path_test(d, "implementer", "edit", "D:/elsewhere/a.lua")["decision"] == "deny"
-    assert av.path_test(d, "reviewer", "edit", "C:/Roblox/AnimalUprising/a.lua")["decision"] == "deny"
-    d["role_rules"]["implementer"]["permissions"]["edit"] = "ask"
-    assert av.path_test(d, "implementer", "edit",
-                        "C:/Roblox/AnimalUprising/src/x.lua")["decision"] == "ask"
-
-
-def test_path_test_shell_and_git_follow_their_categories():
-    d = _doc()
-    assert av.path_test(d, "implementer", "bash", "git commit -m x")["decision"] == "allow"
-    assert av.path_test(d, "implementer", "bash", "git tag v1")["decision"] == "deny"
-    assert av.path_test(d, "reviewer", "bash", "npm test")["decision"] == "deny"
 
 
 def test_rule_warnings_bash_with_restricted_edit_scope():
@@ -200,7 +159,6 @@ def test_seed_document_maps_personas_to_backend_routes():
                 {"virtual_name": "Broken", "pinned_models": "not json"}]
     d = av.seed_document(personas, STATUS, {"reviewer": "Foundry-Kilo-Review", "lead": "Lead-P"},
                          {"meridian": 90})
-    assert d["stub"] is True
     assert [r["backend"] for r in d["personas"]["Foundry-Kilo-Review"]["routes"]] == \
         ["meridian", "cliproxyapi", "strata"]
     assert d["personas"]["Broken"]["routes"] == []
@@ -208,11 +166,24 @@ def test_seed_document_maps_personas_to_backend_routes():
     assert d["backends"]["cliproxyapi"]["cutoff_pct"] == 95       # default
     assert d["backends"]["strata"]["cutoff_pct"] is None           # local: no cutoff
     assert [r["id"] for r in d["roles"]] == [r for r, _ in av.ROLES]
-    # role personas live where C1 keeps them
+    # recent bindings sit where C1 keeps role personas (a hint for unbound roles)
     assert d["settings"]["roles"]["reviewer"] == "Foundry-Kilo-Review"
     assert d["settings"]["lead_manager"]["persona"] == "Lead-P"
     assert av.persona_of(d, "reviewer") == "Foundry-Kilo-Review"
     assert av.persona_of(d, "coordinator") == ""
+
+
+def test_persona_routes_read_order_from_pins_and_on_off_from_the_allowlist():
+    mb = {"meridian": ["a"], "cliproxyapi": ["b", "c"], "strata": ["q"]}
+    p = {"pinned_models": '["b", "a", "q"]', "model_allowlist": '["a", "q", "c"]'}
+    r = av.persona_routes(p, mb)
+    assert [(x["model"], x["backend"], x["enabled"]) for x in r] == [
+        ("b", "cliproxyapi", False), ("a", "meridian", True), ("q", "strata", True),
+        ("c", "cliproxyapi", True)]
+    # no allowlist: every pinned route is on
+    assert all(x["enabled"] for x in av.persona_routes({"pinned_models": ["a", "b"]}, mb))
+    # allowlist only: its order
+    assert [x["model"] for x in av.persona_routes({"model_allowlist": '["c", "a"]'}, mb)] == ["c", "a"]
 
 
 def test_dry_run_resolves_the_persona_from_settings():
@@ -223,14 +194,16 @@ def test_dry_run_resolves_the_persona_from_settings():
     assert av.dry_run(d, "implementer", usage())["persona"] == "P-Impl"
 
 
-def test_scope_star_crosses_folders_and_relative_entries_use_the_workspace():
+def test_dry_run_refuses_unknown_usage_when_the_backend_fails_closed():
+    u = av.normalize_usage(STATUS, MERIDIAN, [{"backend": "cliproxyapi", "ok": False, "accounts": []}],
+                           {"meridian": 95, "cliproxyapi": 95}, fail_closed=True)
+    assert u["cliproxyapi"]["fail_closed"] is True and u["meridian"]["fail_closed"] is False
+    r = av.dry_run(_doc(), "implementer", u)
+    assert "fails closed" in r["hops"][1]["reason"] and r["chosen"]["backend"] == "strata"
+
+
+def test_dry_run_names_a_route_no_backend_lists():
     d = _doc()
-    d["role_rules"]["implementer"]["edit_paths"]["allow"] = ["C:/Roblox/AnimalUprising/*", "tools/*"]
-    ok = av.path_test(d, "implementer", "edit", "C:/Roblox/AnimalUprising/src/deep/x.lua")
-    assert ok["decision"] == "allow"
-    if av._RR is None:
-        # the stub approximation; C1's exact tester decides this case itself
-        assert av.path_test(d, "implementer", "edit", "C:/Work/tools/a.py",
-                            workspace="C:/Work")["decision"] == "allow"
-    assert av.path_test(d, "implementer", "edit", "C:/Work/src/a.py",
-                        workspace="C:/Work")["decision"] == "deny"
+    d["personas"]["P-Impl"]["routes"][0]["backend"] = ""
+    r = av.dry_run(d, "implementer", usage())
+    assert r["hops"][0]["reason"] == "no backend lists claude-sonnet-5-5 right now"

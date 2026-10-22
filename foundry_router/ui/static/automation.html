@@ -5,11 +5,11 @@
   One static page, vanilla JS, no build step. The one external script is
   SortableJS (pinned, SRI) for drag handles; without it the arrow keys and the
   move buttons still reorder everything.
-  Data: /control/api/* behind the control center's operator session (HttpOnly
-  cookie, CSRF header on every write). Config edits go to a draft; Deploy makes
-  it live through the C1 config store (/control/api/config*). Until C1 is
-  merged the page runs on a STUB: today's settings, read from the router, with
-  the draft kept in this browser and Deploy turned off.
+  Sign-in: the control center's operator session (HttpOnly cookie, CSRF
+  header) for /control/api/*. Settings and role rules live in the config store
+  (/admin/api/automation/*, versioned, draft -> deploy -> rollback); persona
+  route order and backend on/off are written live through the persona and
+  backend APIs on Deploy, after a state snapshot.
 -->
 <html lang="en">
 <head>
@@ -307,7 +307,7 @@
   <button class="act primary" id="btn-review" type="button">Review &amp; deploy</button>
 </div>
 <main id="main">
-  <div id="stubnote"></div>
+  <div id="notes"></div>
   <section id="v-routing" role="tabpanel" aria-labelledby="tab-routing" hidden></section>
   <section id="v-settings" role="tabpanel" aria-labelledby="tab-settings" hidden></section>
   <section id="v-rules" role="tabpanel" aria-labelledby="tab-rules" hidden></section>
@@ -373,9 +373,9 @@ const STATE_ICON = {allow: "✓", ask: "?", deny: "✕"};
 /* ======================================================================== state */
 const S = {
   me: null, csrf: "", view: "routing",
-  deployed: null, draft: null, revision: null, deployedRevision: null, stub: false, stubNote: "",
+  deployed: null, draft: null, live: null, revision: null, deployedRevision: null, routerRevision: null,
   usage: {}, usageTs: 0, dry: {}, changes: [], draftErrors: [], warnings: [], schema: null,
-  cfgProject: store("fr.auto.project") || "", c1: null,
+  cfgProject: store("fr.auto.project") || "", c1: null, projects: [], ovProjects: [],
   queue: null, ov: null, project: "", qStub: false, qOps: false, workspace: store("fr.auto.ws") || "",
   ruleSel: null, decTick: null,
 };
@@ -400,172 +400,179 @@ async function api(path, opts = {}) {
 }
 
 /* ======================================================================== C1 adapter
-   Every call to the C1 config store goes through here (contract: notes
-   revamp/config_api.md; proposal revamp/C2_gui_needs.md). When C1 answers 404
-   the page falls back to the STUB: a document seeded from today's router
-   settings, a draft kept in this browser, Deploy / Rollback off. */
-const LOCAL_DRAFT = "fr.auto.draft";
-/* C1 keeps one document per project ({format, project, settings, role_rules})
-   and a router-wide one ("_router": backends.<name>.cutoff_pct). The page
-   shows them together with the live personas and backends (seed): compose()
-   builds that view, split() turns it back into the two documents. Persona
-   route order and backend on/off are stored only once C1's schema has fields
-   for them (personas.*.routes, backends.*.enabled); until then the diff marks
-   those changes as not deployable instead of dropping them silently. */
-function compose(base, proj, router) {
-  const d = clone(base);
+   The config store (foundry_router/automation_api.py, contract v1.2 in the
+   revamp notes) keeps one versioned document per project ({format, project,
+   settings, role_rules}) and a router-wide one, "_router" (per-backend
+   cutoff_pct). Persona route order and backend on/off are live router state,
+   not versioned: Deploy writes them through the persona and backend APIs after
+   taking a state snapshot (restorable from History). The page shows all of it
+   as one view: compose() builds it, split() turns it back into the documents. */
+const ADMIN_KEY = "foundryAdminKey";      // shared with the dashboard (/ui), same origin
+async function adminApi(path, opts = {}) {
+  const o = {method: opts.method || "GET", credentials: "same-origin", headers: {"accept": "application/json"}};
+  if (opts.body !== undefined) { o.body = JSON.stringify(opts.body); o.headers["content-type"] = "application/json"; }
+  if (o.method !== "GET") o.headers["x-foundry-automation"] = "1";      // the store's CSRF guard
+  if (S.me && S.me.actor) o.headers["x-foundry-actor"] = S.me.actor;    // who, in history and audit
+  const k = store(ADMIN_KEY);
+  if (k) o.headers["authorization"] = "Bearer " + k;
+  let r;
+  try { r = await fetch("/admin/api/" + path, o); }
+  catch (e) { const err = new Error("Foundry unreachable"); err.network = true; throw err; }
+  let data = {};
+  try { data = await r.json(); } catch (e) {}
+  const code = data.code || (data.error && data.error.code);
+  if ((r.status === 401 || (r.status === 403 && code === "admin_key_required")) && !opts._retried) {
+    // client_auth.protect_admin is on: the same admin key the dashboard asks for
+    const entered = prompt("Saving settings needs this Foundry's admin client key (a key with the 'admin' scope):");
+    if (entered && entered.trim()) { store(ADMIN_KEY, entered.trim()); return adminApi(path, {...opts, _retried: true}); }
+  }
+  if (!r.ok) {
+    const msg = (data.error && (data.error.message || data.error)) || data.detail || ("HTTP " + r.status);
+    const err = new Error(typeof msg === "string" ? msg : JSON.stringify(msg));
+    err.status = r.status; err.code = code; err.data = data; throw err;
+  }
+  return data;
+}
+const AP = p => "automation/projects/" + encodeURIComponent(p);
+function compose(live, proj, router) {
+  const d = clone(live);
   d.settings = clone((proj || {}).settings || {});
-  if (proj && proj.role_rules) d.role_rules = clone(proj.role_rules);
-  const rs = (router || {}).settings || {};
-  for (const [n, v] of Object.entries(rs.backends || {})) d.backends[n] = {...(d.backends[n] || {}), ...v};
-  for (const [n, v] of Object.entries(rs.personas || {})) if (v && Array.isArray(v.routes)) d.personas[n] = {...(d.personas[n] || {}), routes: clone(v.routes)};
-  d.format = (proj || {}).format; d.project = (proj || {}).project;
+  d.role_rules = clone((proj || {}).role_rules || {});
+  for (const [n, v] of Object.entries(((router || {}).settings || {}).backends || {}))
+    d.backends[n] = {...(d.backends[n] || {}), cutoff_pct: (v || {}).cutoff_pct ?? (d.backends[n] || {}).cutoff_pct};
   return d;
 }
 function split(d) {
-  const p = S.c1.cfg.doc || {}, r = (S.c1.rtr && S.c1.rtr.doc) || {};
-  const proj = {format: p.format, project: p.project, settings: clone(d.settings || {}), role_rules: clone(d.role_rules || {})};
+  const p = S.c1.proj.draft.doc, r = S.c1.router.draft.doc;
+  const proj = {...clone(p), settings: clone(d.settings || {}), role_rules: clone(d.role_rules || {})};
   // a cutoff goes into the router document when it was there already or the
   // operator changed it; live values stay where they are
-  const had = (r.settings || {}).backends || {}, dep = S.deployed.backends || {};
-  const backends = {};
+  const had = ((r.settings || {}).backends) || {}, live = S.live.backends || {};
+  const backends = clone(had);
   for (const [n, v] of Object.entries(d.backends || {})) {
-    const o = {};
-    const changed = (dep[n] || {}).cutoff_pct !== v.cutoff_pct;
-    if (v.cutoff_pct !== null && v.cutoff_pct !== undefined && (changed || (had[n] || {}).cutoff_pct !== undefined)) o.cutoff_pct = v.cutoff_pct;
-    if (hasField("backends.*.enabled")) o.enabled = v.enabled !== false;
-    if (hasField("backends.*.fail_closed") && v.fail_closed !== undefined) o.fail_closed = !!v.fail_closed;
-    if (Object.keys(o).length) backends[n] = o;
+    if (v.cutoff_pct === null || v.cutoff_pct === undefined) continue;
+    if (had[n] || (live[n] || {}).cutoff_pct !== v.cutoff_pct) backends[n] = {...(had[n] || {}), cutoff_pct: v.cutoff_pct};
   }
-  const router = {format: r.format || p.format, project: "_router", settings: {...clone(r.settings || {}), backends}};
-  if (hasField("personas.*.routes")) router.settings.personas = Object.fromEntries(Object.entries(d.personas || {}).map(([n, x]) => [n, {routes: x.routes}]));
+  const rs = clone(r.settings || {});
+  if (Object.keys(backends).length || "backends" in rs) rs.backends = backends;   // never add an empty table
+  const router = {...clone(r), settings: rs};
   return {proj, router};
 }
-function notStored(path) {
-  if (S.stub) return false;
-  if (/^personas\./.test(path)) return !hasField("personas.*.routes");
-  if (/^backends\.[^.]+(\.enabled)?$/.test(path) && !/cutoff_pct/.test(path)) return !hasField("backends.*.enabled");
-  return false;
+// live routing changes: persona route lists and backend on/off that differ from the router
+function liveChanges(d) {
+  const out = [];
+  if (!d) return out;
+  for (const [n, p] of Object.entries(d.personas || {})) {
+    const before = ((S.live.personas || {})[n] || {}).routes || [];
+    if (JSON.stringify(before) !== JSON.stringify(p.routes || [])) out.push({path: `personas.${n}.routes`, before, after: p.routes || [], live: true, persona: n});
+  }
+  for (const [n, b] of Object.entries(d.backends || {})) {
+    const was = ((S.live.backends || {})[n] || {}).enabled !== false, now = b.enabled !== false;
+    if (was !== now) out.push({path: `backends.${n}.enabled`, before: was, after: now, live: true, backend: n});
+  }
+  return out;
 }
+const same = (a, b) => JSON.stringify(a) === JSON.stringify(b);
+// route order and backend on/off edits exist only in this page until Deploy
+window.addEventListener("beforeunload", e => { if (S.live && liveChanges(S.draft).length) { e.preventDefault(); e.returnValue = ""; } });
 const C1 = {
-  q(path, project) {
-    const p = project === undefined ? (S.cfgProject || "") : project;
-    return p ? path + (path.includes("?") ? "&" : "?") + "project=" + encodeURIComponent(p) : path;
-  },
   async load() {
-    const seed = await api("automation/seed");          // live personas, backends, role list
-    let cfg = null;
-    try { cfg = await api(this.q("config")); } catch (e) { if (e.status !== 404 && e.status !== 405) throw e; }
-    if (!cfg) {
-      // STUB: C1 not merged on this router
-      S.stub = true; S.stubNote = seed.note || ""; S.c1 = null;
-      S.deployed = seed.doc; S.revision = 0; S.deployedRevision = 0;
-      let local = null;
-      try { local = JSON.parse(store(LOCAL_DRAFT) || "null"); } catch (e) {}
-      S.draft = local && local.doc ? local.doc : null;
-      return;
-    }
-    let rtr = null;
-    try { rtr = await api(this.q("config", "_router")); } catch (e) { if (e.status !== 404) throw e; }
-    S.stub = false; S.c1 = {cfg, rtr};
-    S.deployed = compose(seed.doc, cfg.doc, rtr && rtr.doc);
-    const hasDraft = cfg.draft || (rtr && rtr.draft);
-    S.draft = hasDraft ? compose(seed.doc, cfg.draft || cfg.doc, rtr && (rtr.draft || rtr.doc)) : null;
-    S.revision = cfg.revision; S.deployedRevision = cfg.deployed_revision ?? cfg.revision;
+    const [seed, pl] = await Promise.all([api("automation/seed"), adminApi("automation/projects")]);
+    const stored = (pl.projects || []).map(x => x.project).filter(p => p && p !== "_router");
+    S.projects = [...new Set([...stored, ...(S.ovProjects || [])])].sort();
+    if (!S.cfgProject || !S.projects.includes(S.cfgProject)) S.cfgProject = S.projects[0] || "";
+    if (!S.cfgProject) throw new Error("No project yet: import a coordinator profile (POST /admin/api/automation/projects/<id>/import) or let the coordinator report one.");
+    const info = Object.fromEntries((pl.projects || []).map(x => [x.project, x]));
+    const deployedDoc = async p => ((info[p] || {}).deployed_rev ? (await adminApi(`${AP(p)}/revisions/${info[p].deployed_rev}`)).doc : null);
+    const [pd, rd, pdep, rdep] = await Promise.all([adminApi(AP(S.cfgProject) + "/draft"), adminApi(AP("_router") + "/draft"),
+                                                   deployedDoc(S.cfgProject), deployedDoc("_router")]);
+    S.live = seed.doc;
+    S.c1 = {proj: {draft: pd, rev: (info[S.cfgProject] || {}).deployed_rev || 0},
+            router: {draft: rd, rev: (info._router || {}).deployed_rev || 0}};
+    // no revision yet: the draft is the starting point (its changes still show in the diff)
+    S.deployed = compose(seed.doc, pdep || {settings: {}, role_rules: {}}, rdep || {settings: {}});
+    S.draft = (pd.dirty || rd.dirty) ? compose(seed.doc, pd.doc, rd.doc) : null;
+    S.revision = S.deployedRevision = S.c1.proj.rev;
+    S.routerRevision = S.c1.router.rev;
   },
   async saveDraft(d) {
-    if (S.stub) { store(LOCAL_DRAFT, JSON.stringify({doc: d, saved: Date.now()})); return {ok: true, errors: []}; }
     const {proj, router} = split(d);
-    const a = await api(this.q("config/draft"), {method: "PUT", body: {doc: proj, base_revision: S.revision}});
-    let b = {errors: []};
-    if (S.c1.rtr) b = await api(this.q("config/draft", "_router"), {method: "PUT", body: {doc: router, base_revision: S.c1.rtr.revision}});
-    return {ok: true, errors: [...((a && a.errors) || []), ...((b && b.errors) || [])]};
+    const errors = [];
+    for (const [k, p, doc] of [["proj", S.cfgProject, proj], ["router", "_router", router]]) {
+      const cur = S.c1[k].draft;
+      if (same(cur.doc, doc)) continue;
+      try {
+        const r = await adminApi(AP(p) + "/draft", {method: "PUT", body: {doc, etag: cur.etag}});
+        cur.etag = r.etag; cur.doc = doc; cur.dirty = true;
+        errors.push(...(((r.validation || {}).errors) || []));
+      } catch (e) {
+        if (e.code === "etag_mismatch") { toast("Someone else changed this draft. Reloading it.", true); await reload(); return {errors: []}; }
+        if (e.status === 422) { errors.push(...((((e.data || {}).validation || {}).errors) || [{path: "", message: e.message}])); continue; }
+        throw e;
+      }
+    }
+    return {ok: !errors.length, errors};
   },
   async diff() {
     if (!S.draft) return [];
-    // one diff over the whole view (settings, rules, cutoffs, routes), marked
-    // where the config store cannot keep a change yet
-    const d = await api("automation/diff", {method: "POST", body: {before: S.deployed, after: S.draft}});
-    return (d.changes || []).map(c => ({...c, not_stored: notStored(c.path)}));
+    const map = (r, kind) => (r.changes || []).map(c => ({path: kind === "router" ? `_router.${c.path}` : c.path,
+      before: c.from, after: c.to, apply: c.apply, op: c.op, kind}));
+    const [pc, rc] = await Promise.all([adminApi(AP(S.cfgProject) + "/diff"), adminApi(AP("_router") + "/diff")]);
+    return [...map(pc, "project"), ...map(rc, "router"), ...liveChanges(S.draft)];
   },
   async deploy(note) {
-    if (S.stub) throw new Error("Deploy needs the C1 config store, which is not merged on this router yet.");
-    const r = await api(this.q("config/deploy"), {method: "POST", body: {base_revision: S.revision, note}});
-    if (S.c1.rtr && S.changes.some(c => /^backends\./.test(c.path) && !c.not_stored))
-      await api(this.q("config/deploy", "_router"), {method: "POST", body: {base_revision: S.c1.rtr.revision, note}});
-    return r;
+    const out = {notes: []};
+    const live = liveChanges(S.draft);
+    for (const c of live.filter(c => c.persona)) if (!c.after.some(x => x.enabled !== false))
+      throw new Error(`${c.persona} needs at least one route turned on (an empty list would allow every model).`);
+    // versioned documents first: the store validates and refuses a bad draft
+    for (const [k, p] of [["proj", S.cfgProject], ["router", "_router"]]) {
+      const cur = S.c1[k].draft;
+      if (!S.changes.some(c => c.kind === (k === "proj" ? "project" : "router"))) continue;
+      const r = await adminApi(AP(p) + "/deploy", {method: "POST", body: {etag: cur.etag, note}});
+      if (k === "proj") out.revision = r.rev;
+      out.notes.push(...(r.router_notes || []));
+      if ((r.restart_needed || []).length) out.notes.push(`Restart the coordinator for: ${r.restart_needed.join(", ")}`);
+    }
+    // then live routing, after a snapshot that History can restore
+    if (live.length) {
+      const snap = await adminApi("snapshots", {method: "POST", body: {reason: `automation page: routes/backends before deploy by ${(S.me || {}).actor || "operator"}${note ? " (" + note + ")" : ""}`}});
+      out.snapshot = snap.id;
+      for (const c of live) {
+        if (c.persona) {
+          const routes = c.after;
+          await adminApi("personas", {method: "POST", body: {virtual_name: c.persona,
+            pinned_models: routes.map(x => x.model), model_allowlist: routes.filter(x => x.enabled !== false).map(x => x.model)}});
+        } else {
+          await adminApi("backends/enabled", {method: "POST", body: {name: c.backend, enabled: c.after}});
+        }
+      }
+    }
+    return out;
   },
   async discard() {
-    if (S.stub) { store(LOCAL_DRAFT, null); return; }
-    await api(this.q("config/discard"), {method: "POST", body: {}});
-    if (S.c1.rtr) await api(this.q("config/discard", "_router"), {method: "POST", body: {}});
+    for (const [k, p] of [["proj", S.cfgProject], ["router", "_router"]])
+      if (S.c1[k].draft.dirty) await adminApi(AP(p) + "/draft/reset", {method: "POST", body: {}});
   },
-  async versions() { if (S.stub) return []; return (await api(this.q("config/versions"))).versions || []; },
-  async rollback(rev) {
-    if (S.stub) throw new Error("Rollback needs the C1 config store.");
-    return api(this.q("config/rollback"), {method: "POST", body: {revision: rev}});
-  },
-  async schema() {
-    if (!S.stub) { try { return await api("config/schema"); } catch (e) { if (e.status !== 404) throw e; } }
-    return STUB_SCHEMA;
+  async versions() { return (await adminApi(AP(S.cfgProject) + "/revisions?limit=30")).revisions || []; },
+  async rollback(rev) { return adminApi(AP(S.cfgProject) + "/rollback", {method: "POST", body: {rev: Number(rev), reset_draft: true}}); },
+  async snapshots() { return ((await adminApi("snapshots")).snapshots || []).filter(s => /^automation page:/.test(s.reason || "")); },
+  async restoreSnapshot(id) { return adminApi(`snapshots/${encodeURIComponent(id)}/restore`, {method: "POST", body: {}}); },
+  async schema() { return adminApi("automation/schema"); },
+  async testPath(role, op, value) {
+    const body = {project: S.cfgProject, role, rules: rulesOf(role), op, workspace: S.workspace || ""};
+    body[op === "bash" ? "command" : "path"] = value;
+    return adminApi("automation/role-rules/test-path", {method: "POST", body});
   },
   async queue(project) {
+    // no queue API in the config store (v1.2): the list is what the bridge reported
     try { const d = await api("queue?project=" + encodeURIComponent(project)); S.qStub = false; S.qOps = true; return d.tasks || []; }
     catch (e) { if (e.status !== 404 && e.status !== 405) throw e; }
     S.qStub = true; S.qOps = false;
     return null;
   },
-  // queue writes that have no typed action today (approve, re-queue a
-  // cancelled task, reorder, dependencies): C1 typed actions queue_*
   queueOp(kind, t, extra) { return action(kind, t, extra); },
 };
-
-/* STUB settings schema, in the C1 schema_json format (foundry_automation.schema):
-   a starter subset with C1's own keys, defaults and apply values. C1 serves the
-   full list (about 140 fields) once it is on this router. */
-const _F = (key, type, dflt, description, group, extra = {}) => ({key, type, default: dflt, description, group, table: key.split(".")[0], apply: "live", scope: "project", ...extra});
-const STUB_SCHEMA = {stub: true,
-  groups: [{id: "roles", label: "Roles & personas", order: 40}, {id: "lead", label: "Lead manager", order: 60},
-           {id: "fast_lane", label: "Fast lane, gate & vision", order: 70}, {id: "helpers", label: "Helpers & lanes", order: 80},
-           {id: "recovery", label: "Retry, frontier & lifecycle", order: 90}, {id: "limits", label: "Limits", order: 100},
-           {id: "decisions", label: "Scope requests & decisions", order: 110}],
-  tables: [{table: "roles", label: "Role personas", group: "roles", description: "Foundry persona per coordinator role."},
-           {table: "lead_manager", label: "Lead manager", group: "lead"}, {table: "fast_lane", label: "Fast lane", group: "fast_lane"},
-           {table: "helpers", label: "Helpers", group: "helpers"}, {table: "retry_guidance", label: "Retry guidance", group: "recovery"},
-           {table: "limits", label: "Limits", group: "limits"}, {table: "scope_policy", label: "Scope requests", group: "decisions"},
-           {table: "decisions", label: "Product decisions", group: "decisions"}],
-  fields: [
-    ...["implementer", "planner", "researcher", "reviewer", "deep_reviewer", "visual_reviewer"].map(r =>
-      _F(`roles.${r}`, "str", "", `Foundry persona for the ${r.replace(/_/g, " ")}.`, "roles", {apply: "next_session", role_binding: r})),
-    _F("lead_manager.enabled", "bool", false, "Run the Lead as the last automated recovery tier.", "lead"),
-    _F("lead_manager.persona", "str", "Foundry-Kilo-Lead-Manager", "Lead persona.", "lead", {role_binding: "lead"}),
-    _F("lead_manager.write_access", "bool", false, "The Lead may edit, run the shell and commit in the game workspace while it holds the lock.", "lead"),
-    _F("lead_manager.allow_local_route", "bool", false, "A local model may be the Lead chain's last route.", "lead"),
-    _F("lead_manager.full_authority", "bool", true, "Delegated recovery actions (clean scratch files, extend budgets, routine decisions).", "lead"),
-    _F("lead_manager.supervisor", "enum", "manual", "Who restarts the coordinator after an upgrade.", "lead", {apply: "restart", enum: ["manual", "supervisor"]}),
-    _F("lead_manager.max_diagnoses", "int", 3, "Diagnoses per recovery case.", "lead", {min: 1}),
-    _F("lead_manager.max_lead_calls_per_task", "int", 6, "Lead calls per task across all its cases.", "lead", {min: 1}),
-    _F("lead_manager.lead_timeout_minutes", "int", 45, "Minutes before a Lead session is given up.", "lead", {min: 1}),
-    _F("fast_lane.enabled", "bool", false, "Run listed tasks as one long session checked by the Studio gate.", "fast_lane"),
-    _F("fast_lane.tasks", "list", [], "Task ids (exact, no globs).", "fast_lane", {item_type: "str"}),
-    _F("fast_lane.gate_timeout_minutes", "int", 45, "A gate run longer than this counts as red.", "fast_lane", {min: 1}),
-    _F("fast_lane.max_vision_rounds", "int", 2, "Vision fix rounds before accepting with notes.", "fast_lane", {min: 0}),
-    _F("fast_lane.vision_batch_frames", "int", 20, "Frames per vision call.", "fast_lane", {min: 1}),
-    _F("helpers.enabled", "bool", false, "Read-only coding helpers on frontier quota.", "helpers"),
-    _F("helpers.on_demand", "bool", true, "Start a helper only on demand, with a declared consumer.", "helpers", {since: "revamp"}),
-    _F("helpers.max_running", "int", 6, "Helpers running at once.", "helpers", {min: 0}),
-    _F("helpers.personas.*", "str", "", "Helper persona per backend.", "helpers", {apply: "next_session", role_binding: "helper"}),
-    _F("retry_guidance.enabled", "bool", false, "One bounded frontier consultation before repair attempts run out.", "recovery"),
-    _F("retry_guidance.local_fallback", "bool", false, "Fall back to the local model when paid quota is refused.", "recovery"),
-    _F("limits.max_attempts", "int", 3, "Attempts per task.", "limits", {min: 1}),
-    _F("limits.max_sessions_per_task", "int", 8, "Sessions per task.", "limits", {min: 1}),
-    _F("limits.max_review_calls", "int", 3, "Review calls per task.", "limits", {min: 1}),
-    _F("limits.max_task_minutes", "int", 1440, "Wall time per task.", "limits", {min: 1}),
-    _F("scope_policy.auto_approve", "list", [], "Harness lines / paths a sprint may change without asking (e.g. tests/GateRunner.lua:EXPECTED_BOOT, default.project.json).", "decisions", {item_type: "str", since: "revamp"}),
-    _F("decisions.timeout_minutes", "int", 30, "Product decisions take their recommended default after this.", "decisions", {min: 1, since: "revamp"}),
-    _F("decisions.apply_default_on_timeout", "bool", true, "Apply and log the default when the timeout passes.", "decisions", {since: "revamp"}),
-    _F("backends.*.cutoff_pct", "float", 95, "Stop using this backend's subscription at this usage %.", "router", {scope: "router", min: 1, max: 100}),
-  ]};
 
 /* ======================================================================== login */
 function showLogin(msg) { $("#login").classList.add("show"); $("#login-msg").textContent = msg || ""; $("#login-key").focus(); }
@@ -619,17 +626,18 @@ $("#nav").addEventListener("keydown", e => {
 window.addEventListener("hashchange", () => { const h = location.hash.slice(1); if (h && h !== S.view) setView(h, false); });
 function renderView() {
   if (!S.deployed) return;
-  renderStubNote();
+  renderNotes();
   if (S.view === "routing") renderRouting();
   else if (S.view === "settings") renderSettings();
   else if (S.view === "rules") renderRules();
   else renderQueue();
 }
-function renderStubNote() {
+function renderNotes() {
   const notes = [];
-  if (S.stub && S.view !== "queue") notes.push(`<div class="banner warn"><b>Preview (C1 not merged).</b> This page shows today's personas and backends read from the router. Edits are a draft kept in this browser; <b>Deploy and Rollback are off</b> until the config store (C1) is on this router.</div>`);
-  if (S.view === "settings" && S.schema && S.schema.stub) notes.push(`<div class="banner">Showing a <b>starter set</b> of coordinator settings. The full list, grouped by component, comes from the shared schema once C1 is merged.</div>`);
-  $("#stubnote").innerHTML = notes.join("");
+  if (S.loadError) notes.push(`<div class="banner bad"><b>Settings not loaded.</b> ${esc(S.loadError)}</div>`);
+  else if (S.c1 && !S.deployedRevision && S.view !== "queue")
+    notes.push(`<div class="banner">Nothing is deployed for <b>${esc(S.cfgProject)}</b> yet. Start from the coordinator's own settings with <button class="act" type="button" data-act="import">Import project.toml…</button>, or edit here and deploy the first revision.</div>`);
+  $("#notes").innerHTML = notes.join("");
 }
 
 /* ======================================================================== draft */
@@ -638,6 +646,12 @@ const saveSoon = debounce(async () => {
   try {
     const r = await C1.saveDraft(S.draft);
     S.draftErrors = (r && r.errors) || [];
+    // paint the store's verdict on the settings rows in place (no re-render: keeps focus)
+    for (const box of $$(".sf[data-sf]")) {
+      const t = $("[data-act=set]", box), err = $(".err", box);
+      if (t && t.getAttribute("aria-invalid") === "true") continue;      // the field's own check wins
+      const m = storeErr(box.dataset.sf); err.hidden = !m; err.textContent = m;
+    }
   } catch (e) { S.draftErrors = [{path: "", message: e.message}]; toast("Draft not saved: " + e.message, true); }
   await refreshChanges();
 }, 500);
@@ -658,23 +672,23 @@ function renderDraftBar() {
   const n = S.changes.length;
   const errs = S.draftErrors.length;
   $("#draftbar").classList.toggle("dirty", !!S.draft && n > 0);
-  const live = S.stub ? `<span class="pill warn">preview</span> Live settings from the router` : `<span class="pill ok">live</span> Revision <b>${esc(S.deployedRevision)}</b>`;
+  const live = S.deployedRevision ? `<span class="pill ok">live</span> Revision <b>${esc(S.deployedRevision)}</b>` : `<span class="pill warn">not deployed</span> No revision yet`;
   const dr = !S.draft || !n ? `<span class="hint" style="margin:0">No draft changes</span>`
+    : !S.deployedRevision ? `<span class="pill info">draft</span> ready to deploy as revision 1 (${n} values)${errs ? ` · <span style="color:var(--bad)">${errs} problem${errs === 1 ? "" : "s"}</span>` : ""}`
     : `<span class="pill info">draft</span> <b>${n}</b> change${n === 1 ? "" : "s"} not deployed${errs ? ` · <span style="color:var(--bad)">${errs} problem${errs === 1 ? "" : "s"}</span>` : ""}`;
   const pj = (S.projects || []).length > 1 ? `<label class="sr-only" for="cfg-project">Project</label><select id="cfg-project">${S.projects.map(p => `<option ${p === S.cfgProject ? "selected" : ""}>${esc(p)}</option>`).join("")}</select>` : S.cfgProject ? `<span class="hint mono" style="margin:0">${esc(S.cfgProject)}</span>` : "";
   $("#draft-state").innerHTML = `${pj} ${live} <span aria-hidden="true">·</span> ${dr}`;
   const ps = $("#cfg-project");
   if (ps) ps.onchange = async () => {
-    if (S.draft && S.stub && !confirm("The preview draft belongs to this browser, not a project. Switch anyway?")) { ps.value = S.cfgProject; return; }
     S.cfgProject = ps.value; store("fr.auto.project", S.cfgProject); await reload();
   };
   $("#btn-discard").disabled = !S.draft;
   $("#btn-review").disabled = !S.draft || !n;
-  $("#btn-review").textContent = S.stub ? "Review changes" : "Review & deploy";
+  $("#btn-review").textContent = "Review & deploy";
 }
 $("#btn-discard").onclick = async () => {
   if (!S.draft || !confirm("Throw away the draft and go back to the live settings?")) return;
-  try { await C1.discard(); S.draft = null; S.changes = []; S.draftErrors = []; renderView(); renderDraftBar(); refreshDry(); refreshWarnings(); toast("Draft discarded"); }
+  try { await C1.discard(); await reload(); S.draft = null; S.changes = []; S.draftErrors = []; renderView(); renderDraftBar(); refreshDry(); refreshWarnings(); toast("Draft discarded"); }
   catch (e) { toast(e.message, true); }
 };
 $("#btn-review").onclick = () => openDiff();
@@ -701,41 +715,85 @@ function short(v) {
   const s = typeof v === "string" ? v : JSON.stringify(v);
   return s.length > 400 ? s.slice(0, 400) + "…" : s;
 }
+// one collapsible group per settings table, role or routing area; small groups open
+function diffGroups(ch, tag) {
+  const key = c => c.live ? "routing (live)" : c.kind === "router" ? "backend cutoffs" : c.path.startsWith("role_rules.") ? c.path.split(".").slice(0, 2).join(".") : c.path.split(".")[0];
+  const groups = {};
+  for (const c of ch) (groups[key(c)] = groups[key(c)] || []).push(c);
+  const row = c => `<li><div class="p">${esc(c.path)}${tag(c)}${c.apply === "restart" ? ` <span class="pill warn">restart needed</span>` : c.apply === "next_session" ? ` <span class="pill info">next session</span>` : ""}</div><div class="b">− ${esc(short(c.before))}</div><div class="a">+ ${esc(short(c.after))}</div></li>`;
+  return `<div class="diff-groups" style="max-height:56vh;overflow:auto">${Object.entries(groups).map(([g, cs]) => `<details ${cs.length <= 5 ? "open" : ""} style="margin:4px 0"><summary><b>${esc(g)}</b> <span class="hint" style="margin:0">${cs.length} change${cs.length === 1 ? "" : "s"}${cs.some(c => c.apply === "restart") ? " · restart needed" : ""}</span></summary><ul class="diff" style="max-height:none;margin-top:4px">${cs.map(row).join("")}</ul></details>`).join("")}</div>`;
+}
 async function openDiff() {
   await refreshChanges();
   const ch = S.changes;
   const errs = S.draftErrors;
-  openModal(`<h3 id="modal-h">${S.stub ? "Draft changes" : "Deploy these changes?"}</h3>
+  const live = ch.filter(c => c.live);
+  const tag = c => c.live ? ` <span class="pill info" title="Written to the router when you deploy, after a snapshot">live routing</span>`
+    : c.kind === "router" ? ` <span class="pill info">router</span>` : "";
+  openModal(`<h3 id="modal-h">Deploy these changes?</h3>
     ${errs.length ? `<div class="banner bad"><b>Fix before deploying:</b><ul>${errs.map(e => `<li><code>${esc(e.path)}</code> ${esc(e.message)}</li>`).join("")}</ul></div>` : ""}
-    ${ch.some(c => c.not_stored) ? `<div class="banner warn">Changes marked <b>not stored yet</b> (route order, backend on/off) have no place in the config store yet: Deploy leaves them out and they are dropped. Keep editing if you want to note them first.</div>` : ""}
-    ${ch.length ? `<ul class="diff">${ch.map(c => `<li><div class="p">${esc(c.path)}${c.not_stored ? ` <span class="pill warn">not stored yet</span>` : ""}${c.apply === "restart" ? ` <span class="pill warn">restart needed</span>` : ""}</div><div class="b">− ${esc(short(c.before))}</div><div class="a">+ ${esc(short(c.after))}</div></li>`).join("")}</ul>` : `<p class="hint">No changes.</p>`}
+    ${live.length ? `<div class="banner">Route order and backend on/off are router state, not part of the versioned settings: Deploy takes a snapshot first (History can restore it), then writes them. Until then they live only in this page.</div>` : ""}
+    ${ch.length ? diffGroups(ch, tag) : `<p class="hint">No changes.</p>`}
     <div class="row" style="margin-top:12px">
-      ${S.stub ? `<span class="hint grow" style="margin:0">Deploy needs the C1 config store (not merged on this router).</span>` : `<input id="dep-note" class="grow" placeholder="Note for the history (optional)" aria-label="Deploy note">`}
+      <input id="dep-note" class="grow" placeholder="Note for the history (optional)" aria-label="Deploy note">
       <button class="act" type="button" data-close>Keep editing</button>
-      <button class="act primary" type="button" id="dep-go" ${S.stub || errs.length || !ch.length ? "disabled" : ""}>Deploy</button>
+      <button class="act primary" type="button" id="dep-go" ${errs.length || !ch.length ? "disabled" : ""}>Deploy</button>
     </div>`);
   const go = $("#dep-go");
   if (go) go.onclick = async () => {
     go.disabled = true;
     try {
       const r = await C1.deploy(($("#dep-note") || {}).value || "");
-      toast(`Deployed revision ${r.revision ?? ""}. The coordinator picks it up at its next safe point.`);
+      toast((r.revision ? `Deployed revision ${r.revision}. The coordinator applies it at its next safe point.` : "Deployed.")
+        + (r.snapshot ? ` Routing snapshot ${r.snapshot} taken first.` : ""));
+      for (const n of r.notes || []) toast(n, false, 9000);
       closeModal(); await reload();
     } catch (e) {
       go.disabled = false;
-      toast(e.status === 409 ? "Someone deployed meanwhile. Reload, check the new live settings, then deploy again." : e.message, true);
+      toast(e.code === "etag_mismatch" ? "The draft changed meanwhile. Reload, check it, then deploy again." : e.message, true, 9000);
     }
   };
 }
+function openImport() {
+  openModal(`<h3 id="modal-h">Import project.toml · ${esc(S.cfgProject)}</h3>
+    <p class="hint">Paste the coordinator's profile (projects/&lt;id&gt;/project.toml). Workstation-only keys (paths, URLs, secret variable names) are dropped and listed; role rules start from the defaults plus the profile's permissions. The result replaces the draft; nothing is deployed until you deploy.</p>
+    <label class="sr-only" for="imp-toml">Profile TOML</label><textarea id="imp-toml" rows="14" spellcheck="false" placeholder="schema_version = 1&#10;id = &quot;animaluprising&quot;&#10;..."></textarea>
+    <div id="imp-out" aria-live="polite"></div>
+    <div class="row" style="margin-top:10px"><span class="grow"></span><button class="act" type="button" id="imp-dry">Check</button><button class="act" type="button" data-close>Cancel</button><button class="act primary" type="button" id="imp-go">Import into the draft</button></div>`);
+  const run = async dry => {
+    const toml = $("#imp-toml").value;
+    if (!toml.trim()) { toast("Paste the profile first", true); return; }
+    try {
+      const r = await adminApi(AP(S.cfgProject) + "/import", {method: "POST", body: {toml, dry_run: dry}});
+      const v = r.validation || {};
+      $("#imp-out").innerHTML = `<div class="banner ${(v.errors || []).length ? "bad" : ""}">${(v.errors || []).length ? `<b>${v.errors.length} problem(s)</b>: ${esc(v.errors.slice(0, 5).map(e => e.path + ": " + e.message).join("; "))}` : "Valid."}
+        ${(r.dropped_local || []).length ? `<div class="hint">Kept on the workstation (not imported): ${esc(r.dropped_local.join(", "))}</div>` : ""}
+        ${(r.notes || []).length ? `<div class="hint">${esc(r.notes.join(" "))}</div>` : ""}</div>`;
+      if (!dry) { toast("Imported into the draft"); closeModal(); await reload(); }
+    } catch (e) { $("#imp-out").innerHTML = `<div class="banner bad">${esc(e.message)}</div>`; }
+  };
+  $("#imp-dry").onclick = () => run(true);
+  $("#imp-go").onclick = () => run(false);
+}
 async function openHistory() {
-  let vs = [];
-  try { vs = await C1.versions(); } catch (e) { toast(e.message, true); }
-  openModal(`<h3 id="modal-h">Deployed versions</h3>
-    ${S.stub ? `<p class="hint">History and rollback come with the C1 config store (not merged on this router).</p>` : ""}
-    ${vs.length ? `<ul class="diff">${vs.map(v => `<li class="row" style="margin:0"><span class="grow"><b>Revision ${esc(v.revision)}</b> <span class="hint">${esc(v.ts ? new Date(v.ts * 1000).toLocaleString() : "")} · ${esc(v.actor || "")}</span>${v.note ? `<div>${esc(v.note)}</div>` : ""}</span>${String(v.revision) === String(S.deployedRevision) ? `<span class="pill ok">live</span>` : `<button class="act" type="button" data-rollback="${esc(v.revision)}">Roll back to this</button>`}</li>`).join("")}</ul>` : (S.stub ? "" : `<p class="hint">No versions yet.</p>`)}`);
+  let vs = [], snaps = [];
+  try { [vs, snaps] = await Promise.all([C1.versions(), C1.snapshots().catch(() => [])]); } catch (e) { toast(e.message, true); }
+  const when = ts => ts ? (typeof ts === "number" ? new Date(ts * 1000) : new Date(ts)).toLocaleString() : "";
+  openModal(`<h3 id="modal-h">History · ${esc(S.cfgProject)}</h3>
+    <h4 style="margin:4px 0">Settings and role rules</h4>
+    ${vs.length ? `<ul class="diff">${vs.map(v => `<li class="row" style="margin:0"><span class="grow"><b>Revision ${esc(v.rev)}</b> <span class="hint">${esc(when(v.ts))} · ${esc(v.actor || "")} · ${esc(v.source || "")}${v.rollback_of ? " of " + esc(v.rollback_of) : ""}</span>${v.note ? `<div>${esc(v.note)}</div>` : ""}</span>${String(v.rev) === String(S.deployedRevision) ? `<span class="pill ok">live</span>` : `<button class="act" type="button" data-rollback="${esc(v.rev)}">Roll back to this</button>`}</li>`).join("")}</ul>` : `<p class="hint">Nothing deployed yet.</p>`}
+    <div class="row"><button class="act" type="button" id="hist-import">Import project.toml…</button></div>
+    <h4 style="margin:12px 0 4px">Route order snapshots</h4>
+    <p class="hint">Taken before each deploy that changed routes or backends. Restoring one puts the personas back as they were (backend on/off is in the dashboard's config history).</p>
+    ${snaps.length ? `<ul class="diff">${snaps.map(x => `<li class="row" style="margin:0"><span class="grow"><b>Snapshot ${esc(x.id)}</b> <span class="hint">${esc(when(x.ts))}</span><div>${esc(x.reason || "")}</div></span><button class="act" type="button" data-restore="${esc(x.id)}">Restore</button></li>`).join("")}</ul>` : `<p class="hint">None yet.</p>`}`);
+  $("#hist-import").onclick = () => openImport();
   for (const b of $$("[data-rollback]")) b.onclick = async () => {
     if (!confirm(`Make revision ${b.dataset.rollback} live again? A new revision is recorded.`)) return;
     try { await C1.rollback(b.dataset.rollback); toast("Rolled back"); closeModal(); await reload(); } catch (e) { toast(e.message, true); }
+  };
+  for (const b of $$("[data-restore]")) b.onclick = async () => {
+    if (!confirm(`Restore the personas from snapshot ${b.dataset.restore}?`)) return;
+    try { await C1.restoreSnapshot(b.dataset.restore); toast("Personas restored"); closeModal(); await reload(); } catch (e) { toast(e.message, true); }
   };
 }
 
@@ -851,13 +909,14 @@ function roleCard(r) {
     <div class="hint" style="margin-top:0">${esc(ROLE_HELP[r.id] || "")}</div>
     ${r.bindable ? `<div class="row"><label class="fld" for="rp-${rid}">Persona</label>
       <select id="rp-${rid}" data-act="role-persona" data-role="${rid}" class="grow"><option value="">— none —</option>${names.map(n => `<option ${n === r.persona ? "selected" : ""}>${esc(n)}</option>`).join("")}</select></div>
-      <div class="hint" style="margin:0">Saved as <code>${esc(ROLE_BINDING[r.id])}</code>.</div>` : `<div class="hint">Runs no model of its own: coordinator repair sessions follow these role rules, and retry guidance uses the Planner's persona unless Settings names another.</div>`}
+      <div class="hint" style="margin:0">Saved as <code>${esc(ROLE_BINDING[r.id])}</code>.${!getPath(doc().settings || {}, ROLE_BINDING[r.id]) && getPath((S.live || {}).settings || {}, ROLE_BINDING[r.id]) ? ` Not set in the settings yet; recent sessions ran with <b>${esc(getPath(S.live.settings, ROLE_BINDING[r.id]))}</b>.` : ""}</div>` : `<div class="hint">Runs no model of its own: coordinator repair sessions follow these role rules, and retry guidance uses the Planner's persona unless Settings names another.</div>`}
     ${shared.length ? `<div class="hint">Shared with ${esc(shared.join(", "))}: route edits apply to every role on this persona.</div>` : ""}
     ${r.bindable ? nowLine(r) : ""}
     ${r.persona && p ? `<ol class="routes" data-persona="${esc(r.persona)}" aria-label="${esc(r.label)} routes, tried in this order">${routes.map((x, k) => routeRow(r.persona, x, k, routes.length, primary)).join("") || `<li class="hint">No routes yet.</li>`}</ol>
     <div class="addroute"><label class="sr-only" for="ab-${rid}">Backend for a new route</label><select id="ab-${rid}" data-act="add-be" data-role="${rid}">${beOpts}</select>
       <label class="sr-only" for="am-${rid}">Model for a new route</label><select id="am-${rid}" data-role="${rid}">${modelOpts(backendNames()[0])}</select>
       <button class="act" type="button" data-act="route-add" data-role="${rid}">Add route</button></div>` : ""}
+    ${r.bindable && storeErr(ROLE_BINDING[r.id]) ? `<div class="banner bad" style="margin:6px 0 0">${esc(storeErr(ROLE_BINDING[r.id]))}</div>` : ""}
     ${ws.length ? `<ul class="warns">${ws.map(([c, t]) => `<li class="${c}">${esc(t)}</li>`).join("")}</ul>` : ""}
   </section>`;
 }
@@ -956,6 +1015,7 @@ $("#main").addEventListener("click", e => {
     edit(dd => { dd.personas[b.dataset.persona].routes.splice(k, 1); }); announce("Route removed");
   }
   else if (a === "route-add") addRoute(b.dataset.role);
+  else if (a === "import") openImport();
   else if (a === "usage-refresh") refreshUsage().then(() => { renderView(); refreshDry(); });
   else if (a === "dry-run") runDry();
   else if (a === "cell") openCell(b.dataset.role, b.dataset.col);
@@ -1118,8 +1178,10 @@ function fieldHtml(f) {
     <label class="k" for="${esc(id)}">${esc(f.label)} <code class="hint" style="margin:0;font-weight:400">${esc(f.key)}</code>${f.locked ? " 🔒" : ""}${apply}${f.since === "revamp" ? ` <span class="pill ok">new</span>` : ""}${mod ? ` <span class="pill info">changed</span>` : ""}</label>
     <div class="ctl">${ctl}${isDef || f.locked ? "" : `<button class="ic" type="button" data-act="set-reset" data-key="${esc(f.key)}" title="Back to the default (${esc(dflt)})" aria-label="Reset ${esc(f.label)} to default">↺</button>`}</div>
     <div class="d" id="${esc(id)}-d">${esc(f.description || "")}${f.role_binding ? ` Also set on the Routing page (${esc(f.role_binding.replace(/_/g, " "))}).` : ""} <span class="hint">Default: ${esc(dflt)}.</span></div>
-    <div class="err" role="alert" hidden></div></div>`;
+    ${storeErr(f.key) ? `<div class="err" role="alert">${esc(storeErr(f.key))}</div>` : `<div class="err" role="alert" hidden></div>`}</div>`;
 }
+// the config store's own validation, shown on the field it names
+function storeErr(key) { const e = (S.draftErrors || []).find(x => x.path === key || x.path === "settings." + key); return e ? e.message : ""; }
 function parseField(t, f) {
   if (f.type === "bool") return {v: t.checked};
   if (f.enum || f.options) { const o = f.enum || f.options; return o.includes(t.value) ? {v: t.value} : {err: "Pick one of the options."}; }
@@ -1172,7 +1234,7 @@ async function ensureSchema() {
 }
 async function renderSettings() {
   const el = $("#v-settings");
-  if (!S.schema) { el.innerHTML = `<p class="hint">Loading the settings schema…</p>`; try { await ensureSchema(); } catch (e) { el.innerHTML = `<p class="hint">${esc(e.message)}</p>`; return; } renderStubNote(); }
+  if (!S.schema) { el.innerHTML = `<p class="hint">Loading the settings schema…</p>`; try { await ensureSchema(); } catch (e) { el.innerHTML = `<p class="hint">${esc(e.message)}</p>`; return; } renderNotes(); }
   const q = (S.setFilter || "").toLowerCase();
   const fields = schemaFields().filter(f => !q || `${f.key} ${f.label} ${f.description || ""}`.toLowerCase().includes(q));
   const tables = Object.fromEntries(((S.schema.tables) || []).map(t => [t.table, t]));
@@ -1289,11 +1351,14 @@ function renderRules() {
 async function testPath(role, op, path, out) {
   if (!path.trim()) { out.innerHTML = `<p class="hint">Type a path or a command.</p>`; return; }
   try {
-    const r = await api("automation/path-test", {method: "POST", body: {doc: doc(), role, op, path, workspace: S.workspace || ""}});
+    const r = await C1.testPath(role, op, path.trim());
+    const rule = r.rule || null;
+    const hard = rule && rule.action === "deny" && (doc().hard_denies || []).find(h => h.permission === rule.permission && h.pattern === rule.pattern);
     const lbl = (ruleRoles().find(x => x.id === role) || {}).label || role;
     const verb = {allow: "Yes", ask: "Asks first", deny: "No"}[r.decision] || r.decision;
     const what = op === "bash" ? "run" : op === "write" ? "create" : op;
-    out.innerHTML = `<div class="verdict ${esc(r.decision)}"><b>${verb}</b> — ${esc(lbl)} ${r.decision === "deny" ? "may not" : "may"} ${what} <code>${esc(path)}</code>${r.locked ? " 🔒" : ""}<div class="hint" style="margin:2px 0 0">Decided by <code>${esc(r.rule)}</code>: ${esc(r.reason)}.${r.exact === false ? " (Close approximation: the shared rules engine arrives with C1.)" : ""}</div></div>`;
+    const by = rule ? `<code>${esc(rule.permission)} ${esc(rule.pattern || "*")} → ${esc(rule.action)}</code>` : "no rule (nothing allows it)";
+    out.innerHTML = `<div class="verdict ${esc(r.decision)}"><b>${verb}</b> — ${esc(lbl)} ${r.decision === "deny" ? "may not" : "may"} ${what} <code>${esc(path)}</code>${hard ? " 🔒" : ""}<div class="hint" style="margin:2px 0 0">Decided by ${by}${hard ? `: ${esc(hard.why || "hard deny")}` : ""}.${r.checked && r.checked !== path.trim() ? ` Kilo checks it as <code>${esc(r.checked)}</code>.` : ""}</div></div>`;
   } catch (e) { out.innerHTML = `<p class="hint">${esc(e.message)}</p>`; }
 }
 /* drawer: one role x category, or one role's agent settings */
@@ -1428,7 +1493,13 @@ function decisionsOf() {
   }
   return out;
 }
-function deadline(d) { const v = d.timeout_ts ?? d.expires_ts ?? d.deadline_ts ?? d.default_at; return v ? Number(v) : null; }
+function deadline(d) { const v = d.deadline_ts ?? d.timeout_ts ?? d.expires_ts; return v ? Number(v) : null; }
+function recommended(d) {
+  if (d.recommended !== undefined && d.recommended !== null && d.recommended !== "") {
+    try { const v = JSON.parse(d.recommended); return typeof v === "string" ? v : JSON.stringify(v); } catch (e) { return String(d.recommended); }
+  }
+  return d.default_option || d.recommendation || "";
+}
 function countdown(ts) {
   const s = Math.round(ts - Date.now() / 1000);
   if (s <= 0) return "default due now";
@@ -1436,7 +1507,7 @@ function countdown(ts) {
   return `default in ${h ? h + "h " : ""}${String(m).padStart(h ? 2 : 1, "0")}m ${String(sec).padStart(2, "0")}s`;
 }
 function decisionHtml({t, d}) {
-  const def = d.default_option || d.recommendation || "";
+  const def = recommended(d);
   const dl = deadline(d), id = esc(d.decision_id);
   const opts = d.options || [];
   return `<section class="dec" aria-labelledby="dh-${id}">
@@ -1476,7 +1547,7 @@ async function renderQueue() {
       <select id="q-project" data-act="q-project">${projects.map(p => `<option ${p === S.project ? "selected" : ""}>${esc(p)}</option>`).join("") || "<option value=''>none reported</option>"}</select>
       ${ps.paused ? `<span class="pill warn">paused (${esc(ps.mode || "")})</span>` : ""}
       <span class="grow"></span><button class="act" type="button" data-act="q-refresh">Refresh</button></div>
-    ${S.qStub ? `<div class="banner warn"><b>Queue order and dependencies live in the coordinator.</b> Until the C1 queue API is on this router, this list shows the tasks the bridge reported (newest first): pause, resume, cancel and re-queue a blocked task work; approve, reorder and dependencies are off.</div>` : ""}
+    ${S.qStub ? `<div class="banner warn"><b>Queue order and dependencies live in the coordinator.</b> There is no queue API on the router yet, so this list shows the tasks the bridge reported (newest first): pause, resume, cancel and re-queue a blocked task work; approve, reorder and dependencies are off.</div>` : ""}
     <h2>Decisions waiting${decs.length ? ` (${decs.length})` : ""}</h2>
     ${decs.length ? decs.map(decisionHtml).join("") : `<p class="hint">Nothing waits on you.</p>`}
     <h2>Tasks</h2>
@@ -1575,11 +1646,17 @@ $("#main").addEventListener("keydown", e => {
 
 /* ======================================================================== boot */
 async function reload() {
-  await C1.load();
+  S.loadError = "";
+  try { await C1.load(); }
+  catch (e) { S.loadError = e.message; renderNotes(); throw e; }
   S.schema = null; S._fields = null;
   try { await ensureSchema(); } catch (e) { toast("Settings schema not readable: " + e.message, true); }
   const hd = ((S.schema || {}).role_rules || {}).hard_denies;
   if (hd) for (const d of [S.deployed, S.draft]) if (d) d.hard_denies = clone(hd);
+  S.draftErrors = [];
+  if (S.draft) {   // the stored draft's own validation, so problems show before the next edit
+    try { S.draftErrors = ((await adminApi(AP(S.cfgProject) + "/validate", {method: "POST", body: {}})).errors) || []; } catch (e) {}
+  }
   await refreshChanges();
   renderView();
   refreshDry(); refreshWarnings();
@@ -1591,8 +1668,7 @@ async function boot() {
   $("#login").classList.remove("show");
   await refreshUsage();
   // settings and rules are per project: the first reported one unless picked
-  try { const ov = await api("overview?hours=720"); S.projects = ov.projects || []; } catch (e) { S.projects = []; }
-  if (!S.cfgProject || !S.projects.includes(S.cfgProject)) S.cfgProject = S.projects[0] || S.cfgProject || "";
+  try { const ov = await api("overview?hours=720"); S.ovProjects = ov.projects || []; } catch (e) { S.ovProjects = []; }
   try { await reload(); } catch (e) { $("#v-" + S.view).innerHTML = `<p class="hint">Could not load the settings: ${esc(e.message)}</p>`; }
   setView(location.hash.slice(1) || "routing", false);
   // background refreshes never repaint a view the operator is typing or tabbing in
