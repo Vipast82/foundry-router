@@ -2,6 +2,62 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.131.0 — automation revamp: tokens and speed first, everything editable in the GUI
+
+The plan is `reports/AUTOMATION_REVAMP_PLAN.md`, built from five audits. Over 38 hours no sprint
+closed on its own, roughly 7% of helper work was used, and most retry rounds were tooling or
+bookkeeping rather than product defects.
+
+- **Router budgets (A).**
+  - Raw model names now pass the same paid-call cap as personas.
+  - Near the cutoff the router reads usage fresh and counts in-flight calls (`reserve_pct`,
+    in-flight accounting), so concurrent calls can't overshoot.
+  - `fail_closed` (default off) treats unreadable usage as no capacity.
+  - Per-backend cutoffs: `effective_cutoff()`, plus `GET`/`POST /admin/api/config/cutoffs`.
+  - A budget denial re-routes to the next route instead of pausing.
+- **Gate, vision, review, closeout (B1–B4, B7).**
+  - The coordinator commits runner outputs itself, and checks only fail on files the agent wrote.
+  - One gate per change: the implementer runs stories and Lune; the gate re-runs only failed or
+    changed checks; a baseline is taken automatically at the sprint base.
+  - Vision batches run in parallel (`vision_parallel`, default 4), only changed frames are sent,
+    and the clean-frame memory is saved after each batch. There is one fix round, then the sprint
+    is accepted with notes.
+  - Code review runs alongside vision, and both send one merged fix round into the same session.
+  - The coordinator ticks the checklist and builds the evidence packet itself.
+  - Closeout is templated.
+- **Helpers, Lead, scope, decisions, infra (B5, B6, B8–B13).**
+  - Helpers start on demand only, each with a declared consumer, and use is measured from git.
+  - Sessions can't start their own subagents, except `explore`.
+  - Retry guidance is skipped when the Lead is on.
+  - Deterministic auto-heal runs before a Lead case opens.
+  - Typed `SCOPE_REQUEST`s are approved automatically from an editable allow-list of harness lines.
+  - Decisions carry a recommended default and a timeout (default 30 min).
+  - An infrastructure preflight runs first; infrastructure failures cost no attempt.
+  - Long sessions hand off at a context ceiling.
+  - Operator notes are sent as a delta, polling is reduced, and unknown actions are not retried.
+- **Config store (C1).**
+  - The shared schema lives in `foundry_automation/schema.py`.
+  - The router stores versioned automation config: draft, validate, deploy, rollback, diff and
+    audit, under `/admin/api/automation/...`.
+  - Role rules cover a permission matrix per role, path-glob scopes and hard denies. They generate
+    both Kilo session rules and `kilo.jsonc` agent blocks.
+  - The coordinator pulls the deployed revision at safe points through
+    `/v1/foundry/control/config`.
+- **GUI (C2–C4).** A new Automation page covers:
+  - roles, mapped to a persona and an ordered route list with drag reorder, live usage bars and
+    cutoffs;
+  - a backend on/off switch;
+  - an overview graph and a dry-run;
+  - settings forms generated from the schema;
+  - the role-rules matrix with a path tester;
+  - a queue editor;
+  - draft, deploy and rollback.
+- **Version.** The router's `__version__` had stayed at 0.130.16, which is why the stack showed a
+  stale release label. Both packages are now 0.131.0.
+
+Known: about 6 router streaming/timing tests fail on the base too, and
+`test_heartbeat_narration_during_slow_worker` is flaky on the base.
+
 ## v0.130.20 — retry guidance can fall back to local
 
 - **`[retry_guidance] local_fallback`** (default false): when Foundry's quota admission refuses
