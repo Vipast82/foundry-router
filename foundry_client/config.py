@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import copy
 import os
+import shutil
 import sys
 import tomllib
 from pathlib import Path
@@ -13,7 +14,10 @@ import tomli_w
 
 from . import APP_ID
 
-COMPONENTS = ("kilo", "coordinator", "supervisor", "media", "rojo")
+COMPONENTS = ("kilo", "coordinator", "supervisor", "rojo")
+
+# components that earlier versions managed; a settings file that still has one is cleaned on load
+RETIRED_COMPONENTS = ("media",)       # Kilo spawns the media adapter itself (stdio MCP)
 
 DEFAULTS: dict[str, Any] = {
     "client": {
@@ -21,11 +25,18 @@ DEFAULTS: dict[str, Any] = {
         "state_dir": "~/.foundry-coordinator",         # coordinator state, logs
         "api_port": 47811,                              # local settings page / API (127.0.0.1)
         "open_settings_on_start": False,
+        "unhealthy_restart_seconds": 300,               # a component unhealthy this long is restarted (0 = never)
+        "safe_restart_max_wait_minutes": 60,            # a pending safe-point restart warns after this
+        "relay": True,                                  # claim stack requests from the router (relay.py)
+        "update_check": True,                           # look for a newer release on GitHub (no auto-update)
+        "update_repo": "Vipast82/foundry-router",
     },
     "workspace": {
         "game": "",                                     # e.g. C:/Roblox/AnimalUprising
         "profiles": "",                                 # coordinator profiles dir (projects/)
         "deploy": "",                                   # coordinator release checkout, if any
+        "kilo_config": "",                              # kilo.jsonc (empty = <game>/kilo.jsonc)
+        "project": "",                                  # coordinator project id (empty = the only one)
     },
     "components": {
         "kilo": {"enabled": True, "path": "", "port": 4096, "args": [],
@@ -37,8 +48,6 @@ DEFAULTS: dict[str, Any] = {
                         "safe_restart": True, "after": ["kilo"]},
         "supervisor": {"enabled": True, "args": [], "env": {}, "secrets": [],
                        "after": ["coordinator"]},
-        "media": {"enabled": False, "command": [], "cwd": "", "env": {},
-                  "secrets": ["FOUNDRY_KEY"]},
         "rojo": {"enabled": False, "path": "", "project": "", "port": 34872, "args": [],
                  "env": {}, "secrets": []},
     },
@@ -99,8 +108,13 @@ def validate(cfg: dict) -> list[str]:
         errs.append("workspace.game is required for the Kilo server (its working folder)")
     if comps["coordinator"]["enabled"] and not cfg["workspace"]["profiles"]:
         errs.append("workspace.profiles is required for the coordinator")
-    if comps["media"]["enabled"] and not comps["media"]["command"]:
-        errs.append("components.media.command is required when the media adapter is enabled")
+    for k in ("unhealthy_restart_seconds", "safe_restart_max_wait_minutes"):
+        v = c.get(k)
+        if isinstance(v, bool) or not isinstance(v, int) or v < 0:
+            errs.append(f"client.{k} must be a whole number, 0 or more")
+    for k in ("relay", "update_check"):
+        if not isinstance(c.get(k), bool):
+            errs.append(f"client.{k} must be true or false")
     return errs
 
 
@@ -109,12 +123,31 @@ def _secretish(name: str) -> bool:
     return any(w in n for w in ("PASSWORD", "SECRET", "TOKEN", "_KEY", "APIKEY"))
 
 
+def migrate(raw: dict) -> bool:
+    """Bring an older settings document up to date in place. True when it changed."""
+    comps = raw.get("components")
+    changed = False
+    if isinstance(comps, dict):
+        for name in RETIRED_COMPONENTS:
+            changed = comps.pop(name, None) is not None or changed
+    return changed
+
+
 def load(path: Path | None = None) -> dict:
     p = Path(path or config_path())
     raw: dict = {}
     if p.is_file():
         with open(p, "rb") as f:
             raw = tomllib.load(f)
+        if migrate(raw):                       # drop retired tables quietly, keep one copy
+            try:
+                shutil.copy2(p, p.with_name(p.name + ".before-migration"))
+                tmp = p.with_suffix(".toml.tmp")
+                with open(tmp, "wb") as f:
+                    tomli_w.dump(raw, f)
+                os.replace(tmp, p)
+            except OSError:
+                pass                           # read-only file: the in-memory copy is clean anyway
     return _merge(DEFAULTS, raw)
 
 

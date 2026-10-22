@@ -28,6 +28,12 @@ def cfg(tmp_path, monkeypatch):
     return c
 
 
+def _kilo(monkeypatch, ok):
+    """What the Kilo health probe says (the real one does HTTP on the port)."""
+    import foundry_client.components as C
+    monkeypatch.setattr(C, "kilo_health", lambda port: (ok, f"port {port}"))
+
+
 class FakeProc:
     n = 0
 
@@ -73,14 +79,14 @@ def test_manager_starts_in_order_waits_for_secrets_and_restarts_crashes(cfg, mon
         launched.append(p)
         return p
     import foundry_client.components as C
-    monkeypatch.setattr(C, "port_open", lambda port, **kw: False)
+    _kilo(monkeypatch, False)
     m = Manager(cfg, popen=popen)
     m.start_all()
     m.step()
     st = {c["name"]: c for c in m.status()["components"]}
     assert st["kilo"]["state"] == "starting"
     assert st["coordinator"]["state"] == "waiting"             # after: kilo
-    monkeypatch.setattr(C, "port_open", lambda port, **kw: True)   # once kilo answers ...
+    _kilo(monkeypatch, True)   # once kilo answers ...
     m.step()
     co = m.status("coordinator")                               # ... a missing secret blocks it
     assert co["state"] == "error" and "FOUNDRY_COORDINATOR_KEY" in co["detail"]
@@ -88,7 +94,7 @@ def test_manager_starts_in_order_waits_for_secrets_and_restarts_crashes(cfg, mon
     assert kilo.argv[1:4] == ["serve", "--hostname", "127.0.0.1"]
     assert kilo.kw["env"]["KILO_SERVER_PASSWORD"] == "pw"
     assert "pw" not in m.tail("kilo")                          # secrets never logged
-    monkeypatch.setattr(C, "port_open", lambda port, **kw: False)
+    _kilo(monkeypatch, False)
     kilo.code = 1                                               # crash -> backoff restart
     m.step()
     assert m.status("kilo")["state"] == "error" and m.procs["kilo"].next_try > 0
@@ -99,7 +105,7 @@ def test_manager_starts_in_order_waits_for_secrets_and_restarts_crashes(cfg, mon
 
 def test_external_kilo_is_adopted_not_duplicated(cfg, monkeypatch):
     import foundry_client.components as C
-    monkeypatch.setattr(C, "port_open", lambda port, **kw: True)
+    _kilo(monkeypatch, True)
     launched = []
     m = Manager(cfg, popen=lambda argv, **kw: launched.append(argv) or FakeProc(argv))
     m.start("kilo")
@@ -128,12 +134,13 @@ def test_safe_point_ignores_idle_sessions_of_paused_tasks(tmp_path):
 def test_safe_restart_waits_while_a_session_works(cfg, tmp_path, monkeypatch):
     monkeypatch.setenv("FOUNDRY_CLIENT_SECRET_KILO_SERVER_PASSWORD", "pw")
     import foundry_client.components as C
-    monkeypatch.setattr(C, "port_open", lambda port, **kw: False)
+    _kilo(monkeypatch, False)
     cfg["client"]["state_dir"] = _db(tmp_path, "IMPLEMENTING")
     m = Manager(cfg, popen=lambda argv, **kw: FakeProc(argv))
     m.start("kilo")
-    m.restart("kilo")
-    assert m.status("kilo")["state"] == "waiting"
+    r = m.restart("kilo")
+    assert m.status("kilo")["pending_restart"] == "safe"       # state stays the real health state
+    assert "1 session" in r["result"] and "safe point" in r["result"]
     m.restart("kilo", force=True)
     assert m.procs["kilo"].restarts == 1
 

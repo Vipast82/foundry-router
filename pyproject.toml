@@ -22,7 +22,7 @@ dependencies = [
 [project.optional-dependencies]
 dev = ["pytest>=8.0", "pytest-asyncio>=0.24"]
 # Foundry Client (tray + stack manager, docs/CLIENT_MANAGER.md)
-client = ["keyring>=25", "pystray>=0.19", "pillow>=10", "tomli-w>=1.0"]
+client = ["keyring>=25", "pystray>=0.19", "pillow>=10", "tomli-w>=1.0", "psutil>=5.9"]
 
 [tool.setuptools.dynamic]
 version = { attr = "foundry_router.__version__" }

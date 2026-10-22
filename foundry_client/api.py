@@ -12,9 +12,10 @@ from pathlib import Path
 from typing import Optional
 
 from fastapi import FastAPI, HTTPException, Request
+from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import HTMLResponse, JSONResponse
 
-from . import __version__, autostart, config, secrets
+from . import __version__, autostart, config, doctor, secrets
 from .config import COMPONENTS
 from .manager import Manager
 
@@ -74,7 +75,40 @@ def create_app(mgr: Manager, token: str, cfg_path: Optional[Path] = None) -> Fas
             return mgr.stop(name)
         if verb == "restart":
             return mgr.restart(name, force=force)
+        if verb == "cancel-restart":
+            return mgr.cancel_restart(name)
         raise HTTPException(404, f"unknown action {verb!r}")
+
+    @app.post("/api/alerts/{key}/dismiss")
+    def dismiss(key: str):
+        return {"dismissed": mgr.dismiss_alert(key)}
+
+    @app.get("/api/observation")
+    def observation():
+        return mgr.observation()
+
+    @app.get("/api/doctor")
+    def run_doctor():
+        return doctor.run(mgr)
+
+    @app.post("/api/router-link/check")
+    def check_link():
+        return mgr.link.poll()
+
+    @app.post("/api/update/check")
+    def check_update():
+        return mgr.update.poll()
+
+    @app.post("/api/kilo-config/apply")
+    async def kilo_config_apply(request: Request):
+        try:
+            body = await request.json()
+        except ValueError:
+            body = {}
+        res = await run_in_threadpool(
+            mgr.apply_kilo_config, str((body or {}).get("project") or ""),
+            bool((body or {}).get("dry_run")), bool((body or {}).get("reload", True)))
+        return JSONResponse(res, status_code=200 if res.get("ok") else 400)
 
     @app.get("/api/settings")
     def get_settings():
@@ -83,8 +117,15 @@ def create_app(mgr: Manager, token: str, cfg_path: Optional[Path] = None) -> Fas
 
     @app.put("/api/settings")
     async def put_settings(request: Request):
+        """The body is merged onto the CURRENT settings, so a partial document changes only
+        what it names. (A full document, as the settings page sends, replaces every value in it.)"""
         body = await request.json()
-        new = config._merge(config.DEFAULTS, body.get("settings") or {})
+        incoming = body.get("settings") or {}
+        config.migrate(incoming)                   # an old page may still send a retired table
+        return await run_in_threadpool(_save_settings, incoming)
+
+    def _save_settings(incoming: dict):
+        new = config._merge(mgr.cfg, incoming)
         problems = config.validate(new)
         if problems:
             return JSONResponse({"error": "; ".join(problems), "problems": problems},

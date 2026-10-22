@@ -52,6 +52,8 @@ def run_tray(mgr, settings_url: str, stop: threading.Event) -> bool:
     def title():
         state, st = overall()
         bad = [c["label"] for c in st["components"] if c["want"] and c["state"] in ("error", "unhealthy")]
+        if not bad and st.get("alerts"):
+            return f"{APP_NAME}: " + st["alerts"][0]["text"][:100]
         return f"{APP_NAME}: " + ("problem with " + ", ".join(bad) if bad else
                                    {"ok": "all running", "busy": "starting…",
                                     "idle": "nothing enabled"}.get(state, state))
@@ -67,6 +69,9 @@ def run_tray(mgr, settings_url: str, stop: threading.Event) -> bool:
         pystray.Menu.SEPARATOR,
         pystray.MenuItem("Open settings", lambda: webbrowser.open(settings_url), default=True),
         pystray.MenuItem("Components", pystray.Menu(lambda: comp_items())),
+        pystray.MenuItem(lambda _i: "Update available: v" + mgr.update.snapshot()["latest"],
+                         lambda: webbrowser.open(mgr.update.snapshot()["url"]),
+                         visible=lambda _i: mgr.update.snapshot()["available"]),
         pystray.MenuItem("Restart Kilo server (safe point)", lambda: mgr.restart("kilo")),
         pystray.MenuItem("Restart coordinator (safe point)", lambda: mgr.restart("coordinator")),
         pystray.MenuItem("Restart everything now",

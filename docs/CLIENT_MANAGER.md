@@ -11,7 +11,7 @@ They become one cross-platform app that anyone can install. Victor chose (2026-1
 |---|---|
 | Packaging | Standalone packages: a Windows setup `.exe` and a Linux AppImage, with Python bundled |
 | Settings screen | A local web page on 127.0.0.1, opened from the tray, in the Foundry GUI style |
-| Managed components | The Kilo server, the coordinator with its upgrade supervisor, the media adapter, and Rojo |
+| Managed components | The Kilo server, the coordinator with its upgrade supervisor, and Rojo. The media adapter is not managed: Kilo starts it itself (stdio MCP); the Doctor checks its entry in `kilo.jsonc` |
 
 ## Pieces (package `foundry_client/`)
 
@@ -30,14 +30,65 @@ They become one cross-platform app that anyone can install. Victor chose (2026-1
 
 | Component | Command | Health | Restart rule |
 |---|---|---|---|
-| Kilo server | `kilo serve --port 4096` (path detected or set), cwd = game workspace | TCP 4096 and `GET /config` | safe point |
+| Kilo server | `kilo serve --port 4096` (path detected or set), cwd = game workspace | `GET /config` on its port, with the Kilo password (tells a closed port, a wrong password and a wedged server apart) | safe point |
 | Coordinator | `foundry-client coordinator run --control ...` (bundled) | heartbeat file age | safe point (tick boundary) |
 | Upgrade supervisor | `foundry-client supervisor --loop ...` (bundled) | process alive | any time |
-| Media adapter | the configured `foundry_media_mcp.py` command | process alive | any time |
-| Rojo | `rojo serve <project> --port 34872` (path detected or set) | TCP 34872 | any time. Plugin reconnects are still manual in Studio. |
+| Rojo | `rojo serve <project> --port 34872` (path detected or set) | `GET /api/rojo` (session id) | any time. Studio's plugin must be reconnected by hand after a restart; the client notices the new session id and says so. |
 
-Kilo, Rojo and the media adapter are external programs. They are detected or configured, not
+Kilo and Rojo are external programs. They are detected or configured, not
 bundled.
+
+## Watchdog, requests and checks (workstream W5)
+
+**Settings.** `client.unhealthy_restart_seconds` (default 300, 0 = never): a component that
+stays unhealthy this long is restarted (at a safe point for Kilo and the coordinator).
+`client.safe_restart_max_wait_minutes` (default 60): a safe-point restart that has waited this
+long raises a warning on the status page; it is never forced. `client.update_check`,
+`client.update_repo` (default `Vipast82/foundry-router`), `client.relay` (take stack requests
+from the router, `relay.py`), `workspace.kilo_config` and `workspace.project` for the role-rules
+button. `PUT /api/settings` merges onto the current settings, so a partial document changes only
+what it names.
+
+**Processes started outside the client** are adopted. They can be stopped and restarted by the
+pid that owns their port (Kilo, Rojo) or the pid in the coordinator heartbeat. A restart that
+could not stop the old process reports `failed: ...` and is not counted.
+
+**Media adapter.** Removed as a component: it is a stdio MCP server that Kilo spawns itself. An
+old `[components.media]` table is dropped from `client.toml` on load (the previous file is kept
+as `client.toml.before-migration`). The Doctor checks that `kilo.jsonc` has a `foundry-media`
+entry whose script exists and that `FOUNDRY_KEY` reaches Kilo (entry environment, the Kilo
+component's secrets, the user environment, or the adapter's `foundry-media.json`).
+
+**Kilo configuration.** "Apply role rules to kilo.jsonc" on the status page (or
+`foundry-client apply-kilo-config`) runs `foundry-client coordinator kilo-config <project>
+--apply`: the coordinator's generator backs the file up, rewrites only the agent permission
+blocks, reads it back and restores the backup on any mismatch. The client also refuses a
+`kilo.jsonc` that does not parse. Afterwards Kilo is reloaded with a safe-point restart.
+
+**Requests from other programs.** Drop a JSON file in `<state_dir>/client-requests/`:
+
+```json
+{"action": "reload_kilo", "id": "abc", "force": false}
+```
+
+Actions: `reload_kilo` (safe-point restart of Kilo), `restart_rojo`, `restart_coordinator`
+(safe point), `apply_kilo_config` (`project`, `dry_run`, `reload`). The client moves the file to
+`processing/`, writes the answer to `results/<same name>` (`status`: `pending` with the reason
+while it waits for a safe point, then `done` or `failed`, plus `message`), and archives the
+request in `done/`.
+
+**Router link.** The status page and `GET /api/observation` show whether `client.backend_url`
+answers (`/health`, else `/api/version`), its version and whether it is still warming up.
+`Manager.observation()` is the secret-free summary the relay sends upstream. The router opens its
+port before MCP servers and probes are ready (`/health` reports `warming_up`).
+
+**Updates.** The client looks at the GitHub releases of `client.update_repo` at start and every
+6 hours and shows a banner with a link. It never downloads or installs anything.
+
+**Linux.** `foundry-client install-service` writes `~/.config/systemd/user/foundry-client.service`
+(`run --headless`) and enables it; run `loginctl enable-linger $USER` once to start it at boot.
+Inside an AppImage, start-at-logon uses the AppImage file (`$APPIMAGE`), not the temporary
+mount path.
 
 ## Packaging (phase 2)
 
@@ -88,7 +139,9 @@ The first run starts nothing and opens the settings page.
 ### Commands
 
 `foundry-client status`, `foundry-client restart kilo [--force] [--wait]`,
-`foundry-client install-autostart`, `foundry-client import-legacy-secrets`.
+`foundry-client install-autostart`, `foundry-client import-legacy-secrets`,
+`foundry-client doctor`, `foundry-client apply-kilo-config [--dry-run]`,
+`foundry-client install-service` / `remove-service` (Linux `systemd --user`).
 
 ### Migrating this workstation
 

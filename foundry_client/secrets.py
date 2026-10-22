@@ -12,7 +12,7 @@ SERVICE = "foundry-client"
 KNOWN = {
     "KILO_SERVER_PASSWORD": "Password of the local Kilo server (port 4096)",
     "FOUNDRY_COORDINATOR_KEY": "Foundry coordinator key (inference + orchestration scopes)",
-    "FOUNDRY_KEY": "Foundry key used by the media adapter",
+    "FOUNDRY_KEY": "Foundry key (media scope) for the media adapter Kilo starts; add FOUNDRY_KEY to the Kilo component's secrets so Kilo passes it on",
 }
 
 
