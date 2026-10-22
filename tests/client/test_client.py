@@ -168,3 +168,61 @@ def test_secret_status_lists_known_names(monkeypatch):
     monkeypatch.setenv("FOUNDRY_CLIENT_SECRET_KILO_SERVER_PASSWORD", "x")
     st = secrets.status([])
     assert st["KILO_SERVER_PASSWORD"] is True and "FOUNDRY_COORDINATOR_KEY" in st
+
+
+# ---------------------------------------------------------------- W1.9: safe point and restarts
+
+def _db_w1(tmp_path, *, lead_started=0, runner_pid=None, task_state="VERIFYING"):
+    import json as _json
+    import os as _os
+    d = tmp_path / "state"
+    d.mkdir(parents=True, exist_ok=True)
+    c = sqlite3.connect(d / "coordinator.sqlite")
+    c.execute("CREATE TABLE sessions (session_id, project_id, task_id, status)")
+    c.execute("CREATE TABLE tasks (project_id, task_id, state, data)")
+    c.execute("CREATE TABLE recovery_actions (action_id, case_id, kind, status)")
+    data = _json.dumps({"fast_lane": {"run": {"pid": runner_pid, "head": "h"}}}) \
+        if runner_pid else "{}"
+    c.execute("INSERT INTO tasks VALUES ('p','T1',?,?)", (task_state, data))
+    for i in range(lead_started):
+        c.execute("INSERT INTO recovery_actions VALUES (?, 'case-1', 'lead_call', 'started')",
+                  (f"a{i}",))
+    c.commit()
+    c.close()
+    _ = _os
+    return str(d)
+
+
+def test_safe_point_counts_lead_sessions_and_gate_runners(tmp_path):
+    import os as _os
+    assert safe_point(_db_w1(tmp_path / "a"))[0] is True
+    ok, why = safe_point(_db_w1(tmp_path / "b", lead_started=1, task_state="BLOCKED"))
+    assert ok is False and "1 lead session(s) in flight" in why
+    ok, why = safe_point(_db_w1(tmp_path / "c", runner_pid=_os.getpid()))
+    assert ok is False and f"gate runner pid {_os.getpid()}" in why
+    assert safe_point(_db_w1(tmp_path / "d", runner_pid=4000000))[0] is True   # a dead pid
+    # the runner lock in the game folder (a live pid holds it; a dead one does not)
+    game = tmp_path / "game"
+    lock = game / ".plan" / "tmp" / "gate" / "runner.lock"
+    lock.parent.mkdir(parents=True)
+    lock.write_text('{"pid": %d, "sprint": "UI-1"}' % _os.getpid())
+    ok, why = safe_point(_db_w1(tmp_path / "e"), str(game))
+    assert ok is False and "runner lock held by pid" in why
+    lock.write_text('{"pid": 4000000, "sprint": "UI-1"}')
+    assert safe_point(_db_w1(tmp_path / "f"), str(game))[0] is True
+    assert safe_point(str(tmp_path / "nowhere"), str(game))[0] is True
+
+
+def test_coordinator_restart_never_kills_the_detached_runner_tree(cfg, tmp_path, monkeypatch):
+    import foundry_client.manager as M
+    calls = []
+    monkeypatch.setattr(M.sys, "platform", "win32")
+    monkeypatch.setattr(M.subprocess, "run", lambda argv, **kw: calls.append(argv))
+    m = Manager(cfg, popen=lambda argv, **kw: FakeProc(argv))
+    for name in ("coordinator", "kilo"):
+        pr = m.procs[name]
+        pr.p = FakeProc(["x"])
+        m._kill(pr, "restarting")
+    coord, kilo = calls
+    assert "/T" not in coord and coord[:3] == ["taskkill", "/PID", str(coord[2])]
+    assert "/T" in kilo                                           # other trees still go

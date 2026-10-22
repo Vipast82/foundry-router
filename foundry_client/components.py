@@ -78,21 +78,104 @@ def heartbeat_age(state_dir: str) -> Optional[float]:
         return None
 
 
-def safe_point(state_dir: str) -> tuple[bool, str]:
-    """True when no coordinator session is actively working (read-only DB probe)."""
-    db = Path(expand(state_dir)) / "coordinator.sqlite"
-    if not db.is_file():
-        return True, "no coordinator database"
+def pid_alive(pid) -> bool:
     try:
-        c = sqlite3.connect(f"file:{db.as_posix()}?mode=ro", uri=True, timeout=5)
-        q = ("SELECT count(*) FROM sessions s JOIN tasks t ON t.project_id=s.project_id AND "
-             "t.task_id=s.task_id WHERE s.status NOT IN ('ended','aborted','created') AND "
-             f"t.state IN ({','.join('?' * len(ACTIVE))})")
-        live = c.execute(q, ACTIVE).fetchone()[0]
-        c.close()
-    except sqlite3.Error as e:
-        return False, f"cannot read the coordinator database ({e})"
-    return live == 0, ("safe" if live == 0 else f"{live} session(s) working")
+        pid = int(pid or 0)
+    except (TypeError, ValueError):
+        return False
+    if pid <= 0:
+        return False
+    if os.name == "nt":
+        import ctypes
+        k = ctypes.windll.kernel32
+        h = k.OpenProcess(0x1000, False, pid)              # PROCESS_QUERY_LIMITED_INFORMATION
+        if not h:
+            return False
+        code = ctypes.c_ulong()
+        ok = k.GetExitCodeProcess(h, ctypes.byref(code))
+        k.CloseHandle(h)
+        return bool(ok) and code.value == 259                # STILL_ACTIVE
+    try:
+        os.kill(pid, 0)
+        return True
+    except OSError:
+        return False
+
+
+def safe_point(state_dir: str, game_dir: str = "") -> tuple[bool, str]:
+    """True when nothing of the coordinator's is working (read-only DB probe):
+    no live session of an active task, no lead or repair session in flight
+    (recovery_actions started), no studio_gate runner (a fast-lane run whose pid is
+    alive, or the runner lock under `game_dir/.plan/tmp/gate` held by a live pid).
+    W1.9: the old probe counted implementer sessions only, so a restart could kill
+    a lead session editing a BLOCKED task or the detached gate runner."""
+    db = Path(expand(state_dir)) / "coordinator.sqlite"
+    busy: list[str] = []
+    if db.is_file():
+        try:
+            c = sqlite3.connect(f"file:{db.as_posix()}?mode=ro", uri=True, timeout=5)
+            try:
+                q = ("SELECT count(*) FROM sessions s JOIN tasks t ON t.project_id=s.project_id "
+                     "AND t.task_id=s.task_id WHERE s.status NOT IN ('ended','aborted','created') "
+                     f"AND t.state IN ({','.join('?' * len(ACTIVE))})")
+                live = c.execute(q, ACTIVE).fetchone()[0]
+                if live:
+                    busy.append(f"{live} session(s) working")
+                busy += _lead_busy(c)
+                busy += _runner_busy(c)
+            finally:
+                c.close()
+        except sqlite3.Error as e:
+            return False, f"cannot read the coordinator database ({e})"
+    else:
+        if not game_dir:
+            return True, "no coordinator database"
+    lock = _lock_busy(game_dir)
+    if lock:
+        busy.append(lock)
+    return (not busy), ("safe" if not busy else "; ".join(busy))
+
+
+def _lead_busy(c) -> list[str]:
+    """Lead / repair sessions in flight (the lead edits a BLOCKED task, so the task
+    state alone never shows it)."""
+    try:
+        n = c.execute("SELECT count(*) FROM recovery_actions WHERE kind IN "
+                      "('lead_call','repair_session') AND status='started'").fetchone()[0]
+    except sqlite3.Error:
+        return []                                   # no lead tables: no lead
+    return [f"{n} lead session(s) in flight"] if n else []
+
+
+def _runner_busy(c) -> list[str]:
+    """A fast-lane studio_gate runner the coordinator started and whose pid lives."""
+    try:
+        rows = c.execute("SELECT task_id, data FROM tasks WHERE state='VERIFYING'").fetchall()
+    except sqlite3.Error:
+        return []
+    out = []
+    for task_id, data in rows:
+        try:
+            run = ((json.loads(data or "{}").get("fast_lane") or {}).get("run")) or {}
+        except (TypeError, ValueError):
+            continue
+        if run.get("pid") and pid_alive(run.get("pid")):
+            out.append(f"gate runner pid {run['pid']} ({task_id})")
+    return out
+
+
+def _lock_busy(game_dir: str) -> str:
+    if not game_dir:
+        return ""
+    p = Path(expand(game_dir)) / ".plan" / "tmp" / "gate" / "runner.lock"
+    try:
+        cur = json.loads(p.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return ""
+    pid = (cur or {}).get("pid") if isinstance(cur, dict) else None
+    if pid and pid_alive(pid):
+        return f"gate runner lock held by pid {pid} ({(cur or {}).get('sprint') or '?'})"
+    return ""
 
 
 def build(cfg: dict) -> dict[str, Spec]:
