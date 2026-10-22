@@ -48,7 +48,8 @@ def report(svc, hours: float = 168, group: str = "client") -> dict:
         f"SELECT id, {col} AS g, session_id, request_id, outcome, status, duration_ms, retries, "
         f"models_used, flags FROM request_log WHERE ts >= ? ORDER BY id", (since_iso,))
     perf = svc.db.query(
-        "SELECT p.request_id, p.ttft_ms, p.decode_tps, p.prompt_tokens, r.g FROM perf_samples p "
+        "SELECT p.request_id, p.ttft_ms, p.decode_tps, p.prompt_tokens, p.timing_src, r.g "
+        "FROM perf_samples p "
         f"JOIN (SELECT request_id, {col} AS g FROM request_log WHERE ts >= ?) r "
         "ON r.request_id = p.request_id WHERE p.ts >= ?", (since_iso, since_iso))
     ledger = svc.db.query(
@@ -90,8 +91,10 @@ def report(svc, hours: float = 168, group: str = "client") -> dict:
                 streak = streak + 1 if bad else 0
                 streak_max = max(streak_max, streak)
         p = [x for x in perf if (x["g"] or "(none)") == g]
-        ttft = [x["ttft_ms"] for x in p if x["ttft_ms"]]
-        dtps = [x["decode_tps"] for x in p if x["decode_tps"]]
+        # speeds from the backend's own timings only: a router estimate (Claude, GPT)
+        # is a different quantity and never averaged in (perf_history.SPEED_KEYS)
+        ttft = [x["ttft_ms"] for x in p if x["ttft_ms"] and x["timing_src"] == "server"]
+        dtps = [x["decode_tps"] for x in p if x["decode_tps"] and x["timing_src"] == "server"]
         ctx_by_req: dict = {}
         for x in p:
             ctx_by_req[x["request_id"]] = max(ctx_by_req.get(x["request_id"], 0), x["prompt_tokens"] or 0)

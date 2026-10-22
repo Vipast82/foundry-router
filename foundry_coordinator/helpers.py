@@ -1021,8 +1021,14 @@ class HelperManager:
                 P.foundry.end(u["session_id"], status)
             except FoundryError:
                 pass
+        began = u.get("started_ts") or u.get("created_ts")
         self.store.event(P.id, u["task_id"], f"helper_{status}", session_id=u["session_id"],
-                         detail={"unit": u["unit_id"], "reason": reason})
+                         detail={"unit": u["unit_id"], "reason": reason, "kind": u.get("kind"),
+                                 "lane": u.get("lane"),
+                                 # numbers for the router's sprint scorecard
+                                 "duration_s": (round(max(0.0, self.clock() - float(began)), 1)
+                                                if began else None),
+                                 **({"tokens": dict(tokens)} if isinstance(tokens, dict) else {})})
 
     # ------------------------------------------------------------------ integration
 

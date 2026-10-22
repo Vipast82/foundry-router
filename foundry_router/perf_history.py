@@ -26,10 +26,42 @@ from typing import Any, Optional
 
 from .db import Database, utcnow
 
-# Retention: how far back samples are kept. A multi-day sprint is the use case,
-# so two weeks comfortably covers "compare this run to the last one" while
-# capping unbounded growth. Pruned opportunistically (see record_sample).
+# Retention: how far back samples are kept (config `perf.retention_days`,
+# default 14). A multi-day sprint is the use case, so two weeks comfortably
+# covers "compare this run to the last one" while capping unbounded growth.
+# Pruned opportunistically (see record_sample) and by the retention loop.
 RETENTION_DAYS = 14
+
+# name of a backend -> "local" | "subscription" | None (unknown). Set by the
+# service so a run label is stamped on local backends only.
+_backend_kind = lambda name: None                              # noqa: E731
+
+
+_retention_fn = lambda: RETENTION_DAYS                         # noqa: E731
+
+
+def retention_days() -> int:
+    try:
+        return max(1, int(_retention_fn()))
+    except Exception:                                          # noqa: BLE001
+        return RETENTION_DAYS
+
+
+def configure(retention=None, backend_kind=None) -> None:
+    """retention: days or a callable returning them (config perf.retention_days,
+    read on every prune so a saved change is live)."""
+    global _retention_fn, _backend_kind
+    if retention is not None:
+        _retention_fn = retention if callable(retention) else (lambda d=int(retention): d)
+    if backend_kind is not None:
+        _backend_kind = backend_kind
+
+
+def prune(db: Database, days: Optional[int] = None) -> int:
+    """Delete samples older than the retention window."""
+    return db.execute_count("DELETE FROM perf_samples WHERE datetime(ts) < datetime('now', ?)",
+                            (f"-{int(days or retention_days())} days",))
+
 
 RUN_LABEL_KEY = "perf_run_label"
 
@@ -97,7 +129,13 @@ def record_sample(db: Database, *, model: str, backend: str = "", persona: str =
     cache_hit_pct = _pct(cached_tokens, prompt_tokens)
     spec_accept_pct = (round(100.0 * draft_n_accepted / draft_n, 1) if draft_n else None)
     if run_label is None:
-        run_label = get_run_label(db)
+        # the run label names the HARDWARE / config run, so it belongs on local
+        # backends only: a Claude or GPT call is not part of that comparison
+        try:
+            kind = _backend_kind(backend)
+        except Exception:                                      # noqa: BLE001
+            kind = None
+        run_label = "" if kind == "subscription" else get_run_label(db)
     try:
         db.execute(
             "INSERT INTO perf_samples (ts, model, backend, persona, mode, "
@@ -107,8 +145,8 @@ def record_sample(db: Database, *, model: str, backend: str = "", persona: str =
             "run_label, timing_src, prefill_tokens, reasoning_tokens, load_ms, "
             "headers_ms, start_ms, tcp_retrans, tcp_rwnd_ms, client_gap_ms, client_tool, "
             "router_ms, arrived_at, sent_at, first_token_at, prev_reply_at, clock_diff_ms, "
-            "request_id, client_id) "
-            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            "request_id, client_id, project_id, work_task_id, run_id, role) "
+            "VALUES (" + ",".join("?" * 43) + ")",
             (utcnow(), model, backend, persona, mode,
              int(prompt_tokens or 0), int(completion_tokens or 0), int(cached_tokens or 0),
              int(draft_n or 0), int(draft_n_accepted or 0),
@@ -137,9 +175,7 @@ def record_sample(db: Database, *, model: str, backend: str = "", persona: str =
     if random.random() < 0.02:
         try:
             # datetime(ts) for the same format-mismatch reason as query_history.
-            db.execute(
-                "DELETE FROM perf_samples WHERE datetime(ts) < datetime('now', ?)",
-                (f"-{RETENTION_DAYS} days",))
+            prune(db)
         except Exception:
             pass
 
@@ -202,6 +238,21 @@ _AVG_KEYS = ("decode_tps", "prefill_tps", "eff_tps", "ttft_ms", "spec_accept_pct
              "cache_hit_pct", "prompt_tokens", "completion_tokens", "wall_ms",
              "load_ms", "decode_ms", "prefill_ms")
 
+# Speeds a backend MEASURED (timing_src 'server': llama.cpp / Ollama timings)
+# versus ones the router derived from a stream's timing ('estimated': Claude,
+# GPT) or could not time (''). The estimates are real information but not the
+# same quantity, so they are reported apart and never averaged into the headline
+# numbers. eff_tps (tokens / wall time) is measured for every backend.
+SPEED_KEYS = ("decode_tps", "prefill_tps", "ttft_ms", "decode_ms", "prefill_ms")
+_EST_KEYS = ("decode_tps", "prefill_tps", "ttft_ms", "eff_tps")
+
+
+def _avg_expr(k: str) -> str:
+    """AVG of a metric; speed metrics over measured samples only."""
+    if k in SPEED_KEYS:
+        return f"ROUND(AVG(CASE WHEN timing_src='server' THEN {k} END), 2) AS {k}"
+    return f"ROUND(AVG({k}), 2) AS {k}"
+
 
 def query_history(db: Database, hours: float = 72, model: Optional[str] = None,
                   limit: int = 4000, backend: Optional[str] = None,
@@ -220,7 +271,8 @@ def query_history(db: Database, hours: float = 72, model: Optional[str] = None,
         f"ORDER BY id DESC LIMIT ?", (*params, int(limit)))
     rows.reverse()   # chronological for charting
 
-    avg_sql = ", ".join(f"ROUND(AVG({k}), 2) AS {k}" for k in _AVG_KEYS) \
+    est_sql = ", ".join(f"ROUND(AVG({k}), 2) AS {k}" for k in _EST_KEYS)
+    avg_sql = ", ".join(_avg_expr(k) for k in _AVG_KEYS) \
         + f", ROUND(AVG({_WAIT_SQL}), 1) AS wait_ms" \
         + f", ROUND(SUM({_WAIT_SQL}) / 1000.0, 1) AS wait_s_total" \
         + ", ROUND(SUM(wall_ms) / 1000.0, 1) AS wall_s_total"
@@ -234,6 +286,12 @@ def query_history(db: Database, hours: float = 72, model: Optional[str] = None,
     summary = {k: agg.get(k) for k in ("samples", *_AVG_KEYS, "truncations",
                                        "out_tokens", "in_tokens", "estimated",
                                        "wait_ms", "wait_s_total", "wall_s_total")}
+    tb = db.query(
+        f"SELECT CASE WHEN timing_src='server' THEN 'measured' WHEN timing_src='estimated' "
+        f"THEN 'estimated' ELSE 'unknown' END AS bucket, COUNT(*) AS n, {est_sql} "
+        f"FROM perf_samples WHERE {clause} GROUP BY bucket", tuple(params))
+    summary["by_timing"] = {r["bucket"]: {k: r[k] for k in ("n", *_EST_KEYS)} for r in tb}
+    summary["measured"] = (summary["by_timing"].get("measured") or {}).get("n", 0)
     summary["samples"] = summary.get("samples") or 0
     summary["truncations"] = summary.get("truncations") or 0
     summary["estimated"] = summary.get("estimated") or 0
@@ -253,20 +311,37 @@ def query_history(db: Database, hours: float = 72, model: Optional[str] = None,
         f"GROUP BY model, backend, COALESCE(run_label,'') "
         f"ORDER BY model, last_ts DESC", tuple(params))
     pct_rows = db.query(
-        f"SELECT model, backend, COALESCE(run_label,'') AS run_label, "
+        f"SELECT model, backend, COALESCE(run_label,'') AS run_label, timing_src, "
         f"decode_tps, ttft_ms, {_WAIT_SQL} AS wait_ms FROM perf_samples WHERE {clause}",
         tuple(params))
     dist: dict = {}
     for r in pct_rows:
         d = dist.setdefault((r["model"], r["backend"], r["run_label"]), ([], [], []))
+        if r["timing_src"] != "server":
+            continue                     # percentiles of measured speeds only
         if r["decode_tps"] is not None:
             d[0].append(r["decode_tps"])
         if r["ttft_ms"] is not None:
             d[1].append(r["ttft_ms"])
         if r["wait_ms"] is not None:
             d[2].append(r["wait_ms"])
+    # The same speeds for the samples that were NOT measured, kept apart.
+    est_rows = db.query(
+        f"SELECT model, backend, COALESCE(run_label,'') AS run_label, "
+        f"CASE WHEN timing_src='estimated' THEN 'estimated' ELSE 'unknown' END AS bucket, "
+        f"COUNT(*) AS n, {est_sql} FROM perf_samples WHERE {clause} AND "
+        f"COALESCE(timing_src,'') != 'server' "
+        f"GROUP BY model, backend, COALESCE(run_label,''), bucket", tuple(params))
+    est_by: dict = {}
+    for r in est_rows:
+        est_by.setdefault((r["model"], r["backend"], r["run_label"]), {})[r["bucket"]] = {
+            k: r[k] for k in ("n", *_EST_KEYS)}
     diagnoses: list[dict] = []
     for g in groups:
+        e = est_by.get((g["model"], g["backend"], g["run_label"]), {})
+        g["estimated_speed"] = e.get("estimated")
+        g["unmeasured_speed"] = e.get("unknown")
+        g["measured"] = max(0, (g.get("n") or 0) - sum(x["n"] for x in e.values()))
         dec, tt, wt = dist.get((g["model"], g["backend"], g["run_label"]), ([], [], []))
         g["p50_decode_tps"] = _percentile(dec, 0.5)
         g["p95_ttft_ms"] = _percentile(tt, 0.95)
@@ -341,11 +416,14 @@ def clear_samples(db: Database, model: Optional[str] = None,
 
 
 def _correlation() -> tuple:
-    """(request_id, client_id) of the request this call belongs to, so a
-    sample joins its request_log row (traces, per-client comparisons)."""
+    """(request_id, client_id, project_id, work_task_id, run_id, role) of the
+    request this call belongs to, so a sample joins its request_log row
+    (traces, per-client comparisons) and a sprint's scorecard."""
     try:
         from . import client_auth, request_context
-        return (request_context.request_id() or None,
-                client_auth.current().get("client_id"))
+        c = client_auth.current()
+        return (request_context.request_id() or None, c.get("client_id"),
+                c.get("project_id") or None, c.get("work_task_id") or None,
+                c.get("run_id") or None, c.get("role") or None)
     except Exception:                                              # noqa: BLE001
-        return (None, None)
+        return (None, None, None, None, None, None)

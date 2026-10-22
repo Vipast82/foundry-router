@@ -113,6 +113,15 @@ class Services:
                                Path(getattr(db, "path", data_dir() / "foundry.sqlite")).parent,
                                secrets_fn=lambda: secret_values(self))
         self.pool.capture = self.capture
+        from . import perf_history, usage as _usage
+
+        def _backend_kind(name):
+            st = (getattr(self.pool, "backends", None) or {}).get(name)
+            return None if st is None else (
+                "subscription" if getattr(st.config, "is_subscription", False) else "local")
+        perf_history.configure(retention=lambda: self.config_store.config.perf.retention_days,
+                               backend_kind=_backend_kind)
+        _usage.set_subscription_rates(lambda: self.config_store.config.perf.subscription_rates)
         self.brain = BrainClient(cfg.agent_brain, self.http, db=db)
         self.research = ResearchAgent(
             cfg.registry.research, db, self.registry, self.mcp,
@@ -399,6 +408,7 @@ class Services:
             asyncio.create_task(self._pricing_loop()),
             asyncio.create_task(self._agent_health_loop()),
             asyncio.create_task(self._retention_loop()),
+            asyncio.create_task(self._server_samples_loop()),
             asyncio.create_task(self._control_watchdog_loop()),
             asyncio.create_task(self.health.loop()),
         ]
@@ -428,6 +438,21 @@ class Services:
             n += 1
             await asyncio.sleep(15)
 
+    async def _server_samples_loop(self) -> None:
+        """Engine /metrics history (server_history.py): Strata / llama.cpp KV
+        fill, slots, tokens/s and Meridian's counters, every
+        perf.server_sample_seconds (0 = off)."""
+        from . import server_history
+        await asyncio.sleep(20)                       # let backends come up first
+        while True:
+            every = int(self.config_store.config.perf.server_sample_seconds or 0)
+            if every > 0:
+                try:
+                    await server_history.sample_once(self)
+                except Exception:
+                    log.exception("server metrics sample failed")
+            await asyncio.sleep(max(15, every) if every > 0 else 60)
+
     async def _retention_loop(self) -> None:
         """Keep log tables inside data_retention.days (Logs -> Data)."""
         from .datatools import prune
@@ -437,6 +462,13 @@ class Services:
                 await asyncio.to_thread(prune, self.db, cfg.days)
             except Exception:
                 log.exception("retention prune failed")
+            try:
+                from . import perf_history, server_history
+                days = self.config_store.config.perf.retention_days
+                await asyncio.to_thread(perf_history.prune, self.db, days)
+                await asyncio.to_thread(server_history.prune, self.db, days)
+            except Exception:
+                log.exception("perf history prune failed")
             try:
                 await asyncio.to_thread(self.media.prune)
                 await asyncio.to_thread(self.ledger.prune)

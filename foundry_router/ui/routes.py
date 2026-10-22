@@ -489,6 +489,45 @@ def _configured_backends(svc) -> list[str]:
                   + [b.name for b in getattr(svc.pool, "disabled", []) or []])
 
 
+@router.get("/admin/api/perf/servers")
+async def perf_servers(request: Request, hours: float = 24, backend: str = "",
+                       metrics: str = ""):
+    """Engine metrics history (server_history.py): per backend and metric, the
+    series sampled from the engines' own /metrics (Strata / llama.cpp KV fill,
+    slots, tokens/s; Meridian counters and latencies)."""
+    from .. import server_history
+    svc = _svc(request)
+    out = server_history.query(svc.db, hours, backend,
+                               [m for m in metrics.split(",") if m] or None)
+    out["interval_s"] = svc.config_store.config.perf.server_sample_seconds
+    out["retention_days"] = svc.config_store.config.perf.retention_days
+    return out
+
+
+@router.get("/admin/api/config/perf")
+async def get_perf_settings(request: Request):
+    return _svc(request).config_store.config.perf.model_dump()
+
+
+@router.post("/admin/api/config/perf")
+async def set_perf_settings(request: Request):
+    """{retention_days?, server_sample_seconds?, subscription_rates?: [{match, model?,
+    usd_per_call}]}: live."""
+    svc = _svc(request)
+    body = await request.json()
+    updates = {k: body[k] for k in ("retention_days", "server_sample_seconds",
+                                    "subscription_rates") if k in body}
+
+    def mutate(raw):
+        raw.setdefault("perf", {}).update(updates)
+    try:
+        cfg = svc.config_store.save(mutate)
+    except Exception as e:                                        # noqa: BLE001
+        from ..errors import describe_exception
+        return JSONResponse({"error": describe_exception(e)}, status_code=400)
+    return {"ok": True, "perf": cfg.perf.model_dump()}
+
+
 @router.get("/admin/api/perf/run-label")
 async def perf_run_label_get(request: Request):
     from .. import perf_history as ph
@@ -1133,6 +1172,17 @@ async def work_usage(request: Request, project: str = "", task: str = "", run: s
     return _svc(request).work.usage(project, task, run, session)
 
 
+@router.get("/admin/api/work/scorecard")
+async def work_scorecard(request: Request, project: str = "", task: str = "",
+                         hours: float = 24 * 14, limit: int = 100):
+    """Per-sprint scorecard (scorecard.py): wall time, model calls, tokens by role,
+    gates run / passed, reviews, vision rounds, helpers used / integrated, speeds
+    (measured apart from estimated), cost and outcome."""
+    from .. import scorecard
+    return scorecard.build(_svc(request).db, project, task,
+                           hours=max(0.0, min(float(hours), 24 * 365)), limit=limit)
+
+
 @router.get("/admin/api/training")
 async def training_view(request: Request, project: str = "", status: str = ""):
     """Training data: Foundry's own capture status, and what the training
@@ -1156,7 +1206,105 @@ async def training_view(request: Request, project: str = "", status: str = ""):
         eps.append({k: d.get(k) for k in ("episode_id", "project_id", "task_id", "kind", "status",
                                           "reasons", "split", "outcome", "sources", "turns",
                                           "summary")})
-    return {"capture": svc.capture.status(), "pipelines": pipes, "episodes": eps}
+    # what the Capture card renders its backend / persona switches from
+    try:
+        personas = sorted(p["virtual_name"] for p in svc.personas.list(enabled_only=True))
+    except Exception:                                             # noqa: BLE001
+        personas = []
+    return {"capture": svc.capture.status(), "pipelines": pipes, "episodes": eps,
+            "options": {"backends": _configured_backends(svc), "personas": personas}}
+
+
+_CAPTURE_LISTS = ("projects", "exclude_projects", "clients", "backends", "exclude_backends",
+                  "personas", "exclude_personas", "allowed_email_domains")
+
+
+@router.post("/admin/api/training/capture")
+async def training_capture_set(request: Request):
+    """Capture switches from the Training tab: enabled, include_unbound,
+    retention_days and the project / client / backend / persona lists (globs;
+    empty include = all). Live: capture re-reads its config on every call."""
+    svc = _svc(request)
+    body = await request.json()
+    updates: dict = {}
+    for k in ("enabled", "include_unbound"):
+        if k in body:
+            updates[k] = bool(body[k])
+    if "retention_days" in body:
+        try:
+            updates["retention_days"] = max(1, min(3650, int(body["retention_days"])))
+        except (TypeError, ValueError):
+            return JSONResponse({"error": "retention_days must be a number"}, status_code=400)
+    for k in _CAPTURE_LISTS:
+        if k in body:
+            v = body[k]
+            if not isinstance(v, list) or not all(isinstance(x, str) for x in v):
+                return JSONResponse({"error": f"{k} must be a list of strings"}, status_code=400)
+            updates[k] = [x.strip() for x in v if x.strip()][:200]
+
+    def mutate(raw):
+        raw.setdefault("training_capture", {}).update(updates)
+    try:
+        cfg = svc.config_store.save(mutate)
+    except Exception as e:                                        # noqa: BLE001
+        from ..errors import describe_exception
+        return JSONResponse({"error": describe_exception(e)}, status_code=400)
+    svc.db.log_event("info", "admin", "training capture settings changed: "
+                     + ", ".join(sorted(updates)) if updates else "training capture saved")
+    return {"ok": True, "training_capture": cfg.training_capture.model_dump(),
+            "capture": svc.capture.status()}
+
+
+@router.get("/admin/api/training/capture/download")
+async def training_capture_download(request: Request, hours: float = 0, backend: str = "",
+                                    persona: str = "", project: str = "", quality: str = "",
+                                    format: str = "chatml", limit: int = 20000):
+    """Captured calls as JSONL (already redacted): `format=chatml` is one
+    {messages, tools, meta} line per successful backend call, `raw` the capture
+    rows as stored. `quality=ok` keeps calls the router saw succeed with no
+    thumbs-down or negative label (router_ok); `quality=verified` also needs a
+    coordinator label (gate PASS, review APPROVED, vision approved)."""
+    import time as _time
+    from fastapi.responses import StreamingResponse
+    from .. import training_quality as tq
+    svc = _svc(request)
+    cap = svc.capture
+    if quality not in ("", "ok", "verified"):
+        return JSONResponse({"error": "quality must be ok or verified"}, status_code=400)
+    if format not in ("chatml", "raw"):
+        return JSONResponse({"error": "format must be chatml or raw"}, status_code=400)
+    since = _time.time() - hours * 3600 if hours else 0.0
+    limit = max(1, min(200000, int(limit)))
+
+    def lines():
+        if cap._store is None and not cap.cfg.enabled:
+            return
+        after, sent = 0, 0
+        while sent < limit:
+            rows = cap.records(after, 500, project, backend=backend, persona=persona,
+                               kind="backend_call", since=since, db=svc.db)
+            if not rows:
+                return
+            after = rows[-1]["id"]
+            for r in rows:
+                if not tq.passes(r, quality):
+                    continue
+                if format == "raw":
+                    out = r
+                else:
+                    out = tq.chatml_example(r)
+                    if out is None:
+                        continue
+                    out["meta"] = {k: r.get(k) for k in ("request_id", "ts", "backend", "model",
+                                                         "persona", "project_id", "role")}
+                    out["meta"]["quality"] = r.get("quality")
+                yield json.dumps(out, default=str, ensure_ascii=False) + "\n"
+                sent += 1
+                if sent >= limit:
+                    return
+    name = f"foundry-captured-calls-{utcnow()[:10]}.jsonl"
+    return StreamingResponse(lines(), media_type="application/x-ndjson",
+                             headers={"Content-Disposition": f'attachment; filename="{name}"'})
 
 
 @router.get("/admin/api/training/datasets")

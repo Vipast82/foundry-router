@@ -24,7 +24,10 @@ Reasoning text is stored in its own field and marked as such; training
 exports leave it out by default.
 
 Which requests: `projects` (empty = every project a coordinator bound) minus
-`exclude_projects`; unbound traffic only with `include_unbound`. Records are
+`exclude_projects`; unbound traffic only with `include_unbound` or when its
+persona is listed in `personas`. Per call, `backends` / `exclude_backends` and
+`personas` / `exclude_personas` (globs, empty include = all) decide whether
+that backend call is recorded (begin_call). Records are
 redacted (foundry_training.redact plus every secret Foundry knows) BEFORE they
 are written, to a separate SQLite file (default <data>/training/capture.sqlite,
 directory 0700, file 0600), pruned after `retention_days`.
@@ -37,6 +40,7 @@ idempotent.
 from __future__ import annotations
 
 import contextvars
+import fnmatch
 import json
 import logging
 import os
@@ -78,6 +82,17 @@ _decision: contextvars.ContextVar = contextvars.ContextVar("foundry_capture_deci
 _received: contextvars.ContextVar = contextvars.ContextVar("foundry_capture_received",
                                                            default=False)
 _attempt: contextvars.ContextVar = contextvars.ContextVar("foundry_capture_attempt", default=0)
+# the request had no coordinator project (its persona may still switch it on)
+_unbound: contextvars.ContextVar = contextvars.ContextVar("foundry_capture_unbound",
+                                                          default=False)
+# a `received` record held back until a persona-allowed backend call starts
+_pending: contextvars.ContextVar = contextvars.ContextVar("foundry_capture_pending",
+                                                          default=None)
+
+
+def glob_match(globs, name: str) -> bool:
+    n = (name or "").lower()
+    return any(fnmatch.fnmatchcase(n, str(g).lower()) for g in globs or [])
 
 
 class CaptureStore:
@@ -159,11 +174,32 @@ class Capture:
             elif pid:
                 ok = (not cfg.projects or pid in cfg.projects) and pid not in cfg.exclude_projects
             else:
-                ok = bool(cfg.include_unbound)
+                # no coordinator project: on with include_unbound, or when a persona
+                # was switched on by name (checked per call in allowed())
+                ok = bool(cfg.include_unbound or cfg.personas)
+                _unbound.set(True)
             if ok and cfg.clients and (c.get("client_id") or "") not in cfg.clients:
                 ok = False
         _decision.set(ok)
         return ok
+
+    def allowed(self, backend: str = "", persona: str = "", check_backend: bool = True) -> bool:
+        """The per-call switches: backend and persona include / exclude globs.
+        A persona named in `personas` is captured even with no coordinator
+        project; an unbound call with no such persona needs include_unbound."""
+        cfg = self.cfg
+        if check_backend and backend:
+            if glob_match(cfg.exclude_backends, backend):
+                return False
+            if cfg.backends and not glob_match(cfg.backends, backend):
+                return False
+        if glob_match(cfg.exclude_personas, persona):
+            return False
+        if cfg.personas and not glob_match(cfg.personas, persona):
+            return False
+        if _unbound.get() and not (cfg.include_unbound or cfg.personas):
+            return False
+        return True
 
     def _known_secrets(self) -> set:
         ts, vals = self._secrets
@@ -215,14 +251,34 @@ class Capture:
             return
         _received.set(True)
         keep = {k: body.get(k) for k in body if k not in ("api_key",)}
-        self._write(self._row("received", {"dialect": dialect, "request": keep},
-                              stream=1 if body.get("stream", dialect == "ollama") else 0,
-                              status="received", model=str(body.get("model") or "")))
+        row = ("received", {"dialect": dialect, "request": keep},
+               dict(stream=1 if body.get("stream", dialect == "ollama") else 0,
+                    status="received", model=str(body.get("model") or ""), ts=time.time()))
+        cfg = self.cfg
+        if cfg.backends or cfg.exclude_backends or cfg.personas or cfg.exclude_personas:
+            # Held until a backend call the switches allow starts: the backend and
+            # the routed persona are not known yet, and a request whose only calls
+            # are filtered out leaves no orphan `received` behind.
+            _pending.set([row])           # a list: shared by reference with child tasks
+            return
+        self._write(self._row(row[0], row[1], **row[2]))
 
-    def begin_call(self) -> Optional[dict]:
-        """Start one backend call record (None when not capturing)."""
+    @staticmethod
+    def _persona() -> str:
+        from . import request_context
+        return (request_context.route() or {}).get("persona") or ""
+
+    def begin_call(self, backend: str = "", persona: Optional[str] = None) -> Optional[dict]:
+        """Start one backend call record (None when not capturing this call)."""
         if not self.wanted():
             return None
+        persona = self._persona() if persona is None else persona
+        if not self.allowed(backend, persona):
+            return None
+        pend = _pending.get()
+        if pend:
+            row = pend.pop(0)             # popped in place: a sibling task's call won't repeat it
+            self._write(self._row(row[0], row[1], **row[2]))
         n = _attempt.get() + 1
         _attempt.set(n)
         return {"attempt": n, "t0": time.time()}
@@ -247,7 +303,8 @@ class Capture:
                    "reasoning": stream_acc.get("thinking", ""),
                    "finish_reason": stream_acc.get("finish_reason") or "",
                    "usage": {"prompt_tokens": stream_acc.get("pt", 0),
-                             "completion_tokens": stream_acc.get("ct", 0)}}
+                             "completion_tokens": stream_acc.get("ct", 0),
+                             "cached_tokens": stream_acc.get("cached", 0)}}
         body = {"request": {"model": model, "messages": messages, "tools": tools,
                             "settings": {k: v for k, v in settings.items() if v is not None}},
                 "response": out, "error": error[:2000] if error else "",
@@ -259,25 +316,55 @@ class Capture:
 
     # -- reading ----------------------------------------------------------------------
 
-    def records(self, after_id: int = 0, limit: int = 200, project: str = "") -> list[dict]:
+    def records(self, after_id: int = 0, limit: int = 200, project: str = "", *,
+                backend: str = "", persona: str = "", kind: str = "", since: float = 0.0,
+                db=None) -> list[dict]:
+        """Oldest first after `after_id`. With `db` (the router database) each
+        row also carries `quality`: request outcome, feedback, perf and the
+        coordinator's labels (training_quality.attach)."""
         q = "SELECT * FROM capture_records WHERE id > ?"
         args: list = [after_id]
-        if project:
-            q += " AND project_id = ?"
-            args.append(project)
+        for col, v in (("project_id", project), ("backend", backend), ("persona", persona),
+                       ("kind", kind)):
+            if v:
+                q += f" AND {col} = ?"
+                args.append(v)
+        if since:
+            q += " AND ts >= ?"
+            args.append(since)
         q += " ORDER BY id LIMIT ?"
         args.append(max(1, min(1000, limit)))
         rows = self.store.query(q, args)
         for r in rows:
             r["body"] = json.loads(r["body"] or "{}")
             r["redaction"] = json.loads(r["redaction"] or "{}")
+        if db is not None:
+            from . import training_quality
+            training_quality.attach(db, rows)
         return rows
+
+    def counts_today(self) -> dict:
+        """Backend calls captured since local midnight, by backend and persona."""
+        lt = time.localtime()
+        midnight = time.mktime((lt.tm_year, lt.tm_mon, lt.tm_mday, 0, 0, 0, 0, 0, -1))
+        out: dict = {"since": midnight, "backends": {}, "personas": {}, "total": 0}
+        for col, key in (("backend", "backends"), ("persona", "personas")):
+            for r in self.store.query(
+                    f"SELECT {col} AS k, COUNT(*) AS n FROM capture_records "
+                    f"WHERE kind='backend_call' AND ts >= ? GROUP BY {col}", (midnight,)):
+                out[key][r["k"] or ""] = r["n"]
+        out["total"] = sum(out["backends"].values())
+        return out
 
     def status(self) -> dict:
         cfg = self.cfg
         out = {"enabled": bool(cfg and cfg.enabled), "projects": list(cfg.projects or []),
                "exclude_projects": list(cfg.exclude_projects or []),
                "include_unbound": bool(cfg.include_unbound), "retention_days": cfg.retention_days,
+               "backends": list(cfg.backends or []),
+               "exclude_backends": list(cfg.exclude_backends or []),
+               "personas": list(cfg.personas or []),
+               "exclude_personas": list(cfg.exclude_personas or []),
                "boundary": BOUNDARY, "errors": self.errors, "last_error": self.last_error}
         if self._store is not None or (cfg and cfg.enabled):
             try:
@@ -286,6 +373,7 @@ class Capture:
                     "SUM(CASE WHEN redaction LIKE '%\"redacted\"%' THEN 1 ELSE 0 END) AS redacted, "
                     "MAX(ts) AS last_ts FROM capture_records GROUP BY project_id, kind")
                 out["counts"] = rows
+                out["today"] = self.counts_today()
                 out["store"] = str(self.store.path)
             except Exception as e:                                # noqa: BLE001
                 out["store_error"] = str(e)[:200]
@@ -297,11 +385,13 @@ def reset_request() -> None:
     _decision.set(None)
     _received.set(False)
     _attempt.set(0)
+    _unbound.set(False)
+    _pending.set(None)
 
 
 def stream_accumulator() -> dict:
     return {"content": "", "thinking": "", "tool_calls": [], "finish_reason": "", "pt": 0,
-            "ct": 0, "done": False}
+            "ct": 0, "cached": 0, "done": False}
 
 
 def accumulate(acc: dict, chunk: dict) -> None:
@@ -316,3 +406,4 @@ def accumulate(acc: dict, chunk: dict) -> None:
         acc["finish_reason"] = chunk.get("finish_reason") or chunk.get("done_reason") or ""
         acc["pt"] = chunk.get("prompt_tokens") or 0
         acc["ct"] = chunk.get("completion_tokens") or 0
+        acc["cached"] = chunk.get("cached_tokens") or 0

@@ -435,6 +435,22 @@ training_capture:
   exclude_projects: []
   include_unbound: false           # traffic with no project binding
   retention_days: 30
+  # Per-call switches (globs, case-insensitive; empty include = all). Editable live
+  # from the Training tab. A persona listed in `personas` is captured even outside a
+  # coordinator project.
+  backends: []
+  exclude_backends: []
+  personas: []
+  exclude_personas: []
+
+# Performance history. perf_samples and the engine-metrics history (server_samples,
+# Performance tab -> Inference servers) are kept this long. subscription_rates
+# allocates a flat USD per call to a subscription backend for sprint / task cost
+# figures (backend glob, optional model glob); it is not added to metered spend.
+perf:
+  retention_days: 14
+  server_sample_seconds: 60        # 0 = do not sample engine /metrics
+  subscription_rates: []           # e.g. [{match: "meridian", usd_per_call: 0.04}]
 
 # Functional health (docs/OBSERVABILITY.md): "reachable" vs actually serving.
 # Real traffic is the evidence; an idle backend with no recent success gets a

@@ -20,6 +20,14 @@ Exclusion reasons (each a requirement that wasn't met):
                     (enforced for every kind while allow_frontier_targets = false)
   no_local_target   every assistant turn is a helper step (frontier code the local
                     model applied): nothing is left to train on
+  router_outcome_missing / router_not_ok / router_unverified
+                    (policy tokens `router_ok`, `router_verified`) the router's own
+                    record of the session's final call: it succeeded, nobody rated it
+                    down, no negative gate / review / vision label; `router_verified`
+                    also needs a positive label (gate PASS, review APPROVED, vision
+                    approved) the coordinator posted. A policy that lists them in
+                    place of the verification tokens lets router-verified output
+                    qualify; whose output may be a target stays `allow_frontier_targets`.
   loop              the same tool call repeated (blind retries)
   missing_artifact  a referenced image's bytes aren't available
   no_feedback       (correction) the repair prompt carried no feedback
@@ -133,6 +141,14 @@ def requirements(ep: dict, cfg, known_secrets=()) -> list[str]:
     if f.get("gate_label_inconsistent") or any(
             g.get("inconsistent") for g in (ep.get("labels") or {}).get("gate") or []):
         reasons.append("gate_label_inconsistent")
+    if "router_ok" in need or "router_verified" in need:
+        rs = oc.get("router") or {}
+        if not rs.get("known"):
+            reasons.append("router_outcome_missing")
+        elif not rs.get("ok"):
+            reasons.append("router_not_ok")
+        elif "router_verified" in need and not rs.get("positive"):
+            reasons.append("router_unverified")
     if "no_loop" in need and f.get("loop"):
         reasons.append("loop")
     if "feedback_present" in need and not (ep.get("feedback") or {}).get("items"):

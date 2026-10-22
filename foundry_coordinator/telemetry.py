@@ -1263,6 +1263,8 @@ class TelemetryBridge:
         # monotonically increasing per bridge process; part of every batch id
         self.send_seq = 1
         self.compat: dict = {}
+        # verified outcomes not yet accepted by Foundry (training_outcome posts)
+        self.pending_outcomes: list[dict] = []
 
     # ---------------------------------------------------------------- lifecycle
 
@@ -1350,6 +1352,8 @@ class TelemetryBridge:
                 self.kilo_ok[pid] = False
                 self.kilo_error = str(e)[:300]
         sent = self._send(obs, commits)
+        if self.pending_outcomes:
+            self._flush_outcomes()
         if now - self._last["beat"] >= 15 or not self._last["beat"]:
             self._heartbeat()
             self._last["beat"] = now
@@ -1384,6 +1388,73 @@ class TelemetryBridge:
             c()
         self.backoff = 0.0
         return True
+
+    # ---------------------------------------------------------------- verified outcomes
+
+    # coordinator event -> (label, test on the event's detail)
+    OUTCOME_EVENTS = {
+        "fast_lane_gate": lambda d: {"PASS": "gate_pass", "FAIL": "gate_fail"}.get(
+            str(d.get("result") or "").upper()),
+        "review": lambda d: {"APPROVED": "review_approved",
+                             "CHANGES_REQUIRED": "review_changes"}.get(
+            str(d.get("verdict") or "").upper()),
+        "fast_lane_vision_approved": lambda d: "vision_approved",
+        "fast_lane_vision_changes": lambda d: "vision_changes",
+    }
+
+    def _outcome_posts(self, evs: list[dict]) -> list[dict]:
+        """One training-outcome post per gate / review / vision verdict event: the
+        label, the work it covers (project, task, the implementer session that
+        produced the verified head, calls up to the event) and a little evidence.
+        Foundry resolves that to request ids and attaches the label to the captured
+        calls, so a verified output can become a training example."""
+        sessions = None
+        out = []
+        for e in evs:
+            test = self.OUTCOME_EVENTS.get(e.get("kind"))
+            pid, tid = e.get("project_id"), e.get("task_id")
+            if test is None or pid not in self.projects or not tid:
+                continue
+            d = e.get("detail") or {}
+            label = test(d)
+            if not label:
+                continue
+            if sessions is None:
+                sessions = self.reader.sessions()
+            mine = [s for s in sessions if s.get("project_id") == pid and s.get("task_id") == tid
+                    and s.get("role") == "implementer" and (s.get("created_ts") or 0) <= e["ts"]]
+            post = {"label": label, "project_id": pid, "task_id": tid, "until_ts": e["ts"],
+                    "evidence": {"event": e.get("kind"), "event_id": e.get("event_id"),
+                                 "head": d.get("head") or d.get("reviewed_commit_sha"),
+                                 "summary": _cap(d.get("summary") or d.get("verdict")
+                                                 or d.get("actor"), 200)}}
+            if mine:
+                latest = max(mine, key=lambda s: s.get("created_ts") or 0)
+                post["session_ids"] = [latest["session_id"]]
+                if latest.get("run_id"):
+                    post["run_id"] = latest["run_id"]
+            out.append(post)
+        return out
+
+    def _send_outcomes(self, posts: list[dict]) -> None:
+        self.pending_outcomes = (self.pending_outcomes + posts)[-500:]
+        self._flush_outcomes()
+
+    def _flush_outcomes(self) -> None:
+        send = getattr(self.foundry, "training_outcome", None)
+        if send is None:
+            self.pending_outcomes = []
+            return
+        keep = []
+        for p in self.pending_outcomes:
+            try:
+                send(p)
+            except Exception as ex:                              # noqa: BLE001
+                # a 4xx is final (nothing recorded to label, an older Foundry); a
+                # connection problem is retried on the next step
+                if not any(f"HTTP {c}" in str(ex) for c in (400, 404, 405, 422)):
+                    keep.append(p)
+        self.pending_outcomes = keep
 
     def _heartbeat(self) -> None:
         own = self.reader.owner() or {}
@@ -1507,6 +1578,9 @@ class TelemetryBridge:
         if evs:
             last_e = evs[-1]["id"]
             commits.append(lambda v=last_e: setattr(self, "cursor_events", v))
+            posts = self._outcome_posts(evs)
+            if posts:
+                commits.append(lambda ps=posts: self._send_outcomes(ps))
         self._lane_facts(obs, commits)
         self._project_pause_facts(obs, commits, now)
         # direct Foundry calls (visual observer) are not Kilo sessions: never poll Kilo for them

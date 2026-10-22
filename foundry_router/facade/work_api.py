@@ -369,16 +369,48 @@ async def denials(request: Request, session: str = "", run: str = "", since: flo
 
 @router.get("/v1/foundry/capture/records")
 async def capture_records(request: Request, after_id: int = 0, limit: int = 200,
-                          project: str = ""):
+                          project: str = "", backend: str = "", persona: str = ""):
     """Captured inference records (already redacted), oldest first, after
-    `after_id`: the training pipeline's incremental, idempotent source."""
-    cap = request.app.state.services.capture
+    `after_id`: the training pipeline's incremental, idempotent source. Each
+    row carries `quality` (request outcome, feedback, perf, coordinator labels)
+    joined by request id."""
+    svc = request.app.state.services
+    cap = svc.capture
     if not cap.cfg.enabled and cap._store is None:
         return {"records": [], "enabled": False, "next_after_id": after_id}
-    rows = cap.records(after_id, limit, project)
+    rows = cap.records(after_id, limit, project, backend=backend, persona=persona, db=svc.db)
     return {"records": rows, "enabled": bool(cap.cfg.enabled),
             "next_after_id": rows[-1]["id"] if rows else after_id, "boundary": rows[0]["boundary"]
             if rows else None}
+
+
+@router.get("/v1/foundry/training/outcomes")
+async def training_outcomes_list(request: Request, after_id: int = 0, limit: int = 500):
+    """The coordinator's outcome labels, oldest first after `after_id`: the training
+    pipeline ingests them next to the capture records."""
+    rows = request.app.state.services.db.query(
+        "SELECT id, ts, request_id, label, source, project_id, task_id, evidence FROM "
+        "training_outcomes WHERE id > ? ORDER BY id LIMIT ?", (after_id, max(1, min(2000, limit))))
+    return {"outcomes": rows, "next_after_id": rows[-1]["id"] if rows else after_id}
+
+
+@router.post("/v1/foundry/training/outcomes")
+async def training_outcomes(request: Request):
+    """The coordinator's verified outcome for model calls: {label, request_ids |
+    (project_id, task_id[, session_ids, run_id, until_ts, roles]), evidence}.
+    Label is gate_pass, review_approved or vision_approved (or gate_fail,
+    review_changes, vision_changes). It joins the captured calls by request id;
+    the training policy tokens router_ok / router_verified read it."""
+    from .. import training_quality as tq
+    try:
+        body = await request.json()
+        if not isinstance(body, dict):
+            raise ValueError("body must be a JSON object")
+        out = tq.add_outcomes(request.app.state.services.db, body,
+                              source=client_auth.current().get("client_id") or "")
+    except (ValueError, tq.OutcomeError) as e:
+        return _bad(e)
+    return {"ok": True, **out}
 
 
 _DATASET_ID = __import__("re").compile(r"^[A-Za-z0-9._-]{8,120}$")
