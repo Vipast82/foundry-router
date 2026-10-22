@@ -200,8 +200,10 @@ def _db_w1(tmp_path, *, lead_started=0, runner_pid=None, task_state="VERIFYING")
     return str(d)
 
 
-def test_safe_point_counts_lead_sessions_and_gate_runners(tmp_path):
+def test_safe_point_counts_lead_sessions_and_gate_runners(tmp_path, monkeypatch):
     import os as _os
+    import foundry_client.components as C
+    monkeypatch.setattr(C, "pid_alive", lambda pid: pid == _os.getpid())
     assert safe_point(_db_w1(tmp_path / "a"))[0] is True
     ok, why = safe_point(_db_w1(tmp_path / "b", lead_started=1, task_state="BLOCKED"))
     assert ok is False and "1 lead session(s) in flight" in why
@@ -225,6 +227,7 @@ def test_coordinator_restart_never_kills_the_detached_runner_tree(cfg, tmp_path,
     calls = []
     monkeypatch.setattr(M.sys, "platform", "win32")
     monkeypatch.setattr(M.subprocess, "run", lambda argv, **kw: calls.append(argv))
+    monkeypatch.setattr(M.Manager, "_kill_pid", M.REAL_KILL_PID)
     m = Manager(cfg, popen=lambda argv, **kw: FakeProc(argv))
     for name in ("coordinator", "kilo"):
         pr = m.procs[name]
