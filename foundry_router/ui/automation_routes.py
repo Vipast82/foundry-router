@@ -1,14 +1,14 @@
 """Automation area (/ui/automation): the page and its read-side glue.
 
-The page edits one automation document through the C1 config store
-(/control/api/config*, its own module). What lives here only reads:
+Settings and role rules are edited through the config store
+(automation_api.py, /admin/api/automation/*); the path tester is its
+role-rules/test-path. What lives here only reads:
 
   GET  /ui/automation                    the page
   GET  /control/api/automation/usage     live 5-hour / weekly usage per backend
-  GET  /control/api/automation/seed      STUB until C1 is merged: today's
-                                         personas, backends and role bindings
+  GET  /control/api/automation/seed      live routing state: persona routes,
+                                         backend on/off, cutoffs in force
   POST /control/api/automation/dry-run   which route each role would use now
-  POST /control/api/automation/path-test may role X read/edit/write P or run command C?
   POST /control/api/automation/check     rule warnings for a document
   POST /control/api/automation/diff      changed paths between two documents
 
@@ -50,34 +50,22 @@ async def automation_page():
 
 
 def _cutoffs(svc) -> dict:
-    """Per-backend cutoff % in force today. A1-A4 (router-budgets) replace the
-    scattered settings with one per-backend value; until then: the backend's
-    usage_limit_pct, else subscription_usage.limit_pct (ChatGPT) or Meridian's
-    conserve_premium_at (Claude)."""
+    """The usage cutoff in force per subscription backend: the one value the
+    budget gate uses (guardrails.effective_cutoff: usage_limit_pct, else
+    Meridian's conserve_strong_at, else subscription_usage.limit_pct)."""
+    from ..guardrails import effective_cutoff
     cfg = svc.config_store.config
     out = {}
-    explicit = getattr(cfg, "cutoffs", None)                # A4, when merged
     for name, s in (getattr(svc.pool, "backends", None) or {}).items():
         c = s.config
-        v = None
-        if isinstance(explicit, dict):
-            v = explicit.get(name)
-        if v is None and c.usage_limit_pct:
-            v = c.usage_limit_pct
-        if v is None:
-            fam = av.backend_family(name, c.effective_flavor or "", c.type or "")
-            if fam == "chatgpt":
-                v = cfg.subscription_usage.limit_pct
-            elif fam == "claude":
-                v = round(float(svc.meridian_usage.cfg.conserve_premium_at) * 100, 1)
-        if v is not None:
-            out[name] = float(v)
+        if av.backend_family(name, c.effective_flavor or "", c.type or "") in ("claude", "chatgpt"):
+            out[name] = float(effective_cutoff(cfg, name))
     return out
 
 
 async def live_usage(svc) -> dict:
     from .routes import _cliproxy_infos
-    status = svc.pool.backend_status()
+    status = _status_with_models(svc)
     mer = []
     for s in getattr(svc.pool, "backends_of_type", lambda t: [])("anthropic-compatible"):
         try:
@@ -96,7 +84,8 @@ async def live_usage(svc) -> dict:
             cli.append({**await cu.snapshot(info), "configured": True})
         except Exception as e:                                   # noqa: BLE001
             cli.append({"backend": info["name"], "ok": False, "error": str(e)[:200], "accounts": []})
-    return av.normalize_usage(status, mer, cli, _cutoffs(svc))
+    return av.normalize_usage(status, mer, cli, _cutoffs(svc),
+                              fail_closed=bool(svc.config_store.config.subscription_usage.fail_closed))
 
 
 @router.get("/control/api/automation/usage")
@@ -129,16 +118,27 @@ def _role_personas(svc) -> dict:
     return out
 
 
+def _status_with_models(svc) -> list[dict]:
+    """Backend status with each backend's discovered AND configured models (as
+    the dashboard's route graph reads them), so a route keeps its backend while
+    that backend is down or not probed yet."""
+    status = svc.pool.backend_status()
+    states = getattr(svc.pool, "backends", None) or {}
+    for b in status:
+        s = states.get(b.get("name"))
+        conf = list(getattr(getattr(s, "config", None), "models", None) or []) if s else []
+        b["models"] = list(dict.fromkeys(list(b.get("models") or []) + conf))
+    return status
+
+
 @router.get("/control/api/automation/seed")
 @_guard
 async def automation_seed(request: Request):
     _op(request)
     svc = request.app.state.services
     personas = [dict(p) for p in svc.personas.list()]
-    doc = av.seed_document(personas, svc.pool.backend_status(), _role_personas(svc), _cutoffs(svc))
-    return {"doc": doc, "stub": True,
-            "note": "Read from today's personas and backends. The C1 config store is not merged, "
-                    "so drafts stay in this browser and Deploy is off."}
+    doc = av.seed_document(personas, _status_with_models(svc), _role_personas(svc), _cutoffs(svc))
+    return {"doc": doc}
 
 
 def _doc(b: dict) -> dict:
@@ -163,19 +163,6 @@ async def automation_dry_run(request: Request):
     else:
         roles = [r.get("id") for r in doc.get("roles") or []]
     return {"results": [av.dry_run(doc, r, usage) for r in roles if r], "ts": time.time()}
-
-
-@router.post("/control/api/automation/path-test")
-@_guard
-async def automation_path_test(request: Request):
-    _op(request, mutate=True)
-    b = await _body(request)
-    path = str(b.get("path") or "").strip()
-    if not path or len(path) > 1000:
-        raise ControlError("path must be 1-1000 characters")
-    op = str(b.get("op") or b.get("tool") or "edit")
-    return av.path_test(_doc(b), str(b.get("role") or ""), op, path,
-                        str(b.get("workspace") or "")[:500])
 
 
 @router.post("/control/api/automation/check")

@@ -1,7 +1,7 @@
 """The Automation page (/ui/automation) and its read-side endpoints: operator
-session + CSRF like the control center, the stub seed until C1 is merged,
-dry run / path test / diff over a posted document, and a page script that
-parses and keeps secrets out of browser storage."""
+session + CSRF like the control center, the live routing base view, dry run /
+check / diff over a posted document, a page that talks to the config store
+(automation_api.py) the way contract v1.2 says, and a script that parses."""
 
 import re
 import shutil
@@ -49,13 +49,31 @@ def test_page_script_parses(tmp_path):
     assert r.returncode == 0, r.stderr[:2000]
 
 
-def test_browser_storage_holds_preferences_and_the_stub_draft_only():
+def test_browser_storage_holds_preferences_and_the_dashboard_admin_key_only():
     s = _script()
-    keys = set(re.findall(r'store\("([^"]+)"', s)) | set(re.findall(r"store\((LOCAL_DRAFT)", s))
-    assert keys <= {"fr-theme", "fr.auto.ws", "fr.auto.project", "LOCAL_DRAFT"}, keys  # prefs + stub draft
-    assert 'const LOCAL_DRAFT = "fr.auto.draft"' in s
-    assert "sessionStorage" not in s and "foundryAdminKey" not in s
+    keys = set(re.findall(r'store\("([^"]+)"', s)) | set(re.findall(r"store\((ADMIN_KEY)", s))
+    assert keys <= {"fr-theme", "fr.auto.ws", "fr.auto.project", "ADMIN_KEY"}, keys
+    # the admin key is the dashboard's own (same origin), asked for only when
+    # client_auth.protect_admin is on; the operator key is never stored
+    assert 'const ADMIN_KEY = "foundryAdminKey"' in s
+    assert "sessionStorage" not in s
     assert '$("#login-key").value = "";' in s
+
+
+def test_page_uses_the_config_store_contract():
+    s = _script()
+    # every store write carries the CSRF header and the signed-in operator as actor
+    assert 'o.headers["x-foundry-automation"] = "1"' in s
+    assert 'o.headers["x-foundry-actor"] = S.me.actor' in s
+    for path in ('"automation/projects"', '"/draft"', '"/diff"', '"/deploy"', '"/draft/reset"',
+                 '"/revisions?limit=30"', '"/rollback"', '"automation/schema"',
+                 '"automation/role-rules/test-path"', 'AP("_router")'):
+        assert path in s, path
+    # route order and backend on/off: live writes after a snapshot (contract v1.2)
+    assert 'adminApi("snapshots", {method: "POST"' in s
+    assert 'adminApi("personas", {method: "POST"' in s and "model_allowlist" in s
+    assert 'adminApi("backends/enabled", {method: "POST"' in s
+    assert "STUB" not in s and "LOCAL_DRAFT" not in s
 
 
 def test_endpoints_need_the_operator_session_and_csrf(client, op):
@@ -69,13 +87,11 @@ def test_endpoints_need_the_operator_session_and_csrf(client, op):
     assert client.post("/control/api/automation/check", json={"doc": {}}, headers=csrf).status_code == 200
 
 
-def test_seed_usage_dry_run_path_test_and_diff(client, op):
+def test_seed_usage_dry_run_check_and_diff(client, op):
     u = client.get("/control/api/automation/usage")
     assert u.status_code == 200, u.text
     assert isinstance(u.json()["usage"], dict)
-    s = client.get("/control/api/automation/seed").json()
-    assert s["stub"] is True
-    doc = s["doc"]
+    doc = client.get("/control/api/automation/seed").json()["doc"]
     assert [r["id"] for r in doc["roles"]][:2] == ["implementer", "lead"]
     assert doc["role_rules"]["implementer"]["permissions"]["edit"] == "allow"
     assert doc["hard_denies"]
@@ -85,25 +101,39 @@ def test_seed_usage_dry_run_path_test_and_diff(client, op):
     r = client.post("/control/api/automation/dry-run", headers=op,
                     json={"doc": doc, "role": "implementer"}).json()["results"][0]
     assert r["chosen"] is None and "not in the pool" in r["hops"][0]["reason"]
-    every = client.post("/control/api/automation/dry-run", headers=op, json={"doc": doc}).json()
-    assert len(every["results"]) == len(doc["roles"])
-
-    pt = client.post("/control/api/automation/path-test", headers=op, json={
-        "doc": doc, "role": "implementer", "op": "edit", "workspace": "C:/Roblox/AnimalUprising",
-        "path": "C:\\Roblox\\AnimalUprising\\src\\x.lua"}).json()
-    assert pt["decision"] == "allow"
-    sh = client.post("/control/api/automation/path-test", headers=op, json={
-        "doc": doc, "role": "implementer", "op": "bash", "path": "git push -f origin"}).json()
-    assert sh["decision"] == "deny" and sh["locked"] is True
-    assert client.post("/control/api/automation/path-test", headers=op,
-                       json={"doc": doc, "role": "implementer", "path": ""}).status_code == 400
+    some = client.post("/control/api/automation/dry-run", headers=op,
+                       json={"doc": doc, "roles": ["implementer", "lead"]}).json()
+    assert [x["role"] for x in some["results"]] == ["implementer", "lead"]
     assert client.post("/control/api/automation/dry-run", headers=op,
                        json={"doc": "nope"}).status_code == 400
+
+    doc["role_rules"]["implementer"]["edit_paths"]["allow"] = ["C:/Roblox/AnimalUprising/**"]
+    w = client.post("/control/api/automation/check", headers=op, json={"doc": doc}).json()["warnings"]
+    assert any(x["role"] == "implementer" and "shell" in x["message"] for x in w)
 
     after = {**doc, "backends": {**doc["backends"], "x": {"enabled": False}}}
     ch = client.post("/control/api/automation/diff", headers=op,
                      json={"before": doc, "after": after}).json()["changes"]
     assert [c["path"] for c in ch] == ["backends.x"]
+
+
+def test_store_endpoints_the_page_calls_answer(client):
+    """The calls the page makes, against the merged config store."""
+    hdr = {"X-Foundry-Automation": "1", "X-Foundry-Actor": "victor"}
+    assert "fields" in client.get("/admin/api/automation/schema").json()
+    assert "projects" in client.get("/admin/api/automation/projects").json()
+    d = client.get("/admin/api/automation/projects/animaluprising/draft").json()
+    doc = d["doc"]
+    doc.setdefault("settings", {}).setdefault("limits", {})["max_attempts"] = 5
+    r = client.put("/admin/api/automation/projects/animaluprising/draft",
+                   json={"doc": doc, "etag": d["etag"]}, headers=hdr)
+    assert r.status_code == 200, r.text
+    ch = client.get("/admin/api/automation/projects/animaluprising/diff").json()["changes"]
+    assert any(c["path"] == "limits.max_attempts" for c in ch)
+    t = client.post("/admin/api/automation/role-rules/test-path", headers=hdr, json={
+        "project": "animaluprising", "role": "implementer", "op": "bash",
+        "command": "git push --force origin main"}).json()
+    assert t["decision"] == "deny"
 
 
 def test_dashboard_and_control_center_link_to_automation():
