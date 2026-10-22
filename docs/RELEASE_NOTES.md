@@ -2,6 +2,12 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.134.1 — Foundry Client: Rojo health reads msgpack
+
+Rojo 7 answers `/api/rojo` with msgpack, not JSON, so the client's Rojo check never passed and
+would have restarted Rojo every five minutes. A 200 now counts as healthy; the session id is
+decoded with `msgpack` when installed (added to the `client` extra).
+
 ## v0.134.0 — Operator chat (Chat tab), Foundry Client relay
 
 The Automation page's Ask tab becomes a **Chat** (`foundry_router/chat_engine.py`,

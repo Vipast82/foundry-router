@@ -292,7 +292,12 @@ def rojo_health(port: int) -> tuple:
     if not port_open(port):
         return False, f"port {port} is closed"
     code, body, err = get_json(f"http://127.0.0.1:{port}/api/rojo", None, 3)
-    if code == 200 and isinstance(body, dict):
+    if code == 200 and not isinstance(body, dict):
+        # Rojo 7 answers with msgpack, not JSON: decode it when the library is there,
+        # otherwise a 200 is healthy with an unknown session id
+        body = _rojo_msgpack(port)
+    if code == 200:
+        body = body if isinstance(body, dict) else {}
         sid = str(body.get("sessionId") or "")
         info = {"sessionId": sid, "projectName": body.get("projectName") or "",
                 "serverVersion": body.get("serverVersion") or ""}
@@ -301,6 +306,18 @@ def rojo_health(port: int) -> tuple:
     if code == 0:
         return False, f"port {port} is open but /api/rojo does not answer ({err})"
     return False, f"port {port} is open but /api/rojo returned HTTP {code or err}"
+
+
+def _rojo_msgpack(port: int) -> dict:
+    try:
+        import urllib.request
+        import msgpack
+        with urllib.request.urlopen(f"http://127.0.0.1:{port}/api/rojo", timeout=3) as r:
+            raw = r.read()
+        out = msgpack.unpackb(raw, raw=False)
+        return out if isinstance(out, dict) else {}
+    except Exception:                                            # noqa: BLE001
+        return {}
 
 
 def project_ids(profiles: str) -> list[str]:
