@@ -43,13 +43,23 @@ def is_enabled() -> bool:
 def enable() -> Path:
     p = path()
     p.parent.mkdir(parents=True, exist_ok=True)
+    root = _root()
     if sys.platform == "win32":
-        p.write_text(f'@echo off\r\nstart "" {_launch_line()}\r\n', encoding="utf-8")
+        cd = f'cd /d "{root}"\r\n' if root else ""
+        p.write_text(f'@echo off\r\n{cd}start "" {_launch_line()}\r\n', encoding="utf-8")
     else:
         p.write_text("[Desktop Entry]\nType=Application\nName=Foundry Client\n"
                      f"Exec={_launch_line()}\nX-GNOME-Autostart-enabled=true\n"
-                     "Icon=foundry-client\nTerminal=false\n", encoding="utf-8")
+                     + (f"Path={root}\n" if root else "")
+                     + "Icon=foundry-client\nTerminal=false\n", encoding="utf-8")
     return p
+
+
+def _root() -> str:
+    """Running from source: the checkout's folder, so `-m foundry_client` finds it."""
+    if getattr(sys, "frozen", False):
+        return ""
+    return str(Path(__file__).resolve().parent.parent)
 
 
 def disable() -> None:

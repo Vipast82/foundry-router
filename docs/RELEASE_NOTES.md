@@ -2,6 +2,12 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.133.1 — Foundry Client: start at logon from a source checkout
+
+When the client runs from source, the start-at-logon entry now starts in the checkout's folder. On
+Windows the `.cmd` does `cd /d`; on Linux the `.desktop` file sets `Path=`. Without this,
+`-m foundry_client` was not found at logon. Packaged installs are unchanged.
+
 ## v0.133.0 — Foundry Client: installer, tray and stack manager
 
 A new package, `foundry_client`, replaces the hand-written workstation scripts
