@@ -16,6 +16,7 @@ def cfg(tmp_path, monkeypatch):
     monkeypatch.setenv("FOUNDRY_CLIENT_CONFIG", str(tmp_path / "client.toml"))
     monkeypatch.setenv("APPDATA", str(tmp_path / "appdata"))
     monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "xdg"))
+    monkeypatch.setattr(secrets, "_kr", lambda: None)          # never the real OS keyring
     c = copy.deepcopy(config.DEFAULTS)
     game = tmp_path / "game"
     game.mkdir()
