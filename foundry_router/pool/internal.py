@@ -489,7 +489,7 @@ class InternalPool(BackendPool):
                 s.busy += 1
                 settled = False
                 cap = getattr(self, "capture", None)
-                ctok = cap.begin_call() if cap is not None else None
+                ctok = cap.begin_call(s.config.name) if cap is not None else None
                 csettings = {"options": options, "max_tokens": max_tokens, "think": think,
                              "format": fmt, "keep_alive": keep_alive}
                 try:
@@ -654,7 +654,7 @@ class InternalPool(BackendPool):
         await self._recheck_optional(s, eid)
         usage = {"pt": 0, "ct": 0, "status": "error", "detail": "stream did not complete"}
         cap = getattr(self, "capture", None)
-        ctok = cap.begin_call() if cap is not None else None
+        ctok = cap.begin_call(s.config.name) if cap is not None else None
         if ctok is not None:
             from ..capture import accumulate, stream_accumulator
             cacc = stream_accumulator()

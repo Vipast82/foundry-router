@@ -472,6 +472,42 @@ def attribute_steps(messages: list[dict], attrs: list[dict]) -> list[dict]:
     return out
 
 
+POSITIVE_LABELS = ("gate_pass", "review_approved", "vision_approved")
+NEGATIVE_LABELS = ("gate_fail", "review_changes", "vision_changes")
+
+
+def quality_state(q: Optional[dict], labels: Optional[list] = None) -> dict:
+    """known / ok / positive / negative for one router `quality` block (the
+    request outcome, summed feedback and coordinator labels of a call).
+    `labels` overrides the block's own (a session pools its calls' labels)."""
+    q = q or {}
+    names = sorted({l.get("label") for l in (q.get("labels") if labels is None else labels) or []
+                    if l.get("label")})
+    pos = [x for x in names if x in POSITIVE_LABELS]
+    neg = [x for x in names if x in NEGATIVE_LABELS]
+    fb = q.get("feedback")
+    known = bool(q)
+    return {"known": known, "outcome": q.get("outcome"), "feedback": fb, "labels": names,
+            "positive": pos, "negative": neg,
+            "ok": bool(known and q.get("outcome") == "ok" and (fb is None or fb >= 0)
+                       and not neg)}
+
+
+def router_signal(calls: list[dict], outcome_events: Optional[list] = None) -> dict:
+    """The router's own quality signal for a session, from its Foundry-captured
+    model calls: the last complete call's request outcome and feedback, and the
+    coordinator labels (gate PASS, review APPROVED, vision approved) attached to
+    any of the session's requests. `ok`: the final call succeeded, nobody rated
+    it down and no negative label was recorded."""
+    done = [c for c in calls if c["facts"].get("status") == "ok"]
+    q = (done[-1]["facts"].get("quality") if done else None) or {}
+    pooled = [l for c in calls for l in ((c["facts"].get("quality") or {}).get("labels") or [])]
+    rids = {c.get("request_id") for c in calls if c.get("request_id")}
+    pooled += [{"label": e["facts"].get("label")} for e in outcome_events or []
+               if e.get("request_id") in rids]
+    return quality_state(q, pooled)
+
+
 def is_target(m: dict, allow_frontier: bool) -> bool:
     """Whether an assistant turn may be a training target. Tool, user and
     system turns are never targets; with allow_frontier_targets = false only

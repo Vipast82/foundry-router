@@ -107,9 +107,20 @@ class Pipeline:
         key_name = f"foundry:{url or capture_db}"
         after = int(self.store.checkpoint(key_name) or 0)
         rows = foundry.from_api(url, key, after) if url else foundry.from_db(capture_db, after)
-        return self.ing.run(key_name, self._filter(foundry.records(rows, project_map), "foundry"),
-                            foundry.normalize,
-                            cursor_of=lambda rid, payload: payload.get("id") or 0)
+        out = self.ing.run(key_name, self._filter(foundry.records(rows, project_map), "foundry"),
+                           foundry.normalize,
+                           cursor_of=lambda rid, payload: payload.get("id") or 0)
+        if url:
+            # the coordinator's verified outcomes (gate PASS, review APPROVED, vision
+            # approved) arrive as their own records, so a label posted after the call
+            # was ingested still reaches its episode
+            okey = f"foundry-outcomes:{url}"
+            orows = foundry.outcomes_from_api(url, key, int(self.store.checkpoint(okey) or 0))
+            o = self.ing.run(okey, self._filter(foundry.outcome_records(orows), "foundry"),
+                             foundry.normalize_outcome,
+                             cursor_of=lambda rid, payload: payload.get("id") or 0)
+            out = dict(out, outcomes=o.get("new_events", 0))
+        return out
 
     def ingest_coordinator(self, db: str) -> dict:
         def norm(payload, pid, raw_ref, redaction):

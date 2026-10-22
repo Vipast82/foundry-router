@@ -235,6 +235,11 @@ class FoundryClient:
     def telemetry(self, batch: dict) -> dict:
         return self._req("POST", "/v1/foundry/telemetry/batch", batch, timeout=30)[0]
 
+    def training_outcome(self, post: dict) -> dict:
+        """A verified outcome (gate PASS, review APPROVED, vision approved) for the
+        implementer's model calls: the router attaches it to the captured calls."""
+        return self._req("POST", "/v1/foundry/training/outcomes", post, timeout=20)[0]
+
     def heartbeat(self, payload: dict) -> dict:
         return self._req("POST", "/v1/foundry/telemetry/heartbeat", payload, timeout=15)[0]
 

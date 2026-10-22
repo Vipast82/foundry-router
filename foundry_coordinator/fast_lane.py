@@ -165,6 +165,14 @@ def rojo_stale_only(v: dict) -> bool:
     return bool(bad) and all(str(c.get("id") or "") in STALE_CHECKS for c in bad)
 
 
+def _since(wall) -> Optional[float]:
+    """Seconds since a time.time() stamp (None when there is none)."""
+    try:
+        return round(max(0.0, time.time() - float(wall)), 1) if wall else None
+    except (TypeError, ValueError):
+        return None
+
+
 def failed_check_lines(v: dict, cap: int = 30) -> list[str]:
     out = []
     for c in v.get("checks") or []:
@@ -757,10 +765,16 @@ class FastLane:
             consumed[vkey] = res
             fl["consumed"] = dict(list(consumed.items())[-20:])
             self._save(P, tid, fl)
+            checks = [c for c in v.get("checks") or [] if isinstance(c, dict)]
             self.store.event(P.id, tid, "fast_lane_gate", detail={
                 "head": run["head"], "result": res, "runner_result": v.get("result"),
                 "summary": v.get("summary_line"), "verdict": verdict_rel(tid, run["head"]),
-                "failed": failed_check_lines(v)[:10] if res != PASS else []})
+                "failed": failed_check_lines(v)[:10] if res != PASS else [],
+                # numbers for the router's sprint scorecard
+                "duration_s": _since(run.get("wall")),
+                "checks_total": len(checks),
+                "checks_failed": sum(1 for c in checks
+                                     if str(c.get("result") or "").upper() not in ("PASS", "SKIP"))})
         rows = self._gate_rows(P, tid, run, v, head)
         if res == "ERROR":
             return self._error(P, t, head, generic + rows,
@@ -857,7 +871,8 @@ class FastLane:
         self._save(P, tid, fl)
         mx = int(s["max_red_gates_before_handoff"])
         self.store.event(P.id, tid, "fast_lane_red_gate", detail={
-            "n": n, "head": v.get("head"), "failed": lines[:10], "timeout": bool(v.get("timeout"))})
+            "n": n, "head": v.get("head"), "failed": lines[:10], "timeout": bool(v.get("timeout")),
+            "duration_s": _since((fl.get("run") or {}).get("wall"))})
         if n >= 2 * mx:
             self.c.store.release(P.id, tid)
             self.c._stop(P, t, S.BLOCKED, {
@@ -1135,6 +1150,9 @@ class FastLane:
             self.store.add_approval(P.id, tid, "visual", head, arts, actor,
                                     f"fast-lane vision approval at gate {run['head'][:12]}; "
                                     f"policy visual_model v1")
+            self.store.event(P.id, tid, "fast_lane_vision_approved", detail={
+                "head": head, "frames": total, "actor": actor,
+                "rounds": int(self._fl(P, tid).get("vision_rounds") or 0)})
             return VerificationResult("fast_lane.vision", PASS, True, "",
                                       f"APPROVED by {actor} ({total} frame(s))", head)
         unsure_notes = [f"inconclusive after one structured retry (accepted with notes): {u}"[:400]
@@ -1183,6 +1201,8 @@ class FastLane:
         """Vision CHANGES go back into the same session (one fix round); with a code
         review's CHANGES at the same head, both in ONE prompt (B4)."""
         lines = list(findings or ["changes required"])
+        self.store.event(P.id, t["task_id"], "fast_lane_vision_changes", detail={
+            "round": rnd, "max": mx, "findings": len(lines), "head": head})
         title = f"Vision review: CHANGES (round {rnd}/{mx})"
         key = f"fast-lane:vision:{fp}"
         if review:

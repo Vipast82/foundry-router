@@ -582,6 +582,11 @@ class Database:
             ("request_log", "work_task_id", "TEXT"),
             ("request_log", "run_id", "TEXT"),
             ("request_log", "role", "TEXT"),
+            # Sprint scorecard (scorecard.py): speed and tokens per project / task / run / role.
+            ("perf_samples", "project_id", "TEXT"),
+            ("perf_samples", "work_task_id", "TEXT"),
+            ("perf_samples", "run_id", "TEXT"),
+            ("perf_samples", "role", "TEXT"),
         ]
         with self._lock:
             for table, column, ddl in added:
@@ -590,6 +595,14 @@ class Database:
                 if column not in cols:
                     self._conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {ddl}")
                     log.info("migrated: %s.%s added", table, column)
+            # request_id joins (training quality, scorecard) and per-sprint lookups
+            for name, table, cols in (
+                    ("idx_request_log_rid", "request_log", "request_id"),
+                    ("idx_perf_samples_rid", "perf_samples", "request_id"),
+                    ("idx_usage_events_rid", "usage_events", "request_id"),
+                    ("idx_request_log_task", "request_log", "project_id, work_task_id"),
+                    ("idx_perf_samples_task", "perf_samples", "project_id, work_task_id")):
+                self._conn.execute(f"CREATE INDEX IF NOT EXISTS {name} ON {table}({cols})")
             self._conn.commit()
 
     def _seed_personas(self) -> None:

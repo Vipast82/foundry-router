@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import urllib.error
 import urllib.parse
 import urllib.request
 from typing import Iterator
@@ -46,6 +47,44 @@ def from_api(url: str, key: str, after_id: int = 0, project: str = "",
         for row in rows:
             yield row
         after_id = rows[-1]["id"]
+
+
+def outcomes_from_api(url: str, key: str, after_id: int = 0, page: int = 500) -> Iterator[dict]:
+    """The coordinator's outcome labels (POST /v1/foundry/training/outcomes), oldest
+    first. An older Foundry without the endpoint yields nothing."""
+    while True:
+        q = urllib.parse.urlencode({"after_id": after_id, "limit": page})
+        req = urllib.request.Request(url.rstrip("/") + "/v1/foundry/training/outcomes?" + q)
+        if key:
+            req.add_header("authorization", f"Bearer {key}")
+        try:
+            with urllib.request.urlopen(req, timeout=60) as r:
+                d = json.loads(r.read())
+        except urllib.error.HTTPError as e:
+            if e.code in (404, 405):
+                return
+            raise
+        rows = d.get("outcomes") or []
+        if not rows:
+            return
+        for row in rows:
+            yield row
+        after_id = rows[-1]["id"]
+
+
+def outcome_records(rows) -> Iterator[tuple[str, str, dict, dict]]:
+    for r in rows:
+        yield (f"outcome:{r['id']}", r.get("project_id") or "", r,
+               {"adapter": ADAPTER, "record_id": r["id"], "sanitization": "foundry-redacted"})
+
+
+def normalize_outcome(r: dict, project_id: str, raw_ref: str, redaction: dict) -> list[Event]:
+    return [Event(ADAPTER, f"outcome:{r['id']}", "router_outcome", project_id=project_id,
+                  timestamp=r["ts"], task_id=r.get("task_id") or None,
+                  request_id=r.get("request_id") or None, actor_role="coordinator",
+                  raw_ref=raw_ref,
+                  facts={"label": r.get("label"), "source": r.get("source"),
+                         "evidence": r.get("evidence")})]
 
 
 def from_db(path: str, after_id: int = 0) -> Iterator[dict]:
@@ -110,6 +149,9 @@ def normalize(r: dict, project_id: str, raw_ref: str, redaction: dict) -> list[E
                          "reasoning": resp.get("reasoning") or "",
                          "finish_reason": resp.get("finish_reason"), "usage": resp.get("usage"),
                          "duration_ms": body.get("duration_ms"), "error": body.get("error"),
+                         # the router's own record of this call (request_log outcome,
+                         # feedback, perf, coordinator labels), joined at read time
+                         "quality": r.get("quality"),
                          "boundary": r.get("boundary"), "client_id": r.get("client_id"),
                          "run_id": r.get("run_id"), "role": r.get("role")},
                   **common)]

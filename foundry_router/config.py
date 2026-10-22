@@ -679,8 +679,8 @@ class TurnAssistConfig(BaseModel):
 
 class DataRetentionConfig(BaseModel):
     """Days to keep rows per log table (0 / absent = keep forever). Pruned
-    on startup and every `prune_interval_minutes`. perf_samples keeps its own
-    retention (perf_history.RETENTION_DAYS)."""
+    on startup and every `prune_interval_minutes`. perf_samples and server_samples keep
+    their own retention (perf.retention_days)."""
     days: dict[str, int] = Field(default_factory=lambda: {
         "interventions": 180,      # fine-tuning material — keep longer
         "assist_turns": 90,
@@ -769,6 +769,24 @@ class TrainingCaptureConfig(BaseModel):
     max_body_bytes: int = 4_000_000
     store_path: Optional[str] = None   # default <data>/training/capture.sqlite
     allowed_email_domains: list[str] = Field(default_factory=list)
+    # Per-call switches (globs, case-insensitive; empty include = every one).
+    # A persona listed in `personas` is captured even outside a coordinator
+    # project, so plain Chat / Research / Cline calls can be switched on by name.
+    backends: list[str] = Field(default_factory=list)
+    exclude_backends: list[str] = Field(default_factory=list)
+    personas: list[str] = Field(default_factory=list)
+    exclude_personas: list[str] = Field(default_factory=list)
+
+
+class PerfConfig(BaseModel):
+    """Performance history (perf_history.py, server_history.py)."""
+    retention_days: int = 14           # perf_samples and server_samples
+    server_sample_seconds: int = 60    # engine /metrics poll for server_samples; 0 = off
+    # Subscription backends report no per-call price. Each rule gives a flat
+    # USD per call for the backends it matches ({match: glob(s) of backend
+    # name, usd_per_call}), added to request_log.est_cost_usd when the call
+    # itself priced at 0. Default: none = today's behaviour (0).
+    subscription_rates: list[dict] = Field(default_factory=list)
 
 
 class BudgetRule(BaseModel):
@@ -854,6 +872,7 @@ class AppConfig(BaseModel):
     persona_profiles: list[str] = Field(default_factory=list)
     budgets: BudgetsConfig = Field(default_factory=BudgetsConfig)
     training_capture: TrainingCaptureConfig = Field(default_factory=TrainingCaptureConfig)
+    perf: PerfConfig = Field(default_factory=PerfConfig)
     health: HealthConfig = Field(default_factory=HealthConfig)
 
 

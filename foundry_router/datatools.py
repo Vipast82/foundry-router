@@ -26,7 +26,7 @@ PRIVATE_TABLES = {"kv", "sqlite_sequence"}
 # Append-only logs: safe to prune by age and to clear. Everything else is
 # configuration or learned state (personas, models, pricing, eval prompts…)
 # — exportable, never cleared from here.
-LOG_TABLES = {"request_log", "perf_samples", "event_log", "claude_usage_log",
+LOG_TABLES = {"request_log", "perf_samples", "server_samples", "event_log", "claude_usage_log",
               "response_feedback", "tool_call_log", "review_log", "eval_runs",
               "eval_results", "semantic_cache", "mcp_call_log", "agent_runs",
               "interventions", "assist_turns"}

@@ -645,3 +645,32 @@ CREATE TABLE IF NOT EXISTS training_datasets (
   client_id TEXT,
   uploaded_ts REAL
 );
+
+-- Coordinator outcome labels for captured calls (training_quality.py): a verified
+-- gate PASS / review APPROVED / vision approval, attached to the request ids it
+-- covers. Joined to capture rows by request_id when they are read.
+CREATE TABLE IF NOT EXISTS training_outcomes (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  ts REAL,
+  request_id TEXT,
+  label TEXT,                        -- gate_pass | review_approved | vision_approved | *_fail / *_changes
+  source TEXT,                       -- who posted it (client id)
+  project_id TEXT,
+  task_id TEXT,
+  evidence TEXT,                     -- JSON, small
+  UNIQUE(request_id, label)
+);
+CREATE INDEX IF NOT EXISTS idx_training_outcomes_req ON training_outcomes(request_id);
+
+-- Engine /metrics history (server_history.py): one row per backend, model and
+-- metric every sample interval (perf.server_sample_seconds). Retention:
+-- perf.retention_days.
+CREATE TABLE IF NOT EXISTS server_samples (
+  ts REAL,                           -- epoch seconds
+  backend TEXT,
+  model TEXT,                        -- loaded model when the engine says (else '')
+  metric TEXT,                       -- e.g. kv_cache_usage_pct, avg_decode_tps, slots_busy
+  value REAL
+);
+CREATE INDEX IF NOT EXISTS idx_server_samples ON server_samples(backend, metric, ts);
+CREATE INDEX IF NOT EXISTS idx_server_samples_ts ON server_samples(ts);

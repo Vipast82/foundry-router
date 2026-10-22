@@ -42,6 +42,8 @@ EVENT_TYPES = (
                             # harvested pre-code model): those steps are context, never targets
     "label",                # an outcome label bound to a revision: studio_gate verdict JSON,
                             # vision verdict, operator / playtest critique
+    "router_outcome",       # Foundry: a coordinator-verified outcome label (gate_pass,
+                            # review_approved, vision_approved, ...) for a request id
     "capture_gap",          # something the source could not provide
 )
 CAPTURE = ("complete", "partial", "missing", "truncated")

@@ -295,6 +295,12 @@ def test_pass_vision_review_close(env):
     assert len(started) == 1
     [g] = events(e, "fast_lane_gate")
     assert json.loads(g["detail"])["result"] == "PASS"
+    # numbers for the router's sprint scorecard: how long the gate ran, how many checks
+    gd = json.loads(g["detail"])
+    assert gd["duration_s"] is not None and gd["duration_s"] >= 0
+    assert gd["checks_total"] >= 1 and gd["checks_failed"] == 0
+    [va] = events(e, "fast_lane_vision_approved")
+    assert json.loads(va["detail"])["frames"] >= 1
     # B1 (2026-10-21): the coordinator commits the gate's captures itself (UI-D1 spent
     # attempts 3-7 on "commit its captures" turns); the session got only its first prompt
     assert not any("capture files" in x[2] for x in e.client.log), [x[2][-600:] for x in e.client.log[1:]]

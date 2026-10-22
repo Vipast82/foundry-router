@@ -241,6 +241,7 @@ def _loop(messages: list[dict]) -> bool:
 def build(store, project_id: str, cfg, diff_fn=None) -> list[dict]:
     ev = store.events(project_id)
     coord = _coordinator_index(ev)
+    outcome_events = [e for e in ev if e["event_type"] == "router_outcome"]
     parent_links = correlate.links(store, project_id, "parent_child")
     children = defaultdict(list)
     for l in parent_links:
@@ -284,6 +285,7 @@ def build(store, project_id: str, cfg, diff_fn=None) -> list[dict]:
         phase = info.get("phase")
         base, head = _revisions(ev, task_id, sid, phase) if task_id else (None, None)
         oc = outcome(ev, task_id, head, "closeout" if phase == "closeout" else "verify")
+        oc["router"] = L.router_signal(calls, outcome_events)
         pair = pairing(convo["messages"])
         arts = [{"status": e["facts"].get("artifact_status"),
                  "refs": e["artifact_references"]} for e in sev if e["event_type"] == "file_ref"]

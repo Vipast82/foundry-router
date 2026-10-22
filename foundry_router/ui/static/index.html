@@ -266,6 +266,7 @@
   .srv .k { color:var(--dim); font-size:11.5px; }
   .srv .v { font-weight:600; }
   .est { color:var(--warn); font-weight:700; margin-left:2px; }
+  .est-v { color:var(--dim); font-style:italic; }
   /* -- Overview (landing page) ---------------------------------------------------
      One sentence says whether things are fine; the list under it says what
      isn't; the tiles give the headline numbers with a 24-hour trend; the cards
@@ -1674,7 +1675,7 @@ async function tabPerformance() {
       </div>
     </div>
     <div id="perf-summary"></div>
-    <div class="jump" role="navigation" aria-label="On this page">Jump to <a href="#perf-sec-charts" data-jump>charts over time</a> or <a href="#perf-sec-detail" data-jump>correlation and recent calls</a></div>
+    <div class="jump" role="navigation" aria-label="On this page">Jump to <a href="#perf-sec-charts" data-jump>charts over time</a>, <a href="#perf-sec-servers" data-jump>inference servers</a> or <a href="#perf-sec-detail" data-jump>correlation and recent calls</a></div>
     <div class="card">${cardH("🩺 Performance advisor", "advisor", "possible problems in this window — click one for what to do")}<div id="perf-advisor" class="hint">…</div></div>
     <div class="card">${cardH("Per-model breakdown", "bymodel", "model × backend × run, every call in the window")}<div id="perf-bymodel"></div></div>
     <h2 id="perf-sec-charts">Speed and latency over time</h2>
@@ -1685,6 +1686,10 @@ async function tabPerformance() {
     <div class="card">${cardH("Cache reuse and draft acceptance (%)", "charts", "KV prefix-cache hit, speculative decoding")}<div id="perf-c-pct"></div></div>
     <div class="card">${cardH("Context fill: prompt tokens per call", "charts", "climbs toward the cap, drops on compaction")}<div id="perf-c-ctx"></div></div>
     </div>
+    <h2 id="perf-sec-servers">Inference servers</h2>
+    <p class="hint">What each engine reports about itself, sampled in the background and kept (Strata / llama.cpp: KV cache, slots, queue, tokens/s; Meridian: requests and latency). These are the engine's own figures — lifetime averages and gauges — not the per-call timings above.</p>
+    <div id="perf-servers"></div>
+    <div class="card">${cardH("Performance settings", null, "retention and subscription cost per call")}<div id="perf-settings"></div></div>
     <h2 id="perf-sec-detail">Details</h2>
     <div class="card">${cardH("Correlation — does it degrade as context fills?", "charts")}
       <div id="perf-c-scatter1"></div><div style="height:8px"></div><div id="perf-c-scatter2"></div><div style="height:8px"></div><div id="perf-c-scatter3"></div></div>
@@ -1746,9 +1751,16 @@ async function tabPerformance() {
              s.samples ? `${Math.round(100 * (s.truncations || 0) / s.samples)}% of calls` : "")
       + tile("tokens", s.out_tokens, "k", "Output tokens generated in this view (input tokens below).",
              `in ${_num(s.in_tokens, "k")}`)
-      + `</div>${s.estimated ? `<div class="hint" style="margin:8px 0 0">${s.estimated} of these calls have router-<b>estimated</b> timings <span class="est">≈</span> (backend reports none, e.g. vLLM) ${help("loaded")}</div>` : ""}</div>`;
+      + `</div><div class="hint" style="margin:8px 0 0">Decode, prefill and TTFT above are <b>measured</b> by the backend's own timings (${s.measured ?? 0} of ${s.samples} calls).${(s.by_timing || {}).estimated ? ` ${s.by_timing.estimated.n} call(s) only have router-<b>estimated</b> timings <span class="est">≈</span> (Claude, GPT: derived from the stream) — kept apart: TTFT ≈${_num(s.by_timing.estimated.ttft_ms, "ms")}, effective ${_num(s.by_timing.estimated.eff_tps)} tok/s (no decode figure: the stream cannot separate it).` : ""}${(s.by_timing || {}).unknown ? ` ${s.by_timing.unknown.n} call(s) carry no timing source.` : ""} Effective tok/s (tokens ÷ call time) is measured for every backend. ${help("loaded")}</div></div>`;
     // per-model breakdown
     const bm = d.by_model || [];
+    // a measured average; for TTFT, else the router's stream-timed estimate marked ≈ (never
+    // blended in). Decode and prefill speed of an estimated backend stay blank: the router
+    // cannot separate them from the stream, and a made-up number is worse than none.
+    const spd = (g, k, unit) => g[k] != null ? cell(g[k], unit)
+      : (k === "ttft_ms" && (g.estimated_speed || {})[k] != null
+        ? `<span class="est-v" title="Estimated by the router from the stream (${g.estimated_speed.n} call(s)); the backend reports no timings">≈${_num(g.estimated_speed[k], unit)}</span>`
+        : `<span class="hint" title="${g.estimated_speed ? "this backend reports no decode / prefill timings; see effective tok/s" : "not reported"}">—</span>`);
     api(`perf/advisor?hours=${_PERF.hours}`).then(a => $("#perf-advisor") && renderAdvisor($("#perf-advisor"), a)).catch(() => {});
     $("#perf-bymodel").innerHTML = (bm.length
       ? `<table><tr><th>model</th><th title="Backend that served the calls">backend</th><th title="Run label the samples were recorded under">run</th>
@@ -1772,10 +1784,10 @@ async function tabPerformance() {
             <td class="nw">${esc(g.backend || "—")}</td>
             <td class="nw">${g.run_label ? `<span class="pill">${esc(g.run_label)}</span>` : '<span class="hint">(unlabelled)</span>'}</td>
             <td class="nw">${g.n}</td>
-            <td class="nw"><b>${cell(g.p50_decode_tps)}</b>${g.estimated ? ` <span class="est" title="${g.estimated} call(s) with router-estimated timing">≈</span>` : ""}</td>
-            <td class="nw">${cell(g.decode_tps)}</td>
-            <td class="nw">${cell(g.prefill_tps)}</td>
-            <td class="nw">${cell(g.ttft_ms, "ms")}</td>
+            <td class="nw">${g.p50_decode_tps != null ? `<b>${cell(g.p50_decode_tps)}</b>` : spd(g, "decode_tps")}</td>
+            <td class="nw">${spd(g, "decode_tps")}</td>
+            <td class="nw">${spd(g, "prefill_tps")}</td>
+            <td class="nw">${spd(g, "ttft_ms", "ms")}</td>
             <td class="nw">${cell(g.p95_ttft_ms, "ms")}</td>
             <td class="nw">${g.p50_wait_ms != null && g.p50_wait_ms >= 10000 ? `<span class="pill warn">${cell(g.p50_wait_ms, "ms")}</span>` : cell(g.p50_wait_ms, "ms")}</td>
             <td class="nw">${cell(g.eff_tps)}</td>
@@ -1836,6 +1848,15 @@ async function tabPerformance() {
           </tr>`).join("") + `</table>`
       : '<span class="hint">No calls recorded in this view yet.</span>';
     wrapTables();
+    loadServers();
+  };
+  const loadServers = async () => {
+    let sv, st;
+    try { [sv, st] = await Promise.all([api(`perf/servers?hours=${_PERF.hours}`), api("config/perf")]); }
+    catch (e) { if (e.stale) return; $("#perf-servers").innerHTML = `<div class="card hint">Could not load: ${esc(e.message)}</div>`; return; }
+    if (!$("#perf-servers")) return;
+    renderServerHistory($("#perf-servers"), sv);
+    renderPerfSettings($("#perf-settings"), st, loadServers);
   };
   ["#perf-win", "#perf-model", "#perf-backend", "#perf-run"].forEach(id => $(id).onchange = load);
   $("#perf-refresh").onclick = load;
@@ -1874,6 +1895,61 @@ async function tabPerformance() {
     $(id).value = v;
   });
   await load();
+}
+
+// Engine /metrics history (server_history.py): one card per backend, one chart per metric group.
+const _SERVER_CHARTS = [
+  ["KV cache used (%)", ["kv_cache_usage_pct"], "%", 0, 100],
+  ["Slots and queue", ["slots_busy", "slots_total", "requests_running", "requests_waiting"], "", 0, null],
+  ["Engine tokens/s", ["live_decode_tps", "avg_decode_tps", "live_prefill_tps", "avg_prompt_tps"], "", null, null],
+  ["Cache and speculation (%)", ["prefix_cache_hit_pct", "spec_accept_pct", "expert_cache_hit_pct", "ram_used_pct"], "%", 0, 100],
+  ["Latency (ms)", ["mean_ttft_ms", "mean_tpot_ms", "mean_e2e_ms", "mean_upstream_ms", "mean_queue_ms"], "ms", null, null],
+  ["Requests", ["requests_total", "requests_failed", "preemptions_total"], "", 0, null],
+];
+function renderServerHistory(el, d) {
+  const names = Object.keys(d.backends || {}).sort();
+  if (!names.length) {
+    el.innerHTML = `<div class="card"><p class="hint">No engine metrics recorded in this window yet. They are sampled every ${d.interval_s || "?"} s from each healthy llama.cpp / Strata / Meridian backend (llama.cpp needs <code>--metrics</code>); 0 turns it off.</p></div>`;
+    return;
+  }
+  const cols = ["--ok", "--accent", "--accent-2", "--warn", "--bad"].map((v, i) => _css(v, ["#3fb950", "#e8833a", "#ffb347", "#e0a441", "#f85149"][i]));
+  el.innerHTML = names.map(b => {
+    const be = d.backends[b], ser = be.series || {};
+    const charts = _SERVER_CHARTS.map(([title, keys, unit, lo, hi], gi) => {
+      const have = keys.filter(k => (ser[k] || []).length > 1);
+      if (!have.length) return "";
+      const byT = {};
+      have.forEach(k => ser[k].forEach(([t, v]) => { (byT[t] = byT[t] || {ts: new Date(t * 1000).toISOString()})[k] = v; }));
+      const rows = Object.keys(byT).map(Number).sort((a, c) => a - c).map(t => byT[t]);
+      const defs = have.map((k, i) => ({key: k, color: cols[i % cols.length], label: k.replace(/_/g, " ")}));
+      return `<div class="card"><div class="card-h">${title}</div>${lineChart(rows, defs, {yMin: lo, yMax: hi, yUnit: unit})}</div>`;
+    }).join("");
+    return `<h3 style="margin:14px 0 4px">${esc(b)} ${be.model ? `<span class="hint">· ${esc(be.model)}</span>` : ""}</h3><div class="chart-grid">${charts || '<div class="card hint">No numeric metrics.</div>'}</div>`;
+  }).join("") + `<p class="hint">${d.samples} samples in this window · every ${d.interval_s} s · kept ${d.retention_days} d</p>`;
+}
+function renderPerfSettings(el, st, reload) {
+  if (!el) return;
+  const rules = (st.subscription_rates || []).map(r => `${r.match || "*"}${r.model ? ":" + r.model : ""} = ${r.usd_per_call}`).join("\n");
+  el.innerHTML = `<div class="row" style="flex-wrap:wrap;gap:6px 18px;align-items:flex-start">
+      <label title="Performance samples and engine metrics older than this are deleted">keep history <input type="number" id="ps-ret" min="1" max="3650" style="width:70px" value="${st.retention_days}"> days</label>
+      <label title="Seconds between engine /metrics samples; 0 = off">sample engines every <input type="number" id="ps-int" min="0" max="3600" style="width:70px" value="${st.server_sample_seconds}"> s</label>
+      <label title="One rule per line: backend[:model] = USD per call. A subscription has no per-call price; this allocates the plan's cost (monthly price ÷ calls) so sprint and task figures show it. It is not added to metered spend, so dollar caps ignore it. Empty = 0.">subscription $ per call
+        <textarea id="ps-rates" rows="3" cols="30" placeholder="meridian = 0.04&#10;meridian:claude-opus* = 0.20&#10;cliproxyapi* = 0.01">${esc(rules)}</textarea></label>
+      <button class="act primary" id="ps-save">Save</button></div>`;
+  $("#ps-save").onclick = async () => {
+    const rates = [];
+    for (const line of $("#ps-rates").value.split("\n")) {
+      if (!line.trim()) continue;
+      const m = line.match(/^\s*([^=:\s]+)(?::([^=\s]+))?\s*=\s*([0-9.]+)\s*$/);
+      if (!m) { toast(`Cannot read rule: ${line}`, true); return; }
+      rates.push({match: m[1], ...(m[2] ? {model: m[2]} : {}), usd_per_call: +m[3]});
+    }
+    try {
+      await api("config/perf", {method: "POST", body: {retention_days: +$("#ps-ret").value || 14,
+        server_sample_seconds: +$("#ps-int").value, subscription_rates: rates}});
+      toast("Saved — live"); reload();
+    } catch (e) { toast(e.message, true); }
+  };
 }
 
 // =========================================================================
@@ -2693,12 +2769,37 @@ async function tabCompare() {
 window._workOpts = window._workOpts || {project: "", hours: 72};
 async function tabWork() {
   const o = window._workOpts;
-  const w = await api(`work?hours=${o.hours}&project=${encodeURIComponent(o.project)}`);
+  const [w, sc] = await Promise.all([
+    api(`work?hours=${o.hours}&project=${encodeURIComponent(o.project)}`),
+    api(`work/scorecard?hours=${o.hours}&project=${encodeURIComponent(o.project)}`).catch(e => { if (e.stale) throw e; return {sprints: [], totals: {}}; })]);
   const stCls = {COMPLETE: "ok", APPROVED: "ok", BLOCKED: "bad", FAILED: "bad", CANCELLED: "",
     AWAITING_HUMAN: "warn", PAUSED: "warn", CHANGES_REQUIRED: "warn"};
   const pill = st => `<span class="pill ${stCls[st] || ""}">${esc(st || "—")}</span>`;
   const sha = v => v ? `<code>${esc(String(v).slice(0, 10))}</code>` : '<span class="hint">—</span>';
   const when = ts => ts ? esc(_tsText(ts)) : "";
+  const dur = sec => sec == null ? '<span class="hint">—</span>' : (sec >= 3600 ? `${Math.floor(sec / 3600)}h ${String(Math.floor(sec % 3600 / 60)).padStart(2, "0")}m` : sec >= 60 ? `${Math.floor(sec / 60)}m ${String(Math.round(sec % 60)).padStart(2, "0")}s` : `${Math.round(sec)}s`);
+  const tk = n => n >= 1e6 ? (n / 1e6).toFixed(1) + "M" : n >= 1e3 ? (n / 1e3).toFixed(1) + "k" : "" + (n || 0);
+  const speedCell = sp => {
+    const m = (sp || {}).measured, e = (sp || {}).estimated;
+    return (m && m.decode_tps != null ? `<span title="measured by the backend's timings (${m.n} calls)">${m.decode_tps} tok/s</span>` : "")
+      + (e ? `${m && m.decode_tps != null ? " · " : ""}<span class="est-v" title="${e.n} call(s) on a backend that reports no decode timing: tokens ÷ call time">eff ${e.eff_tps ?? "—"} tok/s</span>` : "")
+      || '<span class="hint">—</span>';
+  };
+  const scRows = (sc.sprints || []).map(x => {
+    const roles = Object.entries(x.tokens.by_role || {}).map(([r, v]) => `${r}: ${v.calls} calls, ${tk(v.input)} in / ${tk(v.output)} out`).join("\n");
+    const g = x.gates, h = x.helpers;
+    return `<tr><td class="nw">${esc(x.project_id)} / <b>${esc(x.task_id)}</b></td><td class="nw">${pill(x.outcome)}</td>
+      <td class="nw">${x.attempts ?? "—"}</td><td class="nw">${dur(x.wall_s)}</td>
+      <td class="nw" title="${esc(roles)}">${x.model_calls}${x.model_errors ? ` <span class="pill warn">${x.model_errors} err</span>` : ""}</td>
+      <td class="nw" title="${esc(roles)}">${tk(x.tokens.input)} / ${tk(x.tokens.output)}</td>
+      <td class="nw" title="gate runs; red = studio gate went red${g.total_s != null ? "; " + dur(g.total_s).replace(/<[^>]+>/g, "") + " in gates" : ""}">${g.passed}/${g.run} passed${g.red ? ` <span class="pill warn">${g.red} red</span>` : ""}${g.avg_s != null ? ` <span class="hint">~${dur(g.avg_s)}</span>` : ""}</td>
+      <td class="nw">${x.reviews.approved}/${x.reviews.total} approved</td>
+      <td class="nw">${x.vision.rounds ? x.vision.rounds + " round(s)" : '<span class="hint">0</span>'}${x.vision.approved ? " ✓" : ""}</td>
+      <td class="nw" title="helpers started / finished; integrated or rejected is the primary's own account">${h.used} used · ${h.integrated} integrated${h.rejected ? ` · ${h.rejected} rejected` : ""}${h.total_s != null ? ` <span class="hint">${dur(h.total_s)}</span>` : ""}</td>
+      <td class="nw">${speedCell(x.speed)}</td>
+      <td class="nw">${x.cost.sub_cost_usd ? "$" + x.cost.sub_cost_usd.toFixed(2) + ' <span class="hint">plan</span>' : ""}${x.cost.est_cost_usd ? " $" + x.cost.est_cost_usd.toFixed(2) : ""}${!x.cost.sub_cost_usd && !x.cost.est_cost_usd ? '<span class="hint">—</span>' : ""}</td></tr>`;
+  }).join("");
+  const st = sc.totals || {};
   const tasks = w.tasks.map(t => {
     const d = t.data || {};
     const note = d.blocker || d.awaiting || d.pause_reason || d.next_action || "";
@@ -2731,6 +2832,9 @@ async function tabWork() {
     <p class="hint">Tasks a development coordinator runs (e.g. <code>python -m foundry_coordinator</code>) and the coding sessions it bound to them, with every model call Foundry measured for each session. Task states come from the coordinator; Foundry doesn't decide completion and can't see local file edits or Studio operations.</p>
     <div class="row"><label>project</label><select id="wk-proj"><option value="">all</option>${w.projects.map(p => `<option ${p === o.project ? "selected" : ""}>${esc(p)}</option>`).join("")}</select>
       <label>window</label><select id="wk-hours">${[6, 24, 72, 168, 720].map(h => `<option value="${h}" ${h == o.hours ? "selected" : ""}>${h < 24 ? h + " h" : h / 24 + " d"}</option>`).join("")}</select></div>
+    <div class="card"><h3>Sprint scorecard</h3>
+      <p class="hint">Per sprint: wall time, model calls and tokens (hover for roles), studio gates, reviews, vision rounds, helpers, speed (measured, or ≈ estimated, never mixed) and cost. ${st.sprints ? `${st.sprints} sprint(s), ${st.complete} complete · ${st.model_calls} calls · ${tk(st.input_tokens)} in / ${tk(st.output_tokens)} out · ${st.gates_passed}/${st.gates_run} gates passed · ${st.helpers_integrated}/${st.helpers_used} helpers integrated.` : ""}</p>
+      ${scRows ? `<div class="tscroll"><table><tr><th>sprint</th><th>outcome</th><th>attempts</th><th>wall time</th><th>model calls</th><th>tokens in / out</th><th>gates</th><th>reviews</th><th>vision</th><th>helpers</th><th>decode speed</th><th>cost</th></tr>${scRows}</table></div>` : '<p class="hint">No sprints reported in this window.</p>'}</div>
     <div class="card"><h3>Tasks</h3>${w.tasks.length ? `<div class="tscroll"><table><tr><th>project</th><th>task</th><th>state</th><th>attempt</th><th>commit</th><th>now / blocker / findings</th><th>updated</th></tr>${tasks}</table></div>` : '<p class="hint">No coordinator has reported tasks in this window.</p>'}</div>
     <div class="card"><h3>Sessions</h3>${w.sessions.length ? `<div class="tscroll"><table><tr><th>session</th><th>project / task</th><th>role</th><th>persona</th><th>run</th><th>calls</th><th>tokens</th><th>backend / model actually used</th><th>status</th></tr>${sessions}</table></div>` : '<p class="hint">No bound sessions.</p>'}</div>
     <div class="card"><h3>Events</h3>${events ? `<div class="tscroll"><table><tr><th>when</th><th>project / task</th><th>event</th><th>state</th><th>detail</th></tr>${events}</table></div>` : '<p class="hint">No events.</p>'}</div>
@@ -2791,12 +2895,36 @@ async function tabTraining() {
       <td class="nw">${(e.turns || []).length}</td><td class="hint bw-mid" style="white-space:normal">${esc((e.reasons || []).join(", "))}</td></tr>`;
   }).join("");
   window._trainEps = Object.fromEntries((d.episodes || []).map(e => [e.episode_id, e]));
+  // Capture switches: a box is ticked when the saved include / exclude globs would capture it
+  const globRe = g => new RegExp("^" + String(g).replace(/[.+^${}()|[\]\\]/g, "\\$&").replace(/\*/g, ".*").replace(/\?/g, ".") + "$", "i");
+  const globHit = (list, name) => (list || []).some(g => globRe(g).test(name));
+  const wouldCapture = (inc, exc, name) => !globHit(exc, name) && (!(inc || []).length || globHit(inc, name));
+  const capBackends = [...new Set([...((d.options || {}).backends || []), ...Object.keys((c.today || {}).backends || {}).filter(Boolean)])].sort();
+  const capPersonas = [...new Set([...((d.options || {}).personas || []), ...Object.keys((c.today || {}).personas || {}).filter(Boolean)])].sort();
+  const capBoxes = (kind, names, counts) => names.length ? names.map(n => {
+    const on = kind === "backends" ? wouldCapture(c.backends, c.exclude_backends, n) : wouldCapture(c.personas, c.exclude_personas, n);
+    return `<label style="display:block"><input type="checkbox" class="cap-${kind}" value="${esc(n)}" ${on ? "checked" : ""}> ${esc(n)}${counts[n] ? ` <span class="pill">${counts[n]} today</span>` : ""}</label>`;
+  }).join("") : '<span class="hint">none configured</span>';
   $("#main").innerHTML = `
     <h2>Training data</h2>
     <p class="hint">Opt-in capture of model interactions for building training datasets. Foundry records what it received and what it sent to each backend (secrets redacted before writing); the <code>foundry_training</code> pipeline joins that with Kilo/Cline sessions, the coordinator's verification and review records, and git, then curates and exports. After each sprint it runs automatically and uploads validated fine-tuning datasets here; nothing starts training. Episode cards are redacted and truncated.</p>
-    <div class="card"><h3>Foundry capture ${c.enabled ? pill("enabled", "ok") : pill("disabled", "")}</h3>
+    <div class="card" id="cap-card"><h3>Foundry capture ${c.enabled ? pill("enabled", "ok") : pill("disabled", "")}</h3>
       <p class="hint">${esc(c.boundary || "")}</p>
-      <p class="hint">projects: ${esc((c.projects || []).join(", ") || (c.enabled ? "all bound" : "—"))}${(c.exclude_projects || []).length ? " · excluded: " + esc(c.exclude_projects.join(", ")) : ""} · unbound requests ${c.include_unbound ? "captured" : "skipped"} · retention ${c.retention_days} d${c.errors ? ` · <span class="pill bad">${c.errors} capture errors</span> ${esc(c.last_error || "")}` : ""}${c.store_error ? ` · <span class="pill bad">store: ${esc(c.store_error)}</span>` : ""}</p>
+      <div class="row" style="flex-wrap:wrap;gap:6px 18px">
+        <label title="Master switch. Live: the next model call follows it, no restart."><input type="checkbox" id="cap-on" ${c.enabled ? "checked" : ""}> <b>Capture model calls</b></label>
+        <label title="Also capture calls no coordinator project is bound to (plain Chat, Research, Cline), for every persona ticked below."><input type="checkbox" id="cap-unbound" ${c.include_unbound ? "checked" : ""}> calls outside a coordinator project</label>
+        <label>keep <input type="number" id="cap-ret" min="1" max="3650" style="width:70px" value="${c.retention_days}"> days</label>
+        <button class="act primary" id="cap-save">Save</button></div>
+      <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:8px 24px;margin:8px 0">
+        <div><h4 style="margin:4px 0">Backends <span class="hint">captured today: ${(c.today || {}).total ?? 0}</span></h4>${capBoxes("backends", capBackends, ((c.today || {}).backends) || {})}</div>
+        <div><h4 style="margin:4px 0">Personas</h4>${capBoxes("personas", capPersonas, ((c.today || {}).personas) || {})}</div></div>
+      <p class="hint">Untick to leave a backend or persona out. A persona left ticked while others are not is captured even outside a coordinator project. Counts are model calls recorded since midnight. Every backend works, local or not; what a frontier model's output may be used for is decided later by the project's <code>allow_frontier_targets</code> (provider terms).</p>
+      <p class="hint">projects: ${esc((c.projects || []).join(", ") || (c.enabled ? "all bound" : "—"))}${(c.exclude_projects || []).length ? " · excluded: " + esc(c.exclude_projects.join(", ")) : ""}${c.errors ? ` · <span class="pill bad">${c.errors} capture errors</span> ${esc(c.last_error || "")}` : ""}${c.store_error ? ` · <span class="pill bad">store: ${esc(c.store_error)}</span>` : ""}</p>
+      <div class="row" style="flex-wrap:wrap;gap:6px 12px"><b>Download captured calls</b>
+        <select id="cap-dl-q" title="ok = the router saw the call succeed with no thumbs-down and no failed gate/review; verified = ok plus a gate PASS, review APPROVED or vision approval from the coordinator"><option value="">all calls</option><option value="ok">router ok</option><option value="verified">verified by the coordinator</option></select>
+        <select id="cap-dl-h"><option value="0">everything kept</option><option value="24">last 24 h</option><option value="168">last 7 days</option></select>
+        <button class="act" id="cap-dl">Download JSONL</button>
+        <span class="hint">one <code>{messages, tools, meta}</code> line per successful call, secrets redacted, reasoning left out</span></div>
       ${capRows ? `<div class="tscroll"><table><tr><th>project</th><th>record</th><th>count</th><th>truncated</th><th>redacted</th><th>last</th></tr>${capRows}</table></div>` : '<p class="hint">No capture records.</p>'}</div>
     <div class="card"><h3>Fine-tuning datasets in Foundry</h3>
       <p class="hint">Uploaded automatically after each sprint by <code>foundry_training auto</code> (validated; secrets re-checked on arrival). If an upload fails, the dataset stays in the workstation library (<code>~/.foundry-training/library/INDEX.json</code>) and is retried after the next sprint.</p>
@@ -2810,6 +2938,33 @@ async function tabTraining() {
       ${eps ? `<div class="tscroll"><table><tr><th>episode</th><th>project / task</th><th>kind</th><th>status</th><th>split</th><th>outcome at head</th><th>turns</th><th>exclusion reasons</th></tr>${eps}</table></div>` : '<p class="hint">No episodes reported.</p>'}</div>`;
   $("#tr-proj").onchange = e => { o.project = e.target.value; render(); };
   $("#tr-st").onchange = e => { o.status = e.target.value; render(); };
+  const picked = kind => [...document.querySelectorAll(`.cap-${kind}`)].filter(x => x.checked).map(x => x.value);
+  const total = kind => document.querySelectorAll(`.cap-${kind}`).length;
+  $("#cap-save").onclick = async () => {
+    // all ticked = no filter (new backends and personas are included automatically)
+    const bk = picked("backends"), pe = picked("personas");
+    if (bk.length === 0 && total("backends")) { toast("Tick at least one backend (or untick the master switch)", true); return; }
+    if (pe.length === 0 && total("personas")) { toast("Tick at least one persona (or untick the master switch)", true); return; }
+    const body = {enabled: $("#cap-on").checked, include_unbound: $("#cap-unbound").checked,
+      retention_days: +$("#cap-ret").value || 30,
+      backends: bk.length === total("backends") ? [] : bk, exclude_backends: [],
+      personas: pe.length === total("personas") ? [] : pe, exclude_personas: []};
+    try { await api("training/capture", {method: "POST", body}); toast("Capture settings saved — live, no restart"); render(); }
+    catch (e) { toast(e.message, true); }
+  };
+  $("#cap-dl").onclick = () => _downloadAdmin(
+    `training/capture/download?quality=${$("#cap-dl-q").value}&hours=${$("#cap-dl-h").value}`,
+    `foundry-captured-calls${$("#cap-dl-q").value ? "-" + $("#cap-dl-q").value : ""}.jsonl`);
+}
+async function _downloadAdmin(path, filename) {
+  const k = _adminKey();
+  const r = await fetch("/admin/api/" + path, {headers: k ? {"Authorization": "Bearer " + k} : {}});
+  if (!r.ok) { alert(`Download failed: HTTP ${r.status}`); return; }
+  const blob = await r.blob();
+  if (!blob.size) { toast("Nothing captured matches that filter yet", true); return; }
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a"); a.href = url; a.download = filename;
+  document.body.appendChild(a); a.click(); a.remove(); setTimeout(() => URL.revokeObjectURL(url), 5000);
 }
 async function downloadTrainingFile(id, name) {
   const k = _adminKey();

@@ -650,6 +650,34 @@ def estimate_cost_usd(meta: Optional[dict], prompt_tokens: int,
     return (prompt_tokens / 1000.0) * cin + (completion_tokens / 1000.0) * cout
 
 
+_rates_source = lambda: []                                     # noqa: E731
+
+
+def set_subscription_rates(source) -> None:
+    """source() -> the `perf.subscription_rates` rules ({match, model?, usd_per_call})."""
+    global _rates_source
+    _rates_source = source
+
+
+def subscription_rate_usd(backend: str, model: str = "") -> float:
+    """USD per call the operator assigned this subscription backend (first matching
+    rule), 0 when none. A plan has no per-call price; this is an allocation of the
+    plan's cost (monthly price / calls) used for sprint and per-task cost figures.
+    It is NOT added to est_cost_usd, so the metered-dollar caps never see it."""
+    import fnmatch
+    for rule in _rates_source() or []:
+        try:
+            if not fnmatch.fnmatchcase((backend or "").lower(), str(rule.get("match") or "*").lower()):
+                continue
+            if rule.get("model") and not fnmatch.fnmatchcase((model or "").lower(),
+                                                              str(rule["model"]).lower()):
+                continue
+            return max(0.0, float(rule.get("usd_per_call") or 0.0))
+        except (TypeError, ValueError, AttributeError):
+            continue
+    return 0.0
+
+
 def log_subscription_usage(db: Database, model: str, backend: str,
                            prompt_tokens: int, completion_tokens: int) -> None:
     """Our own historical record of window consumption per Claude tier —
@@ -705,10 +733,15 @@ class RequestLogger:
                           completion_tokens: int, est_cost_usd: float) -> None:
         from . import request_context
         request_context.note_route(served_model=model or None, backend=backend or None)
-        self.models_used.append({
+        entry = {
             "model": model, "backend": backend,
             "prompt_tokens": prompt_tokens, "completion_tokens": completion_tokens,
-            "est_cost_usd": round(est_cost_usd, 6)})
+            "est_cost_usd": round(est_cost_usd, 6)}
+        if not est_cost_usd:
+            sub = subscription_rate_usd(backend, model)
+            if sub:
+                entry["sub_cost_usd"] = round(sub, 6)     # plan allocation, not metered spend
+        self.models_used.append(entry)
         self.est_cost += est_cost_usd
 
     # Audit caps: a code-execution call captures the full submitted code (the

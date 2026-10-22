@@ -224,6 +224,7 @@ Exclusion reasons:
 - Review and approval: `review_missing`, `review_not_approved`, `unresolved_findings`, `approval_missing`.
 - Tool sequence: `truncated_tool_output`, `missing_tool_result`, `broken_tool_sequence`.
 - Content: `missing_context`, `non_local_author`, `no_local_target`, `loop`, `no_feedback`, `missing_artifact`, `secret_exposure`.
+- Router outcome (only for a policy that lists the tokens below): `router_outcome_missing`, `router_not_ok`, `router_unverified`.
 
 With `allow_frontier_targets = false` (the default) the authorship rule
 applies to every dataset kind, whether or not a policy lists `local_author`.
@@ -504,6 +505,53 @@ auto --spool DIR [--foundry-url U] [--kilo-url U] [--library DIR] [--no-upload]
     delete or rebuild the affected datasets.
   - To remove a project entirely, delete its rows or the whole store, and
     Foundry's capture rows (`DELETE FROM capture_records WHERE project_id=?`).
+
+## What to capture, and the router's quality signal
+
+**Switches** (Training tab, Capture card; or `training_capture` in config.yaml). All
+live: the next model call follows a saved change, no restart.
+
+- `enabled`: the master switch.
+- `backends` / `exclude_backends`, `personas` / `exclude_personas`: glob lists
+  (case-insensitive; an empty include list means all). They are checked per backend
+  call, so any backend works (local, Meridian, CLIProxyAPI) and any persona. The
+  `received` record of a request is written together with its first allowed call.
+- `include_unbound`: also capture calls no coordinator project is bound to. A
+  persona named in `personas` is captured even outside a coordinator project, so
+  Chat, Research or Cline calls can be switched on by name.
+- The card shows calls captured per backend and persona today, and downloads the
+  captured calls as JSONL: one `{messages, tools, meta}` line per successful
+  call (`GET /admin/api/training/capture/download`, with `quality=ok|verified`).
+
+**Quality signal.** Capture rows are joined, when read, to what the router knows
+about the same request id (`GET /v1/foundry/capture/records` and the download add
+a `quality` block): the request's `outcome` (ok, error, cancelled, timeout,
+denied), thumbs up / down feedback, perf (TTFT, tokens/s and `timing_src`) and the
+coordinator's verified labels. The coordinator bridge posts those labels to
+`POST /v1/foundry/training/outcomes {label, request_ids | project_id+task_id
+[+session_ids, run_id, until_ts], evidence}` after a gate PASS (`gate_pass`), a
+review APPROVED (`review_approved`) or a vision approval (`vision_approved`); the
+failures are `gate_fail`, `review_changes`, `vision_changes`. A label by work
+covers the implementer's calls up to that event. The pipeline ingests the labels
+as `router_outcome` events next to the capture records, so a label that arrives
+after a call was ingested still reaches its episode.
+
+Two curate policy tokens read that signal (`episode.outcome.router`):
+
+- `router_ok`: the session's final call succeeded, nobody rated it down, and no
+  negative label was recorded.
+- `router_verified`: `router_ok` plus at least one positive label.
+
+```toml
+[training.policy.sft]
+require = ["router_verified", "complete_tool_sequence", "system_and_tools_known"]
+[training.export]
+allow_frontier_targets = true       # provider terms: see below
+```
+
+The default policy is unchanged. Whose output may be a target is still decided only
+by `allow_frontier_targets`; the tokens only say whether the router saw the work
+succeed. The router never changes that flag.
 
 ## Using captured outputs for training
 
