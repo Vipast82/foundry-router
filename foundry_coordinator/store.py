@@ -92,6 +92,35 @@ def _uj(v, default=None):
         return default
 
 
+def _owner_dead(owner_id: str) -> bool:
+    """True when the owner id names a process on THIS host that no longer exists (a
+    coordinator killed without releasing its lock, 2026-10-22). A live process, another
+    host or an unreadable id is never treated as dead."""
+    host, _, pid = owner_id.rpartition(":")
+    if host != socket.gethostname() or not pid.isdigit():
+        return False
+    try:
+        import psutil
+        return not psutil.pid_exists(int(pid))
+    except ImportError:
+        pass
+    if os.name == "nt":
+        import ctypes
+        k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        h = k32.OpenProcess(0x1000, False, int(pid))              # QUERY_LIMITED_INFORMATION
+        if not h:
+            return ctypes.get_last_error() != 5                     # 5 = access denied: alive
+        k32.CloseHandle(h)
+        return False
+    try:
+        os.kill(int(pid), 0)
+        return False
+    except ProcessLookupError:
+        return True
+    except PermissionError:
+        return False
+
+
 class Store:
     def __init__(self, path: str):
         self.path = str(path)
@@ -135,7 +164,8 @@ class Store:
         with self.tx():
             cur = _uj(self.meta("owner"), {})
             if cur and cur.get("id") != me and not force \
-                    and time.time() - float(cur.get("beat") or 0) < stale_s:
+                    and time.time() - float(cur.get("beat") or 0) < stale_s \
+                    and not _owner_dead(str(cur.get("id") or "")):
                 raise RuntimeError(f"another coordinator ({cur['id']}) is running on this store")
             self.set_meta("owner", _j({"id": me, "beat": time.time()}))
         return me

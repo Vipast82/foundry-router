@@ -2,6 +2,12 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.134.2 — coordinator: a dead process's owner lock is taken over
+
+A coordinator killed without releasing its owner row blocked the next one ("another
+coordinator is running on this store") until the beat went stale. The lock of a process on this
+host that no longer exists is now taken over at once.
+
 ## v0.134.1 — Foundry Client: Rojo health reads msgpack
 
 Rojo 7 answers `/api/rojo` with msgpack, not JSON, so the client's Rojo check never passed and

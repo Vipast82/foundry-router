@@ -800,3 +800,21 @@ def test_store_owner_lock(tmp_path):
         s.claim_owner()
     assert s.claim_owner(force=True)
     del me
+
+
+def test_store_owner_lock_of_a_dead_process_on_this_host_is_taken_over(tmp_path):
+    """2026-10-22: a coordinator killed hard left its owner row; the next one refused to
+    start. A fresh beat from a pid that no longer exists on this host is stale."""
+    import os
+    import socket
+    import time
+    s = Store(str(tmp_path / "x.sqlite"))
+    s.set_meta("owner", json.dumps({"id": f"{socket.gethostname()}:4000000", "beat": time.time()}))
+    assert s.claim_owner()                                  # dead pid: taken over
+    s.set_meta("owner", json.dumps({"id": f"{socket.gethostname()}:{os.getpid()}",
+                                    "beat": time.time()}))
+    s2 = Store(str(tmp_path / "x.sqlite"))
+    assert s2.claim_owner()                                 # our own id: fine
+    s.set_meta("owner", json.dumps({"id": f"{socket.gethostname()}:0", "beat": time.time()}))
+    with pytest.raises(RuntimeError, match="another coordinator"):
+        Store(str(tmp_path / "x.sqlite")).claim_owner()    # pid 0 (System Idle) counts as alive
