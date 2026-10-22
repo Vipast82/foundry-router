@@ -27,9 +27,12 @@ DEFAULTS: dict[str, Any] = {
         "open_settings_on_start": False,
         "unhealthy_restart_seconds": 300,               # a component unhealthy this long is restarted (0 = never)
         "safe_restart_max_wait_minutes": 60,            # a pending safe-point restart warns after this
-        "relay": True,                                  # claim stack requests from the router (relay.py)
         "update_check": True,                           # look for a newer release on GitHub (no auto-update)
         "update_repo": "Vipast82/foundry-router",
+        # router relay (relay.py): heartbeat + stack actions for the operator chat.
+        # router_key names the keyring entry holding the router key (operator scope)
+        "relay_enabled": True,
+        "router_key": "FOUNDRY_CLIENT_KEY",
     },
     "workspace": {
         "game": "",                                     # e.g. C:/Roblox/AnimalUprising

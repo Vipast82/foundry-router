@@ -13,6 +13,8 @@ KNOWN = {
     "KILO_SERVER_PASSWORD": "Password of the local Kilo server (port 4096)",
     "FOUNDRY_COORDINATOR_KEY": "Foundry coordinator key (inference + orchestration scopes)",
     "FOUNDRY_KEY": "Foundry key (media scope) for the media adapter Kilo starts; add FOUNDRY_KEY to the Kilo component's secrets so Kilo passes it on",
+    "FOUNDRY_CLIENT_KEY": "Router key for this client's relay (operator scope): the router then "
+                          "sees the stack and the operator chat can restart Kilo",
 }
 
 

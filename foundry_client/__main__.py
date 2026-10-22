@@ -89,6 +89,10 @@ def cmd_run(cfg, headless: bool, no_start: bool) -> int:
     if first_run or cfg["client"].get("open_settings_on_start"):
         threading.Timer(1.5, lambda: webbrowser.open(url)).start()
     stop = threading.Event()
+    # router relay (client.relay_enabled, default true when a router key is set):
+    # the router sees the stack and the operator chat can restart its parts
+    from . import relay as _relay
+    mgr.relay = _relay.start_if_enabled(mgr, cfg, stop)
     try:
         if headless or not run_tray(mgr, url, stop):
             print(f"Foundry Client running headless; settings: http://127.0.0.1:{port}/ "

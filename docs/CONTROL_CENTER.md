@@ -428,10 +428,14 @@ Other layers of the contract:
 - **Operator actions and alert delivery** go through the `cc_actions` / `cc_action_log`
   / `cc_alerts` / `cc_alert_log` tables, separate from observations.
 - **Heartbeat**: `POST /v1/foundry/telemetry/heartbeat`
-  `{source:{id, kind: bridge|coordinator}, kilo, coordinator_owner, event_stream, capabilities}`.
+  `{source:{id, kind: bridge|coordinator|client}, kilo, coordinator_owner, event_stream, capabilities}`.
+  A Foundry Client (kind `client`, feature `stack_control`) adds `components`, `overall`,
+  `config_problems` and `events`; an operator key may heart-beat as a client only.
 - **Control channel** (orchestration scope): `POST /v1/foundry/control/claim`
   `{source_id, projects}` and `POST /v1/foundry/control/actions/{id}/status`
-  `{source_id, status, detail, result}`.
+  `{source_id, status, detail, result}`. The Foundry Client claims with
+  `{source_id, source_kind: "client"}` (operator or orchestration scope) and gets only the
+  `client_restart` / `client_reload_kilo_config` actions, which the coordinator never sees.
 - **Browser stream**: `GET /control/api/stream?after=SEQ&sessions=…` (SSE). It replays
   from the cursor, coalesced to the latest state per entity, with a heartbeat every 15 s.
   The browser reconnects with bounded backoff using `Last-Event-ID`. One bridge feeds

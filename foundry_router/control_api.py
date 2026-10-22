@@ -553,11 +553,21 @@ async def telemetry_batch(request: Request):
     return _cc(request).ingest(b, _client())
 
 
+def _relay_only(c: dict) -> bool:
+    """A key admitted on the client relay routes by its operator scope alone
+    (no telemetry/orchestration): it may act as a Foundry Client, nothing else."""
+    return not ({"telemetry", "orchestration", "admin"} & set(c.get("scopes") or []))
+
+
 @router.post("/v1/foundry/telemetry/heartbeat")
 @_guard
 async def telemetry_heartbeat(request: Request):
     b = await _body(request)
-    return _cc(request).heartbeat(b, _client())
+    c = _client()
+    if _relay_only(c) and ((b.get("source") or {}).get("kind") != "client"):
+        raise ControlError("an operator key may heart-beat as a Foundry Client (source.kind client) "
+                           "only", "forbidden", 403)
+    return _cc(request).heartbeat(b, c)
 
 
 @router.post("/v1/foundry/control/claim")
@@ -565,6 +575,14 @@ async def telemetry_heartbeat(request: Request):
 async def control_claim(request: Request):
     b = await _body(request)
     c = _client()
+    if str(b.get("source_kind") or "") == "client":
+        # the Foundry Client: stack actions only (control_center.claim_client);
+        # an operator, orchestration or admin key may claim them
+        if not {"operator", "orchestration", "admin"} & set(c.get("scopes") or []):
+            raise ControlError("claiming stack actions needs the operator or orchestration scope",
+                               "forbidden", 403)
+        return {"actions": _cc(request).claim_client(str(b.get("source_id") or ""),
+                                                     int(b.get("limit") or 20))}
     if not {"orchestration", "admin"} & set(c.get("scopes") or []):
         raise ControlError("claiming operator actions needs the orchestration scope", "forbidden", 403)
     projects = [str(p) for p in (b.get("projects") or [])][:50]
@@ -577,9 +595,15 @@ async def control_claim(request: Request):
 async def control_status(request: Request, action_id: str):
     b = await _body(request)
     c = _client()
-    if not {"orchestration", "admin"} & set(c.get("scopes") or []):
+    cc = _cc(request)
+    if _relay_only(c):
+        from .control_center import CLIENT_ACTIONS
+        a = cc.action_view(action_id, with_log=False)
+        if not a or a["kind"] not in CLIENT_ACTIONS:
+            raise ControlError("an operator key reports stack actions only", "forbidden", 403)
+    elif not {"orchestration", "admin"} & set(c.get("scopes") or []):
         raise ControlError("reporting operator actions needs the orchestration scope", "forbidden",
                            403)
-    return _cc(request).report(action_id, str(b.get("source_id") or ""), str(b.get("status") or ""),
-                               str(b.get("detail") or ""), b.get("result") if isinstance(
-                                   b.get("result"), dict) else None)
+    return cc.report(action_id, str(b.get("source_id") or ""), str(b.get("status") or ""),
+                     str(b.get("detail") or ""), b.get("result") if isinstance(
+                         b.get("result"), dict) else None)

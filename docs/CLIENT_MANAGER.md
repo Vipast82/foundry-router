@@ -152,9 +152,38 @@ The first run starts nothing and opens the settings page.
 
 Components that are already running are adopted, not started twice.
 
+## Router relay (`relay.py`, v0.134.0)
+
+The client reports the stack to the router and carries out the stack actions the operator chat
+files there, so "restart Kilo" works from the Automation page even when the coordinator is down.
+
+- **Heartbeat** every 15 s: `POST /v1/foundry/telemetry/heartbeat` with source kind `client`,
+  feature `stack_control` and each component's state. The router shows the stack in the chat's
+  context and alerts when the client goes silent.
+- **Claim** every 3 s: `POST /v1/foundry/control/claim {source_kind: "client"}` returns the
+  pending `client_restart {component, force}` and `client_reload_kilo_config` actions. The
+  client applies them through its own manager (safe-point restarts stay safe-point restarts)
+  and reports `applied` / `rejected` / `failed` with the resulting state. The router never
+  reaches into the workstation and never sees the client's local API token.
+
+### Router key for the relay
+
+1. In Foundry, Access → Clients & keys, make a key with the **operator** scope (the same
+   preset the control-center sign-in uses). The relay only ever heart-beats as a client and
+   claims `client_*` actions with it; the router refuses anything else from an operator key on
+   these routes.
+2. On the workstation, open the client's Settings page → Secrets and store it as
+   **FOUNDRY_CLIENT_KEY** (the keyring name `client.router_key` points at; change that setting
+   to use another name). Headless: `FOUNDRY_CLIENT_SECRET_FOUNDRY_CLIENT_KEY=<key>` in the
+   environment.
+3. Restart the client. Without a key the client logs "relay: no router key" and runs without
+   the relay; with the coordinator's `orchestration` key present it falls back to that.
+4. `client.relay_enabled = false` in `client.toml` turns the relay off.
+
 ## Phases
 
 1. `foundry_client` running from source on this workstation, replacing `foundry-stack.ps1`.
 2. Packages and CI.
-3. Foundry GUI integration: a Kilo / stack card on the Automation page, and a `restart_kilo`
-   step for the Ask assistant, relayed by the coordinator to the client API.
+3. Foundry GUI integration (v0.134.0): the client heart-beats to the router and claims stack
+   actions; the operator chat's `restart_kilo`, `restart_coordinator`, `restart_rojo` and
+   `reload_kilo_config` reach it directly, not through the coordinator.
