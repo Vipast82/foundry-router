@@ -2,6 +2,36 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.134.0 — Operator chat (Chat tab), Foundry Client relay
+
+The Automation page's Ask tab becomes a **Chat** (`foundry_router/chat_engine.py`,
+`/control/api/chat/*`; docs/AUTOMATION_GUI.md). The operator does everything the page does
+in plain language, over as many turns as needed:
+
+- **How it works.** Each turn sends the operator's text plus a compact context (project
+  index from the bridge data, deployed settings, usage, stack status, open decisions; only
+  blocks whose hash changed are sent again) to the persona `Foundry-Operator-Chat`
+  (Claude Sonnet, then GPT-6.1 Sol, then the local Qwen; strict routing, JSON output; created
+  on first use). The model answers `{say, ask, calls[]}` against a typed tool catalog. The
+  router validates every call deterministically (schema, project allow-list, local and locked
+  settings keys refused, size caps), runs reads, drafts and previews at once, and turns deploys,
+  cutoff changes, persona changes, sprint starts, decisions and restarts into one **confirm
+  card** with per-call checkboxes. At most 4 model calls and 8 tool calls per turn.
+- **Auto-run.** Each confirm class (deploy, cutoffs, persona, sprint, decision, restart) can be
+  switched to auto in the Chat tab's Auto-run drawer (`chat_auto_classes`).
+- **Audit.** Every turn, model call, tool call, refusal, card and decision is a row in
+  `chat_audit_log`; the Audit button shows them. Actions sent to the coordinator or the
+  Foundry Client carry `{chat: {thread, turn, call}}` in their payload.
+- **Stack reach.** The Foundry Client now has a router relay (`foundry_client/relay.py`): it
+  heart-beats as source kind `client` (feature `stack_control`) and claims the new
+  `client_restart` / `client_reload_kilo_config` actions, applying them through its own manager.
+  It needs a router key with the **operator** scope stored as `FOUNDRY_CLIENT_KEY` (the
+  coordinator key is the fallback); `client.relay_enabled` turns it off. See
+  docs/CLIENT_MANAGER.md.
+- **Kept.** `assistant_plan` / `assistant_run` still work; the chat uses them for queue steps
+  (`plan_sprint_steps`, `run_sprint_steps`). `/admin/api/config/cutoffs` now shares its code
+  with the chat (`foundry_router/cutoffs.py`).
+
 ## v0.133.2 — Foundry Client: windowless start works
 
 - **Windowless start.** Started without a console (`pythonw`, the Startup entry, or the packaged

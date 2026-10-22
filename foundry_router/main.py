@@ -135,6 +135,10 @@ class Services:
         self.control = ControlCenter(db, secrets_fn=lambda: secret_values(self))
         from .automation_store import AutomationStore
         self.automation = AutomationStore(db)
+        # operator chat (W3): threads, tool catalog, confirm cards; its model
+        # calls go through this app's own /v1/chat/completions (app set in create_app)
+        from .chat_engine import ChatEngine
+        self.chat = ChatEngine(self)
         from .quota_gate import QuotaGate
         self.quota_gate = QuotaGate(self)
         self.ledger.gate = self.quota_gate
@@ -659,5 +663,8 @@ def create_app(config_path: Optional[Path] = None,
     from .ui.automation_routes import router as automation_ui_router
     app.include_router(automation_ui_router)
     app.include_router(automation_router)
+    from .chat_api import router as chat_router
+    app.include_router(chat_router)
+    services.chat.app = app
     app.include_router(ui_router)
     return app

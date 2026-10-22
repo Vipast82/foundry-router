@@ -21,6 +21,10 @@ DEFAULTS: dict[str, Any] = {
         "state_dir": "~/.foundry-coordinator",         # coordinator state, logs
         "api_port": 47811,                              # local settings page / API (127.0.0.1)
         "open_settings_on_start": False,
+        # router relay (relay.py): heartbeat + stack actions for the operator chat.
+        # router_key names the keyring entry holding the router key (operator scope)
+        "relay_enabled": True,
+        "router_key": "FOUNDRY_CLIENT_KEY",
     },
     "workspace": {
         "game": "",                                     # e.g. C:/Roblox/AnimalUprising

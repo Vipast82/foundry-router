@@ -169,7 +169,18 @@ ACTION_KINDS = ("answer_question", "reply_permission", "approve_review", "reject
                 "pause", "resume", "cancel", "unblock", "instruction", "withdraw_instruction",
                 "lanes", "decision_answer", "project_pause", "project_resume",
                 "lead_case_pause", "lead_case_takeover", "lead_case_instruct", "lead_case_resume",
-                "assistant_plan", "assistant_run")
+                "assistant_plan", "assistant_run", "client_restart", "client_reload_kilo_config")
+# Foundry Client stack actions (W3, 2026-10-22): claimed by the workstation
+# client that heart-beats with source kind `client` (foundry_client/relay.py),
+# never by the coordinator. Payloads:
+#   client_restart            {"component": kilo|coordinator|rojo|supervisor, "force": bool}
+#   client_reload_kilo_config {}   (Kilo re-reads kilo.jsonc; a safe restart when it can't)
+# Workstation-scoped, so project_id is "" and only an operator session that is
+# not restricted to projects may create one; one live action per component.
+CLIENT_ACTIONS = ("client_restart", "client_reload_kilo_config")
+CLIENT_COMPONENTS = ("kilo", "coordinator", "rojo", "supervisor")
+CLIENT_FEATURE = "stack_control"
+SOURCE_KINDS = ("bridge", "coordinator", "client")
 # launch assistant (2026-10-21): a plain-language request becomes a checked plan
 # (assistant_plan {text}); the operator confirms and the coordinator runs the
 # picked steps (assistant_run {plan_id, steps}). Operator sessions only.
@@ -248,6 +259,10 @@ SEVERITIES = ("info", "warning", "high", "critical")
 # still acknowledged instead of alerting again (flapping sources)
 REOPEN_QUIET_SECONDS = 6 * 3600
 PERMISSION_REPLIES = ("once", "reject")       # "always" creates a persistent rule: not offered
+
+
+class _Dup(Exception):
+    """Leaves a transaction early: the live duplicate is returned after it."""
 
 
 class ControlError(ValueError):
@@ -383,6 +398,12 @@ def compat_state(payload: dict, server_version: str = "") -> tuple[str, str]:
     if contract and contract not in SUPPORTED_CONTRACTS:
         return "refuse", (f"contract {contract!r} is not supported (server speaks "
                           f"{', '.join(SUPPORTED_CONTRACTS)})")
+    if src.get("kind") == "client":
+        # a Foundry Client carries no coordinator version: gated on the contract
+        # (above) and on declaring stack_control, which stack actions need
+        if CLIENT_FEATURE not in (source_features(payload) or []):
+            return "warn", f"the client does not declare the {CLIENT_FEATURE} feature"
+        return ("ok", "") if contract else ("warn", "the client did not declare a contract")
     cv_raw = payload.get("coordinator_version") or src.get("coordinator_version")
     cv = _semver(cv_raw)
     if contract and cv_raw and not cv:
@@ -561,14 +582,28 @@ class ControlCenter:
         src = payload.get("source") or {}
         sid = _s(src.get("id"), 120)
         kind = _s(src.get("kind"), 20)
-        if not sid or kind not in ("bridge", "coordinator"):
-            raise ControlError("heartbeat needs source.id and source.kind (bridge|coordinator)")
+        if not sid or kind not in SOURCE_KINDS:
+            raise ControlError("heartbeat needs source.id and source.kind (bridge|coordinator|"
+                               "client)")
         detail = self.redact({k: payload.get(k) for k in (
             "kilo", "coordinator_owner", "projects", "sessions_tracked", "tick", "uptime_s",
             "backoff_s", "errors", "capture_boundary", "event_stream", "monotonic_s",
             "contract", "coordinator_version", "foundry_version", "boot_id", "store_schema",
-            "features")
+            "features", "overall", "client_version")
             if payload.get(k) is not None})
+        if kind == "client":
+            # the stack summary a Foundry Client reports: bounded fields, no free text
+            comps = payload.get("components")
+            detail["components"] = [
+                {k: (_s(c.get(k), 300) if isinstance(c.get(k), str) else c.get(k))
+                 for k in ("name", "label", "state", "detail", "enabled", "want", "pid",
+                           "uptime_s", "restarts", "pending_restart") if k in c}
+                for c in comps if isinstance(c, dict)][:12] if isinstance(comps, list) else []
+            detail["config_problems"] = [_s(x, 300) for x in (payload.get("config_problems") or [])
+                                         if isinstance(x, str)][:20]
+            detail["events"] = [{"ts": _f(e.get("ts")), "component": _s(e.get("component"), 40),
+                                 "text": _s(e.get("text"), 300)}
+                                for e in (payload.get("events") or []) if isinstance(e, dict)][-20:]
         if src.get("boot_id") and not detail.get("boot_id"):
             detail["boot_id"] = _s(src.get("boot_id"), 64)
         feats = source_features(payload)
@@ -1369,6 +1404,9 @@ class ControlCenter:
             if age > limit:
                 what = ("coordinator heartbeat expired (the engine loop stopped, crashed, lost "
                         "the network, or the workstation is asleep)" if s["kind"] == "coordinator"
+                        else "Foundry Client heartbeat expired (client closed, network down or "
+                             "workstation asleep): stack actions cannot be delivered"
+                        if s["kind"] == "client"
                         else "workstation telemetry bridge heartbeat expired (bridge stopped, "
                              "network down or workstation asleep): live views are stale")
                 self.raise_alert(key, "source_stale", "high",
@@ -2369,6 +2407,8 @@ class ControlCenter:
             return self._create_project_action(actor, projects, body, scopes, kind, idem, pid, tid)
         if kind in ASSISTANT_ACTIONS:
             return self._create_assistant_action(actor, projects, body, scopes, kind, idem, pid)
+        if kind in CLIENT_ACTIONS:
+            return self._create_client_action(actor, projects, body, scopes, kind, idem)
         if not pid or not tid:
             raise ControlError("project_id and task_id are required")
         if projects and pid not in projects:
@@ -2692,6 +2732,115 @@ class ControlCenter:
         self._notify()
         return self.action_view(aid)
 
+    def client_sources(self) -> list[dict]:
+        """Foundry Clients that heart-beat (kind client), freshest first."""
+        return sorted([s for s in self.sources([]) if s["kind"] == "client"],
+                      key=lambda s: -(s.get("last_seen") or 0))
+
+    def _create_client_action(self, actor: str, projects: list, body: dict, scopes, kind: str,
+                              idem: str) -> dict:
+        """client_restart / client_reload_kilo_config: workstation-scoped, operator
+        sessions without a project restriction, one live action per component.
+        Refused when no Foundry Client has heart-beated (nothing could claim it)."""
+        if scopes is not None and not {"operator", "admin"} & set(scopes or []):
+            raise ControlError("stack actions need an operator session", "forbidden", 403)
+        if projects:
+            raise ControlError("the workstation stack is not project-scoped; it needs an operator "
+                               "session that is not restricted to projects", "forbidden", 403)
+        if kind == "client_restart":
+            comp = _s(body.get("component"), 40)
+            if comp not in CLIENT_COMPONENTS:
+                raise ControlError(f"component must be one of {', '.join(CLIENT_COMPONENTS)}")
+            force = body.get("force", False)
+            if not isinstance(force, bool):
+                raise ControlError("force must be true or false")
+            payload = {"component": comp, "force": force}
+        else:
+            comp = "kilo"
+            payload = {}
+        summary = self._summary(kind, payload, comp)
+        chat = body.get("chat")
+        if isinstance(chat, dict):
+            payload["chat"] = {k: _s(chat.get(k), 80) for k in ("thread", "turn", "call")}
+        if not self.client_sources():
+            raise ControlError("no Foundry Client has reported to this router; start the client on "
+                               "the workstation with a router key (docs/CLIENT_MANAGER.md)",
+                               "no_client", 409)
+        if not self.rate_ok(actor):
+            raise ControlError("too many control actions; wait a minute", "rate_limited", 429)
+        st = self.settings()
+        now = self.clock()
+        aid = f"act-{uuid.uuid4().hex[:16]}"
+        dup = None
+        try:
+            with self._tx() as c:
+                # task_id carries the component: one live stack action per component
+                # (the view is read after the transaction: the db lock is not re-entrant)
+                live = self._rows(c, "SELECT action_id FROM cc_actions WHERE kind IN (?,?) AND "
+                                     "task_id=? AND status IN ('accepted','claimed','queued',"
+                                     "'delivered') ORDER BY created_ts DESC LIMIT 1",
+                                  (*CLIENT_ACTIONS, comp))
+                if live:
+                    dup = live[0]["action_id"]
+                    raise _Dup()
+                seq = self._feed(c, "action", "", "", aid)
+                c.execute("INSERT INTO cc_actions (action_id, idem_key, actor, kind, project_id, "
+                          "task_id, run_id, session_id, request_id, payload, summary, expected, "
+                          "status, status_detail, created_ts, expires_ts, updated_ts, seq) VALUES "
+                          "(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                          (aid, idem, actor, kind, "", comp, "", "", "", _j(payload), summary,
+                           _j({"component": comp}), "accepted",
+                           "stored by Foundry; waiting for the Foundry Client to claim it", now,
+                           now + st["action_ttl_s"], now, seq))
+                c.execute("INSERT INTO cc_action_log (action_id, ts, status, actor, detail) "
+                          "VALUES (?,?,?,?,?)", (aid, now, "accepted", actor, summary))
+        except _Dup:
+            return {**self.action_view(dup), "duplicate": True}
+        except Exception as e:                                   # noqa: BLE001
+            if "UNIQUE" in str(e) and "idem" in str(e):
+                ex = self.db.query_one("SELECT action_id FROM cc_actions WHERE idem_key=?", (idem,))
+                return {**self.action_view(ex["action_id"]), "duplicate": True}
+            raise
+        self._notify()
+        return self.action_view(aid)
+
+    def claim_client(self, source_id: str, limit: int = 20) -> list[dict]:
+        """Hand pending stack actions to a Foundry Client. Only a source whose
+        last heartbeat was kind `client` and declared stack_control gets them;
+        an action this source claimed but never reported is offered again."""
+        if not source_id:
+            raise ControlError("source_id is required")
+        src = self.db.query_one("SELECT kind FROM cc_sources WHERE source_id=?", (source_id,))
+        if not src or src["kind"] != "client":
+            raise ControlError(f"{source_id} has not heart-beated as a client", "unknown_source", 409)
+        if CLIENT_FEATURE not in self.source_feature_set(source_id):
+            raise ControlError(f"{source_id} does not declare {CLIENT_FEATURE}", "forbidden", 403)
+        if self.source_compat(source_id) == "refuse":
+            raise ControlError(f"{source_id} is refused by the version gate", "version_refused", 409)
+        now = self.clock()
+        kq = ",".join("?" * len(CLIENT_ACTIONS))
+        out = []
+        with self._tx() as c:
+            rows = self._rows(c, f"SELECT * FROM cc_actions WHERE kind IN ({kq}) AND ((status="
+                                 f"'accepted' AND expires_ts >= ?) OR (claimed_by=? AND status="
+                                 f"'claimed' AND claimed_ts < ?)) ORDER BY created_ts LIMIT ?",
+                              (*CLIENT_ACTIONS, now, source_id, now - 60, max(1, min(50, limit))))
+            for r in rows:
+                if r["status"] == "accepted":
+                    c.execute("UPDATE cc_actions SET status='claimed', claimed_by=?, claimed_ts=?, "
+                              "updated_ts=?, status_detail=? WHERE action_id=?",
+                              (source_id, now, now, "claimed by the Foundry Client", r["action_id"]))
+                    c.execute("INSERT INTO cc_action_log (action_id, ts, status, actor, detail) "
+                              "VALUES (?,?,?,?,?)", (r["action_id"], now, "claimed", source_id, ""))
+                    self._feed(c, "action", "", "", r["action_id"])
+                out.append({"action_id": r["action_id"], "kind": r["kind"], "actor": r["actor"],
+                            "component": r["task_id"], "payload": _uj(r["payload"], {}),
+                            "created_ts": r["created_ts"], "expires_ts": r["expires_ts"],
+                            "reoffered": r["status"] != "accepted"})
+        if out:
+            self._notify()
+        return out
+
     def _create_project_action(self, actor: str, projects: list, body: dict, scopes, kind: str,
                                idem: str, pid: str, tid: str) -> dict:
         """project_pause / project_resume: project-scoped (task id optional, no
@@ -2791,6 +2940,10 @@ class ControlCenter:
                     + (f", note {len(p.get('note') or '')} chars" if p.get("note") else ""))[:300]
         if kind == "lanes":
             return f"proactive lanes {'paused' if p.get('paused') else 'un-paused'} ({tid})"
+        if kind == "client_restart":
+            return f"restart {p.get('component')} ({'now' if p.get('force') else 'at a safe point'})"
+        if kind == "client_reload_kilo_config":
+            return "reload kilo.jsonc into the Kilo server"
         if kind == "decision_answer":
             return (f"answer decision {p.get('decision_id')} ({p.get('decision_kind') or '?'}) as "
                     f"{p.get('authority')}" + (" · option chosen" if p.get("option") else "")

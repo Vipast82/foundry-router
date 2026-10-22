@@ -59,6 +59,11 @@ _OPEN_PATHS = ("/", "/api/version")          # liveness probes stay open
 # anywhere, so only code inside this process can present it.
 INTERNAL_HEADER = "x-foundry-internal"
 INTERNAL_TOKEN = secrets.token_urlsafe(32)
+# The Foundry Client's relay (foundry_client/relay.py) heart-beats, claims its
+# stack actions and reports them with an operator-scoped key. These routes
+# admit that scope; control_api.py then limits such a key to source kind
+# `client` and to client_* actions (it never claims coordinator actions).
+CLIENT_RELAY_PATHS = ("/v1/foundry/telemetry/heartbeat", "/v1/foundry/control/claim")
 
 
 def current() -> dict:
@@ -170,12 +175,19 @@ class ClientAuthMiddleware:
                                  "(Setup → Clients & keys) and put it in this client's API "
                                  "key field", "invalid_api_key")
         elif need == "telemetry":
-            if client is None or not ({"telemetry", "orchestration", "admin"} & set(client["scopes"])):
+            # the Foundry Client heart-beats with an operator key (control_api
+            # refuses any other source kind from such a key)
+            ok = {"telemetry", "orchestration", "admin"} | (
+                {"operator"} if path in CLIENT_RELAY_PATHS else set())
+            if client is None or not (ok & set(client["scopes"])):
                 problem = _deny(401 if client is None else 403,
                                 "telemetry needs a client key with the telemetry (or "
                                 "orchestration) scope", "insufficient_scope")
         elif need == "orchestration":
-            if client is None or not ({"orchestration", "admin"} & set(client["scopes"])):
+            ok = {"orchestration", "admin"} | (
+                {"operator"} if path in CLIENT_RELAY_PATHS or path.startswith(
+                    "/v1/foundry/control/actions/") else set())
+            if client is None or not (ok & set(client["scopes"])):
                 problem = _deny(401 if client is None else 403,
                                 "work bindings need a client key with the orchestration "
                                 "scope", "insufficient_scope")

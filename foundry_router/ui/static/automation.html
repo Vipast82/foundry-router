@@ -1,7 +1,9 @@
 <!doctype html>
 <!--
   Foundry automation (/ui/automation): one place to manage the coordinator's
-  roles, routes, backends, settings, role rules and queue.
+  roles, routes, backends, settings, role rules and queue, plus the operator
+  chat (Chat tab, /control/api/chat/*): the same work in plain language, with
+  confirm cards for anything that changes live behaviour.
   One static page, vanilla JS, no build step. The one external script is
   SortableJS (pinned, SRI) for drag handles; without it the arrow keys and the
   move buttons still reorder everything.
@@ -271,6 +273,41 @@
   .toast { background:var(--panel); border:1px solid var(--accent); border-radius:6px; padding:8px 12px; box-shadow:0 6px 20px rgba(0,0,0,.35); font-size:13px; }
   .toast.bad { border-color:var(--bad); }
   [hidden] { display:none !important; }
+  /* chat */
+  .chat-wrap { display:grid; grid-template-columns:minmax(200px, 260px) minmax(0, 1fr); gap:12px; margin-top:12px; min-height:60vh; }
+  .chat-side { min-width:0; }
+  .chat-threads { list-style:none; margin:0; padding:0; display:grid; gap:3px; max-height:70vh; overflow-y:auto; overflow-x:hidden; }
+  .chat-threads li { min-width:0; }
+  .chat-th { width:100%; min-width:0; text-align:left; background:var(--panel); border:1px solid var(--line); border-radius:5px; padding:6px 9px; cursor:pointer; display:flex; flex-direction:column; gap:1px; }
+  .chat-th:hover { border-color:var(--accent); } .chat-th.on { border-color:var(--accent); background:var(--panel-2); }
+  .chat-th .t { font-weight:600; font-size:13px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .chat-main { display:flex; flex-direction:column; min-width:0; background:var(--panel); border:1px solid var(--line); border-radius:6px; box-shadow:var(--shadow); }
+  .chat-head { padding:8px 12px; border-bottom:1px solid var(--line); gap:8px; }
+  .chat-title { flex:1 1 200px; min-width:0; font:600 15px/1.2 var(--num-font); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .chat-msgs { flex:1; overflow:auto; padding:12px; display:grid; gap:10px; align-content:start; max-height:62vh; }
+  .chat-form { padding:10px 12px; border-top:1px solid var(--line); }
+  .chat-empty { max-width:640px; }
+  .msg { display:flex; } .msg.me { justify-content:flex-end; } .msg.sys { justify-content:center; }
+  .bub { max-width:min(760px, 92%); border:1px solid var(--line); border-radius:8px; padding:8px 11px; background:var(--bg); font-size:13.5px; min-width:0; }
+  .msg.me .bub { background:var(--panel-2); border-color:var(--line-2); white-space:pre-wrap; }
+  .msg.sys .bub { font-size:12.5px; color:var(--dim); border-style:dashed; }
+  .say { white-space:pre-wrap; margin:4px 0; }
+  .tcs { display:grid; gap:3px; margin-bottom:6px; }
+  .tc { border:1px solid var(--line); border-radius:5px; background:var(--panel); font-size:12.5px; }
+  .tc summary { padding:4px 8px; cursor:pointer; } .tc summary code { font-weight:600; }
+  .tc-body { padding:4px 8px 8px; } .tc pre { margin:2px 0 6px; white-space:pre-wrap; overflow-wrap:anywhere; font-size:11.5px; max-height:220px; overflow:auto; }
+  .tc.refused { border-color:color-mix(in srgb, var(--warn) 60%, var(--line)); } .tc.refused ul { margin:4px 0; padding-left:18px; }
+  .ask { margin:6px 0; padding:8px 10px; border:1px solid var(--line); border-left:4px solid var(--info); border-radius:5px; }
+  .ask .opts { display:flex; gap:6px; flex-wrap:wrap; margin-top:6px; }
+  .changed { margin:6px 0; font-size:12.5px; } .changed ul { margin:3px 0 0; padding-left:18px; }
+  .confirm { margin:8px 0 2px; padding:10px 12px; border:1px solid var(--line); border-left:4px solid var(--warn); border-radius:6px; background:var(--panel); }
+  .confirm.done { border-left-color:var(--line-2); opacity:.9; }
+  .ccalls { list-style:none; margin:6px 0 0; padding:0; display:grid; gap:6px; }
+  .ccalls li { border:1px solid var(--line); border-radius:5px; padding:6px 8px; background:var(--bg); }
+  .ccalls .sw input { appearance:auto; -webkit-appearance:auto; width:auto; height:auto; background:none; margin-top:2px; }
+  .ccalls .sw input::after { content:none; }
+  .prev { margin:6px 0 0 24px; font-size:12.5px; } .prev .diff-groups { max-height:34vh; }
+  @media (max-width: 760px) { .chat-wrap { grid-template-columns:1fr; } .chat-threads { max-height:24vh; } .chat-msgs { max-height:none; } }
   @media (max-width: 560px) {
     header h1 { font-size:15px; }
     nav button { padding:8px 10px; font-size:13px; }
@@ -296,7 +333,7 @@
   </div>
 </header>
 <nav id="nav" role="tablist" aria-label="Automation sections">
-  <button role="tab" id="tab-ask" aria-controls="v-ask" data-view="ask">Ask</button>
+  <button role="tab" id="tab-ask" aria-controls="v-ask" data-view="ask" title="Operator chat: do anything on this page in plain language">Chat</button>
   <button role="tab" id="tab-routing" aria-controls="v-routing" data-view="routing">Routing</button>
   <button role="tab" id="tab-settings" aria-controls="v-settings" data-view="settings">Settings</button>
   <button role="tab" id="tab-rules" aria-controls="v-rules" data-view="rules">Role rules</button>
@@ -628,10 +665,10 @@ $("#nav").addEventListener("keydown", e => {
 });
 window.addEventListener("hashchange", () => { const h = location.hash.slice(1); if (h && h !== S.view) setView(h, false); });
 function renderView() {
-  if (!S.deployed) return;
   renderNotes();
-  if (S.view === "ask") renderAsk();
-  else if (S.view === "routing") renderRouting();
+  if (S.view === "ask") return renderAsk();          // the chat needs no project document
+  if (!S.deployed) return;
+  if (S.view === "routing") renderRouting();
   else if (S.view === "settings") renderSettings();
   else if (S.view === "rules") renderRules();
   else renderQueue();
@@ -1575,92 +1612,222 @@ function startTick() {
     for (const c of els) c.textContent = countdown(Number(c.dataset.deadline));
   }, 1000);
 }
-/* ===================================================================== ask (launch assistant) */
-const ASK_EXAMPLES = [
-  "Start the project from the next sprint that isn't completed in its documentation",
-  "Queue every remaining sprint in plan order and resume the project",
-  "Pause the project at a safe point",
+/* ===================================================================== chat (operator chat, W3)
+   /control/api/chat/*: persisted threads and turns. The model proposes JSON
+   calls; the router validates them. Reads, drafts and previews run at once;
+   deploy / cutoffs / persona / sprint / decision / restart calls come back as
+   a confirm card (per-call checkboxes) unless their class is on auto (the
+   Auto-run drawer). Nothing is kept in browser storage: threads live on the
+   router under the signed-in operator. */
+const CHAT_EXAMPLES = [
+  "What is running right now, and is anything waiting on me?",
+  "Start Animal Uprising from the next sprint that isn't done",
+  "Set the Claude cutoff to 85 and the GPT cutoff to 90",
+  "Restart Kilo at the next safe point",
 ];
-const STEP_LABEL = {queue_approve: "Queue", reopen: "Re-queue (was cancelled)", resume_task: "Resume", pause_task: "Pause",
-  unblock_task: "Unblock", cancel_task: "Cancel", project_resume: "Resume project", project_pause: "Pause project"};
-function renderAsk() {
+const CLS_PILL = {read: "", draft: "info", preview: "info", ask: "", deploy: "warn", cutoffs: "warn", persona: "warn",
+  sprint: "warn", decision: "warn", restart: "bad"};
+const CHAT_CLASS_HELP = {deploy: "Deploy or roll back settings", cutoffs: "Change usage cutoffs", persona: "Change persona routes",
+  sprint: "Start, queue, pause, resume or cancel sprints; pause/resume a project", decision: "Answer decisions and questions",
+  restart: "Restart stack components / reload kilo.jsonc"};
+S.chat = {threads: null, thread: null, view: null, busy: false, settings: null, actions: {}};
+const CH = {
+  threads: () => api("chat/threads"),
+  create: title => api("chat/threads", {method: "POST", body: {title: title || ""}}),
+  thread: id => api("chat/threads/" + encodeURIComponent(id)),
+  send: (id, text) => api(`chat/threads/${encodeURIComponent(id)}/turns`, {method: "POST", body: {text}}),
+  decide: (cid, decision, picked) => api("chat/confirms/" + encodeURIComponent(cid), {method: "POST", body: {decision, picked}}),
+  del: id => api(`chat/threads/${encodeURIComponent(id)}/delete`, {method: "POST", body: {}}),
+  rename: (id, title) => api(`chat/threads/${encodeURIComponent(id)}/rename`, {method: "POST", body: {title}}),
+  settings: () => api("chat/settings"),
+  saveSettings: auto => api("chat/settings", {method: "PUT", body: {auto_classes: auto}}),
+  audit: id => api("chat/audit?thread=" + encodeURIComponent(id)),
+};
+const when = ts => ts ? new Date(ts * 1000).toLocaleString([], {dateStyle: "short", timeStyle: "short"}) : "";
+async function renderAsk() {
   const el = $("#v-ask");
-  if (el.dataset.ready) return renderAskPlan();
-  el.dataset.ready = "1";
-  el.innerHTML = `<h2>Ask the automation</h2>
-    <p class="muted">Say what you want in plain language. The coordinator reads every sprint plan and the queue, proposes the steps,
-    and checks each one. <b>Nothing runs until you press Run.</b></p>
-    <form id="ask-form"><label for="ask-text" class="sr-only">Request</label>
-    <textarea id="ask-text" rows="3" maxlength="2000" placeholder="e.g. Start Animal Uprising from the next sprint that isn't done" style="font-family:inherit;font-size:14px"></textarea>
-    <div class="row" style="margin-top:8px;gap:6px;flex-wrap:wrap">${ASK_EXAMPLES.map(x => `<button class="act" type="button" data-ex="${esc(x)}">${esc(x)}</button>`).join("")}
-    <span class="grow"></span><button class="act primary" type="submit" id="ask-go">Plan it</button></div></form>
-    <div id="ask-out" aria-live="polite"></div>`;
-  el.addEventListener("click", e => { const b = e.target.closest("[data-ex]"); if (b) { $("#ask-text").value = b.dataset.ex; $("#ask-text").focus(); } });
-  $("#ask-form").onsubmit = async ev => {
-    ev.preventDefault();
-    const text = $("#ask-text").value.trim();
-    if (!text) return toast("Say what you want done", true);
-    $("#ask-go").disabled = true; S.ask = {phase: "planning"}; renderAskPlan();
-    try {
-      const a = await api("actions", {method: "POST", body: {kind: "assistant_plan", project_id: S.project, text, idempotency_key: idem()}});
-      const done = await waitAction(a.action_id);
-      S.ask = done.status === "applied" ? {phase: "plan", plan: done.result} : {phase: "error", error: done.status_detail || done.status};
-    } catch (e) { S.ask = {phase: "error", error: e.message}; }
-    $("#ask-go").disabled = false; renderAskPlan();
-  };
-  renderAskPlan();
+  if (!el.dataset.ready) {
+    el.dataset.ready = "1";
+    el.innerHTML = `<div class="chat-wrap">
+      <aside class="chat-side" aria-label="Chats">
+        <div class="row" style="margin:0 0 6px"><button class="act primary" type="button" data-act="ch-new">New chat</button>
+          <span class="grow"></span><button class="act" type="button" data-act="ch-auto" title="Which kinds of change run without a confirm card">Auto-run…</button></div>
+        <ul class="chat-threads" id="chat-threads" role="listbox" aria-label="Chat threads"></ul>
+      </aside>
+      <section class="chat-main">
+        <div class="chat-head row" id="chat-head" style="margin:0"></div>
+        <div class="chat-msgs" id="chat-msgs" aria-live="polite"></div>
+        <form id="chat-form" class="chat-form"><label for="chat-text" class="sr-only">Message</label>
+          <textarea id="chat-text" rows="2" maxlength="4000" placeholder="Say what you want: start a sprint, change a setting, restart Kilo, answer a decision…" style="font-family:inherit;font-size:14px"></textarea>
+          <div class="row" style="margin:6px 0 0;gap:6px"><div class="chips" id="chat-ex" style="margin:0"></div><span class="grow"></span>
+            <span class="hint" id="chat-busy" style="margin:0"></span><button class="act primary" type="submit" id="chat-send">Send</button></div></form>
+      </section></div>`;
+    el.addEventListener("click", chatClick);
+    $("#chat-form").onsubmit = chatSubmit;
+    $("#chat-text").addEventListener("keydown", e => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); $("#chat-form").requestSubmit(); } });
+  }
+  if (!S.chat.threads) {
+    try { S.chat.threads = (await CH.threads()).threads || []; } catch (e) { $("#chat-threads").innerHTML = `<li class="hint">${esc(e.message)}</li>`; return; }
+    if (!S.chat.thread && S.chat.threads.length) S.chat.thread = S.chat.threads[0].thread_id;
+  }
+  renderThreadList();
+  await renderThread();
 }
-async function waitAction(id, maxS = 240) {
-  const t0 = Date.now();
-  for (;;) {
-    const a = await api("actions/" + encodeURIComponent(id));
-    if (["applied", "rejected", "failed", "expired", "cancelled"].includes(a.status)) return a;
-    if (Date.now() - t0 > maxS * 1000) return {status: "timeout", status_detail: "the coordinator did not answer in time; is it running with --control?"};
-    if (S.ask) { S.ask.waiting = a.status_detail || a.status; const w = $("#ask-wait"); if (w) w.textContent = S.ask.waiting; }
-    await new Promise(r => setTimeout(r, 2000));
+function renderThreadList() {
+  const ul = $("#chat-threads"); if (!ul) return;
+  ul.innerHTML = (S.chat.threads || []).map(t => `<li><button type="button" role="option" class="chat-th${t.thread_id === S.chat.thread ? " on" : ""}" aria-selected="${t.thread_id === S.chat.thread}" data-act="ch-open" data-id="${esc(t.thread_id)}">
+    <span class="t">${esc(t.title || "Chat")}</span><span class="hint" style="margin:0">${esc(when(t.updated_ts))} · ${t.turns || 0} turn${t.turns === 1 ? "" : "s"}</span></button></li>`).join("")
+    || `<li class="hint" style="padding:6px">No chats yet. Start one.</li>`;
+}
+async function renderThread() {
+  const box = $("#chat-msgs"), head = $("#chat-head"); if (!box) return;
+  $("#chat-ex").innerHTML = CHAT_EXAMPLES.map(x => `<button class="act" type="button" data-ex="${esc(x)}" style="font-size:12px">${esc(x)}</button>`).join("");
+  if (!S.chat.thread) { head.innerHTML = ""; box.innerHTML = `<div class="chat-empty"><h2 style="margin-top:0">Operator chat</h2>
+    <p class="hint">Say what you want in plain language. The chat reads the sprints, settings, usage and stack, then makes typed calls the router checks.
+    Reads, drafts and previews run at once. Deploys, cutoff changes, persona changes, sprint starts, decisions and restarts come back as a card you confirm.</p></div>`; return; }
+  try { S.chat.view = await CH.thread(S.chat.thread); } catch (e) { box.innerHTML = `<p class="hint">${esc(e.message)}</p>`; return; }
+  const v = S.chat.view;
+  head.innerHTML = `<b class="chat-title" title="${esc(v.title || "Chat")}">${esc(v.title || "Chat")}</b><span class="hint" style="margin:0;white-space:nowrap">${esc(when(v.created_ts))}</span>
+    <button class="ic" type="button" data-act="ch-rename" title="Rename">✎</button>
+    <button class="act" type="button" data-act="ch-audit" title="Every turn, call and confirmation of this chat, as the router logged them">Audit</button>
+    <button class="act" type="button" data-act="ch-refresh" title="Reload (action results arrive as the coordinator or client reports them)">Refresh</button>
+    <button class="ic danger" type="button" data-act="ch-del" title="Delete this chat">✕</button>`;
+  const cards = Object.fromEntries((v.confirms || []).map(c => [c.confirm_id, c]));
+  box.innerHTML = (v.turns || []).map(t => turnHtml(t, cards)).join("") || `<p class="hint">Say something below.</p>`;
+  if (S.chat.busy) box.insertAdjacentHTML("beforeend", `<div class="msg me"><div class="bub">${esc(S.chat.busy)}</div></div><div class="msg ai"><div class="bub hint" style="margin:0">Thinking… (reads run now; changes come back as a card)</div></div>`);
+  box.scrollTop = box.scrollHeight;
+  fillActionPills();
+}
+function toolChip(c, r) {
+  const ok = r ? (r.ok ? "ok" : "bad") : "";
+  const res = r ? (r.ok ? short(r.result) : r.error) : "";
+  return `<details class="tc"><summary><span class="pill ${CLS_PILL[c.class] || ""}">${esc(c.class)}</span> <code>${esc(c.tool)}</code> ${esc(c.summary && c.summary !== c.tool ? c.summary : "")}${ok ? ` <span class="pill ${ok}">${r.ok ? "done" : "failed"}</span>` : ""}</summary>
+    <div class="tc-body"><div class="hint" style="margin:0">args</div><pre>${esc(JSON.stringify(c.args, null, 1))}</pre>${res ? `<div class="hint" style="margin:0">result</div><pre>${esc(res)}</pre>` : ""}</div></details>`;
+}
+function changesHtml(ch) {
+  if (!ch || !ch.length) return "";
+  return `<div class="changed"><b>What changed</b><ul>${ch.map(x => `<li>${esc(x).replace(/action (act-[0-9a-f]+)/g, (m, id) => `action <a href="/ui/control" title="Open the control center">${esc(id)}</a> <span class="pill" data-action-pill="${esc(id)}">…</span>`)}</li>`).join("")}</ul></div>`;
+}
+function turnHtml(t, cards) {
+  if (t.role === "system") return `<div class="msg sys"><div class="bub"><span class="hint" style="margin:0">${esc(when(t.ts))}</span> ${esc(t.text || "")}${changesHtml(t.changes)}</div></div>`;
+  const calls = t.calls || [], results = t.results || [];
+  const byId = Object.fromEntries(results.map(r => [r.id, r]));
+  const auto = calls.filter(c => c.mode === "auto");
+  const card = t.confirm_id ? (cards[t.confirm_id] || null) : null;
+  let out = `<div class="msg me"><div class="bub">${esc(t.text || "")}<div class="hint" style="margin:2px 0 0">${esc(when(t.ts))}</div></div></div>`;
+  out += `<div class="msg ai"><div class="bub">`;
+  if (auto.length) out += `<div class="tcs">${auto.map(c => toolChip(c, byId[c.id])).join("")}</div>`;
+  if ((t.refused || []).length) out += `<details class="tc refused"><summary>${t.refused.length} call${t.refused.length === 1 ? "" : "s"} refused by the router's checks</summary><ul>${t.refused.map(r => `<li><code>${esc(r.tool)}</code>: ${esc(r.reason)}</li>`).join("")}</ul></details>`;
+  if (t.status === "error") out += `<div class="banner bad" style="margin:4px 0"><b>Turn failed.</b> ${esc(t.error || "")}</div>`;
+  out += `<div class="say">${esc(t.say || "")}</div>`;
+  if (t.ask) out += `<div class="ask"><b>${esc(t.ask.text)}</b>${(t.ask.options || []).length ? `<div class="opts">${t.ask.options.map(o => `<button class="act" type="button" data-act="ch-answer" data-opt="${esc(o)}">${esc(o)}</button>`).join("")}</div>` : ""}</div>`;
+  out += changesHtml(t.changes);
+  if (t.confirm_id) out += confirmHtml(card || {confirm_id: t.confirm_id, status: "gone"}, t);
+  out += `<div class="hint" style="margin:4px 0 0">${esc(t.served_model || "")}${t.model_calls ? ` · ${t.model_calls} model call${t.model_calls === 1 ? "" : "s"}` : ""}${(t.prompt_tokens || t.completion_tokens) ? ` · ${t.prompt_tokens}+${t.completion_tokens} tokens` : ""}</div>`;
+  return out + `</div></div>`;
+}
+function previewHtml(c) {
+  const p = c.preview || {};
+  if (p.changes) return `<div class="prev">${p.changes.length ? diffGroups(p.changes, () => "") : `<span class="hint">no changes against the deployed revision</span>`}${(p.restart_needed || []).length ? `<div class="banner warn" style="margin:4px 0"><b>Restart needed</b> for: ${esc(p.restart_needed.join(", "))}</div>` : ""}${p.valid === false ? `<div class="banner bad" style="margin:4px 0">The draft does not validate; the deploy will be refused.</div>` : ""}</div>`;
+  if (p.question) return `<div class="prev"><div style="white-space:pre-wrap">${esc(p.question)}</div>${(p.options || []).length ? `<div class="hint">options: ${esc(p.options.join(", "))}</div>` : ""}</div>`;
+  if (p.stack) return `<div class="prev hint">${p.stack.client === "none attached" ? "No Foundry Client is attached: the action will be refused." : `client ${esc(p.stack.client)}${p.stack.fresh === false ? " (stale)" : ""}: ${(p.stack.components || []).map(x => `${esc(x.name)} ${esc(x.state || "")}`).join(", ")}`}</div>`;
+  if (p.current) return `<div class="prev hint">now: ${esc(short(p.current))}</div>`;
+  return "";
+}
+function confirmHtml(card, t) {
+  const live = card.status === "pending";
+  const res = Object.fromEntries((card.results || []).map(r => [r.id, r]));
+  const calls = card.calls || (t.calls || []).filter(c => c.mode === "confirm");
+  return `<section class="confirm${live ? "" : " done"}" data-cid="${esc(card.confirm_id)}" aria-label="Confirm card">
+    <div class="row" style="margin:0"><b>${live ? "Needs your confirmation" : `Card ${esc(card.status)}`}</b>${card.decided_by ? `<span class="hint" style="margin:0">by ${esc(card.decided_by)} · ${esc(when(card.decided_ts))}</span>` : ""}</div>
+    <ul class="ccalls">${calls.map(c => `<li><label class="sw" style="align-items:flex-start"><input type="checkbox" data-call="${esc(c.id)}" ${live ? "checked" : "disabled"}><span><span class="pill ${CLS_PILL[c.class] || ""}">${esc(c.class)}</span> ${esc(c.summary || c.tool)}${res[c.id] ? ` <span class="pill ${res[c.id].ok ? "ok" : "bad"}">${res[c.id].ok ? "done" : "failed"}</span>` : card.picked && !card.picked.includes(c.id) && !live ? ` <span class="pill">skipped</span>` : ""}</span></label>${previewHtml(c)}${res[c.id] && !res[c.id].ok ? `<div class="hint" style="color:var(--bad)">${esc(res[c.id].error || "")}</div>` : ""}</li>`).join("")}</ul>
+    ${live ? `<div class="row" style="margin:6px 0 0"><span class="hint" style="margin:0">Untick what should not run. Each call is checked again when it runs.</span><span class="grow"></span><button class="act" type="button" data-act="ch-decline">Decline</button><button class="act primary" type="button" data-act="ch-confirm">Run checked</button></div>` : ""}
+  </section>`;
+}
+async function fillActionPills() {
+  for (const p of $$("[data-action-pill]")) {
+    const id = p.dataset.actionPill;
+    try {
+      const a = S.chat.actions[id] || (S.chat.actions[id] = await api("actions/" + encodeURIComponent(id)));
+      p.textContent = a.status; p.title = a.status_detail || "";
+      p.className = "pill " + ({applied: "ok", rejected: "bad", failed: "bad", expired: "bad", cancelled: ""}[a.status] || "info");
+      if (["accepted", "claimed", "queued", "delivered"].includes(a.status)) delete S.chat.actions[id];
+    } catch (e) { p.textContent = "?"; }
   }
 }
-function renderAskPlan() {
-  const out = $("#ask-out"); if (!out) return;
-  const A = S.ask;
-  if (!A) { out.innerHTML = ""; return; }
-  if (A.phase === "planning" || A.phase === "running") {
-    out.innerHTML = `<div class="banner">${A.phase === "planning" ? "Reading the sprint plans and asking the planner…" : "Running the steps…"} <span class="muted" id="ask-wait">${esc(A.waiting || "")}</span></div>`;
-    return;
-  }
-  if (A.phase === "error") { out.innerHTML = `<div class="banner bad">${esc(A.error || "failed")}</div>`; return; }
-  const p = A.plan || {};
-  const warn = (p.warnings || []).map(w => `<li>${esc(w)}</li>`).join("");
-  const qs = (p.questions || []).map(q => `<li>${esc(q)}</li>`).join("");
-  if (A.phase === "ran") {
-    const rows = (A.results || []).map(r => `<tr><td>${esc(STEP_LABEL[r.kind] || r.kind)}</td><td>${esc(r.task_id || "")}</td><td class="${r.result === "done" ? "" : "bad"}">${esc(r.result)}</td></tr>`).join("");
-    out.innerHTML = `<div class="banner">Ran plan ${esc(p.plan_id)}.</div><table class="q"><thead><tr><th>Step</th><th>Sprint</th><th>Result</th></tr></thead><tbody>${rows}</tbody></table>`
-      + ((A.runWarnings || []).length ? `<div class="banner warn"><ul>${A.runWarnings.map(w => `<li>${esc(w)}</li>`).join("")}</ul></div>` : "");
-    return;
-  }
-  const steps = p.steps || [];
-  out.innerHTML = `<div class="banner"><b>Plan</b> ${esc(p.summary || "")} <span class="muted">(${esc(p.served_model || "")})</span></div>`
-    + (qs ? `<div class="banner warn"><b>The assistant asks:</b><ul>${qs}</ul>Rephrase your request with the answer.</div>` : "")
-    + (warn ? `<div class="banner warn"><b>Dropped or changed by the checks:</b><ul>${warn}</ul></div>` : "")
-    + (steps.length ? `<table class="q"><thead><tr><th>Run</th><th>Step</th><th>Sprint</th><th>After</th><th>Why</th></tr></thead><tbody>${steps.map((x, i) =>
-        `<tr><td><input type="checkbox" checked data-step="${i}" aria-label="Run step ${i + 1}"></td><td>${esc(STEP_LABEL[x.kind] || x.kind)}</td><td>${esc(x.task_id || S.project)}</td><td>${esc((x.deps || []).join(", "))}</td><td>${esc(x.why || "")}</td></tr>`).join("")}</tbody></table>
-        <div class="row" style="margin-top:8px"><span class="grow"></span><button class="act" type="button" id="ask-clear">Discard</button><button class="act primary" type="button" id="ask-run">Run checked steps</button></div>`
-      : `<div class="banner">No steps proposed.</div>`);
-  const clear = $("#ask-clear"); if (clear) clear.onclick = () => { S.ask = null; renderAskPlan(); };
-  const run = $("#ask-run");
-  if (run) run.onclick = async () => {
-    const picked = $$("#ask-out [data-step]").filter(c => c.checked).map(c => Number(c.dataset.step));
-    if (!picked.length) return toast("Nothing is checked", true);
-    S.ask = {...A, phase: "running"}; renderAskPlan();
-    try {
-      const a = await api("actions", {method: "POST", body: {kind: "assistant_run", project_id: S.project, plan_id: p.plan_id, steps: picked, idempotency_key: idem()}});
-      const done = await waitAction(a.action_id);
-      const r = done.result || {};
-      S.ask = r.results ? {phase: "ran", plan: p, results: r.results, runWarnings: r.warnings} : {phase: "error", error: done.status_detail || done.status};
-      S.queue = null;
-    } catch (e) { S.ask = {phase: "error", error: e.message}; }
-    renderAskPlan();
+async function chatSubmit(ev) {
+  ev.preventDefault();
+  const ta = $("#chat-text"), text = ta.value.trim();
+  if (!text || S.chat.busy) return;
+  try {
+    if (!S.chat.thread) { const t = await CH.create(); S.chat.thread = t.thread_id; S.chat.threads = null; }
+    S.chat.busy = text; ta.value = ""; $("#chat-send").disabled = true; $("#chat-busy").textContent = "working…";
+    await renderThread();
+    const turn = await CH.send(S.chat.thread, text);
+    S.chat.busy = false;
+    if (turn.status === "error") toast("The chat could not finish: " + (turn.error || ""), true);
+    if (turn.confirm) announce("The chat proposes changes that need your confirmation.");
+    S.chat.threads = null;
+  } catch (e) { S.chat.busy = false; toast(e.message, true); ta.value = text; }
+  $("#chat-send").disabled = false; $("#chat-busy").textContent = "";
+  await renderAsk();
+  $("#chat-text").focus();
+}
+async function chatClick(e) {
+  const ex = e.target.closest("[data-ex]"); if (ex) { $("#chat-text").value = ex.dataset.ex; $("#chat-text").focus(); return; }
+  const b = e.target.closest("[data-act]"); if (!b) return;
+  const a = b.dataset.act;
+  try {
+    if (a === "ch-new") { const t = await CH.create(); S.chat.thread = t.thread_id; S.chat.threads = null; await renderAsk(); $("#chat-text").focus(); }
+    else if (a === "ch-open") { S.chat.thread = b.dataset.id; renderThreadList(); await renderThread(); }
+    else if (a === "ch-refresh") { S.chat.actions = {}; await renderThread(); }
+    else if (a === "ch-del") { if (!confirm("Delete this chat? Its audit rows are kept.")) return; await CH.del(S.chat.thread); S.chat.thread = null; S.chat.threads = null; await renderAsk(); }
+    else if (a === "ch-rename") { const t = prompt("Chat title", (S.chat.view || {}).title || ""); if (t === null) return; await CH.rename(S.chat.thread, t); S.chat.threads = null; await renderAsk(); }
+    else if (a === "ch-audit") await openChatAudit();
+    else if (a === "ch-auto") await openAutoDrawer();
+    else if (a === "ch-answer") { $("#chat-text").value = b.dataset.opt; $("#chat-form").requestSubmit(); }
+    else if (a === "ch-confirm" || a === "ch-decline") {
+      const sec = b.closest(".confirm"), cid = sec.dataset.cid;
+      const picked = $$("[data-call]", sec).filter(c => c.checked).map(c => c.dataset.call);
+      if (a === "ch-confirm" && !picked.length) return toast("Nothing is checked", true);
+      for (const x of $$("button", sec)) x.disabled = true;
+      const out = await CH.decide(cid, a === "ch-confirm" ? "confirm" : "decline", picked);
+      const bad = (out.results || []).filter(r => !r.ok);
+      toast(a === "ch-decline" ? "Declined; nothing ran." : bad.length ? `${bad.length} call${bad.length === 1 ? "" : "s"} failed; see the card.` : "Done.", !!bad.length);
+      S.chat.threads = null; S.queue = null; await renderAsk();
+    }
+  } catch (err) { toast(err.message, true); }
+}
+async function openChatAudit() {
+  let rows = [];
+  try { rows = (await CH.audit(S.chat.thread)).audit || []; } catch (e) { return toast(e.message, true); }
+  openModal(`<h3 id="modal-h">Audit · ${esc((S.chat.view || {}).title || "chat")}</h3>
+    <p class="hint">Every turn, model call, tool call, refusal and confirmation of this chat, newest first (chat_audit_log). Actions sent to the coordinator or the Foundry Client are also in the <a href="/ui/control">control center</a>'s action log.</p>
+    <div style="max-height:60vh;overflow:auto"><table class="q"><thead><tr><th>When</th><th>Event</th><th>Who</th><th>Detail</th></tr></thead><tbody>
+    ${rows.map(r => `<tr><td class="mono" style="white-space:nowrap">${esc(when(r.ts))}</td><td><span class="pill ${({failed: "bad", refused: "warn", declined: "warn", applied: "ok", confirmed: "ok"})[r.status] || ""}">${esc(r.status)}</span></td><td>${esc(r.actor || "")}</td><td style="overflow-wrap:anywhere">${esc(r.detail || "")}</td></tr>`).join("") || `<tr><td colspan="4" class="hint">Nothing yet.</td></tr>`}</tbody></table></div>`);
+}
+async function openAutoDrawer() {
+  let s;
+  try { s = await CH.settings(); } catch (e) { return toast(e.message, true); }
+  S.chat.settings = s;
+  const groups = {};
+  for (const t of s.catalog || []) (groups[t.class] = groups[t.class] || []).push(t);
+  const d = $("#drawer");
+  _drawerReturn = document.activeElement;
+  d.innerHTML = `<button class="ic x" type="button" data-close-drawer aria-label="Close">✕</button><h3 id="drawer-h">Auto-run</h3>
+    <p class="hint">Reads, drafts and previews always run at once. Each class below shows a confirm card unless you switch it to auto. Global for every operator; saved on the router.</p>
+    <fieldset><legend>Run without a card</legend>${(s.classes || []).map(c => `<label class="sw" style="display:flex;margin:6px 0"><input type="checkbox" data-cls="${esc(c.id)}" ${s.auto_classes[c.id] ? "checked" : ""}><span><b>${esc(c.id)}</b> — ${esc(c.label)}</span></label>`).join("")}</fieldset>
+    <div class="row"><span class="grow"></span><span class="hint" id="auto-msg" style="margin:0"></span><button class="act primary" type="button" data-save-auto>Save</button></div>
+    <h4 style="margin:14px 0 4px">What the chat can do</h4>
+    ${Object.entries(groups).map(([g, ts]) => `<details style="margin:4px 0"><summary><span class="pill ${CLS_PILL[g] || ""}">${esc(g)}</span> ${ts.length} tool${ts.length === 1 ? "" : "s"} · ${esc(ts[0].mode)}</summary><ul class="hint" style="padding-left:18px">${ts.map(t => `<li><code>${esc(t.name)}</code>: ${esc(t.description)}</li>`).join("")}</ul></details>`).join("")}`;
+  d.hidden = false;
+  $("[data-close-drawer]", d).onclick = closeDrawer;
+  $("[data-save-auto]", d).onclick = async () => {
+    const auto = Object.fromEntries($$("[data-cls]", d).map(c => [c.dataset.cls, c.checked]));
+    try { await CH.saveSettings(auto); $("#auto-msg").textContent = "Saved"; toast("Auto-run classes saved"); }
+    catch (e) { toast(e.message, true); }
   };
+  ($("input", d) || d).focus();
 }
 function qTask(id) { return (S.queue || []).find(x => x.task_id === id); }
 async function action(kind, x, extra = {}) {
