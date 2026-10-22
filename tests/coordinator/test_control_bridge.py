@@ -139,24 +139,38 @@ def test_worker_transcript_reasoning_tools_mcp_without_credentials(env):
         assert secret not in blob, secret
 
 
-def test_question_answered_through_the_coordinator_resumes_the_session(env):
-    fake, sid, cc, c, ch, store = (env[k] for k in ("fake", "sid", "cc", "c", "ch", "store"))
+def test_implementer_question_is_answered_by_the_engine_not_the_operator(env):
+    """W1.1: a Kilo `question` of the implementer never reaches a person: the engine
+    answers it with the standing instruction and the task stays IMPLEMENTING."""
+    fake, sid, cc, c, store = (env[k] for k in ("fake", "sid", "cc", "c", "store"))
     rid = fake.ask_question(sid, [{"question": "Which size first?", "header": "Size",
                                    "options": [{"label": "390x844"}, {"label": "1920x1080"}]}])
     c.tick()
+    assert store.task("game", "T1")["state"] == "IMPLEMENTING"
+    assert fake.replies and fake.replies[0]["request_id"] == rid
+    assert "BLOCKED report" in fake.replies[0]["body"]["answers"][0][0]
+    env["bridge"].step()
+    assert not [a for a in cc.alerts([], "open") if a["kind"] == "question"]
+
+
+def test_permission_answered_through_the_coordinator_resumes_the_session(env):
+    """A Kilo permission ask still reaches the operator (the control center's
+    reply_permission action), and the reply resumes the same session."""
+    fake, sid, cc, c, ch, store = (env[k] for k in ("fake", "sid", "cc", "c", "ch", "store"))
+    rid = fake.ask_permission(sid, "edit", [".kilo/tally/r1.txt"])
+    c.tick()
     assert store.task("game", "T1")["state"] == "AWAITING_HUMAN"
     env["bridge"].step()
-    alerts = [a for a in cc.alerts([], "open") if a["kind"] == "question"]
+    alerts = [a for a in cc.alerts([], "open") if a["kind"] == "permission"]
     assert len(alerts) == 1 and alerts[0]["request_id"] == rid
-    text = "Do 390x844 first.\n\nReason: phone layout is the binding check.\n```\nnote\n```"
-    a = act(cc, kind="answer_question", request_id=rid, session_id=sid, answers=[[text]],
+    a = act(cc, kind="reply_permission", request_id=rid, session_id=sid, reply="once",
             expected={"task_state": "AWAITING_HUMAN"})
     with pytest.raises(ControlError) as e:                # another tab: refused
-        act(cc, kind="answer_question", request_id=rid, session_id=sid, answers=[["other"]])
+        act(cc, kind="reply_permission", request_id=rid, session_id=sid, reply="reject")
     assert e.value.code == "duplicate_reply"
     ch.poll()
-    assert fake.replies == [{"kind": "question", "request_id": rid, "session_id": sid,
-                             "body": {"answers": [[text]]}}]
+    assert fake.replies == [{"kind": "permission", "request_id": rid, "session_id": sid,
+                             "body": {"reply": "once"}}]
     assert store.task("game", "T1")["state"] == "IMPLEMENTING"
     v = cc.action_view(a["action_id"])
     assert v["status"] == "applied" and sid in v["status_detail"]
@@ -169,12 +183,12 @@ def test_question_answered_through_the_coordinator_resumes_the_session(env):
 
 def test_reply_waits_until_the_engine_has_recorded_the_question(env):
     fake, sid, cc, c, ch, store = (env[k] for k in ("fake", "sid", "cc", "c", "ch", "store"))
-    rid = fake.ask_question(sid, [{"question": "Go?", "options": [{"label": "yes"}]}])
+    rid = fake.ask_permission(sid, "edit", ["src/a.txt"])
     env["bridge"].step()                                  # bridge saw it first
-    a = act(cc, kind="answer_question", request_id=rid, session_id=sid, answers=[["yes"]])
+    a = act(cc, kind="reply_permission", request_id=rid, session_id=sid, reply="once")
     ch.poll()
     assert cc.action_view(a["action_id"])["status"] == "queued" and fake.replies == []
-    c.tick()                                              # engine records the question
+    c.tick()                                              # engine records the request
     ch.poll()
     assert cc.action_view(a["action_id"])["status"] == "applied"
     assert fake.replies[0]["request_id"] == rid
@@ -182,10 +196,10 @@ def test_reply_waits_until_the_engine_has_recorded_the_question(env):
 
 def test_changed_session_is_not_silently_retargeted(env):
     fake, sid, cc, c, ch, store = (env[k] for k in ("fake", "sid", "cc", "c", "ch", "store"))
-    rid = fake.ask_question(sid, [{"question": "Go?"}])
+    rid = fake.ask_permission(sid, "edit", ["src/a.txt"])
     c.tick()
     env["bridge"].step()
-    a = act(cc, kind="answer_question", request_id=rid, session_id=sid, answers=[["yes"]])
+    a = act(cc, kind="reply_permission", request_id=rid, session_id=sid, reply="once")
     t = store.task("game", "T1")
     store.update_task("game", "T1", session_id="ses_other")      # the session changed meanwhile
     ch.poll()
@@ -389,7 +403,7 @@ def test_event_stream_delivers_streaming_text(env):
 
 def test_a_question_is_not_recorded_as_an_engine_error(env):
     fake, sid, c, store = env["fake"], env["sid"], env["c"], env["store"]
-    fake.ask_question(sid, [{"question": "Go?"}])
+    fake.ask_permission(sid, "bash", ["git push"])
     c.tick()
     t = store.task("game", "T1")
     assert t["state"] == "AWAITING_HUMAN" and not (t["next_action"] or "").startswith("error")

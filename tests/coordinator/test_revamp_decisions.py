@@ -20,10 +20,12 @@ P0 = SimpleNamespace(profile=SimpleNamespace(raw={}))
 
 
 def test_classification():
-    assert DP.classify("obligation_conflict", {}) == "defect"
+    # W1.2: every lead escalation and obligation conflict is a decision with a default;
+    # only the reviewer-access / flaky-check kinds stay defects
+    assert DP.classify("obligation_conflict", {}) == "decision"
     assert DP.classify("review_access", {}) == "defect"
-    assert DP.classify("lead_escalation", {"reason": "guard_violation"}) == "defect"
-    assert DP.classify("lead_escalation", {"reason": "max_diagnoses"}) == "defect"
+    assert DP.classify("lead_escalation", {"reason": "guard_violation"}) == "decision"
+    assert DP.classify("lead_escalation", {"reason": "max_diagnoses"}) == "decision"
     assert DP.classify("lead_escalation", {"reason": "lead_asks"}) == "decision"
     assert DP.classify("scope_request", {}) == "decision"
     assert DP.classify("no_progress", {}) == "decision"
@@ -36,7 +38,14 @@ def test_meta_gives_a_default_only_when_one_is_safe():
                  "timeout_minutes": 30}
     # no recommended option -> no timeout (it waits for the operator)
     assert DP.meta(P0, "no_progress", {}, ["stop the task"])["timeout_minutes"] == 0
-    assert DP.meta(P0, "obligation_conflict", {"recommended": "x"}, ["x"])["recommended"] is None
+    # the recommendation= text names the default too (W1.2), when it is one of the options
+    m = DP.meta(P0, "obligation_conflict", {}, ["keep BUILD (default)", "operator decision"],
+                recommendation="keep BUILD: captures are BUILD evidence")
+    assert m == {"decision_class": "decision", "recommended": json.dumps("keep BUILD (default)"),
+                 "timeout_minutes": 30}
+    assert DP.meta(P0, "no_progress", {}, ["a", "b"], recommendation="something else")[
+        "recommended"] is None
+    assert DP.meta(P0, "review_access", {"recommended": "x"}, ["x"])["recommended"] is None
     lead = DP.meta(P0, "lead_escalation", {"reason": "lead_asks", "recommended": "layout B"},
                    ["layout A", "layout B"])
     assert lead["recommended"] == json.dumps("layout B") and lead["timeout_minutes"] == 30
@@ -126,6 +135,10 @@ def test_lead_questions_may_carry_options_and_a_recommendation():
     assert validate_report({**base, "options": ["layout A", "layout B"],
                             "recommended": "layout C"})[0] is None
     assert validate_report({**base, "options": ["only one"]})[0] is None
+    # W1.2: both are required for ask_victor (the repair prompt names what is missing)
+    _, errs = validate_report(base)
+    assert any("needs options" in e for e in errs) and any("needs recommended" in e for e in errs)
+    assert validate_report({**base, "options": ["layout A", "layout B"]})[0] is None
 
 
 # ------------------------------------------------------------------ no progress

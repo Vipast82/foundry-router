@@ -532,7 +532,8 @@ def test_s5_restart_during_a_question_then_answer(game):
 
     def agent(ctx):
         if not ctx.get("answers"):
-            return {"question": {"text": "Blue or green?"}}
+            # a permission ask: the request that still reaches a person (W1.1)
+            return {"question": {"text": "edit src/a.txt?", "kind": "permission"}}
         return {"writes": {"src/a.txt": "OK"}, "commit": "T1: green"}
     client = Gated(agent)
     c1 = coordinator(tmp, [prof], {"game": client})
@@ -540,9 +541,9 @@ def test_s5_restart_during_a_question_then_answer(game):
     assert run_until(c1, lambda: _state(c1) == S.AWAITING_HUMAN)
     del c1
     c2 = coordinator(tmp, [prof], {"game": client})
-    c2.answer("game", "T1", [["green"]])
+    c2.answer("game", "T1", [["once"]])
     assert run_until(c2, lambda: _state(c2) == S.COMPLETE)
-    assert len(client.starts) == 1 and client.answered[0][3] == "question"
+    assert len(client.starts) == 1 and client.answered[0][3] == "permission"
 
 
 def test_s5_pause_restart_resume_continues_the_same_session(game):

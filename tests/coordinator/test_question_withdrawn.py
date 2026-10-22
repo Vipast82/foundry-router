@@ -1,6 +1,8 @@
-"""A session question Kilo withdraws on its own (it times some out, e.g. its
-snapshot prompt) must not leave the task AWAITING_HUMAN while the session keeps
-working: the coordinator returns it to the state it came from."""
+"""A session request Kilo withdraws on its own (it times some out) must not leave
+the task AWAITING_HUMAN while the session keeps working: the coordinator returns
+it to the state it came from. Since W1.1 an implementer's `question` is answered
+by the coordinator itself, so the request that still reaches a person is a Kilo
+permission ask."""
 
 import pytest
 
@@ -14,7 +16,8 @@ T1 = {"id": "T1", "title": "Make the thing", "spec": "Write src/a.txt containing
 
 def agent(ctx):
     if not ctx.get("answers"):
-        return {"question": {"text": "Disable snapshots for this repository?"}}
+        return {"question": {"text": "permission edit for .kilo/tally/r1.txt",
+                             "kind": "permission"}}
     return {"writes": {"src/a.txt": "OK"}, "commit": "T1: work",
             "final": '```coordinator-report\n{"status": "DONE", "summary": "did it"}\n```'}
 

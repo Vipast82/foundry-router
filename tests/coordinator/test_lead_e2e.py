@@ -535,7 +535,9 @@ def test_lead_escalation_replaces_the_stall_decision_with_one_question(tmp_path)
                          "list; continuing needs a scope decision.",
            "evidence_refs": ["docs/progress/UI-02_PLAN.md:7"],
            "action": {"kind": "ask_victor"},
-           "question": "Should UI-02 include the HUD screens, or stop after the kit?"}
+           "question": "Should UI-02 include the HUD screens, or stop after the kit?",
+           "options": ["include the HUD screens", "stop after the kit"],
+           "recommended": "stop after the kit"}
     c, client, ff, did, utid = _lifecycle_game(tmp_path, lambda ctx: lead_reply(rep))
     O = c.obligations
     assert run_until(c, lambda: (c.lead.active_case("game", utid) or {}).get("state")
@@ -1072,7 +1074,9 @@ def test_named_user_action_marks_the_case_needs_human(tmp_path):
         "hypothesis": "Roblox Studio is signed out, so no gallery capture can run.",
         "evidence_refs": ["studio log"],
         "action": {"kind": "ask_victor", "user_action": "Open Roblox Studio and sign in"},
-        "question": "Please sign Roblox Studio in; should the task then retry the capture?"}),
+        "question": "Please sign Roblox Studio in; should the task then retry the capture?",
+        "options": ["signed in: retry the capture", "stop the task"],
+        "recommended": "stop the task"}),
         extra=lead_toml())
     e["c"].approve("game", TID, [], "victor")
     assert run_until(e["c"], lambda: (case(e) or {}).get("state") == "NEEDS_VICTOR", limit=60)

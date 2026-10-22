@@ -359,7 +359,7 @@ Inner loop: write code -> stories -> fix -> repeat; Lune specs for the models yo
 While a gate holds Studio, do not call Studio tools yourself. Put scratch files under `.plan/tmp/` (git-ignored).
 Do NOT write {t}_SUMMARY.md, the STATE.md row or the MASTER_ORDER status, and do NOT push: a short CLOSE session does that after a green gate, the vision approval and the review.
 The coordinator refreshes `{self.LIVE_CHECKPOINT}` (read-only) while you work; never call the Kilo server or port 4096 yourself.
-Stop with one question (BLOCKED) only for a contract the plan doesn't settle, a product decision, a needed file outside the file list, a doctor failure you can't fix, or a §24 safety stop. A routine red check is not a stop.
+Stop (BLOCKED, with 2-4 `options` and the one you `recommended`; nobody is asked mid-session, the coordinator decides) only for a contract the plan doesn't settle, a product decision, a doctor failure you can't fix, or a §24 safety stop. A needed file outside the file list is a SCOPE_REQUEST block, not a stop. A routine red check is not a stop. Vision CHANGES come back into this session once; after that the coordinator accepts with notes.
 
 {report_instructions()}
 """
@@ -426,7 +426,7 @@ Do NOT write {spec.task_id}_SUMMARY.md, the STATE.md row or the MASTER_ORDER sta
 Never edit files outside the plan's "Files this sprint may change" list (§3, the commit hook enforces it). Never --no-verify, --force, rebase, amend or tag.
 Helper PREWORK notes in the coordinator memory below were prepared ahead of time for your next steps: when one matches the step you are on and its HEAD is current, `git apply --check` its draft patch, apply it, run the listed checks and commit, instead of re-deriving the change; verify it against the plan first (it is advisory, never authority). Put verification scratch and one-off generated files under `.plan/tmp/` (git-ignored), never elsewhere in the repo.
 §34 checkpoints: the coordinator audits this session itself and refreshes `{self.LIVE_CHECKPOINT}` (read-only) about every two minutes while you work; read it for the KILO-CHECKPOINT verdict and act on CONTINUE/STOP-AND-REPLAN. Do not run kilo_checkpoint against the Kilo server or call port 4096 (it needs credentials you don't have); if the file is missing or its header time is more than 10 minutes old, note "KILO-CHECKPOINT pending (coordinator audit)" and continue.
-Before reporting NEEDS_HUMAN for a visual or interaction step, use the available Studio MCP tools as described above. If the step still needs Victor (an ACTION NEEDED FROM VICTOR block, §22) or a decision the plan doesn't settle (§10), stop and report NEEDS_HUMAN or BLOCKED with the exact attempted tools and blocker text.
+Before reporting NEEDS_HUMAN for a visual or interaction step, use the available Studio MCP tools as described above. If the step still needs Victor (an ACTION NEEDED FROM VICTOR block, §22) or a decision the plan doesn't settle (§10), stop and report NEEDS_HUMAN or BLOCKED with the exact attempted tools and blocker text, plus 2-4 `options` and the one you `recommended` (the coordinator decides; nobody is asked mid-session).
 
 {report_instructions()}
 """
@@ -1556,6 +1556,60 @@ Change no code or test file in this session; if one needs changing, stop and rep
                acceptance=f"Final visual approval by {approver} on current committed images",
                status="pending_model" if model_approval else "pending_human")
         return out
+
+    # -- live infrastructure before a session (W1.8; infra.preflight) ---------------------
+
+    INFRA_CHECKS_DEFAULT = ("rojo",)
+
+    def infra_checks(self) -> list[dict]:
+        """[{name, ok, detail}] live checks infra.preflight runs before an
+        implementer session (a failure starts nothing and costs nothing; the task
+        waits with a backoff). `[animaluprising] infra_checks` lists them:
+          rojo    Rojo's HTTP API on the project's servePort (default.project.json,
+                  34872 by default): down = a Studio sync outage, not the code
+          studio  the live Studio probe when one is configured (studio_probe); not
+                  checkable offline, so ok=None (ignored) without one"""
+        names = self.cfg.get("infra_checks")
+        if names is None:
+            names = list(self.INFRA_CHECKS_DEFAULT)
+        out = []
+        for name in names:
+            name = str(name).strip().lower()
+            if name == "rojo":
+                out.append(self._rojo_check())
+            elif name == "studio":
+                out.append(self._studio_check())
+        return out
+
+    def _rojo_check(self) -> dict:
+        import urllib.error
+        import urllib.request
+        from .studio_gate import rojo_port
+        port = rojo_port(self.p.workspace)
+        url = f"http://127.0.0.1:{port}/api/rojo"
+        try:
+            with urllib.request.urlopen(url, timeout=3) as r:
+                ok = int(getattr(r, "status", 200)) < 500
+                return {"name": "rojo", "ok": ok, "detail": f"rojo serve on {port}" if ok
+                        else f"{url}: HTTP {r.status}"}
+        except urllib.error.HTTPError as e:
+            return {"name": "rojo", "ok": e.code < 500, "detail": f"{url}: HTTP {e.code}"}
+        except (OSError, ValueError) as e:
+            return {"name": "rojo", "ok": False,
+                    "detail": f"rojo serve not reachable on port {port}: {e}"[:300]}
+
+    def _studio_check(self) -> dict:
+        probe = self.studio_probe
+        if not callable(probe):
+            return {"name": "studio", "ok": None, "detail": "no live Studio probe configured"}
+        try:
+            live = probe(None) or {}
+        except Exception as e:                                    # noqa: BLE001
+            return {"name": "studio", "ok": False, "detail": f"Studio probe failed: {e}"[:300]}
+        ok = live.get("connected")
+        return {"name": "studio", "ok": None if ok is None else bool(ok),
+                "detail": str(live.get("error") or ("Studio connected" if ok else
+                                                    "Studio/Rojo not connected"))[:300]}
 
     # -- readiness (GAP_C design; read-only, offline-first) -------------------------------
 
