@@ -378,21 +378,39 @@ def test_s3_reset_keeps_the_adviser_out_of_reviewing_guided_work(tmp_path):
 
 # ============================================================ 4. questions / permissions / notes
 
-def test_s4_question_via_kilo_holds_the_writer_and_resumes_the_same_session(kenv):
+def test_s4_question_via_kilo_is_answered_by_the_coordinator(kenv):
+    """W1.1: an implementer's Kilo question never reaches a person; the engine
+    answers it in place and the session keeps the writer slot."""
     sid = kenv.start()
     rid = kenv.fake.ask_question(sid, [{"question": "Use blue or green?",
                                         "options": [{"label": "blue"}, {"label": "green"}]}])
     kenv.c.tick()
     t = kenv.c.store.task("game", "T1")
-    assert t["state"] == S.AWAITING_HUMAN and "blue or green" in t["awaiting"]
+    assert t["state"] == S.IMPLEMENTING and not t["data"].get("question")
+    assert kenv.fake.replies[-1]["kind"] == "question"
+    assert kenv.fake.replies[-1]["request_id"] == rid
+    assert "BLOCKED report" in kenv.fake.replies[-1]["body"]["answers"][0][0]
+    assert any(l["resource"].startswith("writer:") for l in kenv.c.store.locks())  # still owned
+    kenv.commit("src/a.txt", "OK green")
+    kenv.fake.finish(sid, REPORT_DONE)
+    assert run_until(kenv.c, lambda: _state(kenv.c) == S.COMPLETE, limit=10)
+    assert len(kenv.fake.prompts) == 1                         # the answer is not a new prompt
+
+
+def test_s4_permission_via_kilo_holds_the_writer_and_resumes_the_same_session(kenv):
+    sid = kenv.start()
+    rid = kenv.fake.ask_permission(sid, "edit", ["src/a.txt"])
+    kenv.c.tick()
+    t = kenv.c.store.task("game", "T1")
+    assert t["state"] == S.AWAITING_HUMAN and "permission edit" in t["awaiting"]
     assert t["data"]["question"]["request_id"] == rid
     assert any(l["resource"].startswith("writer:") for l in kenv.c.store.locks())  # still owned
     for _ in range(3):
         kenv.c.tick()
     assert _state(kenv.c) == S.AWAITING_HUMAN                  # waits for a person, no timeout
-    kenv.c.answer("game", "T1", [["green"]])
-    assert kenv.fake.replies[-1]["kind"] == "question"
-    assert kenv.fake.replies[-1]["body"] == {"answers": [["green"]]}
+    kenv.c.answer("game", "T1", ["once"])
+    assert kenv.fake.replies[-1]["kind"] == "permission"
+    assert kenv.fake.replies[-1]["body"] == {"reply": "once"}
     assert _state(kenv.c) == S.IMPLEMENTING
     kenv.commit("src/a.txt", "OK green")
     kenv.fake.finish(sid, REPORT_DONE)

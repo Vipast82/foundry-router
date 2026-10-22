@@ -1323,7 +1323,7 @@ class Coordinator:
             # FAIL only a history rewrite could clear (UI-02b lost a 6.7 h lead session to
             # exactly that)
             from . import commits as CM
-            bad, exempt = CM.unprefixed(P, commits, prefix)
+            bad, exempt_commits = CM.unprefixed(P, commits, prefix)
             fixable = CM.rewordable(P, t, [c[0] for c in bad]) if bad else ""
             add("commit_messages", FAIL if (bad and not fixable) else PASS,
                 ("commits without the '" + prefix + "' prefix: "
@@ -1332,7 +1332,8 @@ class Coordinator:
                     else " (the coordinator rewords its own unpushed commits before "
                          "verification; this set predates that)")) if bad
                 else f"all {len(commits)} commit message(s) start with {prefix!r}"
-                + (f"; {len(exempt)} revert/merge commit(s) exempt" if exempt else ""),
+                + (f"; {len(exempt_commits)} revert/merge commit(s) exempt"
+                   if exempt_commits else ""),
                 required=not (bad and fixable))
         changed = P.ws.changed_files(base, head)
         runner_out, runner_caps = [], []
