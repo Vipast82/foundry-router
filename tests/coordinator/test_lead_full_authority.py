@@ -358,7 +358,9 @@ def test_validation_requires_materially_different_actions_and_personal_questions
     assert any("materially different action" in x for x in errs)
     ask = {"classification": "product", "hypothesis": "The counter limit was reached again.",
            "evidence_refs": [], "action": {"kind": "ask_victor"},
-           "question": "Should I authorize another round?"}
+           "question": "Should I authorize another round?",
+           "options": ["authorize another round", "stop the task"],
+           "recommended": "stop the task"}
     _, errs = validate_report(ask, full_authority=True)
     assert any("resolves routine recovery itself" in x for x in errs)
     ask["action"]["user_action"] = "Sign in to Roblox Studio on the workstation"

@@ -8,7 +8,8 @@ session_id} and returns a dict:
   commit:   "message"               git add the written files + commit
   run:      [["cmd", ...], ...]     commands to run in the workspace
   final:    "text"                  the session's last message (may hold a report)
-  question: {"text": ..}            the session stops waiting for a human
+  question: {"text": .., "kind": "question"|"permission"}  the session stops waiting
+                                    (an implementer question is auto-answered, W1.1)
   error:    "text"                  the session ends with this provider error
 """
 
@@ -80,8 +81,11 @@ class ScriptedClient(CodingClient):
             subprocess.run(["git", "commit", "-q", "-m", out["commit"]], cwd=ws,
                            capture_output=True)
         if out.get("question"):
+            # kind "permission" = a Kilo permission ask (still a person); "question" is
+            # answered by the coordinator itself for implementer sessions (W1.1)
             return SessionState(status="attention", question={
-                "request_id": f"q_{uuid.uuid4().hex[:8]}", "kind": "question",
+                "request_id": f"q_{uuid.uuid4().hex[:8]}",
+                "kind": out["question"].get("kind") or "question",
                 "text": out["question"].get("text", ""), "options": []})
         if out.get("error"):
             return SessionState(status="error", error=out["error"],

@@ -194,6 +194,116 @@ def _valid_verdict(answer: dict, frames: list[tuple[str, str, bytes]], arts: dic
     return verdict, findings
 
 
+def prior_approvals(store, pid: str, tid: str) -> list:
+    fn = getattr(store, "approvals", None)
+    if not callable(fn):
+        return []
+    try:
+        return list(fn(pid, tid, "visual") or [])
+    except Exception:                                            # noqa: BLE001
+        return []
+
+
+def accepted_hashes(store, pid: str, tid: str, t: dict) -> set:
+    """W1.3: every frame sha a visual approval of this task already covers (approved,
+    carried, or accepted with notes by the fast lane) plus the clean-frame memory.
+    Such a frame is never sent to a vision model again."""
+    out = set(clean_memory(_task(store, pid, tid, t)))
+    for a in prior_approvals(store, pid, tid):
+        out |= {str(v) for v in (a.get("artifacts") or {}).values() if v}
+    return out
+
+
+def _max_rounds(P) -> int:
+    fl = getattr(P.profile, "fast_lane", None)
+    try:
+        return max(0, int((fl or {}).get("max_vision_rounds", 1)))
+    except (TypeError, ValueError, AttributeError):
+        return 1
+
+
+def _file_sha(P, rel: str) -> str:
+    path = os.path.join(P.profile.workspace, rel)
+    try:
+        with open(path, "rb") as fh:
+            return hashlib.sha256(fh.read()).hexdigest()
+    except OSError:
+        return ""
+
+
+def _carry_prior(c, P, t: dict, revision: str, why: str) -> bool:
+    """Carry the latest visual approval to `revision` when every frame it covers
+    still has the same bytes in the workspace (W1.3: the templated closeout moves
+    HEAD, so an exact-revision approval from the fast lane never matched)."""
+    pid, tid = P.id, t["task_id"]
+    prior = prior_approvals(c.store, pid, tid)
+    if not prior:
+        return False
+    last = prior[-1]
+    arts = dict(last.get("artifacts") or {})
+    if not arts:
+        return False
+    if any(_file_sha(P, rel) != sha for rel, sha in arts.items()):
+        return False
+    c.store.add_approval(pid, tid, "visual", revision, arts, last.get("approver") or "carried",
+                         f"carried from the visual approval at "
+                         f"{str(last.get('revision') or '')[:12]}: every frame it covers is "
+                         f"byte-identical ({len(arts)} frame(s)); {why}; no model call")
+    c.store.event(pid, tid, "visual_approval_carried", detail={
+        "revision": revision, "from": last.get("revision"), "frames": len(arts), "why": why})
+    return True
+
+
+def _missing_frames(c, P, t: dict, spec, rule, revision: str, problem: str) -> None:
+    """W1.3: a required frame that is missing (or a plan naming none) is a
+    continuation: one recapture round in CHANGES_REQUIRED with the exact finding,
+    then a stop the lead sees. Never a silent AWAITING_HUMAN forever."""
+    pid, tid = P.id, t["task_id"]
+    if _carry_prior(c, P, t, revision, f"the rule's frames could not be gathered ({problem})"):
+        return
+    data = dict((_task(c.store, pid, tid, t) or {}).get("data") or {})
+    rounds = dict(data.get("visual_missing_rounds") or {})
+    n = int(rounds.get(revision[:12]) or 0)
+    finding = (f"visual approval: {problem}. Capture and commit the required frame(s) the plan "
+               f"names (rule artifacts {list(rule.artifacts)}) at the current revision, by "
+               f"explicit path; nothing else changes.")
+    if n < 1 and callable(getattr(c, "reject_human", None)):
+        rounds[revision[:12]] = n + 1
+        if callable(getattr(c.store, "merge_data", None)):
+            c.store.merge_data(pid, tid, visual_missing_rounds=rounds)
+        c.store.event(pid, tid, "visual_frames_missing", detail={
+            "revision": revision, "problem": problem[:300], "round": n + 1,
+            "action": "recapture (CHANGES_REQUIRED)"})
+        c.reject_human(pid, tid, [finding], "coordinator:visual_approval")
+        return
+    stop = getattr(c, "_stop", None)
+    if callable(stop):
+        from . import states as S
+        c.store.event(pid, tid, "visual_frames_missing", detail={
+            "revision": revision, "problem": problem[:300], "round": n,
+            "action": "stop (after the recapture round)"})
+        stop(P, _task(c.store, pid, tid, t), S.BLOCKED, {
+            "blocker": f"visual approval: {problem} (still missing after the recapture round)"},
+            cls="visual_frames_missing")
+        return
+    c.store.update_task(pid, tid, next_action=f"visual approval: {problem[:350]}")
+
+
+def _accept_with_notes(c, P, t: dict, revision: str, arts: dict, actor: str, notes: list,
+                       why: str) -> None:
+    pid, tid = P.id, t["task_id"]
+    notes = [str(n)[:400] for n in notes][:40]
+    if callable(getattr(c.store, "merge_data", None)):
+        cur = dict((_task(c.store, pid, tid, t) or {}).get("data") or {})
+        c.store.merge_data(pid, tid, visual_notes=(list(cur.get("visual_notes") or [])
+                                                   + notes)[-60:])
+    c.store.add_approval(pid, tid, "visual", revision, arts,
+                         f"coordinator:visual_approval ({actor})",
+                         f"accepted with notes {why}: " + " | ".join(notes)[:1500])
+    c.store.event(pid, tid, "visual_approval_accepted_with_notes", detail={
+        "revision": revision, "why": why, "notes": notes[:20]})
+
+
 def step(c, P, t: dict, spec, rule, revision: str) -> None:
     """One fail-closed approval attempt; the caller rechecks artifact hashes."""
     if not enabled(P) or rule.kind != "visual" or P.foundry is None:
@@ -211,16 +321,19 @@ def step(c, P, t: dict, spec, rule, revision: str) -> None:
         return
     frames, problem = _required(P, spec, rule, arts)
     if problem:
+        if "missing" in problem or "names no required" in problem:
+            return _missing_frames(c, P, t, spec, rule, revision, problem)
         c.store.update_task(pid, tid, next_action=f"visual approval: {problem[:350]}")
         return
-    # B3: frames already judged clean at these exact bytes (by this path or the fast lane)
-    # are never sent again; when none is left the memory itself is the approval
-    mem = clean_memory(_task(c.store, pid, tid, t))
+    # B3 / W1.3: frames already judged clean at these exact bytes (this path or the fast
+    # lane), or covered by ANY earlier visual approval (approved, carried, accepted with
+    # notes), are never sent again; when none is left the record itself is the approval
+    mem = accepted_hashes(c.store, pid, tid, t)
     todo = [f for f in frames if arts.get(f[0]) not in mem]
     if not todo:
         c.store.add_approval(pid, tid, "visual", revision, arts, "coordinator:vision-memory",
-                             f"every required frame was judged clean at these bytes earlier "
-                             f"({len(frames)} frame(s)); no model call")
+                             f"every required frame was judged clean or accepted at these bytes "
+                             f"earlier ({len(frames)} frame(s)); no model call")
         c.store.event(pid, tid, "visual_approval_from_memory", detail={
             "revision": revision, "frames": len(frames)})
         return
@@ -239,7 +352,9 @@ def step(c, P, t: dict, spec, rule, revision: str) -> None:
                             "vision-capable for every possible model")
         return
     fingerprint = hashlib.sha256(json.dumps([revision, arts], sort_keys=True).encode()).hexdigest()
-    key = f"visual-approval:{pid}:{tid}:{fingerprint}"
+    data0 = dict((_task(c.store, pid, tid, t) or {}).get("data") or {})
+    tries = int((data0.get("visual_uncertain") or {}).get(fingerprint[:16]) or 0)
+    key = f"visual-approval:{pid}:{tid}:{fingerprint}" + (f":retry{tries}" if tries else "")
     prior = c.store.op_begin(key, pid, tid, "visual_approval")
     if prior:
         result = prior.get("result") or {}
@@ -251,7 +366,12 @@ def step(c, P, t: dict, spec, rule, revision: str) -> None:
                                      f"recovered recorded model review {result.get('session_id')}; "
                                      "policy visual_model v1")
             elif result.get("verdict") == "changes_required":
-                c.reject_human(pid, tid, list(result.get("findings") or []), actor)
+                _changes(c, P, t, revision, arts, actor, list(result.get("findings") or []))
+            else:
+                # W1.3: an inconclusive answer is retried once (structured), then
+                # accepted with notes; never a dead end at AWAITING_HUMAN
+                _uncertain(c, P, t, revision, arts, actor, fingerprint, tries,
+                           list(result.get("findings") or []))
             return
         if prior["status"] == "deferred" and c.clock() >= float(
                 result.get("retry_at") or 0):
@@ -266,7 +386,10 @@ def step(c, P, t: dict, spec, rule, revision: str) -> None:
         c.store.add_session(sid, pid, tid, t["run_id"], "visual_reviewer", "visual_approval",
                             t["attempt"], "foundry-direct", persona,
                             {"parent": t.get("session_id"), "revision": revision})
-    parts = [{"type": "text", "text": (
+    retry_note = ("This is the one retry of a review whose first answer could not be verified: "
+                  "answer with exactly the JSON object the response schema describes, one frame "
+                  "object per attached image, each sha256 copied exactly. " if tries else "")
+    parts = [{"type": "text", "text": retry_note + (
         f"Review ALL {len(frames)} required current screenshots for project {pid}, task {tid}, "
         f"revision {revision}. Assess the sprint acceptance criteria below. Check the expected "
         "UI subject and state, readable text, clipping, overlap, contrast, target sizes, "
@@ -285,10 +408,11 @@ def step(c, P, t: dict, spec, rule, revision: str) -> None:
         P.foundry.bind(sid, pid, tid, t["run_id"], "visual_reviewer", persona,
                        parent=t.get("session_id") or "", purpose="review")
         c.store.op_update(key, "calling", {"session_id": sid})
+        kw = {"schema": VISION_SCHEMA} if tries else {}
         raw, meta = P.foundry.chat(persona, [
             {"role": "system", "content": "You are a read-only, independent vision reviewer. "
              "Judge only the actual attached frames. Never waive test gates or invent evidence."},
-            {"role": "user", "content": parts}], session_id=sid, max_tokens=5000)
+            {"role": "user", "content": parts}], session_id=sid, max_tokens=5000, **kw)
     except FoundryDenied as e:
         delay = max(60, int(e.retry_after or 300))
         c.store.op_update(key, "deferred", {"retry_at": c.clock() + delay,
@@ -320,12 +444,50 @@ def step(c, P, t: dict, spec, rule, revision: str) -> None:
         c.store.update_task(pid, tid, next_action="visual review became stale; recapture "
                             "and review the current revision")
         return
+    actor = f"model:{persona}/{served}"
     if verdict == "approve":
-        c.store.add_approval(pid, tid, "visual", revision, arts,
-                             f"model:{persona}/{served}",
+        c.store.add_approval(pid, tid, "visual", revision, arts, actor,
                              f"model visual review {sid}; policy visual_model v1")
     elif verdict == "changes_required":
-        c.reject_human(pid, tid, findings, f"model:{persona}/{served}")
+        _changes(c, P, t, revision, arts, actor, findings)
     else:
-        c.store.update_task(pid, tid, next_action="visual review inconclusive; frames "
-                            "must be reviewed again at the current revision")
+        _uncertain(c, P, t, revision, arts, actor, fingerprint, tries, findings)
+
+
+def _uncertain(c, P, t: dict, revision: str, arts: dict, actor: str, fingerprint: str,
+               tries: int, findings: list) -> None:
+    """W1.3: one structured retry of an inconclusive review, then accept with notes."""
+    pid, tid = P.id, t["task_id"]
+    if tries < 1 and callable(getattr(c.store, "merge_data", None)):
+        cur = dict((_task(c.store, pid, tid, t) or {}).get("data") or {})
+        unc = dict(cur.get("visual_uncertain") or {})
+        unc[fingerprint[:16]] = tries + 1
+        c.store.merge_data(pid, tid, visual_uncertain=unc)
+        c.store.event(pid, tid, "visual_approval_retry", detail={
+            "revision": revision, "why": findings[:4], "retry": tries + 1})
+        c.store.update_task(pid, tid, next_action="visual review inconclusive; one structured "
+                            "retry at the current revision")
+        return
+    _accept_with_notes(c, P, t, revision, arts, actor,
+                       [f"inconclusive after one structured retry: {f}" for f in findings[:10]]
+                       or ["inconclusive after one structured retry"],
+                       "(inconclusive after one structured retry)")
+
+
+def _changes(c, P, t: dict, revision: str, arts: dict, actor: str, findings: list) -> None:
+    """Vision CHANGES after closeout: back into one fix round (CHANGES_REQUIRED), at
+    most [fast_lane] max_vision_rounds times per task (default 1); then accepted
+    with notes (W1.3), like the fast lane does at the gate."""
+    pid, tid = P.id, t["task_id"]
+    cur = dict((_task(c.store, pid, tid, t) or {}).get("data") or {})
+    rounds = int(cur.get("visual_changes_rounds") or 0)
+    mx = _max_rounds(P)
+    if rounds < mx and callable(getattr(c, "reject_human", None)):
+        if callable(getattr(c.store, "merge_data", None)):
+            c.store.merge_data(pid, tid, visual_changes_rounds=rounds + 1)
+        c.store.event(pid, tid, "visual_approval_changes", detail={
+            "revision": revision, "round": rounds + 1, "of": mx, "findings": findings[:10]})
+        c.reject_human(pid, tid, findings, actor)
+        return
+    _accept_with_notes(c, P, t, revision, arts, actor, findings,
+                       f"after {rounds} CHANGES round(s)")

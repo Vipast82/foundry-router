@@ -165,7 +165,15 @@ def report_instructions() -> str:
             f"coordinator decides completion only from the verification checks):\n"
             f"```{REPORT_FENCE}\n"
             '{"status": "DONE | NOT DONE | BLOCKED | NEEDS_HUMAN", "summary": "<one line>", '
-            '"blocker": "<what you need, if BLOCKED or NEEDS_HUMAN>"}\n```\n'
+            '"blocker": "<what you need, if BLOCKED or NEEDS_HUMAN>", '
+            '"options": ["<2-4 concrete ways to resolve the blocker>"], '
+            '"recommended": "<the option you recommend>", '
+            '"blocker_kind": "product | tooling"}\n```\n'
+            "Nobody answers questions during a session (the question tool is off): decide "
+            "within the plan; if a decision the plan does not settle truly blocks you, commit "
+            "safe partial work and report BLOCKED with 2-4 options and the one you recommend. "
+            "The coordinator decides (the recommended option applies after its timeout) and "
+            "continues the sprint. "
             "Need a file outside the task's file list (e.g. a harness row)? Don't edit it: "
             "add a ```SCOPE_REQUEST``` block with {\"path\": \"<file>\", \"reason\": "
             "\"<one line>\"} and stop; the coordinator grants allow-listed harness lines "

@@ -37,7 +37,7 @@ lanes = ["prework", "test_design", "failure_triage", "incremental_review"]
 | `gate_module` | the AU `studio_gate` | Dotted module run with `python -m`, or a `.py` path (relative to the Foundry-Router checkout). |
 | `gate_timeout_minutes` | `45` | A run still going after this is stopped and counts as a red gate (`fast_lane.timeout`). At least 1. |
 | `max_red_gates_before_handoff` | `2` | On a local-primary task, this many red gates request the frontier primary. Twice this many stops the task BLOCKED. At least 1. |
-| `max_vision_rounds` | `2` | Vision CHANGES rounds sent to the session before the next CHANGES is accepted with notes. |
+| `max_vision_rounds` | `1` | Vision CHANGES rounds sent to the session before the next CHANGES is accepted with notes (revamp decision 1, 2026-10-21: one round). |
 | `vision_batch_frames` | `20` | Frames per vision call; every batch must approve (v0.129.2). |
 | `runner_outputs` | `["docs/progress/{task}_EVIDENCE_RAW.log"]` | Files the runner rewrites every run; left out of `coordinator.clean` and `coordinator.unrelated_preserved` for fast-lane tasks (v0.129.5). |
 | `runner_captures` | `["docs/evidence/UI-v3/{task}/**"]` | Capture files: still committed after a PASS, but re-rendering one that was dirty at run start is not "touching a pre-existing change" (v0.129.5). |

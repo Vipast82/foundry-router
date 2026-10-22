@@ -400,23 +400,48 @@ def test_repair_that_changes_nothing_is_not_re_reviewed(game):
                          for h in later)
 
 
-def test_question_waits_for_a_human_answer(game):
+def test_permission_ask_waits_for_a_human_answer(game):
+    """A Kilo permission ask still reaches a person (W1.1 answers only `question`)."""
     tmp, _, _, prof = game
 
     def agent(ctx):
         if not ctx.get("answers"):
-            return {"question": {"text": "Use blue or green?"}}
-        assert ctx["answers"] == [["green"]]
+            return {"question": {"text": "edit src/a.txt?", "kind": "permission"}}
+        assert ctx["answers"] == [["once"]]
         return {"writes": {"src/a.txt": "OK green"}, "commit": "T1: green"}
     c = coordinator(tmp, [prof], {"game": agent})
     c.approve("game", "T1", [], "victor")
     assert run_until(c, lambda: _state(c, "game", "T1") == S.AWAITING_HUMAN)
-    assert "blue or green" in c.store.task("game", "T1")["awaiting"]
+    assert "edit src/a.txt" in c.store.task("game", "T1")["awaiting"]
     for _ in range(2):
         c.tick()
     assert _state(c, "game", "T1") == S.AWAITING_HUMAN
-    c.answer("game", "T1", [["green"]])
+    c.answer("game", "T1", [["once"]])
     assert run_until(c, lambda: _state(c, "game", "T1") == S.COMPLETE)
+
+
+def test_implementer_question_is_answered_by_the_coordinator(game):
+    """W1.1 (Victor 2026-10-22): an implementer never waits on a person. Kilo's
+    question tool is denied in its session rules; if one still comes, the
+    coordinator answers it with the standing instruction and the session goes on."""
+    tmp, _, _, prof = game
+    seen = []
+
+    def agent(ctx):
+        if not ctx.get("answers"):
+            return {"question": {"text": "Use blue or green?"}}
+        seen.append(ctx["answers"])
+        return {"writes": {"src/a.txt": "OK green"}, "commit": "T1: green"}
+    c = coordinator(tmp, [prof], {"game": agent})
+    c.approve("game", "T1", [], "victor")
+    assert run_until(c, lambda: _state(c, "game", "T1") == S.COMPLETE)
+    assert not any(h["to_state"] == S.AWAITING_HUMAN for h in c.store.history("game", "T1"))
+    assert seen and "BLOCKED report" in seen[0][0][0] and "options" in seen[0][0][0]
+    ev = c.store.q("SELECT detail FROM events WHERE kind='question_auto_answered'")
+    assert len(ev) == 1 and "blue or green" in ev[0]["detail"]
+    client = c.projects["game"].client
+    rules = next(iter(client.sessions.values()))["permissions"]
+    assert rules[-1] == {"permission": "question", "pattern": "*", "action": "deny"}
 
 
 def test_permission_reply_without_new_kilo_turn_gets_one_continuation(game):

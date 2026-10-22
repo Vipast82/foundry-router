@@ -630,17 +630,23 @@ def validate_report(rep: Any, *, scope=None, allowed_dirs=None, acceptance_globs
                     "different action is required")
     if cls in ("scope_core", "external") and kind != "ask_victor" and not question:
         errs.append(f"a {cls} problem goes to Victor: give a precise question")
-    # revamp B11: a question for Victor may carry its options and a recommended one
-    # (applied after the decision timeout); both optional, both validated
+    # revamp B11 / W1.2: a question for Victor carries its options and the recommended
+    # one (applied after the decision timeout, so no sprint waits on a person for
+    # long); both REQUIRED for ask_victor, both validated
     options, recommended = [], ""
-    if kind == "ask_victor" and (rep.get("options") or rep.get("recommended")):
+    if kind == "ask_victor":
         options = rep.get("options")
         if not isinstance(options, list) or not 2 <= len(options) <= 4 or any(
                 not isinstance(o, str) or not 3 <= len(o.strip()) <= 300 for o in options):
-            errs.append("options must be 2-4 answers of 3-300 characters")
+            errs.append("ask_victor needs options: 2-4 concrete answers of 3-300 characters "
+                        "(the coordinator applies the recommended one when Victor does not "
+                        "answer in time)")
             options = []
         recommended = str(rep.get("recommended") or "").strip()
-        if recommended and recommended not in [o.strip() for o in options]:
+        if not recommended:
+            errs.append("ask_victor needs recommended: the option to apply when Victor does "
+                        "not answer in time")
+        elif options and recommended not in [o.strip() for o in options]:
             errs.append("recommended must be one of the options")
     if errs:
         return None, errs
@@ -2291,10 +2297,6 @@ class LeadManager:
             for name in ("diagnoses", "quota_calls"):
                 if self._bound_exhausted(case, s, name):
                     return self._escalate_bound(P, t, case, name)
-            totals = self.task_totals(P.id, t["task_id"])
-            lim = self.task_limit(s, totals, "lead_calls")
-            if totals["lead_calls"] >= lim:
-                return self._escalate_task_bound(P, t, case, "lead_calls", totals, lim)
             hard = self.hard_cap(P)
             used = self.lifetime_calls(P.id, t["task_id"])
             if hard and used >= hard:
@@ -2309,6 +2311,10 @@ class LeadManager:
                     f"blocked: {_cut((case.get('trigger') or {}).get('reason') or '', 400)}. "
                     f"What has to change for this sprint?",
                     user_action="raise [automation] lead_hard_max_calls or decide the sprint")
+            totals = self.task_totals(P.id, t["task_id"])
+            lim = self.task_limit(s, totals, "lead_calls")
+            if totals["lead_calls"] >= lim:
+                return self._escalate_task_bound(P, t, case, "lead_calls", totals, lim)
             if not write and not is_read_only(perms):
                 # never start a lead session that could write the game workspace
                 self._act(case, "permissions", status="failed",
@@ -2412,11 +2418,22 @@ class LeadManager:
 
     @staticmethod
     def hard_cap(P) -> int:
+        """The absolute lead-call cap of a task: [automation] lead_hard_max_calls,
+        never lower than [lead_manager] max_lead_calls_per_task (W1.5: the live
+        profile had 8 < 12, so the hard cap fired before the per-task budget was
+        reachable). 0 = no hard cap."""
         from .automation import get as auto_get
         try:
-            return int(auto_get(P, "lead_hard_max_calls") or 0)
+            hard = int(auto_get(P, "lead_hard_max_calls") or 0)
         except Exception:                                        # noqa: BLE001
             return 0
+        if hard <= 0:
+            return 0
+        try:
+            per_task = int(LeadManager.settings(P).get("max_lead_calls_per_task") or 0)
+        except Exception:                                        # noqa: BLE001
+            per_task = 0
+        return max(hard, per_task)
 
     def lifetime_calls(self, project_id: str, task_id: str) -> int:
         """Lead calls ever charged on a task, across every case and budget round
@@ -3267,6 +3284,18 @@ class LeadManager:
         prior_answer = prev if prev_d and prev_d.get("status") == "answered" else ""
         did = ""
         trig = case.get("trigger") or {}
+        # W1.2 (Victor 2026-10-22): every escalation carries options and a recommended
+        # one. A lead question brings its own; a bound, hard cap or coordinator defect
+        # defaults to PARK (the task stays BLOCKED with a summary, the queue moves on)
+        # after [automation] decision_timeout_minutes
+        from .decision_policy import PARK
+        options = list((report or {}).get("options") or [])
+        recommended = str((report or {}).get("recommended") or "")
+        if not options:
+            options = [PARK, self.ESCALATION_OPTIONS[1], self.ESCALATION_OPTIONS[0]]
+            recommended = PARK
+        elif not recommended:
+            recommended = options[0]
         if O is not None:
             with self.store.tx():
                 did = O.open_decision(
@@ -3281,16 +3310,14 @@ class LeadManager:
                               "bounds": {k: int(s[v]) for k, v in BOUNDS.items()},
                               "bound": list(bound) if bound else None,
                               "user_action": user_action,
-                              "recommended": (report or {}).get("recommended") or "",
+                              "recommended": recommended,
                               "supersedes": [d["decision_id"] for d in originals],
                               "original_decisions": [
                                   {"decision_id": d["decision_id"], "kind": d["kind"],
                                    "question": self.redact(P, _cut(d.get("question") or "", 600))}
                                   for d in originals]},
-                    options=list((report or {}).get("options") or []) or [
-                        "give a specific instruction and resume the case",
-                        "authorize another bounded round", "stop the task"],
-                    recommendation=(report or {}).get("recommended") or "",
+                    options=options,
+                    recommendation=recommended,
                     blocks=[f"lead_case:{case['case_id']}"],
                     supersedes=prior_answer or (originals[0]["decision_id"] if originals
                                                 else None))
@@ -3307,7 +3334,7 @@ class LeadManager:
         return self._save(case["case_id"], state="NEEDS_VICTOR", decision_id=did,
                           needs_human=bool(user_action), outcome=f"needs_victor: {reason}")
 
-    WAIT_KINDS = ("no_progress", "recovery_escalation")
+    WAIT_KINDS = ("no_progress", "recovery_escalation", "implementer_blocked")
 
     def _wait_originals(self, P, case: dict) -> list[dict]:
         """The still-open decisions a case opened from a decision wait was

@@ -132,7 +132,8 @@ class Manager:
                 alive = pr.p is not None and pr.p.poll() is None
                 if pr.pending_restart:
                     if pr.pending_restart == "safe" and alive:
-                        ok, why = safe_point(self.cfg["client"]["state_dir"])
+                        ok, why = safe_point(self.cfg["client"]["state_dir"],
+                                             (self.cfg.get("workspace") or {}).get("game") or "")
                         if not ok:
                             pr.state, pr.detail = "waiting", f"restart waits for a safe point: {why}"
                             continue
@@ -217,7 +218,12 @@ class Manager:
             return
         try:
             if sys.platform == "win32":
-                subprocess.run(["taskkill", "/PID", str(p.pid), "/T", "/F"], capture_output=True,
+                # W1.9: the coordinator's process tree holds the DETACHED studio_gate
+                # runner (and its MCP children) while a gate runs; `/T` on the coordinator
+                # killed it mid-playtest. The coordinator is stopped alone (it has no other
+                # children to reap); every other component still goes with its tree.
+                tree = [] if pr.spec.name == "coordinator" else ["/T"]
+                subprocess.run(["taskkill", "/PID", str(p.pid), *tree, "/F"], capture_output=True,
                                creationflags=NO_WINDOW, timeout=30)
             else:
                 p.terminate()

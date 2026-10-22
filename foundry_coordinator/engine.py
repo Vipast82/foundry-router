@@ -542,7 +542,7 @@ class Coordinator:
                 directory=directory, title=f"{P.id} {tid} {phase} #{attempt}", persona=persona,
                 agent=agent, metadata={"project": P.id, "task": tid, "run": run_id,
                                        "phase": phase, "attempt": attempt, "role": role},
-                permissions=P.adapter.session_permissions(spec, phase))
+                permissions=self._session_rules(P, spec, phase, role))
             self.store.op_update(key, "started", {"session_id": sid})
             if meta:
                 self.store.add_session(sid, P.id, tid, run_id, role, phase, attempt,
@@ -599,6 +599,18 @@ class Coordinator:
                                      "attempt": attempt, "run_id": run_id})
         return sid
 
+    # W1.1 (Victor 2026-10-22): an implementer session never asks a person. Kilo's
+    # `question` tool is denied (a session-level deny removes the tool), appended last
+    # so no profile or role rule re-allows it; the prompt says to report BLOCKED with
+    # options instead (adapters.base.report_instructions).
+    IMPLEMENTER_DENIES = ({"permission": "question", "pattern": "*", "action": "deny"},)
+
+    def _session_rules(self, P: Project, spec, phase: str, role: str) -> list[dict]:
+        rules = [dict(r) for r in (P.adapter.session_permissions(spec, phase) or [])]
+        if role == "implementer":
+            rules += [dict(r) for r in self.IMPLEMENTER_DENIES]
+        return rules
+
     def _bind(self, P: Project, sid: str, tid: str, run_id: str, role: str, persona: str,
               parent: str = "", purpose: str = "") -> None:
         if P.foundry is None:
@@ -630,6 +642,10 @@ class Coordinator:
             # continuation, verification -> review) runs when the project resumes
             return
         pid, tid = P.id, t["task_id"]
+        # W1.4: commit messages without the task prefix are the coordinator's to fix,
+        # on its own unpushed commits, before anything (gate, review, approvals) is
+        # bound to this head; the session is never asked to rebase
+        self._reword_commits(P, t)
         head = P.ws.head()
         rep = s.report or {}
         data = self.store.merge_data(pid, tid, last_report=rep or None)
@@ -675,6 +691,8 @@ class Coordinator:
         data = self.store.merge_data(pid, tid, helper_wait_since=None)
         if blocked:
             self.store.release(pid, tid)
+            if self._blocked_decision(P, self.store.task(pid, tid), rep, status):
+                return                   # W1.1: a BLOCKED-with-options report is a decision
             return self._stop(P, t, S.BLOCKED, {
                 "blocker": f"session reported {status}: {rep.get('blocker') or rep.get('summary')}",
                 "session_id": t["session_id"]}, cls="session_" + status.lower(),
@@ -721,6 +739,83 @@ class Coordinator:
             "head_sha": head, "session_idle": True, "session_id": t["session_id"],
             "model_report": rep or "none (advisory only)"},
             head_sha=head, next_action="verifying", data=data)
+
+    def _reword_commits(self, P: Project, t: dict) -> None:
+        """W1.4: reword the coordinator's own unpushed commits that lack the task
+        prefix (commits.reword); journaled, never a session's job."""
+        try:
+            spec = P.adapter.describe(t["task_id"])
+        except AdapterError:
+            return
+        from . import commits as CM
+        try:
+            CM.reword(self, P, self.store.task(P.id, t["task_id"]) or t, spec)
+        except Exception as e:                                    # noqa: BLE001
+            self.store.event(P.id, t["task_id"], "warning", detail={
+                "commit_reword": f"{type(e).__name__}: {e}"[:400]})
+
+    # options an implementer's BLOCKED report must carry to become a decision (W1.1)
+    BLOCKED_OPTIONS = (2, 4)
+
+    def _blocked_decision(self, P: Project, t: dict, rep: dict, status: str) -> bool:
+        """W1.1 (Victor 2026-10-22): the implementer never asks a person. A BLOCKED
+        report that carries 2-4 `options` (and optionally `recommended`) becomes an
+        `implementer_blocked` decision: recommended = the first option unless the
+        report names one, the standard timeout applies, and the task waits BLOCKED
+        on it (decision_wait). A tooling question (`blocker_kind: tooling`, or any
+        blocker text without options) still goes the auto-heal / lead way; an
+        infrastructure signature always does. True when a decision now holds the
+        task."""
+        if not self._lc(P):
+            return False
+        pid, tid = P.id, t["task_id"]
+        options = rep.get("options")
+        if not isinstance(options, list):
+            return False
+        options = [str(o).strip()[:300] for o in options if str(o or "").strip()]
+        lo, hi = self.BLOCKED_OPTIONS
+        if not lo <= len(options) <= hi:
+            return False
+        blocker = str(rep.get("blocker") or rep.get("summary") or "").strip()
+        from .autoheal import infra_signature
+        if infra_signature(blocker):
+            return False                 # deterministic retry / repair first
+        from . import decision_policy as DP
+        rec = DP.match_option(options, rep.get("recommended")) or options[0]
+        kind_hint = str(rep.get("blocker_kind") or "").strip().lower()
+        tooling = kind_hint in ("tooling", "harness", "environment", "infra", "infrastructure",
+                                "coordinator")
+        q = f"the {status.lower()} report of {tid}: {blocker[:700] or '(no blocker text)'}"
+        did = self.obligations.open_decision(
+            pid, tid, "implementer_blocked", q,
+            evidence={"blocker": blocker[:1000], "session_id": t.get("session_id") or "",
+                      "recommended": rec, "options": options,
+                      "blocker_kind": "tooling" if tooling else "product",
+                      "summary": str(rep.get("summary") or "")[:500]},
+            options=options, recommendation=rec, blocks=[tid])
+        self.store.event(pid, tid, "implementer_blocked_decision", session_id=t.get("session_id"),
+                         detail={"decision_id": did, "options": options, "recommended": rec,
+                                 "blocker_kind": "tooling" if tooling else "product",
+                                 "blocker": blocker[:300]})
+        d = self.obligations.decision(did) or {}
+        if d.get("status") == "answered":
+            # the same question was decided before: apply it without waiting
+            self._lc_apply_answers(P, self.store.task(pid, tid), [d])
+            if self._lc_stop_answer([d]):
+                self._lc_stop_block(P, self.store.task(pid, tid), d,
+                                    self._lc_stop_answer([d])[1])
+                return True
+            self._release_session(P, t)
+            self.store.transition(pid, tid, S.CHANGES_REQUIRED, {
+                "findings": list((self.store.task(pid, tid)["data"] or {}).get("findings")
+                                 or [f"decision {did} answered earlier"])},
+                next_action=f"continue per decision {did}")
+            return True
+        self._lc_wait(P, self.store.task(pid, tid), [did],
+                      f"the session's BLOCKED report offered options; recommended "
+                      f"{rec!r} applies after the timeout", S.READY,
+                      evidence={"session_id": t.get("session_id") or ""})
+        return True
 
     def _scope_requests(self, P: Project, tid: str, s, rep: dict) -> bool:
         """revamp B10: typed scope requests of an idle primary (scope.py). True
@@ -823,6 +918,9 @@ class Coordinator:
             return None
         if s.status == "attention":
             q = s.question or {}
+            if q.get("kind", "question") == "question" and self._auto_answer_question(
+                    P, t, sid, phase, q):
+                return None              # W1.1: never a person; the session decides
             self.store.update_session(sid, status="waiting")
             return self.store.transition(pid, tid, S.AWAITING_HUMAN, {
                 "awaiting": f"{q.get('kind', 'question')}: {q.get('text', '')}"[:1000],
@@ -883,6 +981,40 @@ class Coordinator:
                         return None
         self._end_session(P, sid, "idle", tokens=s.tokens, report=s.report)
         return s
+
+    QUESTION_AUTO_ANSWER = (
+        "The coordinator does not answer questions during a session and no person is "
+        "waiting. Decide within the plan and the sprint's rules. If a decision the plan does "
+        "not settle truly blocks you, commit safe partial work and end your turn with a "
+        "BLOCKED report that lists 2-4 concrete options and the one you recommend "
+        "(`options`, `recommended`); the coordinator decides and continues the sprint.")
+
+    def _auto_answer_question(self, P: Project, t: dict, sid: str, phase: str, q: dict) -> bool:
+        """W1.1: a Kilo `question` from an implementer / closeout session (the tool is
+        denied; this is the safety net when a role rule re-allowed it) is answered
+        by the coordinator with the standing instruction, once per request, and the
+        session continues. False when the reply could not be sent (the old
+        AWAITING_HUMAN path then applies)."""
+        if phase not in ("implement", "closeout"):
+            return False
+        rid = str(q.get("request_id") or "")
+        key = f"question-auto:{P.id}:{t['task_id']}:{sid}:{rid or 'none'}"
+        if self.store.op_begin(key, P.id, t["task_id"], "question_auto") is not None:
+            return False                 # answered once already and still pending: a person
+        n = max(1, len(q.get("options") or []) or 1)
+        try:
+            P.client.answer(sid, rid, [[self.QUESTION_AUTO_ANSWER]] * n,
+                            directory=P.profile.workspace, kind="question")
+        except Exception as e:                                    # noqa: BLE001
+            self.store.op_update(key, "failed", {"error": str(e)[:300]})
+            return False
+        self.store.op_update(key, "done", {"request_id": rid})
+        self.store.event(P.id, t["task_id"], "question_auto_answered", session_id=sid,
+                         detail={"request_id": rid, "text": str(q.get("text") or "")[:400],
+                                 "phase": phase})
+        self._note(P, t, f"{phase} session asked a question; answered by the coordinator "
+                         f"(decide within the plan or report BLOCKED with options)")
+        return True
 
     def _compacted(self, P: Project, t: dict, sid: str, phase: str, comp: dict):
         """The turn ended on Kilo's compaction summary. It is never verified and
@@ -1186,11 +1318,23 @@ class Coordinator:
                                      "evidence from an uncommitted working copy doesn't count)")
         prefix = P.profile.commit.get("prefix", "{task}").replace("{task}", spec.task_id)
         if P.profile.commit.get("require_prefix", True):
-            bad = [c for c in commits if not c[1].startswith(prefix)]
-            add("commit_messages", FAIL if bad else PASS,
+            # W1.4: `revert:` and merge commits are exempt; a commit the coordinator could
+            # not reword itself (already pushed, a non-linear range) is advisory, never a
+            # FAIL only a history rewrite could clear (UI-02b lost a 6.7 h lead session to
+            # exactly that)
+            from . import commits as CM
+            bad, exempt_commits = CM.unprefixed(P, commits, prefix)
+            fixable = CM.rewordable(P, t, [c[0] for c in bad]) if bad else ""
+            add("commit_messages", FAIL if (bad and not fixable) else PASS,
                 ("commits without the '" + prefix + "' prefix: "
-                 + "; ".join(f"{c[0][:10]} {c[1][:60]}" for c in bad[:5])) if bad
-                else f"all {len(commits)} commit message(s) start with {prefix!r}")
+                 + "; ".join(f"{c[0][:10]} {c[1][:60]}" for c in bad[:5])
+                 + (f" (not reworded by the coordinator: {fixable}; advisory)" if fixable
+                    else " (the coordinator rewords its own unpushed commits before "
+                         "verification; this set predates that)")) if bad
+                else f"all {len(commits)} commit message(s) start with {prefix!r}"
+                + (f"; {len(exempt_commits)} revert/merge commit(s) exempt"
+                   if exempt_commits else ""),
+                required=not (bad and fixable))
         changed = P.ws.changed_files(base, head)
         runner_out, runner_caps = [], []
         if self.fast_lane.on(P, spec.task_id):
@@ -1417,6 +1561,16 @@ class Coordinator:
         # a re-review of the SAME commit ([lifecycle] evidence_incomplete): no diff at all,
         # only the evidence and the findings.
         dbase, dnotes = base, []
+        if invalid:
+            # W1.6: an invalid review is re-sent ONCE, with the validation error
+            # appended, never identical (the same packet got the same bad answer)
+            bad = [r for r in prior if not r["valid"]]
+            dnotes.append(f"your previous review output for {head[:12]} was REJECTED "
+                          f"({str(bad[-1].get('error') or 'invalid')[:300]}); this is the one "
+                          f"re-send: answer with exactly the JSON object the schema describes "
+                          f"(sprint_id, project_id, reviewed_commit_sha = {head}, verdict, "
+                          f"findings, evidence_inspected, missing_evidence, required_repairs, "
+                          f"residual_risks), nothing else")
         last = next((r for r in reversed(earlier) if r["verdict"] == "CHANGES_REQUIRED"
                      and R.packet_version(r) == R.PACKET_VERSION), None)
         if last and P.profile.review.get("incremental", True):
@@ -1881,6 +2035,7 @@ class Coordinator:
                     return
                 self._release_session(P, t)
                 self.store.merge_data(pid, tid, closeout_done=sid, closeout_report=s.report)
+                self._reword_commits(P, t)          # W1.4: a CLOSE commit without the prefix
         head = P.ws.head()
         t = self.store.task(pid, tid)
         why = self._review_still_valid(P, t, spec, head)
@@ -2671,22 +2826,44 @@ class Coordinator:
             sent = set(_json.loads(self.store.meta(key) or "[]"))
         except ValueError:
             sent = set()
-        paras = [p for p in text.strip("\n").split("\n\n") if p.strip()]
-        hashes = [hashlib.sha1(p.strip().encode()).hexdigest()[:16] for p in paras]
-        new = [(h, p) for h, p in zip(hashes, paras) if h not in sent]
+        # W1.6: hashed per ENTRY (a "- " line, or any non-header line), not per block:
+        # one new memory entry no longer re-sends the whole memory and decisions blocks
+        blocks = []
+        for para in text.strip("\n").split("\n\n"):
+            if not para.strip():
+                continue
+            header, entries = [], []
+            for line in para.splitlines():
+                if not line.strip():
+                    continue
+                if not entries and (line.lstrip().startswith("#") or line.rstrip().endswith(":")):
+                    header.append(line)
+                else:
+                    entries.append(line)
+            if not entries:
+                entries, header = header, []
+            blocks.append((header, entries))
+        entries_all = [(hashlib.sha1(e.strip().encode()).hexdigest()[:16], e)
+                       for _, es in blocks for e in es]
+        hashes = [h for h, _ in entries_all]
+        new_hashes = {h for h in hashes if h not in sent}
         pend = self.__dict__.setdefault("_memory_pending", {})
         prior = set(pend[sid][1]) if sid in pend else set()     # two blocks, one prompt
         pend[sid] = (key, sorted(sent | prior | set(hashes))[-self.MEMORY_SENT_CAP:])
-        if not new:
+        if not new_hashes:
             return ""
-        if len(new) == len(paras):
+        if len(new_hashes) == len(set(hashes)):
             return text                                   # first time: unchanged text
-        if len(new) < len(paras):
-            self.store.event(P.id, tid, "memory_delta", session_id=sid, detail={
-                "sent": len(new), "unchanged": len(paras) - len(new)})
-            return ("\n\n## Coordinator memory (changed since your last prompt; the rest is "
-                    "unchanged)\n" + "\n\n".join(p for _, p in new) + "\n")
-        return "\n\n" + "\n\n".join(p for _, p in new) + "\n"
+        out = []
+        for header, es in blocks:
+            keep = [e for e in es if hashlib.sha1(e.strip().encode()).hexdigest()[:16]
+                    in new_hashes]
+            if keep:
+                out.append("\n".join(header + keep))
+        self.store.event(P.id, tid, "memory_delta", session_id=sid, detail={
+            "sent": len(new_hashes), "unchanged": len(set(hashes)) - len(new_hashes)})
+        return ("\n\n## Coordinator memory (entries changed since your last prompt; the rest "
+                "is unchanged)\n" + "\n\n".join(out) + "\n")
 
     def _notes_delivered(self, ids: list[str], session_id: str) -> None:
         got = self.__dict__.get("_memory_pending", {}).pop(session_id, None)
@@ -2758,7 +2935,8 @@ class Coordinator:
     # it without paying for another review or re-running the verification.
     LC_PENDING = "lc_pending_continuation"
     # decision kinds whose answer may be "stop the task" (Recovery._escalation_answer)
-    LC_STOP_KINDS = ("recovery_escalation", "no_progress", "review_access")
+    LC_STOP_KINDS = ("recovery_escalation", "no_progress", "review_access",
+                     "implementer_blocked")
     # the control center shows (and hashes) at most this much of a question
     LC_UI_QUESTION_CHARS = 1500
 
@@ -2780,11 +2958,12 @@ class Coordinator:
         return self._obligations
 
     def _decision_meta(self, project: str, task: str, kind: str, evidence: dict,
-                       options: list) -> dict:
+                       options: list, recommendation: str = "") -> dict:
         """revamp B11: class, recommended option and timeout of a new decision."""
         from . import decision_policy
         P = self.projects.get(project)
-        return decision_policy.meta(P, kind, evidence, options) if P is not None else {}
+        return decision_policy.meta(P, kind, evidence, options, recommendation) \
+            if P is not None else {}
 
     def _unblock_ref_ok(self, project: str, task: str, ref: str, actor: str) -> bool:
         """Obligations' check of an `unblock:<ref>` budget authorization. The
@@ -3098,7 +3277,11 @@ class Coordinator:
         if pending:
             if final_ids != ids:
                 self._lc_rewait(P, t, final_ids)
-            stalls = [d for d in pending if d["kind"] in self.LEAD_WAIT_KINDS]
+            # W1.1: the lead takes an implementer's BLOCKED question only when it is a
+            # tooling question; a product choice waits for its default or the operator
+            stalls = [d for d in pending if d["kind"] in self.LEAD_WAIT_KINDS and not (
+                d["kind"] == "implementer_blocked"
+                and (d.get("evidence") or {}).get("blocker_kind") != "tooling")]
             if stalls and self._lead_on(P):
                 # [lead_manager] the deterministic re-check above did not clear the
                 # no-progress / repeated-repair question: before it reaches Victor,
@@ -3183,7 +3366,10 @@ class Coordinator:
         operator unblock withdraws the answer and lets it continue)."""
         pid, tid = P.id, t["task_id"]
         did = d.get("decision_id") or ""
-        text = f"recovery stopped by operator decision {did}: {reason or 'stop'}"[:900]
+        full = self.obligations.decision(did) if did else None
+        by = "timeout default" if (full or {}).get("authority") == "timeout_default" \
+            else "operator decision"
+        text = f"parked: recovery stopped by {by} {did}: {reason or 'stop'}"[:900]
         cur = self.store.task(pid, tid)
         data = {k: v for k, v in (cur["data"] or {}).items()
                 if k not in ("decision_wait", self.LC_PENDING)}
@@ -3195,10 +3381,47 @@ class Coordinator:
         self.store.release(pid, tid)
         if cur["state"] == S.BLOCKED:
             self.store.update_task(pid, tid, blocker=text, next_action=text[:500], data=data)
-            return
-        self.store.transition(pid, tid, S.BLOCKED, {"blocker": text, "decision_id": did,
-                                                    "blocker_class": "decision"},
-                              blocker=text, data=data)
+        else:
+            self.store.transition(pid, tid, S.BLOCKED, {"blocker": text, "decision_id": did,
+                                                        "blocker_class": "decision"},
+                                  blocker=text, data=data)
+        self._park_summary(P, self.store.task(pid, tid), text, decision_id=did,
+                           kind=str(d.get("kind") or ""))
+
+    def _park_summary(self, P: Project, t: dict, why: str, decision_id: str = "",
+                      kind: str = "", case_id: str = "") -> None:
+        """W1.2 (Victor 2026-10-22): a sprint parked on a tooling limit leaves one
+        summary event (sprint_parked) and one operator notice; the queue moves on
+        by itself (a dependent sprint waits for it, an independent one starts)."""
+        pid, tid = P.id, t["task_id"]
+        data = t.get("data") or {}
+        try:
+            lead_calls = self.lead.lifetime_calls(pid, tid) if self._lead_on(P) else 0
+        except Exception:                                         # noqa: BLE001
+            lead_calls = 0
+        try:
+            counters = self.obligations.counters(pid, tid) if self._lc(P, "obligations") else {}
+        except Exception:                                         # noqa: BLE001
+            counters = {}
+        waiting = [q["task_id"] for q in self.store.tasks(pid)
+                   if q["state"] == S.QUEUED and tid in (
+                       (self.store.queue_entry(pid, q["task_id"]) or {}).get("deps") or [])]
+        summary = {
+            "task_id": tid, "why": str(why)[:800], "decision_id": decision_id, "kind": kind,
+            "case_id": case_id or data.get("recovery_case") or "",
+            "head_sha": t.get("head_sha") or "", "attempt": t.get("attempt"),
+            "sessions": t.get("sessions"), "lead_calls": lead_calls, "counters": counters,
+            "findings": [str(f)[:300] for f in (data.get("findings") or [])[:8]],
+            "last_report": {k: str(v)[:300] for k, v in (data.get("last_report") or {}).items()
+                            if k in ("status", "summary", "blocker", "next")},
+            "dependents_waiting": waiting[:20],
+            "resume": "operator: unblock / answer a superseding decision; the queue continues "
+                      "with independent sprints meanwhile"}
+        self.store.event(pid, tid, "sprint_parked", detail=summary)
+        self.store.event(pid, tid, "operator_notice", detail={
+            "text": (f"{tid}: parked BLOCKED ({str(why)[:200]}); the queue continues"
+                     + (f"; waiting on it: {', '.join(waiting[:6])}" if waiting else "")),
+            "kind": "sprint_parked", "decision_id": decision_id, "task_id": tid})
 
     def _lc_rewait(self, P: Project, t: dict, ids: list) -> None:
         """The task keeps waiting, now on these (current) decision ids."""
@@ -3293,6 +3516,29 @@ class Coordinator:
                 except ValueError as e:
                     self.store.event(P.id, tid, "warning", detail={
                         "decision": d["decision_id"], "set_phase": str(e)[:300]})
+            elif d["kind"] == "implementer_blocked":
+                # W1.1: the answer to the session's BLOCKED options becomes the first
+                # finding of the next session (the repair prompt carries it)
+                cur = self.store.task(P.id, tid)
+                applied = set((cur["data"] or {}).get("blocked_decisions_applied") or [])
+                if d["decision_id"] in applied:
+                    continue
+                answer = d.get("answer")
+                if isinstance(answer, dict):
+                    import json as _json
+                    answer = answer.get("option") or answer.get("strategy") or \
+                        answer.get("answer") or _json.dumps(answer)
+                who = "the timeout default" if d.get("authority") == "timeout_default" \
+                    else str(d.get("actor") or "the operator")
+                line = (f"Decision {d['decision_id']} on your BLOCKED report "
+                        f"({str((d.get('evidence') or {}).get('blocker') or '')[:300]}): "
+                        f"{str(answer)[:500]} (decided by {who}). Continue the sprint "
+                        f"accordingly, within the plan's file list.")
+                prior = [f for f in ((cur["data"] or {}).get("findings") or [])
+                         if not str(f).startswith("Decision dec-")]
+                self.store.merge_data(P.id, tid, findings=[line] + prior[:20],
+                                      blocked_decisions_applied=sorted(
+                                          applied | {d["decision_id"]}))
         return reopened
 
     def _lc_wait(self, P: Project, t: dict, ids: list, why: str, resume: str,
@@ -3378,15 +3624,23 @@ class Coordinator:
                     "case_id": (t["data"].get("lead_assignment") or {}).get("case_id"),
                     "stalls": pr.get("stalls")})
             elif pr["no_progress"]:
+                from . import decision_policy as DP
+                continued = (t["data"].get("no_progress_continued") or {})
                 q = (f"{pr['stalls']} sessions in a row made no progress (no newly verified "
                      f"obligation, same findings, {pr['summary_only_sessions']} summary-only); "
                      f"another broad retry would repeat them")
+                if continued:
+                    q += " (the one continuation was used)"
+                # W1.2 (Victor 2026-10-22): the default is to continue once, then park the
+                # sprint BLOCKED with a summary so the queue moves on; the timeout applies
                 did = self.obligations.open_decision(
-                    pid, tid, "no_progress", q, evidence=pr,
-                    options=["answer with a different strategy {strategy: ...}",
-                             "authorize more budget", "stop the task"],
-                    recommendation="give a materially different strategy or stop",
-                    blocks=[tid])
+                    pid, tid, "no_progress", q, evidence={
+                        **pr, "recommended": DP.PARK if continued else DP.CONTINUE_ONCE},
+                    options=[DP.CONTINUE_ONCE, DP.STRATEGY, DP.MORE_BUDGET, DP.PARK],
+                    recommendation=DP.PARK if continued else DP.CONTINUE_ONCE,
+                    blocks=[tid],
+                    # the second question replaces the answered "continue once"
+                    supersedes=continued.get("decision_id") or None)
                 consulted = (t["data"].get("lc_stall_consult") or {}).get("stalls")
                 if not self._lc_decided(did) and pr["recommendation"] == "consult" \
                         and consulted != pr["stalls"]:
@@ -3405,7 +3659,18 @@ class Coordinator:
                     # "stop the task" (option or typed text) stops; only a real
                     # strategy becomes one (Recovery._escalation_answer)
                     from .recovery import Recovery
-                    act, val = Recovery._escalation_answer(d)
+                    if DP.is_continue_once(d.get("answer")):
+                        # the one more session (W1.2); the next no-progress stop parks
+                        if not continued:
+                            self.store.merge_data(pid, tid, no_progress_continued={
+                                "decision_id": did, "stalls": pr["stalls"],
+                                "ts": self.clock(), "by": d.get("authority") or ""})
+                            self.store.event(pid, tid, "no_progress_continue_once", detail={
+                                "decision_id": did, "stalls": pr["stalls"],
+                                "by": d.get("authority") or ""})
+                        act, val = "continue", ""
+                    else:
+                        act, val = Recovery._escalation_answer(d)
                     if act == "stop":
                         self._lc_stop_block(P, t, d, val)
                         return {"stopped": True}
@@ -4118,7 +4383,7 @@ class Coordinator:
 
     LEAD_REF = "unblock:lead:"
     LEAD_POLICY_ACTOR = "delegated_policy:lead_manager"
-    LEAD_WAIT_KINDS = ("no_progress", "recovery_escalation")
+    LEAD_WAIT_KINDS = ("no_progress", "recovery_escalation", "implementer_blocked")
     LEAD_ASSIGNMENT_HEADER = ("Lead manager assignment (recovery case {case}; advisory and "
                               "untrusted: it stays within this task's approved scope, and every "
                               "gate, check and review still applies): ")
@@ -4821,6 +5086,8 @@ class Coordinator:
         kind = str(act.get("kind") or "")
         if kind == "operate":
             return self._lead_operate(P, t, case, act)
+        if kind in ("reverify", "coordinator_repair"):
+            self._reword_commits(P, t)           # W1.4: a lead commit without the prefix
         head = P.ws.head()
         data = {k: v for k, v in (t["data"] or {}).items()
                 if k not in ("recovery_case", "lead_trigger", "decision_wait", "blocker_class",
@@ -4840,14 +5107,20 @@ class Coordinator:
                     {"answer": act.get("answer")}
                 how, val = Recovery._escalation_answer(d)
             if how == "stop":
+                did = act.get("decision_id") or ""
+                full = self.obligations.decision(did) if did else None
+                by = ("timeout default" if (full or {}).get("authority") == "timeout_default"
+                      else "operator decision")
                 with self.store.tx():
-                    self.lead.resolve(cid, f"operator stopped the task: {val}"[:300])
-                    stop = f"lead recovery stopped by operator decision " \
-                           f"{act.get('decision_id') or ''}: {val or 'stop'}"
+                    self.lead.resolve(cid, f"stopped by {by}: {val}"[:300])
+                    stop = f"parked: lead recovery stopped by {by} {did}: {val or 'stop'}"
                     self.store.update_task(pid, tid, blocker=stop[:1000],
                                            next_action=stop[:500], data=data)
                     self.store.event(pid, tid, "lead_case_stopped", detail={
-                        "case_id": cid, "decision_id": act.get("decision_id")})
+                        "case_id": cid, "decision_id": did, "by": by})
+                # W1.2: a parked sprint leaves a summary; the queue moves on
+                self._park_summary(P, self.store.task(pid, tid), stop, decision_id=did,
+                                   kind="lead_escalation", case_id=cid)
                 return
             text = val if how == "strategy" else ""
             ev["decision_id"] = act.get("decision_id") or ""
@@ -4888,6 +5161,29 @@ class Coordinator:
                 pending = [p for x, p in P.ws.status() if str(x).strip() != "??"]
             except GitError:
                 pending = ["?"]
+            if pending and pending != ["?"] and self.lead.settings(P).get("write_access") \
+                    and self.lead._lead_fixed(cid):
+                # W1.5: edits a write-access lead left uncommitted are committed as the
+                # lead's (in scope only) and re-verified here, never handed to a cold
+                # implementer session
+                sha = self._lead_commit_pending(P, t, case, act)
+                if sha:
+                    head = P.ws.head()
+                    ev["lead_commit"] = sha
+                    fresh = self.store.task(pid, tid)["data"] or {}
+                    data = {k: v for k, v in fresh.items()
+                            if k not in ("recovery_case", "lead_trigger", "decision_wait",
+                                         "blocker_class", "readiness_block", "readiness",
+                                         self.LC_PENDING)}
+                    try:
+                        pending = [p for x, p in P.ws.status() if str(x).strip() != "??"]
+                    except GitError:
+                        pending = ["?"]
+            if pending and pending != ["?"]:
+                self.store.event(pid, tid, "lead_resume_uncommitted", detail={
+                    "case_id": cid, "paths": pending[:20],
+                    "note": "uncommitted changes outside the task's files stay; a fresh "
+                            "session is told to check them"})
             if head and t.get("base_sha") and head != t["base_sha"] and not pending:
                 if self._acquire(P, t, self._workspace_locks(P)):
                     return
@@ -4926,6 +5222,52 @@ class Coordinator:
                                   data=data, next_action=res[:500])
             self.lead.resolve(cid, f"resumed: {kind} -> {target}")
         self.store.event(pid, tid, "lead_resume", detail={**ev, "to": target})
+
+    def _lead_commit_pending(self, P: Project, t: dict, case: dict, act: dict) -> str:
+        """W1.5: commit the in-scope files a write-access lead session left
+        uncommitted (the task's files, its closeout-exempt paths and the files
+        the lead named), as the lead's own commit under the task prefix. Files
+        outside that set are never touched. Returns the commit sha or ''."""
+        pid, tid, cid = P.id, t["task_id"], case["case_id"]
+        try:
+            spec = P.adapter.describe(tid)
+        except AdapterError:
+            return ""
+        allowed = list(spec.scope) + list(P.adapter.exempt_paths(spec)) + \
+            [str(f) for f in (act.get("files") or [])]
+        baseline = set(t.get("data", {}).get("task_baseline_dirty") or [])
+        try:
+            dirty = P.ws.status()
+        except GitError:
+            return ""
+        paths = sorted({p for _, p in dirty if matches_any(p, allowed) and p not in baseline})
+        if not paths:
+            return ""
+        from . import bookkeeping as BK
+        hyp = str(act.get("hypothesis") or "lead fix")[:72]
+        msg = BK.message(P, tid, f"lead case {cid}: {hyp}")
+        try:
+            sha = P.ws.commit_paths(paths, msg)
+        except (GitError, OSError) as e:
+            self.store.event(pid, tid, "lead_commit_failed", detail={
+                "case_id": cid, "paths": paths[:20], "error": str(e)[:300]})
+            return ""
+        if not sha:
+            return ""
+        kept = list((self.store.task(pid, tid).get("data") or {}).get("lead_commits") or [])
+        self.store.merge_data(pid, tid, lead_commits=(kept + [sha])[-50:])
+        self.store.event(pid, tid, "lead_commit", detail={
+            "case_id": cid, "sha": sha, "paths": paths[:40], "message": msg,
+            "note": "uncommitted write-access lead edits committed as the lead's; "
+                    "re-verified in place (scope, review and gate still apply)"})
+        try:
+            self.lead._act(case, "lead_commit", result=f"{sha[:12]}: {len(paths)} file(s)",
+                           repo="game", scope_files=paths[:40],
+                           detail={"sha": sha, "paths": paths[:40]},
+                           op_key=f"{cid}:lead_commit:{sha[:12]}")
+        except Exception:                                         # noqa: BLE001
+            pass
+        return sha
 
     # ======================================================================= helpers
 

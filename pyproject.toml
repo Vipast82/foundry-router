@@ -38,7 +38,7 @@ foundry-client = "foundry_client.__main__:main"
 [tool.setuptools.package-data]
 "foundry_router" = ["schema.sql", "ui/static/*"]
 "foundry_client" = ["static/*"]
-"foundry_coordinator" = ["projects/*/*.toml", "projects/*/*.md"]
+"foundry_coordinator" = ["projects/*/*.toml", "projects/*/*.md", "projects/*/kilo_skills/*/*.md"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"

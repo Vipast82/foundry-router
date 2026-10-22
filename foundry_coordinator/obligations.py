@@ -70,7 +70,8 @@ OPERATOR_CHANNEL = "control"
 # Decision kinds the coordinator knows (others are allowed; these are typed).
 DECISION_KINDS = ("budget_extension", "reset", "obligation_phase", "obligation_conflict",
                   "recovery_escalation", "no_progress", "review_access", "scope_change",
-                  "approval", "expectation_change", "quarantine_check", "policy", "flaky_check")
+                  "approval", "expectation_change", "quarantine_check", "policy", "flaky_check",
+                  "implementer_blocked")
 BUDGET_KINDS = ("budget_extension", "reset")
 
 # Ledger counters (raw usage, only ever charged upward).
@@ -456,7 +457,8 @@ class Obligations:
                 evidence={"obligation_id": oid, "unknown_evidence": bad[:10],
                           "source": str(ob.get("source") or "")},
                 options=["fix the adapter's evidence declaration", "operator decision"],
-                recommendation="declare check/path/blob_changed/log_marker evidence",
+                recommendation="fix the adapter's evidence declaration (declare check/path/"
+                               "blob_changed/log_marker evidence)",
                 blocks=[oid])
         return True
 
@@ -555,9 +557,12 @@ class Obligations:
         scope = list(getattr(spec, "scope", None) or [])
 
         def conflict(kind, q, evidence, blocks):
+            # W1.2: every decision carries a default; after the timeout the conflict
+            # is answered "fix the plan or scope" (the next session / lead reads it in
+            # the authorized-decisions block) instead of waiting for a person
             did = self.open_decision(P.id, task, "obligation_conflict", q, evidence=evidence,
                                      options=["fix the plan or scope", "operator decision"],
-                                     recommendation="", blocks=blocks)
+                                     recommendation="fix the plan or scope", blocks=blocks)
             conflicts.append({"kind": kind, "decision_id": did, **evidence})
 
         # the adapter now proposes a different phase for an existing obligation
@@ -889,9 +894,17 @@ class Obligations:
             did = "dec-" + _sha(f"{project}|{task}|{kind}|{qhash}|{len(rows)}", 16)
             meta = {}
             if callable(self.decision_policy):
+                # W1.2: the recommendation text names the default too (older policies
+                # take five positional arguments)
                 try:
-                    meta = self.decision_policy(project, task, kind, evidence or {},
-                                                list(options or [])) or {}
+                    try:
+                        meta = self.decision_policy(project, task, kind, evidence or {},
+                                                    list(options or []),
+                                                    recommendation=str(recommendation or ""))
+                    except TypeError:
+                        meta = self.decision_policy(project, task, kind, evidence or {},
+                                                    list(options or []))
+                    meta = meta or {}
                 except Exception:                                 # noqa: BLE001
                     meta = {}
             now = self.clock()

@@ -75,6 +75,9 @@ TRANSITIONS: dict[tuple[str, str], object] = {
     (AWAITING_HUMAN, COMPLETE): ("approval_id", "closeout_id"),
     (AWAITING_HUMAN, CHANGES_REQUIRED): ("findings",),
     (AWAITING_HUMAN, VERIFYING): ("invalidated",),
+    # W1.3: the after-close visual approval cannot be satisfied (frames missing after
+    # the one recapture round): a stop the lead / operator sees, never a silent wait
+    (AWAITING_HUMAN, BLOCKED): ("blocker",),
     (CLOSING, COMPLETE): ("closeout_id", "review_valid", "published"),
     (CLOSING, AWAITING_HUMAN): [("closeout_id", "awaiting"), ("awaiting", "session_id")],
     (CLOSING, CHANGES_REQUIRED): ("findings",),

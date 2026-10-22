@@ -55,6 +55,7 @@ from typing import Optional
 
 from . import states as S
 from .adapters.base import FAIL, PASS, UNKNOWN, VerificationResult, evidence_dir
+from .autoheal import pid_alive
 from .adapters.foundry import FoundryDenied, FoundryError
 from .adapters.project import failed_findings
 from .profile import FAST_LANE_DEFAULTS, matches_any
@@ -150,6 +151,18 @@ def effective_result(v: dict) -> str:
                              for c in checks if c.get("required", True)):
         return PASS
     return FAIL
+
+
+STALE_CHECKS = ("host.live_hash",)
+
+
+def rojo_stale_only(v: dict) -> bool:
+    """True when the only required checks that did not pass are the Studio-vs-HEAD
+    source hash checks (W1.8: a stale Rojo sync, tooling, never the code)."""
+    bad = [c for c in (v or {}).get("checks") or []
+           if isinstance(c, dict) and c.get("required", True)
+           and str(c.get("result") or "").upper() not in ("PASS", "SKIP")]
+    return bool(bad) and all(str(c.get("id") or "") in STALE_CHECKS for c in bad)
 
 
 def failed_check_lines(v: dict, cap: int = 30) -> list[str]:
@@ -629,6 +642,24 @@ class FastLane:
             return self._error(P, t, head, generic,
                                f"the studio gate finished (status.json) without a verdict for "
                                f"{run['head'][:12]}; log {run.get('log')}")
+        if proc is None and run.get("pid") and st.get("pid") == run.get("pid") and \
+                st.get("phase") != "done" and not pid_alive(run.get("pid")):
+            # W1.8: after a coordinator restart the runner is known only by its pid; a
+            # dead pid without a verdict used to wait out gate_timeout_minutes (45) and
+            # then count as a red gate. It is tooling (auto-heal re-runs the gate).
+            v = self._verdict(P, tid, run)
+            if v is not None:
+                return self._consume(P, t, spec, head, generic, run, v)
+            if st.get("playing"):
+                self._stop_playtest(P, tid)
+            self.store.event(P.id, tid, "fast_lane_runner_dead", detail={
+                "head": run["head"], "pid": run.get("pid"), "phase": st.get("phase"),
+                "playing": bool(st.get("playing"))})
+            return self._error(P, t, head, generic,
+                               f"the studio gate runner (pid {run.get('pid')}) is gone without a "
+                               f"verdict for {run['head'][:12]} (last phase "
+                               f"{st.get('phase') or 'unknown'}); log {run.get('log')}: "
+                               + self._log_tail(run, 400).strip()[-400:])
         limit = float(settings(P)["gate_timeout_minutes"]) * 60
         elapsed = self.clock() - float(run.get("started") or self.clock())
         if elapsed > limit:
@@ -735,6 +766,14 @@ class FastLane:
             return self._error(P, t, head, generic + rows,
                                "the studio gate reported ERROR (tooling / not ready): "
                                + "; ".join(failed_check_lines(v)[:4]))
+        if res != PASS and rojo_stale_only(v):
+            # W1.8: Studio's loaded sources differ from HEAD while nothing else failed:
+            # Rojo / the plugin is stale, not the code. Tooling: auto-heal restarts Rojo
+            # through the client and re-runs the gate; no red gate, no session prompt
+            return self._error(P, t, head, generic + rows,
+                               "Rojo stale: Studio's loaded sources differ from HEAD "
+                               "(host.live_hash) while every other check passed: "
+                               + "; ".join(failed_check_lines(v)[:3]))
         if res != PASS:
             return self._red(P, t, spec, head, generic + rows, v, vkey, first)
         # PASS: the runner's own outputs are committed by the coordinator (B1), then this
@@ -909,7 +948,9 @@ class FastLane:
                   "commits the runner's captures and logs itself. "
                   "Never weaken a check, skip a story "
                   "or edit the runner to get PASS. If a finding needs a decision the plan "
-                  "doesn't settle, report BLOCKED with one question.\n")
+                  "doesn't settle, report BLOCKED with 2-4 options and the one you recommend "
+                  "(`options`, `recommended` in the report); the coordinator decides and "
+                  "continues the sprint, nobody is asked.\n")
         try:
             sent = self.c._prompt_primary(P, t, text, pend["key"])
         except Exception as e:                                    # noqa: BLE001

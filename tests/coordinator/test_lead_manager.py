@@ -124,6 +124,9 @@ def report(kind="assign_game_repair", cls="product", hyp=None, **act):
          "evidence_refs": ["src/a.txt:1"], "action": a}
     if kind == "ask_victor":
         d["question"] = "Which gallery layout did you approve for the desktop view?"
+        # W1.2: every question carries options and the recommended one
+        d["options"] = ["layout A (grid)", "layout B (list)"]
+        d["recommended"] = "layout A (grid)"
     return d
 
 

@@ -128,8 +128,9 @@ def test_an_invalid_report_is_repaired_in_the_same_session(tmp_path):
 def test_the_hard_cap_is_absolute(tmp_path):
     e = make_game(tmp_path, lambda ctx: blocked("which gallery layout is approved?"),
                   lead=lambda ctx: {"final": "no block"},
-                  extra=lead_toml(max_diagnoses=5) + "\n[automation]\nlead_hard_max_calls = 1"
-                                                     "\nlead_report_repairs = 0\n")
+                  # W1.5: the hard cap is never below max_lead_calls_per_task (derived)
+                  extra=lead_toml(max_diagnoses=5, max_lead_calls_per_task=1)
+                  + "\n[automation]\nlead_hard_max_calls = 1\nlead_report_repairs = 0\n")
     c = e["c"]
     c.approve("game", TID, [], "victor")
     for _ in range(60):
@@ -142,6 +143,26 @@ def test_the_hard_cap_is_absolute(tmp_path):
     esc = [a for a in acts(e, k["case_id"]) if a["kind"] == "escalate"][-1]
     assert esc["detail"]["reason"] == "lead_hard_cap"
     assert c.lead.lifetime_calls("game", TID) == 1
+    # W1.2: the escalation carries options and the PARK default with the timeout
+    d = c.obligations.decision(k["decision_id"])
+    assert d["decision_class"] == "decision" and d["timeout_minutes"] == 30
+    assert json.loads(d["recommended"]).startswith("stop the task (park")
+
+
+def test_the_hard_cap_derives_from_the_per_task_lead_budget(tmp_path):
+    """W1.5: [automation] lead_hard_max_calls (8 live) was below [lead_manager]
+    max_lead_calls_per_task (12 live), so the hard cap fired first and the per-task
+    budget was unreachable. The hard cap is never lower than the per-task cap."""
+    e = make_game(tmp_path, lambda ctx: blocked("x"), extra=lead_toml(max_lead_calls_per_task=12)
+                  + "\n[automation]\nlead_hard_max_calls = 8\n")
+    assert e["c"].lead.hard_cap(e["P"]) == 12
+    e2 = make_game(tmp_path / "b", lambda ctx: blocked("x"),
+                   extra=lead_toml(max_lead_calls_per_task=4) + "\n[automation]\n"
+                                                               "lead_hard_max_calls = 9\n")
+    assert e2["c"].lead.hard_cap(e2["P"]) == 9
+    e3 = make_game(tmp_path / "c", lambda ctx: blocked("x"),
+                   extra=lead_toml() + "\n[automation]\nlead_hard_max_calls = 0\n")
+    assert e3["c"].lead.hard_cap(e3["P"]) == 0                   # 0 keeps meaning "off"
 
 
 def test_a_deploy_moving_the_router_head_on_a_clean_tree_is_not_a_violation():

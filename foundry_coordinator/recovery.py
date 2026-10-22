@@ -679,17 +679,21 @@ class Recovery:
                 q = base_q if latest is None else \
                     f"{base_q} (attempt {attempt}; the answer to {supersedes} did not resolve it)"
                 did = ""
+                from .decision_policy import MORE_BUDGET, PARK, STRATEGY
                 for n in range(4):
                     qq = q if n == 0 else f"{q} [re-ask {n}]"
+                    # W1.2 (Victor 2026-10-22): the default after the timeout is to park
+                    # the sprint (BLOCKED with a summary; the queue moves on). The lead,
+                    # when on, takes the question first (engine._lead_from_wait)
                     did = obs.open_decision(
                         P.id, task, "recovery_escalation", qq,
                         evidence={"repeats": repeats,
                                   "last_strategy": (prev or {}).get("strategy"),
                                   "adviser": adviser_note or "unavailable",
-                                  "rejected_guidance": rejected, "attempt": attempt},
-                        options=["answer with a different strategy {strategy: ...}",
-                                 "authorize more budget", "stop the task"],
-                        recommendation="give a materially different strategy or stop",
+                                  "rejected_guidance": rejected, "attempt": attempt,
+                                  "recommended": PARK},
+                        options=[STRATEGY, MORE_BUDGET, PARK],
+                        recommendation=PARK,
                         blocks=[task], scope={"escalation_key": key, "attempt": attempt},
                         supersedes=supersedes)
                     if (obs.decision(did) or {}).get("status") == "open":
