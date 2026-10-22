@@ -4,6 +4,9 @@
   foundry-client status                            component states (from the running client)
   foundry-client restart <component> [--force] [--wait]
   foundry-client install-autostart | remove-autostart
+  foundry-client install-service | remove-service   systemd --user unit (Linux, headless)
+  foundry-client doctor                            checks of this workstation (running client)
+  foundry-client apply-kilo-config [--dry-run]     role rules -> kilo.jsonc, then reload Kilo
   foundry-client import-legacy-secrets             one-time: old PowerShell credential files
   foundry-client coordinator <args...>             the bundled coordinator CLI
   foundry-client supervisor <args...>              the bundled upgrade supervisor
@@ -39,6 +42,23 @@ def _running(cfg) -> bool:
         return False
 
 
+def _start_relay(mgr, cfg) -> None:
+    """The router claim loop lives in relay.py (added separately); it is optional here.
+    Contract: relay.start(mgr, cfg) starts its own daemon thread and returns at once; it
+    reads mgr.observation() for what to report and calls mgr.restart / mgr.apply_kilo_config
+    for what it is asked."""
+    if not cfg["client"].get("relay", True):
+        return
+    try:
+        from . import relay
+    except ImportError:
+        return
+    try:
+        relay.start(mgr, cfg)
+    except Exception as e:                                       # noqa: BLE001
+        mgr._event("client", f"router relay did not start: {type(e).__name__}: {e}")
+
+
 def cmd_run(cfg, headless: bool, no_start: bool) -> int:
     from . import api, config
     from .manager import Manager
@@ -62,6 +82,7 @@ def cmd_run(cfg, headless: bool, no_start: bool) -> int:
     if not no_start:
         mgr.start_all()
     mgr.start_thread()
+    _start_relay(mgr, cfg)
     app = api.create_app(mgr, api.load_token())
     server = uvicorn.Server(uvicorn.Config(app, host="127.0.0.1", port=port, log_level="warning"))
     threading.Thread(target=server.run, daemon=True).start()
@@ -121,6 +142,13 @@ def main(argv=None) -> int:
     x.add_argument("--wait", action="store_true", help="return once it is running again")
     sub.add_parser("install-autostart")
     sub.add_parser("remove-autostart")
+    sub.add_parser("install-service")
+    sub.add_parser("remove-service")
+    sub.add_parser("doctor")
+    k = sub.add_parser("apply-kilo-config")
+    k.add_argument("--dry-run", action="store_true")
+    k.add_argument("--project", default="")
+    k.add_argument("--no-reload", action="store_true", help="do not reload Kilo afterwards")
     sub.add_parser("import-legacy-secrets")
     a = ap.parse_args(argv or ["run"])
     cfg = config.load()
@@ -133,20 +161,74 @@ def main(argv=None) -> int:
             print("the Foundry Client is not running")
             return 1
         for c in st["components"]:
-            print(f"{c['label']:<20} {c['state']:<10} {c['detail']}")
+            print(f"{c['label']:<20} {c['state']:<10} {c['detail']}"
+                  + (f"  [restart pending: {c['pending_reason'] or 'queued'}]"
+                     if c["pending_restart"] else ""))
+        r = st.get("router") or {}
+        print(f"{'Foundry router':<20} " + (f"{'reachable':<10} v{r.get('version')}"
+              if r.get("reachable") else f"{'unreachable':<10} {r.get('error', '')}"))
+        for al in st.get("alerts") or []:
+            print(f"! {al['text']}")
+        u = st.get("update") or {}
+        if u.get("available"):
+            print(f"update available: {u['latest']} (installed {u['current']}) {u['url']}")
         return 0 if st["overall"] == "ok" else 1
     if a.cmd == "restart":
         q = "?force=true" if a.force else ""
-        st = _api(cfg, f"/api/components/{a.component}/restart{q}", "POST", {})
-        print(f"{st['label']}: {st['state']} {st['detail']}")
+        try:
+            st = _api(cfg, f"/api/components/{a.component}/restart{q}", "POST", {}, timeout=120)
+        except (urllib.error.URLError, OSError):
+            print("the Foundry Client is not running")
+            return 1
+        print(f"{st['label']}: {st['state']} {st['detail']}"
+              + (f" - {st['result']}" if st.get("result") else ""))
+        if str(st.get("result", "")).startswith("failed"):
+            return 1
         if a.wait:
+            c = st
             for _ in range(600):
                 time.sleep(2)
-                st = _api(cfg, f"/api/status")
+                st = _api(cfg, "/api/status")
                 c = next(c for c in st["components"] if c["name"] == a.component)
-                if c["state"] == "running":
+                if c["state"] == "running" and not c["pending_restart"]:
                     return 0
+                if c["restart_result"].startswith("failed"):
+                    break
+            print(f"{c['label']}: {c['state']} {c['detail']}"
+                  + (f" (restart pending: {c['pending_reason']})" if c["pending_restart"] else ""))
             return 1
+        return 0
+    if a.cmd == "doctor":
+        try:
+            d = _api(cfg, "/api/doctor", timeout=60)
+        except (urllib.error.URLError, OSError):
+            print("the Foundry Client is not running")
+            return 1
+        for c in d["checks"]:
+            print(f"{c['status'].upper():<5} {c['label']:<30} {c['detail']}")
+        return 0 if d["ok"] else 1
+    if a.cmd == "apply-kilo-config":
+        try:
+            r = _api(cfg, "/api/kilo-config/apply", "POST",
+                     {"project": a.project, "dry_run": a.dry_run, "reload": not a.no_reload},
+                     timeout=180)
+        except urllib.error.HTTPError as e:
+            r = json.loads(e.read() or b"{}")
+        except (urllib.error.URLError, OSError):
+            print("the Foundry Client is not running")
+            return 1
+        print(json.dumps(r, indent=2))
+        return 0 if r.get("ok") else 1
+    if a.cmd == "install-service":
+        try:
+            print(f"systemd unit: {autostart.install_service()}")
+        except RuntimeError as e:
+            print(e)
+            return 2
+        return 0
+    if a.cmd == "remove-service":
+        autostart.remove_service()
+        print("systemd unit removed")
         return 0
     if a.cmd == "install-autostart":
         print(f"autostart: {autostart.enable()}")

@@ -52,7 +52,7 @@ CORRELATION_HEADERS = {"x-foundry-session": "session_id", "x-foundry-task": "tas
 # A client's own session id when it sends no x-foundry-session (Kilo and
 # OpenCode send x-session-id = their session id on every model call).
 SESSION_FALLBACK_HEADERS = ("x-session-id", "x-opencode-session", "x-session-affinity")
-_OPEN_PATHS = ("/", "/api/version")          # liveness probes stay open
+_OPEN_PATHS = ("/", "/api/version", "/health")          # liveness probes stay open
 
 # Foundry calling itself (persona validation runs the real HTTP route
 # in-process). A per-process random secret: never configured, logged or sent

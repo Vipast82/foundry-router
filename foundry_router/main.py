@@ -17,6 +17,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import time
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Optional
@@ -50,6 +51,9 @@ from .cliproxy_usage import CliproxyUsage
 from .usage import MeridianUsage
 
 log = logging.getLogger(__name__)
+
+# one start-up warm-up step (agent probes, tool sync, context lengths) may take this long
+WARMUP_STEP_TIMEOUT = 180.0
 
 
 class Services:
@@ -151,6 +155,10 @@ class Services:
         self.evals = EvalHarness(self)
         self._eval_tasks: list[asyncio.Task] = []  # keep background runs alive
         self._bg_tasks: list[asyncio.Task] = []
+        self._warmup_task: Optional[asyncio.Task] = None
+        # "pending" until start_background runs (tests and FOUNDRY_DISABLE_BACKGROUND
+        # never warm up: report that honestly instead of "warming").
+        self.warmup: dict = {"state": "pending", "steps": {}}
         # Cached brain-health snapshot, refreshed by _brain_health_loop and on
         # demand via /admin/api/brain/health. Cached (not probed per status
         # call) so a down brain doesn't make the status endpoint hang on its
@@ -390,15 +398,6 @@ class Services:
                                   f"embedding-only models")
         except Exception:
             log.exception("cross-pass conflation sweep failed")
-        try:
-            await self.agents.probe_all()   # agent health / skills before the first sync
-        except Exception:
-            log.exception("agent probe failed")
-        await self.tool_registry.sync(self.pool)
-        await self.populate_context_lengths()
-        self._apply_persona_profiles()
-        await self.refresh_brain_health()   # populate the indicator immediately
-        self.research.start()
         self._bg_tasks = [
             asyncio.create_task(self._openrouter_loop()),
             asyncio.create_task(self._tool_sync_loop()),
@@ -412,6 +411,38 @@ class Services:
             asyncio.create_task(self._control_watchdog_loop()),
             asyncio.create_task(self.health.loop()),
         ]
+        # The slow, network-bound start-up work (agent probes, MCP handshakes,
+        # context lengths) must not hold the port closed: it runs after the app
+        # is already serving, and /health reports its progress.
+        self.warmup = {"state": "running", "started": time.time(), "steps": {}}
+        self._warmup_task = asyncio.create_task(self._warmup())
+
+    async def _warmup(self) -> None:
+        steps = (("agent probe", self.agents.probe_all),
+                 ("tool sync", lambda: self.tool_registry.sync(self.pool)),
+                 ("context lengths", self.populate_context_lengths))
+        for name, step in steps:
+            t0 = time.monotonic()
+            try:
+                await asyncio.wait_for(step(), timeout=WARMUP_STEP_TIMEOUT)
+                self.warmup["steps"][name] = {"ok": True, "seconds": round(time.monotonic() - t0, 1)}
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:
+                log.exception("startup warm-up: %s failed or timed out", name)
+                self.warmup["steps"][name] = {"ok": False, "error": str(e) or type(e).__name__}
+        try:
+            self._apply_persona_profiles()
+        except Exception:
+            log.exception("persona profiles at startup failed")
+        try:
+            await self.refresh_brain_health()   # populate the indicator
+        except Exception:
+            log.exception("brain health at startup failed")
+        self.research.start()
+        self.warmup["state"] = "done"
+        self.warmup["seconds"] = round(time.time() - self.warmup["started"], 1)
+        self.db.log_event("info", "main", "startup warm-up finished")
 
     def _apply_persona_profiles(self) -> None:
         from . import profiles
@@ -620,8 +651,9 @@ class Services:
                 log.exception("subscription usage poll error")
 
     async def shutdown(self) -> None:
-        for t in self._bg_tasks:
-            t.cancel()
+        for t in [*self._bg_tasks, self._warmup_task]:
+            if t is not None:
+                t.cancel()
         await self.research.stop()
         try:
             await self.mcp.close_sessions()
@@ -680,6 +712,13 @@ def create_app(config_path: Optional[Path] = None,
     app.add_middleware(ClientAuthMiddleware, get_config=lambda: config_store.config,
                        get_agent_tokens=lambda: dict(_rc._agent_tokens))
     app.add_middleware(RequestIdMiddleware)
+    @app.get("/health")
+    async def health() -> dict:
+        w = services.warmup
+        return {"status": "ok", "version": __version__, "warmup": w.get("state"),
+                "warming_up": w.get("state") == "running",
+                "warmup_steps": w.get("steps", {})}
+
     app.include_router(facade_router)
     app.include_router(openai_router)
     app.include_router(media_router)

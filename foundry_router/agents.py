@@ -222,7 +222,7 @@ class AgentManager:
         return out
 
     async def probe_all(self) -> list[dict]:
-        return [await self.probe(n) for n in self.agents]
+        return list(await asyncio.gather(*(self.probe(n) for n in list(self.agents))))
 
     def health(self, name: str) -> dict:
         return dict(self._health.get(name) or {})

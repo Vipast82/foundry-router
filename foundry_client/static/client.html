@@ -34,7 +34,11 @@
   fieldset { border:1px solid var(--line); border-radius:8px; padding:8px 12px 12px; margin:0 0 12px; background:var(--panel); }
   legend { font-weight:600; padding:0 4px; }
   .banner { border:1px solid var(--line); border-left:4px solid var(--accent); background:var(--panel); border-radius:6px; padding:8px 12px; margin:0 0 12px; }
-  .banner.bad { border-left-color:var(--bad); } .ok { color:var(--ok); } .bad { color:var(--bad); }
+  .banner.bad { border-left-color:var(--bad); } .banner.warn { border-left-color:var(--busy); }
+  .chip { font-size:11px; border:1px solid var(--line); border-radius:10px; padding:0 6px; color:var(--dim); }
+  .c-ok .dot { background:var(--ok); } .c-warn .dot { background:var(--busy); } .c-fail .dot { background:var(--bad); } .c-info .dot { background:var(--dim); }
+  .checks { display:grid; gap:6px; } .check { display:flex; gap:8px; align-items:baseline; background:var(--panel); border:1px solid var(--line); border-radius:6px; padding:8px 12px; }
+  .check b { min-width:210px; } .check .d { color:var(--dim); word-break:break-word; } .ok { color:var(--ok); } .bad { color:var(--bad); }
   pre.log { background:var(--panel); border:1px solid var(--line); border-radius:6px; padding:10px; max-height:60vh; overflow:auto; font-size:12px; white-space:pre-wrap; }
   .toast { position:fixed; bottom:16px; right:16px; background:var(--panel); border:1px solid var(--line); border-radius:6px; padding:8px 12px; max-width:420px; }
   @media (max-width:600px) { header { flex-wrap:wrap; } main { padding:12px; } }
@@ -49,11 +53,13 @@
     <button role="tab" data-v="status" aria-selected="true">Status</button>
     <button role="tab" data-v="settings">Settings</button>
     <button role="tab" data-v="secrets">Secrets</button>
+    <button role="tab" data-v="doctor">Doctor</button>
     <button role="tab" data-v="logs">Logs</button>
   </nav>
   <section id="v-status"></section>
   <section id="v-settings" hidden></section>
   <section id="v-secrets" hidden></section>
+  <section id="v-doctor" hidden></section>
   <section id="v-logs" hidden></section>
 </main>
 <script>
@@ -74,39 +80,72 @@ function toast(t, bad) { const el = document.createElement("div"); el.className 
 function setView(v) {
   S.view = v;
   for (const b of document.querySelectorAll("nav button")) b.setAttribute("aria-selected", b.dataset.v === v ? "true" : "false");
-  for (const x of ["status", "settings", "secrets", "logs"]) $("#v-" + x).hidden = x !== v;
+  for (const x of ["status", "settings", "secrets", "doctor", "logs"]) $("#v-" + x).hidden = x !== v;
   render();
 }
 document.querySelector("nav").onclick = e => { const b = e.target.closest("button[data-v]"); if (b) setView(b.dataset.v); };
 
 /* ------------------------------------------------------------------ status */
 const fmtUp = s => !s ? "" : s < 120 ? `${s}s` : s < 7200 ? `${Math.round(s / 60)}m` : `${Math.round(s / 3600)}h`;
-function renderStatus() {
-  const st = S.status; if (!st) return;
-  $("#ver").textContent = "v" + st.version;
-  $("#overall").innerHTML = {ok: '<span class="ok">all running</span>', busy: "starting…", idle: "nothing running", error: '<span class="bad">a component has a problem</span>'}[st.overall] || st.overall;
-  $("#problems").innerHTML = (st.config_problems || []).length ? `<div class="banner bad"><b>Settings need attention:</b> ${st.config_problems.map(esc).join("; ")}</div>` : "";
-  $("#v-status").innerHTML = `<div class="cards">${st.components.map(c => `
-    <div class="card s-${esc(c.state)}"><h3><span class="dot"></span>${esc(c.label)}</h3>
+function ago(ts) { const d = Math.max(0, Date.now() / 1000 - ts); return d < 90 ? Math.round(d) + " s ago" : d < 5400 ? Math.round(d / 60) + " min ago" : Math.round(d / 3600) + " h ago"; }
+function compCard(c) {
+  const rojo = c.info && c.info.sessionId ? ` · session ${esc(String(c.info.sessionId).slice(0, 8))}` : "";
+  return `<div class="card s-${esc(c.state)}"><h3><span class="dot"></span>${esc(c.label)}${c.adopted ? ' <span class="chip" title="Running before the client started; the client can still stop or restart it by its port">started outside</span>' : ""}</h3>
       <div>${c.enabled ? esc(c.state) : '<span class="dim">disabled</span>'} <span class="dim">${esc(c.detail)}</span></div>
-      <div class="dim">${c.pid ? "pid " + c.pid + " · up " + fmtUp(c.uptime_s) : ""}${c.restarts ? " · " + c.restarts + " restart(s)" : ""}</div>
+      <div class="dim">${c.pid ? "pid " + c.pid + " · up " + fmtUp(c.uptime_s) : ""}${c.restarts ? " · " + c.restarts + " restart(s)" : ""}${rojo}</div>
+      ${c.last_exit && c.state !== "running" ? `<div class="dim">last exit: ${esc(c.last_exit)}</div>` : ""}
       ${c.problem && c.enabled ? `<div class="bad">${esc(c.problem)}</div>` : ""}
-      ${c.pending_restart ? `<div class="dim">restart pending (${esc(c.pending_restart)})</div>` : ""}
+      ${c.restart_result && c.restart_result.startsWith("failed") ? `<div class="bad">restart ${esc(c.restart_result)}</div>` : ""}
+      ${c.pending_restart ? `<div class="dim">restart pending (${esc(c.pending_restart)}${c.pending_for_s ? ", " + fmtUp(c.pending_for_s) : ""})${c.pending_reason ? ": " + esc(c.pending_reason) : ""}
+        <button class="act" data-do="cancel-restart" data-c="${c.name}">Cancel</button></div>` : ""}
       <div class="row">${c.enabled ? `
         <button class="act" data-do="start" data-c="${c.name}" ${c.want ? "disabled" : ""}>Start</button>
         <button class="act" data-do="stop" data-c="${c.name}" ${c.want ? "" : "disabled"}>Stop</button>
         <button class="act" data-do="restart" data-c="${c.name}">Restart</button>
         <button class="act" data-do="force" data-c="${c.name}" title="Restart without waiting for a safe point">Restart now</button>` : ""}
-        <button class="act" data-do="logs" data-c="${c.name}">Logs</button></div></div>`).join("")}</div>
+        <button class="act" data-do="logs" data-c="${c.name}">Logs</button></div></div>`;
+}
+function renderStatus() {
+  const st = S.status; if (!st) return;
+  $("#ver").textContent = "v" + st.version;
+  $("#overall").innerHTML = {ok: '<span class="ok">all running</span>', busy: "starting…", idle: "nothing running", error: '<span class="bad">a component has a problem</span>'}[st.overall] || st.overall;
+  $("#problems").innerHTML = (st.config_problems || []).length ? `<div class="banner bad"><b>Settings need attention:</b> ${st.config_problems.map(esc).join("; ")}</div>` : "";
+  const u = st.update || {}, r = st.router || {};
+  const banners = (st.alerts || []).map(a => `<div class="banner warn"><b>${esc(a.text)}</b> <span class="dim">${ago(a.ts)}</span>
+      <button class="act" data-alert="${esc(a.key)}">${a.key.startsWith("restart_wait") ? "Dismiss" : "Done"}</button></div>`).join("")
+    + (u.available ? `<div class="banner"><b>Update available:</b> Foundry Client ${esc(u.latest)} (you have ${esc(u.current)}).
+      <a href="${esc(u.url)}" target="_blank" rel="noopener">Release page</a> <span class="dim">Download and install it yourself; the client never updates itself.</span></div>` : "");
+  const link = `<div class="card c-${r.reachable ? (r.warming_up ? "warn" : "ok") : r.reachable === false ? "fail" : "info"}"><h3><span class="dot"></span>Foundry router</h3>
+      <div>${r.reachable ? (r.warming_up ? "reachable, still warming up" : "reachable") : r.reachable === false ? '<span class="bad">not reachable</span>' : "not checked yet"}
+        <span class="dim">${esc(r.url || "")}${r.version ? " · v" + esc(r.version) : ""}${r.latency_ms != null ? " · " + r.latency_ms + " ms" : ""}</span></div>
+      ${r.error ? `<div class="bad">${esc(r.error)}</div>` : ""}<div class="dim">${r.checked_at ? "checked " + ago(r.checked_at) : ""}${u.checked_at ? " · updates checked " + ago(u.checked_at) + (u.error ? " (" + esc(u.error) + ")" : "") : ""}</div>
+      <div class="row"><button class="act" data-do="link-check">Check now</button><button class="act" data-do="update-check">Check for updates</button></div></div>`;
+  $("#v-status").innerHTML = banners + `<div class="cards">${st.components.map(compCard).join("")}${link}</div>
+    <h3 style="margin-top:16px">Kilo configuration</h3>
+    <div class="dim">Writes the router's role rules into the agent blocks of kilo.jsonc (a backup is kept, the file is checked afterwards) and reloads Kilo at the next safe point.</div>
+    <div class="row"><button class="act" data-do="kilo-preview">Preview changes</button><button class="act primary" data-do="kilo-apply">Apply role rules to kilo.jsonc</button></div>
+    <pre class="log" id="kilo-out" ${S.kiloOut ? "" : "hidden"}>${esc(S.kiloOut || "")}</pre>
     <h3 style="margin-top:16px">Recent events</h3><div class="dim">${(st.events || []).slice().reverse().map(e => `${new Date(e.ts * 1000).toLocaleTimeString()} · ${esc(e.component)}: ${esc(e.text)}`).join("<br>") || "none"}</div>`;
 }
 $("#v-status").onclick = async e => {
+  const al = e.target.closest("button[data-alert]");
+  if (al) { try { await api(`alerts/${al.dataset.alert}/dismiss`, "POST", {}); await refresh(); } catch (err) { toast(err.message, true); } return; }
   const b = e.target.closest("button[data-do]"); if (!b) return;
   const c = b.dataset.c, d = b.dataset.do;
   if (d === "logs") { S.logName = c; return setView("logs"); }
   try {
-    await api(`components/${c}/${d === "force" ? "restart" : d}${d === "force" ? "?force=true" : ""}`, "POST", {});
-    toast(d === "restart" ? "Restart requested; the Kilo server and coordinator wait for a safe point." : `${d} requested`);
+    if (d === "link-check") { await api("router-link/check", "POST", {}); await refresh(); return; }
+    if (d === "update-check") { const u = await api("update/check", "POST", {}); toast(u.error ? "Update check failed: " + u.error : u.available ? "Version " + u.latest + " is available" : "You have the latest version"); await refresh(); return; }
+    if (d === "kilo-preview" || d === "kilo-apply") {
+      if (d === "kilo-apply" && !confirm("Rewrite the agent permission blocks in kilo.jsonc from the role rules, then reload Kilo at the next safe point?")) return;
+      const out = $("#kilo-out"); out.hidden = false; out.textContent = S.kiloOut = "working…";
+      try { const r = await api("kilo-config/apply", "POST", {dry_run: d === "kilo-preview"}); out.textContent = S.kiloOut = JSON.stringify(r, null, 2); toast(d === "kilo-preview" ? "Preview ready" : r.applied ? "kilo.jsonc updated" + (r.reload ? "; Kilo: " + r.reload : "") : "kilo.jsonc is already up to date"); }
+      catch (err) { out.textContent = S.kiloOut = err.message; toast(err.message, true); }
+      return;
+    }
+    const r = await api(`components/${c}/${d === "force" ? "restart" : d}${d === "force" ? "?force=true" : ""}`, "POST", {});
+    if (d === "restart" || d === "force") toast(r.result ? (r.result.startsWith("failed") ? "Restart " + r.result : r.result === "restarted" ? "Restarted" : r.result) : "Restart requested", !!(r.result || "").startsWith("failed"));
+    else toast(`${d} requested`);
     await refresh();
   } catch (err) { toast(err.message, true); }
 };
@@ -114,10 +153,10 @@ $("#v-status").onclick = async e => {
 /* ------------------------------------------------------------------ settings */
 const FIELDS = [
   ["Foundry", [["client.backend_url", "Foundry router URL", "text"], ["client.state_dir", "Coordinator state folder", "text"], ["client.api_port", "Local settings port", "number"]]],
-  ["Workspace", [["workspace.game", "Game project folder (Kilo works here)", "text"], ["workspace.profiles", "Coordinator profiles folder (…/foundry_coordinator/projects)", "text"], ["workspace.deploy", "Coordinator release checkout (for the upgrade supervisor; optional)", "text"]]],
+  ["Workspace", [["workspace.game", "Game project folder (Kilo works here)", "text"], ["workspace.profiles", "Coordinator profiles folder (…/foundry_coordinator/projects)", "text"], ["workspace.deploy", "Coordinator release checkout (for the upgrade supervisor; optional)", "text"], ["workspace.kilo_config", "kilo.jsonc (empty = game folder / kilo.jsonc)", "text"], ["workspace.project", "Coordinator project for role rules (empty = the only one)", "text"]]],
+  ["Watchdog", [["client.unhealthy_restart_seconds", "Restart a component that stays unhealthy this many seconds (0 = never)", "number"], ["client.safe_restart_max_wait_minutes", "Warn when a safe-point restart has waited this many minutes (0 = never)", "number"], ["client.update_check", "Look for a newer Foundry Client release on GitHub", "bool"], ["client.relay", "Take stack requests from the Foundry router", "bool"]]],
   ["Kilo server", [["components.kilo.enabled", "Run the Kilo server", "bool"], ["components.kilo.path", "kilo executable (empty = find it)", "text"], ["components.kilo.port", "Port", "number"]]],
   ["Coordinator", [["components.coordinator.enabled", "Run the coordinator", "bool"], ["components.coordinator.poll_seconds", "Poll seconds", "number"], ["components.supervisor.enabled", "Run the upgrade supervisor", "bool"]]],
-  ["Media adapter", [["components.media.enabled", "Run the media adapter", "bool"], ["components.media.command", "Command (one argument per line)", "list"], ["components.media.cwd", "Working folder", "text"]]],
   ["Rojo", [["components.rojo.enabled", "Run rojo serve", "bool"], ["components.rojo.path", "rojo executable (empty = find it)", "text"], ["components.rojo.project", "Project folder (empty = game folder)", "text"], ["components.rojo.port", "Port", "number"]]],
 ];
 const get = (o, p) => p.split(".").reduce((a, k) => a == null ? a : a[k], o);
@@ -165,6 +204,15 @@ async function renderSecrets() {
   };
 }
 
+/* ------------------------------------------------------------------ doctor */
+async function renderDoctor() {
+  $("#v-doctor").innerHTML = '<div class="dim">checking…</div>';
+  let d; try { d = await api("doctor"); } catch (e) { $("#v-doctor").innerHTML = `<div class="banner bad">${esc(e.message)}</div>`; return; }
+  $("#v-doctor").innerHTML = `<div class="row"><b class="${d.ok ? "ok" : "bad"}">${d.ok ? "Nothing blocks the stack" : "Something blocks the stack"}</b><span style="flex:1"></span><button class="act" id="redo">Check again</button></div>
+    <div class="checks">${d.checks.map(c => `<div class="check c-${esc(c.status)}"><span class="dot"></span><b>${esc(c.label)}</b><span class="d">${esc(c.detail)}</span></div>`).join("")}</div>`;
+  $("#redo").onclick = renderDoctor;
+}
+
 /* ------------------------------------------------------------------ logs */
 async function renderLogs() {
   const names = (S.status?.components || []).map(c => c.name);
@@ -185,6 +233,7 @@ function render() {
   if (S.view === "status") renderStatus();
   else if (S.view === "settings") renderSettings();
   else if (S.view === "secrets") renderSecrets();
+  else if (S.view === "doctor") renderDoctor();
   else if (S.view === "logs") renderLogs();
 }
 refresh(); setInterval(() => { if (S.view === "status") refresh(); }, 4000);
