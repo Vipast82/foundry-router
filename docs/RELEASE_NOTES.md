@@ -32,6 +32,65 @@ in plain language, over as many turns as needed:
   (`plan_sprint_steps`, `run_sprint_steps`). `/admin/api/config/cutoffs` now shares its code
   with the chat (`foundry_router/cutoffs.py`).
 
+## v0.134.0 (continued) — full-stack gap closure: no human in the loop, permissions, metrics, client
+
+Built from the four audits in `reports/FULL_STACK_GAP_PLAN.md`. Victor's decisions: the chat
+confirms risky actions; a sprint that hits a tooling limit with no answer is parked and the queue
+moves on.
+
+- **No human in the loop (W1).**
+  - The implementer's `question` tool is denied; a session reports BLOCKED with options
+    instead, which becomes a decision with a recommended default. Permission asks are
+    auto-rejected with guidance, never left waiting.
+  - Every decision kind carries options, a recommended default and a timeout. On a tooling limit
+    the task is parked BLOCKED with a summary and the queue continues. `no_progress` continues
+    once, then parks.
+  - The after-closeout visual check carries prior approvals by frame hash, never re-asks
+    accepted-with-notes frames, and retries "uncertain" once.
+  - The coordinator rewords its own unpushed commits for the message prefix; sessions are never
+    asked to rebase.
+  - The Lead's hard call cap derives from the profile. Uncommitted Lead write-mode edits are
+    committed as the Lead's and reverified in place. The Lead's self-approval of test changes it
+    made opens an operator decision instead.
+  - Memory is sent as a per-entry delta. An invalid review is re-sent once with the error.
+  - Auto-heal now repairs: stale runner lock, dead gate pid, Rojo restart through the client,
+    source re-sync. A profile-drift doctor check flags values that contradict the decisions.
+  - The client's safe point counts Lead sessions and gate runners, and a coordinator restart no
+    longer kills the detached runner.
+- **Permissions match the GUI (W2).**
+  - Hard denies cover the Studio never-tools, git history rewrites and shell secret reads. No
+    role allow and no Lead `*` allow can override them. `studio_mcp` splits into read and write.
+  - An empty edit scope means the sprint's scope only. Reads never grant writes. Config files
+    (`kilo.jsonc`, `.kilo/**`, hooks, `.env*`) are not editable by sessions.
+  - The write-mode Lead keeps every deny: no push, no history rewrite, no secrets, scope
+    widening only through the allow-list.
+  - Subagent rules come from role rules, so GUI edits win. A role-rules deploy regenerates
+    `kilo.jsonc` and asks the client to reload Kilo. Config pull keeps local edits (three-way
+    overlay), applies restart-scoped keys at startup, and asks the client for a safe-point
+    restart.
+  - One source of defaults, with a parity test; `max_review_calls` is 4 everywhere.
+- **Training capture and metrics (W4).**
+  - Capture is switchable per backend and per persona from a Capture card on the Training tab,
+    live, with counts and a JSONL download.
+  - Outcome and quality join by request id; coordinator outcomes (gate PASS, review APPROVED,
+    vision approved) are posted to the router, so verified outputs can become training examples
+    under the existing policy.
+  - Server metrics history (`server_samples`): Strata tokens/s, prompt speed, slots, KV cache;
+    Meridian metrics; a Performance chart; `perf.retention_days`.
+  - Speeds aggregate by `timing_src`, so estimates never mix with measured numbers.
+  - A per-sprint scorecard: `/admin/api/work/scorecard` and a Work-tab table.
+- **Client and router startup (W5).**
+  - The router opens its port first; MCP connections and probes warm up in the background with
+    a 20 s per-server timeout. `/health` reports warm-up.
+  - The media component is gone (Kilo starts the adapter itself); a doctor check covers it.
+  - Bugs fixed: stale detail on disabled components, adopted processes can be stopped and
+    restarted, settings saves merge onto current values, hung components restart, pending
+    safe-point restarts warn after a limit, Kilo and Rojo health use their HTTP endpoints.
+  - New: client-request consumer (reload Kilo, restart Rojo or the coordinator), "Apply role
+    rules to kilo.jsonc", update check against GitHub releases, Rojo session-change detection
+    with a reconnect prompt, a `systemd --user` unit, AppImage autostart fix, a router-link card
+    and a Doctor tab.
+
 ## v0.133.2 — Foundry Client: windowless start works
 
 - **Windowless start.** Started without a console (`pythonw`, the Startup entry, or the packaged
