@@ -137,23 +137,90 @@ def import_profile(raw: dict, project: str = "") -> tuple[dict, list[str], list[
     return doc, dropped, notes
 
 
-def overlay(raw: dict, doc: dict) -> dict:
-    """A local profile with the document on top (local-only keys stay local)."""
+_MISSING = object()
+
+
+def local_view(raw: dict) -> dict:
+    """The local profile as a document for merging: its settings (local keys
+    dropped) and the role rules the TOML itself carries (normalized; {} when
+    it has none)."""
+    own = raw.get("role_rules") if isinstance(raw.get("role_rules"), dict) else {}
+    return {"settings": import_profile(raw)[0]["settings"],
+            "role_rules": {r: RR.normalize(r, v) for r, v in own.items() if r in RR.RULE_ROLES}}
+
+
+def overlay(raw: dict, doc: dict, base: Optional[dict] = None,
+            local_base: Optional[dict] = None) -> dict:
+    """A local profile with the document on top (local-only keys stay local).
+    With `base` and `local_base` the merge is three-way: see `overlay3`."""
+    return overlay3(raw, doc, base, local_base)[0]
+
+
+def overlay3(raw: dict, doc: dict, base: Optional[dict] = None,
+             local_base: Optional[dict] = None) -> tuple[dict, dict]:
+    """(merged profile, report): the deployed document `doc` on top of the
+    local profile `raw`, three-way. `base` is the document applied before and
+    `local_base` the local profile's view (`local_view`) at that time, both
+    from the coordinator's cache (None = first apply).
+
+    Per setting (dotted path, lists are leaves):
+      * a local-only key (schema scope `local`, `*_env`): the local value, always;
+      * the operator edited project.toml since the last apply and the router did
+        not change the key since `base`: the local value stays (`kept_local`);
+      * both changed, differently: the router wins (`conflicts`);
+      * otherwise the router's value; a key the router does not have is dropped
+        only when the router removed it since `base` (kept when the router never
+        had it, e.g. an extra TOML key).
+    `role_rules` merge the same way per leaf, against the TOML's own role rules
+    (usually none: the router's apply whole). The report also lists `router`
+    (paths taken from the router that differ from the local value)."""
     out = copy.deepcopy(raw)
-    settings = (doc or {}).get("settings") or {}
-    keep = {p: _get_path(raw, p) for p in local_paths(raw)}
-    for t, v in settings.items():
-        if t in _IDENTITY:
+    report = {"kept_local": [], "conflicts": [], "router": []}
+    doc = doc or {}
+    local = local_view(raw)
+    locals_ = set(local_paths(raw)) | set(local_paths((doc.get("settings") or {})))
+    for top in ("settings", "role_rules"):
+        if top == "role_rules" and not isinstance(doc.get("role_rules"), dict):
             continue
-        out[t] = copy.deepcopy(v)
-    for p, v in keep.items():
-        _set_path(out, p, copy.deepcopy(v))
-    for p in local_paths(settings):              # never take a local key from the router
-        if p not in keep:
+        l = flatten(local.get(top) or {})
+        d = flatten(doc.get(top) or {})
+        b = flatten((base or {}).get(top) or {}) if base is not None else None
+        lb = flatten((local_base or {}).get(top) or {}) if local_base is not None else None
+        prefix = "" if top == "settings" else "role_rules."
+        for p in sorted(set(l) | set(d) | set(b or {}) | set(lb or {})):
+            if top == "settings" and (p in _IDENTITY or any(
+                    p == q or p.startswith(q + ".") for q in locals_)):
+                continue                           # never from the router
+            lv, dv = l.get(p, _MISSING), d.get(p, _MISSING)
+            if _same(lv, dv):
+                continue                           # agree: nothing to do
+            bv = b.get(p, _MISSING) if b is not None else _MISSING
+            lbv = lb.get(p, _MISSING) if lb is not None else _MISSING
+            local_changed = lb is not None and not _same(lv, lbv)
+            router_changed = b is None or not _same(dv, bv)
+            if local_changed and not router_changed:
+                report["kept_local"].append(prefix + p)
+                continue                           # the operator's edit stays
+            if local_changed:
+                report["conflicts"].append(prefix + p)
+            if dv is _MISSING and (b is None or bv is _MISSING):
+                continue                           # the router never had it: keep local
+            report["router"].append(prefix + p)
+            full = prefix + p if top == "role_rules" else p
+            if dv is _MISSING:
+                _pop_path(out, full)
+            else:
+                _set_path(out, full, copy.deepcopy(dv))
+    for p in local_paths(doc.get("settings") or {}):   # never take a local key from the router
+        if p not in set(local_paths(raw)):
             _pop_path(out, p)
-    if isinstance((doc or {}).get("role_rules"), dict):
-        out["role_rules"] = copy.deepcopy(doc["role_rules"])
-    return out
+    return out, report
+
+
+def _same(a, b) -> bool:
+    if a is _MISSING or b is _MISSING:
+        return a is b
+    return canonical(a) == canonical(b)
 
 
 # --------------------------------------------------------------------------- validation
@@ -287,5 +354,5 @@ def restart_needed(a: Optional[dict], b: Optional[dict]) -> list[str]:
     return [c["path"] for c in diff(a, b) if c["apply"] == "restart"]
 
 
-__all__ = ["canonical", "doc_hash", "empty", "flatten", "import_profile", "overlay",
+__all__ = ["canonical", "doc_hash", "empty", "flatten", "import_profile", "overlay", "overlay3", "local_view",
            "validate", "diff", "restart_needed", "local_paths", "LOCAL_KEYS", "PROFILE_SCHEMA"]

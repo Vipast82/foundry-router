@@ -5,6 +5,12 @@ section. Every key has a working default; a profile without the table gets
 exactly these defaults. Read it with `settings(P)` (P = a Project, a Profile or
 anything with a `.profile` / `.raw`), which never raises.
 
+W2.5: the keys, defaults, scope allow-list rules and the validator live ONCE,
+in `foundry_automation.schema` (the router validates drafts with the same
+code); this module re-exports them and wraps the validator in the
+coordinator's own error type. `tests/test_automation_parity.py` keeps them
+equal.
+
   helpers                    "on_demand" (default): proactive helper lanes are off
                              for every task; a helper starts only when the primary
                              asks for one (helper_requests) and it is consumed by
@@ -13,8 +19,9 @@ anything with a `.profile` / `.raw`), which never raises.
                              the consumer touches a path of the proposal)
   helper_lane_misses         consecutive git-unused results that turn a lane off
                              for the task (0 = never)
-  subagents_allowed          Kilo `task` subagents a session may spawn (all others
-                             are denied); default ["explore"]
+  subagents_allowed          Kilo `task` subagents a session may spawn when NO role
+                             rules are deployed (deployed role rules: the role's
+                             `task_agents`); default ["explore"]
   scope_auto_approve         the scope allow-list (see scope.py): harness lines the
                              coordinator adds to a sprint's file list by itself
   scope_unlisted_default     the recommended answer of a scope decision for a path
@@ -45,123 +52,23 @@ anything with a `.profile` / `.raw`), which never raises.
 
 from __future__ import annotations
 
-from typing import Any
-
-HELPER_MODES = ("on_demand", "proactive")
-SCOPE_DEFAULTS = ("deny", "approve")
-
-# The harness lines a sprint legitimately needs (Victor 2026-10-21). `path` is a
-# glob ({task} = the sprint id). Optional constraints on the change itself:
-# `blocks` = every added/removed line lies inside one of these named table
-# assignments (e.g. `EXPECTED_BOOT = { ... }`); `lines` = regexes every changed
-# line must match; `json_paths_in_plan` = a default.project.json change may only
-# add/remove `"$path"` mappings to files the plan lists (plus JSON structure).
-DEFAULT_SCOPE_RULES = [
-    {"name": "gate_runner_boot_and_mounted_rows", "path": "tests/GateRunner.lua",
-     "blocks": ["EXPECTED_BOOT", "MOUNTED_TESTS"]},
-    {"name": "sprint_gate_manifest", "path": "docs/progress/{task}_gate.json"},
-    {"name": "rojo_mapping_for_plan_files", "path": "default.project.json",
-     "json_paths_in_plan": True},
-]
-
-AUTOMATION_DEFAULTS: dict[str, Any] = {
-    "helpers": "on_demand",
-    "helper_git_measure": True,
-    "helper_lane_misses": 2,
-    "subagents_allowed": ["explore"],
-    "scope_auto_approve": [dict(r) for r in DEFAULT_SCOPE_RULES],
-    "scope_unlisted_default": "deny",
-    "decision_timeout_minutes": 30,
-    "no_progress_sessions": 2,
-    "auto_heal_retries": 2,
-    "lead_hard_max_calls": 8,
-    "lead_report_repairs": 1,
-    "infra_retry_max": 5,
-    "infra_backoff_seconds": 60,
-    "preflight": True,
-    "preflight_endpoints": [],
-    "context_ceiling_tokens": 160000,
-    "memory_delta": True,
-    "transcript_poll_seconds": 120,
-    "generic_checks_cache": True,
-}
-
-_RULE_KEYS = {"name", "path", "lines", "blocks", "json_paths_in_plan", "reason"}
+from foundry_automation.schema import (AUTOMATION_DEFAULTS, DEFAULT_SCOPE_RULES,  # noqa: F401
+                                       HELPER_MODES, SCOPE_DEFAULTS, SettingsError,
+                                       automation_table)
 
 
-class AutomationError(ValueError):
+class AutomationError(SettingsError):
     pass
-
-
-def _rules(path: str, v) -> list[dict]:
-    import re
-    if not isinstance(v, list):
-        raise AutomationError(f"{path}: automation.scope_auto_approve must be a list of tables")
-    out = []
-    for i, r in enumerate(v):
-        if not isinstance(r, dict) or not isinstance(r.get("path"), str) or \
-                not r["path"].strip():
-            raise AutomationError(f"{path}: automation.scope_auto_approve[{i}] needs a path")
-        bad = sorted(set(r) - _RULE_KEYS)
-        if bad:
-            raise AutomationError(f"{path}: automation.scope_auto_approve[{i}]: unknown keys "
-                                  f"{bad}")
-        p = r["path"].replace("\\", "/").strip()
-        if p.startswith(("/", "../")) or ".." in p.split("/") or ":" in p:
-            raise AutomationError(f"{path}: automation.scope_auto_approve[{i}].path must be a "
-                                  f"workspace-relative glob")
-        lines = r.get("lines") or []
-        if not isinstance(lines, list) or any(not isinstance(x, str) for x in lines):
-            raise AutomationError(f"{path}: automation.scope_auto_approve[{i}].lines must be a "
-                                  f"list of regexes")
-        for x in lines:
-            try:
-                re.compile(x)
-            except re.error as e:
-                raise AutomationError(f"{path}: automation.scope_auto_approve[{i}].lines: "
-                                      f"{x!r}: {e}") from None
-        blocks = r.get("blocks") or []
-        if not isinstance(blocks, list) or any(
-                not isinstance(x, str) or not re.match(r"^[A-Za-z_][\w.]*$", x) for x in blocks):
-            raise AutomationError(f"{path}: automation.scope_auto_approve[{i}].blocks must be "
-                                  f"a list of identifiers")
-        out.append({"name": str(r.get("name") or p), "path": p, "lines": list(lines),
-                    "blocks": list(blocks),
-                    "json_paths_in_plan": bool(r.get("json_paths_in_plan", False)),
-                    "reason": str(r.get("reason") or "")})
-    return out
 
 
 def table(path: str, raw) -> dict:
     """Validate the [automation] table (raises AutomationError)."""
-    a = raw if raw is not None else {}
-    if not isinstance(a, dict):
-        raise AutomationError(f"{path}: [automation] must be a table")
-    unknown = sorted(set(a) - set(AUTOMATION_DEFAULTS))
-    if unknown:
-        raise AutomationError(f"{path}: unknown [automation] keys {unknown}")
-    out = defaults()
-    for k, v in a.items():
-        want = type(AUTOMATION_DEFAULTS[k])
-        if k == "scope_auto_approve":
-            out[k] = _rules(path, v)
-            continue
-        if want is bool and not isinstance(v, bool):
-            raise AutomationError(f"{path}: automation.{k} must be true or false")
-        if want is int and (isinstance(v, bool) or not isinstance(v, int) or v < 0):
-            raise AutomationError(f"{path}: automation.{k} must be a non-negative integer")
-        if want is str and not isinstance(v, str):
-            raise AutomationError(f"{path}: automation.{k} must be a string")
-        if want is list and (not isinstance(v, list) or
-                             any(not isinstance(x, str) or not x.strip() for x in v)):
-            raise AutomationError(f"{path}: automation.{k} must be a list of non-empty strings")
-        out[k] = list(v) if isinstance(v, list) else v
-    if out["helpers"] not in HELPER_MODES:
-        raise AutomationError(f"{path}: automation.helpers must be one of {HELPER_MODES}")
-    if out["scope_unlisted_default"] not in SCOPE_DEFAULTS:
-        raise AutomationError(f"{path}: automation.scope_unlisted_default must be one of "
-                              f"{SCOPE_DEFAULTS}")
-    return out
+    try:
+        return automation_table(path, raw)
+    except AutomationError:
+        raise
+    except SettingsError as e:
+        raise AutomationError(str(e), getattr(e, "path", "")) from None
 
 
 def defaults() -> dict:

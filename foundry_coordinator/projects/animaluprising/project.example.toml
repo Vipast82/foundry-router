@@ -133,7 +133,7 @@ require_prefix = true
 [limits]
 max_attempts = 3
 max_sessions_per_task = 8
-max_review_calls = 3
+max_review_calls = 4
 max_closeout_attempts = 2
 session_timeout_minutes = 240
 max_task_minutes = 1440

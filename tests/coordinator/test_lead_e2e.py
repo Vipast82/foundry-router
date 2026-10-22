@@ -1197,7 +1197,8 @@ def test_lead_bash_allowlist_denies_writers_and_executors(tmp_path):
         assert kilo_decision(rules, "bash", cmd) == "allow", cmd
     # the lead stays inside the workspace and never reads secret stores
     ext = [r for r in rules if r["permission"] == "external_directory"]
-    assert ext == [{"permission": "external_directory", "pattern": "*", "action": "deny"}]
+    assert {"permission": "external_directory", "pattern": "*", "action": "deny"} in ext
+    assert all(r["action"] == "deny" for r in ext)        # W2: hard denies add secret-store denies
     assert kilo_decision(rules, "read", "C:/foundry/_secrets/kilo.key") == "deny"
     # a later allow of a writer makes the rules not read-only
     assert not is_read_only(rules + [{"permission": "bash", "pattern": "rg *", "action": "allow"}])
