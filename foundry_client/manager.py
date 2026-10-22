@@ -374,13 +374,13 @@ class Manager:
         nothing of it is left. On failure `restart_result` says why."""
         p = pr.p
         if p is not None and p.poll() is None:
-            self._kill_pid(p.pid, p)
+            self._kill_pid(p.pid, p, pr.spec.name != "coordinator")
             pr.p = None
         elif pr.adopted and adopted:
             pr.p = None
             pid = pr.spec.owner_pid() if pr.spec.owner_pid else None
             if pid is not None:
-                self._kill_pid(pid, None)
+                self._kill_pid(pid, None, pr.spec.name != "coordinator")
                 deadline = time.monotonic() + STOP_WAIT
                 while pid_alive(pid) and time.monotonic() < deadline:
                     time.sleep(0.25)
@@ -405,15 +405,15 @@ class Manager:
         return True
 
     @staticmethod
-    def _kill_pid(pid: int, p: Optional[subprocess.Popen]) -> None:
+    def _kill_pid(pid: int, p: Optional[subprocess.Popen], tree: bool = True) -> None:
         try:
             if sys.platform == "win32":
                 # W1.9: the coordinator's process tree holds the DETACHED studio_gate
                 # runner (and its MCP children) while a gate runs; `/T` on the coordinator
                 # killed it mid-playtest. The coordinator is stopped alone; every other
                 # component still goes with its tree.
-                tree = [] if pr.spec.name == "coordinator" else ["/T"]
-                subprocess.run(["taskkill", "/PID", str(pid), *tree, "/F"], capture_output=True,
+                subprocess.run(["taskkill", "/PID", str(pid), *(["/T"] if tree else []), "/F"],
+                               capture_output=True,
                                creationflags=NO_WINDOW, timeout=30)
             elif p is not None:
                 p.terminate()

@@ -72,7 +72,7 @@ def killed(monkeypatch):
     """Record kills instead of running taskkill; a killed FakeProc ends."""
     log = []
 
-    def kill_pid(pid, p):
+    def kill_pid(pid, p, *a):
         log.append(pid)
         if p is not None:
             p.code = -9
@@ -165,7 +165,7 @@ def test_adopted_process_is_stopped_by_pid_and_restart_is_truthful(cfg, monkeypa
     m.start("kilo")
     assert m.procs["kilo"].adopted and "outside the client" in m.status("kilo")["detail"]
 
-    def die(pid, p):
+    def die(pid, p, *a):
         killed.append(pid)
         alive["pid"] = None
         state["up"] = False
@@ -180,7 +180,7 @@ def test_restart_of_an_adopted_process_that_will_not_die_reports_failure(cfg, mo
     _health(monkeypatch, lambda port: (True, "up"))
     monkeypatch.setattr(M, "pid_alive", lambda pid: True)
     monkeypatch.setattr(M, "STOP_WAIT", 0.3)
-    monkeypatch.setattr(Manager, "_kill_pid", staticmethod(lambda pid, p: None))
+    monkeypatch.setattr(Manager, "_kill_pid", staticmethod(lambda pid, p, *a: None))
     m = mk(cfg)
     m.procs["kilo"].spec.owner_pid = lambda: 888
     m.start("kilo")
@@ -197,7 +197,7 @@ def test_stop_kills_an_adopted_process(cfg, monkeypatch, killed):
     m = mk(cfg)
     m.procs["kilo"].spec.owner_pid = lambda: 9
     m.start("kilo")
-    monkeypatch.setattr(Manager, "_kill_pid", staticmethod(lambda pid, p: gone.update(v=True)))
+    monkeypatch.setattr(Manager, "_kill_pid", staticmethod(lambda pid, p, *a: gone.update(v=True)))
     st = m.stop("kilo")
     assert st["state"] == "stopped" and not m.procs["kilo"].adopted
 
@@ -217,7 +217,7 @@ def test_component_unhealthy_for_too_long_is_restarted(cfg, monkeypatch, killed)
     clk = Clock()
     ok = {"v": False}                                            # not up yet: the client launches it
     _health(monkeypatch, lambda port: (ok["v"], "up" if ok["v"] else "port open, /config dead"))
-    monkeypatch.setattr(M, "safe_point", lambda d: (True, "safe"))
+    monkeypatch.setattr(M, "safe_point", lambda d, g="": (True, "safe"))
     cfg["client"]["unhealthy_restart_seconds"] = 120
     m = mk(cfg, clk)
     m.start("kilo")
@@ -258,7 +258,7 @@ def test_unhealthy_restart_can_be_switched_off(cfg, monkeypatch, killed):
 def test_pending_safe_restart_keeps_health_and_warns_after_the_deadline(cfg, monkeypatch, killed):
     clk = Clock()
     _health(monkeypatch, lambda port: (True, "up"))
-    monkeypatch.setattr(M, "safe_point", lambda d: (False, "2 session(s) working"))
+    monkeypatch.setattr(M, "safe_point", lambda d, g="": (False, "2 session(s) working"))
     cfg["client"]["safe_restart_max_wait_minutes"] = 60
     m = mk(cfg, clk)
     m.start("kilo")
@@ -371,7 +371,7 @@ def _result(m, name):
 def test_reload_kilo_request_waits_for_a_safe_point_then_reports(cfg, monkeypatch, killed):
     _health(monkeypatch, lambda port: (True, "up"))
     safe = {"v": (False, "1 session(s) working")}
-    monkeypatch.setattr(M, "safe_point", lambda d: safe["v"])
+    monkeypatch.setattr(M, "safe_point", lambda d, g="": safe["v"])
     m = mk(cfg)
     m.start("kilo")
     _req(m, "r1.json", {"action": "reload_kilo", "id": "x1"})
@@ -392,7 +392,7 @@ def test_other_request_kinds_and_bad_ones(cfg, monkeypatch, killed):
     cfg["components"]["rojo"].update(enabled=True, path=sys.executable)
     cfg["components"]["coordinator"]["enabled"] = True
     monkeypatch.setattr(C, "rojo_health", lambda port: (True, "up", {"sessionId": "s"}))
-    monkeypatch.setattr(M, "safe_point", lambda d: (True, "safe"))
+    monkeypatch.setattr(M, "safe_point", lambda d, g="": (True, "safe"))
     m = mk(cfg)
     m.start("rojo")
     _req(m, "a.json", {"kind": "restart-rojo"})
@@ -432,7 +432,7 @@ def test_apply_kilo_config_runs_the_generator_then_reloads_kilo(cfg, tmp_path, m
     proj.mkdir()
     (proj / "project.toml").write_text('id = "animaluprising"\n', encoding="utf-8")
     _health(monkeypatch, lambda port: (True, "up"))
-    monkeypatch.setattr(M, "safe_point", lambda d: (True, "safe"))
+    monkeypatch.setattr(M, "safe_point", lambda d, g="": (True, "safe"))
     calls = []
 
     def run(argv, **kw):

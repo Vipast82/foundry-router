@@ -12,4 +12,5 @@ def _never_touch_real_processes(monkeypatch):
     monkeypatch.setattr(C, "port_owner_pid", lambda port: None)
     monkeypatch.setattr(C, "pid_alive", lambda pid: False)
     monkeypatch.setattr(C, "port_open", lambda port, **kw: False)
-    monkeypatch.setattr(M.Manager, "_kill_pid", staticmethod(lambda pid, p: None))
+    M.REAL_KILL_PID = M.Manager.__dict__["_kill_pid"]        # the staticmethod object
+    monkeypatch.setattr(M.Manager, "_kill_pid", staticmethod(lambda pid, p, tree=True: None))
