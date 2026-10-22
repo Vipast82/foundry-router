@@ -921,6 +921,9 @@ class Coordinator:
             if q.get("kind", "question") == "question" and self._auto_answer_question(
                     P, t, sid, phase, q):
                 return None              # W1.1: never a person; the session decides
+            if q.get("kind") == "permission" and self._auto_reject_permission(
+                    P, t, sid, phase, q):
+                return None              # W2/W1: a permission ask is a deny, never a person
             self.store.update_session(sid, status="waiting")
             return self.store.transition(pid, tid, S.AWAITING_HUMAN, {
                 "awaiting": f"{q.get('kind', 'question')}: {q.get('text', '')}"[:1000],
@@ -949,10 +952,14 @@ class Coordinator:
             # session instead of verifying an unfinished BUILD or waiting for
             # the long execution timeout.
             key = f"permission-reply:{recovery.get('request_id') or 'unknown'}"
-            if self._prompt_primary(P, t, "The permission reply was applied. Continue the "
+            lead_in = ("The permission was rejected: your session's rules are the policy "
+                       "and nobody widens them mid-session. " if recovery.get("auto_rejected")
+                       else "The permission reply was applied. ")
+            if self._prompt_primary(P, t, lead_in + "Continue the "
                     "approved sprint using only in-scope paths. Preserve all required "
                     "evidence and checks. If you cannot proceed, return a precise "
-                    "BLOCKED report; do not request broader access for scratch files.", key):
+                    "BLOCKED report with 2-4 options and the one you recommend; do not "
+                    "request broader access for scratch files.", key):
                 self.store.merge_data(pid, tid, permission_reply_recovery=None)
                 self.store.event(pid, tid, "permission_reply_continued", session_id=sid,
                                  detail={"request_id": recovery.get("request_id")})
@@ -1014,6 +1021,38 @@ class Coordinator:
                                  "phase": phase})
         self._note(P, t, f"{phase} session asked a question; answered by the coordinator "
                          f"(decide within the plan or report BLOCKED with options)")
+        return True
+
+    PERMISSION_AUTO_REJECT = ("not allowed here; report BLOCKED with options if you need it")
+
+    def _auto_reject_permission(self, P: Project, t: dict, sid: str, phase: str,
+                                q: dict) -> bool:
+        """W2 / W1 follow-up: a Kilo permission ask from an implementer / closeout
+        session is answered `reject` by the coordinator (the session's rules are
+        the policy; a person never widens them mid-session), once per request,
+        journaled (permission_auto_rejected). The session then continues once
+        in place (permission_reply_recovery) if the rejected turn ended without
+        a report. False when the reply could not be sent (AWAITING_HUMAN then)."""
+        if phase not in ("implement", "closeout"):
+            return False
+        rid = str(q.get("request_id") or "")
+        key = f"permission-auto:{P.id}:{t['task_id']}:{sid}:{rid or 'none'}"
+        if self.store.op_begin(key, P.id, t["task_id"], "permission_auto") is not None:
+            return False
+        try:
+            P.client.answer(sid, rid, ["reject", self.PERMISSION_AUTO_REJECT],
+                            directory=P.profile.workspace, kind="permission")
+        except Exception as e:                                    # noqa: BLE001
+            self.store.op_update(key, "failed", {"error": str(e)[:300]})
+            return False
+        self.store.op_update(key, "done", {"request_id": rid})
+        self.store.merge_data(P.id, t["task_id"], permission_reply_recovery={
+            "session_id": sid, "request_id": rid, "auto_rejected": True})
+        self.store.event(P.id, t["task_id"], "permission_auto_rejected", session_id=sid,
+                         detail={"request_id": rid, "text": str(q.get("text") or "")[:400],
+                                 "phase": phase})
+        self._note(P, t, f"{phase} session asked for a permission; rejected by the coordinator "
+                         f"({str(q.get('text') or '')[:120]})")
         return True
 
     def _compacted(self, P: Project, t: dict, sid: str, phase: str, comp: dict):
@@ -1352,12 +1391,25 @@ class Coordinator:
             from . import bookkeeping as BK
             mine = set(BK.only_coordinator(P, t, base, head, outside))
             outside = [f for f in outside if f not in mine]
+        from . import scope as _scope           # revamp B10: granted files keep to their rule
+        auto = []
+        if outside and phase == "verify":
+            # W2.5 (wired by W1): a changed file the [automation] scope_auto_approve
+            # allow-list covers is granted here like a SCOPE_REQUEST would have been
+            # (the session may edit it before asking since W2); its rule is still
+            # checked below, never a scope FAIL that asks a person
+            auto = [f for f in outside if _scope.rule_for(P, spec.task_id, f) is not None]
+            for f in auto:
+                _scope.auto_grant_changed(self, P, t, spec, f)
+            if auto:
+                outside = [f for f in outside if f not in auto]
+                t = self.store.task(P.id, spec.task_id) or t
         add("scope", FAIL if outside else PASS,
             ("changed outside the task's files: " + ", ".join(outside[:12])
              + " — ask for a harness line with a SCOPE_REQUEST block; the coordinator "
                "grants only allow-listed paths itself") if outside
-            else f"{len(changed)} changed file(s), all within scope")
-        from . import scope as _scope           # revamp B10: granted files keep to their rule
+            else f"{len(changed)} changed file(s), all within scope"
+            + (f"; granted by the allow-list: {', '.join(auto[:8])}" if auto else ""))
         out += _scope.grant_checks(P, t, spec, base, head)
         dirty = P.ws.status()
         baseline = t["data"].get("baseline_dirty") or {}
@@ -5009,6 +5061,31 @@ class Coordinator:
             return True, f"{op['bound']} raised by {op.get('by')}", {"raised": raised}
         if kind == "approve_test_change":
             path = op.get("path") or ""
+            # W2.3 (wired by W1): a test the lead's own write session changed is never
+            # self-approved; it is an operator expectation_change decision (the
+            # recommended answer is shown, but an operator-only kind never times out)
+            from .lead import lead_self_changed_tests
+            before = str(((self.lead.case(cid) or {}).get("source_revision"))
+                         or (t.get("data") or {}).get("task_base") or t.get("base_sha") or "")
+            own = lead_self_changed_tests(P, before) if s.get("write_access") else {}
+            if path in own:
+                q = (f"[lead case {cid}] the lead changed acceptance test {path} itself "
+                     f"({'; '.join(own[path])[:300]}): accept the new expectation?")
+                did = self.obligations.open_decision(
+                    pid, tid, "expectation_change", q,
+                    evidence={"case_id": cid, "path": path, "reason": op.get("reason"),
+                              "self_changed": own[path][:5],
+                              "recommended": "reject: restore the test's expectation"},
+                    options=["reject: restore the test's expectation",
+                             "accept: the new expectation is the product's"],
+                    recommendation="reject: restore the test's expectation",
+                    blocks=[f"lead_case:{cid}", path])
+                self.store.event(pid, tid, "lead_self_approval_refused", detail={
+                    "case_id": cid, "path": path, "decision_id": did})
+                return False, (f"the lead changed {path} itself in this session; its "
+                               f"expectation change waits for operator decision {did} "
+                               f"(expectation_change), never a lead approval"), \
+                    {"decision_id": did, "path": path, "self_changed": own[path][:5]}
             q = f"[lead case {cid}] approve a change to acceptance test {path}"
             did = self.obligations.open_decision(
                 pid, tid, "lead_test_change", q,

@@ -35,6 +35,9 @@ class Withdrawing(ScriptedClient):
     def answer(self, session_id, request_id, answers, *, directory, kind="question"):
         if self.fail_reply:
             raise RuntimeError(f"HTTP 404 QuestionNotFoundError {request_id}")
+        if kind == "permission" and len(answers) > 1 and answers[0] == "reject":
+            # the coordinator's own reject is refused here: the ask reaches a person
+            raise RuntimeError("reject refused (test)")
         return super().answer(session_id, request_id, answers, directory=directory, kind=kind)
 
 

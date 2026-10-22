@@ -223,6 +223,33 @@ def _grant(c, P, t: dict, spec, path: str, reason: str, rule_name: str, rule: di
 
 # ------------------------------------------------------------------ verification
 
+def auto_grant_changed(c, P, t: dict, spec, path: str) -> dict:
+    """W2.5 / W1: a file the session changed WITHOUT asking that the allow-list
+    covers is granted after the fact (the task source gets the path when the
+    adapter can edit it; otherwise the grant is journaled alone), so the scope
+    check never fails on it and grant_checks still verifies the change against
+    its rule. Idempotent per path. Returns the grant record."""
+    pid, tid = P.id, t["task_id"]
+    for g in grants(c.store.task(pid, tid) or t):
+        if g.get("path") == path:
+            return g
+    rule = rule_for(P, tid, path) or {}
+    name = rule.get("name") or rule.get("path") or "allow-list"
+    reason = "changed by the session; covered by the allow-list (granted at verification)"
+    sha = _grant(c, P, t, spec, path, reason, name, rule, actor="policy:scope_auto_approve")
+    cur = c.store.task(pid, tid) or t
+    if any(g.get("path") == path for g in grants(cur)):
+        return next(g for g in grants(cur) if g.get("path") == path)
+    g = {"path": path, "reason": reason, "rule": name, "actor": "policy:scope_auto_approve",
+         "commit": sha, "file": "", "ts": c.clock(),
+         "constraints": {k: rule[k] for k in ("blocks", "lines", "json_paths_in_plan")
+                         if rule.get(k)}}
+    c.store.merge_data(pid, tid, scope_grants=grants(cur) + [g])
+    c.store.event(pid, tid, "scope_granted", session_id=t.get("session_id"),
+                  detail={**g, "note": "the task source was not edited (no JSON task file)"})
+    return g
+
+
 def grant_checks(P, t: dict, spec, base: str, head: str) -> list:
     """coordinator.scope_grant results: each granted file with constraints
     changed only the way its rule allows (base..head)."""

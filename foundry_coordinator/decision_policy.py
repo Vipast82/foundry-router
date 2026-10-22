@@ -97,6 +97,11 @@ def meta(P, kind: str, evidence: Optional[dict], options: list,
     ev = evidence if isinstance(evidence, dict) else {}
     cls = classify(kind, ev)
     rec = None
+    from .obligations import OPERATOR_ONLY_KINDS
+    if kind in OPERATOR_ONLY_KINDS:
+        # approval / policy / expectation_change: the recommendation is shown
+        # (the `recommendation` column) but never applied by a timeout
+        return {"decision_class": cls, "recommended": None, "timeout_minutes": 0}
     if cls == "decision":
         if kind == "scope_request":
             rec = _option(options, str(auto_get(P, "scope_unlisted_default") or "deny"))

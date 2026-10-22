@@ -401,7 +401,8 @@ def test_repair_that_changes_nothing_is_not_re_reviewed(game):
 
 
 def test_permission_ask_waits_for_a_human_answer(game):
-    """A Kilo permission ask still reaches a person (W1.1 answers only `question`)."""
+    """A permission ask reaches a person only when Kilo refuses the coordinator's
+    own reject (W1 follow-up: implementer permission asks are auto-rejected)."""
     tmp, _, _, prof = game
 
     def agent(ctx):
@@ -409,7 +410,8 @@ def test_permission_ask_waits_for_a_human_answer(game):
             return {"question": {"text": "edit src/a.txt?", "kind": "permission"}}
         assert ctx["answers"] == [["once"]]
         return {"writes": {"src/a.txt": "OK green"}, "commit": "T1: green"}
-    c = coordinator(tmp, [prof], {"game": agent})
+    from tests.coordinator.helpers import refuse_auto_reject
+    c = coordinator(tmp, [prof], {"game": refuse_auto_reject(ScriptedClient(agent, "game"))})
     c.approve("game", "T1", [], "victor")
     assert run_until(c, lambda: _state(c, "game", "T1") == S.AWAITING_HUMAN)
     assert "edit src/a.txt" in c.store.task("game", "T1")["awaiting"]
@@ -470,16 +472,14 @@ def test_permission_reply_without_new_kilo_turn_gets_one_continuation(game):
     client = RejectedWrite(agent)
     c = coordinator(tmp, [prof], {"game": client})
     c.approve("game", "T1", [], "victor")
-    assert run_until(c, lambda: _state(c, "game", "T1") == S.AWAITING_HUMAN)
-    sid = c.store.task("game", "T1")["session_id"]
-    prompt_ts = c.store.session(sid)["prompt_ts"]
-    c.answer("game", "T1", ["reject"])
-    assert c.store.session(sid)["prompt_ts"] == prompt_ts
-    c.tick()
-    assert _state(c, "game", "T1") == S.IMPLEMENTING
-    assert len(client.sessions[sid]["prompts"]) == 2
-    assert c.store.session(sid)["prompt_ts"] >= prompt_ts
+    # W1 follow-up: the coordinator rejects the ask itself; the rejected turn ended
+    # without a report, so the same session is continued once (no person, no new session)
     assert run_until(c, lambda: _state(c, "game", "T1") == S.COMPLETE)
+    sid = c.store.task("game", "T1")["session_id"]
+    assert client.answers[sid][0] == "reject"
+    assert len(client.sessions[sid]["prompts"]) == 2
+    assert not any(h["to_state"] == S.AWAITING_HUMAN for h in c.store.history("game", "T1"))
+    assert c.store.task("game", "T1")["sessions"] == 1
 
 
 def test_idle_unadmitted_prompt_recovers_before_session_timeout(game):

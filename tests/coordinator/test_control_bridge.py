@@ -19,7 +19,8 @@ from foundry_coordinator.profile import load
 from foundry_coordinator.store import Store
 from foundry_coordinator.telemetry import KiloObserver, TelemetryBridge
 from foundry_router.control_center import ControlError
-from tests.coordinator.helpers import FakeFoundry, git, make_repo, write_profile
+from tests.coordinator.helpers import (FakeFoundry, git, make_repo, refuse_auto_reject,
+                                       write_profile)
 
 T1 = {"id": "T1", "title": "Frame sizes", "spec": "Do the work.", "scope": ["src/a.txt",
                                                                           "docs/evidence/T1/*"],
@@ -154,9 +155,11 @@ def test_implementer_question_is_answered_by_the_engine_not_the_operator(env):
 
 
 def test_permission_answered_through_the_coordinator_resumes_the_session(env):
-    """A Kilo permission ask still reaches the operator (the control center's
-    reply_permission action), and the reply resumes the same session."""
+    """When Kilo refuses the coordinator's own reject, the permission ask reaches the
+    operator (the control center's reply_permission action) and the reply resumes
+    the same session."""
     fake, sid, cc, c, ch, store = (env[k] for k in ("fake", "sid", "cc", "c", "ch", "store"))
+    refuse_auto_reject(c.projects["game"].client)
     rid = fake.ask_permission(sid, "edit", [".kilo/tally/r1.txt"])
     c.tick()
     assert store.task("game", "T1")["state"] == "AWAITING_HUMAN"
@@ -183,6 +186,7 @@ def test_permission_answered_through_the_coordinator_resumes_the_session(env):
 
 def test_reply_waits_until_the_engine_has_recorded_the_question(env):
     fake, sid, cc, c, ch, store = (env[k] for k in ("fake", "sid", "cc", "c", "ch", "store"))
+    refuse_auto_reject(c.projects["game"].client)
     rid = fake.ask_permission(sid, "edit", ["src/a.txt"])
     env["bridge"].step()                                  # bridge saw it first
     a = act(cc, kind="reply_permission", request_id=rid, session_id=sid, reply="once")
@@ -196,6 +200,7 @@ def test_reply_waits_until_the_engine_has_recorded_the_question(env):
 
 def test_changed_session_is_not_silently_retargeted(env):
     fake, sid, cc, c, ch, store = (env[k] for k in ("fake", "sid", "cc", "c", "ch", "store"))
+    refuse_auto_reject(c.projects["game"].client)
     rid = fake.ask_permission(sid, "edit", ["src/a.txt"])
     c.tick()
     env["bridge"].step()
@@ -401,13 +406,15 @@ def test_event_stream_delivers_streaming_text(env):
     assert texts == ["Checking S45 timing."]
 
 
-def test_a_question_is_not_recorded_as_an_engine_error(env):
+def test_a_permission_ask_is_rejected_and_not_recorded_as_an_engine_error(env):
     fake, sid, c, store = env["fake"], env["sid"], env["c"], env["store"]
-    fake.ask_permission(sid, "bash", ["git push"])
+    rid = fake.ask_permission(sid, "bash", ["git push"])
     c.tick()
     t = store.task("game", "T1")
-    assert t["state"] == "AWAITING_HUMAN" and not (t["next_action"] or "").startswith("error")
+    assert t["state"] == "IMPLEMENTING" and not (t["next_action"] or "").startswith("error")
     assert not [e for e in store.events("game") if e["kind"] == "error"]
+    assert fake.replies[-1]["request_id"] == rid and fake.replies[-1]["body"]["reply"] == "reject"
+    assert [e for e in store.events("game") if e["kind"] == "permission_auto_rejected"]
 
 
 # ------------------------------------------------------------------ v0.122 sprint fields

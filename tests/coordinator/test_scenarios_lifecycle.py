@@ -35,7 +35,7 @@ from foundry_coordinator.devtools.fake_kilo import FakeKilo
 from foundry_coordinator.engine import Coordinator
 from foundry_coordinator.profile import load
 from foundry_coordinator.store import Store
-from tests.coordinator.helpers import (FakeFoundry, coordinator, git, make_repo,
+from tests.coordinator.helpers import (refuse_auto_reject, FakeFoundry, coordinator, git, make_repo,
                                        review_json, run_until, write_ok, write_profile)
 
 T1 = {"id": "T1", "title": "Make the thing", "spec": "Write src/a.txt containing OK.",
@@ -398,6 +398,8 @@ def test_s4_question_via_kilo_is_answered_by_the_coordinator(kenv):
 
 
 def test_s4_permission_via_kilo_holds_the_writer_and_resumes_the_same_session(kenv):
+    """The fallback when Kilo refuses the coordinator's own reject: a person decides."""
+    refuse_auto_reject(kenv.c.projects["game"].client)
     sid = kenv.start()
     rid = kenv.fake.ask_permission(sid, "edit", ["src/a.txt"])
     kenv.c.tick()
@@ -418,17 +420,17 @@ def test_s4_permission_via_kilo_holds_the_writer_and_resumes_the_same_session(ke
     assert len(kenv.fake.prompts) == 1                         # the answer is not a new prompt
 
 
-def test_s4_permission_request_is_answered_through_the_permission_endpoint(kenv):
+def test_s4_permission_request_is_rejected_through_the_permission_endpoint(kenv):
+    """W1 follow-up: the coordinator rejects an implementer's permission ask itself."""
     sid = kenv.start()
     kenv.fake.ask_permission(sid, "bash", ["rm -rf build"])
     kenv.c.tick()
     t = kenv.c.store.task("game", "T1")
-    assert t["state"] == S.AWAITING_HUMAN and t["data"]["question"]["kind"] == "permission"
-    assert "rm -rf build" in t["awaiting"]
-    kenv.c.answer("game", "T1", ["reject"])
+    assert t["state"] == S.IMPLEMENTING and not t["data"].get("question")
     assert kenv.fake.replies[-1]["kind"] == "permission"
-    assert kenv.fake.replies[-1]["body"] == {"reply": "reject"}
-    assert _state(kenv.c) == S.IMPLEMENTING
+    assert kenv.fake.replies[-1]["body"] == {
+        "reply": "reject", "message": "not allowed here; report BLOCKED with options if you need it"}
+    assert t["data"]["permission_reply_recovery"]["auto_rejected"] is True
     with pytest.raises(ValueError):
         kenv.c.answer("game", "T1", ["once"])                  # no open question any more
 
@@ -553,7 +555,7 @@ def test_s5_restart_during_a_question_then_answer(game):
             # a permission ask: the request that still reaches a person (W1.1)
             return {"question": {"text": "edit src/a.txt?", "kind": "permission"}}
         return {"writes": {"src/a.txt": "OK"}, "commit": "T1: green"}
-    client = Gated(agent)
+    client = refuse_auto_reject(Gated(agent))
     c1 = coordinator(tmp, [prof], {"game": client})
     c1.approve("game", "T1", [], "victor")
     assert run_until(c1, lambda: _state(c1) == S.AWAITING_HUMAN)
