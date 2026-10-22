@@ -551,7 +551,10 @@ def test_running_gate_publishes_live_progress_for_the_control_center(env):
     from foundry_coordinator.telemetry import background_work
     e = env([{"result": "PASS", "sleep": 3, "captures": [CAP]}])
     e.c.approve("game", "T1", [], "victor")
-    t = drive(e, lambda t: (fl(e).get("live") or {}).get("kind") == "gate", step=1)
+    # (revamp B13: cached per-tick checks make ticks fast enough to see the record before
+    # the runner wrote its first phase; wait for the phase this test asserts)
+    t = drive(e, lambda t: (fl(e).get("live") or {}).get("kind") == "gate" and
+              (fl(e).get("live") or {}).get("phase") == "stories", step=1)
     live = fl(e)["live"]
     assert live["phase"] == "stories" and live["progress"] == "1/3" and live["limit_s"] == 45 * 60
     assert live["log"].endswith("fast_lane_gate.log") and live["started_ts"] > 1_700_000_000
