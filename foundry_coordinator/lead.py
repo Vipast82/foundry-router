@@ -389,7 +389,8 @@ def report_contract(full_authority: bool = False) -> str:
 
 def validate_report(rep: Any, *, scope=None, allowed_dirs=None, acceptance_globs=None,
                     prior_hypotheses=None, full_authority: bool = False, prior_actions=None,
-                    max_extend: int = 3, max_clean: int = 20) -> tuple[Optional[dict], list[str]]:
+                    max_extend: int = 3, max_clean: int = 20,
+                    self_changed_tests=None) -> tuple[Optional[dict], list[str]]:
     """(clean report, errors). Errors make the report invalid (it counts a
     diagnosis and is retried within bounds)."""
     errs: list[str] = []
@@ -593,6 +594,12 @@ def validate_report(rep: Any, *, scope=None, allowed_dirs=None, acceptance_globs
                     errs.append(f"operations[{i}].path must be a test path in the repo")
                 elif acceptance_globs is not None and not _match(r, acceptance_globs or ()):
                     errs.append(f"operations[{i}].path: {r} is not an acceptance test")
+                elif self_changed_tests and r in self_changed_tests:
+                    # W2.3: no self-approval of a test the lead changed itself
+                    errs.append(f"operations[{i}].path: the lead changed {r} itself in this "
+                                "session; a test-expectation change it made needs an operator "
+                                "expectation_change decision, not a lead approval: "
+                                + "; ".join(self_changed_tests[r])[:200])
                 c["path"] = r or ""
             clean_ops.append(c)
         then = str(act.get("then") or "")
@@ -668,6 +675,24 @@ def _deny_tools(P) -> list[str]:
     return list((raw.get("helpers") or {}).get("deny_tools") or _DEFAULT_DENY_TOOLS)
 
 
+# W2.3: what the lead's WRITE session may never run, on top of HARD_DENIES:
+# any push (the coordinator publishes), refspec pushes, history rewrites,
+# hook / config changes, scratch cleanup (the clean_untracked op does that).
+LEAD_WRITE_BASH_DENY = ("git push", "git push *", "git push*+*", "git push*:*",
+                        "git reset*--hard*", "git reset*--merge*", "git rebase*",
+                        "git commit*--amend*", "git commit* -n", "git commit* -n *",
+                        "git update-ref*", "git filter-*", "git*hooksPath*", "git -c *",
+                        "git config*", "git stash drop*", "git stash clear*",
+                        "git branch -D*", "git branch*--delete*", "git checkout*--orphan*",
+                        "git clean*", "git tag*")
+
+
+def _hard_denies() -> list[dict]:
+    from foundry_automation.role_rules import HARD_DENIES
+    return [{"permission": h["permission"], "pattern": h["pattern"], "action": "deny"}
+            for h in HARD_DENIES]
+
+
 def lead_permissions(P, spec=None) -> list[dict]:
     """Kilo session rules for the lead in the GAME workspace: read-only. The
     profile's own rules are kept except any for write tools, bash or
@@ -675,7 +700,8 @@ def lead_permissions(P, spec=None) -> list[dict]:
     then every write tool, bash and every directory outside the workspace are
     denied, only READ_ONLY_BASH is allowed again, and READ_ONLY_BASH_DENY
     (writer / executor options, redirects, secrets, outside paths) is denied
-    after the allows (last match wins). Reads of `_secrets` are denied."""
+    after the allows (last match wins). Reads of `_secrets` are denied, and
+    the hard denies come last."""
     rules = [r for r in _base_rules(P, spec, "lead")
              if r.get("permission") not in WRITE_TOOLS + ("bash", "external_directory")]
     rules.append({"permission": "external_directory", "pattern": "*", "action": "deny"})
@@ -690,28 +716,72 @@ def lead_permissions(P, spec=None) -> list[dict]:
         rules.append({"permission": perm, "pattern": _SECRET_PATTERN, "action": "deny"})
     for tool in _deny_tools(P):
         rules.append({"permission": tool, "pattern": "*", "action": "deny"})
+    rules += _hard_denies()
     return rules
 
 
 def lead_write_permissions(P, spec=None) -> list[dict]:
-    """[lead_manager] write_access: the lead may do anything in its session (every
-    tool, shell, outside directories, Studio MCP) except read or edit secrets and
-    ask a question (it acts; it never waits on a person). The coordinator still
-    holds the workspace lock and guards the router checkout and its DB."""
-    rules = [r for r in _base_rules(P, spec, "lead") if r.get("action") != "deny"]
-    rules.append({"permission": "*", "pattern": "*", "action": "allow"})
-    # revamp B6: no subagents of its own beyond the read-only allow-list (explore)
-    from .adapters.project import subagent_rules
-    rules += subagent_rules(getattr(P, "profile", None))
+    """[lead_manager] write_access (W2.3): the lead session starts from `*`
+    allow (every tool, shell, Studio MCP), then gets the adapter's session
+    rules for the lead role VERBATIM, denies included: the profile's client
+    rules, the subagent rule (explore only), the deployed role rules with the
+    sprint's edit scope injected (or the floor without a deploy). So what the
+    GUI shows for the lead is what applies. On top: no push of any kind, no
+    history rewrite, no hook or git-config change, no scratch cleanup, no
+    `question` (it acts, it never waits on a person), and the hard denies
+    last (secrets through tools and shell, Studio never-tools). The
+    coordinator still holds the workspace lock and guards the router checkout
+    and its DB."""
+    rules = [{"permission": "*", "pattern": "*", "action": "allow"}]
+    rules += _base_rules(P, spec, "lead")
+    for pat in LEAD_WRITE_BASH_DENY:
+        rules.append({"permission": "bash", "pattern": pat, "action": "deny"})
     for perm in _READ_TOOLS + ("edit", "write", "patch", "multiedit", "apply_patch"):
         for pat in (_SECRET_PATTERN, "*.env", "*.env.*", "*secret*"):
             rules.append({"permission": perm, "pattern": pat, "action": "deny"})
     rules.append({"permission": "question", "pattern": "*", "action": "deny"})
-    # the floor no setting removes (secrets, force push, tag deletion, --no-verify)
-    from foundry_automation.role_rules import HARD_DENIES
-    rules += [{"permission": h["permission"], "pattern": h["pattern"], "action": "deny"}
-              for h in HARD_DENIES]
+    rules += _hard_denies()
     return rules
+
+
+def lead_self_changed_tests(P, before_head: str) -> dict:
+    """W2.3: test files the lead's own write session changed (committed since
+    `before_head`, or dirty now) in a way that changes their expectations:
+    {path: [why]} (repair.test_expectation_changes). The lead may not
+    `approve_test_change` one of these: a change it made itself needs an
+    operator decision (expectation_change), never a self-approval."""
+    from .repair import is_test_path, test_expectation_changes
+    ws = getattr(P, "ws", None)
+    if ws is None or not before_head:
+        return {}
+    root = getattr(getattr(P, "profile", None), "workspace", "") or ""
+    try:
+        changed = list(ws.changed_files(before_head, ws.head()))
+        changed += [p for _, p in ws.status()]
+    except Exception:                                            # noqa: BLE001
+        return {}
+    out = {}
+    for rel in dict.fromkeys(p.replace("\\", "/") for p in changed):
+        if not (is_test_path(rel) or _match(rel, DEFAULT_ACCEPTANCE_GLOBS)):
+            continue
+        try:
+            old = ws.show_at(before_head, rel)
+        except Exception:                                        # noqa: BLE001
+            old = None
+        try:
+            with open(os.path.join(root, rel), encoding="utf-8", errors="replace",
+                      newline="") as fh:
+                new = fh.read()
+        except OSError:
+            new = None
+        if old is None and new is None:
+            continue
+        why = test_expectation_changes(rel, old, new)
+        if not why and not rel.endswith(".py") and old != new and old is not None:
+            why = [f"{rel}: existing test file modified"]
+        if why:
+            out[rel] = why
+    return out
 
 
 def router_moved_by_deploy(before: dict, after: dict) -> bool:
@@ -726,11 +796,12 @@ def router_moved_by_deploy(before: dict, after: dict) -> bool:
 
 def kilo_decision(rules: list[dict], perm: str, value: str) -> Optional[str]:
     """What Kilo decides for `perm` on `value` (a command or path): the last
-    matching rule wins; None when nothing matches."""
+    matching rule wins; None when nothing matches. A rule's permission may be
+    a glob (`*manage_monetization`), as in kilo.jsonc."""
     act = None
     for r in rules:
         rp = str(r.get("permission"))
-        if (rp == perm or rp == "*") and fnmatch.fnmatchcase(value, str(r.get("pattern"))):
+        if (rp == perm or rp == "*" or ("*" in rp and fnmatch.fnmatchcase(perm, rp))) and                 fnmatch.fnmatchcase(value, str(r.get("pattern"))):
             act = str(r.get("action"))
     return act
 

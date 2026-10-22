@@ -796,7 +796,7 @@ FIELDS: list[Field] = [
     # limits ---------------------------------------------------------------------
     F("limits.max_attempts", "int", 3, "Attempts per task.", "limits", C, min=1),
     F("limits.max_sessions_per_task", "int", 8, "Sessions per task.", "limits", C, min=1),
-    F("limits.max_review_calls", "int", 3, "Review calls per task.", "limits", C, min=1),
+    F("limits.max_review_calls", "int", 4, "Review calls per task.", "limits", C, min=1),
     F("limits.max_closeout_attempts", "int", 2, "Closeout attempts.", "limits", C, min=1),
     F("limits.session_timeout_minutes", "int", 240, "Session timeout.", "limits", C, min=1),
     F("limits.max_task_minutes", "int", 1440, "Wall time per task.", "limits", C, min=1),

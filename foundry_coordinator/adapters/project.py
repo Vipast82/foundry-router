@@ -242,9 +242,45 @@ class GenericAdapter(ReviewContractDefaults):
 
     # -- session permissions -------------------------------------------------------------
 
+    # coordinator phase -> role whose rules the session gets
+    ROLE_OF_PHASE = {"helper": "helper", "lead": "lead", "repair": "coordinator"}
+
+    def edit_scope(self, spec: TaskSpec, phase: str) -> Optional[list[str]]:
+        """The files a session of this task may edit (W2.2): the sprint's own
+        scope, the closeout-exempt paths, the fast-lane runner outputs and
+        captures, and the paths the [automation] scope_auto_approve allow-list
+        grants by itself. None = no sprint scope applies (no spec, or a
+        coordinator repair session, which edits its own worktree)."""
+        if spec is None or phase == "repair":
+            return None
+        if phase == "helper":
+            return []                                   # helpers never edit
+        out = list(spec.scope) + list(self.exempt_paths(spec))
+        try:
+            from ..fast_lane import runner_patterns
+            outputs, captures = runner_patterns(self, spec.task_id)
+            out += outputs + captures
+        except Exception:                                # noqa: BLE001
+            pass
+        from ..automation import get as auto_get
+        for r in auto_get(self.p, "scope_auto_approve") or []:
+            pat = str((r or {}).get("path") or "").replace("{task}", spec.task_id)
+            if pat:
+                out.append(pat)
+        return list(dict.fromkeys(x for x in out if x))
+
+    @property
+    def profile(self):
+        """`self` doubles as a Project stand-in for modules that read P.profile."""
+        return self.p
+
     def session_permissions(self, spec: TaskSpec, phase: str) -> list[dict]:
         """Kilo permission rules for a session. Deny by default what an
-        unattended session must never do; the profile adds its own."""
+        unattended session must never do; the profile adds its own; then the
+        role's rules from the router (role_rules, after a deploy) with the
+        sprint's edit scope injected, or, without deployed role rules, the
+        floor (sprint scope, config-file denies, hard denies). The subagent
+        rule comes BEFORE the role rules, so a GUI edit of `task_agents` wins."""
         rules = [
             {"permission": "agent_manager", "pattern": "*", "action": "deny"},
             {"permission": "external_directory", "pattern": "*", "action": "deny"},
@@ -258,15 +294,15 @@ class GenericAdapter(ReviewContractDefaults):
                     rules.append({"permission": name, "pattern": pattern, "action": act})
             else:
                 rules.append({"permission": name, "pattern": "*", "action": str(action)})
-        # role rules from the router (C1 config store), after the profile's own:
-        # only when deployed role rules are part of the applied profile
+        role = self.ROLE_OF_PHASE.get(phase, "implementer")
+        rules += subagent_rules(self.p, role)
+        from foundry_automation.role_rules import floor_rules, session_rules
+        scope = self.edit_scope(spec, phase)
         role_rules = (getattr(self.p, "raw", None) or {}).get("role_rules")
         if isinstance(role_rules, dict):
-            from foundry_automation.role_rules import session_rules
-            role = {"helper": "helper", "lead": "lead", "repair": "coordinator"}.get(
-                phase, "implementer")
-            rules += session_rules(role, role_rules.get(role), self.p.workspace)
-        rules += subagent_rules(self.p)
+            rules += session_rules(role, role_rules.get(role), self.p.workspace, scope=scope)
+        else:
+            rules += floor_rules(role, self.p.workspace, scope)
         return rules
 
     def grant_scope(self, spec: TaskSpec, path: str, reason: str) -> str:
@@ -319,13 +355,21 @@ class GenericAdapter(ReviewContractDefaults):
         return out
 
 
-def subagent_rules(profile) -> list[dict]:
-    """revamp B6: a session may not spawn its own subagents (Kilo `task` tool)
-    except the read-only ones [automation] subagents_allowed names (default
-    `explore`). Appended last, so a profile's own `task` allow can't widen it
-    (Kilo: the last matching rule wins)."""
+def subagent_rules(profile, role: str = "implementer") -> list[dict]:
+    """revamp B6 / W2.4: a session may not spawn its own subagents (Kilo `task`
+    tool) except the read-only ones the role's rules name (`task_agents`,
+    default `explore`); without deployed role rules, [automation]
+    subagents_allowed. Emitted BEFORE the role rules, so a GUI edit of the
+    role's `task` permission or `task_agents` wins (Kilo: the last matching
+    rule wins), but after the profile's own rules, so a legacy `task: allow`
+    there can't widen it."""
     from ..automation import get as auto_get
-    allowed = list(auto_get(profile, "subagents_allowed") or [])
+    role_rules = (getattr(profile, "raw", None) or {}).get("role_rules")
+    if isinstance(role_rules, dict):
+        from foundry_automation.role_rules import normalize
+        allowed = list(normalize(role, role_rules.get(role))["task_agents"])
+    else:
+        allowed = list(auto_get(profile, "subagents_allowed") or [])
     return ([{"permission": "task", "pattern": "*", "action": "deny"}]
             + [{"permission": "task", "pattern": a, "action": "allow"} for a in allowed])
 

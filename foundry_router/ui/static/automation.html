@@ -1267,9 +1267,9 @@ async function renderSettings() {
    deny, read and edit path globs, shell command patterns and the subagents a
    role may start. Kilo uses the last matching rule; hard denies come last, so
    nothing here can loosen them. */
-const COLS = ["read", "edit", "write", "bash", "git", "task", "webfetch", "studio_mcp", "external_directory"];
+const COLS = ["read", "edit", "write", "bash", "git", "task", "webfetch", "studio_read", "studio_write", "external_directory"];
 const COL_LABEL = {read: "Read", edit: "Edit", write: "Create files", bash: "Shell", git: "Git", task: "Subagents",
-                   webfetch: "Web", studio_mcp: "Studio", external_directory: "Outside workspace"};
+                   webfetch: "Web", studio_read: "Studio read", studio_write: "Studio write", external_directory: "Outside workspace"};
 const COL_HELP = {
   read: "Reading files is allowed by default; deny globs block paths, and absolute allow globs also open folders outside the workspace.",
   edit: "Editing existing files (edit, patch, multiedit). Limited by the edit globs, which Create files shares.",
@@ -1278,7 +1278,8 @@ const COL_HELP = {
   git: "git commands through the shell. Force push, tag push or deletion and --no-verify stay denied.",
   task: "Starting subagents. Plan rule B6: only explore.",
   webfetch: "webfetch and websearch.",
-  studio_mcp: "Roblox Studio MCP tools (run tests, set script source, capture).",
+  studio_read: "Roblox Studio MCP read tools (list, get, search, screenshot, console).",
+  studio_write: "Roblox Studio MCP tools that change Studio state (set, create, delete, insert, mass, run, execute). Monetization, uploads, asset insertion and live script mutation stay denied for every role.",
   external_directory: "Folders outside the workspace. Folders named by absolute read/edit globs are opened automatically.",
 };
 const RULE_PERMS = {read: ["read", "list", "grep", "glob"], edit: ["edit", "patch", "multiedit", "apply_patch"], write: ["write"],
@@ -1297,7 +1298,15 @@ function rulesOf(role) {
   for (const k of ["task_agents", "deny_tools", "extra"]) out[k] = out[k] || [];
   const raw = (doc().role_rules || {})[role] || {};
   for (const [k, v] of Object.entries(raw)) {
-    if (k === "permissions" && v && typeof v === "object") Object.assign(out.permissions, v);
+    if (k === "permissions" && v && typeof v === "object") {
+      const p = Object.assign({}, v);
+      if ("studio_mcp" in p) {                      // W2.1: legacy category, applies to both
+        if (!("studio_read" in p)) p.studio_read = p.studio_mcp;
+        if (!("studio_write" in p)) p.studio_write = p.studio_mcp;
+        delete p.studio_mcp;
+      }
+      Object.assign(out.permissions, p);
+    }
     else if (["read_paths", "edit_paths", "bash"].includes(k) && v && typeof v === "object") out[k] = {allow: [...(v.allow || [])], deny: [...(v.deny || [])]};
     else out[k] = clone(v);
   }

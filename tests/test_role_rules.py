@@ -64,7 +64,7 @@ def test_hard_denies_cannot_be_removed():
     # the folded kilo.jsonc block keeps them last within each permission
     blk = RR.agent_block("implementer", rules, WS)
     assert list(blk["read"].items())[-1][1] == "deny"
-    assert blk["bash"]["git commit*--no-verify*"] == "deny"
+    assert blk["bash"]["git*--no-verify*"] == "deny"
 
 
 def test_absolute_windows_scope_for_the_implementer():
