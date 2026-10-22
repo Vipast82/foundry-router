@@ -69,6 +69,9 @@ CONTEXT_MARGIN = 0.9                    # headroom for tokenizer variance and ch
 EVIDENCE_ITEM_CHARS = 12_000            # per evidence item
 SPEC_CHARS = 12_000
 EARLIER_CHARS = 10_000
+EARLIER_FULL = 1                        # newest earlier reviews listed finding by finding
+EARLIER_FINDINGS = 20                   # findings listed per such review
+EARLIER_LINE = 300                      # characters per listed finding
 MIN_SLICE = 400                         # smaller leftovers are omitted, not sliced
 LISTED_FILES = 300                      # coverage lines beyond this are summarized
 CODE_MAX_PRIORITY = 1                   # priorities 0 (source) and 1 (tests) must fit whole
@@ -261,15 +264,25 @@ def _earlier_section(earlier: list[dict], head: str) -> list[str]:
     out = ["## Earlier review findings — verify whether the new commit resolves them",
            "From earlier reviews of this task (kept in the audit trail). For each one, check "
            "whether this commit resolves it; anything still open is a finding of this review."]
+    # B4 (2026-10-21): newest first; the latest review's findings one line each, older
+    # reviews summarized (UI-02a packets re-sent ~10K characters of old findings per round)
     body, cut = [], False
-    for r in earlier:
+    for k, r in enumerate(reversed(earlier)):
         res = r.get("result") or {}
         ver = (res.get("packet") or {}).get("version", 1)
         where = "this same commit" if r.get("reviewed_sha") == head else \
             f"{(r.get('reviewed_sha') or '')[:12]}"
         lines = [f"### {r.get('review_id')} at {where} — {r.get('verdict')} "
                  f"({r.get('persona')}, packet v{ver})"]
-        lines += [f"- {x}" for x in findings_for_repair(res)] or ["- (no details recorded)"]
+        found = findings_for_repair(res)
+        if k < EARLIER_FULL:
+            lines += [f"- {_one_line(x, EARLIER_LINE)}" for x in found[:EARLIER_FINDINGS]] \
+                or ["- (no details recorded)"]
+            if len(found) > EARLIER_FINDINGS:
+                lines.append(f"- ... and {len(found) - EARLIER_FINDINGS} more finding(s)")
+        else:
+            lines.append(f"- {len(found)} finding(s); first: "
+                         + (_one_line(found[0], EARLIER_LINE // 2) if found else "none recorded"))
         block = "\n".join(lines)
         if sum(len(b) for b in body) + len(block) > EARLIER_CHARS:
             cut = True
@@ -280,6 +293,11 @@ def _earlier_section(earlier: list[dict], head: str) -> list[str]:
         out.append(f"(older findings omitted for space; {len(earlier) - len(body)} more review(s) "
                    f"in the audit trail)")
     return out
+
+
+def _one_line(text: str, cap: int) -> str:
+    s = " ".join(str(text or "").split())
+    return s if len(s) <= cap else s[:cap - 3] + "..."
 
 
 def build_packet(*, project_id: str, task_id: str, title: str, spec: str, scope: list[str],

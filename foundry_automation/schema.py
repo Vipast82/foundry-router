@@ -132,7 +132,7 @@ FAST_LANE_DEFAULTS = {
     "gate_module": "foundry_coordinator.projects.animaluprising.studio_gate",
     "gate_timeout_minutes": 45,               # a run still going after this = red gate
     "max_red_gates_before_handoff": 2,        # local-primary tasks then auto-request frontier_primary
-    "max_vision_rounds": 2,                   # CHANGES rounds before accept-with-notes
+    "max_vision_rounds": 1,                   # revamp 2026-10-21: one fix round, then accept with notes
     "vision_batch_frames": 20,                # frames per vision call (UI-D1 had ~560 frames)
     # revamp B3/B2/B4 (branch revamp/gate-vision, same names and defaults; that branch
     # also changes max_vision_rounds to 1 and revamp/lead-scope lanes to [] -- take

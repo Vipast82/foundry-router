@@ -418,7 +418,8 @@ def background_work(task: dict) -> Optional[dict]:
                    playing=live.get("playing") is True, log=_cap(live.get("log"), 400))
     else:
         out.update({k: num(live.get(k)) for k in ("batch", "batches", "frames", "total_frames",
-                                                   "done", "changes", "more_findings")})
+                                                   "done", "changes", "more_findings",
+                                                   "in_flight")})
         out["findings"] = [_cap(f, 300) for f in (live.get("findings") or [])[:8]
                            if isinstance(f, str)]
         out["persona"] = _cap(live.get("persona"), 120)

@@ -1713,45 +1713,100 @@ class Gate:
     # carry nothing. Carried checks stay in the verdict, marked CARRIED with their commit.
     CARRY_INVALIDATORS = ("tests/RegressionIndex.lua", "tests/GateRunner.lua", "default.project.json")
 
+    # B2 (2026-10-21): the gate directory is a content-addressed result store. Every earlier
+    # verdict of this sprint (sprint runs and the automatic baseline) is a set of check
+    # results bound to a commit and its root tree. A passed check is reused, never re-run,
+    # when its inputs are unchanged: the same tree (identical content, e.g. a same-head
+    # verdict), or an ancestor commit whose diff to HEAD touches nothing the check covers.
+    # Failed checks never carry. Each passed suite comes from the newest verdict that still
+    # covers it; passed stories carry one by one and only failed stories re-run.
+    def _store_verdicts(self) -> list:
+        out = []
+        for name in sorted(os.listdir(self.gate_dir)) if os.path.isdir(self.gate_dir) else []:
+            if not name.endswith((".sprint.json", ".baseline.json")):
+                continue
+            v = _read_json_file(os.path.join(self.gate_dir, name))
+            if isinstance(v, dict) and v.get("head") and isinstance(v.get("checks"), list) \
+                    and v.get("result") != "ERROR":
+                out.append(v)
+        out.sort(key=lambda v: float(v.get("finished") or 0), reverse=True)
+        return out
+
+    def _tree(self, rev: str) -> Optional[str]:
+        rc, txt = self.run_cmd(["git", "rev-parse", f"{rev}^{{tree}}"], self.repo, 30)
+        txt = (txt or "").strip()
+        return txt if rc == 0 and re.fullmatch(r"[0-9a-f]{40}", txt) else None
+
+    def _changed_since(self, v: dict, head: str, memo: dict) -> Optional[list]:
+        """Files changed from the verdict's commit to HEAD ([] = same content), or None
+        when the verdict is not on HEAD's history (it says nothing about this code)."""
+        prev = str(v["head"])
+        if prev in memo:
+            return memo[prev]
+        res: Optional[list] = None
+        if prev == head:
+            res = []
+        else:
+            if "__tree__" not in memo:
+                memo["__tree__"] = self._tree(head)
+            mine = memo["__tree__"]
+            if mine and (v.get("tree") == mine or self._tree(prev) == mine):
+                res = []
+            else:
+                rc, _ = self.run_cmd(["git", "merge-base", "--is-ancestor", prev, head], self.repo, 30)
+                if rc == 0:
+                    rc, txt = self.run_cmd(["git", "diff", "--name-only", prev, head], self.repo, 60)
+                    if rc == 0:
+                        res = [f.strip() for f in txt.splitlines() if f.strip()]
+        memo[prev] = res
+        return res
+
     def carry_plan(self, selection: str, plan_file: str) -> dict:
-        out = {"from": None, "suites": [], "stories": False, "changed": []}
+        out = {"from": None, "suites": [], "stories": False, "changed": [],
+               "suite_from": {}, "story_from": None, "stories_failed": []}
         head = self.head
         if not head:
             return out
-        prev = None
-        for name in sorted(os.listdir(self.gate_dir)) if os.path.isdir(self.gate_dir) else []:
-            if not name.endswith(".sprint.json") or name.startswith(head[:12]):
-                continue
-            v = _read_json_file(os.path.join(self.gate_dir, name))
-            if isinstance(v, dict) and v.get("head") and v.get("checks") and                     (prev is None or float(v.get("finished") or 0) > float(prev.get("finished") or 0)):
-                prev = v
-        if prev is None:
+        verdicts = self._store_verdicts()
+        if not verdicts:
             return out
-        base = prev["head"]
-        rc, _ = self.run_cmd(["git", "merge-base", "--is-ancestor", base, head], self.repo, 30)
-        if rc != 0:
-            return out
-        rc, txt = self.run_cmd(["git", "diff", "--name-only", base, head], self.repo, 60)
-        if rc != 0:
-            return out
-        changed = [f.strip() for f in txt.splitlines() if f.strip()]
-        out.update({"from": prev, "changed": changed})
-        if any(f in self.CARRY_INVALIDATORS or f.startswith("tests/lib/") or f == plan_file
-               for f in changed):
-            return out                       # the harness itself changed: re-run everything
-        code = [f for f in changed if f.startswith(("src/", "tests/"))]
-        passed = {c["id"][len("regression."):] for c in prev.get("checks") or []
-                  if isinstance(c, dict) and str(c.get("id", "")).startswith("regression.")
-                  and c.get("result") == "PASS" and c.get("required")
-                  and _SUITE_RE.search(str(c.get("detail") or ""))}
-        hit = affected_selection(code, self.index or {}, suite_text=suite_reader(self.repo, head))             if code else ""
-        if hit == "ui":
-            hit_ids = set((self.index or {}).get("subsets", {}).get("ui") or [])
-        else:
-            hit_ids = {x for x in hit.split(",") if x}
+        memo: dict = {}
         wanted = {e.get("id") for e in (select_entries(self.index or {}, selection) or [])}
-        out["suites"] = sorted((passed & wanted) - hit_ids)
-        out["stories"] = not any(f.startswith("src/") for f in changed)
+        reader = suite_reader(self.repo, head)
+        for v in verdicts:
+            changed = self._changed_since(v, head, memo)
+            if changed is None:
+                continue
+            if out["from"] is None:
+                out.update({"from": v, "changed": changed})
+            if any(f in self.CARRY_INVALIDATORS or f.startswith("tests/lib/") or f == plan_file
+                   for f in changed):
+                continue                     # the harness itself changed since: nothing carries
+            code = [f for f in changed if f.startswith(("src/", "tests/"))]
+            hit = affected_selection(code, self.index or {}, suite_text=reader) if code else ""
+            if hit == "ui":
+                hit_ids = set((self.index or {}).get("subsets", {}).get("ui") or [])
+            else:
+                hit_ids = {x for x in hit.split(",") if x}
+            for c in v.get("checks") or []:
+                cid = str(c.get("id", "")) if isinstance(c, dict) else ""
+                sid = cid[len("regression."):]
+                if cid.startswith("regression.") and c.get("result") == "PASS" \
+                        and c.get("required") and _SUITE_RE.search(str(c.get("detail") or "")) \
+                        and sid in wanted and sid not in hit_ids and sid not in out["suite_from"]:
+                    out["suite_from"][sid] = v
+            if out["story_from"] is None and v.get("mode", "sprint") == "sprint" \
+                    and not any(f.startswith("src/") for f in changed):
+                story = [c for c in v.get("checks") or [] if isinstance(c, dict)
+                         and str(c.get("id", "")).startswith(("story.", "focus."))]
+                if any(c.get("result") == "PASS" for c in story):
+                    out["story_from"] = v
+                    out["stories"] = all(c.get("result") == "PASS" for c in story
+                                         if c.get("required"))
+                    out["stories_failed"] = sorted({
+                        str(c["id"])[len("story."):].split("@")[0] for c in story
+                        if str(c["id"]).startswith("story.") and c.get("result") != "PASS"})
+        out["suites"] = sorted(out["suite_from"])
         return out
 
     def regression_lane(self, selection: str) -> None:
@@ -1897,6 +1952,12 @@ class Gate:
              "error": error}
         if baseline:
             v["baseline"] = baseline
+        if self.head:
+            # the content address of the code this verdict judged (B2 result store)
+            with contextlib.suppress(Exception):
+                tree = self._tree(self.head)
+                if tree:
+                    v["tree"] = tree
         path = os.path.join(self.gate_dir, verdict_name(head, self.mode))
         self.verdict_path = path
         self.raw_path = os.path.join(self.gate_dir, f"{head[:12]}.{self.mode}.raw.log")
@@ -1918,6 +1979,10 @@ class Gate:
                 self._raw.append(f"REVIEW SHEET FAILED {type(e).__name__}: {e}\n")
         if evidence:
             append_evidence(self.repo, self.sprint, v, rel(self.repo, path), meta)
+        if self.mode == "baseline" and not error:
+            # the automatic baseline (B2): what the sprint's regression looked like at its
+            # base commit; apply_baseline reads it, carry_plan reuses its passed suites
+            write_json(os.path.join(self.gate_dir, "baseline.json"), v)
         self.status("done", "")
         return v
 
@@ -2318,19 +2383,30 @@ def _run_gate(a, mode, sprint, run_id, out, official, community, run_cmd) -> int
             g.console_base = g.console_lines()
             g.live_verify(expect)
             stories = plan.get("stories") or []
-            carry = g.carry_plan(selection, plan_rel(sprint)) if selection else                 g.carry_plan("", plan_rel(sprint))
-            prev = carry.get("from") or {}
-            tag = str(prev.get("head") or "")[:12]
-            prev_story = [c for c in prev.get("checks") or [] if isinstance(c, dict)
+            carry = g.carry_plan(selection or "", plan_rel(sprint))
+            sv = carry.get("story_from") or {}
+            stag = str(sv.get("head") or "")[:12]
+            prev_story = [c for c in sv.get("checks") or [] if isinstance(c, dict)
                           and str(c.get("id", "")).startswith(("story.", "focus."))]
-            if stories and carry.get("stories") and prev_story and                     all(c.get("result") == "PASS" for c in prev_story if c.get("required")):
-                # no src/ file and no story input changed since the last sprint gate, and its
-                # stories all passed: their checks and committed captures carry
-                for c in prev_story:
-                    g.add(dict(c, detail=f"CARRIED from {tag} (no src/ or story change): "
+            failed_names = set(carry.get("stories_failed") or [])
+            focus_ok = all(c.get("result") == "PASS" for c in prev_story
+                           if str(c.get("id", "")).startswith("focus.") and c.get("required"))
+            if stories and prev_story and focus_ok and (carry.get("stories") or failed_names):
+                # no src/ file and no story input changed since that verdict: its PASSED story
+                # checks and their captures carry; only the stories that failed there re-run
+                kept = [c for c in prev_story if c.get("result") == "PASS" and not (
+                    str(c["id"]).startswith("story.")
+                    and str(c["id"])[len("story."):].split("@")[0] in failed_names)]
+                for c in kept:
+                    g.add(dict(c, detail=f"CARRIED from {stag} (no src/ or story change): "
                                          + str(c.get("detail") or "")))
-                g.captures.extend(prev.get("captures") or [])
-                g.raw("carry", "", f"carried {len(prev_story)} story/focus check(s) from {tag}")
+                g.captures.extend(cp for cp in sv.get("captures") or []
+                                  if isinstance(cp, dict) and cp.get("story") not in failed_names)
+                g.raw("carry", "", f"carried {len(kept)} story/focus check(s) from {stag}"
+                      + (f"; re-running failed: {','.join(sorted(failed_names))}"
+                         if failed_names else ""))
+                if failed_names:
+                    g.run_stories(stories, sorted(failed_names))
             else:
                 if stories:
                     g.run_stories(stories)
@@ -2347,20 +2423,26 @@ def _run_gate(a, mode, sprint, run_id, out, official, community, run_cmd) -> int
                     finally:
                         g.stop_playtest()
             if selection:
-                keep = set(carry.get("suites") or [])
-                for c in prev.get("checks") or []:
-                    if str(c.get("id", "")).startswith("regression.") and                             c["id"][len("regression."):] in keep:
-                        g.add(dict(c, detail=f"CARRIED from {tag} (no file it covers changed): "
-                                             + str(c.get("detail") or "")))
+                frm = carry.get("suite_from") or {}
+                keep = set(frm)
+                for sid in sorted(keep):
+                    src = frm[sid]
+                    tag = str(src.get("head") or "")[:12] + (
+                        " (baseline)" if src.get("mode") == "baseline" else "")
+                    c = next(c for c in src.get("checks") or []
+                             if isinstance(c, dict) and c.get("id") == f"regression.{sid}")
+                    g.add(dict(c, detail=f"CARRIED from {tag} (no file it covers changed): "
+                                         + str(c.get("detail") or "")))
                 entries = [e.get("id") for e in (select_entries(g.index or {}, selection) or [])]
                 rest = [x for x in entries if x not in keep]
                 if keep:
-                    g.raw("carry", "", f"carried {len(keep)} suite(s) from {tag}: {','.join(sorted(keep))}")
+                    g.raw("carry", "", f"carried {len(keep)} suite(s): {','.join(sorted(keep))}")
                 if rest:
                     g.regression_lane(",".join(rest) if keep else selection)
                 else:
                     g.add(check("regression.selection", "PASS",
-                                f"every selected suite CARRIED from {tag}", required=False))
+                                "every selected suite CARRIED from an earlier verdict",
+                                required=False))
             else:
                 g.add(check("regression.selection", "SKIP", "no affected suites", required=False))
             g.console_check()
@@ -2378,6 +2460,31 @@ def _run_gate(a, mode, sprint, run_id, out, official, community, run_cmd) -> int
                 g.run_stories(plan.get("stories") or [], a.story)
                 g.run_focus(plan.get("focus"), plan.get("stories") or [], in_play=False)
                 g.console_check()
+        elif mode == "baseline":
+            # B2 (2026-10-21): the coordinator runs this once per sprint at the sprint's base
+            # commit, before the first session (no model tokens): the plan's selection, else
+            # the suites its file list affects. Red suites here are PRE-EXISTING later.
+            rc, head = run_cmd(["git", "rev-parse", "HEAD"], g.repo, 30)
+            g.head = head.strip() if rc == 0 and re.fullmatch(r"[0-9a-f]{40}", head.strip()) else None
+            plan, _problem = load_plan(g.repo, sprint, g.head or "HEAD")
+            plan = plan or {}
+            g.index = load_index(g.repo, g.head or "HEAD")
+            explicit = a.selection if a.selection is not None else plan.get("selection")
+            files = [f for f in plan.get("files") or [] if isinstance(f, str)]
+            if plan.get("lane") == "mock":
+                selection = ""
+            elif explicit is not None and str(explicit).strip():
+                selection = str(explicit)
+            else:
+                selection = affected_selection(files, g.index, suite_text=suite_reader(g.repo, g.head or "HEAD"))
+            meta = f"baseline selection={selection or 'none'}"
+            if selection:
+                g.preflight()
+                g.console_base = g.console_lines()
+                g.regression_lane(selection)
+            else:
+                g.add(check("regression.selection", "SKIP", "nothing to baseline (no affected suites)",
+                            required=False))
         elif mode == "regression":
             rc, head = run_cmd(["git", "rev-parse", "HEAD"], g.repo, 30)
             g.head = head.strip() if rc == 0 and re.fullmatch(r"[0-9a-f]{40}", head.strip()) else None
@@ -2403,6 +2510,8 @@ def _run_gate(a, mode, sprint, run_id, out, official, community, run_cmd) -> int
         out(f"ERROR: {error}")
     out(f"VERDICT {rel(g.repo, g.verdict_path)}")
     out(v["summary_line"])
+    if mode == "baseline":
+        return 2 if v["result"] == "ERROR" else 0          # a red baseline is still a baseline
     return 2 if v["result"] == "ERROR" else (0 if v["result"] == "PASS" else 1)
 
 
@@ -2624,6 +2733,10 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--selection", default=None)
     s.add_argument("--tier", choices=["A", "B", "C"], default="B")
     s.add_argument("--base", default="HEAD~1", help="base rev for the comment-only Remotes.lua check")
+    s.add_argument("--background", action="store_true")
+    s = sub.add_parser("baseline", help="regression at HEAD recorded as the sprint's baseline.json")
+    s.add_argument("--sprint", required=True)
+    s.add_argument("--selection", default=None)
     s.add_argument("--background", action="store_true")
     s = sub.add_parser("regression")
     s.add_argument("--selection", required=True)

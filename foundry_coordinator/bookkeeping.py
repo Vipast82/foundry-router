@@ -1,0 +1,121 @@
+"""Deterministic bookkeeping the coordinator does itself, never a model session
+(automation revamp B1/B4/B7, 2026-10-21).
+
+UI-D1 and UI-02a spent ~20 implementer sessions on work with no product content:
+committing the gate's captures and evidence log, ticking plan checklists, writing
+closeout documents. Here the coordinator makes those commits itself and records
+their SHAs in the task data (`coord_commits`), so its own checks can tell its
+commits from the agent's: a hygiene or scope check fails a session only for a
+file the agent changed. The SHA list is the authority, not the commit message,
+which an agent could copy.
+"""
+
+from __future__ import annotations
+
+import re
+from typing import Optional
+
+from .adapters.git import GitError
+from .profile import matches_any
+
+KEY = "coord_commits"            # task data: SHAs of commits the coordinator made
+MAX_KEPT = 200
+
+
+def message(P, tid: str, text: str) -> str:
+    """`text` under the profile's commit prefix ("T1" -> "T1: text")."""
+    prefix = str(P.profile.commit.get("prefix", "{task}") or "{task}").replace("{task}", tid)
+    head = prefix.rstrip()
+    if not head.endswith(":"):
+        head += ":"
+    return f"{head} {text}"
+
+
+def commits(t: dict) -> set:
+    return set((t.get("data") or {}).get(KEY) or [])
+
+
+def commit(c, P, t: dict, paths: list, text: str, kind: str) -> tuple[str, str]:
+    """Commit exactly `paths` in the workspace as the coordinator. (sha, "") on a
+    commit, ("", "") when there was nothing to commit, ("", error) on failure."""
+    tid = t["task_id"]
+    msg = message(P, tid, text)
+    try:
+        sha = P.ws.commit_paths(sorted(paths), msg)
+    except (GitError, OSError) as e:
+        c.store.event(P.id, tid, "coordinator_commit_failed", detail={
+            "kind": kind, "paths": sorted(paths)[:40], "error": str(e)[:400]})
+        return "", str(e)[:400]
+    if not sha:
+        return "", ""
+    cur = c.store.task(P.id, tid) or t
+    kept = list((cur.get("data") or {}).get(KEY) or []) + [sha]
+    c.store.merge_data(P.id, tid, **{KEY: kept[-MAX_KEPT:]})
+    c.store.event(P.id, tid, "coordinator_commit", detail={
+        "kind": kind, "sha": sha, "message": msg, "paths": sorted(paths)[:40],
+        "count": len(paths)})
+    return sha, ""
+
+
+def agent_files(P, t: dict, base: str, head: str) -> Optional[set]:
+    """Files changed base..head by commits the coordinator did NOT make, or None
+    when git can't say (callers then treat every changed file as the agent's)."""
+    mine = commits(t)
+    if not mine:
+        return None
+    try:
+        per = P.ws.commit_files(base, head)
+    except Exception:                                             # noqa: BLE001
+        return None
+    out: set = set()
+    for sha, files in per:
+        if sha not in mine:
+            out.update(f.replace("\\", "/") for f in files)
+    return out
+
+
+def only_coordinator(P, t: dict, base: str, head: str, files: list) -> list:
+    """The subset of `files` that only coordinator commits touched in base..head."""
+    agent = agent_files(P, t, base, head)
+    if agent is None:
+        return []
+    return [f for f in files if f.replace("\\", "/") not in agent]
+
+
+# ---- plan checklist ticks (B4) --------------------------------------------------------
+
+_BOX = re.compile(r"^(\s*(?:[-*+]|\d+[.)])\s*)\[( |~|-|/)\](\s*)(.*)$")
+_DONE = re.compile(r"^\s*(?:[-*+]|\d+[.)])\s*\[[xX]\]")
+
+
+def tick_lines(text: str, verified: dict) -> tuple[str, list]:
+    """Tick open checklist rows of `text` whose wording matches one of `verified`
+    ({regex: evidence line}). The final CLOSE row (the last row) is never ticked:
+    it belongs to closeout. CRLF files keep their line ends. Returns (new text,
+    [ticked row texts])."""
+    lines = text.split("\n")
+    bare = [ln[:-1] if ln.endswith("\r") else ln for ln in lines]
+    rows = [i for i, ln in enumerate(bare) if _BOX.match(ln) or _DONE.match(ln)]
+    if not rows:
+        return text, []
+    last = rows[-1]
+    ticked = []
+    for i in rows:
+        m = _BOX.match(bare[i])
+        if i == last or not m:
+            continue
+        body = m.group(4)
+        for pat, ev in verified.items():
+            if re.search(pat, body, re.I):
+                end = lines[i][len(bare[i]):]
+                lines[i] = (f"{m.group(1)}[x]{m.group(3)}{body} (verified by the coordinator: "
+                            f"{ev}){end}")
+                ticked.append(body[:160])
+                break
+    return "\n".join(lines), ticked
+
+
+def runner_paths(dirty: list, patterns: list, exact: set) -> list:
+    """Dirty paths that are the runner's own outputs (patterns or exact capture paths)."""
+    return sorted({p.replace("\\", "/") for _, p in dirty
+                   if matches_any(p, patterns) or p.replace("\\", "/") in exact})

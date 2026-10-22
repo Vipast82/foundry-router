@@ -124,6 +124,55 @@ class Workspace:
             h.update(f.read())
         return h.hexdigest()[:16]
 
+    def tree(self, revision: str) -> Optional[str]:
+        """The root tree id of `revision` (a content address: equal trees = equal code)."""
+        r = subprocess.run(["git", "-C", self.path, "rev-parse", f"{revision}^{{tree}}"],
+                           capture_output=True, text=True, timeout=60)
+        return r.stdout.strip() if r.returncode == 0 else None
+
+    def commit_files(self, base: str, head: str) -> list[tuple[str, list[str]]]:
+        """[(sha, [files])] for each commit in base..head (newest first)."""
+        if base == head:
+            return []
+        out = self.run("log", "--format=@@%H", "--name-only", "--no-renames", f"{base}..{head}")
+        res: list[tuple[str, list[str]]] = []
+        for line in out.splitlines():
+            line = line.strip()
+            if line.startswith("@@"):
+                res.append((line[2:], []))
+            elif line and res:
+                res[-1][1].append(line)
+        return res
+
+    def commit_paths(self, paths: list[str], message: str) -> str:
+        """Commit exactly `paths` (added, modified or deleted) with `message`; other
+        staged or dirty files are left alone. Returns the new HEAD, or "" when the
+        paths had nothing to commit. Never --no-verify, never amend."""
+        paths = [p for p in dict.fromkeys(paths) if p]
+        if not paths:
+            return ""
+        import tempfile
+        before = self.head()
+        # a pathspec file, not argv: ~500 capture paths overflow the Windows command line
+        fd, spec = tempfile.mkstemp(prefix="foundry-pathspec-", suffix=".txt")
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as f:
+                f.write("\n".join(paths) + "\n")
+            self.run("add", "-A", f"--pathspec-from-file={spec}")
+            want = {p.replace("\\", "/") for p in paths}
+            staged = [p for p in self.run("diff", "--cached", "--name-only",
+                                          "--no-renames").splitlines() if p.strip() in want]
+            if not staged:
+                return ""
+            self.run("commit", "-q", "-m", message, f"--pathspec-from-file={spec}")
+        finally:
+            try:
+                os.remove(spec)
+            except OSError:
+                pass
+        after = self.head()
+        return after if after != before else ""
+
     def remote_head(self, remote: str, branch: str) -> Optional[str]:
         out = self.run("ls-remote", remote, f"refs/heads/{branch}", timeout=60)
         line = out.strip().splitlines()

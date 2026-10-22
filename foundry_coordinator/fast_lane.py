@@ -93,6 +93,14 @@ def settings(P) -> dict:
     return dict(fl) if isinstance(fl, dict) else dict(FAST_LANE_DEFAULTS)
 
 
+def runner_patterns(P, task_id: str) -> tuple[list, list]:
+    """([runner_outputs], [runner_captures]) for the task ({task} filled in): files the
+    studio_gate runner writes. The coordinator commits them; they are never the agent's."""
+    s = settings(P)
+    return ([x.replace("{task}", task_id) for x in s.get("runner_outputs") or []],
+            [x.replace("{task}", task_id) for x in s.get("runner_captures") or []])
+
+
 def is_task(P, task_id: str) -> bool:
     fn = getattr(P.profile, "fast_lane_task", None)
     try:
@@ -246,15 +254,124 @@ class FastLane:
 
     # -- the runner --------------------------------------------------------------
 
-    def _command(self, P, tid: str, files: list[str], run_id: str) -> list[str]:
+    def _runner(self, P, run_id: str) -> list[str]:
         gm = settings(P)["gate_module"].strip()
         if gm.endswith(".py"):
             path = gm if os.path.isabs(gm) else os.path.join(ROUTER_ROOT, gm)
             cmd = [sys.executable, path]
         else:
             cmd = [sys.executable, "-m", gm]
-        return cmd + ["--repo", P.profile.workspace, "--run-id", run_id, "sprint", "--sprint", tid,
-                      "--files", ",".join(files)]
+        return cmd + ["--repo", P.profile.workspace, "--run-id", run_id]
+
+    def _command(self, P, tid: str, files: list[str], run_id: str) -> list[str]:
+        return self._runner(P, run_id) + ["sprint", "--sprint", tid, "--files", ",".join(files)]
+
+    def _spawn(self, cmd: list, log: str, run_id: str):
+        """Start the runner detached (its own process group, no console window): it
+        outlives a tick and a coordinator restart. Returns the Popen."""
+        env = dict(os.environ)
+        env["PYTHONPATH"] = ROUTER_ROOT + (os.pathsep + env["PYTHONPATH"]
+                                           if env.get("PYTHONPATH") else "")
+        env["FOUNDRY_GATE_RUN_ID"] = run_id
+        env["PYTHONIOENCODING"] = "utf-8"             # stdout is a log file: never cp1252
+        flags = 0
+        if os.name == "nt":
+            flags = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0) | 0x08000000
+        with open(log, "w", encoding="utf-8") as lf:
+            lf.write("$ " + " ".join(cmd) + "\n")
+            lf.flush()
+            return subprocess.Popen(cmd, cwd=ROUTER_ROOT, stdout=lf, stderr=subprocess.STDOUT,
+                                    stdin=subprocess.DEVNULL, env=env, creationflags=flags)
+
+    # -- the automatic baseline (B2) -----------------------------------------------------
+
+    def baseline_hold(self, P, t: dict) -> bool:
+        """B2 (2026-10-21): before a fast-lane sprint's FIRST session, while the workspace
+        is still at the sprint's base commit, the coordinator runs the runner's `baseline`
+        mode once (regression only, no model tokens) and it becomes baseline.json: suites
+        already red at the base are PRE-EXISTING in every sprint gate (UI-02a lost ~4 h to
+        reds that a manual baseline later proved pre-existing), and suites that passed
+        there carry. True = the first session waits (the runner holds Studio). Fails open:
+        an errored baseline only means a strict gate, as before."""
+        tid = t["task_id"]
+        if not settings(P).get("auto_baseline", True) or (t.get("data") or {}).get("task_base"):
+            return False
+        fl = self._fl(P, tid)
+        b = dict(fl.get("baseline") or {})
+        if b.get("status") in ("done", "skipped", "error"):
+            return False
+        gd = self._gate_dir(P, tid)
+        if not b:
+            if os.path.exists(os.path.join(gd, "baseline.json")):
+                fl["baseline"] = {"status": "skipped", "why": "baseline.json already present"}
+                self._save(P, tid, fl)
+                return False
+            if self.c._held(P, t, "baseline start"):
+                return True
+            try:
+                head = P.ws.head()
+            except Exception as e:                                # noqa: BLE001
+                return self._baseline_done(P, t, {"status": "error"}, f"git: {e}")
+            run_id = f"{tid}-base-{head[:12]}-{secrets.token_hex(6)}"
+            log = os.path.join(evidence_dir(self.c.state_dir, P.id, tid, head),
+                               "fast_lane_baseline.log")
+            cmd = self._runner(P, run_id) + ["baseline", "--sprint", tid]
+            try:
+                proc = self._spawn(cmd, log, run_id)
+            except OSError as e:
+                return self._baseline_done(P, t, {"status": "error"}, f"could not start: {e}")
+            self._procs[(P.id, tid, f"baseline:{head}")] = proc
+            fl["baseline"] = {"status": "running", "head": head, "run_id": run_id, "pid": proc.pid,
+                              "log": log, "started": self.clock(), "wall": time.time()}
+            self._save(P, tid, fl)
+            self.store.event(P.id, tid, "fast_lane_baseline_started", detail={
+                "head": head, "pid": proc.pid, "run_id": run_id, "log": log})
+            self.c._note(P, t, f"automatic baseline running at {head[:12]} before the first "
+                               f"session (no model tokens)")
+            return True
+        head = str(b.get("head") or "")
+        v = _read_json(os.path.join(gd, f"{head[:12]}.baseline.json"))
+        if v and v.get("run_id") == b.get("run_id") and v.get("mode") == "baseline" \
+                and v.get("head") == head:
+            self._procs.pop((P.id, tid, f"baseline:{head}"), None)
+            if str(v.get("result") or "").upper() == "ERROR":
+                return self._baseline_done(P, t, b, f"runner error: {str(v.get('error'))[:300]}")
+            red = [str(c.get("id")) for c in v.get("checks") or [] if isinstance(c, dict)
+                   and str(c.get("id", "")).startswith("regression.")
+                   and str(c.get("result") or "").upper() in ("FAIL", "UNKNOWN")]
+            b.update(status="done", result=v.get("result"), pre_existing=red[:60])
+            fl = self._fl(P, tid)
+            fl["baseline"] = b
+            self._save(P, tid, fl)
+            self.store.event(P.id, tid, "fast_lane_baseline", detail={
+                "head": head, "result": v.get("result"), "red": red[:30],
+                "summary": v.get("summary_line")})
+            return False
+        proc = self._procs.get((P.id, tid, f"baseline:{head}"))
+        if proc is not None and proc.poll() is not None:
+            self._procs.pop((P.id, tid, f"baseline:{head}"), None)
+            return self._baseline_done(P, t, b, f"the runner exited with code {proc.returncode} "
+                                                f"without a baseline verdict")
+        st = _read_json(os.path.join(gd, "status.json")) or {}
+        if proc is None and st.get("pid") == b.get("pid") and st.get("phase") == "done":
+            return self._baseline_done(P, t, b, "the runner finished without a baseline verdict")
+        limit = float(settings(P)["gate_timeout_minutes"]) * 60
+        elapsed = self.clock() - float(b.get("started") or self.clock())
+        if elapsed > limit:
+            self._kill(P, tid, {"head": f"baseline:{head}", "pid": b.get("pid")}, "baseline timeout")
+            return self._baseline_done(P, t, b, f"did not finish within {int(limit // 60)} minutes")
+        self.c._note(P, t, f"automatic baseline running at {head[:12]}: phase "
+                           f"{st.get('phase') or 'starting'} {st.get('progress') or ''}, "
+                           f"{int(elapsed // 60)}:{int(elapsed % 60):02d}")
+        return True
+
+    def _baseline_done(self, P, t: dict, b: dict, why: str) -> bool:
+        tid = t["task_id"]
+        fl = self._fl(P, tid)
+        fl["baseline"] = {**b, "status": "error", "error": why[:500]}
+        self._save(P, tid, fl)
+        self.store.event(P.id, tid, "fast_lane_baseline_error", detail={"reason": why[:500]})
+        return False
 
     def _start(self, P, t: dict, spec, head: str) -> Optional[list]:
         tid = t["task_id"]
@@ -275,22 +392,8 @@ class FastLane:
         run_id = f"{tid}-{head[:12]}-{secrets.token_hex(8)}"
         cmd = self._command(P, tid, files, run_id)
         log = os.path.join(evidence_dir(self.c.state_dir, P.id, tid, head), "fast_lane_gate.log")
-        env = dict(os.environ)
-        env["PYTHONPATH"] = ROUTER_ROOT + (os.pathsep + env["PYTHONPATH"]
-                                           if env.get("PYTHONPATH") else "")
-        env["FOUNDRY_GATE_RUN_ID"] = run_id
-        env["PYTHONIOENCODING"] = "utf-8"             # stdout is a log file: never cp1252
-        flags = 0
-        if os.name == "nt":
-            # its own process group, no console window: it outlives a tick (and a
-            # coordinator restart) and is never killed by a Ctrl+C meant for us
-            flags = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0) | 0x08000000
         try:
-            with open(log, "w", encoding="utf-8") as lf:
-                lf.write("$ " + " ".join(cmd) + "\n")
-                lf.flush()
-                proc = subprocess.Popen(cmd, cwd=ROUTER_ROOT, stdout=lf, stderr=subprocess.STDOUT,
-                                        stdin=subprocess.DEVNULL, env=env, creationflags=flags)
+            proc = self._spawn(cmd, log, run_id)
         except OSError as e:
             return self._error(P, t, head, [], f"the studio gate could not be started: {e}")
         self._procs[(P.id, tid, head)] = proc
@@ -352,8 +455,86 @@ class FastLane:
             return False
         caps = [str(c.get("path")) for c in (v or {}).get("captures") or []
                 if isinstance(c, dict) and c.get("path")]
-        allowed = list(P.adapter.exempt_paths(spec)) + caps
-        return all(matches_any(f, allowed) for f in changed)
+        outs, rcaps = runner_patterns(P, spec.task_id) if spec is not None else ([], [])
+        allowed = list(P.adapter.exempt_paths(spec)) + caps + outs + rcaps
+        rest = [f for f in changed if not matches_any(f, allowed)]
+        if rest and spec is not None:
+            # B1: a coordinator commit (runner outputs, checklist ticks) never invalidates
+            # the gate it followed
+            from . import bookkeeping as BK
+            t = self.store.task(P.id, spec.task_id) or {}
+            mine = set(BK.only_coordinator(P, t, gate_head, head, rest))
+            rest = [f for f in rest if f not in mine]
+        return not rest
+
+    def _commit_runner_files(self, P, t: dict, v: dict, spec=None,
+                             run: Optional[dict] = None) -> tuple[str, str]:
+        """B1 (2026-10-21): the coordinator commits the runner's outputs itself (the
+        verdict's captures, the task's runner_captures folder, its runner_outputs such as
+        the evidence log) instead of asking the session to. UI-D1 spent attempts 3-7 on
+        "commit its captures" turns. B4: the same commit ticks the plan checklist rows the
+        green gate verifies. (sha, "") | ("", "") nothing to commit | ("", error)."""
+        from . import bookkeeping as BK
+        tid = t["task_id"]
+        outs, caps = runner_patterns(P, tid)
+        exact = {str(c.get("path")).replace("\\", "/") for c in v.get("captures") or []
+                 if isinstance(c, dict) and c.get("path")}
+        try:
+            dirty = P.ws.status()
+        except Exception as e:                                    # noqa: BLE001
+            return "", str(e)[:300]
+        paths = [p for p in BK.runner_paths(dirty, outs + caps, exact)
+                 if P.profile.in_workspace(p)]
+        ticked = self._tick_plan(P, t, spec, v, run or {}, dirty, exact)
+        if ticked:
+            paths.append(ticked)
+        if not paths:
+            return "", ""
+        what = "gate captures and runner outputs" + (
+            ", verified checklist ticks" if ticked else "")
+        return BK.commit(self.c, P, t, paths, f"{what} (coordinator)",
+                         "runner_outputs" + ("+checklist" if ticked else ""))
+
+    def _tick_plan(self, P, t: dict, spec, v: dict, run: dict, dirty: list,
+                   caps: set) -> str:
+        """B4 (2026-10-21): tick the plan checklist rows a green gate verifies (rows about
+        the gate, and about captures when the gate made some), each with its evidence;
+        never the final CLOSE row, never a plan with uncommitted edits. UI-D1's three
+        Deep-Reviews blocked on unticked BUILD rows. Returns the plan path when changed."""
+        from . import bookkeeping as BK
+        if spec is None or not settings(P).get("tick_checklist", True):
+            return ""
+        plan = str((getattr(spec, "data", None) or {}).get("plan") or "").replace("\\", "/")
+        if not plan or not P.profile.in_workspace(plan) or \
+                plan in {p.replace("\\", "/") for _, p in dirty}:
+            return ""
+        path = os.path.join(P.profile.workspace, *plan.split("/"))
+        try:
+            with open(path, encoding="utf-8", newline="") as f:
+                text = f.read()
+        except OSError:
+            return ""
+        tid = t["task_id"]
+        full = str(run.get("head") or v.get("head") or "")
+        gh = full[:12]
+        verified = {r"\bgate\b(?!\.json)": f"GATE {tid} PASS at {gh}, {verdict_rel(tid, full)}"}
+        if caps:
+            verified[r"\b(?:captures?|screenshots?)\b"] = (
+                f"{len(caps)} capture(s) from the gate at {gh}, committed by the coordinator")
+        new, rows = BK.tick_lines(text, verified)
+        if not rows:
+            return ""
+        try:
+            with open(path, "w", encoding="utf-8", newline="") as f:
+                f.write(new)
+        except OSError:
+            return ""
+        fl = self._fl(P, tid)
+        fl["ticked"] = (list(fl.get("ticked") or []) + rows)[-40:]
+        self._save(P, tid, fl)
+        self.store.event(P.id, tid, "checklist_ticked", detail={"plan": plan, "rows": rows[:20],
+                                                                 "gate_head": gh})
+        return plan
 
     def _proc(self, P, tid: str, run: dict):
         return self._procs.get((P.id, tid, run.get("head")))
@@ -413,9 +594,13 @@ class FastLane:
 
     def abort(self, P, tid: str, why: str) -> None:
         """The task was cancelled: stop its runner (best effort)."""
-        run = self._fl(P, tid).get("run")
+        fl = self._fl(P, tid)
+        run = fl.get("run")
         if run:
             self._kill(P, tid, run, why)
+        b = fl.get("baseline") or {}
+        if b.get("status") == "running":
+            self._kill(P, tid, {"head": f"baseline:{b.get('head')}", "pid": b.get("pid")}, why)
 
     def _log_tail(self, run: dict, n: int = 1500) -> str:
         try:
@@ -552,9 +737,27 @@ class FastLane:
                                + "; ".join(failed_check_lines(v)[:4]))
         if res != PASS:
             return self._red(P, t, spec, head, generic + rows, v, vkey, first)
-        # PASS: the gate's captures (and nothing else) may still be uncommitted
+        # PASS: the runner's own outputs are committed by the coordinator (B1), then this
+        # verdict is re-read at the new head next tick (a coordinator commit carries it)
+        sha, cerr = self._commit_runner_files(P, t, v, spec, run)
+        if sha:
+            self.c._note(P, t, f"studio gate PASS at {run['head'][:12]}; the coordinator "
+                               f"committed its captures and outputs at {sha[:12]}")
+            return None
         bad = [r for r in generic if r.required and r.result != PASS]
-        if bad:
+        if bad and not cerr:
+            # what is left is the agent's own work (B1: runner outputs never land here)
+            vid = self.store.save_verification(P.id, tid, head, "verify", generic + rows)
+            lines = failed_findings(bad)
+            key = f"fast-lane:checks-after:{head[:12]}:" + hashlib.sha1(
+                "\n".join(lines).encode()).hexdigest()[:10]
+            return self._continue(P, t, spec, head, vid, key,
+                                  f"Studio gate PASS at {run['head'][:12]}, but the "
+                                  f"coordinator's checks failed", lines,
+                                  "the studio gate passed; the coordinator's checks did not")
+        if cerr:
+            # the coordinator could not commit the runner outputs itself (a hook refused,
+            # git failed): the old path, the session commits them
             vid = self.store.save_verification(P.id, tid, head, "verify", generic + rows)
             caps = [str(c.get("path")) for c in v.get("captures") or []
                     if isinstance(c, dict) and c.get("path")]
@@ -576,10 +779,17 @@ class FastLane:
                 f"captures\"), nothing else: `git add -A -- {' '.join(dirs)}` then commit. "
                 f"That is the gate's {len(caps)} capture(s) plus {len(other)} other re-rendered "
                 f"frame(s) in the same folder (e.g. {', '.join(other[:5])})"] if caps or other
-                else [])
+                else []) + [f"(the coordinator's own commit of these files failed: "
+                            f"{cerr[:200]})"]
             return self._continue(P, t, spec, head, vid, f"fast-lane:commit:{head}",
                                   f"Studio gate PASS at {run['head'][:12]}: commit its captures",
                                   lines, "the studio gate passed; its captures must be committed")
+        if settings(P).get("early_review", True):
+            # B4: the code review needs only the green gate, not the look: it starts now and
+            # runs while the vision batches do; both feed ONE fix round
+            if (P.id, tid, head) not in self.c._early_reviews:
+                vid0 = self.store.save_verification(P.id, tid, head, "verify", generic + rows)
+                self.c.early_review_start(P, self.store.task(P.id, tid) or t, head, vid0)
         vision = self._vision(P, t, spec, head, run, v, generic + rows)
         if vision is None:
             return None
@@ -655,16 +865,18 @@ class FastLane:
     # -- same-session continuation -----------------------------------------------------
 
     def _continue(self, P, t: dict, spec, head: str, vid: str, key: str, title: str,
-                  lines: list, reason: str, extra: str = "") -> Optional[list]:
+                  lines: list, reason: str, extra: str = "",
+                  review_id: str = "") -> Optional[list]:
         tid = t["task_id"]
         sid = t.get("session_id") or ""
         if sid and self.store.op(f"deliver:{P.id}:{tid}:{sid}:{key}"):
             # this exact prompt already went to this session and it came back
             # unchanged: no loop, the ordinary repair path takes over
-            return self._fallback(P, t, vid, lines)
+            return self._fallback(P, t, vid, lines, review_id)
         fl = self._fl(P, tid)
         fl["pending"] = {"key": key, "head": head, "vid": vid, "title": title,
-                         "lines": list(lines)[:30], "reason": reason, "extra": extra}
+                         "lines": list(lines)[:30], "reason": reason, "extra": extra,
+                         "review_id": review_id}
         self._save(P, tid, fl)
         return self._send(P, self.store.task(P.id, tid), spec, head, fl["pending"])
 
@@ -672,14 +884,14 @@ class FastLane:
         tid = t["task_id"]
         sid = t.get("session_id") or ""
         if not sid or not self.store.session(sid):
-            return self._fallback(P, t, pend["vid"], pend["lines"])
+            return self._fallback(P, t, pend["vid"], pend["lines"], pend.get("review_id") or "")
         try:
             gone = P.client.state(sid, directory=P.profile.workspace,
                                   since_ts=0).status == "missing"
         except Exception:                                         # noqa: BLE001
             gone = False                 # unknown: the prompt decides
         if gone:
-            return self._fallback(P, t, pend["vid"], pend["lines"])
+            return self._fallback(P, t, pend["vid"], pend["lines"], pend.get("review_id") or "")
         if self.c._held(P, t, "fast-lane continuation"):
             return None                  # kept pending for the resume
         if self.c._acquire(P, t, self.c._session_locks(P), writer=True):
@@ -688,12 +900,13 @@ class FastLane:
                 + f"\n\n## {pend['title']} (from the coordinator; fix it in this session)\n"
                 + "\n".join(f"{i}. {x}" for i, x in enumerate(pend["lines"], 1)) + "\n"
                 + (pend.get("extra") or "")
-                + "\nFix the cause within the plan's file list. Re-run ONLY what failed: "
-                  "`stories --sprint <ID> --story <name>` for each failing story, and "
-                  "`regression --selection <failing suite ids>` for each failing suite. Do not "
-                  "start `sprint` yourself and do not re-run checks that passed: passed work is "
-                  "recorded and carried. Commit by explicit path, then report DONE: the "
-                  "coordinator's gate re-runs only what failed or what your change touched. "
+                + "\nFix the cause within the plan's file list. Check your fix with `stories "
+                  "--sprint <ID> --story <name>` for each failing story and the Lune specs of "
+                  "the models you touched, nothing else: never run `sprint` or `regression` "
+                  "yourself and do not re-run checks that passed (passed work is recorded and "
+                  "carried). Commit by explicit path, then report DONE: the coordinator runs "
+                  "the one gate, re-running only what failed or what your change touched; it "
+                  "commits the runner's captures and logs itself. "
                   "Never weaken a check, skip a story "
                   "or edit the runner to get PASS. If a finding needs a decision the plan "
                   "doesn't settle, report BLOCKED with one question.\n")
@@ -703,20 +916,22 @@ class FastLane:
             self.c._release_session(P, t)
             self.store.event(P.id, tid, "warning", session_id=sid, detail={
                 "fast_lane": f"continuation failed ({pend['key']}): {type(e).__name__}: {e}"[:400]})
-            return self._fallback(P, t, pend["vid"], pend["lines"])
+            return self._fallback(P, t, pend["vid"], pend["lines"], pend.get("review_id") or "")
         fl = self._fl(P, tid)
         fl.pop("pending", None)
         self._save(P, tid, fl)
         self.store.event(P.id, tid, "fast_lane_continuation", session_id=sid, detail={
             "key": pend["key"], "sent": sent, "resumed": resumed, "title": pend["title"],
             "findings": pend["lines"][:10]})
-        self.store.transition(P.id, tid, S.IMPLEMENTING, {
-            "verification_id": pend["vid"], "session_id": sid, "continuation": pend["key"],
-            "fast_lane": pend["title"]}, phase="implement", head_sha=head,
+        ev = {"verification_id": pend["vid"], "session_id": sid, "continuation": pend["key"],
+              "fast_lane": pend["title"]}
+        if pend.get("review_id"):
+            ev["review_id"] = pend["review_id"]          # (REVIEWING -> IMPLEMENTING, B4)
+        self.store.transition(P.id, tid, S.IMPLEMENTING, ev, phase="implement", head_sha=head,
             next_action=f"session working (fast lane: {pend['title']})"[:500])
         return None
 
-    def _fallback(self, P, t: dict, vid: str, lines: list) -> None:
+    def _fallback(self, P, t: dict, vid: str, lines: list, review_id: str = "") -> None:
         tid = t["task_id"]
         fl = self._fl(P, tid)
         fl.pop("pending", None)
@@ -725,9 +940,13 @@ class FastLane:
         self.c._release_session(P, cur)
         findings = list(lines) or ["fast lane: the studio gate did not pass"]
         self.store.event(P.id, tid, "fast_lane_fallback", detail={"findings": findings[:10]})
-        self.store.transition(P.id, tid, S.CHANGES_REQUIRED, {
-            "verification_id": vid, "findings": findings}, verification_id=vid,
-            data={**cur["data"], "findings": findings})
+        ev = {"verification_id": vid, "findings": findings}
+        kw = {"verification_id": vid} if vid else {}
+        if review_id:
+            ev["review_id"] = review_id
+            kw["review_id"] = review_id
+        self.store.transition(P.id, tid, S.CHANGES_REQUIRED, ev,
+                              data={**cur["data"], "findings": findings}, **kw)
         return None
 
     # -- vision approval ---------------------------------------------------------------
@@ -771,6 +990,7 @@ class FastLane:
         frames, arts, problem = self._frames(P, caps)
         if problem:
             return self._error(P, t, head, results, f"vision approval: {problem}")
+        all_frames = list(frames)
         dirty = {p.replace("\\", "/") for _, p in P.ws.status()}
         if any(rel in dirty for rel in arts):
             self.c._note(P, t, "fast-lane vision approval waits for committed capture bytes")
@@ -807,7 +1027,7 @@ class FastLane:
         # vision memory (2026-10-21): a frame the reviewer already judged clean (seen, valid, no
         # finding) at these exact bytes is never sent again, in any round. Only frames that
         # changed or had findings are reviewed.
-        clean = set(fl.get("vision_clean") or [])
+        clean = VA.clean_memory(self.store.task(P.id, tid) or t)
         if clean:
             todo = [f for f in frames if arts[f[0]] not in clean]
             if not todo:
@@ -820,54 +1040,269 @@ class FastLane:
             frames = todo
         fp = hashlib.sha256(json.dumps([run["head"], arts], sort_keys=True).encode()).hexdigest()
         tries = int((fl.get("vision_uncertain") or {}).get(fp, 0))
-        # Batches (UI-D1, 2026-10-20: ~560 frames in ONE call came back "uncertain" because
-        # no model reliably returns a row per frame at that size). One idempotent call per
-        # batch, at most one call per tick; every batch must approve; findings merge.
+        # Batches (UI-D1, 2026-10-20: ~560 frames in ONE call came back "uncertain"). B3
+        # (2026-10-21): a round's batches are cut once and kept, so the clean-frame memory
+        # saved after each batch never re-cuts the batches still to come; up to
+        # [fast_lane] vision_parallel batch calls run at once (a pass took 30-39 min one
+        # call per tick); every batch must approve; findings merge.
         size = max(1, int(settings(P).get("vision_batch_frames") or 20))
-        batches = [frames[i:i + size] for i in range(0, len(frames), size)]
-        results_b, served_all = [], set()
+        rnd = fl.get("vision_round") or {}
+        if rnd.get("fp") != fp:
+            rnd = {"fp": fp, "batches": [[rel for rel, _m, _b in frames[i:i + size]]
+                                         for i in range(0, len(frames), size)]}
+            fl["vision_round"] = rnd
+            self._save(P, tid, fl)
+        by_rel = {f[0]: f for f in all_frames}
+        batches = [[by_rel[r] for r in b if r in by_rel] for b in rnd["batches"]]
+        batches = [b for b in batches if b]
+        total = sum(len(b) for b in batches)
+        for _pass in range(2):
+            results_b, pending, waiting = self._vision_state(P, tid, fp, tries, batches, arts,
+                                                             size)
+            if pending and _pass == 0:
+                if self.c._held(P, t, "vision review"):
+                    return None
+                self._vision_calls(P, t, spec, head, run, v, persona, routes, pending, tries,
+                                   results_b, len(batches), total, arts)
+                continue
+            break
+        if pending or waiting:
+            return None
+        served_all = {r.get("served_model") or "unknown" for r in results_b}
+        verdicts = [r.get("verdict") for r in results_b]
+        findings, unsure = [], []
+        for bi, r in enumerate(results_b):
+            pre = f"[batch {bi + 1}/{len(results_b)}] " if len(results_b) > 1 else ""
+            if r.get("verdict") == "changes_required":
+                findings += [pre + str(f) for f in (r.get("findings") or [])]
+            elif r.get("verdict") != "approve":
+                unsure.append(pre + "; ".join(str(f) for f in (r.get("findings") or [])[:2]))
+        served = ",".join(sorted(served_all)) or "unknown"
+        actor = f"model:{persona}/{served}"
+        if unsure and tries < 1:
+            # one structured retry (B3): only the inconclusive batches are asked again, in
+            # small chunks with a JSON schema; decisive batches are kept
+            fl = self._fl(P, tid)
+            unc = dict(fl.get("vision_uncertain") or {})
+            unc[fp] = tries + 1
+            fl["vision_uncertain"] = unc
+            self._save(P, tid, fl)
+            self.c._note(P, t, f"fast-lane vision review: {len(unsure)} batch(es) inconclusive; "
+                               f"one structured retry")
+            return None
+        if all(x == "approve" for x in verdicts):
+            self.store.add_approval(P.id, tid, "visual", head, arts, actor,
+                                    f"fast-lane vision approval at gate {run['head'][:12]}; "
+                                    f"policy visual_model v1")
+            return VerificationResult("fast_lane.vision", PASS, True, "",
+                                      f"APPROVED by {actor} ({total} frame(s))", head)
+        unsure_notes = [f"inconclusive after one structured retry (accepted with notes): {u}"[:400]
+                        for u in unsure]
+        if findings:
+            fl = self._fl(P, tid)
+            rounds = int(fl.get("vision_rounds") or 0)
+            mx = int(settings(P)["max_vision_rounds"])
+            if rounds < mx:
+                # B4: a code review running alongside joins this fix round (one round, one
+                # warm session); wait for it rather than send two rounds
+                merged = self._review_for_merge(P, t, head)
+                if merged == "wait":
+                    self.c._note(P, t, "vision asks for changes; waiting for the code review in "
+                                       "flight to send one merged fix round")
+                    return None
+                fl = self._fl(P, tid)
+                fl["vision_rounds"] = rounds + 1
+                self._save(P, tid, fl)
+                vid = self.store.save_verification(P.id, tid, head, "verify", results + [
+                    VerificationResult("fast_lane.vision", FAIL, True, "",
+                                       "CHANGES: " + " | ".join(findings[:6]), head)])
+                return self._vision_changes(P, t, spec, head, vid, fp, rounds + 1, mx,
+                                            findings[:60] + unsure_notes, merged)
+        # accept with notes: CHANGES after the fix rounds, or batches still inconclusive after
+        # the one structured retry (never a stop: the operator decided 2026-10-21)
+        fl = self._fl(P, tid)
+        rounds = int(fl.get("vision_rounds") or 0)
+        notes = (findings[:30] + unsure_notes)[:40]
+        fl["vision_notes"] = (list(fl.get("vision_notes") or []) + notes)[-60:]
+        self._save(P, tid, fl)
+        why = (f"after {rounds} CHANGES round(s)" if findings else
+               f"{len(unsure)} batch(es) inconclusive after one structured retry")
+        self.store.add_approval(P.id, tid, "visual", head, arts,
+                                f"coordinator:fast_lane ({actor})",
+                                f"accepted with notes {why}: " + " | ".join(notes)[:1500])
+        self.store.event(P.id, tid, "fast_lane_vision_accepted_with_notes", detail={
+            "rounds": rounds, "notes": notes[:20], "head": head,
+            "inconclusive": len(unsure)})
+        return VerificationResult("fast_lane.vision", PASS, True, "",
+                                  f"accepted with notes {why} (follow-ups): "
+                                  + " | ".join(notes[:8]), head)
+
+    def _vision_changes(self, P, t: dict, spec, head: str, vid: str, fp: str, rnd: int, mx: int,
+                        findings: list, review: Optional[dict] = None) -> Optional[VerificationResult]:
+        """Vision CHANGES go back into the same session (one fix round); with a code
+        review's CHANGES at the same head, both in ONE prompt (B4)."""
+        lines = list(findings or ["changes required"])
+        title = f"Vision review: CHANGES (round {rnd}/{mx})"
+        key = f"fast-lane:vision:{fp}"
+        if review:
+            lines = [f"vision: {x}" for x in lines] + review["lines"]
+            title += f" + code review {review['review_id']}: CHANGES_REQUIRED"
+            key += f":review:{review['review_id']}"
+        return self._continue(P, t, spec, head, vid, key, title, lines[:60],
+                              "the vision reviewer" + (" and the code reviewer" if review else "")
+                              + " asked for changes")
+
+    def _review_for_merge(self, P, t: dict, head: str):
+        """B4: "wait" while the early review of `head` runs; its CHANGES_REQUIRED (lines,
+        id) once done; None when there is nothing to merge."""
+        from . import review as R
+        tid = t["task_id"]
+        got = self.c.early_review_collect(P, t, head)
+        if got == "running":
+            return "wait"
+        revs = [r for r in self.store.reviews(P.id, tid, head) if r["valid"]
+                and r["verdict"] == "CHANGES_REQUIRED" and R.packet_version(r) == R.PACKET_VERSION]
+        if not revs:
+            return None
+        rev = revs[-1]
+        lines = ["code review: " + x for x in (R.findings_for_repair(rev["result"] or {})
+                                              or ["the reviewer asked for changes"])]
+        self.store.event(P.id, tid, "fast_lane_merged_fix_round", detail={
+            "head": head, "review_id": rev["review_id"], "review_findings": lines[:10]})
+        return {"review_id": rev["review_id"], "lines": lines[:30]}
+
+    def review_changes(self, P, t: dict, rev: dict, findings: list) -> bool:
+        """B4: a code review's CHANGES_REQUIRED goes back into the same warm session
+        (fast lane), like a red gate or vision CHANGES, instead of a cold repair
+        session. False = not handled here (no session): the caller's repair path."""
+        tid = t["task_id"]
+        if not t.get("session_id") or not settings(P).get("early_review", True):
+            return False
+        spec = P.adapter.describe(tid)
+        self._continue(P, t, spec, rev["reviewed_sha"], t.get("verification_id") or "",
+                       f"fast-lane:review:{rev['review_id']}",
+                       f"Code review {rev['review_id']}: CHANGES_REQUIRED",
+                       findings or ["the reviewer asked for changes"],
+                       "the code reviewer asked for changes", review_id=rev["review_id"])
+        return True
+
+    def review_evidence(self, P, t: dict, spec, head: str) -> list:
+        """B4: the coordinator's own evidence for the review packet, built from what it
+        verified itself: the gate verdict (with carried and pre-existing checks), the
+        captures and vision state, and its bookkeeping commits (runner outputs,
+        checklist ticks), which are never review findings."""
+        from . import bookkeeping as BK
+        tid = t["task_id"]
+        fl = self._fl(P, tid)
+        run = fl.get("run") or {}
+        v = self._verdict(P, tid, run) if run.get("head") else None
+        items = []
+        if v:
+            checks = [c for c in v.get("checks") or [] if isinstance(c, dict)]
+            res = effective_result(v)
+            carried = [c.get("id") for c in checks if "CARRIED from" in str(c.get("detail") or "")]
+            pre = [c.get("id") for c in checks if "PRE-EXISTING" in str(c.get("detail") or "")]
+            lines = [f"{v.get('summary_line') or ''} at {run['head']} (run {run.get('run_id')}, "
+                     f"mode {v.get('mode')})",
+                     f"effective result {res}: {len(checks)} check(s), "
+                     f"{sum(1 for c in checks if c.get('result') == 'PASS')} PASS, "
+                     f"{len(carried)} carried from earlier verdicts (inputs unchanged), "
+                     f"{len(pre)} pre-existing at the sprint's baseline"]
+            for c in checks[:80]:
+                ln = f"- {c.get('id')}: {c.get('result')}"
+                if not c.get("required", True):
+                    ln += " (advisory)"
+                if c.get("result") != "PASS" or c.get("id") in pre:
+                    ln += f" - {str(c.get('detail') or '')[:160]}"
+                lines.append(ln)
+            same = run["head"] == head
+            items.append({"title": f"{tid} studio gate verdict (read by the coordinator)",
+                          "path": verdict_rel(tid, run["head"]), "revision": run["head"],
+                          "text": "\n".join(lines), "status": "ok", "priority": 1,
+                          "note": "the coordinator ran this gate itself; " + (
+                              "at the reviewed commit" if same else
+                              f"at {run['head'][:12]}; only coordinator-committed or evidence "
+                              f"files changed since")})
+            caps = [c for c in v.get("captures") or [] if isinstance(c, dict) and c.get("path")]
+            if caps:
+                apr = self.store.approvals(P.id, tid, "visual")
+                vis = (f"visual approval at {str(apr[-1]['revision'])[:12]} by "
+                       f"{apr[-1]['approver']}: {str(apr[-1].get('note') or '')[:300]}"
+                       if apr else "vision review not finished when this packet was built "
+                                   "(it runs alongside this review)")
+                items.append({"title": f"{tid} gate captures and vision (coordinator)",
+                              "path": "", "revision": head, "status": "ok", "priority": 3,
+                              "text": f"{len(caps)} capture(s) from the gate, committed by the "
+                                      f"coordinator: " + ", ".join(str(c['path']) for c in caps[:30])
+                                      + ("" if len(caps) <= 30 else f" and {len(caps) - 30} more")
+                                      + f"\n{vis}"})
+        mine = BK.commits(self.store.task(P.id, tid) or t)
+        ticked = list(fl.get("ticked") or [])
+        if mine or ticked:
+            text = ["Bookkeeping the coordinator does itself (verified by it; not the "
+                    "implementer's work and never a review finding):"]
+            if mine:
+                text.append(f"- {len(mine)} coordinator commit(s) of runner outputs "
+                            f"(captures, evidence log) and checklist ticks")
+            text += [f"- ticked by the coordinator: {r}" for r in ticked[:20]]
+            text.append("- closeout documents (summary, state row) are written by the "
+                        "coordinator after approval")
+            items.append({"title": "coordinator bookkeeping (not for review)", "path": "",
+                          "revision": head, "status": "ok", "priority": 4,
+                          "text": "\n".join(text)})
+        return items
+
+    def _vision_state(self, P, tid: str, fp: str, tries: int, batches: list, arts: dict,
+                      size: int):
+        """(results of finished batches in order, [pending call units], waiting?). A
+        unit is one call: a whole batch on the first try, a chunk of an inconclusive
+        batch on the retry. Saves the clean-frame memory of every finished batch."""
+        from . import visual_approval as VA
+        results_b, pending, waiting = [], [], False
+        newly = []
         for bi, batch in enumerate(batches):
-            barts = {rel: arts[rel] for rel, _m, _b in batch}
             suffix = f":b{bi + 1}of{len(batches)}" if len(batches) > 1 else ""
             key = f"fast-lane-vision:{P.id}:{tid}:{fp}:{tries}{suffix}"
             reused = None
-            for earlier in range(tries):     # a retry re-asks only the inconclusive batches
+            for earlier in range(tries + 1):
                 op = self.store.op(f"fast-lane-vision:{P.id}:{tid}:{fp}:{earlier}{suffix}")
                 r0 = (op or {}).get("result") or {}
-                if op and op.get("status") == "done" and r0.get("verdict") in ("approve",
-                                                                                "changes_required"):
+                if op and op.get("status") == "done" and (
+                        earlier == tries or r0.get("verdict") in ("approve", "changes_required")):
                     reused = r0
             if reused is not None:
                 results_b.append(reused)
-                served_all.add(reused.get("served_model") or "unknown")
+                newly += [arts[r] for r in VA.clean_frames(
+                    reused.get("verdict"), reused.get("findings") or [],
+                    [rel for rel, _m, _b in batch])]
                 continue
-            # a retry re-asks an inconclusive batch in small chunks: at 20 frames a model
-            # sometimes drops a frame row or mis-copies a sha256 (UI-D1: 2-4 of 26 batches per
-            # round), and two inconclusive rounds stopped the task
             small = max(1, size // 4)
             chunks = [batch] if tries == 0 else [batch[i:i + small]
                                                  for i in range(0, len(batch), small)]
             parts_r = []
             for ci, chunk in enumerate(chunks):
                 ckey = key if len(chunks) == 1 else f"{key}.c{ci + 1}of{len(chunks)}"
-                carts = {rel: arts[rel] for rel, _m, _b in chunk}
-                kept = None              # only a failing chunk is asked again on a later try
-                for earlier in range(1, tries):
-                    op = self.store.op(f"fast-lane-vision:{P.id}:{tid}:{fp}:{earlier}{suffix}"
-                                       f".c{ci + 1}of{len(chunks)}")
-                    r0 = (op or {}).get("result") or {}
-                    if op and op.get("status") == "done" and \
-                            r0.get("verdict") in ("approve", "changes_required"):
-                        kept = r0
-                if kept is not None:
-                    parts_r.append(kept)
+                op = self.store.op(ckey)
+                r0 = (op or {}).get("result") or {}
+                st = (op or {}).get("status")
+                if st == "done":
+                    parts_r.append(r0)
                     continue
-                state, cres = self._vision_one(P, t, spec, head, run, v, chunk, carts, persona,
-                                               routes, ckey, (bi + 1, len(batches)), batches,
-                                               batch, frames, results_b)
-                if state != "done":
-                    return None          # waiting, or one call made: one call per tick
-                parts_r.append(cres)
+                if st == "calling":
+                    # a restart during the call: its outcome is unknown and never paid twice
+                    res = {"verdict": "uncertain", "findings": ["call outcome unknown after a "
+                                                                "restart"], "served_model": ""}
+                    self.store.op_update(ckey, "done", res)
+                    parts_r.append(res)
+                    continue
+                if st == "deferred" and self.clock() < float(r0.get("retry_at") or 0):
+                    waiting = True
+                    continue
+                pending.append({"bi": bi, "ci": ci, "chunks": len(chunks), "key": ckey,
+                                "chunk": chunk, "batch": batch,
+                                "arts": {rel: arts[rel] for rel, _m, _b in chunk}})
+            if len(parts_r) != len(chunks):
+                continue
             if len(parts_r) == 1:
                 res = parts_r[0]
             else:
@@ -879,133 +1314,81 @@ class FastLane:
                                     for f in (r.get("findings") or [])],
                        "served_model": ",".join(sorted({r.get("served_model") or "unknown"
                                                         for r in parts_r}))}
-                if self.store.op_begin(key, P.id, tid, "visual_approval") is None or                         (self.store.op(key) or {}).get("status") != "done":
-                    self.store.op_update(key, "done", res)   # later tries reuse the whole batch
+                if self.store.op_begin(key, P.id, tid, "visual_approval") is None or \
+                        (self.store.op(key) or {}).get("status") != "done":
+                    self.store.op_update(key, "done", res)
             results_b.append(res)
-            served_all.add(res.get("served_model") or "unknown")
-        verdicts = [r.get("verdict") for r in results_b]
-        # remember the frames this round judged clean (approved batch, or no finding names them)
-        # A CHANGES batch only clears its unnamed frames when every finding names a frame,
-        # so a finding we cannot place never lets a frame skip review.
-        newly = []
-        for batch, r in zip(batches, results_b):
-            rels = [rel for rel, _m, _b in batch]
-            notes = [str(f) for f in (r.get("findings") or [])]
-            placed = r.get("verdict") == "changes_required" and notes and                 all(any(rel in n for rel in rels) for n in notes)
-            for rel in rels:
-                if r.get("verdict") == "approve" or (placed and not any(rel in n for n in notes)):
-                    newly.append(arts[rel])
+            newly += [arts[r] for r in VA.clean_frames(res.get("verdict"), res.get("findings")
+                                                       or [], [rel for rel, _m, _b in batch])]
         if newly:
-            fl2 = self._fl(P, tid)
-            mem = list(dict.fromkeys(list(fl2.get("vision_clean") or []) + newly))[-4000:]
-            fl2["vision_clean"] = mem
-            self._save(P, tid, fl2)
-        findings = []
-        for bi, r in enumerate(results_b):
-            pre = f"[batch {bi + 1}/{len(results_b)}] " if len(results_b) > 1 else ""
-            findings += [pre + str(f) for f in (r.get("findings") or [])
-                         if r.get("verdict") != "approve"]
-        if all(x == "approve" for x in verdicts):
-            verdict = "approve"
-        elif any(x == "changes_required" for x in verdicts) and \
-                not any(x not in ("approve", "changes_required") for x in verdicts):
-            verdict = "changes_required"
-        else:
-            verdict = "uncertain"
-        res = {"verdict": verdict, "findings": findings[:60],
-               "served_model": ",".join(sorted(served_all))}
-        served = res.get("served_model") or "unknown"
-        actor = f"model:{persona}/{served}"
-        if verdict == "approve":
-            self.store.add_approval(P.id, tid, "visual", head, arts, actor,
-                                    f"fast-lane vision approval at gate {run['head'][:12]}; "
-                                    f"policy visual_model v1")
-            return VerificationResult("fast_lane.vision", PASS, True, "",
-                                      f"APPROVED by {actor} ({len(frames)} frame(s))", head)
-        if verdict == "changes_required":
             fl = self._fl(P, tid)
-            rounds = int(fl.get("vision_rounds") or 0)
-            mx = int(settings(P)["max_vision_rounds"])
-            if rounds < mx:
-                fl["vision_rounds"] = rounds + 1
+            old = list(fl.get("vision_clean") or [])
+            mem = list(dict.fromkeys(old + newly))[-4000:]
+            if mem != old:
+                fl["vision_clean"] = mem
                 self._save(P, tid, fl)
-                vid = self.store.save_verification(P.id, tid, head, "verify", results + [
-                    VerificationResult("fast_lane.vision", FAIL, True, "",
-                                       "CHANGES: " + " | ".join(findings[:6]), head)])
-                return self._continue(P, t, spec, head, vid, f"fast-lane:vision:{fp}",
-                                      f"Vision review: CHANGES (round {rounds + 1}/{mx})",
-                                      findings or ["changes required"],
-                                      "the vision reviewer asked for changes")
-            notes = findings[:30]
-            fl["vision_notes"] = (list(fl.get("vision_notes") or []) + notes)[-60:]
-            self._save(P, tid, fl)
-            self.store.add_approval(P.id, tid, "visual", head, arts,
-                                    f"coordinator:fast_lane ({actor})",
-                                    f"accepted with notes after {rounds} CHANGES round(s): "
-                                    + " | ".join(notes)[:1500])
-            self.store.event(P.id, tid, "fast_lane_vision_accepted_with_notes", detail={
-                "rounds": rounds, "notes": notes[:20], "head": head})
-            return VerificationResult("fast_lane.vision", PASS, True, "",
-                                      f"accepted with notes after {rounds} CHANGES round(s) "
-                                      f"(follow-ups): " + " | ".join(notes[:8]), head)
-        # uncertain: ask once more, then stop for a person (never a pass)
-        fl = self._fl(P, tid)
-        unc = dict(fl.get("vision_uncertain") or {})
-        unc[fp] = tries + 1
-        fl["vision_uncertain"] = unc
-        self._save(P, tid, fl)
-        if tries + 1 >= 3:
-            return self._error(P, t, head, results, "vision approval inconclusive 3 times: "
-                               + "; ".join(findings[:3]))
-        self.c._note(P, t, "fast-lane vision review inconclusive; asking again")
-        return None
+        return results_b, pending, waiting
 
-    def _vision_one(self, P, t, spec, head, run, v, chunk, carts, persona, routes, key,
-                    label, batches, batch, frames, results_b) -> tuple:
-        """One journaled vision call: ("done", result) | ("wait", None) | ("called", None)."""
+    def _vision_calls(self, P, t, spec, head, run, v, persona, routes, pending: list,
+                      tries: int, results_b: list, n_batches: int, total: int, arts: dict) -> None:
+        """Up to [fast_lane] vision_parallel calls at once (B3). Bookkeeping (journal,
+        sessions, events, memory) stays on this thread; only the HTTP calls run in the
+        pool. Each finished batch's clean frames are remembered right away."""
+        from concurrent.futures import ThreadPoolExecutor
         tid = t["task_id"]
-        prior = self.store.op_begin(key, P.id, tid, "visual_approval")
-        if prior:
-            r = prior.get("result") or {}
-            if prior["status"] == "done":
-                return "done", r
-            if prior["status"] == "deferred" and self.clock() >= float(r.get("retry_at") or 0):
-                pass                     # retry the deferred call now
-            elif prior["status"] == "calling":
-                # a restart during the call: its outcome is unknown and never paid twice
-                res = {"verdict": "uncertain", "findings": ["call outcome unknown after a "
-                                                            "restart"], "served_model": ""}
-                self.store.op_update(key, "done", res)
-                return "done", res
-            else:
-                self.c._note(P, t, f"fast-lane vision approval deferred: "
-                                   f"{r.get('reason') or ''}"[:500])
-                return "wait", None
+        par = max(1, int(settings(P).get("vision_parallel") or 1))
+        units = pending[:par]
         prev = self._fl(P, tid).get("live") or {}
         so_far = [str(f) for r in results_b if r.get("verdict") != "approve"
                   for f in (r.get("findings") or [])]
         self._live(P, tid, {
-            "kind": "vision", "head": head, "batch": label[0], "batches": label[1],
-            "frames": len(batch), "total_frames": len(frames), "done": len(results_b),
+            "kind": "vision", "head": head, "batch": units[0]["bi"] + 1, "batches": n_batches,
+            "frames": sum(len(u["chunk"]) for u in units), "total_frames": total,
+            "done": len(results_b), "in_flight": len(units),
             "changes": sum(1 for r in results_b if r.get("verdict") == "changes_required"),
             "findings": [f[:300] for f in so_far[:8]], "more_findings": max(0, len(so_far) - 8),
             "persona": str(persona)[:120],
             "started_ts": prev.get("started_ts") if prev.get("kind") == "vision"
             and prev.get("head") == head else time.time()})
-        self.c._note(P, t, f"fast-lane vision review: batch {label[0]}/{label[1]} "
-                           f"({len(chunk)} frames)")
-        res = self._vision_call(P, t, spec, head, run, v, chunk, carts, persona, routes,
-                                key, batch_label=label)
-        if res is None:
-            return "wait", None
-        if label[0] < label[1] or len(chunk) < len(batch):
-            return "called", None        # one call per tick; the next tick goes on
-        return "done", res
+        self.c._note(P, t, f"fast-lane vision review: {len(units)} call(s) in flight, "
+                           f"{len(results_b)}/{n_batches} batch(es) done")
+        jobs = []
+        for u in units:
+            if self.store.op_begin(u["key"], P.id, tid, "visual_approval") is not None and \
+                    (self.store.op(u["key"]) or {}).get("status") not in ("deferred", "started"):
+                continue
+            sid, messages = self._vision_request(P, t, spec, head, run, v, u, persona,
+                                                 (u["bi"] + 1, n_batches), tries)
+            jobs.append((u, sid, messages))
+        if not jobs:
+            return
+        schema = None
+        if tries > 0:
+            from . import visual_approval as VA
+            schema = VA.VISION_SCHEMA
 
-    def _vision_call(self, P, t, spec, head, run, v, frames, arts, persona, routes,
-                     key, batch_label: tuple = (1, 1)) -> Optional[dict]:
+        def call(job):
+            _u, sid, messages = job
+            try:
+                return P.foundry.chat(persona, messages, session_id=sid, max_tokens=6000,
+                                      **({"schema": schema} if schema else {})), None
+            except (FoundryDenied, FoundryError) as e:
+                return None, e
+        if len(jobs) == 1:
+            outs = [call(jobs[0])]
+        else:
+            with ThreadPoolExecutor(max_workers=len(jobs)) as pool:
+                outs = list(pool.map(call, jobs))
+        for (u, sid, _m), (ans, err) in zip(jobs, outs):
+            self._vision_result(P, t, head, u, sid, persona, routes, ans, err)
+
+    def _vision_request(self, P, t, spec, head, run, v, u: dict, persona: str,
+                        batch_label: tuple, tries: int) -> tuple[str, list]:
+        """Journal the call as "calling", bind its session and build its messages."""
         from . import visual_approval as VA
         tid = t["task_id"]
+        key = u["key"]
+        frames, arts = u["chunk"], u["arts"]
         sid = f"fast-lane-vision-{key.rsplit(':', 2)[-2][:16]}-{key.rsplit(':', 1)[-1]}"
         if not self.store.session(sid):
             self.store.add_session(sid, P.id, tid, t["run_id"], "visual_reviewer",
@@ -1014,16 +1397,20 @@ class FastLane:
                                     "fast_lane": True})
         by_path = {str(c.get("path")).replace("\\", "/"): c for c in v.get("captures") or []
                    if isinstance(c, dict)}
+        retry = ("This is the one retry of a batch whose first answer could not be verified: "
+                 "answer with exactly the JSON object the response schema describes, one frame "
+                 "object per attached image, each sha256 copied exactly. " if tries > 0 else "")
         parts = [{"type": "text", "text": (
             f"Fast-lane vision approval for project {P.id}, sprint {tid}, revision {head} (the "
             f"studio gate passed at {run['head'][:12]}). This is batch {batch_label[0]} of "
-            f"{batch_label[1]}; every batch must approve. Review ALL {len(frames)} captures in "
-            "this batch against the sprint and the rubric below. Do not infer pixels from "
-            "filenames or claim inspection without seeing each image. Return valid JSON with "
-            'keys "verdict" (approve, changes_required or uncertain), "frames" (one object per '
-            "image with path, sha256, image_seen, subject_present, validity, observation and "
-            'findings), and "limitations". ' + VA.FRAME_FIELDS + " Approve only if every frame "
-            f"is valid, actually seen and meets the rubric.\n\n{RUBRIC}\n\nSprint:\n{spec.spec[:8000]}")}]
+            f"{batch_label[1]}; every batch must approve. {retry}Review ALL {len(frames)} "
+            "captures in this batch against the sprint and the rubric below. Do not infer "
+            "pixels from filenames or claim inspection without seeing each image. Return valid "
+            'JSON with keys "verdict" (approve, changes_required or uncertain), "frames" (one '
+            "object per image with path, sha256, image_seen, subject_present, validity, "
+            'observation and findings), and "limitations". ' + VA.FRAME_FIELDS + " Approve only "
+            f"if every frame is valid, actually seen and meets the rubric.\n\n{RUBRIC}\n\n"
+            f"Sprint:\n{spec.spec[:8000]}")}]
         for rel, mime, blob in frames:
             c = by_path.get(rel) or {}
             layout = [str(x) for x in (c.get("layout_lines") or [])][:8]
@@ -1033,27 +1420,31 @@ class FastLane:
                 + ("; checker lines: " + " | ".join(layout) if layout else ""))})
             parts.append({"type": "image_url", "image_url": {
                 "url": f"data:{mime};base64,{base64.b64encode(blob).decode()}"}})
-        try:
-            P.foundry.bind(sid, P.id, tid, t["run_id"], "visual_reviewer", persona,
-                           parent=t.get("session_id") or "", purpose="review")
-            self.store.op_update(key, "calling", {"session_id": sid})
-            raw, meta = P.foundry.chat(persona, [
-                {"role": "system", "content": "You are a read-only, independent vision reviewer. "
-                 "Judge only the actual attached frames. Never waive test gates or invent "
-                 "evidence."}, {"role": "user", "content": parts}], session_id=sid,
-                max_tokens=6000)
-        except FoundryDenied as e:
-            self.store.op_update(key, "deferred", {"retry_at": self.clock() + max(
-                60, int(e.retry_after or 300)), "reason": str(e)[:300]})
-            self.c._note(P, t, f"fast-lane vision approval deferred: {e}"[:500])
-            return None
-        except FoundryError as e:
-            self.store.op_update(key, "deferred", {"retry_at": self.clock() + 300,
-                                                   "reason": str(e)[:300]})
-            self.c._note(P, t, f"fast-lane vision approval unavailable: {e}"[:500])
-            return None
+        P.foundry.bind(sid, P.id, tid, t["run_id"], "visual_reviewer", persona,
+                       parent=t.get("session_id") or "", purpose="review")
+        self.store.op_update(key, "calling", {"session_id": sid})
+        return sid, [{"role": "system", "content": "You are a read-only, independent vision "
+                      "reviewer. Judge only the actual attached frames. Never waive test gates "
+                      "or invent evidence."}, {"role": "user", "content": parts}]
+
+    def _vision_result(self, P, t, head, u: dict, sid: str, persona: str, routes: list,
+                       ans, err) -> None:
+        from . import visual_approval as VA
+        tid = t["task_id"]
+        key = u["key"]
+        if err is not None:
+            if isinstance(err, FoundryDenied):
+                self.store.op_update(key, "deferred", {"retry_at": self.clock() + max(
+                    60, int(err.retry_after or 300)), "reason": str(err)[:300]})
+                self.c._note(P, t, f"fast-lane vision approval deferred: {err}"[:500])
+            else:
+                self.store.op_update(key, "deferred", {"retry_at": self.clock() + 300,
+                                                       "reason": str(err)[:300]})
+                self.c._note(P, t, f"fast-lane vision approval unavailable: {err}"[:500])
+            return
+        raw, meta = ans
         served = str((meta or {}).get("served_model") or "")
-        verdict, findings = VA._valid_verdict(VA._answer(raw), frames, arts)
+        verdict, findings = VA._valid_verdict(VA._answer(raw), u["chunk"], u["arts"])
         if served not in {r["model"] for r in routes}:
             verdict, findings = "uncertain", ["actual serving model was not verified as "
                                               "vision-capable"]
@@ -1064,5 +1455,4 @@ class FastLane:
         self.store.update_session(sid, status="ended", outcome=verdict, ended_ts=self.clock())
         self.store.event(P.id, tid, "model_visual_review", session_id=sid, detail={
             "verdict": verdict, "persona": persona, "served_model": served, "revision": head,
-            "fast_lane": True, "artifacts": arts, "findings": findings[:10]})
-        return res
+            "fast_lane": True, "artifacts": u["arts"], "findings": findings[:10]})

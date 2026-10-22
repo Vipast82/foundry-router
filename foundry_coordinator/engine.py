@@ -33,6 +33,13 @@ from .store import Store
 
 REVIEW_ERRORS_BEFORE_BLOCK = 3
 INVALID_REVIEWS_BEFORE_BLOCK = 2
+
+
+def _prio(item) -> int:
+    try:
+        return int((item or {}).get("priority") or 0)
+    except (TypeError, ValueError, AttributeError):
+        return 0
 ROUTE_RETRY_S = 300
 
 
@@ -62,6 +69,9 @@ class Coordinator:
         # [fast_lane] (UI-T0): studio_gate-verified one-session sprints; inert
         # for every task the profile's [fast_lane] table doesn't name
         self.fast_lane = FastLane(self, clock=clock)
+        # B4: code reviews started early (while vision runs), by (project, task, head)
+        self._early_reviews: dict = {}
+        self._early_pool = None
         self._live_audit_ts: dict[str, float] = {}     # session -> last live checkpoint write
         self._q_missing_since: dict[str, float] = {}   # request id -> first seen withdrawn
         # [lifecycle] (v0.122): evidence ledger, obligations/decisions/budget
@@ -342,6 +352,10 @@ class Coordinator:
             r = self._lc_readiness(P, t, spec, {"attempt": attempt, "base": t["base_sha"]})
             if r:
                 return self._lc_block_readiness(P, t, r)
+        if self.fast_lane.on(P, tid):
+            if self.fast_lane.baseline_hold(P, t):
+                return   # B2: the sprint's automatic baseline runs before its first session
+            t = self.store.task(pid, tid)        # keep the baseline record it just saved
         try:
             dirty = P.ws.status()
         except GitError as e:
@@ -1054,22 +1068,31 @@ class Coordinator:
                  + "; ".join(f"{c[0][:10]} {c[1][:60]}" for c in bad[:5])) if bad
                 else f"all {len(commits)} commit message(s) start with {prefix!r}")
         changed = P.ws.changed_files(base, head)
-        outside = [f for f in changed if not matches_any(f, spec.scope + exempt)]
+        runner_out, runner_caps = [], []
+        if self.fast_lane.on(P, spec.task_id):
+            from .fast_lane import runner_patterns
+            runner_out, runner_caps = runner_patterns(P, spec.task_id)
+        # B1 (2026-10-21): scope blames the agent only for files it changed. Runner outputs
+        # and files only the coordinator's own commits touched are never "outside scope".
+        outside = [f for f in changed if not matches_any(f, spec.scope + exempt + runner_out
+                                                         + runner_caps)]
+        if outside:
+            from . import bookkeeping as BK
+            mine = set(BK.only_coordinator(P, t, base, head, outside))
+            outside = [f for f in outside if f not in mine]
         add("scope", FAIL if outside else PASS,
             ("changed outside the task's files: " + ", ".join(outside[:12])
              + " — the coordinator never widens scope") if outside
             else f"{len(changed)} changed file(s), all within scope")
         dirty = P.ws.status()
         baseline = t["data"].get("baseline_dirty") or {}
-        runner_out, runner_caps = [], []
-        if self.fast_lane.on(P, spec.task_id):
-            from .fast_lane import settings as _fl_settings
-            fls = _fl_settings(P)
-            runner_out = [x.replace("{task}", spec.task_id) for x in fls.get("runner_outputs") or []]
-            runner_caps = [x.replace("{task}", spec.task_id) for x in fls.get("runner_captures") or []]
-            # [fast_lane]: the studio_gate runner's own outputs are not session work
-            dirty = [(st, p) for st, p in dirty if not matches_any(p, runner_out)]
-            baseline = {p: h for p, h in baseline.items() if not matches_any(p, runner_out)}
+        if runner_out or runner_caps:
+            # [fast_lane] B1: the studio_gate runner's own outputs (evidence log, captures)
+            # are the coordinator's to commit after a green gate, never session work: they
+            # can't fail clean or unrelated_preserved
+            own = runner_out + runner_caps
+            dirty = [(st, p) for st, p in dirty if not matches_any(p, own)]
+            baseline = {p: h for p, h in baseline.items() if not matches_any(p, own)}
         in_scope_dirty = [p for _, p in dirty if matches_any(p, spec.scope)
                          or (matches_any(p, exempt) and (p not in baseline or p in changed))]
         inter = [p for p in self._intermediate_dirty(P, t, spec, dirty)
@@ -1122,41 +1145,74 @@ class Coordinator:
                                f"before the review"})
         if self._lc(P) and self._lc_resume_continuation(P, t):
             return                       # a pending continuation at this head: never re-reviewed
+        # B4: a review started early (while vision ran) for this head is collected, never
+        # paid for twice
+        early = self.early_review_collect(P, t, head)
+        if early == "running":
+            return self._note(P, t, f"code review in flight at {head[:12]} (started with "
+                                    f"the vision review)")
+        prep = self._review_prepare(P, t, head)
+        if prep is None:
+            return
+        if prep.get("apply"):
+            return self._apply_review(P, t, prep["apply"])
+        text, meta, err = self._review_call(P, prep)
+        rev = self._review_finish(P, t, prep, text, meta, err)
+        if rev is not None:
+            self._apply_review(P, t, rev)
+
+    def _review_prepare(self, P: Project, t: dict, head: str,
+                        early: bool = False) -> Optional[dict]:
+        """Everything before the paid review call: reuse, budgets, the reviewer's
+        independence, the packet, the journal entry and the binding. None = handled
+        here (or, early, not startable now); {"apply": review} = reuse that review;
+        else the call context for _review_call / _review_finish. With early=True
+        (B4, the fast lane starts the review while vision runs) nothing stops,
+        blocks or moves the task: any such condition only means "not early"."""
+        pid, tid = P.id, t["task_id"]
         spec, spec_from, spec_notes = self._reviewed_spec(P, tid, head)
         if not P.profile.review.get("required", True):
-            return self.store.transition(pid, tid, S.APPROVED, {
+            if early:
+                return None
+            self.store.transition(pid, tid, S.APPROVED, {
                 "review_id": "policy:review-not-required", "reviewed_commit_sha": head},
                 reviewed_sha=head, review_id="policy:review-not-required")
+            return None
         prior = self.store.reviews(pid, tid, head)
         # only a review made from the current packet format is this commit's review;
         # one from an older format (possibly truncated, no phase contract) is kept in
         # the audit trail and its findings carried forward, never reused as a verdict
         valid = [r for r in prior if r["valid"] and R.packet_version(r) == R.PACKET_VERSION]
-        if self._lc(P):
-            # [lifecycle] a review routed evidence_incomplete/access_blocked is kept
-            # for the audit but not reused: the commit is reviewed again
-            again = set(t["data"].get("lc_rereview") or [])
-            valid = [r for r in valid if r["review_id"] not in again]
+        again = set(t["data"].get("lc_rereview") or []) if self._lc(P) else set()
+        # [lifecycle] a review routed evidence_incomplete/access_blocked is kept
+        # for the audit but not reused: the commit is reviewed again
+        valid = [r for r in valid if r["review_id"] not in again]
         if valid:
-            return self._apply_review(P, t, valid[-1])
+            return None if early else {"apply": valid[-1]}
         older = [r for r in prior if r["valid"]]
         invalid = len([r for r in prior if not r["valid"]])
         n = len(prior)                                  # call index at this head (op key)
         if invalid >= INVALID_REVIEWS_BEFORE_BLOCK:
+            if early:
+                return None
             self.store.release(pid, tid)
-            return self._stop(P, t, S.BLOCKED, {
+            self._stop(P, t, S.BLOCKED, {
                 "blocker": f"the reviewer returned {invalid} invalid results for {head[:12]}: "
                            f"{prior[-1]['error']}"}, cls="review_invalid")
+            return None
         if self._held(P, t, "review"):
-            return                       # a paused project starts no new paid review
+            return None                  # a paused project starts no new paid review
         all_reviews = self.store.reviews(pid, tid)
         cap = P.profile.limit("max_review_calls", 4)
         lc_calls = self._lc(P, "obligations")
         if not lc_calls and len(all_reviews) >= cap:
+            if early:
+                return None
             self.store.release(pid, tid)
-            return self._stop(P, t, S.BLOCKED, {
+            self._stop(P, t, S.BLOCKED, {
                 "blocker": f"review budget used ({len(all_reviews)}/{cap} review calls)"},
                 cls="review_budget")
+            return None
         deep = [p for p in P.profile.review.get("deep_when") or []
                 if any(matches_any(tag, [p]) for tag in spec.tags)]
         role = "deep_reviewer" if deep and "deep_reviewer" in P.profile.roles else "reviewer"
@@ -1172,25 +1228,31 @@ class Coordinator:
             alt = next((r for r in ("deep_reviewer", "reviewer") if r in P.profile.roles
                         and P.profile.persona(r, tid) not in authors), None)
             if alt is None:
-                return self._block(P, t, f"no independent reviewer: {persona} also authored helper "
-                                         f"proposals integrated into this revision; configure a "
-                                         f"different reviewer persona")
+                if not early:
+                    self._block(P, t, f"no independent reviewer: {persona} also authored helper "
+                                      f"proposals integrated into this revision; configure a "
+                                      f"different reviewer persona")
+                return None
             role, persona = alt, P.profile.persona(alt, tid)
         if P.foundry is None:
-            return self._block(P, t, "review needs Foundry ([foundry] url) and none is configured")
+            if not early:
+                self._block(P, t, "review needs Foundry ([foundry] url) and none is configured")
+            return None
         key = f"review:{pid}:{tid}:{head}:{role}:{n}:p{R.PACKET_VERSION}"
         if (self.store.op(key) or {}).get("status") == "done":
-            return
+            return None
         if lc_calls and not self._lc_charged(P, tid, "review_calls", key):
             # [lifecycle] the budget ledger's limit (base + authorized extensions);
             # a call already charged under this key (a retried error) is not refused
             self._lc_backfill(P, t)
             lim = self.obligations.effective_limits(P, t)["review_calls"]
             if lim["remaining"] <= 0:
-                self.store.release(pid, tid)
-                return self._stop(P, t, S.BLOCKED, {
-                    "blocker": f"review budget used ({lim['used']}/{lim['max']} review calls, "
-                               f"budget ledger)"}, cls="review_budget")
+                if not early:
+                    self.store.release(pid, tid)
+                    self._stop(P, t, S.BLOCKED, {
+                        "blocker": f"review budget used ({lim['used']}/{lim['max']} review "
+                                   f"calls, budget ledger)"}, cls="review_budget")
+                return None
         base = t["data"].get("task_base") or t["base_sha"]
         ver = self.store.verification(t["verification_id"], pid, tid)
         limits, limits_from = self._reviewer_limits(P, persona)
@@ -1201,6 +1263,10 @@ class Coordinator:
         evidence = self._review_evidence(P, spec, head)
         if self._lc(P, "evidence"):
             evidence = self._lc_review_items(P, spec, head, evidence)
+        if self.fast_lane.on(P, tid):
+            # B4: the coordinator's own evidence (gate verdict, captures, vision, its
+            # bookkeeping commits) so a reviewer never flags bookkeeping
+            evidence = self.fast_lane.review_evidence(P, t, spec, head) + evidence
         prio_fn = getattr(P.adapter, "diff_priority", None)
 
         def priority(f):
@@ -1212,30 +1278,46 @@ class Coordinator:
             return R.default_diff_priority(f["path"], spec, f.get("binary", False))
         earlier = [r for r in self.store.reviews(pid, tid) if r["valid"]
                    and r["verdict"] != "APPROVED"
-                   and (r["reviewed_sha"] != head or R.packet_version(r) != R.PACKET_VERSION)]
+                   and (r["reviewed_sha"] != head or R.packet_version(r) != R.PACKET_VERSION
+                        or r["review_id"] in again)]
         # Incremental re-review (2026-10-21, token cost): after a CHANGES_REQUIRED review at an
         # ancestor commit, send only the files changed since that review, plus its findings.
-        # Files reviewed there and unchanged since are not sent again.
+        # Files reviewed there and unchanged since are not sent again. B4: the same holds for
+        # a re-review of the SAME commit ([lifecycle] evidence_incomplete): no diff at all,
+        # only the evidence and the findings.
         dbase, dnotes = base, []
         last = next((r for r in reversed(earlier) if r["verdict"] == "CHANGES_REQUIRED"
-                     and R.packet_version(r) == R.PACKET_VERSION
-                     and r["reviewed_sha"] != head), None)
+                     and R.packet_version(r) == R.PACKET_VERSION), None)
         if last and P.profile.review.get("incremental", True):
             try:
-                ok = P.ws.is_ancestor(last["reviewed_sha"], head)
+                ok = last["reviewed_sha"] == head or P.ws.is_ancestor(last["reviewed_sha"], head)
             except Exception:                                     # noqa: BLE001
                 ok = False
             if ok:
                 dbase = last["reviewed_sha"]
                 kept = sorted({f["path"] for f in P.ws.diff_files(base, head)}
                               - {f["path"] for f in P.ws.diff_files(dbase, head)})
-                dnotes = [f"incremental re-review: the diff below is {dbase[:12]}..{head[:12]} "
-                          f"(since review {last['review_id']}); the task diff from {base[:12]} "
-                          f"was reviewed there. Check that its findings (listed below) are "
-                          f"resolved and that the changes since are correct.",
-                          f"{len(kept)} file(s) reviewed at {dbase[:12]} and unchanged since "
-                          f"(not re-sent): " + ", ".join(kept[:40])
-                          + (" ..." if len(kept) > 40 else "")]
+                if dbase == head:
+                    dnotes = [f"incremental re-review of the SAME commit {head[:12]}: review "
+                              f"{last['review_id']} inspected its code and asked for evidence. "
+                              f"No code changed since, so no diff is sent: check the evidence "
+                              f"below and whether its findings (listed below) are now resolved."]
+                else:
+                    dnotes = [f"incremental re-review: the diff below is {dbase[:12]}..{head[:12]} "
+                              f"(since review {last['review_id']}); the task diff from {base[:12]} "
+                              f"was reviewed there. Check that its findings (listed below) are "
+                              f"resolved and that the changes since are correct."]
+                dnotes.append(f"{len(kept)} file(s) reviewed at {dbase[:12]} and unchanged since "
+                              f"(not re-sent): " + ", ".join(kept[:40])
+                              + (" ..." if len(kept) > 40 else ""))
+                evidence, unchanged = self._review_evidence_delta(P, evidence, dbase, head, last)
+                if unchanged:
+                    dnotes.append(f"{unchanged} evidence item(s) unchanged since review "
+                                  f"{last['review_id']} are listed without their text")
+        evidence, dropped = self._review_evidence_cap(P, evidence)
+        if dropped:
+            dnotes.append(f"{dropped} lower-priority evidence item(s) left out ([review] "
+                          f"max_evidence_items)")
         packet, info = R.build_packet(
             project_id=pid, task_id=tid, title=spec.title, spec=spec.spec, scope=spec.scope,
             base=dbase, head=head, commits=P.ws.commits(dbase, head), verification=ver,
@@ -1245,11 +1327,14 @@ class Coordinator:
             budget=budget,
             earlier=earlier, authors=authors, question=P.profile.review.get("question") or "")
         if info["insufficient"]:
+            if early:
+                return None
             # never a partial-code review: the reviewer isn't called at all
             self.store.event(pid, tid, "review_insufficient", detail={
                 "reviewed_commit_sha": head, "packet_version": R.PACKET_VERSION,
                 **info["coverage"], "budget_source": budget["source"]})
-            return self._block(P, t, info["insufficient"])
+            self._block(P, t, info["insufficient"])
+            return None
         if older:
             self.store.event(pid, tid, "review_not_reused", detail={
                 "reviewed_commit_sha": head, "packet_version": R.PACKET_VERSION,
@@ -1264,22 +1349,57 @@ class Coordinator:
                        "chars": info["chars"], "est_tokens": info["est_tokens"],
                        "budget_source": budget["source"], "max_tokens": budget["max_tokens"],
                        "code_bytes": cov["code_bytes"], "partial": cov["partial"][:50],
-                       "omitted": cov["omitted"][:50], "evidence": cov["evidence"][:30]}
+                       "omitted": cov["omitted"][:50], "evidence": cov["evidence"][:30],
+                       "incremental_from": dbase if dbase != base else None,
+                       "early": bool(early)}
         rsid = f"review-{t['run_id']}-{n}"
+        prep = {"key": key, "rsid": rsid, "role": role, "persona": persona, "packet": packet,
+                "max_tokens": budget["max_tokens"], "meta_packet": meta_packet, "head": head,
+                "scope": spec.scope}
         try:
             self._bind(P, rsid, tid, t["run_id"], role, persona)
-            text, meta = P.foundry.chat(persona, [{"role": "system", "content": R.SYSTEM},
-                                                  {"role": "user", "content": packet}],
-                                        session_id=rsid, schema=R.SCHEMA,
-                                        max_tokens=budget["max_tokens"])
-        except FoundryDenied as e:
+        except (FoundryDenied, FoundryError, RuntimeError) as e:
+            prep["bind_error"] = e        # handled like a failed call by _review_finish
+        return prep
+
+    @staticmethod
+    def _review_call(P: Project, prep: dict) -> tuple:
+        """The paid call itself (safe off the main thread: no store access).
+        (text, meta, None) or (None, None, exception)."""
+        if prep.get("bind_error") is not None:
+            return None, None, prep["bind_error"]
+        try:
+            text, meta = P.foundry.chat(prep["persona"], [
+                {"role": "system", "content": R.SYSTEM},
+                {"role": "user", "content": prep["packet"]}],
+                session_id=prep["rsid"], schema=R.SCHEMA, max_tokens=prep["max_tokens"])
+            return text, meta, None
+        except (FoundryDenied, FoundryError, RuntimeError) as e:
+            return None, None, e
+
+    def _review_finish(self, P: Project, t: dict, prep: dict, text, meta, err,
+                       early: bool = False) -> Optional[dict]:
+        """Journal and store the review; the stored review row, or None (an error,
+        an invalid result, a denial: handled here). Early (B4): an error only
+        drops the early review; the normal REVIEWING step tries again."""
+        pid, tid = P.id, t["task_id"]
+        key, rsid, head = prep["key"], prep["rsid"], prep["head"]
+        if isinstance(err, FoundryDenied):
             self._end_review_binding(P, rsid, "denied")
-            self.store.op_update(key, "denied", {"category": e.category, "code": e.code})
+            self.store.op_update(key, "denied", {"category": err.category, "code": err.code})
             self.store.x("DELETE FROM ops WHERE key=?", (key,))
-            return self._on_denial(P, t, {"category": e.category, "retry_after": e.retry_after},
-                                   e.message, resume=S.REVIEWING, session=rsid)
-        except (FoundryError, RuntimeError) as e:
+            if early:
+                return None
+            self._on_denial(P, t, {"category": err.category, "retry_after": err.retry_after},
+                            err.message, resume=S.REVIEWING, session=rsid)
+            return None
+        if err is not None:
             self.store.x("DELETE FROM ops WHERE key=?", (key,))
+            if early:
+                self._end_review_binding(P, rsid, "error")
+                self.store.event(pid, tid, "early_review_failed", detail={
+                    "head": head, "error": str(err)[:300]})
+                return None
             n = int(t["data"].get("review_errors") or 0) + 1
             self.store.merge_data(pid, tid, review_errors=n)
             max_err = REVIEW_ERRORS_BEFORE_BLOCK
@@ -1290,27 +1410,134 @@ class Coordinator:
                 max_err = self.obligations.effective_limits(P, t)["review_errors"]["max"]
             if n >= max_err:
                 self.store.release(pid, tid)
-                return self._stop(P, t, S.BLOCKED, {
-                    "blocker": f"review call failed {n} times: {e}"}, cls="review_errors")
-            return self._note(P, t, f"review call failed ({n}/{max_err}): {e}")
+                self._stop(P, t, S.BLOCKED, {
+                    "blocker": f"review call failed {n} times: {err}"}, cls="review_errors")
+                return None
+            self._note(P, t, f"review call failed ({n}/{max_err}): {err}")
+            return None
         self._end_review_binding(P, rsid, "done")
         try:
-            res = R.validate(text, project_id=pid, task_id=tid, head_sha=head, scope=spec.scope)
-            res["packet"] = meta_packet
-            rid = self.store.save_review(pid, tid, head, role, persona, res["verdict"], True, "",
-                                         res, text)
+            res = R.validate(text, project_id=pid, task_id=tid, head_sha=head, scope=prep["scope"])
+            res["packet"] = prep["meta_packet"]
+            rid = self.store.save_review(pid, tid, head, prep["role"], prep["persona"],
+                                         res["verdict"], True, "", res, text)
         except R.ReviewInvalid as e:
-            rid = self.store.save_review(pid, tid, head, role, persona, "", False, str(e),
-                                         {"packet": meta_packet}, text)
+            rid = self.store.save_review(pid, tid, head, prep["role"], prep["persona"], "", False,
+                                         str(e), {"packet": prep["meta_packet"]}, text)
             self.store.op_update(key, "done", {"review_id": rid, "valid": False})
-            self.store.event(pid, tid, "review_invalid", detail={"error": str(e), "role": role})
-            return self._note(P, t, f"review result rejected: {e}")
+            self.store.event(pid, tid, "review_invalid", detail={"error": str(e),
+                                                                 "role": prep["role"]})
+            if not early:
+                self._note(P, t, f"review result rejected: {e}")
+            return None
         self.store.op_update(key, "done", {"review_id": rid, "valid": True})
-        self.store.event(pid, tid, "review", detail={"verdict": res["verdict"], "role": role,
-                                                     "persona": persona,
-                                                     "served_model": meta.get("served_model"),
-                                                     "reviewed_commit_sha": head})
-        self._apply_review(P, t, self.store.review(rid, pid, tid))
+        self.store.event(pid, tid, "review", detail={"verdict": res["verdict"],
+                                                     "role": prep["role"],
+                                                     "persona": prep["persona"],
+                                                     "served_model": (meta or {}).get(
+                                                         "served_model"),
+                                                     "reviewed_commit_sha": head,
+                                                     "early": bool(early)})
+        return self.store.review(rid, pid, tid)
+
+    # -- B4: the review starts while vision runs ----------------------------------------
+
+    def early_review_start(self, P: Project, t: dict, head: str, vid: str) -> bool:
+        """Start the code review of `head` in the background (the fast lane calls this
+        once the gate is green, so the review runs alongside the vision batches). True
+        when a review for this head is running or was started now."""
+        pid, tid = P.id, t["task_id"]
+        k = (pid, tid, head)
+        pool = getattr(self, "_early_reviews", None)
+        if pool is None:
+            pool = self._early_reviews = {}
+        if k in pool:
+            return True
+        tried = getattr(self, "_early_tried", None)
+        if tried is None:
+            tried = self._early_tried = set()
+        if k in tried:
+            return False             # tried once for this head: the normal path reviews it
+        tried.add(k)
+        if len(tried) > 500:
+            tried.clear()
+        cur = self.store.task(pid, tid) or t
+        tt = {**cur, "verification_id": vid, "head_sha": head}
+        if self._lc(P, "recovery") and self._lc(P, "obligations") and self._lc(P, "evidence"):
+            # never ahead of the [lifecycle] submission gate: a review it would refuse is
+            # not started early (the gate runs on REVIEWING as before)
+            spec = P.adapter.describe(tid)
+            try:
+                refused = self.recovery.gate_submission(
+                    P, tt, head, self.ledger, self.obligations, spec=spec,
+                    evidence_items=self._review_evidence(P, spec, head))
+            except Exception:                                     # noqa: BLE001
+                refused = True
+            if refused:
+                return False
+        prep = self._review_prepare(P, tt, head, early=True)
+        if not prep or prep.get("apply"):
+            return False
+        from concurrent.futures import ThreadPoolExecutor
+        ex = getattr(self, "_early_pool", None)
+        if ex is None:
+            ex = self._early_pool = ThreadPoolExecutor(max_workers=2,
+                                                       thread_name_prefix="early-review")
+        pool[k] = (ex.submit(self._review_call, P, prep), prep, tt)
+        self.store.event(pid, tid, "early_review_started", detail={
+            "head": head, "persona": prep["persona"], "key": prep["key"],
+            "incremental_from": prep["meta_packet"].get("incremental_from")})
+        return True
+
+    def early_review_collect(self, P: Project, t: dict, head: str):
+        """"running" while the early review for `head` is in flight; the stored review
+        once it finished (saved here, on the engine thread); None when there is none."""
+        pool = getattr(self, "_early_reviews", None) or {}
+        k = (P.id, t["task_id"], head)
+        if k not in pool:
+            return None
+        fut, prep, tt = pool[k]
+        if not fut.done():
+            return "running"
+        pool.pop(k, None)
+        text, meta, err = fut.result()
+        return self._review_finish(P, {**(self.store.task(P.id, t["task_id"]) or tt),
+                                       "verification_id": tt["verification_id"]},
+                                   prep, text, meta, err, early=True)
+
+    def _review_evidence_delta(self, P: Project, evidence: list, dbase: str, head: str,
+                               last: dict) -> tuple[list, int]:
+        """B4 (incremental re-review): an evidence item read from a file that did not
+        change since the last review is listed without its text; it was sent there."""
+        if dbase == head:
+            return evidence, 0
+        try:
+            changed = {f["path"] for f in P.ws.diff_files(dbase, head)}
+        except Exception:                                         # noqa: BLE001
+            return evidence, 0
+        out, n = [], 0
+        for it in evidence:
+            path = str((it or {}).get("path") or "")
+            if path and path not in changed and it.get("text") and \
+                    str(it.get("status") or "") == "ok" and int(it.get("priority") or 0) > 0:
+                n += 1
+                out.append({**it, "text": "", "note": (str(it.get("note") or "") + "; " if
+                                                        it.get("note") else "")
+                            + f"unchanged since review {last['review_id']} at {dbase[:12]} "
+                              f"(sent there)"})
+            else:
+                out.append(it)
+        return out, n
+
+    def _review_evidence_cap(self, P: Project, evidence: list) -> tuple[list, int]:
+        """B4: at most [review] max_evidence_items (default 24) evidence items, the
+        essential (priority 0) ones always kept, then by priority."""
+        cap = int(P.profile.review.get("max_evidence_items") or 24)
+        if len(evidence) <= cap:
+            return evidence, 0
+        order = sorted(range(len(evidence)), key=lambda i: (_prio(evidence[i]), i))
+        keep = set(order[:cap]) | {i for i, it in enumerate(evidence) if _prio(it) == 0}
+        return [it for i, it in enumerate(evidence) if i in keep], len(evidence) - len(keep)
 
     def _adapter_call(self, P: Project, name: str, default: Callable, *args):
         fn = getattr(P.adapter, name, None)
@@ -1419,6 +1646,8 @@ class Coordinator:
                 review_id=rev["review_id"])
         if rev["verdict"] == "CHANGES_REQUIRED":
             findings = R.findings_for_repair(res) or ["reviewer asked for changes without details"]
+            if self.fast_lane.on(P, tid) and self.fast_lane.review_changes(P, t, rev, findings):
+                return           # B4: the same warm session fixes it (one round, no cold start)
             return self.store.transition(pid, tid, S.CHANGES_REQUIRED, {
                 "review_id": rev["review_id"], "findings": findings, "verdict": "CHANGES_REQUIRED"},
                 review_id=rev["review_id"], data={**t["data"], "findings": findings})
@@ -1442,6 +1671,12 @@ class Coordinator:
             return f"reviewed commit {rs[:12]} is not an ancestor of {head[:12]}"
         changed = P.ws.changed_files(rs, head)
         code = [f for f in changed if not matches_any(f, P.adapter.exempt_paths(spec))]
+        if code:
+            # B7: the coordinator's own commits (templated closeout documents, runner
+            # outputs) never invalidate the review they followed
+            from . import bookkeeping as BK
+            mine = set(BK.only_coordinator(P, t, rs, head, code))
+            code = [f for f in code if f not in mine]
         if code:
             return "files changed after the review: " + ", ".join(code[:10])
         return None
@@ -1475,7 +1710,17 @@ class Coordinator:
             t = self.store.task(pid, tid)
         spec = P.adapter.describe(tid)
         mode = P.adapter.closeout_mode()
-        if mode == "session":
+        templated = False
+        if mode == "session" and not t["data"].get("closeout_session"):
+            # B7 (2026-10-21): the coordinator writes the closeout documents from the task
+            # record itself (no model tokens); a CLOSE session only when it can't, or when
+            # the templated closeout fails its checks (closeout_attempts > 0)
+            got = self._closeout_template(P, t, spec)
+            if got == "wait":
+                return
+            templated = got == "done"
+            t = self.store.task(pid, tid)
+        if mode == "session" and not templated:
             sid = t["data"].get("closeout_session")
             if not sid:
                 if self._held(P, t, "closeout session start"):
@@ -1515,7 +1760,8 @@ class Coordinator:
                                                "closeout_done": None})
         results = self._generic_checks(P, t, spec, head, phase="closeout")
         results += P.adapter.verify(spec, "closeout", head, t["reviewed_sha"])
-        published = self._publish(P, t, head, results)
+        # a templated closeout has no session to push: the coordinator pushes (B7)
+        published = self._publish(P, t, head, results, push=templated)
         cid = self.store.save_verification(pid, tid, head, "closeout", results)
         bad = [r for r in results if r.required and r.result != PASS]
         if bad:
@@ -1564,6 +1810,124 @@ class Coordinator:
                 self.log(f"{P.id}/{t['task_id']}: training capture failed: {e}")
             return pol != "hold"
 
+    def _closeout_template(self, P: Project, t: dict, spec) -> str:
+        """B7: one deterministic closeout by the coordinator. "done" (documents
+        committed at this head; the normal closeout checks follow), "wait" (locks /
+        paused), "none" (no template, or it was tried: the CLOSE session runs). The
+        adapter's closeout_template(spec, ctx) returns {"files": {path: text}} (or
+        None when it can't); closeout_template_finish(spec, ctx) may return more
+        files to commit after the first commit (e.g. done_check output for the
+        evidence log), or {"error": why} to hand over to the session."""
+        from . import bookkeeping as BK
+        pid, tid = P.id, t["task_id"]
+        fn = getattr(P.adapter, "closeout_template", None)
+        if not callable(fn) or (P.profile.raw.get("closeout") or {}).get("template") is False:
+            return "none"
+        st = dict(t["data"].get("closeout_template") or {})
+        if int(t["data"].get("closeout_attempts") or 0) > 0 or st.get("status") == "failed":
+            return "none"
+        head = P.ws.head()
+        if st.get("status") == "done":
+            return "done" if st.get("head") == head else "none"
+        if self._held(P, t, "closeout"):
+            return "wait"
+        if self._acquire(P, t, self._session_locks(P), writer=True):
+            return "wait"
+
+        def failed(why: str) -> str:
+            self.store.merge_data(pid, tid, closeout_template={"status": "failed",
+                                                               "error": why[:500], "head": head})
+            self.store.event(pid, tid, "closeout_template_failed", detail={"reason": why[:500]})
+            self._release_session(P, t)
+            return "none"
+        ctx = self._closeout_facts(P, t, spec, head)
+        try:
+            out = fn(spec, ctx) or {}
+        except Exception as e:                                    # noqa: BLE001
+            return failed(f"template: {type(e).__name__}: {e}")
+        files = dict(out.get("files") or {})
+        if out.get("error") or not files:
+            return failed(str(out.get("error") or "the template produced no documents"))
+        sha, err = self._write_and_commit(P, t, files, "closeout (coordinator template)",
+                                          "closeout")
+        if err:
+            return failed(err)
+        fin = getattr(P.adapter, "closeout_template_finish", None)
+        if callable(fin):
+            try:
+                more = fin(spec, {**ctx, "head": P.ws.head(), "commit": sha}) or {}
+            except Exception as e:                                # noqa: BLE001
+                return failed(f"finish: {type(e).__name__}: {e}")
+            if more.get("error"):
+                return failed(str(more["error"]))
+            if more.get("files"):
+                sha2, err = self._write_and_commit(P, t, dict(more["files"]),
+                                                   "closeout evidence (coordinator template)",
+                                                   "closeout")
+                if err:
+                    return failed(err)
+                sha = sha2 or sha
+        head = P.ws.head()
+        self.store.merge_data(pid, tid, closeout_template={"status": "done", "head": head,
+                                                           "commit": sha,
+                                                           "files": sorted(files)[:20]})
+        self.store.event(pid, tid, "closeout_templated", detail={
+            "head": head, "files": sorted(files)[:20], "notes": list(out.get("notes") or [])[:10]})
+        self._release_session(P, t)
+        return "done"
+
+    def _write_and_commit(self, P: Project, t: dict, files: dict, text: str,
+                          kind: str) -> tuple[str, str]:
+        """Write the template's files (workspace paths only) and commit exactly them as
+        the coordinator. (sha or "", error or "")."""
+        from . import bookkeeping as BK
+        for rel, content in files.items():
+            rel = str(rel).replace("\\", "/")
+            if not P.profile.in_workspace(rel):
+                return "", f"template path {rel!r} leaves the workspace"
+            path = os.path.join(P.profile.workspace, *rel.split("/"))
+            try:
+                os.makedirs(os.path.dirname(path), exist_ok=True)
+                with open(path, "w", encoding="utf-8", newline="") as f:
+                    f.write(str(content))
+            except OSError as e:
+                return "", f"cannot write {rel}: {e}"
+        sha, err = BK.commit(self, P, t, list(files), text, kind)
+        return sha, err
+
+    def _closeout_facts(self, P: Project, t: dict, spec, head: str) -> dict:
+        """What the coordinator knows about the finished task, for templated documents."""
+        pid, tid = P.id, t["task_id"]
+        base = t["data"].get("task_base") or t["base_sha"]
+        try:
+            changed = P.ws.changed_files(base, head)
+            commits = P.ws.commits(base, head)
+        except Exception:                                         # noqa: BLE001
+            changed, commits = [], []
+        rev = self.store.review(t.get("review_id") or "", pid, tid) if t.get("review_id") else None
+        apr = self.store.approvals(pid, tid, "visual")
+        fl = (t["data"].get("fast_lane") or {}) if isinstance(t["data"], dict) else {}
+        gate = None
+        if self.fast_lane.on(P, tid) and fl.get("run"):
+            from .fast_lane import verdict_rel
+            run = fl["run"]
+            v = self.fast_lane._verdict(P, tid, run)
+            if v:
+                gate = {"head": run["head"], "verdict": verdict_rel(tid, run["head"]),
+                        "summary": v.get("summary_line"), "result": v.get("result"),
+                        "checks": len(v.get("checks") or []),
+                        "captures": len(v.get("captures") or [])}
+        return {"task_id": tid, "title": spec.title, "head": head, "base": base,
+                "reviewed_sha": t.get("reviewed_sha") or "", "attempt": t.get("attempt"),
+                "sessions": t.get("sessions"), "changed": changed[:200],
+                "commits": [list(c) for c in commits[:60]],
+                "review": {"review_id": rev["review_id"], "verdict": rev["verdict"],
+                           "persona": rev.get("persona")} if rev else None,
+                "visual": {"approver": apr[-1]["approver"], "note": apr[-1].get("note"),
+                           "revision": apr[-1]["revision"]} if apr else None,
+                "vision_notes": list(fl.get("vision_notes") or [])[:30], "gate": gate,
+                "date": time.strftime("%Y-%m-%d", time.localtime(self.clock()))}
+
     def _closeout_retry(self, P: Project, t: dict, why: str, cid: str = "") -> None:
         pid, tid = P.id, t["task_id"]
         t = self.store.task(pid, tid)
@@ -1582,11 +1946,16 @@ class Coordinator:
             data={**t["data"], "findings": [f"closeout: {why}"], "closeout_session": None,
                   "closeout_done": None, "closeout_attempts": 0})
 
-    def _publish(self, P: Project, t: dict, head: str, results: list) -> str:
+    def _publish(self, P: Project, t: dict, head: str, results: list,
+                 push: bool = False) -> str:
         """Push (or check the agent's push) exactly once per commit. A push is
-        a backup, not a verdict: it is the last step after every check."""
+        a backup, not a verdict: it is the last step after every check. push=True
+        (a coordinator-templated closeout, B7): verify_only pushes too, since no
+        session is there to push."""
         pub = P.profile.publish
         mode = pub.get("mode", "none")
+        if push and mode == "verify_only":
+            mode = "push"
         if mode == "none":
             return "not published (policy: none)"
         if any(r.required and r.result != PASS for r in results):

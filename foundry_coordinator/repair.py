@@ -944,17 +944,41 @@ class RepairWorkspace:
         sha = self.head(ap)
         if _git(ap, "status", "--porcelain").stdout.strip():
             raise RepairError("commit the candidate before review: the review binds one commit")
-        d = diff if diff is not None else _git(ap, "diff", "--no-renames", base, sha).stdout
-        files = sorted(f for f in _git(ap, "diff", "--name-only", "-z", base, sha).stdout
-                       .split("\0") if f)
+        all_files = sorted(f for f in _git(ap, "diff", "--name-only", "-z", base, sha).stdout
+                           .split("\0") if f)
+        # B4 (2026-10-21): after a CHANGES_REQUIRED review of an earlier candidate of this
+        # case, only the diff since it is sent, with its findings (one line each); files
+        # reviewed there and unchanged since are named, not re-sent
+        last = self._last_review(ap, case_id)
+        dbase, earlier = base, []
+        if diff is None and last and last.get("verdict") == "CHANGES_REQUIRED" and \
+                last.get("sha") and last["sha"] != sha and \
+                _git(ap, "merge-base", "--is-ancestor", last["sha"], sha,
+                     check=False).returncode == 0:
+            dbase = last["sha"]
+            since = {f for f in _git(ap, "diff", "--name-only", "-z", dbase, sha).stdout
+                     .split("\0") if f}
+            earlier = (["", f"## Earlier review {last.get('review_id')} of candidate "
+                            f"{dbase[:12]}: CHANGES_REQUIRED (incremental re-review)",
+                        f"The diff below is {dbase[:12]}..{sha[:12]}; the candidate diff from "
+                        f"{base[:12]} was reviewed there. Check that these findings are "
+                        f"resolved and that the changes since are correct.",
+                        *[f"- {' '.join(str(x).split())[:300]}"
+                          for x in (last.get("findings") or [])[:20]],
+                        f"Reviewed there and unchanged since (not re-sent): "
+                        + (", ".join(sorted(set(all_files) - since)[:40]) or "(none)")])
+        d = diff if diff is not None else _git(ap, "diff", "--no-renames", dbase, sha).stdout
+        files = all_files
         cut = len(d) > DIFF_CHARS
         packet = "\n".join([
             "# Coordinator repair review",
             f"case id (sprint_id): {case_id}", f"project_id: {project_id}",
             f"base commit: {base}", f"candidate commit (reviewed_commit_sha): {sha}",
             "files changed:", *[f"- {f}" for f in files],
-            "", "## Context", (context or "(none)")[:20_000],
-            "", "## Diff" + (" (truncated: the diff exceeds the packet)" if cut else ""),
+            "", "## Context", (context or "(none)")[:20_000], *earlier,
+            "", "## Diff" + (f" ({dbase[:12]}..{sha[:12]}, since the earlier review)"
+                             if dbase != base else "")
+            + (" (truncated: the diff exceeds the packet)" if cut else ""),
             "```diff", d[:DIFF_CHARS], "```"])
         rsid = f"lead-review-{case_id}-{sha[:12]}"
         text, meta = P.foundry.chat(rev, [{"role": "system", "content": REPAIR_REVIEW_SYSTEM},
@@ -963,6 +987,7 @@ class RepairWorkspace:
         rid = "rr-" + hashlib.sha256(f"{sha}:{rev}:{text}".encode("utf-8", "replace")).hexdigest()[:12]
         out = {"review_id": rid, "persona": rev, "reviewed_sha": sha,
                "served_model": (meta or {}).get("served_model"), "error": "", "review": None}
+        out["incremental_from"] = dbase if dbase != base else None
         try:
             v = R.validate(text, project_id=project_id, task_id=case_id, head_sha=sha, scope=files)
         except R.ReviewInvalid as e:
@@ -970,7 +995,43 @@ class RepairWorkspace:
             return out
         out.update(verdict=v["verdict"], findings=v["findings"], review=v,
                    approved=v["verdict"] == "APPROVED")
+        self._remember_review(ap, case_id, {"sha": sha, "verdict": v["verdict"],
+                                            "review_id": rid,
+                                            "findings": R.findings_for_repair(v)})
         return out
+
+    def _review_memory_path(self, ap: str) -> Optional[str]:
+        r = _git(ap, "rev-parse", "--absolute-git-dir", check=False)
+        d = (r.stdout or "").strip()
+        return os.path.join(d, "foundry-repair-reviews.json") if r.returncode == 0 and d else None
+
+    def _last_review(self, ap: str, case_id: str) -> Optional[dict]:
+        p = self._review_memory_path(ap)
+        try:
+            with open(p or "", encoding="utf-8") as f:
+                got = (json.load(f) or {}).get(case_id)
+            return got if isinstance(got, dict) else None
+        except (OSError, ValueError, AttributeError):
+            return None
+
+    def _remember_review(self, ap: str, case_id: str, rec: dict) -> None:
+        """The last review of each case, in the worktree's git dir (never committed;
+        survives a coordinator restart): the next review of the case is incremental."""
+        p = self._review_memory_path(ap)
+        if not p:
+            return
+        try:
+            with open(p, encoding="utf-8") as f:
+                mem = json.load(f) or {}
+        except (OSError, ValueError):
+            mem = {}
+        mem[case_id] = rec
+        try:
+            with open(p + ".tmp", "w", encoding="utf-8") as f:
+                json.dump(mem, f)
+            os.replace(p + ".tmp", p)
+        except OSError:
+            pass
 
     # -- the whole gate ---------------------------------------------------------------
 
