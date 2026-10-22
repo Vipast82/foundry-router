@@ -1317,13 +1317,16 @@ def test_write_access_permissions_allow_everything_but_secrets_and_questions(tmp
     rules = lead_write_permissions(e["P"], e["P"].adapter.describe(TID))
     assert not is_read_only(rules)
     for perm, val in (("bash", "git commit -m x -- src/a.txt"), ("edit", "src/a.txt"),
-                      ("task", "explore"), ("robloxstudio-mcp_run_code", "*"),
-                      ("external_directory", "C:/elsewhere/x")):
+                      ("task", "explore"), ("robloxstudio-mcp_run_code", "*")):
         assert kilo_decision(rules, perm, val) == "allow", (perm, val)
     for perm, val in (("read", "config/_secrets.toml"), ("read", "app.env"),
                       ("edit", "my_secret_key.txt"), ("question", "anything"),
                       # revamp B6: no subagents of its own beyond explore
-                      ("task", "au-helper"), ("task", "au-planner")):
+                      ("task", "au-helper"), ("task", "au-planner"),
+                      # W2 (2026-10-22): the write-mode lead stays inside the workspace and
+                      # never pushes or rewrites history
+                      ("external_directory", "C:/elsewhere/x"), ("bash", "git push origin main"),
+                      ("bash", "git rebase -i HEAD~2")):
         assert kilo_decision(rules, perm, val) == "deny", (perm, val)
 
 
