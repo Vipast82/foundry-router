@@ -85,6 +85,33 @@ def test_absolute_windows_scope_for_the_implementer():
     assert RR.test("implementer", narrow, "edit", "tools/a.ps1", WS)["decision"] == "deny"
 
 
+def test_tester_checks_the_path_kilo_sees():
+    # reported by the GUI session: an absolute path inside the workspace is
+    # matched relative to the worktree, like Kilo does
+    rules = {"edit_paths": {"allow": ["tools/*"], "deny": []}}
+    out = RR.test("implementer", rules, "edit", "C:/Work/tools/a.py", "C:/Work")
+    assert out["decision"] == "allow" and out["checked"] == "tools/a.py"
+    assert RR.test("implementer", rules, "edit", "C:/Work/src/a.py", "C:/Work")[
+        "decision"] == "deny"
+
+
+def test_scopes_never_leak_upwards():
+    # Kilo's * also matches "../", so a broad scope must not cover parent folders
+    t = lambda rules, p: RR.test("implementer", rules, "edit", p, WS)["decision"]  # noqa: E731
+    wide = {"edit_paths": {"allow": ["**"], "deny": []}}
+    assert t(wide, "src/a.lua") == "allow"
+    assert t(wide, "../Other/a.lua") == "deny"
+    roblox = {"edit_paths": {"allow": ["C:\\Roblox\\**"], "deny": []}}
+    assert t(roblox, "C:\\Roblox\\Shared\\x.lua") == "allow"
+    assert t(roblox, "C:\\Users\\x\\y.lua") == "deny"
+    assert RR.decide(RR.agent_block_rules("implementer", roblox, WS), "edit",
+                     "../../Users/x/y.lua")[0] == "deny"
+    # a broader second entry re-allows what it covers, a narrower one doesn't widen
+    both = {"edit_paths": {"allow": ["C:\\Roblox\\Shared\\**", "C:\\**"], "deny": []}}
+    assert t(both, "C:\\Tools\\a.txt") == "allow"
+    assert t(both, "D:\\a.txt") == "deny"
+
+
 def test_validation_errors():
     errs, warns = RR.validate({
         "boss": {},

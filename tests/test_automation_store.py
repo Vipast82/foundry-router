@@ -48,7 +48,8 @@ def test_schema_describes_every_table_and_role(client):
     keys = {f["key"] for f in s["fields"]}
     for k in ("lead_manager.write_access", "lead_manager.allow_local_route",
               "retry_guidance.local_fallback", "fast_lane.vision_parallel",
-              "scope_policy.auto_approve", "decisions.timeout_minutes", "helpers.on_demand",
+              "automation.scope_auto_approve", "automation.decision_timeout_minutes",
+              "automation.helpers", "fast_lane.early_review",
               "backends.*.cutoff_pct", "roles.implementer", "role_overrides.*.tasks",
               "limits.max_attempts", "commit.prefix", "review.max_diff_bytes"):
         assert k in keys, k
@@ -82,6 +83,25 @@ def test_validate_reports_types_limits_strict_tables_and_secrets():
     assert paths.get("client.url") == "local_key"
     assert any(c == "secret" for c in paths.values())
     assert any(w["path"] == "whatever.x" for w in v["warnings"])
+
+
+def test_automation_table_matches_the_coordinator_rules():
+    doc = D.empty("p")
+    doc["settings"] = {"roles": {"implementer": "X"}, "automation": {
+        "helpers": "on_demand", "decision_timeout_minutes": 0,
+        "scope_auto_approve": [{"name": "gate", "path": "tests/GateRunner.lua",
+                                "blocks": ["EXPECTED_BOOT"]}]}}
+    assert D.validate(doc, "p")["ok"]
+    for bad in ({"helpers": "always"}, {"nope": 1}, {"decision_timeout_minutes": -1},
+                {"scope_auto_approve": [{"path": "../outside"}]},
+                {"scope_auto_approve": [{"path": "x", "lines": ["("]}]}):
+        doc["settings"]["automation"] = bad
+        v = D.validate(doc, "p")
+        assert not v["ok"] and any(e["path"].startswith("automation") for e in v["errors"]), bad
+    f = {x.key: x for x in S.FIELDS}
+    assert f["automation.helpers"].enum == ["on_demand", "proactive"]
+    assert f["automation.scope_auto_approve"].default == S.AUTOMATION_DEFAULTS[
+        "scope_auto_approve"]
 
 
 def test_validate_needs_implementer_and_explicit_override_tasks():

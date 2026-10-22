@@ -134,8 +134,13 @@ FAST_LANE_DEFAULTS = {
     "max_red_gates_before_handoff": 2,        # local-primary tasks then auto-request frontier_primary
     "max_vision_rounds": 2,                   # CHANGES rounds before accept-with-notes
     "vision_batch_frames": 20,                # frames per vision call (UI-D1 had ~560 frames)
-    # revamp B3: vision batches sent at once (1 = one batch per tick, as before)
-    "vision_parallel": 3,
+    # revamp B3/B2/B4 (branch revamp/gate-vision, same names and defaults; that branch
+    # also changes max_vision_rounds to 1 and revamp/lead-scope lanes to [] -- take
+    # those at the merge, together with the code that reads them)
+    "vision_parallel": 4,                     # vision batch calls in flight at once
+    "auto_baseline": True,                    # baseline gate at the base commit first
+    "early_review": True,                     # review runs alongside vision
+    "tick_checklist": True,                   # the coordinator ticks verified checklist rows
     "lanes": ["prework", "test_design", "failure_triage", "incremental_review"],
     # files the runner rewrites on every run ({task} = the task id): never part of the
     # coordinator's clean / unrelated_preserved checks (UI-D1 lost its last attempt to the
@@ -146,6 +151,112 @@ FAST_LANE_DEFAULTS = {
     # pre-existing change"
     "runner_captures": ["docs/evidence/UI-v3/{task}/**"],
 }
+
+
+# [automation] (revamp B5-B13): the coordinator's own policy knobs. Same keys,
+# defaults and rules as foundry_coordinator/automation.py on branch
+# revamp/lead-scope (at the merge, that module can import these).
+HELPER_MODES = ("on_demand", "proactive")
+SCOPE_DEFAULTS = ("deny", "approve")
+DEFAULT_SCOPE_RULES = [
+    {"name": "gate_runner_boot_and_mounted_rows", "path": "tests/GateRunner.lua",
+     "blocks": ["EXPECTED_BOOT", "MOUNTED_TESTS"]},
+    {"name": "sprint_gate_manifest", "path": "docs/progress/{task}_gate.json"},
+    {"name": "rojo_mapping_for_plan_files", "path": "default.project.json",
+     "json_paths_in_plan": True},
+]
+AUTOMATION_DEFAULTS: dict = {
+    "helpers": "on_demand",
+    "helper_git_measure": True,
+    "helper_lane_misses": 2,
+    "subagents_allowed": ["explore"],
+    "scope_auto_approve": [dict(r) for r in DEFAULT_SCOPE_RULES],
+    "scope_unlisted_default": "deny",
+    "decision_timeout_minutes": 30,
+    "no_progress_sessions": 2,
+    "auto_heal_retries": 2,
+    "lead_hard_max_calls": 8,
+    "lead_report_repairs": 1,
+    "infra_retry_max": 5,
+    "infra_backoff_seconds": 60,
+    "preflight": True,
+    "preflight_endpoints": [],
+    "context_ceiling_tokens": 160000,
+    "memory_delta": True,
+    "transcript_poll_seconds": 120,
+    "generic_checks_cache": True,
+}
+_SCOPE_RULE_KEYS = {"name", "path", "lines", "blocks", "json_paths_in_plan", "reason"}
+
+
+def _scope_allow_rules(path: str, v) -> list:
+    where = "automation.scope_auto_approve"
+    if not isinstance(v, list):
+        raise SettingsError(f"{path}: {where} must be a list of tables", where)
+    out = []
+    for i, r in enumerate(v):
+        w = f"{where}[{i}]"
+        if not isinstance(r, dict) or not isinstance(r.get("path"), str) or \
+                not r["path"].strip():
+            raise SettingsError(f"{path}: {w} needs a path", where)
+        bad = sorted(set(r) - _SCOPE_RULE_KEYS)
+        if bad:
+            raise SettingsError(f"{path}: {w}: unknown keys {bad}", where)
+        p = r["path"].replace("\\", "/").strip()
+        if p.startswith(("/", "../")) or ".." in p.split("/") or ":" in p:
+            raise SettingsError(f"{path}: {w}.path must be a workspace-relative glob", where)
+        lines = r.get("lines") or []
+        if not isinstance(lines, list) or any(not isinstance(x, str) for x in lines):
+            raise SettingsError(f"{path}: {w}.lines must be a list of regexes", where)
+        for x in lines:
+            try:
+                re.compile(x)
+            except re.error as e:
+                raise SettingsError(f"{path}: {w}.lines: {x!r}: {e}", where) from None
+        blocks = r.get("blocks") or []
+        if not isinstance(blocks, list) or any(
+                not isinstance(x, str) or not re.match(r"^[A-Za-z_][\w.]*$", x) for x in blocks):
+            raise SettingsError(f"{path}: {w}.blocks must be a list of identifiers", where)
+        out.append({"name": str(r.get("name") or p), "path": p, "lines": list(lines),
+                    "blocks": list(blocks),
+                    "json_paths_in_plan": bool(r.get("json_paths_in_plan", False)),
+                    "reason": str(r.get("reason") or "")})
+    return out
+
+
+def automation_table(path: str, raw) -> dict:
+    """Validate [automation] (raises SettingsError)."""
+    a = raw if raw is not None else {}
+    if not isinstance(a, dict):
+        raise SettingsError(f"{path}: [automation] must be a table", "automation")
+    unknown = sorted(set(a) - set(AUTOMATION_DEFAULTS))
+    if unknown:
+        raise SettingsError(f"{path}: unknown [automation] keys {unknown}", "automation")
+    out = {k: ([dict(x) if isinstance(x, dict) else x for x in v] if isinstance(v, list)
+               else v) for k, v in AUTOMATION_DEFAULTS.items()}
+    for k, v in a.items():
+        want = type(AUTOMATION_DEFAULTS[k])
+        where = f"automation.{k}"
+        if k == "scope_auto_approve":
+            out[k] = _scope_allow_rules(path, v)
+            continue
+        if want is bool and not isinstance(v, bool):
+            raise SettingsError(f"{path}: {where} must be true or false", where)
+        if want is int and (isinstance(v, bool) or not isinstance(v, int) or v < 0):
+            raise SettingsError(f"{path}: {where} must be a non-negative integer", where)
+        if want is str and not isinstance(v, str):
+            raise SettingsError(f"{path}: {where} must be a string", where)
+        if want is list and (not isinstance(v, list) or
+                             any(not isinstance(x, str) or not x.strip() for x in v)):
+            raise SettingsError(f"{path}: {where} must be a list of non-empty strings", where)
+        out[k] = list(v) if isinstance(v, list) else v
+    if out["helpers"] not in HELPER_MODES:
+        raise SettingsError(f"{path}: automation.helpers must be one of {HELPER_MODES}",
+                            "automation.helpers")
+    if out["scope_unlisted_default"] not in SCOPE_DEFAULTS:
+        raise SettingsError(f"{path}: automation.scope_unlisted_default must be one of "
+                            f"{SCOPE_DEFAULTS}", "automation.scope_unlisted_default")
+    return out
 
 
 def _copy_defaults(d: dict) -> dict:
@@ -346,7 +457,8 @@ GROUPS = [
     {"id": "helpers", "label": "Helpers & lanes", "order": 80},
     {"id": "recovery", "label": "Retry, frontier & lifecycle", "order": 90},
     {"id": "limits", "label": "Limits", "order": 100},
-    {"id": "decisions", "label": "Scope requests & decisions", "order": 110},
+    {"id": "decisions", "label": "Coordinator policy (scope, decisions, helpers)",
+     "order": 110},
     {"id": "git", "label": "Commit, publish & closeout", "order": 120},
     {"id": "telemetry", "label": "Telemetry & training", "order": 130},
     {"id": "router", "label": "Router backends", "order": 140},
@@ -378,10 +490,10 @@ TABLES = [
     Table("lead_manager", "Lead manager", "lead", strict=True),
     Table("frontier_primary", "Frontier primary", "recovery"),
     Table("retry_guidance", "Retry guidance", "recovery"),
-    Table("scope_policy", "Scope requests", "decisions",
-          "Revamp B10: typed scope requests and the auto-approve allow-list."),
-    Table("decisions", "Product decisions", "decisions",
-          "Revamp B11: product decisions carry a default and a timeout."),
+    Table("automation", "Coordinator policy", "decisions",
+          "Revamp B5-B13 (branch revamp/lead-scope, foundry_coordinator/automation.py): "
+          "helpers on demand, subagents, scope allow-list, decision timeout, auto-heal, "
+          "infrastructure retries, preflight, context ceiling, memory delta.", strict=True),
     Table("telemetry", "Telemetry", "telemetry"),
     Table("training", "Training capture", "telemetry"),
     Table("prompts", "Prompts", "client"),
@@ -435,10 +547,46 @@ _FL_DESC = {
     "max_red_gates_before_handoff": "Red gates before a local primary hands off to frontier.",
     "max_vision_rounds": "Vision CHANGES rounds before accept-with-notes.",
     "vision_batch_frames": "Frames per vision call.",
-    "vision_parallel": "Revamp B3: vision batches sent at once.",
+    "vision_parallel": "Revamp B3: vision batch calls in flight at once.",
+    "auto_baseline": "Revamp B2: run the sprint's gate at its base commit before the first "
+                     "session (pre-existing reds never block).",
+    "early_review": "Revamp B4: start the code review while vision runs, once the gate is "
+                    "green; review changes go into the same session.",
+    "tick_checklist": "Revamp B4: the coordinator ticks plan checklist rows a green gate "
+                      "verifies.",
     "lanes": "Lanes that run for fast-lane tasks.",
     "runner_outputs": "Files the runner rewrites every run (never a hygiene failure).",
     "runner_captures": "Runner capture globs (must be committed).",
+}
+
+_AUTO_ENUMS = {"helpers": HELPER_MODES, "scope_unlisted_default": SCOPE_DEFAULTS}
+_AUTO_DESC = {
+    "helpers": "on_demand: proactive helper lanes are off; a helper starts only when the "
+               "primary asks for one and that primary consumes it. proactive: [lanes] apply.",
+    "helper_git_measure": "Measure a delivered helper's use from git.",
+    "helper_lane_misses": "Consecutive git-unused results that turn a lane off for the task "
+                          "(0 = never).",
+    "subagents_allowed": "Kilo `task` subagents a session may spawn (all others denied).",
+    "scope_auto_approve": "Scope allow-list: harness lines the coordinator adds to a sprint's "
+                          "file list itself. Each entry {name, path (glob, {task}), blocks[], "
+                          "lines[] (regexes), json_paths_in_plan, reason}.",
+    "scope_unlisted_default": "Recommended answer of a scope decision for a path the "
+                              "allow-list doesn't cover.",
+    "decision_timeout_minutes": "Product decisions apply their recommended option after this "
+                                "long (0 = wait for the operator).",
+    "no_progress_sessions": "Sessions in a row with no progress before a no-progress decision.",
+    "auto_heal_retries": "Deterministic re-runs of a tooling/infra stop before a lead case.",
+    "lead_hard_max_calls": "Absolute lead calls per task (delegation never raises it).",
+    "lead_report_repairs": "Invalid lead reports sent back into the same session.",
+    "infra_retry_max": "Infrastructure failures retried free per task run.",
+    "infra_backoff_seconds": "First infra retry delay (doubles, capped at 15 min).",
+    "preflight": "Check Kilo / Rojo / Studio MCP / local model before a session starts.",
+    "preflight_endpoints": "Extra endpoints the preflight probes (name=url; tcp:// or http(s)://).",
+    "context_ceiling_tokens": "A session over this context hands off to a fresh one (0 = off).",
+    "memory_delta": "Send operator notes / memory once per session, then only changes.",
+    "transcript_poll_seconds": "Lane transcript ingest interval.",
+    "generic_checks_cache": "Reuse per-tick coordinator checks while HEAD and the tree are "
+                            "unchanged.",
 }
 
 C = "coordinator"
@@ -563,8 +711,6 @@ FIELDS: list[Field] = [
     # helpers & lanes ------------------------------------------------------------
     F("helpers.enabled", "bool", False, "Read-only coding helpers on frontier quota.", "helpers",
       "coordinator.helpers"),
-    F("helpers.on_demand", "bool", True, "Revamp B5: start a helper only on demand, with a "
-      "declared consumer.", "helpers", "coordinator.helpers", since="revamp"),
     F("helpers.order", "list", [], "Backend order for helpers.", "helpers",
       "coordinator.helpers", item_type="str"),
     F("helpers.selective", "list", [], "Backends used only for high-value units.", "helpers",
@@ -662,14 +808,17 @@ FIELDS: list[Field] = [
       "question (0 = never).", "limits", C, min=0),
     F("auto_queue_followups.*", "list", [], "Task -> follow-up tasks queued when it is "
       "approved.", "limits", C, item_type="str"),
-    # decisions / scope ----------------------------------------------------------
-    F("scope_policy.auto_approve", "list", [], "Harness lines / paths a sprint may change "
-      "without asking (e.g. tests/GateRunner.lua:EXPECTED_BOOT, default.project.json).",
-      "decisions", "coordinator.scope", since="revamp"),
-    F("decisions.timeout_minutes", "int", 30, "Product decisions take their recommended "
-      "default after this.", "decisions", "coordinator.decisions", min=1, since="revamp"),
-    F("decisions.apply_default_on_timeout", "bool", True, "Apply and log the default when "
-      "the timeout passes.", "decisions", "coordinator.decisions", since="revamp"),
+    # [automation] (revamp B5-B13) ----------------------------------------------
+    *[F(f"automation.{k}",
+        "enum" if k in _AUTO_ENUMS else
+        {bool: "bool", int: "int", str: "str", list: "list"}[type(v)],
+        v, _AUTO_DESC.get(k, ""), "decisions", "coordinator.automation",
+        "next_session" if k in ("subagents_allowed", "memory_delta") else "live",
+        enum=list(_AUTO_ENUMS[k]) if k in _AUTO_ENUMS else None,
+        item_type=("table" if k == "scope_auto_approve" else "str")
+        if isinstance(v, list) else None,
+        min=0 if isinstance(v, int) and not isinstance(v, bool) else None, since="revamp")
+      for k, v in AUTOMATION_DEFAULTS.items()],
     # git ------------------------------------------------------------------------
     F("commit.prefix", "str", "{task}:", "Commit message prefix.", "git", "coordinator.git"),
     F("commit.require_prefix", "bool", True, "Refuse commits without the prefix.", "git",

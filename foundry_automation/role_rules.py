@@ -245,25 +245,95 @@ def validate(role_rules: Any, where: str = "role_rules") -> tuple[list[dict], li
 
 # --------------------------------------------------------------------------- generation
 
+def _rel(p: str, workspace: str) -> str:
+    """`p` relative to the workspace as Kilo shows edit paths ("" = another
+    drive or no workspace)."""
+    if not workspace:
+        return ""
+    ws = norm_path(workspace).rstrip("/")
+    try:
+        rel = ntpath.relpath(p.replace("/", "\\"), ws.replace("/", "\\")).replace("\\", "/")
+    except ValueError:                  # another drive
+        return ""
+    return "" if rel == "." else rel
+
+
+def _ups(rel: str) -> int:
+    n = 0
+    while rel.startswith("../"):
+        rel = rel[3:]
+        n += 1
+    return n
+
+
 def _path_forms(p: str, workspace: str) -> list[str]:
-    """Patterns for one scope entry. Kilo matches edit paths relative to the
-    session's worktree and external_directory against absolute paths, so an
-    absolute entry also yields its workspace-relative form."""
+    """Patterns for one scope entry: the entry itself and, for an absolute
+    entry, its workspace-relative form (Kilo matches edit paths relative to
+    the session's worktree, external_directory against absolute paths)."""
     p = norm_path(p)
     forms = [p]
     if workspace and is_abs(p):
-        ws = norm_path(workspace).rstrip("/")
-        try:
-            rel = ntpath.relpath(p.replace("/", "\\"), ws.replace("/", "\\")).replace("\\", "/")
-        except ValueError:              # another drive
-            rel = ""
-        if rel and rel != ".":
+        rel = _rel(p, workspace)
+        if rel:
             forms.append(rel)
-        # a glob whose directory holds the workspace covers the workspace itself
-        head = re.split(r"[*?\[]", p, maxsplit=1)[0].rstrip("/")
-        if p.endswith("*") and head and (ws.lower() + "/").startswith(head.lower() + "/"):
-            forms.append("*")
     return list(dict.fromkeys(forms))
+
+
+def _covers_workspace(p: str, workspace: str) -> bool:
+    """An absolute glob whose directory holds the workspace (C:/Roblox/** for
+    C:/Roblox/AnimalUprising) covers every workspace file."""
+    if not (workspace and is_abs(p) and p.endswith("*")):
+        return False
+    head = re.split(r"[*?\[]", p, maxsplit=1)[0].rstrip("/").lower()
+    ws = norm_path(workspace).rstrip("/").lower()
+    return bool(head) and (ws + "/").startswith(head + "/")
+
+
+def _scope_rules(perm: str, action: str, allow: list[str], deny: list[str],
+                 workspace: str) -> list[dict]:
+    """Edit/write scope as Kilo rules (last match wins). Kilo's `*` matches
+    `/` and `..` too, so every relative allow is followed by a deny for paths
+    that climb further out than it does; allows are emitted narrowest first
+    (fewest `../`) so a broader entry later re-allows what it covers."""
+    out = [{"permission": perm, "pattern": "*",
+            "action": action if not allow or action == "deny" else "deny"}]
+
+    def add(pattern, act):
+        out.append({"permission": perm, "pattern": pattern, "action": act})
+
+    if action != "deny" and allow:
+        inside, outside = [], []                     # inside: no "../"; outside: (ups, rel)
+        for g in allow:
+            n = norm_path(g)
+            if is_abs(n):
+                add(n, action)                       # absolute form (abs paths, if shown)
+                if _covers_workspace(n, workspace):
+                    inside.append("*")
+                rel = _rel(n, workspace)
+                if rel:
+                    (outside.append((_ups(rel), rel)) if rel.startswith("../")
+                     else inside.append(rel))
+            else:
+                inside.append(n)
+        for pat in dict.fromkeys(inside):
+            add(pat, action)
+        if inside:
+            add("../*", "deny")
+        for ups, rel in sorted(dict.fromkeys(outside)):
+            add(rel, action)
+            add("../" * (ups + 1) + "*", "deny")
+    for g in deny:
+        for form in _path_forms(g, workspace):
+            add(form, "deny")
+    return out
+
+
+def kilo_path(value: str, workspace: str) -> str:
+    """The path Kilo checks for an edit: relative to the workspace when it can be."""
+    v = norm_path(value)
+    if is_abs(v):
+        return _rel(v, workspace) or v
+    return v
 
 
 def _abs_dirs(globs: list[str]) -> list[str]:
@@ -295,17 +365,9 @@ def session_rules(role: str, rules: Optional[dict] = None, workspace: str = "",
 
     # edit / write with path scope
     for cat, perms in (("edit", EDIT_PERMS), ("write", ("write",))):
-        act = p.get(cat, "deny")
-        allow = r["edit_paths"]["allow"]
         for perm in perms:
-            add(perm, "*", act if not allow or act == "deny" else "deny")
-            if act != "deny":
-                for g in allow:
-                    for form in _path_forms(g, workspace):
-                        add(perm, form, act)
-            for g in r["edit_paths"]["deny"]:
-                for form in _path_forms(g, workspace):
-                    add(perm, form, "deny")
+            out += _scope_rules(perm, p.get(cat, "deny"), r["edit_paths"]["allow"],
+                                r["edit_paths"]["deny"], workspace)
     # reads: allowed by default (a reviewer's agent block starts from "*": deny)
     for perm in READ_PERMS + ("glob", "grep"):
         add(perm, "*", "allow")
@@ -414,26 +476,22 @@ def decide(rules: list[dict], perm: str, value: str) -> tuple[Optional[str], Opt
 def test(role: str, rules: Optional[dict], op: str, value: str, workspace: str = "") -> dict:
     """The GUI path tester: op read | edit | write | bash | <permission>."""
     lst = agent_block_rules(role, rules, workspace)
-    perm = {"read": "read", "edit": "edit", "write": "write", "bash": "bash"}.get(op, op)
-    v = norm_path(value) if op in ("read", "edit", "write") else value
-    candidates = [v]
-    if op in ("read", "edit", "write"):
-        candidates = _path_forms(v, workspace)
-    decision, rule = None, None
-    for c in candidates:
-        d, rr = decide(lst, perm, c)
-        if d == "deny":
-            decision, rule = d, rr
-            break
-        if d and decision is None:
-            decision, rule = d, rr
-    if op in ("read", "edit", "write") and is_abs(v) and workspace and decision != "deny":
-        ws = norm_path(workspace).rstrip("/")
-        if not v.lower().startswith(ws.lower() + "/"):
-            d, rr = decide(lst, "external_directory", posixpath.dirname(v))
-            if d != "allow":
-                decision, rule = d or "deny", rr
-    return {"decision": decision or "deny", "rule": rule}
+    if op not in ("read", "edit", "write"):
+        d, rr = decide(lst, op, value)
+        return {"decision": d or "deny", "rule": rr, "checked": value}
+    v = norm_path(value)
+    seen = kilo_path(v, workspace)            # what Kilo matches the edit rules against
+    decision, rule = decide(lst, op, seen)
+    # a file outside the workspace also needs external_directory for its folder
+    absolute = v if is_abs(v) else (
+        posixpath.normpath(norm_path(workspace).rstrip("/") + "/" + v) if workspace else "")
+    ws = norm_path(workspace).rstrip("/").lower()
+    if decision != "deny" and absolute and ws and \
+            not (absolute.lower() + "/").startswith(ws + "/"):
+        d, rr = decide(lst, "external_directory", posixpath.dirname(absolute))
+        if d != "allow":
+            decision, rule = d or "deny", rr
+    return {"decision": decision or "deny", "rule": rule, "checked": seen}
 
 
 def agent_block_rules(role: str, rules: Optional[dict], workspace: str = "") -> list[dict]:
