@@ -1042,6 +1042,8 @@ const GROUPS = [
   ["Monitor",     ["Live", "Performance", "Cost", "Scoreboard", "Compare", "Work"]],
   ["Backends",    ["Pool", "Model Registry", "Host Admin"]],
   ["Routing",     ["Personas", "Guardrails", "Routes"]],
+  // its own page (operator sign-in, drafts, deploy): the group button opens it
+  ["Automation",  []],
   ["Tools & MCP", ["Tools", "MCP Servers", "MCP Metrics", "Agents"]],
   ["Labs",        ["Research", "Evals"]],
   ["Logs",        ["Usage Log", "Events", "Dev Log", "Data", "Training"]],
@@ -1055,6 +1057,7 @@ const GROUP_HELP = {
   Monitor: "Watch traffic as it happens: live activity, speed and latency history, cost and model comparisons.",
   Backends: "The inference servers Foundry sends work to, the models they serve, and host administration.",
   Routing: "How requests pick a model: personas, spending guardrails and the route map.",
+  Automation: "One place to run the coordinator: roles, ordered routes, backend cutoffs, settings, role rules and the queue (opens its own page).",
   "Tools & MCP": "Tools the models can call, the MCP servers behind them, and agents.",
   Labs: "Research settings and evaluation runs for personas.",
   Logs: "Every request, event and log line, plus data export and training capture.",
@@ -1097,7 +1100,8 @@ function render() {
     b.className = gname === activeGroup ? "active" : "";
     b.setAttribute("aria-selected", gname === activeGroup ? "true" : "false");
     if (GROUP_HELP[gname]) b.title = GROUP_HELP[gname];
-    b.onclick = () => { current = _lastLeaf[gname] || leaves[0]; render(); };
+    b.onclick = leaves.length ? () => { current = _lastLeaf[gname] || leaves[0]; render(); }
+                              : () => { location.href = "/ui/automation"; };
     groupRow.appendChild(b);
   }
   nav.appendChild(groupRow);

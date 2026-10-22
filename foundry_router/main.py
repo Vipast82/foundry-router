@@ -656,6 +656,8 @@ def create_app(config_path: Optional[Path] = None,
     from .control_api import router as control_router
     app.include_router(control_router)
     from .automation_api import router as automation_router
+    from .ui.automation_routes import router as automation_ui_router
+    app.include_router(automation_ui_router)
     app.include_router(automation_router)
     app.include_router(ui_router)
     return app
