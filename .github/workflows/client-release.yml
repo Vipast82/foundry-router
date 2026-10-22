@@ -1,0 +1,61 @@
+name: Foundry Client packages
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch: {}
+
+permissions:
+  contents: write
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[client]" pyinstaller==6.22.3
+      - name: Icon
+        run: python -c "from foundry_client.tray import icon_image; icon_image('ok', 256).save('packaging/foundry-client.ico', sizes=[(16,16),(32,32),(48,48),(256,256)])"
+      - name: Bundle
+        run: pyinstaller packaging/foundry-client.spec --noconfirm
+      - name: Smoke
+        run: dist/FoundryClient/foundry-client.exe --help
+      - name: Installer
+        run: |
+          choco install innosetup -y --no-progress
+          $v = "${{ github.ref_name }}".TrimStart("v")
+          & "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" "/DAppVersion=$v" packaging\windows\FoundryClient.iss
+      - uses: softprops/action-gh-release@v2
+        if: startsWith(github.ref, 'refs/tags/')
+        with:
+          files: dist/FoundryClientSetup-*.exe
+
+  linux:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: System packages
+        run: sudo apt-get update && sudo apt-get install -y libfuse2 libayatana-appindicator3-1
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[client]" pyinstaller==6.22.3 python-xlib
+      - name: Bundle
+        run: pyinstaller packaging/foundry-client.spec --noconfirm
+      - name: Smoke
+        run: dist/FoundryClient/foundry-client --help
+      - name: AppImage
+        run: bash packaging/linux/build_appimage.sh "${GITHUB_REF_NAME#v}"
+      - uses: softprops/action-gh-release@v2
+        if: startsWith(github.ref, 'refs/tags/')
+        with:
+          files: dist/FoundryClient-*.AppImage

@@ -21,6 +21,8 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = ["pytest>=8.0", "pytest-asyncio>=0.24"]
+# Foundry Client (tray + stack manager, docs/CLIENT_MANAGER.md)
+client = ["keyring>=25", "pystray>=0.19", "pillow>=10", "tomli-w>=1.0"]
 
 [tool.setuptools.dynamic]
 version = { attr = "foundry_router.__version__" }
@@ -31,9 +33,11 @@ include = ["foundry_router*", "foundry_coordinator*", "foundry_training*", "foun
 [project.scripts]
 foundry-coordinator = "foundry_coordinator.cli:main"
 foundry-training = "foundry_training.cli:main"
+foundry-client = "foundry_client.__main__:main"
 
 [tool.setuptools.package-data]
 "foundry_router" = ["schema.sql", "ui/static/*"]
+"foundry_client" = ["static/*"]
 "foundry_coordinator" = ["projects/*/*.toml", "projects/*/*.md"]
 
 [tool.pytest.ini_options]

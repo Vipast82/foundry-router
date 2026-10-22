@@ -1,0 +1,138 @@
+"""Local API + settings page on 127.0.0.1 only. Every /api call needs the per-install
+token (header X-Client-Token); the tray opens the page with the token in the URL
+fragment, which never reaches the server or a log. Host-header check against DNS
+rebinding. Secrets are write-only."""
+from __future__ import annotations
+
+import os
+import secrets as _rnd
+import threading
+from importlib import resources
+from pathlib import Path
+from typing import Optional
+
+from fastapi import FastAPI, HTTPException, Request
+from fastapi.responses import HTMLResponse, JSONResponse
+
+from . import __version__, autostart, config, secrets
+from .config import COMPONENTS
+from .manager import Manager
+
+HOSTS = ("127.0.0.1", "localhost")
+
+
+def token_path() -> Path:
+    return config.config_dir() / "api.token"
+
+
+def load_token() -> str:
+    p = token_path()
+    if p.is_file():
+        t = p.read_text(encoding="utf-8").strip()
+        if len(t) >= 32:
+            return t
+    p.parent.mkdir(parents=True, exist_ok=True)
+    t = _rnd.token_urlsafe(32)
+    p.write_text(t, encoding="utf-8")
+    try:
+        os.chmod(p, 0o600)
+    except OSError:
+        pass
+    return t
+
+
+def create_app(mgr: Manager, token: str, cfg_path: Optional[Path] = None) -> FastAPI:
+    app = FastAPI(title="Foundry Client", docs_url=None, redoc_url=None, openapi_url=None)
+    lock = threading.Lock()
+
+    @app.middleware("http")
+    async def guard(request: Request, call_next):
+        host = (request.headers.get("host") or "").split(":")[0]
+        if host not in HOSTS:
+            return JSONResponse({"error": "local access only"}, status_code=403)
+        if request.url.path.startswith("/api/"):
+            if not _rnd.compare_digest(request.headers.get("x-client-token", ""), token):
+                return JSONResponse({"error": "missing or wrong client token"}, status_code=401)
+        return await call_next(request)
+
+    @app.get("/", response_class=HTMLResponse)
+    def page():
+        return resources.files("foundry_client").joinpath("static/client.html").read_text("utf-8")
+
+    @app.get("/api/status")
+    def status():
+        return {**mgr.status(), "version": __version__,
+                "backend_url": mgr.cfg["client"]["backend_url"]}
+
+    @app.post("/api/components/{name}/{verb}")
+    def control(name: str, verb: str, force: bool = False):
+        if name not in COMPONENTS or name not in mgr.procs:
+            raise HTTPException(404, f"no component {name!r}")
+        if verb == "start":
+            return mgr.start(name)
+        if verb == "stop":
+            return mgr.stop(name)
+        if verb == "restart":
+            return mgr.restart(name, force=force)
+        raise HTTPException(404, f"unknown action {verb!r}")
+
+    @app.get("/api/settings")
+    def get_settings():
+        return {"settings": mgr.cfg, "path": str(cfg_path or config.config_path()),
+                "problems": config.validate(mgr.cfg)}
+
+    @app.put("/api/settings")
+    async def put_settings(request: Request):
+        body = await request.json()
+        new = config._merge(config.DEFAULTS, body.get("settings") or {})
+        problems = config.validate(new)
+        if problems:
+            return JSONResponse({"error": "; ".join(problems), "problems": problems},
+                                status_code=400)
+        with lock:
+            config.save(new, cfg_path)
+            mgr.reload(new)
+            for n in COMPONENTS:                      # newly enabled components start
+                if new["components"][n]["enabled"] and not mgr.procs[n].want:
+                    mgr.procs[n].want = True
+                if not new["components"][n]["enabled"] and mgr.procs[n].want:
+                    mgr.stop(n)
+        return {"ok": True, "note": "saved; running components use the new settings after "
+                                    "their next restart"}
+
+    @app.get("/api/secrets")
+    def get_secrets():
+        names = {s for c in mgr.cfg["components"].values() for s in c.get("secrets") or []}
+        return {"secrets": secrets.status(names), "help": secrets.KNOWN}
+
+    @app.put("/api/secrets/{name}")
+    async def put_secret(name: str, request: Request):
+        body = await request.json()
+        try:
+            secrets.set_secret(name, str(body.get("value") or ""))
+        except (ValueError, RuntimeError) as e:
+            raise HTTPException(400, str(e)) from None
+        return {"ok": True, "set": bool(body.get("value"))}
+
+    @app.post("/api/secrets/import-legacy")
+    def import_legacy():
+        done = secrets.migrate_legacy(config.expand(mgr.cfg["client"]["state_dir"]))
+        return {"imported": done}
+
+    @app.get("/api/logs/{name}")
+    def logs(name: str, lines: int = 200):
+        if name not in COMPONENTS:
+            raise HTTPException(404, f"no component {name!r}")
+        return {"name": name, "text": mgr.tail(name, max(10, min(2000, lines)))}
+
+    @app.get("/api/autostart")
+    def get_autostart():
+        return {"enabled": autostart.is_enabled()}
+
+    @app.post("/api/autostart")
+    async def set_autostart(request: Request):
+        body = await request.json()
+        (autostart.enable if body.get("enabled") else autostart.disable)()
+        return {"enabled": autostart.is_enabled()}
+
+    return app

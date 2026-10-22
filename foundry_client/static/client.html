@@ -1,0 +1,193 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Foundry Client</title>
+<style>
+  :root { --bg:#f6f7f9; --panel:#fff; --line:#d8dce1; --text:#1c2128; --dim:#5d6672; --accent:#d9730d;
+          --ok:#1f883d; --busy:#9a6700; --bad:#cf222e; --code-font:ui-monospace, Consolas, monospace; }
+  @media (prefers-color-scheme: dark) { :root { --bg:#14161a; --panel:#1c1f24; --line:#30353c; --text:#e6e8eb;
+          --dim:#9aa3ad; --accent:#f08c2e; --ok:#3fb950; --busy:#d29922; --bad:#f85149; } }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); color:var(--text); font:14px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif; }
+  header { display:flex; align-items:center; gap:12px; padding:12px 16px; border-bottom:1px solid var(--line); background:var(--panel); }
+  header h1 { font-size:16px; margin:0; } header .grow { flex:1; } .dim { color:var(--dim); }
+  main { max-width:1100px; margin:0 auto; padding:16px; }
+  nav { display:flex; gap:4px; margin-bottom:12px; flex-wrap:wrap; }
+  nav button { border:1px solid var(--line); background:var(--panel); color:var(--text); padding:6px 12px; border-radius:6px; cursor:pointer; }
+  nav button[aria-selected="true"] { border-color:var(--accent); color:var(--accent); font-weight:600; }
+  .cards { display:grid; grid-template-columns:repeat(auto-fill, minmax(300px, 1fr)); gap:12px; }
+  .card { background:var(--panel); border:1px solid var(--line); border-radius:8px; padding:12px; }
+  .card h3 { margin:0 0 4px; font-size:15px; display:flex; align-items:center; gap:8px; }
+  .dot { width:10px; height:10px; border-radius:50%; display:inline-block; background:var(--dim); }
+  .s-running .dot { background:var(--ok); } .s-starting .dot, .s-waiting .dot { background:var(--busy); }
+  .s-error .dot, .s-unhealthy .dot { background:var(--bad); }
+  .row { display:flex; gap:6px; align-items:center; flex-wrap:wrap; margin-top:8px; }
+  button.act { border:1px solid var(--line); background:var(--bg); color:var(--text); border-radius:5px; padding:4px 10px; cursor:pointer; font:inherit; font-size:13px; }
+  button.act.primary { background:var(--accent); border-color:var(--accent); color:#fff; }
+  button.act:disabled { opacity:.5; cursor:default; }
+  label { display:block; font-size:12px; color:var(--dim); margin-top:10px; }
+  input[type=text], input[type=number], input[type=password], textarea { width:100%; background:var(--bg); color:var(--text);
+         border:1px solid var(--line); border-radius:5px; padding:6px 8px; font:inherit; }
+  textarea { font-family:var(--code-font); font-size:12px; }
+  fieldset { border:1px solid var(--line); border-radius:8px; padding:8px 12px 12px; margin:0 0 12px; background:var(--panel); }
+  legend { font-weight:600; padding:0 4px; }
+  .banner { border:1px solid var(--line); border-left:4px solid var(--accent); background:var(--panel); border-radius:6px; padding:8px 12px; margin:0 0 12px; }
+  .banner.bad { border-left-color:var(--bad); } .ok { color:var(--ok); } .bad { color:var(--bad); }
+  pre.log { background:var(--panel); border:1px solid var(--line); border-radius:6px; padding:10px; max-height:60vh; overflow:auto; font-size:12px; white-space:pre-wrap; }
+  .toast { position:fixed; bottom:16px; right:16px; background:var(--panel); border:1px solid var(--line); border-radius:6px; padding:8px 12px; max-width:420px; }
+  @media (max-width:600px) { header { flex-wrap:wrap; } main { padding:12px; } }
+</style>
+</head>
+<body>
+<header><h1>Foundry Client</h1><span class="dim" id="ver"></span><span class="grow"></span>
+  <span id="overall" class="dim" aria-live="polite"></span></header>
+<main>
+  <div id="problems"></div>
+  <nav role="tablist">
+    <button role="tab" data-v="status" aria-selected="true">Status</button>
+    <button role="tab" data-v="settings">Settings</button>
+    <button role="tab" data-v="secrets">Secrets</button>
+    <button role="tab" data-v="logs">Logs</button>
+  </nav>
+  <section id="v-status"></section>
+  <section id="v-settings" hidden></section>
+  <section id="v-secrets" hidden></section>
+  <section id="v-logs" hidden></section>
+</main>
+<script>
+"use strict";
+const $ = s => document.querySelector(s);
+const esc = s => String(s ?? "").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+let TOKEN = "";
+try { const m = location.hash.match(/t=([\w-]+)/); if (m) { sessionStorage.setItem("fc-token", m[1]); history.replaceState(null, "", "/"); } TOKEN = sessionStorage.getItem("fc-token") || ""; } catch (e) {}
+const S = {view: "status", status: null, settings: null};
+async function api(path, method = "GET", body) {
+  const r = await fetch("/api/" + path, {method, headers: {"X-Client-Token": TOKEN, "Content-Type": "application/json"},
+    body: body === undefined ? undefined : JSON.stringify(body)});
+  let d = {}; try { d = await r.json(); } catch (e) {}
+  if (!r.ok) throw new Error(d.error || d.detail || ("HTTP " + r.status));
+  return d;
+}
+function toast(t, bad) { const el = document.createElement("div"); el.className = "toast" + (bad ? " bad" : ""); el.textContent = t; document.body.append(el); setTimeout(() => el.remove(), 5000); }
+function setView(v) {
+  S.view = v;
+  for (const b of document.querySelectorAll("nav button")) b.setAttribute("aria-selected", b.dataset.v === v ? "true" : "false");
+  for (const x of ["status", "settings", "secrets", "logs"]) $("#v-" + x).hidden = x !== v;
+  render();
+}
+document.querySelector("nav").onclick = e => { const b = e.target.closest("button[data-v]"); if (b) setView(b.dataset.v); };
+
+/* ------------------------------------------------------------------ status */
+const fmtUp = s => !s ? "" : s < 120 ? `${s}s` : s < 7200 ? `${Math.round(s / 60)}m` : `${Math.round(s / 3600)}h`;
+function renderStatus() {
+  const st = S.status; if (!st) return;
+  $("#ver").textContent = "v" + st.version;
+  $("#overall").innerHTML = {ok: '<span class="ok">all running</span>', busy: "starting…", idle: "nothing running", error: '<span class="bad">a component has a problem</span>'}[st.overall] || st.overall;
+  $("#problems").innerHTML = (st.config_problems || []).length ? `<div class="banner bad"><b>Settings need attention:</b> ${st.config_problems.map(esc).join("; ")}</div>` : "";
+  $("#v-status").innerHTML = `<div class="cards">${st.components.map(c => `
+    <div class="card s-${esc(c.state)}"><h3><span class="dot"></span>${esc(c.label)}</h3>
+      <div>${c.enabled ? esc(c.state) : '<span class="dim">disabled</span>'} <span class="dim">${esc(c.detail)}</span></div>
+      <div class="dim">${c.pid ? "pid " + c.pid + " · up " + fmtUp(c.uptime_s) : ""}${c.restarts ? " · " + c.restarts + " restart(s)" : ""}</div>
+      ${c.problem && c.enabled ? `<div class="bad">${esc(c.problem)}</div>` : ""}
+      ${c.pending_restart ? `<div class="dim">restart pending (${esc(c.pending_restart)})</div>` : ""}
+      <div class="row">${c.enabled ? `
+        <button class="act" data-do="start" data-c="${c.name}" ${c.want ? "disabled" : ""}>Start</button>
+        <button class="act" data-do="stop" data-c="${c.name}" ${c.want ? "" : "disabled"}>Stop</button>
+        <button class="act" data-do="restart" data-c="${c.name}">Restart</button>
+        <button class="act" data-do="force" data-c="${c.name}" title="Restart without waiting for a safe point">Restart now</button>` : ""}
+        <button class="act" data-do="logs" data-c="${c.name}">Logs</button></div></div>`).join("")}</div>
+    <h3 style="margin-top:16px">Recent events</h3><div class="dim">${(st.events || []).slice().reverse().map(e => `${new Date(e.ts * 1000).toLocaleTimeString()} · ${esc(e.component)}: ${esc(e.text)}`).join("<br>") || "none"}</div>`;
+}
+$("#v-status").onclick = async e => {
+  const b = e.target.closest("button[data-do]"); if (!b) return;
+  const c = b.dataset.c, d = b.dataset.do;
+  if (d === "logs") { S.logName = c; return setView("logs"); }
+  try {
+    await api(`components/${c}/${d === "force" ? "restart" : d}${d === "force" ? "?force=true" : ""}`, "POST", {});
+    toast(d === "restart" ? "Restart requested; the Kilo server and coordinator wait for a safe point." : `${d} requested`);
+    await refresh();
+  } catch (err) { toast(err.message, true); }
+};
+
+/* ------------------------------------------------------------------ settings */
+const FIELDS = [
+  ["Foundry", [["client.backend_url", "Foundry router URL", "text"], ["client.state_dir", "Coordinator state folder", "text"], ["client.api_port", "Local settings port", "number"]]],
+  ["Workspace", [["workspace.game", "Game project folder (Kilo works here)", "text"], ["workspace.profiles", "Coordinator profiles folder (…/foundry_coordinator/projects)", "text"], ["workspace.deploy", "Coordinator release checkout (for the upgrade supervisor; optional)", "text"]]],
+  ["Kilo server", [["components.kilo.enabled", "Run the Kilo server", "bool"], ["components.kilo.path", "kilo executable (empty = find it)", "text"], ["components.kilo.port", "Port", "number"]]],
+  ["Coordinator", [["components.coordinator.enabled", "Run the coordinator", "bool"], ["components.coordinator.poll_seconds", "Poll seconds", "number"], ["components.supervisor.enabled", "Run the upgrade supervisor", "bool"]]],
+  ["Media adapter", [["components.media.enabled", "Run the media adapter", "bool"], ["components.media.command", "Command (one argument per line)", "list"], ["components.media.cwd", "Working folder", "text"]]],
+  ["Rojo", [["components.rojo.enabled", "Run rojo serve", "bool"], ["components.rojo.path", "rojo executable (empty = find it)", "text"], ["components.rojo.project", "Project folder (empty = game folder)", "text"], ["components.rojo.port", "Port", "number"]]],
+];
+const get = (o, p) => p.split(".").reduce((a, k) => a == null ? a : a[k], o);
+const put = (o, p, v) => { const ks = p.split("."); let a = o; for (const k of ks.slice(0, -1)) a = a[k] ??= {}; a[ks.at(-1)] = v; };
+function renderSettings() {
+  if (!S.settings) return;
+  const s = S.settings.settings;
+  $("#v-settings").innerHTML = `<form id="sf">${FIELDS.map(([g, fs]) => `<fieldset><legend>${esc(g)}</legend>${fs.map(([p, l, t]) => {
+      const v = get(s, p);
+      if (t === "bool") return `<label style="color:var(--text)"><input type="checkbox" name="${p}" ${v ? "checked" : ""}> ${esc(l)}</label>`;
+      if (t === "list") return `<label for="${p}">${esc(l)}</label><textarea id="${p}" name="${p}" rows="3">${esc((v || []).join("\n"))}</textarea>`;
+      return `<label for="${p}">${esc(l)}</label><input id="${p}" name="${p}" type="${t}" value="${esc(v ?? "")}">`;
+    }).join("")}</fieldset>`).join("")}
+    <fieldset><legend>Startup</legend><label style="color:var(--text)"><input type="checkbox" id="autostart"> Start the Foundry Client when I sign in</label></fieldset>
+    <div class="row"><span class="dim">Saved to ${esc(S.settings.path)}</span><span style="flex:1"></span><button class="act primary" type="submit">Save</button></div></form>`;
+  api("autostart").then(a => { $("#autostart").checked = a.enabled; });
+  $("#autostart").onchange = async e => { try { await api("autostart", "POST", {enabled: e.target.checked}); toast("Startup setting saved"); } catch (err) { toast(err.message, true); } };
+  $("#sf").onsubmit = async e => {
+    e.preventDefault();
+    const s2 = structuredClone(s);
+    for (const [, fs] of FIELDS) for (const [p, , t] of fs) {
+      const el = document.getElementsByName(p)[0];
+      put(s2, p, t === "bool" ? el.checked : t === "number" ? Number(el.value) : t === "list" ? el.value.split("\n").map(x => x.trim()).filter(Boolean) : el.value.trim());
+    }
+    try { const r = await api("settings", "PUT", {settings: s2}); toast(r.note || "Saved"); S.settings = null; await refresh(); }
+    catch (err) { toast(err.message, true); }
+  };
+}
+
+/* ------------------------------------------------------------------ secrets */
+async function renderSecrets() {
+  let d; try { d = await api("secrets"); } catch (e) { $("#v-secrets").innerHTML = `<div class="banner bad">${esc(e.message)}</div>`; return; }
+  $("#v-secrets").innerHTML = `<div class="banner">Secrets are stored in your system keyring and passed only to the components that need them. They are never shown again here.</div>
+    ${Object.entries(d.secrets).map(([n, set]) => `<fieldset><legend>${esc(n)} ${set ? '<span class="ok">set</span>' : '<span class="bad">not set</span>'}</legend>
+      <div class="dim">${esc(d.help[n] || "")}</div><div class="row"><input type="password" autocomplete="new-password" data-secret="${esc(n)}" placeholder="${set ? "replace…" : "value"}" style="flex:1">
+      <button class="act primary" data-save="${esc(n)}">Save</button>${set ? `<button class="act" data-clear="${esc(n)}">Remove</button>` : ""}</div></fieldset>`).join("")}
+    <div class="row"><button class="act" id="legacy">Import from the old PowerShell launcher files</button></div>`;
+  $("#v-secrets").onclick = async e => {
+    const sv = e.target.closest("[data-save]"), cl = e.target.closest("[data-clear]");
+    try {
+      if (sv) { const inp = document.querySelector(`[data-secret="${sv.dataset.save}"]`); if (!inp.value) return; await api("secrets/" + sv.dataset.save, "PUT", {value: inp.value}); inp.value = ""; toast("Saved to the keyring"); renderSecrets(); }
+      if (cl) { await api("secrets/" + cl.dataset.clear, "PUT", {value: ""}); toast("Removed"); renderSecrets(); }
+      if (e.target.id === "legacy") { const r = await api("secrets/import-legacy", "POST", {}); toast("Imported: " + (r.imported.join(", ") || "nothing found")); renderSecrets(); }
+    } catch (err) { toast(err.message, true); }
+  };
+}
+
+/* ------------------------------------------------------------------ logs */
+async function renderLogs() {
+  const names = (S.status?.components || []).map(c => c.name);
+  S.logName ||= names[0];
+  let text = ""; try { text = (await api(`logs/${S.logName}?lines=400`)).text; } catch (e) { text = e.message; }
+  $("#v-logs").innerHTML = `<div class="row">${names.map(n => `<button class="act ${n === S.logName ? "primary" : ""}" data-log="${n}">${esc(n)}</button>`).join("")}<span style="flex:1"></span><button class="act" data-log="${S.logName}">Refresh</button></div>
+    <pre class="log">${esc(text || "(empty)")}</pre>`;
+  $("#v-logs").onclick = e => { const b = e.target.closest("[data-log]"); if (b) { S.logName = b.dataset.log; renderLogs(); } };
+  const pre = $("#v-logs pre"); pre.scrollTop = pre.scrollHeight;
+}
+
+async function refresh() {
+  try { S.status = await api("status"); } catch (e) { $("#problems").innerHTML = `<div class="banner bad">${esc(e.message)}${TOKEN ? "" : " — open this page from the tray menu (Open settings)."}</div>`; return; }
+  if (!S.settings) { try { S.settings = await api("settings"); } catch (e) {} }
+  render();
+}
+function render() {
+  if (S.view === "status") renderStatus();
+  else if (S.view === "settings") renderSettings();
+  else if (S.view === "secrets") renderSecrets();
+  else if (S.view === "logs") renderLogs();
+}
+refresh(); setInterval(() => { if (S.view === "status") refresh(); }, 4000);
+</script>
+</body>
+</html>

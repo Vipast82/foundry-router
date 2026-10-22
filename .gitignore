@@ -35,3 +35,4 @@ htmlcov/
 
 # Coordinator project profiles are machine-specific; commit project.example.toml
 foundry_coordinator/projects/*/project.toml
+packaging/foundry-client.ico

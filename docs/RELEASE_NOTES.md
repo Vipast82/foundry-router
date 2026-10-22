@@ -2,6 +2,40 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.133.0 — Foundry Client: installer, tray and stack manager
+
+A new package, `foundry_client`, replaces the hand-written workstation scripts
+(`foundry-stack.ps1` and the start/deploy scripts) with one cross-platform app. See
+`docs/CLIENT_MANAGER.md`.
+
+- **What it manages.** It starts, health-checks and restarts the Kilo server, the coordinator,
+  the upgrade supervisor, the media adapter and Rojo.
+  - Dependency order: Kilo, then the coordinator, then the supervisor.
+  - Crash restarts back off: 2 s, 5 s, 15 s, up to 2 min.
+  - Restarts of the Kilo server and the coordinator wait for a safe point. That means no session
+    working on an active task; the idle session of a paused task no longer blocks.
+  - Components already running are adopted, not started twice.
+  - Each component gets its own log under `<state>/client-logs/`.
+- **Secrets** live in the OS keyring (Windows Credential Manager or the Linux Secret Service) and
+  are passed only to the components that need them. They are write-only in the UI. A one-click
+  import reads the old PowerShell DPAPI credential files.
+- **Local settings page** on 127.0.0.1, guarded by a per-install token in the URL fragment and a
+  Host-header check. It has status cards with start, stop and restart, settings forms, secrets,
+  start-at-logon and a log viewer.
+- **Tray icon** (pystray) coloured by health. Its menu opens settings, restarts components at a
+  safe point, opens the Foundry control center and Automation page, opens the logs folder, sets
+  start at logon, and quits.
+- **Commands:** `foundry-client run [--headless]`, `status`, `restart <component>`,
+  `install-autostart`, `import-legacy-secrets`. The same program runs the bundled coordinator
+  (`coordinator ...`) and supervisor (`supervisor ...`).
+- **Packages.** A PyInstaller bundle (`packaging/foundry-client.spec`) holds two programs: a
+  windowless tray app and a console twin. On top of it:
+  - Windows: an Inno Setup per-user installer (`packaging/windows/FoundryClient.iss`).
+  - Linux: an AppImage (`packaging/linux/build_appimage.sh`).
+  - The GitHub Actions workflow `client-release.yml` builds both on each `v*` tag and attaches
+    them to the release.
+- **Install from source:** `pip install -e ".[client]"`.
+
 ## v0.132.0 — launch assistant: run the automation in plain language
 
 The Automation page has a new **Ask** tab. You describe what you want, for example "start the
