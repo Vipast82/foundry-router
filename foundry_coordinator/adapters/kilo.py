@@ -188,8 +188,10 @@ class KiloClient(CodingClient):
 
     def answer(self, session_id, request_id, answers, *, directory, kind="question") -> None:
         if kind == "permission":
-            self._req("POST", f"/permission/{request_id}/reply",
-                      {"reply": answers[0] if answers else "reject"}, {"directory": directory})
+            body = {"reply": answers[0] if answers else "reject"}
+            if len(answers) > 1 and answers[1]:
+                body["message"] = str(answers[1])[:500]       # shown to the model with the reply
+            self._req("POST", f"/permission/{request_id}/reply", body, {"directory": directory})
         else:
             self._req("POST", f"/question/{request_id}/reply", {"answers": answers},
                       {"directory": directory})

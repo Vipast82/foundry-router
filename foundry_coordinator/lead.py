@@ -2382,6 +2382,13 @@ class LeadManager:
         errors = [err] if err else []
         clean = None
         if rep is not None:
+            # W2.3 (wired by W1): a write-access lead may not approve a test change it
+            # made itself; the guard snapshot holds the pre-session HEAD
+            self_changed = {}
+            if write:
+                before = (((self._action(key) or {}).get("detail") or {}).get("guard")
+                          or {}).get("game", {}).get("head") or ""
+                self_changed = lead_self_changed_tests(P, before)
             clean, errors = validate_report(
                 rep, scope=list(getattr(spec, "scope", None) or []),
                 allowed_dirs=list(getattr(P.profile, "allowed_dirs", None) or []),
@@ -2390,7 +2397,8 @@ class LeadManager:
                 full_authority=bool(s.get("full_authority")),
                 prior_actions=self._prior_actions(P, case),
                 max_extend=int(s.get("max_extend_attempts") or 3),
-                max_clean=int(s.get("max_clean_paths") or 20))
+                max_clean=int(s.get("max_clean_paths") or 20),
+                self_changed_tests=self_changed or None)
         if clean is None:
             if self._repair_report(P, t, case, key, sid, ws, s, errors):
                 return self.case(case["case_id"])

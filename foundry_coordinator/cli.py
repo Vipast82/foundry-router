@@ -275,9 +275,44 @@ def _profile_paths(a) -> list[str]:
     return [p for p in env.split(os.pathsep) if p]
 
 
+def load_profiles(paths: list[str], state_dir: str, log=lambda m: None) -> list:
+    """find_profiles plus the W2.4 startup overlay: each TOML is loaded with the
+    last applied router revision (its restart-scoped keys included) on top,
+    from <state_dir>/config/<project>.json, BEFORE any object is built."""
+    import tomllib
+    from .config_pull import startup_overlay
+    from .profile import check_isolation, from_raw, load
+    files = []
+    for p in paths:
+        if os.path.isdir(p):
+            files += [os.path.join(p, n, "project.toml") for n in sorted(os.listdir(p))
+                      if os.path.isfile(os.path.join(p, n, "project.toml"))]
+        else:
+            files.append(p)
+    out = []
+    for path in files:
+        try:
+            with open(path, "rb") as f:
+                raw = tomllib.loads(f.read().decode("utf-8"))
+            merged, cache = startup_overlay(state_dir, raw)
+        except Exception:                                         # noqa: BLE001
+            out.append(load(path))                               # profile.load reports it
+            continue
+        if cache is None:
+            out.append(load(path))
+            continue
+        prof = from_raw(merged, path)
+        log(f"{prof.id}: startup overlay applied (router revision "
+            f"{cache.get('rev')}, restart-scoped keys included)")
+        out.append(prof)
+    check_isolation(out)
+    return out
+
+
 def build(a, clients=None, foundry=None) -> Coordinator:
     sd = _state_dir(a)
-    profiles = find_profiles(_profile_paths(a))
+    profiles = load_profiles(_profile_paths(a), sd,
+                             log=lambda m: print(time.strftime("%H:%M:%S"), m, flush=True))
     store = Store(os.path.join(sd, "coordinator.sqlite"))
     projects = [build_project(p, sd, client=(clients or {}).get(p.id),
                               foundry=(foundry or {}).get(p.id)) for p in profiles]

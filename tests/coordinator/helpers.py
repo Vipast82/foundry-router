@@ -242,3 +242,18 @@ def denial(category="budget", retry=60):
     return FoundryDenied(category, {"budget": "budget_denied", "pause": "paused",
                                     "route": "route_unavailable", "config": "persona_disabled"}[category],
                          f"refused ({category})", retry)
+
+
+def refuse_auto_reject(client):
+    """Make a client refuse the COORDINATOR's own permission reject (the reply
+    that carries a message), so a test can exercise the fallback where the ask
+    still reaches a person (W1 follow-up: implementer permission asks are
+    auto-rejected otherwise). Operator replies (one item) go through."""
+    orig = client.answer
+
+    def answer(session_id, request_id, answers, *, directory, kind="question"):
+        if kind == "permission" and len(answers) > 1 and answers[0] == "reject":
+            raise RuntimeError("Kilo refused the coordinator's reject (test)")
+        return orig(session_id, request_id, answers, directory=directory, kind=kind)
+    client.answer = answer
+    return client
