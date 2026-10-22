@@ -115,7 +115,7 @@ def validate(cfg: dict) -> list[str]:
         v = c.get(k)
         if isinstance(v, bool) or not isinstance(v, int) or v < 0:
             errs.append(f"client.{k} must be a whole number, 0 or more")
-    for k in ("relay", "update_check"):
+    for k in ("relay_enabled", "update_check"):
         if not isinstance(c.get(k), bool):
             errs.append(f"client.{k} must be true or false")
     return errs
