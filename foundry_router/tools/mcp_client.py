@@ -27,6 +27,9 @@ from ..errors import describe_exception
 
 log = logging.getLogger(__name__)
 
+# per-server cap on the tool-manifest handshake during a sync sweep (seconds)
+LIST_TOOLS_TIMEOUT = 20.0
+
 # DB (kv) key prefix for a per-server auth secret set in the UI instead of
 # config.yaml. Value is JSON {"header": <name>, "token": <secret>}. Kept out of
 # config so operators can add a token without editing the file, and it survives
@@ -378,15 +381,22 @@ class MCPManager:
         """Manifest per ENABLED server; disabled servers are skipped (so Tool
         Sync drops their tools this cycle) and unreachable ones are logged and
         omitted (their tools simply don't appear this sync cycle)."""
-        out: dict[str, list[dict]] = {}
-        for name, cfg in list(self.servers.items()):
-            if not getattr(cfg, "enabled", True):
-                continue                      # operator-disabled: exclude its tools
+        async def one(name: str, cfg) -> tuple[str, Optional[list[dict]]]:
+            # A server that accepts TCP but never answers the MCP handshake must not
+            # hold the whole sweep: bound each one (the handshake, not tool calls).
+            cap = min(LIST_TOOLS_TIMEOUT, float(getattr(cfg, "timeout_seconds", 300) or 300))
             try:
-                out[name] = await self.list_tools(name)
+                return name, await asyncio.wait_for(self.list_tools(name), timeout=cap)
             except Exception as e:
                 self.db.log_event("warning", "tool_sync",
-                                  f"MCP server {name} unreachable during sync", str(e))
+                                  f"MCP server {name} unreachable during sync",
+                                  str(e) or f"no answer within {cap:g} s")
+                return name, None
+
+        results = await asyncio.gather(*(
+            one(name, cfg) for name, cfg in list(self.servers.items())
+            if getattr(cfg, "enabled", True)))      # operator-disabled: exclude its tools
+        out: dict[str, list[dict]] = {n: t for n, t in results if t is not None}
         if self.agents is not None:
             for name, tools in self.agents.tool_manifests().items():
                 out.setdefault(name, tools)

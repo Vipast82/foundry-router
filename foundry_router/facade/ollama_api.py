@@ -197,6 +197,8 @@ async def manage_unsupported(request: Request):
 
 @router.get("/api/version")
 async def version() -> dict:
+    # Answers from memory only (no pool, DB or MCP access), so it works while the
+    # router is still warming up.
     # Clients gate features on Ollama's version number; we advertise one whose
     # API surface we match (do NOT bump this to our version). Foundry's own
     # version rides alongside in a separate field.
