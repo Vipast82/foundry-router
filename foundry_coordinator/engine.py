@@ -121,6 +121,32 @@ class Coordinator:
                 self.store.event(project_id, task_id, 'work_adopted', detail=adopted)
         return entry
 
+    def reopen(self, project_id: str, task_id: str, deps: list[str], approver: str,
+               reason: str = "") -> dict:
+        """Put a CANCELLED task back on the queue (fresh attempt counters, no run or
+        session, cleared findings); the transition history keeps the earlier runs."""
+        t = self.store.task(project_id, task_id)
+        if t is None:
+            return self.approve(project_id, task_id, deps, approver, reason)
+        if t["state"] != S.CANCELLED:
+            raise ValueError(f"{project_id}/{task_id} is {t['state']}, not CANCELLED")
+        for d in deps:
+            if d == task_id or not self.store.task(project_id, d):
+                raise ValueError(f"dependency {d} is not on {project_id}'s queue")
+        keep = {k: v for k, v in (t.get("data") or {}).items()
+                if k in ("baseline_dirty", "task_base")}
+        with self.store.tx():
+            self.store.transition(project_id, task_id, S.QUEUED,
+                                  {"reopened_by": approver, "reason": reason or "reopened"},
+                                  actor=approver)
+            self.store.update_task(project_id, task_id, attempt=0, sessions=0, run_id=None,
+                                   session_id=None, phase=None, base_sha=None, head_sha=None,
+                                   reviewed_sha=None, review_id=None, verification_id=None,
+                                   closeout_id=None, next_action=None, started_ts=None,
+                                   data={**keep, "reopened": {"by": approver, "reason": reason}})
+            entry = self.store.approve(project_id, task_id, deps, approver, reason)
+        return entry
+
     # ======================================================================= loop
 
     def tick(self) -> list[str]:

@@ -245,6 +245,7 @@
   table.q th, table.q td { border-bottom:1px solid var(--line); padding:6px 6px; text-align:left; vertical-align:middle; }
   table.q th { color:var(--dim); font-weight:500; font-size:12px; white-space:nowrap; }
   table.q td.acts { white-space:nowrap; text-align:right; }
+  .muted { color:var(--dim); } td.bad { color:var(--bad); }
   table.q tr.sortable-ghost { opacity:.35; }
   .qwrap { overflow-x:auto; }
   .deps { display:flex; flex-wrap:wrap; gap:3px; align-items:center; }
@@ -295,6 +296,7 @@
   </div>
 </header>
 <nav id="nav" role="tablist" aria-label="Automation sections">
+  <button role="tab" id="tab-ask" aria-controls="v-ask" data-view="ask">Ask</button>
   <button role="tab" id="tab-routing" aria-controls="v-routing" data-view="routing">Routing</button>
   <button role="tab" id="tab-settings" aria-controls="v-settings" data-view="settings">Settings</button>
   <button role="tab" id="tab-rules" aria-controls="v-rules" data-view="rules">Role rules</button>
@@ -308,6 +310,7 @@
 </div>
 <main id="main">
   <div id="notes"></div>
+  <section id="v-ask" role="tabpanel" aria-labelledby="tab-ask" hidden></section>
   <section id="v-routing" role="tabpanel" aria-labelledby="tab-routing" hidden></section>
   <section id="v-settings" role="tabpanel" aria-labelledby="tab-settings" hidden></section>
   <section id="v-rules" role="tabpanel" aria-labelledby="tab-rules" hidden></section>
@@ -602,7 +605,7 @@ $("#theme-btn").onclick = () => applyTheme(document.documentElement.dataset.them
 applyTheme(store("fr-theme") || (matchMedia("(prefers-color-scheme: light)").matches ? "light" : "dark"));
 
 /* ======================================================================== views */
-const VIEWS = ["routing", "settings", "rules", "queue"];
+const VIEWS = ["ask", "routing", "settings", "rules", "queue"];
 function setView(v, push = true) {
   if (!VIEWS.includes(v)) v = "routing";
   S.view = v;
@@ -611,7 +614,7 @@ function setView(v, push = true) {
     b.setAttribute("aria-selected", on ? "true" : "false"); b.tabIndex = on ? 0 : -1;
   }
   for (const x of VIEWS) $("#v-" + x).hidden = x !== v;
-  $("#draftbar").hidden = v === "queue";
+  $("#draftbar").hidden = v === "queue" || v === "ask";
   if (push && location.hash.slice(1) !== v) history.replaceState(null, "", "#" + v);
   closeDrawer();
   renderView();
@@ -627,7 +630,8 @@ window.addEventListener("hashchange", () => { const h = location.hash.slice(1); 
 function renderView() {
   if (!S.deployed) return;
   renderNotes();
-  if (S.view === "routing") renderRouting();
+  if (S.view === "ask") renderAsk();
+  else if (S.view === "routing") renderRouting();
   else if (S.view === "settings") renderSettings();
   else if (S.view === "rules") renderRules();
   else renderQueue();
@@ -1570,6 +1574,93 @@ function startTick() {
     if (!els.length || S.view !== "queue") { clearInterval(S.decTick); S.decTick = null; return; }
     for (const c of els) c.textContent = countdown(Number(c.dataset.deadline));
   }, 1000);
+}
+/* ===================================================================== ask (launch assistant) */
+const ASK_EXAMPLES = [
+  "Start the project from the next sprint that isn't completed in its documentation",
+  "Queue every remaining sprint in plan order and resume the project",
+  "Pause the project at a safe point",
+];
+const STEP_LABEL = {queue_approve: "Queue", reopen: "Re-queue (was cancelled)", resume_task: "Resume", pause_task: "Pause",
+  unblock_task: "Unblock", cancel_task: "Cancel", project_resume: "Resume project", project_pause: "Pause project"};
+function renderAsk() {
+  const el = $("#v-ask");
+  if (el.dataset.ready) return renderAskPlan();
+  el.dataset.ready = "1";
+  el.innerHTML = `<h2>Ask the automation</h2>
+    <p class="muted">Say what you want in plain language. The coordinator reads every sprint plan and the queue, proposes the steps,
+    and checks each one. <b>Nothing runs until you press Run.</b></p>
+    <form id="ask-form"><label for="ask-text" class="sr-only">Request</label>
+    <textarea id="ask-text" rows="3" maxlength="2000" placeholder="e.g. Start Animal Uprising from the next sprint that isn't done" style="font-family:inherit;font-size:14px"></textarea>
+    <div class="row" style="margin-top:8px;gap:6px;flex-wrap:wrap">${ASK_EXAMPLES.map(x => `<button class="act" type="button" data-ex="${esc(x)}">${esc(x)}</button>`).join("")}
+    <span class="grow"></span><button class="act primary" type="submit" id="ask-go">Plan it</button></div></form>
+    <div id="ask-out" aria-live="polite"></div>`;
+  el.addEventListener("click", e => { const b = e.target.closest("[data-ex]"); if (b) { $("#ask-text").value = b.dataset.ex; $("#ask-text").focus(); } });
+  $("#ask-form").onsubmit = async ev => {
+    ev.preventDefault();
+    const text = $("#ask-text").value.trim();
+    if (!text) return toast("Say what you want done", true);
+    $("#ask-go").disabled = true; S.ask = {phase: "planning"}; renderAskPlan();
+    try {
+      const a = await api("actions", {method: "POST", body: {kind: "assistant_plan", project_id: S.project, text, idempotency_key: idem()}});
+      const done = await waitAction(a.action_id);
+      S.ask = done.status === "applied" ? {phase: "plan", plan: done.result} : {phase: "error", error: done.status_detail || done.status};
+    } catch (e) { S.ask = {phase: "error", error: e.message}; }
+    $("#ask-go").disabled = false; renderAskPlan();
+  };
+  renderAskPlan();
+}
+async function waitAction(id, maxS = 240) {
+  const t0 = Date.now();
+  for (;;) {
+    const a = await api("actions/" + encodeURIComponent(id));
+    if (["applied", "rejected", "failed", "expired", "cancelled"].includes(a.status)) return a;
+    if (Date.now() - t0 > maxS * 1000) return {status: "timeout", status_detail: "the coordinator did not answer in time; is it running with --control?"};
+    if (S.ask) { S.ask.waiting = a.status_detail || a.status; const w = $("#ask-wait"); if (w) w.textContent = S.ask.waiting; }
+    await new Promise(r => setTimeout(r, 2000));
+  }
+}
+function renderAskPlan() {
+  const out = $("#ask-out"); if (!out) return;
+  const A = S.ask;
+  if (!A) { out.innerHTML = ""; return; }
+  if (A.phase === "planning" || A.phase === "running") {
+    out.innerHTML = `<div class="banner">${A.phase === "planning" ? "Reading the sprint plans and asking the planner…" : "Running the steps…"} <span class="muted" id="ask-wait">${esc(A.waiting || "")}</span></div>`;
+    return;
+  }
+  if (A.phase === "error") { out.innerHTML = `<div class="banner bad">${esc(A.error || "failed")}</div>`; return; }
+  const p = A.plan || {};
+  const warn = (p.warnings || []).map(w => `<li>${esc(w)}</li>`).join("");
+  const qs = (p.questions || []).map(q => `<li>${esc(q)}</li>`).join("");
+  if (A.phase === "ran") {
+    const rows = (A.results || []).map(r => `<tr><td>${esc(STEP_LABEL[r.kind] || r.kind)}</td><td>${esc(r.task_id || "")}</td><td class="${r.result === "done" ? "" : "bad"}">${esc(r.result)}</td></tr>`).join("");
+    out.innerHTML = `<div class="banner">Ran plan ${esc(p.plan_id)}.</div><table class="q"><thead><tr><th>Step</th><th>Sprint</th><th>Result</th></tr></thead><tbody>${rows}</tbody></table>`
+      + ((A.runWarnings || []).length ? `<div class="banner warn"><ul>${A.runWarnings.map(w => `<li>${esc(w)}</li>`).join("")}</ul></div>` : "");
+    return;
+  }
+  const steps = p.steps || [];
+  out.innerHTML = `<div class="banner"><b>Plan</b> ${esc(p.summary || "")} <span class="muted">(${esc(p.served_model || "")})</span></div>`
+    + (qs ? `<div class="banner warn"><b>The assistant asks:</b><ul>${qs}</ul>Rephrase your request with the answer.</div>` : "")
+    + (warn ? `<div class="banner warn"><b>Dropped or changed by the checks:</b><ul>${warn}</ul></div>` : "")
+    + (steps.length ? `<table class="q"><thead><tr><th>Run</th><th>Step</th><th>Sprint</th><th>After</th><th>Why</th></tr></thead><tbody>${steps.map((x, i) =>
+        `<tr><td><input type="checkbox" checked data-step="${i}" aria-label="Run step ${i + 1}"></td><td>${esc(STEP_LABEL[x.kind] || x.kind)}</td><td>${esc(x.task_id || S.project)}</td><td>${esc((x.deps || []).join(", "))}</td><td>${esc(x.why || "")}</td></tr>`).join("")}</tbody></table>
+        <div class="row" style="margin-top:8px"><span class="grow"></span><button class="act" type="button" id="ask-clear">Discard</button><button class="act primary" type="button" id="ask-run">Run checked steps</button></div>`
+      : `<div class="banner">No steps proposed.</div>`);
+  const clear = $("#ask-clear"); if (clear) clear.onclick = () => { S.ask = null; renderAskPlan(); };
+  const run = $("#ask-run");
+  if (run) run.onclick = async () => {
+    const picked = $$("#ask-out [data-step]").filter(c => c.checked).map(c => Number(c.dataset.step));
+    if (!picked.length) return toast("Nothing is checked", true);
+    S.ask = {...A, phase: "running"}; renderAskPlan();
+    try {
+      const a = await api("actions", {method: "POST", body: {kind: "assistant_run", project_id: S.project, plan_id: p.plan_id, steps: picked, idempotency_key: idem()}});
+      const done = await waitAction(a.action_id);
+      const r = done.result || {};
+      S.ask = r.results ? {phase: "ran", plan: p, results: r.results, runWarnings: r.warnings} : {phase: "error", error: done.status_detail || done.status};
+      S.queue = null;
+    } catch (e) { S.ask = {phase: "error", error: e.message}; }
+    renderAskPlan();
+  };
 }
 function qTask(id) { return (S.queue || []).find(x => x.task_id === id); }
 async function action(kind, x, extra = {}) {

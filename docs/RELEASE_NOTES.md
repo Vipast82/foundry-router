@@ -2,6 +2,29 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.132.0 — launch assistant: run the automation in plain language
+
+The Automation page has a new **Ask** tab. You describe what you want, for example "start the
+project from the next sprint that isn't completed in its documentation".
+
+- **Proposing.** The coordinator builds a compact snapshot: each sprint plan's checklist progress
+  and status line, its coordinator state, the queue, and the project pause. It makes **one** call
+  to the planner persona (Claude, then GPT, then local) for an ordered list of steps.
+- **Allowed steps:** queue, re-queue a cancelled sprint, resume, pause, unblock or cancel a sprint,
+  and resume or pause the project.
+- **Checking.** Every step is checked against the live queue, simulating earlier steps. A step
+  that doesn't fit is dropped and shown with the reason.
+- **Running.** Nothing runs until you press **Run**, and you can uncheck steps first. The steps
+  are checked again against the live queue before they run, and a plan runs at most once.
+- **Plumbing.** Two new typed control actions, `assistant_plan` `{text}` and `assistant_run`
+  `{plan_id, steps}`, are project-scoped and need an operator session. Plans are stored under the
+  coordinator's state dir, `assistant/<plan_id>.json`, with `assistant_plan` and `assistant_run`
+  events.
+- **Reopen.** The new `engine.reopen()` and the `CANCELLED -> QUEUED` transition put a cancelled
+  sprint back on the queue. The attempt counters are fresh, and the history is kept. This was
+  needed to re-queue the sprints cancelled on 2026-10-21.
+- **Persona.** `[assistant] persona` in the profile (default: the planner role).
+
 ## v0.131.0 — automation revamp: tokens and speed first, everything editable in the GUI
 
 The plan is `reports/AUTOMATION_REVAMP_PLAN.md`, built from five audits. Over 38 hours no sprint

@@ -84,6 +84,9 @@ TRANSITIONS: dict[tuple[str, str], object] = {
     # [lifecycle] a gate/review decision was answered: verify the same head again
     (BLOCKED, VERIFYING): ("resolution", "decision_id"),
     (FAILED, READY): ("resolution",),
+    # an operator (or the launch assistant on the operator's confirmation) reopens a
+    # cancelled task so it can be queued again; its history stays (2026-10-21)
+    (CANCELLED, QUEUED): ("reopened_by", "reason"),
 }
 
 # Operator controls, allowed from any state that isn't terminal.
@@ -110,7 +113,7 @@ def required_evidence(frm: str, to: str):
 
 def check(frm: str, to: str, evidence: dict) -> None:
     """Raise TransitionError unless the transition is allowed with this evidence."""
-    if frm in TERMINAL:
+    if frm in TERMINAL and (frm, to) != (CANCELLED, QUEUED):   # an operator reopen
         raise TransitionError(f"{frm} is final")
     need = required_evidence(frm, to)
     options = need if isinstance(need, list) else [need]

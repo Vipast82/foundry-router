@@ -35,6 +35,8 @@ RETRY_UNRECORDED_S = 120      # wait this long for the engine to record a Kilo q
 # project-scoped actions (task_id may be empty): pause / resume a whole project
 # for an operator upgrade (payload {mode: "safe" | "now", note})
 PROJECT_KINDS = ("project_pause", "project_resume")
+# launch assistant (2026-10-21): plain-language request -> a checked plan -> run on confirm
+ASSISTANT_KINDS = ("assistant_plan", "assistant_run")
 # lead recovery case controls (v0.123; payload {case_id, note}): applied through
 # the engine's LeadManager (engine.lead) when this coordinator has one
 LEAD_KINDS = ("lead_case_pause", "lead_case_resume", "lead_case_takeover", "lead_case_instruct")
@@ -128,7 +130,7 @@ class ControlChannel:
                                "actions": ["answer_question", "reply_permission", "approve_review",
                                            "reject_review", "pause", "resume", "cancel", "unblock",
                                            "instruction", "withdraw_instruction",
-                                           "decision_answer", *PROJECT_KINDS,
+                                           "decision_answer", *PROJECT_KINDS, *ASSISTANT_KINDS,
                                            *(LEAD_KINDS if lead_on else ())]}},
                 "contract": _contract(), "coordinator_version": _coordinator_version(),
                 # lifecycle features advertised only when some project actually
@@ -187,6 +189,8 @@ class ControlChannel:
         if pid not in self.c.projects:
             return self._report(a, "rejected", f"{pid or '(no project)'} is not run by this "
                                                f"coordinator")
+        if a["kind"] in ASSISTANT_KINDS:
+            return self._assistant_action(a, f"{a.get('actor') or 'operator'} (control center)")
         if a["kind"] in PROJECT_KINDS:
             # project-scoped: no task to look up or re-check
             return getattr(self, f"_do_{a['kind']}")(
@@ -206,6 +210,30 @@ class ControlChannel:
             return self._report(a, "rejected", f"{tid} is now {t['state']}, not "
                                                f"{exp['task_state']} as the operator saw it")
         return fn(a, t, actor)
+
+    def _assistant_action(self, a, actor):
+        from .assistant import Assistant
+        if not hasattr(self, "_assistant"):
+            self._assistant = Assistant(self.c)
+        P = self.c.projects[a["project_id"]]
+        p = a.get("payload") or {}
+        try:
+            if a["kind"] == "assistant_plan":
+                plan = self._assistant.plan(P, str(p.get("text") or ""), actor)
+                return self._report(a, "applied", f"plan {plan['plan_id']}: "
+                                    f"{len(plan['steps'])} step(s) proposed",
+                                    {k: plan[k] for k in ("plan_id", "summary", "steps",
+                                                          "warnings", "questions",
+                                                          "served_model")})
+            plan = self._assistant.run(P, str(p.get("plan_id") or ""), p.get("steps"), actor)
+            failed = [r for r in plan["results"] if r["result"] != "done"]
+            return self._report(a, "failed" if failed else "applied",
+                                f"ran {len(plan['results']) - len(failed)} of "
+                                f"{len(plan['results'])} step(s)",
+                                {"plan_id": plan["plan_id"], "results": plan["results"],
+                                 "warnings": plan.get("run_warnings") or []})
+        except Exception as e:                                   # noqa: BLE001
+            return self._report(a, "rejected", f"launch assistant: {e}"[:500])
 
     def _do_answer_question(self, a, t, actor):
         return self._answer(a, t, actor, "question", (a.get("payload") or {}).get("answers") or [])

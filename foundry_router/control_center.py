@@ -168,7 +168,13 @@ SETTING_LIMITS = {
 ACTION_KINDS = ("answer_question", "reply_permission", "approve_review", "reject_review",
                 "pause", "resume", "cancel", "unblock", "instruction", "withdraw_instruction",
                 "lanes", "decision_answer", "project_pause", "project_resume",
-                "lead_case_pause", "lead_case_takeover", "lead_case_instruct", "lead_case_resume")
+                "lead_case_pause", "lead_case_takeover", "lead_case_instruct", "lead_case_resume",
+                "assistant_plan", "assistant_run")
+# launch assistant (2026-10-21): a plain-language request becomes a checked plan
+# (assistant_plan {text}); the operator confirms and the coordinator runs the
+# picked steps (assistant_run {plan_id, steps}). Operator sessions only.
+ASSISTANT_ACTIONS = ("assistant_plan", "assistant_run")
+MAX_ASSISTANT_TEXT = 2000
 # lead recovery case controls (v0.123): an operator pauses, takes over or adds an
 # instruction to the task's current recovery case (the bridge's `lead` field).
 # Payload {"case_id": str, "note": str (<= 2000; required for lead_case_instruct)};
@@ -2361,6 +2367,8 @@ class ControlCenter:
         pid, tid = _s(body.get("project_id"), 120), _s(body.get("task_id"), 120)
         if kind in PROJECT_ACTIONS:
             return self._create_project_action(actor, projects, body, scopes, kind, idem, pid, tid)
+        if kind in ASSISTANT_ACTIONS:
+            return self._create_assistant_action(actor, projects, body, scopes, kind, idem, pid)
         if not pid or not tid:
             raise ControlError("project_id and task_id are required")
         if projects and pid not in projects:
@@ -2631,6 +2639,58 @@ class ControlCenter:
                              "rowid DESC LIMIT 1", (pid,))
         st = self._rows(c, "SELECT data FROM cc_project_status WHERE project_id=?", (pid,))
         return (last[0] if last else None), (_uj(st[0]["data"], {}) if st else None)
+
+    def _create_assistant_action(self, actor: str, projects: list, body: dict, scopes,
+                                 kind: str, idem: str, pid: str) -> dict:
+        if scopes is not None and not {"operator", "admin"} & set(scopes or []):
+            raise ControlError("the launch assistant needs an operator session", "forbidden", 403)
+        if not pid:
+            raise ControlError("project_id is required")
+        if projects and pid not in projects:
+            raise ControlError("this operator may not act on that project", "forbidden", 403)
+        if kind == "assistant_plan":
+            text = str(body.get("text") or "").strip()
+            if not text:
+                raise ControlError("say what you want done")
+            if len(text) > MAX_ASSISTANT_TEXT:
+                raise ControlError(f"request is over {MAX_ASSISTANT_TEXT} characters")
+            payload = {"text": text}
+            summary = f"launch assistant: plan for {pid} ({len(text)} chars)"
+        else:
+            plan_id = str(body.get("plan_id") or "")
+            if not re.fullmatch(r"asp-[0-9a-f]{12}", plan_id):
+                raise ControlError("plan_id is required (from the assistant's plan)")
+            steps = body.get("steps")
+            if steps is not None and (not isinstance(steps, list) or not all(
+                    isinstance(i, int) and 0 <= i < 50 for i in steps)):
+                raise ControlError("steps must be a list of step indexes")
+            payload = {"plan_id": plan_id, "steps": steps}
+            summary = f"launch assistant: run {plan_id} on {pid}"
+        if not self.rate_ok(actor):
+            raise ControlError("too many control actions; wait a minute", "rate_limited", 429)
+        st = self.settings()
+        now = self.clock()
+        aid = f"act-{uuid.uuid4().hex[:16]}"
+        try:
+            with self._tx() as c:
+                seq = self._feed(c, "action", pid, "", aid)
+                c.execute("INSERT INTO cc_actions (action_id, idem_key, actor, kind, project_id, "
+                          "task_id, run_id, session_id, request_id, payload, summary, expected, "
+                          "status, status_detail, created_ts, expires_ts, updated_ts, seq) VALUES "
+                          "(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                          (aid, idem, actor, kind, pid, "", "", "", "", _j(payload), summary,
+                           _j({}), "accepted",
+                           "stored by Foundry; waiting for the coordinator to claim it", now,
+                           now + st["action_ttl_s"], now, seq))
+                c.execute("INSERT INTO cc_action_log (action_id, ts, status, actor, detail) "
+                          "VALUES (?,?,?,?,?)", (aid, now, "accepted", actor, summary))
+        except Exception as e:                                   # noqa: BLE001
+            if "UNIQUE" in str(e) and "idem" in str(e):
+                ex = self.db.query_one("SELECT action_id FROM cc_actions WHERE idem_key=?", (idem,))
+                return {**self.action_view(ex["action_id"]), "duplicate": True}
+            raise
+        self._notify()
+        return self.action_view(aid)
 
     def _create_project_action(self, actor: str, projects: list, body: dict, scopes, kind: str,
                                idem: str, pid: str, tid: str) -> dict:
