@@ -88,7 +88,7 @@ class ScriptedClient(CodingClient):
                                 denial=foundry_denial(out["error"]))
         text = out.get("final") or ""
         return SessionState(status="idle", final_text=text, report=parse_report(text),
-                            tokens={"input": 100, "output": 20})
+                            tokens={"input": 100, "output": 20}, context=out.get("context"))
 
     def answer(self, session_id, request_id, answers, *, directory, kind="question") -> None:
         self.answers[session_id] = answers

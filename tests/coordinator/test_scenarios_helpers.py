@@ -690,6 +690,8 @@ def test_s5_refused_prompt_is_still_sent_after_reconciling(env):
 # --------------------------------------------------------------------------------------
 
 S6_VIS = """
+[automation]
+helpers = "proactive"  # revamp B5: lanes are opt-in
 [lanes]
 enabled = true
 transcript_poll_seconds = 0

@@ -238,6 +238,44 @@ class AnimalUprisingAdapter(GenericAdapter):
                         data={"tier": tier, "visual": visual, "plan": rel,
                               "close_step": _close_step(plan)})
 
+    _FILES_HEADING = re.compile(r"^#{2,4}\s+Files this sprint may change", re.I)
+
+    def grant_scope(self, spec: TaskSpec, path: str, reason: str) -> str:
+        """revamp B10: add `path` to the plan's "Files this sprint may change" list
+        (one "- `path` -- reason" line after the last entry) for a coordinator
+        scope grant. The plan is re-parsed with done_check's own parser; if the
+        path still isn't in scope the file is restored and AdapterError raised.
+        Returns the plan's workspace-relative path ('' = already listed)."""
+        rel = _plan_rel(spec.task_id)
+        full = os.path.join(self.p.workspace, rel)
+        with open(full, encoding="utf-8", newline="") as f:
+            text = f.read()
+        nl = "\r\n" if "\r\n" in text else "\n"
+        lines = text.split(nl)
+        start = next((i for i, l in enumerate(lines) if self._FILES_HEADING.match(l.strip())),
+                     None)
+        if start is None:
+            raise AdapterError(f"{rel} has no 'Files this sprint may change' section")
+        last = start
+        for i in range(start + 1, len(lines)):
+            s = lines[i].strip()
+            if s.startswith("#"):
+                break
+            if re.match(r"^[-*]\s+`", s):
+                last = i
+                if s.split("`")[1].strip() == path:
+                    return ""
+        why = re.sub(r"\s+", " ", reason or "").strip()[:200]
+        lines.insert(last + 1, f"- `{path}` -- {why}" if why else f"- `{path}`")
+        with open(full, "w", encoding="utf-8", newline="") as f:
+            f.write(nl.join(lines))
+        if path not in self._parse_plan(spec.task_id, rel, nl.join(lines)).scope:
+            with open(full, "w", encoding="utf-8", newline="") as f:
+                f.write(text)
+            raise AdapterError(f"{rel}: done_check does not read {path} from the edited "
+                               f"file list; nothing changed")
+        return rel
+
     def preflight_task(self, spec: TaskSpec):
         if self.cfg.get("require_rule_amendment", True):
             try:
@@ -364,8 +402,7 @@ never satisfies a physical-input row.
 """
         if self.p.roles.get("planner"):
             planning = """
-Before executing this attempt, invoke the read-only `au-planner` subagent once through the task tool. Give it this sprint's approved plan, current revision, latest NEXT/checklist, relevant observed results, and any repair findings below. It uses the configured Foundry planner persona to identify the next bounded steps and resolve routine procedure choices already covered by the plan. Keep this delegation bounded; do not re-plan every file or run duplicate planning calls.
-The planner returns advice, not acceptance evidence or permission to widen scope. Integrate its result and continue the approved BUILD work in this Code session; do not stop merely to ask Victor to copy a planner response into another chat or switch modes. The primary alone writes and controls Studio. For required screenshot inspection, invoke the enabled read-only au-visual-review vision subagent with each actual capture, its expected subject and viewport; record its visible OBSERVATION separately from measured validity lines. An inability of this primary model to see images is not a human blocker. Recapture invalid, stale, occluded or wrong-subject frames. Use Studio MCP to attempt physical input tests only when this sprint's current plan requires them; UI-01 through UI-06 operator flows are deferred to UI-GT1. {SIGN_OFF}Stop for Victor only for a genuinely unavailable human-only interaction, credentials/OS action, a product decision outside the plan, or an unresolved blocker after configured recovery. Never waive a failed/unknown gate or weaken a test to avoid a stop.
+The approved plan and its checklist are this attempt's plan: do not spawn planner or vision subagents (only the read-only `explore` subagent is available; the coordinator plans, and its own vision reviewer checks every committed capture). Integrate any advice into the approved BUILD work in this Code session; advice is never acceptance evidence or permission to widen scope. The primary alone writes and controls Studio. Record measured validity lines for each capture and recapture invalid, stale, occluded or wrong-subject frames; an inability of this primary model to see images is not a human blocker. Use Studio MCP to attempt physical input tests only when this sprint's current plan requires them; UI-01 through UI-06 operator flows are deferred to UI-GT1. {SIGN_OFF}Stop for Victor only for a genuinely unavailable human-only interaction, credentials/OS action, a product decision outside the plan, or an unresolved blocker after configured recovery. Never waive a failed/unknown gate or weaken a test to avoid a stop.
 """
             # final sign-off is delegated only when [approval] visual_model is on;
             # otherwise the operator's visual approval still closes the sprint
@@ -389,7 +426,7 @@ Do NOT write {spec.task_id}_SUMMARY.md, the STATE.md row or the MASTER_ORDER sta
 Never edit files outside the plan's "Files this sprint may change" list (§3, the commit hook enforces it). Never --no-verify, --force, rebase, amend or tag.
 Helper PREWORK notes in the coordinator memory below were prepared ahead of time for your next steps: when one matches the step you are on and its HEAD is current, `git apply --check` its draft patch, apply it, run the listed checks and commit, instead of re-deriving the change; verify it against the plan first (it is advisory, never authority). Put verification scratch and one-off generated files under `.plan/tmp/` (git-ignored), never elsewhere in the repo.
 §34 checkpoints: the coordinator audits this session itself and refreshes `{self.LIVE_CHECKPOINT}` (read-only) about every two minutes while you work; read it for the KILO-CHECKPOINT verdict and act on CONTINUE/STOP-AND-REPLAN. Do not run kilo_checkpoint against the Kilo server or call port 4096 (it needs credentials you don't have); if the file is missing or its header time is more than 10 minutes old, note "KILO-CHECKPOINT pending (coordinator audit)" and continue.
-Before reporting NEEDS_HUMAN for a visual or interaction step, use the enabled vision subagent and available Studio MCP tools as described above. If the step still needs Victor (an ACTION NEEDED FROM VICTOR block, §22) or a decision the plan doesn't settle (§10), stop and report NEEDS_HUMAN or BLOCKED with the exact attempted tools and blocker text.
+Before reporting NEEDS_HUMAN for a visual or interaction step, use the available Studio MCP tools as described above. If the step still needs Victor (an ACTION NEEDED FROM VICTOR block, §22) or a decision the plan doesn't settle (§10), stop and report NEEDS_HUMAN or BLOCKED with the exact attempted tools and blocker text.
 
 {report_instructions()}
 """

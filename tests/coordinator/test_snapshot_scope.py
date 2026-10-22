@@ -141,7 +141,7 @@ def test_incremental_review_does_not_repeat_unchanged_code_across_runs(tmp_path)
     for the same code is still 'unchanged'."""
     from tests.coordinator.helpers import git
     from tests.coordinator.lane_env import CLAUDE, admit, setup
-    env = setup(tmp_path, lanes="[lanes]\nenabled = true\ntranscript_poll_seconds = 0\n"
+    env = setup(tmp_path, lanes="[automation]\nhelpers = \"proactive\"\n[lanes]\nenabled = true\ntranscript_poll_seconds = 0\n"
                                 "[lanes.incremental_review]\nenabled = true\n"
                                 "min_interval_seconds = 0\n")
     try:
@@ -187,7 +187,7 @@ def test_a_review_that_never_ran_does_not_block_the_next_runs_review(tmp_path):
     same code gets its own review in the new run."""
     from tests.coordinator.helpers import git
     from tests.coordinator.lane_env import CLAUDE, admit, setup
-    env = setup(tmp_path, lanes="[lanes]\nenabled = true\ntranscript_poll_seconds = 0\n"
+    env = setup(tmp_path, lanes="[automation]\nhelpers = \"proactive\"\n[lanes]\nenabled = true\ntranscript_poll_seconds = 0\n"
                                 "[lanes.incremental_review]\nenabled = true\n"
                                 "min_interval_seconds = 0\n")
     try:

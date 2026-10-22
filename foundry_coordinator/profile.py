@@ -113,6 +113,9 @@ class Profile:
     lead_manager: dict = field(default_factory=lambda: {
         k: (list(v) if isinstance(v, list) else v) for k, v in LEAD_MANAGER_DEFAULTS.items()})
     # [fast_lane] (UI-T0): validated settings with defaults; off by default.
+    # [automation] (revamp B5-B13): validated settings with defaults (automation.py)
+    automation: dict = field(default_factory=lambda: __import__(
+        "foundry_coordinator.automation", fromlist=["defaults"]).defaults())
     fast_lane: dict = field(default_factory=lambda: {
         k: (list(v) if isinstance(v, list) else v) for k, v in FAST_LANE_DEFAULTS.items()})
 
@@ -282,6 +285,12 @@ def from_raw(raw: dict, path: str, digest: str = "") -> Profile:
         raise ProfileError(str(e)) from None
     lead_manager = _lead_manager_table(path, raw.get("lead_manager"))
     fast_lane = _fast_lane_table(path, raw.get("fast_lane"))
+    # [automation] (revamp B5-B13): validated settings with defaults (automation.py)
+    from .automation import AutomationError, table as _automation_table
+    try:
+        automation = _automation_table(path, raw.get("automation"))
+    except AutomationError as e:
+        raise ProfileError(str(e)) from None
     return Profile(
         id=pid, name=str(raw.get("name") or pid), version=str(raw.get("version") or "1"),
         path=path, hash=digest, workspace=wpath,
@@ -294,7 +303,8 @@ def from_raw(raw: dict, path: str, digest: str = "") -> Profile:
         resources=list((raw.get("resources") or {}).get("exclusive") or []),
         closeout=dict(raw.get("closeout") or {}), prompts=dict(raw.get("prompts") or {}),
         artifacts=dict(raw.get("artifacts") or {}), commit=dict(raw.get("commit") or {}),
-        lifecycle=lifecycle, lead_manager=lead_manager, fast_lane=fast_lane)
+        lifecycle=lifecycle, lead_manager=lead_manager, fast_lane=fast_lane,
+        automation=automation)
 
 
 def check_isolation(profiles: list[Profile]) -> None:

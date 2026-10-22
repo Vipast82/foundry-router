@@ -371,7 +371,10 @@ def report_contract(full_authority: bool = False) -> str:
         ' "action": {"kind": "assign_game_repair", "assignment": "<concrete instructions for '
         'the primary>", "files": ["<game paths within the task scope>"], "tests": [], '
         '"manifest": {"acceptance_tests": []}}\n'
-        ' , "question": "<only for ask_victor: one precise question>"}\n```\n'
+        ' , "question": "<only for ask_victor: one precise question>",\n'
+        ' "options": ["<only for ask_victor: 2-4 concrete answers>"], '
+        '"recommended": "<the option you recommend; applied if Victor does not answer in '
+        'time>"}\n```\n'
         "Other action kinds: {\"kind\": \"coordinator_repair\", \"plan\": \"...\", \"files\": "
         "[\"<Foundry-Router paths>\"], \"reproducing_test\": \"tests/...::test_x\", "
         "\"focused_tests\": [...], \"broader_tests\": [...], \"manifest\": "
@@ -620,11 +623,28 @@ def validate_report(rep: Any, *, scope=None, allowed_dirs=None, acceptance_globs
                     "different action is required")
     if cls in ("scope_core", "external") and kind != "ask_victor" and not question:
         errs.append(f"a {cls} problem goes to Victor: give a precise question")
+    # revamp B11: a question for Victor may carry its options and a recommended one
+    # (applied after the decision timeout); both optional, both validated
+    options, recommended = [], ""
+    if kind == "ask_victor" and (rep.get("options") or rep.get("recommended")):
+        options = rep.get("options")
+        if not isinstance(options, list) or not 2 <= len(options) <= 4 or any(
+                not isinstance(o, str) or not 3 <= len(o.strip()) <= 300 for o in options):
+            errs.append("options must be 2-4 answers of 3-300 characters")
+            options = []
+        recommended = str(rep.get("recommended") or "").strip()
+        if recommended and recommended not in [o.strip() for o in options]:
+            errs.append("recommended must be one of the options")
     if errs:
         return None, errs
-    return {"classification": cls, "hypothesis": hyp[:2000],
-            "evidence_refs": [r[:300] for r in refs][:40], "action": clean_act,
-            "question": question[:1500]}, []
+    out = {"classification": cls, "hypothesis": hyp[:2000],
+           "evidence_refs": [r[:300] for r in refs][:40], "action": clean_act,
+           "question": question[:1500]}
+    if options:
+        out["options"] = [o.strip() for o in options]
+        if recommended:
+            out["recommended"] = recommended
+    return out, []
 
 
 # -- permissions --------------------------------------------------------------------------
@@ -680,6 +700,9 @@ def lead_write_permissions(P, spec=None) -> list[dict]:
     holds the workspace lock and guards the router checkout and its DB."""
     rules = [r for r in _base_rules(P, spec, "lead") if r.get("action") != "deny"]
     rules.append({"permission": "*", "pattern": "*", "action": "allow"})
+    # revamp B6: no subagents of its own beyond the read-only allow-list (explore)
+    from .adapters.project import subagent_rules
+    rules += subagent_rules(getattr(P, "profile", None))
     for perm in _READ_TOOLS + ("edit", "write", "patch", "multiedit", "apply_patch"):
         for pat in (_SECRET_PATTERN, "*.env", "*.env.*", "*secret*"):
             rules.append({"permission": perm, "pattern": pat, "action": "deny"})
@@ -689,6 +712,16 @@ def lead_write_permissions(P, spec=None) -> list[dict]:
     rules += [{"permission": h["permission"], "pattern": h["pattern"], "action": "deny"}
               for h in HARD_DENIES]
     return rules
+
+
+def router_moved_by_deploy(before: dict, after: dict) -> bool:
+    """A deploy (fast-forward / checkout of a release) moves the router checkout's
+    HEAD and leaves its tree clean; an edit by a session leaves it dirty. Only the
+    first is ignored by the guard (revamp B9: 5 of 6 guard violations were
+    deploys while a lead ran)."""
+    return bool(before.get("head")) and bool(after.get("head")) and \
+        before.get("head") != after.get("head") and before.get("clean") is True and \
+        after.get("clean") is True
 
 
 def kilo_decision(rules: list[dict], perm: str, value: str) -> Optional[str]:
@@ -1695,7 +1728,8 @@ class LeadManager:
     def _write_mode_text(t: dict) -> str:
         tid = t["task_id"]
         return (f"You have FULL ACCESS to this workspace ([lead_manager] write_access): edit, "
-                f"shell, git, Studio MCP, skills and subagents. No primary session runs while "
+                f"shell, git, Studio MCP, skills and the read-only explore subagent. No primary "
+                f"session runs while "
                 f"you hold the workspace. Fix what blocks the task yourself: harness or tooling "
                 f"faults, a plan file-list gap for a harness line the sprint legitimately needs "
                 f"(add the path to docs/progress/{tid}_PLAN.md under 'Files this sprint may "
@@ -1918,7 +1952,7 @@ class LeadManager:
                                 timeout=120).stdout
         except Exception:                                        # noqa: BLE001
             return {"path": path, "head": "", "status": ""}
-        return {"path": path, "head": head, "status": _sha(st)[:16]}
+        return {"path": path, "head": head, "status": _sha(st)[:16], "clean": not st.strip()}
 
     def _db_marker(self, project_id: str, task_id: str) -> str:
         """An mtime-independent marker of the coordinator rows a session must
@@ -1959,7 +1993,7 @@ class LeadManager:
             if (before.get("game") or {}).get(k) != now["game"].get(k):
                 out.append(f"game workspace {k} changed")
         rb, rn = before.get("router") or {}, now["router"]
-        if rb.get("path") == rn.get("path"):
+        if rb.get("path") == rn.get("path") and not router_moved_by_deploy(rb, rn):
             for k in ("head", "status"):
                 if rb.get(k) != rn.get(k):
                     out.append(f"router checkout {rb.get('path')} {k} changed")
@@ -1977,6 +2011,18 @@ class LeadManager:
         if d.get("guard_ok"):
             return []
         changes = self._guard_changes(P, t["task_id"], d.get("guard") or {})
+        if a and a["kind"] == "lead_call" and not self.settings(P).get("write_access"):
+            # revamp B9: a read-only lead's Kilo rules (checked by is_read_only before
+            # the call) deny every write tool, every non-read shell command and every
+            # directory outside the game workspace, so it cannot have changed the
+            # router checkout or the coordinator DB: a change there is an operator /
+            # deploy / other-task write, never a reason to discard the lead's report
+            ignored = [c for c in changes if not c.startswith("game workspace")]
+            if ignored:
+                self._act(case, "guard_ignored", status="done",
+                          result="; ".join(ignored)[:1500],
+                          detail={"op_key": key, "why": "read-only lead: not its doing"})
+            changes = [c for c in changes if c.startswith("game workspace")]
         if a and a["kind"] == "lead_call" and self.settings(P).get("write_access"):
             fixed = [c for c in changes if c.startswith("game workspace")]
             changes = [c for c in changes if not c.startswith("game workspace")]
@@ -2178,6 +2224,20 @@ class LeadManager:
             lim = self.task_limit(s, totals, "lead_calls")
             if totals["lead_calls"] >= lim:
                 return self._escalate_task_bound(P, t, case, "lead_calls", totals, lim)
+            hard = self.hard_cap(P)
+            used = self.lifetime_calls(P.id, t["task_id"])
+            if hard and used >= hard:
+                # revamp B9: an absolute cap that no delegated round or budget reset
+                # raises; the operator decides what changes for this sprint
+                self._act(case, "hard_cap", status="failed",
+                          result=f"{used} lead calls on this task (hard cap {hard})")
+                return self._escalate(
+                    P, t, case, "lead_hard_cap",
+                    f"The lead manager made {used} calls on {P.id}/{t['task_id']} (hard cap "
+                    f"[automation] lead_hard_max_calls = {hard}) and the task is still "
+                    f"blocked: {_cut((case.get('trigger') or {}).get('reason') or '', 400)}. "
+                    f"What has to change for this sprint?",
+                    user_action="raise [automation] lead_hard_max_calls or decide the sprint")
             if not write and not is_read_only(perms):
                 # never start a lead session that could write the game workspace
                 self._act(case, "permissions", status="failed",
@@ -2255,8 +2315,14 @@ class LeadManager:
                 max_extend=int(s.get("max_extend_attempts") or 3),
                 max_clean=int(s.get("max_clean_paths") or 20))
         if clean is None:
+            if self._repair_report(P, t, case, key, sid, ws, s, errors):
+                return self.case(case["case_id"])
             self._upd(key, status="failed", result="invalid lead-report", errors=errors[:12])
             self._end_session(P, key, "invalid_report")
+            if self._lead_fixed(case["case_id"], key) and s.get("write_access"):
+                # revamp B9: the lead committed a fix but never produced a usable
+                # report: the coordinator re-verifies the fix anyway
+                return self._reverify_after_fix(case, "the lead's report was invalid")
             return self.case(case["case_id"])
         clean = self._red(P.id, clean)               # model text: redacted before any use
         self._upd(key, status="done", result=f"{clean['classification']}: "
@@ -2270,6 +2336,77 @@ class LeadManager:
                           "action": clean["action"]["kind"]},
                   scope_files=clean["action"].get("files") or [])
         return self._route(P, t, case, s, clean)
+
+    # -- revamp B9 ---------------------------------------------------------------------
+
+    @staticmethod
+    def hard_cap(P) -> int:
+        from .automation import get as auto_get
+        try:
+            return int(auto_get(P, "lead_hard_max_calls") or 0)
+        except Exception:                                        # noqa: BLE001
+            return 0
+
+    def lifetime_calls(self, project_id: str, task_id: str) -> int:
+        """Lead calls ever charged on a task, across every case and budget round
+        (a budget reset or a delegated round never refills this)."""
+        n = 0
+        for a in self.store.q("SELECT a.detail, a.status FROM recovery_actions a JOIN "
+                              "recovery_cases c ON a.case_id=c.case_id WHERE c.project_id=? AND "
+                              "c.task_id=? AND a.kind='lead_call'", (project_id, task_id)):
+            d = _uj(a.get("detail"), {}) or {}
+            if d.get("phase") not in (None, "creating", "created", "bound") or \
+                    a["status"] in ("done", "uncertain"):
+                n += 1
+        return n
+
+    def _repair_report(self, P, t, case, key: str, sid: str, ws: str, s: dict,
+                       errors: list) -> bool:
+        """revamp B9: an invalid lead-report goes back into the SAME session (it
+        has the whole investigation in context) with the validation errors, at
+        most [automation] lead_report_repairs times; a fresh session on the same
+        40K dossier was the old answer. True when the repair prompt was sent."""
+        from .automation import get as auto_get
+        a = self._action(key) or {}
+        d = a.get("detail") or {}
+        n = int(d.get("report_repairs") or 0)
+        if not sid or n >= int(auto_get(P, "lead_report_repairs") or 0):
+            return False
+        locks = list(d.get("locks") or self._ws_locks(P))
+        held = self.store.acquire(locks, P.id, t["task_id"])
+        if held:
+            return False
+        text = (f"Your {REPORT_FENCE} block was not accepted: " + "; ".join(
+            str(e) for e in errors[:8]) + ". Keep your diagnosis and reply with ONLY one "
+            f"corrected ```{REPORT_FENCE}``` block that follows the contract from the first "
+            "message. Do not change the workspace.")
+        try:
+            P.client.prompt(sid, text, directory=ws, persona=s["persona"], agent=s["agent"])
+        except Exception:                                        # noqa: BLE001
+            self.store.release(P.id, t["task_id"], locks)
+            return False
+        # the first turn passed the guard; the repair turn is guarded from now on
+        self._upd(key, report_repairs=n + 1, phase="prompted", prompt_ts=self.clock(),
+                  guard_ok=False, locks=locks, locks_released=False,
+                  guard=self._guard_snapshot(P, t["task_id"]), repair_errors=errors[:12])
+        self._act(case, "report_repair", result="; ".join(str(e) for e in errors[:4])[:500],
+                  detail={"op_key": key, "session_id": sid, "n": n + 1})
+        return True
+
+    def _lead_fixed(self, case_id: str, key: str = "") -> bool:
+        """Did a lead session of this case change the game workspace (write_access)?"""
+        for a in self.actions(case_id):
+            if a["kind"] == "lead_fix" and (not key or (a.get("detail") or {}).get("op_key") == key):
+                return True
+        return False
+
+    def _reverify_after_fix(self, case, why: str, cls: str = "product"):
+        proposed = {"kind": "reverify", "hypothesis": why or "the lead fixed the workspace",
+                    "classification": cls if cls in CLASSES else "product", "after_fix": True}
+        self._act(case, "reverify", result="the lead's write-access fix is re-verified by the "
+                                           "engine (no paid call)",
+                  op_key=f"{case['case_id']}:reverify_after_fix")
+        return self._save(case["case_id"], state="RESUMING", proposed_action=proposed)
 
     def _prior_hypotheses(self, P, case) -> list[str]:
         out = []
@@ -2301,6 +2438,11 @@ class LeadManager:
     def _route(self, P, t, case, s, rep: dict):
         act = rep["action"]
         kind, cls = act["kind"], rep["classification"]
+        if s.get("write_access") and kind in ("wait", "reverify") and \
+                self._lead_fixed(case["case_id"]):
+            # revamp B9: a fix the lead committed with write access is followed by
+            # re-verification, never by a wait that leaves it unverified
+            return self._reverify_after_fix(case, rep.get("hypothesis") or "", cls)
         if kind == "ask_victor" or cls in ("scope_core", "external"):
             q = rep.get("question") or f"The lead classified the blocker as {cls}: " \
                                        f"{rep['hypothesis'][:400]}. How should it proceed?"
@@ -3068,14 +3210,17 @@ class LeadManager:
                               "bounds": {k: int(s[v]) for k, v in BOUNDS.items()},
                               "bound": list(bound) if bound else None,
                               "user_action": user_action,
+                              "recommended": (report or {}).get("recommended") or "",
                               "supersedes": [d["decision_id"] for d in originals],
                               "original_decisions": [
                                   {"decision_id": d["decision_id"], "kind": d["kind"],
                                    "question": self.redact(P, _cut(d.get("question") or "", 600))}
                                   for d in originals]},
-                    options=["give a specific instruction and resume the case",
-                             "authorize another bounded round", "stop the task"],
-                    recommendation="", blocks=[f"lead_case:{case['case_id']}"],
+                    options=list((report or {}).get("options") or []) or [
+                        "give a specific instruction and resume the case",
+                        "authorize another bounded round", "stop the task"],
+                    recommendation=(report or {}).get("recommended") or "",
+                    blocks=[f"lead_case:{case['case_id']}"],
                     supersedes=prior_answer or (originals[0]["decision_id"] if originals
                                                 else None))
                 if originals:

@@ -16,6 +16,8 @@ LANES = """
 [lifecycle]
 enabled = true
 
+[automation]
+helpers = "proactive"  # revamp B5: lanes are opt-in
 [lanes]
 enabled = true
 transcript_poll_seconds = 0

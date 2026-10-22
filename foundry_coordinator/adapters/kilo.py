@@ -156,9 +156,13 @@ class KiloClient(CodingClient):
             t = ((m.get("info") or {}).get("tokens") or {})
             tokens["input"] += int(t.get("input") or 0)
             tokens["output"] += int(t.get("output") or 0)
+        lt = info.get("tokens") or {}
+        cache = lt.get("cache") or {}
+        context = (int(lt.get("input") or 0) + int(cache.get("read") or 0)
+                   + int(cache.get("write") or 0)) if lt else None
         return SessionState(status="error" if err else "idle", error=err_text,
                             denial=foundry_denial(err_text) if err else None, final_text=text,
-                            report=parse_report(text), tokens=tokens)
+                            report=parse_report(text), tokens=tokens, context=context)
 
     def _pending(self, session_id: str, directory: str) -> Optional[dict]:
         for q in self._req("GET", "/question", query={"directory": directory}) or []:

@@ -375,11 +375,13 @@ def test_migration_on_existing_db(tmp_path):
     """)
     s.set_meta("schema:obligations", "1")
     ob = Obligations(s)
-    assert s.meta("schema:obligations") == "2"
+    # revamp B11: step 3 adds the decision class, recommended answer and deadline
+    assert s.meta("schema:obligations") == "3"
     cols = {r["name"] for r in s.q("PRAGMA table_info(decisions)")}
     assert "qhash" in cols
+    assert {"decision_class", "recommended", "timeout_minutes", "deadline_ts"} <= cols
     assert ob.decision("dec-old")["question"] == "old?"
-    assert migrate(s) == 2 and migrate(s) == 2          # idempotent
+    assert migrate(s) == 3 and migrate(s) == 3          # idempotent
     ob.answer("dec-old", "yes", "victor", "operator", channel="control")
     # existing core tables are untouched
     assert s.meta("schema_version") == "1"

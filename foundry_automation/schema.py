@@ -141,7 +141,7 @@ FAST_LANE_DEFAULTS = {
     "auto_baseline": True,                    # baseline gate at the base commit first
     "early_review": True,                     # review runs alongside vision
     "tick_checklist": True,                   # the coordinator ticks verified checklist rows
-    "lanes": ["prework", "test_design", "failure_triage", "incremental_review"],
+    "lanes": [],                              # revamp B5: helpers start on demand only
     # files the runner rewrites on every run ({task} = the task id): never part of the
     # coordinator's clean / unrelated_preserved checks (UI-D1 lost its last attempt to the
     # evidence log, which was already dirty at run start and changed on every gate run)

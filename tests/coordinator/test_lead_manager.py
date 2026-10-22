@@ -394,22 +394,38 @@ def test_diagnosis_read_only_session_and_valid_report(env):
     assert env["lm"].resume_action("game", "T1")["action"]["kind"] == "assign_game_repair"
 
 
-def test_invalid_report_is_retried_within_bounds(env):
+def test_invalid_report_is_repaired_in_the_same_session(env):
+    """revamp B9: the errors go back into the SAME session once (it has the whole
+    investigation in context); before, a new session re-read the 40K dossier."""
     env["replies"] += ["no report at all", reply(report())]
+    case = drive(env, open_case(env), state_is("RESUMING", "NEEDS_VICTOR"))
+    assert case["state"] == "RESUMING" and case["counters"]["diagnoses"] == 1
+    calls = [a for a in env["lm"].actions(case["case_id"]) if a["kind"] == "lead_call"]
+    assert [a["status"] for a in calls] == ["done"]
+    assert calls[0]["detail"]["report_repairs"] == 1 and calls[0]["detail"]["repair_errors"]
+    prompts = lead_prompts(env)
+    assert len(env["P"].client.starts) == 1 and len(prompts) == 2
+    assert "was not accepted" in prompts[1]["text"]
+
+
+def test_a_report_still_invalid_after_its_repair_starts_a_new_call(env):
+    env["replies"] += ["no report at all", "still none", reply(report())]
     case = drive(env, open_case(env), state_is("RESUMING", "NEEDS_VICTOR"))
     assert case["state"] == "RESUMING" and case["counters"]["diagnoses"] == 2
     calls = [a for a in env["lm"].actions(case["case_id"]) if a["kind"] == "lead_call"]
     assert [a["status"] for a in calls] == ["failed", "done"]
     assert calls[0]["result"] == "invalid lead-report" and calls[0]["detail"]["errors"]
-    # the second dossier carries the first report's errors
-    assert "invalid lead-report" in lead_prompts(env)[1]["text"]
+    # the new dossier carries the first call's errors
+    assert "invalid lead-report" in lead_prompts(env)[2]["text"]
 
 
 def test_bounds_exhausted_reaches_victor_with_precise_question(env):
-    env["replies"] += ["nothing", reply('{"classification": "product"}')]
+    # revamp B9: each call's invalid report is repaired once in its session (2 replies)
+    env["replies"] += ["nothing", "nothing again", reply('{"classification": "product"}'),
+                       reply('{"classification": "product"}')]
     case = drive(env, open_case(env), state_is("NEEDS_VICTOR", "RESUMING"))
     assert case["state"] == "NEEDS_VICTOR" and case["counters"]["diagnoses"] == 2
-    assert len(lead_prompts(env)) == 2
+    assert len(env["P"].client.starts) == 2 and len(lead_prompts(env)) == 4
     d = env["c"].obligations.decision(case["decision_id"])
     assert d["kind"] == "lead_escalation" and d["status"] == "open"
     assert "exhausted max_diagnoses (2/2)" in d["question"]
@@ -563,7 +579,7 @@ def test_lead_report_never_answers_a_victor_decision(env):
     did = env["c"].obligations.open_decision("game", "T1", "scope_change", "Widen scope?")
     bad = report()
     bad["answers"] = {did: "yes"}
-    env["replies"] += [reply(bad), reply(bad)]
+    env["replies"] += [reply(bad)] * 4             # (revamp B9: each call repaired once)
     case = drive(env, open_case(env), state_is("NEEDS_VICTOR", "RESUMING"))
     assert case["state"] == "NEEDS_VICTOR"
     assert env["c"].obligations.decision(did)["status"] == "open"
@@ -901,7 +917,8 @@ def test_lead_session_ends_after_its_report_once(env):
 
 
 def test_invalid_report_session_is_ended(env):
-    env["replies"] += ["no report at all", reply(report())]
+    # revamp B9: the first call's report repair is invalid too, so a second call runs
+    env["replies"] += ["no report at all", "still none", reply(report())]
     case = drive(env, open_case(env), state_is("RESUMING", "NEEDS_VICTOR"))
     s1, s2 = [s["session_id"] for s in env["P"].client.starts]
     assert env["ff"].ended == [(s1, "invalid_report"), (s2, "report_parsed")]

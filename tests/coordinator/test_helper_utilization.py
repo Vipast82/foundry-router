@@ -7,7 +7,7 @@ import pytest
 from foundry_coordinator import lanes as L
 from tests.coordinator.lane_env import setup, admit, CLAUDE, GPT, answer_helper, tool_part
 
-ONLY = '[lanes]\nenabled=true\ntranscript_poll_seconds=0\n[lanes.failure_triage]\nenabled=true\n'
+ONLY = '[automation]\nhelpers = \"proactive\"\n[lanes]\nenabled=true\ntranscript_poll_seconds=0\n[lanes.failure_triage]\nenabled=true\n'
 
 @pytest.fixture
 def env(tmp_path):

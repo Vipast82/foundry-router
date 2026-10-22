@@ -128,6 +128,11 @@ class Coordinator:
         ids = sorted(self.projects)
         if not ids:
             return acted
+        try:
+            from . import decision_policy       # revamp B11: decisions past their timeout
+            decision_policy.sweep(self)
+        except Exception as e:                                    # noqa: BLE001
+            self.log(f"decision timeout sweep failed: {type(e).__name__}: {e}")
         rr = int(self.store.meta("rr") or 0) % len(ids)
         order = ids[rr:] + ids[:rr]
         self.store.set_meta("rr", str(rr + 1))
@@ -207,6 +212,11 @@ class Coordinator:
     def _step(self, P: Project, t: dict) -> None:
         st = t["state"]
         self._close_session_notes(P, t)
+        if st == S.BLOCKED and (t.get("data") or {}).get("auto_heal"):
+            from . import autoheal                        # revamp B9: a scheduled retry
+            if autoheal.step(self, P, t):
+                return
+            t = self.store.task(P.id, t["task_id"])
         if st == S.BLOCKED and (t.get("data") or {}).get("recovery_case") and self._lead_on(P):
             return self._lead_blocked(P, t)
         if (t.get("data") or {}).get("recovery_case") and not self._lead_on(P):
@@ -342,9 +352,16 @@ class Coordinator:
             spec = P.adapter.describe(tid)
         except AdapterError as e:
             return self._block(P, t, f"task description unavailable: {e}")
+        from . import infra                        # revamp B12: infra before a session
+        note = infra.waiting(self, P, t)
+        if note:
+            return self._note(P, t, note)
         held = self._acquire(P, t, self._workspace_locks(P) + self._session_locks(P),
                              writer=True)
         if held:
+            return
+        if infra.preflight_blocks(self, P, t, P.profile.persona("implementer", tid)):
+            self.store.release(pid, tid)
             return
         if self._lc(P, "readiness"):
             # [lifecycle] the environment/tooling must be ready before a session
@@ -522,7 +539,8 @@ class Coordinator:
             ts = self.clock()
             if role == "implementer":
                 self.frontier.on_new_session(P, tid)
-            prompt, notes = self._with_operator_notes(P.id, tid, prompt, "")
+            prompt, notes = self._with_operator_notes(P.id, tid, prompt, "",
+                                                      memory_for=sid)
             units = (self.helpers.proposals_for(P.id, tid, sid, run_id=run_id)
                      if role == "implementer" and self.helpers.enabled(P) else [])
             if units:
@@ -591,6 +609,16 @@ class Coordinator:
         data = self.store.merge_data(pid, tid, last_report=rep or None)
         if self._lc(P):
             self._lc_session_ended(P, t, t["session_id"], head, rep)
+        from . import infra
+        infra.session_ok(self, P, tid)
+        handoff = infra.over_ceiling(P, s, rep)
+        if handoff:
+            # revamp B12: a fresh session continues instead of compacting until Kilo
+            # gives up (UI-02b lost 85 min that way); no attempt is charged
+            self.store.event(pid, tid, "context_handoff", session_id=t["session_id"],
+                             detail={"context": getattr(s, "context", None),
+                                     "why": handoff[:300]})
+            return self._session_failed(P, t, handoff, "implement", free=True)
         status = str(rep.get("status") or "").upper()
         # A session can commit legitimate BUILD progress and still hit a hard
         # scope or operator blocker.  Do not reinterpret its explicit stop as
@@ -599,14 +627,20 @@ class Coordinator:
         # budget is exhausted.  The blocked path records the completed commit
         # and waits for the blocker to be resolved.
         blocked = status in ("BLOCKED", "NEEDS_HUMAN")
+        if self.helpers.enabled(P):
+            # revamp B5: delivered helper results are judged by the consumer's commits
+            self.helpers.measure_git(P, tid)
         if self.helpers.enabled(P) and rep.get("helper_feedback"):
             self.helpers.record_feedback(P, self.store.task(pid, tid), rep)
+        if self._scope_requests(P, tid, s, rep):
+            return                       # revamp B10: granted and continued, or a decision waits
         if self.frontier.on_idle(P, self.store.task(pid, tid), rep):
             return                       # a frontier phase started, continued or handed back
         if not blocked and self.helpers.enabled(P) and \
                 self._helper_handoff(P, self.store.task(pid, tid), rep):
             return                       # the primary continues, or waits for its helpers
         if self.helpers.enabled(P):
+            self.helpers.measure_git(P, tid, final=True)
             self.helpers.abort_running(P, tid, "cancelled", "the primary finished first")
             self.helpers.skip_waiting(P, tid, "the primary finished before this unit was "
                                               "admitted")
@@ -661,6 +695,20 @@ class Coordinator:
             "head_sha": head, "session_idle": True, "session_id": t["session_id"],
             "model_report": rep or "none (advisory only)"},
             head_sha=head, next_action="verifying", data=data)
+
+    def _scope_requests(self, P: Project, tid: str, s, rep: dict) -> bool:
+        """revamp B10: typed scope requests of an idle primary (scope.py). True
+        when the session was continued after a grant (or a decision waits)."""
+        from . import scope as SC
+        reqs = SC.parse_requests(getattr(s, "final_text", "") or "", rep)
+        if not reqs:
+            return False
+        try:
+            spec = P.adapter.describe(tid)
+        except AdapterError:
+            return False
+        return SC.handle(self, P, self.store.task(P.id, tid), spec, reqs) in (
+            "continued", "waiting")
 
     def _poll(self, P: Project, t: dict, sid: str, phase: str):
         """Poll a session. Returns the idle SessionState, or None after
@@ -852,9 +900,13 @@ class Coordinator:
 
     def _session_failed(self, P: Project, t: dict, why: str, phase: str, free: bool = False):
         pid, tid = P.id, t["task_id"]
+        if phase != "closeout":
+            from . import infra                    # revamp B12: infra failures are free
+            free = infra.session_failure(self, P, t, why, free)
         self._release_session(P, t)
         if self.helpers.enabled(P):
             # this run is over: its lane work never reaches the next session
+            self.helpers.measure_git(P, tid, final=True)
             self.helpers.abort_lane_running(P, tid, f"the session ended: {why}"[:300])
             self.helpers.expire_lane_results(P, tid, "the run ended before delivery")
         if phase == "closeout":
@@ -1028,8 +1080,54 @@ class Coordinator:
         return [p for xy, p in dirty
                 if xy == "??" and p.replace("\\", "/") in exact and p not in before]
 
+    GENERIC_CACHE_SECONDS = 600
+
     def _generic_checks(self, P: Project, t: dict, spec, head: str, phase: str,
                         intermediate: bool = False) -> list:
+        """revamp B13: _verifying runs these every tick while a gate runs (up to 45
+        min; ~6 git calls plus a SHA of every pre-existing dirty file each time).
+        The result is reused while HEAD, the porcelain status, the pre-existing
+        dirty files' size/mtime and the task's inputs are unchanged (at most
+        GENERIC_CACHE_SECONDS); any change recomputes."""
+        from .automation import get as auto_get
+        if not auto_get(P, "generic_checks_cache"):
+            return self._generic_checks_uncached(P, t, spec, head, phase, intermediate)
+        key = self._generic_key(P, t, spec, head, phase, intermediate)
+        cache = self.__dict__.setdefault("_generic_cache", {})
+        hit = cache.get((P.id, t["task_id"]))
+        now = self.clock()
+        if key and hit and hit[0] == key and now - hit[1] < self.GENERIC_CACHE_SECONDS:
+            return list(hit[2])
+        out = self._generic_checks_uncached(P, t, spec, head, phase, intermediate)
+        if key:
+            cache[(P.id, t["task_id"])] = (key, now, list(out))
+        return out
+
+    def _generic_key(self, P: Project, t: dict, spec, head: str, phase: str,
+                     intermediate: bool) -> str:
+        import hashlib
+        import json as _json
+        data = t.get("data") or {}
+        try:
+            status = P.ws.status()
+        except Exception:                                         # noqa: BLE001
+            return ""
+        stats = []
+        for p in sorted(data.get("baseline_dirty") or {}):
+            try:
+                st = os.stat(os.path.join(P.profile.workspace, p))
+                stats.append((p, st.st_size, st.st_mtime_ns))
+            except OSError:
+                stats.append((p, None, None))
+        body = _json.dumps([head, phase, bool(intermediate), t.get("base_sha"),
+                            data.get("task_base"), sorted(map(list, status)), stats,
+                            sorted(spec.scope), bool(data.get("findings")),
+                            data.get("task_baseline_dirty"), data.get("scope_grants"),
+                            self.fast_lane.on(P, spec.task_id)], default=str)
+        return hashlib.sha256(body.encode()).hexdigest()
+
+    def _generic_checks_uncached(self, P: Project, t: dict, spec, head: str, phase: str,
+                                 intermediate: bool = False) -> list:
         """Scope / history / commits / clean / unrelated-dirty checks. With
         intermediate=True (ONLY the committed partial-BUILD continuation),
         task-owned unfinished files are carried into the next BUILD session.
@@ -1072,18 +1170,25 @@ class Coordinator:
         if self.fast_lane.on(P, spec.task_id):
             from .fast_lane import runner_patterns
             runner_out, runner_caps = runner_patterns(P, spec.task_id)
+        # (revamp B10: the task-source file a coordinator scope grant edited is not
+        # the session's change)
+        granted_src = [g.get("file") for g in (t.get("data") or {}).get("scope_grants") or []
+                       if g.get("file")]
         # B1 (2026-10-21): scope blames the agent only for files it changed. Runner outputs
         # and files only the coordinator's own commits touched are never "outside scope".
         outside = [f for f in changed if not matches_any(f, spec.scope + exempt + runner_out
-                                                         + runner_caps)]
+                                                         + runner_caps + granted_src)]
         if outside:
             from . import bookkeeping as BK
             mine = set(BK.only_coordinator(P, t, base, head, outside))
             outside = [f for f in outside if f not in mine]
         add("scope", FAIL if outside else PASS,
             ("changed outside the task's files: " + ", ".join(outside[:12])
-             + " — the coordinator never widens scope") if outside
+             + " — ask for a harness line with a SCOPE_REQUEST block; the coordinator "
+               "grants only allow-listed paths itself") if outside
             else f"{len(changed)} changed file(s), all within scope")
+        from . import scope as _scope           # revamp B10: granted files keep to their rule
+        out += _scope.grant_checks(P, t, spec, base, head)
         dirty = P.ws.status()
         baseline = t["data"].get("baseline_dirty") or {}
         if runner_out or runner_caps:
@@ -2490,14 +2595,18 @@ class Coordinator:
     # ======================================================================= operator notes
 
     def _with_operator_notes(self, project_id: str, task_id: str, prompt: str,
-                             session_id: str) -> tuple[str, list[str]]:
+                             session_id: str, memory_for: str = "") -> tuple[str, list[str]]:
         """Append queued control-center instructions to a prompt the engine is
         about to send anyway (a safe point: never a second, concurrent prompt).
         They are the operator's words for this task, inside its existing scope
-        and permissions: they don't widen scope or waive a check."""
+        and permissions: they don't widen scope or waive a check.
+        revamp B13: the [lifecycle] memory blocks go to a session once; later
+        prompts into the same session carry only the paragraphs that changed
+        ([automation] memory_delta)."""
         P = self.projects.get(project_id)
         if P is not None and self._lc(P):
-            prompt += self._lc_memory_blocks(P, task_id)
+            prompt += self._memory_delta(P, task_id, memory_for or session_id,
+                                         self._lc_memory_blocks(P, task_id))
         try:
             notes = self.store.pending_operator_messages(project_id, task_id, session_id)
         except Exception:                                         # noqa: BLE001
@@ -2516,11 +2625,48 @@ class Coordinator:
     def _notes_requeue(self, ids: list[str]) -> None:
         """The prompt carrying these notes was refused (nothing sent): they wait
         for the next prompt instead of staying 'delivering' forever."""
+        self.__dict__.pop("_memory_pending", None)    # nothing reached the session
         if ids:
             self.store.mark_operator_messages(ids, "queued", "", "the prompt carrying it was "
                                                                  "refused; waiting for the next")
 
+    MEMORY_SENT_CAP = 400
+
+    def _memory_delta(self, P: Project, tid: str, sid: str, text: str) -> str:
+        """`text` minus the paragraphs this session already received. The sent
+        set is committed only when Kilo accepted the prompt (_notes_delivered)."""
+        from .automation import get as auto_get
+        if not text.strip() or not sid or not auto_get(P, "memory_delta"):
+            return text
+        import hashlib
+        import json as _json
+        key = f"memsent:{P.id}:{tid}:{sid}"
+        try:
+            sent = set(_json.loads(self.store.meta(key) or "[]"))
+        except ValueError:
+            sent = set()
+        paras = [p for p in text.strip("\n").split("\n\n") if p.strip()]
+        hashes = [hashlib.sha1(p.strip().encode()).hexdigest()[:16] for p in paras]
+        new = [(h, p) for h, p in zip(hashes, paras) if h not in sent]
+        pend = self.__dict__.setdefault("_memory_pending", {})
+        prior = set(pend[sid][1]) if sid in pend else set()     # two blocks, one prompt
+        pend[sid] = (key, sorted(sent | prior | set(hashes))[-self.MEMORY_SENT_CAP:])
+        if not new:
+            return ""
+        if len(new) == len(paras):
+            return text                                   # first time: unchanged text
+        if len(new) < len(paras):
+            self.store.event(P.id, tid, "memory_delta", session_id=sid, detail={
+                "sent": len(new), "unchanged": len(paras) - len(new)})
+            return ("\n\n## Coordinator memory (changed since your last prompt; the rest is "
+                    "unchanged)\n" + "\n\n".join(p for _, p in new) + "\n")
+        return "\n\n" + "\n\n".join(p for _, p in new) + "\n"
+
     def _notes_delivered(self, ids: list[str], session_id: str) -> None:
+        got = self.__dict__.get("_memory_pending", {}).pop(session_id, None)
+        if got:
+            import json as _json
+            self.store.set_meta(got[0], _json.dumps(got[1]))
         if ids:
             self.store.mark_operator_messages(ids, "delivered", session_id,
                                               "included in the prompt Kilo accepted")
@@ -2603,8 +2749,16 @@ class Coordinator:
             from .obligations import Obligations
             self._obligations = Obligations(self.store, clock=self.clock,
                                             unblock_validator=self._unblock_ref_ok,
-                                            lead_validator=self._lead_authority_ok)
+                                            lead_validator=self._lead_authority_ok,
+                                            decision_policy=self._decision_meta)
         return self._obligations
+
+    def _decision_meta(self, project: str, task: str, kind: str, evidence: dict,
+                       options: list) -> dict:
+        """revamp B11: class, recommended option and timeout of a new decision."""
+        from . import decision_policy
+        P = self.projects.get(project)
+        return decision_policy.meta(P, kind, evidence, options) if P is not None else {}
 
     def _unblock_ref_ok(self, project: str, task: str, ref: str, actor: str) -> bool:
         """Obligations' check of an `unblock:<ref>` budget authorization. The
@@ -3601,8 +3755,10 @@ class Coordinator:
         if self._lc(P, "evidence"):
             block = self._lc_safe(P, tid, "prompt_block", lambda: self.ledger.prompt_block(
                 P, spec, head, cap=int(self._lcv(P, "prompt_cap", 6000))), "")
-            if block:
-                text += "\n" + block + "\n"
+            # revamp B13: only what this session has not seen yet
+            block = self._memory_delta(P, tid, sid, block) if block else block
+            if block.strip():
+                text += "\n" + block.strip("\n") + "\n"
         try:
             sent = self._prompt_primary(P, t, text, key)
         except Exception as e:                                    # noqa: BLE001
@@ -4031,6 +4187,12 @@ class Coordinator:
         the lead is off (or the case cannot be opened) the original transition
         is applied unchanged."""
         if self._lead_on(P):
+            # revamp B9: tooling / infrastructure stops are retried deterministically
+            # (bounded, with backoff) before any paid lead case
+            from . import autoheal
+            healed = autoheal.try_heal(self, P, t, to, evidence, cls, dict(fields))
+            if healed is not None:
+                return healed
             try:
                 out = self._lead_open(P, t, to, evidence, cls, dict(fields))
             except Exception as e:                                # noqa: BLE001

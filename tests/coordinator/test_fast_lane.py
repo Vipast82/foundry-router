@@ -273,7 +273,7 @@ def test_profile_defaults_and_validation(tmp_path):
 def test_lane_trimming_only_for_fast_lane_tasks(tmp_path):
     repo, _ = make_repo(tmp_path, "game", [T1, T2])
     lanes = "\n".join(f"[lanes.{x}]\nenabled = true" for x in L.LANES)
-    p = load(str(fl_profile(tmp_path, repo, tmp_path / "x.py", "[lanes]\nenabled = true\n"
+    p = load(str(fl_profile(tmp_path, repo, tmp_path / "x.py", "[automation]\nhelpers = \"proactive\"\n[lanes]\nenabled = true\n"
                             + lanes + "\n")))
     P = SimpleNamespace(profile=p)
     fast = L.settings(P, "T1")
@@ -582,7 +582,10 @@ def test_running_gate_publishes_live_progress_for_the_control_center(env):
     from foundry_coordinator.telemetry import background_work
     e = env([{"result": "PASS", "sleep": 3, "captures": [CAP]}])
     e.c.approve("game", "T1", [], "victor")
-    t = drive(e, lambda t: (fl(e).get("live") or {}).get("kind") == "gate", step=1)
+    # (revamp B13: cached per-tick checks make ticks fast enough to see the record before
+    # the runner wrote its first phase; wait for the phase this test asserts)
+    t = drive(e, lambda t: (fl(e).get("live") or {}).get("kind") == "gate" and
+              (fl(e).get("live") or {}).get("phase") == "stories", step=1)
     live = fl(e)["live"]
     assert live["phase"] == "stories" and live["progress"] == "1/3" and live["limit_s"] == 45 * 60
     assert live["log"].endswith("fast_lane_gate.log") and live["started_ts"] > 1_700_000_000

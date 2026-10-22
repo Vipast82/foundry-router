@@ -33,6 +33,7 @@ import re
 import time
 from typing import Optional
 
+from .automation import get as _auto_get
 from .profile import matches_any
 
 SCHEMA = """
@@ -99,7 +100,11 @@ def settings(P, task_id: str = "") -> dict:
     raw = dict((getattr(P.profile, "raw", None) or {}).get("lanes") or {})
     out = {
         "enabled": bool(raw.get("enabled", False)),
-        "transcript_poll_seconds": float(raw.get("transcript_poll_seconds", 20)),
+        # revamp B13: the transcript is fetched every 2 min, not every 20 s
+        # ([automation] transcript_poll_seconds; an explicit [lanes] value wins)
+        "transcript_poll_seconds": float(raw["transcript_poll_seconds"]
+                                         if "transcript_poll_seconds" in raw
+                                         else _auto_get(P, "transcript_poll_seconds")),
         "max_lane_units_per_task": int(raw.get("max_lane_units_per_task", 24)),
         "max_dispatches_per_task": int(raw.get("max_dispatches_per_task", 16)),
         # v0.126.2: the two caps above are per RUN; this lifetime ceiling still
@@ -124,6 +129,15 @@ def settings(P, task_id: str = "") -> dict:
         merged = {**dflt, **sec}
         merged["enabled"] = bool(out["enabled"] and sec.get("enabled", False))
         out["lanes"][lane] = merged
+    # revamp B5 (Victor 2026-10-21): helpers run on demand only. In the default
+    # [automation] helpers = "on_demand" no proactive lane runs for any task: a
+    # helper starts only when the primary asks for one (helper_requests).
+    if _auto_get(P, "helpers") == "on_demand":
+        out["enabled"] = False
+        for cfg in out["lanes"].values():
+            cfg["enabled"] = False
+        out["on_demand"] = True
+        return out
     fn = getattr(P.profile, "fast_lane_task", None)
     if task_id and callable(fn) and fn(task_id):
         keep = set((getattr(P.profile, "fast_lane", None) or {}).get("lanes") or [])

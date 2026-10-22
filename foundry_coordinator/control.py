@@ -677,11 +677,32 @@ class ControlChannel:
 
     # ------------------------------------------------------------------ instruction outcomes
 
+    # revamp B13: a terminal "unknown action" answer from the control plane retires
+    # the action id; before, its report was retried every poll (28k log lines)
+    RETIRED = "retired"
+    ANSWER_CHECK_SECONDS = 60
+
+    @staticmethod
+    def _unknown_action(e: Exception) -> bool:
+        text = str(e)
+        return "HTTP 404" in text or "HTTP 410" in text
+
     def report_messages(self) -> None:
+        checked = self.__dict__.setdefault("_answer_checked", {})
         for m in self.store.operator_messages():
             if str(m.get("action_id") or "").startswith("internal:"):
                 continue              # the coordinator's own (unblock resolution): no action
             done = m.get("reported") or ""
+            if done == self.RETIRED:
+                continue
+            if m["status"] == "delivered" and done == "delivered":
+                # the transcript read behind _answered_since is not repeated every poll
+                # (every poll for the first two minutes, then once a minute)
+                last = checked.get(m["msg_id"], 0.0)
+                young = self.clock() - float(m.get("delivered_ts") or 0) < 120
+                if not young and self.clock() - last < self.ANSWER_CHECK_SECONDS:
+                    continue
+                checked[m["msg_id"]] = self.clock()
             try:
                 if m["status"] == "delivered" and done in ("", "queued"):
                     self.foundry.action_status(m["action_id"], self.source_id, "delivered",
@@ -706,7 +727,15 @@ class ControlChannel:
                                                "sending the prompt that carried it")
                     self.store.set_operator_reported(m["msg_id"], "uncertain")
             except FoundryError as e:
-                self.log(f"control: report {m['action_id']}: {e}")
+                if self._unknown_action(e):
+                    # the control plane does not know this action: retire it once
+                    self.store.set_operator_reported(m["msg_id"], self.RETIRED)
+                    self.store.event(m.get("project_id") or "", m.get("task_id") or "",
+                                     "control_action_retired",
+                                     detail={"action_id": m["action_id"],
+                                             "error": str(e)[:300]})
+                self.log(f"control: report {m['action_id']}: {e}"
+                         + (" (retired: not retried)" if self._unknown_action(e) else ""))
 
     def _answered_since(self, m: dict) -> bool:
         P = self.c.projects.get(m["project_id"])
