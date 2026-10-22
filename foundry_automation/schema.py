@@ -615,6 +615,9 @@ FIELDS: list[Field] = [
       "coordinator.au_adapter", "restart", "local"),
     F("animaluprising.runtime_fingerprint", "str", "", "Runtime-vs-revision fingerprint "
       "mode (e.g. fnv1a32-blob); empty = off.", "identity", "coordinator.au_adapter"),
+    F("animaluprising.infra_checks", "list", ["rojo"], "Live checks before a session: rojo "
+      "(Rojo's HTTP API), studio (the live Studio probe when configured).", "identity",
+      "coordinator.au_adapter", item_type="str"),
     F("foundry.url", "str", "", "Foundry router URL.", "identity", "coordinator.foundry",
       "restart", "local"),
     F("foundry.key_env", "str", "", "Env var holding the orchestration key.", "identity",

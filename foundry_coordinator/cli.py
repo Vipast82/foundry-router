@@ -440,6 +440,12 @@ def doctor(c: Coordinator, project: str = "") -> int:
                 rows.append(("FAIL", "lead readiness", f"{type(e).__name__}: {e}"[:300]))
         if P.foundry is not None:
             rows.extend(_fallback_rows(P))
+        # W1.7: profile values that contradict the revamp decisions
+        try:
+            from . import profile_drift
+            rows.extend(profile_drift.checks(P))
+        except Exception as e:                                    # noqa: BLE001
+            rows.append(("WARN", "profile drift", f"{type(e).__name__}: {e}"[:300]))
         for st, name, detail in rows:
             bad += st == "FAIL"
             print(f"  {st:<4} {name:<22} {detail}")

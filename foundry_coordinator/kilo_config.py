@@ -57,6 +57,12 @@ def plan(text: str, role_rules: Optional[dict], workspace: str) -> dict:
     blocks = RR.agent_blocks(role_rules, workspace)
     out = {"changed": [], "unchanged": [], "missing": [], "blocks": {}}
     new = text
+    # W1.1: Kilo's snapshot question is a question to a person; the top-level
+    # `snapshot: false` turns it off (the key is absent from the hand-written file)
+    out["snapshot_changed"] = False
+    if isinstance(data, dict) and data.get("snapshot") is not False:
+        new = jsonc.replace_value(new, ("snapshot",), False)
+        out["snapshot_changed"] = True
     for agent, gen in blocks.items():
         if agent not in agents or not isinstance(agents[agent], dict):
             out["missing"].append(agent)
@@ -92,8 +98,9 @@ def regenerate(profile, role_rules: Optional[dict] = None, apply: bool = False,
     except jsonc.JsoncError as e:
         raise KiloConfigError(f"{path} is not valid JSONC: {e}") from None
     result = {"path": path, "changed": p["changed"], "unchanged": p["unchanged"],
-              "missing": p["missing"], "applied": False, "backup": ""}
-    if not apply or not p["changed"]:
+              "missing": p["missing"], "applied": False, "backup": "",
+              "snapshot": "set false" if p.get("snapshot_changed") else "already false"}
+    if not apply or not (p["changed"] or p.get("snapshot_changed")):
         return result
     backup = f"{path}.bak-{time.strftime('%Y%m%d-%H%M%S', time.localtime(clock()))}"
     shutil.copy2(path, backup)
@@ -108,6 +115,8 @@ def regenerate(profile, role_rules: Optional[dict] = None, apply: bool = False,
         for agent in p["changed"]:
             if back["agent"][agent].get("permission") != p["blocks"][agent]:
                 raise KiloConfigError(f"agent {agent}: the written block reads back differently")
+        if p.get("snapshot_changed") and back.get("snapshot") is not False:
+            raise KiloConfigError("snapshot: the written value reads back differently")
     except Exception as e:                                       # noqa: BLE001
         shutil.copy2(backup, path)
         result["error"] = f"{type(e).__name__}: {e}"[:500]
