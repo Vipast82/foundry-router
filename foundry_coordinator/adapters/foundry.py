@@ -183,6 +183,39 @@ class FoundryClient:
             raise FoundryError(f"GET {path}: unexpected response {str(data)[:200]}")
         return data
 
+    def get_config(self, project_id: str, etag: str = "") -> tuple[str, Optional[dict]]:
+        """The router's deployed automation revision for a project (C1 config
+        store): ("ok", body) | ("unchanged", None) when `etag` still matches |
+        ("none", None) when nothing is deployed (or an older router has no
+        config store). Unreachable or any other error raises FoundryError."""
+        url = (self.url + "/v1/foundry/control/config?"
+               + urllib.parse.urlencode({"project": project_id}))
+        req = urllib.request.Request(url, method="GET")
+        if self.key:
+            req.add_header("authorization", f"Bearer {self.key}")
+        if etag:
+            req.add_header("if-none-match", f'"{etag}"')
+        try:
+            with urllib.request.urlopen(req, timeout=20) as r:
+                raw = r.read()
+                data = json.loads(raw) if raw else {}
+        except urllib.error.HTTPError as e:
+            if e.code == 304:
+                return "unchanged", None
+            if e.code == 404:
+                return "none", None
+            raise FoundryError(f"GET /v1/foundry/control/config: HTTP {e.code}") from None
+        except (urllib.error.URLError, TimeoutError, ConnectionError, OSError,
+                http.client.HTTPException, ValueError) as e:
+            raise FoundryError(f"GET /v1/foundry/control/config: {type(e).__name__}: {e}"[:400]
+                               ) from None
+        if not isinstance(data, dict) or not isinstance(data.get("doc"), dict):
+            raise FoundryError("GET /v1/foundry/control/config: unexpected response")
+        return "ok", data
+
+    def config_applied(self, payload: dict) -> dict:
+        return self._req("POST", "/v1/foundry/control/config/applied", payload, timeout=20)[0]
+
     def served_models(self, session_id: str) -> Optional[dict]:
         """{session_id, calls, served_models (first use first), backends, routes,
         last_ts} from Foundry's ledger; None when unavailable (404 / unreachable)."""

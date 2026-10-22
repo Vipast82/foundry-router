@@ -684,6 +684,10 @@ def lead_write_permissions(P, spec=None) -> list[dict]:
         for pat in (_SECRET_PATTERN, "*.env", "*.env.*", "*secret*"):
             rules.append({"permission": perm, "pattern": pat, "action": "deny"})
     rules.append({"permission": "question", "pattern": "*", "action": "deny"})
+    # the floor no setting removes (secrets, force push, tag deletion, --no-verify)
+    from foundry_automation.role_rules import HARD_DENIES
+    rules += [{"permission": h["permission"], "pattern": h["pattern"], "action": "deny"}
+              for h in HARD_DENIES]
     return rules
 
 

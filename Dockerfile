@@ -24,6 +24,8 @@ COPY foundry_router/ ./foundry_router/
 # The router imports foundry_training.redact for training-data capture and
 # episode uploads; the coordinator and the training CLI run on the workstation.
 COPY foundry_training/ ./foundry_training/
+# The automation config store validates with the schema the coordinator uses.
+COPY foundry_automation/ ./foundry_automation/
 COPY config.example.yaml .
 
 # /config holds config.yaml (copied from config.example.yaml on first start if

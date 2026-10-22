@@ -559,6 +559,12 @@ def main(argv=None, clients=None, foundry=None) -> int:
     x.add_argument("action", choices=["request", "return", "status"])
     x.add_argument("project"); x.add_argument("task")
     x.add_argument("--reason", default=""); x.add_argument("--by", default="operator")
+    x = sub.add_parser("kilo-config", help="regenerate kilo.jsonc agent permission blocks from "
+                                           "the role rules (dry run unless --apply)")
+    x.add_argument("project"); x.add_argument("--apply", action="store_true")
+    x.add_argument("--path", default="", help="kilo.jsonc (default <workspace>/kilo.jsonc)")
+    x = sub.add_parser("config-pull", help="pull and apply the router's deployed settings now")
+    x.add_argument("project", nargs="?", default="")
     a = ap.parse_args(argv)
     try:
         c = build(a, clients=clients, foundry=foundry)
@@ -570,6 +576,27 @@ def main(argv=None, clients=None, foundry=None) -> int:
     except (ValueError, S.TransitionError) as e:
         print(f"error: {e}", file=sys.stderr)
         return 2
+
+
+def _kilo_config(c: Coordinator, a) -> int:
+    """Regenerate kilo.jsonc agent permission blocks: the role rules of the
+    router revision this coordinator last applied (its cache), else the
+    profile's own [role_rules]."""
+    from .config_pull import ConfigPuller
+    from .kilo_config import KiloConfigError, regenerate
+    P = c.projects.get(a.project)
+    if P is None:
+        print(f"error: unknown project {a.project!r}", file=sys.stderr)
+        return 2
+    cached = ConfigPuller(c).cached(P.id)
+    rules = ((cached or {}).get("doc") or {}).get("role_rules")
+    try:
+        out = regenerate(P.profile, rules, apply=a.apply, path=a.path, store=c.store)
+    except KiloConfigError as e:
+        print(f"error: {e}", file=sys.stderr)
+        return 2
+    print(json.dumps(out, indent=2))
+    return 0
 
 
 def _dispatch(a, c: Coordinator) -> int:
@@ -619,6 +646,12 @@ def _dispatch(a, c: Coordinator) -> int:
                 s.release_owner(me)
                 return 2
             c.after_tick.append(ch.poll)
+        # router-deployed settings (C1 config store): pulled each tick, applied at
+        # a safe point; off per project with [config_pull] enabled = false
+        from .config_pull import ConfigPuller
+        puller = ConfigPuller(c, log=c.log)
+        if any(puller.enabled(pid) for pid in c.projects):
+            c.after_tick.append(puller.poll)
         if a.telemetry:
             import threading
             bridge = _bridge(c, a)
@@ -715,6 +748,19 @@ def _dispatch(a, c: Coordinator) -> int:
             print(json.dumps({k: ph[k] for k in ("phase_id", "state", "persona", "turns",
                                                  "verified_model", "head", "end_reason")},
                              default=str))
+        return 0
+    elif a.cmd == "kilo-config":
+        return _kilo_config(c, a)
+    elif a.cmd == "config-pull":
+        from .config_pull import ConfigPuller
+        cp = ConfigPuller(c, log=c.log)
+        for pid in sorted(c.projects):
+            if a.project and pid != a.project:
+                continue
+            if not cp.enabled(pid):
+                print(f"{pid}: config pull off (no [foundry] url, or [config_pull] enabled = false)")
+                continue
+            print(f"{pid}: {cp.sync(pid, force=True)}")
         return 0
     elif a.cmd == "events":
         for e in reversed(s.events(a.project or None, 60)):

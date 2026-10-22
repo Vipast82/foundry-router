@@ -24,185 +24,32 @@ import tomllib
 from dataclasses import dataclass, field
 from typing import Any, Optional
 
-PROFILE_SCHEMA = 1
-ROLES = ("implementer", "planner", "researcher", "reviewer", "deep_reviewer", "visual_reviewer",
-         "image_generator")
-_ID = re.compile(r"^[a-z0-9][a-z0-9._-]{0,63}$")
-_SECRETY_KEY = re.compile(r"(api_?key|token|secret|password|passwd)$", re.I)
-_SECRETY_VAL = re.compile(r"^(sk-[A-Za-z0-9_-]{12,}|[A-Fa-f0-9]{40,}|ghp_[A-Za-z0-9]{20,}|"
-                          r"eyJ[A-Za-z0-9_-]{20,}\.)")
+from foundry_automation.schema import (  # noqa: F401  (re-exported; the shared schema)
+    FAST_LANE_DEFAULTS, LEAD_MANAGER_DEFAULTS, LEAD_SUPERVISOR_MODES, LIFECYCLE_DEFAULTS,
+    PROFILE_ROLES as ROLES, PROFILE_SCHEMA, SettingsError, fast_lane_table, lead_manager_table,
+    lifecycle_table, role_overrides_table, roles_table, walk_secrets as _walk_secrets)
+from foundry_automation.schema import ID_RE as _ID  # noqa: F401
+from foundry_automation.schema import SECRETY_KEY as _SECRETY_KEY  # noqa: F401
+from foundry_automation.schema import SECRETY_VAL as _SECRETY_VAL  # noqa: F401
 
-
-LIFECYCLE_DEFAULTS = {"enabled": False, "evidence": True, "obligations": True, "recovery": True,
-                      "readiness": True, "readiness_retry_seconds": 120,
-                      "recover_max_parts": 400, "recover_max_seconds": 20,
-                      "prompt_cap": 6000}
-
-# [lead_manager] (v0.123): the last automated recovery tier (lead.py). Off by
-# default; disabled means the engine behaves exactly as without it.
-LEAD_MANAGER_DEFAULTS = {
-    "enabled": False,
-    "persona": "Foundry-Kilo-Lead-Manager",
-    "expected_models": ["claude-opus-5-5"],   # ordered route chain; first = primary route
-    "agent": "lead",                          # Kilo agent of the lead session (read-only tools)
-    "kilo_client": "kilo",                    # Foundry client name of Kilo's worker key (its
-                                              # grant of the lead persona is what readiness checks)
-    "repair_agent": "",                       # Kilo agent of a coordinator repair session
-                                              # ("" = the profile's client.agent)
-    "reviewer": "",                           # independent repair reviewer persona
-                                              # ("" = roles.deep_reviewer, else roles.reviewer)
-    "max_diagnoses": 3,
-    "max_candidates": 2,
-    "max_upgrades": 1,
-    "max_fingerprint_repeats": 1,
-    "max_case_minutes": 240,
-    "max_quota_calls": 12,
-    # per-TASK caps across all of its cases (a game repair commit moves HEAD,
-    # so a returning blocker is a repeat, never a fresh budget)
-    "max_cases_per_task": 3,
-    "max_lead_calls_per_task": 6,
-    "max_extra_attempts_per_task": 2,
-    "max_upgrade_minutes": 120,               # UPGRADING longer than this -> Victor
-    "max_resuming_minutes": 60,               # RESUMING the engine never applied -> Victor
-    "lead_timeout_minutes": 45,
-    "extra_attempts": 1,
-    "defer_seconds": 300,                     # first DEFERRED backoff (doubles, capped)
-    "acceptance_tests": [],                   # game globs a lead assignment may only change
-                                              # when its manifest declares them ([] = the
-                                              # adapter's test paths, else tests/**,
-                                              # *_test.*, *.spec.* ...)
-    "repair_broader_tests": ["tests/coordinator"],  # broader suite of a coordinator repair
-                                              # when the lead names none
-    "repair_root": "",
-    "router_repo": "",
-    "supervisor": "manual",                   # manual | supervisor
-    # Delegated recovery authority (Victor's policy, on by default when the lead
-    # is enabled): the lead's `operate` actions -- executed, journaled and
-    # verified by the coordinator, never by the read-only lead session -- clean
-    # generated scratch files, extend budgets, resolve routine decisions, raise
-    # exhausted recovery bounds and record test-change decisions. A counter
-    # limit becomes a journaled delegated round that needs a materially
-    # different action, never a question for Victor by itself.
-    "full_authority": True,
-    # Victor 2026-10-21: write_access gives the lead session full Kilo access to
-    # the game workspace (edit, shell, git, Studio MCP, subagents) while it holds
-    # the workspace lock, so no primary writes at the same time. It fixes blockers
-    # itself, commits with the task prefix, and the coordinator re-verifies.
-    # Secrets stay unreadable; the router checkout and coordinator DB stay guarded.
-    "write_access": False,
-    # Victor 2026-10-21: every role must keep working when paid models are gone, so
-    # a local model may be the lead chain's last route (also list it in expected_models).
-    "allow_local_route": False,
-    "max_delegated_rounds": 12,               # runaway guard per task budget round
-    "max_extend_attempts": 3,                 # attempts one extend_budget op may grant
-    "max_clean_paths": 20,                    # files one clean_untracked op may remove
-}
-LEAD_SUPERVISOR_MODES = ("manual", "supervisor")
+# The defaults tables and typed validators live in foundry_automation.schema
+# (shared with the router's config store and GUI). These wrappers keep the
+# coordinator's own error type.
 
 
 def _lead_manager_table(path: str, raw) -> dict:
-    lm_raw = raw if raw is not None else {}
-    if not isinstance(lm_raw, dict):
-        raise ProfileError(f"{path}: [lead_manager] must be a table")
-    unknown = sorted(set(lm_raw) - set(LEAD_MANAGER_DEFAULTS))
-    if unknown:
-        raise ProfileError(f"{path}: unknown [lead_manager] keys {unknown}")
-    out = {k: (list(v) if isinstance(v, list) else v) for k, v in LEAD_MANAGER_DEFAULTS.items()}
-    for k, v in lm_raw.items():
-        want = type(LEAD_MANAGER_DEFAULTS[k])
-        if want is bool and not isinstance(v, bool):
-            raise ProfileError(f"{path}: lead_manager.{k} must be true or false")
-        if want is int and (isinstance(v, bool) or not isinstance(v, int) or v < 0):
-            raise ProfileError(f"{path}: lead_manager.{k} must be a non-negative integer")
-        if want is str and not isinstance(v, str):
-            raise ProfileError(f"{path}: lead_manager.{k} must be a string")
-        if want is list and (not isinstance(v, list) or
-                             any(not isinstance(x, str) or not x.strip() for x in v)):
-            raise ProfileError(f"{path}: lead_manager.{k} must be a list of non-empty strings")
-        out[k] = list(v) if isinstance(v, list) else v
-    if not out["expected_models"]:
-        raise ProfileError(f"{path}: lead_manager.expected_models must name the route chain "
-                           f"(first = the primary route)")
-    if len(set(out["expected_models"])) != len(out["expected_models"]):
-        raise ProfileError(f"{path}: lead_manager.expected_models has duplicates")
-    if not out["persona"].strip() or not out["agent"].strip() or not out["kilo_client"].strip():
-        raise ProfileError(f"{path}: lead_manager.persona, agent and kilo_client are required")
-    if out["supervisor"] not in LEAD_SUPERVISOR_MODES:
-        raise ProfileError(f"{path}: lead_manager.supervisor must be manual or supervisor")
-    if out["reviewer"] and out["reviewer"].strip().casefold() == out["persona"].strip().casefold():
-        raise ProfileError(f"{path}: lead_manager.reviewer must differ from the lead persona")
-    for k in ("max_diagnoses", "max_quota_calls", "max_case_minutes", "lead_timeout_minutes",
-              "max_cases_per_task", "max_lead_calls_per_task", "max_upgrade_minutes",
-              "max_resuming_minutes"):
-        if out[k] < 1:
-            raise ProfileError(f"{path}: lead_manager.{k} must be at least 1")
-    for x in out["repair_broader_tests"]:
-        x = x.strip().replace("\\", "/")
-        if x.startswith(("-", "/")) or ".." in x.split("/") or ":" in x.split("::")[0]:
-            raise ProfileError(f"{path}: lead_manager.repair_broader_tests: {x!r} must be a "
-                               f"relative test path or id (no options)")
-    return out
-
-
-# [fast_lane] (UI-T0): named tasks run as one long session verified by the
-# project's studio_gate runner (fast_lane.py). Off by default; a task not in
-# `tasks` behaves exactly as without it.
-FAST_LANE_DEFAULTS = {
-    "enabled": False,
-    "tasks": [],                              # explicit task ids (no globs)
-    "gate_module": "foundry_coordinator.projects.animaluprising.studio_gate",
-    "gate_timeout_minutes": 45,               # a run still going after this = red gate
-    "max_red_gates_before_handoff": 2,        # local-primary tasks then auto-request frontier_primary
-    "max_vision_rounds": 2,                   # CHANGES rounds before accept-with-notes
-    "vision_batch_frames": 20,                # frames per vision call (UI-D1 had ~560 frames)
-    "lanes": ["prework", "test_design", "failure_triage", "incremental_review"],
-    # files the runner rewrites on every run ({task} = the task id): never part of the
-    # coordinator's clean / unrelated_preserved checks (UI-D1 lost its last attempt to the
-    # evidence log, which was already dirty at run start and changed on every gate run)
-    "runner_outputs": ["docs/progress/{task}_EVIDENCE_RAW.log"],
-    # the runner's capture files: still must be committed (the post-PASS capture commit),
-    # but re-rendering or committing one that was dirty at run start is not "touching a
-    # pre-existing change"
-    "runner_captures": ["docs/evidence/UI-v3/{task}/**"],
-}
+    try:
+        return lead_manager_table(path, raw)
+    except SettingsError as e:
+        raise ProfileError(str(e)) from None
 
 
 def _fast_lane_table(path: str, raw) -> dict:
-    fl_raw = raw if raw is not None else {}
-    if not isinstance(fl_raw, dict):
-        raise ProfileError(f"{path}: [fast_lane] must be a table")
-    unknown = sorted(set(fl_raw) - set(FAST_LANE_DEFAULTS))
-    if unknown:
-        raise ProfileError(f"{path}: unknown [fast_lane] keys {unknown}")
-    out = {k: (list(v) if isinstance(v, list) else v) for k, v in FAST_LANE_DEFAULTS.items()}
-    for k, v in fl_raw.items():
-        want = type(FAST_LANE_DEFAULTS[k])
-        if want is bool and not isinstance(v, bool):
-            raise ProfileError(f"{path}: fast_lane.{k} must be true or false")
-        if want is int and (isinstance(v, bool) or not isinstance(v, int) or v < 0):
-            raise ProfileError(f"{path}: fast_lane.{k} must be a non-negative integer")
-        if want is str and (not isinstance(v, str) or not v.strip()):
-            raise ProfileError(f"{path}: fast_lane.{k} must be a non-empty string")
-        if want is list and (not isinstance(v, list) or
-                             any(not isinstance(x, str) or not x.strip() for x in v)):
-            raise ProfileError(f"{path}: fast_lane.{k} must be a list of non-empty strings")
-        out[k] = list(v) if isinstance(v, list) else v
-    if any(c in t for t in out["tasks"] for c in "*?[]") or \
-            len(set(out["tasks"])) != len(out["tasks"]):
-        raise ProfileError(f"{path}: fast_lane.tasks needs explicit, distinct task IDs")
-    for k in ("gate_timeout_minutes", "max_red_gates_before_handoff"):
-        if out[k] < 1:
-            raise ProfileError(f"{path}: fast_lane.{k} must be at least 1")
     from .lanes import LANES                       # (lanes imports profile: lazily)
-    bad = sorted(set(out["lanes"]) - set(LANES))
-    if bad:
-        raise ProfileError(f"{path}: fast_lane.lanes: unknown lanes {bad} "
-                           f"(known: {', '.join(sorted(LANES))})")
-    gm = out["gate_module"].strip()
-    if not (gm.endswith(".py") or re.match(r"^[A-Za-z_][\w]*(\.[A-Za-z_][\w]*)*$", gm)):
-        raise ProfileError(f"{path}: fast_lane.gate_module must be a dotted module name "
-                           f"(or a .py script path)")
-    return out
+    try:
+        return fast_lane_table(path, raw, tuple(LANES))
+    except SettingsError as e:
+        raise ProfileError(str(e)) from None
 
 
 class ProfileError(ValueError):
@@ -352,6 +199,17 @@ def load(path: str) -> Profile:
         raw = tomllib.loads(blob.decode("utf-8"))
     except (OSError, tomllib.TOMLDecodeError, UnicodeDecodeError) as e:
         raise ProfileError(f"{path}: {e}") from None
+    return from_raw(raw, path, hashlib.sha256(blob).hexdigest()[:16])
+
+
+def from_raw(raw: dict, path: str, digest: str = "") -> Profile:
+    """Validate a parsed profile (a TOML file, or the local TOML with the
+    router's deployed settings overlaid, see config_pull.py)."""
+    path = os.path.abspath(path)
+    if not digest:
+        import json
+        digest = hashlib.sha256(json.dumps(raw, sort_keys=True, default=str).encode()
+                                ).hexdigest()[:16]
     bad = _walk_secrets(raw)
     if bad:
         raise ProfileError(f"{path}: secrets must not be in a profile: {'; '.join(bad)}")
@@ -372,28 +230,17 @@ def load(path: str) -> Profile:
     for a in allowed:
         if a.startswith("..") or os.path.isabs(a):
             raise ProfileError(f"{path}: allowed_dirs entry {a!r} leaves the workspace")
-    roles = dict(raw.get("roles") or {})
-    unknown = [r for r in roles if r not in ROLES]
-    if unknown:
-        raise ProfileError(f"{path}: unknown roles {unknown} (known: {', '.join(ROLES)})")
-    if "implementer" not in roles:
-        raise ProfileError(f"{path}: roles.implementer is required")
-    overrides = raw.get("role_overrides") or {}
-    if not isinstance(overrides, dict):
-        raise ProfileError(f"{path}: role_overrides must be named tables")
-    assigned = set()
-    for name, override in overrides.items():
-        if not isinstance(override, dict) or set(override) - {"tasks", *ROLES}:
-            raise ProfileError(f"{path}: role_overrides.{name}: unknown roles or invalid table")
-        task_ids = override.get("tasks")
-        if not isinstance(task_ids, list) or not task_ids or any(
-                not isinstance(t, str) or not t or any(c in t for c in "*?[]") for t in task_ids):
-            raise ProfileError(f"{path}: role_overrides.{name}.tasks needs explicit task IDs")
-        if len(set(task_ids)) != len(task_ids) or assigned.intersection(task_ids):
-            raise ProfileError(f"{path}: overlapping role override task IDs")
-        assigned.update(task_ids)
-        if any(not isinstance(v, str) or not v for k, v in override.items() if k != "tasks"):
-            raise ProfileError(f"{path}: role_overrides.{name} personas must be nonempty strings")
+    try:
+        roles = roles_table(path, raw.get("roles"))
+        role_overrides_table(path, raw.get("role_overrides"))
+    except SettingsError as e:
+        raise ProfileError(str(e)) from None
+    if raw.get("role_rules") is not None:
+        from foundry_automation.role_rules import validate as _rr_validate
+        errs, _ = _rr_validate(raw.get("role_rules"))
+        if errs:
+            raise ProfileError(f"{path}: " + "; ".join(f"{e['path']}: {e['message']}"
+                                                       for e in errs[:5]))
     checks = []
     for c in (raw.get("verify") or {}).get("checks") or []:
         if not c.get("name") or not c.get("command"):
@@ -429,25 +276,15 @@ def load(path: str) -> Profile:
         raise ProfileError(f"{path}: publish.mode must be none, push or verify_only")
     if publish.get("force") or publish.get("tags") == "all":
         raise ProfileError(f"{path}: force pushes and pushing all tags are never allowed")
-    lc_raw = raw.get("lifecycle") or {}
-    if not isinstance(lc_raw, dict):
-        raise ProfileError(f"{path}: [lifecycle] must be a table")
-    unknown_lc = sorted(set(lc_raw) - set(LIFECYCLE_DEFAULTS))
-    if unknown_lc:
-        raise ProfileError(f"{path}: unknown [lifecycle] keys {unknown_lc}")
-    lifecycle = dict(LIFECYCLE_DEFAULTS)
-    for k, v in lc_raw.items():
-        want = type(LIFECYCLE_DEFAULTS[k])
-        if want is bool and not isinstance(v, bool):
-            raise ProfileError(f"{path}: lifecycle.{k} must be true or false")
-        if want is int and (isinstance(v, bool) or not isinstance(v, int) or v < 0):
-            raise ProfileError(f"{path}: lifecycle.{k} must be a non-negative integer")
-        lifecycle[k] = v
+    try:
+        lifecycle = lifecycle_table(path, raw.get("lifecycle"))
+    except SettingsError as e:
+        raise ProfileError(str(e)) from None
     lead_manager = _lead_manager_table(path, raw.get("lead_manager"))
     fast_lane = _fast_lane_table(path, raw.get("fast_lane"))
     return Profile(
         id=pid, name=str(raw.get("name") or pid), version=str(raw.get("version") or "1"),
-        path=path, hash=hashlib.sha256(blob).hexdigest()[:16], workspace=wpath,
+        path=path, hash=digest, workspace=wpath,
         allowed_dirs=allowed, branch=str(ws.get("branch") or "main"),
         remote=str(ws.get("remote") or "origin"), raw=raw, tasks=tasks, adapter=adapter,
         client=client, roles=roles, foundry=dict(raw.get("foundry") or {}), checks=checks,
