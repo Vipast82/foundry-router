@@ -46,7 +46,8 @@ def enable() -> Path:
     root = _root()
     if sys.platform == "win32":
         cd = f'cd /d "{root}"\r\n' if root else ""
-        p.write_text(f'@echo off\r\n{cd}start "" {_launch_line()}\r\n', encoding="utf-8")
+        p.write_text(f'@echo off\r\n{cd}start "" {_launch_line()}\r\n', encoding="utf-8",
+                     newline="")
     else:
         p.write_text("[Desktop Entry]\nType=Application\nName=Foundry Client\n"
                      f"Exec={_launch_line()}\nX-GNOME-Autostart-enabled=true\n"

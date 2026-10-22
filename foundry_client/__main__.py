@@ -83,7 +83,23 @@ def cmd_run(cfg, headless: bool, no_start: bool) -> int:
     return 0
 
 
+def _windowless_streams() -> None:
+    """pythonw / a windowless bundle has no stdout/stderr; uvicorn's logging and print()
+    would crash on None. Send them to <config dir>/client.log instead."""
+    if sys.stdout is not None and sys.stderr is not None:
+        return
+    from .config import config_dir
+    d = config_dir()
+    d.mkdir(parents=True, exist_ok=True)
+    log = open(d / "client.log", "a", encoding="utf-8", buffering=1)
+    if sys.stdout is None:
+        sys.stdout = log
+    if sys.stderr is None:
+        sys.stderr = log
+
+
 def main(argv=None) -> int:
+    _windowless_streams()
     argv = list(sys.argv[1:] if argv is None else argv)
     if argv and argv[0] == "coordinator":
         from foundry_coordinator.cli import main as coord_main

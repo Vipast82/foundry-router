@@ -2,6 +2,13 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.133.2 — Foundry Client: windowless start works
+
+- **Windowless start.** Started without a console (`pythonw`, the Startup entry, or the packaged
+  tray app), the client had no stdout or stderr, so uvicorn's logging crashed it at once. Its
+  output now goes to `<config dir>/client.log`.
+- **Startup entry.** The Windows startup `.cmd` is written without doubled line breaks.
+
 ## v0.133.1 — Foundry Client: start at logon from a source checkout
 
 When the client runs from source, the start-at-logon entry now starts in the checkout's folder. On
