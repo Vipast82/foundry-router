@@ -287,7 +287,8 @@ def test_specific_aggregator_endpoints_mount_before_base(tmp_path):
     from foundry_router.main import create_app
     from tests.conftest import TEST_CONFIG
     cfg = tmp_path / "c.yaml"
-    cfg.write_text(TEST_CONFIG + "mcp_aggregator: {enabled: true, profiles: {search: [searxng]}}\n")
+    cfg.write_text(TEST_CONFIG + "mcp_aggregator: {enabled: true, profiles: {search: [searxng]}}\n",
+                   encoding="utf-8")
     app = create_app(config_path=cfg, database_path=tmp_path / "t.sqlite")
     with TestClient(app):
         paths = [r.path for r in app.router.routes if isinstance(r, Mount)]

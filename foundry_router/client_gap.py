@@ -43,7 +43,7 @@ def arrived(messages: list[dict]) -> dict:
     if not hit:
         return {}
     t, tools, wall = hit
-    gap = time.monotonic() - t
+    gap = time.perf_counter() - t
     if gap < 0 or gap > _STALE_S:
         return {}
     return {"client_gap_ms": round(gap * 1000.0, 1), "client_tool": tools,
@@ -58,7 +58,9 @@ def finished(messages: list[dict], tool_names: Optional[list] = None) -> None:
     except Exception:                                            # noqa: BLE001
         return
     names = ",".join(n for n in (tool_names or []) if n)[:120]
-    _last[key] = (time.monotonic(), names, walltime.now())
+    # perf_counter, not monotonic: Windows' coarse (~15.6ms) monotonic clock
+    # under-measured gaps (a 300ms client tool run could read as 297ms).
+    _last[key] = (time.perf_counter(), names, walltime.now())
     _last.move_to_end(key)
     while len(_last) > _MAX:
         _last.popitem(last=False)

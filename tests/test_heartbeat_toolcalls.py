@@ -98,8 +98,11 @@ ASK_THEN_RETURN = lambda: [
 # -- heartbeats ----------------------------------------------------------------------
 
 async def test_heartbeat_narration_during_slow_worker(tmp_path):
-    runner, ctx, _ = _make(tmp_path, ASK_THEN_RETURN(), SlowPool(0.08),
-                           heartbeat=0.02)
+    # Wide spread between tick (0.02) and visible (0.09) intervals: Windows'
+    # ~15.6ms timer quantizes asyncio timeouts to ~31ms ticks, and with the
+    # old 0.03 visible interval every tick crossed a milestone — no keepalives.
+    runner, ctx, _ = _make(tmp_path, ASK_THEN_RETURN(), SlowPool(0.25),
+                           heartbeat=0.02, visible=0.09)
     events = [ev async for ev in runner.run(ctx)]
     beats = [ev for ev in events if "still working" in ev.text]
     assert beats and all(ev.kind == "think" for ev in beats)

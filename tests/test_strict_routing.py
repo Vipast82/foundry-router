@@ -185,7 +185,7 @@ def test_disconnect_cancels_backend_task(strict):
     early (client gone) must cancel it."""
     import asyncio
     from foundry_router.facade import ollama_api
-    src = open(ollama_api.__file__).read()
+    src = open(ollama_api.__file__, encoding="utf-8").read()
     assert "task.cancel()" in src and "client disconnected — backend call cancelled" in src
 
     async def run():

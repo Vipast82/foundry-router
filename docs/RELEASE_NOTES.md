@@ -2,6 +2,30 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.138.1 — Windows timing fixes; environment-dependent tests repaired
+
+Triage of the 7 test failures that reproduced on a clean checkout (plus one
+timing flake). None was a regression from recent releases; all were
+Windows-environment issues, two of them real product bugs on the platform the
+live stack runs on:
+
+- **Stream timing used the coarse Windows clock** (`time.monotonic_ns` ticks
+  every ~15.6ms on Python < 3.13). In `pool/protocols.py` the OpenAI and
+  Anthropic stream adapters now measure with `time.perf_counter_ns`:
+  previously `headers_ms` could read 0, and fast responses got no
+  `timing_source="estimated"` decode/prefill estimate at all because the
+  first and last delta read the same clock value.
+- **`client_gap.py` under-measured client tool time** the same way (a 300ms
+  tool run could record as 297ms); it now uses `time.perf_counter`.
+- Test-only repairs: two Windows default-encoding bugs (a config written as
+  cp1252 but read as UTF-8, a source file read as cp1252), the capture-store
+  `chmod 600` assertion gated to POSIX (Windows has no POSIX modes; the file
+  is ACL-protected), and the heartbeat-narration test's tick/visible
+  intervals spread apart so Windows' ~31ms effective tick cadence still
+  produces invisible keep-alives.
+
+No behavior change on Linux/macOS beyond marginally finer timing resolution.
+
 ## v0.138.0 — Playbook: the cross-project knowledge base
 
 Review item A1 (reports/UI_AUTOMATION_REVIEW_2026-10-23.md); design and

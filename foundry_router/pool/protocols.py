@@ -1189,14 +1189,17 @@ class OpenAIProtocol(BaseProtocol):
             # Ask llama.cpp to stream prompt-processing progress (ignored by
             # builds that don't support it).
             payload.setdefault("return_progress", True)
-        t_start = time.monotonic_ns()
+        # perf_counter_ns, not monotonic_ns: on Windows before Python 3.13 the
+        # monotonic clock ticks every ~15.6ms, which zeroes headers_ms and the
+        # estimated decode timings for fast responses.
+        t_start = time.perf_counter_ns()
         t_first = t_last = 0
         headers_ms = start_ms = 0.0
         tcp: dict = {}
         for attempt in (0, 1):
             async with self.client.stream("POST", f"{self._base()}/chat/completions",
                                           json=payload, headers=self._headers()) as r:
-                headers_ms = (time.monotonic_ns() - t_start) / 1e6
+                headers_ms = (time.perf_counter_ns() - t_start) / 1e6
                 if r.status_code >= 400:
                     body = (await r.aread()).decode("utf-8", "replace")
                     fitted = (_fit_max_tokens(body, payload.get("max_tokens") or 0)
@@ -1245,7 +1248,7 @@ class OpenAIProtocol(BaseProtocol):
                             # time_ms = how long llama.cpp has been processing
                             # the prompt; subtracting it from our clock gives
                             # when it STARTED, measured from our send.
-                            arrived = (time.monotonic_ns() - t_start) / 1e6
+                            arrived = (time.perf_counter_ns() - t_start) / 1e6
                             try:
                                 start_ms = max(0.1, arrived - float(pp.get("time_ms") or 0))
                             except (TypeError, ValueError):
@@ -1277,7 +1280,7 @@ class OpenAIProtocol(BaseProtocol):
                         content, inline = splitter.feed(content)
                         reasoning = reasoning + inline
                     if content or reasoning or delta.get("tool_calls"):
-                        now = time.monotonic_ns()
+                        now = time.perf_counter_ns()
                         t_first = t_first or now
                         t_last = now
                     if content or reasoning:
@@ -1667,7 +1670,7 @@ class AnthropicProtocol(BaseProtocol):
         blocks: dict = {}         # content-block index -> {type,name,id,json(str)}
         pt = ct = cached = 0
         finish = ""
-        t_start = time.monotonic_ns()
+        t_start = time.perf_counter_ns()   # not monotonic_ns: see OpenAI chat_stream
         t_first = t_last = 0
         async with self.client.stream("POST", f"{self.url}/v1/messages", json=payload,
                                       headers=self._headers(messages, model)) as r:
@@ -1704,7 +1707,7 @@ class AnthropicProtocol(BaseProtocol):
                 elif etype == "content_block_delta":
                     d = ev.get("delta") or {}
                     dt = d.get("type")
-                    now = time.monotonic_ns()
+                    now = time.perf_counter_ns()
                     if dt in ("text_delta", "thinking_delta", "input_json_delta"):
                         t_first = t_first or now
                         t_last = now

@@ -73,7 +73,9 @@ def test_capture_records_received_and_effective_backend_call(ledgered, client):
         assert leak not in json.dumps(r)
     assert rec["redaction"]["status"] == "redacted"
     assert {"anthropic-key", "assignment"} <= set(rec["redaction"]["kinds"])
-    assert oct(os.stat(ledgered.capture.store.path).st_mode)[-3:] == "600"
+    if os.name != "nt":   # Windows has no POSIX modes (st_mode reads 666); the
+        # file is protected by the user-profile ACL instead.
+        assert oct(os.stat(ledgered.capture.store.path).st_mode)[-3:] == "600"
 
 
 def test_capture_is_opt_in_and_respects_project_scope(ledgered, client):
