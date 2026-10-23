@@ -45,12 +45,14 @@ ROUTE_RETRY_S = 300
 
 class Coordinator:
     def __init__(self, store: Store, projects: list[Project], state_dir: str,
-                 max_writers: int = 1, clock: Callable[[], float] = time.time,
+                 max_writers: Optional[int] = None, clock: Callable[[], float] = time.time,
                  log: Callable[[str], None] = lambda m: None):
         self.store = store
         self.projects = {p.id: p for p in projects}
         self.state_dir = state_dir
-        self.max_writers = max(1, int(max_writers))
+        # Team Lead (2026-10-22): the writer cap is the live [automation] max_agents
+        # (tracks/manager.py); an explicit --max-writers stays as an override
+        self.max_writers_override = max(1, int(max_writers)) if max_writers else None
         self.clock = clock
         self.log = log
         # Called after every tick by the process that owns the engine (`run`):
@@ -88,11 +90,27 @@ class Coordinator:
         for p in projects:
             store.register_project(p.id, p.profile.name, p.profile.path, p.profile.hash,
                                    p.profile.version, os.path.realpath(p.profile.workspace))
+        from .tracks import TrackManager
+        # Team Lead tracks: parallel sprints on git worktrees, the Studio scheduler
+        # and merges back at a quiescent point; inert until a track exists
+        self.tracks = TrackManager(self, clock=clock)
+
+    @property
+    def max_writers(self) -> int:
+        """Writer slots in force: --max-writers when given, else [automation] max_agents."""
+        return self.tracks.max_agents() if hasattr(self, "tracks") else \
+            (self.max_writers_override or 1)
+
+    def _task_project(self, project_id: str, task_id: str) -> Project:
+        """The Project a task runs with: its track's worktree, or the main checkout."""
+        P = self._project(project_id)
+        return self.tracks.project_for(P, {"task_id": task_id})
 
     # ======================================================================= queue
 
     def approve(self, project_id: str, task_id: str, deps: list[str], approver: str,
-                note: str = "", adopt_existing: Optional[list[str]] = None) -> dict:
+                note: str = "", adopt_existing: Optional[list[str]] = None,
+                track: str = "") -> dict:
         """Put a task on the approved queue. Dependencies must be tasks of the
         same project that are already approved (a dependency on another
         project's task is refused: projects are isolated)."""
@@ -115,7 +133,7 @@ class Coordinator:
         adopted = (handoff.capture(P.ws, spec, self.state_dir, adopt_existing, approver)
                    if adopt_existing else None)
         with self.store.tx():
-            entry = self.store.approve(project_id, task_id, deps, approver, note)
+            entry = self.store.approve(project_id, task_id, deps, approver, note, track=track)
             if adopted:
                 self.store.merge_data(project_id, task_id, inherited_work=adopted)
                 self.store.event(project_id, task_id, 'work_adopted', detail=adopted)
@@ -165,10 +183,15 @@ class Coordinator:
         for pid in order:
             P = self.projects[pid]
             self._queue_approved_followups(P)
+            try:
+                self.tracks.tick(P)                          # track lifecycle + merges
+            except Exception as e:                            # noqa: BLE001
+                self.log(f"{pid}: tracks tick failed: {type(e).__name__}: {e}")
             for t in self.store.tasks(pid):
                 before = (t["state"], t["updated_ts"])
                 try:
-                    self._step(P, t)
+                    # a sprint queued on a track runs with the track's worktree
+                    self._step(self.tracks.project_for(P, t), t)
                 except Exception as e:                            # noqa: BLE001
                     self.store.update_task(pid, t["task_id"],
                                            next_action=f"error: {type(e).__name__}: {e}"[:500])
@@ -891,6 +914,12 @@ class Coordinator:
         s = P.client.state(sid, directory=directory, since_ts=prompt_ts)
         if s.status == "busy":
             self._sync_children(P, t, sid)
+            try:
+                # the main session's last Studio tool call (the Studio scheduler's
+                # "in use" fact); rate limited, only while a track exists
+                self.tracks.observe_session(P, t, sid)
+            except Exception:                                     # noqa: BLE001
+                pass
             if s.denial:
                 P.client.abort(sid, directory=directory)
                 return self._on_denial(P, t, s.denial, s.error, resume=t["state"], session=sid)
@@ -1209,6 +1238,11 @@ class Coordinator:
             if extra is None:
                 return
             results += extra
+        elif self.tracks.is_track(P):
+            # a track sprint: the project's Studio-free checks in its worktree; the
+            # Studio gate runs at merge time in the main checkout (tracks/merge.py)
+            results += self.tracks.verify_track(P, spec, head,
+                                                t["data"].get("task_base") or t["base_sha"])
         else:
             results += P.adapter.verify(spec, "verify", head,
                                         t["data"].get("task_base") or t["base_sha"])
@@ -2399,7 +2433,7 @@ class Coordinator:
     # ======================================================================= operator
 
     def resume(self, project_id: str, task_id: str, actor: str = "operator", note: str = "") -> dict:
-        P = self._project(project_id)
+        P = self._task_project(project_id, task_id)
         t = self.store.task(project_id, task_id)
         if t["state"] != S.PAUSED:
             raise ValueError(f"{project_id}/{task_id} is {t['state']}, not PAUSED")
@@ -2464,7 +2498,7 @@ class Coordinator:
                                      data=data)
 
     def pause(self, project_id: str, task_id: str, reason: str, actor: str = "operator") -> dict:
-        P = self._project(project_id)
+        P = self._task_project(project_id, task_id)
         t = self.store.task(project_id, task_id)
         if t["state"] in S.WRITING and t["session_id"]:
             P.client.abort(t["session_id"], directory=P.profile.workspace)
@@ -2476,7 +2510,7 @@ class Coordinator:
                   "resume_session": t["session_id"] if t["state"] in S.WRITING else None})
 
     def cancel(self, project_id: str, task_id: str, reason: str, actor: str = "operator") -> dict:
-        P = self._project(project_id)
+        P = self._task_project(project_id, task_id)
         t = self.store.task(project_id, task_id)
         if t["state"] in S.WRITING and t["session_id"]:
             P.client.abort(t["session_id"], directory=P.profile.workspace)
@@ -2589,7 +2623,7 @@ class Coordinator:
                       note: str = "") -> str:
         """Record a person's approval, bound to the task's current revision and
         the current content of the artifacts the approval rule names."""
-        P = self._project(project_id)
+        P = self._task_project(project_id, task_id)
         t = self.store.task(project_id, task_id)
         if t["state"] != S.AWAITING_HUMAN or kind not in (t["data"].get("awaiting_kinds") or []):
             raise ValueError(f"{project_id}/{task_id} is not waiting for a {kind!r} approval")
@@ -2610,7 +2644,7 @@ class Coordinator:
     def answer(self, project_id: str, task_id: str, answer: list, actor: str = "operator") -> dict:
         """Answer the coding session's question (or permission request) and let
         it continue."""
-        P = self._project(project_id)
+        P = self._task_project(project_id, task_id)
         t = self.store.task(project_id, task_id)
         q = t["data"].get("question")
         if t["state"] != S.AWAITING_HUMAN or not q:
@@ -5372,20 +5406,34 @@ class Coordinator:
                              f"{held['project_id']}/{held['task_id']})")
             return held
         if writer and not any(r.startswith("writer:") for r in before):
-            for i in range(self.max_writers):
+            # the main checkout may take any slot, a track slot 1.. only: the main
+            # sprint is counted first against max_agents (tracks/manager.py)
+            for i in self.tracks.writer_slots(P, t):
                 if self.store.acquire([f"writer:{i}"], pid, tid) is None:
+                    self._journal_locks(P, t, [r for r in resources if r not in before], "acquire")
                     return None
             self.store.release(pid, tid, [r for r in resources if r not in before])
             busy = [l for l in self.store.locks() if l["resource"].startswith("writer:")]
             self._note(P, t, "waiting for a writer slot (held by "
-                             + ", ".join(f"{l['project_id']}/{l['task_id']}" for l in busy) + ")")
+                             + ", ".join(f"{l['project_id']}/{l['task_id']}" for l in busy)
+                             + f"; max_agents {self.max_writers})")
             return {"resource": "writer"}
+        self._journal_locks(P, t, [r for r in resources if r not in before], "acquire")
         return None
+
+    def _journal_locks(self, P: Project, t: dict, resources: list[str], event: str) -> None:
+        try:
+            self.tracks.resources.on_locks(P, t, resources, event)
+        except Exception:                                         # noqa: BLE001
+            pass
 
     def _release_session(self, P: Project, t: dict) -> None:
         pid, tid = P.id, t["task_id"]
-        self.store.release(pid, tid, self._session_locks(P)
-                           + [r for r in self.store.holds(pid, tid) if r.startswith("writer:")])
+        held = self.store.holds(pid, tid)
+        res = self._session_locks(P) + [r for r in held if r.startswith("writer:")]
+        self.store.release(pid, tid, res)
+        self._journal_locks(P, t, [r for r in res if r in held and not r.startswith("writer:")],
+                            "release")
 
     def _block(self, P: Project, t: dict, why: str) -> None:
         self.store.release(P.id, t["task_id"])
@@ -5450,8 +5498,9 @@ class Coordinator:
             "last_report": d.get("last_report"), "stage": d.get("stage")}
 
     def status(self) -> dict:
-        out = {"projects": [], "locks": self.store.locks()}
+        out = {"projects": [], "locks": self.store.locks(), "max_agents": self.max_writers}
         for p in self.store.projects():
             tasks = self.store.tasks(p["project_id"])
-            out["projects"].append({**p, "tasks": tasks})
+            tracks = self.store.tracks(p["project_id"])
+            out["projects"].append({**p, "tasks": tasks, **({"tracks": tracks} if tracks else {})})
         return out

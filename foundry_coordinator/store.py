@@ -76,7 +76,24 @@ CREATE TABLE IF NOT EXISTS operator_messages (
   created_ts REAL, delivered_session TEXT, delivered_ts REAL, detail TEXT,
   reported TEXT DEFAULT '');
 CREATE INDEX IF NOT EXISTS idx_opmsg_task ON operator_messages(project_id, task_id, status);
+-- Team Lead tracks (2026-10-22, tracks/manager.py): one git worktree + branch per
+-- parallel track; `sprints` is the ordered chain queued on it (queue.track names it).
+CREATE TABLE IF NOT EXISTS tracks (
+  project_id TEXT, name TEXT, kind TEXT, worktree TEXT, branch TEXT, base_sha TEXT,
+  state TEXT, current_sprint TEXT, needs TEXT, sprints TEXT, created_by TEXT,
+  created_ts REAL, updated_ts REAL, merged_sha TEXT, data TEXT,
+  PRIMARY KEY (project_id, name));
+-- who held which capacity resource (studio, gpu, blender), for what and how long
+-- (tracks/resources.py); the GUI's Studio timeline reads it
+CREATE TABLE IF NOT EXISTS resource_journal (
+  id INTEGER PRIMARY KEY AUTOINCREMENT, ts REAL, resource TEXT, project_id TEXT,
+  owner TEXT, event TEXT, purpose TEXT, detail TEXT);
+CREATE INDEX IF NOT EXISTS idx_rj_res ON resource_journal(resource, ts);
 """
+# columns added after the first schema version (ALTER TABLE on open; idempotent)
+MIGRATIONS = (
+    ("queue", "track", "TEXT DEFAULT ''"),          # the track a sprint is queued on
+)
 
 
 def _j(v) -> str:
@@ -131,6 +148,10 @@ class Store:
         self.conn.execute("PRAGMA journal_mode=WAL")
         self.conn.execute("PRAGMA busy_timeout=5000")
         self.conn.executescript(SCHEMA)
+        for table, col, decl in MIGRATIONS:
+            cols = {r["name"] for r in self.conn.execute(f"PRAGMA table_info({table})")}
+            if col not in cols:
+                self.conn.execute(f"ALTER TABLE {table} ADD COLUMN {col} {decl}")
         if self.meta("schema_version") is None:
             self.set_meta("schema_version", str(SCHEMA_VERSION))
 
@@ -215,10 +236,11 @@ class Store:
     # -- queue --------------------------------------------------------------------
 
     def approve(self, project_id: str, task_id: str, deps: list[str], approved_by: str,
-                note: str = "") -> dict:
+                note: str = "", track: str = "") -> dict:
         """Put a task on the approved queue (and create its task row). An
         approved task keeps its place; approving again updates deps/note only
-        while it hasn't started."""
+        while it hasn't started. `track` = the parallel track (tracks table)
+        the sprint runs on; '' = the main checkout."""
         with self.tx():
             pos = (self.q("SELECT MAX(position) AS m FROM queue WHERE project_id=?",
                           (project_id,))[0]["m"] or 0) + 1
@@ -226,17 +248,18 @@ class Store:
             if existing and existing["state"] not in (S.QUEUED,):
                 raise ValueError(f"{project_id}/{task_id} is already {existing['state']}")
             self.x("INSERT INTO queue (project_id, task_id, position, deps, approved_by, "
-                   "approved_ts, note) VALUES (?,?,?,?,?,?,?) ON CONFLICT(project_id, task_id) "
+                   "approved_ts, note, track) VALUES (?,?,?,?,?,?,?,?) "
+                   "ON CONFLICT(project_id, task_id) "
                    "DO UPDATE SET deps=excluded.deps, approved_by=excluded.approved_by, "
-                   "approved_ts=excluded.approved_ts, note=excluded.note",
+                   "approved_ts=excluded.approved_ts, note=excluded.note, track=excluded.track",
                    (project_id, task_id, pos, _j(sorted(set(deps))), approved_by, time.time(),
-                    note))
+                    note, track or ""))
             if not existing:
                 self.x("INSERT INTO tasks (project_id, task_id, state, updated_ts, data) "
                        "VALUES (?,?,?,?,?)", (project_id, task_id, S.QUEUED, time.time(), "{}"))
                 self._record(project_id, task_id, "", S.QUEUED,
                              {"approved_by": approved_by, "deps": sorted(set(deps)),
-                              "note": note}, "operator")
+                              "note": note, **({"track": track} if track else {})}, "operator")
         return self.queue_entry(project_id, task_id)
 
     def queue_entry(self, project_id: str, task_id: str) -> Optional[dict]:
@@ -251,6 +274,91 @@ class Store:
         for r in out:
             r["deps"] = _uj(r["deps"], [])
         return out
+
+    def task_track(self, project_id: str, task_id: str) -> str:
+        """The track a queued sprint runs on ('' = the main checkout)."""
+        r = self.q("SELECT track FROM queue WHERE project_id=? AND task_id=?",
+                   (project_id, task_id))
+        return str((r[0].get("track") if r else "") or "")
+
+    # -- tracks (tracks/manager.py) ---------------------------------------------------
+
+    def add_track(self, project_id: str, name: str, kind: str, worktree: str, branch: str,
+                  base_sha: str, needs: list[str], sprints: list[str], created_by: str,
+                  state: str = "planned", data: Optional[dict] = None) -> dict:
+        now = time.time()
+        self.x("INSERT INTO tracks (project_id, name, kind, worktree, branch, base_sha, state, "
+               "current_sprint, needs, sprints, created_by, created_ts, updated_ts, merged_sha, "
+               "data) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+               (project_id, name, kind, worktree, branch, base_sha, state, "", _j(list(needs)),
+                _j(list(sprints)), created_by, now, now, "", _j(data or {})))
+        return self.track(project_id, name)
+
+    def track(self, project_id: str, name: str) -> Optional[dict]:
+        r = self.q("SELECT * FROM tracks WHERE project_id=? AND name=?", (project_id, name))
+        return self._track_row(r[0]) if r else None
+
+    def tracks(self, project_id: Optional[str] = None) -> list[dict]:
+        rows = self.q("SELECT * FROM tracks" + (" WHERE project_id=?" if project_id else "")
+                      + " ORDER BY created_ts, name", (project_id,) if project_id else ())
+        return [self._track_row(r) for r in rows]
+
+    @staticmethod
+    def _track_row(r: dict) -> dict:
+        r["needs"] = _uj(r.get("needs"), [])
+        r["sprints"] = _uj(r.get("sprints"), [])
+        r["data"] = _uj(r.get("data"), {})
+        return r
+
+    def update_track(self, project_id: str, name: str, **fields) -> Optional[dict]:
+        for k in ("needs", "sprints", "data"):
+            if k in fields and not isinstance(fields[k], str):
+                fields[k] = _j(fields[k])
+        fields["updated_ts"] = time.time()
+        cols = ", ".join(f"{k}=?" for k in fields)
+        self.x(f"UPDATE tracks SET {cols} WHERE project_id=? AND name=?",
+               (*fields.values(), project_id, name))
+        return self.track(project_id, name)
+
+    def merge_track_data(self, project_id: str, name: str, **kv) -> dict:
+        with self.tx():
+            t = self.track(project_id, name)
+            data = dict((t or {}).get("data") or {})
+            for k, v in kv.items():
+                if v is None:
+                    data.pop(k, None)
+                else:
+                    data[k] = v
+            self.update_track(project_id, name, data=data)
+        return data
+
+    def delete_track(self, project_id: str, name: str) -> None:
+        self.x("DELETE FROM tracks WHERE project_id=? AND name=?", (project_id, name))
+
+    # -- resource journal (tracks/resources.py) -----------------------------------------
+
+    def journal(self, resource: str, project_id: str, owner: str, event: str, purpose: str = "",
+                detail: Optional[dict] = None, ts: Optional[float] = None) -> None:
+        self.x("INSERT INTO resource_journal (ts, resource, project_id, owner, event, purpose, "
+               "detail) VALUES (?,?,?,?,?,?,?)",
+               (ts if ts is not None else time.time(), resource, project_id, owner, event,
+                purpose, _j(detail or {})[:4000]))
+
+    def journal_rows(self, resource: Optional[str] = None, project_id: Optional[str] = None,
+                     limit: int = 200) -> list[dict]:
+        where, args = [], []
+        if resource:
+            where.append("resource=?")
+            args.append(resource)
+        if project_id:
+            where.append("project_id=?")
+            args.append(project_id)
+        sql = "SELECT * FROM resource_journal" + (" WHERE " + " AND ".join(where) if where else "") \
+            + " ORDER BY id DESC LIMIT ?"
+        rows = self.q(sql, (*args, limit))
+        for r in rows:
+            r["detail"] = _uj(r["detail"], {})
+        return rows[::-1]
 
     # -- tasks --------------------------------------------------------------------
 

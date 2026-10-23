@@ -194,8 +194,32 @@ fails preservation. New or task-owned uncommitted closeout files still fail CLEA
 - A task holds `workspace:<path>` from start to completion, plus the
   profile's exclusive resources (e.g. `studio:victor-workstation`,
   `rojo:34872`) and one global writer slot while a session writes.
-  `--max-writers` defaults to 1: one implementation writer across all
-  projects.
+  The writer cap is the live `[automation] max_agents` setting (default 1:
+  one implementation writer across all projects); `--max-writers N` overrides
+  it for the process.
+- **Parallel tracks (Team Lead, 2026-10-22; `foundry_coordinator/tracks/`).**
+  `tracks analyze PROJECT` reads every sprint plan and prints which sprints can
+  run side by side (needs: studio, blender, audio, images, gpu, backend; explicit
+  dependencies and shared files make sprints serial, except the append-safe
+  ledgers in `[automation] track_append_safe`). `tracks propose`, `tracks start
+  NAME SPRINT...` / `--plan ID`, `tracks stop`, `tracks merge`, `tracks status`
+  and `tracks set-max-agents N` drive the same manager the chat and the
+  Automation page's Tracks tab use. A track is a git worktree at
+  `<workspace>/.tracks/<name>` on branch `track/<name>` (cut from the profile's
+  branch); its sprints are queued on it and run there with no Studio/Rojo names
+  in their exclusive resources (the `blender` / `gpu` rows from their needs
+  instead) and the fast lane off. The main sprint counts first against
+  `max_agents` (a track takes writer slot 1 and up). A finished track merges at
+  a quiescent point of the main sprint only (no live main session): rebase onto
+  the branch, fast-forward, the project's checks on the merged files in the
+  main checkout (the studio_gate runner under a Studio lease when the track
+  needs Studio: admitted after `studio_idle_minutes` without a main Studio tool
+  call, no main request pending, bounded by `studio_track_max_minutes` and never
+  interrupted), `track_merged`, worktree removed (branch kept). The merge
+  commits count as the coordinator's for the main sprint's scope checks. A
+  rebase conflict opens a decision whose default (after
+  `decision_timeout_minutes`) is "stop this track". Studio holds and leases are
+  journaled (`resource_journal`); the Tracks tab shows the timeline.
 - Resource names are global. Two projects that name the same Studio contend
   for it (in the pilot, AnimalUprising waited for the fixture game's Studio
   lock).

@@ -549,6 +549,17 @@ Change no code or test file in this session; if one needs changing, stop and rep
         out += super().verify(spec, phase, revision, base)       # extra profile checks
         return out
 
+    def verify_track(self, spec: TaskSpec, phase: str, revision: str, base: str, ws=None) -> list:
+        """A sprint running on a parallel track (its git worktree, no Studio):
+        done_check, Lune and the profile checks, without the gate binding. The
+        Studio gate of the merge result runs in the main checkout when the track
+        merges (foundry_coordinator/tracks/merge.py)."""
+        out = self._done_check(spec, phase, revision)
+        if phase == "verify" and spec.data.get("tier") in ("A", "B"):
+            out += self._lune(spec, revision)
+        out += GenericAdapter.verify(self, spec, phase, revision, base)
+        return out
+
     def _done_check(self, spec: TaskSpec, phase: str, revision: str) -> list:
         cmd = self._python() + [os.path.join("tools", "guard", "done_check.py"), spec.task_id]
         t0 = time.time()

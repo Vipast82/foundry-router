@@ -105,3 +105,23 @@ def get(P, key: str):
     if key not in AUTOMATION_DEFAULTS:
         raise KeyError(f"unknown [automation] setting {key!r}")
     return settings(P).get(key, AUTOMATION_DEFAULTS[key])
+
+
+def set_live(P, key: str, value) -> None:
+    """Change one [automation] setting of a LIVE project in place (the chat's
+    set_max_agents): the validated table, the profile's raw table (what the
+    settings cache keys on) and the cache entry, so every `get()` sees it at
+    once. A router revision applied later (config_pull) overrides it."""
+    if key not in AUTOMATION_DEFAULTS:
+        raise KeyError(f"unknown [automation] setting {key!r}")
+    prof = getattr(P, "profile", None) or P
+    raw = getattr(prof, "raw", None)
+    if isinstance(raw, dict):
+        table = raw.get("automation")
+        if not isinstance(table, dict):
+            table = raw["automation"] = {}
+        table[key] = value
+        _CACHE.pop(id(raw), None)
+    auto = getattr(prof, "automation", None)
+    if isinstance(auto, dict):
+        auto[key] = value

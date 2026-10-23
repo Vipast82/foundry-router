@@ -316,7 +316,7 @@ def build(a, clients=None, foundry=None) -> Coordinator:
     store = Store(os.path.join(sd, "coordinator.sqlite"))
     projects = [build_project(p, sd, client=(clients or {}).get(p.id),
                               foundry=(foundry or {}).get(p.id)) for p in profiles]
-    return Coordinator(store, projects, sd, max_writers=int(a.max_writers or 1),
+    return Coordinator(store, projects, sd, max_writers=int(a.max_writers) if a.max_writers else None,
                        log=lambda m: print(time.strftime("%H:%M:%S"), m, flush=True))
 
 
@@ -546,7 +546,8 @@ def main(argv=None, clients=None, foundry=None) -> int:
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--state")
     ap.add_argument("--profiles", action="append")
-    ap.add_argument("--max-writers", type=int, default=1)
+    ap.add_argument("--max-writers", type=int, default=None,
+                    help="override the live [automation] max_agents setting")
     sub = ap.add_subparsers(dest="cmd", required=True)
     d = sub.add_parser("doctor"); d.add_argument("project", nargs="?", default="")
     q = sub.add_parser("queue"); qs = q.add_subparsers(dest="qcmd", required=True)
@@ -606,6 +607,25 @@ def main(argv=None, clients=None, foundry=None) -> int:
     x.add_argument("--path", default="", help="kilo.jsonc (default <workspace>/kilo.jsonc)")
     x = sub.add_parser("config-pull", help="pull and apply the router's deployed settings now")
     x.add_argument("project", nargs="?", default="")
+    x = sub.add_parser("tracks", help="parallel tracks (Team Lead): analyze, propose, start, "
+                                      "stop, merge, status, set-max-agents")
+    xs = x.add_subparsers(dest="tcmd", required=True)
+    x1 = xs.add_parser("analyze", help="which sprints can run side by side, and why not")
+    x1.add_argument("project"); x1.add_argument("--json", action="store_true")
+    x1 = xs.add_parser("propose", help="a track plan for an agent count (nothing starts)")
+    x1.add_argument("project"); x1.add_argument("--max-agents", type=int, default=0)
+    x1.add_argument("--json", action="store_true")
+    x1 = xs.add_parser("start", help="create a track (worktree + branch) and queue its sprints")
+    x1.add_argument("project"); x1.add_argument("name"); x1.add_argument("sprints", nargs="*")
+    x1.add_argument("--plan", default="", help="start every track of a proposal instead")
+    x1.add_argument("--by", default="operator")
+    x1 = xs.add_parser("stop"); x1.add_argument("project"); x1.add_argument("name")
+    x1.add_argument("--reason", default=""); x1.add_argument("--by", default="operator")
+    x1 = xs.add_parser("merge"); x1.add_argument("project"); x1.add_argument("name")
+    x1.add_argument("--by", default="operator")
+    x1 = xs.add_parser("status"); x1.add_argument("project"); x1.add_argument("--json", action="store_true")
+    x1 = xs.add_parser("set-max-agents"); x1.add_argument("project"); x1.add_argument("n", type=int)
+    x1.add_argument("--by", default="operator")
     a = ap.parse_args(argv)
     try:
         c = build(a, clients=clients, foundry=foundry)
@@ -640,10 +660,80 @@ def _kilo_config(c: Coordinator, a) -> int:
     return 0
 
 
+def _tracks(c: Coordinator, a) -> int:
+    """`tracks analyze PROJECT` prints the ordered tracks (deterministic, no model
+    call); the other subcommands drive tracks/manager.py like the chat does."""
+    from .tracks import analysis as AN
+    from .tracks.manager import TrackError
+    P = c.projects.get(a.project)
+    if P is None:
+        print(f"error: unknown project {a.project!r}", file=sys.stderr)
+        return 2
+    tm = c.tracks
+    try:
+        if a.tcmd == "analyze":
+            out = tm.analyze(P)
+            print(json.dumps(out, indent=2, default=str) if a.json else AN.render(out))
+            print(f"max_agents {tm.max_agents()}") if not a.json else None
+        elif a.tcmd == "propose":
+            plan = tm.propose(P, a.max_agents or None, actor=a.by if hasattr(a, "by") else "cli")
+            if a.json:
+                print(json.dumps(plan, indent=2, default=str))
+            else:
+                print(f"proposal {plan['plan_id']}: {plan['agents']} agent(s) of max_agents "
+                      f"{plan['max_agents']}")
+                if plan["main"]:
+                    print(f"  main   {' -> '.join(plan['main']['sprints'])}")
+                for t in plan["tracks"]:
+                    print(f"  track  {t['name']:<14} {' -> '.join(t['sprints'])}  needs "
+                          f"{', '.join(t['needs'])}")
+                for n in plan["notes"]:
+                    print(f"  note: {n}")
+                print(f"start with: tracks start {P.id} --plan {plan['plan_id']}")
+        elif a.tcmd == "start":
+            if a.plan:
+                rows = tm.start_plan(P, a.plan, a.by)
+            else:
+                tm.create(P, a.name, a.sprints, None, a.by)
+                rows = [tm.start(P, a.name, a.by)]
+            for r in rows:
+                print(f"track {r['name']} {r['state']}: {r['branch']} at {r['worktree']}; "
+                      f"sprints {', '.join(r['sprints'])}")
+        elif a.tcmd == "stop":
+            r = tm.stop(P, a.name, a.by, a.reason)
+            print(f"track {r['name']} {r['state']}")
+        elif a.tcmd == "merge":
+            r = tm.merger.request(P, a.name, a.by)
+            print(f"track {r['name']} {r['state']} (merges at the main sprint's next quiet point)")
+        elif a.tcmd == "status":
+            st = tm.status(P)
+            if a.json:
+                print(json.dumps(st, indent=2, default=str))
+            else:
+                print(f"max_agents {st['max_agents']}, running {st['agents_running']}; main "
+                      f"{st['main']['sprint'] or '-'} "
+                      f"{'quiescent' if st['main']['quiescent'] else st['main']['why']}")
+                for t in st["tracks"]:
+                    print(f"  {t['name']:<14} {t['state']:<8} {t['current_sprint'] or '-':<10} "
+                          f"needs {', '.join(t['needs']) or '-'}  "
+                          + ", ".join(f"{s['task_id']} {s['state']}" for s in t["sprints"]))
+                sv = st["studio"]
+                print(f"studio: {sv['in_use'] or 'idle'}; lease "
+                      f"{(sv['lease'] or {}).get('track') or '-'}")
+        elif a.tcmd == "set-max-agents":
+            print(f"max_agents {tm.set_max_agents(P, a.n, a.by)}")
+    except TrackError as e:
+        print(f"error: {e}", file=sys.stderr)
+        return 2
+    return 0
+
+
 def _dispatch(a, c: Coordinator) -> int:
     s = c.store
     if a.cmd == "doctor":
         return doctor(c, a.project)
+    if a.cmd == "tracks":
+        return _tracks(c, a)
     if a.cmd == "queue":
         if a.qcmd == "approve":
             deps = [d.strip() for d in a.deps.split(",") if d.strip()]
