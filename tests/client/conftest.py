@@ -14,3 +14,12 @@ def _never_touch_real_processes(monkeypatch):
     monkeypatch.setattr(C, "port_open", lambda port, **kw: False)
     M.REAL_KILL_PID = M.Manager.__dict__["_kill_pid"]        # the staticmethod object
     monkeypatch.setattr(M.Manager, "_kill_pid", staticmethod(lambda pid, p, tree=True: None))
+
+
+@pytest.fixture(autouse=True)
+def _never_probe_the_real_network(monkeypatch):
+    """MCP / service probing opens sockets (the audio MCPs live on the LAN) and reads the real
+    global Kilo config; tests get neither unless they pass their own."""
+    from foundry_automation import service_map as SM
+    monkeypatch.setattr(SM, "port_open", lambda host, port, timeout=1.0: False)
+    monkeypatch.setattr(SM, "global_kilo_paths", lambda: [])

@@ -65,12 +65,14 @@ RESULT_CHARS = 3000                    # a tool result shown to the model, at mo
 CONTEXT_CHARS = 6000
 CONFIRM_TTL_S = 24 * 3600
 AUTO_CLASSES = ("read", "draft", "preview", "ask")
-CONFIRM_CLASSES = ("deploy", "cutoffs", "persona", "sprint", "decision", "restart", "tracks")
+CONFIRM_CLASSES = ("deploy", "cutoffs", "persona", "sprint", "decision", "restart", "tracks",
+                   "memory")
 CLASS_LABEL = {"deploy": "Deploy or roll back settings", "cutoffs": "Change usage cutoffs",
                "persona": "Change persona routes", "sprint": "Start, queue, pause, resume or "
                "cancel sprints (and pause/resume a project)", "decision": "Answer decisions "
                "and questions", "restart": "Restart stack components / reload kilo.jsonc",
-               "tracks": "Start, stop or merge parallel tracks; change max_agents"}
+               "tracks": "Start, stop or merge parallel tracks; change max_agents",
+               "memory": "Add to or edit project memory (committed to the game repo)"}
 # the task states the queue tools accept, mirrored from the coordinator
 _TERMINAL = ("COMPLETE", "CANCELLED")
 
@@ -149,6 +151,15 @@ SYSTEM = (
     "Studio stays with the main checkout and a track's Studio work runs at merge time. "
     "track_status shows them; track_stop / track_merge act on one; set_max_agents changes "
     "the live cap (the main sprint always counts first). Nothing starts without the card.\n"
+    "- Services: the `services` context block lists each service's status and the sprints waiting "
+    "for one (a sprint declares needs: studio, blender, audio, images, gpu, backend; a missing "
+    "service makes it wait, never fail). services_status shows detail; service_restart and "
+    "service_enable only work for services a Foundry Client component runs.\n"
+    "- Project memory (docs/memory in the game repo: decisions, conventions, known issues, the "
+    "asset registry, per-sprint and per-track notes) is what every session reads: memory_search "
+    "and memory_summary read it; memory_add appends a fact under a heading and memory_edit "
+    "replaces a heading's body, both committed by the coordinator after the confirm card. Record "
+    "the operator's standing decisions and rules there when asked to remember something.\n"
     "- At most 8 tool calls per turn. Keep `say` under 120 words. No markdown tables.")
 
 
@@ -588,6 +599,69 @@ class ChatEngine:
                                for x in d.get("components") or []],
                 "config_problems": d.get("config_problems") or []}
 
+    def _client_detail(self) -> dict:
+        clients = self.svc.control.client_sources()
+        return (clients[0].get("detail") or {}) if clients else {}
+
+    def services_view(self, projects: Optional[list] = None, full: bool = False) -> dict:
+        """The service registry as the Foundry Client reports it (status, provider, needed-by),
+        plus the sprints waiting for a service. `full` adds the MCP probes and detail text;
+        the small form (the context block) carries no timestamps, so its hash only changes when
+        a service does."""
+        d = self._client_detail()
+        rows = d.get("services") or []
+        out_rows = []
+        for r in rows:
+            row = {"name": r.get("name"), "status": r.get("status"), "provider": r.get("provider"),
+                   "needed_by": r.get("needed_by") or []}
+            if r.get("provider") == "client":
+                row["component"] = r.get("component")
+                row["enabled"] = r.get("enabled")
+            if full:
+                row.update(label=r.get("label"), kind=r.get("kind"), detail=r.get("detail"),
+                           note=r.get("note"), component_state=r.get("component_state"))
+            elif r.get("status") == "down":
+                row["detail"] = _s(r.get("detail"), 80)
+            out_rows.append(row)
+        waiting = []
+        try:
+            rs = self.db.query("SELECT project_id, task_id, state, data FROM cc_tasks WHERE data "
+                               "LIKE ? LIMIT 30", ('%"service_wait": {%',))
+        except Exception:                                        # noqa: BLE001
+            rs = []
+        for r in rs:
+            if projects and r["project_id"] not in projects:
+                continue
+            if r["state"] in _TERMINAL:
+                continue
+            w = (_uj(r.get("data"), {}) or {}).get("service_wait") or {}
+            waiting.append({"project": r["project_id"], "task": r["task_id"],
+                            "waiting_for": list(w.get("missing") or [])[:6],
+                            "needs": list(w.get("needs") or [])[:6]})
+        out = {"client": "attached" if rows or d else "none attached", "services": out_rows,
+               "waiting_sprints": waiting[:10]}
+        if full:
+            out["mcp"] = [{k: m.get(k) for k in ("name", "type", "enabled", "available", "detail")}
+                          for m in d.get("mcp") or []]
+        return out
+
+    def _service_component(self, name: str) -> tuple:
+        """(component, registry row) for a service or component name; ChatError when the
+        service is external (no client component runs it)."""
+        name = (name or "").strip()
+        rows = self._client_detail().get("services") or []
+        row = next((r for r in rows if r.get("name") == name), None) or next(
+            (r for r in rows if r.get("component") == name), None)
+        if row is None:
+            known = ", ".join(r.get("name") for r in rows) or "none reported (is the client attached?)"
+            raise ChatError(f"no service {name!r}; the client reports: {known}", "unknown_service", 404)
+        if row.get("provider") != "client" or not row.get("component"):
+            raise ChatError(f"{row['name']} is {row.get('provider')}: no Foundry Client component "
+                            f"runs it, so there is nothing to restart or switch here"
+                            + (f" ({row.get('note')})" if row.get("note") else ""),
+                            "external_service", 409)
+        return row["component"], row
+
     def _block_pending(self, projects: list) -> dict:
         cc = self.svc.control
         ov = cc.overview(projects, hours=24 * 30)
@@ -616,8 +690,28 @@ class ChatEngine:
                   "settings": self._block_settings(projects),
                   "usage": await self._block_usage(),
                   "stack": self._block_stack(),
-                  "pending": self._block_pending(projects)}
+                  "services": self.services_view(projects),
+                  "pending": self._block_pending(projects),
+                  "memory": self._block_memory(projects)}
         return blocks
+
+    def _memory_snapshot(self, project: str) -> Optional[dict]:
+        try:
+            return self.svc.control.snapshot("memory", project)
+        except Exception:                                        # noqa: BLE001
+            return None
+
+    def _block_memory(self, projects: list) -> dict:
+        """Project memory, small and hashed: files with counts, the latest
+        decisions, live slices (memory_view.summary) per project."""
+        from .memory_view import summary
+        out: dict = {}
+        for pid in self.allowed_projects(projects)[:6]:
+            snap = self._memory_snapshot(pid)
+            if snap is None:
+                continue
+            out[pid] = summary(snap)
+        return out or {"state": "no project has reported memory"}
 
     # ------------------------------------------------------------------ prompt
 
@@ -629,8 +723,8 @@ class ChatEngine:
                           for k, v in t.args.items())
             lines.append(f"- {t.name}({a}) [{t.cls}]: {t.description}")
         lines.append("Classes: read/draft/preview/ask run at once; deploy, cutoffs, persona, sprint, "
-                     "decision and restart need the operator's confirmation unless switched to "
-                     "auto.")
+                     "decision, restart and memory need the operator's confirmation unless switched "
+                     "to auto.")
         return "\n".join(lines)
 
     def _history(self, thread_id: str) -> list[dict]:
@@ -990,6 +1084,8 @@ class ChatEngine:
                 return {"question": d.get("question"), "options": d.get("options")}
             if call["tool"].startswith("restart_") or call["tool"] == "reload_kilo_config":
                 return {"stack": self._block_stack()}
+            if call["tool"] in ("service_restart", "service_enable"):
+                return {"services": self.services_view(ctx.projects)}
             if call["tool"] == "set_cutoffs":
                 from . import cutoffs
                 return {"current": cutoffs.view(self.svc)}
@@ -1149,6 +1245,37 @@ class ChatEngine:
                    "component's state and detail, pending restarts, config problems.", "read")
         async def get_stack(ctx: Ctx, a: dict):
             return eng._block_stack()
+
+        @self._add("services_status", "The service registry: each service (Rojo, Kilo, the "
+                   "Studio / Blender / audio / image MCP servers, the local model) with status "
+                   "up|down|unknown, who provides it (client component, backend, external), which "
+                   "sprint needs it, the MCP probes, and the sprints waiting for a service.",
+                   "read")
+        async def services_status(ctx: Ctx, a: dict):
+            return eng.services_view(ctx.projects, full=True)
+
+        @self._add("service_restart", "Restart a service that a Foundry Client component runs "
+                   "(kilo, rojo, blender and the audio servers when managed). External services "
+                   "cannot be restarted here. force=true skips the safe-point wait.", "restart",
+                   {"name": {"type": "string", "max": 80}, "force": {"type": "boolean"}}, ("name",),
+                   summary=lambda a: f"restart service {a.get('name')} "
+                   f"({'now' if a.get('force') else 'at a safe point'})")
+        async def service_restart(ctx: Ctx, a: dict):
+            comp, _row = eng._service_component(a["name"])
+            return await eng._client_action(ctx, "client_restart",
+                                            {"component": comp, "force": bool(a.get("force"))})
+
+        @self._add("service_enable", "Switch a managed service component on or off in the Foundry "
+                   "Client's settings (rojo, blender, acestep-music, stable-audio, kokoro-tts, "
+                   "chatterbox-tts); on starts it, off stops it.", "restart",
+                   {"name": {"type": "string", "max": 80}, "on": {"type": "boolean"}},
+                   ("name", "on"),
+                   summary=lambda a: f"{'enable' if a.get('on') else 'disable'} service "
+                   f"{a.get('name')}")
+        async def service_enable(ctx: Ctx, a: dict):
+            comp, _row = eng._service_component(a["name"])
+            return await eng._client_action(ctx, "client_service_enable",
+                                            {"component": comp, "enabled": bool(a["on"])})
 
         @self._add("get_actions", "Recent operator actions (queue, decisions, stack) with status, "
                    "so you can tell what the coordinator or client did with them.", "read",
@@ -1715,6 +1842,69 @@ class ChatEngine:
                 raise ChatError("max_agents must be a whole number from 1 to 16")
             return await eng._track_action(ctx, "set_max_agents", a["project"],
                                            {"max_agents": n}, 30, changed=True)
+        # ---- project memory (docs/memory, Team Lead piece 4) --------------------
+        MF = {"type": "string", "max": 120, "desc": "DECISIONS.md | CONVENTIONS.md | KNOWN_ISSUES.md "
+                                                   "| ASSETS.md | sprints/<ID>.md | tracks/<name>.md"}
+
+        @self._add("memory_search", "Search the project's memory (docs/memory: decisions, "
+                   "conventions, known issues, the asset registry, per-sprint and per-track notes) "
+                   "as the coordinator indexed it. Returns file, heading and text of the best "
+                   "matches; file narrows to one file.", "read",
+                   {"project": P, "query": {"type": "string", "max": 200}, "file": MF},
+                   ("project", "query"), "project")
+        async def memory_search(ctx: Ctx, a: dict):
+            from .memory_view import search
+            snap = eng._memory_snapshot(a["project"])
+            if not snap:
+                raise ChatError(f"the coordinator has not reported memory for {a['project']} "
+                                "(docs/memory missing, [automation] project_memory off, or the "
+                                "coordinator is offline)", "no_memory", 404)
+            ents = (snap.get("data") or {}).get("entries") or []
+            hits = search(ents, a["query"], 10, a.get("file") or "")
+            return {"project": a["project"], "entries_indexed": len(ents),
+                    "results": [{**h, "text": _s(h["text"], 500)} for h in hits]}
+
+        @self._add("memory_summary", "The project's memory at a glance: files with entry counts, "
+                   "the latest decisions, the memory slice each running session got, recent notes "
+                   "sessions recorded.", "read", {"project": P}, ("project",), "project")
+        async def memory_summary(ctx: Ctx, a: dict):
+            from .memory_view import summary
+            snap = eng._memory_snapshot(a["project"])
+            out = summary(snap, decisions=8)
+            if snap:
+                d = snap.get("data") or {}
+                out["notes"] = [{k: n.get(k) for k in ("task_id", "file", "heading", "status",
+                                                       "detail")} for n in (d.get("notes") or [])[:10]]
+                out["slices"] = [{"session": (s.get("session_id") or "")[:12], "task": s.get("task_id"),
+                                  "role": s.get("role"), "track": s.get("track"), "live": s.get("live"),
+                                  "entries": len(s.get("entries") or []), "tokens": s.get("tokens"),
+                                  "budget": s.get("budget"), "prompts": s.get("prompts")}
+                                 for s in (d.get("slices") or [])[:10]]
+            return out
+
+        @self._add("memory_add", "Append a fact under a heading of a memory file (a new heading is "
+                   "created at the end of the file; use file=sprints/<ID>.md for one sprint, "
+                   "tracks/<name>.md for a track, ASSETS.md heading Registry with a table row for "
+                   "an asset). The coordinator validates it (no secrets, size) and commits it to the "
+                   "game repo.", "memory",
+                   {"project": P, "file": MF, "heading": {"type": "string", "max": 120},
+                    "text": {"type": "string", "max": 4000}, "task_id": {"type": "string", "max": 120}},
+                   ("project", "file", "heading", "text"), "project",
+                   lambda a: f"memory: add to {a.get('file')} > {a.get('heading')}: "
+                   f"{_compact(a.get('text'), 100)}")
+        async def memory_add(ctx: Ctx, a: dict):
+            return await eng._memory_action(ctx, "memory_add", a)
+
+        @self._add("memory_edit", "Replace the whole body under one heading of a memory file with "
+                   "new text (memory_search first to see the current body). The coordinator "
+                   "validates and commits it.", "memory",
+                   {"project": P, "file": MF, "heading": {"type": "string", "max": 120},
+                    "text": {"type": "string", "max": 4000}, "task_id": {"type": "string", "max": 120}},
+                   ("project", "file", "heading", "text"), "project",
+                   lambda a: f"memory: replace {a.get('file')} > {a.get('heading')} with "
+                   f"{_compact(a.get('text'), 100)}")
+        async def memory_edit(ctx: Ctx, a: dict):
+            return await eng._memory_action(ctx, "memory_edit", a)
 
         @self._add("ask_operator", "Ask the operator one question and end the turn; options are "
                    "shown as buttons.", "ask", {"text": {"type": "string", "max": 1000},
@@ -1763,6 +1953,25 @@ class ChatEngine:
         if changed:
             return {"result": out, "changed": [f"{project}: {act['summary']} ({status})"]}
         return out
+    async def _memory_action(self, ctx: Ctx, kind: str, a: dict) -> dict:
+        body = {"kind": kind, "project_id": a["project"], "file": a["file"], "heading": a["heading"],
+                "text": a["text"], "idempotency_key": f"chat:{ctx.thread_id}:{ctx.turn_id}:{ctx.call_id}",
+                "chat": {"thread": ctx.thread_id, "turn": ctx.turn_id, "call": ctx.call_id}}
+        if a.get("task_id"):
+            body["task_id"] = a["task_id"]
+        act = self.svc.control.create_action(ctx.actor, ctx.projects, body, scopes=ctx.scopes)
+        done = await self._wait_action(act["action_id"], 30)
+        res = done.get("result") or {}
+        status = done.get("status")
+        return {"result": {"action_id": act["action_id"], "status": status,
+                           "detail": done.get("status_detail"), "sha": res.get("sha"),
+                           "path": res.get("path"),
+                           "note": "" if status in ("applied", "rejected", "failed") else
+                           "the coordinator has not applied it yet (is it running with --control?); "
+                           "check get_actions later"},
+                "changed": [f"{a['project']}: {act['summary']}: {status}"
+                            + (f" ({res['sha'][:12]})" if res.get("sha") else "")
+                            + (f" ({done.get('status_detail')})" if status == "rejected" else "")]}
 
     async def _client_action(self, ctx: Ctx, kind: str, payload: dict) -> dict:
         if not self.svc.control.client_sources():

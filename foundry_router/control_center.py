@@ -171,7 +171,9 @@ ACTION_KINDS = ("answer_question", "reply_permission", "approve_review", "reject
                 "lead_case_pause", "lead_case_takeover", "lead_case_instruct", "lead_case_resume",
                 "assistant_plan", "assistant_run", "client_restart", "client_reload_kilo_config",
                 "tracks_analyze", "tracks_propose", "track_start", "track_stop", "track_merge",
-                "track_status", "set_max_agents")
+                "track_status", "set_max_agents",
+                "client_service_enable",
+                "memory_add", "memory_edit")
 # Team Lead tracks (2026-10-22): project-scoped, operator sessions, claimed by a
 # coordinator that declares the `tracks` feature (foundry_coordinator/control.py
 # TRACK_KINDS has the payloads). The coordinator's heartbeat carries `tracks`
@@ -182,15 +184,29 @@ TRACK_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9._-]{0,39}$")
 TRACK_PLAN_RE = re.compile(r"^trp-[0-9a-f]{12}$")
 MAX_TRACK_SPRINTS = 20
 MAX_AGENTS_LIMIT = 16
+# project memory (Team Lead piece 4, 2026-10-22): the chat / Memory tab append to or
+# edit one docs/memory file; the coordinator validates, commits and re-indexes.
+# Payload {"file", "heading", "text", "task_id"?}; project-scoped, operator sessions
+# only, handed only to a coordinator that declares the `project_memory` feature.
+MEMORY_ACTIONS = ("memory_add", "memory_edit")
+MEMORY_FILE = re.compile(r"^(?:(?i:decisions|conventions|assets|known_issues)\.md|"
+                         r"(?:tracks|sprints)/[A-Za-z0-9][A-Za-z0-9._-]{0,59}(?:\.md)?)$")
+MAX_MEMORY_TEXT = 4000
+MAX_MEMORY_HEADING = 120
 # Foundry Client stack actions (W3, 2026-10-22): claimed by the workstation
 # client that heart-beats with source kind `client` (foundry_client/relay.py),
 # never by the coordinator. Payloads:
 #   client_restart            {"component": kilo|coordinator|rojo|supervisor, "force": bool}
 #   client_reload_kilo_config {}   (Kilo re-reads kilo.jsonc; a safe restart when it can't)
+#   client_service_enable     {"component": rojo|blender|acestep-music|stable-audio|kokoro-tts|
+#                              chatterbox-tts, "enabled": bool}   (Team Lead 5: switch a
+#                              service component on or off in the client's settings)
 # Workstation-scoped, so project_id is "" and only an operator session that is
 # not restricted to projects may create one; one live action per component.
-CLIENT_ACTIONS = ("client_restart", "client_reload_kilo_config")
-CLIENT_COMPONENTS = ("kilo", "coordinator", "rojo", "supervisor")
+CLIENT_ACTIONS = ("client_restart", "client_reload_kilo_config", "client_service_enable")
+SERVICE_COMPONENTS = ("blender", "acestep-music", "stable-audio", "kokoro-tts", "chatterbox-tts")
+CLIENT_TOGGLE = ("rojo",) + SERVICE_COMPONENTS
+CLIENT_COMPONENTS = ("kilo", "coordinator", "rojo", "supervisor") + SERVICE_COMPONENTS
 CLIENT_FEATURE = "stack_control"
 SOURCE_KINDS = ("bridge", "coordinator", "client")
 # launch assistant (2026-10-21): a plain-language request becomes a checked plan
@@ -251,11 +267,12 @@ COORDINATOR_MAJOR = 0
 FEATURE_GATED_ACTIONS = {"decision_answer": "decision_answer", "project_pause": "project_pause",
                          "project_resume": "project_pause",
                          **{k: "lead_manager" for k in LEAD_ACTIONS},
-                         **{k: "tracks" for k in TRACK_ACTIONS}}
+                         **{k: "tracks" for k in TRACK_ACTIONS},
+                         **{k: "project_memory" for k in MEMORY_ACTIONS}}
 # observation types that only make sense inside a project: an empty project_id
 # would bypass the per-key project allowlist, so they are refused
 PROJECT_SCOPED_TYPES = ("task", "lane_unit", "artifact", "mcp", "config", "capabilities", "todo",
-                        "lane_state", "transition", "pending", "project", "project_pause")
+                        "lane_state", "transition", "pending", "project", "project_pause", "memory")
 BATCH_MEMORY = 200                                # batch ids kept per source
 # readiness classes that are not a product defect (the AU adapter's: scope,
 # tooling, environment, runtime_sync, capability, credentials, model, tests,
@@ -612,6 +629,23 @@ class ControlCenter:
                  for k in ("name", "label", "state", "detail", "enabled", "want", "pid",
                            "uptime_s", "restarts", "pending_restart") if k in c}
                 for c in comps if isinstance(c, dict)][:12] if isinstance(comps, list) else []
+            # Team Lead 5: the MCP servers Kilo can see here and the service registry
+            mcp = payload.get("mcp")
+            detail["mcp"] = [
+                {"name": _s(m.get("name"), 80), "type": _s(m.get("type"), 12),
+                 "enabled": bool(m.get("enabled")),
+                 "available": m.get("available") if isinstance(m.get("available"), bool) else None,
+                 "detail": _s(m.get("detail"), 160), "target": _s(m.get("target"), 120)}
+                for m in mcp if isinstance(m, dict)][:40] if isinstance(mcp, list) else []
+            svs = payload.get("services")
+            detail["services"] = [
+                {**{k: _s(x.get(k), 80) for k in ("name", "label", "kind", "check", "provider",
+                                                  "component", "status", "component_state")
+                    if isinstance(x.get(k), str)},
+                 "detail": _s(x.get("detail"), 200), "note": _s(x.get("note"), 160),
+                 "enabled": x.get("enabled") if isinstance(x.get("enabled"), bool) else None,
+                 "needed_by": [_s(n, 20) for n in (x.get("needed_by") or [])][:8]}
+                for x in svs if isinstance(x, dict)][:30] if isinstance(svs, list) else []
             detail["config_problems"] = [_s(x, 300) for x in (payload.get("config_problems") or [])
                                          if isinstance(x, str)][:20]
             detail["events"] = [{"ts": _f(e.get("ts")), "component": _s(e.get("component"), 40),
@@ -957,6 +991,44 @@ class ControlCenter:
                     servers[-1]["error"] = _s(servers[-1]["error"], 400)
         self._snapshot(c, "mcp", o, {"servers": servers, "source": _s(o.get("source"), 80),
                                      "status_endpoint": o.get("status_endpoint")}, now)
+        return []
+
+    def _in_memory(self, c, o, st, now, src):
+        """The coordinator's project memory snapshot (memory/manager.py snapshot):
+        files, entries (bounded), per-session slices, recent notes."""
+        ents = []
+        for e in (o.get("entries") or [])[:3000]:
+            if isinstance(e, dict):
+                ents.append({"entry_id": _s(e.get("entry_id"), 40), "file": _s(e.get("file"), 120),
+                             "heading": _s(e.get("heading"), 300), "ord": int(e.get("ord") or 0),
+                             "text": _s(e.get("text"), 1200), "hash": _s(e.get("hash"), 40),
+                             "tags": [_s(t, 80) for t in (e.get("tags") or [])[:24]
+                                      if isinstance(t, str)]})
+        sl = []
+        for s_ in (o.get("slices") or [])[:40]:
+            if isinstance(s_, dict):
+                sl.append({"session_id": _s(s_.get("session_id"), 160),
+                           "task_id": _s(s_.get("task_id"), 120), "role": _s(s_.get("role"), 30),
+                           "track": _s(s_.get("track"), 80), "ts": _f(s_.get("ts")),
+                           "prompts": int(s_.get("prompts") or 0), "tokens": int(s_.get("tokens") or 0),
+                           "budget": int(s_.get("budget") or 0), "hash": _s(s_.get("hash"), 40),
+                           "live": bool(s_.get("live")), "status": _s(s_.get("status"), 30),
+                           "entries": [{"file": _s(x.get("file"), 120),
+                                        "heading": _s(x.get("heading"), 300),
+                                        "hash": _s(x.get("hash"), 40), "why": _s(x.get("why"), 60)}
+                                       for x in (s_.get("entries") or [])[:200] if isinstance(x, dict)]})
+        notes = [{k: (_s(n.get(k), 300) if isinstance(n.get(k), str) else n.get(k))
+                  for k in ("task_id", "session_id", "actor", "file", "heading", "status", "detail",
+                            "sha", "ts")} for n in (o.get("notes") or [])[:30] if isinstance(n, dict)]
+        files = [{"file": _s(f.get("file"), 120), "entries": int(f.get("entries") or 0),
+                  "hash": _s(f.get("hash"), 40), "indexed_ts": _f(f.get("indexed_ts")),
+                  "size": int(f.get("size") or 0)}
+                 for f in (o.get("files") or [])[:500] if isinstance(f, dict)]
+        self._snapshot(c, "memory", o, {"dir": _s(o.get("dir"), 80) or "docs/memory",
+                                        "enabled": bool(o.get("enabled", True)),
+                                        "fingerprint": _s(o.get("fingerprint"), 40),
+                                        "files": files, "entries": ents, "slices": sl,
+                                        "notes": notes}, now)
         return []
 
     def _in_capabilities(self, c, o, st, now, src):
@@ -2424,6 +2496,8 @@ class ControlCenter:
             return self._create_assistant_action(actor, projects, body, scopes, kind, idem, pid)
         if kind in CLIENT_ACTIONS:
             return self._create_client_action(actor, projects, body, scopes, kind, idem)
+        if kind in MEMORY_ACTIONS:
+            return self._create_memory_action(actor, projects, body, scopes, kind, idem, pid)
         if not pid or not tid:
             raise ControlError("project_id and task_id are required")
         if projects and pid not in projects:
@@ -2870,6 +2944,68 @@ class ControlCenter:
         return sorted([s for s in self.sources([]) if s["kind"] == "client"],
                       key=lambda s: -(s.get("last_seen") or 0))
 
+    def _create_memory_action(self, actor: str, projects: list, body: dict, scopes, kind: str,
+                              idem: str, pid: str) -> dict:
+        """memory_add / memory_edit: project-scoped, operator sessions only. The
+        body is checked here (file name, heading, text size); the coordinator
+        validates again (secrets, the file's headings) and commits."""
+        if scopes is not None and not {"operator", "admin"} & set(scopes or []):
+            raise ControlError("editing project memory needs an operator session", "forbidden", 403)
+        if not pid:
+            raise ControlError("project_id is required")
+        if projects and pid not in projects:
+            raise ControlError("this operator may not act on that project", "forbidden", 403)
+        file = _s(body.get("file"), 160).replace("\\", "/").strip().strip("/")
+        if file.lower().startswith("docs/memory/"):
+            file = file[len("docs/memory/"):]
+        if not MEMORY_FILE.match(file):
+            raise ControlError("file must be DECISIONS.md, CONVENTIONS.md, ASSETS.md, KNOWN_ISSUES.md, "
+                               "tracks/<name>.md or sprints/<ID>.md")
+        heading = " ".join(str(body.get("heading") or "").split())
+        if not heading:
+            raise ControlError("a heading is required (the section the text goes under)")
+        if len(heading) > MAX_MEMORY_HEADING or heading.startswith("#"):
+            raise ControlError(f"heading must be one line of at most {MAX_MEMORY_HEADING} characters, "
+                               "without '#'")
+        text = str(body.get("text") or "")
+        if not text.strip():
+            raise ControlError("text is empty")
+        if len(text) > MAX_MEMORY_TEXT:
+            raise ControlError(f"text is over {MAX_MEMORY_TEXT} characters")
+        payload = {"file": file, "heading": heading, "text": text}
+        tid = _s(body.get("task_id"), 120)
+        if tid:
+            payload["task_id"] = tid
+        chat = body.get("chat")
+        if isinstance(chat, dict):
+            payload["chat"] = {k: _s(chat.get(k), 80) for k in ("thread", "turn", "call")}
+        if not self.rate_ok(actor):
+            raise ControlError("too many control actions; wait a minute", "rate_limited", 429)
+        st = self.settings()
+        now = self.clock()
+        aid = f"act-{uuid.uuid4().hex[:16]}"
+        summary = self._summary(kind, payload, pid)
+        try:
+            with self._tx() as c:
+                seq = self._feed(c, "action", pid, "", aid)
+                c.execute("INSERT INTO cc_actions (action_id, idem_key, actor, kind, project_id, "
+                          "task_id, run_id, session_id, request_id, payload, summary, expected, "
+                          "status, status_detail, created_ts, expires_ts, updated_ts, seq) VALUES "
+                          "(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                          (aid, idem, actor, kind, pid, "", "", "", "", _j(payload), summary,
+                           _j({}), "accepted",
+                           "stored by Foundry; waiting for the coordinator to claim it", now,
+                           now + st["action_ttl_s"], now, seq))
+                c.execute("INSERT INTO cc_action_log (action_id, ts, status, actor, detail) "
+                          "VALUES (?,?,?,?,?)", (aid, now, "accepted", actor, summary))
+        except Exception as e:                                   # noqa: BLE001
+            if "UNIQUE" in str(e) and "idem" in str(e):
+                ex = self.db.query_one("SELECT action_id FROM cc_actions WHERE idem_key=?", (idem,))
+                return {**self.action_view(ex["action_id"]), "duplicate": True}
+            raise
+        self._notify()
+        return self.action_view(aid)
+
     def _create_client_action(self, actor: str, projects: list, body: dict, scopes, kind: str,
                               idem: str) -> dict:
         """client_restart / client_reload_kilo_config: workstation-scoped, operator
@@ -2888,6 +3024,14 @@ class ControlCenter:
             if not isinstance(force, bool):
                 raise ControlError("force must be true or false")
             payload = {"component": comp, "force": force}
+        elif kind == "client_service_enable":
+            comp = _s(body.get("component"), 40)
+            if comp not in CLIENT_TOGGLE:
+                raise ControlError(f"component must be one of {', '.join(CLIENT_TOGGLE)}")
+            en = body.get("enabled")
+            if not isinstance(en, bool):
+                raise ControlError("enabled must be true or false")
+            payload = {"component": comp, "enabled": en}
         else:
             comp = "kilo"
             payload = {}
@@ -2909,10 +3053,15 @@ class ControlCenter:
             with self._tx() as c:
                 # task_id carries the component: one live stack action per component
                 # (the view is read after the transaction: the db lock is not re-entrant)
-                live = self._rows(c, "SELECT action_id FROM cc_actions WHERE kind IN (?,?) AND "
+                # restarts and reloads share one slot per component; switching a service on
+                # or off is its own kind (a restart in flight must not swallow it)
+                same = (("client_service_enable",) if kind == "client_service_enable"
+                        else tuple(k for k in CLIENT_ACTIONS if k != "client_service_enable"))
+                live = self._rows(c, "SELECT action_id FROM cc_actions WHERE kind IN ("
+                                     + ",".join("?" * len(same)) + ") AND "
                                      "task_id=? AND status IN ('accepted','claimed','queued',"
                                      "'delivered') ORDER BY created_ts DESC LIMIT 1",
-                                  (*CLIENT_ACTIONS, comp))
+                                  (*same, comp))
                 if live:
                     dup = live[0]["action_id"]
                     raise _Dup()
@@ -3073,12 +3222,18 @@ class ControlCenter:
                     + (f", note {len(p.get('note') or '')} chars" if p.get("note") else ""))[:300]
         if kind == "lanes":
             return f"proactive lanes {'paused' if p.get('paused') else 'un-paused'} ({tid})"
+        if kind in MEMORY_ACTIONS:
+            verb = "add to" if kind == "memory_add" else "edit"
+            return (f"memory {verb} {p.get('file')} > {p.get('heading')} ({tid}), "
+                    f"{len(p.get('text') or '')} chars")[:300]
         if kind == "client_restart":
             return f"restart {p.get('component')} ({'now' if p.get('force') else 'at a safe point'})"
         if kind == "client_reload_kilo_config":
             return "reload kilo.jsonc into the Kilo server"
         if kind in TRACK_ACTIONS:
             return ControlCenter._track_payload(kind, {**p, "name": p.get("name") or tid})[1][:300]
+        if kind == "client_service_enable":
+            return f"{'enable' if p.get('enabled') else 'disable'} {p.get('component')}"
         if kind == "decision_answer":
             return (f"answer decision {p.get('decision_id')} ({p.get('decision_kind') or '?'}) as "
                     f"{p.get('authority')}" + (" · option chosen" if p.get("option") else "")

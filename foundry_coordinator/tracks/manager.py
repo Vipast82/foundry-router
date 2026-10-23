@@ -252,7 +252,7 @@ class TrackManager:
             fn = None
         if callable(fn):
             try:
-                out = fn(dict(row, main_workspace=P.profile.workspace, profile=P.profile))
+                out = fn(row, profile=P.profile)       # services.track_kilo_config(track, *, profile)
                 if out:
                     return str(out)
             except Exception as e:                                # noqa: BLE001

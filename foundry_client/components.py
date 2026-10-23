@@ -13,8 +13,10 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, Optional
 
+from foundry_automation import service_map as SM
+
 from . import secrets
-from .config import expand
+from .config import SERVICE_COMPONENTS, expand
 from .probe import basic_auth, get_json, pid_alive, port_owner_pid
 
 # task states in which a live session may be writing (a paused/blocked task's idle
@@ -237,6 +239,69 @@ def build(cfg: dict) -> dict[str, Spec]:
                        health=lambda: rojo_health(rport), port=rport,
                        owner_pid=lambda: port_owner_pid(rport),
                        problem="" if rojo else "rojo was not found; set its path in Settings")
+
+    labels = {"blender": "Blender (blender-mcp add-on)", "acestep-music": "ACE-Step music",
+              "stable-audio": "Stable Audio", "kokoro-tts": "Kokoro speech",
+              "chatterbox-tts": "Chatterbox speech"}
+    for name in SERVICE_COMPONENTS:
+        c = comps.get(name) or {}
+        prog = expand(c.get("path") or "")
+        sport = int(c.get("port") or 0)
+        # blender: no health check (its socket opens only after "Connect" in Blender), so a
+        # started Blender is never restarted as unhealthy; the others answer on their port
+        health = (lambda p=sport: _port_health(p)) if sport and name != "blender" else None
+        out[name] = Spec(name, labels[name], [prog, *c.get("args", [])],
+                         cwd=expand(c.get("cwd") or ""), env=c.get("env") or {},
+                         secrets=c.get("secrets") or [], health=health, port=sport,
+                         owner_pid=(lambda p=sport: port_owner_pid(p)) if sport and name != "blender"
+                         else None,
+                         problem="" if prog and os.path.isfile(prog) else
+                         f"set the program path for {labels[name]} in Settings")
+    return out
+
+
+def _port_health(port: int) -> tuple:
+    return (True, f"port {port} is open") if port_open(port) else (False, f"port {port} is closed")
+
+
+# --------------------------------------------------------------------------- MCP + services report
+
+def mcp_report(cfg: dict, global_path: Optional[str] = None, port_fn=None) -> list[dict]:
+    """The MCP servers Kilo can see for this workstation's project (kilo.jsonc over the global
+    Kilo config) and whether each looks available: a command's binary exists, a URL's host
+    accepts a connection. Not a handshake (service_map documents the assumptions)."""
+    path = kilo_config_path(cfg)
+    servers = SM.merged_mcp(project_path=path if path and os.path.isfile(path) else "",
+                            global_path=global_path)
+    from concurrent.futures import ThreadPoolExecutor
+    names = list(servers)
+    if not names:
+        return []
+    fn = port_fn or SM.port_open
+    with ThreadPoolExecutor(max_workers=min(8, len(names))) as ex:
+        return list(ex.map(lambda n: SM.probe_server(n, servers[n], port_fn=fn), names))
+
+
+def services_report(cfg: dict, mcp_rows: list[dict], comp_states: dict,
+                    port_fn=None, http_fn=None) -> list[dict]:
+    """The registry as this client sees it: every catalog service with its status, who provides
+    it (a client component when one exists here, else external / backend), and whether that
+    component is switched on. `comp_states`: {component: {"state", "enabled"}}."""
+    rows = {r["name"]: r for r in mcp_rows}
+    ov = {}
+    out = []
+    for name, svc in SM.SERVICES.items():
+        ok, detail = SM.check_service(svc, rows, ov, port_fn or SM.port_open, http_fn)
+        comp = comp_states.get(svc.component) if svc.component else None
+        provider = "client" if comp is not None else ("backend" if svc.provider == "backend"
+                                                      else "external")
+        out.append({"name": name, "label": svc.label, "kind": svc.kind, "check": svc.check,
+                    "provider": provider, "component": svc.component if comp is not None else "",
+                    "enabled": bool(comp.get("enabled")) if comp is not None else None,
+                    "component_state": (comp or {}).get("state") if comp is not None else None,
+                    "needed_by": SM.needed_by(name),
+                    "status": "up" if ok is True else "down" if ok is False else "unknown",
+                    "detail": str(detail)[:200], "note": svc.note})
     return out
 
 

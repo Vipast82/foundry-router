@@ -180,6 +180,41 @@ files there, so "restart Kilo" works from the Automation page even when the coor
    the relay; with the coordinator's `orchestration` key present it falls back to that.
 4. `client.relay_enabled = false` in `client.toml` turns the relay off.
 
+## Services and MCP probing (Team Lead piece 5)
+
+A sprint declares what it needs (`studio`, `blender`, `audio`, `images`, `gpu`, `backend`; a
+`## Needs` block in its plan, or the track analysis). Before it starts, the coordinator checks the
+services those needs map to and, when one is down, the sprint waits ("waiting for rojo", retried
+with a 30 s .. 10 min backoff, no attempt used). The map lives in `foundry_automation/service_map.py`:
+
+| Need | Services | Provided by |
+|---|---|---|
+| `studio` | `rojo`, `robloxstudio-mcp`, `kilo` | client components (Rojo, Kilo); the MCP is spawned by Kilo |
+| `blender` | `blender-mcp` | external; the add-on socket (default 9876) must be connected in Blender |
+| `audio` | `acestep-music`, `stable-audio`, `kokoro-tts`, `chatterbox-tts` | external (the GPU host) unless a local component of the same name is switched on |
+| `images` | `comfy-mcp` or `foundry-media` (either) | external |
+| `gpu` | `local-model` (the router's backend `/health`) | backend |
+| `backend` | `router` | backend |
+
+**MCP probing.** Every heartbeat (cached 30 s) carries `mcp` (the servers in the workstation's
+`kilo.jsonc` merged over the global `~/.config/kilo/kilo.jsonc`) and `services` (the registry as
+this client sees it). The probe is cheap and is not an MCP handshake: a local command's binary or
+script exists (looking through `cmd /c` and `powershell -File`), a remote URL's host and port
+accept a connection, Blender's socket port is open. A stub like `{"enabled": false}` is resolved
+against the global config; a server defined nowhere reports `unknown`, which never blocks a
+sprint. `GET /api/mcp` on the client's local API shows the same data.
+
+**Optional managed components**, off by default and with no program set: `blender`,
+`acestep-music`, `stable-audio`, `kokoro-tts`, `chatterbox-tts` (`path`, `args`, `cwd`, `env`,
+`port`). Use them only for programs that run on this workstation; the audio MCPs on the GPU
+host are probed, not managed. Blender has no health check (its socket opens only after
+"Connect" in its side panel), so a started Blender is never restarted as unhealthy.
+
+**Verbs.** `client_restart` accepts these component names; `client_service_enable {component,
+enabled}` saves the setting and starts or stops the component (refused when enabling without a
+program path); a coordinator file request `start_service` (`detail.component`) starts a stopped
+enabled component or restarts an unhealthy one, and never switches a disabled one on.
+
 ## Phases
 
 1. `foundry_client` running from source on this workstation, replacing `foundry-stack.ps1`.

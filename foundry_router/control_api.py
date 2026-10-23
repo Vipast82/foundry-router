@@ -209,14 +209,46 @@ async def search(request: Request, q: str = "", project: str = "", session: str 
 async def snapshots(request: Request, kind: str, project: str = "", session: str = "",
                     at: float = 0):
     s = _op(request)
-    if kind not in ("mcp", "todo", "capabilities", "config"):
-        raise ControlError("kind must be mcp|todo|capabilities|config")
+    if kind not in ("mcp", "todo", "capabilities", "config", "memory"):
+        raise ControlError("kind must be mcp|todo|capabilities|config|memory")
     if s["projects"] and project not in s["projects"]:
         raise ControlError("unknown project", "not_found", 404)
     snap = _cc(request).snapshot(kind, project, session, at)
     return {"snapshot": snap, "requested_at": at or None,
             "note": None if snap else "nothing captured for this scope"
                                       + (" at or before that time" if at else "")}
+
+
+@router.get("/control/api/memory")
+@_guard
+async def memory(request: Request, project: str):
+    """The project's memory as the coordinator last reported it (files, entries,
+    the slice each session got, recent notes); the Memory tab's data."""
+    s = _op(request)
+    if not project:
+        raise ControlError("project is required")
+    if s["projects"] and project not in s["projects"]:
+        raise ControlError("unknown project", "not_found", 404)
+    from .memory_view import summary
+    snap = _cc(request).snapshot("memory", project)
+    return {"project": project, "snapshot": snap, "summary": summary(snap),
+            "note": None if snap else "the coordinator has not reported memory for this project "
+                                      "(docs/memory missing, [automation] project_memory off, or the "
+                                      "coordinator is offline)"}
+
+
+@router.get("/control/api/memory/search")
+@_guard
+async def memory_search(request: Request, project: str, q: str = "", file: str = "",
+                        limit: int = 20):
+    s = _op(request)
+    if s["projects"] and project not in s["projects"]:
+        raise ControlError("unknown project", "not_found", 404)
+    from .memory_view import search
+    snap = _cc(request).snapshot("memory", project)
+    ents = ((snap or {}).get("data") or {}).get("entries") or []
+    return {"project": project, "query": q, "results": search(ents, q, max(1, min(int(limit), 50)),
+                                                               file)}
 
 
 @router.get("/control/api/graph")

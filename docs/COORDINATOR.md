@@ -261,6 +261,22 @@ Victor decided on 2026-10-21.
 | `transcript_poll_seconds` | `120` | Lane transcript ingest interval (an explicit `[lanes]` value wins). |
 | `generic_checks_cache` | `true` | Reuse the per-tick coordinator checks while HEAD / tree / inputs are unchanged. |
 
+### Needs and services (`services.py`, Team Lead piece 5)
+
+A sprint may declare `needs` (`studio`, `blender`, `audio`, `images`, `gpu`, `backend`, `none`): a
+`## Needs` block in its plan (the AU adapter reads it into the task spec), `needs:x` tags, or
+`data["needs"]` set by the track analysis. Nothing is guessed from the old free-text
+`**NEEDS (MCP):**` line, and a sprint without needs behaves exactly as before. Before the
+implementer session starts (after the infra backoff, before any lock), the engine asks
+`services.ready(needs)`; the services the needs map to must be up (a cheap probe stored in the
+`services` table, trusted 30 s). A missing one sets the task's note to `waiting for <service>`,
+retries with a 30 s .. 10 min backoff, uses no attempt and never fails the task; when a Foundry Client
+component runs that service the coordinator leaves a `start_service` client request (at most one
+per service every 10 minutes). The task observation carries `needs` and `service_wait` for the
+Queue tab. A profile may override a probe with `[services.<name>] port | host | url | enabled`.
+`kilo_config.track_kilo_config(track)` writes a track worktree's `kilo.jsonc` with the MCP servers
+its needs allow (see `docs/CLIENT_MANAGER.md` for the map and the Kilo assumptions).
+
 ## Setting it up (Victor's workstation)
 
 1. **Foundry:** add a coordinator key. Access → Clients & keys → preset

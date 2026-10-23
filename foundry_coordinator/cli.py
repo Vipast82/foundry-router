@@ -626,6 +626,30 @@ def main(argv=None, clients=None, foundry=None) -> int:
     x1 = xs.add_parser("status"); x1.add_argument("project"); x1.add_argument("--json", action="store_true")
     x1 = xs.add_parser("set-max-agents"); x1.add_argument("project"); x1.add_argument("n", type=int)
     x1.add_argument("--by", default="operator")
+    m = sub.add_parser("memory", help="project memory: docs/memory in the game repo, indexed "
+                                      "here and sliced per session")
+    ms = m.add_subparsers(dest="mcmd", required=True)
+    x = ms.add_parser("init", help="create docs/memory (idempotent) and commit the new files")
+    x.add_argument("project"); x.add_argument("--by", default="operator")
+    x = ms.add_parser("import-state", help="one-time: fold docs/progress/STATE.md, state/DECISIONS.md, "
+                                           "state/KNOWN_ISSUES.md and the operator notes into "
+                                           "docs/memory, as one coordinator commit")
+    x.add_argument("project"); x.add_argument("--by", default="operator")
+    x.add_argument("--force", action="store_true", help="import again (appends)")
+    x = ms.add_parser("reindex", help="re-parse every memory file into the index")
+    x.add_argument("project")
+    x = ms.add_parser("status", help="files, entry counts, settings")
+    x.add_argument("project")
+    x = ms.add_parser("search", help="full-text search of the index")
+    x.add_argument("project"); x.add_argument("query", nargs="+")
+    x = ms.add_parser("slice", help="the slice a sprint's session would get")
+    x.add_argument("project"); x.add_argument("task")
+    x.add_argument("--track", default=""); x.add_argument("--budget", type=int, default=0)
+    x.add_argument("--role", default="implementer")
+    x = ms.add_parser("add", help="append an entry under a heading (a coordinator commit)")
+    x.add_argument("project"); x.add_argument("file"); x.add_argument("heading")
+    x.add_argument("text", nargs="+"); x.add_argument("--by", default="operator")
+    x.add_argument("--task", default="")
     a = ap.parse_args(argv)
     try:
         c = build(a, clients=clients, foundry=foundry)
@@ -660,6 +684,37 @@ def _kilo_config(c: Coordinator, a) -> int:
     return 0
 
 
+def _memory_cmd(c: Coordinator, a) -> int:
+    P = c.projects.get(a.project)
+    if P is None:
+        print(f"error: unknown project {a.project!r}", file=sys.stderr)
+        return 2
+    mem = c.memory
+    if a.mcmd == "init":
+        out = mem.init(P, a.by)
+    elif a.mcmd == "import-state":
+        out = mem.import_state(P, a.by, force=a.force)
+    elif a.mcmd == "reindex":
+        out = mem.reindex(P, force=True)
+    elif a.mcmd == "status":
+        out = mem.status(P)
+    elif a.mcmd == "search":
+        mem.reindex(P)
+        out = [{k: e[k] for k in ("file", "heading", "text")} for e in
+               mem.search(P, " ".join(a.query), 20)]
+    elif a.mcmd == "slice":
+        mem.reindex(P)
+        sl = mem.slice(P, P.adapter.describe(a.task), a.track, a.budget or None, role=a.role)
+        print(sl["text"])
+        out = {"entries": len(sl["entries"]), "tokens": sl["tokens"], "budget": sl["budget"],
+               "dropped": sl["dropped"], "query": sl["query"],
+               "why": [f"{e['file']} > {e['heading']}: {e['why']}" for e in sl["entries"]]}
+    else:
+        out = mem.add(P, a.file, a.heading, " ".join(a.text), a.by, task_id=a.task)
+    print(json.dumps(out, indent=2, default=str))
+    return 0 if not (isinstance(out, dict) and (out.get("error") or out.get("ok") is False)) else 1
+
+
 def _tracks(c: Coordinator, a) -> int:
     """`tracks analyze PROJECT` prints the ordered tracks (deterministic, no model
     call); the other subcommands drive tracks/manager.py like the chat does."""
@@ -674,9 +729,10 @@ def _tracks(c: Coordinator, a) -> int:
         if a.tcmd == "analyze":
             out = tm.analyze(P)
             print(json.dumps(out, indent=2, default=str) if a.json else AN.render(out))
-            print(f"max_agents {tm.max_agents()}") if not a.json else None
+            if not a.json:
+                print(f"max_agents {tm.max_agents()}")
         elif a.tcmd == "propose":
-            plan = tm.propose(P, a.max_agents or None, actor=a.by if hasattr(a, "by") else "cli")
+            plan = tm.propose(P, a.max_agents or None, actor="cli")
             if a.json:
                 print(json.dumps(plan, indent=2, default=str))
             else:
@@ -734,6 +790,8 @@ def _dispatch(a, c: Coordinator) -> int:
         return doctor(c, a.project)
     if a.cmd == "tracks":
         return _tracks(c, a)
+    if a.cmd == "memory":
+        return _memory_cmd(c, a)
     if a.cmd == "queue":
         if a.qcmd == "approve":
             deps = [d.strip() for d in a.deps.split(",") if d.strip()]

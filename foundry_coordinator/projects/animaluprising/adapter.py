@@ -221,6 +221,10 @@ class AnimalUprisingAdapter(GenericAdapter):
                                           m.group(1).split("**")[0]) if d != task_id]
         goal = _section(plan, "Goal")
         acceptance = _accept_section(plan)
+        # Team Lead 5: an optional `## Needs` block (studio, blender, audio, images, gpu,
+        # backend, none); the engine waits for those services before it starts a session
+        from ...services import parse_needs
+        needs = parse_needs(plan)
         nxt = [l for l in plan.splitlines() if l.startswith("NEXT:")]
         checklist = "\n".join(l for l in plan.splitlines() if checklist_mark(l))
         visual_gate = (" Visual sprint: final screenshot sign-off is by the "
@@ -236,7 +240,8 @@ class AnimalUprisingAdapter(GenericAdapter):
         return TaskSpec(project_id=self.p.id, task_id=task_id, title=_title(plan, task_id),
                         spec=spec, scope=scope, tags=tags, deps=deps,
                         data={"tier": tier, "visual": visual, "plan": rel,
-                              "close_step": _close_step(plan)})
+                              "close_step": _close_step(plan),
+                              **({"needs": needs} if needs else {})})
 
     _FILES_HEADING = re.compile(r"^#{2,4}\s+Files this sprint may change", re.I)
 
