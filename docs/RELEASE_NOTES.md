@@ -2,6 +2,57 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.135.0 — Team Lead: parallel tracks, project memory, service registry
+
+Design: `reports/TEAM_LEAD_DESIGN.md`. The coordinator now runs a project like a team lead.
+Victor's decisions (2026-10-22): a git worktree per parallel track; Studio stays with the main
+checkout and a track's Studio work runs at merge time in the main sprint's idle windows; memory
+lives in the repo under `docs/memory/`; `max_agents` is a live setting; the chat proposes and
+nothing starts without a confirm.
+
+- **Parallel tracks (`foundry_coordinator/tracks/`).**
+  - `analysis.py` reads every sprint plan, infers or parses its needs (studio, blender, audio,
+    images, gpu, backend), builds the dependency graph from explicit deps and file overlap, and
+    returns the tracks that can run side by side and the sprints that must stay serial. No model
+    call. CLI: `tracks analyze <project>`.
+  - `manager.py`: a `tracks` table; a track is a git worktree under `<workspace>/.tracks/<name>`
+    on branch `track/<name>` with its own `kilo.jsonc`; a sprint queued on a track runs with the
+    track's workspace, locks, scope and memory slice. `max_agents` caps running sprints, main
+    first.
+  - `resources.py`: `studio`, `gpu` and `blender` as capacity resources in the `locks` table.
+    Studio "in use" is the gate runner lock plus the main session's last Studio tool call, so a
+    long editing session no longer pins Studio. A track's merge-gate takes Studio only after
+    `studio_idle_minutes` (10) with no main request pending, for at most
+    `studio_track_max_minutes` (45), never interrupted mid-run.
+  - Merge manager: at a quiescent point of the main sprint, rebase the track onto master,
+    fast-forward, run the gate in the main checkout for the merged files, record `track_merged`,
+    remove the worktree. A conflict goes to a Lead repair, then a decision with the default "stop
+    this track". Shared files conflict by construction and are marked serial unless on the
+    `append_safe` list.
+  - Chat tools: `analyze_tracks`, `propose_tracks`, `track_start/stop/status/merge`,
+    `set_max_agents`. A **Tracks** tab shows each track, the Studio timeline and the agent count.
+- **Project memory (`foundry_coordinator/memory/`).**
+  - `docs/memory/` in the game repo: `DECISIONS.md`, `CONVENTIONS.md`, `ASSETS.md`,
+    `KNOWN_ISSUES.md`, `tracks/<name>.md`, `sprints/<ID>.md`. `memory init` creates them;
+    `memory import-state` folds the old `STATE.md` ledger and operator notes in.
+  - An FTS index by heading, re-indexed when the files change. Each session gets a slice matched
+    to its files, needs and track within a token budget, hashed per entry so unchanged slices are
+    not re-sent. The implementer, Lead and review prompts use it in place of the operator-notes
+    block.
+  - Sessions write memory through `MEMORY_NOTE` blocks that the coordinator validates, commits
+    and re-indexes. Chat tools: `memory_search`, `memory_summary`, `memory_add`, `memory_edit`.
+    A **Memory** tab shows the files, search, add and edit, and the slice each session received.
+- **Service and MCP registry (`foundry_coordinator/services.py`).**
+  - A `services` table with a needs-to-services map. `services.ready(needs)` runs before a
+    sprint starts: a missing service makes the sprint wait, never fail, and the client is asked to
+    start it when it can.
+  - The Foundry Client probes the MCP servers in `kilo.jsonc` and reports them in its heartbeat;
+    optional managed components for Blender and the audio MCPs (off by default).
+  - `track_kilo_config(track)` writes each track's `kilo.jsonc` with the MCP allow-list filtered
+    to the track's needs and agent blocks from role rules.
+  - Chat tools: `services_status`, `service_restart`, `service_enable`. A **Services** tab shows
+    health, provider and needed-by.
+
 ## v0.134.2 — coordinator: a dead process's owner lock is taken over
 
 A coordinator killed without releasing its owner row blocked the next one ("another
