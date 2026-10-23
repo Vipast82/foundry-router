@@ -1982,7 +1982,7 @@ function memEntriesHtml() {
           <textarea name="text" rows="${clamp(g.entries.length + 2, 3, 14)}" maxlength="4000" required>${esc(g.entries.map(e => e.text).join("\n"))}</textarea>
           <div class="row" style="margin:6px 0 0"><button class="act primary" type="submit">Save (commit)</button><button class="act" type="button" data-act="m-edit-cancel">Cancel</button>
           <span class="hint" style="margin:0">Replaces everything under <b>${esc(g.heading)}</b> in ${esc(g.file)}.</span></div></form>`
-        : `<ul class="mem-list">${g.entries.map(e => `<li>${e.text && e.text.startsWith("|") ? `<code>${esc(e.text)}</code>` : esc(e.text)}${(e.tags || []).length ? `<span class="mem-tags">${e.tags.slice(0, 8).map(t => `<span>${esc(t)}</span>`).join("")}</span>` : ""}</li>`).join("")}</ul>`}
+        : `<ul class="mem-list">${g.entries.map(e => `<li>${e.text && e.text.startsWith("|") ? `<code>${esc(e.text)}</code>` : esc(String(e.text || "").replace(/^(?:[-*+]|\d+[.)])\s+/, ""))}${(e.tags || []).length ? `<span class="mem-tags">${e.tags.slice(0, 8).map(t => `<span>${esc(t)}</span>`).join("")}</span>` : ""}</li>`).join("")}</ul>`}
     </section>`;
   }).join("") + (groups.length > 200 ? `<p class="hint">${groups.length - 200} more headings; narrow the search.</p>` : "");
 }
