@@ -1799,7 +1799,19 @@ class LeadManager:
             "Give a materially different hypothesis than any earlier one in the dossier.",
             ("Current project recovery policy (higher priority than historical plan notes): "
              + policy) if policy else "",
+            self._memory_text(P, t),
             report_contract(bool(self.settings(P).get("full_authority"))), "", text])
+
+    def _memory_text(self, P, t: dict) -> str:
+        """The project memory slice (docs/memory) for the lead: half the
+        implementer budget, never raises."""
+        mem = getattr(self.c, "memory", None)
+        if mem is None:
+            return ""
+        try:
+            return mem.prompt_block(P, t["task_id"], "", role="lead")
+        except Exception:                                         # noqa: BLE001
+            return ""
 
     @staticmethod
     def _write_mode_text(t: dict) -> str:

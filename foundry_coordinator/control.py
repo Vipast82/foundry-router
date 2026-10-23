@@ -40,6 +40,10 @@ ASSISTANT_KINDS = ("assistant_plan", "assistant_run")
 # lead recovery case controls (v0.123; payload {case_id, note}): applied through
 # the engine's LeadManager (engine.lead) when this coordinator has one
 LEAD_KINDS = ("lead_case_pause", "lead_case_resume", "lead_case_takeover", "lead_case_instruct")
+# Team Lead piece 4: project memory edits from the chat / Memory tab, applied as
+# coordinator commits in docs/memory. Project-scoped (no task); payload
+# {"file", "heading", "text"}.
+MEMORY_KINDS = ("memory_add", "memory_edit")
 LEAD_UNAVAILABLE = "lead manager not available in this coordinator"
 MAX_LEAD_NOTE = 2000
 
@@ -96,6 +100,50 @@ class ControlChannel:
                 self.log(f"control: {a.get('action_id')}: {type(e).__name__}: {e}")
                 self._report(a, "failed", f"coordinator error: {type(e).__name__}: {e}"[:500])
         self.report_messages()
+        self._publish_memory()
+
+    def _memory_on(self) -> bool:
+        mem = getattr(self.c, "memory", None)
+        if mem is None:
+            return False
+        for P in (getattr(self.c, "projects", None) or {}).values():
+            try:
+                if mem.enabled(P):
+                    return True
+            except Exception:                                    # noqa: BLE001
+                continue
+        return False
+
+    def _publish_memory(self) -> None:
+        """Changed memory snapshots (files, entries, slices, notes) go to the
+        router as `memory` observations, so the chat and the Memory tab read them
+        without a round trip to the coordinator."""
+        mem = getattr(self.c, "memory", None)
+        if mem is None or self.foundry is None or not hasattr(self.foundry, "telemetry"):
+            return
+        try:
+            mem.publish(self.foundry, self.source_id)
+        except Exception as e:                                   # noqa: BLE001
+            self.log(f"control: memory snapshot: {type(e).__name__}: {e}")
+
+    def _memory_action(self, a, actor):
+        """memory_add / memory_edit: a validated edit of one docs/memory file,
+        committed by the coordinator with the MEMORY prefix (or the task's when
+        the payload names a task)."""
+        mem = getattr(self.c, "memory", None)
+        if mem is None:
+            return self._report(a, "rejected", "this coordinator has no project memory")
+        P = self.c.projects[a["project_id"]]
+        p = a.get("payload") or {}
+        fn = mem.add if a["kind"] == "memory_add" else mem.edit
+        out = fn(P, str(p.get("file") or ""), str(p.get("heading") or ""), str(p.get("text") or ""),
+                 actor, task_id=str(p.get("task_id") or a.get("task_id") or ""))
+        if not out.get("ok"):
+            return self._report(a, "rejected", str(out.get("error") or "refused")[:500], out)
+        detail = (f"{out['path']} > {str(p.get('heading') or '')[:60]}: "
+                  + ("committed " + out["sha"][:12] if out.get("sha") else "no change"))
+        self._publish_memory()
+        return self._report(a, "applied", detail[:500], out)
 
     def _lifecycle_on(self) -> bool:
         """At least one project has [lifecycle] enabled."""
@@ -125,13 +173,15 @@ class ControlChannel:
     def _beat(self) -> dict:
         tasks = self.store.tasks()
         lead_on = self._lead_on()
+        mem_on = self._memory_on()
         return {"source": {"id": self.source_id, "kind": "coordinator", "host": socket.gethostname(),
                            "version": _version(), "capabilities": {
                                "actions": ["answer_question", "reply_permission", "approve_review",
                                            "reject_review", "pause", "resume", "cancel", "unblock",
                                            "instruction", "withdraw_instruction",
                                            "decision_answer", *PROJECT_KINDS, *ASSISTANT_KINDS,
-                                           *(LEAD_KINDS if lead_on else ())]}},
+                                           *(LEAD_KINDS if lead_on else ()),
+                                           *(MEMORY_KINDS if mem_on else ())]}},
                 "contract": _contract(), "coordinator_version": _coordinator_version(),
                 # lifecycle features advertised only when some project actually
                 # runs the lifecycle; project pause/resume always; lead_manager
@@ -140,7 +190,8 @@ class ControlChannel:
                 # lead_escalation decisions even when no project runs the lifecycle)
                 "features": (["decision_answer", "lifecycle"] if self._lifecycle_on() else
                              ["decision_answer"] if lead_on else [])
-                + ["project_pause"] + (["lead_manager"] if lead_on else []),
+                + ["project_pause"] + (["lead_manager"] if lead_on else [])
+                + (["project_memory"] if mem_on else []),
                 # per project: {paused, mode, note, actor, since, busy_sessions,
                 # running_helpers, running_reviews, safe_to_upgrade}
                 "project_pause": {pid: self._pause_status(pid) for pid in sorted(self.c.projects)},
@@ -195,6 +246,8 @@ class ControlChannel:
             # project-scoped: no task to look up or re-check
             return getattr(self, f"_do_{a['kind']}")(
                 a, f"{a.get('actor') or 'operator'} (control center)")
+        if a["kind"] in MEMORY_KINDS:
+            return self._memory_action(a, f"{a.get('actor') or 'operator'} (control center)")
         t = self.store.task(pid, tid)
         if not t:
             return self._report(a, "rejected", f"{pid}/{tid} is not on this coordinator's queue")

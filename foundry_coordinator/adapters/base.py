@@ -177,7 +177,26 @@ def report_instructions() -> str:
             "Need a file outside the task's file list (e.g. a harness row)? Don't edit it: "
             "add a ```SCOPE_REQUEST``` block with {\"path\": \"<file>\", \"reason\": "
             "\"<one line>\"} and stop; the coordinator grants allow-listed harness lines "
-            "itself and continues this session.")
+            "itself and continues this session.\n"
+            + memory_note_instructions())
+
+
+def memory_note_instructions() -> str:
+    """How a session records a project-memory fact (Team Lead piece 4). The
+    coordinator parses these lines from the final message (memory/notes.py),
+    validates them and commits them to docs/memory itself."""
+    return ("Project memory: a fact the next session or sprint must know (a decision you made "
+            "within the plan, a convention you found, a pitfall and its workaround, an asset you "
+            "delivered) goes to docs/memory through the coordinator, never by editing those files "
+            "yourself. Add one line per fact to your final message:\n"
+            "MEMORY_NOTE: file=<DECISIONS.md | CONVENTIONS.md | KNOWN_ISSUES.md | ASSETS.md | "
+            "sprints/<ID>.md | tracks/<name>.md> heading=\"<section>\" text=\"<one or two "
+            "sentences>\"\n"
+            "The coordinator validates each line (known file, size cap, no secrets), appends it "
+            "under the heading, commits it with your task prefix and indexes it; invalid lines are "
+            "logged, never applied. Asset sprints record every deliverable as a registry row: "
+            "MEMORY_NOTE: file=ASSETS.md heading=\"Registry\" text=\"| <name> | <path> | <sprint> | "
+            "<generated|imported|verified> | <notes> |\"")
 
 
 def safe_rel(path: str) -> Optional[str]:
