@@ -216,7 +216,7 @@ def by_task(mapping: dict):
 
 
 def coordinator(tmp, profiles: list, scripts: dict, foundry: dict | None = None,
-                clock=None, max_writers: int = 1, store_path=None):
+                clock=None, max_writers: int = 1, store_path=None, playbook: str = ""):
     store = Store(str(store_path or tmp / "state" / "c.sqlite"))
     projects = []
     fakes = foundry or {}
@@ -227,7 +227,8 @@ def coordinator(tmp, profiles: list, scripts: dict, foundry: dict | None = None,
         projects.append(build_project(p, str(tmp / "state"), client=client,
                                       foundry=fakes.get(p.id) or FakeFoundry()))
     kw = {"clock": clock} if clock else {}
-    return Coordinator(store, projects, str(tmp / "state"), max_writers=max_writers, **kw)
+    return Coordinator(store, projects, str(tmp / "state"), max_writers=max_writers,
+                       playbook_path=playbook, **kw)
 
 
 def run_until(c, pred, limit=40):

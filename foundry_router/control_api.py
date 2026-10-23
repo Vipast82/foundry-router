@@ -227,14 +227,18 @@ async def memory(request: Request, project: str):
     s = _op(request)
     if not project:
         raise ControlError("project is required")
-    if s["projects"] and project not in s["projects"]:
+    # "@playbook" is the cross-project playbook snapshot: readable by any operator
+    if project != "@playbook" and s["projects"] and project not in s["projects"]:
         raise ControlError("unknown project", "not_found", 404)
     from .memory_view import summary
     snap = _cc(request).snapshot("memory", project)
     return {"project": project, "snapshot": snap, "summary": summary(snap),
-            "note": None if snap else "the coordinator has not reported memory for this project "
-                                      "(docs/memory missing, [automation] project_memory off, or the "
-                                      "coordinator is offline)"}
+            "note": None if snap else (
+                "the coordinator has not reported a playbook (no --playbook path, or the "
+                "coordinator is offline)" if project == "@playbook" else
+                "the coordinator has not reported memory for this project "
+                "(docs/memory missing, [automation] project_memory off, or the "
+                "coordinator is offline)")}
 
 
 @router.get("/control/api/memory/search")
@@ -242,7 +246,7 @@ async def memory(request: Request, project: str):
 async def memory_search(request: Request, project: str, q: str = "", file: str = "",
                         limit: int = 20):
     s = _op(request)
-    if s["projects"] and project not in s["projects"]:
+    if project != "@playbook" and s["projects"] and project not in s["projects"]:
         raise ControlError("unknown project", "not_found", 404)
     from .memory_view import search
     snap = _cc(request).snapshot("memory", project)

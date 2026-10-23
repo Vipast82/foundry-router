@@ -31,6 +31,8 @@ Commands
   reject PROJECT TASK --by NAME --finding TEXT [...]      send back with findings
   answer PROJECT TASK TEXT...              answer the coding session's question
   history PROJECT TASK  /  events [PROJECT]  /  reviews PROJECT TASK
+  playbook init|status|reindex|search|add    the cross-project playbook (A1): its own
+                                           repo, --playbook or $FOUNDRY_PLAYBOOK
 """
 
 from __future__ import annotations
@@ -317,7 +319,8 @@ def build(a, clients=None, foundry=None) -> Coordinator:
     projects = [build_project(p, sd, client=(clients or {}).get(p.id),
                               foundry=(foundry or {}).get(p.id)) for p in profiles]
     return Coordinator(store, projects, sd, max_writers=int(a.max_writers) if a.max_writers else None,
-                       log=lambda m: print(time.strftime("%H:%M:%S"), m, flush=True))
+                       log=lambda m: print(time.strftime("%H:%M:%S"), m, flush=True),
+                       playbook_path=getattr(a, "playbook", None) or "")
 
 
 def _fmt_task(t: dict) -> str:
@@ -391,6 +394,14 @@ def _media_row(P, persona: str, label: str, needed: bool, cache: dict) -> tuple:
 
 def doctor(c: Coordinator, project: str = "") -> int:
     bad = 0
+    pb = getattr(c, "playbook", None)
+    if pb is not None:
+        if not pb.path:
+            print("playbook: off (no --playbook / $FOUNDRY_PLAYBOOK)")
+        else:
+            print(f"playbook: {pb.path} "
+                  + (f"({len(pb.files())} file(s))" if pb.configured()
+                     else "(layout missing: run `playbook init`)"))
     for pid, P in sorted(c.projects.items()):
         if project and pid != project:
             continue
@@ -548,6 +559,9 @@ def main(argv=None, clients=None, foundry=None) -> int:
     ap.add_argument("--profiles", action="append")
     ap.add_argument("--max-writers", type=int, default=None,
                     help="override the live [automation] max_agents setting")
+    ap.add_argument("--playbook", default=None,
+                    help="path of the cross-project playbook repo (default: $FOUNDRY_PLAYBOOK; "
+                         "unset = the playbook is off)")
     sub = ap.add_subparsers(dest="cmd", required=True)
     d = sub.add_parser("doctor"); d.add_argument("project", nargs="?", default="")
     q = sub.add_parser("queue"); qs = q.add_subparsers(dest="qcmd", required=True)
@@ -650,6 +664,19 @@ def main(argv=None, clients=None, foundry=None) -> int:
     x.add_argument("project"); x.add_argument("file"); x.add_argument("heading")
     x.add_argument("text", nargs="+"); x.add_argument("--by", default="operator")
     x.add_argument("--task", default="")
+    pbp = sub.add_parser("playbook", help="cross-project playbook (A1): its own repo "
+                                          "(--playbook / $FOUNDRY_PLAYBOOK), indexed here and "
+                                          "sliced into every project's prompts")
+    pbs = pbp.add_subparsers(dest="pcmd", required=True)
+    x = pbs.add_parser("init", help="create the playbook repo/layout (idempotent) and commit it")
+    x.add_argument("--by", default="operator")
+    x = pbs.add_parser("status", help="path, files, entry counts, promotion candidates")
+    x = pbs.add_parser("reindex", help="re-parse every playbook file into the index")
+    x = pbs.add_parser("search", help="full-text search of the playbook index")
+    x.add_argument("query", nargs="+")
+    x = pbs.add_parser("add", help="append an entry under a heading (a coordinator commit)")
+    x.add_argument("file"); x.add_argument("heading"); x.add_argument("text", nargs="+")
+    x.add_argument("--by", default="operator")
     a = ap.parse_args(argv)
     try:
         c = build(a, clients=clients, foundry=foundry)
@@ -711,6 +738,28 @@ def _memory_cmd(c: Coordinator, a) -> int:
                "why": [f"{e['file']} > {e['heading']}: {e['why']}" for e in sl["entries"]]}
     else:
         out = mem.add(P, a.file, a.heading, " ".join(a.text), a.by, task_id=a.task)
+    print(json.dumps(out, indent=2, default=str))
+    return 0 if not (isinstance(out, dict) and (out.get("error") or out.get("ok") is False)) else 1
+
+
+def _playbook_cmd(c: Coordinator, a) -> int:
+    pb = c.playbook
+    if a.pcmd != "init" and not pb.configured():
+        print("error: no playbook configured (--playbook or $FOUNDRY_PLAYBOOK), or the layout "
+              "is missing (run `playbook init`)", file=sys.stderr)
+        return 2
+    if a.pcmd == "init":
+        out = pb.init(a.by)
+    elif a.pcmd == "status":
+        out = pb.status()
+    elif a.pcmd == "reindex":
+        out = pb.reindex(force=True)
+    elif a.pcmd == "search":
+        pb.reindex()
+        out = [{k: e[k] for k in ("file", "heading", "text")} for e in
+               pb.search(" ".join(a.query), 20)]
+    else:
+        out = pb.add(None, a.file, a.heading, " ".join(a.text), a.by)
     print(json.dumps(out, indent=2, default=str))
     return 0 if not (isinstance(out, dict) and (out.get("error") or out.get("ok") is False)) else 1
 
@@ -792,6 +841,8 @@ def _dispatch(a, c: Coordinator) -> int:
         return _tracks(c, a)
     if a.cmd == "memory":
         return _memory_cmd(c, a)
+    if a.cmd == "playbook":
+        return _playbook_cmd(c, a)
     if a.cmd == "queue":
         if a.qcmd == "approve":
             deps = [d.strip() for d in a.deps.split(",") if d.strip()]

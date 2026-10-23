@@ -160,6 +160,10 @@ SYSTEM = (
     "and memory_summary read it; memory_add appends a fact under a heading and memory_edit "
     "replaces a heading's body, both committed by the coordinator after the confirm card. Record "
     "the operator's standing decisions and rules there when asked to remember something.\n"
+    "- The playbook is the cross-project knowledge base (templates, how-tos, fixes: error "
+    "signature -> verified fix, scripts, formats) every project's sessions also read: kb_search "
+    "reads it; kb_add / kb_edit change it (coordinator commits, confirm card). Project facts go "
+    "to memory, reusable org-wide knowledge to the playbook.\n"
     "- At most 8 tool calls per turn. Keep `say` under 120 words. No markdown tables.")
 
 
@@ -1905,6 +1909,53 @@ class ChatEngine:
                    f"{_compact(a.get('text'), 100)}")
         async def memory_edit(ctx: Ctx, a: dict):
             return await eng._memory_action(ctx, "memory_edit", a)
+
+        # ---- cross-project playbook (A1) ----------------------------------------
+        KF = {"type": "string", "max": 120,
+              "desc": "templates/<name>.md | howto/<name>.md | fixes/<name>.md | "
+                      "scripts/<name>.md | formats/<name>.md"}
+
+        @self._add("kb_search", "Search the cross-project playbook (templates, how-tos, "
+                   "fixes: error signature -> verified fix, scripts, formats) as the "
+                   "coordinator indexed it. The playbook is shared by every project.", "read",
+                   {"query": {"type": "string", "max": 200}, "file": KF}, ("query",))
+        async def kb_search(ctx: Ctx, a: dict):
+            from .memory_view import search
+            snap = eng._memory_snapshot("@playbook")
+            if not snap:
+                raise ChatError("the coordinator has not reported a playbook (no --playbook "
+                                "path configured, or the coordinator is offline)",
+                                "no_playbook", 404)
+            d = snap.get("data") or {}
+            ents = d.get("entries") or []
+            hits = search(ents, a["query"], 10, a.get("file") or "")
+            return {"entries_indexed": len(ents),
+                    "results": [{**h, "text": _s(h["text"], 500)} for h in hits],
+                    "candidates_pending": sum(1 for cd in (d.get("candidates") or [])
+                                              if cd.get("status") == "proposed")}
+
+        @self._add("kb_add", "Append an entry under a heading of a playbook file (cross-project; "
+                   "a new heading is created at the end of the file). Use fixes/<name>.md for "
+                   "an error-signature -> fix entry. The coordinator validates (no secrets, "
+                   "size) and commits it to the playbook repo.", "memory",
+                   {"project": P, "file": KF, "heading": {"type": "string", "max": 120},
+                    "text": {"type": "string", "max": 4000}},
+                   ("project", "file", "heading", "text"), "project",
+                   lambda a: f"playbook: add to {a.get('file')} > {a.get('heading')}: "
+                   f"{_compact(a.get('text'), 100)}")
+        async def kb_add(ctx: Ctx, a: dict):
+            return await eng._memory_action(ctx, "playbook_add", a)
+
+        @self._add("kb_edit", "Replace the whole body under one heading of a playbook file "
+                   "(kb_search first to see the current body). The coordinator validates and "
+                   "commits it.", "memory",
+                   {"project": P, "file": KF, "heading": {"type": "string", "max": 120},
+                    "text": {"type": "string", "max": 4000}},
+                   ("project", "file", "heading", "text"), "project",
+                   lambda a: f"playbook: replace {a.get('file')} > {a.get('heading')} with "
+                   f"{_compact(a.get('text'), 100)}")
+        async def kb_edit(ctx: Ctx, a: dict):
+            return await eng._memory_action(ctx, "playbook_edit", a)
 
         @self._add("ask_operator", "Ask the operator one question and end the turn; options are "
                    "shown as buttons.", "ask", {"text": {"type": "string", "max": 1000},

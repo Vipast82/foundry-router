@@ -396,7 +396,7 @@
   <button role="tab" id="tab-queue" aria-controls="v-queue" data-view="queue">Queue</button>
   <button role="tab" id="tab-tracks" aria-controls="v-tracks" data-view="tracks" title="Parallel tracks: one git worktree per track, Studio shared at merge time">Tracks</button>
   <button role="tab" id="tab-services" aria-controls="v-services" data-view="services" title="Studio, Blender, audio and other services sprints need">Services</button>
-  <button role="tab" id="tab-memory" aria-controls="v-memory" data-view="memory" title="Project memory: the docs/memory files, search, add and edit, and the slice each session got">Memory</button>
+  <button role="tab" id="tab-memory" aria-controls="v-memory" data-view="memory" title="Project memory (docs/memory) and the cross-project playbook: browse, search, add and edit, and the slice each session got">Memory</button>
 </nav>
 <div id="draftbar" role="region" aria-label="Draft">
   <div class="state grow" id="draft-state" aria-live="polite"></div>
@@ -2315,14 +2315,19 @@ $("#main").addEventListener("keydown", e => {
 });
 
 /* ======================================================================== memory view (Team Lead piece 4) */
-S.mem = {project: store("fr.auto.memproject") || "", data: null, file: "", q: "", open: {}, edit: null, busy: false};
+S.mem = {project: store("fr.auto.memproject") || "", scope: store("fr.auto.memscope") || "project", data: null, file: "", q: "", open: {}, edit: null, busy: false};
 const MEM_FIXED = ["DECISIONS.md", "CONVENTIONS.md", "KNOWN_ISSUES.md", "ASSETS.md"];
 const MEM_FILE_RE = /^(?:(?:DECISIONS|CONVENTIONS|ASSETS|KNOWN_ISSUES)\.md|(?:tracks|sprints)\/[A-Za-z0-9][A-Za-z0-9._-]{0,59}(?:\.md)?)$/i;
+/* cross-project playbook (A1): the same snapshot shape under project @playbook */
+const PB_PROJECT = "@playbook";
+const PB_FILE_RE = /^(?:templates|howto|fixes|scripts|formats)\/[A-Za-z0-9][A-Za-z0-9._-]{0,59}(?:\.md)?$/;
+const memPB = () => S.mem.scope === "playbook";
 async function loadMemory() {
   if (!S.ov) S.ov = await api("overview?hours=720");
   const projects = S.ov.projects || [];
   if (!S.mem.project || !projects.includes(S.mem.project)) S.mem.project = S.project || projects[0] || "";
-  S.mem.data = S.mem.project ? await api("memory?project=" + encodeURIComponent(S.mem.project)) : {snapshot: null, note: "No project has been reported by the coordinator yet."};
+  if (memPB()) S.mem.data = await api("memory?project=" + encodeURIComponent(PB_PROJECT));
+  else S.mem.data = S.mem.project ? await api("memory?project=" + encodeURIComponent(S.mem.project)) : {snapshot: null, note: "No project has been reported by the coordinator yet."};
 }
 function memData() { const s = S.mem.data && S.mem.data.snapshot; return (s && s.data) || null; }
 function memSearch(entries, q) {
@@ -2376,7 +2381,7 @@ function memSlicesHtml(d) {
   return `<table class="mem-table"><thead><tr><th>Session</th><th>Task</th><th>Role · track</th><th>State</th><th>Entries</th><th>Tokens</th><th>Prompts</th><th>Last sent</th></tr></thead><tbody>
     ${slices.map(s => { const open = !!S.mem.open[s.session_id]; return `<tr class="${s.live ? "live" : ""}">
       <td><button class="act" type="button" data-act="m-slice" data-sid="${esc(s.session_id)}" aria-expanded="${open}" title="Show the entries this session got"><code>${esc((s.session_id || "").slice(0, 12))}</code> ${open ? "▴" : "▾"}</button></td>
-      <td>${esc(s.task_id)}</td><td>${esc(s.role)}${s.track ? ` · ${esc(s.track)}` : ""}</td>
+      <td>${s.project_id && memPB() ? `${esc(s.project_id)} / ` : ""}${esc(s.task_id)}</td><td>${esc(s.role)}${s.track ? ` · ${esc(s.track)}` : ""}</td>
       <td>${s.live ? `<span class="pill info">live</span>` : `<span class="pill">${esc(s.status || "ended")}</span>`}</td>
       <td>${(s.entries || []).length}</td><td>${s.tokens} / ${s.budget}</td><td>${s.prompts}</td><td class="hint">${esc(when(s.ts))}</td></tr>
       ${open ? `<tr><td colspan="8"><ul class="mem-list small">${(s.entries || []).map(e => `<li><code>${esc(e.file)}</code> ${esc(e.heading)} <span class="hint" style="margin:0">${esc(e.why || "")}</span></li>`).join("") || "<li class='hint'>empty slice</li>"}</ul></td></tr>` : ""}`; }).join("")}
@@ -2397,43 +2402,57 @@ async function renderMemory() {
   const snap = S.mem.data.snapshot, d = memData();
   const files = (d && d.files) || [];
   const known = files.map(f => f.file);
-  const fileOptions = [...MEM_FIXED, ...known.filter(f => !MEM_FIXED.includes(f))];
+  const pb = memPB();
+  const fileOptions = pb ? known : [...MEM_FIXED, ...known.filter(f => !MEM_FIXED.includes(f))];
+  const scopeBtn = (v, label, title) => `<button type="button" role="tab" class="act${S.mem.scope === v ? " primary" : ""}" aria-selected="${S.mem.scope === v}" data-act="m-scope" data-scope="${v}" title="${esc(title)}">${label}</button>`;
   el.innerHTML = `
-    <div class="row" style="margin-top:12px"><label class="fld" for="m-project">Project</label>
-      <select id="m-project" data-act="m-project">${projects.map(p => `<option ${p === S.mem.project ? "selected" : ""}>${esc(p)}</option>`).join("") || "<option value=''>none reported</option>"}</select>
-      ${d ? `<span class="hint" style="margin:0"><code>${esc(d.dir || "docs/memory")}</code> · ${(d.entries || []).length} entries in ${files.length} files · reported ${esc(when(snap.source_ts))}${d.enabled === false ? " · <b>memory is off</b>" : ""}</span>` : ""}
+    <div class="row" style="margin-top:12px">
+      <span role="tablist" aria-label="Memory scope">${scopeBtn("project", "Project memory", "docs/memory in the game repo: this project's own facts")}${scopeBtn("playbook", "Playbook", "the cross-project knowledge base (templates, how-tos, fixes, scripts, formats) every project reads")}</span>
+      ${pb ? "" : `<label class="fld" for="m-project">Project</label>
+      <select id="m-project" data-act="m-project">${projects.map(p => `<option ${p === S.mem.project ? "selected" : ""}>${esc(p)}</option>`).join("") || "<option value=''>none reported</option>"}</select>`}
+      ${d ? `<span class="hint" style="margin:0"><code>${esc(pb ? "playbook repo" : (d.dir || "docs/memory"))}</code> · ${(d.entries || []).length} entries in ${files.length} files · reported ${esc(when(snap.source_ts))}${d.enabled === false ? ` · <b>${pb ? "playbook not configured" : "memory is off"}</b>` : ""}</span>` : ""}
       <span class="grow"></span><button class="act" type="button" data-act="m-refresh">Refresh</button></div>
-    ${!d ? `<div class="banner"><b>No memory reported for ${esc(S.mem.project || "this project")}.</b> ${esc(S.mem.data.note || "")} Create the layout on the workstation with <code>python -m foundry_coordinator memory init ${esc(S.mem.project)}</code> (and <code>memory import-state</code> once to fold STATE.md in); the coordinator reports it at its next tick.</div>` : ""}
+    ${!d ? (pb ? `<div class="banner"><b>No playbook reported.</b> ${esc(S.mem.data.note || "")} Configure it on the workstation (start the coordinator with <code>--playbook PATH</code> or <code>$FOUNDRY_PLAYBOOK</code>, then <code>python -m foundry_coordinator playbook init</code>); the coordinator reports it at its next tick.</div>`
+            : `<div class="banner"><b>No memory reported for ${esc(S.mem.project || "this project")}.</b> ${esc(S.mem.data.note || "")} Create the layout on the workstation with <code>python -m foundry_coordinator memory init ${esc(S.mem.project)}</code> (and <code>memory import-state</code> once to fold STATE.md in); the coordinator reports it at its next tick.</div>`) : ""}
     <div class="mem-wrap">
       <aside class="mem-side">
-        <ul class="mem-files" role="listbox" aria-label="Memory files">
+        <ul class="mem-files" role="listbox" aria-label="${pb ? "Playbook" : "Memory"} files">
           <li><button type="button" role="option" class="chat-th${!S.mem.file ? " on" : ""}" aria-selected="${!S.mem.file}" data-act="m-file" data-file=""><span class="t">All files</span><span class="hint" style="margin:0">${(d && d.entries || []).length} entries</span></button></li>
           ${files.map(f => `<li><button type="button" role="option" class="chat-th${f.file === S.mem.file ? " on" : ""}" aria-selected="${f.file === S.mem.file}" data-act="m-file" data-file="${esc(f.file)}"><span class="t">${esc(f.file)}</span><span class="hint" style="margin:0">${f.entries} entr${f.entries === 1 ? "y" : "ies"}</span></button></li>`).join("")}
         </ul>
         <form id="mem-add" class="mem-add" autocomplete="off">
-          <h3 style="margin:0 0 6px">Add a fact</h3>
+          <h3 style="margin:0 0 6px">${pb ? "Add a playbook entry" : "Add a fact"}</h3>
           <label class="fld" for="mem-add-file">File</label>
-          <select id="mem-add-file" name="file">${fileOptions.map(f => `<option ${f === (S.mem.file || "DECISIONS.md") ? "selected" : ""}>${esc(f)}</option>`).join("")}<option value="__other">sprints/&lt;ID&gt;.md or tracks/&lt;name&gt;.md…</option></select>
-          <input id="mem-add-custom" name="custom" placeholder="sprints/UI-02b.md" hidden spellcheck="false">
+          <select id="mem-add-file" name="file">${fileOptions.map(f => `<option ${f === (S.mem.file || (pb ? fileOptions[0] : "DECISIONS.md")) ? "selected" : ""}>${esc(f)}</option>`).join("")}<option value="__other">${pb ? "fixes/&lt;name&gt;.md, howto/&lt;name&gt;.md…" : "sprints/&lt;ID&gt;.md or tracks/&lt;name&gt;.md…"}</option></select>
+          <input id="mem-add-custom" name="custom" placeholder="${pb ? "fixes/rojo-stale.md" : "sprints/UI-02b.md"}" hidden spellcheck="false">
           <label class="fld" for="mem-add-heading">Heading</label>
-          <input id="mem-add-heading" name="heading" maxlength="120" required placeholder="Studio: gate order" spellcheck="false">
+          <input id="mem-add-heading" name="heading" maxlength="120" required placeholder="${pb ? "rojo_stale: repaired rojo stop" : "Studio: gate order"}" spellcheck="false">
           <label class="fld" for="mem-add-text">Text</label>
-          <textarea id="mem-add-text" name="text" rows="4" maxlength="4000" required placeholder="One or two sentences, or a | table | row | for ASSETS.md"></textarea>
+          <textarea id="mem-add-text" name="text" rows="4" maxlength="4000" required placeholder="${pb ? "What the error looks like, the cause, the verified fix." : "One or two sentences, or a | table | row | for ASSETS.md"}"></textarea>
           <div class="row" style="margin:6px 0 0"><button class="act primary" type="submit" ${!d || S.mem.busy ? "disabled" : ""}>Add (commit)</button><span class="hint" id="mem-add-msg" style="margin:0"></span></div>
-          <p class="hint">The coordinator validates it (known file, size, no secrets), appends it under the heading and commits it to the game repo; a new heading goes at the end of the file.</p>
+          <p class="hint">${pb ? "The coordinator validates it (known directory, size, no secrets), appends it under the heading and commits it to the playbook repo shared by every project." : "The coordinator validates it (known file, size, no secrets), appends it under the heading and commits it to the game repo; a new heading goes at the end of the file."}</p>
         </form>
       </aside>
       <section class="mem-main">
-        <div class="row" style="margin:0 0 8px"><label class="sr-only" for="mem-q">Search memory</label><input id="mem-q" type="search" placeholder="Search memory (words in headings, tags and text)…" value="${esc(S.mem.q)}" style="flex:1;min-width:160px" ${!d ? "disabled" : ""}><span class="hint" id="mem-count" style="margin:0"></span></div>
+        <div class="row" style="margin:0 0 8px"><label class="sr-only" for="mem-q">Search ${pb ? "playbook" : "memory"}</label><input id="mem-q" type="search" placeholder="Search ${pb ? "the playbook" : "memory"} (words in headings, tags and text)…" value="${esc(S.mem.q)}" style="flex:1;min-width:160px" ${!d ? "disabled" : ""}><span class="hint" id="mem-count" style="margin:0"></span></div>
         <div id="mem-entries">${memEntriesHtml()}</div>
+        ${pb ? memCandidatesHtml(d) : ""}
         <h3>Slices sent to sessions</h3>
-        <p class="hint" style="margin-top:0">What each session got in its prompt: the entries matching its sprint's files, needs and track plus the latest decisions, within the token budget. A later prompt to the same session carries only entries that changed.</p>
+        <p class="hint" style="margin-top:0">${pb ? "The playbook entries each session's prompt carried (all projects, helpers included), chosen by its role, files, needs and failure signature in what the memory slice left of the shared token budget." : "What each session got in its prompt: the entries matching its sprint's files, needs and track plus the latest decisions, within the token budget."} A later prompt to the same session carries only entries that changed.</p>
         ${memSlicesHtml(d)}
         <h3>Recent notes</h3>
         ${memNotesHtml(d)}
       </section>
     </div>`;
   memCount();
+}
+function memCandidatesHtml(d) {
+  const cds = (d && d.candidates) || [];
+  if (!cds.length) return "";
+  const pill = s => s === "promoted" ? "ok" : s === "proposed" ? "info" : s === "dismissed" ? "" : "";
+  return `<h3>Promotion candidates</h3>
+    <p class="hint" style="margin-top:0">Deterministic counters: a twice-repaired failure signature or a thrice-repeated operator instruction drafts an entry and opens a low-priority decision (answer it from the control center). Off until <code>[automation] playbook_promote</code> is enabled.</p>
+    <ul class="mem-list">${cds.map(cd => `<li><span class="pill ${pill(cd.status)}">${esc(cd.status)}</span> <code>${esc(cd.key)}</code> ${cd.count}/${cd.threshold}× (${esc((cd.projects || []).join(", "))})${cd.file ? ` → <code>${esc(cd.file)}</code> ${esc(cd.heading || "")}` : ""}${cd.decision_id && cd.status === "proposed" ? ` <span class="hint" style="margin:0">decision ${esc(cd.decision_id)}</span>` : ""}</li>`).join("")}</ul>`;
 }
 function memCount() { const c = $("#mem-count"); if (c) c.textContent = $$("#mem-entries .mem-group").length + " heading(s) shown"; }
 const memSearchSoon = debounce(() => { const i = $("#mem-q"); if (!i) return; S.mem.q = i.value; const box = $("#mem-entries"); if (box) box.innerHTML = memEntriesHtml(); memCount(); }, 200);
@@ -2443,7 +2462,9 @@ async function memAction(kind, file, heading, text, msgEl) {
   const say = t => { if (msgEl) msgEl.textContent = t; };
   try {
     say("Sending to the coordinator…");
-    const r = await api("actions", {method: "POST", body: {kind, project_id: S.mem.project, file, heading, text, idempotency_key: idem()}});
+    // playbook actions are cross-project; the project id only routes the action
+    const pid = memPB() ? (S.mem.project || ((S.ov && S.ov.projects) || [])[0] || "") : S.mem.project;
+    const r = await api("actions", {method: "POST", body: {kind, project_id: pid, file, heading, text, idempotency_key: idem()}});
     let a = r;
     for (let i = 0; i < 12 && !["applied", "rejected", "failed", "expired", "cancelled"].includes(a.status); i++) {
       say(`${r.summary}: ${a.status}…`);
@@ -2461,6 +2482,7 @@ $("#v-memory").addEventListener("click", async e => {
   const b = e.target.closest("[data-act]"); if (!b) return;
   const a = b.dataset.act;
   if (a === "m-refresh") { S.mem.data = null; S.ov = null; renderMemory(); }
+  else if (a === "m-scope") { S.mem.scope = b.dataset.scope === "playbook" ? "playbook" : "project"; store("fr.auto.memscope", S.mem.scope); S.mem.file = ""; S.mem.q = ""; S.mem.edit = null; S.mem.data = null; renderMemory(); }
   else if (a === "m-file") { S.mem.file = b.dataset.file || ""; S.mem.edit = null; renderMemory(); }
   else if (a === "m-edit") { S.mem.edit = b.dataset.file + "\n" + b.dataset.heading; const box = $("#mem-entries"); box.innerHTML = memEntriesHtml(); const t = $(".mem-editform textarea", box); if (t) t.focus(); }
   else if (a === "m-edit-cancel") { S.mem.edit = null; $("#mem-entries").innerHTML = memEntriesHtml(); }
@@ -2476,11 +2498,15 @@ $("#v-memory").addEventListener("submit", async e => {
   if (f.id === "mem-add") {
     const fd = new FormData(f);
     let file = fd.get("file") === "__other" ? String(fd.get("custom") || "").trim() : String(fd.get("file"));
-    if (!MEM_FILE_RE.test(file)) { toast("File must be DECISIONS.md, CONVENTIONS.md, KNOWN_ISSUES.md, ASSETS.md, sprints/<ID>.md or tracks/<name>.md", true); return; }
-    const ok = await memAction("memory_add", file, String(fd.get("heading")).trim(), String(fd.get("text")).trim(), $("#mem-add-msg"));
+    if (memPB() ? !PB_FILE_RE.test(file) : !MEM_FILE_RE.test(file)) {
+      toast(memPB() ? "File must be templates/<name>.md, howto/<name>.md, fixes/<name>.md, scripts/<name>.md or formats/<name>.md"
+                    : "File must be DECISIONS.md, CONVENTIONS.md, KNOWN_ISSUES.md, ASSETS.md, sprints/<ID>.md or tracks/<name>.md", true);
+      return;
+    }
+    const ok = await memAction(memPB() ? "playbook_add" : "memory_add", file, String(fd.get("heading")).trim(), String(fd.get("text")).trim(), $("#mem-add-msg"));
     if (ok) f.reset();
   } else if (f.classList.contains("mem-editform")) {
-    await memAction("memory_edit", f.dataset.file, f.dataset.heading, String(new FormData(f).get("text")).trim(), null);
+    await memAction(memPB() ? "playbook_edit" : "memory_edit", f.dataset.file, f.dataset.heading, String(new FormData(f).get("text")).trim(), null);
   }
 });
 

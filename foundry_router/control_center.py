@@ -173,7 +173,7 @@ ACTION_KINDS = ("answer_question", "reply_permission", "approve_review", "reject
                 "tracks_analyze", "tracks_propose", "track_start", "track_stop", "track_merge",
                 "track_status", "set_max_agents",
                 "client_service_enable",
-                "memory_add", "memory_edit",
+                "memory_add", "memory_edit", "playbook_add", "playbook_edit",
                 "queue_approve", "queue_reorder", "queue_deps", "queue_requeue")
 # Team Lead tracks (2026-10-22): project-scoped, operator sessions, claimed by a
 # coordinator that declares the `tracks` feature (foundry_coordinator/control.py
@@ -293,6 +293,7 @@ FEATURE_GATED_ACTIONS = {"decision_answer": "decision_answer", "project_pause": 
                          **{k: "lead_manager" for k in LEAD_ACTIONS},
                          **{k: "tracks" for k in TRACK_ACTIONS},
                          **{k: "project_memory" for k in MEMORY_ACTIONS},
+                         **{k: "playbook" for k in PLAYBOOK_ACTIONS},
                          **{k: "queue" for k in QUEUE_ACTIONS}}
 # observation types that only make sense inside a project: an empty project_id
 # would bypass the per-key project allowlist, so they are refused
@@ -803,7 +804,10 @@ class ControlCenter:
                     continue
                 t = o.get("type")
                 pid = _s(o.get("project_id"), 120)
-                if allowed and pid and pid not in allowed:
+                if allowed and pid and pid not in allowed and \
+                        not (pid == PLAYBOOK_PROJECT and t == "memory"):
+                    # the playbook snapshot is cross-project by design: any source
+                    # allowed to send memory observations may send it
                     skipped["project_not_allowed"] = skipped.get("project_not_allowed", 0) + 1
                     continue
                 if not pid and (allowed or t in PROJECT_SCOPED_TYPES):
@@ -1049,11 +1053,26 @@ class ControlCenter:
                   "hash": _s(f.get("hash"), 40), "indexed_ts": _f(f.get("indexed_ts")),
                   "size": int(f.get("size") or 0)}
                  for f in (o.get("files") or [])[:500] if isinstance(f, dict)]
-        self._snapshot(c, "memory", o, {"dir": _s(o.get("dir"), 80) or "docs/memory",
-                                        "enabled": bool(o.get("enabled", True)),
-                                        "fingerprint": _s(o.get("fingerprint"), 40),
-                                        "files": files, "entries": ents, "slices": sl,
-                                        "notes": notes}, now)
+        data = {"dir": _s(o.get("dir"), 80) or "docs/memory",
+                "enabled": bool(o.get("enabled", True)),
+                "fingerprint": _s(o.get("fingerprint"), 40),
+                "files": files, "entries": ents, "slices": sl, "notes": notes}
+        if o.get("candidates") is not None:
+            # the playbook snapshot (project @playbook): promotion candidates
+            data["candidates"] = [
+                {"key": _s(cd.get("key"), 120), "kind": _s(cd.get("kind"), 20),
+                 "count": int(cd.get("count") or 0), "threshold": int(cd.get("threshold") or 0),
+                 "projects": [_s(x, 80) for x in (cd.get("projects") or [])[:20]],
+                 "status": _s(cd.get("status"), 20), "decision_id": _s(cd.get("decision_id"), 60),
+                 "file": _s(cd.get("file"), 120), "heading": _s(cd.get("heading"), 200),
+                 "draft": _s(cd.get("draft"), 400), "last_ts": _f(cd.get("last_ts"))}
+                for cd in (o.get("candidates") or [])[:30] if isinstance(cd, dict)]
+        if sl:
+            # playbook slices carry the receiving project per session
+            for s_, raw in zip(data["slices"], (o.get("slices") or [])[:40]):
+                if isinstance(raw, dict) and raw.get("project_id"):
+                    s_["project_id"] = _s(raw.get("project_id"), 120)
+        self._snapshot(c, "memory", o, data, now)
         return []
 
     def _in_capabilities(self, c, o, st, now, src):
@@ -2523,6 +2542,8 @@ class ControlCenter:
             return self._create_client_action(actor, projects, body, scopes, kind, idem)
         if kind in MEMORY_ACTIONS:
             return self._create_memory_action(actor, projects, body, scopes, kind, idem, pid)
+        if kind in PLAYBOOK_ACTIONS:
+            return self._create_memory_action(actor, projects, body, scopes, kind, idem, pid)
         if kind in QUEUE_ACTIONS:
             return self._create_queue_action(actor, projects, body, scopes, kind, idem, pid, tid)
         if not pid or not tid:
@@ -3095,7 +3116,11 @@ class ControlCenter:
         file = _s(body.get("file"), 160).replace("\\", "/").strip().strip("/")
         if file.lower().startswith("docs/memory/"):
             file = file[len("docs/memory/"):]
-        if not MEMORY_FILE.match(file):
+        if kind in PLAYBOOK_ACTIONS:
+            if not PLAYBOOK_FILE.match(file):
+                raise ControlError("file must be templates/<name>.md, howto/<name>.md, "
+                                   "fixes/<name>.md, scripts/<name>.md or formats/<name>.md")
+        elif not MEMORY_FILE.match(file):
             raise ControlError("file must be DECISIONS.md, CONVENTIONS.md, ASSETS.md, KNOWN_ISSUES.md, "
                                "tracks/<name>.md or sprints/<ID>.md")
         heading = " ".join(str(body.get("heading") or "").split())
@@ -3467,6 +3492,10 @@ class ControlCenter:
         if kind in MEMORY_ACTIONS:
             verb = "add to" if kind == "memory_add" else "edit"
             return (f"memory {verb} {p.get('file')} > {p.get('heading')} ({tid}), "
+                    f"{len(p.get('text') or '')} chars")[:300]
+        if kind in PLAYBOOK_ACTIONS:
+            verb = "add to" if kind == "playbook_add" else "edit"
+            return (f"playbook {verb} {p.get('file')} > {p.get('heading')}, "
                     f"{len(p.get('text') or '')} chars")[:300]
         if kind == "client_restart":
             return f"restart {p.get('component')} ({'now' if p.get('force') else 'at a safe point'})"

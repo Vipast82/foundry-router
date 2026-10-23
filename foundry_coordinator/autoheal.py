@@ -141,6 +141,15 @@ def try_heal(c, P, t: dict, to: str, evidence: dict, cls: str, fields: dict) -> 
     c.store.event(pid, tid, "auto_heal", detail={
         "key": key, "n": n + 1, "of": retries, "action": action, "signature": sig,
         "class": cls, "delay_s": delay, "reason": reason[:300], "repairs": repairs})
+    if n == 0:
+        # A1: one promotion-pipeline occurrence per auto-heal key (head/class/
+        # signature), counted on its first retry; inert without a playbook
+        pb = getattr(c, "playbook", None)
+        if pb is not None:
+            try:
+                pb.promote.observe_failure(P, tid, sig, cls, reason)
+            except Exception as e:                               # noqa: BLE001
+                c.log(f"{pid}/{tid}: playbook observe_failure failed: {e}")
     return out
 
 

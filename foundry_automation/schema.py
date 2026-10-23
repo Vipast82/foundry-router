@@ -187,6 +187,10 @@ AUTOMATION_DEFAULTS: dict = {
     "memory_slice_tokens": 3000,
     "memory_decisions": 8,
     "memory_note_max_chars": 1500,
+    # A1 playbook (2026-10-23): the cross-project knowledge base; both keys are
+    # inert until the coordinator is started with a playbook path
+    "playbook": True,
+    "playbook_promote": False,
     "transcript_poll_seconds": 120,
     "generic_checks_cache": True,
     # Team Lead tracks (2026-10-22): parallel sprints on git worktrees
@@ -601,6 +605,11 @@ _AUTO_DESC = {
                            "review prompts get half).",
     "memory_decisions": "Most recent DECISIONS.md entries every slice includes.",
     "memory_note_max_chars": "Longest MEMORY_NOTE text a session may record.",
+    "playbook": "Cross-project playbook slices in this project's prompts (inert without a "
+                "configured playbook path: --playbook / $FOUNDRY_PLAYBOOK).",
+    "playbook_promote": "Promotion pipeline: a twice-repaired failure signature or a thrice-"
+                        "repeated operator instruction drafts a playbook entry and opens a "
+                        "low-priority decision. Off until the operator enables it.",
     "transcript_poll_seconds": "Lane transcript ingest interval.",
     "generic_checks_cache": "Reuse per-tick coordinator checks while HEAD and the tree are "
                             "unchanged.",

@@ -46,7 +46,7 @@ ROUTE_RETRY_S = 300
 class Coordinator:
     def __init__(self, store: Store, projects: list[Project], state_dir: str,
                  max_writers: Optional[int] = None, clock: Callable[[], float] = time.time,
-                 log: Callable[[str], None] = lambda m: None):
+                 log: Callable[[str], None] = lambda m: None, playbook_path: str = ""):
         self.store = store
         self.projects = {p.id: p for p in projects}
         self.state_dir = state_dir
@@ -75,6 +75,10 @@ class Coordinator:
         # Team Lead piece 4: project memory (docs/memory in the repo), indexed here and
         # sliced per session; inert for a project without the layout
         self.memory = MemoryManager(self)
+        from .playbook import PlaybookManager
+        # A1: the cross-project playbook (its own repo, --playbook / $FOUNDRY_PLAYBOOK);
+        # inert without a configured path
+        self.playbook = PlaybookManager(self, playbook_path)
         # B4: code reviews started early (while vision runs), by (project, task, head)
         self._early_reviews: dict = {}
         self._early_pool = None
@@ -238,6 +242,13 @@ class Coordinator:
             decision_policy.sweep(self)
         except Exception as e:                                    # noqa: BLE001
             self.log(f"decision timeout sweep failed: {type(e).__name__}: {e}")
+        try:
+            # A1: re-index the cross-project playbook and apply answered
+            # promotion decisions (both inert without a configured playbook)
+            self.playbook.tick()
+            self.playbook.promote.sweep()
+        except Exception as e:                                    # noqa: BLE001
+            self.log(f"playbook tick failed: {type(e).__name__}: {e}")
         rr = int(self.store.meta("rr") or 0) % len(ids)
         order = ids[rr:] + ids[:rr]
         self.store.set_meta("rr", str(rr + 1))
@@ -2973,23 +2984,38 @@ class Coordinator:
     # ======================================================================= project memory
 
     def _memory_block(self, P: Project, tid: str, sid: str) -> str:
-        """The docs/memory slice for this task's prompt (memory/manager.py); never
+        """The docs/memory slice for this task's prompt (memory/manager.py), plus
+        the playbook slice filling what's left of the shared budget (A1); never
         raises: a memory failure costs the prompt its slice, nothing else."""
         try:
             # a sprint queued on a track gets the track's slice (tracks/manager.py)
-            return self.memory.prompt_block(P, tid, sid, track=self.store.task_track(P.id, tid))
+            track = self.store.task_track(P.id, tid)
+            block = self.memory.prompt_block(P, tid, sid, track=track)
         except Exception as e:                                    # noqa: BLE001
             self.log(f"{P.id}/{tid}: memory slice failed: {type(e).__name__}: {e}")
-            return ""
+            block, track = "", None
+        try:
+            pb = self.playbook.prompt_block(P, tid, sid, track=track, used_text=block)
+        except Exception as e:                                    # noqa: BLE001
+            self.log(f"{P.id}/{tid}: playbook slice failed: {type(e).__name__}: {e}")
+            pb = ""
+        if block and pb:
+            return block.rstrip("\n") + "\n\n" + pb
+        return block or pb
 
     def _memory_notes(self, P: Project, t: dict, s) -> None:
-        """MEMORY_NOTE lines of an ended session's final message -> validated,
-        appended, committed and indexed by the coordinator."""
+        """MEMORY_NOTE / PLAYBOOK_NOTE lines of an ended session's final message
+        -> validated, appended, committed and indexed by the coordinator."""
         try:
             self.memory.apply_notes(P, t, s)
         except Exception as e:                                    # noqa: BLE001
             self.store.event(P.id, t["task_id"], "warning", session_id=t.get("session_id") or "",
                              detail={"memory_notes": f"{type(e).__name__}: {e}"[:400]})
+        try:
+            self.playbook.apply_notes(P, t, s)
+        except Exception as e:                                    # noqa: BLE001
+            self.store.event(P.id, t["task_id"], "warning", session_id=t.get("session_id") or "",
+                             detail={"playbook_notes": f"{type(e).__name__}: {e}"[:400]})
 
     def _memory_review_note(self, P: Project, spec) -> str:
         """One provenance note for the review packet: the conventions, known

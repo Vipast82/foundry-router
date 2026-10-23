@@ -23,6 +23,12 @@ from . import layout
 
 NOTE_LINE = re.compile(r"^[ \t>*-]*MEMORY_NOTE:\s*(.+?)\s*$", re.M)
 _KV = re.compile(r'(\w+)=("((?:[^"\\]|\\.)*)"|\'((?:[^\'\\]|\\.)*)\'|((?:(?!\s\w+=).)+))')
+
+
+def note_line(keyword: str) -> re.Pattern:
+    """The NOTE_LINE pattern for another report keyword (the playbook's
+    PLAYBOOK_NOTE); MEMORY_NOTE keeps the precompiled one."""
+    return re.compile(r"^[ \t>*-]*" + re.escape(keyword) + r":\s*(.+?)\s*$", re.M)
 MAX_HEADING = 120
 MAX_NOTES_PER_REPORT = 12
 SECRETS = [
@@ -37,12 +43,14 @@ SECRETS = [
 ]
 
 
-def parse_notes(text: str) -> list[dict]:
+def parse_notes(text: str, keyword: str = "") -> list[dict]:
     """Every MEMORY_NOTE line of a session's final message, in order: {file,
     heading, text, raw}. Malformed lines come back with "error" set so they can
-    be reported, never silently dropped."""
+    be reported, never silently dropped. `keyword` parses another block name
+    (the playbook's PLAYBOOK_NOTE) with the same grammar."""
     out = []
-    for m in NOTE_LINE.finditer(text or ""):
+    rx = note_line(keyword) if keyword and keyword != "MEMORY_NOTE" else NOTE_LINE
+    for m in rx.finditer(text or ""):
         body = m.group(1).strip()
         note: dict = {"raw": body[:600]}
         if body.startswith("{"):
@@ -83,14 +91,17 @@ def find_secret(text: str) -> str:
     return ""
 
 
-def validate(note: dict, max_chars: int = 1500) -> str:
-    """"" when the note may be applied, else the reason."""
+def validate(note: dict, max_chars: int = 1500, file_ok=None, files_hint: str = "") -> str:
+    """"" when the note may be applied, else the reason. `file_ok` validates the
+    file against another layout (the playbook's); the default is the memory
+    layout, and `files_hint` names the allowed files in the rejection."""
     if note.get("error"):
         return note["error"]
-    file = layout.file_ok(note.get("file") or "")
+    file = (file_ok or layout.file_ok)(note.get("file") or "")
     if not file:
-        return (f"unknown memory file {note.get('file')!r} (one of "
-                f"{', '.join(layout.FIXED_FILES)}, tracks/<name>.md, sprints/<ID>.md)")
+        hint = files_hint or (f"one of {', '.join(layout.FIXED_FILES)}, tracks/<name>.md, "
+                              "sprints/<ID>.md")
+        return f"unknown memory file {note.get('file')!r} ({hint})"
     heading = (note.get("heading") or "").strip()
     if not heading:
         return "heading is empty"

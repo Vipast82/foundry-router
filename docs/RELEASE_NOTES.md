@@ -2,6 +2,50 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.138.0 — Playbook: the cross-project knowledge base
+
+Review item A1 (reports/UI_AUTOMATION_REVIEW_2026-10-23.md); design and
+as-built notes in reports/PLAYBOOK_DESIGN.md. The org-wide wiki Victor asked
+for: templates, how-tos, verified fixes (error signature → fix), scripts and
+formats in one git repo every project's sessions read — reusing the project
+memory machinery, not duplicating it. Everything is inert until the
+coordinator is started with `--playbook PATH` (or `$FOUNDRY_PLAYBOOK`); then
+`python -m foundry_coordinator playbook init` creates and commits the layout.
+
+- **Repo + index** (`foundry_coordinator/playbook/`): `templates/ howto/
+  fixes/ scripts/ formats/`, same heading-entry markdown as docs/memory,
+  indexed by the same indexer under the reserved id `@playbook` (no schema
+  change there; new additive tables `playbook_slices`, `playbook_notes`,
+  `playbook_candidates`).
+- **Slices in every prompt** share the `memory_slice_tokens` budget: the
+  memory slice first, the playbook fills the remainder (400-token floor), a
+  `fixes/` entry matching the task's recorded failure signature is boosted to
+  the front, and the joined block rides the existing per-entry delta hashing.
+  Primaries, the lead and helpers all get it ([automation] `playbook`, default
+  on, gates it per project).
+- **Writes**: sessions contribute `PLAYBOOK_NOTE` lines in their final report
+  (same grammar/validator as MEMORY_NOTE, secret scan, per-session dedupe);
+  the coordinator commits by explicit path to the playbook repo (`PLAYBOOK:`
+  prefix). Chat `kb_search` / `kb_add` / `kb_edit`; control kinds
+  `playbook_add` / `playbook_edit` (feature `playbook`); `playbook
+  init|status|reindex|search|add` on the CLI; a doctor line.
+- **Promotion pipeline** ([automation] `playbook_promote`, **default off**):
+  deterministic counters — the same repaired failure signature twice (first
+  auto-heal retry per key, or a resolved lead case) or the same normalized
+  operator instruction three times — render a template draft and open a
+  low-priority `playbook_promotion` decision (operator-only, recommends "add",
+  blocks nothing, never timeout-applied). "add" commits the draft; "skip"
+  re-asks only after two further repeats. Counting runs while a playbook is
+  configured, so enabling the pipeline later starts from real history.
+- **Sessions' kb_search**: `foundry_coordinator/playbook/kb_mcp.py`, a
+  read-only stdio MCP server over the index (SQLite `mode=ro`), wired into a
+  project's kilo.jsonc per project.
+- **UI**: the Memory tab gets a Project memory ↔ Playbook scope switch —
+  browse/search, add/edit (typed actions), which sessions received which
+  entries, and the pending promotion candidates. The snapshot travels as a
+  `memory` observation under `@playbook` (scope `playbook`), readable by any
+  operator.
+
 ## v0.137.0 — Queue API, kanban board, PM decisions inbox
 
 Review items A2, A3 and V9 (reports/UI_AUTOMATION_REVIEW_2026-10-23.md). The

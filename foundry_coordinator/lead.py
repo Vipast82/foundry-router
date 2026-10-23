@@ -1803,15 +1803,26 @@ class LeadManager:
             report_contract(bool(self.settings(P).get("full_authority"))), "", text])
 
     def _memory_text(self, P, t: dict) -> str:
-        """The project memory slice (docs/memory) for the lead: half the
-        implementer budget, never raises."""
+        """The project memory slice (docs/memory) for the lead, plus the playbook
+        slice in what's left of the shared budget (A1): half the implementer
+        budget, never raises."""
         mem = getattr(self.c, "memory", None)
-        if mem is None:
-            return ""
-        try:
-            return mem.prompt_block(P, t["task_id"], "", role="lead")
-        except Exception:                                         # noqa: BLE001
-            return ""
+        block = ""
+        if mem is not None:
+            try:
+                block = mem.prompt_block(P, t["task_id"], "", role="lead")
+            except Exception:                                     # noqa: BLE001
+                block = ""
+        pb = getattr(self.c, "playbook", None)
+        extra = ""
+        if pb is not None:
+            try:
+                extra = pb.prompt_block(P, t["task_id"], "", role="lead", used_text=block)
+            except Exception:                                     # noqa: BLE001
+                extra = ""
+        if block and extra:
+            return block.rstrip("\n") + "\n\n" + extra
+        return block or extra
 
     @staticmethod
     def _write_mode_text(t: dict) -> str:
@@ -3421,8 +3432,29 @@ class LeadManager:
             self._end_case_sessions(None, c, "case_resolved")
             self._withdraw_escalation(c, f"the case was resolved: {outcome}")
             self._act(c, "resolve", result=outcome[:500], actor=actor)
-            return self._save(case_id, state="RESOLVED", outcome=outcome[:500])
+            out = self._save(case_id, state="RESOLVED", outcome=outcome[:500])
+            self._observe_playbook(c)        # A1: one promotion occurrence per resolved case
+            return out
         return c
+
+    def _observe_playbook(self, c: dict) -> None:
+        """A resolved lead case counts once toward the playbook promotion
+        pipeline (same normalized class/signature as auto-heal); inert without a
+        configured playbook."""
+        pb = getattr(self.c, "playbook", None)
+        P = (getattr(self.c, "projects", None) or {}).get(c.get("project_id"))
+        if pb is None or P is None:
+            return
+        trig = c.get("trigger") or {}
+        reason = str(trig.get("reason") or "")
+        from .autoheal import infra_signature
+        try:
+            pb.promote.observe_failure(P, c.get("task_id") or "",
+                                       infra_signature(reason) or "lead_repair",
+                                       str(trig.get("class") or "stop"), reason)
+        except Exception as e:                                   # noqa: BLE001
+            (getattr(self.c, "log", None) or (lambda m: None))(
+                f"playbook observe_failure (lead) failed: {e}")
 
     def cancel(self, case_id: str, reason: str, actor: str = "engine", P=None) -> dict:
         """Cancel an open case: abort and end its lead / repair sessions, cancel

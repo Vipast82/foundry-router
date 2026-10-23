@@ -850,6 +850,7 @@ class HelperManager:
                                          "lost; Kilo has the prompt, not resent"})
         if not res.get("prompted"):
             text = self.lanes.prompt(P, spec, u) if u.get("lane") else self.prompt(spec, u)
+            text += self._playbook_text(P, spec, u, sid)
             self.store.op_update(key, "bound", {**res, "prompting": True})
             P.client.prompt(sid, text, directory=directory, persona=persona, agent=h["agent"])
             self.store.op_update(key, "done", {**res, "prompted": True})
@@ -881,6 +882,23 @@ class HelperManager:
                   "Return ONE final message: a concise proposal (unified diff or test code "
                   "where relevant), the evidence it rests on, and how the primary should "
                   "verify it.")
+
+    def _playbook_text(self, P, spec, u: dict, sid: str) -> str:
+        """The playbook slice for a helper prompt (A1: all lanes get it; helpers
+        read no docs/memory slice, so the full shared budget is free). Never
+        raises; a helper is read-only, so its render still says notes go in the
+        final report (the primary decides what to keep)."""
+        pb = getattr(self.c, "playbook", None)
+        if pb is None:
+            return ""
+        try:
+            text = pb.prompt_block(P, spec.task_id, sid, spec=spec,
+                                   role=str(u.get("kind") or "helper"))
+        except Exception as e:                                    # noqa: BLE001
+            (getattr(self.c, "log", None) or (lambda m: None))(
+                f"{P.id}/{spec.task_id}: helper playbook slice failed: {e}")
+            return ""
+        return ("\n\n" + text.strip("\n") + "\n") if text.strip() else ""
 
     def _poll(self, P, u: dict, h: dict) -> None:
         if u.get("mode") == "direct":

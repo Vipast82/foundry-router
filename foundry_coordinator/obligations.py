@@ -57,7 +57,7 @@ AUTHORITIES = ("operator", "delegated_policy", "lead_policy", "timeout_default")
 LEAD_ACTOR_PREFIX = "lead_manager:"
 # A delegated policy may never answer these (they need the operator).
 OPERATOR_ONLY_KINDS = frozenset({"scope_change", "approval", "expectation_change",
-                                 "quarantine_check", "policy"})
+                                 "quarantine_check", "policy", "playbook_promotion"})
 # An extra layer only: operator authority is a POSITIVE rule (the control
 # channel or an operator allowlist, see Obligations._check_authority).
 MODEL_ACTOR_PREFIXES = ("model", "session", "helper", "assistant", "persona", "kilo",

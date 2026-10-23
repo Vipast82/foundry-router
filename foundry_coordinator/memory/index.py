@@ -293,17 +293,21 @@ class MemoryIndex:
     # -- reading files ------------------------------------------------------------
 
     def reindex(self, project_id: str, workspace: str, commit: str = "",
-                force: bool = False) -> dict:
+                force: bool = False, files: Optional[list] = None,
+                root: str = "") -> dict:
         """Parse every memory file whose mtime/size (or the commit) changed; drop
         files that vanished. Returns {"files", "entries", "changed": [files],
-        "removed": [files]}."""
-        files = layout.list_files(workspace)
+        "removed": [files]}. `files` + `root` index another layout with the same
+        machinery (the playbook repo, keyed by its reserved project id)."""
+        if files is None:
+            files = layout.list_files(workspace)
+        root = root or layout.memory_dir(workspace)
         known = {r["file"]: r for r in self.store.q(
             "SELECT * FROM memory_files WHERE project_id=?", (project_id,))}
         changed, total = [], 0
         now = time.time()
         for rel in files:
-            path = os.path.join(layout.memory_dir(workspace), *rel.split("/"))
+            path = os.path.join(root, *rel.split("/"))
             try:
                 st = os.stat(path)
             except OSError:

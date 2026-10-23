@@ -44,6 +44,10 @@ LEAD_KINDS = ("lead_case_pause", "lead_case_resume", "lead_case_takeover", "lead
 # coordinator commits in docs/memory. Project-scoped (no task); payload
 # {"file", "heading", "text"}.
 MEMORY_KINDS = ("memory_add", "memory_edit")
+# A1 playbook (2026-10-23): cross-project playbook edits from the chat / Memory
+# tab's playbook scope, applied as coordinator commits in the playbook repo.
+# Project-scoped only for routing/journaling; payload {"file", "heading", "text"}.
+PLAYBOOK_KINDS = ("playbook_add", "playbook_edit")
 LEAD_UNAVAILABLE = "lead manager not available in this coordinator"
 MAX_LEAD_NOTE = 2000
 # Team Lead tracks (2026-10-22): project-scoped, applied through the engine's
@@ -147,6 +151,12 @@ class ControlChannel:
             mem.publish(self.foundry, self.source_id)
         except Exception as e:                                   # noqa: BLE001
             self.log(f"control: memory snapshot: {type(e).__name__}: {e}")
+        pb = getattr(self.c, "playbook", None)
+        if pb is not None:
+            try:
+                pb.publish(self.foundry, self.source_id)
+            except Exception as e:                               # noqa: BLE001
+                self.log(f"control: playbook snapshot: {type(e).__name__}: {e}")
 
     def _memory_action(self, a, actor):
         """memory_add / memory_edit: a validated edit of one docs/memory file,
@@ -160,6 +170,34 @@ class ControlChannel:
         fn = mem.add if a["kind"] == "memory_add" else mem.edit
         out = fn(P, str(p.get("file") or ""), str(p.get("heading") or ""), str(p.get("text") or ""),
                  actor, task_id=str(p.get("task_id") or a.get("task_id") or ""))
+        if not out.get("ok"):
+            return self._report(a, "rejected", str(out.get("error") or "refused")[:500], out)
+        detail = (f"{out['path']} > {str(p.get('heading') or '')[:60]}: "
+                  + ("committed " + out["sha"][:12] if out.get("sha") else "no change"))
+        self._publish_memory()
+        return self._report(a, "applied", detail[:500], out)
+
+    def _playbook_on(self) -> bool:
+        pb = getattr(self.c, "playbook", None)
+        try:
+            return pb is not None and pb.configured()
+        except Exception:                                        # noqa: BLE001
+            return False
+
+    def _playbook_action(self, a, actor):
+        """playbook_add / playbook_edit: a validated edit of one playbook file,
+        committed by the coordinator to the playbook repo (A1). The project id
+        only routes and journals the action; the playbook is cross-project."""
+        pb = getattr(self.c, "playbook", None)
+        if pb is None or not pb.configured():
+            return self._report(a, "rejected", "this coordinator has no playbook configured "
+                                               "(--playbook or $FOUNDRY_PLAYBOOK)")
+        P = self.c.projects[a["project_id"]]
+        p = a.get("payload") or {}
+        fn = pb.add if a["kind"] == "playbook_add" else pb.edit
+        out = fn(P, str(p.get("file") or ""), str(p.get("heading") or ""),
+                 str(p.get("text") or ""), actor, task_id=str(p.get("task_id") or
+                                                              a.get("task_id") or ""))
         if not out.get("ok"):
             return self._report(a, "rejected", str(out.get("error") or "refused")[:500], out)
         detail = (f"{out['path']} > {str(p.get('heading') or '')[:60]}: "
@@ -196,6 +234,7 @@ class ControlChannel:
         tasks = self.store.tasks()
         lead_on = self._lead_on()
         mem_on = self._memory_on()
+        pb_on = self._playbook_on()
         return {"source": {"id": self.source_id, "kind": "coordinator", "host": socket.gethostname(),
                            "version": _version(), "capabilities": {
                                "actions": ["answer_question", "reply_permission", "approve_review",
@@ -204,7 +243,8 @@ class ControlChannel:
                                            "decision_answer", *PROJECT_KINDS, *ASSISTANT_KINDS,
                                            *TRACK_KINDS, *QUEUE_KINDS,
                                            *(LEAD_KINDS if lead_on else ()),
-                                           *(MEMORY_KINDS if mem_on else ())]}},
+                                           *(MEMORY_KINDS if mem_on else ()),
+                                           *(PLAYBOOK_KINDS if pb_on else ())]}},
                 "contract": _contract(), "coordinator_version": _coordinator_version(),
                 # lifecycle features advertised only when some project actually
                 # runs the lifecycle; project pause/resume always; lead_manager
@@ -214,7 +254,8 @@ class ControlChannel:
                 "features": (["decision_answer", "lifecycle"] if self._lifecycle_on() else
                              ["decision_answer"] if lead_on else [])
                 + ["project_pause", "tracks", "queue"] + (["lead_manager"] if lead_on else [])
-                + (["project_memory"] if mem_on else []),
+                + (["project_memory"] if mem_on else [])
+                + (["playbook"] if pb_on else []),
                 # Team Lead tracks per project (the Tracks tab reads it from the
                 # coordinator source's heartbeat): max_agents, tracks, Studio timeline
                 "tracks": self._tracks_status(),
@@ -276,6 +317,8 @@ class ControlChannel:
             return self._track_action(a, f"{a.get('actor') or 'operator'} (control center)")
         if a["kind"] in MEMORY_KINDS:
             return self._memory_action(a, f"{a.get('actor') or 'operator'} (control center)")
+        if a["kind"] in PLAYBOOK_KINDS:
+            return self._playbook_action(a, f"{a.get('actor') or 'operator'} (control center)")
         if a["kind"] in QUEUE_KINDS:
             return self._queue_action(a, f"{a.get('actor') or 'operator'} (control center)")
         t = self.store.task(pid, tid)
@@ -877,6 +920,16 @@ class ControlChannel:
                                         t["session_id"] if scope == "session" or
                                         delivery == "pause_and_steer" else "",
                                         scope, delivery, a.get("actor") or "operator", p.get("text") or "")
+        pb = getattr(self.c, "playbook", None)
+        if pb is not None:
+            # A1: the third repeat of the same normalized operator instruction
+            # proposes a howto/ playbook entry (deterministic; inert unless
+            # [automation] playbook_promote is on)
+            try:
+                pb.promote.observe_instruction(self.c.projects[pid], tid, p.get("text") or "",
+                                               a.get("actor") or "operator")
+            except Exception as e:                               # noqa: BLE001
+                self.log(f"control: playbook observe_instruction: {type(e).__name__}: {e}")
         if delivery == "next_session":
             return self._report(a, "queued", f"queued: added to the next session prompt the "
                                              f"coordinator sends for {tid} (implementation, repair, "
