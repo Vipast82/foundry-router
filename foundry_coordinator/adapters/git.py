@@ -16,8 +16,9 @@ class Workspace:
     def __init__(self, path: str):
         self.path = path
 
-    def run(self, *args, check: bool = True, timeout: int = 120) -> str:
-        env = dict(os.environ, GIT_TERMINAL_PROMPT="0", GCM_INTERACTIVE="never")
+    def run(self, *args, check: bool = True, timeout: int = 120,
+            env: Optional[dict] = None) -> str:
+        env = dict(os.environ, GIT_TERMINAL_PROMPT="0", GCM_INTERACTIVE="never", **(env or {}))
         try:
             r = subprocess.run(["git", "-C", self.path, *args], capture_output=True, text=True,
                                timeout=timeout, env=env, encoding="utf-8", errors="replace")
@@ -144,10 +145,11 @@ class Workspace:
                 res[-1][1].append(line)
         return res
 
-    def commit_paths(self, paths: list[str], message: str) -> str:
+    def commit_paths(self, paths: list[str], message: str, env: Optional[dict] = None) -> str:
         """Commit exactly `paths` (added, modified or deleted) with `message`; other
         staged or dirty files are left alone. Returns the new HEAD, or "" when the
-        paths had nothing to commit. Never --no-verify, never amend."""
+        paths had nothing to commit. Never --no-verify, never amend. `env` adds
+        variables to the commit (the repo's hooks read their overrides there)."""
         paths = [p for p in dict.fromkeys(paths) if p]
         if not paths:
             return ""
@@ -164,7 +166,7 @@ class Workspace:
                                           "--no-renames").splitlines() if p.strip() in want]
             if not staged:
                 return ""
-            self.run("commit", "-q", "-m", message, f"--pathspec-from-file={spec}")
+            self.run("commit", "-q", "-m", message, f"--pathspec-from-file={spec}", env=env)
         finally:
             try:
                 os.remove(spec)

@@ -69,6 +69,10 @@ class Coordinator:
         # [fast_lane] (UI-T0): studio_gate-verified one-session sprints; inert
         # for every task the profile's [fast_lane] table doesn't name
         self.fast_lane = FastLane(self, clock=clock)
+        from .memory import MemoryManager
+        # Team Lead piece 4: project memory (docs/memory in the repo), indexed here and
+        # sliced per session; inert for a project without the layout
+        self.memory = MemoryManager(self)
         # B4: code reviews started early (while vision runs), by (project, task, head)
         self._early_reviews: dict = {}
         self._early_pool = None
@@ -165,6 +169,10 @@ class Coordinator:
         for pid in order:
             P = self.projects[pid]
             self._queue_approved_followups(P)
+            try:
+                self.memory.tick(P)
+            except Exception as e:                                # noqa: BLE001
+                self.log(f"{pid}: memory tick failed: {type(e).__name__}: {e}")
             for t in self.store.tasks(pid):
                 before = (t["state"], t["updated_ts"])
                 try:
@@ -652,6 +660,7 @@ class Coordinator:
         head = P.ws.head()
         rep = s.report or {}
         data = self.store.merge_data(pid, tid, last_report=rep or None)
+        self._memory_notes(P, t, s)          # MEMORY_NOTE lines: committed by the coordinator
         if self._lc(P):
             self._lc_session_ended(P, t, t["session_id"], head, rep)
         from . import infra
@@ -1658,6 +1667,9 @@ class Coordinator:
         if dropped:
             dnotes.append(f"{dropped} lower-priority evidence item(s) left out ([review] "
                           f"max_evidence_items)")
+        mem_note = self._memory_review_note(P, spec)
+        if mem_note:
+            dnotes.append(mem_note)
         packet, info = R.build_packet(
             project_id=pid, task_id=tid, title=spec.title, spec=spec.spec, scope=spec.scope,
             base=dbase, head=head, commits=P.ws.commits(dbase, head), verification=ver,
@@ -2090,6 +2102,7 @@ class Coordinator:
                     return
                 self._release_session(P, t)
                 self.store.merge_data(pid, tid, closeout_done=sid, closeout_report=s.report)
+                self._memory_notes(P, t, s)
                 self._reword_commits(P, t)          # W1.4: a CLOSE commit without the prefix
         head = P.ws.head()
         t = self.store.task(pid, tid)
@@ -2843,6 +2856,14 @@ class Coordinator:
         if P is not None and self._lc(P):
             prompt += self._memory_delta(P, task_id, memory_for or session_id,
                                          self._lc_memory_blocks(P, task_id))
+        if P is not None:
+            # Team Lead piece 4: the project memory slice (docs/memory), hashed per
+            # entry like the lifecycle blocks: a later prompt carries only changes
+            block = self._memory_block(P, task_id, memory_for or session_id)
+            if block:
+                delta = self._memory_delta(P, task_id, memory_for or session_id, block)
+                if delta.strip():
+                    prompt += "\n\n" + delta.strip("\n") + "\n"
         try:
             notes = self.store.pending_operator_messages(project_id, task_id, session_id)
         except Exception:                                         # noqa: BLE001
@@ -2857,6 +2878,41 @@ class Coordinator:
         return (prompt + "\n\n## Operator instructions (from the control center)\n"
                 "Follow these within the task's approved scope and rules; they do not authorize "
                 "new scope, skipped checks or changed routing.\n\n" + body + "\n"), ids
+
+    # ======================================================================= project memory
+
+    def _memory_block(self, P: Project, tid: str, sid: str) -> str:
+        """The docs/memory slice for this task's prompt (memory/manager.py); never
+        raises: a memory failure costs the prompt its slice, nothing else."""
+        try:
+            return self.memory.prompt_block(P, tid, sid)
+        except Exception as e:                                    # noqa: BLE001
+            self.log(f"{P.id}/{tid}: memory slice failed: {type(e).__name__}: {e}")
+            return ""
+
+    def _memory_notes(self, P: Project, t: dict, s) -> None:
+        """MEMORY_NOTE lines of an ended session's final message -> validated,
+        appended, committed and indexed by the coordinator."""
+        try:
+            self.memory.apply_notes(P, t, s)
+        except Exception as e:                                    # noqa: BLE001
+            self.store.event(P.id, t["task_id"], "warning", session_id=t.get("session_id") or "",
+                             detail={"memory_notes": f"{type(e).__name__}: {e}"[:400]})
+
+    def _memory_review_note(self, P: Project, spec) -> str:
+        """One provenance note for the review packet: the conventions, known
+        issues and decisions that match the sprint's files (compact)."""
+        try:
+            if not self.memory.enabled(P):
+                return ""
+            from .memory import slices as MS
+            sl = self.memory.slice(P, spec, role="reviewer")
+            text = MS.compact(sl["entries"], 1500)
+            return ("project memory (docs/memory entries matching this sprint; facts the code "
+                    "must respect): " + text) if text else ""
+        except Exception as e:                                    # noqa: BLE001
+            self.log(f"{P.id}: memory review note failed: {type(e).__name__}: {e}")
+            return ""
 
     def _notes_requeue(self, ids: list[str]) -> None:
         """The prompt carrying these notes was refused (nothing sent): they wait

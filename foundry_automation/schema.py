@@ -183,6 +183,10 @@ AUTOMATION_DEFAULTS: dict = {
     "preflight_endpoints": [],
     "context_ceiling_tokens": 160000,
     "memory_delta": True,
+    "project_memory": True,
+    "memory_slice_tokens": 3000,
+    "memory_decisions": 8,
+    "memory_note_max_chars": 1500,
     "transcript_poll_seconds": 120,
     "generic_checks_cache": True,
 }
@@ -584,6 +588,12 @@ _AUTO_DESC = {
     "preflight_endpoints": "Extra endpoints the preflight probes (name=url; tcp:// or http(s)://).",
     "context_ceiling_tokens": "A session over this context hands off to a fresh one (0 = off).",
     "memory_delta": "Send operator notes / memory once per session, then only changes.",
+    "project_memory": "Project memory (docs/memory in the repo): slices in prompts, MEMORY_NOTE "
+                      "report lines committed by the coordinator.",
+    "memory_slice_tokens": "Token budget of the memory slice an implementer prompt gets (lead and "
+                           "review prompts get half).",
+    "memory_decisions": "Most recent DECISIONS.md entries every slice includes.",
+    "memory_note_max_chars": "Longest MEMORY_NOTE text a session may record.",
     "transcript_poll_seconds": "Lane transcript ingest interval.",
     "generic_checks_cache": "Reuse per-tick coordinator checks while HEAD and the tree are "
                             "unchanged.",
