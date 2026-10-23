@@ -65,11 +65,12 @@ RESULT_CHARS = 3000                    # a tool result shown to the model, at mo
 CONTEXT_CHARS = 6000
 CONFIRM_TTL_S = 24 * 3600
 AUTO_CLASSES = ("read", "draft", "preview", "ask")
-CONFIRM_CLASSES = ("deploy", "cutoffs", "persona", "sprint", "decision", "restart")
+CONFIRM_CLASSES = ("deploy", "cutoffs", "persona", "sprint", "decision", "restart", "memory")
 CLASS_LABEL = {"deploy": "Deploy or roll back settings", "cutoffs": "Change usage cutoffs",
                "persona": "Change persona routes", "sprint": "Start, queue, pause, resume or "
                "cancel sprints (and pause/resume a project)", "decision": "Answer decisions "
-               "and questions", "restart": "Restart stack components / reload kilo.jsonc"}
+               "and questions", "restart": "Restart stack components / reload kilo.jsonc",
+               "memory": "Add to or edit project memory (committed to the game repo)"}
 # the task states the queue tools accept, mirrored from the coordinator
 _TERMINAL = ("COMPLETE", "CANCELLED")
 
@@ -140,6 +141,11 @@ SYSTEM = (
     "- Stack: restart_kilo / restart_coordinator / restart_rojo / reload_kilo_config go to the "
     "Foundry Client; if no client is attached, say so and give the command "
     "`foundry-client restart kilo --wait`.\n"
+    "- Project memory (docs/memory in the game repo: decisions, conventions, known issues, the "
+    "asset registry, per-sprint and per-track notes) is what every session reads: memory_search "
+    "and memory_summary read it; memory_add appends a fact under a heading and memory_edit "
+    "replaces a heading's body, both committed by the coordinator after the confirm card. Record "
+    "the operator's standing decisions and rules there when asked to remember something.\n"
     "- At most 8 tool calls per turn. Keep `say` under 120 words. No markdown tables.")
 
 
@@ -607,8 +613,27 @@ class ChatEngine:
                   "settings": self._block_settings(projects),
                   "usage": await self._block_usage(),
                   "stack": self._block_stack(),
-                  "pending": self._block_pending(projects)}
+                  "pending": self._block_pending(projects),
+                  "memory": self._block_memory(projects)}
         return blocks
+
+    def _memory_snapshot(self, project: str) -> Optional[dict]:
+        try:
+            return self.svc.control.snapshot("memory", project)
+        except Exception:                                        # noqa: BLE001
+            return None
+
+    def _block_memory(self, projects: list) -> dict:
+        """Project memory, small and hashed: files with counts, the latest
+        decisions, live slices (memory_view.summary) per project."""
+        from .memory_view import summary
+        out: dict = {}
+        for pid in self.allowed_projects(projects)[:6]:
+            snap = self._memory_snapshot(pid)
+            if snap is None:
+                continue
+            out[pid] = summary(snap)
+        return out or {"state": "no project has reported memory"}
 
     # ------------------------------------------------------------------ prompt
 
@@ -620,8 +645,8 @@ class ChatEngine:
                           for k, v in t.args.items())
             lines.append(f"- {t.name}({a}) [{t.cls}]: {t.description}")
         lines.append("Classes: read/draft/preview/ask run at once; deploy, cutoffs, persona, sprint, "
-                     "decision and restart need the operator's confirmation unless switched to "
-                     "auto.")
+                     "decision, restart and memory need the operator's confirmation unless switched "
+                     "to auto.")
         return "\n".join(lines)
 
     def _history(self, thread_id: str) -> list[dict]:
@@ -1586,6 +1611,70 @@ class ChatEngine:
         async def reload_kilo_config(ctx: Ctx, a: dict):
             return await eng._client_action(ctx, "client_reload_kilo_config", {})
 
+        # ---- project memory (docs/memory, Team Lead piece 4) --------------------
+        MF = {"type": "string", "max": 120, "desc": "DECISIONS.md | CONVENTIONS.md | KNOWN_ISSUES.md "
+                                                   "| ASSETS.md | sprints/<ID>.md | tracks/<name>.md"}
+
+        @self._add("memory_search", "Search the project's memory (docs/memory: decisions, "
+                   "conventions, known issues, the asset registry, per-sprint and per-track notes) "
+                   "as the coordinator indexed it. Returns file, heading and text of the best "
+                   "matches; file narrows to one file.", "read",
+                   {"project": P, "query": {"type": "string", "max": 200}, "file": MF},
+                   ("project", "query"), "project")
+        async def memory_search(ctx: Ctx, a: dict):
+            from .memory_view import search
+            snap = eng._memory_snapshot(a["project"])
+            if not snap:
+                raise ChatError(f"the coordinator has not reported memory for {a['project']} "
+                                "(docs/memory missing, [automation] project_memory off, or the "
+                                "coordinator is offline)", "no_memory", 404)
+            ents = (snap.get("data") or {}).get("entries") or []
+            hits = search(ents, a["query"], 10, a.get("file") or "")
+            return {"project": a["project"], "entries_indexed": len(ents),
+                    "results": [{**h, "text": _s(h["text"], 500)} for h in hits]}
+
+        @self._add("memory_summary", "The project's memory at a glance: files with entry counts, "
+                   "the latest decisions, the memory slice each running session got, recent notes "
+                   "sessions recorded.", "read", {"project": P}, ("project",), "project")
+        async def memory_summary(ctx: Ctx, a: dict):
+            from .memory_view import summary
+            snap = eng._memory_snapshot(a["project"])
+            out = summary(snap, decisions=8)
+            if snap:
+                d = snap.get("data") or {}
+                out["notes"] = [{k: n.get(k) for k in ("task_id", "file", "heading", "status",
+                                                       "detail")} for n in (d.get("notes") or [])[:10]]
+                out["slices"] = [{"session": (s.get("session_id") or "")[:12], "task": s.get("task_id"),
+                                  "role": s.get("role"), "track": s.get("track"), "live": s.get("live"),
+                                  "entries": len(s.get("entries") or []), "tokens": s.get("tokens"),
+                                  "budget": s.get("budget"), "prompts": s.get("prompts")}
+                                 for s in (d.get("slices") or [])[:10]]
+            return out
+
+        @self._add("memory_add", "Append a fact under a heading of a memory file (a new heading is "
+                   "created at the end of the file; use file=sprints/<ID>.md for one sprint, "
+                   "tracks/<name>.md for a track, ASSETS.md heading Registry with a table row for "
+                   "an asset). The coordinator validates it (no secrets, size) and commits it to the "
+                   "game repo.", "memory",
+                   {"project": P, "file": MF, "heading": {"type": "string", "max": 120},
+                    "text": {"type": "string", "max": 4000}, "task_id": {"type": "string", "max": 120}},
+                   ("project", "file", "heading", "text"), "project",
+                   lambda a: f"memory: add to {a.get('file')} > {a.get('heading')}: "
+                   f"{_compact(a.get('text'), 100)}")
+        async def memory_add(ctx: Ctx, a: dict):
+            return await eng._memory_action(ctx, "memory_add", a)
+
+        @self._add("memory_edit", "Replace the whole body under one heading of a memory file with "
+                   "new text (memory_search first to see the current body). The coordinator "
+                   "validates and commits it.", "memory",
+                   {"project": P, "file": MF, "heading": {"type": "string", "max": 120},
+                    "text": {"type": "string", "max": 4000}, "task_id": {"type": "string", "max": 120}},
+                   ("project", "file", "heading", "text"), "project",
+                   lambda a: f"memory: replace {a.get('file')} > {a.get('heading')} with "
+                   f"{_compact(a.get('text'), 100)}")
+        async def memory_edit(ctx: Ctx, a: dict):
+            return await eng._memory_action(ctx, "memory_edit", a)
+
         @self._add("ask_operator", "Ask the operator one question and end the turn; options are "
                    "shown as buttons.", "ask", {"text": {"type": "string", "max": 1000},
                                                 "options": {"type": "array", "max_items": 8}},
@@ -1605,6 +1694,26 @@ class ChatEngine:
         if d.get("status") != "open":
             raise ChatError(f"decision {decision_id} is {d.get('status')}, not open", "stale", 409)
         return d
+
+    async def _memory_action(self, ctx: Ctx, kind: str, a: dict) -> dict:
+        body = {"kind": kind, "project_id": a["project"], "file": a["file"], "heading": a["heading"],
+                "text": a["text"], "idempotency_key": f"chat:{ctx.thread_id}:{ctx.turn_id}:{ctx.call_id}",
+                "chat": {"thread": ctx.thread_id, "turn": ctx.turn_id, "call": ctx.call_id}}
+        if a.get("task_id"):
+            body["task_id"] = a["task_id"]
+        act = self.svc.control.create_action(ctx.actor, ctx.projects, body, scopes=ctx.scopes)
+        done = await self._wait_action(act["action_id"], 30)
+        res = done.get("result") or {}
+        status = done.get("status")
+        return {"result": {"action_id": act["action_id"], "status": status,
+                           "detail": done.get("status_detail"), "sha": res.get("sha"),
+                           "path": res.get("path"),
+                           "note": "" if status in ("applied", "rejected", "failed") else
+                           "the coordinator has not applied it yet (is it running with --control?); "
+                           "check get_actions later"},
+                "changed": [f"{a['project']}: {act['summary']}: {status}"
+                            + (f" ({res['sha'][:12]})" if res.get("sha") else "")
+                            + (f" ({done.get('status_detail')})" if status == "rejected" else "")]}
 
     async def _client_action(self, ctx: Ctx, kind: str, payload: dict) -> dict:
         if not self.svc.control.client_sources():

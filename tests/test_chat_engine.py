@@ -191,14 +191,14 @@ def test_confirm_classes_can_be_switched_to_auto(chat, app, client):
 
 def test_context_is_sent_once_and_only_changed_blocks_again(chat, app):
     t1 = chat("hi", reply("hi"))
-    assert set(t1["context_sent"]) == {"projects", "settings", "usage", "stack", "pending"}
+    assert set(t1["context_sent"]) == {"projects", "settings", "usage", "stack", "pending", "memory"}
     t2 = chat("again", reply("hi"), thread=t1["_thread"])
     assert t2["context_sent"] is None                             # nothing changed
     app.state.services.automation.draft("newproj")               # settings block changes
     t3 = chat("again", reply("hi"), thread=t1["_thread"])
     assert "settings" in t3["context_sent"] and "stack" not in t3["context_sent"]
     third = chat.eng._model_fn.seen[0][-1]["content"]
-    assert "unchanged: pending, stack, usage" in third and '"settings":' in third
+    assert "unchanged: memory, pending, stack, usage" in third and '"settings":' in third
 
 
 def _client_beat(client, sid="client:ws", features=("stack_control",), hdr=CLIENT_HDR):

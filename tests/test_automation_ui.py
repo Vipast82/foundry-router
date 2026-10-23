@@ -52,7 +52,7 @@ def test_page_script_parses(tmp_path):
 def test_browser_storage_holds_preferences_and_the_dashboard_admin_key_only():
     s = _script()
     keys = set(re.findall(r'store\("([^"]+)"', s)) | set(re.findall(r"store\((ADMIN_KEY)", s))
-    assert keys <= {"fr-theme", "fr.auto.ws", "fr.auto.project", "ADMIN_KEY"}, keys
+    assert keys <= {"fr-theme", "fr.auto.ws", "fr.auto.project", "fr.auto.memproject", "ADMIN_KEY"}, keys
     # the admin key is the dashboard's own (same origin), asked for only when
     # client_auth.protect_admin is on; the operator key is never stored
     assert 'const ADMIN_KEY = "foundryAdminKey"' in s
