@@ -3,7 +3,10 @@
   Foundry automation (/ui/automation): one place to manage the coordinator's
   roles, routes, backends, settings, role rules and queue, plus the operator
   chat (Chat tab, /control/api/chat/*): the same work in plain language, with
-  confirm cards for anything that changes live behaviour.
+  confirm cards for anything that changes live behaviour, and the Tracks tab
+  (Team Lead, 2026-10-22): parallel tracks (one git worktree per track), the
+  live max_agents cap, the Studio lease timeline and start/stop/merge buttons
+  (POST /control/api/actions kinds track_*, read GET /control/api/tracks).
   One static page, vanilla JS, no build step. The one external script is
   SortableJS (pinned, SRI) for drag handles; without it the arrow keys and the
   move buttons still reorder everything.
@@ -253,6 +256,24 @@
   .deps { display:flex; flex-wrap:wrap; gap:3px; align-items:center; }
   .deps code { border:1px solid var(--line-2); border-radius:9px; padding:0 6px; }
   .dec { border:1px solid var(--line); border-left:4px solid var(--warn); border-radius:5px; padding:10px 12px; background:var(--panel); margin:8px 0; }
+  /* Tracks tab: one column per track, the Studio timeline below */
+  .tracks { display:grid; grid-template-columns:repeat(auto-fill, minmax(260px, 1fr)); gap:10px; margin:8px 0; }
+  .track { border:1px solid var(--line); border-radius:6px; background:var(--panel); padding:10px 12px; box-shadow:var(--shadow); min-width:0; display:flex; flex-direction:column; gap:6px; }
+  .track.main { border-top:3px solid var(--accent); }
+  .track.parallel { border-top:3px solid var(--info); }
+  .track h3 { display:flex; align-items:center; gap:8px; }
+  .track .kv { display:grid; grid-template-columns:auto 1fr; gap:2px 10px; font-size:12px; }
+  .track .kv dt { color:var(--dim); margin:0; } .track .kv dd { margin:0; min-width:0; overflow-wrap:anywhere; }
+  .track ol.sprints { margin:0; padding-left:18px; font-size:12.5px; }
+  .track ol.sprints li { margin:2px 0; }
+  .track .btns { display:flex; gap:6px; flex-wrap:wrap; margin-top:auto; padding-top:6px; }
+  .tl { position:relative; height:28px; background:var(--panel-2); border-radius:4px; overflow:hidden; margin:6px 0; }
+  .tl .seg { position:absolute; top:4px; height:20px; border-radius:3px; font-size:11px; line-height:20px; padding:0 4px; white-space:nowrap; overflow:hidden; color:var(--on-accent); }
+  .tl .seg.main { background:var(--accent); } .tl .seg.track { background:var(--info); } .tl .seg.wait { background:var(--warn); opacity:.7; }
+  .tl .seg.open { border-right:2px dashed var(--fg); }
+  table.jrn { border-collapse:collapse; width:100%; font-size:12px; }
+  table.jrn th, table.jrn td { border-bottom:1px solid var(--line); padding:3px 6px; text-align:left; }
+  table.jrn th { color:var(--dim); font-weight:500; }
   .dec .opts { display:flex; gap:6px; flex-wrap:wrap; margin-top:8px; }
   .countdown { font:600 13px var(--num-font); color:var(--warn); }
   /* modal */
@@ -338,6 +359,7 @@
   <button role="tab" id="tab-settings" aria-controls="v-settings" data-view="settings">Settings</button>
   <button role="tab" id="tab-rules" aria-controls="v-rules" data-view="rules">Role rules</button>
   <button role="tab" id="tab-queue" aria-controls="v-queue" data-view="queue">Queue</button>
+  <button role="tab" id="tab-tracks" aria-controls="v-tracks" data-view="tracks" title="Parallel tracks: one git worktree per track, Studio shared at merge time">Tracks</button>
 </nav>
 <div id="draftbar" role="region" aria-label="Draft">
   <div class="state grow" id="draft-state" aria-live="polite"></div>
@@ -352,6 +374,7 @@
   <section id="v-settings" role="tabpanel" aria-labelledby="tab-settings" hidden></section>
   <section id="v-rules" role="tabpanel" aria-labelledby="tab-rules" hidden></section>
   <section id="v-queue" role="tabpanel" aria-labelledby="tab-queue" hidden></section>
+  <section id="v-tracks" role="tabpanel" aria-labelledby="tab-tracks" hidden></section>
 </main>
 <aside id="drawer" role="dialog" aria-modal="false" aria-labelledby="drawer-h" hidden></aside>
 <div class="modal" id="modal" hidden><div class="modal-box" role="dialog" aria-modal="true" aria-labelledby="modal-h"></div></div>
@@ -642,7 +665,7 @@ $("#theme-btn").onclick = () => applyTheme(document.documentElement.dataset.them
 applyTheme(store("fr-theme") || (matchMedia("(prefers-color-scheme: light)").matches ? "light" : "dark"));
 
 /* ======================================================================== views */
-const VIEWS = ["ask", "routing", "settings", "rules", "queue"];
+const VIEWS = ["ask", "routing", "settings", "rules", "queue", "tracks"];
 function setView(v, push = true) {
   if (!VIEWS.includes(v)) v = "routing";
   S.view = v;
@@ -651,7 +674,7 @@ function setView(v, push = true) {
     b.setAttribute("aria-selected", on ? "true" : "false"); b.tabIndex = on ? 0 : -1;
   }
   for (const x of VIEWS) $("#v-" + x).hidden = x !== v;
-  $("#draftbar").hidden = v === "queue" || v === "ask";
+  $("#draftbar").hidden = v === "queue" || v === "ask" || v === "tracks";
   if (push && location.hash.slice(1) !== v) history.replaceState(null, "", "#" + v);
   closeDrawer();
   renderView();
@@ -667,6 +690,7 @@ window.addEventListener("hashchange", () => { const h = location.hash.slice(1); 
 function renderView() {
   renderNotes();
   if (S.view === "ask") return renderAsk();          // the chat needs no project document
+  if (S.view === "tracks") return renderTracks();    // the coordinator's heartbeat, no document
   if (!S.deployed) return;
   if (S.view === "routing") renderRouting();
   else if (S.view === "settings") renderSettings();
@@ -676,7 +700,7 @@ function renderView() {
 function renderNotes() {
   const notes = [];
   if (S.loadError) notes.push(`<div class="banner bad"><b>Settings not loaded.</b> ${esc(S.loadError)}</div>`);
-  else if (S.c1 && !S.deployedRevision && S.view !== "queue")
+  else if (S.c1 && !S.deployedRevision && S.view !== "queue" && S.view !== "tracks")
     notes.push(`<div class="banner">Nothing is deployed for <b>${esc(S.cfgProject)}</b> yet. Start from the coordinator's own settings with <button class="act" type="button" data-act="import">Import project.toml…</button>, or edit here and deploy the first revision.</div>`);
   $("#notes").innerHTML = notes.join("");
 }
@@ -1063,6 +1087,7 @@ $("#main").addEventListener("click", e => {
   else if (a === "role-rules") openCell(b.dataset.role, "_role");
   else if (a === "test-path") testPath($("#pt-role").value, $("#pt-op").value, $("#pt-path").value, $("#pt-out"));
   else if (a === "set-reset") resetField(b.dataset.key);
+  else if (a.startsWith("tr-")) trackClick(a, b);
   else if (a) queueClick(a, b);
 });
 $("#main").addEventListener("keydown", e => {
@@ -1621,6 +1646,147 @@ function startTick() {
     for (const c of els) c.textContent = countdown(Number(c.dataset.deadline));
   }, 1000);
 }
+/* ===================================================================== tracks (Team Lead)
+   GET /control/api/tracks: the coordinator's heartbeat block per project
+   (max_agents, agents running, each track with its sprints and merge stage,
+   the Studio lease and resource journal). Buttons file typed actions
+   (track_start / track_stop / track_merge / set_max_agents / tracks_propose)
+   that the coordinator claims and applies on its next tick. */
+const TRACK_CLS = {planned: "info", running: "info", merging: "warn", merged: "ok", stopped: "", failed: "bad"};
+S.tr = {data: null, project: "", plan: null, busy: false, err: ""};
+async function loadTracks() {
+  const r = await api("tracks" + (S.tr.project ? "?project=" + encodeURIComponent(S.tr.project) : ""));
+  S.tr.data = r;
+  const ids = Object.keys(r.tracks || {});
+  const known = Array.from(new Set([...(S.ovProjects || []), ...ids]));
+  if (!S.tr.project || !known.includes(S.tr.project)) S.tr.project = ids[0] || known[0] || "";
+}
+function fmtAge(s) { if (s === null || s === undefined) return "never"; s = Math.round(s); return s < 60 ? s + "s" : s < 3600 ? Math.round(s / 60) + "m" : Math.round(s / 360) / 10 + "h"; }
+function sprintPill(st) { return `<span class="pill ${STATE_CLS[st] || (st === "NOT_QUEUED" ? "" : "info")}">${esc(st || "?")}</span>`; }
+function trackCard(t, st) {
+  const m = t.merge || {}, lease = t.lease ? `<span class="pill warn" title="This track holds the Studio lease for its merge gate">Studio lease</span>` : "";
+  const dec = m.decision && m.decision.status === "open" ? m.decision : null;
+  const b = [], name = esc(t.name);
+  const btn = (act, label, title, cls = "") => `<button class="act ${cls}" type="button" data-act="${act}" data-track="${name}" title="${esc(title)}">${label}</button>`;
+  if (t.state === "planned") b.push(btn("tr-start", "Start", "Queue its sprints on the track", "primary"));
+  if (t.state === "running" && t.sprints.every(s => s.state === "COMPLETE")) b.push(btn("tr-merge", "Merge", "Merge at the main sprint's next quiet point", "primary"));
+  if (t.state === "failed" && t.sprints.every(s => s.state === "COMPLETE")) b.push(btn("tr-merge", "Retry merge", "Merge again after the fix"));
+  if (["planned", "running", "merging", "failed"].includes(t.state)) b.push(btn("tr-stop", "Stop", "Cancel its unfinished sprints; the worktree and branch stay", "danger"));
+  return `<article class="track ${esc(t.kind || "parallel")}" aria-labelledby="trk-${name}">
+    <h3 id="trk-${name}"><span class="mono">${name}</span><span class="pill ${TRACK_CLS[t.state] || ""}">${esc(t.state)}</span>${lease}</h3>
+    <dl class="kv">
+      <dt>Sprint</dt><dd>${t.current_sprint ? `<b class="mono">${esc(t.current_sprint)}</b>` : `<span class="hint" style="margin:0">${t.state === "merged" ? "all merged" : "none running"}</span>`}</dd>
+      <dt>Needs</dt><dd>${(t.needs || []).map(n => `<span class="pill ${n === "studio" ? "warn" : ""}">${esc(n)}</span>`).join(" ") || "<span class='hint' style='margin:0'>none</span>"}</dd>
+      <dt>Worktree</dt><dd class="mono" title="${esc(t.worktree || "")}">${esc((t.worktree || "").split(/[\\/]/).slice(-2).join("/"))} <span class="hint" style="margin:0">on ${esc(t.branch || "")}${t.base ? " from " + esc(t.base) : ""}</span></dd>
+      ${m.merge_stage ? `<dt>Merge</dt><dd>${esc(m.merge_stage)}${m.merge_wait ? ` <span class="hint" style="margin:0">waiting: ${esc(m.merge_wait)}</span>` : ""}${m.gate && m.gate.result ? ` <span class="pill ${m.gate.result === "PASS" ? "ok" : "bad"}">gate ${esc(m.gate.result)}</span>` : ""}</dd>` : ""}
+      ${m.failed ? `<dt>Failed</dt><dd style="color:var(--bad)">${esc(m.failed.why || "")}</dd>` : ""}
+      ${m.stopped ? `<dt>Stopped</dt><dd>${esc(m.stopped.by || "")}${m.stopped.reason ? ": " + esc(m.stopped.reason) : ""}</dd>` : ""}
+    </dl>
+    <ol class="sprints">${(t.sprints || []).map(s => `<li><span class="mono">${esc(s.task_id)}</span> ${sprintPill(s.state)}${s.blocker ? ` <span class="hint" style="margin:0;color:var(--bad)">${esc(s.blocker)}</span>` : s.next ? ` <span class="hint" style="margin:0">${esc(s.next)}</span>` : ""}</li>`).join("")}</ol>
+    ${dec ? `<section class="dec"><div style="white-space:pre-wrap">${esc(dec.question || "")}</div><div class="opts">${(dec.options || []).map(o => `<button class="act${o === dec.default ? " primary" : ""}" type="button" data-act="tr-decide" data-track="${name}" data-opt="${esc(o)}">${o === dec.default ? "Default: " : ""}${esc(o)}</button>`).join("")}</div></section>` : ""}
+    <div class="btns">${b.join(" ")}</div>
+  </article>`;
+}
+function studioTimeline(st) {
+  const rows = (st.journal || []).filter(r => r.resource === "studio" || /^studio:/.test(r.resource || "")), now = Date.now() / 1000;
+  if (!rows.length) return `<p class="hint">No Studio holds journaled yet.</p>`;
+  const t0 = Math.min(...rows.map(r => r.ts)), span = Math.max(60, now - t0);
+  const open = {}, segs = [];
+  for (const r of rows) {
+    if (r.event === "acquire") open[r.owner] = r;
+    else if (r.event === "release" && open[r.owner]) { const a = open[r.owner]; delete open[r.owner]; segs.push({a: a.ts, b: r.ts, owner: a.owner, cls: a.owner.startsWith("track:") ? "track" : "main", p: a.purpose}); }
+    else if (r.event === "wait") segs.push({a: r.ts, b: Math.min(now, r.ts + 60), owner: r.owner, cls: "wait", p: (r.detail || {}).why || "waiting"});
+  }
+  for (const a of Object.values(open)) segs.push({a: a.ts, b: now, owner: a.owner, cls: (a.owner.startsWith("track:") ? "track" : "main") + " open", p: a.purpose});
+  const pct = v => Math.max(0, Math.min(100, (v - t0) / span * 100));
+  return `<div class="tl" role="img" aria-label="Studio holds over the last ${fmtAge(span)}">${segs.map(g => `<div class="seg ${g.cls}" style="left:${pct(g.a)}%;width:${Math.max(0.8, pct(g.b) - pct(g.a))}%" title="${esc(g.owner)} ${esc(g.p || "")} ${fmtAge(g.b - g.a)}">${esc(g.owner.replace(/^track:/, ""))}</div>`).join("")}</div>
+  <div class="hint">Orange: the main sprint's sessions and gates. Blue: a track's merge gate under its lease. Amber: a track waiting for Studio. Window: the last ${fmtAge(span)}.</div>
+  <details><summary class="hint">Journal (${rows.length})</summary><table class="jrn"><thead><tr><th>When</th><th>Resource</th><th>Who</th><th>Event</th><th>For</th><th>Detail</th></tr></thead><tbody>${rows.slice(-40).reverse().map(r => `<tr><td class="mono">${esc(when(r.ts))}</td><td>${esc(r.resource)}</td><td class="mono">${esc(r.owner)}</td><td>${esc(r.event)}</td><td>${esc(r.purpose || "")}</td><td class="hint" style="margin:0">${esc(Object.entries(r.detail || {}).map(([k, v]) => k + "=" + (typeof v === "object" ? JSON.stringify(v) : v)).join(" "))}</td></tr>`).join("")}</tbody></table></details>`;
+}
+function planHtml(plan) {
+  if (!plan) return "";
+  return `<section class="dec" aria-labelledby="trplan-h"><div class="row" style="margin:0"><b id="trplan-h">Proposal ${esc(plan.plan_id)}</b><span class="pill info">${plan.agents} agent${plan.agents === 1 ? "" : "s"} of max_agents ${plan.max_agents}</span><span class="grow"></span><button class="act" type="button" data-act="tr-plan-dismiss">Dismiss</button></div>
+    ${plan.main ? `<div style="margin-top:6px"><span class="hint" style="margin:0">Main checkout:</span> <span class="mono">${esc(plan.main.sprints.join(" → "))}</span></div>` : ""}
+    ${(plan.tracks || []).length ? `<ul style="margin:6px 0 0;padding-left:18px">${plan.tracks.map(t => `<li><b class="mono">${esc(t.name)}</b>: <span class="mono">${esc(t.sprints.join(" → "))}</span> <span class="hint" style="margin:0">needs ${esc((t.needs || []).join(", "))}${t.studio_at_merge ? "; Studio at merge" : ""}</span></li>`).join("")}</ul>` : `<p class="hint">No parallel track fits: every open sprint is serial with the main one, or max_agents is 1.</p>`}
+    ${(plan.notes || []).length ? `<ul class="hint" style="margin:6px 0 0;padding-left:18px">${plan.notes.map(n => `<li>${esc(n)}</li>`).join("")}</ul>` : ""}
+    <div class="opts">${(plan.tracks || []).length ? `<button class="act primary" type="button" data-act="tr-plan-start" data-plan="${esc(plan.plan_id)}">Start these tracks</button>` : ""}</div></section>`;
+}
+async function renderTracks() {
+  const el = $("#v-tracks");
+  if (!S.tr.data) {
+    el.innerHTML = `<p class="hint">Loading the tracks…</p>`;
+    try { await loadTracks(); } catch (e) { el.innerHTML = `<p class="hint">${esc(e.message)}</p>`; return; }
+  }
+  const d = S.tr.data || {}, all = d.tracks || {}, st = all[S.tr.project] || null;
+  const projects = Array.from(new Set([...(S.ovProjects || []), ...Object.keys(all)]));
+  const tracks = st ? (st.tracks || []) : [];
+  el.innerHTML = `
+    <div class="row" style="margin-top:12px"><label class="fld" for="tr-project">Project</label>
+      <select id="tr-project" data-act="tr-project">${projects.map(p => `<option ${p === S.tr.project ? "selected" : ""}>${esc(p)}</option>`).join("") || "<option value=''>none reported</option>"}</select>
+      ${st ? `<span class="pill info" title="Sprints running at once across the main checkout and the tracks; the main sprint counts first">agents ${st.agents_running} / ${st.max_agents}${st.max_agents_override ? " (--max-writers)" : ""}</span>
+      <label class="fld" for="tr-max" style="margin-left:8px">max_agents</label><input id="tr-max" type="number" min="1" max="16" value="${st.max_agents}" style="width:64px"><button class="act" type="button" data-act="tr-max" title="Live: the coordinator applies it at once">Set</button>` : ""}
+      <span class="grow"></span>
+      <button class="act" type="button" data-act="tr-propose" ${S.tr.busy ? "disabled" : ""} title="Read every sprint plan and propose tracks for the agent count (nothing starts)">Propose tracks…</button>
+      <button class="act" type="button" data-act="tr-new" title="Start one track by name and sprint ids">New track…</button>
+      <button class="act" type="button" data-act="tr-refresh">Refresh</button></div>
+    ${d.source ? `<p class="hint">Reported by ${esc(d.source)} ${fmtAge(d.age_s)} ago.${st && st.main ? ` Main sprint: <b class="mono">${esc(st.main.sprint || "none")}</b>, ${st.main.quiescent ? "quiescent (a merge may land)" : esc(st.main.why || "busy")}.` : ""}</p>` : `<div class="banner">No coordinator has reported tracks yet. It needs to run with <code>--control</code> on a build with the Team Lead tracks; the chat's <code>analyze_tracks</code> works the same way.</div>`}
+    ${S.tr.err ? `<div class="banner bad">${esc(S.tr.err)}</div>` : ""}
+    ${planHtml(S.tr.plan)}
+    <h2>Tracks${tracks.length ? ` (${tracks.length})` : ""}</h2>
+    ${tracks.length ? `<div class="tracks">${tracks.map(t => trackCard(t, st)).join("")}</div>` : `<p class="hint">No tracks. Propose some, or ask the chat: "what can run in parallel?"</p>`}
+    ${st ? `<h2>Studio</h2><div class="card">
+      <div class="row" style="margin:0"><span class="pill ${st.studio.in_use ? "warn" : "ok"}">${st.studio.in_use ? "in use: " + esc(st.studio.in_use) : "idle"}</span>${st.studio.pending ? `<span class="pill info">pending: ${esc(st.studio.pending)}</span>` : ""}${st.studio.lease ? `<span class="pill warn">lease: ${esc(st.studio.lease.track)} until ${esc(when(st.studio.lease.until))}</span>` : ""}<span class="hint" style="margin:0">last main Studio call ${fmtAge(st.studio.last_main_call_age_s)} ago · idle after ${st.studio.idle_minutes} min · lease ≤ ${st.studio.max_minutes} min</span></div>
+      ${studioTimeline(st.studio)}</div>` : ""}`;
+}
+async function trackAction(kind, body, okText) {
+  const r = await api("actions", {method: "POST", body: {kind, project_id: S.tr.project, idempotency_key: idem(), ...body}});
+  toast(okText || `${kind.replace(/_/g, " ")}: ${r.status || "accepted"}. The coordinator applies it on its next tick.`);
+  return r;
+}
+async function waitAction(id, ms = 60000) {
+  const t0 = Date.now();
+  while (Date.now() - t0 < ms) {
+    const a = await api("actions/" + encodeURIComponent(id));
+    if (["applied", "rejected", "failed", "expired", "cancelled"].includes(a.status)) return a;
+    await new Promise(r => setTimeout(r, 1500));
+  }
+  return {status: "pending"};
+}
+async function trackClick(a, b) {
+  const name = b.dataset.track, refresh = () => { S.tr.data = null; renderTracks(); };
+  try {
+    if (a === "tr-refresh") return refresh();
+    if (a === "tr-project") { S.tr.project = b.value; S.tr.plan = null; return refresh(); }
+    if (a === "tr-plan-dismiss") { S.tr.plan = null; return renderTracks(); }
+    if (a === "tr-max") {
+      const n = parseInt($("#tr-max").value, 10);
+      if (!(n >= 1 && n <= 16)) return toast("max_agents is 1 to 16", true);
+      await trackAction("set_max_agents", {max_agents: n}); return setTimeout(refresh, 2500);
+    }
+    if (a === "tr-propose") {
+      const n = parseInt(($("#tr-max") || {}).value, 10);
+      S.tr.busy = true; S.tr.err = ""; renderTracks();
+      const r = await trackAction("tracks_propose", n >= 1 ? {max_agents: n} : {}, "Asking the coordinator for a proposal…");
+      const done = await waitAction(r.action_id);
+      S.tr.busy = false;
+      if (done.status === "applied") S.tr.plan = done.result;
+      else S.tr.err = done.status === "pending" ? "The coordinator has not answered yet; is it running with --control?" : `${done.status}: ${done.status_detail || ""}`;
+      return refresh();
+    }
+    if (a === "tr-plan-start") { await trackAction("track_start", {plan_id: b.dataset.plan}); S.tr.plan = null; return setTimeout(refresh, 2500); }
+    if (a === "tr-new") return formModal("New track", `<label class="fld" for="f-name">Name (a-z, 0-9, . _ -)</label><input id="f-name" name="name" style="width:100%" required pattern="[a-z0-9][a-z0-9._-]{0,39}"><label class="fld" for="f-sprints" style="margin-top:8px">Sprints, in order (ids, comma-separated)</label><input id="f-sprints" name="sprints" style="width:100%" required><label class="fld" for="f-needs" style="margin-top:8px">Needs (optional: studio, blender, audio, images, gpu, backend)</label><input id="f-needs" name="needs" style="width:100%">`, "Start track", async f => {
+      const sprints = String(f.get("sprints") || "").split(/[,\s]+/).filter(Boolean), needs = String(f.get("needs") || "").split(/[,\s]+/).filter(Boolean);
+      await trackAction("track_start", {name: String(f.get("name") || "").trim().toLowerCase(), sprints, ...(needs.length ? {needs} : {})});
+      setTimeout(refresh, 2500);
+    });
+    if (a === "tr-start") { await trackAction("track_start", {name, sprints: ((S.tr.data.tracks[S.tr.project].tracks.find(t => t.name === name) || {}).sprints || []).map(s => s.task_id)}); return setTimeout(refresh, 2500); }
+    if (a === "tr-merge") { await trackAction("track_merge", {name}); return setTimeout(refresh, 2500); }
+    if (a === "tr-decide") { if (!confirm(`Track ${name}: ${b.dataset.opt}?`)) return; await trackAction("track_merge", {name, option: b.dataset.opt}); return setTimeout(refresh, 2500); }
+    if (a === "tr-stop") return formModal(`Stop track ${name}?`, `<p class="hint">Its unfinished sprints are cancelled (sessions aborted). The worktree and branch stay for inspection.</p><label class="fld" for="f-why">Reason</label><input id="f-why" name="reason" style="width:100%" required>`, "Stop track", async f => { await trackAction("track_stop", {name, reason: f.get("reason")}); setTimeout(refresh, 2500); }, true);
+  } catch (e) { S.tr.busy = false; toast(e.message, true); }
+}
+$("#main").addEventListener("change", e => { const b = e.target.closest("[data-act=tr-project]"); if (b) trackClick("tr-project", b); });
+
 /* ===================================================================== chat (operator chat, W3)
    /control/api/chat/*: persisted threads and turns. The model proposes JSON
    calls; the router validates them. Reads, drafts and previews run at once;
@@ -1635,10 +1801,10 @@ const CHAT_EXAMPLES = [
   "Restart Kilo at the next safe point",
 ];
 const CLS_PILL = {read: "", draft: "info", preview: "info", ask: "", deploy: "warn", cutoffs: "warn", persona: "warn",
-  sprint: "warn", decision: "warn", restart: "bad"};
+  sprint: "warn", decision: "warn", restart: "bad", tracks: "warn"};
 const CHAT_CLASS_HELP = {deploy: "Deploy or roll back settings", cutoffs: "Change usage cutoffs", persona: "Change persona routes",
   sprint: "Start, queue, pause, resume or cancel sprints; pause/resume a project", decision: "Answer decisions and questions",
-  restart: "Restart stack components / reload kilo.jsonc"};
+  restart: "Restart stack components / reload kilo.jsonc", tracks: "Start, stop or merge parallel tracks; change max_agents"};
 S.chat = {threads: null, thread: null, view: null, busy: false, settings: null, actions: {}};
 const CH = {
   threads: () => api("chat/threads"),
@@ -1942,6 +2108,7 @@ async function boot() {
   const busy = id => $("#" + id).contains(document.activeElement) || !$("#modal").hidden;
   setInterval(async () => { if (document.hidden) return; await refreshUsage(); if (S.view === "routing" && !busy("v-routing")) { renderRouting(); refreshDry(); } }, 60000);
   setInterval(() => { if (!document.hidden && S.view === "queue" && !busy("v-queue")) { S.queue = null; renderQueue(); } }, 20000);
+  setInterval(() => { if (!document.hidden && S.view === "tracks" && !busy("v-tracks") && !S.tr.busy) { S.tr.data = null; renderTracks(); } }, 20000);
 }
 boot();
 </script>
