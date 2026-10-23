@@ -382,6 +382,9 @@ class Coordinator:
         note = infra.waiting(self, P, t)
         if note:
             return self._note(P, t, note)
+        from . import services                     # Team Lead 5: the sprint's needs are up
+        if services.blocks(self, P, t, spec):
+            return                                 # "waiting for <service>": no lock, no attempt
         held = self._acquire(P, t, self._workspace_locks(P) + self._session_locks(P),
                              writer=True)
         if held:

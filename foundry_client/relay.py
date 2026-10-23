@@ -26,11 +26,12 @@ import urllib.error
 import urllib.request
 from typing import Callable, Optional
 
-from . import __version__, secrets
+from . import __version__, config, secrets
+from .config import TOGGLE_COMPONENTS
 
 CONTRACT = "foundry.cc.v1"            # control_center.CONTRACT (the client never imports the router)
 FEATURES = ["stack_control"]
-KINDS = ("client_restart", "client_reload_kilo_config")
+KINDS = ("client_restart", "client_reload_kilo_config", "client_service_enable")
 HEARTBEAT_S = 15.0
 CLAIM_S = 3.0
 BACKOFF = (5, 15, 30, 60, 120)
@@ -44,7 +45,8 @@ class Relay:
     def __init__(self, mgr, cfg: dict, key: str, source_id: str = "",
                  post: Optional[Callable[[str, dict], dict]] = None,
                  clock: Callable[[], float] = time.time, log: Callable[[str], None] = print,
-                 kilo_dispose: Optional[Callable[[], tuple[bool, str]]] = None):
+                 kilo_dispose: Optional[Callable[[], tuple[bool, str]]] = None,
+                 save: Optional[Callable[[dict], object]] = None):
         self.mgr = mgr
         self.cfg = cfg
         self.url = str(cfg["client"]["backend_url"]).rstrip("/")
@@ -54,6 +56,7 @@ class Relay:
         self.clock = clock
         self.log = log
         self._dispose = kilo_dispose or self._kilo_dispose
+        self._save = save or config.save
         self.last_beat = 0.0
         self.last_ok = 0.0
         self.last_error = ""
@@ -88,7 +91,13 @@ class Relay:
 
     def beat_payload(self) -> dict:
         st = self.mgr.status()
-        return {"source": {"id": self.source_id, "kind": "client", "host": socket.gethostname(),
+        try:
+            sv = self.mgr.mcp_status()
+        except Exception:                                        # noqa: BLE001
+            sv = {}
+        return {"mcp": [{k: r.get(k) for k in ("name", "type", "enabled", "available", "detail",
+                                                "target")} for r in sv.get("mcp") or []],
+                "services": sv.get("services") or [],"source": {"id": self.source_id, "kind": "client", "host": socket.gethostname(),
                            "version": __version__, "capabilities": {"actions": list(KINDS)}},
                 "contract": CONTRACT, "features": list(FEATURES), "client_version": __version__,
                 "overall": st.get("overall"),
@@ -142,6 +151,18 @@ class Relay:
                                                      "detail": st.get("detail"),
                                                      "pending_restart": st.get("pending_restart"),
                                                      "force": force})
+            elif kind == "client_service_enable":
+                comp = str(payload.get("component") or a.get("component") or "")
+                on = payload.get("enabled")
+                if comp not in TOGGLE_COMPONENTS or comp not in self.mgr.procs:
+                    self.report(aid, "rejected", f"{comp!r} cannot be switched on or off here")
+                    return
+                if not isinstance(on, bool):
+                    self.report(aid, "rejected", "enabled must be true or false")
+                    return
+                ok, msg = self._set_enabled(comp, on)
+                self.report(aid, "applied" if ok else "failed", msg,
+                            {"component": comp, "enabled": on})
             elif kind == "client_reload_kilo_config":
                 ok, how = self._dispose()
                 if ok:
@@ -161,6 +182,25 @@ class Relay:
             self.report(aid, "failed", f"client error: {type(e).__name__}: {e}")
         self.handled.append({"action_id": aid, "kind": kind, "ts": self.clock()})
         del self.handled[:-50]
+
+    def _set_enabled(self, comp: str, on: bool) -> tuple[bool, str]:
+        """Switch a service component on or off: the setting is saved (client.toml), the
+        component starts or stops. Refuses an invalid result (enabling without a program)."""
+        import copy
+        new = copy.deepcopy(self.mgr.cfg)
+        new["components"][comp]["enabled"] = on
+        errs = config.validate(new)
+        if errs and on:
+            return False, "; ".join(errs)[:300]
+        try:
+            self._save(new)
+        except Exception as e:                                   # noqa: BLE001
+            return False, f"settings not saved: {type(e).__name__}: {e}"[:300]
+        self.mgr.reload(new)
+        st = self.mgr.start(comp) if on else self.mgr.stop(comp)
+        return True, (f"{st.get('label') or comp}: {'enabled' if on else 'disabled'} "
+                      f"({st.get('state')}" + (f", {st['detail']}" if st.get("detail") else "")
+                      + ")")
 
     def _kilo_dispose(self) -> tuple[bool, str]:
         """Ask the Kilo server to drop its instance so the next session re-reads

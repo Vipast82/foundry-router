@@ -140,6 +140,10 @@ SYSTEM = (
     "- Stack: restart_kilo / restart_coordinator / restart_rojo / reload_kilo_config go to the "
     "Foundry Client; if no client is attached, say so and give the command "
     "`foundry-client restart kilo --wait`.\n"
+    "- Services: the `services` context block lists each service's status and the sprints waiting "
+    "for one (a sprint declares needs: studio, blender, audio, images, gpu, backend; a missing "
+    "service makes it wait, never fail). services_status shows detail; service_restart and "
+    "service_enable only work for services a Foundry Client component runs.\n"
     "- At most 8 tool calls per turn. Keep `say` under 120 words. No markdown tables.")
 
 
@@ -579,6 +583,69 @@ class ChatEngine:
                                for x in d.get("components") or []],
                 "config_problems": d.get("config_problems") or []}
 
+    def _client_detail(self) -> dict:
+        clients = self.svc.control.client_sources()
+        return (clients[0].get("detail") or {}) if clients else {}
+
+    def services_view(self, projects: Optional[list] = None, full: bool = False) -> dict:
+        """The service registry as the Foundry Client reports it (status, provider, needed-by),
+        plus the sprints waiting for a service. `full` adds the MCP probes and detail text;
+        the small form (the context block) carries no timestamps, so its hash only changes when
+        a service does."""
+        d = self._client_detail()
+        rows = d.get("services") or []
+        out_rows = []
+        for r in rows:
+            row = {"name": r.get("name"), "status": r.get("status"), "provider": r.get("provider"),
+                   "needed_by": r.get("needed_by") or []}
+            if r.get("provider") == "client":
+                row["component"] = r.get("component")
+                row["enabled"] = r.get("enabled")
+            if full:
+                row.update(label=r.get("label"), kind=r.get("kind"), detail=r.get("detail"),
+                           note=r.get("note"), component_state=r.get("component_state"))
+            elif r.get("status") == "down":
+                row["detail"] = _s(r.get("detail"), 80)
+            out_rows.append(row)
+        waiting = []
+        try:
+            rs = self.db.query("SELECT project_id, task_id, state, data FROM cc_tasks WHERE data "
+                               "LIKE ? LIMIT 30", ('%"service_wait": {%',))
+        except Exception:                                        # noqa: BLE001
+            rs = []
+        for r in rs:
+            if projects and r["project_id"] not in projects:
+                continue
+            if r["state"] in _TERMINAL:
+                continue
+            w = (_uj(r.get("data"), {}) or {}).get("service_wait") or {}
+            waiting.append({"project": r["project_id"], "task": r["task_id"],
+                            "waiting_for": list(w.get("missing") or [])[:6],
+                            "needs": list(w.get("needs") or [])[:6]})
+        out = {"client": "attached" if rows or d else "none attached", "services": out_rows,
+               "waiting_sprints": waiting[:10]}
+        if full:
+            out["mcp"] = [{k: m.get(k) for k in ("name", "type", "enabled", "available", "detail")}
+                          for m in d.get("mcp") or []]
+        return out
+
+    def _service_component(self, name: str) -> tuple:
+        """(component, registry row) for a service or component name; ChatError when the
+        service is external (no client component runs it)."""
+        name = (name or "").strip()
+        rows = self._client_detail().get("services") or []
+        row = next((r for r in rows if r.get("name") == name), None) or next(
+            (r for r in rows if r.get("component") == name), None)
+        if row is None:
+            known = ", ".join(r.get("name") for r in rows) or "none reported (is the client attached?)"
+            raise ChatError(f"no service {name!r}; the client reports: {known}", "unknown_service", 404)
+        if row.get("provider") != "client" or not row.get("component"):
+            raise ChatError(f"{row['name']} is {row.get('provider')}: no Foundry Client component "
+                            f"runs it, so there is nothing to restart or switch here"
+                            + (f" ({row.get('note')})" if row.get("note") else ""),
+                            "external_service", 409)
+        return row["component"], row
+
     def _block_pending(self, projects: list) -> dict:
         cc = self.svc.control
         ov = cc.overview(projects, hours=24 * 30)
@@ -607,6 +674,7 @@ class ChatEngine:
                   "settings": self._block_settings(projects),
                   "usage": await self._block_usage(),
                   "stack": self._block_stack(),
+                  "services": self.services_view(projects),
                   "pending": self._block_pending(projects)}
         return blocks
 
@@ -981,6 +1049,8 @@ class ChatEngine:
                 return {"question": d.get("question"), "options": d.get("options")}
             if call["tool"].startswith("restart_") or call["tool"] == "reload_kilo_config":
                 return {"stack": self._block_stack()}
+            if call["tool"] in ("service_restart", "service_enable"):
+                return {"services": self.services_view(ctx.projects)}
             if call["tool"] == "set_cutoffs":
                 from . import cutoffs
                 return {"current": cutoffs.view(self.svc)}
@@ -1124,6 +1194,37 @@ class ChatEngine:
                    "component's state and detail, pending restarts, config problems.", "read")
         async def get_stack(ctx: Ctx, a: dict):
             return eng._block_stack()
+
+        @self._add("services_status", "The service registry: each service (Rojo, Kilo, the "
+                   "Studio / Blender / audio / image MCP servers, the local model) with status "
+                   "up|down|unknown, who provides it (client component, backend, external), which "
+                   "sprint needs it, the MCP probes, and the sprints waiting for a service.",
+                   "read")
+        async def services_status(ctx: Ctx, a: dict):
+            return eng.services_view(ctx.projects, full=True)
+
+        @self._add("service_restart", "Restart a service that a Foundry Client component runs "
+                   "(kilo, rojo, blender and the audio servers when managed). External services "
+                   "cannot be restarted here. force=true skips the safe-point wait.", "restart",
+                   {"name": {"type": "string", "max": 80}, "force": {"type": "boolean"}}, ("name",),
+                   summary=lambda a: f"restart service {a.get('name')} "
+                   f"({'now' if a.get('force') else 'at a safe point'})")
+        async def service_restart(ctx: Ctx, a: dict):
+            comp, _row = eng._service_component(a["name"])
+            return await eng._client_action(ctx, "client_restart",
+                                            {"component": comp, "force": bool(a.get("force"))})
+
+        @self._add("service_enable", "Switch a managed service component on or off in the Foundry "
+                   "Client's settings (rojo, blender, acestep-music, stable-audio, kokoro-tts, "
+                   "chatterbox-tts); on starts it, off stops it.", "restart",
+                   {"name": {"type": "string", "max": 80}, "on": {"type": "boolean"}},
+                   ("name", "on"),
+                   summary=lambda a: f"{'enable' if a.get('on') else 'disable'} service "
+                   f"{a.get('name')}")
+        async def service_enable(ctx: Ctx, a: dict):
+            comp, _row = eng._service_component(a["name"])
+            return await eng._client_action(ctx, "client_service_enable",
+                                            {"component": comp, "enabled": bool(a["on"])})
 
         @self._add("get_actions", "Recent operator actions (queue, decisions, stack) with status, "
                    "so you can tell what the coordinator or client did with them.", "read",

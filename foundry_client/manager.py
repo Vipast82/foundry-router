@@ -547,6 +547,32 @@ class Manager:
                     "events": self.events[-30:], "alerts": list(self.alerts.values()),
                     "router": self.link.snapshot(), "update": self.update.snapshot()}
 
+    def mcp_status(self, max_age: float = 30.0, probe: Optional[Callable] = None) -> dict:
+        """{"mcp": [server probes], "services": [registry rows], "ts"}: the MCP servers Kilo can
+        see and the service registry as this client sees it. Cached `max_age` seconds (the probes
+        open sockets); never raises. `probe` replaces the real MCP probe in tests."""
+        lock = self.__dict__.setdefault("_mcp_lock", threading.Lock())
+        with lock:
+            cur = self.__dict__.get("_mcp_cache")
+            now = self.clock()
+            if cur and now - cur["ts"] < max_age:
+                return cur
+            try:
+                rows = (probe or _components.mcp_report)(self.cfg)
+            except Exception as e:                                # noqa: BLE001
+                rows = []
+                self._event("client", f"MCP probe failed: {type(e).__name__}: {e}")
+            comp = {c["name"]: {"state": c["state"], "enabled": c["enabled"]}
+                    for c in self.status()["components"]}
+            try:
+                reg = _components.services_report(self.cfg, rows, comp)
+            except Exception as e:                                # noqa: BLE001
+                reg = []
+                self._event("client", f"service report failed: {type(e).__name__}: {e}")
+            cur = {"mcp": rows, "services": reg, "ts": now}
+            self._mcp_cache = cur
+            return cur
+
     def observation(self) -> dict:
         """What the relay sends the router: the status without anything local-only."""
         st = self.status()

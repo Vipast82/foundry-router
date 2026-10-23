@@ -65,6 +65,11 @@ def create_app(mgr: Manager, token: str, cfg_path: Optional[Path] = None) -> Fas
         return {**mgr.status(), "version": __version__,
                 "backend_url": mgr.cfg["client"]["backend_url"]}
 
+    @app.get("/api/mcp")
+    def mcp(fresh: bool = False):
+        """MCP servers Kilo can see here and the service registry (what the heartbeat reports)."""
+        return mgr.mcp_status(max_age=0 if fresh else 30.0)
+
     @app.post("/api/components/{name}/{verb}")
     def control(name: str, verb: str, force: bool = False):
         if name not in COMPONENTS or name not in mgr.procs:

@@ -14,7 +14,15 @@ import tomli_w
 
 from . import APP_ID
 
-COMPONENTS = ("kilo", "coordinator", "supervisor", "rojo")
+COMPONENTS = ("kilo", "coordinator", "supervisor", "rojo", "blender", "acestep-music",
+              "stable-audio", "kokoro-tts", "chatterbox-tts")
+
+# optional service components (Team Lead 5): local programs a sprint's needs can ask the
+# client to start. Off by default and with no program set; a server that only runs on
+# another machine (the audio MCPs on the GPU host) is probed, never managed.
+SERVICE_COMPONENTS = ("blender", "acestep-music", "stable-audio", "kokoro-tts", "chatterbox-tts")
+# components a service tab / chat may switch on or off (enabled in client.toml)
+TOGGLE_COMPONENTS = ("rojo",) + SERVICE_COMPONENTS
 
 # components that earlier versions managed; a settings file that still has one is cleaned on load
 RETIRED_COMPONENTS = ("media",)       # Kilo spawns the media adapter itself (stdio MCP)
@@ -53,6 +61,20 @@ DEFAULTS: dict[str, Any] = {
                        "after": ["coordinator"]},
         "rojo": {"enabled": False, "path": "", "project": "", "port": 34872, "args": [],
                  "env": {}, "secrets": []},
+        # blender: the Blender program (path) with the blender-mcp add-on enabled; port is the
+        # add-on's socket (BLENDER_PORT, default 9876). The socket only opens after "Connect"
+        # in Blender's side panel, so the client does not health-check it (a started Blender
+        # that is not connected shows as running; the MCP probe reports the socket).
+        "blender": {"enabled": False, "path": "", "cwd": "", "port": 9876, "args": [],
+                    "env": {}, "secrets": []},
+        "acestep-music": {"enabled": False, "path": "", "cwd": "", "port": 0, "args": [],
+                          "env": {}, "secrets": []},
+        "stable-audio": {"enabled": False, "path": "", "cwd": "", "port": 0, "args": [],
+                         "env": {}, "secrets": []},
+        "kokoro-tts": {"enabled": False, "path": "", "cwd": "", "port": 0, "args": [],
+                       "env": {}, "secrets": []},
+        "chatterbox-tts": {"enabled": False, "path": "", "cwd": "", "port": 0, "args": [],
+                           "env": {}, "secrets": []},
     },
 }
 
@@ -107,6 +129,13 @@ def validate(cfg: dict) -> list[str]:
             errs.append(f"components.{name}.env holds a secret-looking name; store it as a "
                         f"secret instead (it is kept in the OS keyring)")
     comps = cfg["components"]
+    for name in SERVICE_COMPONENTS:
+        comp = comps.get(name) or {}
+        if comp.get("enabled") and not str(comp.get("path") or "").strip():
+            errs.append(f"components.{name}.path is required to enable {name}")
+        port = comp.get("port", 0)
+        if isinstance(port, bool) or not isinstance(port, int) or not 0 <= port <= 65535:
+            errs.append(f"components.{name}.port must be 0 or a port number")
     if comps["kilo"]["enabled"] and not cfg["workspace"]["game"]:
         errs.append("workspace.game is required for the Kilo server (its working folder)")
     if comps["coordinator"]["enabled"] and not cfg["workspace"]["profiles"]:

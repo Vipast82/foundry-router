@@ -5,7 +5,8 @@ coordinator, the permission escalation flow). Drop a JSON file in
     {"action": "reload_kilo", "id": "abc", "force": false, "reason": "..."}
 
 actions: reload_kilo (safe-point restart of the Kilo server), restart_rojo,
-restart_coordinator (safe point), apply_kilo_config (optional "project", "dry_run").
+restart_coordinator (safe point), apply_kilo_config (optional "project", "dry_run"),
+start_service ("component" or detail.component: start it if stopped, restart it if unhealthy).
 
 The client moves the file to `processing/`, answers in `results/<same file name>`
 ({"status": "pending" | "done" | "failed", "message", "ts", ...}; a safe-point restart
@@ -28,6 +29,7 @@ ALIASES = {
     "restart_rojo": "restart_rojo", "stack_restart_rojo": "restart_rojo",
     "restart_coordinator": "restart_coordinator", "stack_restart_coordinator": "restart_coordinator",
     "apply_kilo_config": "apply_kilo_config", "kilo_config_apply": "apply_kilo_config",
+    "start_service": "start_service", "service_start": "start_service",
 }
 TIMEOUT_S = 2 * 3600          # a request still pending after this is reported failed
 
@@ -114,6 +116,8 @@ class RequestQueue:
             threading.Thread(target=self._apply_worker, args=(name, rec), daemon=True,
                              name="foundry-client-kilo-config").start()
             return 1
+        if act == "start_service":
+            return self._start_service(name, rec)
         comp = {"reload_kilo": "kilo", "restart_rojo": "rojo",
                 "restart_coordinator": "coordinator"}[act]
         if comp not in m.procs or not m.cfg["components"][comp]["enabled"]:
@@ -127,6 +131,30 @@ class RequestQueue:
             self._write(name, {"status": "pending", "message": st["result"], "component": comp})
         self._settle(name)
         return 1
+
+    def _start_service(self, name: str, rec: dict) -> int:
+        """A sprint needs a service: start the managed component when it is stopped, restart it
+        when it is unhealthy, leave it alone when it runs. Never enables a disabled component
+        (that is the operator's switch)."""
+        m, req = self.mgr, rec["req"]
+        comp = str(req.get("component") or (req.get("detail") or {}).get("component") or "")
+        if comp not in m.procs:
+            return self._finish(name, rec, "failed", f"{comp or 'that service'} is not a component "
+                                                     f"of this client (it is external)")
+        if not m.cfg["components"][comp]["enabled"]:
+            return self._finish(name, rec, "failed", f"{comp} is switched off in the settings; "
+                                                     f"turn it on in the Services tab")
+        pr = m.procs[comp]
+        if pr.state == "running":
+            return self._finish(name, rec, "done", f"{pr.spec.label} is already running",
+                                component=comp, state=pr.state)
+        if pr.state == "unhealthy":
+            st = m.restart(comp, force=bool(req.get("force")))
+        else:
+            st = m.start(comp)
+        return self._finish(name, rec, "done", f"{pr.spec.label}: {st.get('state')}"
+                            + (f" ({st['detail']})" if st.get("detail") else ""),
+                            component=comp, state=st.get("state"))
 
     def _apply_worker(self, name: str, rec: dict) -> None:
         try:
