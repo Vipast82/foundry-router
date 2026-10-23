@@ -42,6 +42,18 @@ ASSISTANT_KINDS = ("assistant_plan", "assistant_run")
 LEAD_KINDS = ("lead_case_pause", "lead_case_resume", "lead_case_takeover", "lead_case_instruct")
 LEAD_UNAVAILABLE = "lead manager not available in this coordinator"
 MAX_LEAD_NOTE = 2000
+# Team Lead tracks (2026-10-22): project-scoped, applied through the engine's
+# TrackManager (tracks/manager.py). Payloads:
+#   tracks_analyze {}                          -> the deterministic analysis (read)
+#   tracks_propose {max_agents?}               -> a plan {plan_id, tracks, agents, notes}
+#   track_start    {plan_id} | {name, sprints, needs?}   create + queue (the confirm)
+#   track_stop     {name, reason}
+#   track_merge    {name, option?}             merge now (quiet point), or answer a
+#                                              conflict decision with `option`
+#   track_status   {}                          -> the Tracks tab's data
+#   set_max_agents {max_agents}                live cap on running sprints
+TRACK_KINDS = ("tracks_analyze", "tracks_propose", "track_start", "track_stop", "track_merge",
+               "track_status", "set_max_agents")
 
 
 class ControlChannel:
@@ -131,7 +143,7 @@ class ControlChannel:
                                            "reject_review", "pause", "resume", "cancel", "unblock",
                                            "instruction", "withdraw_instruction",
                                            "decision_answer", *PROJECT_KINDS, *ASSISTANT_KINDS,
-                                           *(LEAD_KINDS if lead_on else ())]}},
+                                           *TRACK_KINDS, *(LEAD_KINDS if lead_on else ())]}},
                 "contract": _contract(), "coordinator_version": _coordinator_version(),
                 # lifecycle features advertised only when some project actually
                 # runs the lifecycle; project pause/resume always; lead_manager
@@ -140,7 +152,10 @@ class ControlChannel:
                 # lead_escalation decisions even when no project runs the lifecycle)
                 "features": (["decision_answer", "lifecycle"] if self._lifecycle_on() else
                              ["decision_answer"] if lead_on else [])
-                + ["project_pause"] + (["lead_manager"] if lead_on else []),
+                + ["project_pause", "tracks"] + (["lead_manager"] if lead_on else []),
+                # Team Lead tracks per project (the Tracks tab reads it from the
+                # coordinator source's heartbeat): max_agents, tracks, Studio timeline
+                "tracks": self._tracks_status(),
                 # per project: {paused, mode, note, actor, since, busy_sessions,
                 # running_helpers, running_reviews, safe_to_upgrade}
                 "project_pause": {pid: self._pause_status(pid) for pid in sorted(self.c.projects)},
@@ -195,6 +210,8 @@ class ControlChannel:
             # project-scoped: no task to look up or re-check
             return getattr(self, f"_do_{a['kind']}")(
                 a, f"{a.get('actor') or 'operator'} (control center)")
+        if a["kind"] in TRACK_KINDS:
+            return self._track_action(a, f"{a.get('actor') or 'operator'} (control center)")
         t = self.store.task(pid, tid)
         if not t:
             return self._report(a, "rejected", f"{pid}/{tid} is not on this coordinator's queue")
@@ -234,6 +251,80 @@ class ControlChannel:
                                  "warnings": plan.get("run_warnings") or []})
         except Exception as e:                                   # noqa: BLE001
             return self._report(a, "rejected", f"launch assistant: {e}"[:500])
+
+    # ------------------------------------------------------------------ tracks
+
+    def _tracks_status(self) -> dict:
+        tm = getattr(self.c, "tracks", None)
+        if tm is None:
+            return {}
+        out = {}
+        for pid, P in sorted(self.c.projects.items()):
+            try:
+                st = tm.status(P)
+                st["studio"]["journal"] = (st["studio"].get("journal") or [])[-40:]
+                out[pid] = st
+            except Exception as e:                               # noqa: BLE001
+                out[pid] = {"error": f"{type(e).__name__}: {e}"[:200]}
+        return out
+
+    def _track_action(self, a, actor):
+        from .tracks.manager import TrackError
+        tm = getattr(self.c, "tracks", None)
+        if tm is None:
+            return self._report(a, "rejected", "tracks are not available in this coordinator")
+        P = self.c.projects[a["project_id"]]
+        p = a.get("payload") or {}
+        kind = a["kind"]
+        try:
+            if kind == "tracks_analyze":
+                an = tm.analyze(P)
+                return self._report(a, "applied", f"{len(an['tracks'])} track(s), "
+                                    f"{len(an['serial'])} serial pair(s)",
+                                    {"tracks": an["tracks"], "serial": an["serial"][:40],
+                                     "warnings": an["warnings"][:20], "done": an["done"],
+                                     "open": an["open"], "max_agents": tm.max_agents(),
+                                     "sprints": {k: {"needs": v["needs"],
+                                                     "needs_source": v["needs_source"],
+                                                     "deps": v["deps"], "files": len(v["files"])}
+                                                 for k, v in an["sprints"].items()}})
+            if kind == "tracks_propose":
+                plan = tm.propose(P, p.get("max_agents"), actor=actor)
+                return self._report(a, "applied", f"proposal {plan['plan_id']}: "
+                                    f"{plan['agents']} agent(s), {len(plan['tracks'])} parallel "
+                                    f"track(s)", plan)
+            if kind == "track_start":
+                if p.get("plan_id"):
+                    rows = tm.start_plan(P, str(p["plan_id"]), actor, p.get("names") or None)
+                else:
+                    tm.create(P, str(p.get("name") or ""), list(p.get("sprints") or []),
+                              p.get("needs"), actor)
+                    rows = [tm.start(P, str(p.get("name") or "").strip().lower(), actor)]
+                return self._report(a, "applied", "started " + ", ".join(
+                    f"{r['name']} ({' -> '.join(r['sprints'])})" for r in rows),
+                    {"tracks": [{k: r[k] for k in ("name", "state", "branch", "worktree",
+                                                   "sprints", "needs")} for r in rows]})
+            if kind == "track_stop":
+                r = tm.stop(P, str(p.get("name") or ""), actor, str(p.get("reason") or ""))
+                return self._report(a, "applied", f"track {r['name']} stopped",
+                                    {"name": r["name"], "state": r["state"]})
+            if kind == "track_merge":
+                name = str(p.get("name") or "")
+                if p.get("option"):
+                    r = tm.merger.decide(P, name, str(p["option"]), actor)
+                    return self._report(a, "applied", f"track {name}: {p['option']}",
+                                        {"name": name, "state": r["state"]})
+                r = tm.merger.request(P, name, actor)
+                return self._report(a, "applied", f"track {name} merges at the main sprint's "
+                                    f"next quiet point", {"name": name, "state": r["state"]})
+            if kind == "track_status":
+                return self._report(a, "applied", "ok", tm.status(P))
+            if kind == "set_max_agents":
+                n = tm.set_max_agents(P, p.get("max_agents"), actor)
+                return self._report(a, "applied", f"max_agents is {n}", {"max_agents": n})
+        except TrackError as e:
+            return self._report(a, "rejected", str(e)[:500])
+        return self._report(a, "rejected", f"unsupported track action {kind!r}")
 
     def _do_answer_question(self, a, t, actor):
         return self._answer(a, t, actor, "question", (a.get("payload") or {}).get("answers") or [])

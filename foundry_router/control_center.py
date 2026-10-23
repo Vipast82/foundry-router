@@ -169,7 +169,19 @@ ACTION_KINDS = ("answer_question", "reply_permission", "approve_review", "reject
                 "pause", "resume", "cancel", "unblock", "instruction", "withdraw_instruction",
                 "lanes", "decision_answer", "project_pause", "project_resume",
                 "lead_case_pause", "lead_case_takeover", "lead_case_instruct", "lead_case_resume",
-                "assistant_plan", "assistant_run", "client_restart", "client_reload_kilo_config")
+                "assistant_plan", "assistant_run", "client_restart", "client_reload_kilo_config",
+                "tracks_analyze", "tracks_propose", "track_start", "track_stop", "track_merge",
+                "track_status", "set_max_agents")
+# Team Lead tracks (2026-10-22): project-scoped, operator sessions, claimed by a
+# coordinator that declares the `tracks` feature (foundry_coordinator/control.py
+# TRACK_KINDS has the payloads). The coordinator's heartbeat carries `tracks`
+# {project: status} for the Automation page's Tracks tab (tracks_view).
+TRACK_ACTIONS = ("tracks_analyze", "tracks_propose", "track_start", "track_stop", "track_merge",
+                 "track_status", "set_max_agents")
+TRACK_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9._-]{0,39}$")
+TRACK_PLAN_RE = re.compile(r"^trp-[0-9a-f]{12}$")
+MAX_TRACK_SPRINTS = 20
+MAX_AGENTS_LIMIT = 16
 # Foundry Client stack actions (W3, 2026-10-22): claimed by the workstation
 # client that heart-beats with source kind `client` (foundry_client/relay.py),
 # never by the coordinator. Payloads:
@@ -238,7 +250,8 @@ COORDINATOR_MAJOR = 0
 # action kinds a source must declare in its features/capabilities to be handed them
 FEATURE_GATED_ACTIONS = {"decision_answer": "decision_answer", "project_pause": "project_pause",
                          "project_resume": "project_pause",
-                         **{k: "lead_manager" for k in LEAD_ACTIONS}}
+                         **{k: "lead_manager" for k in LEAD_ACTIONS},
+                         **{k: "tracks" for k in TRACK_ACTIONS}}
 # observation types that only make sense inside a project: an empty project_id
 # would bypass the per-key project allowlist, so they are refused
 PROJECT_SCOPED_TYPES = ("task", "lane_unit", "artifact", "mcp", "config", "capabilities", "todo",
@@ -589,7 +602,7 @@ class ControlCenter:
             "kilo", "coordinator_owner", "projects", "sessions_tracked", "tick", "uptime_s",
             "backoff_s", "errors", "capture_boundary", "event_stream", "monotonic_s",
             "contract", "coordinator_version", "foundry_version", "boot_id", "store_schema",
-            "features", "overall", "client_version")
+            "features", "overall", "client_version", "tracks")
             if payload.get(k) is not None})
         if kind == "client":
             # the stack summary a Foundry Client reports: bounded fields, no free text
@@ -2405,6 +2418,8 @@ class ControlCenter:
         pid, tid = _s(body.get("project_id"), 120), _s(body.get("task_id"), 120)
         if kind in PROJECT_ACTIONS:
             return self._create_project_action(actor, projects, body, scopes, kind, idem, pid, tid)
+        if kind in TRACK_ACTIONS:
+            return self._create_track_action(actor, projects, body, scopes, kind, idem, pid)
         if kind in ASSISTANT_ACTIONS:
             return self._create_assistant_action(actor, projects, body, scopes, kind, idem, pid)
         if kind in CLIENT_ACTIONS:
@@ -2732,6 +2747,124 @@ class ControlCenter:
         self._notify()
         return self.action_view(aid)
 
+    @staticmethod
+    def _track_payload(kind: str, body: dict) -> tuple[dict, str]:
+        """(payload, summary) of a track action, validated; ControlError otherwise."""
+        name = _s(body.get("name"), 40).strip().lower()
+        if kind in ("track_stop", "track_merge") or (kind == "track_start"
+                                                     and not body.get("plan_id")):
+            if not TRACK_NAME_RE.match(name):
+                raise ControlError("name: 1-40 characters of a-z, 0-9, '.', '_' or '-'")
+        if kind == "tracks_analyze":
+            return {}, "analyze the sprint plans for parallel tracks"
+        if kind == "track_status":
+            return {}, "track status"
+        if kind == "tracks_propose":
+            n = body.get("max_agents")
+            if n is not None and (isinstance(n, bool) or not isinstance(n, int)
+                                  or not 1 <= n <= MAX_AGENTS_LIMIT):
+                raise ControlError(f"max_agents must be a whole number 1..{MAX_AGENTS_LIMIT}")
+            return ({"max_agents": n} if n is not None else {},
+                    "propose tracks" + (f" for {n} agents" if n else ""))
+        if kind == "set_max_agents":
+            n = body.get("max_agents")
+            if isinstance(n, bool) or not isinstance(n, int) or not 1 <= n <= MAX_AGENTS_LIMIT:
+                raise ControlError(f"max_agents must be a whole number 1..{MAX_AGENTS_LIMIT}")
+            return {"max_agents": n}, f"set max_agents to {n}"
+        if kind == "track_start":
+            plan_id = _s(body.get("plan_id"), 40)
+            if plan_id:
+                if not TRACK_PLAN_RE.match(plan_id):
+                    raise ControlError("plan_id must come from a tracks_propose result")
+                names = body.get("names")
+                if names is not None and (not isinstance(names, list) or any(
+                        not isinstance(x, str) or not TRACK_NAME_RE.match(x) for x in names)):
+                    raise ControlError("names must be a list of track names")
+                p = {"plan_id": plan_id}
+                if names:
+                    p["names"] = names[:MAX_TRACK_SPRINTS]
+                return p, f"start the tracks of proposal {plan_id}" + (
+                    f" ({', '.join(names)})" if names else "")
+            sprints = body.get("sprints")
+            if not isinstance(sprints, list) or not sprints or len(sprints) > MAX_TRACK_SPRINTS \
+                    or any(not isinstance(x, str) or not x.strip() for x in sprints):
+                raise ControlError(f"sprints must be 1..{MAX_TRACK_SPRINTS} sprint ids")
+            p = {"name": name, "sprints": [_s(x, 120) for x in sprints]}
+            needs = body.get("needs")
+            if needs is not None:
+                if not isinstance(needs, list) or any(not isinstance(x, str) for x in needs):
+                    raise ControlError("needs must be a list of strings")
+                p["needs"] = [_s(x, 20) for x in needs][:8]
+            return p, f"start track {name}: {' -> '.join(p['sprints'])}"
+        if kind == "track_stop":
+            reason = _s(body.get("reason"), 500)
+            return {"name": name, "reason": reason}, f"stop track {name}" + (
+                f": {reason}" if reason else "")
+        option = _s(body.get("option"), 60)
+        p = {"name": name}
+        if option:
+            p["option"] = option
+        return p, (f"track {name}: {option}" if option else f"merge track {name}")
+
+    def _create_track_action(self, actor: str, projects: list, body: dict, scopes, kind: str,
+                             idem: str, pid: str) -> dict:
+        if scopes is not None and not {"operator", "admin"} & set(scopes or []):
+            raise ControlError("track actions need an operator session", "forbidden", 403)
+        if not pid:
+            raise ControlError("project_id is required")
+        if projects and pid not in projects:
+            raise ControlError("this operator may not act on that project", "forbidden", 403)
+        payload, summary = self._track_payload(kind, body)
+        chat = body.get("chat")
+        if isinstance(chat, dict):
+            payload["chat"] = {k: _s(chat.get(k), 80) for k in ("thread", "turn", "call")}
+        if not self.rate_ok(actor):
+            raise ControlError("too many control actions; wait a minute", "rate_limited", 429)
+        st = self.settings()
+        now = self.clock()
+        aid = f"act-{uuid.uuid4().hex[:16]}"
+        try:
+            with self._tx() as c:
+                seq = self._feed(c, "action", pid, "", aid)
+                c.execute("INSERT INTO cc_actions (action_id, idem_key, actor, kind, project_id, "
+                          "task_id, run_id, session_id, request_id, payload, summary, expected, "
+                          "status, status_detail, created_ts, expires_ts, updated_ts, seq) VALUES "
+                          "(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                          (aid, idem, actor, kind, pid, "", "", "", "", _j(payload), summary,
+                           _j({}), "accepted",
+                           "stored by Foundry; waiting for the coordinator to claim it", now,
+                           now + st["action_ttl_s"], now, seq))
+                c.execute("INSERT INTO cc_action_log (action_id, ts, status, actor, detail) "
+                          "VALUES (?,?,?,?,?)", (aid, now, "accepted", actor, summary))
+        except Exception as e:                                   # noqa: BLE001
+            if "UNIQUE" in str(e) and "idem" in str(e):
+                ex = self.db.query_one("SELECT action_id FROM cc_actions WHERE idem_key=?", (idem,))
+                return {**self.action_view(ex["action_id"]), "duplicate": True}
+            raise
+        self._notify()
+        return self.action_view(aid)
+
+    def tracks_view(self, projects: list, project: str = "") -> dict:
+        """The `tracks` block of the freshest coordinator heartbeat, per project
+        (the Tracks tab and the chat's track_status read it): {project: status},
+        plus the source and its age. Empty when no coordinator reports tracks."""
+        best, out = None, {}
+        for s in self.sources(projects):
+            if s.get("kind") != "coordinator":
+                continue
+            d = s.get("detail") if isinstance(s.get("detail"), dict) else _uj(s.get("detail"), {})
+            tr = (d or {}).get("tracks")
+            if not isinstance(tr, dict):
+                continue
+            if best is None or (s.get("last_seen") or 0) > (best.get("last_seen") or 0):
+                best, out = s, tr
+        if projects:
+            out = {k: v for k, v in out.items() if k in projects}
+        if project:
+            out = {k: v for k, v in out.items() if k == project}
+        return {"tracks": out, "source": (best or {}).get("source_id"),
+                "age_s": (round(self.clock() - (best.get("last_seen") or 0)) if best else None)}
+
     def client_sources(self) -> list[dict]:
         """Foundry Clients that heart-beat (kind client), freshest first."""
         return sorted([s for s in self.sources([]) if s["kind"] == "client"],
@@ -2944,6 +3077,8 @@ class ControlCenter:
             return f"restart {p.get('component')} ({'now' if p.get('force') else 'at a safe point'})"
         if kind == "client_reload_kilo_config":
             return "reload kilo.jsonc into the Kilo server"
+        if kind in TRACK_ACTIONS:
+            return ControlCenter._track_payload(kind, {**p, "name": p.get("name") or tid})[1][:300]
         if kind == "decision_answer":
             return (f"answer decision {p.get('decision_id')} ({p.get('decision_kind') or '?'}) as "
                     f"{p.get('authority')}" + (" · option chosen" if p.get("option") else "")

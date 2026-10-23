@@ -65,11 +65,12 @@ RESULT_CHARS = 3000                    # a tool result shown to the model, at mo
 CONTEXT_CHARS = 6000
 CONFIRM_TTL_S = 24 * 3600
 AUTO_CLASSES = ("read", "draft", "preview", "ask")
-CONFIRM_CLASSES = ("deploy", "cutoffs", "persona", "sprint", "decision", "restart")
+CONFIRM_CLASSES = ("deploy", "cutoffs", "persona", "sprint", "decision", "restart", "tracks")
 CLASS_LABEL = {"deploy": "Deploy or roll back settings", "cutoffs": "Change usage cutoffs",
                "persona": "Change persona routes", "sprint": "Start, queue, pause, resume or "
                "cancel sprints (and pause/resume a project)", "decision": "Answer decisions "
-               "and questions", "restart": "Restart stack components / reload kilo.jsonc"}
+               "and questions", "restart": "Restart stack components / reload kilo.jsonc",
+               "tracks": "Start, stop or merge parallel tracks; change max_agents"}
 # the task states the queue tools accept, mirrored from the coordinator
 _TERMINAL = ("COMPLETE", "CANCELLED")
 
@@ -140,6 +141,14 @@ SYSTEM = (
     "- Stack: restart_kilo / restart_coordinator / restart_rojo / reload_kilo_config go to the "
     "Foundry Client; if no client is attached, say so and give the command "
     "`foundry-client restart kilo --wait`.\n"
+    "- Parallel tracks (a dev-team lead): analyze_tracks reads every sprint plan and says which "
+    "sprints can run side by side (needs: studio, blender, audio, backend; file overlap and "
+    "dependencies make sprints serial). propose_tracks(project, max_agents) returns a plan "
+    "card (plan_id, tracks, agent count); track_start(plan_id) starts the proposed tracks after "
+    "the operator confirms. Each track is a git worktree + branch with its own Kilo session; "
+    "Studio stays with the main checkout and a track's Studio work runs at merge time. "
+    "track_status shows them; track_stop / track_merge act on one; set_max_agents changes "
+    "the live cap (the main sprint always counts first). Nothing starts without the card.\n"
     "- At most 8 tool calls per turn. Keep `say` under 120 words. No markdown tables.")
 
 
@@ -984,6 +993,22 @@ class ChatEngine:
             if call["tool"] == "set_cutoffs":
                 from . import cutoffs
                 return {"current": cutoffs.view(self.svc)}
+            if call["tool"] == "track_start" and a.get("plan_id"):
+                # the plan card: the proposal the coordinator returned for this plan_id
+                for r in self.db.query("SELECT result FROM cc_actions WHERE kind='tracks_propose' "
+                                       "AND status='applied' AND project_id=? ORDER BY "
+                                       "created_ts DESC LIMIT 20", (a["project"],)):
+                    plan = _uj(r.get("result"), {}) or {}
+                    if plan.get("plan_id") == a["plan_id"]:
+                        return {"plan": {k: plan.get(k) for k in ("plan_id", "agents", "max_agents",
+                                                                  "main", "tracks", "notes")}}
+                return {"note": f"no proposal {a['plan_id']} found; propose_tracks again"}
+            if call["tool"] in ("track_stop", "track_merge", "set_max_agents"):
+                v = self.svc.control.tracks_view([], a["project"])
+                st = (v.get("tracks") or {}).get(a["project"]) or {}
+                return {"max_agents": st.get("max_agents"),
+                        "tracks": [{k: t.get(k) for k in ("name", "state", "current_sprint")}
+                                   for t in st.get("tracks") or []][:12]}
             if call["tool"] == "set_persona_routes":
                 p = self.svc.personas.get(a["name"]) or {}
                 return {"current": {"pinned_models": _uj(p.get("pinned_models"), []),
@@ -1586,6 +1611,111 @@ class ChatEngine:
         async def reload_kilo_config(ctx: Ctx, a: dict):
             return await eng._client_action(ctx, "client_reload_kilo_config", {})
 
+        # ---- parallel tracks (Team Lead; typed actions the coordinator claims) ----
+        @self._add("analyze_tracks", "Read every sprint plan of a project and return the "
+                   "deterministic track analysis: ordered tracks (chains of sprints with their "
+                   "needs: studio, blender, audio, images, gpu, backend), the serial pairs with "
+                   "the reason (dependency or shared file), warnings, and the current "
+                   "max_agents. No model call; takes a few seconds.", "read",
+                   {"project": P}, ("project",), "project")
+        async def analyze_tracks(ctx: Ctx, a: dict):
+            return await eng._track_action(ctx, "tracks_analyze", a["project"], {}, 60)
+
+        @self._add("propose_tracks", "A track plan for an agent count: the main track plus up "
+                   "to max_agents-1 parallel tracks (never two on one blender/gpu), with notes. "
+                   "Returns plan_id, tracks[{name, sprints, needs}], agents. Nothing starts: "
+                   "track_start(plan_id) does, after the operator's card.", "draft",
+                   {"project": P, "max_agents": {"type": "integer"}}, ("project",), "project",
+                   lambda a: f"propose tracks for {a.get('project')}"
+                   + (f" ({a['max_agents']} agents)" if a.get("max_agents") else ""))
+        async def propose_tracks(ctx: Ctx, a: dict):
+            body = {}
+            if a.get("max_agents") is not None:
+                body["max_agents"] = int(a["max_agents"])
+            return await eng._track_action(ctx, "tracks_propose", a["project"], body, 60)
+
+        @self._add("track_status", "The tracks of a project as the coordinator last reported "
+                   "them: each with state, sprints and their states, worktree, needs, merge "
+                   "stage; max_agents and running agents; the Studio lease and timeline.",
+                   "read", {"project": P}, ("project",), "project")
+        async def track_status(ctx: Ctx, a: dict):
+            v = eng.svc.control.tracks_view(ctx.projects, a["project"])
+            st = (v.get("tracks") or {}).get(a["project"])
+            if not st:
+                return {"project": a["project"], "tracks": [], "note": "the coordinator has not "
+                        "reported tracks yet (is it running with --control on a build with "
+                        "tracks?)", "source": v.get("source")}
+            studio = dict(st.get("studio") or {})
+            studio["journal"] = (studio.get("journal") or [])[-12:]
+            return {"project": a["project"], "max_agents": st.get("max_agents"),
+                    "agents_running": st.get("agents_running"), "main": st.get("main"),
+                    "tracks": [{k: t.get(k) for k in ("name", "state", "current_sprint",
+                                                      "sprints", "needs", "branch", "worktree",
+                                                      "merge", "lease")}
+                               for t in st.get("tracks") or []][:20],
+                    "studio": {k: studio.get(k) for k in ("in_use", "pending", "lease",
+                                                          "last_main_call_age_s", "journal")},
+                    "reported_s_ago": v.get("age_s")}
+
+        @self._add("track_start", "Start parallel tracks: plan_id from propose_tracks (all its "
+                   "tracks, or `names`), or one track by name with its sprints (and needs). "
+                   "Creates the git worktree and branch, queues the sprints on it.", "tracks",
+                   {"project": P, "plan_id": {"type": "string", "max": 40},
+                    "names": {"type": "array", "max_items": 8},
+                    "name": {"type": "string", "max": 40},
+                    "sprints": {"type": "array", "max_items": 20},
+                    "needs": {"type": "array", "max_items": 8}}, ("project",), "project",
+                   lambda a: (f"start the tracks of {a['plan_id']} on {a.get('project')}"
+                              + (f" ({', '.join(map(str, a['names']))})" if a.get("names") else "")
+                              if a.get("plan_id") else
+                              f"start track {a.get('name')} on {a.get('project')}: "
+                              + " -> ".join(map(str, a.get("sprints") or []))))
+        async def track_start(ctx: Ctx, a: dict):
+            body = {k: a[k] for k in ("plan_id", "names", "name", "sprints", "needs") if a.get(k)}
+            if not body.get("plan_id") and not (body.get("name") and body.get("sprints")):
+                raise ChatError("give plan_id (from propose_tracks) or name + sprints")
+            return await eng._track_action(ctx, "track_start", a["project"], body, 60,
+                                           changed=True)
+
+        @self._add("track_stop", "Stop a track: its unfinished sprints are cancelled (sessions "
+                   "aborted); the worktree and branch are kept for inspection.", "tracks",
+                   {"project": P, "name": {"type": "string", "max": 40},
+                    "reason": {"type": "string", "max": 500}}, ("project", "name"), "project",
+                   lambda a: f"stop track {a.get('name')} on {a.get('project')}"
+                   + (f": {a['reason']}" if a.get("reason") else ""))
+        async def track_stop(ctx: Ctx, a: dict):
+            return await eng._track_action(ctx, "track_stop", a["project"],
+                                           {"name": a["name"], "reason": a.get("reason") or ""},
+                                           30, changed=True)
+
+        @self._add("track_merge", "Merge a finished track into master at the main sprint's next "
+                   "quiet point (rebase, fast-forward, the gate on the merged files in the main "
+                   "checkout). With `option`, answer the track's open conflict decision: "
+                   "'stop this track' (default), 'retry the merge', 'keep the branch, no merge'.",
+                   "tracks", {"project": P, "name": {"type": "string", "max": 40},
+                              "option": {"type": "string", "max": 60}}, ("project", "name"),
+                   "project", lambda a: (f"track {a.get('name')}: {a['option']}" if a.get("option")
+                                         else f"merge track {a.get('name')} on {a.get('project')}"))
+        async def track_merge(ctx: Ctx, a: dict):
+            body = {"name": a["name"]}
+            if a.get("option"):
+                body["option"] = a["option"]
+            return await eng._track_action(ctx, "track_merge", a["project"], body, 30,
+                                           changed=True)
+
+        @self._add("set_max_agents", "Change the live cap on sprints running at once across the "
+                   "main checkout and the tracks (1 = no parallel tracks; the main sprint always "
+                   "counts first). Applies at once; survives a coordinator restart.", "tracks",
+                   {"project": P, "max_agents": {"type": "integer"}}, ("project", "max_agents"),
+                   "project", lambda a: f"set max_agents to {a.get('max_agents')} "
+                   f"({a.get('project')})")
+        async def set_max_agents(ctx: Ctx, a: dict):
+            n = a["max_agents"]
+            if isinstance(n, bool) or not isinstance(n, int) or not 1 <= n <= 16:
+                raise ChatError("max_agents must be a whole number from 1 to 16")
+            return await eng._track_action(ctx, "set_max_agents", a["project"],
+                                           {"max_agents": n}, 30, changed=True)
+
         @self._add("ask_operator", "Ask the operator one question and end the turn; options are "
                    "shown as buttons.", "ask", {"text": {"type": "string", "max": 1000},
                                                 "options": {"type": "array", "max_items": 8}},
@@ -1605,6 +1735,34 @@ class ChatEngine:
         if d.get("status") != "open":
             raise ChatError(f"decision {decision_id} is {d.get('status')}, not open", "stale", 409)
         return d
+
+    async def _track_action(self, ctx: Ctx, kind: str, project: str, payload: dict,
+                            wait_s: float, changed: bool = False) -> dict:
+        """File a track action for the coordinator and wait briefly for its answer
+        (the coordinator claims it on its next tick; reads come back with the
+        result, changes with the status)."""
+        act = self.svc.control.create_action(ctx.actor, ctx.projects, {
+            "kind": kind, "project_id": project, **payload,
+            "idempotency_key": f"chat:{ctx.thread_id}:{ctx.turn_id}:{ctx.call_id}",
+            "chat": {"thread": ctx.thread_id, "turn": ctx.turn_id, "call": ctx.call_id}},
+            scopes=ctx.scopes)
+        done = await self._wait_action(act["action_id"], wait_s)
+        status = done.get("status")
+        res = done.get("result") or {}
+        if status == "applied" and not changed:
+            return {**res, "action_id": act["action_id"]}
+        if status in ("rejected", "failed"):
+            raise ChatError(f"the coordinator {status} it: {done.get('status_detail')}",
+                            "coordinator_" + status, 409)
+        note = ("" if status == "applied" else
+                "the coordinator has not answered yet (is it running with --control on a build "
+                "with tracks?); check get_actions or track_status later")
+        out = {"action_id": act["action_id"], "status": status,
+               "detail": done.get("status_detail"), **({"result": res} if res else {}),
+               **({"note": note} if note else {})}
+        if changed:
+            return {"result": out, "changed": [f"{project}: {act['summary']} ({status})"]}
+        return out
 
     async def _client_action(self, ctx: Ctx, kind: str, payload: dict) -> dict:
         if not self.svc.control.client_sources():

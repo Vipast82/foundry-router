@@ -226,6 +226,19 @@ async def graph(request: Request, project: str = "", task: str = "", minutes: fl
     return _cc(request).route_graph(s["projects"], project, task, max(1.0, min(1440.0, minutes)))
 
 
+@router.get("/control/api/tracks")
+@_guard
+async def tracks(request: Request, project: str = ""):
+    """Team Lead tracks as the coordinator's heartbeat reports them: per project
+    max_agents, the tracks (sprints, state, worktree, needs, merge stage) and
+    the Studio timeline (resource journal). Read-only; actions go through
+    POST /control/api/actions (track_start, track_stop, track_merge, ...)."""
+    s = _op(request)
+    if project and s["projects"] and project not in s["projects"]:
+        raise ControlError("unknown project", "not_found", 404)
+    return _cc(request).tracks_view(s["projects"], project)
+
+
 @router.get("/control/api/lanes")
 @_guard
 async def lanes(request: Request, project: str, task: str = ""):
