@@ -338,6 +338,7 @@
   <button role="tab" id="tab-settings" aria-controls="v-settings" data-view="settings">Settings</button>
   <button role="tab" id="tab-rules" aria-controls="v-rules" data-view="rules">Role rules</button>
   <button role="tab" id="tab-queue" aria-controls="v-queue" data-view="queue">Queue</button>
+  <button role="tab" id="tab-services" aria-controls="v-services" data-view="services" title="Studio, Blender, audio and other services sprints need">Services</button>
 </nav>
 <div id="draftbar" role="region" aria-label="Draft">
   <div class="state grow" id="draft-state" aria-live="polite"></div>
@@ -352,6 +353,7 @@
   <section id="v-settings" role="tabpanel" aria-labelledby="tab-settings" hidden></section>
   <section id="v-rules" role="tabpanel" aria-labelledby="tab-rules" hidden></section>
   <section id="v-queue" role="tabpanel" aria-labelledby="tab-queue" hidden></section>
+  <section id="v-services" role="tabpanel" aria-labelledby="tab-services" hidden></section>
 </main>
 <aside id="drawer" role="dialog" aria-modal="false" aria-labelledby="drawer-h" hidden></aside>
 <div class="modal" id="modal" hidden><div class="modal-box" role="dialog" aria-modal="true" aria-labelledby="modal-h"></div></div>
@@ -642,7 +644,7 @@ $("#theme-btn").onclick = () => applyTheme(document.documentElement.dataset.them
 applyTheme(store("fr-theme") || (matchMedia("(prefers-color-scheme: light)").matches ? "light" : "dark"));
 
 /* ======================================================================== views */
-const VIEWS = ["ask", "routing", "settings", "rules", "queue"];
+const VIEWS = ["ask", "routing", "settings", "rules", "queue", "services"];
 function setView(v, push = true) {
   if (!VIEWS.includes(v)) v = "routing";
   S.view = v;
@@ -651,7 +653,7 @@ function setView(v, push = true) {
     b.setAttribute("aria-selected", on ? "true" : "false"); b.tabIndex = on ? 0 : -1;
   }
   for (const x of VIEWS) $("#v-" + x).hidden = x !== v;
-  $("#draftbar").hidden = v === "queue" || v === "ask";
+  $("#draftbar").hidden = v === "queue" || v === "ask" || v === "services";
   if (push && location.hash.slice(1) !== v) history.replaceState(null, "", "#" + v);
   closeDrawer();
   renderView();
@@ -667,6 +669,7 @@ window.addEventListener("hashchange", () => { const h = location.hash.slice(1); 
 function renderView() {
   renderNotes();
   if (S.view === "ask") return renderAsk();          // the chat needs no project document
+  if (S.view === "services") { S.svc = null; return renderServices(); }   // nor do the services
   if (!S.deployed) return;
   if (S.view === "routing") renderRouting();
   else if (S.view === "settings") renderSettings();
@@ -676,7 +679,7 @@ function renderView() {
 function renderNotes() {
   const notes = [];
   if (S.loadError) notes.push(`<div class="banner bad"><b>Settings not loaded.</b> ${esc(S.loadError)}</div>`);
-  else if (S.c1 && !S.deployedRevision && S.view !== "queue")
+  else if (S.c1 && !S.deployedRevision && S.view !== "queue" && S.view !== "services")
     notes.push(`<div class="banner">Nothing is deployed for <b>${esc(S.cfgProject)}</b> yet. Start from the coordinator's own settings with <button class="act" type="button" data-act="import">Import project.toml…</button>, or edit here and deploy the first revision.</div>`);
   $("#notes").innerHTML = notes.join("");
 }
@@ -1063,6 +1066,7 @@ $("#main").addEventListener("click", e => {
   else if (a === "role-rules") openCell(b.dataset.role, "_role");
   else if (a === "test-path") testPath($("#pt-role").value, $("#pt-op").value, $("#pt-path").value, $("#pt-out"));
   else if (a === "set-reset") resetField(b.dataset.key);
+  else if (a.startsWith("svc-")) servicesClick(a, b);
   else if (a) queueClick(a, b);
 });
 $("#main").addEventListener("keydown", e => {
@@ -1572,6 +1576,12 @@ function decisionHtml({t, d}) {
 function depsHtml(x) {
   return `<span class="deps">${(x.deps || []).map(d => `<code>${esc(d)}</code>`).join("") || `<span class="hint" style="margin:0">none</span>`}${S.qOps ? ` <button class="ic" type="button" data-act="q-deps" data-task="${esc(x.task_id)}" aria-label="Edit dependencies of ${esc(x.task_id)}">✎</button>` : ""}</span>`;
 }
+function needsHtml(x) {
+  const d = (x.live && x.live.data) || {}, needs = d.needs || [], w = d.service_wait;
+  const pills = needs.map(n => `<span class="pill info">${esc(n)}</span>`).join(" ");
+  const wait = w && (w.missing || []).length ? `<div><span class="pill warn" title="The sprint starts by itself when the service is up; no attempt is used">waiting for ${esc(w.missing.join(", "))}</span></div>` : "";
+  return pills || wait ? pills + wait : `<span class="hint" style="margin:0">–</span>`;
+}
 function rowActions(x) {
   const st = x.state || "", b = [], tid = esc(x.task_id);
   const btn = (act, label, title, cls = "") => `<button class="act ${cls}" type="button" data-act="${act}" data-task="${tid}" title="${esc(title)}">${label}</button>`;
@@ -1602,14 +1612,15 @@ async function renderQueue() {
     ${decs.length ? decs.map(decisionHtml).join("") : `<p class="hint">Nothing waits on you.</p>`}
     <h2>Tasks</h2>
     <div class="card qwrap"><table class="q"><caption class="sr-only">Queue for ${esc(S.project)}</caption>
-      <thead><tr>${S.qOps ? `<th scope="col"><span class="sr-only">Order</span></th>` : ""}<th scope="col">Task</th><th scope="col">State</th><th scope="col">Depends on</th><th scope="col">Note</th><th scope="col"><span class="sr-only">Actions</span></th></tr></thead>
+      <thead><tr>${S.qOps ? `<th scope="col"><span class="sr-only">Order</span></th>` : ""}<th scope="col">Task</th><th scope="col">State</th><th scope="col">Depends on</th><th scope="col">Needs</th><th scope="col">Note</th><th scope="col"><span class="sr-only">Actions</span></th></tr></thead>
       <tbody id="qbody">${(S.queue || []).map((x, i) => `<tr data-task="${esc(x.task_id)}">
         ${S.qOps ? `<td><button class="drag" type="button" data-act="q-key" data-i="${i}" aria-label="${esc(x.task_id)}, position ${i + 1} of ${S.queue.length}. Drag, or press arrow up or down to move."><span aria-hidden="true">⠿</span><span class="pos" aria-hidden="true">${i + 1}</span></button></td>` : ""}
         <td><b class="mono">${esc(x.task_id)}</b>${x.approved_by ? `<div class="hint" style="margin:0">approved by ${esc(x.approved_by)}</div>` : ""}</td>
         <td><span class="pill ${STATE_CLS[x.state] || ""}">${esc(x.state || "?")}</span></td>
         <td>${depsHtml(x)}</td>
+        <td>${needsHtml(x)}</td>
         <td class="hint" style="margin:0;max-width:340px">${esc(String(x.note || "").slice(0, 200))}</td>
-        <td class="acts">${rowActions(x)}</td></tr>`).join("") || `<tr><td colspan="6" class="hint">No tasks reported for this project.</td></tr>`}</tbody></table></div>`;
+        <td class="acts">${rowActions(x)}</td></tr>`).join("") || `<tr><td colspan="7" class="hint">No tasks reported for this project.</td></tr>`}</tbody></table></div>`;
   attachSortables();
   startTick();
 }
@@ -1620,6 +1631,55 @@ function startTick() {
     if (!els.length || S.view !== "queue") { clearInterval(S.decTick); S.decTick = null; return; }
     for (const c of els) c.textContent = countdown(Number(c.dataset.deadline));
   }, 1000);
+}
+
+/* ======================================================================== services view (Team Lead 5) */
+const SVC_PILL = {up: "ok", down: "bad", unknown: ""};
+const SVC_NEEDS = {studio: "Studio", blender: "Blender", audio: "Audio", images: "Images", gpu: "GPU", backend: "Backend"};
+async function renderServices() {
+  const el = $("#v-services");
+  if (!S.svc) {
+    el.innerHTML = `<p class="hint">Loading the services…</p>`;
+    try { S.svc = await api("services"); } catch (e) { el.innerHTML = `<p class="hint">${esc(e.message)}</p>`; return; }
+  }
+  const v = S.svc, rows = v.services || [], wait = v.waiting_sprints || [];
+  const down = rows.filter(r => r.status === "down").length;
+  el.innerHTML = `
+    <div class="row" style="margin-top:12px"><h2 style="margin:0">Services</h2>
+      <span class="pill ${down ? "bad" : "ok"}">${down ? down + " down" : "all reachable"}</span>
+      <span class="grow"></span><button class="act" type="button" data-act="svc-refresh">Refresh</button></div>
+    <p class="hint">A sprint declares what it needs (studio, blender, audio, images, gpu, backend). The coordinator checks these services before it starts the sprint; a missing one makes the sprint wait, never fail. Services run by the Foundry Client can be restarted or switched on here; the rest are external.</p>
+    ${v.client === "none attached" || !rows.length ? `<div class="banner warn"><b>No Foundry Client has reported services.</b> Start the client on the workstation with a router key (docs/CLIENT_MANAGER.md).</div>` : ""}
+    <div class="card qwrap"><table class="q"><caption class="sr-only">Service registry</caption>
+      <thead><tr><th scope="col">Service</th><th scope="col">Status</th><th scope="col">Provided by</th><th scope="col">Needed by</th><th scope="col">Detail</th><th scope="col"><span class="sr-only">Actions</span></th></tr></thead>
+      <tbody>${rows.map(r => `<tr>
+        <td><b>${esc(r.label || r.name)}</b><div class="hint mono" style="margin:0">${esc(r.name)}${r.kind ? " · " + esc(r.kind) : ""}</div></td>
+        <td><span class="pill ${SVC_PILL[r.status] || ""}">${esc(r.status || "?")}</span></td>
+        <td>${esc(r.provider || "")}${r.provider === "client" && r.component ? ` <span class="hint" style="margin:0">(${esc(r.component)}${r.component_state ? ", " + esc(r.component_state) : ""}${r.enabled === false ? ", off" : ""})</span>` : ""}</td>
+        <td>${(r.needed_by || []).map(n => `<span class="pill info">${esc(SVC_NEEDS[n] || n)}</span>`).join(" ")}</td>
+        <td class="hint" style="margin:0;max-width:340px">${esc(String(r.detail || "").slice(0, 200))}${r.note ? `<div>${esc(r.note)}</div>` : ""}</td>
+        <td class="acts">${r.provider === "client" && r.component ? `<button class="act" type="button" data-act="svc-restart" data-comp="${esc(r.component)}" data-name="${esc(r.name)}" title="Restart ${esc(r.name)} through the Foundry Client">Restart</button>
+          ${["rojo", "blender", "acestep-music", "stable-audio", "kokoro-tts", "chatterbox-tts"].includes(r.component) ? `<button class="act" type="button" data-act="svc-enable" data-comp="${esc(r.component)}" data-on="${r.enabled ? "0" : "1"}" title="${r.enabled ? "Stop it and turn it off in the client settings" : "Turn it on in the client settings and start it"}">${r.enabled ? "Disable" : "Enable"}</button>` : ""}` : `<span class="hint" style="margin:0">external</span>`}</td></tr>`).join("") || `<tr><td colspan="6" class="hint">Nothing reported yet.</td></tr>`}</tbody></table></div>
+    <h2>Sprints waiting for a service${wait.length ? ` (${wait.length})` : ""}</h2>
+    ${wait.length ? `<ul>${wait.map(w => `<li><b class="mono">${esc(w.task)}</b> <span class="hint" style="margin:0">${esc(w.project)}</span> waits for ${w.waiting_for.map(n => `<span class="pill warn">${esc(n)}</span>`).join(" ")} <span class="hint" style="margin:0">(needs ${esc((w.needs || []).join(", "))})</span></li>`).join("")}</ul>` : `<p class="hint">No sprint is waiting.</p>`}
+    <details><summary>MCP servers Kilo can see (${(v.mcp || []).length})</summary>
+      <table class="q"><thead><tr><th scope="col">Server</th><th scope="col">Type</th><th scope="col">Enabled</th><th scope="col">Available</th><th scope="col">Detail</th></tr></thead>
+      <tbody>${(v.mcp || []).map(m => `<tr><td class="mono">${esc(m.name)}</td><td>${esc(m.type || "")}</td><td>${m.enabled ? "yes" : "no"}</td><td><span class="pill ${m.available === true ? "ok" : m.available === false ? "bad" : ""}">${m.available === true ? "yes" : m.available === false ? "no" : "unknown"}</span></td><td class="hint" style="margin:0">${esc(m.detail || "")}</td></tr>`).join("")}</tbody></table></details>`;
+}
+async function servicesClick(a, b) {
+  if (a === "svc-refresh") { S.svc = null; return renderServices(); }
+  try {
+    if (a === "svc-restart") {
+      if (!confirm(`Restart ${b.dataset.name} at the next safe point?`)) return;
+      const r = await api("actions", {method: "POST", body: {kind: "client_restart", component: b.dataset.comp, force: false, idempotency_key: idem()}});
+      toast(`Restart ${b.dataset.comp}: ${r.status || "accepted"}. The Foundry Client applies it at a safe point.`);
+    } else if (a === "svc-enable") {
+      const on = b.dataset.on === "1";
+      const r = await api("actions", {method: "POST", body: {kind: "client_service_enable", component: b.dataset.comp, enabled: on, idempotency_key: idem()}});
+      toast(`${on ? "Enable" : "Disable"} ${b.dataset.comp}: ${r.status || "accepted"}.`);
+    }
+    setTimeout(() => { S.svc = null; if (S.view === "services") renderServices(); }, 4000);
+  } catch (e) { toast(e.message, true); }
 }
 /* ===================================================================== chat (operator chat, W3)
    /control/api/chat/*: persisted threads and turns. The model proposes JSON
@@ -1942,6 +2002,7 @@ async function boot() {
   const busy = id => $("#" + id).contains(document.activeElement) || !$("#modal").hidden;
   setInterval(async () => { if (document.hidden) return; await refreshUsage(); if (S.view === "routing" && !busy("v-routing")) { renderRouting(); refreshDry(); } }, 60000);
   setInterval(() => { if (!document.hidden && S.view === "queue" && !busy("v-queue")) { S.queue = null; renderQueue(); } }, 20000);
+  setInterval(() => { if (!document.hidden && S.view === "services" && !busy("v-services")) { S.svc = null; renderServices(); } }, 20000);
 }
 boot();
 </script>

@@ -191,14 +191,14 @@ def test_confirm_classes_can_be_switched_to_auto(chat, app, client):
 
 def test_context_is_sent_once_and_only_changed_blocks_again(chat, app):
     t1 = chat("hi", reply("hi"))
-    assert set(t1["context_sent"]) == {"projects", "settings", "usage", "stack", "pending"}
+    assert set(t1["context_sent"]) == {"projects", "settings", "usage", "stack", "services", "pending"}
     t2 = chat("again", reply("hi"), thread=t1["_thread"])
     assert t2["context_sent"] is None                             # nothing changed
     app.state.services.automation.draft("newproj")               # settings block changes
     t3 = chat("again", reply("hi"), thread=t1["_thread"])
     assert "settings" in t3["context_sent"] and "stack" not in t3["context_sent"]
     third = chat.eng._model_fn.seen[0][-1]["content"]
-    assert "unchanged: pending, stack, usage" in third and '"settings":' in third
+    assert "unchanged: pending, services, stack, usage" in third and '"settings":' in third
 
 
 def _client_beat(client, sid="client:ws", features=("stack_control",), hdr=CLIENT_HDR):
@@ -348,3 +348,117 @@ def test_api_needs_the_operator_session_and_csrf(client, cc):  # noqa: F811
     # a bare client key is not an operator session
     client.cookies.clear()
     assert client.get("/control/api/chat/threads", headers=CLIENT_HDR).status_code == 401
+
+
+# ---------------------------------------------------------------- services (Team Lead 5)
+
+SERVICES_BEAT = {
+    "source": {"id": "client:ws", "kind": "client", "version": "0.134.0"}, "contract": "foundry.cc.v1",
+    "features": ["stack_control"], "overall": "ok",
+    "components": [{"name": "rojo", "state": "stopped", "enabled": False}],
+    "mcp": [{"name": "kokoro-tts", "type": "remote", "enabled": False, "available": False,
+             "detail": "192.168.0.115:8934 is not reachable", "target": "192.168.0.115:8934",
+             "headers": "dropped"}],
+    "services": [
+        {"name": "rojo", "label": "Rojo serve", "kind": "process", "check": "port",
+         "provider": "client", "component": "rojo", "enabled": False, "component_state": "stopped",
+         "needed_by": ["studio"], "status": "down", "detail": "port 34872 is closed", "note": ""},
+        {"name": "kokoro-tts", "label": "Kokoro speech", "kind": "mcp", "check": "mcp",
+         "provider": "external", "component": "", "enabled": None, "needed_by": ["audio"],
+         "status": "down", "detail": "192.168.0.115:8934 is not reachable", "note": ""},
+        {"name": "kilo", "label": "Kilo server", "kind": "process", "check": "port",
+         "provider": "client", "component": "kilo", "enabled": True, "component_state": "running",
+         "needed_by": ["studio"], "status": "up", "detail": "port 4096 is open", "note": ""}]}
+
+
+def _confirm(client, chat, t, picked=("c1",)):
+    r = client.post(f"/control/api/chat/confirms/{t['confirm']['confirm_id']}", headers=chat.h,
+                    json={"decision": "confirm", "picked": list(picked)})
+    return r.json()["results"][0]
+
+
+def test_services_status_tool_and_the_small_context_block(chat, client, cc, app):  # noqa: F811
+    from tests.test_control_center import ingest, task_obs
+    r = client.post("/v1/foundry/telemetry/heartbeat", headers=CLIENT_HDR, json=SERVICES_BEAT)
+    assert r.status_code == 200, r.text
+    ingest(client, task_obs(state="READY", needs=["audio"],
+                            service_wait={"missing": ["kokoro-tts"], "needs": ["audio"], "n": 1}))
+    t = chat("what is down?", reply("", [call("services_status")]), reply("kokoro"))
+    res = t["results"][0]["result"]
+    by = {s["name"]: s for s in res["services"]}
+    assert by["rojo"]["status"] == "down" and by["rojo"]["provider"] == "client"
+    assert by["kokoro-tts"]["provider"] == "external" and "component" not in by["kokoro-tts"]
+    assert by["kilo"]["status"] == "up"
+    assert res["waiting_sprints"] == [{"project": "proj", "task": "T-1",
+                                      "waiting_for": ["kokoro-tts"], "needs": ["audio"]}]
+    assert res["mcp"] == [{"name": "kokoro-tts", "type": "remote", "enabled": False,
+                           "available": False, "detail": "192.168.0.115:8934 is not reachable"}]
+    # the context block is small and stable: no timestamps, no free-text for services that are up
+    blk = chat.eng.services_view(["proj"])
+    assert "detail" not in {s["name"]: s for s in blk["services"]}["kilo"]
+    assert chat.eng.services_view(["proj"]) == blk
+
+
+def test_service_restart_and_enable_file_client_actions(chat, client, cc):  # noqa: F811
+    client.post("/v1/foundry/telemetry/heartbeat", headers=CLIENT_HDR, json=SERVICES_BEAT)
+    t = chat("restart rojo", reply("", [call("service_restart", name="rojo", force=True)]), reply("card"))
+    assert t["confirm"]["calls"][0]["class"] == "restart"
+    assert t["confirm"]["calls"][0]["summary"] == "restart service rojo (now)"
+    res = _confirm(client, chat, t)
+    assert res["ok"], res
+    a = cc.action_view(res["result"]["action_id"])
+    assert a["kind"] == "client_restart" and a["summary"] == "restart rojo (now)"
+    assert a["expected"] == {"component": "rojo"}
+
+    t = chat("turn rojo on", reply("", [call("service_enable", name="rojo", on=True)]), reply("card"))
+    assert t["confirm"]["calls"][0]["summary"] == "enable service rojo"
+    res = _confirm(client, chat, t)
+    assert res["ok"], res
+    a = cc.action_view(res["result"]["action_id"])
+    assert a["kind"] == "client_service_enable" and a["summary"] == "enable rojo"
+    # the client claims it like any stack action, payload intact
+    r = client.post("/v1/foundry/control/claim", headers=CLIENT_HDR,
+                    json={"source_id": "client:ws", "source_kind": "client"})
+    got = {x["kind"]: x["payload"] for x in r.json()["actions"]}
+    assert got["client_service_enable"]["component"] == "rojo"
+    assert got["client_service_enable"]["enabled"] is True
+    assert got["client_restart"]["component"] == "rojo" and got["client_restart"]["force"] is True
+
+
+def test_external_and_unknown_services_cannot_be_restarted(chat, client, cc):  # noqa: F811
+    client.post("/v1/foundry/telemetry/heartbeat", headers=CLIENT_HDR, json=SERVICES_BEAT)
+    t = chat("restart kokoro", reply("", [call("service_restart", name="kokoro-tts")]), reply("card"))
+    res = _confirm(client, chat, t)
+    assert res["ok"] is False and "external" in res["error"] and "nothing to restart" in res["error"]
+    t = chat("enable bogus", reply("", [call("service_enable", name="bogus", on=True)]), reply("card"))
+    res = _confirm(client, chat, t)
+    assert res["ok"] is False and "no service 'bogus'" in res["error"]
+    # nothing was filed
+    assert not [a for a in cc.actions([], "", "", "", 50) if a["kind"] == "client_service_enable"]
+
+
+def test_service_enable_validation_in_the_control_center(client, cc, chat):  # noqa: F811
+    client.post("/v1/foundry/telemetry/heartbeat", headers=CLIENT_HDR, json=SERVICES_BEAT)
+    h = chat.h
+    r = client.post("/control/api/actions", headers=h, json={
+        "kind": "client_service_enable", "component": "kilo", "enabled": True,
+        "idempotency_key": "svc-enable-1"})
+    assert r.status_code == 400 and "component must be one of" in r.text
+    r = client.post("/control/api/actions", headers=h, json={
+        "kind": "client_service_enable", "component": "blender", "enabled": "yes",
+        "idempotency_key": "svc-enable-2"})
+    assert r.status_code == 400 and "true or false" in r.text
+    r = client.post("/control/api/actions", headers=h, json={
+        "kind": "client_service_enable", "component": "blender", "enabled": True,
+        "idempotency_key": "svc-enable-3"})
+    assert r.status_code == 200 and r.json()["status"] == "accepted"
+
+
+def test_services_http_route_for_the_gui(client, chat, cc):  # noqa: F811
+    client.post("/v1/foundry/telemetry/heartbeat", headers=CLIENT_HDR, json=SERVICES_BEAT)
+    r = client.get("/control/api/services", headers=chat.h)
+    assert r.status_code == 200
+    assert {s["name"] for s in r.json()["services"]} == {"rojo", "kokoro-tts", "kilo"}
+    client.cookies.clear()
+    r = client.get("/control/api/services")                      # no session
+    assert r.status_code == 401

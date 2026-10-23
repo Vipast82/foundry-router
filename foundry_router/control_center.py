@@ -169,16 +169,22 @@ ACTION_KINDS = ("answer_question", "reply_permission", "approve_review", "reject
                 "pause", "resume", "cancel", "unblock", "instruction", "withdraw_instruction",
                 "lanes", "decision_answer", "project_pause", "project_resume",
                 "lead_case_pause", "lead_case_takeover", "lead_case_instruct", "lead_case_resume",
-                "assistant_plan", "assistant_run", "client_restart", "client_reload_kilo_config")
+                "assistant_plan", "assistant_run", "client_restart", "client_reload_kilo_config",
+                "client_service_enable")
 # Foundry Client stack actions (W3, 2026-10-22): claimed by the workstation
 # client that heart-beats with source kind `client` (foundry_client/relay.py),
 # never by the coordinator. Payloads:
 #   client_restart            {"component": kilo|coordinator|rojo|supervisor, "force": bool}
 #   client_reload_kilo_config {}   (Kilo re-reads kilo.jsonc; a safe restart when it can't)
+#   client_service_enable     {"component": rojo|blender|acestep-music|stable-audio|kokoro-tts|
+#                              chatterbox-tts, "enabled": bool}   (Team Lead 5: switch a
+#                              service component on or off in the client's settings)
 # Workstation-scoped, so project_id is "" and only an operator session that is
 # not restricted to projects may create one; one live action per component.
-CLIENT_ACTIONS = ("client_restart", "client_reload_kilo_config")
-CLIENT_COMPONENTS = ("kilo", "coordinator", "rojo", "supervisor")
+CLIENT_ACTIONS = ("client_restart", "client_reload_kilo_config", "client_service_enable")
+SERVICE_COMPONENTS = ("blender", "acestep-music", "stable-audio", "kokoro-tts", "chatterbox-tts")
+CLIENT_TOGGLE = ("rojo",) + SERVICE_COMPONENTS
+CLIENT_COMPONENTS = ("kilo", "coordinator", "rojo", "supervisor") + SERVICE_COMPONENTS
 CLIENT_FEATURE = "stack_control"
 SOURCE_KINDS = ("bridge", "coordinator", "client")
 # launch assistant (2026-10-21): a plain-language request becomes a checked plan
@@ -599,6 +605,23 @@ class ControlCenter:
                  for k in ("name", "label", "state", "detail", "enabled", "want", "pid",
                            "uptime_s", "restarts", "pending_restart") if k in c}
                 for c in comps if isinstance(c, dict)][:12] if isinstance(comps, list) else []
+            # Team Lead 5: the MCP servers Kilo can see here and the service registry
+            mcp = payload.get("mcp")
+            detail["mcp"] = [
+                {"name": _s(m.get("name"), 80), "type": _s(m.get("type"), 12),
+                 "enabled": bool(m.get("enabled")),
+                 "available": m.get("available") if isinstance(m.get("available"), bool) else None,
+                 "detail": _s(m.get("detail"), 160), "target": _s(m.get("target"), 120)}
+                for m in mcp if isinstance(m, dict)][:40] if isinstance(mcp, list) else []
+            svs = payload.get("services")
+            detail["services"] = [
+                {**{k: _s(x.get(k), 80) for k in ("name", "label", "kind", "check", "provider",
+                                                  "component", "status", "component_state")
+                    if isinstance(x.get(k), str)},
+                 "detail": _s(x.get("detail"), 200), "note": _s(x.get("note"), 160),
+                 "enabled": x.get("enabled") if isinstance(x.get("enabled"), bool) else None,
+                 "needed_by": [_s(n, 20) for n in (x.get("needed_by") or [])][:8]}
+                for x in svs if isinstance(x, dict)][:30] if isinstance(svs, list) else []
             detail["config_problems"] = [_s(x, 300) for x in (payload.get("config_problems") or [])
                                          if isinstance(x, str)][:20]
             detail["events"] = [{"ts": _f(e.get("ts")), "component": _s(e.get("component"), 40),
@@ -2755,6 +2778,14 @@ class ControlCenter:
             if not isinstance(force, bool):
                 raise ControlError("force must be true or false")
             payload = {"component": comp, "force": force}
+        elif kind == "client_service_enable":
+            comp = _s(body.get("component"), 40)
+            if comp not in CLIENT_TOGGLE:
+                raise ControlError(f"component must be one of {', '.join(CLIENT_TOGGLE)}")
+            en = body.get("enabled")
+            if not isinstance(en, bool):
+                raise ControlError("enabled must be true or false")
+            payload = {"component": comp, "enabled": en}
         else:
             comp = "kilo"
             payload = {}
@@ -2776,10 +2807,15 @@ class ControlCenter:
             with self._tx() as c:
                 # task_id carries the component: one live stack action per component
                 # (the view is read after the transaction: the db lock is not re-entrant)
-                live = self._rows(c, "SELECT action_id FROM cc_actions WHERE kind IN (?,?) AND "
+                # restarts and reloads share one slot per component; switching a service on
+                # or off is its own kind (a restart in flight must not swallow it)
+                same = (("client_service_enable",) if kind == "client_service_enable"
+                        else tuple(k for k in CLIENT_ACTIONS if k != "client_service_enable"))
+                live = self._rows(c, "SELECT action_id FROM cc_actions WHERE kind IN ("
+                                     + ",".join("?" * len(same)) + ") AND "
                                      "task_id=? AND status IN ('accepted','claimed','queued',"
                                      "'delivered') ORDER BY created_ts DESC LIMIT 1",
-                                  (*CLIENT_ACTIONS, comp))
+                                  (*same, comp))
                 if live:
                     dup = live[0]["action_id"]
                     raise _Dup()
@@ -2944,6 +2980,8 @@ class ControlCenter:
             return f"restart {p.get('component')} ({'now' if p.get('force') else 'at a safe point'})"
         if kind == "client_reload_kilo_config":
             return "reload kilo.jsonc into the Kilo server"
+        if kind == "client_service_enable":
+            return f"{'enable' if p.get('enabled') else 'disable'} {p.get('component')}"
         if kind == "decision_answer":
             return (f"answer decision {p.get('decision_id')} ({p.get('decision_kind') or '?'}) as "
                     f"{p.get('authority')}" + (" · option chosen" if p.get("option") else "")

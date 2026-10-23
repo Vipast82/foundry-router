@@ -14,10 +14,22 @@ is restored.
 Kilo caches its config per workspace instance: the new blocks take effect for
 sessions created after Kilo reloads (it reloads on its own instance dispose,
 which the coordinator never forces mid-session).
+
+Team Lead piece 5: `track_kilo_config(track)` writes a kilo.jsonc into a track's
+worktree (kilo.jsonc is untracked, so a fresh worktree has none). It starts from
+the main file's text (comments, providers and models survive), turns every MCP
+server a need controls on or off by the track's needs, regenerates the agent
+blocks from the role rules for that worktree (Studio tools denied without the
+`studio` need, Blender / audio / image tools denied without theirs), sets
+`"snapshot": false`, and validates the result by parsing it back. Servers no need
+controls (git, context7 ...) stay as the source has them. A stub
+`{"enabled": true}` for a server the main file only knows from the global Kilo
+config relies on Kilo merging project over global config.
 """
 
 from __future__ import annotations
 
+import copy
 import os
 import shutil
 import time
@@ -25,6 +37,7 @@ from typing import Optional
 
 from foundry_automation import jsonc
 from foundry_automation import role_rules as RR
+from foundry_automation import service_map as SM
 
 
 class KiloConfigError(RuntimeError):
@@ -129,3 +142,136 @@ def regenerate(profile, role_rules: Optional[dict] = None, apply: bool = False,
     if store is not None:
         store.event(profile.id, "", "kilo_config_applied", detail=result)
     return result
+
+
+# --------------------------------------------------------------------------- per-track file
+
+def _attr(track, name: str, default=None):
+    if isinstance(track, dict):
+        return track.get(name, default)
+    return getattr(track, name, default)
+
+
+def track_rules(role_rules: Optional[dict], needs: list) -> Optional[dict]:
+    """The role rules narrowed to a track's needs: Studio tools denied without `studio`,
+    each other tool family denied without its need. None stays None (no rules)."""
+    if not role_rules:
+        return None
+    out: dict = {}
+    for role in RR.RULE_ROLES:
+        r = copy.deepcopy(RR.normalize(role, role_rules.get(role)))
+        if "studio" not in needs:
+            r["permissions"]["studio_read"] = "deny"
+            r["permissions"]["studio_write"] = "deny"
+        deny = list(r.get("deny_tools") or [])
+        for need, tools in SM.NEEDS_TOOLS.items():
+            if need not in needs:
+                deny += [t for t in tools if t not in deny]
+        r["deny_tools"] = deny
+        out[role] = r
+    return out
+
+
+def track_text(text: str, needs, role_rules: Optional[dict], workspace: str) -> dict:
+    """Pure part of `track_kilo_config`: {"text", "mcp": {name: enabled}, "blocks": {agent: block},
+    "missing": [agents]}. Raises JsoncError on an unparseable source."""
+    needs = SM.normalize_needs(needs)
+    data = jsonc.parse(text)
+    if not isinstance(data, dict):
+        raise jsonc.JsoncError("kilo.jsonc is not an object")
+    new = text
+    if data.get("snapshot") is not False:
+        new = jsonc.replace_value(new, ("snapshot",), False)
+    want = set(SM.mcp_for(needs))
+    mcp = data.get("mcp") if isinstance(data.get("mcp"), dict) else None
+    flags: dict = {}
+    for name in SM.CONTROLLED_MCP:
+        on = name in want
+        cur = (mcp or {}).get(name)
+        if isinstance(cur, dict):
+            if cur.get("enabled") is not on:
+                new = jsonc.replace_value(new, ("mcp", name, "enabled"), on)
+            flags[name] = on
+        elif on:                                   # the server lives in the global config only
+            if "mcp" in jsonc.parse(new):
+                new = jsonc.replace_value(new, ("mcp", name), {"enabled": True})
+            else:
+                new = jsonc.replace_value(new, ("mcp",), {name: {"enabled": True}})
+            flags[name] = True
+    out = {"mcp": flags, "blocks": {}, "missing": []}
+    rules = track_rules(role_rules, needs)
+    if rules:
+        agents = data.get("agent") or {}
+        for agent, gen in RR.agent_blocks(rules, workspace).items():
+            if agent not in agents or not isinstance(agents[agent], dict):
+                out["missing"].append(agent)
+                continue
+            # a track's block is the generated one outright: no stale key of the main file survives
+            if agents[agent].get("permission") != gen:
+                new = jsonc.replace_value(new, ("agent", agent, "permission"), gen)
+            out["blocks"][agent] = gen
+    out["text"] = new
+    return out
+
+
+def track_kilo_config(track, *, profile=None, role_rules: Optional[dict] = None, source: str = "",
+                      workspace: str = "", clock=time.time) -> str:
+    """Write `<track worktree>/kilo.jsonc` for the track's needs and return its path.
+
+    track: object or dict with `.worktree`, `.needs`, optionally `.name`.
+    profile: a coordinator Profile; supplies `source` (kilo_path) and `role_rules` when those
+    are not given. Raises KiloConfigError when the source is unreadable or invalid, or the
+    written file reads back differently (an existing target is restored from its backup)."""
+    wt = str(_attr(track, "worktree") or "")
+    if not wt:
+        raise KiloConfigError("the track has no worktree")
+    needs = SM.normalize_needs(_attr(track, "needs") or [])
+    source = source or (kilo_path(profile) if profile is not None else "")
+    if not source:
+        raise KiloConfigError("no source kilo.jsonc: pass source= or profile=")
+    if role_rules is None and profile is not None:
+        role_rules = (getattr(profile, "raw", None) or {}).get("role_rules")
+    try:
+        with open(source, encoding="utf-8") as f:
+            text = f.read()
+    except OSError as e:
+        raise KiloConfigError(f"cannot read {source}: {e}") from None
+    try:
+        p = track_text(text, needs, role_rules, workspace or wt)
+    except (jsonc.JsoncError, RR.RuleError) as e:
+        raise KiloConfigError(f"{source}: {e}") from None
+    target = os.path.join(wt, "kilo.jsonc")
+    os.makedirs(wt, exist_ok=True)
+    backup = ""
+    if os.path.exists(target):
+        with open(target, encoding="utf-8") as f:
+            if f.read() == p["text"]:
+                return target                        # idempotent: nothing to rewrite
+        backup = f"{target}.bak-{time.strftime('%Y%m%d-%H%M%S', time.localtime(clock()))}"
+        shutil.copy2(target, backup)
+    tmp = target + ".tmp"
+    try:
+        with open(tmp, "w", encoding="utf-8", newline="") as f:
+            f.write(p["text"])
+        os.replace(tmp, target)
+        with open(target, encoding="utf-8") as f:
+            back = jsonc.parse(f.read())
+        if back.get("snapshot") is not False:
+            raise KiloConfigError("snapshot: the written value reads back differently")
+        for name, on in p["mcp"].items():
+            if ((back.get("mcp") or {}).get(name) or {}).get("enabled") is not on:
+                raise KiloConfigError(f"mcp {name}: the written value reads back differently")
+        for agent, gen in p["blocks"].items():
+            if back["agent"][agent].get("permission") != gen:
+                raise KiloConfigError(f"agent {agent}: the written block reads back differently")
+    except Exception as e:                                       # noqa: BLE001
+        if backup:
+            shutil.copy2(backup, target)
+        else:
+            try:
+                os.remove(target)
+            except OSError:
+                pass
+        raise KiloConfigError(f"track kilo.jsonc not written: {type(e).__name__}: {e}"[:500]
+                              ) from None
+    return target

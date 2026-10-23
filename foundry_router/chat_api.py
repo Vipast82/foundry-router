@@ -132,3 +132,13 @@ async def audit(request: Request, thread: str = "", limit: int = 200):
         return {"audit": eng.audit(thread, limit)}
     rows = [r for r in eng.audit("", limit * 3) if r.get("actor") == s["actor"]][:limit]
     return {"audit": rows}
+
+
+@router.get("/control/api/services")
+@_guard
+async def services(request: Request):
+    """The service registry for the Automation page's Services tab: what the Foundry Client
+    reports (status, provider, needed-by, MCP probes) and the sprints waiting for a service.
+    Restart / enable buttons post the client_restart / client_service_enable actions."""
+    s = _op(request)
+    return _eng(request).services_view(s["projects"], full=True)

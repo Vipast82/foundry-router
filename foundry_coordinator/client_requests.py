@@ -10,6 +10,9 @@ a restart-scoped setting), it writes a request file:
 
 kinds:  reload_kilo          restart the Kilo server at a safe point
         restart_coordinator  restart the coordinator at a safe point
+        start_service        start (or restart, when unhealthy) a managed service the
+                             sprint needs; detail {"service", "component"}; one file per
+                             service (services.py asks at most every 10 minutes)
 
 One file per kind and project: a repeated request updates the file in place
 (its `count` grows) instead of queueing duplicates. The client (st-client)
@@ -28,24 +31,27 @@ import uuid
 from typing import Optional
 
 DIR = "client-requests"
-KINDS = ("reload_kilo", "restart_coordinator")
+KINDS = ("reload_kilo", "restart_coordinator", "start_service")
 
 
 def _dir(state_dir: str) -> str:
     return os.path.join(state_dir, DIR)
 
 
-def _path(state_dir: str, kind: str, project: str) -> str:
+def _path(state_dir: str, kind: str, project: str, key: str = "") -> str:
     safe = "".join(c if c.isalnum() or c in "._-" else "_" for c in project or "all")
+    if key:
+        safe += "-" + "".join(c if c.isalnum() or c in "._-" else "_" for c in key)
     return os.path.join(_dir(state_dir), f"{kind}-{safe}.json")
 
 
 def request(state_dir: str, kind: str, project: str, reason: str, detail: Optional[dict] = None,
-            store=None, clock=time.time) -> dict:
-    """Write (or refresh) one request; returns the record written."""
+            store=None, clock=time.time, key: str = "") -> dict:
+    """Write (or refresh) one request; returns the record written. `key` makes a second
+    request of the same kind and project a file of its own (start_service: one per service)."""
     if kind not in KINDS:
         raise ValueError(f"unknown client request kind {kind!r} (known: {', '.join(KINDS)})")
-    path = _path(state_dir, kind, project)
+    path = _path(state_dir, kind, project, key)
     prev = read(path)
     rec = {"id": (prev or {}).get("id") or uuid.uuid4().hex[:12], "kind": kind,
            "project": project, "reason": str(reason)[:500], "ts": clock(),

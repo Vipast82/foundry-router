@@ -1682,6 +1682,7 @@ class TelemetryBridge:
                                       "awaiting", "next_action", "pause_reason", "pause_until",
                                       "started_ts", "updated_ts")},
              "source_ts": t.get("updated_ts"), "stage": d.get("stage"),
+             "needs": d.get("needs"), "service_wait": d.get("svc_wait"),
              "findings": (d.get("findings") or [])[:10], "last_report": d.get("last_report"),
              "build_continuing": build_continuation(self.reader.task_transitions(
                  t["project_id"], t["task_id"])),
