@@ -3044,6 +3044,32 @@ async def host_backends(request: Request):
     return {"backends": out, "jobs": svc.ollama_admin.job_snapshot()}
 
 
+# --------------------------------------------------------------------------- #
+# Foundry Client tab: downloads, connected clients, install guide (v0.139.0). #
+# Same posture as the rest of the dashboard: open on the internal network,    #
+# covered by client_auth.protect_admin when on. Downloads are links to the    #
+# public GitHub release matching the running version — the router serves no   #
+# binaries and holds no GitHub credentials (client_guide.py docstring).       #
+# --------------------------------------------------------------------------- #
+
+@router.get("/admin/api/client/install")
+async def client_install(request: Request, refresh: int = 0):
+    """The running router version, whether its installers are downloadable
+    (release state: available / no_assets / untagged / unreachable, with the
+    latest release as a labeled fallback), and every heart-beating Foundry
+    Client with its version compared against the router's."""
+    from ..client_guide import install_status
+    return await install_status(_svc(request), __version__, refresh=bool(refresh))
+
+
+@router.get("/admin/api/client/guide")
+async def client_install_guide(request: Request):
+    """The install guide rendered from docs/CLIENT_MANAGER.md (one source of
+    truth; client_guide.py extracts and renders the install sections)."""
+    from ..client_guide import guide_html
+    return guide_html()
+
+
 @router.get("/admin/api/host/diag")
 async def host_diag(request: Request, backend: str):
     """Read-only diagnostics for an openai-dialect backend (llama.cpp / Unsloth /

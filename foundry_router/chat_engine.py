@@ -164,6 +164,12 @@ SYSTEM = (
     "signature -> verified fix, scripts, formats) every project's sessions also read: kb_search "
     "reads it; kb_add / kb_edit change it (coordinator commits, confirm card). Project facts go "
     "to memory, reusable org-wide knowledge to the playbook.\n"
+    "- Installing the Foundry Client on a workstation: read_install_guide reads the install "
+    "guide (docs/CLIENT_MANAGER.md) section by section and client_install_status says whether "
+    "installers for this router's version are downloadable (with links), plus every connected "
+    "client's version and heartbeat. Walk the operator through it one step at a time, give the "
+    "download link for their OS, and check client_install_status at the end to confirm the "
+    "client registered. The dashboard's Client tab shows the same guide and downloads.\n"
     "- At most 8 tool calls per turn. Keep `say` under 120 words. No markdown tables.")
 
 
@@ -1257,6 +1263,36 @@ class ChatEngine:
                    "read")
         async def services_status(ctx: Ctx, a: dict):
             return eng.services_view(ctx.projects, full=True)
+
+        @self._add("client_install_status", "Install state of the Foundry Client: this router's "
+                   "version, whether installers for that version can be downloaded (GitHub "
+                   "release state and links), and every connected client with its version, "
+                   "heartbeat freshness and router-version match.", "read")
+        async def client_install_status(ctx: Ctx, a: dict):
+            from . import __version__
+            from .client_guide import install_status
+            return await install_status(eng.svc, __version__)
+
+        @self._add("read_install_guide", "The Foundry Client install guide, from "
+                   "docs/CLIENT_MANAGER.md. Without section: the list of sections. With "
+                   "section (its id, e.g. install, first-run, router-key-for-the-relay, "
+                   "troubleshooting): that section's text.", "read",
+                   {"section": {"type": "string", "max": 60}})
+        async def read_install_guide(ctx: Ctx, a: dict):
+            from .client_guide import load_guide
+            g = load_guide()
+            if g["missing"]:
+                return {"error": "docs/CLIENT_MANAGER.md was not found next to this checkout"}
+            if not a.get("section"):
+                return {"sections": [{"id": s["id"], "title": s["title"]} for s in g["sections"]],
+                        "hint": "pass section=<id> to read one"}
+            want = str(a["section"]).strip().lower().replace(" ", "-")
+            for s in g["sections"]:
+                if s["id"] == want or s["id"].startswith(want):
+                    return {"section": s["id"], "title": s["title"],
+                            "text": _s(s["text"], RESULT_CHARS - 200)}
+            return {"error": f"no section {a['section']!r}",
+                    "sections": [s["id"] for s in g["sections"]]}
 
         @self._add("service_restart", "Restart a service that a Foundry Client component runs "
                    "(kilo, rojo, blender and the audio servers when managed). External services "

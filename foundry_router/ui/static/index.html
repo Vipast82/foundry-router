@@ -168,6 +168,13 @@
   .mcp-item.disabled { opacity:.5; }
   .mcp-item input { flex:none; }
   .mcp-item .hint { white-space:nowrap; }
+  /* Client tab install guide (rendered server-side from docs/CLIENT_MANAGER.md) */
+  .guide-toc { display:flex; flex-wrap:wrap; gap:4px 14px; list-style:none; padding:8px 10px;
+               margin:0 0 10px; background:var(--panel-2); border:1px solid var(--line); border-radius:6px; }
+  .guide-toc li { margin:0; }
+  #cl-guide h3 { margin:18px 0 6px; }
+  #cl-guide pre { overflow-x:auto; background:var(--bg); border:1px solid var(--line);
+                  border-radius:5px; padding:8px 10px; }
   /* Wide tables scroll inside their own box (added by wrapTables) so the page
      body never scrolls sideways. */
   .tscroll { overflow-x:auto; -webkit-overflow-scrolling:touch; margin:6px 0 14px;
@@ -1035,6 +1042,7 @@ const TABS = {
   "Training":       tabTraining,
   "Clients & Keys": tabClients,
   "Helpers & Limits": tabLimits,
+  "Client":         tabClient,
 };
 // Primary nav groups -> their leaf tabs (the secondary row): the overview
 // first, then watching (Monitor), then what you configure, then records.
@@ -1049,6 +1057,8 @@ const GROUPS = [
   ["Labs",        ["Research", "Evals"]],
   ["Logs",        ["Usage Log", "Events", "Dev Log", "Data", "Training"]],
   ["Access",      ["Clients & Keys", "Helpers & Limits"]],
+  // the workstation app: download, connected clients, install guide
+  ["Client",      ["Client"]],
 ];
 // Shown names where the internal key is not the plainest wording (keys stay
 // stable: timers compare `current` against them).
@@ -1062,7 +1072,8 @@ const GROUP_HELP = {
   "Tools & MCP": "Tools the models can call, the MCP servers behind them, and agents.",
   Labs: "Research settings and evaluation runs for personas.",
   Logs: "Every request, event and log line, plus data export and training capture.",
-  Access: "Client keys and who may use what; helper capacity and limits."};
+  Access: "Client keys and who may use what; helper capacity and limits.",
+  Client: "The Foundry Client workstation app: download the installer, see connected clients, and the install guide."};
 const TAB_HELP = {
   Overview: "Health, throughput, latency, tokens and budget at a glance.",
   Live: "What is generating right now, refreshed every 2 s.",
@@ -1077,7 +1088,8 @@ const TAB_HELP = {
   Agents: "Configured agents and their runs.", Research: "Web research settings.", Evals: "Persona evaluation runs and scores.",
   "Usage Log": "Every request Foundry handled.", Events: "System events and warnings.", "Dev Log": "Application log lines.",
   Data: "Export, prune or clear stored data.", Training: "Captured training data.",
-  "Clients & Keys": "Client keys and their scopes.", "Helpers & Limits": "Helper capacity, budgets and limits."};
+  "Clients & Keys": "Client keys and their scopes.", "Helpers & Limits": "Helper capacity, budgets and limits.",
+  Client: "Download the Foundry Client, see which workstations run it, and how to install it."};
 const tabLabel = leaf => TAB_LABEL[leaf] || leaf;
 const _groupOf = leaf => (GROUPS.find(g => g[1].includes(leaf)) || GROUPS[0])[0];
 const _lastLeaf = {};        // group name -> last leaf visited (remembered on switch)
@@ -3021,6 +3033,71 @@ function _connectHelp(preset, name, key, ep) {
 }
 
 window._clientOpts = window._clientOpts || {preset: "cline"};
+async function tabClient() {
+  // The Foundry Client workstation app: download links to the GitHub release
+  // matching this router's version (never proxied — the repo is public), the
+  // clients heart-beating right now, and the install guide rendered from
+  // docs/CLIENT_MANAGER.md by the server (one source of truth).
+  let d, g;
+  try {
+    [d, g] = await Promise.all([api("client/install"), api("client/guide")]);
+  } catch (e) {
+    if (e.stale) return;
+    $("#main").innerHTML = `<div class="card hint">Could not load: ${esc(e.message)}</div>`; return;
+  }
+  const rel = d.release || {};
+  const mb = s => s ? (s / 1048576).toFixed(1) + " MB" : "";
+  const osName = {windows: "Windows installer", linux: "Linux AppImage"};
+  const assetRow = (a, note) => `<div style="margin:6px 0">
+      <a class="act" style="text-decoration:none" href="${esc(a.url)}" target="_blank" rel="noopener">⬇ ${esc(osName[a.os] || a.os)}</a>
+      <code>${esc(a.name)}</code> <span class="hint">${mb(a.size)}${a.unverified ? " · unverified (GitHub not reachable)" : ""}${note ? " · " + esc(note) : ""}</span></div>`;
+  const stateLine = {
+    available: `<span class="pill ok">installers available</span> for <b>${esc(rel.tag)}</b> — matches this router (v${esc(d.router_version)})`,
+    no_assets: `<span class="pill warn">no installers yet</span> for <b>${esc(rel.tag)}</b>`,
+    untagged: `<span class="pill warn">dev build</span> — this router runs v${esc(d.router_version)}, which has no release`,
+    unreachable: `<span class="pill warn">unverified</span> — GitHub could not be checked`,
+  }[rel.state] || esc(rel.state || "");
+  const latest = rel.latest && (rel.latest.assets || []).length
+    ? `<div style="margin-top:8px"><b>Latest release ${esc(rel.latest.tag)}</b> <span class="hint">(will not match this router's version)</span>
+       ${rel.latest.assets.map(a => assetRow(a)).join("")}</div>` : "";
+  const clientRows = (d.clients || []).map(c => {
+    const badge = {match: '<span class="pill ok">matches router</span>',
+                   older: `<span class="pill warn" title="Update this client to v${esc(d.router_version)} from the download above">older than router</span>`,
+                   newer: '<span class="pill warn" title="The client is newer than this router — usually a router deploy is pending">newer than router</span>'}[c.match]
+                  || '<span class="hint">version unknown</span>';
+    return `<tr><td class="nw"><b>${esc(c.source_id)}</b></td><td class="nw">${esc(c.host || "")}</td>
+      <td class="nw">${esc(c.version || "—")} ${badge}</td>
+      <td class="nw">${c.fresh ? '<span class="pill ok">fresh</span>' : '<span class="pill bad">silent</span>'} <span class="hint">${c.age_s != null ? Math.round(c.age_s) + "s ago" : ""}</span></td>
+      <td class="nw">${esc(c.overall || "")}</td></tr>`;
+  }).join("");
+  $("#main").innerHTML = `
+    <h2>Foundry Client</h2>
+    <p class="hint">The workstation tray app that runs the Kilo server, the coordinator and Rojo, keeps secrets in the
+      OS keyring, and relays stack actions from this router (heartbeats as source kind <code>client</code>).
+      Downloads link to the public GitHub release built for each <code>v*</code> tag — this router serves no binaries.</p>
+    <div class="card"><h3>Download</h3>
+      <p>${stateLine} <button class="act" id="cl-refresh" style="margin-left:8px">Re-check</button>
+        <span class="hint">${rel.cached ? "cached" : ""}</span></p>
+      ${rel.note ? `<p class="hint">${esc(rel.note)}</p>` : ""}
+      ${(rel.assets || []).map(a => assetRow(a)).join("")}
+      ${latest}
+      <p class="hint">All versions: <a href="${esc(rel.releases_url || "#")}" target="_blank" rel="noopener">${esc(rel.releases_url || "")}</a></p>
+    </div>
+    <div class="card"><h3>Connected clients</h3>
+      ${clientRows ? `<table><tr><th>client</th><th>host</th><th>version</th><th>heartbeat</th><th>stack</th></tr>${clientRows}</table>`
+                   : `<p class="hint">No Foundry Client has reported yet. Install one with the guide below; it appears here
+                      within ~15 s of its first heartbeat (it needs a router key with the <b>operator</b> scope — see
+                      “Router key for the relay”).</p>`}
+    </div>
+    <div class="card"><h3>Install guide</h3>
+      <div id="cl-guide">${g.html}</div>
+      <p class="hint">Rendered from <code>${esc(g.source)}</code> in this checkout — edit the doc, not this page.</p>
+    </div>`;
+  $("#cl-refresh").onclick = async () => {
+    try { await api("client/install?refresh=1"); render(); } catch (e) { toast(e.message, true); }
+  };
+}
+
 async function tabClients() {
   const d = await api("setup/clients");
   const o = window._clientOpts;

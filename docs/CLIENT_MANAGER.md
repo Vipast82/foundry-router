@@ -180,6 +180,42 @@ files there, so "restart Kilo" works from the Automation page even when the coor
    the relay; with the coordinator's `orchestration` key present it falls back to that.
 4. `client.relay_enabled = false` in `client.toml` turns the relay off.
 
+## Troubleshooting
+
+The install guide on the router's Client tab and the operator chat's install help render
+this section (and Install / First run / Router key / Tray / Commands / Migrating above)
+straight from this file — fix it here, not there.
+
+- **The client does not appear on the router's Client tab (no heartbeat).** The relay
+  needs a router key with the **operator** scope (Foundry → Access → Clients & keys) stored
+  as **FOUNDRY_CLIENT_KEY** on the client's Settings → Secrets page (headless:
+  `FOUNDRY_CLIENT_SECRET_FOUNDRY_CLIENT_KEY=<key>` in the environment). Without one the
+  client logs `relay: no router key` and runs without the relay. Also check that
+  `client.backend_url` points at the router (the status page shows whether it answers) and
+  that `client.relay_enabled` is not `false` in `client.toml`. Restart the client after
+  adding the key; it heart-beats every 15 s, and the router marks it silent when heartbeats
+  stop for longer than the source expiry window.
+- **A key that heart-beats but is refused.** The relay only ever heart-beats as source kind
+  `client` and claims `client_*` actions; a key with the wrong scope is refused on these
+  routes. Make the key from the operator preset, not inference.
+- **A restart that never happens.** Kilo server and coordinator restarts wait for a safe
+  point (no live session in the coordinator DB). After
+  `client.safe_restart_max_wait_minutes` (default 60) the status page shows a warning; the
+  restart is never forced on its own. Force one deliberately with
+  `foundry-client restart kilo --force` or the tray's "restart everything now".
+- **Where logs live.** Each component writes a rotating log to
+  `<client.state_dir>/client-logs/<component>.log` (state_dir defaults to
+  `~/.foundry-coordinator`); the tray menu's "open the logs folder" opens it. The client's
+  own settings live in `client.toml`: `%APPDATA%\FoundryClient` on Windows,
+  `~/.config/foundry-client` on Linux.
+- **Rojo restarted but Studio stopped syncing.** Studio's Rojo plugin must be reconnected
+  by hand after a Rojo restart; the client notices the new session id and says so on the
+  status page.
+- **Version mismatch.** The router's Client tab flags a client older or newer than the
+  router. Update by installing the release that matches the router (the tab links it); the
+  client also shows its own update banner when a newer release exists. It never
+  self-updates.
+
 ## Services and MCP probing (Team Lead piece 5)
 
 A sprint declares what it needs (`studio`, `blender`, `audio`, `images`, `gpu`, `backend`; a

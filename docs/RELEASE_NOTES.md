@@ -2,6 +2,43 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.139.0 — Client tab: download, install guide, chat install help
+
+Victor's ask: somewhere in the web GUI to get the Foundry Client and read how
+to install it, and the operator chat able to assist an install.
+
+- **Client tab** (dashboard, its own nav group): offers the installers for the
+  running router version. Downloads **link** to the public GitHub release that
+  each `v*` tag builds (client-release.yml) — the router proxies nothing and
+  serves no binaries. The states are honest: available · release exists but no
+  installers attached yet · untagged dev build (the latest release is offered
+  as a labeled fallback that "will not match this router's version") · GitHub
+  unreachable (the deterministic asset links are shown, marked unverified).
+  Availability answers are cached an hour, errors ten minutes, with a
+  re-check button. A connected-clients table lists every heart-beating
+  Foundry Client (source, host, version, freshness, stack state) with a
+  version badge against the router: matches / older / newer.
+- **Install guide** on the same tab, rendered server-side from
+  docs/CLIENT_MANAGER.md (new client_guide.py: section extraction plus an
+  escaping markdown-subset renderer) — one source of truth, nothing
+  hand-copied that can drift. CLIENT_MANAGER.md gains a Troubleshooting
+  section (no heartbeat → relay key scope and keyring name; restarts that
+  wait for a safe point; where logs live; Rojo/Studio reconnect; version
+  mismatch).
+- **Endpoints** `GET /admin/api/client/install` and `/admin/api/client/guide`
+  sit with the rest of the dashboard: open on the internal network by
+  default, covered by `client_auth.protect_admin` when that is on. No auth
+  widening — the payloads hold public release links, a tracked doc and the
+  same heartbeat metadata the dashboard already shows; never a secret.
+- **Operator chat**: two read tools, no new mutations —
+  `client_install_status` (router version, download availability, connected
+  clients with version match) and `read_install_guide` (guide sections on
+  demand), plus a system-prompt line to walk an operator through an install
+  one step at a time and confirm the client registered afterwards.
+- Tests: guide extraction and safe rendering, the four release states and
+  caching, the endpoints, and the chat tools (tests/test_client_guide.py and
+  tests/test_chat_engine.py).
+
 ## v0.138.1 — Windows timing fixes; environment-dependent tests repaired
 
 Triage of the 7 test failures that reproduced on a clean checkout (plus one

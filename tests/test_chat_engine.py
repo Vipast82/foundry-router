@@ -462,3 +462,42 @@ def test_services_http_route_for_the_gui(client, chat, cc):  # noqa: F811
     client.cookies.clear()
     r = client.get("/control/api/services")                      # no session
     assert r.status_code == 401
+
+
+def test_install_help_tools_read_the_guide_and_the_install_state(chat, client, monkeypatch):
+    import foundry_router.client_guide as CG
+    from foundry_router import __version__
+
+    cat = {t["name"]: t for t in chat.eng.catalog()}
+    assert cat["read_install_guide"]["mode"] == "auto"           # read class: runs at once
+    assert cat["client_install_status"]["mode"] == "auto"
+    # the guide: list the sections, then read one (text straight from the doc)
+    t = chat("how do I install the client?",
+             reply("", [call("read_install_guide"),
+                        call("read_install_guide", "c2", section="install")]),
+             reply("here is how"))
+    assert all(r["ok"] for r in t["results"]), t["results"]
+    ids = [s["id"] for s in t["results"][0]["result"]["sections"]]
+    assert ids[:3] == ["install", "first-run", "router-key-for-the-relay"]
+    assert "troubleshooting" in ids
+    assert "FoundryClientSetup" in t["results"][1]["result"]["text"]
+    # install state: release availability from a (faked) GitHub lookup plus the
+    # heart-beating client's version compared against the router's
+    tags = f"https://api.github.com/repos/o/r/releases/tags/v{__version__}"
+
+    async def fetch(url):
+        assert url == tags, url
+        return 200, {"tag_name": f"v{__version__}", "assets": [
+            {"name": f"FoundryClientSetup-{__version__}.exe", "size": 9,
+             "browser_download_url": "https://github.com/dl/win"}]}
+
+    monkeypatch.setattr(CG, "_SOURCE", CG.ReleaseSource("o/r", fetch))
+    _client_beat(client)                                         # version 0.134.0
+    t = chat("is the client connected?", reply("", [call("client_install_status")]),
+             reply("yes"))
+    d = t["results"][0]["result"]
+    assert d["router_version"] == __version__
+    assert d["release"]["state"] == "available"
+    assert d["release"]["assets"][0]["url"] == "https://github.com/dl/win"
+    assert d["clients"][0]["source_id"] == "client:ws"
+    assert d["clients"][0]["version"] == "0.134.0" and d["clients"][0]["match"] == "older"
