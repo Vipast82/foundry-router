@@ -86,6 +86,10 @@ TRANSITIONS: dict[tuple[str, str], object] = {
     (BLOCKED, READY): ("resolution",),
     # [lifecycle] a gate/review decision was answered: verify the same head again
     (BLOCKED, VERIFYING): ("resolution", "decision_id"),
+    # [lead_manager] a lead game assignment (or Victor's strategy answer to the
+    # case's question) resumes as a proper repair round, never as a fresh READY
+    # start: the findings carried here are the assignment the repair prompt uses
+    (BLOCKED, CHANGES_REQUIRED): ("resolution", "findings"),
     (FAILED, READY): ("resolution",),
     # an operator (or the launch assistant on the operator's confirmation) reopens a
     # cancelled task so it can be queued again; its history stays (2026-10-21)

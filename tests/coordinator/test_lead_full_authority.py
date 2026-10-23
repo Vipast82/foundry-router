@@ -231,6 +231,15 @@ def test_reserved_decisions_and_foreign_actors_are_refused(tmp_path):
             raise AssertionError(f"{actor} answered")
         except DecisionRefused:
             pass
+    # the lead's own escalations are Victor's even for the case's valid actor:
+    # refused by obligations itself, not only by the engine's resolve_decision
+    esc = c.obligations.open_decision("game", TID, "lead_escalation", "stuck?", blocks=[TID])
+    try:
+        c.obligations.answer(esc, {"strategy": "x"}, f"lead_manager:{cid}", "lead_policy")
+        raise AssertionError("the lead answered its own escalation")
+    except DecisionRefused:
+        pass
+    assert c.obligations.decision(esc)["status"] == "open"
 
 
 def test_single_writer_operations_wait_for_the_workspace(tmp_path):

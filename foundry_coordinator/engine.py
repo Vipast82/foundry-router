@@ -5323,6 +5323,11 @@ class Coordinator:
                 "authorized": grant["counters"]})
             data = {k: v for k, v in data.items() if v is not None}
             ev["extra_attempts"] = grant["n"]
+            # the assignment resumes as a proper repair round (BLOCKED ->
+            # CHANGES_REQUIRED carries the findings as transition evidence),
+            # not as a fresh READY start
+            target = S.CHANGES_REQUIRED
+            ev["findings"] = list(data.get("findings") or [])
             res = f"lead case {cid}: the primary repairs per the lead's assignment"
         elif kind == "reverify" or (kind == "coordinator_repair" and
                                     self._lead_upgraded(case, act)):

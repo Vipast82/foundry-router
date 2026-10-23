@@ -2,6 +2,37 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.136.0 — Lead sprint manager: known gaps closed, pilot checklist
+
+Closes the four "Known gaps" of docs/LEAD_SPRINT_MANAGER.md and prepares the
+controlled live pilot (review item A4, reports/UI_AUTOMATION_REVIEW_2026-10-23.md).
+Gaps 1–3 (upgrade queueing through `supervisor.request_upgrade`, the supervisor
+never moving `recovery_cases`, lead/repair session rows ended on every outcome)
+were already fixed in code; the doc now says so.
+
+- **BLOCKED -> CHANGES_REQUIRED (gap 4).** states.py gains the edge (evidence:
+  `resolution` + `findings`). A lead game assignment — and Victor's strategy
+  answer to a case's question — resumes the task as a proper repair round whose
+  transition evidence carries the assignment as findings, not as a fresh READY
+  start. `operate` with `then: assign` follows the same path; `resume`, `wait`
+  and reverify targets are unchanged.
+- **Delegated-authority audit.** `resolve_decision`, `approve_test_change` and
+  the extra-attempts grant match the doc (operator-only kinds and the lead's
+  own escalations reserved; self-changed acceptance tests become an operator
+  `expectation_change` decision; grants capped, once per case, journaled).
+  Hardening: obligations itself now refuses a `lead_escalation` under
+  `lead_policy` authority — before, only the engine's `resolve_decision` did.
+- **Tests.** New restart-boundary coverage: a crash after the lead saved
+  RESUMING but before the engine applied the resume applies the assignment
+  exactly once (no second paid call, no duplicate grant); a crash mid repair
+  session reuses the journaled session and worktree and queues exactly one
+  upgrade request. The defect e2e pins that the upgrade row is queued in the
+  supervisor's own format (`get_request`, candidate branch ref).
+- **Pilot.** docs/LEAD_PILOT_CHECKLIST.md: enable / watch / rollback for the
+  one backed-up live pilot, including where the deployed config actually
+  stands. `[lead_manager] enabled = false` stays the repo default; nothing
+  live was changed.
+
 ## v0.135.0 — Team Lead: parallel tracks, project memory, service registry
 
 Design: `reports/TEAM_LEAD_DESIGN.md`. The coordinator now runs a project like a team lead.

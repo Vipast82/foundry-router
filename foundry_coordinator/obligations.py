@@ -942,7 +942,10 @@ class Obligations:
             raise DecisionRefused(f"operator authority needs the control channel's operator "
                                   f"session (channel={channel!r}, actor={actor!r})")
         if authority == "lead_policy":
-            if d["kind"] in OPERATOR_ONLY_KINDS:
+            # the lead's own escalations are Victor's (a counter-only take-back
+            # WITHDRAWS the decision, it never answers it), enforced here as well
+            # as in the engine's resolve_decision
+            if d["kind"] in OPERATOR_ONLY_KINDS or d["kind"] == "lead_escalation":
                 raise DecisionRefused(f"the lead manager cannot answer {d['kind']}")
             ok = False
             if str(actor or "").startswith(LEAD_ACTOR_PREFIX) and callable(self.lead_validator):

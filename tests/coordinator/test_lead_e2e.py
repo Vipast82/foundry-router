@@ -424,7 +424,7 @@ def test_genuine_stall_decision_goes_to_the_lead_before_victor(tmp_path):
     assert not [s for s in client.sessions.values() if s["metadata"].get("role") == "lead"]
     assert run_until(c, lambda: c.store.task("game", utid)["state"] != S.BLOCKED, limit=10)
     t = c.store.task("game", utid)
-    assert t["state"] in (S.READY, S.IMPLEMENTING)
+    assert t["state"] in (S.CHANGES_REQUIRED, S.IMPLEMENTING)
     assert c.obligations.decision(did)["status"] == "withdrawn"
     assert c.lead.case(cid)["state"] == "RESOLVED"
     # the delegated extra attempt is an authorized ledger row referencing the case
@@ -625,7 +625,12 @@ def test_true_blocker_lead_assignment_repairs_and_completes(tmp_path):
     assert grant["detail"]["ref"] == f"unblock:lead:{cid}"
     resume = next(h for h in transitions(e) if h["evidence"].get("recovery_case") == cid and
                   h["from_state"] == S.BLOCKED)
-    assert resume["to_state"] == S.READY and resume["evidence"]["action"] == "assign_game_repair"
+    # the assignment resumes as a proper repair round, and the transition itself
+    # carries the assignment as findings evidence (BLOCKED -> CHANGES_REQUIRED)
+    assert resume["to_state"] == S.CHANGES_REQUIRED
+    assert resume["evidence"]["action"] == "assign_game_repair"
+    assert resume["evidence"]["findings"] and \
+        resume["evidence"]["findings"][0].startswith("Lead manager assignment")
     # the assignment reached the primary, marked as the lead's untrusted advice
     last_prompt = log[-1]["prompt"]
     assert "Lead manager assignment (recovery case " + cid in last_prompt
@@ -811,6 +816,9 @@ def test_coordinator_defect_isolated_repair_supervisor_upgrade_and_resume(tmp_pa
         up = SV.get_request(e["c"].store, k["upgrade_id"])
         assert up["status"] == "requested" and up["manifest"]["tests"]["regression"] == \
             "tests/test_checker_regression.py::test_accepts_ok_line"
+        # the lead queued through supervisor.request_upgrade (its journal format):
+        # the row is readable by get_request and carries the candidate branch
+        assert up["candidate_ref"].startswith(f"lead/{cid}")
         # the old coordinator build runs; the supervisor installs the candidate
         sup = supervisor(e)
         old = sup.start_coordinator("old")
@@ -977,6 +985,61 @@ def test_restart_mid_lead_call_never_repeats_the_paid_call(tmp_path):
     assert rec[0]["detail"]["kilo_has_prompt"] is True
     k = e["c"].lead.case(cid)
     assert k["counters"]["diagnoses"] == 1 and k["counters"]["quota_calls"] == 1
+
+
+def test_restart_at_the_resuming_boundary_applies_the_assignment_exactly_once(tmp_path):
+    """The coordinator dies after the lead saved RESUMING but before the engine
+    applied the resume: the restarted coordinator applies the assignment exactly
+    once, as a CHANGES_REQUIRED repair round, with no second paid call and no
+    duplicate attempt grant."""
+    log = []
+    e = make_game(tmp_path, primary_script(log), lead=lambda ctx: lead_reply(game_assignment()),
+                  extra=lead_toml())
+    c = e["c"]
+    # the crash point: the tick that parsed the report saved RESUMING, but the
+    # process died before _lead_resume ran
+    c._lead_resume = lambda *a, **k: None
+    c.approve("game", TID, [], "victor")
+    assert run_until(c, lambda: (case(e) or {}).get("state") == "RESUMING", limit=40), hist(e)
+    cid = case(e)["case_id"]
+    assert state(e) == S.BLOCKED                     # the resume was never applied
+    restart(e)
+    assert run_until(e["c"], lambda: state(e) == S.COMPLETE, limit=40), hist(e)
+    assert len(e["client"].lead_prompts()) == 1 and len(e["client"].lead_starts()) == 1
+    resumes = [h for h in transitions(e) if h["evidence"].get("recovery_case") == cid
+               and h["from_state"] == S.BLOCKED]
+    assert len(resumes) == 1 and resumes[0]["to_state"] == S.CHANGES_REQUIRED
+    assert resumes[0]["evidence"]["findings"]
+    grants = [a for a in acts(e, cid) if a["kind"] == "authorize_attempts"]
+    assert len(grants) == 1 and grants[0]["detail"]["n"] == 1
+    k = e["c"].lead.case(cid)
+    assert k["state"] == "RESOLVED" and k["counters"]["diagnoses"] == 1
+
+
+def test_restart_mid_repair_session_reuses_the_session_and_worktree(tmp_path):
+    """The coordinator dies while the lead's coordinator-repair session exists
+    (the REPAIRING boundary): the restarted coordinator reuses the journaled
+    session and worktree and queues exactly one upgrade request."""
+    lead = repair_lead([{"checker.py": CHECKER_FIXED,
+                         "tests/test_checker_regression.py": REGRESSION}],
+                       [coordinator_repair()])
+    e = coordinator_game(tmp_path, lead)
+    c = e["c"]
+    c.approve("game", TID, [], "victor")
+    assert run_until(c, lambda: bool(case(e) and any(
+        a["kind"] == "repair_session" for a in acts(e, case(e)["case_id"]))), limit=80), hist(e)
+    cid = case(e)["case_id"]
+    restart(e)
+    assert run_until(e["c"], lambda: (e["c"].lead.case(cid) or {}).get("state")
+                     in ("UPGRADING", "NEEDS_VICTOR"), limit=80), acts(e, cid)
+    assert e["c"].lead.case(cid)["state"] == "UPGRADING", acts(e, cid)
+    # exactly one repair round, one worktree, one repair session, one request
+    assert len(lead.rounds) == 1
+    assert len([a for a in acts(e, cid) if a["kind"] == "repair_session"]) == 1
+    assert len([a for a in acts(e, cid) if a["kind"] == "repair_worktree"]) == 1
+    assert len(e["c"].store.q("SELECT upgrade_id FROM upgrade_requests WHERE case_id=?",
+                              (cid,))) == 1
+    assert len(e["client"].diag_prompts()) == 1
 
 
 # ------------------------------------------------------------------ 7. quota deferral

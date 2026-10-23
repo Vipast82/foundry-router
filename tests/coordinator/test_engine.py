@@ -786,6 +786,10 @@ def test_every_transition_is_checked():
         S.check(S.VERIFYING, S.REVIEWING, {"verification_id": "v", "head_sha": "h",
                                           "all_required_pass": False})
     S.check(S.REVIEWING, S.APPROVED, {"review_id": "r", "reviewed_commit_sha": "abc"})
+    # a lead assignment resumes as a repair round: the edge needs the findings
+    S.check(S.BLOCKED, S.CHANGES_REQUIRED, {"resolution": "lead case", "findings": ["fix it"]})
+    with pytest.raises(S.TransitionError):
+        S.check(S.BLOCKED, S.CHANGES_REQUIRED, {"resolution": "lead case"})
     S.check(S.IMPLEMENTING, S.PAUSED, {"reason": "x", "resume_state": S.IMPLEMENTING})
     with pytest.raises(S.TransitionError):
         S.check(S.COMPLETE, S.PAUSED, {"reason": "x", "resume_state": S.READY})

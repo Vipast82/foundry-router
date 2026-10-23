@@ -53,14 +53,25 @@ What is implemented:
   `lead_manager` heartbeat feature, gated on `engine.lead` and a project
   enabling it.
 
-Known gaps (see the integrator report): the lead queues upgrade requests with a
-list journal the supervisor cannot read (the engine normalizes a `requested`
-row until lead.py queues through `supervisor.request_upgrade`); the supervisor
-moves the case to RESUMING / DIAGNOSING itself, bypassing the lead's
-`upgrade_result` journal row and its rollback-once rule (bounded instead by
-`max_upgrades` / `max_candidates`); lead session rows are never ended; and
-states.py has no BLOCKED -> CHANGES_REQUIRED edge, so a game assignment resumes
-as READY with the assignment as the repair findings.
+The four known gaps of the integrator report are closed (v0.136.0):
+
+1. The lead queues upgrade requests ONLY through `supervisor.request_upgrade`
+   (the supervisor's own journal format), once per journaled op key
+   (`LeadManager._request_upgrade`); the engine's `requested`-row normalization
+   workaround is gone.
+2. The supervisor never writes `recovery_cases`: it reports only on its
+   `upgrade_requests` row, and the lead's UPGRADING step polls `get_request`,
+   journals one `upgrade_result` row per outcome and moves the case itself —
+   `done` -> RESUMING, `rolled_back`/`failed` -> DIAGNOSING exactly once
+   (`validation.rollback_retried`), else NEEDS_VICTOR.
+3. Lead and repair session rows are ended on every outcome (report parsed,
+   timeout, guard violation, served-model mismatch, resolve, cancel, escalate,
+   takeover, supersede): store row `status=ended` with `ended_ts`, and the
+   Foundry binding (`_end_session` / `_end_case_sessions`).
+4. states.py has a BLOCKED -> CHANGES_REQUIRED edge (evidence: `resolution` +
+   `findings`), so a lead game assignment — and Victor's strategy answer to a
+   case's question — resumes as a proper repair round carrying the assignment
+   as transition evidence, not as a fresh READY start.
 
 ## Goal and authority
 
