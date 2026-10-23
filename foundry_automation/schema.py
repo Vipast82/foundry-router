@@ -185,6 +185,13 @@ AUTOMATION_DEFAULTS: dict = {
     "memory_delta": True,
     "transcript_poll_seconds": 120,
     "generic_checks_cache": True,
+    # Team Lead tracks (2026-10-22): parallel sprints on git worktrees
+    "max_agents": 1,
+    "studio_idle_minutes": 10,
+    "studio_track_max_minutes": 45,
+    "track_append_safe": ["docs/progress/STATE.md", "docs/progress/state/**",
+                          "docs/progress/STATE_ARCHIVE*.md", "docs/MASTER_ORDER.md",
+                          "docs/design/ASSET_LEDGER.md", "docs/memory/**"],
 }
 _SCOPE_RULE_KEYS = {"name", "path", "lines", "blocks", "json_paths_in_plan", "reason"}
 
@@ -587,6 +594,14 @@ _AUTO_DESC = {
     "transcript_poll_seconds": "Lane transcript ingest interval.",
     "generic_checks_cache": "Reuse per-tick coordinator checks while HEAD and the tree are "
                             "unchanged.",
+    "max_agents": "Sprints running at once across the main checkout and parallel tracks "
+                  "(the main sprint always counts first; 1 = no parallel tracks). Live.",
+    "studio_idle_minutes": "A track's merge gate may take Studio only after the main sprint "
+                           "has not used it for this long.",
+    "studio_track_max_minutes": "Longest Studio lease of a track's merge gate (one run; never "
+                                "interrupted mid-run).",
+    "track_append_safe": "Shared files two sprints may both change without being serial "
+                         "(append-only ledgers the rebase merges row by row).",
 }
 
 C = "coordinator"
