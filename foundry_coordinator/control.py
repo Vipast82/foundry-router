@@ -58,6 +58,16 @@ MAX_LEAD_NOTE = 2000
 #   set_max_agents {max_agents}                live cap on running sprints
 TRACK_KINDS = ("tracks_analyze", "tracks_propose", "track_start", "track_stop", "track_merge",
                "track_status", "set_max_agents")
+# Queue API (2026-10-23, review A2): edits of the approved queue through the
+# engine's own methods. Order is priority (tick() walks queue positions);
+# nothing here dispatches work or invents a transition. Payloads:
+#   queue_approve {deps?, note?, track?}   approve a task onto the queue (or
+#                                          update deps/note while still QUEUED)
+#   queue_reorder {position}               1-based position within the project
+#   queue_deps    {deps}                   replace deps (QUEUED tasks only)
+#   queue_requeue {reason}                 reopen a CANCELLED task (COMPLETE
+#                                          stays closed: passed work never reruns)
+QUEUE_KINDS = ("queue_approve", "queue_reorder", "queue_deps", "queue_requeue")
 
 
 class ControlChannel:
@@ -192,7 +202,8 @@ class ControlChannel:
                                            "reject_review", "pause", "resume", "cancel", "unblock",
                                            "instruction", "withdraw_instruction",
                                            "decision_answer", *PROJECT_KINDS, *ASSISTANT_KINDS,
-                                           *TRACK_KINDS, *(LEAD_KINDS if lead_on else ()),
+                                           *TRACK_KINDS, *QUEUE_KINDS,
+                                           *(LEAD_KINDS if lead_on else ()),
                                            *(MEMORY_KINDS if mem_on else ())]}},
                 "contract": _contract(), "coordinator_version": _coordinator_version(),
                 # lifecycle features advertised only when some project actually
@@ -202,7 +213,7 @@ class ControlChannel:
                 # lead_escalation decisions even when no project runs the lifecycle)
                 "features": (["decision_answer", "lifecycle"] if self._lifecycle_on() else
                              ["decision_answer"] if lead_on else [])
-                + ["project_pause", "tracks"] + (["lead_manager"] if lead_on else [])
+                + ["project_pause", "tracks", "queue"] + (["lead_manager"] if lead_on else [])
                 + (["project_memory"] if mem_on else []),
                 # Team Lead tracks per project (the Tracks tab reads it from the
                 # coordinator source's heartbeat): max_agents, tracks, Studio timeline
@@ -265,6 +276,8 @@ class ControlChannel:
             return self._track_action(a, f"{a.get('actor') or 'operator'} (control center)")
         if a["kind"] in MEMORY_KINDS:
             return self._memory_action(a, f"{a.get('actor') or 'operator'} (control center)")
+        if a["kind"] in QUEUE_KINDS:
+            return self._queue_action(a, f"{a.get('actor') or 'operator'} (control center)")
         t = self.store.task(pid, tid)
         if not t:
             return self._report(a, "rejected", f"{pid}/{tid} is not on this coordinator's queue")
@@ -378,6 +391,59 @@ class ControlChannel:
         except TrackError as e:
             return self._report(a, "rejected", str(e)[:500])
         return self._report(a, "rejected", f"unsupported track action {kind!r}")
+
+    # ------------------------------------------------------------------ queue
+
+    def _queue_action(self, a, actor):
+        """queue_approve / queue_reorder / queue_deps / queue_requeue: edits of
+        the approved queue through the engine's own methods. queue_approve may
+        name a task the bridge hasn't reported yet (a planned sprint), so the
+        task lookup is per kind, not the shared one in handle()."""
+        pid, tid = a["project_id"], a.get("task_id") or ""
+        p = a.get("payload") or {}
+        kind = a["kind"]
+        if not tid:
+            return self._report(a, "rejected", "a queue action names a task")
+        t = self.store.task(pid, tid)
+        exp = (a.get("expected") or {}).get("task_state")
+        if t is None and kind != "queue_approve":
+            return self._report(a, "rejected", f"{pid}/{tid} is not on this coordinator's queue")
+        if t is not None and exp and exp != t["state"]:
+            return self._report(a, "rejected", f"{tid} is now {t['state']}, not {exp} as the "
+                                               f"operator saw it")
+        try:
+            if kind == "queue_approve":
+                deps = [str(d) for d in (p.get("deps") or [])]
+                if self.c._deps_cycle(pid, tid, deps):
+                    raise ValueError("those dependencies make a loop")
+                entry = self.c.approve(pid, tid, deps, actor, note=str(p.get("note") or ""),
+                                       track=str(p.get("track") or ""))
+                return self._report(a, "applied", f"{tid} approved at position "
+                                                  f"{entry['position']}",
+                                    {"position": entry["position"], "deps": entry["deps"]})
+            if kind == "queue_reorder":
+                pos = int(p.get("position") or 0)
+                if pos < 1:
+                    return self._report(a, "rejected", "position must be 1 or higher")
+                self.c.move(pid, tid, pos, actor)
+                after = self.store.queue_entry(pid, tid) or {}
+                return self._report(a, "applied", f"{tid} moved to position "
+                                                  f"{after.get('position', pos)}",
+                                    {"position": after.get("position", pos)})
+            if kind == "queue_deps":
+                entry = self.c.set_deps(pid, tid, [str(d) for d in (p.get("deps") or [])], actor)
+                return self._report(a, "applied", f"{tid} now depends on "
+                                                  f"{', '.join(entry['deps']) or 'nothing'}",
+                                    {"deps": entry["deps"]})
+            # queue_requeue: a CANCELLED task back on the queue (reopen keeps its
+            # history, resets counters); COMPLETE is refused by reopen itself —
+            # passed work is never rerun
+            deps = list((self.store.queue_entry(pid, tid) or {}).get("deps") or [])
+            entry = self.c.reopen(pid, tid, deps, actor, reason=str(p.get("reason") or ""))
+            return self._report(a, "applied", f"{tid} reopened at position {entry['position']}",
+                                {"position": entry["position"]})
+        except ValueError as e:
+            return self._report(a, "rejected", str(e)[:500])
 
     def _do_answer_question(self, a, t, actor):
         return self._answer(a, t, actor, "question", (a.get("payload") or {}).get("answers") or [])

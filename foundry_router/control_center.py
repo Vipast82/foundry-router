@@ -173,7 +173,8 @@ ACTION_KINDS = ("answer_question", "reply_permission", "approve_review", "reject
                 "tracks_analyze", "tracks_propose", "track_start", "track_stop", "track_merge",
                 "track_status", "set_max_agents",
                 "client_service_enable",
-                "memory_add", "memory_edit")
+                "memory_add", "memory_edit",
+                "queue_approve", "queue_reorder", "queue_deps", "queue_requeue")
 # Team Lead tracks (2026-10-22): project-scoped, operator sessions, claimed by a
 # coordinator that declares the `tracks` feature (foundry_coordinator/control.py
 # TRACK_KINDS has the payloads). The coordinator's heartbeat carries `tracks`
@@ -189,10 +190,33 @@ MAX_AGENTS_LIMIT = 16
 # Payload {"file", "heading", "text", "task_id"?}; project-scoped, operator sessions
 # only, handed only to a coordinator that declares the `project_memory` feature.
 MEMORY_ACTIONS = ("memory_add", "memory_edit")
+# Queue API (2026-10-23, review A2): edits of the coordinator's approved queue.
+# Task-scoped, operator sessions, handed only to a coordinator that declares the
+# `queue` feature; the coordinator re-checks everything (state, deps, cycles)
+# and applies through its own engine methods — order is priority, no dispatch
+# change. Payloads (foundry_coordinator/control.py QUEUE_KINDS):
+#   queue_approve {deps?: [task ids], note?: str, track?: str}  may name a task
+#                 the bridge hasn't reported yet (a planned sprint), so it skips
+#                 the cc_tasks-row requirement and the stale-state check
+#   queue_reorder {position: int >= 1} + expected {task_state}
+#   queue_deps    {deps: [task ids]}   + expected {task_state} (QUEUED only)
+#   queue_requeue {reason: str}        + expected {task_state} (CANCELLED only:
+#                 COMPLETE stays closed, passed work is never rerun)
+QUEUE_ACTIONS = ("queue_approve", "queue_reorder", "queue_deps", "queue_requeue")
+MAX_QUEUE_DEPS = 20
+MAX_QUEUE_NOTE = 500
 MEMORY_FILE = re.compile(r"^(?:(?i:decisions|conventions|assets|known_issues)\.md|"
                          r"(?:tracks|sprints)/[A-Za-z0-9][A-Za-z0-9._-]{0,59}(?:\.md)?)$")
 MAX_MEMORY_TEXT = 4000
 MAX_MEMORY_HEADING = 120
+# cross-project playbook (A1, 2026-10-23): same flow as MEMORY_ACTIONS against
+# the coordinator's playbook repo; the project id routes the action, the edit is
+# cross-project. Its snapshot arrives as a `memory` observation under the
+# reserved project id PLAYBOOK_PROJECT with scope "playbook".
+PLAYBOOK_ACTIONS = ("playbook_add", "playbook_edit")
+PLAYBOOK_PROJECT = "@playbook"
+PLAYBOOK_FILE = re.compile(r"^(?:templates|howto|fixes|scripts|formats)/"
+                           r"[A-Za-z0-9][A-Za-z0-9._-]{0,59}(?:\.md)?$")
 # Foundry Client stack actions (W3, 2026-10-22): claimed by the workstation
 # client that heart-beats with source kind `client` (foundry_client/relay.py),
 # never by the coordinator. Payloads:
@@ -268,7 +292,8 @@ FEATURE_GATED_ACTIONS = {"decision_answer": "decision_answer", "project_pause": 
                          "project_resume": "project_pause",
                          **{k: "lead_manager" for k in LEAD_ACTIONS},
                          **{k: "tracks" for k in TRACK_ACTIONS},
-                         **{k: "project_memory" for k in MEMORY_ACTIONS}}
+                         **{k: "project_memory" for k in MEMORY_ACTIONS},
+                         **{k: "queue" for k in QUEUE_ACTIONS}}
 # observation types that only make sense inside a project: an empty project_id
 # would bypass the per-key project allowlist, so they are refused
 PROJECT_SCOPED_TYPES = ("task", "lane_unit", "artifact", "mcp", "config", "capabilities", "todo",
@@ -2498,6 +2523,8 @@ class ControlCenter:
             return self._create_client_action(actor, projects, body, scopes, kind, idem)
         if kind in MEMORY_ACTIONS:
             return self._create_memory_action(actor, projects, body, scopes, kind, idem, pid)
+        if kind in QUEUE_ACTIONS:
+            return self._create_queue_action(actor, projects, body, scopes, kind, idem, pid, tid)
         if not pid or not tid:
             raise ControlError("project_id and task_id are required")
         if projects and pid not in projects:
@@ -2939,6 +2966,116 @@ class ControlCenter:
         return {"tracks": out, "source": (best or {}).get("source_id"),
                 "age_s": (round(self.clock() - (best.get("last_seen") or 0)) if best else None)}
 
+    def queue_view(self, projects: list, project: str) -> dict:
+        """One project's approved queue, from the `queue` field the bridge puts
+        on task observations (position = priority; the coordinator owns the
+        truth). The Automation page's Queue tab reads it: a 404 on the route is
+        what used to keep approve/reorder/deps switched off (review A2)."""
+        if not project:
+            raise ControlError("project is required")
+        if projects and project not in projects:
+            raise ControlError("this operator may not read that project", "forbidden", 403)
+        out = []
+        for r in self.db.query("SELECT task_id, state, data FROM cc_tasks WHERE project_id=?",
+                               (project,)):
+            d = _uj(r["data"], {})
+            q = d.get("queue") if isinstance(d.get("queue"), dict) else {}
+            out.append({"task_id": r["task_id"], "state": r["state"],
+                        "position": q.get("position"), "deps": q.get("deps") or [],
+                        "approved_by": q.get("approved_by") or "",
+                        "note": q.get("note") or d.get("next_action") or "",
+                        "track": q.get("track") or ""})
+        out.sort(key=lambda x: (x["position"] is None, x["position"] or 0, x["task_id"]))
+        return {"tasks": out, "server_ts": self.clock()}
+
+    # one-line "why you" for a Lead escalation: the case's reason code, said as
+    # a sentence (review A3). Codes from foundry_coordinator/lead.py _escalate.
+    _ESCALATION_SENTENCES = {
+        "lead_permissions": "permission only you hold",
+        "scope_core": "out of scope: touches a core contract",
+        "external": "needs external input",
+        "lead_asks": "the Lead asks you directly",
+        "guard_violation": "a guard rule was violated",
+        "served_model_mismatch": "the served model does not match the profile",
+        "readiness": "a readiness check the Lead cannot clear",
+        "repair_unavailable": "no repair path is available",
+        "upgrade_missing": "the requested upgrade is not installed",
+        "upgrade_rolled_back": "an upgrade was rolled back",
+        "upgrade_failed": "an upgrade failed",
+        "upgrade_cancelled": "an upgrade was cancelled",
+        "answer_not_applicable": "your earlier answer no longer applies",
+        "unknown_action": "the case asks for an action the Lead doesn't know",
+    }
+
+    @classmethod
+    def _escalation_sentence(cls, code: str) -> str:
+        code = (code or "").strip()
+        if not code:
+            return ""
+        if code in cls._ESCALATION_SENTENCES:
+            return cls._ESCALATION_SENTENCES[code]
+        if code.startswith("max_") or code == "lead_hard_cap":
+            return "recovery limits exhausted"
+        return code.replace("_", " ")
+
+    def decisions_inbox(self, projects: list) -> dict:
+        """One "Your decisions" list across projects (review A3): every open
+        decision — with the Lead's one-line escalation reason where there is
+        one — plus the open operator questions, and how many decisions the
+        Lead resolved itself in the last 7 days."""
+        pf, pa = self._pfilter(projects)
+        now = self.clock()
+        week_ago = now - 7 * 86400
+        live = {}
+        for a in self.db.query("SELECT action_id, actor, status, payload, created_ts FROM "
+                               "cc_actions WHERE kind='decision_answer' AND status IN "
+                               "('accepted','claimed','queued','delivered','applied')" + pf, pa):
+            did = (_uj(a.get("payload"), {}) or {}).get("decision_id")
+            if did:
+                live[did] = {"action_id": a["action_id"], "status": a["status"],
+                             "by": a["actor"], "ts": a["created_ts"]}
+        decisions, lead_7d = [], 0
+        for t in self.db.query("SELECT project_id, task_id, state, data FROM cc_tasks "
+                               "WHERE 1=1" + pf, pa):
+            d = _uj(t["data"], {})
+            decs = d.get("decisions") if isinstance(d.get("decisions"), list) else []
+            lead = d.get("lead") if isinstance(d.get("lead"), dict) else {}
+            for x in decs:
+                if not isinstance(x, dict):
+                    continue
+                if x.get("status") != "open":
+                    if (x.get("authority") == "lead_policy"
+                            and (x.get("answered_ts") or 0) >= week_ago):
+                        lead_7d += 1
+                    continue
+                row = {"project_id": t["project_id"], "task_id": t["task_id"],
+                       "task_state": t["state"],
+                       **{k: x.get(k) for k in ("decision_id", "kind", "question", "options",
+                                                "recommendation", "recommended",
+                                                "decision_class", "timeout_minutes",
+                                                "deadline_ts", "opened_ts")},
+                       "question_hash": _hash(x.get("question") or "")}
+                if x.get("decision_id") in live:
+                    row["answer_action"] = live[x["decision_id"]]
+                if x.get("kind") == "lead_escalation":
+                    reason = str(x.get("escalation_reason") or "")
+                    if not reason and lead.get("decision_id") == x.get("decision_id"):
+                        # older coordinators: the case outcome is "needs_victor: <code>"
+                        out = str(lead.get("outcome") or "")
+                        reason = out.split(":", 1)[1].strip() if out.startswith(
+                            "needs_victor") and ":" in out else ""
+                    row["escalation_reason"] = self._escalation_sentence(reason)
+                    row["lead"] = {k: lead.get(k) for k in ("case_id", "state",
+                                                            "lead_session_id")}
+                decisions.append(row)
+        decisions.sort(key=lambda x: (x.get("deadline_ts") is None,
+                                      x.get("deadline_ts") or 0,
+                                      -(x.get("opened_ts") or 0)))
+        questions = self.db.query("SELECT request_id, project_id, task_id, session_id, kind, "
+                                  "created_ts FROM cc_pending WHERE status='open'" + pf, pa)
+        return {"decisions": decisions, "questions": questions,
+                "resolved_by_lead_7d": lead_7d, "server_ts": now}
+
     def client_sources(self) -> list[dict]:
         """Foundry Clients that heart-beat (kind client), freshest first."""
         return sorted([s for s in self.sources([]) if s["kind"] == "client"],
@@ -3003,6 +3140,111 @@ class ControlCenter:
                 ex = self.db.query_one("SELECT action_id FROM cc_actions WHERE idem_key=?", (idem,))
                 return {**self.action_view(ex["action_id"]), "duplicate": True}
             raise
+        self._notify()
+        return self.action_view(aid)
+
+    def _create_queue_action(self, actor: str, projects: list, body: dict, scopes, kind: str,
+                             idem: str, pid: str, tid: str) -> dict:
+        """queue_approve / queue_reorder / queue_deps / queue_requeue: edits of
+        the coordinator's approved queue (review A2). Checked here against what
+        the bridge last reported; the coordinator re-checks state, membership
+        and cycles when it applies. queue_approve may name a task the bridge
+        hasn't reported yet (a planned sprint), so it has no cc_tasks row or
+        stale-state requirement."""
+        if scopes is not None and not {"operator", "admin"} & set(scopes or []):
+            raise ControlError("queue actions need an operator session", "forbidden", 403)
+        if not pid or not tid:
+            raise ControlError("project_id and task_id are required")
+        if projects and pid not in projects:
+            raise ControlError("this operator may not act on that project", "forbidden", 403)
+        task = self.db.query_one("SELECT * FROM cc_tasks WHERE project_id=? AND task_id=?",
+                                 (pid, tid))
+        if not task and kind != "queue_approve":
+            raise ControlError(f"{pid}/{tid} has not been reported by the coordinator bridge",
+                               "unknown_task", 404)
+        expected = dict(body.get("expected") or {})
+        if task:
+            expected.setdefault("task_state", task["state"])
+            if expected["task_state"] != task["state"]:
+                raise ControlError(f"{tid} is now {task['state']} (you saw "
+                                   f"{expected['task_state']}); review the current state first",
+                                   "stale_state", 409, current=task["state"])
+        else:
+            expected.pop("task_state", None)
+
+        def _deps() -> list:
+            deps = body.get("deps")
+            if not isinstance(deps, list) or not all(isinstance(d, str) and d.strip()
+                                                     for d in deps):
+                raise ControlError("deps must be a list of task ids")
+            deps = sorted({_s(d, 120).strip() for d in deps})
+            if len(deps) > MAX_QUEUE_DEPS:
+                raise ControlError(f"at most {MAX_QUEUE_DEPS} dependencies")
+            if tid in deps:
+                raise ControlError("a task can't depend on itself")
+            return deps
+
+        if kind == "queue_approve":
+            if task and task["state"] != "QUEUED":
+                raise ControlError(f"{tid} is {task['state']}; only a QUEUED task's approval "
+                                   "(deps, note) can be updated", "stale_state", 409)
+            payload = {"deps": _deps() if body.get("deps") is not None else [],
+                       "note": _s(body.get("note"), MAX_QUEUE_NOTE),
+                       "track": _s(body.get("track"), 80)}
+            if not payload["track"]:
+                payload.pop("track")
+        elif kind == "queue_reorder":
+            pos = body.get("position")
+            if not isinstance(pos, int) or isinstance(pos, bool) or pos < 1:
+                raise ControlError("position must be a whole number, 1 or higher")
+            payload = {"position": pos}
+        elif kind == "queue_deps":
+            if task and task["state"] != "QUEUED":
+                raise ControlError(f"{tid} is {task['state']}; dependencies can only change "
+                                   "while QUEUED", "stale_state", 409)
+            payload = {"deps": _deps()}
+        else:                                                    # queue_requeue
+            if task and task["state"] != "CANCELLED":
+                raise ControlError(f"{tid} is {task['state']}; only a CANCELLED task is "
+                                   "re-queued (passed work is never rerun)", "stale_state", 409)
+            reason = _s(body.get("reason"), 500).strip()
+            if not reason:
+                raise ControlError("a reason is required")
+            payload = {"reason": reason}
+        if not self.rate_ok(actor):
+            raise ControlError("too many control actions; wait a minute", "rate_limited", 429)
+        st = self.settings()
+        now = self.clock()
+        aid = f"act-{uuid.uuid4().hex[:16]}"
+        summary = self._summary(kind, payload, tid)
+        dup = None
+        try:
+            with self._tx() as c:
+                live = self._rows(c, "SELECT action_id FROM cc_actions WHERE project_id=? AND "
+                                     "task_id=? AND kind IN (?,?,?,?) AND status IN "
+                                     "('accepted','claimed','delivered','queued')",
+                                  (pid, tid, *QUEUE_ACTIONS))
+                if live:
+                    dup = live[0]["action_id"]           # one queue action per task in flight
+                else:
+                    seq = self._feed(c, "action", pid, "", aid)
+                    c.execute("INSERT INTO cc_actions (action_id, idem_key, actor, kind, "
+                              "project_id, task_id, run_id, session_id, request_id, payload, "
+                              "summary, expected, status, status_detail, created_ts, expires_ts, "
+                              "updated_ts, seq) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                              (aid, idem, actor, kind, pid, tid, "", "", "", _j(payload), summary,
+                               _j(expected), "accepted",
+                               "stored by Foundry; waiting for the coordinator to claim it", now,
+                               now + st["action_ttl_s"], now, seq))
+                    c.execute("INSERT INTO cc_action_log (action_id, ts, status, actor, detail) "
+                              "VALUES (?,?,?,?,?)", (aid, now, "accepted", actor, summary))
+        except Exception as e:                                   # noqa: BLE001
+            if "UNIQUE" in str(e) and "idem" in str(e):
+                ex = self.db.query_one("SELECT action_id FROM cc_actions WHERE idem_key=?", (idem,))
+                return {**self.action_view(ex["action_id"]), "duplicate": True}
+            raise
+        if dup:
+            return {**self.action_view(dup), "duplicate": True}
         self._notify()
         return self.action_view(aid)
 
@@ -3234,6 +3476,14 @@ class ControlCenter:
             return ControlCenter._track_payload(kind, {**p, "name": p.get("name") or tid})[1][:300]
         if kind == "client_service_enable":
             return f"{'enable' if p.get('enabled') else 'disable'} {p.get('component')}"
+        if kind == "queue_approve":
+            return f"approve {tid} onto the queue ({len(p.get('deps') or [])} dep(s))"
+        if kind == "queue_reorder":
+            return f"move {tid} to position {p.get('position')}"
+        if kind == "queue_deps":
+            return f"{tid} depends on {', '.join(p.get('deps') or []) or 'nothing'}"[:300]
+        if kind == "queue_requeue":
+            return f"re-queue {tid}: {p.get('reason') or ''}"[:300]
         if kind == "decision_answer":
             return (f"answer decision {p.get('decision_id')} ({p.get('decision_kind') or '?'}) as "
                     f"{p.get('authority')}" + (" · option chosen" if p.get("option") else "")

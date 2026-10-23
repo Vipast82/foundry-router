@@ -169,6 +169,63 @@ class Coordinator:
             entry = self.store.approve(project_id, task_id, deps, approver, reason)
         return entry
 
+    def move(self, project_id: str, task_id: str, position: int, actor: str) -> list[dict]:
+        """Move a queued row to a 1-based position (queue order = priority).
+        Presentation of the queue only; no task changes state."""
+        self._project(project_id)
+        entry = self.store.queue_entry(project_id, task_id)
+        if entry is None:
+            raise ValueError(f"{project_id}/{task_id} is not on the queue")
+        with self.store.tx():
+            out = self.store.move(project_id, task_id, int(position))
+            self.store.event(project_id, task_id, "queue_moved",
+                             detail={"from": entry["position"], "to": int(position),
+                                     "actor": actor})
+        return out
+
+    def set_deps(self, project_id: str, task_id: str, deps: list[str], actor: str) -> dict:
+        """Replace a QUEUED task's dependencies. Deps are consumed at
+        QUEUED→READY, so edits after that are refused."""
+        self._project(project_id)
+        t = self.store.task(project_id, task_id)
+        if t is None:
+            raise ValueError(f"unknown task {project_id}/{task_id}")
+        if t["state"] != S.QUEUED:
+            raise ValueError(f"{project_id}/{task_id} is {t['state']}; dependencies can "
+                             f"only change while QUEUED")
+        deps = sorted(set(deps))
+        for d in deps:
+            if ":" in d or "/" in d:
+                raise ValueError(f"dependency {d!r} names another project; cross-project "
+                                 f"dependencies aren't allowed")
+            if d == task_id:
+                raise ValueError("a task can't depend on itself")
+            if not self.store.queue_entry(project_id, d):
+                raise ValueError(f"dependency {d} is not on {project_id}'s approved queue")
+        if self._deps_cycle(project_id, task_id, deps):
+            raise ValueError("those dependencies make a loop")
+        old = self.store.queue_entry(project_id, task_id)
+        with self.store.tx():
+            entry = self.store.set_deps(project_id, task_id, deps)
+            self.store.event(project_id, task_id, "deps_changed",
+                             detail={"from": (old or {}).get("deps") or [], "to": deps,
+                                     "actor": actor})
+        return entry
+
+    def _deps_cycle(self, project_id: str, task_id: str, deps: list[str]) -> bool:
+        graph = {e["task_id"]: list(e["deps"] or []) for e in self.store.queue(project_id)}
+        graph[task_id] = list(deps)
+        seen, stack = set(), list(deps)
+        while stack:
+            n = stack.pop()
+            if n == task_id:
+                return True
+            if n in seen:
+                continue
+            seen.add(n)
+            stack.extend(graph.get(n, []))
+        return False
+
     # ======================================================================= loop
 
     def tick(self) -> list[str]:

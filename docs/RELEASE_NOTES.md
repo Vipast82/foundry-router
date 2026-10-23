@@ -2,6 +2,42 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.137.0 — Queue API, kanban board, PM decisions inbox
+
+Review items A2, A3 and V9 (reports/UI_AUTOMATION_REVIEW_2026-10-23.md). The
+Automation page's Queue tab had its approve/reorder/dependency controls built
+but switched off ("no queue API on the router yet"); the API now exists and
+the tab grew a board. Presentation and typed actions only — no dispatch change.
+
+- **Queue actions (A2).** New task-scoped kinds `queue_approve`,
+  `queue_reorder`, `queue_deps`, `queue_requeue` (feature-gated on `queue`),
+  applied by the coordinator through the engine's own paths: `approve`, new
+  `move` (positions renumber 1..N; order is what `tick()` starts), new
+  `set_deps` (QUEUED only, same-project, server-side cycle check) and `reopen`
+  (CANCELLED only — COMPLETE is never re-queued: passed work is never rerun).
+  Journaled (`queue_moved`, `deps_changed`), idempotent through the ops table,
+  one queue action per task in flight.
+- **Queue view.** The approved queue (position, deps, approved_by, note,
+  track) rides the task observation; `GET /control/api/queue?project=` serves
+  it in the shape the page already probed for, so approve, drag-reorder and
+  the dependency editor light up on their own against a coordinator that
+  declares the feature.
+- **Board (V9).** The Queue tab renders a kanban board (toggle to the flat
+  table is remembered): columns QUEUED → BLOCKED with folded states keeping
+  their true pill, tracks as swimlanes, cards with attempt, blocker and the
+  open decision's countdown. COMPLETE and CANCELLED collapse to counted groups
+  in both views, so live rows are no longer buried. Dragging is only a
+  shortcut for an existing typed action (reorder within QUEUED; BLOCKED/FAILED
+  into READY = the unblock modal); every other move snaps back.
+- **"Your decisions" (A3).** `GET /control/api/inbox`: every open decision
+  across projects with its recommended default, deadline and in-flight answer,
+  open operator questions, and `resolved_by_lead_7d`. Lead escalations carry a
+  one-line "why you" (`escalation_reason`, now an explicit field in
+  `decisions_view` — the capped evidence string was losing it), said as a
+  sentence ("permission only you hold", "recovery limits exhausted", …).
+  Surfaced on the Queue tab (cross-project, with the weekly Lead counter) and
+  in the control center's bell drawer.
+
 ## v0.136.0 — Lead sprint manager: known gaps closed, pilot checklist
 
 Closes the four "Known gaps" of docs/LEAD_SPRINT_MANAGER.md and prepares the

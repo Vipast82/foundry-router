@@ -256,6 +256,25 @@
   .deps { display:flex; flex-wrap:wrap; gap:3px; align-items:center; }
   .deps code { border:1px solid var(--line-2); border-radius:9px; padding:0 6px; }
   .dec { border:1px solid var(--line); border-left:4px solid var(--warn); border-radius:5px; padding:10px 12px; background:var(--panel); margin:8px 0; }
+  /* queue board (A2): columns by state, tracks as swimlanes */
+  .qtools { display:flex; gap:10px; align-items:center; flex-wrap:wrap; margin:8px 0; }
+  .lane { margin:10px 0 14px; }
+  .lane > h3 { font-size:13px; color:var(--dim); margin:4px 0 6px; display:flex; gap:8px; align-items:center; }
+  .board { display:grid; grid-auto-flow:column; grid-auto-columns:minmax(190px, 1fr); gap:8px; overflow-x:auto; align-items:start; padding-bottom:4px; }
+  .kcolwrap { background:var(--panel-2); border:1px solid var(--line); border-radius:6px; min-width:0; }
+  .kcolwrap > h4 { font-size:11.5px; color:var(--dim); font-weight:600; padding:6px 8px; margin:0; border-bottom:1px solid var(--line); white-space:nowrap; }
+  ul.kcol { list-style:none; margin:0; padding:6px; min-height:34px; display:flex; flex-direction:column; gap:6px; }
+  li.kcard { border:1px solid var(--line); border-radius:5px; background:var(--panel); padding:6px 8px; font-size:12.5px; box-shadow:var(--shadow); min-width:0; }
+  li.kcard.sortable-ghost { opacity:.35; }
+  .kcard .khead { display:flex; gap:6px; align-items:center; min-width:0; }
+  .kcard .khead b { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; min-width:0; }
+  .kcard .kmeta { color:var(--dim); font-size:11.5px; margin-top:3px; display:flex; gap:8px; flex-wrap:wrap; }
+  .kcard .kblock { color:var(--bad); font-size:11.5px; margin-top:3px; overflow-wrap:anywhere; }
+  .kcard .acts { margin-top:5px; display:flex; gap:4px; flex-wrap:wrap; }
+  .kcard .acts .act { padding:1px 7px; font-size:11.5px; }
+  details.qgroup { border:1px solid var(--line); border-radius:6px; background:var(--panel); margin:8px 0; }
+  details.qgroup > summary { cursor:pointer; padding:8px 12px; color:var(--dim); font-size:13px; }
+  details.qgroup > .qwrap { padding:0 8px 8px; }
   /* Tracks tab: one column per track, the Studio timeline below */
   .tracks { display:grid; grid-template-columns:repeat(auto-fill, minmax(260px, 1fr)); gap:10px; margin:8px 0; }
   .track { border:1px solid var(--line); border-radius:6px; background:var(--panel); padding:10px 12px; box-shadow:var(--shadow); min-width:0; display:flex; flex-direction:column; gap:6px; }
@@ -461,6 +480,7 @@ const S = {
   cfgProject: store("fr.auto.project") || "", c1: null, projects: [], ovProjects: [],
   queue: null, ov: null, project: "", qStub: false, qOps: false, workspace: store("fr.auto.ws") || "",
   ruleSel: null, decTick: null,
+  qView: store("fr.auto.qview") === "table" ? "table" : "board", qOpen: {}, inbox: null,
 };
 const doc = () => S.draft || S.deployed;
 
@@ -1065,7 +1085,13 @@ function attachSortables() {
     });
   }
   const tb = $("#qbody");
-  if (tb && !tb._sortable && S.qOps) tb._sortable = window.Sortable.create(tb, {handle: ".drag", forceFallback: true, draggable: "tr", onEnd: e => queueMove(e.oldIndex, e.newIndex)});
+  const anim = matchMedia("(prefers-reduced-motion: reduce)").matches ? 0 : 140;
+  if (tb && !tb._sortable && S.qOps) tb._sortable = window.Sortable.create(tb, {handle: ".drag", forceFallback: true, animation: anim, draggable: "tr", onEnd: e => domMove(e)});
+  for (const ul of $$("#v-queue ul.kcol")) {
+    if (ul._sortable || !S.qOps) continue;
+    // one drag group per swimlane: cards move between that lane's columns
+    ul._sortable = window.Sortable.create(ul, {group: "q-" + (ul.dataset.lane || ""), handle: ".drag", forceFallback: true, animation: anim, draggable: "li.kcard", onEnd: e => boardDrop(e)});
+  }
 }
 window.__sortableReady = attachSortables;
 
@@ -1085,6 +1111,7 @@ $("#main").addEventListener("change", e => {
   else if (a === "dr-whatif") { $("#dr-whatif-box").hidden = !t.checked; }
   else if (a === "set") setField(t);
   else if (a === "q-project") { S.project = t.value; S.queue = null; renderQueue(); }
+  else if (a === "q-view") { S.qView = t.value === "table" ? "table" : "board"; store("fr.auto.qview", S.qView); renderQueue(); }
 });
 $("#main").addEventListener("input", e => {
   const t = e.target;
@@ -1582,8 +1609,14 @@ async function loadQueue() {
   if (q) S.queue = q.map(x => ({...x, live: byId[x.task_id] || null, state: (byId[x.task_id] || {}).state || x.state}));
   else S.queue = tasks.slice().sort((a, b) => (b.received_ts || 0) - (a.received_ts || 0))
     .map(t => ({task_id: t.task_id, state: t.state, deps: (t.data || {}).deps || [], approved_by: (t.data || {}).approved_by || "", note: (t.data || {}).next_action || "", live: t}));
+  try { S.inbox = await api("inbox"); }
+  catch (e) { if (e.status !== 404 && e.status !== 405) throw e; S.inbox = null; }
 }
 function decisionsOf() {
+  // one PM inbox (A3): every open decision across projects, with the Lead's
+  // escalation reason; falls back to this project's task views without it
+  if (S.inbox) return (S.inbox.decisions || []).map(d => (
+    {t: {task_id: d.task_id, project_id: d.project_id, state: d.task_state}, d}));
   const out = [];
   for (const t of (S.ov && S.ov.tasks) || []) {
     if (t.project_id !== S.project) continue;
@@ -1609,8 +1642,9 @@ function decisionHtml({t, d}) {
   const dl = deadline(d), id = esc(d.decision_id);
   const opts = d.options || [];
   return `<section class="dec" aria-labelledby="dh-${id}">
-    <div class="row" style="margin:0"><span class="pill warn">${esc(d.kind || "decision")}</span><b id="dh-${id}">${esc(t.task_id)}</b><span class="grow"></span>${dl ? `<span class="countdown" data-deadline="${dl}" title="When the timeout passes the coordinator applies the recommended default and logs it">${esc(countdown(dl))}</span>` : `<span class="hint" style="margin:0">no timeout</span>`}</div>
+    <div class="row" style="margin:0"><span class="pill warn">${esc(d.kind || "decision")}</span>${t.project_id && t.project_id !== S.project ? `<span class="pill info">${esc(t.project_id)}</span>` : ""}<b id="dh-${id}">${esc(t.task_id)}</b><span class="grow"></span>${dl ? `<span class="countdown" data-deadline="${dl}" title="When the timeout passes the coordinator applies the recommended default and logs it">${esc(countdown(dl))}</span>` : `<span class="hint" style="margin:0">no timeout</span>`}</div>
     <div style="white-space:pre-wrap;margin-top:4px">${esc(d.question || "")}</div>
+    ${d.escalation_reason ? `<div style="margin-top:4px"><span class="hint" style="margin:0">Why you:</span> <b>${esc(d.escalation_reason)}</b> <a href="/ui/control" title="The case dossier is in the task's Lead recovery section in the control center">dossier</a></div>` : ""}
     ${def ? `<div style="margin-top:4px"><span class="hint" style="margin:0">Recommended default:</span> <b>${esc(def)}</b></div>` : ""}
     ${d.answer_action ? `<div class="hint">Answer ${esc(d.answer_action.status)} by ${esc(d.answer_action.by || "?")}: waiting for the coordinator.</div>`
       : `<div class="opts">${(opts.length ? opts : def ? [def] : []).map(o => `<button class="act${o === def ? " primary" : ""}" type="button" data-act="q-decide" data-task="${esc(t.task_id)}" data-dec="${id}" data-opt="${esc(o)}">${o === def ? "Accept default: " : ""}${esc(o)}</button>`).join("")}
@@ -1618,7 +1652,8 @@ function decisionHtml({t, d}) {
   </section>`;
 }
 function depsHtml(x) {
-  return `<span class="deps">${(x.deps || []).map(d => `<code>${esc(d)}</code>`).join("") || `<span class="hint" style="margin:0">none</span>`}${S.qOps ? ` <button class="ic" type="button" data-act="q-deps" data-task="${esc(x.task_id)}" aria-label="Edit dependencies of ${esc(x.task_id)}">✎</button>` : ""}</span>`;
+  // deps are consumed at QUEUED -> READY, so the editor only shows while QUEUED
+  return `<span class="deps">${(x.deps || []).map(d => `<code>${esc(d)}</code>`).join("") || `<span class="hint" style="margin:0">none</span>`}${S.qOps && x.state === "QUEUED" ? ` <button class="ic" type="button" data-act="q-deps" data-task="${esc(x.task_id)}" aria-label="Edit dependencies of ${esc(x.task_id)}">✎</button>` : ""}</span>`;
 }
 function needsHtml(x) {
   const d = (x.live && x.live.data) || {}, needs = d.needs || [], w = d.service_wait;
@@ -1631,11 +1666,93 @@ function rowActions(x) {
   const btn = (act, label, title, cls = "") => `<button class="act ${cls}" type="button" data-act="${act}" data-task="${tid}" title="${esc(title)}">${label}</button>`;
   if (S.qOps && !x.approved_by && st === "QUEUED") b.push(btn("q-approve", "Approve", "Approve into the queue", "primary"));
   if (["BLOCKED", "FAILED"].includes(st)) b.push(btn("q-unblock", "Re-queue", "Say what was fixed and put it back in line"));
-  else if (S.qOps && ["CANCELLED", "COMPLETE"].includes(st)) b.push(btn("q-requeue", "Re-queue", "Run this task again"));
+  // COMPLETE is never re-queued: passed work is never rerun, and the engine
+  // has no COMPLETE -> QUEUED transition
+  else if (S.qOps && st === "CANCELLED") b.push(btn("q-requeue", "Re-queue", "Run this task again"));
   if (st === "PAUSED") b.push(btn("q-resume", "Resume", "Resume this task"));
   else if (RUNNING.includes(st) || st === "QUEUED") b.push(btn("q-pause", "Pause", "Pause this task"));
   if (!["COMPLETE", "CANCELLED"].includes(st)) b.push(btn("q-cancel", "Cancel", "Cancel for good", "danger"));
   return b.join(" ");
+}
+/*qboard-start*/
+// kanban board (A2): columns by state; the other live states fold into these
+// with their true state still on the card. CANCELLED and COMPLETE live in
+// collapsed groups below the board (V9), so null here means "not a column".
+const BOARD_COLS = ["QUEUED", "READY", "IMPLEMENTING", "VERIFYING", "REVIEWING", "AWAITING_HUMAN", "BLOCKED"];
+const COL_OF = {CHANGES_REQUIRED: "IMPLEMENTING", APPROVED: "REVIEWING", CLOSING: "REVIEWING", FAILED: "BLOCKED"};
+function boardColumn(x) {
+  const st = x.state || "";
+  if (st === "PAUSED") {
+    const r = (x.live || {}).resume_state || ((x.live || {}).data || {}).resume_state || "";
+    return BOARD_COLS.includes(r) ? r : COL_OF[r] || "BLOCKED";
+  }
+  if (BOARD_COLS.includes(st)) return st;
+  return COL_OF[st] || null;
+}
+function boardLanes(rows) {
+  const lanes = new Map();
+  for (const x of rows) { const k = x.track || ""; if (!lanes.has(k)) lanes.set(k, []); lanes.get(k).push(x); }
+  return [...lanes.entries()].sort((a, b) => (a[0] === "") - (b[0] === "") || a[0].localeCompare(b[0]));
+}
+// a drag is only a shortcut for an existing typed action; everything else
+// snaps back — the engine owns all other transitions
+function dragAction(x, fromCol, toCol) {
+  if (fromCol === toCol) return x.state === "QUEUED" ? {kind: "queue_reorder"} : null;
+  if (toCol === "READY" && ["BLOCKED", "FAILED"].includes(x.state)) return {kind: "unblock"};
+  return null;
+}
+// the dropped card's new 1-based position in the full queue, from its new
+// neighbours (the coordinator removes it, then inserts at position-1)
+function boardDropPosition(queue, taskId, prevId, nextId) {
+  const others = queue.filter(x => x.task_id !== taskId).map(x => x.task_id);
+  if (prevId) { const i = others.indexOf(prevId); if (i >= 0) return i + 2; }
+  if (nextId) { const i = others.indexOf(nextId); if (i >= 0) return i + 1; }
+  return others.length + 1;
+}
+/*qboard-end*/
+function kcard(x) {
+  const d = (x.live || {}).data || x.live || {}, tv = (x.live || {}).task_view || {};
+  const att = d.attempt, mx = (d.limits || {}).max_attempts;
+  const blocker = String(d.blocker || d.pause_reason || "").slice(0, 120);
+  const dec = ((tv.decisions || {}).open || [])[0];
+  const dl = dec ? deadline(dec) : null;
+  const i = (S.queue || []).findIndex(y => y.task_id === x.task_id);
+  return `<li class="kcard" data-task="${esc(x.task_id)}">
+    <div class="khead">${S.qOps ? `<button class="drag" type="button" data-act="q-key" data-task="${esc(x.task_id)}" aria-label="${esc(x.task_id)}, position ${i + 1} of ${(S.queue || []).length}. Drag, or press arrow up or down to move."><span aria-hidden="true">⠿</span></button>` : ""}<b class="mono" title="${esc(x.task_id)}">${esc(x.task_id)}</b><span class="grow"></span><span class="pill ${STATE_CLS[x.state] || ""}">${esc(x.state || "?")}</span></div>
+    <div class="kmeta">${att != null ? `<span title="attempt">try ${esc(att)}${mx ? `/${esc(mx)}` : ""}</span>` : ""}${(x.deps || []).length ? `<span title="depends on ${esc(x.deps.join(", "))}">${x.deps.length} dep(s)</span>` : ""}${x.track ? `<span title="track">${esc(x.track)}</span>` : ""}${dl ? `<span class="countdown" data-deadline="${dl}" title="An open decision's default applies when the timeout passes">${esc(countdown(dl))}</span>` : dec ? `<span class="pill warn">decision open</span>` : ""}</div>
+    ${blocker ? `<div class="kblock">${esc(blocker)}</div>` : ""}
+    <div class="acts">${rowActions(x)}</div></li>`;
+}
+function boardHtml(rows) {
+  const lanes = boardLanes(rows);
+  const lane = (name, xs) => {
+    const by = {};
+    for (const x of xs) { const c = boardColumn(x); if (c) (by[c] = by[c] || []).push(x); }
+    return `<section class="lane">${lanes.length > 1 || name ? `<h3>${name ? `Track: ${esc(name)}` : "No track (main checkout)"}</h3>` : ""}
+      <div class="board">${BOARD_COLS.map(c => `<div class="kcolwrap"><h4>${esc(c)}${(by[c] || []).length ? ` (${by[c].length})` : ""}</h4>
+        <ul class="kcol" data-col="${c}" data-lane="${esc(name)}">${(by[c] || []).map(kcard).join("")}</ul></div>`).join("")}</div></section>`;
+  };
+  return lanes.map(([name, xs]) => lane(name, xs)).join("") || `<p class="hint">No live tasks reported for this project.</p>`;
+}
+function tableHtml(rows, order = true) {
+  return `<div class="card qwrap"><table class="q"><caption class="sr-only">Queue for ${esc(S.project)}</caption>
+    <thead><tr>${S.qOps && order ? `<th scope="col"><span class="sr-only">Order</span></th>` : ""}<th scope="col">Task</th><th scope="col">State</th><th scope="col">Depends on</th><th scope="col">Needs</th><th scope="col">Note</th><th scope="col"><span class="sr-only">Actions</span></th></tr></thead>
+    <tbody${order ? ` id="qbody"` : ""}>${rows.map(x => {
+      const i = (S.queue || []).findIndex(y => y.task_id === x.task_id);
+      return `<tr data-task="${esc(x.task_id)}">
+      ${S.qOps && order ? `<td><button class="drag" type="button" data-act="q-key" data-task="${esc(x.task_id)}" aria-label="${esc(x.task_id)}, position ${i + 1} of ${(S.queue || []).length}. Drag, or press arrow up or down to move."><span aria-hidden="true">⠿</span><span class="pos" aria-hidden="true">${i + 1}</span></button></td>` : ""}
+      <td><b class="mono">${esc(x.task_id)}</b>${x.approved_by ? `<div class="hint" style="margin:0">approved by ${esc(x.approved_by)}</div>` : ""}</td>
+      <td><span class="pill ${STATE_CLS[x.state] || ""}">${esc(x.state || "?")}</span></td>
+      <td>${depsHtml(x)}</td>
+      <td>${needsHtml(x)}</td>
+      <td class="hint" style="margin:0;max-width:340px">${esc(String(x.note || "").slice(0, 200))}</td>
+      <td class="acts">${rowActions(x)}</td></tr>`;
+    }).join("") || `<tr><td colspan="7" class="hint">No tasks reported for this project.</td></tr>`}</tbody></table></div>`;
+}
+function groupHtml(name, rows) {
+  if (!rows.length) return "";
+  return `<details class="qgroup" data-group="${esc(name)}"${S.qOpen[name] ? " open" : ""}>
+    <summary>${esc(name)} (${rows.length})</summary>${tableHtml(rows, false)}</details>`;
 }
 async function renderQueue() {
   const el = $("#v-queue");
@@ -1646,25 +1763,28 @@ async function renderQueue() {
   const projects = (S.ov && S.ov.projects) || [];
   const decs = decisionsOf();
   const ps = (S.ov.project_status || {})[S.project] || {};
+  const rows = S.queue || [];
+  const liveRows = rows.filter(x => !["COMPLETE", "CANCELLED"].includes(x.state));
   el.innerHTML = `
     <div class="row" style="margin-top:12px"><label class="fld" for="q-project">Project</label>
       <select id="q-project" data-act="q-project">${projects.map(p => `<option ${p === S.project ? "selected" : ""}>${esc(p)}</option>`).join("") || "<option value=''>none reported</option>"}</select>
       ${ps.paused ? `<span class="pill warn">paused (${esc(ps.mode || "")})</span>` : ""}
       <span class="grow"></span><button class="act" type="button" data-act="q-refresh">Refresh</button></div>
-    ${S.qStub ? `<div class="banner warn"><b>Queue order and dependencies live in the coordinator.</b> There is no queue API on the router yet, so this list shows the tasks the bridge reported (newest first): pause, resume, cancel and re-queue a blocked task work; approve, reorder and dependencies are off.</div>` : ""}
-    <h2>Decisions waiting${decs.length ? ` (${decs.length})` : ""}</h2>
-    ${decs.length ? decs.map(decisionHtml).join("") : `<p class="hint">Nothing waits on you.</p>`}
+    ${S.qStub ? `<div class="banner warn"><b>Queue order and dependencies live in the coordinator.</b> The coordinator has not reported its queue yet (it may predate the queue feature), so this list shows the tasks the bridge reported (newest first): pause, resume, cancel and re-queue a blocked task work; approve, reorder and dependencies are off.</div>` : ""}
+    <h2>Your decisions${decs.length ? ` (${decs.length})` : ""}</h2>
+    ${S.inbox ? `<p class="hint" style="margin:2px 0 8px" title="Decisions the Lead manager answered itself under its delegated authority, across projects">Resolved by the Lead this week: <b>${Number(S.inbox.resolved_by_lead_7d) || 0}</b>${decs.length ? "" : " — nothing waits on you."}</p>` : ""}
+    ${decs.length ? decs.map(decisionHtml).join("") : S.inbox ? "" : `<p class="hint">Nothing waits on you.</p>`}
     <h2>Tasks</h2>
-    <div class="card qwrap"><table class="q"><caption class="sr-only">Queue for ${esc(S.project)}</caption>
-      <thead><tr>${S.qOps ? `<th scope="col"><span class="sr-only">Order</span></th>` : ""}<th scope="col">Task</th><th scope="col">State</th><th scope="col">Depends on</th><th scope="col">Needs</th><th scope="col">Note</th><th scope="col"><span class="sr-only">Actions</span></th></tr></thead>
-      <tbody id="qbody">${(S.queue || []).map((x, i) => `<tr data-task="${esc(x.task_id)}">
-        ${S.qOps ? `<td><button class="drag" type="button" data-act="q-key" data-i="${i}" aria-label="${esc(x.task_id)}, position ${i + 1} of ${S.queue.length}. Drag, or press arrow up or down to move."><span aria-hidden="true">⠿</span><span class="pos" aria-hidden="true">${i + 1}</span></button></td>` : ""}
-        <td><b class="mono">${esc(x.task_id)}</b>${x.approved_by ? `<div class="hint" style="margin:0">approved by ${esc(x.approved_by)}</div>` : ""}</td>
-        <td><span class="pill ${STATE_CLS[x.state] || ""}">${esc(x.state || "?")}</span></td>
-        <td>${depsHtml(x)}</td>
-        <td>${needsHtml(x)}</td>
-        <td class="hint" style="margin:0;max-width:340px">${esc(String(x.note || "").slice(0, 200))}</td>
-        <td class="acts">${rowActions(x)}</td></tr>`).join("") || `<tr><td colspan="7" class="hint">No tasks reported for this project.</td></tr>`}</tbody></table></div>`;
+    <div class="qtools"><div class="seg" role="radiogroup" aria-label="Queue layout">
+      <label><input type="radio" name="qview" value="board" data-act="q-view"${S.qView === "board" ? " checked" : ""}>Board</label>
+      <label><input type="radio" name="qview" value="table" data-act="q-view"${S.qView === "table" ? " checked" : ""}>Table</label></div>
+      <span class="hint" style="margin:0">${S.qView === "board" ? "Columns are task states; drag reorders QUEUED sprints or re-queues a BLOCKED one into READY — other moves belong to the coordinator." : "Rows in queue order (the order the engine starts them)."}</span></div>
+    ${S.qView === "board" ? boardHtml(liveRows) : tableHtml(liveRows)}
+    ${groupHtml("COMPLETE", rows.filter(x => x.state === "COMPLETE"))}
+    ${groupHtml("CANCELLED", rows.filter(x => x.state === "CANCELLED"))}`;
+  for (const g of $$("#v-queue details.qgroup")) {
+    g.addEventListener("toggle", () => { S.qOpen[g.dataset.group] = g.open; });
+  }
   attachSortables();
   startTick();
 }
@@ -2097,13 +2217,37 @@ function wouldCycle(task, deps) {
   while (stack.length) { const n = stack.pop(); if (n === task) return true; if (seen.has(n)) continue; seen.add(n); stack.push(...(graph[n] || [])); }
   return false;
 }
-async function queueMove(from, to) {
-  if (from === to) return;
+async function queueMoveTo(tid, pos) {
+  // pos is the 1-based target in the full queue (the order the engine starts
+  // tasks); optimistic like the rest of the page, reloaded on an error
+  const from = (S.queue || []).findIndex(y => y.task_id === tid);
+  if (from < 0 || pos < 1 || pos > S.queue.length || from === pos - 1) return;
   const x = S.queue[from];
-  const [m] = S.queue.splice(from, 1); S.queue.splice(to, 0, m);
+  const [m] = S.queue.splice(from, 1); S.queue.splice(pos - 1, 0, m);
   renderQueue();
-  try { await C1.queueOp("queue_reorder", x, {position: to + 1}); }
+  announce(`${tid} moved to position ${pos}`);
+  try { await C1.queueOp("queue_reorder", x, {position: pos}); }
   catch (e) { toast(e.message, true); S.queue = null; renderQueue(); }
+}
+function domMove(e) {
+  // a drop in the flat table: the new neighbours say the global position
+  const tid = e.item.dataset.task;
+  const prev = e.item.previousElementSibling, next = e.item.nextElementSibling;
+  return queueMoveTo(tid, boardDropPosition(S.queue || [], tid,
+                                            prev && prev.dataset.task, next && next.dataset.task));
+}
+function boardDrop(e) {
+  const tid = e.item.dataset.task, x = qTask(tid);
+  const from = e.from.dataset.col, to = e.to.dataset.col;
+  if (!x) return;
+  const act = dragAction(x, from, to);
+  if (!act) {
+    if (from !== to || e.oldIndex !== e.newIndex) toast("That move belongs to the coordinator; use the card's buttons (pause, cancel, re-queue).", true);
+    return renderQueue();
+  }
+  if (act.kind === "queue_reorder") return domMove(e);
+  renderQueue();                       // snap back; the modal issues the typed action
+  if (act.kind === "unblock") queueClick("q-unblock", {dataset: {task: tid}});
 }
 function formModal(title, fields, submitLabel, onSubmit, danger = false) {
   openModal(`<h3 id="modal-h">${esc(title)}</h3><form id="mform">${fields}<div class="row" style="margin-top:12px"><span class="grow"></span><button class="act" type="button" data-close>Back</button><button class="act ${danger ? "danger" : "primary"}" type="submit">${esc(submitLabel)}</button></div></form>`);
@@ -2117,6 +2261,25 @@ function formModal(title, fields, submitLabel, onSubmit, danger = false) {
 async function queueClick(a, b) {
   const x = b.dataset.task ? qTask(b.dataset.task) : null;
   if (a === "q-refresh") { S.queue = null; return renderQueue(); }
+  if (a === "q-decide") {
+    // the inbox lists every project's decisions, so the task may not be on
+    // this project's queue: the decision row itself names project and task
+    const o = decisionsOf().find(o => o.d.decision_id === b.dataset.dec);
+    if (!o) return toast("That decision is no longer open", true);
+    const {t, d} = o;
+    if (!confirm(`Answer ${t.task_id}'s decision with:\n${b.dataset.opt}`)) return;
+    try {
+      const body = {kind: "decision_answer", project_id: t.project_id || S.project,
+                    task_id: t.task_id, idempotency_key: idem(),
+                    decision_id: d.decision_id,
+                    option: (d.options || []).includes(b.dataset.opt) ? b.dataset.opt : "",
+                    answer: b.dataset.opt, note: "", question_hash: d.question_hash || ""};
+      const r = await api("actions", {method: "POST", body});
+      toast(`decision answer for ${t.task_id}: ${r.status || "accepted"}. The coordinator applies it and re-checks the task first.`);
+      S.queue = null; renderQueue();
+    } catch (e) { toast(e.message, true); }
+    return;
+  }
   if (!x && a !== "q-key") return;
   if (a === "q-approve") formModal(`Approve ${x.task_id}`, `<label class="fld" for="f-deps">Depends on (task ids, comma-separated)</label><input id="f-deps" name="deps" style="width:100%" value="${esc((x.deps || []).join(", "))}"><label class="fld" for="f-note" style="margin-top:8px">Note</label><input id="f-note" name="note" style="width:100%">`, "Approve", f => {
     const deps = String(f.get("deps") || "").split(/[,\s]+/).filter(Boolean);
@@ -2136,24 +2299,19 @@ async function queueClick(a, b) {
     if (f.get("confirm") !== `cancel ${x.task_id}`) throw new Error(`Type: cancel ${x.task_id}`);
     return action("cancel", x, {reason: f.get("reason"), confirm: f.get("confirm")});
   }, true);
-  else if (a === "q-decide") {
-    const {d} = decisionsOf().find(o => o.t.task_id === x.task_id && o.d.decision_id === b.dataset.dec) || {};
-    if (!d) return toast("That decision is no longer open", true);
-    if (!confirm(`Answer ${x.task_id}'s decision with:\n${b.dataset.opt}`)) return;
-    try {
-      await action("decision_answer", x, {decision_id: d.decision_id, option: (d.options || []).includes(b.dataset.opt) ? b.dataset.opt : "", answer: b.dataset.opt, note: "", question_hash: d.question_hash || ""});
-      S.queue = null; renderQueue();
-    } catch (e) { toast(e.message, true); }
-  }
 }
 $("#main").addEventListener("keydown", e => {
   const b = e.target.closest && e.target.closest("[data-act=q-key]");
   if (!b || !["ArrowUp", "ArrowDown"].includes(e.key)) return;
   e.preventDefault();
-  const i = +b.dataset.i, to = i + (e.key === "ArrowUp" ? -1 : 1);
-  if (to < 0 || to >= S.queue.length) return;
-  queueMove(i, to).then(() => { const h = $$("[data-act=q-key]")[to]; if (h) h.focus(); });
-  announce(`${S.queue[to] ? S.queue[to].task_id : ""} moved to position ${to + 1}`);
+  const tid = b.dataset.task;
+  const i = (S.queue || []).findIndex(y => y.task_id === tid);
+  if (i < 0) return;
+  const pos = i + 1 + (e.key === "ArrowUp" ? -1 : 1);
+  queueMoveTo(tid, pos).then(() => {
+    const h = $(`[data-act=q-key][data-task="${CSS.escape(tid)}"]`);
+    if (h) h.focus();
+  });
 });
 
 /* ======================================================================== memory view (Team Lead piece 4) */

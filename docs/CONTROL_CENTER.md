@@ -278,8 +278,14 @@ The audit summary never contains the answer or instruction text.
 - **Commands**: pause, resume, unblock (optionally reset attempts), and cancel (you must
   type `cancel TASK`). Each shows its effect before you submit. "Inspect status" is
   read-only. All of them are the engine's own transitions.
-- **Queue approval for new sprints** is not offered here. It stays a separate decision
-  (`queue approve`).
+- **Queue approval for new sprints** is not offered here. It lives on the Automation
+  page's Queue tab (board or table), which issues the typed queue actions —
+  `queue_approve`, `queue_reorder`, `queue_deps`, `queue_requeue` — applied by the
+  coordinator like every other action; the CLI's `queue approve` still works too.
+- The bell drawer is the **"Your decisions" inbox** (`GET /control/api/inbox`): every
+  open decision across projects with its recommended default and the time until the
+  default applies, the one-line reason a Lead escalation reached you ("why you"), and
+  how many decisions the Lead resolved itself in the last 7 days.
 
 ## Helper capacity
 

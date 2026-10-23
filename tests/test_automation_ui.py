@@ -52,7 +52,8 @@ def test_page_script_parses(tmp_path):
 def test_browser_storage_holds_preferences_and_the_dashboard_admin_key_only():
     s = _script()
     keys = set(re.findall(r'store\("([^"]+)"', s)) | set(re.findall(r"store\((ADMIN_KEY)", s))
-    assert keys <= {"fr-theme", "fr.auto.ws", "fr.auto.project", "fr.auto.memproject", "ADMIN_KEY"}, keys
+    assert keys <= {"fr-theme", "fr.auto.ws", "fr.auto.project", "fr.auto.memproject",
+                    "fr.auto.memscope", "fr.auto.qview", "ADMIN_KEY"}, keys
     # the admin key is the dashboard's own (same origin), asked for only when
     # client_auth.protect_admin is on; the operator key is never stored
     assert 'const ADMIN_KEY = "foundryAdminKey"' in s
@@ -140,3 +141,62 @@ def test_dashboard_and_control_center_link_to_automation():
     static = PAGE.parent
     assert "/ui/automation" in (static / "index.html").read_text(encoding="utf-8")
     assert "/ui/automation" in (static / "control.html").read_text(encoding="utf-8")
+
+
+# ------------------------------------------------------------------ queue board (A2)
+
+@pytest.mark.skipif(not shutil.which("node"), reason="node not installed")
+def test_board_helpers_map_states_lanes_and_drags(tmp_path):
+    """The board's pure logic, run in node against the real inline script:
+    column mapping (folded states keep their true pill, PAUSED sits in its
+    resume column, terminal states are not columns), swimlanes by track, drag
+    legality (only moves with an existing typed action), and the global
+    position a drop means."""
+    from tests.test_control_ui_behavior import between, run_js
+    s = _script()
+    block = between(s, "/*qboard-start*/", "/*qboard-end*/")
+    out = run_js(tmp_path, block + """
+const rows = [
+  {task_id: "A", state: "QUEUED", track: ""},
+  {task_id: "B", state: "CHANGES_REQUIRED", track: "ui"},
+  {task_id: "C", state: "PAUSED", live: {resume_state: "VERIFYING"}, track: "ui"},
+  {task_id: "D", state: "CANCELLED", track: ""},
+  {task_id: "E", state: "COMPLETE", track: ""},
+  {task_id: "F", state: "FAILED", track: ""},
+];
+const out = {
+  cols: rows.map(x => [x.task_id, boardColumn(x)]),
+  lanes: boardLanes(rows).map(([k, xs]) => [k, xs.map(x => x.task_id)]),
+  reorder: dragAction({state: "QUEUED"}, "QUEUED", "QUEUED"),
+  unblock: dragAction({state: "FAILED"}, "BLOCKED", "READY"),
+  illegal: [dragAction({state: "READY"}, "READY", "IMPLEMENTING"),
+            dragAction({state: "IMPLEMENTING"}, "IMPLEMENTING", "QUEUED"),
+            dragAction({state: "READY"}, "READY", "READY")],
+  posAfter: boardDropPosition([{task_id: "A"}, {task_id: "B"}, {task_id: "C"}], "A", "B", "C"),
+  posTop: boardDropPosition([{task_id: "A"}, {task_id: "B"}, {task_id: "C"}], "C", null, "A"),
+  posOnly: boardDropPosition([{task_id: "A"}], "A", null, null),
+};
+console.log(JSON.stringify(out));
+""")
+    assert dict(out["cols"]) == {"A": "QUEUED", "B": "IMPLEMENTING", "C": "VERIFYING",
+                                 "D": None, "E": None, "F": "BLOCKED"}
+    assert out["lanes"] == [["ui", ["B", "C"]], ["", ["A", "D", "E", "F"]]]
+    assert out["reorder"] == {"kind": "queue_reorder"}
+    assert out["unblock"] == {"kind": "unblock"}
+    assert out["illegal"] == [None, None, None]
+    # moving A after B in [A, B, C]: remove A -> [B, C], insert at 2 -> [B, A, C]
+    assert out["posAfter"] == 2 and out["posTop"] == 1 and out["posOnly"] == 1
+
+
+def test_queue_page_has_the_board_the_toggle_and_no_complete_requeue():
+    s = _script()
+    # the board/table toggle persists, CANCELLED and COMPLETE collapse (V9)
+    assert 'store("fr.auto.qview"' in s and 'data-act="q-view"' in s
+    assert 'groupHtml("COMPLETE"' in s and 'groupHtml("CANCELLED"' in s
+    # drag issues typed actions only; the queue ops hit the real endpoints
+    assert '"queue_reorder"' in s and '"queue_approve"' in s and '"queue_deps"' in s
+    assert 'api("queue?project="' in s and 'api("inbox")' in s
+    # re-queue is offered for CANCELLED only: passed work is never rerun
+    assert 'st === "CANCELLED"' in s and '["CANCELLED", "COMPLETE"].includes(st)' not in s
+    # the PM inbox pieces (A3)
+    assert "Resolved by the Lead this week" in s and "escalation_reason" in s

@@ -1210,3 +1210,42 @@ def test_lead_controls_end_to_end_with_the_real_lead_manager(env):
     assert lv["paused"] is True and lv["instructions_count"] == 2      # the seeded one + ours
     assert [x["kind"] for x in lv["actions"]][-2:] == ["instruct", "takeover"]
     assert lv["actions"][-1]["actor"] == "victor (control center)"
+
+
+# ------------------------------------------------------------------ queue API (A2/A3)
+
+def test_queue_rides_the_task_observation_and_a_reorder_round_trips(env):
+    """The approved queue (position, deps, approved_by, track) travels on the
+    task observation; Foundry's queue view orders by it; a typed queue action
+    goes Foundry -> control channel -> engine and reports applied."""
+    cc, ch = env["cc"], env["ch"]
+    v = cc.queue_view([], "game")
+    assert [t["task_id"] for t in v["tasks"]] == ["T1"]
+    row = v["tasks"][0]
+    assert row["position"] == 1 and row["approved_by"] == "victor"
+    assert row["state"] == "IMPLEMENTING" and row["deps"] == []
+    a = act(cc, kind="queue_reorder", position=1, expected={"task_state": "IMPLEMENTING"})
+    assert a["status"] == "accepted"
+    ch.poll()
+    done = cc.action_view(a["action_id"])
+    assert done["status"] == "applied", done["status_detail"]
+    # requeue of a live task is refused by Foundry before the coordinator sees it
+    with pytest.raises(ControlError) as e:
+        act(cc, kind="queue_requeue", reason="again")
+    assert e.value.code == "stale_state"
+
+
+def test_decisions_view_sends_the_lead_escalation_reason_as_its_own_field():
+    """The capped, sorted evidence string usually loses `reason` (the long
+    `attempted` list sorts first); the explicit field never does (A3)."""
+    from foundry_coordinator.telemetry import decisions_view
+    ev = json.dumps({"attempted": ["x" * 700], "reason": "scope_core"}, sort_keys=True)
+    rows = [{"decision_id": "d1", "kind": "lead_escalation", "status": "open",
+             "question": "q?", "evidence": ev, "options": "[]", "blocks": "[]",
+             "opened_ts": 1.0},
+            {"decision_id": "d2", "kind": "budget", "status": "open", "question": "q?",
+             "evidence": ev, "options": "[]", "blocks": "[]", "opened_ts": 2.0}]
+    out = {d["decision_id"]: d for d in decisions_view(rows)}
+    assert out["d1"]["escalation_reason"] == "scope_core"
+    assert "reason" not in (out["d1"]["evidence"] or [""])[0]       # proves the cap loses it
+    assert "escalation_reason" not in out["d2"]                     # lead escalations only

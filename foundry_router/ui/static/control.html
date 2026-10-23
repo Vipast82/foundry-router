@@ -1477,11 +1477,28 @@ function openDecisions(tasks) {
   }
   return out.sort((a, b) => (b.d.opened_ts || 0) - (a.d.opened_ts || 0));
 }
+function decDeadline(d) {
+  const t = Number(d.deadline_ts || 0);
+  if (!t) return "";
+  const s = Math.max(0, Math.round(t - nowS()));
+  const m = Math.floor(s / 60), h = Math.floor(m / 60);
+  return s <= 0 ? "default due now" : `default in ${h ? h + " h " + (m % 60) + " m" : m + " m"}`;
+}
+function decRecommended(d) {
+  if (d.recommended === undefined || d.recommended === null || d.recommended === "") return "";
+  try { const v = JSON.parse(d.recommended); return typeof v === "string" ? v : JSON.stringify(v); } catch (e) { return String(d.recommended); }
+}
 function decisionsInboxHtml(tasks) {
+  // "Your decisions" (A3): every open decision with its recommended default,
+  // the time until it applies, and — for Lead escalations — why it reached you
   const list = openDecisions(tasks);
-  if (!list.length) return "";
-  return `<h4 style="margin:4px 0">Decisions (${list.length})</h4>` + list.map(({t, d}) => `<div class="alert sev-high"><div class="atitle">${esc(d.kind || "decision")} · ${esc(t.project_id)}/${esc(t.task_id)}</div>
+  const inbox = S.inboxData || null;
+  const lead = inbox ? `<div class="dim" title="Decisions the Lead manager answered itself under its delegated authority, across projects">Resolved by the Lead this week: <b>${Number(inbox.resolved_by_lead_7d) || 0}</b></div>` : "";
+  if (!list.length) return lead;
+  return `<h4 style="margin:4px 0">Your decisions (${list.length})</h4>` + lead + list.map(({t, d}) => `<div class="alert sev-high"><div class="atitle">${esc(d.kind || "decision")} · ${esc(t.project_id)}/${esc(t.task_id)}${d.deadline_ts ? ` · <span class="dim">${esc(decDeadline(d))}</span>` : ""}</div>
     <div style="white-space:pre-wrap">${esc(String(d.question || "").slice(0, 600))}</div>
+    ${d.escalation_reason ? `<div class="dim">why you: <b>${esc(d.escalation_reason)}</b> · the dossier is in the task's Lead recovery section</div>` : ""}
+    ${decRecommended(d) ? `<div class="dim">recommended default: <b>${esc(decRecommended(d))}</b></div>` : ""}
     ${(d.blocks || []).length ? `<div class="dim">blocks ${esc(d.blocks.join(", "))}</div>` : ""}
     <div class="row">${d.answer_action ? `<span class="dim">answer ${esc(d.answer_action.status)}</span>` : `<button class="primary" data-decide-task="${esc(t.project_id)}/${esc(t.task_id)}" data-decide-id="${esc(d.decision_id)}">Answer</button>`}<button data-task="${esc(t.project_id)}/${esc(t.task_id)}">Open task</button></div></div>`).join("");
 }
@@ -2706,6 +2723,7 @@ $("#inbox-close").onclick = () => $("#inbox").classList.remove("open");
 $("#inbox-filter").onchange = () => renderInbox();
 async function renderInbox() {
   const f = $("#inbox-filter").value;
+  try { S.inboxData = await api("inbox"); } catch (e) { S.inboxData = null; }
   let list;
   if (f === "open") list = [...S.alerts.values()].filter(a => a.status === "new" || a.status === "acknowledged");
   else { try { list = (await api(`alerts?status=${f}&limit=150&log=1`)).alerts; for (const a of list) S.alerts.set(a.alert_id, {...S.alerts.get(a.alert_id), ...a}); } catch (e) { list = []; } }

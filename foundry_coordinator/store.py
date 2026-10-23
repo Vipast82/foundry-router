@@ -281,6 +281,33 @@ class Store:
                    (project_id, task_id))
         return str((r[0].get("track") if r else "") or "")
 
+    def move(self, project_id: str, task_id: str, position: int) -> list[dict]:
+        """Move a queued row to a 1-based position and renumber the project's
+        queue 1..N. Position is the effective priority: tick() walks tasks in
+        queue order, so earlier READY tasks get writer slots first."""
+        with self.tx():
+            rows = self.q("SELECT task_id FROM queue WHERE project_id=? ORDER BY position",
+                          (project_id,))
+            ids = [r["task_id"] for r in rows]
+            if task_id not in ids:
+                raise ValueError(f"{project_id}/{task_id} is not on the queue")
+            ids.remove(task_id)
+            pos = max(1, min(int(position), len(ids) + 1))
+            ids.insert(pos - 1, task_id)
+            for i, tid in enumerate(ids, start=1):
+                self.x("UPDATE queue SET position=? WHERE project_id=? AND task_id=?",
+                       (i, project_id, tid))
+        return self.queue(project_id)
+
+    def set_deps(self, project_id: str, task_id: str, deps: list[str]) -> dict:
+        """Replace a queued row's dependencies (validation is the caller's job:
+        Coordinator.set_deps checks state, same-project membership and cycles)."""
+        if not self.queue_entry(project_id, task_id):
+            raise ValueError(f"{project_id}/{task_id} is not on the queue")
+        self.x("UPDATE queue SET deps=? WHERE project_id=? AND task_id=?",
+               (_j(sorted(set(deps))), project_id, task_id))
+        return self.queue_entry(project_id, task_id)
+
     # -- tracks (tracks/manager.py) ---------------------------------------------------
 
     def add_track(self, project_id: str, name: str, kind: str, worktree: str, branch: str,

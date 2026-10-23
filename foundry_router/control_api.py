@@ -271,6 +271,28 @@ async def tracks(request: Request, project: str = ""):
     return _cc(request).tracks_view(s["projects"], project)
 
 
+@router.get("/control/api/queue")
+@_guard
+async def queue(request: Request, project: str):
+    """One project's approved queue (position = priority, deps, approved_by,
+    note, track), from the coordinator bridge's task observations. Read-only;
+    edits go through POST /control/api/actions (queue_approve, queue_reorder,
+    queue_deps, queue_requeue)."""
+    s = _op(request)
+    return _cc(request).queue_view(s["projects"], project)
+
+
+@router.get("/control/api/inbox")
+@_guard
+async def inbox(request: Request):
+    """"Your decisions" (review A3): every open decision across projects with
+    its recommended default, deadline and — for Lead escalations — the one-line
+    reason it reached you, plus open operator questions and how many decisions
+    the Lead resolved itself this week."""
+    s = _op(request)
+    return _cc(request).decisions_inbox(s["projects"])
+
+
 @router.get("/control/api/lanes")
 @_guard
 async def lanes(request: Request, project: str, task: str = ""):

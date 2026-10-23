@@ -527,6 +527,14 @@ class CoordReader:
             r["data"] = _j(r.get("data"))
         return rows
 
+    def queue(self) -> list[dict]:
+        """Every approved-queue row (position = priority, deps, approved_by,
+        note, track) for the router's queue view."""
+        rows = self._q("SELECT * FROM queue ORDER BY project_id, position")
+        for r in rows:
+            r["deps"] = _jl(r.get("deps"))
+        return rows
+
     def sessions(self) -> list[dict]:
         rows = self._q("SELECT * FROM sessions ORDER BY created_ts")
         for r in rows:
@@ -1031,7 +1039,13 @@ def decisions_view(rows: list) -> list:
     out = []
     for r in rows:
         ev = _jv(r.get("evidence"))
+        # the Lead's one-line "why you" (review A3): sent as its own field —
+        # the capped evidence string usually loses it (sort_keys puts the long
+        # `attempted` list first)
+        reason = (ev.get("reason") if isinstance(ev, dict) else "") or ""
         out.append({"decision_id": r.get("decision_id"), "kind": r.get("kind"),
+                    **({"escalation_reason": _cap(reason, 200)}
+                       if reason and r.get("kind") == "lead_escalation" else {}),
                     "status": r.get("status"), "question": _cap(r.get("question"), 1500),
                     "evidence": [_cap(x, 600) for x in (ev if isinstance(ev, list) else
                                                         [ev] if ev else [])][:10],
@@ -1528,6 +1542,9 @@ class TelemetryBridge:
         units_by: dict = {}
         for u in units:
             units_by.setdefault((u["project_id"], u["task_id"]), []).append(u)
+        # queue rows change (reorder, deps) without touching the task row, so
+        # they join the cache signature and ride on the task observation
+        q_by = {(r["project_id"], r["task_id"]): r for r in self.reader.queue()}
         for t in tasks:
             P = self.projects.get(t["project_id"])
             if P is None:
@@ -1535,7 +1552,8 @@ class TelemetryBridge:
             key = (t["project_id"], t["task_id"])
             hit = self._task_cache.get(key)
             om_sig = _h([om_by.get(key, []), units_by.get(key, []), lsig.get(key, {}),
-                         leadsig.get(key, {}), "recovery_cases" in self._tables])
+                         leadsig.get(key, {}), "recovery_cases" in self._tables,
+                         q_by.get(key) or {}])
             sig = (t.get("updated_ts"), t["state"], om_sig,
                    tuple(x["state"] for x in by_project[t["project_id"]]))
             # an approval card is re-hashed every pass: artifact bytes can change
@@ -1547,6 +1565,13 @@ class TelemetryBridge:
                 o = self._task_obs(P, t, by_project[t["project_id"]], omsgs)
                 # ordinary units only: lane units travel as lane_unit observations
                 o["helpers"] = [u for u in units_by.get(key, []) if not u.get("lane")][-30:]
+                qe = q_by.get(key)
+                if qe:
+                    o["queue"] = {"position": qe.get("position"),
+                                  "deps": qe.get("deps") or [],
+                                  "approved_by": qe.get("approved_by") or "",
+                                  "note": _cap(qe.get("note"), 300),
+                                  "track": qe.get("track") or ""}
                 self._task_cache[key] = (sig, now, o)
             self._emit(obs, commits, f"task:{t['project_id']}/{t['task_id']}", o)
         trs = self.reader.transitions_after(self.cursor_transitions)
