@@ -10,6 +10,7 @@ A paid brain (meridian/openrouter provider) works identically but inverts the
 from __future__ import annotations
 
 import logging
+import time
 from typing import Optional
 
 import httpx
@@ -61,6 +62,52 @@ class BrainClient:
     @property
     def model(self) -> str:
         return self.cfg.model
+
+    # -- metrics (v0.141.0) ---------------------------------------------------------
+    # brain_calls rows (one per call) and the calls in flight right now, for the
+    # Performance tab's Brain panel and the live route view. Best-effort: a
+    # metrics failure never touches the call.
+    _active: Optional[dict] = None
+    _seq: int = 0
+
+    def active(self) -> list[dict]:
+        now = time.monotonic()
+        return sorted(({**{k: v for k, v in c.items() if k != "t0"},
+                        "seconds": round(now - c["t0"], 1)}
+                       for c in (self._active or {}).values()), key=lambda x: -x["seconds"])
+
+    def _who(self) -> dict:
+        try:
+            from .. import request_context
+            from ..client_auth import current
+            c = current()
+            return {"request_id": request_context.request_id() or None,
+                    "persona": request_context.route().get("persona") or None,
+                    "client_id": c.get("client_id") or None,
+                    "client_addr": c.get("client_addr") or None}
+        except Exception:                                          # noqa: BLE001
+            return {}
+
+    def _record(self, purpose: str, t0: float, outcome: str, result=None,
+                reason: str = "", who: Optional[dict] = None) -> None:
+        if self.db is None:
+            return
+        try:
+            from ..db import utcnow
+            ms = (time.monotonic() - t0) * 1000 if t0 else 0.0
+            pt = int(getattr(result, "prompt_tokens", 0) or 0)
+            ct = int(getattr(result, "completion_tokens", 0) or 0)
+            tps = round(ct / (ms / 1000), 1) if ct and ms > 0 else None
+            w = who if who is not None else self._who()
+            self.db.execute(
+                "INSERT INTO brain_calls (ts, purpose, provider, model, latency_ms, "
+                "prompt_tokens, completion_tokens, tps, outcome, reason, request_id, persona, "
+                "client_id, client_addr) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (utcnow(), purpose, self.cfg.provider, self.cfg.model, round(ms, 1), pt, ct,
+                 tps, outcome, (reason or "")[:300], w.get("request_id"), w.get("persona"),
+                 w.get("client_id"), w.get("client_addr")))
+        except Exception:                                          # noqa: BLE001
+            log.debug("brain_calls row not written", exc_info=True)
 
     # -- routing-mode gate -------------------------------------------------------
     # Set by the service from the periodic health probe; a real call failure
@@ -115,18 +162,35 @@ class BrainClient:
         """`on_retry` (optional zero-arg callable) fires when the malformed-
         tool-call retry engages — the agent passes an emitter so the retry is
         narrated to the client, not just written to the Events log."""
+        purpose = "background" if aux else ("routing" if tools else "assist")
+        who = self._who()
         reason = self.skip_reason(aux=aux)
         if reason:
             # Instant degrade — every caller already handles BrainUnreachable.
+            self._record(purpose, 0.0, "skipped", reason=reason, who=who)
             raise BrainUnreachable(f"brain skipped: {reason}")
         msgs = messages
+        t0 = time.monotonic()
+        if self._active is None:
+            self._active = {}
+        self._seq += 1
+        call_id = self._seq
+        self._active[call_id] = {"t0": t0, "model": self.cfg.model, "purpose": purpose, **who}
+        try:
+            return await self._chat_attempts(msgs, tools, on_retry, purpose, t0, who)
+        finally:
+            self._active.pop(call_id, None)
+
+    async def _chat_attempts(self, msgs, tools, on_retry, purpose, t0, who) -> ChatResult:
         for attempt in (1, 2):
             try:
-                return await self.protocol.chat(
+                res = await self.protocol.chat(
                     self.cfg.model, msgs, tools=tools,
                     options=self.cfg.options or None,
                     keep_alive=self.cfg.keep_alive if self.cfg.provider == "ollama" else None,
                     max_tokens=self.cfg.max_tokens)
+                self._record(purpose, t0, "ok" if attempt == 1 else "retried", res, who=who)
+                return res
             except Exception as e:
                 emsg = str(e)
                 # Malformed tool-call JSON: the brain isn't down, it made a
@@ -153,8 +217,8 @@ class BrainClient:
                 # degrade path. The brain host rebooting must never take the
                 # whole service down.
                 from ..errors import describe_exception
-                import time
                 self._failed_at = time.monotonic()
+                self._record(purpose, t0, "failed", reason=describe_exception(e), who=who)
                 raise BrainUnreachable(
                     f"agent brain ({self.cfg.provider} {self.cfg.model} @ "
                     f"{self.cfg.endpoint}): {describe_exception(e)}") from e

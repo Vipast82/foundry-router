@@ -1018,6 +1018,7 @@ async function openClearDialog(pre) {
 const TABS = {
   "Overview":       tabOverview,
   "Live":           tabLive,
+  "Active Use":     tabActiveUse,
   "Performance":    tabPerformance,
   "Cost":           tabCost,
   "Scoreboard":     tabScoreboard,
@@ -1048,7 +1049,7 @@ const TABS = {
 // first, then watching (Monitor), then what you configure, then records.
 const GROUPS = [
   ["Overview",    ["Overview"]],
-  ["Monitor",     ["Live", "Performance", "Cost", "Scoreboard", "Compare", "Work"]],
+  ["Monitor",     ["Live", "Active Use", "Performance", "Cost", "Scoreboard", "Compare", "Work"]],
   ["Backends",    ["Pool", "Model Registry", "Host Admin"]],
   ["Routing",     ["Personas", "Guardrails", "Routes"]],
   // its own page (operator sign-in, drafts, deploy): the group button opens it
@@ -1077,6 +1078,7 @@ const GROUP_HELP = {
 const TAB_HELP = {
   Overview: "Health, throughput, latency, tokens and budget at a glance.",
   Live: "What is generating right now, refreshed every 2 s.",
+  "Active Use": "Who is using the router: each client key (or untracked IP), what it runs right now and its traffic over time.",
   Performance: "Speed, latency and context history per call, with charts.",
   Cost: "What the tokens would cost on paid APIs vs self-hosting.",
   Scoreboard: "Which models win on quality and speed.", Compare: "Side-by-side model comparison.",
@@ -1689,6 +1691,7 @@ async function tabPerformance() {
     <div id="perf-summary"></div>
     <div class="jump" role="navigation" aria-label="On this page">Jump to <a href="#perf-sec-charts" data-jump>charts over time</a>, <a href="#perf-sec-servers" data-jump>inference servers</a> or <a href="#perf-sec-detail" data-jump>correlation and recent calls</a></div>
     <div class="card">${cardH("🩺 Performance advisor", "advisor", "possible problems in this window — click one for what to do")}<div id="perf-advisor" class="hint">…</div></div>
+    <div class="card">${cardH("🧠 Routing brain", "", "every call to the brain model: speed, failures, and requests that fell back to the simple rule")}<div id="perf-brain" class="hint">…</div></div>
     <div class="card">${cardH("Per-model breakdown", "bymodel", "model × backend × run, every call in the window")}<div id="perf-bymodel"></div></div>
     <h2 id="perf-sec-charts">Speed and latency over time</h2>
     <div class="chart-grid">
@@ -1774,6 +1777,7 @@ async function tabPerformance() {
         ? `<span class="est-v" title="Estimated by the router from the stream (${g.estimated_speed.n} call(s)); the backend reports no timings">≈${_num(g.estimated_speed[k], unit)}</span>`
         : `<span class="hint" title="${g.estimated_speed ? "this backend reports no decode / prefill timings; see effective tok/s" : "not reported"}">—</span>`);
     api(`perf/advisor?hours=${_PERF.hours}`).then(a => $("#perf-advisor") && renderAdvisor($("#perf-advisor"), a)).catch(() => {});
+    api(`brain/metrics?hours=${_PERF.hours}`).then(b => $("#perf-brain") && renderBrainPanel($("#perf-brain"), b)).catch(() => {});
     $("#perf-bymodel").innerHTML = (bm.length
       ? `<table><tr><th>model</th><th title="Backend that served the calls">backend</th><th title="Run label the samples were recorded under">run</th>
           <th title="Number of calls">calls</th>
@@ -1971,6 +1975,28 @@ const _MCPM = { hours: 24, source: "", server: "", ctx: 262144 };
 try { Object.assign(_MCPM, JSON.parse(localStorage.getItem("mcpmCtl") || "{}")); } catch (e) {}
 
 // Performance advisor findings -> collapsible, plain-English cards.
+// Routing brain panel (Performance tab): brain_calls over the window.
+function renderBrainPanel(el, b) {
+  if (!b || !b.calls) { el.innerHTML = '<span class="hint">No brain calls in this window. Requests that bring their own tools (Cline, Kilo, AnythingLLM @agent) and strict personas never use the brain.</span>'; return; }
+  const o = b.outcomes || {}, pct = v => v == null ? "—" : (v * 100).toFixed(1) + "%";
+  const ms = v => v == null ? "—" : fmtDur(v);
+  const rows = (b.series || []).map(x => ({ts: x.t, calls: x.calls, failed: x.failed + x.skipped, p50_ms: x.p50_ms}));
+  const purposes = Object.entries(b.by_purpose || {}).map(([k, v]) => `<tr><td>${esc(k)}</td><td>${v.calls}</td><td>${ms(v.p50_ms)}</td><td>${ms(v.p95_ms)}</td><td>${v.failed}</td><td>${v.skipped}</td></tr>`).join("");
+  el.classList.remove("hint");
+  el.innerHTML = `<div class="row" style="flex-wrap:wrap;gap:6px 18px;margin:0 0 8px">
+      <span class="stat"><b>${b.calls}</b> calls (${b.per_hour}/h)</span>
+      <span class="stat">latency p50 <b>${ms(b.latency_ms.p50)}</b> · p95 <b>${ms(b.latency_ms.p95)}</b></span>
+      <span class="stat">${b.tps_p50 != null ? `<b>${b.tps_p50}</b> tok/s` : "tok/s —"}</span>
+      <span class="stat">failed <b>${o.failed || 0}</b> (${pct(b.failure_rate)} of calls)</span>
+      <span class="stat">fell back to the simple rule <b>${(o.failed || 0) + (o.skipped || 0)}</b> (${pct(b.fallback_rate)})</span>
+      <span class="stat">retried ok <b>${o.retried || 0}</b></span>
+      <span class="hint" style="margin:0">${esc((b.models || []).join(", "))}</span></div>
+    <div class="chart-grid"><div>${lineChart(rows, [{key: "calls", color: _css("--accent", "#e8833a"), label: "calls"}, {key: "failed", color: _css("--bad", "#e5484d"), label: "failed or skipped"}], {})}</div>
+      <div>${lineChart(rows, [{key: "p50_ms", color: "#3b82f6", label: "median latency"}], {yUnit: "ms"})}</div></div>
+    ${purposes ? `<table style="margin-top:6px"><tr><th>purpose</th><th>calls</th><th>p50</th><th>p95</th><th>failed</th><th>skipped</th></tr>${purposes}</table>` : ""}
+    ${(b.top_reasons || []).length ? `<p class="hint" style="margin:6px 0 0">Why it failed or was skipped: ${b.top_reasons.map(r => `${esc(r.reason)} (${r.count})`).join(" · ")}</p>` : ""}`;
+}
+
 function renderAdvisor(el, a) {
   const f = (a && a.findings) || [];
   const sevStyle = {critical: ["bad", "🔴", "Critical"], warning: ["warn", "🟠", "Warning"], info: ["", "🔵", "Tip"]};
@@ -3191,12 +3217,13 @@ async function tabClients() {
       <div class="row"><label>scopes</label>${d.scopes.map(s => `<label style="min-width:0"><input type="checkbox" class="ed-scope" value="${s}" ${c.scopes.includes(s) ? "checked" : ""}> ${s}</label>`).join(" ")}</div>
       <div class="row"><label>only personas</label><input id="ed-personas" data-multi="csv" data-options="personas" data-free="0" value="${esc(c.personas.join(", "))}" placeholder="all personas (pick to restrict)"></div>
       <div class="row"><label>note</label><input id="ed-note" value="${esc(c.note || "")}" style="min-width:300px"></div>
+      <div class="row"><label title="Add '— via <model> @ <backend>' under every answer this client gets (and the route line in buffered replies' reasoning). For AnythingLLM / Open WebUI, which hide reasoning."><input type="checkbox" id="ed-footer" ${c.route_footer ? "checked" : ""}> show which model and backend answered</label></div>
       <div class="row"><label><input type="checkbox" id="ed-enabled" ${c.enabled ? "checked" : ""}> enabled</label>
         <button class="act primary" id="ed-save">Save</button></div>
       <p class="hint">The name is this client's identifier in logs and budget rules, so it isn't renamed; make a new client instead.</p>`);
     $("#ed-save", body).onclick = () => api(`setup/clients/${encodeURIComponent(c.name)}`, {method: "PATCH", body: {
       scopes: scopesOf(".ed-scope"), personas: list($("#ed-personas", body).value), note: $("#ed-note", body).value,
-      enabled: $("#ed-enabled", body).checked}}).then(() => { closeModal(); toast("Saved"); render(); }).catch(e => toast(e.message, true));
+      enabled: $("#ed-enabled", body).checked, route_footer: $("#ed-footer", body).checked}}).then(() => { closeModal(); toast("Saved"); render(); }).catch(e => toast(e.message, true));
   });
   const rc = $("#rej-clear");
   if (rc) rc.onclick = () => run(api("setup/rejected", {method: "DELETE"}));
@@ -3236,13 +3263,14 @@ async function tabLimits() {
 
 // Route view (routes_view.py): the routing graph generated from the live
 // configuration, overlaid with traffic, budget denials, failures and image jobs.
-window._routeOpts = window._routeOpts || {hours: 24, all: false};
+window._routeOpts = window._routeOpts || {hours: 24, all: false, active: false};
 async function tabRoutes() {
   const o = window._routeOpts;
-  const g = await api(`routes?hours=${o.hours}&all=${o.all ? 1 : 0}`);
+  const g = await api(`routes?hours=${o.hours}&all=${o.all ? 1 : 0}&active=${o.active ? 1 : 0}`);
   const cols = ["client", "persona", "model", "backend"];
-  const colName = {client: "clients", persona: "personas · route · budget gate", model: "models", backend: "backends"};
-  const byCol = Object.fromEntries(cols.map(c => [c, g.nodes.filter(n => n.kind === c)
+  const colName = {client: "clients (key name, or untracked · IP)", persona: "personas · route · budget gate", model: "models · routing brain", backend: "backends"};
+  const colOf = n => n.kind === "brain" ? "model" : n.kind;
+  const byCol = Object.fromEntries(cols.map(c => [c, g.nodes.filter(n => colOf(n) === c)
     .sort((a, b) => (b.count - a.count) || a.label.localeCompare(b.label))]));
   const W = 1180, NW = 220, NH = 46, GAP = 14, TOP = 34;
   const colX = i => 10 + i * ((W - NW - 20) / 3);
@@ -3252,7 +3280,8 @@ async function tabRoutes() {
   const style = {
     traffic: "stroke:#3b82f6;opacity:.8", failed: "stroke:var(--bad)", denied: "stroke:var(--bad);stroke-dasharray:6 4",
     config: "stroke:var(--dim);stroke-dasharray:3 4;opacity:.6", fallback: "stroke:var(--dim);stroke-dasharray:1 4;opacity:.8",
-    image: "stroke:#a855f7;stroke-dasharray:8 3"};
+    image: "stroke:#a855f7;stroke-dasharray:8 3", brain: "stroke:#f59e0b;stroke-dasharray:4 3",
+    live: "stroke:#22c55e;stroke-dasharray:7 4;animation:rt-flow 1s linear infinite"};
   const width = e => ["config", "fallback"].includes(e.kind) ? 1.3 : 1.6 + Math.log2((e.count || 0) + 1) * 1.4;
   const edgesSvg = g.edges.filter(e => pos[e.from] && pos[e.to]).map((e, i) => {
     const a = pos[e.from], b = pos[e.to];
@@ -3279,14 +3308,18 @@ async function tabRoutes() {
       sub = [n.flavor, n.health, n.missing ? "not configured" : ""].filter(Boolean).join(" · ");
       dot = healthCls[n.health] || "";
     } else if (n.kind === "client") {
-      sub = n.configured ? `${(n.scopes || []).join("+")}${n.restricted ? " · restricted" : ""}` : "no key";
+      sub = n.configured ? `${(n.scopes || []).join("+")}${n.restricted ? " · restricted" : ""}` : n.tracked === false ? "no key — make one" : "no key";
+      if (n.live) dot = "ok";
+    } else if (n.kind === "brain") {
+      sub = "routing brain";
+      dot = n.live ? "ok" : "";
     } else if (n.kind === "model") {
       sub = n.image ? "image model" : n.raw ? "raw model (no persona)" : "";
     }
     const dim = n.enabled === false || n.disabled ? "opacity:.45" : "";
     const gates = n.gates || [];
     const label = n.kind === "backend" && n.label.startsWith("<") ? `no ${n.label.slice(1, -1)} backend` : n.label;
-    return `<g class="rnode" style="${dim}"><title>${esc(label)}${n.count ? " · " + n.count + " requests" : ""}${n.errors ? " · " + n.errors + " failed" : ""}${gates.length ? "\nbudget rules: " + gates.join(", ") : ""}</title>
+    return `<g class="rnode" style="${dim}"><title>${esc(label)}${n.count ? " · " + n.count + " requests" : ""}${n.errors ? " · " + n.errors + " failed" : ""}${n.live ? " · " + n.live + " running now" : ""}${gates.length ? "\nbudget rules: " + gates.join(", ") : ""}${(n.agents || []).length ? "\n" + n.agents.join("\n") : ""}</title>
       <rect x="${p.x}" y="${p.y}" width="${NW}" height="${NH}" rx="7" class="rnode-box ${n.errors ? "has-err" : ""}"/>
       ${dot ? `<circle cx="${p.x + NW - 11}" cy="${p.y + 11}" r="4.5" class="rdot ${dot}"/>` : ""}
       <text x="${p.x + 9}" y="${p.y + 18}" class="rname">${esc(label.length > 27 ? label.slice(0, 26) + "…" : label)}${n.enabled === false ? " (off)" : ""}</text>
@@ -3296,14 +3329,55 @@ async function tabRoutes() {
   const heads = cols.map((c, i) => `<text x="${colX(i)}" y="18" class="rhead">${colName[c]}</text>`).join("");
   $("#main").innerHTML = `
     <h2>Routes — generated from the live configuration</h2>
-    <p class="hint">Dotted grey = what the config allows (persona allowlists in pinned order: #2, #3 are the explicit fallback chain; client persona restrictions; the backend each model is served by — the pinned backend for strict routes). <b style="color:#3b82f6">Blue</b> = requests in the window (thicker = more), <b style="color:var(--bad)">red</b> = failed, red dashed = denied by a budget rule, <b style="color:#a855f7">purple dashed</b> = image jobs. ⛁N = budget rules that gate a client or persona (hover for names); the dot = validation (personas) or serving health (backends). Click a coloured edge for its requests, then a request for its full trace.</p>
-    <div class="row"><label>window</label><select id="rt-hours">${[1, 6, 24, 168].map(h => `<option value="${h}" ${h == o.hours ? "selected" : ""}>${h >= 24 ? h / 24 + " d" : h + " h"}</option>`).join("")}</select>
+    <style>@keyframes rt-flow { to { stroke-dashoffset: -22; } }</style>
+    <p class="hint"><b style="color:#22c55e">Green moving</b> = running right now · <b style="color:#f59e0b">amber dashed</b> = requests whose persona used the routing brain · a client without a key shows as <b>untracked · its IP</b> (make it a key in Access → Clients &amp; Keys to see it by name). Dotted grey = what the config allows (persona allowlists in pinned order: #2, #3 are the explicit fallback chain; client persona restrictions; the backend each model is served by — the pinned backend for strict routes). <b style="color:#3b82f6">Blue</b> = requests in the window (thicker = more), <b style="color:var(--bad)">red</b> = failed, red dashed = denied by a budget rule, <b style="color:#a855f7">purple dashed</b> = image jobs. ⛁N = budget rules that gate a client or persona (hover for names); the dot = validation (personas) or serving health (backends). Click a coloured edge for its requests, then a request for its full trace.</p>
+    <div class="row"><label>window</label><select id="rt-hours">${[[1 / 6, "10 min"], [0.5, "30 min"], [2, "2 h"], [6, "6 h"], [24, "1 d"], [168, "7 d"]].map(([h, l]) => `<option value="${h}" ${Math.abs(h - o.hours) < 1e-6 ? "selected" : ""}>${l}</option>`).join("")}</select>
       <label for="rt-all">all personas</label><input type="checkbox" id="rt-all" ${o.all ? "checked" : ""}>
-      <span class="stat">${g.requests} requests · ${g.denials} denials · ${g.image_jobs} image jobs</span></div>
+      <label for="rt-active" title="Only what was observed (traffic, denials, calls running now), no configuration; refreshes every 5 s">active only (live)</label><input type="checkbox" id="rt-active" ${o.active ? "checked" : ""}>
+      <span class="stat">${g.requests} requests · ${g.denials} denials · ${g.image_jobs} image jobs · ${g.live || 0} running now</span></div>
     <div class="tscroll"><svg viewBox="0 0 ${W} ${H}" width="${W}" height="${H}" class="routes-svg">${heads}${edgesSvg}${nodesSvg}</svg></div>
     <div id="rt-detail"></div><div id="rt-trace"></div>`;
   $("#rt-hours").onchange = e => { o.hours = +e.target.value; render(); };
   $("#rt-all").onchange = e => { o.all = e.target.checked; render(); };
+  $("#rt-active").onchange = e => { o.active = e.target.checked; if (o.active && o.hours > 2) o.hours = 0.5; render(); };
+  clearTimeout(window._routeTimer);
+  if (o.active) window._routeTimer = setTimeout(() => { if (current === "Routes" && window._routeOpts.active && !$("#rt-detail").innerHTML) render(); }, 5000);
+}
+
+// Monitor → Active Use: who uses the router (client keys and untracked IPs),
+// what each runs right now, and its traffic over time. Refreshes every 10 s.
+window._auOpts = window._auOpts || {hours: 24};
+async function tabActiveUse() {
+  const o = window._auOpts;
+  const [d, lv] = await Promise.all([api(`clients/activity?hours=${o.hours}`), api("live")]);
+  const when = ts => ts ? esc(_tsText(ts)) : "—";
+  const live = (lv.calls || []).map(c => `<tr><td class="nw">${esc(c.client_label)}</td><td class="nw">${esc(c.persona || "")}</td><td class="mono nw">${esc(c.model)}</td><td class="nw">${esc(c.backend || "")}</td><td class="nw">${esc(c.phase || "")}</td><td class="nw">${fmtDur((c.seconds || 0) * 1000)}</td></tr>`)
+    .concat((lv.brain || []).map(b => `<tr><td class="nw">${esc(b.client_label)}</td><td class="nw">${esc(b.persona || "")}</td><td class="mono nw">🧠 ${esc(b.model || "")}</td><td class="nw">brain</td><td class="nw">${esc(b.purpose || "")}</td><td class="nw">${fmtDur((b.seconds || 0) * 1000)}</td></tr>`)).join("");
+  const rows = d.clients.map(c => `<tr>
+      <td class="nw"><b>${esc(c.client)}</b> ${c.tracked ? (c.configured ? '<span class="pill ok">key</span>' : "") : '<span class="pill warn">untracked</span>'}${c.live ? ` <span class="pill ok">${c.live} running</span>` : ""}${c.configured && c.enabled === false ? ' <span class="pill">off</span>' : ""}</td>
+      <td class="nw">${c.requests}</td><td class="nw">${c.errors ? `<span class="pill bad">${c.errors}</span>` : 0}</td>
+      <td class="nw">${c.input_tokens.toLocaleString()} / ${c.output_tokens.toLocaleString()}</td>
+      <td class="nw">${c.p50_s ? c.p50_s + " s" : "—"}</td>
+      <td>${sparkline(c.series, c.tracked ? _css("--accent", "#e8833a") : _css("--warn", "#d9a400"), "req")}</td>
+      <td class="hint nw">${when(c.last_seen)}</td>
+      <td class="hint" style="white-space:normal">${esc((c.addrs || []).join(", ") || "—")}<div>${esc(((c.agents || [])[0] || "").slice(0, 70))}</div></td>
+      <td class="hint" style="white-space:normal">${esc((c.personas || []).join(", "))}<div class="mono">${esc((c.models || []).slice(0, 3).join(", "))}</div></td>
+      <td class="nw">${c.tracked ? "" : `<button class="act" data-mk="${esc((c.addrs || [""])[0])}" title="Make a client key for this program so it shows by name (Access → Clients & Keys)">Make a key</button>`}</td></tr>`).join("");
+  $("#main").innerHTML = `
+    <h2>Active use</h2>
+    <p class="hint">Every program that called the router in the window. A program with a client key shows by its name; one without a key shows as <b>untracked · its IP</b> — give it a key (Access → Clients &amp; Keys) and put that key in its API-key field (AnythingLLM, Open WebUI…) to track it by name. The route map with the brain and live paths is Routing → Routes (tick <i>active only</i>).</p>
+    <div class="row"><label>window</label><select id="au-hours">${[[1, "1 h"], [6, "6 h"], [24, "1 d"], [168, "7 d"]].map(([h, l]) => `<option value="${h}" ${h == o.hours ? "selected" : ""}>${l}</option>`).join("")}</select>
+      <span class="stat">${d.total_requests} requests · ${d.clients.length} clients · ${d.untracked} untracked</span></div>
+    <div class="card"><h3>Running right now</h3>${live ? `<table><tr><th>client</th><th>persona</th><th>model</th><th>backend</th><th>phase</th><th>for</th></tr>${live}</table>` : '<p class="hint">Nothing in flight.</p>'}</div>
+    <div class="card"><h3>Clients</h3>${rows ? `<div class="tscroll"><table><tr><th>client</th><th>requests</th><th>errors</th><th>tokens in / out</th><th>median time</th><th>requests over the window</th><th>last seen</th><th>IP · app</th><th>personas · models</th><th></th></tr>${rows}</table></div>` : '<p class="hint">No traffic in this window.</p>'}</div>`;
+  $("#au-hours").onchange = e => { o.hours = +e.target.value; render(); };
+  document.querySelectorAll("[data-mk]").forEach(b => b.onclick = () => {
+    window._clientOpts = window._clientOpts || {}; window._clientOpts.preset = "openwebui";
+    current = "Clients & Keys"; render();
+    toast(`Make a client for the program at ${b.dataset.mk || "this address"}, then paste its key into that program`);
+  });
+  clearTimeout(window._auTimer);
+  window._auTimer = setTimeout(() => { if (current === "Active Use") render(); }, 10000);
 }
 
 window.showRouteEdge = async (kind, src, dst) => {
@@ -4518,7 +4592,9 @@ async function tabPersonas() {
         <label title="Strict personas only: the exact backend. The persona then never uses the same model id from another backend (e.g. a second Claude account in CLIProxyAPI). Blank = the single best backend serving the model.">backend</label>
         <select id="pe-backend"><option value="">(best serving backend)</option>${(window._backends || []).map(b => `<option value="${esc(b.name)}">${esc(b.name)}${b.subscription ? " · subscription" : ""}</option>`).join("")}</select>
         <label title="Leave Foundry's own status lines (routing header, notes, heartbeat text) out of the reasoning stream. Keep-alive frames still flow. For data-generation personas (Foundry-FineTune) so reasoning traces come out clean.">quiet narration</label>
-        <input type="checkbox" id="pe-quiet"></div>
+        <input type="checkbox" id="pe-quiet">
+        <label title="Show which model and backend answered: a '— via <model> @ <backend>' line under each answer, and the route line in a buffered reply's reasoning. For clients that hide reasoning (AnythingLLM's agent view, Open WebUI). Can also be switched on per client key (Access → Clients & Keys → Edit).">route footer</label>
+        <input type="checkbox" id="pe-routefoot"></div>
       <div class="row"><label title="What this persona must support. Strict personas advertise exactly these to clients (/v1/models, /api/show), and validation tests each one. Image policies (kind image) are used by generate_image / edit_image only.">capabilities</label>
         <label for="pe-cap-text">text</label><input type="checkbox" id="pe-cap-text" class="pe-cap" value="text">
         <label for="pe-cap-tools">tool calling</label><input type="checkbox" id="pe-cap-tools" class="pe-cap" value="tools">
@@ -4608,6 +4684,7 @@ async function tabPersonas() {
     kind: $("#pe-kind").value || null,
     capabilities: [...document.querySelectorAll(".pe-cap:checked")].map(c => c.value),
     quiet_narration: $("#pe-quiet").checked ? 1 : 0,
+    route_footer: $("#pe-routefoot").checked ? 1 : 0,
     assist: JSON.parse($("#pe-assist").value || "{}")}}));
 window.clonePersona = async source => {
   const newName = prompt("New persona name (clone of " + source + "):",
@@ -4882,6 +4959,7 @@ window.editPersona = name => {
   const caps = parseTags(p.capabilities);
   document.querySelectorAll(".pe-cap").forEach(c => { c.checked = caps.includes(c.value); });
   $("#pe-quiet").checked = !!p.quiet_narration;
+  $("#pe-routefoot").checked = !!p.route_footer;
   $("#pe-assist").value = typeof p.assist === "string"
     ? (p.assist || "{}") : JSON.stringify(p.assist || {});
 };

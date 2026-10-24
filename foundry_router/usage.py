@@ -821,8 +821,8 @@ class RequestLogger:
                     est_cost_usd, status, error, request_id,
                     client_id, session_id, task_id, parent_task_id,
                     served_model, served_backend, routing, attempts, retries, outcome, flags,
-                    project_id, work_task_id, run_id, role)
-                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                    project_id, work_task_id, run_id, role, client_addr, user_agent)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                 (utcnow(), self.persona, self.client_model, self.mode, self.summary,
                  json.dumps(self.models_used), json.dumps(self.tool_calls),
                  self.steps, int((time.monotonic() - self._t0) * 1000),
@@ -831,7 +831,8 @@ class RequestLogger:
                  cl.get("client_id"), cl.get("session_id"), cl.get("task_id"),
                  cl.get("parent_task_id"), served, backend, route.get("routing"),
                  attempts, retries, outcome_of(status, error), json.dumps(flags) if flags else None,
-                 cl.get("project_id"), cl.get("work_task_id"), cl.get("run_id"), cl.get("role")))
+                 cl.get("project_id"), cl.get("work_task_id"), cl.get("run_id"), cl.get("role"),
+                 cl.get("client_addr") or None, cl.get("user_agent") or None))
         except Exception:
             log.exception("failed to write request_log row")
 

@@ -218,7 +218,8 @@ class ClientAuthMiddleware:
                                     (b"www-authenticate", b"Bearer")]})
             await send({"type": "http.response.body", "body": body})
             return
-        info = {**(client or {"client_id": "anonymous", "scopes": [], "personas": []}), **corr}
+        info = {**(client or {"client_id": "anonymous", "scopes": [], "personas": []}), **corr,
+                "client_addr": addr[:80], "user_agent": agent[:200]}
         token = _client.set(info)
         from .capture import reset_request
         reset_request()

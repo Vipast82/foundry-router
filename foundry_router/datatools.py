@@ -29,7 +29,7 @@ PRIVATE_TABLES = {"kv", "sqlite_sequence"}
 LOG_TABLES = {"request_log", "perf_samples", "server_samples", "event_log", "claude_usage_log",
               "response_feedback", "tool_call_log", "review_log", "eval_runs",
               "eval_results", "semantic_cache", "mcp_call_log", "agent_runs",
-              "interventions", "assist_turns"}
+              "interventions", "assist_turns", "brain_calls"}
 _TS_COLS = ("ts", "created_at", "started_at", "updated_at", "last_updated")
 FORMATS = ("jsonl", "csv", "json")
 

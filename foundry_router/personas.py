@@ -24,7 +24,7 @@ PERSONA_FIELDS = ["description", "benchmark_category", "local_bias_strength",
                   "sampling_options", "output_format", "force_reasoning_effort",
                   "mcp_tools_in_direct", "agent_backend", "max_output_tokens",
                   "assist", "fallback_policy", "quiet_narration", "routing", "backend",
-                  "capabilities", "kind", "enabled"]
+                  "capabilities", "kind", "enabled", "route_footer"]
 
 
 class PersonaStore:

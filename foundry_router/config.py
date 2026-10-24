@@ -706,6 +706,10 @@ class ClientConfig(BaseModel):
     # Optional: only these personas are visible/usable for this client.
     personas: list[str] = Field(default_factory=list)
     enabled: bool = True
+    # Show which model and backend answered: a "— via <model> @ <backend>" line
+    # under each answer, and the route line in a buffered reply's reasoning.
+    # For clients that hide reasoning (AnythingLLM's agent view, Open WebUI).
+    route_footer: bool = False
     note: str = ""                     # free text: what/where this client is
     created: Optional[str] = None      # ISO time the key was made / last rotated
 

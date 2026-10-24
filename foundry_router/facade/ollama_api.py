@@ -1137,6 +1137,7 @@ async def _agent_events_to_chat_chunks(svc, ctx: RequestContext, model_name: str
 
     status, error = "ok", ""
     answers: list[str] = []
+    fell_back = False
     try:
         async for ev in _run_events(svc, ctx):
             if ev.kind == "keepalive":
@@ -1172,6 +1173,7 @@ async def _agent_events_to_chat_chunks(svc, ctx: RequestContext, model_name: str
                                  "brain unreachable — static fallback engaged", ev.text)
                 async for chunk in _fallback_chunks(svc, ctx, model_name):
                     yield chunk
+                fell_back = True
             elif ev.kind == "error":
                 status, error = "error", ev.text
                 yield tr.chat_chunk(model_name, f"\n[foundry-router] {ev.text}")
@@ -1189,6 +1191,13 @@ async def _agent_events_to_chat_chunks(svc, ctx: RequestContext, model_name: str
                             "\n\n".join(a for a in answers if a.strip()))
         except Exception:
             log.exception("semantic cache store failed")
+    used = [u for u in (ctx.logger.models_used or []) if u.get("model")]
+    if (status == "ok" and (fell_back or any(a.strip() for a in answers)) and used
+            and route_visible(svc, ctx.persona)):
+        last = used[-1]
+        brain = "" if ctx.logger.mode in ("fallback", "cache") else getattr(svc.brain, "model", "")
+        yield tr.chat_chunk(model_name, route_footer(svc, last["model"], last.get("backend") or "",
+                                                     len(used), brain))
     yield tr.chat_chunk(model_name, "", done=True,
                         stats=_logger_stats(ctx.logger, time.monotonic_ns() - t0))
 
@@ -1618,6 +1627,48 @@ _GUARD_MAX_AUTO_RESERVE = 8192
 _WRAP_UP_PROMPT = ("Tool-round limit reached: no more tools can run in this turn. Write your "
                    "final answer now from what you have already gathered. Say clearly what "
                    "you could not check, so the user can ask you to continue.")
+
+
+def route_visible(svc, persona) -> bool:
+    """Show the route on this reply: the persona's route_footer, or the calling
+    client key's (AnythingLLM / Open WebUI hide reasoning). Never for a quiet
+    (data-generation) persona."""
+    p = persona or {}
+    if p.get("quiet_narration"):
+        return False
+    if p.get("route_footer"):
+        return True
+    try:
+        from ..client_auth import current
+        cid = current().get("client_id")
+        return any(c.name == cid and getattr(c, "route_footer", False)
+                   for c in svc.config_store.config.clients or [])
+    except Exception:                                              # noqa: BLE001
+        return False
+
+
+def _family_label(svc, model_id: str, backend: str = "") -> str:
+    from ..automation_view import backend_family
+    info = svc.pool.backend_info(model_id) or {}
+    fam = backend_family(backend or info.get("name") or "", info.get("flavor") or "",
+                         info.get("type") or "")
+    return {"claude": "Claude", "chatgpt": "ChatGPT", "local": "local"}.get(fam, fam)
+
+
+def route_footer(svc, model_id: str, backend: str, model_calls: int = 1,
+                 brain: str = "") -> str:
+    """The visible route line under an answer."""
+    if not model_id:
+        return ""
+    return (f"\n\n— via {model_id} @ {backend or '?'} ({_family_label(svc, model_id, backend)})"
+            + (f" · routed by brain {brain}" if brain else "")
+            + (f" · {model_calls} model calls" if model_calls > 1 else ""))
+
+
+def route_reasoning(svc, model_id: str, backend: str) -> str:
+    rid = (request_context.request_id() or "")[:8]
+    return (f"⚙️ {_family_label(svc, model_id, backend)} · {model_id} @ {backend or '?'} "
+            f"[Foundry {__version__} · req {rid}]\n")
 
 
 def _cap_note(cap: int) -> str:
@@ -2636,6 +2687,10 @@ async def _direct_dispatch_chat(svc, persona, model_name, messages, client_tools
                                 + ("; still no final answer" if wrapping else ""))
                             if wrapping:
                                 yield tr.chat_chunk(model_name, _cap_note(tool_cap), done=False)
+                        if (not rest and text_chars and client_format is None and not summary_req
+                                and route_visible(svc, persona)):
+                            yield tr.chat_chunk(model_name, route_footer(
+                                svc, model_id, backend_name, len(logger.models_used)), done=False)
                         logger.finish("ok")
                         tcs_out = [{**({"id": t["id"]} if t.get("id") else {}),
                                     "function": {"name": t["name"], "arguments": t["arguments"]}}
@@ -2711,6 +2766,11 @@ async def _direct_dispatch_chat(svc, persona, model_name, messages, client_tools
         msg: dict = {"role": "assistant", "content": result.content}
         if result.thinking:
             msg["thinking"] = result.thinking
+        if route_visible(svc, persona) and not summary_req:
+            msg["thinking"] = route_reasoning(svc, model_id, last_backend) + (msg.get("thinking") or "")
+            if result.content and not tool_calls and client_format is None:
+                msg["content"] = result.content + route_footer(
+                    svc, model_id, last_backend, len(logger.models_used))
         if tool_calls:
             msg["tool_calls"] = tool_calls
         return JSONResponse({"model": model_name, "created_at": tr.now_iso(),
@@ -2780,7 +2840,15 @@ async def _direct_dispatch_chat(svc, persona, model_name, messages, client_tools
                 # The model's own reasoning (Claude extended thinking, a local
                 # model's think block) — to the native thinking pane, not content.
                 yield tr.chat_chunk(model_name, "", thinking=result.thinking)
-            yield tr.chat_chunk(model_name, result.content, tool_calls=tool_calls)
+            _content = result.content
+            if route_visible(svc, persona) and not summary_req:
+                if not hb:
+                    yield tr.chat_chunk(model_name, "", thinking=route_reasoning(
+                        svc, model_id, last_backend))
+                if _content and not tool_calls and client_format is None:
+                    _content += route_footer(svc, model_id, last_backend,
+                                             len(logger.models_used))
+            yield tr.chat_chunk(model_name, _content, tool_calls=tool_calls)
             yield tr.chat_chunk(model_name, "", done=True, stats=stats)
         finally:
             # Client went away mid-call (Cline restart, Kilo cancel): stop the

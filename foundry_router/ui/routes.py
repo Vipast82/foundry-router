@@ -1289,11 +1289,38 @@ async def training_episode(request: Request, episode_id: str):
 
 
 @router.get("/admin/api/routes")
-async def routes_graph(request: Request, hours: float = 24, all: int = 0):
+async def routes_graph(request: Request, hours: float = 24, all: int = 0, active: int = 0):
     """Routing graph from the live configuration + traffic / denials /
-    failures / image jobs in the last `hours`."""
+    failures / image jobs / brain calls in the last `hours`, plus calls in
+    flight. active=1: only what was observed (no configuration)."""
     from .. import routes_view
-    return routes_view.graph(_svc(request), hours=max(0.1, min(720.0, hours)), show_all=bool(all))
+    return routes_view.graph(_svc(request), hours=max(0.02, min(720.0, hours)),
+                             show_all=bool(all), active=bool(active))
+
+
+@router.get("/admin/api/brain/metrics")
+async def brain_metrics(request: Request, hours: float = 24, buckets: int = 24):
+    """Brain calls over `hours`: per hour, latency p50/p95, tokens/s, outcomes
+    (failed / skipped = the request fell back to the static rule), by purpose,
+    a time series and recent failures."""
+    from .. import observability
+    return observability.brain_metrics(_svc(request).db, hours, max(4, min(96, buckets)))
+
+
+@router.get("/admin/api/clients/activity")
+async def clients_activity(request: Request, hours: float = 24, buckets: int = 24):
+    """Who uses the router: per client key (or "untracked · <IP>" for requests
+    without a key) requests, errors, tokens, personas, models, IPs, user
+    agents, last seen, a request series and calls in flight."""
+    from .. import observability
+    return observability.clients_activity(_svc(request), hours, max(4, min(96, buckets)))
+
+
+@router.get("/admin/api/live")
+async def live_calls(request: Request):
+    """Backend calls and brain calls in flight right now, with who asked."""
+    from .. import observability
+    return observability.live(_svc(request))
 
 
 @router.get("/admin/api/routes/edge")

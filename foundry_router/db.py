@@ -587,6 +587,13 @@ class Database:
             ("perf_samples", "work_task_id", "TEXT"),
             ("perf_samples", "run_id", "TEXT"),
             ("perf_samples", "role", "TEXT"),
+            # v0.141.0: where the request came from (IP: x-forwarded-for /
+            # x-real-ip / socket) and the client's user agent, so an unkeyed
+            # caller shows as "untracked · <IP>" instead of one "anonymous"
+            ("request_log", "client_addr", "TEXT"),
+            ("request_log", "user_agent", "TEXT"),
+            # "— via <model> @ <backend>" under answers (also per client key)
+            ("personas", "route_footer", "INTEGER DEFAULT 0"),
         ]
         with self._lock:
             for table, column, ddl in added:

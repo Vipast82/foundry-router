@@ -73,6 +73,7 @@ def _usage(svc) -> dict:
 def _view(c, usage: dict, seen: dict) -> dict:
     return {"name": c.name, "scopes": list(c.scopes), "personas": list(c.personas),
             "projects": list(getattr(c, "projects", None) or []), "enabled": c.enabled, "note": c.note, "created": c.created,
+            "route_footer": bool(getattr(c, "route_footer", False)),
             "key_kind": client_keys.key_kind(c),
             "key_hint": c.key_hint,
             "usage": usage.get(c.name) or {}, "seen": seen.get(c.name),
@@ -194,6 +195,8 @@ async def update_client(request: Request, name: str):
         upd["note"] = str(body["note"] or "")[:200]
     if "enabled" in body:
         upd["enabled"] = bool(body["enabled"])
+    if "route_footer" in body:
+        upd["route_footer"] = bool(body["route_footer"])
     loses_admin = ("admin" in cur.scopes and ("admin" not in upd.get("scopes", cur.scopes)
                                               or upd.get("enabled") is False))
     if loses_admin and cfg.client_auth.protect_admin and not _admins(cfg.clients, exclude=name):

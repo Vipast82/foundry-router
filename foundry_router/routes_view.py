@@ -2,6 +2,9 @@
 overlaid with what actually happened.
 
 Columns: client -> persona -> model -> backend (image jobs drawn separately).
+A keyed caller is its client name; a request without a key is
+"untracked · <IP>" (one node per IP, v0.141.0). The brain model is drawn in
+the model column when a persona's requests used it.
 
 Edges
   config    what the configuration allows: a client's persona restriction, a
@@ -12,6 +15,12 @@ Edges
   denied    budget-ledger denials (rule + reason)
   failed    requests that ended in error / timeout on that route
   image     image jobs (client -> image model -> backend)
+  brain     requests whose persona called the routing brain (persona -> brain)
+  live      calls in flight right now (client -> persona -> model -> backend,
+            and persona -> brain)
+
+active=True draws only what was observed (traffic, denials, live calls), no
+configuration: "who is using the router right now and which path".
 
 Every traffic / denied / failed edge can be opened to the requests behind
 it, and every request to its full trace (request row, model calls with
@@ -39,13 +48,15 @@ def _since_iso(hours: float) -> str:
     return (datetime.now(timezone.utc) - timedelta(hours=hours)).isoformat()
 
 
-def graph(svc, hours: float = 24, show_all: bool = False) -> dict:
+def graph(svc, hours: float = 24, show_all: bool = False, active: bool = False) -> dict:
     from .facade.ollama_api import is_strict
+    from .observability import client_label, live as live_now
     cfg = svc.config_store.config
     since_iso, since_ts = _since_iso(hours), time.time() - hours * 3600
     reqs = svc.db.query(
-        "SELECT client_id, persona, client_model, mode, served_model, served_backend, outcome, "
-        "status, duration_ms, request_id, routing FROM request_log WHERE ts >= ?", (since_iso,))
+        "SELECT client_id, client_addr, user_agent, persona, client_model, mode, served_model, "
+        "served_backend, outcome, status, duration_ms, request_id, routing FROM request_log "
+        "WHERE ts >= ?", (since_iso,))
     denials = svc.db.query(
         "SELECT client_id, persona, model, backend, rule, detail FROM usage_events "
         "WHERE ts >= ? AND status='denied'", (since_ts,))
@@ -77,9 +88,13 @@ def graph(svc, hours: float = 24, show_all: bool = False) -> dict:
 
     # traffic
     for r in reqs:
-        client = r["client_id"] or "anonymous"
+        client = client_label(r["client_id"], r["client_addr"])
         persona = r["persona"] or ""
-        c = node("client", client)
+        c = node("client", client, tracked=not client.startswith("untracked"))
+        if r["user_agent"]:
+            nodes[c].setdefault("agents", [])
+            if r["user_agent"] not in nodes[c]["agents"] and len(nodes[c]["agents"]) < 4:
+                nodes[c]["agents"].append(r["user_agent"][:120])
         nodes[c]["count"] += 1
         target = node("persona", persona) if persona else node("model", r["client_model"] or "?", raw=True)
         bad = (r["outcome"] or r["status"]) in ("error", "timeout")
@@ -116,17 +131,64 @@ def graph(svc, hours: float = 24, show_all: bool = False) -> dict:
         e["rules"][d["rule"]] = e["rules"].get(d["rule"], 0) + 1
         e["last_detail"] = d["detail"]
 
+    # the routing brain, for personas whose requests called it
+    try:
+        brain_rows = svc.db.query(
+            "SELECT persona, model, COUNT(*) AS n, SUM(CASE WHEN outcome='failed' THEN 1 ELSE 0 "
+            "END) AS failed, AVG(latency_ms) AS ms FROM brain_calls WHERE ts >= ? AND "
+            "outcome != 'skipped' GROUP BY persona, model", (since_iso,))
+    except Exception:                                             # noqa: BLE001
+        brain_rows = []
+    for b in brain_rows:
+        if not b["persona"]:
+            continue
+        pid = node("persona", b["persona"])
+        bid = node("brain", b["model"] or "brain")
+        nodes[bid]["count"] += b["n"]
+        nodes[bid]["errors"] += b["failed"] or 0
+        e = edge("brain", pid, bid)
+        e["count"] += b["n"]
+        e["errors"] += b["failed"] or 0
+        e["ms"] += int((b["ms"] or 0) * b["n"])
+
+    # calls in flight right now
+    now = live_now(svc)
+    for c in now["calls"]:
+        cid = node("client", c["client_label"], tracked=not c["client_label"].startswith("untracked"))
+        nodes[cid]["live"] = nodes[cid].get("live", 0) + 1
+        prev = cid
+        if c.get("persona"):
+            pid = node("persona", c["persona"])
+            nodes[pid]["live"] = nodes[pid].get("live", 0) + 1
+            e = edge("live", cid, pid)
+            e["count"] += 1
+            prev = pid
+        mid = node("model", c["model"])
+        nodes[mid]["live"] = nodes[mid].get("live", 0) + 1
+        e = edge("live", prev, mid, seconds=c.get("seconds"), phase=c.get("phase"))
+        e["count"] += 1
+        if c.get("backend"):
+            bid = node("backend", c["backend"])
+            nodes[bid]["live"] = nodes[bid].get("live", 0) + 1
+            edge("live", mid, bid)["count"] += 1
+    for b in now["brain"]:
+        bid = node("brain", b.get("model") or "brain")
+        nodes[bid]["live"] = nodes[bid].get("live", 0) + 1
+        src = (node("persona", b["persona"]) if b.get("persona")
+               else node("client", b["client_label"]))
+        edge("live", src, bid, seconds=b.get("seconds"))["count"] += 1
+
     # configuration
     clients_cfg = {c.name: c for c in cfg.clients}
     rules = cfg.budgets.rules if cfg.budgets.enabled else []
-    for name, c in clients_cfg.items():
+    for name, c in ({} if active else clients_cfg).items():
         cid = node("client", name, configured=True, enabled=c.enabled,
                    scopes=list(c.scopes or []), restricted=bool(c.personas))
         nodes[cid]["gates"] = [r.name for r in rules if r.enabled and _client_rule(r, name)]
         for p in c.personas or []:
             if p in personas:
                 edge("config", cid, node("persona", p))
-    for name, p in personas.items():
+    for name, p in ({} if active else personas).items():
         enabled = bool(p.get("enabled"))
         relevant = show_all or name in used_personas or (enabled and is_strict(p)) or p.get("profile")
         if not relevant:
@@ -165,7 +227,7 @@ def graph(svc, hours: float = 24, show_all: bool = False) -> dict:
                 edge("config", mid, bid)
     # model -> backend from the pool (for models already on the graph)
     for nid, n in list(nodes.items()):
-        if n["kind"] != "model":
+        if n["kind"] != "model" or active:
             continue
         for s in backends.values():
             if n["label"] in s.models or n["label"] in (s.config.models or []):
@@ -173,15 +235,19 @@ def graph(svc, hours: float = 24, show_all: bool = False) -> dict:
                 if not any(k[0] in ("config",) and k[1] == nid and k[2] == bid for k in edges):
                     edge("config", nid, bid)
     for s in backends.values():
+        if active and f"backend:{s.config.name}" not in nodes:
+            continue
         b = node("backend", s.config.name)
         nodes[b].update(healthy=s.healthy if s.ever_checked else None,
                         flavor=s.config.effective_flavor, priority=s.config.priority)
     for c in getattr(svc.pool, "disabled", []) or []:
+        if active:
+            continue
         b = node("backend", c.name)
         nodes[b]["disabled"] = True
     # image jobs
     for j in jobs:
-        c = node("client", j["client_id"] or "anonymous")
+        c = node("client", client_label(j["client_id"]))
         m = node("model", j["model"] or "?", image=True)
         e = edge("image", c, m)
         e["count"] += 1
@@ -201,8 +267,9 @@ def graph(svc, hours: float = 24, show_all: bool = False) -> dict:
                 n["health"] = st.get(n["label"], "disabled" if n.get("disabled") else None)
     except Exception:                                             # noqa: BLE001
         pass
-    return {"hours": hours, "nodes": list(nodes.values()), "edges": list(edges.values()),
-            "requests": len(reqs), "denials": len(denials), "image_jobs": len(jobs)}
+    return {"hours": hours, "active": active, "nodes": list(nodes.values()),
+            "edges": list(edges.values()), "requests": len(reqs), "denials": len(denials),
+            "image_jobs": len(jobs), "live": len(now["calls"]) + len(now["brain"])}
 
 
 def _rule_may_cover(rule, persona: str) -> bool:
@@ -257,10 +324,27 @@ def edge_requests(svc, kind: str, a: str, b: str, hours: float = 24, limit: int 
                  "persona": r["persona"], "model": r["model"], "backend": r["backend"],
                  "outcome": r["status"], "duration_ms": r["duration_ms"], "error": r["error"]}
                 for r in rows]
+    if kind == "brain":
+        rows = svc.db.query(
+            "SELECT r.* FROM request_log r WHERE r.ts >= ? AND r.persona=? AND r.request_id IN "
+            "(SELECT request_id FROM brain_calls WHERE ts >= ? AND model=?) ORDER BY r.id DESC "
+            "LIMIT ?", (_since_iso(hours), va, _since_iso(hours), vb, limit))
+        return [_req_view(r) for r in rows]
+    from .observability import parse_label
     where, args = ["ts >= ?"], [_since_iso(hours)]
     for k, v in ((ka, va), (kb, vb)):
         if k == "client":
-            where.append("client_id=?")
+            cid, addr = parse_label(v)
+            if cid == "anonymous" and addr:
+                where.append("(client_id IS NULL OR client_id='anonymous') AND client_addr=?")
+                v = addr
+            elif cid == "anonymous":
+                where.append("(client_id IS NULL OR client_id='anonymous') AND "
+                             "(client_addr IS NULL OR client_addr='') AND ?=?")
+                args.append(1)
+                v = 1
+            else:
+                where.append("client_id=?")
         elif k == "persona":
             where.append("persona=?")
         elif k == "model":
@@ -278,7 +362,10 @@ def edge_requests(svc, kind: str, a: str, b: str, hours: float = 24, limit: int 
 
 def _req_view(r: dict) -> dict:
     used = _jl(r.get("models_used"))
-    return {"ts": r["ts"], "request_id": r.get("request_id"), "client": r.get("client_id"),
+    from .observability import client_label
+    return {"ts": r["ts"], "request_id": r.get("request_id"),
+            "client": client_label(r.get("client_id"), r.get("client_addr")),
+            "user_agent": r.get("user_agent"),
             "session": r.get("session_id"), "task": r.get("task_id"),
             "persona": r.get("persona"), "model": r.get("served_model") or r.get("client_model"),
             "backend": r.get("served_backend"), "mode": r.get("mode"), "routing": r.get("routing"),
@@ -306,12 +393,18 @@ def trace(svc, request_id: str) -> dict:
             "FROM mcp_call_log WHERE request_id=? ORDER BY id", (request_id,))
     except Exception:                                             # noqa: BLE001
         tools = []
+    try:
+        brain = svc.db.query(
+            "SELECT ts, purpose, model, latency_ms, prompt_tokens, completion_tokens, tps, "
+            "outcome, reason FROM brain_calls WHERE request_id=? ORDER BY id", (request_id,))
+    except Exception:                                             # noqa: BLE001
+        brain = []
     if req is None and not calls and not ledger:
         return {}
     out = {"request_id": request_id, "request": _req_view(req) if req else None,
            "guardrail_events": _jl(req.get("guardrail_events")) if req else [],
            "flags": json.loads(req["flags"]) if req and req.get("flags") else {},
-           "model_calls": calls, "tool_calls": tools,
+           "model_calls": calls, "tool_calls": tools, "brain_calls": brain,
            "ledger": [{**l, "ts": datetime.fromtimestamp(l["ts"], timezone.utc).isoformat(),
                        "ms": round((l["settled_ts"] - l["ts"]) * 1000) if l["settled_ts"] else None}
                       for l in ledger]}

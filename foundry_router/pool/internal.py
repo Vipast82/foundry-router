@@ -418,9 +418,18 @@ class InternalPool(BackendPool):
         calls = getattr(self, "_calls", None)
         if calls is None:
             calls = self._calls = {}
+        try:
+            from ..client_auth import current
+            who = current()
+            persona = request_context.route().get("persona") or ""
+        except Exception:                                          # noqa: BLE001
+            who, persona = {}, ""
         calls[self._call_seq] = {"model": model, "backend": backend,
                                  "since": time.monotonic(),
-                                 "request_id": request_context.request_id() or ""}
+                                 "request_id": request_context.request_id() or "",
+                                 "client": who.get("client_id") or "anonymous",
+                                 "addr": who.get("client_addr") or "",
+                                 "persona": persona}
         return self._call_seq
 
     def active_requests(self) -> list[dict]:
@@ -430,6 +439,8 @@ class InternalPool(BackendPool):
         return sorted(({"model": c["model"], "backend": c["backend"],
                         "seconds": round(now - c["since"], 1),
                         "request_id": c["request_id"],
+                        "client": c.get("client", ""), "addr": c.get("addr", ""),
+                        "persona": c.get("persona", ""),
                         "progress": c.get("progress"),
                         "phase": ("generating" if c.get("generating") else
                                   "reading prompt" if (c.get("progress") or {}).get("prefill")

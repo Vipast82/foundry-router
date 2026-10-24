@@ -674,3 +674,29 @@ CREATE TABLE IF NOT EXISTS server_samples (
 );
 CREATE INDEX IF NOT EXISTS idx_server_samples ON server_samples(backend, metric, ts);
 CREATE INDEX IF NOT EXISTS idx_server_samples_ts ON server_samples(ts);
+
+-- Brain calls (v0.141.0) -------------------------------------------------------
+-- One row per call to the routing brain model (brain/client.py): routing turns,
+-- assist jobs (refine, judge, review) and background jobs (research, pricing).
+-- outcome: ok | retried (ok after the malformed-tool-call retry) | failed |
+-- skipped (brain not called: passthrough, down, cooling off — the request
+-- falls back to the static rule). Joins request_log by request_id.
+CREATE TABLE IF NOT EXISTS brain_calls (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  ts TEXT,
+  purpose TEXT,                     -- routing | assist | background
+  provider TEXT,
+  model TEXT,
+  latency_ms REAL,
+  prompt_tokens INTEGER,
+  completion_tokens INTEGER,
+  tps REAL,                         -- completion tokens / wall seconds
+  outcome TEXT,
+  reason TEXT,
+  request_id TEXT,
+  persona TEXT,
+  client_id TEXT,
+  client_addr TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_brain_calls_ts ON brain_calls(ts);
+CREATE INDEX IF NOT EXISTS idx_brain_calls_rid ON brain_calls(request_id);

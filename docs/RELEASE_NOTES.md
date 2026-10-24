@@ -2,6 +2,50 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.141.0 — Brain metrics, who uses the router, which model answered
+
+Victor's ask: track the brain's performance, see live which clients use the
+router (named by key, else "untracked" with the IP), the path each request
+takes including the brain, and see in AnythingLLM / Open WebUI which backend
+answered, like Cline shows.
+
+- **Brain metrics**: every call to the routing brain is a `brain_calls` row
+  (brain/client.py, its one choke point): purpose (routing / assist /
+  background), latency, tokens, tok/s, outcome (ok / retried / failed /
+  skipped + reason; failed and skipped = the request fell back to the simple
+  rule), request id, persona, client and IP. `GET /admin/api/brain/metrics`;
+  Performance → Routing brain panel (stats, calls and latency charts, by
+  purpose, top failure reasons). A log table (Data tab: prune / clear).
+- **Caller identity**: the auth middleware keeps the caller's IP
+  (x-forwarded-for / x-real-ip / socket) and user agent on the request;
+  `request_log.client_addr` / `user_agent` (perf samples and ledger rows join by
+  request id). A request without a key shows as **untracked · <IP>**, one entry
+  per IP, everywhere clients are listed.
+- **Active use** (Monitor → Active Use; `GET /admin/api/clients/activity`,
+  `GET /admin/api/live`): per client key or untracked IP — requests, errors,
+  tokens, median time, a traffic sparkline, last seen, IPs and app, personas
+  and models — plus what is running right now (backend and brain calls with
+  who asked), refreshed every 10 s; "Make a key" for untracked programs.
+- **Route map** (Routing → Routes): untracked callers split by IP, the routing
+  brain drawn on the path (amber) for personas whose requests used it, calls
+  running now animated (green), 10 min / 30 min / 2 h windows and an
+  **active only (live)** mode with no configuration, refreshed every 5 s.
+  Edge drill-down works for untracked labels and brain edges; request traces
+  include the brain calls. In-flight pool calls now carry client, IP and
+  persona.
+- **Which model answered** (opt-in): a `route_footer` switch per persona
+  (Personas tab) and per client key (Clients & Keys → Edit) adds
+  "— via <model> @ <backend> (local/Claude/ChatGPT) · routed by brain <model> ·
+  N model calls" under answers and the route line to buffered replies'
+  reasoning. Never on tool-call-only turns, JSON output, compaction summaries or
+  quiet personas. All direct reply paths and the brain path (incl. its static
+  fallback). docs/CLIENT_COMPAT.md: keys, footer, brain-or-not, long research.
+- Tests: tests/test_brain_and_clients.py (16: labels, IP + agent capture and
+  per-IP grouping, graph untracked/brain/live/active-only and drill-downs,
+  brain rows for every outcome and the metrics endpoint, in-flight brain calls,
+  footer rules per persona / per client / brain path, the Setup switch, and the
+  AnythingLLM / Open WebUI request-shape matrix streamed and buffered).
+
 ## v0.140.0 — Operator chat runs the whole router; one rule set for personas
 
 Victor's ask: tell the chat "make Foundry-Chat use only local and Claude", "128K
