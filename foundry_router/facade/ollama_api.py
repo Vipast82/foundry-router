@@ -1611,6 +1611,20 @@ def _guard_window(svc, persona, model_id: str) -> int:
 
 _GUARD_MAX_AUTO_RESERVE = 8192
 
+# Persona tool loop (direct mode): when the round cap is reached while the
+# model still wants Foundry's own tools, those calls are answered "not run" and
+# the model gets one more round to write its answer from what it gathered. The
+# tool list stays the same, so a local model's prompt cache still hits.
+_WRAP_UP_PROMPT = ("Tool-round limit reached: no more tools can run in this turn. Write your "
+                   "final answer now from what you have already gathered. Say clearly what "
+                   "you could not check, so the user can ask you to continue.")
+
+
+def _cap_note(cap: int) -> str:
+    """Shown to the client when the model still gave no answer after the cap."""
+    return (f"\n\n⚠️ Foundry stopped after {cap} tool rounds before the model wrote a final "
+            f"answer. Ask it to continue, or raise agent_brain.worker_tool_max_steps.")
+
 
 def _apply_context_guard(svc, persona, model_id, messages, tools, options, logger=None,
                          out_cap: int = 0):
@@ -2271,6 +2285,15 @@ async def _direct_dispatch_chat(svc, persona, model_name, messages, client_tools
                                              "arguments": tc.get("arguments") or {}}}
                                for tc in own]}
 
+    def _wrap_up_turns(res, own):
+        """The model's last turn, a "not run" result for each of its pending
+        Foundry-owned calls (tool calls stay paired), and the wrap-up request."""
+        skipped = [{"role": "tool", "name": tc["name"], "tool_call_id": tc.get("id"),
+                    "content": f"NOT RUN: Foundry's tool-round limit ({tool_cap}) was reached."}
+                   for tc in own]
+        return [_assistant_turn(res, own)] + skipped + [{"role": "user",
+                                                         "content": _WRAP_UP_PROMPT}]
+
     last_backend = ""
 
     async def _run(narrate=None):
@@ -2281,7 +2304,8 @@ async def _direct_dispatch_chat(svc, persona, model_name, messages, client_tools
         convo = list(base_convo)
         said: list[str] = []          # text / reasoning from earlier tool rounds
         thought: list[str] = []
-        for rnd in range(tool_cap + 1):
+        wrapping = False              # the extra round after the cap (answer, no tools)
+        for rnd in range(tool_cap + 2):
             t_call = time.monotonic_ns()
             res, backend = await svc.pool.chat(
                 model_id, convo,
@@ -2330,12 +2354,30 @@ async def _direct_dispatch_chat(svc, persona, model_name, messages, client_tools
                     continue
                 if vis:
                     res.content = (res.content or "") + vis
+            if own and rnd >= tool_cap and not rest and not wrapping:
+                # cap reached with only Foundry-owned calls pending: one more
+                # round for the answer instead of ending with interim text
+                logger.record_guardrail(f"persona tool loop hit the {tool_cap}-round cap; "
+                                        "asked the model for its final answer")
+                if narrate:
+                    narrate(f"⚠️ tool-round limit ({tool_cap}) reached — asking for the "
+                            "final answer\n")
+                if (res.content or "").strip():
+                    said.append(res.content.strip())
+                if (res.thinking or "").strip():
+                    thought.append(res.thinking.strip())
+                convo = convo + _wrap_up_turns(res, own)
+                wrapping = True
+                continue
             if not own or rnd >= tool_cap:
                 if own:
-                    logger.record_guardrail(f"persona tool loop hit the {tool_cap}-round cap")
+                    logger.record_guardrail(f"persona tool loop hit the {tool_cap}-round cap"
+                                            + ("; still no final answer" if wrapping else ""))
                 iv.finish_turn(svc.db, assist_turn_id, res.completion_tokens, turn_stats,
                                conv_key, turn_think, bool(_guard_note))
                 res.tool_calls = rest          # never hand Foundry-owned calls to the client
+                if own and wrapping:
+                    res.content = (res.content or "") + _cap_note(tool_cap)
                 # Keep what the model said / reasoned in earlier tool rounds
                 # (live streaming shows it as it happens; buffered must too).
                 if said:
@@ -2460,8 +2502,9 @@ async def _direct_dispatch_chat(svc, persona, model_name, messages, client_tools
                 text_chars = think_chars = 0
                 convo = list(base_convo)
                 err = None
+                wrapping = False     # the extra round after the cap (answer, no tools)
                 try:
-                    for rnd in range(tool_cap + 1):
+                    for rnd in range(tool_cap + 2):
                         acc_tools: list = []
                         round_text: list[str] = []      # this round's streamed content (for the auditor)
                         final = None
@@ -2559,6 +2602,19 @@ async def _direct_dispatch_chat(svc, persona, model_name, messages, client_tools
                                 yield tr.chat_chunk(model_name, "\n\n" + assist_visible.pop(0)
                                                     + "\n\n", done=False)
                             continue
+                        if own and not rest and not wrapping:
+                            # cap reached with only Foundry-owned calls pending:
+                            # one more round for the answer
+                            produced = True
+                            logger.record_guardrail(
+                                f"persona tool loop hit the {tool_cap}-round cap; "
+                                "asked the model for its final answer")
+                            yield tr.chat_chunk(model_name, "", done=False, thinking=_q(
+                                f"⚠️ tool-round limit ({tool_cap}) reached — asking for the "
+                                "final answer\n"))
+                            convo = convo + _wrap_up_turns(res, own)
+                            wrapping = True
+                            continue
                         if not own and rnd < tool_cap:
                             cont, convo2, vis, anotes, rest = await _assist_after(res, rest, convo)
                             for n in anotes:
@@ -2576,7 +2632,10 @@ async def _direct_dispatch_chat(svc, persona, model_name, messages, client_tools
                                        conv_key, turn_think, bool(_guard_note))
                         if own:
                             logger.record_guardrail(
-                                f"persona tool loop hit the {tool_cap}-round cap")
+                                f"persona tool loop hit the {tool_cap}-round cap"
+                                + ("; still no final answer" if wrapping else ""))
+                            if wrapping:
+                                yield tr.chat_chunk(model_name, _cap_note(tool_cap), done=False)
                         logger.finish("ok")
                         tcs_out = [{**({"id": t["id"]} if t.get("id") else {}),
                                     "function": {"name": t["name"], "arguments": t["arguments"]}}

@@ -2,6 +2,30 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.139.2 — Persona tool loop: always an answer at the round cap
+
+AnythingLLM's @agent got "Agent session complete" with no answer on a long
+research question (Foundry-Chat, local Qwen on Strata, 2026-10-24 requests
+68841/68842). In direct mode Foundry runs a persona's own MCP tools (searxng,
+crawl4ai…) for at most `agent_brain.worker_tool_max_steps` rounds (default 6).
+When the model still asked for those tools at the cap, Foundry dropped the
+calls and ended the turn with only the model's interim text ("let me search
+more"), so the client got no answer and no tool call. The cap's original
+"hand to the brain to finish" step (agent mode) never existed on this path.
+
+- At the cap with only Foundry-owned calls pending, those calls get a "NOT RUN:
+  tool-round limit reached" result (calls stay paired) and the model gets one
+  more round with "write your final answer now from what you have gathered;
+  say what you could not check". The tool list is unchanged on that round, so
+  a local model's prompt cache still hits. Streaming and buffered paths both.
+- A model that still asks for tools on that round: its calls are dropped and a
+  visible note says Foundry stopped after N rounds (ask it to continue, or raise
+  `worker_tool_max_steps`). Guardrail events say which case happened.
+- Own + client tool calls together at the cap: unchanged (the client's call is
+  handed out, the client's loop continues).
+- Tests: tests/test_tool_round_cap.py (buffered and streaming, answer after the
+  wrap-up, still no answer, mixed calls).
+
 ## v0.139.1 — Doctor: media adapter key loaded by its launcher is not a red
 
 The client's Doctor showed "foundry-media: FOUNDRY_KEY is not available to Kilo"
