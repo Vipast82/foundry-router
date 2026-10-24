@@ -139,22 +139,15 @@ async def set_backends(request: Request):
 async def set_backend_enabled(request: Request):
     """Park / unpark one backend: {"name": ..., "enabled": bool}. A disabled
     backend stays in config.yaml but is never probed, routed to or alerted on."""
+    from .. import router_ops
     svc = _svc(request)
     body = await request.json()
-    name, enabled = body.get("name"), bool(body.get("enabled"))
-    raw_backends = (svc.config_store.config.backend_pool.internal.backends or [])
-    if not any(b.name == name for b in raw_backends):
-        return JSONResponse({"error": f"no backend named {name!r}"}, status_code=404)
-
-    def mutate(raw):
-        for b in raw.setdefault("backend_pool", {}).setdefault("internal", {}).get("backends", []):
-            if b.get("name") == name:
-                b["enabled"] = enabled
-    svc.config_store.save(mutate)
-    await svc.rebuild_pool()
-    svc.db.log_event("info", "backend_pool",
-                     f"backend {name} {'enabled' if enabled else 'disabled'} by operator")
-    return {"ok": True, "backends": svc.pool.backend_status()}
+    try:
+        status = await router_ops.set_backend_enabled(svc, body.get("name"),
+                                                      bool(body.get("enabled")))
+    except router_ops.OpError as e:
+        return JSONResponse({"error": str(e)}, status_code=e.status)
+    return {"ok": True, "backends": status}
 
 
 @router.post("/admin/api/config/pool_mode")
@@ -1756,8 +1749,14 @@ async def upsert_persona(request: Request):
     name = body.pop("virtual_name", None)
     if not name:
         return JSONResponse({"error": "virtual_name required"}, status_code=400)
-    svc.personas.upsert(name, **body)
-    return {"ok": True, "persona": svc.personas.get(name)}
+    # the same rules the operator chat's persona tools use (persona_rules.py)
+    from .. import persona_rules
+    clean, errors, warnings = persona_rules.validate(svc, body, allow_unknown=True)
+    if errors:
+        return JSONResponse({"error": "; ".join(errors), "errors": errors,
+                             "warnings": warnings}, status_code=400)
+    svc.personas.upsert(name, **clean)
+    return {"ok": True, "persona": svc.personas.get(name), "warnings": warnings}
 
 
 @router.get("/admin/api/scoreboard")

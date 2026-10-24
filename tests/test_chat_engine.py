@@ -55,12 +55,12 @@ def chat(app, client, cc):  # noqa: F811
     return run
 
 
-def test_persona_is_created_on_first_use_with_the_chain(chat, app):
-    assert app.state.services.personas.get(CE.PERSONA) is None
+def test_the_chat_never_creates_or_uses_a_persona(chat, app):
+    """v0.140.0: the chat has its own model chain (operator_chat.routes or the
+    built-in chain), so persona edits can't break it (test_chat_router_tools
+    covers the chain itself)."""
     chat("hello", reply("hi"))
-    p = app.state.services.personas.get(CE.PERSONA)
-    assert p and p["routing"] == "strict" and json.loads(p["pinned_models"]) == CE.PERSONA_CHAIN
-    assert p["execution_mode"] == "direct" and p["output_format"] == "json"
+    assert app.state.services.personas.get(CE.PERSONA) is None
 
 
 def test_reads_run_at_once_and_feed_the_model_then_the_turn_is_persisted(chat, client):

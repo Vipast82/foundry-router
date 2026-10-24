@@ -2000,8 +2000,10 @@ const CHAT_EXAMPLES = [
   "Restart Kilo at the next safe point",
 ];
 const CLS_PILL = {read: "", draft: "info", preview: "info", ask: "", deploy: "warn", cutoffs: "warn", persona: "warn",
-  sprint: "warn", decision: "warn", restart: "bad", tracks: "warn"};
-const CHAT_CLASS_HELP = {deploy: "Deploy or roll back settings", cutoffs: "Change usage cutoffs", persona: "Change persona routes",
+  sprint: "warn", decision: "warn", restart: "bad", tracks: "warn", memory: "warn", backend: "warn",
+  router_config: "warn", admin: "warn"};
+const CHAT_CLASS_HELP = {deploy: "Deploy or roll back settings", cutoffs: "Change usage cutoffs", persona: "Change personas (routes, settings, new personas, client-key grants, evals)",
+  backend: "Turn a whole backend on or off", router_config: "Change router settings (config.yaml) and the chat's own model", admin: "Other router admin actions; deletes and clears always ask",
   sprint: "Start, queue, pause, resume or cancel sprints; pause/resume a project", decision: "Answer decisions and questions",
   restart: "Restart stack components / reload kilo.jsonc", tracks: "Start, stop or merge parallel tracks; change max_agents"};
 S.chat = {threads: null, thread: null, view: null, busy: false, settings: null, actions: {}};
@@ -2015,6 +2017,8 @@ const CH = {
   rename: (id, title) => api(`chat/threads/${encodeURIComponent(id)}/rename`, {method: "POST", body: {title}}),
   settings: () => api("chat/settings"),
   saveSettings: auto => api("chat/settings", {method: "PUT", body: {auto_classes: auto}}),
+  backend: () => api("chat/backend"),
+  saveBackend: routes => api("chat/backend", {method: "PUT", body: {routes}}),
   audit: id => api("chat/audit?thread=" + encodeURIComponent(id)),
 };
 const when = ts => ts ? new Date(ts * 1000).toLocaleString([], {dateStyle: "short", timeStyle: "short"}) : "";
@@ -2025,7 +2029,7 @@ async function renderAsk() {
     el.innerHTML = `<div class="chat-wrap">
       <aside class="chat-side" aria-label="Chats">
         <div class="row" style="margin:0 0 6px"><button class="act primary" type="button" data-act="ch-new">New chat</button>
-          <span class="grow"></span><button class="act" type="button" data-act="ch-auto" title="Which kinds of change run without a confirm card">Auto-run…</button></div>
+          <span class="grow"></span><button class="act" type="button" data-act="ch-auto" title="Which kinds of change run without a confirm card, and the chat's own model">Settings…</button></div>
         <ul class="chat-threads" id="chat-threads" role="listbox" aria-label="Chat threads"></ul>
       </aside>
       <section class="chat-main">
@@ -2058,7 +2062,7 @@ async function renderThread() {
   $("#chat-ex").innerHTML = CHAT_EXAMPLES.map(x => `<button class="act" type="button" data-ex="${esc(x)}" style="font-size:12px">${esc(x)}</button>`).join("");
   if (!S.chat.thread) { head.innerHTML = ""; box.innerHTML = `<div class="chat-empty"><h2 style="margin-top:0">Operator chat</h2>
     <p class="hint">Say what you want in plain language. The chat reads the sprints, settings, usage and stack, then makes typed calls the router checks.
-    Reads, drafts and previews run at once. Deploys, cutoff changes, persona changes, sprint starts, decisions and restarts come back as a card you confirm.</p></div>`; return; }
+    Reads, drafts and previews run at once. Deploys, cutoff changes, persona and backend changes, router settings, admin actions, sprint starts, decisions and restarts come back as a card you confirm.</p></div>`; return; }
   try { S.chat.view = await CH.thread(S.chat.thread); } catch (e) { box.innerHTML = `<p class="hint">${esc(e.message)}</p>`; return; }
   const v = S.chat.view;
   head.innerHTML = `<b class="chat-title" title="${esc(v.title || "Chat")}">${esc(v.title || "Chat")}</b><span class="hint" style="margin:0;white-space:nowrap">${esc(when(v.created_ts))}</span>
@@ -2106,7 +2110,24 @@ function previewHtml(c) {
   if (p.question) return `<div class="prev"><div style="white-space:pre-wrap">${esc(p.question)}</div>${(p.options || []).length ? `<div class="hint">options: ${esc(p.options.join(", "))}</div>` : ""}</div>`;
   if (p.stack) return `<div class="prev hint">${p.stack.client === "none attached" ? "No Foundry Client is attached: the action will be refused." : `client ${esc(p.stack.client)}${p.stack.fresh === false ? " (stale)" : ""}: ${(p.stack.components || []).map(x => `${esc(x.name)} ${esc(x.state || "")}`).join(", ")}`}</div>`;
   if (p.current) return `<div class="prev hint">now: ${esc(short(p.current))}</div>`;
-  return "";
+  const parts = [];
+  const list = (label, xs) => xs && xs.length ? `<div class="hint" style="margin:2px 0"><b>${esc(label)}</b> ${xs.map(esc).join(" → ")}</div>` : "";
+  const warn = xs => (xs || []).map(w => `<div class="banner warn" style="margin:4px 0">${esc(w)}</div>`).join("");
+  if (p.irreversible) parts.push(`<div class="banner bad" style="margin:4px 0"><b>Can't be undone.</b> This deletes or clears data for good.</div>`);
+  if (p.routes) parts.push(list("routes:", p.routes) + list("was:", p.before));
+  if (p.backend && typeof p.backend === "string") parts.push(`<div class="hint">backend: ${esc(p.backend)}</div>`);
+  if (p.notes && p.notes.length) parts.push(`<div class="hint">${p.notes.map(esc).join("; ")}</div>`);
+  if (p.fields) parts.push(`<table class="q" style="margin:4px 0"><tbody>${p.fields.map(f => `<tr><td class="mono">${esc(f.field)}</td><td>${f.before === undefined ? "" : esc(short(f.before)) + " → "}<b>${esc(short(f.after))}</b></td></tr>`).join("")}</tbody></table>`);
+  if (p.config) parts.push(`<table class="q" style="margin:4px 0"><tbody>${p.config.map(f => `<tr><td class="mono">${esc(f.path)}</td><td>${esc(short(f.before))} → <b>${esc(short(f.after))}</b></td></tr>`).join("")}</tbody></table>`
+    + ((p.restart_needed || []).length ? `<div class="banner warn" style="margin:4px 0"><b>Restart needed</b> for: ${esc(p.restart_needed.join(", "))}</div>` : `<div class="hint">applies live</div>`));
+  if (p.orphans) parts.push(p.orphans.length ? `<div class="banner warn" style="margin:4px 0"><b>Personas left without a usable route:</b><ul style="margin:2px 0 0 16px">${p.orphans.map(o => `<li>${esc(o)}</li>`).join("")}</ul></div>` : `<div class="hint">no persona loses its last route</div>`);
+  if (p.request) parts.push(`<div class="hint mono">${esc(p.request)}${p.body !== undefined && p.body !== null ? " " + esc(short(p.body)) : ""}</div>`);
+  if (p.models) parts.push(list("models:", p.models));
+  if (p.clients_to_allow && p.clients_to_allow.length) parts.push(`<div class="hint">client keys that must allow it: ${esc(p.clients_to_allow.join(", "))}</div>`);
+  if (p.after) parts.push(list("now:", p.now) + list("after:", p.after));
+  if (p.note) parts.push(`<div class="hint">${esc(p.note)}</div>`);
+  parts.push(warn(p.warnings));
+  return parts.filter(Boolean).length ? `<div class="prev">${parts.join("")}</div>` : "";
 }
 function confirmHtml(card, t) {
   const live = card.status === "pending";
@@ -2192,6 +2213,9 @@ async function openAutoDrawer() {
     <p class="hint">Reads, drafts and previews always run at once. Each class below shows a confirm card unless you switch it to auto. Global for every operator; saved on the router.</p>
     <fieldset><legend>Run without a card</legend>${(s.classes || []).map(c => `<label class="sw" style="display:flex;margin:6px 0"><input type="checkbox" data-cls="${esc(c.id)}" ${s.auto_classes[c.id] ? "checked" : ""}><span><b>${esc(c.id)}</b> — ${esc(c.label)}</span></label>`).join("")}</fieldset>
     <div class="row"><span class="grow"></span><span class="hint" id="auto-msg" style="margin:0"></span><button class="act primary" type="button" data-save-auto>Save</button></div>
+    <h4 style="margin:14px 0 4px">Chat model</h4>
+    <p class="hint">The backend and model that answer this chat, in order: the first that answers wins. It never goes through a persona, so persona edits can't break the chat. Empty = the built-in chain (Claude Sonnet, GPT-6.1 Sol, local Qwen).</p>
+    <div id="chat-be"><span class="hint">Loading…</span></div>
     <h4 style="margin:14px 0 4px">What the chat can do</h4>
     ${Object.entries(groups).map(([g, ts]) => `<details style="margin:4px 0"><summary><span class="pill ${CLS_PILL[g] || ""}">${esc(g)}</span> ${ts.length} tool${ts.length === 1 ? "" : "s"} · ${esc(ts[0].mode)}</summary><ul class="hint" style="padding-left:18px">${ts.map(t => `<li><code>${esc(t.name)}</code>: ${esc(t.description)}</li>`).join("")}</ul></details>`).join("")}`;
   d.hidden = false;
@@ -2201,7 +2225,39 @@ async function openAutoDrawer() {
     try { await CH.saveSettings(auto); $("#auto-msg").textContent = "Saved"; toast("Auto-run classes saved"); }
     catch (e) { toast(e.message, true); }
   };
+  renderChatBackend();
   ($("input", d) || d).focus();
+}
+async function renderChatBackend() {
+  const box = $("#chat-be");
+  if (!box) return;
+  let v;
+  try { v = await CH.backend(); } catch (e) { box.innerHTML = `<span class="hint">${esc(e.message)}</span>`; return; }
+  const avail = v.available || {};
+  const parse = x => { const y = x.replace(/ \(backend off\)$/, ""), i = y.lastIndexOf("@"); return {model: y.slice(0, i), backend: y.slice(i + 1)}; };
+  let rows = (v.source || "").startsWith("operator_chat") ? (v.chain || []).map(parse) : [];
+  const draw = () => {
+    const beOpts = sel => Object.entries(avail).map(([n, b]) => `<option value="${esc(n)}" ${n === sel ? "selected" : ""}>${esc(n)} (${esc(b.family)}${b.enabled ? "" : ", off"})</option>`).join("");
+    const mOpts = (be, sel) => ((avail[be] || {}).models || []).map(m => `<option ${m === sel ? "selected" : ""}>${esc(m)}</option>`).join("");
+    box.innerHTML = `<div class="hint">Now: ${esc((v.chain || []).join(" → ") || "nothing available")} <span class="pill">${esc(v.source || "")}</span></div>
+      ${rows.map((r, i) => `<div class="row" style="margin:4px 0"><span class="mono">${i + 1}.</span>
+        <select data-cb-be="${i}" aria-label="Backend ${i + 1}">${beOpts(r.backend)}</select>
+        <select data-cb-m="${i}" aria-label="Model ${i + 1}">${mOpts(r.backend, r.model)}</select>
+        <button class="act" type="button" data-cb-del="${i}" aria-label="Remove route ${i + 1}">✕</button></div>`).join("")}
+      <div class="row"><button class="act" type="button" data-cb-add ${rows.length >= 6 ? "disabled" : ""}>+ Add route</button>
+        <button class="act" type="button" data-cb-builtin>Use built-in chain</button><span class="grow"></span>
+        <button class="act primary" type="button" data-cb-save>Save chat model</button></div>`;
+    $$("[data-cb-be]", box).forEach(s => s.onchange = () => { const i = +s.dataset.cbBe; rows[i] = {backend: s.value, model: ((avail[s.value] || {}).models || [])[0] || ""}; draw(); });
+    $$("[data-cb-m]", box).forEach(s => s.onchange = () => { rows[+s.dataset.cbM].model = s.value; });
+    $$("[data-cb-del]", box).forEach(b => b.onclick = () => { rows.splice(+b.dataset.cbDel, 1); draw(); });
+    $("[data-cb-add]", box).onclick = () => { const be = Object.keys(avail).find(n => avail[n].enabled) || Object.keys(avail)[0]; rows.push({backend: be, model: ((avail[be] || {}).models || [])[0] || ""}); draw(); };
+    $("[data-cb-builtin]", box).onclick = () => { rows = []; draw(); };
+    $("[data-cb-save]", box).onclick = async () => {
+      try { v = await CH.saveBackend(rows.filter(r => r.backend && r.model)); toast("Chat model saved"); draw(); }
+      catch (e) { toast(e.message, true); }
+    };
+  };
+  draw();
 }
 function qTask(id) { return (S.queue || []).find(x => x.task_id === id); }
 async function action(kind, x, extra = {}) {

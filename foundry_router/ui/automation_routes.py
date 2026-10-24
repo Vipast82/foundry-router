@@ -122,13 +122,8 @@ def _status_with_models(svc) -> list[dict]:
     """Backend status with each backend's discovered AND configured models (as
     the dashboard's route graph reads them), so a route keeps its backend while
     that backend is down or not probed yet."""
-    status = svc.pool.backend_status()
-    states = getattr(svc.pool, "backends", None) or {}
-    for b in status:
-        s = states.get(b.get("name"))
-        conf = list(getattr(getattr(s, "config", None), "models", None) or []) if s else []
-        b["models"] = list(dict.fromkeys(list(b.get("models") or []) + conf))
-    return status
+    from ..route_resolve import status_with_models
+    return status_with_models(svc)
 
 
 @router.get("/control/api/automation/seed")

@@ -52,9 +52,9 @@ from .control_center import ControlError, _hash, _j, _s, _uj
 
 log = logging.getLogger(__name__)
 
-PERSONA = "Foundry-Operator-Chat"
-# Claude Sonnet, then GPT-6.1 Sol, then the local Qwen (strict routing: never
-# a model outside this list; the quota gate skips a route at its cutoff)
+PERSONA = "Foundry-Operator-Chat"      # older versions routed the chat through it
+# The built-in chain when operator_chat.routes is empty: Claude Sonnet, then
+# GPT-6.1 Sol, then the local Qwen, each on the first enabled backend serving it
 PERSONA_CHAIN = ["claude-sonnet-5-5", "gpt-6.1-sol", "qwen3.8-flash-next-iq3_s"]
 MAX_MODEL_CALLS = 4
 MAX_TOOL_CALLS = 8
@@ -66,13 +66,18 @@ CONTEXT_CHARS = 6000
 CONFIRM_TTL_S = 24 * 3600
 AUTO_CLASSES = ("read", "draft", "preview", "ask")
 CONFIRM_CLASSES = ("deploy", "cutoffs", "persona", "sprint", "decision", "restart", "tracks",
-                   "memory")
+                   "memory", "backend", "router_config", "admin")
 CLASS_LABEL = {"deploy": "Deploy or roll back settings", "cutoffs": "Change usage cutoffs",
-               "persona": "Change persona routes", "sprint": "Start, queue, pause, resume or "
+               "persona": "Change personas (routes, settings, new personas, client-key grants, "
+               "eval runs)", "sprint": "Start, queue, pause, resume or "
                "cancel sprints (and pause/resume a project)", "decision": "Answer decisions "
                "and questions", "restart": "Restart stack components / reload kilo.jsonc",
                "tracks": "Start, stop or merge parallel tracks; change max_agents",
-               "memory": "Add to or edit project memory (committed to the game repo)"}
+               "memory": "Add to or edit project memory (committed to the game repo)",
+               "backend": "Turn a whole backend on or off",
+               "router_config": "Change router settings in config.yaml (and the chat's own backend)",
+               "admin": "Other router admin actions (model research, toggles, pricing, MCP "
+               "servers...); deletes and clears always ask"}
 # the task states the queue tools accept, mirrored from the coordinator
 _TERMINAL = ("COMPLETE", "CANCELLED")
 
@@ -170,6 +175,15 @@ SYSTEM = (
     "client's version and heartbeat. Walk the operator through it one step at a time, give the "
     "download link for their OS, and check client_install_status at the end to confirm the "
     "client registered. The dashboard's Client tab shows the same guide and downloads.\n"
+    "- The router itself: you can see and change all of it. Personas: list_personas / get_persona, "
+    "then set_persona_routes (family words local / Claude / ChatGPT keep that family's current "
+    "routes), set_persona_fields, create_persona (starts disabled), grant_persona_to_client; "
+    "after any persona change offer run_persona_evals. Backends: set_backend_enabled. Settings: "
+    "get_router_config / set_router_config (config.yaml, versioned, restart-needed shown). "
+    "Anything else: list_admin_endpoints, then admin_get to read and admin_call to change. "
+    "Model research: research_status, research_models. 'How is performance?': "
+    "performance_report, then give findings and concrete recommendations (which setting, which "
+    "value, why). The chat's own model: get_chat_backend / set_chat_backend.\n"
     "- At most 8 tool calls per turn. Keep `say` under 120 words. No markdown tables.")
 
 
@@ -264,6 +278,12 @@ class Tool:
     project_arg: str = ""                     # the argument that names the project
     run: Optional[Callable[..., Awaitable[dict]]] = None
     summary: Optional[Callable[[dict], str]] = None
+    # (args, ctx) -> reason to refuse the call, or "" (runs at proposal AND at confirm)
+    check: Optional[Callable[[dict, Any], str]] = None
+    # args -> True when this call must show a card even if its class is on auto
+    force_confirm: Optional[Callable[[dict], bool]] = None
+    # (args, ctx) -> what the confirm card shows under the call
+    preview: Optional[Callable[[dict, Any], dict]] = None
 
     def to_json(self) -> dict:
         return {"name": self.name, "description": self.description, "class": self.cls,
@@ -346,27 +366,6 @@ class ChatEngine:
         self.tools: dict[str, Tool] = {}
         self._build_catalog()
         self._catalog_text = self._render_catalog()
-
-    # ------------------------------------------------------------------ persona
-
-    def ensure_persona(self) -> dict:
-        """`Foundry-Operator-Chat` exists (created through the persona store, as
-        the personas API would): strict routing over the Claude -> GPT -> local
-        chain, JSON output, direct execution (the engine owns the tool loop)."""
-        p = self.svc.personas.get(PERSONA)
-        if p is not None:
-            return p
-        self.svc.personas.upsert(
-            PERSONA, description="Operator chat (Automation page): plain-language control of "
-            "sprints, settings, personas, cutoffs and the workstation stack. Claude Sonnet, then "
-            "GPT-6.1 Sol, then the local Qwen; JSON output; the router validates every call.",
-            execution_mode="direct", routing="strict", model_allowlist=list(PERSONA_CHAIN),
-            pinned_models=list(PERSONA_CHAIN), output_format="json", kind="chat",
-            capabilities=["text"], benchmark_category="general_chat", local_bias_strength="prefer_paid",
-            max_output_tokens=MAX_TOKENS, reasoning_effort="low", brain_handles_tools=0,
-            sampling_options={"temperature": 0}, enabled=1)
-        self.db.log_event("info", "chat", f"persona {PERSONA} created for the operator chat")
-        return self.svc.personas.get(PERSONA)
 
     # ------------------------------------------------------------------ settings (classes)
 
@@ -732,9 +731,9 @@ class ChatEngine:
                           + (f" in {v['enum']}" if v.get("enum") else "")
                           for k, v in t.args.items())
             lines.append(f"- {t.name}({a}) [{t.cls}]: {t.description}")
-        lines.append("Classes: read/draft/preview/ask run at once; deploy, cutoffs, persona, sprint, "
-                     "decision, restart and memory need the operator's confirmation unless switched "
-                     "to auto.")
+        lines.append("Classes: read/draft/preview/ask run at once; " + ", ".join(CONFIRM_CLASSES)
+                     + " need the operator's confirmation unless switched to auto (irreversible "
+                     "admin calls always need it).")
         return "\n".join(lines)
 
     def _history(self, thread_id: str) -> list[dict]:
@@ -789,44 +788,53 @@ class ChatEngine:
     # ------------------------------------------------------------------ model call
 
     async def _call_model(self, messages: list[dict]) -> tuple[str, dict]:
-        """One JSON-schema completion through the router's own OpenAI route,
-        in-process (persona routing, strict chain, quota gate, usage logging all
-        apply). Returns (text, meta)."""
+        """One JSON-schema completion on the chat's own chain (chat_routes):
+        each route pinned to its backend, through the pool (budget gate and
+        ledger apply), the next route on failure. Returns (text, meta)."""
         if self._model_fn is not None:
             out = self._model_fn(messages)
             if asyncio.iscoroutine(out):
                 out = await out
             return out
-        if self.app is None:
-            raise ChatError("the chat engine has no app to call its model through", "no_model", 503)
-        import httpx
-        from .client_auth import INTERNAL_HEADER, INTERNAL_TOKEN
-        body = {"model": PERSONA, "messages": messages, "stream": False, "max_tokens": MAX_TOKENS,
-                "temperature": 0,
-                "response_format": {"type": "json_schema", "json_schema": {
-                    "name": "operator_chat", "schema": OUTPUT_SCHEMA}}}
-        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=self.app),
-                                     base_url="http://foundry.internal",
-                                     headers={INTERNAL_HEADER: INTERNAL_TOKEN,
-                                              "x-foundry-session": "operator-chat",
-                                              "x-foundry-purpose": "operator_chat"},
-                                     timeout=httpx.Timeout(240.0, connect=10.0)) as client:
-            r = await asyncio.create_task(client.post("/v1/chat/completions", json=body))
-        if r.status_code != 200:
+        from . import request_context
+        routes = self.chat_routes()
+        if not routes:
+            raise ChatError("no chat model is available: no enabled backend serves the built-in "
+                            "chain; set the chat backend (Automation -> Chat -> settings)",
+                            "no_model", 503)
+        errors = []
+        for backend, model in routes:
+            tok = request_context.pin_backend(backend)
             try:
-                err = r.json().get("error")
-                msg = err.get("message") if isinstance(err, dict) else str(err)
-            except Exception:                                    # noqa: BLE001
-                msg = r.text[:300]
-            raise ChatError(f"the chat model is not available: {msg}"[:400], "model_failed", 502)
-        data = r.json()
-        text = (((data.get("choices") or [{}])[0].get("message") or {}).get("content")) or ""
-        u = data.get("usage") or {}
-        return text, {"served_model": r.headers.get("x-foundry-served-model") or
-                      (data.get("served_by") or {}).get("model") or "",
-                      "backend": r.headers.get("x-foundry-served-backend") or "",
-                      "prompt_tokens": int(u.get("prompt_tokens") or 0),
-                      "completion_tokens": int(u.get("completion_tokens") or 0)}
+                res, served = await self.svc.pool.chat(
+                    model, messages, options={"temperature": 0}, max_tokens=MAX_TOKENS,
+                    fmt=OUTPUT_SCHEMA)
+            except Exception as e:                               # noqa: BLE001
+                errors.append(f"{model}@{backend}: {str(e)[:160]}")
+                continue
+            finally:
+                request_context._backend_pin.reset(tok)
+            return res.content or "", {"served_model": model, "backend": served or backend,
+                                       "prompt_tokens": int(res.prompt_tokens or 0),
+                                       "completion_tokens": int(res.completion_tokens or 0)}
+        raise ChatError("the chat model is not available: " + " | ".join(errors)[:400],
+                        "model_failed", 502)
+
+    def chat_routes(self) -> list[tuple[str, str]]:
+        """The chat's own model chain, [(backend, model)]: operator_chat.routes,
+        or the built-in chain on the first enabled backend serving each model.
+        Never a persona, so persona edits can't break the chat."""
+        cfg = getattr(self.svc.config_store.config, "operator_chat", None)
+        if cfg is not None and cfg.routes:
+            return [(r.backend, r.model) for r in cfg.routes]
+        from . import route_resolve
+        bmap = route_resolve.backends(self.svc)
+        out = []
+        for m in PERSONA_CHAIN:
+            hosts = [h for h in route_resolve.served_by(bmap, m) if bmap[h]["enabled"]]
+            if hosts:
+                out.append((hosts[0], m))
+        return out
 
     # ------------------------------------------------------------------ validation
 
@@ -854,8 +862,18 @@ class ChatEngine:
                     return None, f"{path}: {why}"
         if len(_compact(args, 10 ** 6)) > 8000:
             return None, "arguments are too large"
+        if tool.check is not None:
+            try:
+                why = tool.check(args, ctx)
+            except Exception as e:                               # noqa: BLE001
+                why = f"{type(e).__name__}: {str(e)[:200]}"
+            if why:
+                return None, why[:600]
+        mode = self.class_of(tool)
+        if tool.force_confirm is not None and tool.force_confirm(args):
+            mode = "confirm"
         return {"id": call.get("id"), "tool": tool.name, "args": args,
-                "class": tool.cls, "mode": self.class_of(tool),
+                "class": tool.cls, "mode": mode,
                 "summary": (tool.summary(args) if tool.summary else tool.name)[:300],
                 "notes": [p for p in probs if p.endswith("ignored")]}, ""
 
@@ -893,7 +911,6 @@ class ChatEngine:
         seq = int(th.get("turns") or 0) + 1
         ctx = Ctx(self, actor, list(projects or []), list(scopes or []), thread_id, turn_id)
         self._audit(thread_id, turn_id, "turn", actor, f"operator message, {len(text)} chars")
-        self.ensure_persona()
         # context: only blocks whose hash changed since this thread's last turn
         try:
             blocks = await self.context_blocks(ctx.projects)
@@ -1078,6 +1095,9 @@ class ChatEngine:
         note. Read-only; never fails the card."""
         try:
             a = call["args"]
+            tool = self.tools.get(call["tool"])
+            if tool is not None and tool.preview is not None:
+                return tool.preview(a, ctx) or {}
             if call["tool"] == "deploy_settings":
                 st = self.svc.automation
                 d = st.diff(a["project"])
@@ -1115,11 +1135,6 @@ class ChatEngine:
                 return {"max_agents": st.get("max_agents"),
                         "tracks": [{k: t.get(k) for k in ("name", "state", "current_sprint")}
                                    for t in st.get("tracks") or []][:12]}
-            if call["tool"] == "set_persona_routes":
-                p = self.svc.personas.get(a["name"]) or {}
-                return {"current": {"pinned_models": _uj(p.get("pinned_models"), []),
-                                    "model_allowlist": _uj(p.get("model_allowlist"), []),
-                                    "enabled": p.get("enabled")}}
         except Exception as e:                                   # noqa: BLE001
             return {"note": f"no preview: {str(e)[:120]}"}
         return {}
@@ -1200,10 +1215,11 @@ class ChatEngine:
         return [{**t.to_json(), "mode": "auto" if t.cls in AUTO_CLASSES or classes.get(t.cls)
                  else "confirm"} for t in self.tools.values()]
 
-    def _add(self, name, description, cls, args=None, required=(), project_arg="", summary=None):
+    def _add(self, name, description, cls, args=None, required=(), project_arg="", summary=None,
+             check=None, force_confirm=None, preview=None):
         def deco(fn):
             self.tools[name] = Tool(name, description, cls, args or {}, tuple(required), project_arg,
-                                    fn, summary)
+                                    fn, summary, check, force_confirm, preview)
             return fn
         return deco
 
@@ -1524,54 +1540,6 @@ class ChatEngine:
             return {k: (_uj(p.get(k), p.get(k)) if k in ("model_allowlist", "pinned_models",
                                                             "capabilities") else p.get(k))
                     for k in keep}
-
-        @self._add("set_persona_routes", "Set a persona's route list: ordered models, each on or "
-                   "off (at least one on), and optionally enable/disable the persona. Written live "
-                   "after a state snapshot (restorable from History).", "persona",
-                   {"name": {"type": "string", "max": 120},
-                    "routes": {"type": "array", "max_items": 12}, "enabled": {"type": "boolean"}},
-                   ("name", "routes"),
-                   summary=lambda a: f"persona {a.get('name')}: routes " + ", ".join(
-                       (r.get("model") if isinstance(r, dict) else str(r)) +
-                       ("" if not isinstance(r, dict) or r.get("enabled", True) else " (off)")
-                       for r in a.get("routes") or [])
-                   + ("" if a.get("enabled") is None else
-                      f"; persona {'enabled' if a['enabled'] else 'disabled'}"))
-        async def set_persona_routes(ctx: Ctx, a: dict):
-            p = eng.svc.personas.get(a["name"])
-            if not p:
-                raise ChatError(f"no persona {a['name']!r}", "not_found", 404)
-            routes = []
-            for r in a["routes"]:
-                if isinstance(r, str):
-                    r = {"model": r, "enabled": True}
-                if not isinstance(r, dict) or not isinstance(r.get("model"), str) or not r["model"]:
-                    raise ChatError("routes are [{model, enabled}]")
-                routes.append({"model": r["model"][:120], "enabled": r.get("enabled", True) is not False})
-            on = [r["model"] for r in routes if r["enabled"]]
-            if not on:
-                raise ChatError(f"{a['name']} needs at least one route turned on (an empty list "
-                                "would allow every model)")
-            known = set(eng.svc.pool.available_models()) | {
-                m for s in (getattr(eng.svc.pool, "backends", None) or {}).values()
-                for m in list(getattr(s, "models", []) or []) + list(s.config.models or [])}
-            unknown = [r["model"] for r in routes if known and r["model"] not in known
-                       and r["model"].split(":")[0] not in {k.split(":")[0] for k in known}]
-            from . import configops
-            sid = configops.snapshot(eng.svc, f"operator chat: routes of {a['name']} before change "
-                                               f"by {ctx.actor}")
-            fields: dict = {"pinned_models": [r["model"] for r in routes], "model_allowlist": on}
-            if a.get("enabled") is not None:
-                fields["enabled"] = 1 if a["enabled"] else 0
-            eng.svc.personas.upsert(p["virtual_name"], **fields)
-            eng.svc.db.log_event("info", "chat", f"persona {p['virtual_name']} routes changed by "
-                                 f"{ctx.actor} via operator chat: {', '.join(fields['pinned_models'])}")
-            return {"result": {"snapshot": sid, "routes": routes,
-                               "unknown_models": unknown,
-                               "note": ("these models are not served by any backend right now: "
-                                        + ", ".join(unknown)) if unknown else ""},
-                    "changed": [f"persona {p['virtual_name']}: routes {', '.join(on)}"
-                                + (f" (snapshot {sid})")]}
 
         @self._add("get_cutoffs", "The usage cutoffs in force (percent used at which a "
                    "subscription backend stops taking optional work): Claude, GPT, per backend.",
@@ -1992,6 +1960,10 @@ class ChatEngine:
                    f"{_compact(a.get('text'), 100)}")
         async def kb_edit(ctx: Ctx, a: dict):
             return await eng._memory_action(ctx, "playbook_edit", a)
+
+        # ---- personas, backends, the whole router (chat_router_tools.py) ----
+        from . import chat_router_tools
+        chat_router_tools.register(self)
 
         @self._add("ask_operator", "Ask the operator one question and end the turn; options are "
                    "shown as buttons.", "ask", {"text": {"type": "string", "max": 1000},

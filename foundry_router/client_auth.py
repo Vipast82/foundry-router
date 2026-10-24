@@ -59,6 +59,10 @@ _OPEN_PATHS = ("/", "/api/version", "/health")          # liveness probes stay o
 # anywhere, so only code inside this process can present it.
 INTERNAL_HEADER = "x-foundry-internal"
 INTERNAL_TOKEN = secrets.token_urlsafe(32)
+# The operator chat's in-process admin reads/writes (chat_router_tools.py):
+# admin scope, never sent off the process, a fresh value per start.
+INTERNAL_ADMIN_HEADER = "x-foundry-internal-admin"
+INTERNAL_ADMIN_TOKEN = secrets.token_urlsafe(32)
 # The Foundry Client's relay (foundry_client/relay.py) heart-beats, claims its
 # stack actions and reports them with an operator-scoped key. These routes
 # admit that scope; control_api.py then limits such a key to source kind
@@ -109,6 +113,10 @@ def identify(cfg, headers: dict, agent_tokens: Optional[dict] = None) -> tuple[O
     internal = headers.get(INTERNAL_HEADER)
     if internal and hmac.compare_digest(internal.encode(), INTERNAL_TOKEN.encode()):
         return ({"client_id": "foundry:validate", "scopes": ["inference", "media"],
+                 "personas": [], "internal": True}, True)
+    admin = headers.get(INTERNAL_ADMIN_HEADER)
+    if admin and hmac.compare_digest(admin.encode(), INTERNAL_ADMIN_TOKEN.encode()):
+        return ({"client_id": "foundry:operator-chat", "scopes": ["admin"],
                  "personas": [], "internal": True}, True)
     from .client_keys import matches
     keys = _keys_from(headers)

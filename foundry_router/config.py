@@ -844,6 +844,21 @@ class HealthConfig(BaseModel):
     fresh_minutes: int = 15
 
 
+class OperatorChatRoute(BaseModel):
+    backend: str
+    model: str
+
+
+class OperatorChatConfig(BaseModel):
+    """The operator chat's own model chain (Automation -> Chat -> settings).
+    Ordered: the first route that answers wins; each call is pinned to that
+    backend and passes the budget gate like any call. It never goes through a
+    persona, so persona edits can't break the chat. Empty = the built-in chain
+    (Claude Sonnet, then GPT-6.1 Sol, then the local Qwen) on whichever enabled
+    backend serves each."""
+    routes: list[OperatorChatRoute] = Field(default_factory=list)
+
+
 class AppConfig(BaseModel):
     # Config file format version (see migrate_raw); stamped on load.
     config_version: int = 1
@@ -874,10 +889,11 @@ class AppConfig(BaseModel):
     training_capture: TrainingCaptureConfig = Field(default_factory=TrainingCaptureConfig)
     perf: PerfConfig = Field(default_factory=PerfConfig)
     health: HealthConfig = Field(default_factory=HealthConfig)
+    operator_chat: OperatorChatConfig = Field(default_factory=OperatorChatConfig)
 
 
 # --------------------------------------------------------------------------- #
-# Load / save                                                                 #
+# Load / save                                                                #
 # --------------------------------------------------------------------------- #
 
 # --------------------------------------------------------------------------- #

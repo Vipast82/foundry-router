@@ -122,6 +122,32 @@ async def put_settings(request: Request):
     return {"auto_classes": _eng(request).set_auto_classes(b.get("auto_classes") or {}, s["actor"])}
 
 
+@router.get(P + "/backend")
+@_guard
+async def get_backend(request: Request):
+    """The chat's own model chain and what it could use (Chat settings)."""
+    _op(request)
+    from .chat_router_tools import chat_backend_view
+    return chat_backend_view(_eng(request))
+
+
+@router.put(P + "/backend")
+@_guard
+async def put_backend(request: Request):
+    """{routes: [{backend, model}]} — [] = the built-in chain."""
+    s = _op(request, mutate=True)
+    if s["projects"]:
+        raise ControlError("the chat backend is global; it needs an operator session that is not "
+                           "restricted to projects", "forbidden", 403)
+    from .chat_router_tools import apply_chat_routes, chat_backend_view
+    b = await _body(request)
+    eng = _eng(request)
+    await apply_chat_routes(eng, b.get("routes") or [], f"{s['actor']} (Chat settings)")
+    eng._audit("", "", "chat_backend", s["actor"], "chat backend: " + (", ".join(
+        f"{r.get('model')}@{r.get('backend')}" for r in b.get("routes") or []) or "built-in chain"))
+    return chat_backend_view(eng)
+
+
 @router.get(P + "/audit")
 @_guard
 async def audit(request: Request, thread: str = "", limit: int = 200):

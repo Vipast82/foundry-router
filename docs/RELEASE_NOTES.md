@@ -2,6 +2,59 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.140.0 — Operator chat runs the whole router; one rule set for personas
+
+Victor's ask: tell the chat "make Foundry-Chat use only local and Claude", "128K
+context", "turn off its MCP tools", "disable the GPT backend", "research the new
+models", "how is performance?", and have the chat's own model not depend on any
+persona. Plan approved 2026-10-24 (decisions A-I).
+
+- **Personas from the chat** (`chat_router_tools.py`, confirm class `persona`):
+  `set_persona_routes` (rewritten) takes model ids, `model@backend`, a backend
+  name, or the family words `local` / `Claude` / `ChatGPT` (`GPT`), which keep
+  the persona's current routes of that family; the card shows the concrete
+  `model@backend` and the routes before. A strict persona tied to a backend that
+  can't serve a new route is refused (it would never be used); `backend=""`
+  unties it. `set_persona_fields` (context window, max output, reasoning
+  effort, local bias, routing, backend, description, MCP grants with
+  `mcp_add` / `mcp_remove`, fallback policy, ...), `create_persona` (copy or
+  `strict-chat` / `flexible-chat` template, starts disabled, names the client
+  keys whose allow-list must add it), `grant_persona_to_client`,
+  `run_persona_evals`. Every persona write reminds you to run its evals.
+- **One rule set** (`persona_rules.py`): the Personas tab's save
+  (`POST /admin/api/personas`) and the chat use the same validation; a bad value
+  is refused with 400 (`errors`, `warnings` in the body). Old spellings are
+  normalized (`xhigh` -> `max`, `flexible` -> unset, `{}` lists -> `[]`). Checked
+  against every persona on the live router before shipping.
+- **Backends**: `set_backend_enabled` (class `backend`) — the same write as the
+  Pool / Routing switch (`router_ops.py`, also behind
+  `POST /admin/api/backends/enabled`); the card lists every persona left with no
+  usable route.
+- **The whole router**: `list_admin_endpoints` (generated from the app),
+  `admin_get` (any admin GET; secret values scrubbed), `get_router_config` /
+  `set_router_config` (class `router_config`: config.yaml through
+  `configops.apply_raw` — validated before the card, a Config history version,
+  applied live where possible, restart-needed shown; secrets refused),
+  `admin_call` (class `admin`: any other admin write; client-key create/rotate,
+  Meridian sign-in, MCP tokens, import, the raw backend list and router restart
+  are refused; deletes and clears always show a red "can't be undone" card even
+  with the class on auto), `research_status` / `research_models`,
+  `performance_report`. The chat calls the admin API in-process under its own
+  internal admin identity (`client_auth.INTERNAL_ADMIN_TOKEN`, per process).
+- **The chat's own model** (`operator_chat.routes` in config.yaml; Chat ->
+  Settings... -> Chat model; `GET/PUT /control/api/chat/backend`;
+  `get_chat_backend` / `set_chat_backend`): an ordered `{backend, model}` list,
+  each call pinned to its backend through the pool (budget gate applies), next
+  route on failure. It never goes through a persona: the `Foundry-Operator-Chat`
+  persona is no longer created or used. Empty = Claude Sonnet, GPT-6.1 Sol,
+  local Qwen on the first enabled backend serving each.
+- Shared helpers: `route_resolve.py` (family resolution, reachability, orphaned
+  personas; the Automation page's seed uses its `status_with_models`).
+- Tests: tests/test_chat_router_tools.py (rules, resolution, every tool's card,
+  snapshot, refusals, unknown-model and orphan warnings, deny list,
+  irreversible-on-auto, scrubbing, chat chain pinning and failover, the
+  settings endpoint).
+
 ## v0.139.2 — Persona tool loop: always an answer at the round cap
 
 AnythingLLM's @agent got "Agent session complete" with no answer on a long

@@ -223,7 +223,7 @@ async def apply_raw(svc, new_raw: dict, source: str) -> dict:
 # Sections every component reads live from config_store.config (no action needed).
 _LIVE = {"budgets", "media", "health", "subscription_usage", "clients", "client_auth",
          "persona_profiles", "data_retention", "config_version", "turn_assist",
-         "training_capture", "perf"}
+         "training_capture", "perf", "operator_chat", "helper_policy"}
 _RESTART = {"server", "mcp_servers", "agents", "mcp_aggregator", "logging", "registry",
             "tool_sync", "semantic_cache"}
 
