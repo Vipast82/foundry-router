@@ -57,7 +57,13 @@ could not stop the old process reports `failed: ...` and is not counted.
 old `[components.media]` table is dropped from `client.toml` on load (the previous file is kept
 as `client.toml.before-migration`). The Doctor checks that `kilo.jsonc` has a `foundry-media`
 entry whose script exists and that `FOUNDRY_KEY` reaches Kilo (entry environment, the Kilo
-component's secrets, the user environment, or the adapter's `foundry-media.json`).
+component's secrets, the user environment, or the adapter's `foundry-media.json`). When none of
+those has it but the entry runs a launcher script that loads the key itself (for example
+`config/workstation/start_media_adapter.ps1`, which reads the DPAPI file
+`~/.foundry-coordinator/media-credential.xml`), the Doctor runs the launcher's own check mode
+(`-Check` for a PowerShell `[switch]$Check`, `--check` otherwise) and trusts its exit code: pass
+is ok, fail is red, a timeout or a self-loading launcher with no check mode is a warning. The
+launcher's output is never shown and the key is never read. With no key anywhere the row is red.
 
 **Kilo configuration.** "Apply role rules to kilo.jsonc" on the status page (or
 `foundry-client apply-kilo-config`) runs `foundry-client coordinator kilo-config <project>

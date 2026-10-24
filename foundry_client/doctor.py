@@ -4,6 +4,7 @@ not set up)."""
 from __future__ import annotations
 
 import os
+import re
 import subprocess
 import sys
 
@@ -13,6 +14,8 @@ from .config import COMPONENTS, expand
 from .probe import NO_WINDOW, get_json, port_owner_pid
 
 ADAPTER_MARKERS = ("foundry_media_mcp", "foundry-media")
+SCRIPT_EXTS = (".py", ".ps1", ".cmd", ".bat", ".sh")
+LAUNCHER_CHECK_TIMEOUT = 30
 
 
 def _c(id_: str, label: str, status: str, detail: str) -> dict:
@@ -151,20 +154,31 @@ def _adapter_check(mcp: dict, cfg: dict) -> dict:
             problems.append(f"type is {e.get('type')!r}, the adapter is a local (stdio) server")
     argv = _argv(e)
     script = next((a for a in argv if a.lower().endswith(".py") and "media" in a.lower()), "")
-    launcher = argv[0] if argv else ""
-    target = script or launcher
+    launcher = _launcher_script(argv)
+    target = script or launcher or (argv[0] if argv else "")
     if not argv:
         problems.append("no command")
     elif target and os.path.isabs(expand(target)) and not os.path.exists(expand(target)):
         problems.append(f"{target} does not exist")
     env = (e.get("environment") or e.get("env") or {}) if isinstance(e, dict) else {}
-    if not _key_available(argv, env, cfg):
-        problems.append("FOUNDRY_KEY is not available to Kilo: put it in the entry's "
-                        "environment, add FOUNDRY_KEY to the Kilo component's secrets and set it "
-                        "on the Secrets tab, or set it as a user environment variable")
+    key_note, warn = "", ""
+    if argv and not problems and not _key_available(argv, env, cfg):
+        verdict, note = _launcher_self_check(argv, env)
+        if verdict == "ok":
+            key_note = note
+        elif verdict == "warn":
+            warn = note
+        else:
+            problems.append(note or (
+                "FOUNDRY_KEY is not available to Kilo: put it in the entry's environment, add "
+                "FOUNDRY_KEY to the Kilo component's secrets and set it on the Secrets tab, set "
+                "it as a user environment variable, or launch the adapter through a script that "
+                "loads it"))
     if problems:
         return _c("media_adapter", label, "fail", f"{name}: " + "; ".join(problems))
-    return _c("media_adapter", label, "ok", f"{name}: {' '.join(argv)[:120]}")
+    if warn:
+        return _c("media_adapter", label, "warn", f"{name}: {warn}")
+    return _c("media_adapter", label, "ok", f"{name}: {key_note or ' '.join(argv)[:120]}")
 
 
 def _argv(e) -> list:
@@ -184,14 +198,8 @@ def _key_available(argv: list, env: dict, cfg: dict) -> bool:
         return True
     if "FOUNDRY_KEY" in (cfg["components"]["kilo"].get("secrets") or [])             and secrets.status(["FOUNDRY_KEY"]).get("FOUNDRY_KEY"):
         return True
-    if sys.platform == "win32":
-        try:
-            import winreg
-            with winreg.OpenKey(winreg.HKEY_CURRENT_USER, "Environment") as k:
-                if winreg.QueryValueEx(k, "FOUNDRY_KEY")[0]:
-                    return True
-        except OSError:
-            pass
+    if _user_env_has_key():
+        return True
     for a in argv:
         f = os.path.join(os.path.dirname(expand(a)), "foundry-media.json")
         if os.path.isabs(expand(a)) and os.path.isfile(f):
@@ -202,3 +210,67 @@ def _key_available(argv: list, env: dict, cfg: dict) -> bool:
             except (OSError, ValueError):
                 pass
     return False
+
+
+def _user_env_has_key() -> bool:
+    """FOUNDRY_KEY set as a user environment variable (Windows registry; new processes get it
+    even when this one started before it was set). Only presence is checked."""
+    if sys.platform != "win32":
+        return False
+    try:
+        import winreg
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, "Environment") as k:
+            return bool(winreg.QueryValueEx(k, "FOUNDRY_KEY")[0])
+    except OSError:
+        return False
+
+
+def _launcher_script(argv: list) -> str:
+    """The script the entry runs (start_media_adapter.ps1, a .cmd/.sh wrapper, the .py adapter)."""
+    return next((a for a in argv if a.lower().endswith(SCRIPT_EXTS)), "")
+
+
+# The launcher sets FOUNDRY_KEY for the adapter itself ($env:FOUNDRY_KEY = ..., export
+# FOUNDRY_KEY=..., set FOUNDRY_KEY=..., os.environ["FOUNDRY_KEY"] = ...).
+_SETS_KEY = re.compile(r"FOUNDRY_KEY['\"]?\]?\s*=(?!=)", re.I)
+_PS_CHECK = re.compile(r"\[switch\]\s*\$Check\b", re.I)
+
+
+def _launcher_self_check(argv: list, env: dict) -> tuple:
+    """For an entry whose launcher script provides the key itself, run the launcher's own check
+    mode (-Check for a PowerShell script with a [switch]$Check, --check otherwise) and trust its
+    exit code. Returns (verdict, note): ok | warn | fail, or ("", "") when the launcher neither
+    loads the key nor has a check mode. The launcher's output is never shown: it is the one
+    place the key could appear."""
+    script = _launcher_script(argv)
+    path = expand(script) if script else ""
+    if not path or not os.path.isfile(path):
+        return "", ""
+    try:
+        with open(path, encoding="utf-8", errors="replace") as f:
+            text = f.read(200_000)
+    except OSError:
+        return "", ""
+    base = os.path.basename(path)
+    loads = bool(_SETS_KEY.search(text))
+    flag = "-Check" if path.lower().endswith(".ps1") and _PS_CHECK.search(text) else (
+        "--check" if "--check" in text else "")
+    if not flag:
+        if loads:
+            return "warn", (f"{base} loads FOUNDRY_KEY itself but has no check mode, so the "
+                            "Doctor cannot confirm it works")
+        return "", ""
+    run_env = {**os.environ, **{str(k): str(v) for k, v in (env or {}).items()}}
+    try:
+        r = subprocess.run([expand(a) for a in argv] + [flag], env=run_env, capture_output=True,
+                           text=True, timeout=LAUNCHER_CHECK_TIMEOUT,
+                           stdin=subprocess.DEVNULL, creationflags=NO_WINDOW)
+    except subprocess.TimeoutExpired:
+        return "warn", f"{base} {flag} did not finish in {LAUNCHER_CHECK_TIMEOUT}s"
+    except OSError as ex:
+        return "fail", f"could not run {base} {flag}: {ex.strerror or ex}"
+    if r.returncode == 0:
+        how = "loads FOUNDRY_KEY itself" if loads else "finds FOUNDRY_KEY"
+        return "ok", f"{base} {how}; its {flag} passed"
+    return "fail", (f"FOUNDRY_KEY not confirmed: {base} {flag} failed (exit {r.returncode}); "
+                    f"run it by hand to see why")

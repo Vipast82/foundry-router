@@ -2,6 +2,24 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.139.1 — Doctor: media adapter key loaded by its launcher is not a red
+
+The client's Doctor showed "foundry-media: FOUNDRY_KEY is not available to Kilo"
+and "Something blocks the stack" on a working setup: the kilo.jsonc entry runs
+`config/workstation/start_media_adapter.ps1`, which loads the key itself from
+its DPAPI credential file, and the Doctor only looked at the entry environment,
+Kilo secrets, the user environment and `foundry-media.json`.
+
+- When none of those has the key, the Doctor now runs the entry's launcher in
+  its own check mode (`-Check` for a PowerShell `[switch]$Check`, `--check`
+  otherwise; 30 s limit) and trusts the exit code: pass → ok, fail → red, timed
+  out or self-loading with no check mode → warning. The launcher's output is
+  never shown and the key is never read. No key anywhere stays red.
+- The user-environment (registry) lookup moved into `_user_env_has_key()`.
+- Tests: tests/client/test_doctor_media_key.py (env, secret, launcher check
+  passes / fails / times out / has no check mode, nothing provided, a real
+  PowerShell `-Check`).
+
 ## v0.139.0 — Client tab: download, install guide, chat install help
 
 Victor's ask: somewhere in the web GUI to get the Foundry Client and read how
