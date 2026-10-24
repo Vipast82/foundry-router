@@ -34,6 +34,7 @@ from typing import Callable, Optional
 
 from . import states as S
 from .adapters.foundry import FoundryError, admitted_routes, pinned_meta
+from .store import add_column
 
 OPTIONAL_KINDS = ("code_proposal", "test_design", "debug_advice", "exploration")
 SCHEMA = """
@@ -302,10 +303,7 @@ class HelperManager:
         # v0.122.0 -> phase / reason_code / investigation_key (status unchanged)
         for col in ("requests INTEGER DEFAULT 1", *LANE_COLUMNS, *STATUS_COLUMNS,
                     *CONSUMER_COLUMNS):
-            try:
-                self.store.conn.execute(f"ALTER TABLE helper_units ADD COLUMN {col}")
-            except Exception:                                    # noqa: BLE001
-                pass
+            add_column(self.store.conn, "helper_units", col)
         self._backfill_status()
         from .proactive import Proactive
         self.lanes = Proactive(self)

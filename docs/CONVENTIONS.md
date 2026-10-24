@@ -9,6 +9,10 @@ debugging time.
 Every user-visible change bumps `__version__` in `foundry_router/__init__.py`
 (patch for fixes, minor for features). The UI header and `/api/version` read
 it, so a deployment's behavior is always attributable to an exact version.
+`foundry_coordinator/__init__.py` carries the same version (bump both;
+`foundry_client` imports the router's). `tests/test_version_parity.py` fails
+when they disagree or when the newest `docs/RELEASE_NOTES.md` entry is not
+this version.
 
 ## Version tag per version
 

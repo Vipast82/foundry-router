@@ -138,6 +138,20 @@ def _owner_dead(owner_id: str) -> bool:
         return False
 
 
+def add_column(conn, table: str, coldef: str) -> bool:
+    """Additive migration: ALTER TABLE ADD COLUMN, ignoring only "duplicate
+    column name" (the column is already there). Any other error (a locked
+    database, a bad definition, a missing table) is raised, so a half-migrated
+    schema fails at startup instead of later as "no such column"."""
+    try:
+        conn.execute(f"ALTER TABLE {table} ADD COLUMN {coldef}")
+        return True
+    except sqlite3.OperationalError as exc:
+        if "duplicate column name" in str(exc).lower():
+            return False
+        raise
+
+
 class Store:
     def __init__(self, path: str):
         self.path = str(path)

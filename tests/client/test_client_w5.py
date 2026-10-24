@@ -687,3 +687,52 @@ def test_a_wrong_password_on_an_open_port_is_reported_not_launched_over(cfg, mon
     st = m.status("kilo")
     assert not launched and st["state"] == "error"
     assert "password" in st["detail"] and "another process" in st["detail"]
+
+
+# --------------------------------------------------------------- coordinator heartbeat pid
+
+def _coordinator_only(cfg, tmp_path, pid):
+    """Coordinator on (no `after`), a fresh heartbeat written by `pid`."""
+    cfg["components"]["kilo"]["enabled"] = False
+    cfg["components"]["coordinator"].update(enabled=True, after=[])
+    state = tmp_path / "state"
+    state.mkdir(exist_ok=True)
+    import time as _t
+    (state / "coordinator.heartbeat").write_text(
+        json.dumps({"pid": pid, "ts": _t.time(), "ok": True}), encoding="utf-8")
+    launched = []
+    m = Manager(cfg, popen=lambda argv, **k: launched.append(argv) or FakeProc(argv, **k),
+                clock=Clock())
+    return m, launched
+
+
+def test_fresh_heartbeat_of_a_dead_coordinator_is_not_adopted(cfg, tmp_path, monkeypatch, killed):
+    """Force-stop, restart the client: the old heartbeat is seconds old but its process is
+    gone, so the client launches a new coordinator at once instead of adopting a ghost."""
+    monkeypatch.setattr(C, "pid_alive", lambda pid: False)
+    m, launched = _coordinator_only(cfg, tmp_path, 4242)
+    ok, why = C._hb_health(cfg["client"]["state_dir"])
+    assert not ok and "4242" in why and "ended" in why
+    m.start("coordinator")
+    pr = m.procs["coordinator"]
+    assert len(launched) == 1 and "coordinator" in launched[0]
+    assert pr.p is not None and not pr.adopted
+    assert "outside the client" not in m.status("coordinator")["detail"]
+
+
+def test_fresh_heartbeat_of_a_live_coordinator_is_still_adopted(cfg, tmp_path, monkeypatch, killed):
+    monkeypatch.setattr(C, "pid_alive", lambda pid: pid == 4242)
+    m, launched = _coordinator_only(cfg, tmp_path, 4242)
+    m.start("coordinator")
+    assert not launched and m.procs["coordinator"].adopted
+    assert "outside the client" in m.status("coordinator")["detail"]
+
+
+def test_heartbeat_without_a_pid_is_judged_by_age_alone(tmp_path, monkeypatch):
+    import time as _t
+    monkeypatch.setattr(C, "pid_alive", lambda pid: False)
+    (tmp_path / "coordinator.heartbeat").write_text(json.dumps({"ts": _t.time()}), encoding="utf-8")
+    assert C._hb_health(str(tmp_path))[0] is True
+    (tmp_path / "coordinator.heartbeat").write_text(json.dumps({"ts": _t.time() - 120}),
+                                                    encoding="utf-8")
+    assert C._hb_health(str(tmp_path))[0] is False

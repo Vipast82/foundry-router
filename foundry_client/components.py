@@ -306,19 +306,32 @@ def services_report(cfg: dict, mcp_rows: list[dict], comp_states: dict,
 
 
 def _hb_health(state: str) -> tuple[bool, str]:
+    """Coordinator health: a fresh heartbeat (< 90 s) whose process still exists.
+    After a force-stop the dead coordinator's last heartbeat stays fresh for up to
+    90 s; checking its pid keeps a restarted client from adopting it as "started
+    outside the client" instead of launching a new one. A heartbeat without a pid
+    (older coordinators) is judged by age alone."""
     age = heartbeat_age(state)
     if age is None:
         return False, "no heartbeat yet"
+    pid = _heartbeat_raw_pid(state)
+    if pid and not pid_alive(pid):
+        return False, f"heartbeat {int(age)} s ago, but its process (pid {pid}) has ended"
     return age < 90, f"heartbeat {int(age)} s ago"
+
+
+def _heartbeat_raw_pid(state_dir: str) -> Optional[int]:
+    """The pid written in the coordinator's heartbeat, alive or not."""
+    p = Path(expand(state_dir)) / "coordinator.heartbeat"
+    try:
+        return int(json.loads(p.read_text(encoding="utf-8")).get("pid") or 0) or None
+    except (OSError, ValueError, TypeError, AttributeError):
+        return None
 
 
 def heartbeat_pid(state_dir: str) -> Optional[int]:
     """The pid in the coordinator's heartbeat, if that process is alive."""
-    p = Path(expand(state_dir)) / "coordinator.heartbeat"
-    try:
-        pid = int(json.loads(p.read_text(encoding="utf-8")).get("pid") or 0)
-    except (OSError, ValueError, TypeError):
-        return None
+    pid = _heartbeat_raw_pid(state_dir)
     return pid if pid and pid_alive(pid) else None
 
 

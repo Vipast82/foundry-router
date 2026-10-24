@@ -2,6 +2,36 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.141.1 — Coordinator version label, loud migrations, no dead-coordinator adoption
+
+Three small defects found while operating v0.141.0 (2026-10-23/24):
+
+- **Coordinator version label**: `foundry_coordinator.__version__` had stayed
+  at 0.138.0 since v0.138.1 bumped only the router (the bridge heartbeat's
+  `coordinator_version` and `foundry_coordinator status` reported it). It now
+  matches the release, and `tests/test_version_parity.py` fails when the
+  router, coordinator and client versions disagree, or when the newest
+  release-notes entry is not the current version.
+- **Swallowed migration errors**: the additive `ALTER TABLE ... ADD COLUMN`
+  migrations for `helper_units` (helpers.py) and `source_snapshots`
+  (artifacts.py) ignored every exception. They now share
+  `store.add_column`, which ignores only "duplicate column name" and raises
+  anything else (a locked database, a bad definition), so a half-migrated
+  table fails at startup instead of later as "no such column: phase" (the
+  one-off failure in test_lead_full_authority seen during the v0.138.1
+  triage). The other coordinator migrations (store.py, evidence.py,
+  obligations.py) already checked `PRAGMA table_info` first and were left
+  as they are.
+- **Client adopted a dead coordinator**: coordinator health was heartbeat
+  age < 90 s alone, so after a force-stop the restarted client took the dead
+  coordinator's last heartbeat for one "started outside the client" and did
+  not launch a coordinator for up to 90 s. Health now also needs the
+  heartbeat's pid to be alive; a heartbeat whose process has ended counts as
+  not running and the client starts a fresh coordinator at once. A heartbeat
+  without a pid is still judged by age alone.
+
+No schema, API or config change.
+
 ## v0.141.0 — Brain metrics, who uses the router, which model answered
 
 Victor's ask: track the brain's performance, see live which clients use the

@@ -51,6 +51,7 @@ import zlib
 from typing import Optional
 
 from .profile import matches_any
+from .store import add_column
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS artifacts (
@@ -227,10 +228,7 @@ class ArtifactStore:
         # v0.119.1, additive: scoped identity. Existing rows keep content_fp NULL
         # (= legacy content-only id) and their recorded owner; nothing is rewritten.
         for col in ("content_fp TEXT", "workspace TEXT"):
-            try:
-                store.conn.execute(f"ALTER TABLE source_snapshots ADD COLUMN {col}")
-            except Exception:                                    # noqa: BLE001
-                pass
+            add_column(store.conn, "source_snapshots", col)
 
     # -- artifacts -------------------------------------------------------------
 
