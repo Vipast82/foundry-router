@@ -833,19 +833,52 @@ def _build_ctx(svc, persona: dict, model_name: str, messages: list[dict],
 def _direct_mcp_tools(svc, persona: dict, client_tools) -> dict:
     """name -> ToolDef of the persona's attached MCP tools to offer in direct
     mode (merged with the client's tools). Empty when the persona has none
-    attached or turned mcp_tools_in_direct off. A client tool with the same
-    name wins — the client's own toolbox is never shadowed."""
+    attached or turned mcp_tools_in_direct off. When the client brings its own
+    tools, mcp_with_client_tools on the client key, else on the persona, else
+    "all" decides (tool_policy). A client tool with the same name wins — the client's own
+    toolbox is never shadowed."""
+    return _direct_mcp_split(svc, persona, client_tools)[0]
+
+
+def _client_tool_override(svc) -> tuple:
+    """(this client's mcp_with_client_tools, who set it): the client key's
+    own setting, or client_auth.keyless_mcp_with_client_tools for a request
+    without a (known) key. (None, "") when nothing is set there."""
+    try:
+        from ..client_auth import current
+        cid = current().get("client_id") or "anonymous"
+        cfg = svc.config_store.config
+        if cid == "anonymous":
+            v = getattr(cfg.client_auth, "keyless_mcp_with_client_tools", None)
+            return v, "keyless clients"
+        c = next((c for c in cfg.clients or [] if c.name == cid), None)
+        return (getattr(c, "mcp_with_client_tools", None), f"client {cid}") if c else (None, "")
+    except Exception:                                             # noqa: BLE001
+        return None, ""
+
+
+def _direct_mcp_split(svc, persona: dict, client_tools) -> tuple[dict, int, str]:
+    """(offered name -> ToolDef, how many granted tools were withheld because
+    the client brought its own, how it was decided — e.g. "client anythingllm:
+    only searxng, kokoro-tts")."""
+    from .. import tool_policy
     if not persona or not _persona_has_mcp_tools(persona):
-        return {}
+        return {}, 0, ""
     flag = persona.get("mcp_tools_in_direct")
     if flag is not None and not int(flag):
-        return {}
+        return {}, 0, ""
     try:
         tools = svc.tool_registry.mcp_tools_for_persona(persona)
     except Exception:
-        return {}
+        return {}, 0, ""
     client_names = {((t or {}).get("function") or {}).get("name") for t in (client_tools or [])}
-    return {t.name: t for t in tools if t.name not in client_names}
+    granted = [t for t in tools if t.name not in client_names]
+    override, who = _client_tool_override(svc) if client_tools else (None, "")
+    offered, mode, source = tool_policy.select(persona, granted, client_tools, override)
+    raw = override if source == "client" else persona.get("mcp_with_client_tools")
+    why = ({"client": who, "persona": f"persona {persona.get('virtual_name')}"}.get(source, "default")
+           + ": " + tool_policy.describe(raw)) if client_tools else ""
+    return {t.name: t for t in offered}, len(granted) - len(offered), why
 
 
 class _LazyFailover:
@@ -2040,8 +2073,18 @@ async def _direct_dispatch_chat(svc, persona, model_name, messages, client_tools
     # A structured-output request (client format, no client tools) is a one-shot
     # JSON answer: the persona's MCP tools are left off so the format can be
     # applied, instead of the tools winning and the schema being dropped.
-    mcp_defs = ({} if client_format is not None and not client_tools
-                else _direct_mcp_tools(svc, persona, client_tools))
+    # Client brought its own tools: mcp_with_client_tools on the client key,
+    # else on the persona, else all, decides which granted tools still ride
+    # along (tool_policy).
+    mcp_withheld, mcp_mode = 0, ""
+    if client_format is not None and not client_tools:
+        mcp_defs = {}
+    else:
+        mcp_defs, mcp_withheld, mcp_mode = _direct_mcp_split(svc, persona, client_tools)
+    if mcp_withheld:
+        logger.record_guardrail(f"{mcp_withheld} persona MCP tool(s) left out: the client "
+                                f"brought {len(client_tools or [])} of its own "
+                                f"(MCP tools with client tools, {mcp_mode})")
     all_tools = (list(client_tools or []) + [td.spec() for td in mcp_defs.values()]) or None
     if mcp_defs:
         fmt = None                        # structured output would break tool calls
@@ -2528,10 +2571,21 @@ async def _direct_dispatch_chat(svc, persona, model_name, messages, client_tools
             if mcp_defs:
                 yield tr.chat_chunk(model_name, "", done=False,
                                     thinking=f"🔧 {len(mcp_defs)} persona MCP tool(s) available "
-                                             f"alongside {len(client_tools or [])} client tool(s)\n")
+                                             f"alongside {len(client_tools or [])} client tool(s)"
+                                             + (f" ({mcp_withheld} left out — {mcp_mode})"
+                                                if mcp_withheld else "") + "\n")
+            elif mcp_withheld:
+                yield tr.chat_chunk(model_name, "", done=False,
+                                    thinking=f"🔧 {mcp_withheld} persona MCP tool(s) left out — "
+                                             f"the client brought {len(client_tools or [])} "
+                                             f"of its own ({mcp_mode})\n")
             hb = float(brain_cfg.direct_stream_heartbeat_seconds or 0)
             stall = float(getattr(brain_cfg, "direct_stream_stall_seconds", 0) or 0)
             pacer = keepalive.Pacer(keepalive.visible_every(brain_cfg))   # one per request
+            # before a call's first token: prompt-reading progress lines, and
+            # an earlier first "still working" line when there's no progress
+            reporter = keepalive.PrefillReporter(
+                enabled=bool(getattr(brain_cfg, "prefill_progress_lines", True)))
             fail_reason = ""
             attempt = -1
             while True:
@@ -2576,16 +2630,33 @@ async def _direct_dispatch_chat(svc, persona, model_name, messages, client_tools
                        else _think_for(svc, model_id, persona, client_think)),
                 fmt=fmt)
                         prog: dict = {}
-                        async for _kind, _payload in _stream_with_heartbeat(_src, hb, hb_start,
-                                                                            stall, prog):
+                        reporter.reset()
+                        wait_pacer = keepalive.Pacer(keepalive.visible_every(brain_cfg),
+                                                     first=keepalive.first_visible(brain_cfg))
+                        async for _kind, _payload in _stream_with_heartbeat(
+                                _src, hb, hb_start, stall, prog, progress_events=True):
+                            if _kind == "progress":
+                                # prompt-reading progress before the first
+                                # token: a few lines per call, not one per frame
+                                _pl = (reporter.line(prog, _payload)
+                                       if ttft_ms is None else None)
+                                if _pl and not quiet:
+                                    yield tr.chat_chunk(model_name, "", done=False,
+                                                        thinking=_pl)
+                                continue
                             if _kind == "beat":
                                 # Keep-alive bytes every beat; a visible status
                                 # line only at milestones (30s, 60s, then every
                                 # heartbeat_visible_seconds) — not a new line
                                 # in the client's thinking panel every 5s.
+                                # Nothing produced and no progress report yet
+                                # (queued, or no progress support): the first
+                                # line comes sooner (heartbeat_first_visible_seconds).
+                                _pc = (wait_pacer if ttft_ms is None and not prog.get("prefill")
+                                       else pacer)
                                 yield tr.chat_chunk(
                                     model_name, "", done=False,
-                                    thinking=pacer.line(
+                                    thinking=_pc.line(
                                         f"{_tag} · {model_id}", _payload,
                                         f"sent {walltime.hms(sent.wall)} · "
                                         f"now {walltime.hms(walltime.now())[:8]} UTC · "

@@ -7,6 +7,9 @@ set_backend_enabled   park / unpark one backend (config.yaml + pool rebuild):
 grant_persona         add a persona to one client key's persona allow-list
                       (what PATCH /admin/api/setup/clients/<name> writes)
 clients_missing       client keys whose allow-list would refuse a persona
+set_client_tool_policy  one client key's (or keyless clients') MCP tools with
+                      client tools (v0.142.0; what PATCH /admin/api/setup/
+                      clients/<name> and POST .../client_auth write)
 """
 
 from __future__ import annotations
@@ -69,3 +72,40 @@ def grant_persona(svc, client: str, persona: str, actor: str = "operator") -> Op
     svc.config_store.save(mutate)
     svc.db.log_event("info", "client_auth", f"client {client}: persona {persona} allowed by {actor}")
     return new
+
+
+KEYLESS = ("keyless", "untracked", "anonymous")
+
+
+def set_client_tool_policy(svc, client: str, value, actor: str = "operator"):
+    """Set which persona MCP tools ride along when `client` sends its own
+    tools (tool_policy): None/"default" = follow the persona, "off", "all",
+    "dedupe", or a list of server/tool names. client "keyless" = requests
+    without a known key. Returns (stored value, warnings)."""
+    from . import persona_rules
+    out, errors, warnings = persona_rules.validate_client_tools_policy(svc, value)
+    if errors:
+        raise OpError("; ".join(errors))
+    name = (client or "").strip()
+    if name.lower() in KEYLESS:
+        def mutate(raw):
+            ca = raw.get("client_auth") or {}
+            ca["keyless_mcp_with_client_tools"] = out
+            raw["client_auth"] = ca
+        who = "keyless clients"
+    else:
+        if not any(c.name == name for c in svc.config_store.config.clients or []):
+            raise OpError(f"no client named {name!r} (or 'keyless' for requests without a key)",
+                          404)
+
+        def mutate(raw):
+            for c in raw.get("clients") or []:
+                if c.get("name") == name:
+                    c["mcp_with_client_tools"] = out
+        who = f"client {name}"
+    svc.config_store.save(mutate)
+    from . import tool_policy
+    svc.db.log_event("info", "client_auth", f"{who}: MCP tools with client tools = "
+                     f"{tool_policy.describe(out) if out is not None else 'follow the persona'} "
+                     f"(by {actor})")
+    return out, warnings

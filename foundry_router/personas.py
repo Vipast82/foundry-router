@@ -22,7 +22,7 @@ PERSONA_FIELDS = ["description", "benchmark_category", "local_bias_strength",
                   "output_style", "model_allowlist", "reasoning_effort",
                   "escalate_when_local_busy", "expose_tool_trail",
                   "sampling_options", "output_format", "force_reasoning_effort",
-                  "mcp_tools_in_direct", "agent_backend", "max_output_tokens",
+                  "mcp_tools_in_direct", "mcp_with_client_tools", "agent_backend", "max_output_tokens",
                   "assist", "fallback_policy", "quiet_narration", "routing", "backend",
                   "capabilities", "kind", "enabled", "route_footer"]
 
@@ -50,7 +50,7 @@ class PersonaStore:
         for k in ("escalation_triggers", "preferred_mcp_tools", "guardrail_overrides",
                   "pinned_models", "required_tags", "selection_weights",
                   "client_compat", "model_allowlist", "sampling_options", "assist",
-                  "capabilities"):
+                  "capabilities", "mcp_with_client_tools"):
             if k in fields and not isinstance(fields[k], (str, type(None))):
                 fields[k] = json.dumps(fields[k])
         fields = {k: v for k, v in fields.items() if k in PERSONA_FIELDS}

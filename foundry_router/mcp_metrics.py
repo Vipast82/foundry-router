@@ -204,7 +204,9 @@ def context_budget(svc: Any, context_tokens: Optional[int] = None) -> dict:
             if (p.get("execution_mode") or "agent") != "direct":
                 modes.append("worker / brain")
             if p.get("mcp_tools_in_direct") is None or int(p.get("mcp_tools_in_direct") or 0):
-                modes.append("direct (merged with client tools)")
+                from . import tool_policy
+                modes.append("direct (with client tools: "
+                             + tool_policy.describe(p.get("mcp_with_client_tools")) + ")")
             out.append(entry(p["virtual_name"], "persona", tools,
                              "persona: " + ", ".join(modes) + " · aggregator persona endpoint"))
     per_tool_all = sorted(({"tool": t.name, "server": t.server,

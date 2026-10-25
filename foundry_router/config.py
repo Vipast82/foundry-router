@@ -20,7 +20,7 @@ import os
 import re
 import shutil
 from pathlib import Path
-from typing import Any, Literal, Optional
+from typing import Any, Literal, Optional, Union
 
 import yaml
 from pydantic import BaseModel, Field
@@ -124,6 +124,19 @@ class AgentBrainConfig(BaseModel):
     # shown only at ~30s, ~60s, then every N seconds (each visible line is a new
     # line in the client's thinking panel). 0 = never show, bytes only.
     heartbeat_visible_seconds: int = 60
+    # Direct streaming, before a model call's first token: the first visible
+    # "still working" line comes at this many seconds instead of 30 (then 20s,
+    # 40s, 60s … as above). Covers a wait with no progress report: queued
+    # behind a busy single-slot server, or a backend that can't report
+    # prompt progress. 0 = the old 30s.
+    heartbeat_first_visible_seconds: int = 10
+    # Direct streaming: show llama.cpp / Strata prompt-reading progress
+    # ("⏳ reading prompt… 45% (8.2k / 18k new tokens) · 7s") before the first
+    # token — the first report, then each 25% step, at most 4 lines a call;
+    # prompts with under 4k tokens to read show none. Status lines only: the
+    # prompt, think level and cache are untouched, and the lines are scrubbed
+    # from history a client echoes back.
+    prefill_progress_lines: bool = True
     # Context guard (direct / raw-model paths): before dispatch, estimate the
     # prompt (messages + tool definitions) and, if it would overflow the model's
     # window minus the output reserve, trim the copy sent to the model — oldest
@@ -710,6 +723,11 @@ class ClientConfig(BaseModel):
     # under each answer, and the route line in a buffered reply's reasoning.
     # For clients that hide reasoning (AnythingLLM's agent view, Open WebUI).
     route_footer: bool = False
+    # v0.142.0: which persona MCP tools ride along when THIS client sends its
+    # own tools: None = follow the persona, "off", "all", "dedupe" (skip ones
+    # duplicating the client's own), or a list of MCP server/tool names (only
+    # within the persona's grants). See tool_policy.
+    mcp_with_client_tools: Optional[Union[str, list]] = None
     note: str = ""                     # free text: what/where this client is
     created: Optional[str] = None      # ISO time the key was made / last rotated
 
@@ -725,6 +743,9 @@ class ClientAuthConfig(BaseModel):
     # while keys are rolled out (clients such as Cline's OpenAI-compatible
     # provider always send whatever is in their API-key field).
     unknown_keys: Literal["refuse", "anonymous"] = "refuse"
+    # v0.142.0: mcp_with_client_tools for requests WITHOUT a known key
+    # (untracked clients). Same values as ClientConfig.mcp_with_client_tools.
+    keyless_mcp_with_client_tools: Optional[Union[str, list]] = None
 
 
 class MediaConfig(BaseModel):

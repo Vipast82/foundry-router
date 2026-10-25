@@ -74,6 +74,7 @@ def _view(c, usage: dict, seen: dict) -> dict:
     return {"name": c.name, "scopes": list(c.scopes), "personas": list(c.personas),
             "projects": list(getattr(c, "projects", None) or []), "enabled": c.enabled, "note": c.note, "created": c.created,
             "route_footer": bool(getattr(c, "route_footer", False)),
+            "mcp_with_client_tools": getattr(c, "mcp_with_client_tools", None),
             "key_kind": client_keys.key_kind(c),
             "key_hint": c.key_hint,
             "usage": usage.get(c.name) or {}, "seen": seen.get(c.name),
@@ -197,6 +198,14 @@ async def update_client(request: Request, name: str):
         upd["enabled"] = bool(body["enabled"])
     if "route_footer" in body:
         upd["route_footer"] = bool(body["route_footer"])
+    tool_warnings: list = []
+    if "mcp_with_client_tools" in body:
+        from .. import persona_rules
+        v, errs, tool_warnings = persona_rules.validate_client_tools_policy(
+            svc, body["mcp_with_client_tools"])
+        if errs:
+            return _err("; ".join(errs))
+        upd["mcp_with_client_tools"] = v
     loses_admin = ("admin" in cur.scopes and ("admin" not in upd.get("scopes", cur.scopes)
                                               or upd.get("enabled") is False))
     if loses_admin and cfg.client_auth.protect_admin and not _admins(cfg.clients, exclude=name):
@@ -208,7 +217,7 @@ async def update_client(request: Request, name: str):
             if c.get("name") == name:
                 c.update(upd)
     svc.config_store.save(mutate)
-    return {"ok": True}
+    return {"ok": True, "warnings": tool_warnings}
 
 
 @router.delete("/admin/api/setup/clients/{name}")
@@ -232,7 +241,8 @@ async def delete_client(request: Request, name: str):
 
 @router.post("/admin/api/setup/client_auth")
 async def set_client_auth(request: Request):
-    """{mode?: optional|required, protect_admin?: bool, unknown_keys?: refuse|anonymous}"""
+    """{mode?: optional|required, protect_admin?: bool, unknown_keys?: refuse|anonymous,
+    keyless_mcp_with_client_tools?: default|off|all|dedupe|[names]}"""
     svc = _svc(request)
     cfg = svc.config_store.config
     body = await request.json()
@@ -245,6 +255,15 @@ async def set_client_auth(request: Request):
         if body["unknown_keys"] not in ("refuse", "anonymous"):
             return _err("unknown_keys must be refuse or anonymous")
         upd["unknown_keys"] = body["unknown_keys"]
+    warnings = []
+    if "keyless_mcp_with_client_tools" in body:
+        from .. import persona_rules
+        v, errs, w = persona_rules.validate_client_tools_policy(
+            svc, body["keyless_mcp_with_client_tools"])
+        if errs:
+            return _err("; ".join(errs))
+        upd["keyless_mcp_with_client_tools"] = v
+        warnings += w
     if "protect_admin" in body:
         upd["protect_admin"] = bool(body["protect_admin"])
         if upd["protect_admin"] and not cfg.client_auth.protect_admin:
@@ -253,7 +272,6 @@ async def set_client_auth(request: Request):
                 return _err("to protect the web UI, first make an admin client, then enter "
                             "its key in this browser (the UI asks for it) — otherwise this "
                             "change would lock you out", 409)
-    warnings = []
     if upd.get("mode") == "required":
         anon = _usage(svc).get("anonymous")
         if anon:

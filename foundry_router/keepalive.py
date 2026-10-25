@@ -53,12 +53,14 @@ def visible_every(cfg) -> float:
 class Pacer:
     """Decides which heartbeat ticks show a visible status line.
 
-    Milestones: min(30, every), then doubling up to `every`, then every
-    `every` seconds — 30s, 60s, 120s, 180s … for the default 60."""
+    Milestones: min(first, every), then doubling up to `every`, then every
+    `every` seconds — 30s, 60s, 120s, 180s … for the default 60 (first=30);
+    10s, 20s, 40s, 60s, 120s … with first=10 (the wait before a first token)."""
 
-    def __init__(self, every: float = 60.0):
+    def __init__(self, every: float = 60.0, first: float = 30.0):
         self.every = float(every or 0)
-        self._next = min(30.0, self.every) if self.every > 0 else math.inf
+        first = float(first or 30.0)
+        self._next = min(first, self.every) if self.every > 0 else math.inf
 
     def due(self, elapsed: float) -> bool:
         if elapsed < self._next:
@@ -75,6 +77,73 @@ class Pacer:
         """status_line(...) when this tick is a visible milestone, else None
         (the caller sends an invisible keep-alive instead)."""
         return status_line(who, elapsed, detail) if self.due(elapsed) else None
+
+
+def first_visible(cfg) -> float:
+    """agent_brain.heartbeat_first_visible_seconds: when the first visible
+    'still working' line shows while a model call has produced nothing yet
+    (default 10; the later milestones are unchanged)."""
+    try:
+        return float(getattr(cfg, "heartbeat_first_visible_seconds", 10) or 30)
+    except (TypeError, ValueError):
+        return 10.0
+
+
+def _k(n: int) -> str:
+    return f"{n / 1000:.1f}k" if n >= 1000 else str(n)
+
+
+def prefill_line(processed: int, total: int, cache: int, elapsed: float) -> str:
+    """The visible 'reading the prompt' line. Starts with ⏳ so
+    prompts.scrub_router_lines strips it from history a client echoes back."""
+    new_total = max(1, total - cache)
+    done_new = max(0, processed - cache)
+    pct = min(99, 100 * done_new // new_total)
+    return (f"⏳ reading prompt… {pct}% ({_k(done_new)} / {_k(new_total)} new tokens"
+            + (f", {_k(cache)} cached" if cache else "")
+            + f") · {fmt_elapsed(elapsed)}\n")
+
+
+class PrefillReporter:
+    """Visible prompt-reading progress before a model call's first token.
+
+    The backend (llama.cpp / Strata `prompt_progress`) reports every batch —
+    every ~8k tokens on Strata — so a line per frame would fill the client's
+    thinking panel on a long Cline cache miss. Shown instead: the first frame,
+    then only when the read crosses 25 / 50 / 75 %, at most `max_lines` per
+    call — so a 30-second read and a 5-minute one both show a handful of
+    lines. Prompts with fewer than `min_new_tokens` to read show nothing."""
+
+    STEPS = (25, 50, 75)
+
+    def __init__(self, enabled: bool = True, min_new_tokens: int = 4096, max_lines: int = 4):
+        self.enabled = bool(enabled)
+        self.min_new = int(min_new_tokens)
+        self.max_lines = int(max_lines)
+        self.reset()
+
+    def reset(self) -> None:
+        self._bucket = -1
+        self._lines = 0
+
+    def line(self, progress: Optional[dict], elapsed: float) -> Optional[str]:
+        if not self.enabled or not progress or progress.get("tool_chars"):
+            return None
+        pf = progress.get("prefill")
+        if not isinstance(pf, dict) or not pf.get("total"):
+            return None
+        total, cache = int(pf["total"]), int(pf.get("cache") or 0)
+        processed = int(pf.get("processed") or 0)
+        new_total = total - cache
+        if new_total < self.min_new or processed >= total:
+            return None
+        pct = 100 * max(0, processed - cache) // max(1, new_total)
+        bucket = sum(1 for s in self.STEPS if pct >= s)
+        if bucket <= self._bucket or self._lines >= self.max_lines:
+            return None
+        self._bucket = bucket
+        self._lines += 1
+        return prefill_line(processed, total, cache, elapsed)
 
 
 class StreamStalled(Exception):
@@ -119,7 +188,7 @@ def progress_detail(progress: Optional[dict]) -> str:
 
 
 async def stream_with_heartbeat(agen, hb: float, start: float, stall: float = 0,
-                                progress: Optional[dict] = None):
+                                progress: Optional[dict] = None, progress_events: bool = False):
     """Wrap an async chunk stream: yield ("chunk", c) for each real upstream
     chunk, and ("beat", elapsed_s) whenever nothing has been passed on for `hb`
     seconds — so the caller can emit a keep-alive during a silent prompt-eval /
@@ -132,6 +201,10 @@ async def stream_with_heartbeat(agen, hb: float, start: float, stall: float = 0,
     are recorded into the caller's `progress` dict (for the status line), and
     don't reset the beat timer — so the client still gets keep-alives while a
     long tool call streams.
+
+    progress_events: also yield ("progress", elapsed_s) right after each
+    progress-only chunk is recorded (the caller decides whether to show it;
+    it does not count as a pass, so keep-alive beats keep their timing).
 
     stall > 0: raise StreamStalled once no output (content / thinking / tool
     call / progress / done) has arrived for that many seconds.
@@ -178,6 +251,8 @@ async def stream_with_heartbeat(agen, hb: float, start: float, stall: float = 0,
                     last_out = time.monotonic()
                     if progress is not None:
                         progress.update(chunk["progress"])
+                        if progress_events:
+                            yield "progress", int(time.monotonic() - start)
                     break                         # read on; nothing to pass
                 if _is_output(chunk):
                     last_out = time.monotonic()

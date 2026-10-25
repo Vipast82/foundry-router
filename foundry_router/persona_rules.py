@@ -138,6 +138,25 @@ def validate_mcp_grants(svc, value: Any) -> tuple[Optional[list], list, list]:
     return out, errors, warnings
 
 
+def validate_client_tools_policy(svc, value: Any) -> tuple[Any, list, list]:
+    """mcp_with_client_tools (persona or client key): unset (None), "off",
+    "all", "dedupe", or a list of server/tool names in the grant syntax
+    (tool_policy). A comma list typed by hand ("searxng, kokoro-tts") is a list."""
+    from . import tool_policy
+    out, err = tool_policy.normalize(value)
+    if err:
+        return None, [f"mcp_with_client_tools: {err}"], []
+    warnings = []
+    if isinstance(out, list):
+        servers, tools = known_mcp(svc)
+        for e in out:
+            n = e if isinstance(e, str) else e["server"]
+            if servers and n not in servers and n not in tools:
+                warnings.append(f"mcp_with_client_tools: {n!r} matches no connected MCP server "
+                                "or tool right now")
+    return out, [], warnings
+
+
 def validate(svc, fields: dict, *, allow_unknown: bool = False) -> tuple[dict, list, list]:
     """Check and normalize persona fields (any subset). Unknown field names are
     an error unless allow_unknown (the admin API keeps its old drop-silently
@@ -208,6 +227,12 @@ def validate(svc, fields: dict, *, allow_unknown: bool = False) -> tuple[dict, l
                 errors.append(f"{k} must be a JSON object")
                 continue
             clean[k] = dv
+        elif k == "mcp_with_client_tools":
+            out, e, w = validate_client_tools_policy(svc, v)
+            errors += e
+            warnings += w
+            if not e:
+                clean[k] = out
         elif k == "preferred_mcp_tools":
             out, e, w = validate_mcp_grants(svc, v)
             errors += e

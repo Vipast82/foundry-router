@@ -3163,6 +3163,7 @@ async function tabClients() {
         <select id="ca-unknown"><option value="refuse" ${a.unknown_keys === "refuse" ? "selected" : ""}>refuse</option><option value="anonymous" ${a.unknown_keys === "anonymous" ? "selected" : ""}>let through as anonymous</option></select>
         <label title="Require an admin-scoped key for this web UI and its API. Make an admin client first; the UI asks for its key once per browser."><input type="checkbox" id="ca-protect" ${a.protect_admin ? "checked" : ""}> protect the web UI</label>
         <button class="act primary" id="ca-save">Save access</button></div>
+      <div class="row"><label title="For requests WITHOUT a key (shown as untracked, e.g. an AnythingLLM with no API key set): which persona MCP tools ride along when the program sends its own tools. Same choices as on a client key; follow the persona = the persona's own setting.">keyless clients: MCP tools with client tools</label>${_mcpPolicyHTML("ca-mcp", a.keyless_mcp_with_client_tools, "follow the persona")}</div>
       <p class="hint">Last 24 h: ${(d.anonymous.calls_24h || 0)} request(s) with no key (anonymous).</p></div>
     <div class="card"><h3>Clients</h3>${rows ? `<div class="tscroll"><table><tr><th>client (identifier)</th><th>scopes</th><th>personas</th><th>key</th><th>calls 24 h</th><th>last seen</th><th>enabled</th><th></th></tr>${rows}</table></div>` : '<p class="hint">No clients yet: every program is anonymous. Add one below.</p>'}</div>
     <div class="card"><h3>Add a client</h3>
@@ -3189,7 +3190,8 @@ async function tabClients() {
     if (use) use.onclick = () => { try { localStorage.setItem("foundryAdminKey", key); } catch (e) {} toast("This browser now uses the admin key"); };
   };
   $("#ca-save").onclick = () => api("setup/client_auth", {method: "POST", body: {mode: $("#ca-mode").value,
-    unknown_keys: $("#ca-unknown").value, protect_admin: $("#ca-protect").checked}})
+    unknown_keys: $("#ca-unknown").value, protect_admin: $("#ca-protect").checked,
+    keyless_mcp_with_client_tools: _mcpPolicyRead("ca-mcp")}})
     .then(r => { toast((r.warnings || []).join(" ") || "Saved", !!(r.warnings || []).length); render(); })
     .catch(e => toast(e.message, true));
   $("#nc-preset").onchange = e => { o.preset = e.target.value; render(); };
@@ -3218,12 +3220,14 @@ async function tabClients() {
       <div class="row"><label>only personas</label><input id="ed-personas" data-multi="csv" data-options="personas" data-free="0" value="${esc(c.personas.join(", "))}" placeholder="all personas (pick to restrict)"></div>
       <div class="row"><label>note</label><input id="ed-note" value="${esc(c.note || "")}" style="min-width:300px"></div>
       <div class="row"><label title="Add '— via <model> @ <backend>' under every answer this client gets (and the route line in buffered replies' reasoning). For AnythingLLM / Open WebUI, which hide reasoning."><input type="checkbox" id="ed-footer" ${c.route_footer ? "checked" : ""}> show which model and backend answered</label></div>
+      <div class="row"><label title="When this client sends its own tools (AnythingLLM @agent, Cline, Kilo, Open WebUI tools), which of the persona's MCP tools ride along. Wins over the persona's own setting; never adds a tool the persona isn't granted. e.g. Cline/Kilo: off · AnythingLLM: acestep-music, stable-audio, kokoro-tts, chatterbox-tts, searxng · Open WebUI: all.">MCP tools with client tools</label>${_mcpPolicyHTML("ed-mcp", c.mcp_with_client_tools, "follow the persona")}</div>
       <div class="row"><label><input type="checkbox" id="ed-enabled" ${c.enabled ? "checked" : ""}> enabled</label>
         <button class="act primary" id="ed-save">Save</button></div>
       <p class="hint">The name is this client's identifier in logs and budget rules, so it isn't renamed; make a new client instead.</p>`);
     $("#ed-save", body).onclick = () => api(`setup/clients/${encodeURIComponent(c.name)}`, {method: "PATCH", body: {
       scopes: scopesOf(".ed-scope"), personas: list($("#ed-personas", body).value), note: $("#ed-note", body).value,
-      enabled: $("#ed-enabled", body).checked, route_footer: $("#ed-footer", body).checked}}).then(() => { closeModal(); toast("Saved"); render(); }).catch(e => toast(e.message, true));
+      enabled: $("#ed-enabled", body).checked, route_footer: $("#ed-footer", body).checked,
+      mcp_with_client_tools: _mcpPolicyRead("ed-mcp", body)}}).then(r => { closeModal(); toast((r.warnings || []).join(" ") || "Saved", !!(r.warnings || []).length); render(); }).catch(e => toast(e.message, true));
   });
   const rc = $("#rej-clear");
   if (rc) rc.onclick = () => run(api("setup/rejected", {method: "DELETE"}));
@@ -4578,7 +4582,9 @@ async function tabPersonas() {
         <label title="When Foundry runs the tool loop (agent / worker-owns-tools), append a compact 'Tool activity' trail (each tool → result excerpt) to the answer sent to the client. Makes the backend's tool work visible to the frontend and, crucially, keeps values like an async job id in the transcript so a follow-up turn ('is it done?') can use it. Also enables a poll-guard: a repeated identical status check stops looping and returns the current status instead of burning steps.">expose tool trail</label>
         <input type="checkbox" id="pe-trail">
         <label title="Direct mode = a client that sends its OWN tools (Cline, OpenCode, Kilo). When ON and this persona has MCP tools attached above, those tools are offered to the model ALONGSIDE the client's tools: Foundry runs its own tool calls and keeps going; the client's tool calls go back to the client as usual. Leave the persona's tool list empty (or turn this off) to keep direct mode client-tools-only — e.g. a Cline persona that uses Cline's own MCP servers and wants minimum context.">persona tools in direct mode</label>
-        <input type="checkbox" id="pe-mcp-direct"></div>
+        <input type="checkbox" id="pe-mcp-direct">
+        <label title="When the CLIENT sends its own tools (AnythingLLM @agent, Cline, Kilo, Open WebUI tools), which of this persona's MCP tools still ride along. all (default) = every attached tool. off = none, the client's own only. auto-dedupe = all except ones that duplicate a client tool by name or purpose (web search, page fetch, files, shell, SQL, image / speech / music generation). only these = the server or tool names you list (comma-separated). Each tool definition is prompt the model reads cold on a new chat (Foundry-Chat's 58 were ~13k tokens, ~11 s on Strata; the 4 media tools ~1.5k). A client key's own setting (Clients &amp; keys) wins over this. Never chosen per message, so the prompt prefix stays cached. Plain chat (no client tools) always gets the attached tools.">MCP tools with client tools</label>
+        <span id="pe-mcp-client-box">${_mcpPolicyHTML("pe-mcp-client", null, "all (default)")}</span></div>
       <div class="row"><label title="Serve this persona with an external AGENT (Hermes) instead of a model: the whole conversation is forwarded to it, its answer streams back and its tool activity shows as thinking. Model-routing fields above then only apply as the fallback when the agent is down or the request came from an agent (loop protection). Client tools are not forwarded — the agent uses its own. Configure agents in Tools &amp; MCP → Agents.">served by agent</label>
         <select id="pe-agent"><option value="">— none (route to models) —</option></select>
         <span class="hint">e.g. a <b>Foundry-Agent</b> persona served by Hermes ${help("agents")}</span>
@@ -4666,6 +4672,7 @@ async function tabPersonas() {
     escalate_when_local_busy: $("#pe-escalate").checked ? 1 : 0,
     expose_tool_trail: $("#pe-trail").checked ? 1 : 0,
     mcp_tools_in_direct: $("#pe-mcp-direct").checked ? 1 : 0,
+    mcp_with_client_tools: _mcpPolicyRead("pe-mcp-client"),
     agent_backend: $("#pe-agent").value || null,
     max_output_tokens: $("#pe-maxout").value ? parseInt($("#pe-maxout").value, 10) : null,
     selection_weights: JSON.parse($("#pe-weights").value || "{}"),
@@ -4947,6 +4954,7 @@ window.editPersona = name => {
   $("#pe-escalate").checked = !!p.escalate_when_local_busy;
   $("#pe-trail").checked = !!p.expose_tool_trail;
   $("#pe-mcp-direct").checked = p.mcp_tools_in_direct == null ? true : !!p.mcp_tools_in_direct;
+  $("#pe-mcp-client-box").innerHTML = _mcpPolicyHTML("pe-mcp-client", p.mcp_with_client_tools, "all (default)");
   _setAgentSelect(p.agent_backend || "");
   $("#pe-maxout").value = p.max_output_tokens || "";
   $("#pe-fallback").value = p.fallback_policy || "";
@@ -4963,6 +4971,39 @@ window.editPersona = name => {
   $("#pe-assist").value = typeof p.assist === "string"
     ? (p.assist || "{}") : JSON.stringify(p.assist || {});
 };
+// "MCP tools with client tools" (v0.142.0), on personas and client keys:
+// null = inherit (persona: all; client: follow the persona) | "off" | "all" |
+// "dedupe" | a list of MCP server/tool names
+function _mcpPolicyHTML(id, v, inheritLabel) {
+  let mode = "", names = "";
+  let list = Array.isArray(v) ? v : null;
+  if (!list && typeof v === "string" && v.trim().startsWith("[")) {
+    try { list = JSON.parse(v); } catch (e) { list = null; }
+  }
+  if (list && list.length) {
+    mode = "list";
+    names = list.every(x => typeof x === "string") ? list.join(", ") : JSON.stringify(list);
+  } else if (["off", "all", "dedupe"].includes(v)) mode = v;
+  else if (list) mode = "off";
+  const opt = (val, label) => `<option value="${val}" ${mode === val ? "selected" : ""}>${label}</option>`;
+  return `<select id="${id}" class="mcp-pol">${opt("", esc(inheritLabel))}${opt("off", "off")}${opt("all", "all")}` +
+    `${opt("dedupe", "auto-dedupe")}${opt("list", "only these…")}</select>` +
+    `<input id="${id}-list" value="${esc(names)}" placeholder="e.g. acestep-music, stable-audio, kokoro-tts, chatterbox-tts, searxng" ` +
+    `style="width:260px;${mode === "list" ? "" : "display:none"}">`;
+}
+function _mcpPolicyRead(id, root) {
+  const r = root || document, sel = r.querySelector("#" + id), inp = r.querySelector("#" + id + "-list");
+  if (!sel) return undefined;
+  if (sel.value === "list") return ((inp && inp.value) || "").trim() || null;
+  return sel.value || null;
+}
+document.addEventListener("change", e => {
+  const t = e.target;
+  if (t && t.classList && t.classList.contains("mcp-pol")) {
+    const inp = document.getElementById(t.id + "-list");
+    if (inp) inp.style.display = t.value === "list" ? "" : "none";
+  }
+});
 function _setAgentSelect(v) {
   const sel = $("#pe-agent");
   if (!sel) return;

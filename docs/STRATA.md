@@ -51,7 +51,7 @@ need it.
 | prior turns' reasoning → `reasoning_content` on assistant messages | needed: Strata's template keeps older reasoning in the prompt; sending it back is what lets the cache match |
 | `top_k`, `min_p`, `repeat_penalty` … (persona `sampling_options`) | honored per request (`top_k` above 64 = all 64) |
 | `max_tokens` (persona `max_output_tokens`) | refused if it can't fit — Foundry now shrinks it to the room left (v0.100.1) |
-| `return_progress: true` | Strata streams `prompt_progress` (total / cache / processed / time_ms), shown as "reading the prompt" |
+| `return_progress: true` | Strata streams `prompt_progress` (total / cache / processed / time_ms) every 8k-token chunk, shown as `⏳ reading prompt… 45% (…)` lines before the first token (v0.142.0: first report + each 25 % step) |
 | cache numbers | if Strata doesn't report `cached_tokens` / `timings`, the Scoreboard shows `not_reported` instead of counting false misses |
 
 Host Admin's llama.cpp panel calls `/props`, `/slots` and `/metrics`; Strata has

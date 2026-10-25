@@ -447,7 +447,8 @@ def test_structured_output_keeps_the_schema_on_a_persona_with_mcp_tools(fleet, c
 
         def spec(self):
             return {"type": "function", "function": {"name": self.name, "parameters": {}}}
-    monkeypatch.setattr(ollama_api, "_direct_mcp_tools", lambda svc, p, ct: {"searxng_search": _Tool()})
+    monkeypatch.setattr(ollama_api, "_direct_mcp_split",
+                        lambda svc, p, ct: ({"searxng_search": _Tool()}, 0, "all"))
     fleet.personas.upsert("Tooly", execution_mode="direct", model_allowlist=["qwen3.8-flash-next-iq3_s"])
     schema = {"type": "object", "properties": {"text": {"type": "string"}}, "required": ["text"]}
     r = client.post("/v1/chat/completions", json={

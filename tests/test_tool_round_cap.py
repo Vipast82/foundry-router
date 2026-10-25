@@ -70,7 +70,7 @@ def looped(app, client):
     cfg = svc.config_store.config.agent_brain
     persona = next(p for p in svc.personas.list(enabled_only=True))
     svc.personas.upsert(persona["virtual_name"], preferred_mcp_tools=json.dumps(["searxng"]),
-                        mcp_tools_in_direct=1)
+                        mcp_tools_in_direct=1, mcp_with_client_tools="all")
     td = ToolDef(name="searxng__search", kind="mcp", description="search",
                  parameters={"type": "object"}, server="searxng", mcp_tool="search")
     svc.tool_registry.tools[td.name] = td

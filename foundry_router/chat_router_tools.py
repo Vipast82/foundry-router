@@ -7,7 +7,8 @@ snapshot first (configops.snapshot; config.yaml changes are also versioned in
 Config history) and is audited in chat_audit_log by the engine.
 
 Personas      set_persona_routes, set_persona_fields, create_persona,
-              grant_persona_to_client, run_persona_evals — validated by
+              grant_persona_to_client, set_client_tool_policy, run_persona_evals —
+              validated by
               persona_rules (the Personas tab's rules) and route_resolve
               ("local" / "Claude" / "ChatGPT" -> concrete models); every persona
               write reminds the operator to run that persona's evals.
@@ -88,7 +89,8 @@ TEMPLATES = {
 # set_persona_fields edits these; routes and the name have their own tools
 FIELD_KEYS = ("context_window", "max_output_tokens", "reasoning_effort", "force_reasoning_effort",
               "local_bias_strength", "routing", "backend", "description", "preferred_mcp_tools",
-              "mcp_tools_in_direct", "fallback_policy", "execution_mode", "capabilities",
+              "mcp_tools_in_direct", "mcp_with_client_tools", "fallback_policy",
+              "execution_mode", "capabilities",
               "enabled", "benchmark_category", "expose_tool_trail", "quiet_narration",
               "output_style", "sampling_options", "escalate_when_local_busy", "outcome_judge")
 
@@ -339,7 +341,8 @@ def plan_fields(svc, name: str, fields: dict, mcp_add=None, mcp_remove=None) -> 
     rows = []
     for k, v in clean.items():
         before = p.get(k)
-        if k in ("preferred_mcp_tools", "capabilities", "sampling_options"):
+        if k in ("preferred_mcp_tools", "capabilities", "sampling_options",
+                 "mcp_with_client_tools"):
             before = _uj(before, before)
         rows.append({"field": k, "before": before, "after": v})
     return {"clean": clean, "warnings": warnings, "rows": rows}
@@ -421,7 +424,11 @@ def register(eng) -> None:                    # noqa: C901 - the catalog in one 
               "force_reasoning_effort, local_bias_strength (strong/moderate/cost_aware_default/"
               "prefer_paid), routing (strict or flexible), backend, description, "
               "preferred_mcp_tools (MCP servers/tools it may use; or mcp_add / mcp_remove lists "
-              "of server or tool names) and mcp_tools_in_direct, fallback_policy (refuse or "
+              "of server or tool names) and mcp_tools_in_direct, mcp_with_client_tools (which "
+              "of those MCP tools still ride along when the client brings its OWN tools, e.g. "
+              "AnythingLLM @agent or Cline: empty = default (all), off, all, dedupe (skip ones "
+              "that duplicate the client's own), or a list of server/tool names; a client "
+              "key's own setting wins, see set_client_tool_policy), fallback_policy (refuse or "
               "local), execution_mode, capabilities, enabled, and a few more. Same rules as the "
               "Personas tab; snapshot first.", "persona",
               {"name": S, "fields": {"type": "object"}, "mcp_add": {"type": "array"},
@@ -566,6 +573,31 @@ def register(eng) -> None:                    # noqa: C901 - the catalog in one 
             raise ChatError(str(e), "invalid", e.status) from None
         return {"result": {"client": a["client"], "personas": new, "snapshot": sid},
                 "changed": [f"client {a['client']}: persona {a['persona']} allowed"]}
+
+    @eng._add("set_client_tool_policy", "Which persona MCP tools ride along when ONE client "
+              "(a client key name, or 'keyless' for requests without a key, e.g. an untracked "
+              "AnythingLLM) sends its own tools. value: default (follow the persona), off, all, "
+              "dedupe (skip persona tools that duplicate the client's own by name or purpose), "
+              "or a comma list of MCP server/tool names, e.g. 'acestep-music, stable-audio, "
+              "kokoro-tts, chatterbox-tts, searxng'. Wins over the persona's "
+              "mcp_with_client_tools; never adds tools the persona isn't granted. "
+              "config.yaml, versioned.",
+              "persona", {"client": S, "value": {"type": "string", "max": 600}},
+              ("client", "value"),
+              summary=lambda a: f"client {a.get('client')}: MCP tools with client tools = "
+                                f"{a.get('value')}")
+    async def set_client_tool_policy(ctx: Ctx, a: dict):
+        sid = _snapshot(ctx, f"MCP tools with client tools on {a['client']}")
+        try:
+            out, warnings = router_ops.set_client_tool_policy(
+                ctx.svc, a["client"], a["value"], f"{ctx.actor} via operator chat")
+        except router_ops.OpError as e:
+            raise ChatError(str(e), "invalid", e.status) from None
+        from . import tool_policy
+        shown = tool_policy.describe(out) if out is not None else "follow the persona"
+        return {"result": {"client": a["client"], "mcp_with_client_tools": out,
+                           "warnings": warnings, "snapshot": sid},
+                "changed": [f"{a['client']}: MCP tools with client tools = {shown}"]}
 
     @eng._add("run_persona_evals", "Start a persona's eval run (its eval prompts through its real "
               "route; frontier personas spend a few subscription calls). Results land in "

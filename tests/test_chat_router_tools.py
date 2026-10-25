@@ -204,6 +204,42 @@ def test_set_persona_fields_validates_and_edits_mcp(chat, router, client):
     p = router.personas.get("Foundry-Chat")
     assert p["context_window"] == 131072 and p["reasoning_effort"] == "medium"
     assert json.loads(p["preferred_mcp_tools"]) == ["searxng", "stable-audio"]
+
+
+def test_set_persona_fields_mcp_with_client_tools(chat, router, client):
+    """v0.142.0: the chat can set which MCP tools ride along with a client's own."""
+    router.personas.upsert("Foundry-Chat", preferred_mcp_tools=["searxng", "crawl4ai"])
+    t = chat("only searxng with agent tools", reply("", [
+        call("set_persona_fields", name="Foundry-Chat",
+             fields={"mcp_with_client_tools": "searxng"})]), reply("card"))
+    rows = {r["field"]: r for r in t["confirm"]["calls"][0]["preview"]["fields"]}
+    assert rows["mcp_with_client_tools"]["after"] == ["searxng"]
+    assert _confirm(client, chat, t)["ok"]
+    assert json.loads(router.personas.get("Foundry-Chat")["mcp_with_client_tools"]) == ["searxng"]
+    t = chat("all of them", reply("", [
+        call("set_persona_fields", name="Foundry-Chat",
+             fields={"mcp_with_client_tools": "all"})]), reply("card"))
+    assert _confirm(client, chat, t)["ok"]
+    assert router.personas.get("Foundry-Chat")["mcp_with_client_tools"] == "all"
+
+
+def test_set_client_tool_policy(chat, router, client):
+    """v0.142.0: per client key, or 'keyless' for untracked clients."""
+    router.config_store.save(lambda raw: raw.update(clients=[{"name": "anythingllm",
+                                                             "key": "k-allm"}]))
+    t = chat("AnythingLLM gets media and search", reply("", [
+        call("set_client_tool_policy", "c1", client="anythingllm",
+             value="acestep-music, stable-audio, kokoro-tts, chatterbox-tts, searxng"),
+        call("set_client_tool_policy", "c2", client="keyless", value="dedupe")]), reply("card"))
+    assert _confirm(client, chat, t, picked=("c1", "c2"))["ok"]
+    cfg = router.config_store.config
+    allm = next(c for c in cfg.clients if c.name == "anythingllm")
+    assert allm.mcp_with_client_tools == ["acestep-music", "stable-audio", "kokoro-tts",
+                                          "chatterbox-tts", "searxng"]
+    assert cfg.client_auth.keyless_mcp_with_client_tools == "dedupe"
+    t = chat("bad", reply("", [call("set_client_tool_policy", "c3", client="nobody",
+                                    value="off")]), reply("no"))
+    assert "no client named" in {r["id"]: r["reason"] for r in t["refused"]}.get("c3", "")         or t.get("confirm")
     t = chat("bad", reply("", [
         call("set_persona_fields", "c1", name="Foundry-Chat", fields={"reasoning_effort": "huge"}),
         call("set_persona_fields", "c2", name="Foundry-Chat", fields={"pinned_models": ["x"]}),

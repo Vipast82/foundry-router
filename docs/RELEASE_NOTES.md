@@ -2,6 +2,82 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.142.0 — Shorter, visible waits in AnythingLLM agent mode
+
+Victor's ask: AnythingLLM's @agent mode on Foundry-Chat sat silent for long
+stretches between tool steps. Measured on the live router (2026-10-24,
+Strata, last ~25 Foundry-Chat calls): most of each step is the model
+thinking (9k–30k tokens, 90–320 s, streamed into AnythingLLM's "Thought for…"
+panel). The silent part was the prompt read: ~28 s cold on the first step of
+a new chat, mostly the 58 persona MCP tool definitions merged next to
+AnythingLLM's own tools, and ~18 s whenever a large file the model wrote came
+back as prompt. Nothing was shown during either.
+
+- **MCP tools with client tools**: when a request brings its own tools
+  (AnythingLLM @agent, Cline, Kilo, Open WebUI native tools), which persona
+  MCP tools ride along is now a setting, so a client without the right tools
+  still gets Foundry's (image / sound generation, search) and one with its
+  own toolbox isn't slowed by duplicates:
+  - `all` (default, as before) · `off` · `dedupe` (all except tools that
+    duplicate a client tool by name or by purpose: web search, page fetch /
+    crawl, files, shell, SQL, image / speech / music generation) · a list of
+    MCP server/tool names (narrows the persona's grants, never widens them).
+  - Set on the **client key** (Clients & keys → Edit, or the operator chat's
+    `set_client_tool_policy`), for **keyless clients** (Clients & keys →
+    Access; an AnythingLLM with no API key is keyless), or on the **persona**
+    (Personas tab, `set_persona_fields`). The client's setting wins; then the
+    persona's; then `all`.
+  - Fixed per client and persona, never chosen per message, so the tool list
+    and the cached prompt prefix stay the same from step to step.
+  - Requests without tools of their own (plain chat) still get every
+    attached tool; `mcp_tools_in_direct` stays the master switch.
+  - The thinking panel says what was left out and why ("🔧 2 persona MCP
+    tool(s) available alongside 9 client tool(s) (56 left out — client
+    anythingllm: only acestep-music, …)") and the request log records it.
+  - Suggested: Cline / Kilo `off` (no persona of theirs has MCP tools today
+    anyway), AnythingLLM `acestep-music, stable-audio, kokoro-tts,
+    chatterbox-tts, searxng` (~3.3k tokens instead of ~13.9k; add ComfyUI's
+    server when it's connected), Open WebUI `all`.
+- **Prompt-reading progress**: before a model call's first token, the
+  llama.cpp / Strata `prompt_progress` Foundry already collected is now shown:
+  `⏳ reading prompt… 45% (8.2k / 18.0k new tokens) · 7s` — the first report,
+  then each 25 % step, at most 4 lines a call; prompts with under 4k tokens
+  to read show none. Before, it only appeared on the 30 s / 60 s keep-alive
+  lines. `agent_brain.prefill_progress_lines` (default on) turns it off.
+- **Earlier first status line**: a call that has produced nothing and has no
+  progress report (queued behind Strata's single slot, or a backend that
+  can't report progress) shows its first "still working" line at 10 s
+  instead of 30 s (`agent_brain.heartbeat_first_visible_seconds`, 0 = 30 s).
+- Status lines only: the prompt, think level, context guard and tool list of
+  a Cline turn are untouched, and the new lines start with ⏳ / 🔧 so
+  `scrub_router_lines` strips them from echoed history exactly as before
+  (tested against v0.141's scrub result, so the next step's prompt cache
+  still matches). Quiet (data-generation) personas show none of them.
+
+Measured 2026-10-24 on Strata (qwen3.8-flash-next IQ3_XXS), the same cold
+AnythingLLM-shaped step (`/api/chat`, Foundry-Chat, stream, think on, one
+client tool), twice each:
+
+| | prompt tokens | first model token |
+|---|---|---|
+| v0.141.1 (58 MCP tools merged) | 13,745 / 13,747 | 13.4 s / 13.3 s |
+| v0.142.0, set to `off` | 370 / 369 | 2.4 s / 2.4 s |
+
+A 24k-token cold read on v0.142.0 showed `⏳ reading prompt… 34% (8.2k /
+24.1k new tokens)` at 7 s and `68%` at 11 s, first token at 17.8 s; before,
+nothing appeared until the 30 s keep-alive line.
+
+Migration: new nullable column `personas.mcp_with_client_tools` (added on
+start) and two optional config keys, `clients[].mcp_with_client_tools` and
+`client_auth.keyless_mcp_with_client_tools`. Unset everywhere means `all`:
+nothing changes until a setting is made. Changing the setting for a client
+that is mid-chat costs that chat one prompt re-read on its next step.
+
+Not in this release (from reports/CLIENT_COMPATIBILITY_AUDIT_2026-10-24.md):
+images / audio returned by a persona MCP tool still reach the model as a
+text placeholder, not the user (B1/B2); that hand-back is the next step for
+ComfyUI / sound in chat.
+
 ## v0.141.1 — Coordinator version label, loud migrations, no dead-coordinator adoption
 
 Three small defects found while operating v0.141.0 (2026-10-23/24):

@@ -429,6 +429,11 @@ class Database:
             # persona's attached MCP tools, run by Foundry. Only matters when
             # tools are attached; 0 = keep direct mode client-tools-only.
             ("personas", "mcp_tools_in_direct", "INTEGER DEFAULT 1"),
+            # v0.142.0: which of those tools still ride along when the client
+            # brings its OWN tools. NULL = default (all), "off", "all",
+            # "dedupe", or a JSON list of server/tool names (tool_policy).
+            # A client key's own setting wins over this one.
+            ("personas", "mcp_with_client_tools", "TEXT"),
             # Persona served by an external agent (Hermes) instead of a model.
             ("personas", "agent_backend", "TEXT"),
             # Per-persona output cap (blank = agent_brain.worker_max_tokens).

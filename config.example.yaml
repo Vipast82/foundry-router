@@ -69,6 +69,8 @@ agent_brain:
   direct_stream: true
   direct_stream_heartbeat_seconds: 10
   heartbeat_visible_seconds: 60
+  heartbeat_first_visible_seconds: 10   # before a call's first token: first status line at 10s
+  prefill_progress_lines: true          # "⏳ reading prompt… 45% (8.2k / 18k new tokens)" lines
   direct_stream_stall_seconds: 900
   stream_worker_reasoning: false   # agent mode, Ollama workers only: stream reasoning live
   worker_keep_alive: "30m"         # Ollama backends: keep the worker loaded between turns
@@ -465,8 +467,12 @@ health:
 client_auth:
   mode: optional
   protect_admin: false
+  # keyless requests that bring their own tools: which persona MCP tools ride
+  # along (unset = follow the persona; off | all | dedupe | [server/tool names])
+  # keyless_mcp_with_client_tools: [acestep-music, stable-audio, kokoro-tts, chatterbox-tts, searxng]
 clients: []
 #  - name: kilo
 #    key: "${FOUNDRY_KEY_KILO}"
 #    scopes: [inference, media]     # media = image jobs (local media adapter)
 #    personas: [Foundry-Kilo-Local]
+#    mcp_with_client_tools: "off"   # Kilo brings its own tools; skip the persona's

@@ -214,7 +214,7 @@ def test_direct_mode_merges_persona_tools_and_runs_them(app, client):
     svc = app.state.services
     persona = next(p for p in svc.personas.list(enabled_only=True))
     svc.personas.upsert(persona["virtual_name"], preferred_mcp_tools=json.dumps(["searxng"]),
-                        mcp_tools_in_direct=1)
+                        mcp_tools_in_direct=1, mcp_with_client_tools="all")
     td = ToolDef(name="searxng__search", kind="mcp", description="search",
                  parameters={"type": "object"}, server="searxng", mcp_tool="search")
     svc.tool_registry.tools[td.name] = td
