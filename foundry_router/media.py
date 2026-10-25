@@ -50,6 +50,12 @@ _JOB_ID_RE = re.compile(r"^img_[0-9a-f]{16}$")
 _SIZE_RE = re.compile(r"^(auto|\d{2,5}x\d{2,5})$")
 _WORD_RE = re.compile(r"^[a-z0-9_-]{1,24}$")
 _EXT = {"image/png": "png", "image/jpeg": "jpg", "image/webp": "webp"}
+# what persona MCP tools may hand back (tool_media.py): images and audio
+TOOL_EXT = {**_EXT, "image/gif": "gif", "audio/wav": "wav", "audio/mpeg": "mp3",
+            "audio/ogg": "ogg", "audio/flac": "flac", "audio/mp4": "m4a",
+            "audio/webm": "webm"}
+# image-budget rows only: tool output (op tool / tool_job) never counts
+_IMAGE_OPS = "op IN ('generate','edit')"
 _IMAGE_MODEL_RE = re.compile(r"(^|[-_/])(gpt-image|dall-e|grok-imagine|imagen|flux|"
                              r"stable-diffusion|sdxl)", re.I)
 _ERR_TYPE = {400: "invalid_request_error", 401: "authentication_error",
@@ -114,6 +120,33 @@ def image_info(data: bytes) -> tuple[Optional[str], Optional[int], Optional[int]
             return "image/webp", None, None
     except (struct.error, IndexError):
         pass
+    return None, None, None
+
+
+def sniff_media(data: bytes) -> tuple[Optional[str], Optional[int], Optional[int]]:
+    """(mime, width, height) for anything a tool may return — PNG/JPEG/WebP/
+    GIF images and WAV/MP3/OGG/FLAC/M4A/WebM audio — from the bytes alone
+    (a server's claimed mime type is never trusted). mime None = unknown."""
+    mime, w, h = image_info(data)
+    if mime:
+        return mime, w, h
+    head = data[:16]
+    if head[:6] in (b"GIF87a", b"GIF89a") and len(data) >= 10:
+        w, h = struct.unpack("<HH", data[6:10])
+        return "image/gif", w, h
+    if head[:4] == b"RIFF" and data[8:12] == b"WAVE":
+        return "audio/wav", None, None
+    if head[:3] == b"ID3" or (len(head) >= 2 and head[0] == 0xFF and (head[1] & 0xE0) == 0xE0
+                              and (head[1] & 0x06) != 0):
+        return "audio/mpeg", None, None
+    if head[:4] == b"OggS":
+        return "audio/ogg", None, None
+    if head[:4] == b"fLaC":
+        return "audio/flac", None, None
+    if data[4:8] == b"ftyp" and data[8:12] in (b"M4A ", b"M4B ", b"mp42", b"isom"):
+        return "audio/mp4", None, None
+    if head[:4] == bytes((0x1A, 0x45, 0xDF, 0xA3)):
+        return "audio/webm", None, None
     return None, None, None
 
 
@@ -219,7 +252,25 @@ class MediaService:
         for r in rows:
             shutil.rmtree(self.dir / r["id"], ignore_errors=True)
             self.db.execute("DELETE FROM media_jobs WHERE id=?", (r["id"],))
-        return len(rows)
+        return len(rows) + self.prune_tool_outputs()
+
+    def prune_tool_outputs(self) -> int:
+        """Keep persona-tool files under media.tool_output_max_total_gb: the
+        oldest finished tool rows go first. Image jobs are never touched."""
+        cap = float(getattr(self.cfg, "tool_output_max_total_gb", 0) or 0) * 1024 ** 3
+        if cap <= 0:
+            return 0
+        rows = self.db.query("SELECT id, artifacts FROM media_jobs WHERE op IN ('tool','tool_job') "
+                             "AND status IN ('succeeded','failed','cancelled') "
+                             "ORDER BY created_ts DESC")
+        total, dropped = 0, 0
+        for r in rows:
+            total += sum(int(a.get("bytes") or 0) for a in _jl(r.get("artifacts"), []))
+            if total > cap:
+                shutil.rmtree(self.dir / r["id"], ignore_errors=True)
+                self.db.execute("DELETE FROM media_jobs WHERE id=?", (r["id"],))
+                dropped += 1
+        return dropped
 
     def _semaphore(self) -> asyncio.Semaphore:
         n = max(1, int(self.cfg.max_concurrent or 1))
@@ -321,7 +372,7 @@ class MediaService:
 
     def _count(self, since: float, client_id: Optional[str] = None) -> int:
         sql = ("SELECT COUNT(*) AS n FROM media_jobs WHERE created_ts >= ? AND "
-               "(charged=1 OR status IN ('queued','running'))")
+               f"{_IMAGE_OPS} AND (charged=1 OR status IN ('queued','running'))")
         args: list = [since]
         if client_id is not None:
             sql += " AND client_id=?"
@@ -332,7 +383,8 @@ class MediaService:
         cfg = self.cfg
         now = time.time()
         active = int(self.db.query_one(
-            "SELECT COUNT(*) AS n FROM media_jobs WHERE status IN ('queued','running')")["n"])
+            "SELECT COUNT(*) AS n FROM media_jobs WHERE status IN ('queued','running') "
+            f"AND {_IMAGE_OPS}")["n"])
         if active >= max(1, cfg.max_queued):
             raise MediaError(429, "media_queue_full",
                              f"{active} image jobs are already queued or running "
@@ -649,6 +701,58 @@ class MediaService:
         if not out:
             raise MediaError(502, "no_image", "the backend returned no image data")
         return out
+
+    # -- persona MCP tool output (tool_media.py) ---------------------------------
+
+    def new_tool_row(self, op: str, server: str, tool: str, arguments: Optional[dict] = None,
+                     status: str = "succeeded", client: Optional[dict] = None,
+                     persona: Optional[str] = None, idem_key: Optional[str] = None) -> str:
+        """A media_jobs row for a tool's output (op 'tool') or a long-running
+        tool call (op 'tool_job'). Never charged, never in the image budget."""
+        from . import client_auth
+        client = client or client_auth.current()
+        try:
+            args = json.dumps(arguments or {}, ensure_ascii=False, default=str)[:4000]
+        except (TypeError, ValueError):
+            args = "{}"
+        job_id = "img_" + secrets.token_hex(8)
+        now = time.time()
+        self.db.execute(
+            "INSERT INTO media_jobs (id, created_at, created_ts, started_ts, op, status, model, "
+            "backend, persona, client_id, session_id, task_id, idem_key, params) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            (job_id, utcnow(), now, now, op, status, f"{server}/{tool}", "mcp:" + server,
+             persona, client.get("client_id") or "anonymous",
+             client.get("session_id"), client.get("task_id"), idem_key,
+             json.dumps({"prompt": f"{server}/{tool} {args}"[:500], "tool": f"{server}/{tool}",
+                         "arguments": args})))
+        return job_id
+
+    def write_tool_artifacts(self, job_id: str, items: list[dict]) -> list[dict]:
+        """Write [{raw, mime, w, h, label}] under media/<job id>/ and return the
+        artifact records (index, file, mime, bytes, sha256, ...)."""
+        d = self.dir / job_id
+        d.mkdir(parents=True, exist_ok=True)
+        out = []
+        for i, it in enumerate(items):
+            raw = it["raw"]
+            name = f"{i}.{TOOL_EXT.get(it['mime'], 'bin')}"
+            (d / name).write_bytes(raw)
+            out.append({"id": f"{job_id}-{i}", "index": i, "file": name, "mime": it["mime"],
+                        "bytes": len(raw), "width": it.get("w"), "height": it.get("h"),
+                        "sha256": hashlib.sha256(raw).hexdigest(),
+                        "label": it.get("label") or ""})
+        return out
+
+    def finish_tool_row(self, job_id: str, *, status: str, artifacts: Optional[list] = None,
+                        result_text: Optional[str] = None, error: Optional[str] = None,
+                        error_code: Optional[str] = None) -> None:
+        row = self.get(job_id) or {}
+        started = row.get("started_ts") or time.time()
+        self._update(job_id, status=status, finished_ts=time.time(),
+                     duration_ms=round((time.time() - started) * 1000, 1),
+                     artifacts=json.dumps(artifacts or []),
+                     result_text=result_text, error=error, error_code=error_code)
 
     def artifact_path(self, job_id: str, index: int) -> Optional[tuple[Path, dict]]:
         row = self.get(job_id)

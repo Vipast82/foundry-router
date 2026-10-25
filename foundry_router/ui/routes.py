@@ -2223,7 +2223,11 @@ async def upsert_mcp(request: Request):
              # normal server is unchanged.
              "executes_code": bool(body.get("executes_code")),
              "call_defaults": body.get("call_defaults")
-                              if isinstance(body.get("call_defaults"), dict) else {}}
+                              if isinstance(body.get("call_defaults"), dict) else {},
+             # Long-running generation (tool_media.py): chat calls become tool
+             # jobs. Kept when an older UI posts without the field.
+             "long_running": bool(body["long_running"]) if "long_running" in body
+                             else bool(getattr(existing, "long_running", False))}
     if body.get("headers"):
         entry["headers"] = body["headers"]
 

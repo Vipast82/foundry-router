@@ -63,6 +63,8 @@ class ToolResult:
         self.blocks = blocks
         self.structured = structured
         self.is_error = is_error
+        # images/audio tool_media.py stored for the chat reply (MediaItem list)
+        self.media_items: list = []
         parts = []
         for b in blocks:
             t = b.get("type")

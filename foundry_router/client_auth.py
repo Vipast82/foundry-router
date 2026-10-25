@@ -6,6 +6,9 @@ in the logs and budgets) and its scopes decide what it may reach:
 
   inference  /api/* (Ollama) and /v1/* chat/completions/responses/embeddings/models
   media      /v1/images/*, /media/*, /mcp/media (image jobs and artifacts)
+             — except /media/a/<token>: signed, expiring links to one stored
+             image/audio file, readable WITHOUT a key so a browser can render
+             them in a chat. The only deliberate unauthenticated read.
   admin      /admin/* (the web UI's API; the /ui page shell itself is static)
   orchestration  /v1/foundry/* (coordinator bindings/state, claiming operator actions)
   telemetry  /v1/foundry/telemetry/* (the workstation bridge's observations; also
@@ -53,6 +56,8 @@ CORRELATION_HEADERS = {"x-foundry-session": "session_id", "x-foundry-task": "tas
 # OpenCode send x-session-id = their session id on every model call).
 SESSION_FALLBACK_HEADERS = ("x-session-id", "x-opencode-session", "x-session-affinity")
 _OPEN_PATHS = ("/", "/api/version", "/health")          # liveness probes stay open
+# Signed media links (see scope_for) — open by design, token-checked by the route.
+PUBLIC_MEDIA_PREFIX = "/media/a/"
 
 # Foundry calling itself (persona validation runs the real HTTP route
 # in-process). A per-process random secret: never configured, logged or sent
@@ -77,6 +82,12 @@ def current() -> dict:
 
 def scope_for(path: str) -> Optional[str]:
     if path in _OPEN_PATHS:
+        return None
+    if path.startswith(PUBLIC_MEDIA_PREFIX):
+        # THE ONE DELIBERATE UNAUTHENTICATED READ: a signed, expiring link to
+        # one stored image/audio file (tool_media.py). A browser rendering a
+        # chat's markdown image sends no Foundry key; the HMAC token in the
+        # path is the capability. No listing, nothing else under this prefix.
         return None
     if path.startswith("/mcp/media"):
         return "media"         # Foundry's built-in image tools

@@ -137,6 +137,10 @@ class Services:
         self.mcp_aggregator = MCPAggregator(self)
         from .media import MediaService
         self.media = MediaService(self)
+        # images/audio from persona MCP tools reach the chat (tool_media.py)
+        from .tool_media import ToolJobs
+        self.tool_jobs = ToolJobs(self)
+        self.mcp.foundry_svc = self
         from .health import HealthMonitor
         self.health = HealthMonitor(self)
         from .configops import ConfigHistory

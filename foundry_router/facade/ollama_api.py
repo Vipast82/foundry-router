@@ -871,14 +871,22 @@ def _direct_mcp_split(svc, persona: dict, client_tools) -> tuple[dict, int, str]
         tools = svc.tool_registry.mcp_tools_for_persona(persona)
     except Exception:
         return {}, 0, ""
+    from ..tool_media import JOBS_SERVER
     client_names = {((t or {}).get("function") or {}).get("name") for t in (client_tools or [])}
-    granted = [t for t in tools if t.name not in client_names]
+    # tool_job_status (tool_media.py) follows the policy result, not the grant:
+    # offered only when a long-running tool survived the filter, and last.
+    status = next((t for t in tools if t.server == JOBS_SERVER), None)
+    granted = [t for t in tools if t.name not in client_names and t.server != JOBS_SERVER]
     override, who = _client_tool_override(svc) if client_tools else (None, "")
     offered, mode, source = tool_policy.select(persona, granted, client_tools, override)
     raw = override if source == "client" else persona.get("mcp_with_client_tools")
     why = ({"client": who, "persona": f"persona {persona.get('virtual_name')}"}.get(source, "default")
            + ": " + tool_policy.describe(raw)) if client_tools else ""
-    return {t.name: t for t in offered}, len(granted) - len(offered), why
+    out = {t.name: t for t in offered}
+    if status is not None and status.name not in client_names \
+            and svc.tool_registry._has_long_running(list(offered)):
+        out[status.name] = status
+    return out, len(granted) - len(offered), why
 
 
 class _LazyFailover:
@@ -1216,9 +1224,14 @@ async def _agent_events_to_chat_chunks(svc, ctx: RequestContext, model_name: str
         yield tr.chat_chunk(model_name, f"\n[foundry-router] internal error: {e}")
     finally:
         ctx.logger.finish(status, error)
+    # Images/audio persona tools made: links after the answer (tool_media.py).
+    media_md = _media_footer(svc, ctx.media)
+    if media_md:
+        yield tr.chat_chunk(model_name, media_md)
     # Store a clean routed answer for future hits (only status ok — never an
-    # error apology or an ask_user question). Store failures are non-fatal.
-    if cacheable and status == "ok" and any(a.strip() for a in answers):
+    # error apology or an ask_user question; never one with media links,
+    # which expire). Store failures are non-fatal.
+    if cacheable and status == "ok" and not ctx.media and any(a.strip() for a in answers):
         try:
             await sem.store(ctx.persona, _last_user_text(ctx.messages),
                             "\n\n".join(a for a in answers if a.strip()))
@@ -1233,6 +1246,19 @@ async def _agent_events_to_chat_chunks(svc, ctx: RequestContext, model_name: str
                                                      len(used), brain))
     yield tr.chat_chunk(model_name, "", done=True,
                         stats=_logger_stats(ctx.logger, time.monotonic_ns() - t0))
+
+
+def _media_footer(svc, sink: list) -> str:
+    """Markdown links for the images/audio persona tools made (tool_media.py);
+    "" when none. Never raises — a link problem must not break the reply."""
+    if not sink:
+        return ""
+    try:
+        from .. import tool_media
+        return tool_media.render(svc, sink)
+    except Exception:                                             # noqa: BLE001
+        log.exception("rendering media links failed")
+        return ""
 
 
 def _logger_stats(logger, total_ns: int) -> dict:
@@ -2299,6 +2325,11 @@ async def _direct_dispatch_chat(svc, persona, model_name, messages, client_tools
                      + (a.verdict_text.splitlines() or [""])[0][:200])
         return False, convo, "", notes, rest
 
+    # Images/audio the persona tools make this request (tool_media.py): stored,
+    # then shown as links after the final reply.
+    media_sink: list = []
+    show_media = client_format is None and not summary_req
+
     async def _exec_foundry_tools(calls: list, narrate=None, convo=None) -> list:
         """Run the Foundry-owned tool calls of one model turn; returns the tool
         messages to append. Failures come back to the model as tool errors
@@ -2337,7 +2368,9 @@ async def _direct_dispatch_chat(svc, persona, model_name, messages, client_tools
             t_call = time.monotonic()
             try:
                 rich = await request_context.mcp_attributed(
-                    call_tool_rich(svc.mcp, td.server, td.mcp_tool, tc.get("arguments") or {}),
+                    call_tool_rich(svc.mcp, td.server, td.mcp_tool, tc.get("arguments") or {},
+                                   sink=media_sink if show_media else None,
+                                   persona=persona.get("virtual_name"), progress=narrate),
                     "direct", f"{persona['virtual_name']} · {model_id}")
                 dur = int((time.monotonic() - t_call) * 1000)
                 logger.record_tool_call(tc["name"], td.server, dur, ok=True, caller=model_id,
@@ -2478,6 +2511,9 @@ async def _direct_dispatch_chat(svc, persona, model_name, messages, client_tools
                     res.content = "\n\n".join(said + [res.content or ""]).strip()
                 if thought:
                     res.thinking = "\n".join(thought + [res.thinking or ""]).strip()
+                media_md = _media_footer(svc, media_sink)
+                if media_md:
+                    res.content = (res.content or "") + media_md
                 logger.finish("ok")
                 return res
             if (res.content or "").strip():
@@ -2716,10 +2752,29 @@ async def _direct_dispatch_chat(svc, persona, model_name, messages, client_tools
                             # back, and keep streaming the model's next turn.
                             produced = True
                             notes: list[str] = []
-                            convo = convo + [_assistant_turn(res, own)] \
-                                + await _exec_foundry_tools(own, notes.append, convo)
-                            for n in notes:
-                                yield tr.chat_chunk(model_name, "", done=False, thinking=_q(n))
+                            # Run them as a task so the stream keeps flowing:
+                            # progress lines as they happen, keep-alive bytes
+                            # between, so a minutes-long tool (image/music
+                            # generation) never looks like a dead connection.
+                            tools_task = asyncio.ensure_future(
+                                _exec_foundry_tools(own, notes.append, convo))
+                            t_tools = time.monotonic()
+                            tpacer = keepalive.Pacer(keepalive.visible_every(brain_cfg))
+                            try:
+                                while True:
+                                    done_t, _ = await asyncio.wait(
+                                        {tools_task}, timeout=hb if hb > 0 else 15.0)
+                                    while notes:
+                                        yield tr.chat_chunk(model_name, "", done=False,
+                                                            thinking=_q(notes.pop(0)))
+                                    if done_t:
+                                        break
+                                    yield tr.chat_chunk(model_name, "", done=False, thinking=_q(
+                                        tpacer.line("🔧 tools", time.monotonic() - t_tools)))
+                            finally:
+                                if not tools_task.done():
+                                    tools_task.cancel()   # client went away
+                            convo = convo + [_assistant_turn(res, own)] + tools_task.result()
                             while assist_visible:
                                 yield tr.chat_chunk(model_name, "\n\n" + assist_visible.pop(0)
                                                     + "\n\n", done=False)
@@ -2758,6 +2813,9 @@ async def _direct_dispatch_chat(svc, persona, model_name, messages, client_tools
                                 + ("; still no final answer" if wrapping else ""))
                             if wrapping:
                                 yield tr.chat_chunk(model_name, _cap_note(tool_cap), done=False)
+                        media_md = _media_footer(svc, media_sink)
+                        if media_md:
+                            yield tr.chat_chunk(model_name, media_md, done=False)
                         if (not rest and text_chars and client_format is None and not summary_req
                                 and route_visible(svc, persona)):
                             yield tr.chat_chunk(model_name, route_footer(

@@ -2,6 +2,50 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.143.0 — Images and audio from persona MCP tools reach every chat client
+
+Victor's goal: ask any chat (AnythingLLM, Open WebUI, Kilo, Cline) for an
+image or a sound and get it back without opening ComfyUI. Before this, a
+persona tool's image/audio became a text note only the model saw (audit
+2026-10-24 §B). Full detail: docs/MEDIA.md, "Images and audio from persona MCP
+tools".
+
+- **Stored.** Image/audio blocks, image/audio resource blobs, and media URLs in
+  a tool's text reply (the live Kokoro, Chatterbox, Stable Audio and ACE-Step
+  servers return `http://<their host>/file.wav`) are saved in the media store
+  (`media_jobs.op = tool`) with a SHA-256. URLs are fetched only from the MCP
+  server's own host (plus `media.tool_fetch_hosts`), with redirects off. Per-file
+  and total size caps. Tool files never count against the image budget.
+- **Signed links** `GET /media/a/<token>`: an HMAC-signed, expiring
+  (`media.public_link_ttl_hours`, 7 days) link to one file. A browser can load it
+  without a key. This is the one deliberate unauthenticated read
+  (`client_auth.PUBLIC_MEDIA_PREFIX`). Failures are a bare 404, there's no listing,
+  and responses have the right content type, `nosniff` and Range support.
+- **In the reply.** After the model's text: `![<tool> image](link)` for images
+  and `🔊 [<tool> audio (wav, 1.2 MB)](link)` for audio (optional
+  `<audio controls>`, `media.audio_html`). This covers the brain path, the worker
+  tool loop and the direct path, Ollama and OpenAI shapes, buffered and
+  streaming. Tool calls handed to the client are untouched. JSON-format requests
+  and compaction summaries get no links. The model sees the text note, a line
+  saying the files are already shown, and the image itself if it has vision.
+  Answers with links skip the semantic cache. Foundry-MCP (`/mcp`) keeps the real
+  image/audio content and adds a text block with the link.
+- **Long-running tools.** New per-server `long_running` setting (config, and a
+  checkbox in the MCP server editor). A chat call runs as a background tool job
+  (`op = tool_job`). The request waits up to `media.tool_inline_wait_seconds`
+  (90), streaming progress, then hands the model a job id. The Foundry-owned
+  `tool_job_status` tool (offered only to personas with such a server) long-polls
+  and never resubmits. The same call from the same client returns the running
+  job. Restarts mark running jobs interrupted.
+- **Direct streaming keeps flowing while persona tools run.** Progress lines and
+  keep-alive frames are sent during the tool call, instead of silence until it
+  returns.
+
+Config: new `media.tool_outputs`, `tool_output_max_mb` (100), `tool_output_max_total_gb` (5),
+`tool_fetch_urls`, `tool_fetch_hosts`, `public_link_ttl_hours` (168), `public_base_url`,
+`audio_html`, `tool_inline_wait_seconds` (90); `mcp_servers[].long_running`.
+Schema: `media_jobs.result_text` (additive). No deploy-time steps. To use it,
+mark Stable Audio (and ComfyUI once connected) `long_running`.
 ## v0.142.0 — Shorter, visible waits in AnythingLLM agent mode
 
 Victor's ask: AnythingLLM's @agent mode on Foundry-Chat sat silent for long

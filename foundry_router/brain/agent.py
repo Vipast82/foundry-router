@@ -24,7 +24,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, AsyncIterator, Optional, TypedDict
 
 from langgraph.graph import END, START, StateGraph
@@ -69,6 +69,9 @@ class RequestContext:
     # The parsed yes/no from a confirmation reply (None = fresh request or an
     # unclear reply). True also sets guard.user_approved_paid at ctx build.
     paid_confirmation: Optional[bool] = None
+    # Images/audio persona tools made this request (tool_media.MediaItem /
+    # PendingJob) — appended to the reply as links by the facade.
+    media: list = field(default_factory=list)
 
 
 class AgentState(TypedDict, total=False):
@@ -76,8 +79,24 @@ class AgentState(TypedDict, total=False):
     done: bool
 
 
-async def call_tool_rich(mcp, server: str, tool: str, args: dict, **kw):
-    """ToolResult from any MCP manager (falls back to the text-only call)."""
+async def call_tool_rich(mcp, server: str, tool: str, args: dict, *, sink=None,
+                         persona=None, progress=None, **kw):
+    """ToolResult from any MCP manager (falls back to the text-only call).
+
+    sink: a chat path's per-request media list. With it, the call goes through
+    tool_media.run_tool — images/audio are stored and queued for the reply,
+    long-running servers become tool jobs. tool_job_status always goes there."""
+    from .. import tool_media
+    svc = getattr(mcp, "foundry_svc", None)
+    if svc is not None and (sink is not None or server == tool_media.JOBS_SERVER):
+        return await tool_media.run_tool(svc, mcp, server, tool, args,
+                                         sink=sink if sink is not None else [],
+                                         persona=persona, progress=progress)
+    return await raw_call_tool_rich(mcp, server, tool, args, **kw)
+
+
+async def raw_call_tool_rich(mcp, server: str, tool: str, args: dict, **kw):
+    """The plain MCP call, no media handling."""
     fn = getattr(mcp, "call_tool_rich", None)
     if fn is not None:
         return await fn(server, tool, args, **kw)
@@ -1032,11 +1051,15 @@ class AgentRunner:
                        else f"Calling MCP tool {tool.server}/{tool.mcp_tool}..."))
         t0 = time.monotonic()
         try:
-            out = await self._with_heartbeat(
+            rich = await self._with_heartbeat(
                 request_context.mcp_attributed(
-                    self.tool_registry.mcp.call_tool(tool.server, tool.mcp_tool, args),
+                    call_tool_rich(self.tool_registry.mcp, tool.server, tool.mcp_tool, args,
+                                   sink=ctx.media,
+                                   persona=(ctx.persona or {}).get("virtual_name"),
+                                   progress=lambda line: emit("think", line.rstrip())),
                     "brain", (ctx.persona or {}).get("virtual_name") or ""),
                 emit, f"MCP tool {tool.server}/{tool.mcp_tool}")
+            out = rich.text
         except Exception as e:
             detail = describe_exception(e)
             dur_ms = int((time.monotonic() - t0) * 1000)
@@ -1845,7 +1868,9 @@ class AgentRunner:
                 try:
                     rich = await request_context.mcp_attributed(
                         call_tool_rich(self.tool_registry.mcp,
-                                       tool.server, tool.mcp_tool, tc["arguments"]),
+                                       tool.server, tool.mcp_tool, tc["arguments"],
+                                       sink=ctx.media,
+                                       persona=(ctx.persona or {}).get("virtual_name")),
                         "worker", f"{(ctx.persona or {}).get('virtual_name') or ''} · {worker}")
                     out = rich.text
                 except Exception as e:

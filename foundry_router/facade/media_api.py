@@ -14,6 +14,12 @@ Foundry job API (the local media adapter, Kilo/Cline tools) — asynchronous:
 
 All of these need the `media` client scope (client_auth.py). A client sees and
 downloads only its own jobs unless it also holds the admin scope.
+
+The one exception, on purpose:
+  GET  /media/a/{token}              one image/audio file a persona MCP tool made,
+                                     for a browser rendering the chat reply. No key:
+                                     the HMAC-signed, expiring token is the access
+                                     (tool_media.py, media.public_link_ttl_hours).
 """
 
 from __future__ import annotations
@@ -220,6 +226,32 @@ async def artifact(request: Request, job_id: str, index: int):
                         filename=f"{job_id}-{index}.{path.suffix.lstrip('.')}",
                         headers={"x-content-sha256": meta["sha256"],
                                  "cache-control": "private, max-age=86400"})
+
+
+_NOT_FOUND = JSONResponse({"error": {"message": "not found", "code": "not_found"}},
+                          status_code=404)
+
+
+@router.get("/media/a/{token}")
+async def public_artifact(request: Request, token: str):
+    """THE ONE DELIBERATE UNAUTHENTICATED READ (client_auth.scope_for): one
+    stored image/audio file for whoever holds a valid, unexpired signed token
+    (tool_media.sign). Every failure — bad signature, expired, pruned — is the
+    same bare 404, so the route reveals nothing. No listing exists."""
+    from .. import tool_media
+    svc = request.app.state.services
+    hit = tool_media.verify(svc.db, token)
+    found = svc.media.artifact_path(*hit) if hit else None
+    if found is None:
+        return _NOT_FOUND
+    path, meta = found
+    return FileResponse(path, media_type=meta["mime"],
+                        filename=f"{hit[0]}-{hit[1]}.{path.suffix.lstrip('.')}",
+                        content_disposition_type="inline",
+                        headers={"x-content-sha256": meta["sha256"],
+                                 "x-content-type-options": "nosniff",
+                                 "cache-control": "private, max-age=3600",
+                                 "referrer-policy": "no-referrer"})
 
 
 @router.get("/media/models")

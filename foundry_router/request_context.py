@@ -11,6 +11,7 @@ see each other's) and the Anthropic adapter forwards the allow-listed ones.
 from __future__ import annotations
 
 import contextvars
+import re
 from typing import Optional
 
 # Client headers worth forwarding to a session-aware backend, lower-case.
@@ -39,6 +40,36 @@ def capture(headers) -> None:
     _client_headers.set(picked)
     _request_id.set(str(rid)[:100] or uuid.uuid4().hex)
     _agent_caller.set(agent_caller_from(headers) or "")
+    origin = _origin_from(headers)
+    _origin.set(origin)
+    if origin:
+        global _last_origin
+        _last_origin = origin
+
+
+# The origin this request reached Foundry on (proxy-aware), for links the
+# client's browser must load — signed media links (tool_media.py).
+_origin: contextvars.ContextVar[str] = contextvars.ContextVar("foundry_origin", default="")
+_HOST_RE = re.compile(r"^[A-Za-z0-9.\-]+(:\d{1,5})?$|^\[[0-9A-Fa-f:.]+\](:\d{1,5})?$")
+
+
+def _origin_from(headers) -> str:
+    try:
+        host = (headers.get("x-forwarded-host") or headers.get("host") or "").split(",")[0].strip()
+        proto = (headers.get("x-forwarded-proto") or "http").split(",")[0].strip().lower()
+    except Exception:
+        return ""
+    if not host or not _HOST_RE.match(host) or proto not in ("http", "https"):
+        return ""
+    return f"{proto}://{host}"
+
+
+_last_origin = ""     # the most recent chat request's origin (MCP calls have none)
+
+
+def public_origin() -> str:
+    """This request's origin, else the last one a chat request arrived on."""
+    return _origin.get() or _last_origin
 
 
 # -- agent loop protection --------------------------------------------------------

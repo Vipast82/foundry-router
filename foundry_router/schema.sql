@@ -490,7 +490,7 @@ CREATE TABLE IF NOT EXISTS media_jobs (
   created_ts REAL,                   -- epoch seconds (budget windows)
   started_ts REAL,
   finished_ts REAL,
-  op TEXT,                           -- generate | edit
+  op TEXT,                           -- generate | edit | tool (persona MCP tool output) | tool_job
   status TEXT,                       -- queued | running | succeeded | failed | cancelled
   model TEXT,
   backend TEXT,
@@ -507,7 +507,8 @@ CREATE TABLE IF NOT EXISTS media_jobs (
   error_status INTEGER,
   artifacts TEXT,                    -- JSON list
   usage TEXT,                        -- JSON as the backend reported it
-  duration_ms REAL
+  duration_ms REAL,
+  result_text TEXT                   -- tool_job: the tool's text result
 );
 CREATE INDEX IF NOT EXISTS idx_media_jobs_ts ON media_jobs(created_ts);
 CREATE INDEX IF NOT EXISTS idx_media_jobs_key ON media_jobs(client_id, idem_key);

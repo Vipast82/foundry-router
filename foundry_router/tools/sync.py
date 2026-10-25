@@ -78,6 +78,11 @@ _ASK_PARAMS = {
 }
 
 
+def _status_tool_name() -> str:
+    from ..tool_media import STATUS_TOOL
+    return STATUS_TOOL
+
+
 def sanitize(model_id: str) -> str:
     """ask_<sanitized_model_id> naming convention: 'qwen3.6:27b' -> 'ask_qwen3_6_27b',
     'anthropic/claude-sonnet-5' -> 'ask_anthropic_claude_sonnet_5'."""
@@ -252,7 +257,14 @@ class ToolRegistry:
 
     def get(self, name: str) -> Optional[ToolDef]:
         t = self.tools.get(name)
+        if t is None and name == _status_tool_name():
+            from ..tool_media import status_tooldef     # Foundry-owned, never synced
+            return status_tooldef()
         return t if t and not t.disabled else None
+
+    def _has_long_running(self, tools: list[ToolDef]) -> bool:
+        servers = getattr(self.mcp, "servers", None) or {}
+        return any(getattr(servers.get(t.server or ""), "long_running", False) for t in tools)
 
     def enabled(self) -> list[ToolDef]:
         return [t for t in self.tools.values() if not t.disabled]
@@ -291,6 +303,12 @@ class ToolRegistry:
                     or (srv in scoped and (names & scoped[srv])):
                 out.append(t)
         self._report_missing_scoped(persona, scoped, registered)
+        # A long-running server (ComfyUI, Stable Audio) hands back job ids;
+        # tool_job_status (tool_media.py) checks them. Appended last so the
+        # tool order stays stable for prompt caching.
+        if out and self._has_long_running(out):
+            from ..tool_media import status_tooldef
+            out.append(status_tooldef())
         return out
 
     def _report_missing_scoped(self, persona: Optional[dict],

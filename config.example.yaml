@@ -330,11 +330,15 @@ mcp_servers: []
 #    call_defaults: {network: true, cpus: 2, memory_mb: 1024}
 #
 #  Media generation (see contrib/mcp-wrappers/README.md) — set generous
-#  per-server timeouts; generation runs far longer than a text tool call:
+#  per-server timeouts; generation runs far longer than a text tool call.
+#  Images/audio these return reach the chat as links (docs/MEDIA.md). Mark a
+#  server long_running when one call takes minutes: chat requests then get a
+#  job id after media.tool_inline_wait_seconds and check it with tool_job_status.
 #  - name: comfyui                 # community server, e.g. joenorton/comfyui-mcp-server
 #    url: http://192.168.1.40:8188/mcp
 #    transport: streamable-http
 #    timeout_seconds: 900
+#    long_running: true
 #  - name: voicebox                # ships its own /mcp endpoint
 #    url: http://192.168.1.40:5001/mcp
 #    transport: streamable-http
@@ -403,6 +407,16 @@ media:
   dedupe_minutes: 30               # the same request returns the existing job
   retention_days: 30
   mcp_tools: true                  # /mcp/media for MCP chat clients (needs mcp_aggregator)
+  # Images/audio from persona MCP tools -> links in the chat reply (docs/MEDIA.md)
+  tool_outputs: true
+  tool_output_max_mb: 100          # per file
+  tool_output_max_total_gb: 5      # oldest tool files pruned past this
+  tool_fetch_urls: true            # fetch media URLs a tool returns (its own host only)
+  tool_fetch_hosts: []             # extra hosts allowed for that
+  public_link_ttl_hours: 168       # /media/a/<token> links expire after this
+  public_base_url: ""              # e.g. https://foundry.lan behind a proxy; "" = request host
+  audio_html: false                # also emit <audio controls> after audio links
+  tool_inline_wait_seconds: 90     # long_running tools: wait this long, then hand back a job id
 
 # Default persona sets applied at startup (docs/KILO.md). Missing personas are
 # created, untouched ones follow newer profile versions, edited ones are kept.

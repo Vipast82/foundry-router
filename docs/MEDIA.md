@@ -89,6 +89,64 @@ succeeded).
 Responses from `/v1/images/*` carry `x-foundry-media-job`,
 `x-foundry-served-model` and `x-foundry-served-backend`.
 
+## Images and audio from persona MCP tools (any chat client)
+
+When a persona's MCP tool (ComfyUI, Kokoro, Chatterbox, Stable Audio,
+ACE-Step, a screenshot tool…) returns an image or audio file, Foundry shows it
+to the person chatting, in any client, on the brain path (plain chat) and the
+direct path (the client brings its own tools):
+
+1. **Stored.** MCP image/audio blocks, image/audio resource blobs, and media
+   URLs in the tool's text reply are saved as a `media_jobs` row (`op: tool`)
+   with a SHA-256, under `<data dir>/media/<id>/`. A URL is fetched only from
+   **that MCP server's own host** (plus `tool_fetch_hosts`), so a link a model
+   or a web page wrote is never fetched. The file type comes from the bytes,
+   not from what the server claims. Limits: `tool_output_max_mb` per file,
+   `tool_output_max_total_gb` for all tool files (oldest go first), and
+   `retention_days`. Tool files never count against the image budget.
+2. **Signed link.** `GET /media/a/<token>` serves that one file with no key.
+   This is **the one deliberate unauthenticated read in Foundry**: a browser
+   rendering a chat's markdown image sends no Foundry key. The token is an
+   HMAC-SHA256 over (file, expiry), with a secret kept in the database, and it
+   expires after `public_link_ttl_hours` (7 days). Anyone holding the link can
+   load that file until then, so treat links like the files themselves. A bad,
+   expired or pruned token is a bare 404. There is no listing. Responses carry
+   the right content type, `nosniff`, `inline`, and support Range requests so
+   audio players can seek. Links use the request's host (proxy headers
+   respected), or `public_base_url` when set.
+3. **In the reply.** After the model's text, Foundry adds `![<tool> image](link)`
+   per image and `🔊 [<tool> audio (wav, 1.2 MB)](link)` per audio file (plus
+   `<audio controls>` when `audio_html` is on). Only `content` changes: tool
+   calls handed to the client are untouched, and JSON-format requests and
+   compaction summaries get no links. The model sees the text note
+   (`[image: image/png, 512 KB]`), a line saying the file is already shown,
+   and the image itself when it has vision. It never sees the link, so it
+   can't repeat or garble it. Answers with links skip the semantic cache.
+4. **Foundry-MCP (`/mcp`).** Clients that attach Foundry as an MCP server still
+   get the real image/audio content, plus a text block with the link for
+   clients that drop MCP media.
+
+### Long-running generation tools
+
+Mark the server `long_running: true` (ComfyUI, Stable Audio: one call can take
+10+ minutes). A call then runs as a background **tool job** (`op: tool_job`):
+
+- The chat request waits up to `tool_inline_wait_seconds` (90, under
+  AnythingLLM's ~120 s cut-off) and streams progress as thinking lines (the
+  server's own progress messages, otherwise "still working · 1m30s").
+- Finished in time: a normal result with the links.
+- Still running: the model gets the job id and the reply shows
+  `⏳ comfyui/run is still running (job img_…) — ask me to check on it.` The
+  persona gains the Foundry-owned tool `tool_job_status(job_id, wait_seconds ≤ 60)`.
+  It long-polls and never resubmits. When the job is done, it returns the
+  tool's text and the reply gets the links.
+- The same call from the same client while one is still running returns that
+  job, so a second generation never starts. A client sees only its own jobs. A
+  restart marks running jobs interrupted. They are never re-run.
+
+ACE-Step already hands back its own job id (`check_music_job`). Its "done. URL:"
+reply is fetched and linked like any other tool result.
+
 ## The local adapter (Windows or Linux)
 
 See `contrib/media-adapter/README.md`. In short:

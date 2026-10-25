@@ -599,6 +599,8 @@ class Database:
             ("request_log", "user_agent", "TEXT"),
             # "— via <model> @ <backend>" under answers (also per client key)
             ("personas", "route_footer", "INTEGER DEFAULT 0"),
+            # media hand-back: a long-running tool job's text result
+            ("media_jobs", "result_text", "TEXT"),
         ]
         with self._lock:
             for table, column, ddl in added:

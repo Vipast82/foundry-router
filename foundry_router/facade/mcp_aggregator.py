@@ -108,7 +108,27 @@ class MCPAggregator:
                               if progress_callback else {})),
             "aggregator", scope, client)
         self._record_call(name, arguments, result.text)
+        await self._add_media_links(td, arguments, result)
         return result
+
+    async def _add_media_links(self, td, arguments, result) -> None:
+        """Images/audio stay real MCP Image/AudioContent; a text block with a
+        signed link is added too, for clients that drop MCP media (tool_media)."""
+        try:
+            from .. import tool_media
+            items = list(getattr(result, "media_items", None) or [])
+            if not items and any(b.get("type") in ("image", "audio")
+                                 for b in result.blocks or []):
+                cap = await tool_media.store_result(self.svc, td.server, td.mcp_tool or td.name,
+                                                    arguments, result, fetch_urls=False)
+                items = cap.items
+            md = tool_media.render(self.svc, items).strip() if items else ""
+            if md:
+                note = "Shown to the user via these links (they expire):\n" + md
+                result.blocks.append({"type": "text", "text": note})
+                result.text = "\n".join(p for p in (result.text, note) if p)
+        except Exception:                                         # noqa: BLE001
+            log.exception("adding media links to %s failed", td.name)
 
     # -- poll guard ------------------------------------------------------------
 

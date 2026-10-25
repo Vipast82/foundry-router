@@ -553,6 +553,12 @@ class MCPServerConfig(BaseModel):
     # initialize handshake per tool call). A broken session is reopened
     # automatically; turn off for a server that misbehaves with long sessions.
     persistent_session: bool = True
+    # Long-running generation (ComfyUI, Stable Audio): a persona tool call on
+    # this server runs as a background tool job. The chat request waits up to
+    # media.tool_inline_wait_seconds, then hands the model a job id it checks
+    # with tool_job_status — so a client's own request timeout (AnythingLLM
+    # ~120 s) never kills a 10-minute generation. Off = a normal call.
+    long_running: bool = False
 
 
 class ToolSyncConfig(BaseModel):
@@ -780,6 +786,27 @@ class MediaConfig(BaseModel):
     # Serve generate_image / edit_image / image_job_status at {mcp base}/media
     # (needs mcp_aggregator.enabled). Never added to the other MCP endpoints.
     mcp_tools: bool = True
+    # -- images / audio produced by persona MCP tools (tool_media.py) --------
+    # Save them in this store and show them in the chat reply through a
+    # signed, expiring link (/media/a/<token>) a browser can load without a key.
+    tool_outputs: bool = True
+    tool_output_max_mb: float = 100.0      # per file; bigger is not stored
+    tool_output_max_total_gb: float = 5.0  # all tool files; oldest pruned past it
+    # Fetch media URLs found in a tool's text reply (kokoro/stable-audio return
+    # http://<their host>/file.wav). Only from the MCP server's own host plus
+    # these extra hosts — never an arbitrary host a model or page wrote.
+    tool_fetch_urls: bool = True
+    tool_fetch_hosts: list[str] = Field(default_factory=list)
+    public_link_ttl_hours: int = 168       # signed link lifetime (7 days)
+    # Base URL the chat user's browser reaches Foundry on (e.g. behind a
+    # reverse proxy). "" = from the request's Host / X-Forwarded-* headers.
+    public_base_url: str = ""
+    # Also add <audio controls> after the audio link (only for clients that
+    # render that HTML; the markdown link is always there).
+    audio_html: bool = False
+    # Long-running tools (mcp_servers[].long_running): how long a chat request
+    # waits before handing the model a job id instead.
+    tool_inline_wait_seconds: int = 90
 
 
 class TrainingCaptureConfig(BaseModel):
