@@ -118,17 +118,31 @@ def _not_found(name: str) -> JSONResponse:
 async def list_models(request: Request) -> dict:
     """Enabled personas, in OpenAI's model-list shape (same policy-only set the
     Ollama /api/tags advertises), with context/output/modality metadata."""
-    from .ollama_api import _visible_personas, openai_model_entry
+    from .ollama_api import _visible_personas, embedding_models, openai_model_entry
     svc = _svc(request)
     created = _now()
     return {"object": "list",
-            "data": [openai_model_entry(svc, p, created) for p in _visible_personas(svc)]}
+            "data": [openai_model_entry(svc, p, created) for p in _visible_personas(svc)]
+            + [_embedding_entry(svc, m, created) for m in embedding_models(svc)]}
+
+
+def _embedding_entry(svc, model_id: str, created: int) -> dict:
+    """An embedding model in /v1/models (audit C4): its real name, which
+    /v1/embeddings takes; marked so pickers can tell it from a chat model."""
+    info = svc.pool.backend_info(model_id) or {}
+    return {"id": model_id, "object": "model", "created": created,
+            "owned_by": info.get("name") or "foundry-router",
+            "capabilities": {"embedding": True, "tools": False, "vision": False,
+                             "reasoning": False},
+            "foundry": {"kind": "embedding"}}
 
 
 @router.get("/v1/models/{model}")
 async def retrieve_model(request: Request, model: str):
-    from .ollama_api import _visible_personas, openai_model_entry
+    from .ollama_api import _visible_personas, embedding_models, openai_model_entry
     svc = _svc(request)
+    if model in embedding_models(svc):
+        return _embedding_entry(svc, model, _now())
     persona = svc.personas.get(model)
     if persona is None or persona["virtual_name"] not in {
             p["virtual_name"] for p in _visible_personas(svc)}:

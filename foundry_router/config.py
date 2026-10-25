@@ -52,6 +52,10 @@ class ServerConfig(BaseModel):
     # internal, no-auth posture — restrict to specific origins if the endpoint is
     # ever exposed. Empty list disables CORS entirely.
     cors_origins: list[str] = Field(default_factory=lambda: ["*"])
+    # List reachable embedding models (real backend names, capability
+    # "embedding") in /api/tags and /v1/models next to the personas, so
+    # embedder pickers (AnythingLLM, Open WebUI) can find them.
+    list_embedding_models: bool = True
 
 
 class AgentBrainConfig(BaseModel):
@@ -896,6 +900,30 @@ class HealthConfig(BaseModel):
     fresh_minutes: int = 15
 
 
+class AudioConfig(BaseModel):
+    """OpenAI audio endpoints (facade/audio_api.py). Speech is made by a TTS
+    MCP server's speech tool (Kokoro / Chatterbox, run by the Foundry Client);
+    the audio comes back as a URL on that server's host, which Foundry fetches
+    and returns. There is no speech-to-text backend: /v1/audio/transcriptions
+    answers 501 until one is configured."""
+    enabled: bool = True
+    # OpenAI `model` value -> MCP server name.
+    speech_servers: dict[str, str] = Field(default_factory=lambda: {
+        "kokoro": "kokoro-tts", "chatterbox": "chatterbox-tts"})
+    # OpenAI's own model names (what clients send by default) -> a key above.
+    speech_aliases: dict[str, str] = Field(default_factory=lambda: {
+        "tts-1": "kokoro", "tts-1-hd": "kokoro", "gpt-4o-mini-tts": "kokoro"})
+    default_speech: str = "kokoro"       # used when `model` is empty or unknown
+    speech_tool: str = "generate_speech"
+    default_voice: str = "af_heart"      # Kokoro voice for OpenAI voice names
+    max_input_chars: int = 4096          # OpenAI's own limit
+    fetch_timeout_seconds: int = 60
+    # Hosts besides the speech MCP server's own that Foundry may download the
+    # returned audio URL from (e.g. a file server behind a gateway).
+    fetch_hosts: list[str] = Field(default_factory=list)
+    max_audio_mb: float = 50.0
+
+
 class OperatorChatRoute(BaseModel):
     backend: str
     model: str
@@ -942,6 +970,7 @@ class AppConfig(BaseModel):
     perf: PerfConfig = Field(default_factory=PerfConfig)
     health: HealthConfig = Field(default_factory=HealthConfig)
     operator_chat: OperatorChatConfig = Field(default_factory=OperatorChatConfig)
+    audio: AudioConfig = Field(default_factory=AudioConfig)
 
 
 # --------------------------------------------------------------------------- #

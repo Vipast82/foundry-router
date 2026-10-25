@@ -81,6 +81,37 @@ Time between steps that AnythingLLM spends running its own tool (Monitor →
 Performance shows it as the client gap) has no request open, so Foundry can't
 show anything there.
 
+## 6. Voice, embeddings, Think toggle, pasted images
+
+**Text to speech** (`/v1/audio/speech`, needs the `media` scope on the key).
+Foundry calls the Kokoro or Chatterbox MCP server (run by the Foundry Client)
+and returns the WAV it makes.
+
+| Client | Setting |
+|---|---|
+| Open WebUI | Admin → Settings → Audio → TTS engine **OpenAI**, API base `http://<router>:11435/v1`, key, model `kokoro` (or `chatterbox`), voice `af_heart` (any Kokoro voice id; OpenAI names like `alloy` become `af_heart`) |
+| AnythingLLM | Settings → Voice & Speech → TTS provider **OpenAI Compatible**, base URL `http://<router>:11435/v1`, key, model `kokoro`, voice `af_heart` |
+
+**Speech to text is not available**: Foundry has no STT backend, and
+`/v1/audio/transcriptions` answers 501 (`no_stt_backend`). Keep the client's
+own speech-to-text (browser / local Whisper) for now.
+
+**Embedding models** are listed in `/api/tags` and `/v1/models` under their
+real backend names (Ollama capability `embedding`), so the AnythingLLM and
+Open WebUI embedder pickers show them. Chat model pickers show them too, as
+real Ollama does; turn the listing off with `server.list_embedding_models:
+false`.
+
+**Think toggle**: personas advertise `thinking` when a model they can reach
+really reasons (Strata's qwen3.8, Claude, gpt-oss…), so Open WebUI shows its
+Think switch. A persona with *force reasoning effort* set keeps its own level,
+and the switch has no effect there. Flipping it mid-chat changes the prompt
+once (one slower turn on a local model).
+
+**Pasted images** on the direct path (AnythingLLM `@agent`, Open WebUI with
+tools) go to a vision model on the persona's route when the chosen model can't
+see images, or get a clear "no model on this route can read the image" answer.
+
 ## Tested request shapes
 
 tests/test_brain_and_clients.py replays each shape, streamed and buffered, with

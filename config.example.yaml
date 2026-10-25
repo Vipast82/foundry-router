@@ -17,6 +17,7 @@
 server:
   host: "0.0.0.0"        # inside Docker keep 0.0.0.0; compose controls exposure
   port: 11435
+  # list_embedding_models: true   # embedding models in /api/tags and /v1/models
 
 # --- §4.2 Agent Brain --------------------------------------------------------
 # The model that makes routing decisions, on EVERY request. An explicit,
@@ -351,6 +352,18 @@ mcp_servers: []
 #    url: http://192.168.1.40:8766/mcp
 #    transport: streamable-http
 #    timeout_seconds: 300
+
+# --- OpenAI audio endpoints (docs/CLIENT_COMPAT.md §6) --------------------------
+# /v1/audio/speech runs a TTS MCP server's speech tool and returns the audio it
+# links to (fetched only from that server's own host or fetch_hosts). There is
+# no speech-to-text backend: /v1/audio/transcriptions answers 501.
+# audio:
+#   enabled: true
+#   speech_servers: {kokoro: kokoro-tts, chatterbox: chatterbox-tts}
+#   speech_aliases: {tts-1: kokoro, tts-1-hd: kokoro, gpt-4o-mini-tts: kokoro}
+#   default_speech: kokoro
+#   default_voice: af_heart       # OpenAI voice names (alloy, nova...) map to this
+#   fetch_hosts: []
 
 # --- External agents (Hermes Agent) — see docs/AGENTS.md ------------------------
 # An agent runs its own multi-step loop (tools, skills, memory). Foundry can use

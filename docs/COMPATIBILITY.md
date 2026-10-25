@@ -41,8 +41,8 @@ work).
 |---|---|
 | `GET` / `HEAD /` | `Ollama is running` (browsers are redirected to `/ui`) |
 | `GET /api/version` | ✅ (advertises an Ollama API version + `foundry_router`) |
-| `GET /api/tags` | ✅ personas |
-| `POST /api/show` | ✅ context length, capabilities (vision / thinking / tools from the backends) |
+| `GET /api/tags` | ✅ personas, plus reachable embedding models under their real names (capability `embedding`; `server.list_embedding_models`) |
+| `POST /api/show` | ✅ context length, capabilities (vision / tools from the backends; `thinking` when a served model really reasons — the same check that decides whether Foundry sends a think setting, so llama.cpp / Strata qwen3 and Claude count) |
 | `GET /api/ps` | ✅ models resident on the backends |
 | `POST /api/chat` | ✅ streaming + non-streaming, tools, images, `think`, `format`, `options` |
 | `POST /api/generate` | ✅ (on top of chat; empty prompt = load / `keep_alive: 0` = unload) |
@@ -54,13 +54,16 @@ work).
 
 | Endpoint | Status |
 |---|---|
-| `GET /v1/models`, `GET /v1/models/{id}` | ✅ personas |
+| `GET /v1/models`, `GET /v1/models/{id}` | ✅ personas, plus embedding models (`capabilities.embedding: true`) |
 | `POST /v1/chat/completions` | ✅ streaming (SSE, `stream_options.include_usage`) + non-streaming; tools / `tool_choice` / `parallel_tool_calls`; images (data URIs); `reasoning_effort` / `reasoning.effort`; `response_format`; `max_tokens` / `max_completion_tokens`; sampling incl. llama.cpp extras; reasoning out as `reasoning_content`; `context_length_exceeded` errors |
 | `POST /v1/responses` | ✅ Responses API: `input` (string or items: messages with `input_text` / `input_image` / `output_text`, `function_call`, `function_call_output`), `instructions`, function `tools`, `tool_choice`, `reasoning.effort`, `text.format` (json schema), `max_output_tokens`; streams the typed events (`response.created`, `output_item.added/done`, `output_text.delta/done`, `reasoning_summary_text.delta/done`, `function_call_arguments.delta/done`, `response.completed` / `incomplete` / `failed`). Stateless: `previous_response_id` is refused (send the full input); hosted tools (web_search, file_search, computer use) are dropped |
 | `POST /v1/completions` | ✅ legacy text completion (stream + non-stream); `suffix` (fill-in-the-middle) is given to the model as context; `n` > 1, `echo`, `logprobs`, `best_of` ignored |
 | `POST /v1/embeddings` | ✅ `input` string / list / token arrays; `encoding_format: "base64"` (float32), `dimensions` |
 | `POST /v1/feedback` | Foundry extension: rate an answer |
-| Audio, images, files, batches, moderations, assistants, fine-tuning | ❌ not served |
+| `POST /v1/audio/speech` | ✅ `model` (kokoro / chatterbox, or tts-1 / tts-1-hd / gpt-4o-mini-tts → kokoro), `input`, `voice` (Kokoro ids pass, OpenAI names → `af_heart`), `speed`; returns the server's audio (WAV, no transcoding). `media` scope |
+| `POST /v1/audio/transcriptions`, `/v1/audio/translations` | ❌ 501 `no_stt_backend`: no speech-to-text backend exists yet |
+| `POST /v1/images/generations`, `/v1/images/edits` | ✅ see [MEDIA.md](MEDIA.md) (`media` scope) |
+| Files, batches, moderations, assistants, fine-tuning | ❌ not served |
 
 ## Backends
 
@@ -171,13 +174,20 @@ so behaviour and metrics are identical on every route:
 | Route | Who owns the loop | What the model sees |
 |---|---|---|
 | Agent mode, persona with MCP tools | the worker model (or the brain) | the persona's tools |
-| **Direct mode** (Cline / OpenCode send their own tools) | the client, plus Foundry for persona tools | client tools **+** the persona's attached MCP tools (if `persona tools in direct mode` is on). Foundry runs its own tool calls and continues; client tool calls go back to the client. A persona with no tools attached is unchanged. |
+| **Direct mode** (Cline / OpenCode send their own tools) | the client, plus Foundry for persona tools | client tools **+** the persona's attached MCP tools (if `persona tools in direct mode` is on). Foundry runs its own tool calls and continues; client tool calls go back to the client. A turn with both: Foundry runs its own, hands the client's back, and puts its own calls + results back into that turn of the history on the next request (all calls stay paired; same prompt every later turn). A persona with no tools attached is unchanged. |
 | Foundry-MCP aggregator (`/mcp/`, `/mcp/p/<profile>/`, `/mcp/persona/<Persona>/`) | the external client (AnythingLLM, Cline, …) | exactly that endpoint's tools |
 | Agent tools (`agent-<name>`: `hermes_run` / `_status` / `_stop`) | whichever loop above holds the grant | three tools that hand a task to an external agent ([AGENTS.md](AGENTS.md)) |
 
 * **Results keep every content type** — text, images, audio, embedded
   resources; structured results are rendered as JSON. The aggregator returns
   them natively; worker / direct loops pass images to vision-capable models.
+* **Images from the client on the direct path**: when the request carries an
+  image and the chosen model is known not to see images (its probed
+  capabilities have no vision), Foundry switches to the first vision model on
+  the persona's own route (strict: its chain; paid models still need the
+  guardrail) and says so in the route note, or answers that no model on the
+  route can read the image. A model whose capabilities were never probed
+  (vLLM, CLIProxyAPI) is trusted as before; Claude routes count as vision.
 * **Tool annotations** (title, readOnly, destructive, idempotent, openWorld)
   are relayed to aggregator clients, so they can ask before a destructive call.
 * **Progress** reported by a downstream server (e.g. "step 12/30") is relayed

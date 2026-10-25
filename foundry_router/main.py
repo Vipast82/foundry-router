@@ -30,7 +30,7 @@ from .brain.agent import AgentRunner
 from .brain.client import BrainClient
 from .config import ConfigStore, data_dir
 from .db import Database
-from .facade import media_router, openai_router, router as facade_router
+from .facade import audio_router, media_router, openai_router, router as facade_router
 from .guardrails import GuardrailEngine
 from .personas import PersonaStore
 from .pool.base import build_pool
@@ -730,6 +730,7 @@ def create_app(config_path: Optional[Path] = None,
     app.include_router(facade_router)
     app.include_router(openai_router)
     app.include_router(media_router)
+    app.include_router(audio_router)
     from .facade.work_api import router as work_router
     app.include_router(work_router)
     from .control_api import router as control_router

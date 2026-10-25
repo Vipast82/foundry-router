@@ -2,6 +2,63 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.144.0 — Client compatibility: mixed tool turns, Think toggle, images, embedders, speech
+
+The smaller findings of the 2026-10-24 client compatibility audit
+(reports/CLIENT_COMPATIBILITY_AUDIT_2026-10-24.md: A4, C2, C5, C4, B4).
+
+- **Mixed tool turns keep the client's calls (A4).** When the model called a
+  persona MCP tool and a client tool in the same turn, the client's call was
+  dropped for that round. Now Foundry runs its own call, hands the client's
+  back in the same reply (no extra model round), and saves its own call and
+  result (`kv` table, `mixed_round:*`, 7 days). On later requests that
+  history turn is rebuilt with every call in the model's order and each one
+  paired with its result (OpenAI by `tool_call_id`, Ollama by order and tool
+  name). The rebuilt prompt is the same on every later turn, so the prompt
+  cache holds. With nothing saved (expired), the history passes through as
+  before. At the round cap the persona call is answered "NOT RUN"; pre-judge
+  and the loop-breaker still check the client calls of a mixed turn.
+  It only happens where persona MCP tools ride along with client tools (the
+  v0.142.0 "MCP tools with client tools" setting). A slow persona tool keeps
+  the stream alive the same way as a plain tool round. Buffered and streamed,
+  both dialects (tests/test_mixed_tool_turns.py).
+- **Think toggle (C2).** Personas now advertise `thinking` on `/api/show`, and
+  `/v1/models` `capabilities.reasoning`, when a model they can reach really
+  reasons. It is the same check that decides whether Foundry sends a think
+  setting, so Strata's qwen3.8 (llama.cpp, which declares no `thinking`) and
+  Claude routes count. Open WebUI now shows its Think switch on
+  Foundry-Chat / Agent / Coding / Kilo-Local. A persona with forced reasoning
+  effort keeps its own level.
+- **Pasted images on the direct path (C5).** When a request carries an image
+  (any turn, so a chat doesn't bounce between models) and the chosen model is
+  known not to see images (probed capabilities without vision), Foundry
+  switches to the first vision model on the persona's own route: a strict
+  persona's chain, else its ranked candidates within its allowlist, with paid
+  models still gated by the guardrail. If there is none, the client gets a
+  clear "can't read the attached image" answer instead of a blind call.
+  Failover for that request keeps to models that can see images. Models
+  whose capabilities were never probed (vLLM, CLIProxyAPI) are trusted as
+  before; Claude routes count as vision.
+- **Embedding models discoverable (C4).** `/api/tags` and `/v1/models` also
+  list reachable, enabled embedding models under their real names (Ollama
+  capability `embedding`), and `/api/show` on a llama.cpp / vLLM embedder says
+  `embedding`. AnythingLLM and Open WebUI embedder pickers now show them.
+  Switch: `server.list_embedding_models` (default on).
+- **Speech API (B4).** New `POST /v1/audio/speech` in the OpenAI shape, the one
+  Open WebUI ("OpenAI" TTS engine) and AnythingLLM ("OpenAI compatible") use.
+  `model` kokoro / chatterbox (tts-1, tts-1-hd and gpt-4o-mini-tts mean
+  kokoro) runs that MCP server's `generate_speech` tool. Foundry downloads
+  the audio URL it returns, only from the MCP server's own host or
+  `audio.fetch_hosts`, and returns the WAV. Kokoro voice ids pass through;
+  OpenAI voice names become `af_heart`. It needs the `media` scope.
+  **No speech to text**: `/v1/audio/transcriptions` and `/translations`
+  answer 501 `no_stt_backend`, because no STT backend exists yet. Setup:
+  docs/CLIENT_COMPAT.md §6.
+
+Config: new `audio` section, new `server.list_embedding_models`. No schema
+change (mixed rounds use the existing `kv` table). API: `/v1/audio/*` (new,
+`media` scope), embedding models in the model lists.
+
 ## v0.143.0 — Images and audio from persona MCP tools reach every chat client
 
 Victor's goal: ask any chat (AnythingLLM, Open WebUI, Kilo, Cline) for an

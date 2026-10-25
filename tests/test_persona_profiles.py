@@ -220,7 +220,8 @@ def test_models_metadata_reports_effective_limits(fleet, client):
     assert local["max_output_tokens"] == 32768
     assert local["top_provider"] == {"context_length": 131072, "max_completion_tokens": 32768}
     assert local["architecture"]["input_modalities"] == ["text"]
-    assert local["capabilities"] == {"tools": True, "vision": False, "reasoning": False}
+    # Strata's qwen3.8 reasons; the registry just doesn't say so (audit C2)
+    assert local["capabilities"] == {"tools": True, "vision": False, "reasoning": True}
     assert local["foundry"]["routing"] == "strict" and local["foundry"]["backend"] == "strata"
     assert local["foundry"]["served_model"] == "qwen3.8-flash-next-iq3_s"
     vis = data["Foundry-Kilo-Vision"]

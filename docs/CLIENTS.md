@@ -70,7 +70,7 @@ client_auth:
 | Scope | Reaches |
 |---|---|
 | `inference` | Ollama `/api/*` and OpenAI `/v1/*` chat, completions, responses, embeddings, model lists |
-| `media` | `/v1/images/*`, `/media/*`, `/mcp/media` (image jobs, artifacts; see docs/MEDIA.md) |
+| `media` | `/v1/images/*`, `/v1/audio/*`, `/media/*`, `/mcp/media` (image jobs, artifacts, speech; see docs/MEDIA.md, docs/CLIENT_COMPAT.md §6) |
 | `admin` | `/admin/*` (the web UI's API; the `/ui` page shell itself is static) |
 | `orchestration` | `/v1/foundry/work/*`: a development coordinator's session bindings, task state and events (docs/COORDINATOR.md) |
 

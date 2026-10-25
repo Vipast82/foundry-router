@@ -23,6 +23,7 @@ A request is served in one of four modes:
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
 import time
@@ -212,7 +213,44 @@ async def tags(request: Request) -> dict:
     # persona names. Raw backend model names are still ACCEPTED by /api/chat
     # (passthrough mode) for anyone who wants to bypass routing — they're just
     # not advertised, keeping client dropdowns policy-only.
-    return {"models": [tr.persona_tag_entry(p) for p in _visible_personas(svc)]}
+    # Exception: embedding models are listed under their real names (audit C4)
+    # — personas are chat policies, and embedder pickers (AnythingLLM, Open
+    # WebUI) read this list. /api/embed takes exactly these names.
+    return {"models": [tr.persona_tag_entry(p) for p in _visible_personas(svc)]
+            + [_embedding_tag_entry(svc, m) for m in embedding_models(svc)]}
+
+
+def embedding_models(svc) -> list[str]:
+    """Reachable, enabled embedding-only models (registry `embedding` flag or
+    capability, or an unmistakable embedding name), sorted. Empty when
+    server.list_embedding_models is off."""
+    from ..registry.tagging import is_embedding_name
+    try:
+        if not svc.config_store.config.server.list_embedding_models:
+            return []
+    except AttributeError:
+        pass
+    out = []
+    for mid in sorted(svc.pool.available_models()):
+        meta = svc.registry.get(mid) or {}
+        if meta.get("enabled") is not None and not meta.get("enabled"):
+            continue
+        if (meta.get("embedding") or "embedding" in _jl_list(meta.get("capabilities"))
+                or is_embedding_name(mid)):
+            out.append(mid)
+    return out
+
+
+def _embedding_tag_entry(svc, model_id: str) -> dict:
+    info = svc.pool.backend_info(model_id) or {}
+    family = info.get("flavor") or info.get("type") or "embedding"
+    return {"name": model_id, "model": model_id,
+            "modified_at": tr.now_iso(), "size": 0,
+            "digest": hashlib.sha256(model_id.encode()).hexdigest(),
+            "details": {"parent_model": "", "format": "", "family": family,
+                        "families": [family], "parameter_size": "",
+                        "quantization_level": ""},
+            "capabilities": ["embedding"]}
 
 
 @router.get("/api/ps")
@@ -378,7 +416,21 @@ def _persona_capabilities(svc, persona: dict) -> list[str]:
         caps.update(c for c in _EXTRA_CAPS if c in mcaps)
         if "vision" in _jl(meta.get("tags")):        # legacy / manual tag
             caps.add("vision")
+        if _model_thinks(svc, mid, meta):
+            caps.add("thinking")
     return [c for c in _CAP_ORDER if c in caps]
+
+
+def _model_thinks(svc, model_id: str, meta: dict) -> bool:
+    """Whether Foundry would really send a thinking control to this model —
+    the same check dispatch makes (thinking.supports_thinking). Registry
+    capabilities alone miss llama.cpp / vLLM / Claude models: those servers
+    don't declare `thinking`, so a reasoning model (Strata, qwen3) hid the
+    client's Think toggle (audit C2)."""
+    info = (getattr(svc.pool, "backend_info", None) or (lambda _m: None))(model_id) or {}
+    from .. import thinking
+    return thinking.supports_thinking(model_id, (meta or {}).get("capabilities"),
+                                      info.get("type") or "")
 
 
 async def _raw_show(svc, name: str):
@@ -402,6 +454,8 @@ async def _raw_show(svc, name: str):
         caps = json.loads(meta.get("capabilities") or "[]") or []
     except (TypeError, ValueError):
         caps = []
+    if name in embedding_models(svc):
+        caps = ["embedding"]         # not a chat model: no completion/tools
     arch = info.get("flavor") or info.get("type") or "remote"
     model_info: dict = {"general.architecture": arch}
     if meta.get("context_length"):
@@ -413,7 +467,8 @@ async def _raw_show(svc, name: str):
                         "families": [arch], "parameter_size": "",
                         "quantization_level": ""},
             "model_info": model_info,
-            "capabilities": sorted(set(caps) | {"completion", "tools"})}
+            "capabilities": (caps if caps == ["embedding"]
+                             else sorted(set(caps) | {"completion", "tools"}))}
 
 
 def persona_meta(svc, persona: dict) -> dict:
@@ -463,7 +518,7 @@ def persona_meta(svc, persona: dict) -> dict:
         # nothing and its model is known to see images)
         if "image_input" in declared or (not declared and "vision" in mcaps):
             caps.append("vision")
-        if "thinking" in mcaps:
+        if "thinking" in mcaps or (served and _model_thinks(svc, served, model_meta)):
             caps.append("thinking")
     validation = {}
     try:
@@ -1019,6 +1074,56 @@ async def _failover_list(svc, persona, first: str, user_text: str, eff,
         if len(out) >= limit:
             break
     return out
+
+
+def _request_has_images(messages) -> bool:
+    return any(m.get("images") for m in messages or [] if m.get("role") in ("user", "tool"))
+
+
+def _sees_images(svc, model_id: str) -> bool:
+    """Known to take images: probed/declared vision, or a Claude route."""
+    from ..brain.agent import _model_has_vision
+    return (_model_has_vision(svc.registry, model_id)
+            or (svc.pool.backend_info(model_id) or {}).get("type") == "anthropic-compatible")
+
+
+def _known_blind(svc, model_id: str) -> bool:
+    """Known NOT to take images: its probed capabilities (Ollama /api/show,
+    llama.cpp /props) list no vision. A model with no probed capabilities
+    (vLLM, CLIProxyAPI, a swapping llama.cpp) is trusted as before — guessing
+    would block images to models that read them."""
+    meta = svc.registry.get(model_id) or {}
+    return bool(_jl_list(meta.get("capabilities"))) and not _sees_images(svc, model_id)
+
+
+async def _vision_route(svc, persona, current: str, user_text: str, eff) -> tuple:
+    """(first vision-capable model on this persona's own route that the
+    guardrail allows now, or None; the vision models checked). Strict: its
+    chain only. Flexible: the persona's ranked candidates."""
+    from ..brain.fallback import fallback_candidates
+    if is_strict(persona):
+        cands = strict_candidates(svc, persona)
+    else:
+        try:
+            cands = fallback_candidates(svc.pool, svc.registry, persona, user_text, limit=50)
+        except Exception:                                         # noqa: BLE001
+            cands = []
+        allow = {str(a) for a in _jl_list(persona.get("model_allowlist"))}
+        if allow:                # same matching as _persona_capabilities
+            bases = {a.split(":")[0] for a in allow}
+            cands = [m for m in cands if m in allow or str(m).split(":")[0] in bases]
+    checked = []
+    for mid in cands:
+        meta = svc.registry.get(mid) or {}
+        if mid == current or not _sees_images(svc, mid) or (
+                meta.get("enabled") is not None and not meta.get("enabled")):
+            continue
+        v = await svc.guardrails.check_paid_call(mid, svc.pool.backend_info(mid),
+                                                 svc.registry.get(mid), RequestGuardState(), eff)
+        if v.allowed:
+            return mid, checked
+        checked.append(f"{mid} (denied: {v.reason})")
+    return None, checked
 
 
 _SUMMARY_MARKERS = ("summarize the provided coding session",)
@@ -2033,6 +2138,25 @@ async def _direct_dispatch_chat(svc, persona, model_name, messages, client_tools
                                               f"local model is reachable: {verdict.reason}"},
                                     status_code=503)
 
+    # Images on the direct path (audit C5): a model that can't see them is
+    # swapped for a vision model on this persona's own route, or the client
+    # gets a clear answer instead of a blind (or failing) model call. Any image
+    # in the request counts, not just the newest turn, so a conversation stays
+    # on one model after a screenshot instead of bouncing (prompt cache).
+    need_vision = _request_has_images(messages)
+    if need_vision and _known_blind(svc, model_id):
+        swap, checked = await _vision_route(svc, persona, model_id, user_text, eff)
+        if swap is None:
+            text = (f"{persona['virtual_name']} can't read the attached image: no model on "
+                    f"its route can see images ({model_id} can't"
+                    + (f"; also checked: {', '.join(checked)[:300]}" if checked else "")
+                    + "). Remove the image, or use a vision persona.")
+            logger.record_guardrail("image attached but no vision model on the route: "
+                                    + model_id)
+            logger.finish("error", text)
+            return _plain_reply(model_name, text, stream)
+        route_notes.append(f"image attached: {model_id} can't see images → {swap}")
+        model_id = swap
     if not route_notes:
         route_notes.extend(_local_down_notes(svc, model_id))
     for n in route_notes:
@@ -2089,8 +2213,12 @@ async def _direct_dispatch_chat(svc, persona, model_name, messages, client_tools
     # Computed lazily — only when the first model actually fails. Building it
     # runs guardrail checks for paid alternatives (which can call the Meridian
     # usage endpoint), so doing it up front added latency to EVERY request.
-    failover = _LazyFailover(model_id, lambda: _failover_list(svc, persona, model_id,
-                                                              user_text, eff))
+    async def _failover_factory():
+        lst = await _failover_list(svc, persona, model_id, user_text, eff)
+        if need_vision:          # an image request fails over to vision models only
+            lst = lst[:1] + [m for m in lst[1:] if not _known_blind(svc, m)]
+        return lst
+    failover = _LazyFailover(model_id, _failover_factory)
     # Persona MCP tools in direct mode (opt-in per persona by attaching tools):
     # merged with the client's own tools. Calls to a Foundry-owned tool are run
     # here and the model continues; calls to a client tool go back to the
@@ -2116,6 +2244,13 @@ async def _direct_dispatch_chat(svc, persona, model_name, messages, client_tools
         fmt = None                        # structured output would break tool calls
     tool_cap = int(getattr(brain_cfg, "worker_tool_max_steps", 6) or 6)
     base_convo = prompts.sanitize_history(messages)
+    if mcp_defs:
+        # persona calls of earlier mixed turns go back into their turns (A4)
+        from .. import mixed_rounds
+        base_convo, _n_mixed = mixed_rounds.restore(svc.db, persona["virtual_name"], base_convo)
+        if _n_mixed:
+            log.debug("restored %d mixed tool round(s) for %s", _n_mixed,
+                      persona["virtual_name"])
     client_convo = base_convo            # what the client holds (before any trim)
     out_cap = _output_cap(svc, persona)
     # Never send more than the model's window (Cline's auto-compact can lag).
@@ -2232,11 +2367,14 @@ async def _direct_dispatch_chat(svc, persona, model_name, messages, client_tools
             all_tools = list(all_tools or []) + [fa.CONSULT_TOOL]
             fmt = None
 
-    async def _assist_after(res, rest, convo):
+    async def _assist_after(res, rest, convo, own=None):
         """After a model round with no Foundry-owned calls: pre-judge its client
-        calls, audit a final report. Returns (continue, convo, visible, notes, rest)."""
+        calls, audit a final report. Returns (continue, convo, visible, notes, rest).
+        own = (calls, results) of a mixed turn's Foundry-owned calls, already
+        run: a re-ask keeps them paired in the assistant turn."""
         nonlocal persona
         notes: list[str] = []
+        own_calls, own_results = own or ([], [])
         if not assist_on:
             return False, convo, "", notes, rest
         pmode = acfg.get("prejudge") or "off"
@@ -2259,7 +2397,8 @@ async def _direct_dispatch_chat(svc, persona, model_name, messages, client_tools
                                     "content": ta.blocked_result(*hit) if hit else
                                     f"{ta.NOTE_TAG} pre-judge] not run: another call in the "
                                     f"same turn was blocked. Re-issue it if you still need it."})
-                return True, convo + [_assistant_turn(res, rest)] + results, "", notes, rest
+                return True, convo + [_assistant_turn(res, own_calls + rest)] + own_results \
+                    + results, "", notes, rest
             rest = j.calls
         if rest and (acfg.get("loop_block_at") or acfg.get("loop_block_any_at")):
             hits = ta.loop_check(convo, rest, acfg, ta.error_rx(acfg))
@@ -2288,7 +2427,8 @@ async def _direct_dispatch_chat(svc, persona, model_name, messages, client_tools
                                     "content": ta.loop_block_text(h, acfg) if h else
                                     f"{ta.NOTE_TAG} loop-breaker] not run: another call in the "
                                     f"same turn was blocked. Re-issue it if you still need it."})
-                return True, convo + [_assistant_turn(res, rest)] + results, "", notes, rest
+                return True, convo + [_assistant_turn(res, own_calls + rest)] + own_results \
+                    + results, "", notes, rest
         amode = acfg.get("auditor") or "off"
         if rest or amode == "off" or not fa.is_final_report(res, summary_req, convo, acfg):
             return False, convo, "", notes, rest
@@ -2412,6 +2552,31 @@ async def _direct_dispatch_chat(svc, persona, model_name, messages, client_tools
                                              "arguments": tc.get("arguments") or {}}}
                                for tc in own]}
 
+    async def _mixed_turn(res, own, rest, convo, narrate, rnd):
+        """A turn with Foundry-owned AND client calls (audit A4): run Foundry's
+        now (at the round cap they are answered "not run"), hand the client
+        calls back unchanged, and save the persona round so later requests'
+        history holds it (mixed_rounds). Same return as _assist_after."""
+        from .. import mixed_rounds
+        if rnd < tool_cap:
+            own_results = await _exec_foundry_tools(own, narrate, convo)
+        else:
+            own_results = [{"role": "tool", "name": tc["name"], "tool_call_id": tc.get("id"),
+                            "content": f"NOT RUN: Foundry's tool-round limit ({tool_cap}) "
+                                       f"was reached."} for tc in own]
+        cont, convo2, vis, notes, rest = await _assist_after(res, rest, convo,
+                                                             own=(own, own_results))
+        if cont:
+            return cont, convo2, vis, notes, rest
+        if not rest:
+            # the pre-judge left no client call: a plain persona-tool round
+            return True, convo + [_assistant_turn(res, own)] + own_results, vis, notes, rest
+        mixed_rounds.save(svc.db, persona["virtual_name"], res.tool_calls or [], own_names,
+                          own_results, rest)
+        notes.append(f"🔧 mixed turn: {len(own)} persona tool call(s) run, {len(rest)} client "
+                     f"call(s) handed back; the persona results join the next request")
+        return False, convo, vis, notes, rest
+
     def _wrap_up_turns(res, own):
         """The model's last turn, a "not run" result for each of its pending
         Foundry-owned calls (tool calls stay paired), and the wrap-up request."""
@@ -2464,7 +2629,31 @@ async def _direct_dispatch_chat(svc, persona, model_name, messages, client_tools
             if assist_on:
                 iv.note_call(turn_stats, res)
                 iv.fill_next(svc.db, conv_key, res.content or "", res.tool_calls or [])
-            if not own and rnd < tool_cap:
+            mixed = False
+            if own and rest:
+                cont, convo2, vis, anotes, rest = await _mixed_turn(res, own, rest, convo,
+                                                                    narrate, rnd)
+                for n in anotes:
+                    logger.record_guardrail(n)
+                    if narrate:
+                        narrate(n + "\n")
+                if cont:
+                    if (res.content or "").strip():
+                        said.append(res.content.strip())
+                    if vis.strip():
+                        said.append(vis.strip())
+                    if (res.thinking or "").strip():
+                        thought.append(res.thinking.strip())
+                    said.extend(assist_visible)
+                    assist_visible.clear()
+                    convo = convo2
+                    continue
+                if vis:
+                    res.content = (res.content or "") + vis
+                said.extend(assist_visible)
+                assist_visible.clear()
+                own, mixed = [], True       # handled: a client-call turn from here
+            if not own and rnd < tool_cap and not mixed:
                 cont, convo2, vis, anotes, rest = await _assist_after(res, rest, convo)
                 for n in anotes:
                     logger.record_guardrail(n)
@@ -2747,6 +2936,45 @@ async def _direct_dispatch_chat(svc, persona, model_name, messages, client_tools
                             iv.note_call(turn_stats, res)
                             iv.fill_next(svc.db, conv_key, res.content or "",
                                          res.tool_calls or [])
+                        mixed = False
+                        if own and rest:
+                            # persona AND client calls in one turn (audit A4)
+                            produced = True
+                            notes = []
+                            # same keep-alive pattern as the plain tool round
+                            # below: a long persona tool never goes silent
+                            mixed_task = asyncio.ensure_future(_mixed_turn(
+                                res, own, rest, convo, notes.append, rnd))
+                            t_tools = time.monotonic()
+                            tpacer = keepalive.Pacer(keepalive.visible_every(brain_cfg))
+                            try:
+                                while True:
+                                    done_t, _ = await asyncio.wait(
+                                        {mixed_task}, timeout=hb if hb > 0 else 15.0)
+                                    while notes:
+                                        yield tr.chat_chunk(model_name, "", done=False,
+                                                            thinking=_q(notes.pop(0)))
+                                    if done_t:
+                                        break
+                                    yield tr.chat_chunk(model_name, "", done=False, thinking=_q(
+                                        tpacer.line("🔧 tools", time.monotonic() - t_tools)))
+                            finally:
+                                if not mixed_task.done():
+                                    mixed_task.cancel()   # client went away
+                            cont, convo2, vis, anotes, rest = mixed_task.result()
+                            for n in anotes:
+                                logger.record_guardrail(n)
+                                yield tr.chat_chunk(model_name, "", done=False,
+                                                    thinking=_q(n + "\n"))
+                            while assist_visible:
+                                yield tr.chat_chunk(model_name, "\n\n" + assist_visible.pop(0)
+                                                    + "\n\n", done=False)
+                            if vis:
+                                yield tr.chat_chunk(model_name, vis, done=False)
+                            if cont:
+                                convo = convo2
+                                continue
+                            own, mixed = [], True
                         if own and rnd < tool_cap:
                             # Foundry-owned tools: run them, feed the results
                             # back, and keep streaming the model's next turn.
@@ -2792,7 +3020,7 @@ async def _direct_dispatch_chat(svc, persona, model_name, messages, client_tools
                             convo = convo + _wrap_up_turns(res, own)
                             wrapping = True
                             continue
-                        if not own and rnd < tool_cap:
+                        if not own and rnd < tool_cap and not mixed:
                             cont, convo2, vis, anotes, rest = await _assist_after(res, rest, convo)
                             for n in anotes:
                                 logger.record_guardrail(n)

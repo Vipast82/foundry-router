@@ -5,10 +5,10 @@ Foundry key in `clients:`. A request's key identifies the client (`client_id`
 in the logs and budgets) and its scopes decide what it may reach:
 
   inference  /api/* (Ollama) and /v1/* chat/completions/responses/embeddings/models
-  media      /v1/images/*, /media/*, /mcp/media (image jobs and artifacts)
-             — except /media/a/<token>: signed, expiring links to one stored
-             image/audio file, readable WITHOUT a key so a browser can render
-             them in a chat. The only deliberate unauthenticated read.
+  media      /v1/images/*, /v1/audio/*, /media/*, /mcp/media (image jobs and artifacts,
+             speech) — except /media/a/<token>: signed, expiring links to one
+             stored image/audio file, readable WITHOUT a key so a browser can
+             render them in a chat. The only deliberate unauthenticated read.
   admin      /admin/* (the web UI's API; the /ui page shell itself is static)
   orchestration  /v1/foundry/* (coordinator bindings/state, claiming operator actions)
   telemetry  /v1/foundry/telemetry/* (the workstation bridge's observations; also
@@ -103,6 +103,8 @@ def scope_for(path: str) -> Optional[str]:
         return "admin"
     if path.startswith("/v1/images") or path.startswith("/media"):
         return "media"
+    if path.startswith("/v1/audio"):
+        return "media"         # speech (TTS MCP servers), audio_api.py
     if path.startswith("/api/") or path.startswith("/v1/"):
         return "inference"
     return None
