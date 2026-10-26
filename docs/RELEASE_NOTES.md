@@ -2,6 +2,13 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.144.1 — coordinator: robloxstudio-mcp pinned to 3.4.2
+
+The community Studio MCP server must match its Studio plugin exactly (HTTP 426
+`plugin_version_mismatch` otherwise). The plugin has been 3.4.2 since 2026-10-25; the
+coordinator still launched 3.2.1, so its Studio gate could not connect
+(`foundry_coordinator/mcp_stdio.py`, docs/STUDIO_GATE.md). Coordinator restart needed.
+
 ## v0.144.0 — Client compatibility: mixed tool turns, Think toggle, images, embedders, speech
 
 The smaller findings of the 2026-10-24 client compatibility audit
