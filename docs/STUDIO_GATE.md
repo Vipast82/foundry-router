@@ -85,7 +85,7 @@ coordinator uses `C:\Users\shock\foundry-deploy`). Standard library only.
 | Server | Command the runner starts | Needs |
 |---|---|---|
 | Official Studio MCP | `cmd.exe /d /c %LOCALAPPDATA%\Roblox\mcp.bat` | Studio open with its MCP server enabled. Every tool takes `studio_id`; the runner resolves it with `list_roblox_studios`. |
-| Community `robloxstudio-mcp` | `cmd.exe /d /c "C:\Program Files\nodejs\npx.cmd" -y @chrrxs/robloxstudio-mcp@3.2.1` | Node.js, the package fetched once with `npx`, and its Studio plugin enabled. |
+| Community `robloxstudio-mcp` | `cmd.exe /d /c "C:\Program Files\nodejs\npx.cmd" -y @chrrxs/robloxstudio-mcp@3.4.2` | Node.js, the package fetched once with `npx`, and its Studio plugin enabled. |
 
 `FOUNDRY_MCP_OFFICIAL` / `FOUNDRY_MCP_COMMUNITY` override a command with a
 JSON argv list (tests, unusual installs).
@@ -378,7 +378,7 @@ READY`, or a `GATE <ID> STARTED|RUNNING|NONE|ERROR|BUSY ...` line.
 | Check | Message / symptom | Fix |
 |---|---|---|
 | `doctor.official_mcp` | cannot start, or no `execute_luau` tool | Open Roblox Studio with its MCP server enabled; `%LOCALAPPDATA%\Roblox\mcp.bat` must exist. |
-| `doctor.community_mcp` | cannot start, or no `capture_screenshot` | Install Node.js, run `npx -y @chrrxs/robloxstudio-mcp@3.2.1` once, enable its Studio plugin. |
+| `doctor.community_mcp` | cannot start, or no `capture_screenshot` | Install Node.js, run `npx -y @chrrxs/robloxstudio-mcp@3.4.2` once, enable its Studio plugin. |
 | `doctor.studio` | `need exactly one Studio ..., found N (open: ...)` | Close the extra Studio windows, or pass `--place NAME`. |
 | `doctor.edit_mode` | `mode=play` | Stop the playtest. `mode=unknown` is UNKNOWN: check `get_studio_state`. |
 | `doctor.datamodel` | `execute_luau (Edit) failed` | Check the Studio output window; usually a plugin or permission dialog. `doctor` writes no raw log. |

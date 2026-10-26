@@ -4,7 +4,7 @@ Starts an MCP server command, speaks newline-delimited JSON-RPC 2.0 over its
 stdin/stdout, and calls tools. Verified shapes (2026-10-19/20, this PC):
   official Studio MCP  cmd.exe /d /c %LOCALAPPDATA%\\Roblox\\mcp.bat
                        every tool takes studio_id (from list_roblox_studios)
-  community MCP        cmd.exe /d /c "C:\\Program Files\\nodejs\\npx.cmd" -y @chrrxs/robloxstudio-mcp@3.2.1
+  community MCP        cmd.exe /d /c "C:\\Program Files\\nodejs\\npx.cmd" -y @chrrxs/robloxstudio-mcp@3.4.2
                        one Studio -> no studio_id
 
     with McpClient(argv, name="official") as c:     # start + initialize
@@ -34,7 +34,7 @@ PROTOCOL_VERSION = "2025-06-18"
 CLIENT_INFO = {"name": "foundry-studio-gate", "version": "1"}
 CREATE_NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000)
 _NO_WINDOW = {"creationflags": CREATE_NO_WINDOW} if os.name == "nt" else {}
-COMMUNITY_PACKAGE = "@chrrxs/robloxstudio-mcp@3.2.1"
+COMMUNITY_PACKAGE = "@chrrxs/robloxstudio-mcp@3.4.2"
 CONNECT_WAIT_S = 30.0          # how long a fresh community server waits for the Studio plugin
 NPX = r"C:\Program Files\nodejs\npx.cmd"
 

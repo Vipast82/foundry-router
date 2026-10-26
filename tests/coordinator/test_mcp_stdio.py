@@ -113,7 +113,7 @@ def test_registry_commands_and_override(monkeypatch):
     monkeypatch.setenv("LOCALAPPDATA", r"C:\Users\x\AppData\Local")
     assert M.official_command()[:3] == ["cmd.exe", "/d", "/c"]
     assert M.official_command()[3].endswith(os.path.join("Roblox", "mcp.bat"))
-    assert M.community_command()[-2:] == ["-y", "@chrrxs/robloxstudio-mcp@3.2.1"]
+    assert M.community_command()[-2:] == ["-y", "@chrrxs/robloxstudio-mcp@3.4.2"]
     monkeypatch.setenv("FOUNDRY_MCP_COMMUNITY", json.dumps(argv("community")))
     with M.connect("community") as c:
         assert "capture_screenshot" in c.tool_names()
