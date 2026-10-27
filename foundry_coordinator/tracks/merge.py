@@ -5,7 +5,9 @@ task between a bound head and its close), never mid-session. Stages, each
 recorded in the track's data (`merge_stage`) so a restart resumes:
 
   wait      -> the main sprint is quiescent
-  rebase    `git rebase <master>` in the worktree; a conflict is aborted and
+  rebase    integrate <master> in the worktree (nothing when master is already in
+            the track, a merge when the track has merge commits, else `git
+            rebase`); a conflict is aborted and
             becomes a Lead repair (when a lead manager offers one) plus a
             decision with the default "stop this track"
   ff        fast-forward master to the track branch in the main checkout; the
@@ -137,17 +139,32 @@ class MergeManager:
         if not os.path.isdir(wt):
             self.tm.fail(P, row, f"worktree {wt} is gone")
             return
-        r = _git(wt, "rebase", f"refs/heads/{base}", check=False)
-        if r.returncode != 0:
-            conflicts = [l.strip() for l in _git(wt, "diff", "--name-only", "--diff-filter=U",
-                                                 check=False).stdout.splitlines() if l.strip()]
-            _git(wt, "rebase", "--abort", check=False)
-            self._conflict(P, row, conflicts, (r.stderr or r.stdout)[-800:])
-            return
+        ref = f"refs/heads/{base}"
+        # 0.146.2: a track that already merged master (to pick up the main sprint's
+        # work) must not be rebased: a rebase drops its merge commits and replays the
+        # track's commits over master, conflicting by construction (GF-NAME1, Lead
+        # case rc-bb1526ee). Master already in the track: nothing to integrate. The
+        # track has merge commits: integrate master by merge. Else rebase as before.
+        how = "rebase"
+        if _git(wt, "merge-base", "--is-ancestor", ref, "HEAD", check=False).returncode == 0:
+            how = "none"
+        elif _git(wt, "rev-list", "--merges", "-n", "1", f"{ref}..HEAD",
+                  check=False).stdout.strip():
+            how = "merge"
+        if how != "none":
+            cmd = ["rebase", ref] if how == "rebase" else ["merge", "--no-edit", ref]
+            r = _git(wt, *cmd, check=False)
+            if r.returncode != 0:
+                conflicts = [l.strip() for l in _git(wt, "diff", "--name-only",
+                                                     "--diff-filter=U", check=False
+                                                     ).stdout.splitlines() if l.strip()]
+                _git(wt, how, "--abort", check=False)
+                self._conflict(P, row, conflicts, (r.stderr or r.stdout)[-800:])
+                return
         head = _git(wt, "rev-parse", "HEAD").stdout.strip()
         self._set(P, row, merge_stage="ff", rebased_head=head)
         self.store.event(P.id, "", "track_rebased", detail={"track": row["name"], "onto": base,
-                                                           "head": head[:12]})
+                                                           "head": head[:12], "how": how})
         self._ff(P, self.store.track(P.id, row["name"]))
 
     def _conflict(self, P, row: dict, files: list[str], log: str) -> None:

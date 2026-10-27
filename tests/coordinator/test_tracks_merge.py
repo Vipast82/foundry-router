@@ -215,3 +215,52 @@ def test_merge_waits_on_a_dirty_main_checkout(tmp_path):
     assert row["state"] == "merging" and "uncommitted changes" in row["data"]["merge_wait"]
     os.remove(os.path.join(root, "src", "a.txt"))
     assert run_until(c, lambda: c.store.track("game", "blender")["state"] == "merged", limit=6)
+
+
+def _track_that_merged_main(tmp_path):
+    """A track whose sprint and the main sprint both changed src/a.txt; the track
+    merged main and resolved it in its merge commit (what GF-NAME1 did)."""
+    c, P, clock, root = env(tmp_path)
+    row = c.tracks.create(P, "conf", ["C1"])
+    wt = row["worktree"]
+    os.makedirs(os.path.join(wt, "src"), exist_ok=True)
+    open(os.path.join(wt, "src", "a.txt"), "w").write("track\n")
+    git(wt, "add", "src/a.txt")
+    git(wt, "commit", "-q", "--no-verify", "-m", "C1: track edit")
+    os.makedirs(os.path.join(root, "src"), exist_ok=True)
+    open(os.path.join(root, "src", "a.txt"), "w").write("main\n")
+    git(root, "add", "src/a.txt")
+    git(root, "commit", "-q", "--no-verify", "-m", "T1: main edit")
+    import subprocess
+    subprocess.run(["git", "-C", wt, "merge", "--no-edit", "main"], capture_output=True)
+    open(os.path.join(wt, "src", "a.txt"), "w").write("main\ntrack\n")
+    git(wt, "add", "src/a.txt")
+    git(wt, "commit", "-q", "--no-verify", "--no-edit")
+    return c, P, root, wt
+
+
+def test_a_track_that_merged_main_is_not_rebased(tmp_path):
+    """0.146.2: a rebase dropped the track's merge commit and replayed its edit over
+    main, conflicting by construction (GF-NAME1, Lead case rc-bb1526ee)."""
+    c, P, root, wt = _track_that_merged_main(tmp_path)
+    c.tracks.merger._rebase(P, c.store.track("game", "conf"))
+    row = c.store.track("game", "conf")
+    assert not row["data"].get("conflict"), row["data"].get("conflict")
+    assert events(c, "track_fast_forwarded")             # merged into main, no conflict
+    assert events(c, "track_rebased")[-1]["detail"]["how"] == "none"
+    assert open(os.path.join(root, "src", "a.txt")).read() == "main\ntrack\n"
+    assert git(root, "rev-list", "--merges", "-n", "1", "main")       # the merge commit kept
+
+
+def test_a_track_with_merge_commits_integrates_a_moved_main_by_merge(tmp_path):
+    c, P, root, wt = _track_that_merged_main(tmp_path)
+    open(os.path.join(root, "src", "c.txt"), "w").write("later main work\n")
+    git(root, "add", "src/c.txt")
+    git(root, "commit", "-q", "--no-verify", "-m", "T2: later main work")
+    c.tracks.merger._rebase(P, c.store.track("game", "conf"))
+    row = c.store.track("game", "conf")
+    assert not row["data"].get("conflict"), row["data"].get("conflict")
+    assert events(c, "track_rebased")[-1]["detail"]["how"] == "merge"
+    assert events(c, "track_fast_forwarded")             # merged into main, no conflict
+    assert open(os.path.join(root, "src", "a.txt")).read() == "main\ntrack\n"
+    assert os.path.isfile(os.path.join(root, "src", "c.txt"))
