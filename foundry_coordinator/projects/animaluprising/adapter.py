@@ -2153,6 +2153,15 @@ def _shell_segments(cmd: str, depth: int = 0) -> list[tuple[str, str]]:
                                  r"|\s*-\w+)*", "", rest).strip()
                     out += _shell_segments(pos, depth + 1) if pos else [(sep, s)]
                 continue
+            # AU's command runner: py -3 tools/guard/run.py [opts] -- <cmd> runs <cmd> and
+            # prints its log tail, so a gate run through it is a gate run (2026-10-27:
+            # every GF-GATE1 gate run through it was excluded as a file read)
+            m = re.match(r"(?i)^(?:py(?:\.exe)?(?:\s+-3)?|python3?(?:\.exe)?)\s+[\"']?"
+                         r"(?:[\w:.\\/ -]*?[\\/])?tools[\\/]guard[\\/]run\.py[\"']?\s"
+                         r"(?:.*?\s)?--\s+(.*)$", s, re.S)
+            if m:
+                out += _shell_segments(m.group(1), depth + 1)
+                continue
             m = re.match(r"(?i)^(?:[\w:.\\/-]*[\\/])?cmd(?:\.exe)?\s+/[ck]\s+(.*)$", s, re.S)
             if m:
                 out += _shell_segments(_unquote(m.group(1)), depth + 1)

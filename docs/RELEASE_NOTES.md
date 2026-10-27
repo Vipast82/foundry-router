@@ -2,6 +2,18 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.150.3 — a gate run through AU's command runner counts as a gate run
+
+AU sessions run the gate through `py -3 tools/guard/run.py --name ... -- pwsh -File
+tools/gate.ps1 ...`, AU's command runner, which logs the output and prints its tail. The verdict
+classifier unwrapped pwsh, `cmd /c` and `bash -c` but not this runner. Every GF-GATE1 gate run
+was therefore excluded as `read_only_command`, the `build.gate` obligation could never be
+verified, and the submission gate sent the sprint back again and again (18:33, attempt 3). The
+runner now counts as a wrapper: the command after `--` is what ran. Reading the runner's log
+(`--last`, Get-Content of the log) is still a read.
+
+Coordinator restart needed.
+
 ## v0.150.2 — the control center shows the coordinator's background checks
 
 Victor 2026-10-27: "how do I know from the control center what is happening right now? I see
