@@ -131,6 +131,26 @@ def due(store, now: float) -> list[dict]:
         return []
 
 
+# lead case states in which the lead is still working the stop (NEEDS_VICTOR: it gave up)
+LEAD_WORKING = ("DIAGNOSING", "REPAIRING", "UPGRADING", "RESUMING", "DEFERRED")
+
+
+def _lead_handling(c, d: dict) -> Optional[dict]:
+    """The open lead case of d's task that is still working, or None."""
+    try:
+        t = c.store.task(d["project_id"], d["task_id"]) or {}
+        cid = (t.get("data") or {}).get("recovery_case")
+        if not cid:
+            return None
+        rows = c.store.q("SELECT case_id, state, deadline_ts FROM recovery_cases "
+                         "WHERE case_id=?", (cid,))
+    except Exception:                                            # noqa: BLE001
+        return None
+    if rows and rows[0]["state"] in LEAD_WORKING:
+        return dict(rows[0])
+    return None
+
+
 def sweep(c, force: bool = False) -> list[str]:
     """Apply the recommended option of every open decision past its deadline.
     Cheap (one indexed query) and run at most every SWEEP_SECONDS."""
@@ -145,6 +165,19 @@ def sweep(c, force: bool = False) -> list[str]:
     for d in due(c.store, now):
         P = (getattr(c, "projects", None) or {}).get(d["project_id"])
         if P is None:
+            continue
+        case = _lead_handling(c, d)
+        if case:
+            # 0.145.2: a lead case is still working this very stop. The timeout
+            # default (often "park the sprint") fired mid-repair and parked
+            # GF-NAME1 and GF-GATE1 on 2026-10-27. The deadline follows the case's
+            # own bound; once the lead gives up or the case closes, it applies.
+            new = max(now + 300, float(case.get("deadline_ts") or 0) + 60)
+            c.store.x("UPDATE decisions SET deadline_ts=? WHERE decision_id=?",
+                      (new, d["decision_id"]))
+            c.store.event(d["project_id"], d["task_id"], "decision_timeout_deferred", detail={
+                "decision_id": d["decision_id"], "case_id": case["case_id"],
+                "case_state": case["state"], "until": new})
             continue
         try:
             answer = json.loads(d["recommended"])
