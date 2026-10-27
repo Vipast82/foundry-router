@@ -757,3 +757,18 @@ def test_intermediate_outputs_are_exact_task_scoped_gate_paths(repo):
     assert len(a.intermediate_outputs(spec)) == 4
     assert ReviewContractDefaults().intermediate_outputs(spec) == []
     assert ReviewContractDefaults().plan_progress(spec, "HEAD", None) is None
+
+
+def test_gate_binding_ignores_coordinator_memory_commits(repo):
+    """0.145.3: the coordinator's memory-notes commit after a passed gate failed
+    GF-GATE1's binding (2026-10-27). docs/memory is not code; src still is."""
+    a, w, ws = repo["a"], repo["w"], repo["ws"]
+    spec = a.describe_at(T, repo["head"], w)
+    _write(ws, "docs/memory/KNOWN_ISSUES.md", "- a note\n")
+    mem = _commit(ws, f"{T}: memory notes from session x: KNOWN_ISSUES.md")
+    g = a._gate_binding(spec, mem, w)
+    assert g.result == PASS, g.detail
+    _write(ws, "src/after_gate.lua", "return 1\n")
+    code = _commit(ws, f"{T}: code after the gate")
+    g = a._gate_binding(spec, code, w)
+    assert g.result == FAIL and "src/after_gate.lua" in g.detail

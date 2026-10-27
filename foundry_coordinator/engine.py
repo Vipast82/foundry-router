@@ -49,6 +49,11 @@ EVIDENCE) and the plan, commit, and report DONE. Never report BLOCKED on Studio 
 studio.lock.
 """
 # a track session's BLOCKED report about Studio, Rojo, the gate or studio.lock
+TRACK_REVIEW_NOTE = ("track sprint: this work ran in a git worktree without Studio. The "
+                     "Studio gate, boot checks, Studio suites and the gate evidence log "
+                     "are run by the merge gate in the main checkout on the merge result, "
+                     "so their absence here is expected: do not ask for them. Review the "
+                     "code, the Lune results and done_check.")
 TRACK_STUDIO_BLOCKER = re.compile(r"studio\.lock|\bstudio\b|\brojo\b|playtest|studio[_ ]gate|"
                                   r"\bgate\b[^.\n]{0,40}\b(?:run|lock|studio)", re.I)
 
@@ -1846,6 +1851,14 @@ class Coordinator:
         mem_note = self._memory_review_note(P, spec)
         if mem_note:
             dnotes.append(mem_note)
+        if self.tracks.is_track(P):
+            # 0.145.3: a track has no Studio; its gate log and Studio checks belong to
+            # the merge gate, so the reviewer is told and never asks for them
+            owns = self.tracks.merge_gate_owns
+            evidence = [e for e in evidence if not (
+                isinstance(e, dict) and str(e.get("status") or "") in ("missing", "stale")
+                and owns("file", e.get("path")))]
+            dnotes.append(TRACK_REVIEW_NOTE)
         packet, info = R.build_packet(
             project_id=pid, task_id=tid, title=spec.title, spec=spec.spec, scope=spec.scope,
             base=dbase, head=head, commits=P.ws.commits(dbase, head), verification=ver,
@@ -4225,7 +4238,9 @@ class Coordinator:
         self.obligations.seed(P, spec)          # lazily, for a task that predates the ledger
         gate = self.recovery.gate_submission(P, self.store.task(pid, tid), head, self.ledger,
                                              self.obligations, spec=spec,
-                                             evidence_items=self._review_evidence(P, spec, head))
+                                             evidence_items=self._review_evidence(P, spec, head),
+                                             deferred=(self.tracks.merge_gate_owns
+                                                       if self.tracks.is_track(P) else None))
         if not gate:
             self.store.event(pid, tid, "submission_gate", detail={"head": head, "ok": True})
             return False
