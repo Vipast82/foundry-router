@@ -2,7 +2,7 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
-## v0.144.2 — coordinator: phase labels are not sprint dependencies
+## v0.144.2 — coordinator: phase labels are not sprint dependencies; no flashing windows
 
 A plan whose `Depends on:` line named a MASTER_ORDER phase ("the A0 entry gate",
 "after A2", "D1") made the coordinator wait for a sprint called A0 and BLOCK the task;
@@ -10,6 +10,13 @@ GF-GATE1 hit it on 2026-10-27. The AU adapter and the track analysis now drop
 phase-shaped ids (A0–F99, optional letter) unless a sprint plan by that name exists
 (`tracks.analysis.drop_phase_labels`). Affected plans: GF-GATE1, AS-REG1, GF-SAVE1, MV2-V1,
 AS-G04, AS-G05. Coordinator restart needed.
+
+Foundry Client (source install on Windows): components were started from `pythonw.exe`,
+so every `git` the coordinator ran on each tick opened its own console window that
+flashed and closed. Children now start from `python.exe` beside it with
+CREATE_NO_WINDOW: one hidden console that their own children reuse
+(`components.console_python`). The tray app itself still starts windowless at logon.
+Full client restart needed (tray Quit, then start).
 
 ## v0.144.1 — coordinator: robloxstudio-mcp pinned to 3.4.2
 

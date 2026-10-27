@@ -736,3 +736,18 @@ def test_heartbeat_without_a_pid_is_judged_by_age_alone(tmp_path, monkeypatch):
     (tmp_path / "coordinator.heartbeat").write_text(json.dumps({"ts": _t.time() - 120}),
                                                     encoding="utf-8")
     assert C._hb_health(str(tmp_path))[0] is False
+
+
+def test_source_install_runs_children_from_the_console_python(tmp_path, monkeypatch):
+    """A pythonw parent made every `git` the coordinator ran flash its own console
+    window (2026-10-27); children now start from python.exe with CREATE_NO_WINDOW."""
+    from foundry_client import components as C
+    w = tmp_path / "pythonw.exe"
+    w.write_text("x")
+    monkeypatch.setattr(C.sys, "platform", "win32")
+    assert C.console_python(str(w)) == str(w)                 # no python.exe beside it
+    (tmp_path / "python.exe").write_text("x")
+    assert C.console_python(str(w)) == str(tmp_path / "python.exe")
+    assert C.console_python(str(tmp_path / "python.exe")) == str(tmp_path / "python.exe")
+    monkeypatch.setattr(C.sys, "platform", "linux")
+    assert C.console_python(str(w)) == str(w)

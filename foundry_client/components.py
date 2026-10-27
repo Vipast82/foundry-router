@@ -50,7 +50,20 @@ def self_argv() -> list:
         d = Path(sys.executable).parent
         con = d / ("foundry-client.exe" if sys.platform == "win32" else "foundry-client")
         return [str(con if con.is_file() else sys.executable)]
-    return [sys.executable, "-m", "foundry_client"]
+    return [console_python(sys.executable), "-m", "foundry_client"]
+
+
+def console_python(exe: str) -> str:
+    """python.exe beside a pythonw.exe (Windows source install). A windowless parent
+    gives every console child it starts (each `git` of the coordinator's tick) a new,
+    briefly flashing window; started from python.exe with CREATE_NO_WINDOW the child
+    owns one hidden console that its own children reuse."""
+    p = Path(exe)
+    if sys.platform == "win32" and p.name.lower() == "pythonw.exe":
+        con = p.with_name("python.exe")
+        if con.is_file():
+            return str(con)
+    return exe
 
 
 def port_open(port: int, host: str = "127.0.0.1", timeout: float = 1.0) -> bool:
