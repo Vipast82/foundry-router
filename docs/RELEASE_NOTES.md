@@ -2,6 +2,41 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.148.0 — Media_Gen per sprint; 2D assets ask the operator first
+
+Victor 2026-10-27: "make sure all documents reference the new Media_Gen ... and turn it
+on for that sprint ... if there is anything that needs 2D assets, let me know first,
+because we are trying to use ChatGPT for that right now."
+
+- **A session sees only the Media_Gen tools its sprint needs.** Every coordinator session
+  carries deny rules for the Media_Gen tools it doesn't need:
+  - an `audio` sprint keeps `generate_music`, `generate_bgm`, `generate_sfx`,
+    `generate_speech`, `generate_dialogue`, `register_voice`, `list_voices` and the job
+    tools;
+  - a sprint without `audio` (or approved images) gets none;
+  - reviewers get none;
+  - nobody gets the video tools or the personal-only `generate_song_personal`.
+
+  `service_map.media_gen_denied()`.
+- **2D assets ask first.** A sprint that needs `images` waits on an operator decision
+  (kind `approval`, never auto-answered) before it starts:
+  - "I will provide the 2D assets (ChatGPT)": it runs without Media_Gen's image tools;
+  - "Use Media_Gen's image tools": it gets them;
+  - "Hold this sprint": it keeps waiting.
+
+  An `operator_notice` announces it. `[automation] media_gen_images`: `ask` (default),
+  `allow` or `deny`. The answer is read from the decision itself, so a transition
+  can't lose it.
+- **Docs:** the AnythingLLM MCP guide, client compatibility, the Foundry Client guide (the
+  needs table and a "Media_Gen per sprint" note), MEDIA.md and the config example name
+  Media_Gen. The speech endpoint note says `/v1/audio/speech` still maps to kokoro-tts
+  until it gets a Media_Gen adapter.
+- **Workstation config (not in the repo):** AU's untracked `kilo.jsonc` has
+  `"Media_Gen": {"enabled": true}` (backup `C:\Roblox\_scratch\kilo.jsonc.bak-2026-10-27`).
+  Kilo loads it on its next restart.
+
+Coordinator restart needed.
+
 ## v0.147.1 — Media_Gen replaces the four audio MCP servers
 
 Victor 2026-10-27: one Media-Gen MCP server (TrueNAS `media-mcp`, streamable HTTP at

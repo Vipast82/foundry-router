@@ -1,7 +1,7 @@
 # AnythingLLM + Foundry's MCP tools (the Foundry-MCP aggregator)
 
 **Goal:** let AnythingLLM use the MCP servers you attached to Foundry-Router
-(acestep-music, TTS, crawl4ai, …) *and* keep its own local MCP servers — as many
+(Media_Gen for music, SFX, speech and images, crawl4ai, …) *and* keep its own local MCP servers — as many
 tools as possible, toggled on the AnythingLLM side.
 
 ## Why the plain persona route didn't do it
@@ -25,7 +25,7 @@ Who decides / runs what:
 - **AnythingLLM's agent** drives the loop and decides which tool to call — using
   whichever model Foundry routes its completion to (your Qwen3.8:27b or Claude,
   per the persona). The small routing *brain* is not in this path.
-- **Foundry** executes the tool (runs acestep-music etc.) and returns the result.
+- **Foundry** executes the tool (runs Media_Gen etc.) and returns the result.
 - Your **local** AnythingLLM MCP servers keep working side-by-side.
 
 ## Enable it
@@ -36,7 +36,7 @@ Who decides / runs what:
    `http://192.168.1.50:8080` — blank uses the configured server host:port), and
    optionally define **profiles** — curated subsets ("MCP personas"):
    ```json
-   { "music": ["acestep-music"], "voice": ["kokoro-tts", "chatterbox-tts"] }
+   { "media": ["Media_Gen"], "research": ["searxng", "crawl4ai"] }
    ```
    Save, then click **↻ Restart Foundry** (endpoints mount at startup). The panel
    shows the live endpoints and **paste-ready AnythingLLM *and* Cline configs**
@@ -98,7 +98,10 @@ the per-call approval prompt for trusted ones.
 
 ## Long tool calls: heartbeat + activity
 
-Media tools (acestep-music, stable-audio) run for **minutes**. Two things help:
+Media tools run for **minutes**. Media_Gen (the TrueNAS media server, 2026-10-27) queues a job and
+returns a `job_id` at once; the result comes from one `media_check_job` call later
+(see `Media-Gen MCP — Connection & Tool Reference`). For servers that do run long inside the
+call, two things help:
 
 - **Raise the per-server timeout.** Edit the slow server's connection and set
   **timeout (s)** high enough (e.g. `1800`). The default 300s kills a music
@@ -113,8 +116,8 @@ Media tools (acestep-music, stable-audio) run for **minutes**. Two things help:
   support may vary.
 
 **Activity view.** The aggregator panel's **Active now** line shows, live, which
-models are generating, which MCP tools are mid-execution (e.g. `acestep-music/
-generate_music · 90s`), and what's loaded in VRAM — so you can see a long job is
+models are generating, which MCP tools are mid-execution (e.g. `Media_Gen/
+generate_music · 2s`), and what's loaded in VRAM — so you can see a long job is
 actually running. Same data at `GET /admin/api/activity`.
 
 ## Notes & limits

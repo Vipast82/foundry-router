@@ -233,8 +233,8 @@ with a 30 s .. 10 min backoff, no attempt used). The map lives in `foundry_autom
 |---|---|---|
 | `studio` | `rojo`, `robloxstudio-mcp`, `kilo` | client components (Rojo, Kilo); the MCP is spawned by Kilo |
 | `blender` | `blender-mcp` | external; the add-on socket (default 9876) must be connected in Blender |
-| `audio` | `acestep-music`, `stable-audio`, `kokoro-tts`, `chatterbox-tts` | external (the GPU host) unless a local component of the same name is switched on |
-| `images` | `comfy-mcp` or `foundry-media` (either) | external |
+| `audio` | `Media_Gen` (music, BGM, SFX, speech, dialogue; replaced acestep-music, stable-audio, kokoro-tts and chatterbox-tts on 2026-10-27) | external (TrueNAS `http://192.168.0.206:8190/mcp`) |
+| `images` | `Media_Gen`, `comfy-mcp` or `foundry-media` (any one) | external; a sprint that needs 2D assets first asks the operator (`[automation] media_gen_images`, default `ask`: they come from ChatGPT for now) |
 | `gpu` | `local-model` (the router's backend `/health`) | backend |
 | `backend` | `router` | backend |
 
@@ -248,8 +248,15 @@ sprint. `GET /api/mcp` on the client's local API shows the same data.
 
 **Optional managed components**, off by default and with no program set: `blender`,
 `acestep-music`, `stable-audio`, `kokoro-tts`, `chatterbox-tts` (`path`, `args`, `cwd`, `env`,
-`port`). Use them only for programs that run on this workstation; the audio MCPs on the GPU
-host are probed, not managed. Blender has no health check (its socket opens only after
+`port`). Use them only for programs that run on this workstation. The four audio components
+are legacy (Media_Gen on TrueNAS replaced those servers and is probed, not managed).
+
+**Media_Gen per sprint.** A coordinator session sees only the Media_Gen tools its sprint
+needs: the audio family (`generate_music`, `generate_bgm`, `generate_sfx`,
+`generate_speech`, `generate_dialogue`, `register_voice`, `list_voices`) and the job tools
+for `audio`; the image family only after the operator chose Media_Gen for a sprint's 2D
+assets; video tools and the personal-only `generate_song_personal` never. Reviewers get
+none. Tracks switch the Media_Gen server on in their `kilo.jsonc` for `audio` or `images`. Blender has no health check (its socket opens only after
 "Connect" in its side panel), so a started Blender is never restarted as unhealthy.
 
 **Verbs.** `client_restart` accepts these component names; `client_service_enable {component,

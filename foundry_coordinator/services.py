@@ -284,6 +284,8 @@ def blocks(c, P, t: dict, spec=None) -> bool:
     if note:
         c._note(P, t, note)
         return True
+    if images_hold(c, P, t, needs):
+        return True
     ok, missing = ready(needs, db=c.store, now=c.clock(), profile=_profile(P))
     if ok:
         if data.get("svc_wait"):
@@ -317,3 +319,75 @@ def track_kilo_config(track, *, profile=None, role_rules: Optional[dict] = None,
     from . import kilo_config
     return kilo_config.track_kilo_config(track, profile=profile, role_rules=role_rules,
                                          source=source, workspace=workspace)
+
+
+# --------------------------------------------------------------------------- 2D assets
+
+IMG_CHATGPT = "I will provide the 2D assets (ChatGPT); run it without Media_Gen image tools"
+IMG_MEDIA_GEN = "Use Media_Gen's image tools for the 2D assets"
+IMG_HOLD = "Hold this sprint"
+IMG_OPTIONS = [IMG_CHATGPT, IMG_MEDIA_GEN, IMG_HOLD]
+
+
+def images_decision(c, pid: str, tid: str):
+    """The newest open or answered 2D-asset decision of the task, or None."""
+    rows = [d for d in c.obligations.active_decisions(pid, tid, "approval")
+            if list(d.get("options") or []) == IMG_OPTIONS]
+    return rows[-1] if rows else None
+
+
+def images_choice(c, pid: str, tid: str) -> str:
+    """'chatgpt' | 'media_gen' | 'hold' (answered) | 'open' | '' (never asked)."""
+    d = images_decision(c, pid, tid)
+    if d is None:
+        return ""
+    if d.get("status") != "answered":
+        return "open"
+    from .decision_policy import match_option
+    ans = d.get("answer")
+    if isinstance(ans, dict):
+        ans = ans.get("option") or ans.get("choice") or ""
+    pick = match_option(IMG_OPTIONS, ans)
+    return {IMG_CHATGPT: "chatgpt", IMG_MEDIA_GEN: "media_gen"}.get(pick, "hold")
+
+
+def images_mode(P) -> str:
+    from .automation import get as auto_get
+    try:
+        mode = str(auto_get(P, "media_gen_images") or "ask").strip().lower()
+    except KeyError:
+        mode = "ask"
+    return mode if mode in ("ask", "allow", "deny") else "ask"
+
+
+def images_hold(c, P, t: dict, needs: list) -> bool:
+    """2026-10-27 (Victor): "if there is anything that needs 2D assets, let me know
+    first" (they come from ChatGPT for now). A sprint that needs `images` waits on an
+    operator decision unless [automation] media_gen_images is 'allow' or 'deny'. The
+    answer lives in the decision itself (task data can be rewritten by a transition);
+    "Hold" keeps the sprint waiting. True = do not start it now."""
+    if "images" not in needs or images_mode(P) != "ask":
+        return False
+    tid = t["task_id"]
+    choice = images_choice(c, P.id, tid)
+    if choice in ("chatgpt", "media_gen"):
+        return False
+    d = images_decision(c, P.id, tid)
+    if choice == "hold":
+        c._note(P, t, f"held by the operator: this sprint needs 2D assets "
+                      f"(decision {d['decision_id']})")
+        return True
+    if d is None:
+        q = (f"{tid} needs 2D image assets (icons, textures, decals, portraits or UI art). "
+             f"They come from you (ChatGPT) for now: provide them, let Media_Gen make them, "
+             f"or hold the sprint?")
+        did = c.obligations.open_decision(P.id, tid, "approval", q, evidence={"needs": needs},
+                                          options=list(IMG_OPTIONS), recommendation=IMG_CHATGPT,
+                                          blocks=[tid])
+        c.store.event(P.id, tid, "operator_notice", detail={
+            "text": f"{tid} needs 2D image assets and waits for your answer (decision {did}): "
+                    f"provide them (ChatGPT), use Media_Gen, or hold.", "decision_id": did})
+    else:
+        did = d["decision_id"]
+    c._note(P, t, f"waiting for the operator: 2D image assets (decision {did})")
+    return True

@@ -132,6 +132,28 @@ MEDIA_GEN_AUDIO = ("generate_music", "generate_bgm", "generate_sfx", "generate_s
                    "generate_dialogue", "register_voice", "list_voices",
                    "generate_song_personal")
 MEDIA_GEN_IMAGES = ("generate_image", "edit_image", "remove_background", "upscale_image")
+MEDIA_GEN_VIDEO = ("generate_video", "interpolate_video", "add_audio_to_video", "stitch_videos",
+                   "create_music_video")
+MEDIA_GEN_JOBS = ("media_check_job", "media_list_jobs", "media_cancel_job")
+# personal-library only (LeVo 2, research licence): never sprint (product) work
+MEDIA_GEN_NEVER = ("generate_song_personal",)
+
+
+def media_gen_denied(audio: bool, images: bool) -> list[str]:
+    """The Media_Gen tools a coordinator session is denied (Kilo names, Media_Gen_<tool>):
+    every family the sprint doesn't need, video always, the personal-only tools always,
+    and the job tools unless some family is allowed. 2026-10-27: a session sees only the
+    Media_Gen tools its sprint needs (Victor: "turn it on for that sprint")."""
+    allow: set = set()
+    if audio:
+        allow |= set(MEDIA_GEN_AUDIO)
+    if images:
+        allow |= set(MEDIA_GEN_IMAGES)
+    if allow:
+        allow |= set(MEDIA_GEN_JOBS)
+    allow -= set(MEDIA_GEN_NEVER)
+    every = MEDIA_GEN_AUDIO + MEDIA_GEN_IMAGES + MEDIA_GEN_VIDEO + MEDIA_GEN_JOBS
+    return [f"Media_Gen_{t}" for t in dict.fromkeys(every) if t not in allow]
 NEEDS_TOOLS = {"blender": ("blender-mcp_*", "blender_mcp_*"),
                "audio": tuple(f"Media_Gen_{t}" for t in MEDIA_GEN_AUDIO)
                + ("acestep-music_*", "stable-audio_*", "kokoro-tts_*", "chatterbox-tts_*"),

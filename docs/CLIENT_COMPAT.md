@@ -67,8 +67,8 @@ rest short and visible:
   58 are ~13.9k tokens, ~11 s on Strata — so choose per client: Clients &
   keys → Edit → "MCP tools with client tools" (off / all / auto-dedupe / only
   these), "keyless clients" under Access for programs with no key, or the
-  same field on the persona. Operator chat: "AnythingLLM gets acestep-music,
-  stable-audio, kokoro-tts, chatterbox-tts and searxng" (set_client_tool_policy).
+  same field on the persona. Operator chat: "AnythingLLM gets Media_Gen and
+  searxng" (set_client_tool_policy).
   Auto-dedupe drops persona tools the client already covers by name or
   purpose (AnythingLLM's web-browsing / web-scraping make searxng and
   crawl4ai redundant). Plain chat (no client tools) always gets them all.
@@ -85,7 +85,9 @@ show anything there.
 
 **Text to speech** (`/v1/audio/speech`, needs the `media` scope on the key).
 Foundry calls the Kokoro or Chatterbox MCP server (run by the Foundry Client)
-and returns the WAV it makes.
+and returns the WAV it makes. Note (2026-10-27): those servers are being replaced by
+Media_Gen, whose `generate_speech` is a queued job (job_id, then `media_check_job`); this
+endpoint still maps to kokoro-tts / chatterbox-tts until it gets a Media_Gen adapter.
 
 | Client | Setting |
 |---|---|

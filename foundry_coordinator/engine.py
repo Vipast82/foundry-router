@@ -771,9 +771,27 @@ class Coordinator:
 
     def _session_rules(self, P: Project, spec, phase: str, role: str) -> list[dict]:
         rules = [dict(r) for r in (P.adapter.session_permissions(spec, phase) or [])]
+        rules += [{"permission": name, "pattern": "*", "action": "deny"}
+                  for name in self._media_gen_denied(P, spec, role)]
         if role == "implementer":
             rules += [dict(r) for r in self.IMPLEMENTER_DENIES]
         return rules
+
+    def _media_gen_denied(self, P: Project, spec, role: str) -> list[str]:
+        """2026-10-27: a session gets only the Media_Gen tools its sprint needs: the
+        audio family for `audio`, the image family for `images` once 2D assets are
+        approved for Media_Gen ([automation] media_gen_images), nothing for reviewers."""
+        from foundry_automation import service_map as SM
+        if role != "implementer":
+            return SM.media_gen_denied(False, False)
+        from . import services as SV
+        t = self.store.task(P.id, spec.task_id) or {}
+        needs = SV.needs_of(t, spec)
+        mode = SV.images_mode(P)
+        images = "images" in needs and (
+            mode == "allow" or (mode == "ask" and
+                                SV.images_choice(self, P.id, spec.task_id) == "media_gen"))
+        return SM.media_gen_denied("audio" in needs, images)
 
     def _bind(self, P: Project, sid: str, tid: str, run_id: str, role: str, persona: str,
               parent: str = "", purpose: str = "") -> None:

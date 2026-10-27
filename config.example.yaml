@@ -496,7 +496,7 @@ client_auth:
   protect_admin: false
   # keyless requests that bring their own tools: which persona MCP tools ride
   # along (unset = follow the persona; off | all | dedupe | [server/tool names])
-  # keyless_mcp_with_client_tools: [acestep-music, stable-audio, kokoro-tts, chatterbox-tts, searxng]
+  # keyless_mcp_with_client_tools: [Media_Gen, searxng]
 clients: []
 #  - name: kilo
 #    key: "${FOUNDRY_KEY_KILO}"

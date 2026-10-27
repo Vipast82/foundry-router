@@ -91,8 +91,8 @@ Responses from `/v1/images/*` carry `x-foundry-media-job`,
 
 ## Images and audio from persona MCP tools (any chat client)
 
-When a persona's MCP tool (ComfyUI, Kokoro, Chatterbox, Stable Audio,
-ACE-Step, a screenshot tool…) returns an image or audio file, Foundry shows it
+When a persona's MCP tool (Media_Gen, ComfyUI, a screenshot tool…; Kokoro,
+Chatterbox, Stable Audio and ACE-Step before Media_Gen replaced them) returns an image or audio file, Foundry shows it
 to the person chatting, in any client, on the brain path (plain chat) and the
 direct path (the client brings its own tools):
 

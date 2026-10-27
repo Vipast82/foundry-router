@@ -195,6 +195,8 @@ AUTOMATION_DEFAULTS: dict = {
     "generic_checks_cache": True,
     # 0.147.0: verify / closeout checks run in worker threads; the tick goes on
     "max_parallel_checks": 2,
+    # 2026-10-27: 2D assets (images) come from the operator (ChatGPT) unless approved
+    "media_gen_images": "ask",
     "inline_check_wait_s": 2,
     # Team Lead tracks (2026-10-22): parallel sprints on git worktrees
     "max_agents": 1,
@@ -616,6 +618,10 @@ _AUTO_DESC = {
     "transcript_poll_seconds": "Lane transcript ingest interval.",
     "generic_checks_cache": "Reuse per-tick coordinator checks while HEAD and the tree are "
                             "unchanged.",
+    "media_gen_images": "A sprint that needs 2D image assets: 'ask' (default) holds it with a "
+                        "decision for the operator (provide the assets, e.g. from ChatGPT, use "
+                        "Media_Gen's image tools, or hold); 'allow' gives it Media_Gen's image "
+                        "tools; 'deny' starts it without them.",
     "max_parallel_checks": "Verify / closeout check runs (done_check, Lune, project suites) "
                            "that run at once in the background; the coordinator keeps "
                            "starting and steering other sprints meanwhile.",
