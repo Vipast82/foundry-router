@@ -205,15 +205,15 @@ def test_merge_waits_on_a_dirty_main_checkout(tmp_path):
     c, P, clock, root = env(tmp_path)
     c.tracks.create(P, "blender", ["B1"])
     c.tracks.start(P, "blender", "victor")
-    os.makedirs(os.path.join(root, "src"), exist_ok=True)
-    with open(os.path.join(root, "src", "a.txt"), "w") as f:
-        f.write("operator edit, uncommitted")
+    # an operator's uncommitted edit of a TRACKED file (untracked files never block)
+    with open(os.path.join(root, "tasks.json"), "a") as f:
+        f.write(" ")
     assert run_until(c, lambda: c.store.task("game", "B1")["state"] == S.COMPLETE, limit=80)
     for _ in range(3):
         c.tick()
     row = c.store.track("game", "blender")
     assert row["state"] == "merging" and "uncommitted changes" in row["data"]["merge_wait"]
-    os.remove(os.path.join(root, "src", "a.txt"))
+    git(root, "checkout", "--", "tasks.json")
     assert run_until(c, lambda: c.store.track("game", "blender")["state"] == "merged", limit=6)
 
 
@@ -264,3 +264,13 @@ def test_a_track_with_merge_commits_integrates_a_moved_main_by_merge(tmp_path):
     assert events(c, "track_fast_forwarded")             # merged into main, no conflict
     assert open(os.path.join(root, "src", "a.txt")).read() == "main\ntrack\n"
     assert os.path.isfile(os.path.join(root, "src", "c.txt"))
+
+
+def test_untracked_files_in_the_main_checkout_do_not_block_the_merge(tmp_path):
+    """AU keeps permanent untracked files; the merge waited forever on them (GF-NAME1)."""
+    c, P, clock, root = env(tmp_path)
+    os.makedirs(os.path.join(root, ".kilo"), exist_ok=True)
+    open(os.path.join(root, ".kilo", "TRIAL.md"), "w").write("local notes\n")
+    assert c.tracks.merger._main_dirty(P) == []
+    open(os.path.join(root, "verify.py"), "a").write("# tracked edit\n")
+    assert c.tracks.merger._main_dirty(P) == ["verify.py"]

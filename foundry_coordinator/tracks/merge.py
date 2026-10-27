@@ -126,8 +126,12 @@ class MergeManager:
                                                                       "why": why[:300]})
 
     def _main_dirty(self, P) -> list[str]:
+        """Tracked files with uncommitted changes in the main checkout. Untracked files
+        don't block a fast-forward (git refuses only one that would be overwritten, and
+        _ff then waits): AU keeps permanent untracked files (.kilo/TRIAL.md, plans,
+        local rules), and counting them parked GF-NAME1's merge forever (2026-10-27)."""
         try:
-            return sorted({p for _, p in P.ws.status()})
+            return sorted({p for xy, p in P.ws.status() if xy != "??"})
         except Exception:                                         # noqa: BLE001
             return []
 

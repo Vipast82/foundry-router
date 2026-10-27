@@ -2,6 +2,17 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.150.1 — a track's merge no longer waits on untracked files
+
+GF-NAME1 completed and its track was ready to merge, but the merge stage waited for a "clean"
+main checkout and counted AU's permanent untracked files (`.kilo/TRIAL.md`, `.kilo/plans/*`,
+local Kilo rules) as uncommitted changes. It would have waited forever.
+
+Only tracked files with uncommitted changes block it now. A fast-forward that would overwrite
+an untracked file still fails in git and waits, as before.
+
+Coordinator restart needed.
+
 ## v0.150.0 — context thresholds follow each model's window; images ChatGPT first, Media_Gen fallback
 
 Victor 2026-10-27: "we are allowing 262k context and output reserve is currently at 32768" and,
