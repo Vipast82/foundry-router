@@ -501,13 +501,13 @@ class TrackManager:
             return
         self.resources.observe_transcript(P, msgs, sid)
 
-    def verify_track(self, P, spec, head: str, base: str) -> list:
-        """A track sprint's project checks without Studio: the adapter's
-        `verify_track` when it has one, else its plain verify."""
+    def verify_track(self, P, spec, head: str, base: str, phase: str = "verify") -> list:
+        """A track sprint's project checks without Studio (verify and closeout):
+        the adapter's `verify_track` when it has one, else its plain verify."""
         fn = getattr(P.adapter, "verify_track", None)
         if callable(fn):
-            return fn(spec, "verify", head, base)
-        return P.adapter.verify(spec, "verify", head, base)
+            return fn(spec, phase, head, base)
+        return P.adapter.verify(spec, phase, head, base)
 
     # ------------------------------------------------------------------ analysis / proposal
 

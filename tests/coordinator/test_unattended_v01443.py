@@ -127,6 +127,7 @@ def test_one_setting_answered_twice_still_conflicts(store):
 def _heal_env(tmp_path, monkeypatch, serving):
     restarts = []
     monkeypatch.setattr(client_api, "component_serving", lambda name, api=None: serving)
+    monkeypatch.setattr(client_api, "studio_settings", lambda api=None: {})   # reopen off
     monkeypatch.setattr(client_api, "restart_component",
                         lambda name, **k: restarts.append(name) or "")
     events = []
@@ -139,7 +140,8 @@ def test_a_serving_rojo_is_not_restarted(tmp_path, monkeypatch):
     c, P, restarts = _heal_env(tmp_path, monkeypatch, "port 34872, Game session 7e63a208")
     out = autoheal.repair(c, P, {"task_id": "T1"}, "rojo", "restart")
     assert restarts == []
-    assert [r["repair"] for r in out] == ["keep_rojo"] and out[0]["ok"]
+    assert [r["repair"] for r in out] == ["keep_rojo", "reopen_studio"] and out[0]["ok"]
+    assert not out[1]["ok"] and "no Foundry Client" in out[1]["detail"]
 
 
 def test_a_down_rojo_is_restarted(tmp_path, monkeypatch):

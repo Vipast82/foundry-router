@@ -64,3 +64,25 @@ def client(app):
     from fastapi.testclient import TestClient
     with TestClient(app) as c:
         yield c
+
+
+_REAL_APPDATA = os.environ.get("APPDATA")
+_REAL_XDG = os.environ.get("XDG_CONFIG_HOME")
+
+
+@pytest.fixture(autouse=True)
+def _no_live_foundry_client(tmp_path_factory, monkeypatch):
+    """No test may reach the Foundry Client running on this machine (0.145.0: its
+    API can restart Rojo and reopen Studio). The coordinator's client discovery
+    looks in an empty folder unless a test points APPDATA / XDG_CONFIG_HOME
+    somewhere itself."""
+    from foundry_coordinator import client_api
+    real = client_api.config_dir
+    empty = tmp_path_factory.mktemp("no-client")
+
+    def guarded():
+        if os.environ.get("APPDATA") == _REAL_APPDATA and \
+                os.environ.get("XDG_CONFIG_HOME") == _REAL_XDG:
+            return empty / "FoundryClient"
+        return real()
+    monkeypatch.setattr(client_api, "config_dir", guarded)

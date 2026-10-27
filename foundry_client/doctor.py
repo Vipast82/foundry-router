@@ -92,6 +92,20 @@ def run(mgr) -> dict:
                              f"session {str(sid)[:8]}; the client cannot see whether Studio is "
                              f"connected (click Connect in the plugin after any Rojo restart)"))
 
+    # Studio auto-reopen (studio.py)
+    studio = getattr(mgr, "studio", None)
+    sts = studio.settings() if studio is not None else {}
+    if sts.get("auto_reopen"):
+        from .studio import validate as studio_validate
+        bad = studio_validate(sts)
+        checks.append(_c("studio_reopen", "Studio auto-reopen", "fail" if bad else "ok",
+                         "; ".join(bad) if bad else
+                         f"on: place {sts['place_id']} (window title contains "
+                         f"'{sts['title_match']}'), at most {sts['max_per_hour']}/hour"))
+    elif studio is not None:
+        checks.append(_c("studio_reopen", "Studio auto-reopen", "info",
+                         "off: a lost Rojo connection waits for Plugins → Rojo → Connect"))
+
     # router
     if not mgr.link.state["checked_at"]:
         mgr.link.poll()

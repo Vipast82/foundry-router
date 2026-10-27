@@ -15,6 +15,7 @@ adapter.
 from __future__ import annotations
 
 import os
+import re
 import time
 import uuid
 from typing import Callable, Optional
@@ -34,6 +35,22 @@ from .store import Store
 
 REVIEW_ERRORS_BEFORE_BLOCK = 3
 INVALID_REVIEWS_BEFORE_BLOCK = 2
+
+# every implementer prompt of a track sprint (0.145.0): its session tried to run
+# the Studio gate itself, hit the main sprint's Studio lock and went BLOCKED
+TRACK_BRIEF = """
+## Track sprint: no Studio here
+This sprint runs on the parallel track `{track}` (git worktree `{workspace}`), beside the
+main sprint, which owns Studio and Rojo. Do not run the Studio gate, a playtest or a boot
+check, and do not take or wait for studio.lock: the coordinator runs the Studio gate on the
+merge result in the main checkout when this track merges. Finish the code, the
+Studio-free checks (Lune, the sprint's unit checks, done_check without GATE / BOOT /
+EVIDENCE) and the plan, commit, and report DONE. Never report BLOCKED on Studio or
+studio.lock.
+"""
+# a track session's BLOCKED report about Studio, Rojo, the gate or studio.lock
+TRACK_STUDIO_BLOCKER = re.compile(r"studio\.lock|\bstudio\b|\brojo\b|playtest|studio[_ ]gate|"
+                                  r"\bgate\b[^.\n]{0,40}\b(?:run|lock|studio)", re.I)
 
 
 def _prio(item) -> int:
@@ -584,6 +601,9 @@ class Coordinator:
         prompt = (P.adapter.repair_prompt(spec, findings, ctx) if findings
                   else P.adapter.implement_prompt(spec, ctx))
         prompt += lc_extra
+        if self.tracks.is_track(P):
+            prompt += TRACK_BRIEF.format(track=self.tracks.track_name(P),
+                                         workspace=P.profile.workspace)
         if inter:
             prompt += ("\n## Intermediate gate outputs\nThese task-owned files are untracked "
                        "intermediate gate output: " + ", ".join(inter[:8]) + ". They do not "
@@ -797,6 +817,13 @@ class Coordinator:
             self.helpers.expire_lane_results(P, tid, "the primary finished; lane results are "
                                                      "never delivered after verification starts")
         data = self.store.merge_data(pid, tid, helper_wait_since=None)
+        if blocked and self.tracks.is_track(P) and \
+                TRACK_STUDIO_BLOCKER.search(str(rep.get("blocker") or rep.get("summary") or "")):
+            # a track never needs Studio (TRACK_BRIEF): its committed work goes to the
+            # Studio-free verify, and the merge gate runs Studio; no decision, no lead
+            self.store.event(pid, tid, "track_studio_blocker_ignored", session_id=t["session_id"],
+                             detail={"blocker": str(rep.get("blocker") or "")[:300]})
+            blocked = False
         if blocked:
             self.store.release(pid, tid)
             if self._blocked_decision(P, self.store.task(pid, tid), rep, status):
@@ -2225,7 +2252,12 @@ class Coordinator:
                                                "closeout_done": None})
         results = self._generic_checks(P, t, spec, head, phase="closeout")
         with keepalive.busy(f"closeout checks {pid}/{tid}", self.VERIFY_COVER_S):
-            results += P.adapter.verify(spec, "closeout", head, t["reviewed_sha"])
+            if self.tracks.is_track(P):
+                # a track sprint closes without Studio; the merge gate covers it
+                results += self.tracks.verify_track(P, spec, head, t["reviewed_sha"],
+                                                    phase="closeout")
+            else:
+                results += P.adapter.verify(spec, "closeout", head, t["reviewed_sha"])
         # a templated closeout has no session to push: the coordinator pushes (B7)
         published = self._publish(P, t, head, results, push=templated)
         cid = self.store.save_verification(pid, tid, head, "closeout", results)

@@ -88,6 +88,27 @@ def create_app(mgr: Manager, token: str, cfg_path: Optional[Path] = None) -> Fas
     def dismiss(key: str):
         return {"dismissed": mgr.dismiss_alert(key)}
 
+    @app.post("/api/studio/reopen")
+    async def studio_reopen(request: Request):
+        """Start a Studio auto-reopen job (studio.py): {task?, dry_run?}. The job runs in
+        the background; GET /api/studio/jobs/<id> reports it."""
+        try:
+            body = await request.json()
+        except ValueError:
+            body = {}
+        body = body if isinstance(body, dict) else {}
+        return mgr.studio.start(task=str(body.get("task") or ""),
+                                dry_run=bool(body.get("dry_run")))
+
+    @app.get("/api/studio/jobs/{jid}")
+    def studio_job(jid: str):
+        j = mgr.studio.get(jid)
+        return j if j else JSONResponse({"error": f"no job {jid}"}, status_code=404)
+
+    @app.get("/api/studio/settings")
+    def studio_settings():
+        return mgr.studio.settings()
+
     @app.get("/api/observation")
     def observation():
         return mgr.observation()

@@ -50,6 +50,10 @@ DEFAULTS: dict[str, Any] = {
         "kilo_config": "",                              # kilo.jsonc (empty = <game>/kilo.jsonc)
         "project": "",                                  # coordinator project id (empty = the only one)
     },
+    # Studio auto-reopen (studio.py): off by default; the TEST place only
+    "studio": {"auto_reopen": False, "place_id": 0, "universe_id": 0, "title_match": "",
+               "never_place_ids": [], "idle_minutes": 2, "max_wait_minutes": 10,
+               "max_per_hour": 2},
     "components": {
         "kilo": {"enabled": True, "path": "", "port": 4096, "args": [],
                  "env": {"KILO_DISABLE_EXTERNAL_SKILLS": "true"},
@@ -148,6 +152,9 @@ def validate(cfg: dict) -> list[str]:
     for k in ("relay_enabled", "update_check"):
         if not isinstance(c.get(k), bool):
             errs.append(f"client.{k} must be true or false")
+    if isinstance(cfg.get("studio"), dict):
+        from .studio import DEFAULTS as STUDIO_DEFAULTS, validate as studio_validate
+        errs += studio_validate({**STUDIO_DEFAULTS, **cfg["studio"]})
     return errs
 
 

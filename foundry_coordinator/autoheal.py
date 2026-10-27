@@ -48,6 +48,10 @@ INFRA_SIGNATURES = (
                                r"Unavailable|Gateway Time-?out", re.I)),
     ("connection", re.compile(r"ECONNREFUSED|ECONNRESET|connection (?:refused|reset|aborted)|"
                               r"timed out connecting|could not connect", re.I)),
+    # the Studio plugin is not connected to a running Rojo (a person would click Connect)
+    ("rojo_connect", re.compile(r"Rojo\s*(?:→|->|>|-)\s*Connect|rojo[^.\n]{0,40}plugin[^.\n]{0,40}"
+                                r"(?:not connected|disconnected|reconnect)|owner click|"
+                                r"click[^.\n]{0,30}\bConnect\b", re.I)),
     ("rojo_stale", re.compile(r"host\.live_hash|rojo[^.\n]{0,40}stale|loaded source[^.\n]{0,40}"
                               r"differ|studio[^.\n]{0,40}(?:out of date|behind HEAD)", re.I)),
     ("rojo", re.compile(r"\brojo\b[^.\n]{0,80}(?:exited|down|not running|not syncing|"
@@ -138,6 +142,16 @@ def try_heal(c, P, t: dict, to: str, evidence: dict, cls: str, fields: dict) -> 
     out = c.store.transition(pid, tid, S.BLOCKED, ev, blocker=blocker, data=data,
                              next_action=blocker[:500], **extra)
     repairs = repair(c, P, t, sig, action)        # W1.8: fix what can be fixed, then retry
+    job = next((r.get("job") for r in repairs if r.get("job")), "")
+    if job:
+        # 0.145.0: the retry waits for the client's Studio reopen job (step())
+        cur2 = c.store.task(pid, tid) or {}
+        d2 = dict(cur2.get("data") or {})
+        ah = dict(d2.get("auto_heal") or {})
+        ah.update(studio_job=job, studio_job_ts=now, retry_at=max(float(ah.get("retry_at") or 0),
+                                                                  now + 30))
+        d2["auto_heal"] = ah
+        c.store.update_task(pid, tid, data=d2)
     c.store.event(pid, tid, "auto_heal", detail={
         "key": key, "n": n + 1, "of": retries, "action": action, "signature": sig,
         "class": cls, "delay_s": delay, "reason": reason[:300], "repairs": repairs})
@@ -234,6 +248,56 @@ def stop_playtest(P) -> str:
     return ""
 
 
+# stops a Studio reopen can fix (the plugin lost Rojo, Studio not connected)
+STUDIO_SYNC_SIGS = ("rojo_connect", "rojo", "rojo_stale", "studio")
+REOPEN_JOB_MAX_S = 1500          # a client job older than this counts as failed
+
+
+def studio_guard(c, P, t: dict) -> str:
+    """'' when Studio is free for a reopen on behalf of task `t`, else why not:
+    another sprint holds the coordinator's Studio lease, a gate runner is alive, or
+    the project says Studio is busy (adapter.studio_busy, e.g. AU's studio.lock)."""
+    pid, tid = P.id, t["task_id"]
+    try:
+        for lk in c.store.locks():
+            if str(lk.get("resource", "")).startswith("studio:") and \
+                    (lk.get("project_id"), lk.get("task_id")) != (pid, tid):
+                return f"Studio is leased to {lk.get('project_id')}/{lk.get('task_id')}"
+    except Exception:                                            # noqa: BLE001
+        pass
+    cur = _read_json(runner_lock_path(P.profile.workspace))
+    if isinstance(cur, dict) and cur.get("pid") and pid_alive(cur.get("pid")):
+        return f"a gate runner is live (pid {cur.get('pid')}, {cur.get('sprint') or '?'})"
+    busy = getattr(P.adapter, "studio_busy", None)
+    if callable(busy):
+        try:
+            why = busy(tid)
+        except Exception as e:                                   # noqa: BLE001
+            return f"studio_busy check failed: {e}"[:200]
+        if why:
+            return why
+    return ""
+
+
+def request_studio_reopen(c, P, t: dict) -> tuple[str, str]:
+    """(job id, '') when the client started a reopen, else ('', why not)."""
+    from . import client_api
+    st = client_api.studio_settings()
+    if not st:
+        return "", "no Foundry Client with Studio auto-reopen here"
+    if not st.get("auto_reopen"):
+        return "", "studio.auto_reopen is off in the Foundry Client"
+    why = studio_guard(c, P, t)
+    if why:
+        return "", why
+    res = client_api.studio_reopen(t["task_id"])
+    if res.get("error") or not res.get("job"):
+        return "", str(res.get("error") or "the client returned no job")[:200]
+    if res.get("state") == "failed":
+        return "", str(res.get("result") or "the reopen failed at once")[:200]
+    return str(res["job"]), ""
+
+
 def repair(c, P, t: dict, sig: str, action: str) -> list[dict]:
     """The deterministic repairs for a stop signature, each journaled:
     [{repair, ok, detail}]. Never raises; never a model call."""
@@ -243,14 +307,14 @@ def repair(c, P, t: dict, sig: str, action: str) -> list[dict]:
     def add(name, ok, detail=""):
         out.append({"repair": name, "ok": bool(ok), "detail": str(detail)[:300]})
     try:
-        if sig in ("gate_tooling", "studio", "rojo", "rojo_stale") or action == "verify":
+        if sig in ("gate_tooling",) + STUDIO_SYNC_SIGS or action == "verify":
             lock = clear_stale_runner_lock(ws)
             if lock["cleared"]:
                 add("clear_stale_runner_lock", True, f"dead pid {lock['pid']} ({lock['sprint']})")
                 if lock["playing"]:
                     why = stop_playtest(P)
                     add("stop_playtest", not why, why or "started")
-        if sig in ("rojo", "rojo_stale"):
+        if sig in STUDIO_SYNC_SIGS:
             from . import client_api
             serving = client_api.component_serving("rojo")
             if serving:
@@ -259,7 +323,16 @@ def repair(c, P, t: dict, sig: str, action: str) -> list[dict]:
                 # Connect click by hand (2026-10-27, GF-GATE1 05:24)
                 add("keep_rojo", True, f"Rojo is serving ({serving}); not restarted, a new "
                                        f"session would need a Connect click in Studio")
-            else:
+                # 0.145.0: reopen the TEST place instead (opt-in on the client), so
+                # Rojo's Auto Reconnect connects without a click
+                job, why = request_studio_reopen(c, P, t)
+                if job:
+                    out.append({"repair": "reopen_studio", "ok": True, "job": job,
+                                "detail": f"client job {job}: closing and reopening the "
+                                          f"TEST place in Studio"})
+                else:
+                    add("reopen_studio", False, f"not reopened: {why}")
+            elif sig != "studio":
                 why = client_api.restart_component("rojo")
                 add("restart_rojo", not why, why or (
                     "restart requested through the Foundry Client"
@@ -288,6 +361,9 @@ def step(c, P, t: dict) -> bool:
         return False
     if c.clock() < float(ah.get("retry_at") or 0):
         return True
+    if ah.get("studio_job"):
+        if not _studio_job_settled(c, P, t, data, ah):
+            return True                  # the Studio reopen is still running
     held = getattr(c, "_held", None)
     if callable(held) and held(P, t, "auto-heal retry"):
         return True
@@ -305,4 +381,27 @@ def step(c, P, t: dict) -> bool:
                            data=data, next_action=res[:500])
     c.store.event(pid, tid, "auto_heal_retry", detail={"key": ah.get("key"),
                                                        "action": ah.get("action")})
+    return True
+
+
+def _studio_job_settled(c, P, t: dict, data: dict, ah: dict) -> bool:
+    """False while the client's Studio reopen job runs; True once it ended (done,
+    failed or lost), journaled once. The retry goes ahead either way: a reopen that
+    did not help shows up as the same stop again, and the retry count escalates it."""
+    from . import client_api
+    jid = str(ah.get("studio_job"))
+    j = client_api.studio_job(jid)
+    age = c.clock() - float(ah.get("studio_job_ts") or 0)
+    if j and j.get("state") == "running" and age < REOPEN_JOB_MAX_S:
+        return False
+    if j is None:
+        state, result = "failed", "the client no longer knows the job (restarted?)"
+    elif j.get("state") == "running":
+        state, result = "failed", f"still running after {int(age)} s"
+    else:
+        state, result = str(j.get("state")), str(j.get("result") or "")
+    c.store.event(P.id, t["task_id"], "studio_reopened" if state == "done"
+                  else "studio_reopen_failed",
+                  detail={"job": jid, "result": result[:300],
+                          "steps": [s.get("text") for s in (j or {}).get("steps") or []][-8:]})
     return True

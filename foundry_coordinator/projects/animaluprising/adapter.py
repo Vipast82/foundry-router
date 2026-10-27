@@ -46,6 +46,8 @@ from ...profile import matches_any
 AMENDMENT_MARKER = "COORDINATOR-ADVANCEMENT"
 VERIFY_ROWS = ("COMMITS", "CLEAN", "SCOPE", "TEST", "GATE", "BOOT", "EVIDENCE", "TIER-C")
 CLOSEOUT_ROWS = VERIFY_ROWS + ("PLAN", "SUMMARY", "PATHS", "API", "STATE")
+# rows only a Studio gate can satisfy: a track sprint leaves them to the merge gate
+STUDIO_ROWS = ("GATE", "BOOT", "EVIDENCE")
 _ROW = re.compile(r"^(PASS|FAIL|NOTE)\s+(\S+)\s+(.*)$")
 # the body line memory/manager.py writes into every coordinator memory commit
 _MEMORY_COMMIT_MARK = "Coordinator memory commit (docs/memory)"
@@ -564,14 +566,40 @@ Change no code or test file in this session; if one needs changing, stop and rep
         """A sprint running on a parallel track (its git worktree, no Studio):
         done_check, Lune and the profile checks, without the gate binding. The
         Studio gate of the merge result runs in the main checkout when the track
-        merges (foundry_coordinator/tracks/merge.py)."""
-        out = self._done_check(spec, phase, revision)
+        merges (foundry_coordinator/tracks/merge.py).
+
+        The done_check rows only a Studio gate can satisfy (GATE, BOOT,
+        EVIDENCE) are left to that merge gate, in verify and in closeout: before
+        0.145.0 a track sprint failed them every time, its session then tried to
+        run the gate itself, hit the main sprint's Studio lock and went BLOCKED
+        (GF-NAME1, 2026-10-27)."""
+        out = self._done_check(spec, phase, revision, skip=STUDIO_ROWS)
         if phase == "verify" and spec.data.get("tier") in ("A", "B"):
             out += self._lune(spec, revision)
         out += GenericAdapter.verify(self, spec, phase, revision, base)
         return out
 
-    def _done_check(self, spec: TaskSpec, phase: str, revision: str) -> list:
+    def studio_busy(self, task_id: str) -> str:
+        """'' when AU's shared studio.lock (tools/coord/lock.py) is free or held for
+        `task_id` itself, else who holds it: a Studio auto-reopen (0.145.0) never
+        pulls Studio from under another sprint's playtest or gate."""
+        p = os.path.join(os.environ.get("AU_LOCK_DIR", "C:/Roblox/_scratch"), "studio.lock")
+        try:
+            with open(p, encoding="utf-8") as f:
+                line = f.read().strip()
+        except FileNotFoundError:
+            return ""
+        except OSError as e:
+            return f"studio.lock unreadable: {e}"[:200]
+        if not line:
+            return ""
+        parts = line.split(" ", 3)               # "<owner> <ISO time> <SPRINT> <what>"
+        if len(parts) >= 3 and parts[2] == task_id:
+            return ""
+        return f"studio.lock is held: {line[:160]}"
+
+    def _done_check(self, spec: TaskSpec, phase: str, revision: str,
+                    skip: tuple = ()) -> list:
         cmd = self._python() + [os.path.join("tools", "guard", "done_check.py"), spec.task_id]
         t0 = time.time()
         log = os.path.join(evidence_dir(self.state_dir, self.p.id, spec.task_id, revision),
@@ -584,7 +612,8 @@ Change no code or test file in this session; if one needs changing, stop and rep
         text = r.stdout + (("\n[stderr]\n" + r.stderr) if r.stderr.strip() else "")
         with open(log, "w", encoding="utf-8") as f:
             f.write(f"$ {' '.join(cmd)}\n{text}\n# exit {r.returncode}\n")
-        wanted = VERIFY_ROWS if phase == "verify" else CLOSEOUT_ROWS
+        wanted = tuple(r for r in (VERIFY_ROWS if phase == "verify" else CLOSEOUT_ROWS)
+                       if r not in skip)
         res, seen = [], set()
         for line in text.splitlines():
             m = _ROW.match(line.strip())
@@ -611,8 +640,15 @@ Change no code or test file in this session; if one needs changing, stop and rep
             detail = final.group(0) if final else "no DONE-CHECK verdict line"
             fails = [m.group(2) for m in (_ROW.match(x.strip()) for x in text.splitlines())
                      if m and m.group(1) == "FAIL"]
-            if verdict == FAIL and forgiven and fails and set(fails) == {"SCOPE"}:
-                verdict, detail = PASS, detail + " (only SCOPE, from coordinator memory commits)"
+            left = [f for f in fails if f not in skip and not (f == "SCOPE" and forgiven)]
+            if verdict == FAIL and fails and not left:
+                why = []
+                if forgiven and "SCOPE" in fails:
+                    why.append("SCOPE from coordinator memory commits")
+                if any(f in skip for f in fails):
+                    why.append("Studio rows (" + ", ".join(sorted({f for f in fails if f in skip}))
+                               + ") checked by the merge gate")
+                verdict, detail = PASS, detail + " (only " + "; ".join(why) + ")"
             res.append(VerificationResult("au.done_check", verdict, True, log, detail, revision))
         if not res:
             res.append(VerificationResult("au.done_check", UNKNOWN, True, log,

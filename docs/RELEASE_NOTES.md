@@ -2,6 +2,38 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.145.0 — Studio auto-reopen (TEST place, opt-in); track sprints never need Studio
+
+**Studio auto-reopen.** The Studio Rojo plugin reconnects only when a place is opened,
+so after Rojo or Studio restarted a sprint waited for the owner to click Plugins → Rojo →
+Connect. Now, when a session or gate stops on a lost Rojo connection (new auto-heal
+signature `rojo_connect`: "Rojo → Connect", "owner click", "plugin not connected") and
+Rojo itself is serving, auto-heal asks the Foundry Client to close the TEST place's
+Studio window and open the TEST place again; Rojo's Auto Reconnect does the rest. The
+retry waits for the client job (`studio_reopened` / `studio_reopen_failed` events).
+
+Off by default (`[studio] auto_reopen` in client.toml) and narrow:
+- only the window whose title contains `title_match` is touched (any LIVE or other
+  Studio window is left alone); the place opened is always `place_id` / `universe_id`,
+  never one in `never_place_ids`
+- a polite close (WM_CLOSE), never a kill: if Studio asks to save or publish, the
+  question is cancelled, Studio stays open, and the reopen fails with the dialog's title
+- never while another sprint holds the coordinator's Studio lease, a gate runner is live,
+  or the project says Studio is busy (AU: `studio.lock` held by another sprint)
+- waits for 2 idle minutes (at most 10, then goes ahead with an alert); 2 per hour
+- `POST /api/studio/reopen {"dry_run": true}` reports what it would do; Doctor shows it
+
+**Track sprints never need Studio.** The AU adapter's track verify still asked done_check
+for GATE / BOOT / EVIDENCE, which only a Studio gate can satisfy, so a track sprint failed
+them, its session tried to run the gate, hit the main sprint's Studio lock and went
+BLOCKED (GF-NAME1, 2026-10-27). Track verify and closeout now leave those rows to the
+merge gate (which already runs Studio under a lease), every track implementer prompt
+says so, and a track session's BLOCKED report about Studio, Rojo or studio.lock goes to
+the Studio-free verify instead of a decision.
+
+Coordinator restart and full client restart needed. To turn the reopen on, set
+`[studio]` in client.toml (see docs) and do the supervised first run.
+
 ## v0.144.3 — automation runs unattended through long verifies, stale questions and Rojo
 
 Seven places where the AU test sprint (2026-10-27) stopped and waited for Victor:

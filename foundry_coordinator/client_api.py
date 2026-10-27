@@ -114,6 +114,39 @@ def discover(timeout: float = TIMEOUT) -> Optional[ClientAPI]:
     return ClientAPI(f"http://127.0.0.1:{read_port()}", token, timeout=timeout)
 
 
+def studio_settings(api: Optional[ClientAPI] = None) -> dict:
+    """The client's [studio] settings, {} when no client or an older one."""
+    api = api or discover()
+    if api is None:
+        return {}
+    try:
+        return api._req("GET", "/api/studio/settings") or {}
+    except ClientError:
+        return {}
+
+
+def studio_reopen(task: str, dry_run: bool = False, api: Optional[ClientAPI] = None) -> dict:
+    """Ask the client to reopen the TEST place in Studio (studio.py). The job's
+    {job, state, ...}, or {"error": why}."""
+    api = api or discover()
+    if api is None:
+        return {"error": "no Foundry Client on this workstation (no api.token)"}
+    try:
+        return api._req("POST", "/api/studio/reopen", {"task": task, "dry_run": dry_run})
+    except ClientError as e:
+        return {"error": str(e)[:200]}
+
+
+def studio_job(jid: str, api: Optional[ClientAPI] = None) -> Optional[dict]:
+    api = api or discover()
+    if api is None:
+        return None
+    try:
+        return api._req("GET", f"/api/studio/jobs/{jid}")
+    except ClientError:
+        return None
+
+
 def component_serving(name: str, api: Optional[ClientAPI] = None) -> str:
     """'' unless the client reports `name` running; then its detail line
     (e.g. "port 34872, AnimalUprising session 7e63a208")."""

@@ -75,6 +75,10 @@ class Manager:
                                   "Vipast82/foundry-router", clock)
         from .client_requests import RequestQueue
         self.requests = RequestQueue(self)
+        from .studio import StudioReopen
+        self.studio = StudioReopen(lambda: self.cfg.get("studio") or {},
+                                   cfg["client"]["state_dir"],
+                                   alert=lambda key, text: self._alert(key, text))
 
     # ---------------------------------------------------------------- lifecycle
 
