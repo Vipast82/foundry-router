@@ -130,7 +130,13 @@ def reword(c, P, t: dict, spec) -> dict:
         return {}
     try:
         head = P.ws.head()
-        commits = P.ws.commits(base, head)
+        own = base
+        tracks = getattr(c, "tracks", None)
+        if tracks is not None and tracks.is_track(P):
+            # 0.145.3: a track that merged master holds master's commits (other
+            # sprints'); only its own are this task's to reword
+            own = tracks.effective_base(P, base, head)
+        commits = P.ws.commits(own, head)
     except GitError:
         return {}
     bad, _ = unprefixed(P, commits, prefix)
