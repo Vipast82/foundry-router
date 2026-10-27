@@ -217,8 +217,12 @@ class AnimalUprisingAdapter(GenericAdapter):
         deps = []
         m = re.search(r"\*\*Depends on:\*\*\s*([^\n]+)", plan)
         if m:
+            from ...tracks.analysis import drop_phase_labels
             deps = [d for d in re.findall(r"\b([A-Z]{1,5}[0-9]?-?[A-Za-z0-9.-]*[0-9][A-Za-z0-9]*)\b",
                                           m.group(1).split("**")[0]) if d != task_id]
+            # "the A0 entry gate" names a MASTER_ORDER phase, not a sprint
+            deps = drop_phase_labels(deps, lambda d: os.path.isfile(os.path.join(
+                self.p.workspace, "docs", "progress", f"{d}_PLAN.md")))
         goal = _section(plan, "Goal")
         acceptance = _accept_section(plan)
         # Team Lead 5: an optional `## Needs` block (studio, blender, audio, images, gpu,

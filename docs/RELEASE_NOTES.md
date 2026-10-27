@@ -2,6 +2,15 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.144.2 — coordinator: phase labels are not sprint dependencies
+
+A plan whose `Depends on:` line named a MASTER_ORDER phase ("the A0 entry gate",
+"after A2", "D1") made the coordinator wait for a sprint called A0 and BLOCK the task;
+GF-GATE1 hit it on 2026-10-27. The AU adapter and the track analysis now drop
+phase-shaped ids (A0–F99, optional letter) unless a sprint plan by that name exists
+(`tracks.analysis.drop_phase_labels`). Affected plans: GF-GATE1, AS-REG1, GF-SAVE1, MV2-V1,
+AS-G04, AS-G05. Coordinator restart needed.
+
 ## v0.144.1 — coordinator: robloxstudio-mcp pinned to 3.4.2
 
 The community Studio MCP server must match its Studio plugin exactly (HTTP 426

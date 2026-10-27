@@ -456,3 +456,16 @@ def test_contract_for_a_hand_built_spec_without_plan_data():
     assert c["phase"] == "build" and len(c["deferred"]) == 6
     assert "final CLOSE step with its evidence line" in "\n".join(c["deferred"])
 
+
+
+def test_depends_on_drops_master_order_phase_labels(repo):
+    """'Depends on: the A0 entry gate' names a MASTER_ORDER phase, not a sprint
+    (GF-GATE1 was blocked on 2026-10-27 waiting for a sprint called A0). A
+    phase-shaped id is still a dependency when a sprint plan by that name exists."""
+    ws, a = repo["ws"], repo["a"]
+    _write(ws, PLAN_REL, PLAN.replace(
+        "**Depends on:** AS-C16.",
+        "**Depends on:** the A0 entry gate in `docs/MASTER_ORDER.md` §5, AS-C16 and D1."))
+    assert a.describe(T).deps == ["AS-C16"]
+    _write(ws, "docs/progress/D1_PLAN.md", "# D1 — a real sprint that looks like a phase\n")
+    assert a.describe(T).deps == ["AS-C16", "D1"]

@@ -284,3 +284,12 @@ def test_smoke_every_real_au_plan_parses_read_only():
     assert seen["AS-P4a"].needs == ["blender"]
     out = A.analyze(list(seen.values()))
     assert out["tracks"] and all(t["sprints"] for t in out["tracks"])
+
+
+def test_plan_deps_ignore_phase_labels_unless_a_plan_exists(tmp_path):
+    text = ("**Tier:** A · **Depends on:** the A0 entry gate (boot 48/27), GF-SEC2 and B2\n")
+    assert A.plan_deps(text, "GF-GATE1") == ["GF-SEC2"]
+    assert A.plan_deps(text, "GF-GATE1", has_plan=lambda d: d == "B2") == ["GF-SEC2", "B2"]
+    (tmp_path / "B2_PLAN.md").write_text("# B2\n", encoding="utf-8")
+    info = A.parse_plan("GF-GATE1", text, path=str(tmp_path / "GF-GATE1_PLAN.md"))
+    assert info.deps == ["GF-SEC2", "B2"]

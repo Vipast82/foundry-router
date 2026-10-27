@@ -44,6 +44,15 @@ PLAN_GLOB = "docs/progress/*_PLAN.md"
 ORDER_FILE = "docs/MASTER_ORDER.md"
 # a sprint id: UI-03a, AS-C-IMP4b, S51B-R, GF-FX1, T1, HK-COORD1
 ID_RE = re.compile(r"\b([A-Z]{1,5}[0-9]?-?[A-Za-z0-9.-]*[0-9][A-Za-z0-9]*)\b")
+# a MASTER_ORDER phase or lane label (A0, A1, B2, D1, C3a): plans cite them in
+# "Depends on" prose ("the A0 entry gate"), but they are not sprints
+PHASE_LABEL_RE = re.compile(r"^[A-F][0-9]{0,2}[a-z]?$")
+
+
+def drop_phase_labels(ids: list[str], has_plan) -> list[str]:
+    """`ids` without phase labels, unless a sprint plan by that name exists
+    (`has_plan(id) -> bool`), so a real sprint id is never dropped."""
+    return [d for d in ids if not PHASE_LABEL_RE.match(d) or has_plan(d)]
 _FILES_HEADING = re.compile(r"^#{2,4}\s+Files this sprint may change", re.I)
 _NEEDS_HEADING = re.compile(r"^#{2,4}\s+Needs\s*$", re.I)
 _MCP_LINE = re.compile(r"NEEDS\s*\(?MCP\)?\s*:?\**\s*(.*)$", re.I)
@@ -152,8 +161,9 @@ def plan_suites(text: str) -> list[str]:
     return out
 
 
-def plan_deps(text: str, task_id: str) -> list[str]:
-    """Ids named by '**Depends on:**' lines and 'Depends on X' prose."""
+def plan_deps(text: str, task_id: str, has_plan=lambda _id: False) -> list[str]:
+    """Ids named by '**Depends on:**' lines and 'Depends on X' prose, without
+    MASTER_ORDER phase labels (see drop_phase_labels)."""
     out: list[str] = []
     # prose wraps: fold each paragraph (lines up to a blank line or heading) first
     folded, para = [], []
@@ -171,7 +181,7 @@ def plan_deps(text: str, task_id: str) -> list[str]:
         for d in ID_RE.findall(seg):
             if d != task_id and d not in out:
                 out.append(d)
-    return out
+    return drop_phase_labels(out, has_plan)
 
 
 def parse_needs_block(text: str) -> Optional[list[str]]:
@@ -255,9 +265,12 @@ def parse_plan(task_id: str, text: str, path: str = "", done: bool = False) -> P
         needs, src = parse_mcp_line(text), "mcp_line"
     if needs is None:
         needs, src = infer_needs(files, stories, tier), "inferred"
+    plan_dir = os.path.dirname(path) if path else ""
     return PlanInfo(task_id=task_id, path=path, title=plan_title(text, task_id), tier=tier,
                     files=files, suites=plan_suites(text), stories=stories,
-                    deps=plan_deps(text, task_id), needs=needs, needs_source=src, done=done)
+                    deps=plan_deps(text, task_id, has_plan=lambda d: bool(plan_dir) and
+                                   os.path.isfile(os.path.join(plan_dir, f"{d}_PLAN.md"))),
+                    needs=needs, needs_source=src, done=done)
 
 
 def plan_from_spec(spec, done: bool = False) -> PlanInfo:
