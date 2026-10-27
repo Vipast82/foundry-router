@@ -133,8 +133,14 @@ python -m venv .venv && . .venv/bin/activate
 pip install -r requirements-dev.txt
 export FOUNDRY_CONFIG=./config/config.yaml FOUNDRY_DATA_DIR=./data
 python -m foundry_router
-pytest                      # tests need no network or GPUs
+pytest                      # tests need no network or GPUs; parallel by default
 ```
+
+`pytest` runs the suite on pytest-xdist workers (`-n auto`: one per physical core,
+capped by free memory; see `tests/conftest.py`). `pytest -n 0` runs in one
+process (for `--pdb` or print debugging), `pytest -n 4` picks a count, and a
+single named test (`pytest tests/test_x.py::test_y`) always runs serially.
+New tests must be parallel-safe: see docs/CONVENTIONS.md.
 
 ## Operational notes
 

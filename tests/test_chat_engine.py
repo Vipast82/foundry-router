@@ -40,6 +40,14 @@ def call(tool, cid="c1", **args):
 def chat(app, client, cc):  # noqa: F811
     eng = app.state.services.chat
     h = login(client)
+    # Nothing claims a filed action while a TestClient request is in flight, so the
+    # engine's real poll (20-90 s) could only run out its clock: poll once, then
+    # return whatever status the action has (tests may still install their own).
+    real_wait = eng._wait_action
+
+    async def _wait_once(action_id, seconds):
+        return await real_wait(action_id, 0)
+    eng._wait_action = _wait_once
 
     def run(text, *replies, thread=None):
         eng._model_fn = FakeModel(*replies)

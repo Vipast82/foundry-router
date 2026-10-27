@@ -17,9 +17,10 @@ ALL_LANES = "[lanes]\nenabled = true\n" + "\n".join(
     f"[lanes.{x}]\nenabled = true" for x in L.LANES) + "\n"
 
 
-def _profile(tmp_path, extra):
-    repo, _ = make_repo(tmp_path, "game", [{"id": "T1", "title": "t", "spec": "s",
-                                            "scope": ["src/*"]}])
+def _profile(tmp_path, extra, repo=None):
+    if repo is None:
+        repo, _ = make_repo(tmp_path, "game", [{"id": "T1", "title": "t", "spec": "s",
+                                                "scope": ["src/*"]}])
     return load(str(write_profile(tmp_path, "game", repo, extra=extra)))
 
 
@@ -50,8 +51,10 @@ def test_automation_table_is_validated(tmp_path):
                 '[automation]\ndecision_timeout_minutes = -1\n',
                 '[automation]\nscope_auto_approve = [{path = "../x"}]\n',
                 '[automation]\nscope_auto_approve = [{path = "a", lines = ["("]}]\n'):
+        # each bad table gets its own profile dir over the one valid workspace
+        # (only the [automation] table differs, so a fresh git repo per case is waste)
         with pytest.raises(ProfileError):
-            _profile(tmp_path / bad.__hash__().__str__(), bad)
+            _profile(tmp_path / bad.__hash__().__str__(), bad, repo=p.workspace)
 
 
 def test_transcript_poll_default_is_two_minutes(tmp_path):

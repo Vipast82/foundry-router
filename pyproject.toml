@@ -20,7 +20,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-dev = ["pytest>=8.0", "pytest-asyncio>=0.24"]
+dev = ["pytest>=8.0", "pytest-asyncio>=0.24", "pytest-xdist>=3.6", "psutil>=5.9"]
 # Foundry Client (tray + stack manager, docs/CLIENT_MANAGER.md)
 client = ["keyring>=25", "pystray>=0.19", "pillow>=10", "tomli-w>=1.0", "msgpack>=1.0", "psutil>=5.9"]
 
@@ -43,3 +43,8 @@ foundry-client = "foundry_client.__main__:main"
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
+# Parallel by default (pytest-xdist): `-n auto` is one worker per physical core,
+# capped by free memory, and serial for a single named test (tests/conftest.py,
+# pytest_xdist_auto_num_workers). `-n 0` runs everything in one process (pdb,
+# print debugging); `-n 4` picks a count.
+addopts = "-n auto --dist worksteal"

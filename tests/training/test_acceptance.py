@@ -86,7 +86,20 @@ def test_real_kilo_export_imported_without_touching_the_source(world, tmp_path):
     assert any(g["kind"] == "no-system-prompt" for g in p.store.gaps(PID))
 
 
-def test_kilo_database_is_read_through_a_readonly_snapshot(world, tmp_path):
+def test_kilo_database_is_read_through_a_readonly_snapshot(world, tmp_path, monkeypatch):
+    import tempfile
+    # a private temp root: parallel workers snapshot Kilo databases into the shared
+    # %TEMP% too, and their live snapshot dirs are not this test's leftovers
+    tmpdir = tmp_path / "temp"
+    tmpdir.mkdir()
+    monkeypatch.setattr(tempfile, "tempdir", str(tmpdir))
+    made = []
+    real_mkdtemp = tempfile.mkdtemp
+
+    def recording_mkdtemp(*a, **kw):
+        made.append(real_mkdtemp(*a, **kw))
+        return made[-1]
+    monkeypatch.setattr(tempfile, "mkdtemp", recording_mkdtemp)
     db = kilo_db(tmp_path, [kilo_export()], credential="sk-kilo-credential-DO-NOT-READ-123456")
     before = file_state(db)
     p = pipeline(tmp_path, [world[4]])
@@ -95,9 +108,9 @@ def test_kilo_database_is_read_through_a_readonly_snapshot(world, tmp_path):
     assert file_state(db) == before                       # Kilo's DB is never written
     for f in (p.store.root / "raw" / "raw.sqlite", p.store.root / "normalized.sqlite"):
         assert b"DO-NOT-READ" not in f.read_bytes()       # credential/share tables never read
-    # the snapshot directory is removed afterwards
-    import tempfile
-    tmpdir = tempfile.gettempdir()                         # /tmp on POSIX, %TEMP% on Windows
+    # the snapshot directory was made in the temp root and is removed afterwards
+    assert [d for d in made if os.path.basename(d).startswith("kilo-ro-")
+            and os.path.dirname(d) == str(tmpdir)]
     assert not [d for d in os.listdir(tmpdir) if d.startswith("kilo-ro-")
                 and os.path.exists(os.path.join(tmpdir, d, "kilo-snapshot.db"))]
 
