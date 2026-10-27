@@ -23,6 +23,7 @@ without a model call:
 from __future__ import annotations
 
 import fnmatch
+import functools
 import os
 import re
 from dataclasses import dataclass, field
@@ -303,31 +304,44 @@ def _prefix(p: str) -> str:
     return p if not m else p[:m.start()]
 
 
+@functools.lru_cache(maxsize=None)
+def _entry(e: str) -> tuple:
+    """(normalized, is_glob, literal prefix) of one 'may change' entry; a project
+    has a few thousand distinct entries, compared millions of times."""
+    s = e.replace("\\", "/").strip("/")
+    g = bool(_GLOB.search(s))
+    return s, g, (_prefix(s) if g else s)
+
+
 def files_overlap(a: str, b: str) -> bool:
     """Two 'may change' entries can touch the same file."""
-    a, b = a.replace("\\", "/").strip("/"), b.replace("\\", "/").strip("/")
+    a, ga, pa = _entry(a)
+    b, gb, pb = _entry(b)
     if not a or not b:
         return False
-    ga, gb = bool(_GLOB.search(a)), bool(_GLOB.search(b))
     if not ga and not gb:
         return a == b or a.startswith(b + "/") or b.startswith(a + "/")
     if not ga:
-        return fnmatch.fnmatchcase(a, b) or a.startswith(_prefix(b)) or matches_any(a, [b])
+        return fnmatch.fnmatchcase(a, b) or a.startswith(pb) or matches_any(a, [b])
     if not gb:
-        return files_overlap(b, a)
-    pa, pb = _prefix(a), _prefix(b)
+        return fnmatch.fnmatchcase(b, a) or b.startswith(pa) or matches_any(b, [a])
     return pa.startswith(pb) or pb.startswith(pa)
+
+
+@functools.lru_cache(maxsize=65536)
+def _append_safe(path: str, safe: tuple) -> bool:
+    return matches_any(path, list(safe))
 
 
 def shared_files(a: PlanInfo, b: PlanInfo, append_safe: list[str]) -> list[str]:
     """Entries of `a` that overlap an entry of `b`, minus the append-safe ledgers."""
     out: list[str] = []
+    safe = tuple(append_safe or ())
+    bfiles = [fb for fb in b.files if not _append_safe(fb, safe)]
     for fa in a.files:
-        if matches_any(fa, append_safe):
+        if _append_safe(fa, safe):
             continue
-        for fb in b.files:
-            if matches_any(fb, append_safe):
-                continue
+        for fb in bfiles:
             if files_overlap(fa, fb):
                 out.append(fa if fa == fb else f"{fa} ~ {fb}")
                 break
@@ -384,13 +398,15 @@ def analyze(plans: list[PlanInfo], append_safe: Optional[list[str]] = None,
             if d in uf.p:
                 uf.union(d, tid)
                 serial.append({"a": tid, "b": d, "reason": f"{tid} depends on {d}"})
+    paired = {frozenset((s["a"], s["b"])) for s in serial}
     for i, a in enumerate(open_ids):
         for b in open_ids[i + 1:]:
-            if any(s["a"] in (a, b) and s["b"] in (a, b) for s in serial):
+            if frozenset((a, b)) in paired:
                 continue
             shared = shared_files(by_id[a], by_id[b], safe)
             if shared:
                 uf.union(a, b)
+                paired.add(frozenset((a, b)))
                 serial.append({"a": a, "b": b, "files": shared[:12],
                                "reason": f"{a} and {b} both change " + ", ".join(shared[:4])
                                + (f" (+{len(shared) - 4})" if len(shared) > 4 else "")})
