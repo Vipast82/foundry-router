@@ -478,10 +478,11 @@ def _scope_row(files):
                               + ", ".join(files), "rev")
 
 
-def test_scope_forgives_only_coordinator_memory_commits(repo):
+def test_scope_forgives_only_memory_files(repo):
     """The coordinator's own docs/memory note commits carry the sprint prefix, so
-    done_check's SCOPE counted them (GF-GATE1, 2026-10-27). Those alone pass; a
-    sprint commit of its own in docs/memory, or any other file, still fails."""
+    done_check's SCOPE counted them (GF-GATE1, 2026-10-27). docs/memory files alone
+    pass (0.145.1: also a session's own memory commit, reported advisory by the
+    engine); any other file, or a list done_check may have cut at 6, still fails."""
     from foundry_coordinator.adapters.base import FAIL, PASS
     ws, a = repo["ws"], repo["a"]
     spec = a.describe(T)
@@ -497,11 +498,6 @@ def test_scope_forgives_only_coordinator_memory_commits(repo):
     _write(ws, "docs/memory/KNOWN_ISSUES.md", "# issues\n- by the session itself\n")
     _commit(ws, f"{T}: session edits memory directly")
     row = _scope_row(["docs/memory/CONVENTIONS.md", "docs/memory/KNOWN_ISSUES.md"])
+    assert a._forgive_memory_scope(spec, [row]) and row.result == PASS
+    row = _scope_row([f"docs/memory/f{i}.md" for i in range(6)])
     assert not a._forgive_memory_scope(spec, [row]) and row.result == FAIL
-
-
-def test_memory_commit_mark_matches_the_memory_manager():
-    import inspect
-    from foundry_coordinator.memory import manager
-    from foundry_coordinator.projects.animaluprising import adapter
-    assert adapter._MEMORY_COMMIT_MARK in inspect.getsource(manager.MemoryManager.commit)

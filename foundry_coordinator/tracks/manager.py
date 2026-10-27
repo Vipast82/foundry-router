@@ -215,6 +215,23 @@ class TrackManager:
             return P
         return self.c.projects[P.id]
 
+    def effective_base(self, P, base: str, head: str) -> str:
+        """The base a track sprint's own changes are measured from. A track that
+        merged the main branch in (to pick up the main sprint's work) would
+        otherwise be blamed for every file the main branch changed (GF-NAME1,
+        2026-10-27: 30 files "outside scope"). When `base` is an ancestor of the
+        newest main-branch commit the track contains, that commit is the base."""
+        if not self.is_track(P) or not base or not head:
+            return base
+        branch = str(getattr(self.main_of(P).profile, "branch", "") or "main")
+        try:
+            mb = P.ws.run("merge-base", head, f"refs/heads/{branch}", check=False).strip()
+        except Exception:                                         # noqa: BLE001
+            return base
+        if mb and mb != base and P.ws.is_ancestor(base, mb):
+            return mb
+        return base
+
     # ------------------------------------------------------------------ create / queue
 
     def _check_name(self, name: str) -> str:

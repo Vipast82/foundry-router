@@ -2,6 +2,28 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.145.1 — verify stops failing on project memory, merged tracks and slow Lune
+
+Three verify failures that parked or re-looped the AU sprints on 2026-10-27, none of
+them the sprint's code:
+
+- **docs/memory is the coordinator's.** `coordinator.scope` and AU's done_check SCOPE
+  still failed GF-GATE1 on `docs/memory` files, because its session had reverted the
+  coordinator's memory commits to get past the older SCOPE bug. Project memory is now
+  exempt from both scope checks; a session's own edit there is reported as the advisory
+  `coordinator.memory_direct_edit` (notes belong in the report's memory_notes).
+- **A track that merged the main branch is measured from that merge.** GF-NAME1 merged
+  master into its track to pick up GF-GATE1's work, and its scope and scope-grant checks
+  then blamed it for ~30 files master had changed. A track sprint's base is now the
+  newest main-branch commit it contains (`TrackManager.effective_base`), so only the
+  track's own changes count.
+- **Lune timeout.** One `lune run tests/lune/run.luau` (1588 specs) takes ~12 min on the
+  workstation with sessions running beside it; the 600 s limit made the required `au.lune`
+  check UNKNOWN on every verify. Now 30 min per run (`[animaluprising] lune_timeout_s`),
+  and the verify heartbeat cover is 90 min.
+
+Coordinator restart needed.
+
 ## v0.145.0 — Studio auto-reopen (TEST place, opt-in); track sprints never need Studio
 
 **Studio auto-reopen.** The Studio Rojo plugin reconnects only when a place is opened,

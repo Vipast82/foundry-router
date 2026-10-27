@@ -49,8 +49,6 @@ CLOSEOUT_ROWS = VERIFY_ROWS + ("PLAN", "SUMMARY", "PATHS", "API", "STATE")
 # rows only a Studio gate can satisfy: a track sprint leaves them to the merge gate
 STUDIO_ROWS = ("GATE", "BOOT", "EVIDENCE")
 _ROW = re.compile(r"^(PASS|FAIL|NOTE)\s+(\S+)\s+(.*)$")
-# the body line memory/manager.py writes into every coordinator memory commit
-_MEMORY_COMMIT_MARK = "Coordinator memory commit (docs/memory)"
 
 
 class AnimalUprisingAdapter(GenericAdapter):
@@ -644,7 +642,7 @@ Change no code or test file in this session; if one needs changing, stop and rep
             if verdict == FAIL and fails and not left:
                 why = []
                 if forgiven and "SCOPE" in fails:
-                    why.append("SCOPE from coordinator memory commits")
+                    why.append("SCOPE from docs/memory, the coordinator's")
                 if any(f in skip for f in fails):
                     why.append("Studio rows (" + ", ".join(sorted({f for f in fails if f in skip}))
                                + ") checked by the merge gate")
@@ -670,24 +668,12 @@ Change no code or test file in this session; if one needs changing, stop and rep
         # done_check lists at most 6: a full list may hide files past the 6th
         if not files or len(files) >= 6 or not all(f.startswith("docs/memory/") for f in files):
             return False
-        try:
-            log = self._ws().run("log", "-n", "400", "--format=%H%x1f%s%x1f%b%x1e", "--",
-                                 *files, check=False)
-        except Exception:                                         # noqa: BLE001
-            return False
-        sid = spec.task_id
-        for rec in log.split("\x1e"):
-            parts = rec.strip("\n").split("\x1f")
-            if len(parts) < 3:
-                continue
-            subj, body = parts[1], parts[2]
-            if not (subj.startswith(sid + ":") or subj.startswith(sid + " ")):
-                continue
-            if _MEMORY_COMMIT_MARK not in body:
-                return False             # a sprint commit of its own touched docs/memory
+        # 0.145.1: docs/memory is the coordinator's in any case. A sprint commit that
+        # touched it (GF-GATE1 reverted the coordinator's notes to get past this very
+        # check) is reported by coordinator.memory_direct_edit, advisory, not here.
         row.result = PASS
         row.detail += ("\nPASS by the coordinator: the only out-of-scope files are docs/memory "
-                       "notes the coordinator committed itself")
+                       "(project memory, the coordinator's)")
         return True
 
     def _gate_binding(self, spec: TaskSpec, revision: str, ws=None) -> VerificationResult:
@@ -734,6 +720,17 @@ Change no code or test file in this session; if one needs changing, stop and rep
                                   f"GATE {spec.task_id} PASS at {gate_head}; only evidence files "
                                   f"changed since ({len(changed)})", revision)
 
+    # one `lune run tests/lune/run.luau` took ~12 min on the workstation (1588 specs,
+    # 2026-10-27, with sessions running beside it); 600 s timed out and made the
+    # required au.lune check UNKNOWN on every verify. [animaluprising] lune_timeout_s
+    LUNE_TIMEOUT_S = 1800
+
+    def _lune_timeout(self) -> int:
+        try:
+            return max(60, int(self.cfg.get("lune_timeout_s") or self.LUNE_TIMEOUT_S))
+        except (TypeError, ValueError):
+            return self.LUNE_TIMEOUT_S
+
     def _lune(self, spec: TaskSpec, revision: str) -> list:
         lune = self.cfg.get("lune") or shutil.which("lune")
         if not lune:
@@ -748,7 +745,7 @@ Change no code or test file in this session; if one needs changing, stop and rep
             try:
                 r = subprocess.run([lune, "run", "tests/lune/run.luau", *args],
                                    cwd=self.p.workspace, capture_output=True, text=True,
-                                   timeout=600, encoding="utf-8", errors="replace")
+                                   timeout=self._lune_timeout(), encoding="utf-8", errors="replace")
                 text = r.stdout + r.stderr
             except (OSError, subprocess.TimeoutExpired) as e:
                 out.append(VerificationResult(name, UNKNOWN, True, "", str(e), revision))

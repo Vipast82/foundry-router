@@ -64,7 +64,7 @@ ROUTE_RETRY_S = 300
 class Coordinator:
     # ceiling of the heartbeat cover over one verify / closeout check run
     # (keepalive.busy); past it a stuck check lets the heartbeat go stale
-    VERIFY_COVER_S = 3600
+    VERIFY_COVER_S = 5400            # two 30-min Lune runs + done_check (AU)
 
     def __init__(self, store: Store, projects: list[Project], state_dir: str,
                  max_writers: Optional[int] = None, clock: Callable[[], float] = time.time,
@@ -1480,7 +1480,12 @@ class Coordinator:
         task-owned unfinished files are carried into the next BUILD session.
         Final verification and closeout never pass this flag."""
         base = t["data"].get("task_base") or t["base_sha"]
-        exempt = P.adapter.exempt_paths(spec)
+        # 0.145.1: a track that merged the main branch is measured from that merge
+        base = self.tracks.effective_base(P, base, head)
+        # 0.145.1: docs/memory is the coordinator's (notes reach it through the
+        # report); a session edit there is reported below, never a scope FAIL
+        from .memory.layout import MEMORY_DIR
+        exempt = list(P.adapter.exempt_paths(spec)) + [MEMORY_DIR]
         out = []
 
         def add(name, ok, detail, required=True):
@@ -1537,6 +1542,15 @@ class Coordinator:
         # and files only the coordinator's own commits touched are never "outside scope".
         outside = [f for f in changed if not matches_any(f, spec.scope + exempt + runner_out
                                                          + runner_caps + granted_src)]
+        mem = [f for f in changed if matches_any(f, [MEMORY_DIR])]
+        if mem:
+            from . import bookkeeping as BK
+            own = set(BK.only_coordinator(P, t, base, head, mem))
+            by_session = [f for f in mem if f not in own]
+            if by_session:
+                add("memory_direct_edit", FAIL,
+                    "the session edited project memory directly (advisory; notes belong in "
+                    "the report's memory_notes): " + ", ".join(by_session[:8]), required=False)
         if outside:
             from . import bookkeeping as BK
             mine = set(BK.only_coordinator(P, t, base, head, outside))
