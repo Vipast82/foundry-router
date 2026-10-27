@@ -55,6 +55,33 @@ if os.name == "nt":
 
     _sp.Popen.__init__ = _hidden_popen_init
 
+# No test uses the network (0.146.2). A lookup of a name that isn't local fails at
+# once with the gaierror a real failed lookup gives (it cost about 2.7 s each on
+# Windows: router tests upsert MCP servers like http://x/mcp), and the "nothing
+# listens here" endpoint 127.0.0.1:9 resolves to 0.0.0.0:9, which fails at once
+# instead of after Windows' 2 s of SYN retries. FOUNDRY_TEST_NETWORK=1 turns it off.
+if os.environ.get("FOUNDRY_TEST_NETWORK") != "1":
+    import ipaddress as _ip
+    import socket as _socket
+
+    _real_getaddrinfo = _socket.getaddrinfo
+    _LOCAL_NAMES = {"localhost", "testserver", ""}
+
+    def _test_getaddrinfo(host, port, *a, **kw):
+        h = host.decode() if isinstance(host, bytes) else (host or "")
+        try:
+            _ip.ip_address(h.strip("[]"))
+            numeric = True
+        except ValueError:
+            numeric = False
+        if not numeric and h.lower() not in _LOCAL_NAMES and not h.lower().endswith(".localhost"):
+            raise _socket.gaierror(11001, f"no network in tests: {h!r} is not resolved")
+        if h == "127.0.0.1" and str(port) == "9":
+            h = "0.0.0.0"
+        return _real_getaddrinfo(h, port, *a, **kw)
+
+    _socket.getaddrinfo = _test_getaddrinfo
+
 TEST_CONFIG = """
 server: {host: 127.0.0.1, port: 11435}
 agent_brain:
