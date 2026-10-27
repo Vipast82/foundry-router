@@ -20,7 +20,6 @@ import time
 import uuid
 from typing import Callable, Optional
 
-from . import keepalive
 from . import review as R
 from . import states as S
 from . import training_hook
@@ -116,6 +115,8 @@ class Coordinator:
         # [fast_lane] (UI-T0): studio_gate-verified one-session sprints; inert
         # for every task the profile's [fast_lane] table doesn't name
         self.fast_lane = FastLane(self, clock=clock)
+        from .bg_checks import BackgroundChecks
+        self.bg_checks = BackgroundChecks()      # 0.147.0: verify/closeout off the tick
         from .memory import MemoryManager
         # Team Lead piece 4: project memory (docs/memory in the repo), indexed here and
         # sliced per session; inert for a project without the layout
@@ -294,6 +295,14 @@ class Coordinator:
             self.playbook.promote.sweep()
         except Exception as e:                                    # noqa: BLE001
             self.log(f"playbook tick failed: {type(e).__name__}: {e}")
+        try:
+            # 0.147.0: forget background check runs of tasks that left the state
+            # they were started in (cancelled, paused, unblocked, head moved on)
+            want = {"verify": S.VERIFYING, "closeout": S.CLOSING}
+            self.bg_checks.drop(lambda k: (self.store.task(k[0], k[1]) or {}).get("state")
+                                == want.get(k[2]))
+        except Exception as e:                                    # noqa: BLE001
+            self.log(f"background checks sweep failed: {type(e).__name__}: {e}")
         rr = int(self.store.meta("rr") or 0) % len(ids)
         order = ids[rr:] + ids[:rr]
         self.store.set_meta("rr", str(rr + 1))
@@ -309,6 +318,11 @@ class Coordinator:
             except Exception as e:                                # noqa: BLE001
                 self.log(f"{pid}: memory tick failed: {type(e).__name__}: {e}")
             for t in self.store.tasks(pid):
+                # 0.147.0: re-read the row right before its step. An earlier task's
+                # long step (a 13-min verify) left this snapshot stale, and an
+                # operator unblock made meanwhile was overwritten by it (GF-NAME1,
+                # 2026-10-27: its resolution note was lost, the old findings re-asked)
+                t = self.store.task(pid, t["task_id"]) or t
                 before = (t["state"], t["updated_ts"])
                 try:
                     # a sprint queued on a track runs with the track's worktree
@@ -1363,6 +1377,12 @@ class Coordinator:
             return                       # a pending continuation at this head: never re-verified
         spec = P.adapter.describe(tid)
         head = P.ws.head()
+        if not self.fast_lane.on(P, tid):
+            # 0.147.0: the project's checks run in the background; the tick goes on
+            heavy = self._bg_checks(P, t, "verify", head,
+                                    lambda: self._verify_heavy(P, t, spec, head))
+            if heavy is None:
+                return
         results = self._generic_checks(P, t, spec, head, phase="verify")
         if self.fast_lane.on(P, tid):
             # [fast_lane] (UI-T0): the studio_gate runner is this task's verify step
@@ -1373,28 +1393,8 @@ class Coordinator:
             if extra is None:
                 return
             results += extra
-        elif self.tracks.is_track(P):
-            # a track sprint: the project's Studio-free checks in its worktree; the
-            # Studio gate runs at merge time in the main checkout (tracks/merge.py)
-            with keepalive.busy(f"verify {pid}/{tid} (track checks)", self.VERIFY_COVER_S):
-                results += self.tracks.verify_track(P, spec, head,
-                                                    t["data"].get("task_base") or t["base_sha"])
         else:
-            # project test suites can hold this tick for many minutes: keep the
-            # heartbeat covered so the client does not restart a busy coordinator
-            with keepalive.busy(f"verify {pid}/{tid}", self.VERIFY_COVER_S):
-                results += P.adapter.verify(spec, "verify", head,
-                                            t["data"].get("task_base") or t["base_sha"])
-            for sess in self.store.sessions(pid, tid):
-                if sess["run_id"] == t["run_id"] and sess["role"] == "implementer":
-                    try:
-                        tr = P.client.transcript(sess["session_id"],
-                                                 directory=P.profile.workspace)
-                        results += P.adapter.session_audit(spec, sess["session_id"], tr, head)
-                    except Exception as e:                        # noqa: BLE001
-                        results.append(VerificationResult("coordinator.session_audit", UNKNOWN,
-                                                          False, "", f"transcript unavailable: "
-                                                          f"{e}", head))
+            results += heavy
         # only findings the checks themselves raised can be seen to have cleared; a
         # code review's findings are not in `results`, so they still need a change
         last_cr = next((h for h in reversed(self.store.history(pid, tid))
@@ -1457,6 +1457,51 @@ class Coordinator:
                 if xy == "??" and p.replace("\\", "/") in exact and p not in before]
 
     GENERIC_CACHE_SECONDS = 600
+
+    def _verify_heavy(self, P: Project, t: dict, spec, head: str) -> list:
+        """The project's own verify checks (worker thread, 0.147.0): a track
+        sprint's Studio-free checks in its worktree (the Studio gate runs at merge
+        time in the main checkout, tracks/merge.py), else the adapter's verify and
+        the implementer session audit. Reads only; results go back to the tick."""
+        pid, tid = P.id, t["task_id"]
+        base = t["data"].get("task_base") or t["base_sha"]
+        if self.tracks.is_track(P):
+            return list(self.tracks.verify_track(P, spec, head, base))
+        out = list(P.adapter.verify(spec, "verify", head, base))
+        for sess in self.store.sessions(pid, tid):
+            if sess["run_id"] == t["run_id"] and sess["role"] == "implementer":
+                try:
+                    tr = P.client.transcript(sess["session_id"], directory=P.profile.workspace)
+                    out += P.adapter.session_audit(spec, sess["session_id"], tr, head)
+                except Exception as e:                            # noqa: BLE001
+                    out.append(VerificationResult("coordinator.session_audit", UNKNOWN, False,
+                                                  "", f"transcript unavailable: {e}", head))
+        return out
+
+    def _bg_checks(self, P: Project, t: dict, kind: str, head: str, fn) -> Optional[list]:
+        """The results of `fn` (a check run) for this task, kind and head, or None
+        while it runs in the background (a note says so). A run that raised is one
+        required UNKNOWN row, like a crashed check."""
+        from .automation import get as auto_get
+        try:
+            cap = int(auto_get(P, "max_parallel_checks") or 2)
+            wait = float(auto_get(P, "inline_check_wait_s") or 0)
+        except (KeyError, TypeError, ValueError):
+            cap, wait = 2, 2.0
+        st, val = self.bg_checks.run((P.id, t["task_id"], kind, head), fn, wait, cap)
+        if st == "done":
+            if isinstance(val, BaseException):
+                return [VerificationResult("coordinator.checks", UNKNOWN, True, "",
+                                           f"{kind} checks raised {type(val).__name__}: "
+                                           f"{val}"[:500], head)]
+            return list(val or [])
+        if st == "queued":
+            self._note(P, t, f"{kind} checks queued: {val} check run(s) already in the "
+                             f"background ([automation] max_parallel_checks = {cap})")
+        else:
+            self._note(P, t, f"{kind} checks running in the background ({val} s) at "
+                             f"{head[:12]}")
+        return None
 
     def _generic_checks(self, P: Project, t: dict, spec, head: str, phase: str,
                         intermediate: bool = False) -> list:
@@ -2301,14 +2346,17 @@ class Coordinator:
             return self.store.transition(pid, tid, S.VERIFYING, {"invalidated": why},
                                          data={**t["data"], "closeout_session": None,
                                                "closeout_done": None})
-        results = self._generic_checks(P, t, spec, head, phase="closeout")
-        with keepalive.busy(f"closeout checks {pid}/{tid}", self.VERIFY_COVER_S):
-            if self.tracks.is_track(P):
-                # a track sprint closes without Studio; the merge gate covers it
-                results += self.tracks.verify_track(P, spec, head, t["reviewed_sha"],
-                                                    phase="closeout")
-            else:
-                results += P.adapter.verify(spec, "closeout", head, t["reviewed_sha"])
+        rs = t["reviewed_sha"]
+        if self.tracks.is_track(P):
+            # a track sprint closes without Studio; the merge gate covers it
+            heavy_fn = lambda: list(self.tracks.verify_track(P, spec, head, rs,  # noqa: E731
+                                                             phase="closeout"))
+        else:
+            heavy_fn = lambda: list(P.adapter.verify(spec, "closeout", head, rs))  # noqa: E731
+        heavy = self._bg_checks(P, t, "closeout", head, heavy_fn)   # 0.147.0: off the tick
+        if heavy is None:
+            return
+        results = self._generic_checks(P, t, spec, head, phase="closeout") + heavy
         # a templated closeout has no session to push: the coordinator pushes (B7)
         published = self._publish(P, t, head, results, push=templated)
         cid = self.store.save_verification(pid, tid, head, "closeout", results)

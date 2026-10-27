@@ -341,8 +341,12 @@ def _heartbeat_busy(state_dir: str) -> str:
         hb = json.loads(p.read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return ""
-    if not isinstance(hb, dict) or not hb.get("busy"):
+    if not isinstance(hb, dict):
         return ""
+    if not hb.get("busy"):
+        # 0.147.0: verify / closeout checks run in the background; name them
+        checks = [str(c)[:60] for c in (hb.get("checks") or []) if c][:3]
+        return ("checks: " + ", ".join(checks)) if checks else ""
     mins = int(hb.get("busy_s") or 0) // 60
     return f"{str(hb['busy'])[:80]}, {mins} min"
 

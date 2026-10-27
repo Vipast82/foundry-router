@@ -193,6 +193,9 @@ AUTOMATION_DEFAULTS: dict = {
     "playbook_promote": False,
     "transcript_poll_seconds": 120,
     "generic_checks_cache": True,
+    # 0.147.0: verify / closeout checks run in worker threads; the tick goes on
+    "max_parallel_checks": 2,
+    "inline_check_wait_s": 2,
     # Team Lead tracks (2026-10-22): parallel sprints on git worktrees
     "max_agents": 1,
     "studio_idle_minutes": 10,
@@ -613,6 +616,11 @@ _AUTO_DESC = {
     "transcript_poll_seconds": "Lane transcript ingest interval.",
     "generic_checks_cache": "Reuse per-tick coordinator checks while HEAD and the tree are "
                             "unchanged.",
+    "max_parallel_checks": "Verify / closeout check runs (done_check, Lune, project suites) "
+                           "that run at once in the background; the coordinator keeps "
+                           "starting and steering other sprints meanwhile.",
+    "inline_check_wait_s": "Seconds a tick waits for a check run before leaving it in the "
+                           "background (quick checks still finish within the tick).",
     "max_agents": "Sprints running at once across the main checkout and parallel tracks "
                   "(the main sprint always counts first; 1 = no parallel tracks). Live.",
     "studio_idle_minutes": "A track's merge gate may take Studio only after the main sprint "

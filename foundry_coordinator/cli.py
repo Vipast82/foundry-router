@@ -273,8 +273,15 @@ class _ProcessFiles:
             ok = False
             problems.append(f"{errs} engine error event(s) since the last heartbeat")
         self._last_ts = time.time()
+        checks = []
+        bg = getattr(self.c, "bg_checks", None)
+        if bg is not None:
+            try:
+                checks = [f"{j['label']} {j['seconds']} s" for j in bg.running()][:6]
+            except Exception:                                     # noqa: BLE001
+                checks = []
         self._beat({"ok": ok, "errors": problems, "lead_ready": lead_ready,
-                    "lead_detail": detail})
+                    "lead_detail": detail, "checks": checks})
         if self._stop_requested():
             raise _StopRequested()
 

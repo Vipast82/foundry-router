@@ -2,6 +2,50 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.147.0 — Studio evidence counts; checks never freeze the coordinator
+
+Plan: reports/V0147_STUDIO_EVIDENCE_AND_BACKGROUND_VERIFY_PLAN.md (Victor approved
+2026-10-27).
+
+- **Studio boot and suite records now count.** A Studio check counts only when the
+  ledger knows what code the runtime had loaded (verifyLive's fingerprint). One Studio
+  session prints its boot, suites and verifyLive in separate tool calls, and each call
+  named its own runtime, so only the verifyLive runtime had a fingerprint. Boot and
+  suite records were "unknown" forever, the submission gate refused review, and AU
+  Studio sprints looped into "findings repeat" and the Lead. Only two tasks ever got
+  past this gate.
+
+  Now a record without a fingerprint borrows the one from the nearest verifyLive PASS,
+  when all of these hold:
+  - it is in the same session;
+  - it ran against byte-identical dependencies;
+  - it is within `[lifecycle] runtime_bind_window_s` (default 1800; 0 turns it off);
+  - there is no failed or truncated verifyLive in between;
+  - it is on the same place, when both runtimes know it.
+
+  The freshness detail says so ("runtime bound to ..."). A verdict still comes only from
+  real tool output, never from a file read.
+- **docs/memory is exempt everywhere** (`GenericAdapter.exempt_paths`). Before, a
+  coordinator memory-notes commit:
+  - still staled the gate block in the review packet;
+  - could invalidate a review.
+
+  It already no longer unbound the gate (v0.146.0).
+- **Verify and closeout checks run in the background.** done_check, Lune and the
+  project suites used to hold the tick for up to ~15 min, so nothing else could start,
+  decide or recover (GF-NAME1 sat READY while GF-GATE1 verified).
+  - They now run on worker threads. `[automation] max_parallel_checks` (default 2)
+    caps them, because Lune is memory-heavy.
+  - A tick waits `inline_check_wait_s` (default 2) for a quick result, then moves on;
+    the task's note shows "checks running in the background (N s)".
+  - A run at an older head, or for a task that left the state, is dropped.
+  - A run that raised is one required UNKNOWN row.
+  - The heartbeat lists running checks, and the client status shows them
+    ("busy: checks: GF-GATE1 verify 312 s").
+  - After a restart the checks run again. Lune passes are reused by input content.
+
+Coordinator restart needed.
+
 ## v0.146.2 — a track that merged master can land; tests need no network
 
 - **Track merge keeps merge commits.** The merge stage ran `git rebase <master>` in the
