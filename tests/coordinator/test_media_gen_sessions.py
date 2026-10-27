@@ -58,7 +58,21 @@ def test_a_code_sprint_gets_no_media_gen_and_an_audio_sprint_gets_the_audio_tool
     assert "Media_Gen_generate_image" in d
 
 
+def foundry_media_denied(c, tid):
+    """(foundry-media tools denied?, foundry-images skill denied?) for the implementer."""
+    perms = []
+    for s in c.projects["game"].client.sessions.values():
+        if s["metadata"].get("task") == tid and s["metadata"].get("role") == "implementer":
+            perms = s["permissions"]
+    tools = any(r["permission"] == "foundry-media_*" and r["action"] == "deny" for r in perms)
+    skill = any(r["permission"] == "skill" and r["pattern"] == "foundry-images"
+                and r["action"] == "deny" for r in perms)
+    return tools, skill
+
+
 def test_an_images_sprint_waits_for_the_operator_then_follows_the_answer(tmp_path):
+    """2026-10-27: the 2D options are generate (ChatGPT first, Media_Gen fallback),
+    provide myself, hold. "Provide" runs the sprint with every image tool off."""
     c, P = env(tmp_path)
     c.approve("game", "I1", [], "victor")
     for _ in range(4):
@@ -67,23 +81,28 @@ def test_an_images_sprint_waits_for_the_operator_then_follows_the_answer(tmp_pat
     assert t["state"] in (S.QUEUED, S.READY) and not P.client.sessions   # nothing started
     did = SV.images_decision(c, "game", "I1")["decision_id"]
     d = c.obligations.decision(did)
-    assert d["status"] == "open" and d["kind"] == "approval" and SV.IMG_CHATGPT in d["options"]
+    assert d["status"] == "open" and d["kind"] == "approval"
+    assert d["options"] == [SV.IMG_GENERATE, SV.IMG_PROVIDE, SV.IMG_HOLD]
     assert any(e["kind"] == "operator_notice" for e in c.store.events("game", 50))
-    c.decision_answer("game", "I1", did, SV.IMG_CHATGPT, actor="victor", channel="control")
+    c.decision_answer("game", "I1", did, SV.IMG_PROVIDE, actor="victor", channel="control")
     assert run_until(c, lambda: c.store.task("game", "I1")["state"] == S.COMPLETE, limit=40)
-    assert SV.images_choice(c, "game", "I1") == "chatgpt"
-    assert "Media_Gen_generate_image" in denied(c, "I1")         # ChatGPT: no image tools
+    assert SV.images_choice(c, "game", "I1") == "provide"
+    assert "Media_Gen_generate_image" in denied(c, "I1")         # provided: no image tools
+    assert foundry_media_denied(c, "I1") == (True, True)
 
 
-def test_media_gen_answer_gives_the_image_tools_and_allow_skips_the_question(tmp_path):
+def test_generate_answer_gives_both_image_paths_and_allow_skips_the_question(tmp_path):
     c, P = env(tmp_path)
     c.approve("game", "I1", [], "victor")
     assert run_until(c, lambda: SV.images_decision(c, "game", "I1") is not None, limit=6)
     did = SV.images_decision(c, "game", "I1")["decision_id"]
-    c.decision_answer("game", "I1", did, SV.IMG_MEDIA_GEN, actor="victor", channel="control")
+    c.decision_answer("game", "I1", did, SV.IMG_GENERATE, actor="victor", channel="control")
     assert run_until(c, lambda: c.store.task("game", "I1")["state"] == S.COMPLETE, limit=40)
-    assert "Media_Gen_generate_image" not in denied(c, "I1")
+    assert SV.images_choice(c, "game", "I1") == "generate"
+    assert "Media_Gen_generate_image" not in denied(c, "I1")     # the fallback
+    assert foundry_media_denied(c, "I1") == (False, False)       # ChatGPT first
     c2, P2 = env(tmp_path / "b", extra='\n[automation]\nmedia_gen_images = "allow"\n')
     c2.approve("game", "I1", [], "victor")
     assert run_until(c2, lambda: c2.store.task("game", "I1")["state"] == S.COMPLETE, limit=40)
     assert SV.images_decision(c2, "game", "I1") is None
+    assert foundry_media_denied(c2, "I1") == (False, False)

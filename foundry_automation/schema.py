@@ -164,6 +164,12 @@ DEFAULT_SCOPE_RULES = [
     {"name": "sprint_gate_manifest", "path": "docs/progress/{task}_gate.json"},
     {"name": "rojo_mapping_for_plan_files", "path": "default.project.json",
      "json_paths_in_plan": True},
+    # 2026-10-27: docs/memory is the coordinator's project memory (MEMORY_NOTE commits); a
+    # sprint's done_check SCOPE row counts those commits, so a session asking for a memory
+    # file gets it at once (GF-GATE1 asked the owner for docs/memory/DECISIONS.md). The
+    # grant keeps SCOPE green; the files stay the coordinator's (never in the edit scope)
+    {"name": "coordinator_project_memory", "path": "docs/memory/**",
+     "reason": "project memory written by the coordinator (MEMORY_NOTE)"},
 ]
 AUTOMATION_DEFAULTS: dict = {
     "helpers": "on_demand",

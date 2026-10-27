@@ -411,10 +411,15 @@ def test_build_contract_defers_exactly_the_close_duties(repo):
     assert c["phase"] == "build"
     assert c["deferred"] == [d["duty"] for d in a._close_duties(spec)]
     joined = "\n".join(c["deferred"])
-    for need in (f"{T}_SUMMARY.md", "STATE.md ledger row", "API-surface", "docs/progress/state/",
+    for need in (f"{T}_SUMMARY.md", "STATE.md ledger row", "API facts", "MEMORY_NOTE",
                  "MASTER_ORDER", "final CLOSE step (4 Docs + gate -Finish", f"DONE-CHECK {T} PASS",
-                 "git push origin master"):
+                 f'"{T}: closeout" commit'):
         assert need in joined, need
+    # 2026-10-27: the coordinator pushes master after closeout verification; the CLOSE
+    # session has no push duty
+    assert "git push" not in joined and "the coordinator pushes it" in joined
+    # one memory store (2026-10-27): docs/progress/state/* is read-only history
+    assert "docs/progress/state/" not in joined
     reviewed = "\n".join(c["reviewed"])
     assert "BUILD implementation" in reviewed and f"GATE {T} PASS" in reviewed
     assert "captures" in reviewed and "Scope" in reviewed
@@ -426,6 +431,7 @@ def test_build_contract_defers_exactly_the_close_duties(repo):
         if d["step"]:
             assert d["step"] in prompt
     assert "1. docs/progress/UX-01_SUMMARY.md" in prompt and "5. Commit only those" in prompt
+    assert "Never push" in prompt and "git push origin" not in prompt
 
 
 def test_diff_priority_ordering(repo):

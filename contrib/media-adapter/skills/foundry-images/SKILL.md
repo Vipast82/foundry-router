@@ -1,12 +1,17 @@
 ---
 name: foundry-images
-description: Generate or edit game art (icons, UI art, textures, concept sheets) through Foundry's image tools (foundry-media MCP server) and stage the results as unapproved assets. Use when a task needs a new or changed image file; not for reading screenshots.
+description: Generate or edit game art (icons, UI art, textures, concept sheets) through Foundry's image tools (foundry-media MCP server) and stage the results as unapproved assets. Use only when the plan's `## Needs` lists `images` and the coordinator's kickoff says the owner allowed image generation for this sprint; not for reading screenshots.
 ---
 
 # Foundry images
 
-The `foundry-media` MCP server sends image jobs to Foundry and saves the
-results inside this project. You get file paths back, not image data.
+The `foundry-media` MCP server sends image jobs to Foundry (ChatGPT images) and
+saves the results inside this project. You get file paths back, not image data.
+
+Only when the kickoff says the owner allowed 2D generation for this sprint (the
+coordinator turns these tools on then, and off otherwise). This path comes
+first; Media_Gen's image tools are the fallback when foundry-media refuses or
+fails.
 
 ## Before generating
 
@@ -34,19 +39,20 @@ results inside this project. You get file paths back, not image data.
 
 ## While a job runs
 
-- If the reply says `status: running`, call `image_job_status` with that
-  `job_id` (repeat until it finishes). **Never** call `generate_image` or
+- If the reply says `status: running`, do other plan work and call
+  `image_job_status` with that `job_id` once per completed step (never a
+  polling loop of identical calls). **Never** call `generate_image` or
   `edit_image` again for the same request: that bills a second image.
 - A budget or quota refusal (`budget_denied`, `quota_exceeded`) ends the
-  attempt. Report it to the user with the reset time. Do not switch to another
-  model or tool to get around it.
+  attempt. Put it in your report with the reset time, then use Media_Gen's
+  image tools if the kickoff allows them; never another model or tool.
 
 ## After saving
 
 - Check the saved file: dimensions, transparency and format. Use `preview: true`
   only when a vision-capable model will actually look at the image.
 - Every image is **unapproved** (see its `.foundry.json` sidecar). Do not wire
-  it into game code, upload it to Roblox or replace an approved asset. List the
-  saved paths for the user's visual approval, following the project's approval
-  process.
+  it into game code, upload it to Roblox or replace an approved asset unless the
+  plan says so. List the saved paths in your report; approval follows the
+  project's approval process.
 - Record the job id and path in the sprint notes, as evidence.

@@ -19,8 +19,16 @@ works too). The coordinator then, deterministically:
   * a path the [automation] scope_auto_approve allow-list covers: adds it to the
     task's file list in the task source (the sprint plan), commits that with the
     task prefix, journals the grant and continues the SAME session;
+  * a path no grant may ever cover (the Kilo config, git internals, hook folders,
+    secrets): denied by rule at once, no decision;
   * anything else: opens a `scope_request` decision with a recommended answer
     ([automation] scope_unlisted_default) and the editable timeout (B11).
+
+2026-10-27 rules streamline: the session is always told the answer in the same
+session, with the reason (granted by rule X; denied by rule; denied by the owner;
+denied after the decision timeout; could not be added), never left silently with a
+deny. A grant of a docs/memory path keeps done_check's SCOPE row green; the memory
+files stay the coordinator's (MEMORY_NOTE), never the session's to edit.
 
 A grant may carry constraints on the change itself (`blocks`, `lines`,
 `json_paths_in_plan`): verification checks the final diff of the granted file
@@ -85,6 +93,37 @@ def rule_for(P, task_id: str, path: str) -> Optional[dict]:
     return None
 
 
+# paths no scope grant may cover: the session's tool config, git internals, hooks and
+# secrets (role_rules.CONFIG_FILES / the secret patterns deny them anyway)
+NEVER_GRANT = ("kilo.jsonc", "kilo.json", ".kilo/*", ".git/*", "tools/hooks/*", ".githooks/*",
+               ".husky/*", ".env", ".env.*", "*.env", "*_secrets*", "*secret*", "*credential*")
+
+
+def never_grant(path: str) -> str:
+    """The rule that forbids granting `path` ('' = none)."""
+    low = path.lower()
+    for pat in NEVER_GRANT:
+        if fnmatch.fnmatchcase(low, pat) or fnmatch.fnmatchcase(low.rsplit("/", 1)[-1], pat):
+            return pat
+    return ""
+
+
+def _is_memory(path: str) -> bool:
+    from .memory.layout import MEMORY_DIR
+    return path.startswith(MEMORY_DIR.rstrip("/") + "/")
+
+
+def _why_denied(d: dict) -> str:
+    actor = str(d.get("actor") or "")
+    auth = str(d.get("authority") or "")
+    if actor == "timeout_default" or auth == "timeout_default":
+        return ("nobody answered within the decision timeout, so the default "
+                "(scope_unlisted_default: deny) applied")
+    if auth == "delegated_policy" or actor.startswith("policy"):
+        return f"denied by policy ({actor or auth})"
+    return f"denied by {actor or 'the operator'}"
+
+
 def grants(t: dict) -> list[dict]:
     return list(((t or {}).get("data") or {}).get("scope_grants") or [])
 
@@ -106,39 +145,57 @@ def handle(c, P, t: dict, spec, reqs: list[dict]) -> Optional[str]:
         if matches_any(path, list(spec.scope)):
             granted.append({**r, "rule": "already in scope"})
             continue
+        forbidden = never_grant(path)
+        if forbidden:
+            denied.append({**r, "decision_id": "", "why": f"denied by rule: {path} matches "
+                           f"{forbidden!r}, which no scope grant may cover"})
+            continue
         rule = rule_for(P, tid, path)
         if rule is not None:
             g = _grant(c, P, t, spec, path, r["reason"], rule.get("name") or rule["path"],
                        rule, actor="policy:scope_auto_approve")
             (granted if g else failed).append({**r, "rule": rule.get("name"),
-                                               **({"commit": g} if g else {})})
+                                               **({"commit": g} if g else {}),
+                                               **({} if g else {"why": "the plan's file list "
+                                                   "could not be edited"})})
             continue
         d = _decision(c, P, t, r)
         if d is None:
-            failed.append({**r, "rule": "no decisions table"})
+            failed.append({**r, "rule": "no decisions table",
+                           "why": "no decision could be opened for it"})
         elif d["status"] == "open":
             pending.append({**r, "decision_id": d["decision_id"]})
         elif d["status"] == "answered" and _approved(d):
             g = _grant(c, P, t, spec, path, r["reason"], "decision " + d["decision_id"], {},
                        actor=str(d.get("actor") or "operator"))
             (granted if g else failed).append({**r, "rule": "decision", "decision_id":
-                                               d["decision_id"]})
+                                               d["decision_id"],
+                                               **({} if g else {"why": "approved, but the "
+                                                   "plan's file list could not be edited"})})
         else:
-            denied.append({**r, "decision_id": d["decision_id"]})
+            denied.append({**r, "decision_id": d["decision_id"], "why": _why_denied(d)})
     if pending:
         c._note(P, t, "waiting for scope decision(s): " + ", ".join(
             f"{x['decision_id']} ({x['path']})" for x in pending))
         return "waiting"
     if denied or failed or not granted:
-        if denied:
-            # told once; a repeat of the same request is then an ordinary stop
-            text = ("The scope request(s) were denied: " + "; ".join(
-                f"{x['path']} ({x['decision_id']})" for x in denied) + ". Finish the sprint "
-                "inside the approved file list, or report BLOCKED with a different blocker.")
+        if denied or failed:
+            # told once, with the reason; a repeat of the same request is then an
+            # ordinary stop
+            lines = [f"{x['path']}: {x.get('why') or 'denied'}"
+                     + (f" ({x['decision_id']})" if x.get("decision_id") else "")
+                     for x in denied + failed]
+            ok = ("; ".join(f"{x['path']} ({x['rule']})" for x in granted) if granted else "")
+            text = ("Answer to your scope request(s): NOT granted: " + "; ".join(lines) + "."
+                    + (f" Granted: {ok}." if ok else "")
+                    + " Do not edit the refused file(s). Finish the sprint inside the approved "
+                      "file list, or report BLOCKED (`product`, with options) if the sprint "
+                      "cannot be done without them.")
             if c._prompt_primary(P, t, text, "scope-denied:" + ",".join(
-                    sorted(x["path"] for x in denied))):
+                    sorted(x["path"] for x in denied + failed))):
                 c.store.event(pid, tid, "scope_denied", session_id=t.get("session_id"),
-                              detail={"paths": [x["path"] for x in denied]})
+                              detail={"paths": [x["path"] for x in denied + failed],
+                                      "why": [x.get("why") or "" for x in denied + failed]})
                 return "continued"
         return None
     text = ("The coordinator added these paths to this sprint's file list (scope grant, "
@@ -146,6 +203,10 @@ def handle(c, P, t: dict, spec, reqs: list[dict]) -> Optional[str]:
                 f"{x['path']} ({x['rule']})" for x in granted)
             + ". Continue the sprint; change them only as the request said "
               "(allow-listed harness files are checked against their rule at verification).")
+    if any(_is_memory(x["path"]) for x in granted):
+        text += (" docs/memory is the coordinator's project memory: the grant keeps "
+                 "done_check's SCOPE row green, but never edit or revert those files; record "
+                 "facts with MEMORY_NOTE lines in your final message.")
     key = "scope-grant:" + ",".join(sorted(x["path"] for x in granted))
     if not c._prompt_primary(P, t, text, key):
         return None

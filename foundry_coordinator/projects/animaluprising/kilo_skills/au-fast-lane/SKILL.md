@@ -1,11 +1,11 @@
 ---
 name: au-fast-lane
-description: Run an AnimalUprising fast-lane sprint in one Kilo session - one-page plan, helper prework, the studio_gate runner loop, verdict JSON, red-gate fixes, the escalation ladder, explicit-path commits and the fast-lane rules card. Use when the coordinator kickoff names a fast-lane task; not for sprints run under the full AGENT_RULES.
+description: Run an AnimalUprising fast-lane sprint in one Kilo session - one-page plan, the studio_gate stories loop, verdict JSON, red-gate fixes, the escalation ladder, explicit-path commits and the fast-lane rules card. Use when the coordinator kickoff names a fast-lane task; not for sprints run under the full AGENT_RULES.
 ---
 
 # Fast-lane sprint
 
-> Source of truth for this skill is `foundry_coordinator/projects/animaluprising/kilo_skills/au-fast-lane/SKILL.md` in Foundry-Router (W1.7, 2026-10-22); the workstation copy under `.kilo/skills/au-fast-lane/` is installed from it. Changes here: one vision round, BLOCKED reports carry options (no questions to a person), the coordinator rewords its own commit messages, out-of-list files are SCOPE_REQUESTs, helpers are on demand.
+> Source of truth for this skill is `foundry_coordinator/projects/animaluprising/kilo_skills/au-fast-lane/SKILL.md` in Foundry-Router (W1.7, 2026-10-22); the workstation copy under `.kilo/skills/au-fast-lane/` is installed from it. Changes here: one vision round, BLOCKED reports carry a `blocker_kind` (options only for a product decision; no questions to a person), the coordinator rewords its own commit messages and runs every full gate, out-of-list files are SCOPE_REQUESTs, helpers are on demand, the coordinator pushes (2026-10-27 rules streamline).
 
 A fast-lane sprint is one long Kilo session (2-4 h) that the coordinator starts, verifies with the `studio_gate` runner and keeps alive across red gates. You are the primary: the only writer, the only Studio controller outside the runner. This skill and the rules card below replace AGENT_RULES for this task; the full rules still govern anything outside the fast lane. Load `au-ui-v3` and `au-roblox-ui-development` for UI work, plus the Luau/Roblox baselines.
 
@@ -14,8 +14,8 @@ A fast-lane sprint is one long Kilo session (2-4 h) that the coordinator starts,
 1. Read the one-page plan the kickoff names, all of it: Goal, Screens, Files this sprint may change, Contracts used, Stories, Wiring checks, Affected suites, Done when, Carry-over fixes, Decisions needed. That is the whole spec: no pre-code diffs, no evidence-log instructions, no tick lists.
 2. `git status` and `git log -3`; preserve unrelated working changes.
 3. Verify every contract the plan lists against the current source (remote declaration in `Shared.Net.Remotes`, the server fire/handler site, payload shape, reason codes). If source and plan disagree, source wins; note it in your end report.
-4. Read the helper output in `.plan/tmp/prework/<task>/` (drafts, stories, fixtures, interface notes, API notes, reviews).
-5. Run `studio_gate doctor`. If it fails, apply its printed fix when it is yours to apply (Rojo plugin state, a Studio setting the doctor names as session-level); otherwise stop with a BLOCKED report and options (below). Never start a gate on a failed doctor.
+4. If the kickoff names helper output under `.plan/tmp/prework/<task>/`, read it (drafts, stories, fixtures, interface notes, API notes, reviews); otherwise there is none.
+5. Run `studio_gate doctor`. If it fails, apply its printed fix when it is yours to apply (Rojo plugin state, a Studio setting the doctor names as session-level); otherwise stop BLOCKED `tooling` (below). Never start a gate on a failed doctor.
 
 ## Helper drafts and authorship
 
@@ -29,17 +29,18 @@ Who may write what depends on the sprint's primary (the kickoff says which):
 ## The loop
 
 ```
-py -m foundry_coordinator.projects.animaluprising.studio_gate --repo C:\Roblox\AnimalUprising doctor
-py -m foundry_coordinator.projects.animaluprising.studio_gate --repo C:\Roblox\AnimalUprising stories --sprint <ID> [--story <Screen.state> ...]
-py -m foundry_coordinator.projects.animaluprising.studio_gate --repo C:\Roblox\AnimalUprising status --sprint <ID>
+py -m foundry_coordinator.projects.animaluprising.studio_gate --repo <workspace from the kickoff> doctor
+py -m foundry_coordinator.projects.animaluprising.studio_gate --repo <workspace from the kickoff> stories --sprint <ID> [--story <Screen.state> ...]
+py -m foundry_coordinator.projects.animaluprising.studio_gate --repo <workspace from the kickoff> status --sprint <ID>
 ```
+Use the exact runner lines the kickoff prints (they carry the workspace); never point `--repo` at another checkout.
 `stories` is your inner loop; `status` only reads a verdict the coordinator produced. Never run `sprint` or `regression` yourself: the coordinator runs the one full gate on your commit when you report DONE (`sprint --background` is its command, not yours). Exit codes: 0 PASS, 1 FAIL, 2 not ready / tooling error / BUSY.
 
 - Inner loop: write code (Rojo syncs it; no commit needed) -> `stories --sprint <ID> --story <Screen.state>` (seconds per story) -> read the verdict -> fix -> repeat. Run Lune specs for the models and reason maps you touched before Studio.
 - When every screen in the plan is green on stories and Lune: commit (below) and report DONE. Do NOT run `sprint` yourself: the coordinator runs the full gate once on your commit, re-running only checks that failed or whose files changed (revamp v0.131.0). Use `status --sprint <ID>` only to read a verdict the coordinator produced.
 - While the runner holds Studio (it takes the `studio:victor-workstation` lock), do not call Studio tools, Assistant subagents or playtests yourself.
 - The full gate runs on committed code only. Uncommitted changes make it fail host checks by design. The gate file `docs/progress/<ID>_gate.json` and `tests/RegressionIndex.lua` are read from HEAD, not the working tree: commit the gate file with your work, or `host.gate_plan` fails when the coordinator's gate runs.
-- One runner drives Studio at a time (`.plan/tmp/gate/runner.lock`). A second one prints `GATE <ID> BUSY: another studio_gate runner is driving Studio (...)` and exits 2: wait with `status --sprint <its ID> --wait 8`; never delete the lock or start another run. If a killed run left Studio in Play, run `stop-playtest` (same prefix, no sprint).
+- One runner drives Studio at a time (`.plan/tmp/gate/runner.lock`). A second one prints `GATE <ID> BUSY: another studio_gate runner is driving Studio (...)` and exits 2: do other plan work (Lune specs, code) and check `status --sprint <its ID>` once per finished step, never in a loop of identical calls; never delete the lock or start another run. If a killed run left Studio in Play, run `stop-playtest` (same prefix, no sprint).
 - `--run-id <nonce>` (before the command, or env `FOUNDRY_GATE_RUN_ID`) is written into the verdict as `run_id`; the coordinator's gate uses its own nonce, so your runs never count as its verdict.
 - Regression suites each run in their own fresh solo playtest (boot CALL 1-2 re-run per suite). RegressionIndex entries may set `isolation = "shared"`, `setup = {"server.<expr>"}`, `runLast = true`, `rerunAfter = {"S48"}` and `waits = {[stepIdx] = seconds}`; a regression failure is never fixed by adding these to an entry you were not asked to change.
 - Which checks to climb before the gate: [references/verification-ladder.md](references/verification-ladder.md). Studio MCP safety and tool quirks: [../au-runtime-gate/references/studio-mcp-safety.md](../au-runtime-gate/references/studio-mcp-safety.md).
@@ -59,17 +60,17 @@ The runner writes `.plan/tmp/gate/<ID>/<head12>.<mode>.json` (`<head12>.sprint.j
 
 ## Red gate in the same session
 
-Passed work is recorded and carried, so a fix round re-runs only what failed. Re-run each failing story with `stories --sprint <ID> --story <name>` and each failing suite with `regression --selection <ids>`. Never start `sprint` in a fix round, and never re-run checks that passed. The coordinator's gate re-runs only failed checks and checks whose files changed. Its re-review covers only the diff since the last review.
+Passed work is recorded and carried, so a fix round re-runs only what failed. Re-run each failing story with `stories --sprint <ID> --story <name>`; failing regression suites are re-run by the coordinator's gate, not by you. Never start `sprint` or `regression` in a fix round, and never re-run checks that passed. The coordinator's gate re-runs only failed checks and checks whose files changed. Its re-review covers only the diff since the last review.
 
 The coordinator sends findings back into this session; there is no new session and no recovery case for a red check.
-- Fix the cause in scope, re-run `--stories` for the affected screen, then the full gate again.
+- Fix the cause in scope, re-run `stories` for the affected screen (and the Lune specs you touched), commit, and report DONE: the coordinator re-runs the full gate, only the checks that failed or whose files changed. Never run `sprint` yourself.
 - Use `rbx-debug` (breakpoints, thread inspection) for a runtime error instead of guessing; use the `explore` subagent for a codebase or live-state question (its answer is a lead, confirm it).
 - Never weaken a check, raise a timeout, remove an assertion, skip a story or edit the runner to get PASS.
-- After two failed full gates on the same check, stop with a BLOCKED report and options (below).
+- After two failed full gates on the same check, stop BLOCKED (below): `product` with options when the plan does not settle the fix, `tooling` (no options) when the runner or Studio is at fault.
 
 ## Vision approval
 
-After a green mechanical gate the coordinator's vision reviewer compares the captures with the v3 references and the rubric. CHANGES arrive in this session as numbered, located fixes: fix them, re-run the stories and the full gate. After ONE CHANGES round on the same item (the coordinator's `max_vision_rounds`, default 1) the coordinator accepts with notes; you do not argue or self-approve. Frames it already accepted, with or without notes, are never reviewed again. The sprint is DONE when the gate is green and the vision approval is recorded at that revision. Victor's own playtest critiques arrive later as small fix sprints.
+After a green mechanical gate the coordinator's vision reviewer compares the captures with the v3 references and the rubric. CHANGES arrive in this session as numbered, located fixes: fix them, re-run the affected stories, commit and report DONE (the coordinator runs the gate). After ONE CHANGES round on the same item (the coordinator's `max_vision_rounds`, default 1) the coordinator accepts with notes; you do not argue or self-approve. Frames it already accepted, with or without notes, are never reviewed again. The sprint is DONE when the gate is green and the vision approval is recorded at that revision. The owner's own playtest critiques arrive later as small fix sprints.
 
 ## Committing
 
@@ -78,11 +79,16 @@ After a green mechanical gate the coordinator's vision reviewer compares the cap
 - Separate commits for helper-drafted steps (ladder step 3), named `(helper:<unit>)`.
 - An amendment to a contract or to an earlier sprint's code is one line in the commit message, not a ceremony.
 - Remove an old screen only after its v3 replacement passes the gate, in the same sprint, by explicit path.
-- Push and close-out (summary file, STATE row) follow the kickoff's instructions for fast-lane tasks.
+- Never push: the coordinator pushes master after the CLOSE checks. A short CLOSE session writes the summary file and the STATE row.
 
-## Stop with options (never a question to a person)
+## Stop BLOCKED (never a question to a person)
 
-The `question` tool is off and nobody answers during a session. Stop (status BLOCKED) only for: a contract the plan does not settle, a product or design decision, two failed full gates on the same check, a doctor failure you cannot fix, or any §24 safety stop. Your report then carries `options` (2-4 concrete ways to resolve it) and `recommended` (the one you would take); the coordinator decides, applies the recommended option when nobody answers in time, and continues the sprint. Commit safe partial work first. A needed file outside the file list is a ```SCOPE_REQUEST``` block (path + one-line reason), not a stop: the coordinator grants allow-listed harness lines itself and continues this session. Do not stop for a routine red check, a helper being slow or a quota defer ("waiting for frontier usage" is the coordinator's state, not yours).
+The `question` tool is off and nobody answers during a session. Commit safe partial work first, then stop with status BLOCKED and one `blocker_kind`:
+- `product`: a contract the plan does not settle, or a product or design decision. Carry `options` (2-4 concrete ways to resolve it) and `recommended` (the one you would take); the coordinator decides, applies the recommended option when nobody answers in time, and continues the sprint.
+- `tooling`: a doctor failure you cannot fix, the runner, Studio, Rojo or MCP misbehaving, two failed full gates on the same check caused by tooling. No options: the coordinator retries it or sends its lead.
+- `user_action`: something only the owner can physically do (§24 safety stops included). Say the exact steps in `blocker`; it waits for the owner, never for a timeout.
+
+A needed file outside the file list is a ```SCOPE_REQUEST``` block (path + one-line reason), not a stop: carry on with the steps that don't need it and end your turn; the coordinator answers in this session (allow-listed harness lines are granted at once; a denial comes with its reason). Do not stop for a routine red check, a helper being slow or a quota defer ("waiting for frontier usage" is the coordinator's state, not yours).
 
 ## Rules card (fast lane)
 

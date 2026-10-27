@@ -20,9 +20,10 @@ Two generated forms, from the same rules:
 Kilo uses the LAST matching rule, so the order is: category bases, scopes,
 allow lists, deny lists, extra, the config-file denies (every role but the
 coordinator) and finally HARD_DENIES, which no setting removes: secrets and
-credential files (tools and shell), force pushes, ref deletion, history
-rewrites, hook bypasses, and the Studio tools no role may ever call
-(monetization, uploads, asset insertion, live script mutation).
+credential files (tools and shell), every git push (the coordinator publishes),
+ref deletion, history rewrites, hook bypasses, and the Studio tools no role may
+ever call (monetization, uploads, publishing, experience settings, imports,
+asset insertion, live script mutation).
 
 Edit scope (W2.2): an EMPTY `edit_paths.allow` means "the sprint's files
 only". The coordinator passes the sprint's scope (`scope=`) and it becomes the
@@ -66,7 +67,12 @@ STUDIO_WRITE_TOOLS = ("set_*", "create_*", "delete_*", "insert_*", "mass_*", "*d
 # outside git): the live kilo.jsonc global denies, now a hard deny
 STUDIO_NEVER = ("*manage_monetization", "*upload_image", "*insert_asset", "*multi_edit",
                 "*set_script_source", "*edit_script_lines", "*insert_script_lines",
-                "*delete_script_lines", "*find_and_replace_in_scripts")
+                "*delete_script_lines", "*find_and_replace_in_scripts",
+                # 2026-10-27 rules streamline (AU §24/§27): uploads, experience settings,
+                # model imports and publishing are the owner's / the coordinator's, never a
+                # session's (Studio auto-reopen is the TEST place only)
+                "*upload_asset", "*manage_experience", "*import_rbxm", "Roblox_Studio_publish*",
+                "robloxstudio-mcp_publish*", "robloxstudio_mcp_publish*")
 WEB_PERMS = ("webfetch", "websearch")
 # Roles a coordinator runs unattended: "ask" waits for the operator.
 UNATTENDED = ("implementer", "reviewer", "deep_reviewer", "visual_reviewer", "planner",
@@ -80,9 +86,10 @@ _SECRET_BASH = ("*_secrets*", "*credential*", "*.foundry-coordinator*",
                 "*\\.env", "*\\.env.*", "*\\.env *",
                 "env", "printenv*", "set", "export", "*$env:*", "*$Env:*", "*$ENV:*",
                 "*Env:*", "*env:*", "*FOUNDRY_COORDINATOR_KEY*", "*KILO_SERVER_PASSWORD*")
-# git: force pushes, ref deletion, tag push / deletion, history rewrites, hook
-# bypasses. Plain `git push` is a ROLE rule (closeout sessions may publish).
-_GIT_HARD = ("git push*--force*", "git push*-f", "git push*-f *", "git push*--tags*",
+# git: every push (2026-10-27, Victor: the coordinator pushes master, always; sessions
+# never push, CLOSE included; tracks never push, the merge stage publishes), force,
+# ref deletion, tag push / deletion, history rewrites, hook bypasses.
+_GIT_HARD = ("git push", "git push *", "git push*--force*", "git push*-f", "git push*-f *", "git push*--tags*",
              "git push*--delete*", "git push*:refs/tags/*", "git push*--mirror*",
              "git push*--prune*", "git push*+*", "git push* :*", "git push*:refs/*",
              "git tag -d*", "git tag*--delete*",
@@ -109,16 +116,17 @@ def _hard() -> list[dict]:
                         "why": "secret store"})
     for pat in _GIT_HARD:
         out.append({"permission": "bash", "pattern": pat, "action": "deny",
-                    "why": "force push, ref/tag deletion, history rewrite and hook bypass "
-                           "are never allowed"})
+                    "why": "pushes (the coordinator publishes), force push, ref/tag "
+                           "deletion, history rewrite and hook bypass are never allowed"})
     for pat in _SECRET_BASH:
         out.append({"permission": "bash", "pattern": pat, "action": "deny",
                     "why": "secret store, .env / credential files and the environment are "
                            "never readable from the shell"})
     for pat in STUDIO_NEVER:
         out.append({"permission": pat, "pattern": "*", "action": "deny",
-                    "why": "Studio monetization, uploads, asset insertion and live script "
-                           "mutation are never allowed (scripts change through git)"})
+                    "why": "Studio monetization, uploads, publishing, experience settings, "
+                           "imports, asset insertion and live script mutation are never "
+                           "allowed (scripts change through git)"})
     return out
 
 
@@ -161,7 +169,7 @@ def default_rules(role: str) -> dict:
                   task="deny", studio_read="allow", studio_write="allow",
                   external_directory="deny")
         r["task_agents"] = ["explore"]
-        r["bash"]["deny"] = ["git tag*"]
+        r["bash"]["deny"] = ["git tag*", "git push", "git push *"]
         r["deny_tools"] = ["searxng_*", "crawl4ai_*"]
         r["extra"] = copy.deepcopy(_READ_ONLY_EXTRA)
         return r

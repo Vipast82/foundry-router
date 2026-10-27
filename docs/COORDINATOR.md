@@ -401,7 +401,8 @@ For a new game, copy `contrib/coordinator-pilot/fixture-game/project.toml.templa
 - `[[verify.checks]]`: name, command, `pass_regex` / `fail_regex`, `phase`
   (verify | closeout), `required`, `evidence`;
 - `[review]`, `[approval]` rules (`match` tag, `kind`, `stage`, `artifacts`),
-  `[publish]` (`none` | `push` | `verify_only`; force and tags are refused),
+  `[publish]` (`none` | `push`; the coordinator pushes after closeout verification and no
+  session ever pushes, so the old `verify_only` reads as `push`; force and tags are refused),
   `[limits]`, `[resources] exclusive`, `[closeout]` (`mode`, `exempt_paths`),
   `[commit]`.
 

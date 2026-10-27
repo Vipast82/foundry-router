@@ -44,6 +44,86 @@ class KiloConfigError(RuntimeError):
     pass
 
 
+# 2026-10-27 rules streamline: instruction files no session may load any more.
+# KILO_MCP_PROFILES.md told every session to run a profile switcher that rewrites the
+# shared kilo.jsonc and named five retired MCP servers; the coordinator sets the MCP set
+# per sprint from the plan's `## Needs`.
+RETIRED_INSTRUCTIONS = ("KILO_MCP_PROFILES.md",)
+
+
+# the Kilo-native session core (rules streamline phase 2, AU repo); once the workspace
+# has it, it replaces the Cline-era core in `instructions`
+SESSION_CORE = "docs/rules/SESSION_CORE.md"
+OLD_CORE = "CLINERULES_CORE.md"
+
+
+def drop_retired_instructions(text: str, data: Optional[dict] = None,
+                              workspace: str = "") -> tuple[str, list]:
+    """(new text, removed entries): `instructions` without the retired files, and, when
+    `workspace` holds docs/rules/SESSION_CORE.md, with the session core in place of the
+    old CLINERULES_CORE.md entry (added when neither is listed)."""
+    data = jsonc.parse(text) if data is None else data
+    ins = (data or {}).get("instructions") if isinstance(data, dict) else None
+    if not isinstance(ins, list):
+        return text, []
+
+    def norm(x):
+        return x.replace("\\", "/").lower() if isinstance(x, str) else ""
+    gone = [x for x in ins if any(r.lower() in norm(x) for r in RETIRED_INSTRUCTIONS)]
+    keep = [x for x in ins if x not in gone]
+    if workspace and os.path.isfile(os.path.join(workspace, *SESSION_CORE.split("/"))):
+        old = [x for x in keep if norm(x).endswith(OLD_CORE.lower())]
+        gone += old
+        have = any(norm(x).endswith(SESSION_CORE.lower()) for x in keep)
+        out = []
+        for x in keep:
+            if x in old:
+                if not have:
+                    out.append(SESSION_CORE)
+                    have = True
+                continue
+            out.append(x)
+        if not have:
+            out.append(SESSION_CORE)
+        if out != keep:
+            keep = out
+    if keep == ins:
+        return text, []
+    return jsonc.replace_value(text, ("instructions",), keep), gone
+
+
+def _skill_map(agents: dict, name: str) -> Optional[dict]:
+    perm = (agents.get(name) or {}).get("permission") if isinstance(agents.get(name), dict) \
+        else None
+    sk = perm.get("skill") if isinstance(perm, dict) else None
+    return dict(sk) if isinstance(sk, dict) else None
+
+
+def with_skill_maps(blocks: dict, agents: dict, role_rules: Optional[dict]) -> dict:
+    """Generated blocks with the skill maps the source file holds: each agent keeps its
+    own `skill` map (generated skill rules, e.g. the foundry-images deny, win), and the
+    lead agent gets the implementer's map, so it can load the Luau / Roblox baseline
+    skills its rules require (AU audit H13: it inherited the global map, which allows
+    neither)."""
+    impl = RR.normalize("implementer", (role_rules or {}).get("implementer")).get("agent")
+    lead = RR.normalize("lead", (role_rules or {}).get("lead")).get("agent")
+    out = {}
+    for agent, gen in blocks.items():
+        base = _skill_map(agents, agent)
+        if agent == lead and impl:
+            base = {**(_skill_map(agents, impl) or {}), **(base or {})} or None
+        gen = dict(gen)
+        if base is not None:
+            mine = gen.get("skill")
+            mine = mine if isinstance(mine, dict) else ({"*": mine} if isinstance(mine, str)
+                                                        else {})
+            merged = {k: v for k, v in base.items() if k not in mine}
+            merged.update(mine)
+            gen["skill"] = merged
+        out[agent] = gen
+    return out
+
+
 def kilo_path(profile) -> str:
     cp = (getattr(profile, "raw", None) or {}).get("config_pull") or {}
     p = str(cp.get("kilo_config") or "")
@@ -67,9 +147,10 @@ def plan(text: str, role_rules: Optional[dict], workspace: str) -> dict:
     "blocks": {agent: merged block}}"""
     data = jsonc.parse(text)
     agents = (data or {}).get("agent") or {}
-    blocks = RR.agent_blocks(role_rules, workspace)
+    blocks = with_skill_maps(RR.agent_blocks(role_rules, workspace), agents, role_rules)
     out = {"changed": [], "unchanged": [], "missing": [], "blocks": {}}
-    new = text
+    new, out["instructions_removed"] = drop_retired_instructions(text, data, workspace)
+    out["instructions_changed"] = new != text
     # W1.1: Kilo's snapshot question is a question to a person; the top-level
     # `snapshot: false` turns it off (the key is absent from the hand-written file)
     out["snapshot_changed"] = False
@@ -112,8 +193,10 @@ def regenerate(profile, role_rules: Optional[dict] = None, apply: bool = False,
         raise KiloConfigError(f"{path} is not valid JSONC: {e}") from None
     result = {"path": path, "changed": p["changed"], "unchanged": p["unchanged"],
               "missing": p["missing"], "applied": False, "backup": "",
-              "snapshot": "set false" if p.get("snapshot_changed") else "already false"}
-    if not apply or not (p["changed"] or p.get("snapshot_changed")):
+              "snapshot": "set false" if p.get("snapshot_changed") else "already false",
+              "instructions_removed": p.get("instructions_removed") or []}
+    if not apply or not (p["changed"] or p.get("snapshot_changed")
+                         or p.get("instructions_changed")):
         return result
     backup = f"{path}.bak-{time.strftime('%Y%m%d-%H%M%S', time.localtime(clock()))}"
     shutil.copy2(path, backup)
@@ -168,6 +251,10 @@ def track_rules(role_rules: Optional[dict], needs: list) -> Optional[dict]:
             if need not in needs:
                 deny += [t for t in tools if t not in deny]
         r["deny_tools"] = deny
+        if "images" not in needs:
+            # the foundry-images skill drives foundry-media: off with the image tools
+            skill = {"permission": "skill", "pattern": SM.FOUNDRY_IMAGES_SKILL, "action": "deny"}
+            r["extra"] = list(r.get("extra") or []) + [skill]
         out[role] = r
     return out
 
@@ -182,6 +269,7 @@ def track_text(text: str, needs, role_rules: Optional[dict], workspace: str) -> 
     new = text
     if data.get("snapshot") is not False:
         new = jsonc.replace_value(new, ("snapshot",), False)
+    new, _ = drop_retired_instructions(new, workspace=workspace)
     want = set(SM.mcp_for(needs))
     mcp = data.get("mcp") if isinstance(data.get("mcp"), dict) else None
     flags: dict = {}
@@ -202,7 +290,8 @@ def track_text(text: str, needs, role_rules: Optional[dict], workspace: str) -> 
     rules = track_rules(role_rules, needs)
     if rules:
         agents = data.get("agent") or {}
-        for agent, gen in RR.agent_blocks(rules, workspace).items():
+        for agent, gen in with_skill_maps(RR.agent_blocks(rules, workspace), agents,
+                                          role_rules).items():
             if agent not in agents or not isinstance(agents[agent], dict):
                 out["missing"].append(agent)
                 continue

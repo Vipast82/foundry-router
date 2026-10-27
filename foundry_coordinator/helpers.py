@@ -1148,8 +1148,10 @@ class HelperManager:
             out = ("## Helper proposals (advisory)\nRead-only helpers returned these proposals for "
                    "independent parts of this task. You decide what to integrate: apply only what "
                    "fits the approved scope, run the meaningful tests, and commit as usual. Don't "
-                   "treat a proposal as verified. Mention which unit ids you integrated or "
-                   "rejected in your report.\n\n" + body + "\n")
+                   "treat a proposal as verified. Say what you did with each unit in your "
+                   "coordinator-report: \"helper_feedback\": [{\"unit\": \"<id>\", "
+                   "\"status\": \"integrated | rejected | deferred | superseded\", "
+                   "\"note\": \"<why>\"}] (a rejection needs its reason).\n\n" + body + "\n")
         if lane:
             out += ("\n" if out else "") + self.lanes.cards(lane)
         return out

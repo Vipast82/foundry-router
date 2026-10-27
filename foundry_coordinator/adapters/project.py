@@ -21,12 +21,17 @@ import tomllib
 from typing import Optional
 
 from .base import (FAIL, PASS, ReviewContractDefaults, TaskSpec, VerificationResult,
-                   duty_bullets, report_instructions, safe_rel, sha256_file)
+                   duty_bullets, report_instructions, report_pointer, safe_rel, sha256_file)
 from .verify_cmd import run_check
 
 
 class AdapterError(RuntimeError):
     pass
+
+
+# git-ignored scratch space every implementer session may write (verification scratch,
+# one-off generated files); the prompts send that work here
+SCRATCH_GLOB = ".plan/tmp/**"
 
 
 DEFAULT_IMPLEMENT = """You are working on project {project} in a fresh session, on ONE task only: {task} — {title}.
@@ -40,8 +45,8 @@ DEFAULT_IMPLEMENT = """You are working on project {project} in a fresh session, 
 {scope}
 
 When the work is done and your own checks pass, commit ONLY those files with a message starting "{task}: ".
-Never use git push, --force, --no-verify, rebase or amend. Do not start any other task.
-If you cannot finish without changing scope or making a design decision the task doesn't settle, stop and say so.
+Never use git push (the coordinator publishes), --force, --no-verify, rebase or amend. Do not start any other task.
+If you cannot finish without changing scope or making a design decision the task doesn't settle, stop BLOCKED as the report block below says.
 
 {report}
 """
@@ -196,8 +201,10 @@ class GenericAdapter(ReviewContractDefaults):
         return self._fill(self._template("closeout", DEFAULT_CLOSEOUT), spec, extra=steps)
 
     def continue_prompt(self, spec: TaskSpec, reason: str) -> str:
+        # 2026-10-27: a continuation is always the same session, which got the full
+        # report block and MEMORY_NOTE grammar in its first prompt: a short pointer only
         return (f"Continue task {spec.task_id} where you stopped ({reason}). Same scope, same rules. "
-                f"{report_instructions()}")
+                f"{report_pointer()}")
 
     # -- verification ----------------------------------------------------------------
 
@@ -273,6 +280,16 @@ class GenericAdapter(ReviewContractDefaults):
             pat = str((r or {}).get("path") or "").replace("{task}", spec.task_id)
             if pat:
                 out.append(pat)
+        # 2026-10-27 rules streamline: prompts send scratch work to the git-ignored
+        # .plan/tmp/, so every sprint may write there. docs/memory is the coordinator's
+        # (MEMORY_NOTE lines): a scope grant keeps done_check's SCOPE row green, it never
+        # makes the memory files a session's to edit (the old "docs/memory/" exempt entry
+        # had no wildcard and matched nothing anyway)
+        from ..memory.layout import MEMORY_DIR
+        out.append(SCRATCH_GLOB)
+        mem = MEMORY_DIR.rstrip("/")
+        out = [x for x in out if not (x.replace("\\", "/").rstrip("/") == mem
+                                      or x.replace("\\", "/").startswith(mem + "/"))]
         return list(dict.fromkeys(x for x in out if x))
 
     @property
