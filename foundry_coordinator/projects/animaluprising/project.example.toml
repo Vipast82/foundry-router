@@ -34,6 +34,12 @@ module = "foundry_coordinator.projects.animaluprising.adapter:AnimalUprisingAdap
 require_rule_amendment = true
 # python = ["py", "-3"]                      # default: the coordinator's own Python
 # lune = "C:/Users/<you>/.rokit/bin/lune.exe"  # EDIT if lune isn't on PATH
+# lune_timeout_s = 1800                      # per Lune run (suite, negative control)
+# lune_reuse = true                          # carry a Lune PASS to a revision with the same
+#   Lune inputs (src, tests, project file, wally.lock, Packages, files the suite reads);
+#   cache in <state_dir>/cache/lune/. false = always run.
+# lune_workers = 6                           # OPTIONAL: AU_LUNE_WORKERS for run.luau's
+#   parallel mode (suite gets n-1, negative control 1 when both run); unset = runner default
 # Live checks before a session (W1.8, infra.preflight): "rojo" = Rojo's HTTP API on the
 # project's servePort; "studio" = the live Studio probe when one is configured.
 infra_checks = ["rojo"]
