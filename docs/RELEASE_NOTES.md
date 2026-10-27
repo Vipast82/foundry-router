@@ -2,6 +2,16 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.146.1 — track plan analysis 11x faster
+
+`tracks analyze` / `tracks propose` compared every pair of open sprints' "may change"
+entries, normalizing and regex-checking each path on every comparison and scanning the
+whole serial list for every pair. On AU's 178 plans that took 21 s (35–60 s under load).
+Each entry is now normalized once and the pair check is a set lookup: 1.9 s, with a
+byte-identical result on all 178 plans. Docs: why the tests use `--dist worksteal`.
+
+Coordinator restart needed (rides with v0.146.0's pending restart).
+
 ## v0.146.0 — faster verify and tests; three more stops that weren't the sprint's
 
 Victor 2026-10-27: "make EVERYTHING faster ... use all the cores ... keep quality high",
