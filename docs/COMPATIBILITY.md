@@ -60,7 +60,7 @@ work).
 | `POST /v1/completions` | ✅ legacy text completion (stream + non-stream); `suffix` (fill-in-the-middle) is given to the model as context; `n` > 1, `echo`, `logprobs`, `best_of` ignored |
 | `POST /v1/embeddings` | ✅ `input` string / list / token arrays; `encoding_format: "base64"` (float32), `dimensions` |
 | `POST /v1/feedback` | Foundry extension: rate an answer |
-| `POST /v1/audio/speech` | ✅ `model` (kokoro / chatterbox, or tts-1 / tts-1-hd / gpt-4o-mini-tts → kokoro), `input`, `voice` (Kokoro ids pass, OpenAI names → `af_heart`), `speed`; returns the server's audio (WAV, no transcoding). `media` scope |
+| `POST /v1/audio/speech` | ✅ `model` (media-gen; the old kokoro / chatterbox / tts-1 / tts-1-hd / gpt-4o-mini-tts names map to it), `input`, `voice` (`audio.voices` map, else the default designed voice), `speed` (as a delivery style), `response_format` (mp3 / ogg / flac file of the Media_Gen job). `media` scope |
 | `POST /v1/audio/transcriptions`, `/v1/audio/translations` | ❌ 501 `no_stt_backend`: no speech-to-text backend exists yet |
 | `POST /v1/images/generations`, `/v1/images/edits` | ✅ see [MEDIA.md](MEDIA.md) (`media` scope) |
 | Files, batches, moderations, assistants, fine-tuning | ❌ not served |

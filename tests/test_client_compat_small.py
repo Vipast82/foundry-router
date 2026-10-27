@@ -202,9 +202,17 @@ def _tts(app, text_result="Saved: http://192.168.0.115:8880/files/out_1.wav", bl
         return ToolResult(blocks or [{"type": "text", "text": text_result}])
     svc.mcp.call_tool_rich = fake_rich
     svc.http = _Http()
+    # these tests drive the URL-returning servers (Kokoro / Chatterbox) explicitly;
+    # the default since 2026-10-27 is Media_Gen (tests below)
+    acfg = svc.config_store.config.audio
+    old_audio = (acfg.speech_servers, acfg.speech_aliases, acfg.default_speech)
+    acfg.speech_servers = {"kokoro": "kokoro-tts", "chatterbox": "chatterbox-tts"}
+    acfg.speech_aliases = {"tts-1": "kokoro", "tts-1-hd": "kokoro", "gpt-4o-mini-tts": "kokoro"}
+    acfg.default_speech = "kokoro"
 
     def restore():
         svc.mcp.servers, svc.mcp.call_tool_rich, svc.http = old
+        acfg.speech_servers, acfg.speech_aliases, acfg.default_speech = old_audio
     return svc, calls, restore
 
 
@@ -429,3 +437,94 @@ def test_model_with_unknown_capabilities_is_trusted_with_images(app, client):
     finally:
         restore()
     assert [m for m, _ in pool.called] == ["text-a"]
+
+
+MG_DONE = ("job_id: b6962e66d091\nSTATUS: done\ntool: generate_speech (VoxCPM2)\n"
+           "Files (URLs on the remote server):\n"
+           "  ogg: http://192.168.0.206:8190/files/personal/speech/t_b6962e66.ogg\n"
+           "  mp3: http://192.168.0.206:8190/files/personal/speech/t_b6962e66.mp3\n"
+           "  flac: http://192.168.0.206:8190/files/personal/speech/t_b6962e66.flac\n")
+
+
+def _media_gen(app, checks=("job_id: b6962e66d091\nSTATUS: running", MG_DONE)):
+    """Media_Gen (2026-10-27) as Foundry's MCP server: generate_speech queues a job,
+    media_check_job reports it running, then done with ogg/mp3/flac links."""
+    from foundry_router.config import MCPServerConfig
+    from foundry_router.tools.mcp_client import ToolResult
+    svc = app.state.services
+    calls, left = [], list(checks)
+    old = (dict(svc.mcp.servers), svc.mcp.call_tool_rich, svc.http)
+    acfg = svc.config_store.config.audio
+    old_poll = acfg.job_poll_seconds
+    acfg.job_poll_seconds = 0.2
+    svc.mcp.servers["Media_Gen"] = MCPServerConfig(name="Media_Gen",
+                                                   url="http://192.168.0.206:8190/mcp")
+
+    async def fake_rich(server, tool, args, **kw):
+        calls.append((server, tool, args))
+        if tool == "generate_speech":
+            return ToolResult([{"type": "text",
+                                "text": "job_id: b6962e66d091  (seed 1)\nSTATUS: queued"}])
+        return ToolResult([{"type": "text", "text": left.pop(0) if left else MG_DONE}])
+    svc.mcp.call_tool_rich = fake_rich
+    svc.http = _Http(b"ID3" + bytes(64))
+
+    def restore():
+        svc.mcp.servers, svc.mcp.call_tool_rich, svc.http = old
+        acfg.job_poll_seconds = old_poll
+    return svc, calls, restore
+
+
+def test_speech_goes_to_media_gen_by_default_and_waits_for_the_job(app, client):
+    svc, calls, restore = _media_gen(app)
+    try:
+        r = client.post("/v1/audio/speech", json={"model": "tts-1", "input": "Hello there",
+                                                  "voice": "alloy", "speed": 1.25})
+        urls = svc.http.urls
+    finally:
+        restore()
+    assert r.status_code == 200 and r.headers["content-type"] == "audio/mpeg"
+    assert r.headers["x-foundry-speech-server"] == "Media_Gen"
+    server, tool, args = calls[0]
+    assert (server, tool) == ("Media_Gen", "generate_speech")
+    assert args["library"] == "personal" and args["text"] == "Hello there"
+    assert args["voice_description"] and args["style"] == "slightly faster pace"
+    assert [c[1] for c in calls[1:]] == ["media_check_job", "media_check_job"]
+    assert calls[1][2] == {"job_id": "b6962e66d091"}
+    assert urls == ["http://192.168.0.206:8190/files/personal/speech/t_b6962e66.mp3"]
+
+
+def test_old_tts_names_and_formats_pick_the_media_gen_file(app, client):
+    svc, calls, restore = _media_gen(app, checks=(MG_DONE, MG_DONE))
+    try:
+        client.post("/v1/audio/speech", json={"model": "kokoro", "input": "a",
+                                              "response_format": "opus"})
+        client.post("/v1/audio/speech", json={"model": "chatterbox", "input": "b",
+                                              "response_format": "wav"})
+        urls = svc.http.urls
+    finally:
+        restore()
+    assert {c[0] for c in calls} == {"Media_Gen"}
+    assert urls[0].endswith(".ogg") and urls[1].endswith(".flac")
+
+
+def test_a_failed_media_gen_job_is_a_502(app, client):
+    svc, calls, restore = _media_gen(app, checks=("job_id: b6962e66d091\nSTATUS: failed\n"
+                                                  "error: out of memory",))
+    try:
+        r = client.post("/v1/audio/speech", json={"input": "hi"})
+    finally:
+        restore()
+    assert r.status_code == 502 and r.json()["error"]["code"] == "speech_failed"
+    assert "failed" in r.json()["error"]["message"]
+
+
+def test_a_registered_voice_mapping_is_passed_as_voice():
+    from foundry_router.config import AudioConfig
+    from foundry_router.facade.audio_api import speech_arguments
+    cfg = AudioConfig(voices={"nova": "Narrator", "onyx": "deep calm male voice, slow"})
+    a = speech_arguments(cfg, "media-gen", "x", "nova", None, "Media_Gen")
+    assert a == {"text": "x", "library": "personal", "voice": "Narrator"}
+    b = speech_arguments(cfg, "media-gen", "x", "onyx", 0.8, "Media_Gen")
+    assert b["voice_description"] == "deep calm male voice, slow"
+    assert b["style"].startswith("slower")

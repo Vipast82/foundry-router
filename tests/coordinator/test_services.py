@@ -42,7 +42,8 @@ def test_needs_map_services_per_need():
     assert S.services_for("blender") == ["blender-mcp"]
     # 2026-10-27: one Media_Gen server replaced the four audio servers
     assert S.services_for(["audio"]) == ["Media_Gen"]
-    assert S.services_for(["images"]) == ["Media_Gen", "comfy-mcp", "foundry-media"]
+    # local ComfyUI (comfy-mcp) is legacy; foundry-media is the ChatGPT image path
+    assert S.services_for(["images"]) == ["Media_Gen", "foundry-media"]
     assert S.normalize_needs("media-gen sfx") == ["audio"]
     assert S.services_for(["gpu"]) == ["local-model"]
     assert S.services_for(["backend"]) == ["router"] and S.services_for(["none"]) == []
@@ -81,10 +82,9 @@ def test_ready_without_a_db_uses_the_probe_directly():
 def test_unknown_is_not_missing_and_an_any_of_group_needs_one_member():
     assert S.ready(["audio"], probe=probe_of(Media_Gen=None))[0] is True
     assert S.ready(["audio"], probe=probe_of(Media_Gen=False)) == (False, ["Media_Gen"])
-    assert S.ready(["images"], probe=probe_of(comfy_mcp=False))[0] is True        # Media_Gen is up
-    ok, missing = S.ready(["images"], probe=probe_of(Media_Gen=False, comfy_mcp=False,
-                                                      foundry_media=False))
-    assert not ok and missing == ["Media_Gen/comfy-mcp/foundry-media"]
+    assert S.ready(["images"], probe=probe_of(Media_Gen=False))[0] is True        # foundry-media is up
+    ok, missing = S.ready(["images"], probe=probe_of(Media_Gen=False, foundry_media=False))
+    assert not ok and missing == ["Media_Gen/foundry-media"]
 
 
 def test_ready_stores_probes_and_trusts_them_for_the_ttl(tmp_path):
@@ -152,7 +152,7 @@ def test_make_probe_resolves_stubs_against_the_global_config(kilo_files):
     assert probe("blender-mcp")[0] is False                  # uvx found, but the add-on socket is closed
     assert "9876" in probe("blender-mcp")[1]
     assert probe("foundry-media")[0] is True                 # powershell -File script exists
-    assert probe("comfy-mcp")[0] is None                     # defined nowhere: unknown, not down
+    assert probe("comfy-mcp") == (None, "not in the service catalog")   # replaced by Media_Gen
     assert probe("kilo")[0] is False                         # port check, closed
     assert probe("rojo", )[1].startswith("port 34872")
 
@@ -295,4 +295,4 @@ def test_media_gen_tools_are_denied_per_family():
     assert "Media_Gen_generate_image" in aud and "Media_Gen_generate_sfx" not in aud
     both = track_rules(rules, ["audio", "images"])["implementer"]["deny_tools"]
     assert not [t for t in both if t.startswith("Media_Gen_")]
-    assert "Media_Gen" in SM.CONTROLLED_MCP and "kokoro-tts" in SM.CONTROLLED_MCP
+    assert {"Media_Gen", "kokoro-tts", "comfy-mcp"} <= set(SM.CONTROLLED_MCP)

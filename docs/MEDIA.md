@@ -128,8 +128,8 @@ direct path (the client brings its own tools):
 
 ### Long-running generation tools
 
-Mark the server `long_running: true` (ComfyUI, Stable Audio: one call can take
-10+ minutes). A call then runs as a background **tool job** (`op: tool_job`):
+Mark the server `long_running: true` when one call can take 10+ minutes (Media_Gen
+does not need it: it answers at once with a job_id). A call then runs as a background **tool job** (`op: tool_job`):
 
 - The chat request waits up to `tool_inline_wait_seconds` (90, under
   AnythingLLM's ~120 s cut-off) and streams progress as thinking lines (the

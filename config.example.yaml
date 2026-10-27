@@ -335,11 +335,10 @@ mcp_servers: []
 #  Images/audio these return reach the chat as links (docs/MEDIA.md). Mark a
 #  server long_running when one call takes minutes: chat requests then get a
 #  job id after media.tool_inline_wait_seconds and check it with tool_job_status.
-#  - name: comfyui                 # community server, e.g. joenorton/comfyui-mcp-server
-#    url: http://192.168.1.40:8188/mcp
-#    transport: streamable-http
-#    timeout_seconds: 900
-#    long_running: true
+#  - name: Media_Gen               # music, SFX, speech, images, video (one TrueNAS server;
+#    url: http://192.168.0.206:8190/mcp   # replaced local ComfyUI, ACE-Step, Stable Audio,
+#    transport: streamable-http           # Kokoro and Chatterbox on 2026-10-27). Jobs: a
+#    timeout_seconds: 300                 # job_id at once, then media_check_job.
 #  - name: voicebox                # ships its own /mcp endpoint
 #    url: http://192.168.1.40:5001/mcp
 #    transport: streamable-http
@@ -354,15 +353,19 @@ mcp_servers: []
 #    timeout_seconds: 300
 
 # --- OpenAI audio endpoints (docs/CLIENT_COMPAT.md §6) --------------------------
-# /v1/audio/speech runs a TTS MCP server's speech tool and returns the audio it
-# links to (fetched only from that server's own host or fetch_hosts). There is
+# /v1/audio/speech runs Media_Gen's generate_speech job, waits for it and returns
+# the file (fetched only from that server's own host or fetch_hosts). There is
 # no speech-to-text backend: /v1/audio/transcriptions answers 501.
 # audio:
 #   enabled: true
-#   speech_servers: {kokoro: kokoro-tts, chatterbox: chatterbox-tts}
-#   speech_aliases: {tts-1: kokoro, tts-1-hd: kokoro, gpt-4o-mini-tts: kokoro}
-#   default_speech: kokoro
-#   default_voice: af_heart       # OpenAI voice names (alloy, nova...) map to this
+#   speech_servers: {media-gen: Media_Gen, kokoro: Media_Gen, chatterbox: Media_Gen}
+#   speech_aliases: {tts-1: media-gen, tts-1-hd: media-gen, gpt-4o-mini-tts: media-gen}
+#   default_speech: media-gen
+#   job_servers: [Media_Gen]      # queue a job: job_id, then media_check_job
+#   job_library: personal         # chat speech is never a game asset
+#   job_timeout_seconds: 180
+#   voices: {}                    # client voice -> registered Media_Gen voice or a description
+#   default_voice_description: "warm, clear, friendly adult narrator, natural pace"
 #   fetch_hosts: []
 
 # --- External agents (Hermes Agent) — see docs/AGENTS.md ------------------------

@@ -2,6 +2,37 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.149.0 — speech, sound and 2D on Media_Gen; local ComfyUI retired
+
+Victor 2026-10-27: "Any reference to the old ComfyUI (local) should now go to Media_Gen, any
+old TTS, or anything that covers MCP for sound / 2D assets should go to the new Media_Gen
+MCP. Blender is still local for right now."
+
+- **`/v1/audio/speech` runs on Media_Gen.**
+  - Every model name the endpoint accepted (media-gen, kokoro, chatterbox, tts-1,
+    tts-1-hd, gpt-4o-mini-tts) maps to `Media_Gen`.
+  - Foundry submits `generate_speech` (`library: personal`, a designed voice), polls
+    `media_check_job` until the job is done (`audio.job_timeout_seconds`, 180), and
+    downloads the file from the server's own host.
+  - The file follows `response_format`: mp3 (default), ogg for opus/ogg, flac for
+    wav/flac.
+  - `audio.voices` maps a client voice to a registered Media_Gen voice or a
+    description. Speed becomes a delivery style.
+  - A failed or timed-out job is a 502 in the OpenAI error shape.
+  - Servers that answer with a URL (Kokoro, Chatterbox) still work when configured
+    (`audio.job_servers` lists the job-based ones).
+  - **Router backend:** if its `config.yaml` sets `audio.speech_servers` explicitly,
+    remove it (or point it at `Media_Gen`) so these defaults apply.
+- **Local ComfyUI retired.** `comfy-mcp` left the service catalog. It is a legacy server
+  that tracks always switch off. `images` needs Media_Gen or `foundry-media`, either one.
+  `foundry-media` is kept because it is the ChatGPT image path (gpt-image through the
+  router). The 2D ask-first hold (v0.148.0) is unchanged.
+- **Docs:** CLIENT_COMPAT §6 (speech settings for Open WebUI and AnythingLLM: model
+  `media-gen`), COMPATIBILITY, CLIENT_MANAGER (needs table), MEDIA and the config example
+  (a Media_Gen server entry and the new audio keys).
+
+Coordinator restart (catalog) and a router backend rebuild (speech) needed.
+
 ## v0.148.0 — Media_Gen per sprint; 2D assets ask the operator first
 
 Victor 2026-10-27: "make sure all documents reference the new Media_Gen ... and turn it

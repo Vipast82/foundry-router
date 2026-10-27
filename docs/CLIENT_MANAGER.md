@@ -234,7 +234,7 @@ with a 30 s .. 10 min backoff, no attempt used). The map lives in `foundry_autom
 | `studio` | `rojo`, `robloxstudio-mcp`, `kilo` | client components (Rojo, Kilo); the MCP is spawned by Kilo |
 | `blender` | `blender-mcp` | external; the add-on socket (default 9876) must be connected in Blender |
 | `audio` | `Media_Gen` (music, BGM, SFX, speech, dialogue; replaced acestep-music, stable-audio, kokoro-tts and chatterbox-tts on 2026-10-27) | external (TrueNAS `http://192.168.0.206:8190/mcp`) |
-| `images` | `Media_Gen`, `comfy-mcp` or `foundry-media` (any one) | external; a sprint that needs 2D assets first asks the operator (`[automation] media_gen_images`, default `ask`: they come from ChatGPT for now) |
+| `images` | `Media_Gen` or `foundry-media` (the ChatGPT image adapter; either one; the local comfy-mcp was replaced by Media_Gen) | external; a sprint that needs 2D assets first asks the operator (`[automation] media_gen_images`, default `ask`: they come from ChatGPT for now) |
 | `gpu` | `local-model` (the router's backend `/health`) | backend |
 | `backend` | `router` | backend |
 

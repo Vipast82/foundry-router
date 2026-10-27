@@ -95,8 +95,10 @@ SERVICES: dict[str, Service] = {s.name: s for s in (
             "Media-Gen (music, SFX, speech, images, video)",
             note="TrueNAS media-mcp at 192.168.0.206:8190; jobs return a job_id, "
                  "results via media_check_job; library 'game' for AU assets"),
-    Service("comfy-mcp", "mcp", "mcp", "external", ("images",), "Comfy MCP"),
-    Service("foundry-media", "mcp", "mcp", "external", ("images",), "Foundry media adapter"),
+    # the local ComfyUI (comfy-mcp) was replaced by Media_Gen's image tools (2026-10-27);
+    # foundry-media is the ChatGPT image path (gpt-image through the router), kept
+    Service("foundry-media", "mcp", "mcp", "external", ("images",),
+            "Foundry media adapter (ChatGPT images)"),
     Service("local-model", "backend", "http", "backend", ("gpu",), "Local model backend",
             url=ROUTER_URL),
     Service("router", "backend", "http", "backend", ("backend",), "Foundry router", url=ROUTER_URL),
@@ -108,7 +110,7 @@ NEEDS_SERVICES: dict[str, list] = {
     "studio": ["rojo", "robloxstudio-mcp", "kilo"],
     "blender": ["blender-mcp"],
     "audio": ["Media_Gen"],
-    "images": [("Media_Gen", "comfy-mcp", "foundry-media")],
+    "images": [("Media_Gen", "foundry-media")],
     "gpu": ["local-model"],
     "backend": ["router"],
     "none": [],
@@ -119,11 +121,11 @@ NEEDS_MCP: dict[str, tuple] = {
     "studio": ("Roblox_Studio", "robloxstudio-mcp"),
     "blender": ("blender-mcp",),
     "audio": ("Media_Gen",),
-    "images": ("Media_Gen", "comfy-mcp", "foundry-media"),
+    "images": ("Media_Gen", "foundry-media"),
 }
 # every server some need controls (an unlisted server is left as the source has it)
 # servers Media_Gen replaced (2026-10-27): no need enables them, a track always has them off
-LEGACY_MCP = ("acestep-music", "stable-audio", "kokoro-tts", "chatterbox-tts")
+LEGACY_MCP = ("acestep-music", "stable-audio", "kokoro-tts", "chatterbox-tts", "comfy-mcp")
 CONTROLLED_MCP = tuple(dict.fromkeys([m for v in NEEDS_MCP.values() for m in v]
                                      + list(LEGACY_MCP)))
 # tool-name prefixes denied for a role when the track lacks the need

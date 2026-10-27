@@ -901,19 +901,31 @@ class HealthConfig(BaseModel):
 
 
 class AudioConfig(BaseModel):
-    """OpenAI audio endpoints (facade/audio_api.py). Speech is made by a TTS
-    MCP server's speech tool (Kokoro / Chatterbox, run by the Foundry Client);
-    the audio comes back as a URL on that server's host, which Foundry fetches
-    and returns. There is no speech-to-text backend: /v1/audio/transcriptions
-    answers 501 until one is configured."""
+    """OpenAI audio endpoints (facade/audio_api.py). Speech is made by an MCP
+    server's speech tool. Since 2026-10-27 that is Media_Gen (TrueNAS), which
+    queues a job: Foundry submits it, waits for `media_check_job` to report it
+    done, then fetches the file from the server's own host and returns it. A
+    server that answers with a URL directly (the retired Kokoro / Chatterbox)
+    still works when configured. There is no speech-to-text backend:
+    /v1/audio/transcriptions answers 501 until one is configured."""
     enabled: bool = True
-    # OpenAI `model` value -> MCP server name.
+    # OpenAI `model` value -> MCP server name. Every old TTS name goes to Media_Gen.
     speech_servers: dict[str, str] = Field(default_factory=lambda: {
-        "kokoro": "kokoro-tts", "chatterbox": "chatterbox-tts"})
+        "media-gen": "Media_Gen", "kokoro": "Media_Gen", "chatterbox": "Media_Gen"})
     # OpenAI's own model names (what clients send by default) -> a key above.
     speech_aliases: dict[str, str] = Field(default_factory=lambda: {
-        "tts-1": "kokoro", "tts-1-hd": "kokoro", "gpt-4o-mini-tts": "kokoro"})
-    default_speech: str = "kokoro"       # used when `model` is empty or unknown
+        "tts-1": "media-gen", "tts-1-hd": "media-gen", "gpt-4o-mini-tts": "media-gen"})
+    default_speech: str = "media-gen"    # used when `model` is empty or unknown
+    # servers whose speech tool queues a job (job_id -> job_check_tool -> file URLs)
+    job_servers: list[str] = Field(default_factory=lambda: ["Media_Gen"])
+    job_check_tool: str = "media_check_job"
+    job_library: str = "personal"        # chat speech is never a game asset
+    job_timeout_seconds: int = 180
+    job_poll_seconds: float = 2.0
+    # a client's `voice` -> a registered Media_Gen voice name, or a description
+    # (anything with a space or comma is a description); others get the default
+    voices: dict[str, str] = Field(default_factory=dict)
+    default_voice_description: str = "warm, clear, friendly adult narrator, natural pace"
     speech_tool: str = "generate_speech"
     default_voice: str = "af_heart"      # Kokoro voice for OpenAI voice names
     max_input_chars: int = 4096          # OpenAI's own limit

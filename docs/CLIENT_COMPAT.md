@@ -84,15 +84,18 @@ show anything there.
 ## 6. Voice, embeddings, Think toggle, pasted images
 
 **Text to speech** (`/v1/audio/speech`, needs the `media` scope on the key).
-Foundry calls the Kokoro or Chatterbox MCP server (run by the Foundry Client)
-and returns the WAV it makes. Note (2026-10-27): those servers are being replaced by
-Media_Gen, whose `generate_speech` is a queued job (job_id, then `media_check_job`); this
-endpoint still maps to kokoro-tts / chatterbox-tts until it gets a Media_Gen adapter.
+Foundry calls Media_Gen's `generate_speech` (TrueNAS, VoxCPM2, `library: personal`),
+waits for the job (`media_check_job`, up to `audio.job_timeout_seconds`, 180), downloads
+the file and returns it: MP3 by default, OGG for `opus`/`ogg`, FLAC for `wav`/`flac`. Every
+old model name (`kokoro`, `chatterbox`, `tts-1`, `tts-1-hd`, `gpt-4o-mini-tts`) goes to
+Media_Gen. The voice is a designed one (`audio.default_voice_description`); map a client's
+voice to a registered Media_Gen voice or a description with `audio.voices`. A short line
+takes about 5-40 s (the GPU queue is shared with other media jobs).
 
 | Client | Setting |
 |---|---|
-| Open WebUI | Admin → Settings → Audio → TTS engine **OpenAI**, API base `http://<router>:11435/v1`, key, model `kokoro` (or `chatterbox`), voice `af_heart` (any Kokoro voice id; OpenAI names like `alloy` become `af_heart`) |
-| AnythingLLM | Settings → Voice & Speech → TTS provider **OpenAI Compatible**, base URL `http://<router>:11435/v1`, key, model `kokoro`, voice `af_heart` |
+| Open WebUI | Admin → Settings → Audio → TTS engine **OpenAI**, API base `http://<router>:11435/v1`, key, model `media-gen` (any old name works), voice any (mapped by `audio.voices`, else the default designed voice) |
+| AnythingLLM | Settings → Voice & Speech → TTS provider **OpenAI Compatible**, base URL `http://<router>:11435/v1`, key, model `media-gen`, voice any |
 
 **Speech to text is not available**: Foundry has no STT backend, and
 `/v1/audio/transcriptions` answers 501 (`no_stt_backend`). Keep the client's
