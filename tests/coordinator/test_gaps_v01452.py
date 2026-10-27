@@ -51,3 +51,21 @@ def test_the_timeout_waits_while_the_lead_is_working(tmp_path):
 def test_the_timeout_applies_without_a_working_lead(tmp_path):
     c, now, did = _setup(tmp_path, "CANCELLED")
     assert DP.sweep(c, force=True) == [did]
+
+
+def test_a_repair_with_nothing_left_to_fix_passes():
+    from foundry_coordinator.adapters.base import FAIL, PASS, UNKNOWN, VerificationResult as V
+    from foundry_coordinator.engine import _nothing_left_to_repair
+    rc = lambda: V("coordinator.repair_changed", FAIL, True, "", "committed nothing", "h")  # noqa: E731
+    ok = V("au.lune", PASS, True, "", "LUNE 1/1 PASS", "h")
+    res = [rc(), ok]
+    _nothing_left_to_repair(res)
+    assert res[0].result == PASS and "nothing left to repair" in res[0].detail
+    for other in (V("au.done_check.SCOPE", FAIL, True, "", "x", "h"),
+                  V("au.lune", UNKNOWN, True, "", "timeout", "h")):
+        res = [rc(), other]
+        _nothing_left_to_repair(res)
+        assert res[0].result == FAIL                 # a real finding remains: still a FAIL
+    res = [rc(), V("coordinator.memory_direct_edit", FAIL, False, "", "advisory", "h")]
+    _nothing_left_to_repair(res)
+    assert res[0].result == PASS                     # advisory rows don't count

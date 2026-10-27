@@ -53,6 +53,24 @@ TRACK_STUDIO_BLOCKER = re.compile(r"studio\.lock|\bstudio\b|\brojo\b|playtest|st
                                   r"\bgate\b[^.\n]{0,40}\b(?:run|lock|studio)", re.I)
 
 
+def _nothing_left_to_repair(results: list) -> None:
+    """`repair_changed` fails a repair session that committed nothing. When every
+    other required check passes at this head, the earlier findings no longer apply
+    (a coordinator fix cleared them, or another sprint's merge did): nothing was
+    left to repair, so it passes. Before 0.145.2 an unparked GF-NAME1 failed on
+    this alone and went straight to "findings repeat" (2026-10-27)."""
+    rc = [r for r in results if r.check == "coordinator.repair_changed" and r.result == FAIL]
+    if not rc:
+        return
+    if any(r.required and r.result in (FAIL, UNKNOWN) and r.check != "coordinator.repair_changed"
+           for r in results):
+        return
+    for r in rc:
+        r.result = PASS
+        r.detail = ("nothing left to repair: every other check passes at this head (the "
+                    "earlier findings no longer apply)")
+
+
 def _prio(item) -> int:
     try:
         return int((item or {}).get("priority") or 0)
@@ -1372,6 +1390,7 @@ class Coordinator:
                         results.append(VerificationResult("coordinator.session_audit", UNKNOWN,
                                                           False, "", f"transcript unavailable: "
                                                           f"{e}", head))
+        _nothing_left_to_repair(results)
         vid = self.store.save_verification(pid, tid, head, "verify", results)
         fails = [r for r in results if r.required and r.result == FAIL]
         unknown = [r for r in results if r.required and r.result == UNKNOWN]
