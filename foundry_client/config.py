@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import copy
 import os
+import re
 import shutil
 import sys
 import tomllib
@@ -150,8 +151,15 @@ def validate(cfg: dict) -> list[str]:
     return errs
 
 
+# git's own config-by-environment names (GIT_CONFIG_COUNT / _KEY_n / _VALUE_n) hold
+# config keys such as core.abbrev, never a secret
+_NOT_SECRET = re.compile(r"^GIT_CONFIG_(COUNT|KEY_\d+|VALUE_\d+)$")
+
+
 def _secretish(name: str) -> bool:
     n = name.upper()
+    if _NOT_SECRET.match(n):
+        return False
     return any(w in n for w in ("PASSWORD", "SECRET", "TOKEN", "_KEY", "APIKEY"))
 
 

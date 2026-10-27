@@ -253,6 +253,12 @@ class ConfigPuller:
             return "rejected"
         rules_changed = role_rules_changed(prev, body["doc"]) or (prev is None)
         prof.__dict__.update(new.__dict__)          # in place: every holder sees it
+        tracks = getattr(self.c, "tracks", None)
+        if tracks is not None and hasattr(tracks, "after_config_apply"):
+            try:
+                tracks.after_config_apply(P, prev, body["doc"])
+            except Exception as e:                                # noqa: BLE001
+                self.log(f"config: {pid}: max_agents restore failed: {e}")
         self.store.register_project(prof.id, prof.name, prof.path, prof.hash, prof.version,
                                     prof.workspace)
         if report["kept_local"] or report["conflicts"]:

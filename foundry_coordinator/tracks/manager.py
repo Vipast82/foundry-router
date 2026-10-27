@@ -89,6 +89,35 @@ class TrackManager:
                 except Exception:                                 # noqa: BLE001
                     pass
 
+    @staticmethod
+    def _doc_max_agents(doc):
+        try:
+            return ((doc or {}).get("settings") or {}).get("automation", {}).get("max_agents")
+        except AttributeError:
+            return None
+
+    def after_config_apply(self, P, prev_doc, new_doc) -> None:
+        """A router revision just replaced P's profile tables (config_pull), which
+        drops a chat/CLI-set max_agents. It comes back unless this revision itself
+        changed max_agents: then the router wins and the stored value is dropped.
+        Before 0.144.3 every re-apply of the same revision reset the cap to 1, and a
+        track sprint waited for a writer slot forever (2026-10-27, GF-NAME1)."""
+        key = f"max_agents:{P.id}"
+        new_v = self._doc_max_agents(new_doc)
+        if new_v is not None and new_v != self._doc_max_agents(prev_doc):
+            if self.store.meta(key):
+                self.store.set_meta(key, "")
+                self.store.event(P.id, "", "max_agents_changed", detail={
+                    "to": new_v, "actor": "router revision", "override": False})
+            return
+        v = self.store.meta(key)
+        if v and v.isdigit():
+            from ..automation import set_live
+            try:
+                set_live(P, "max_agents", max(1, min(MAX_AGENTS_LIMIT, int(v))))
+            except Exception:                                     # noqa: BLE001
+                pass
+
     def max_agents(self) -> int:
         """The live cap: the --max-writers override when given, else the largest
         [automation] max_agents across the projects (1 = today's behaviour)."""

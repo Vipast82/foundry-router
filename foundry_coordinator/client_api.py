@@ -114,6 +114,21 @@ def discover(timeout: float = TIMEOUT) -> Optional[ClientAPI]:
     return ClientAPI(f"http://127.0.0.1:{read_port()}", token, timeout=timeout)
 
 
+def component_serving(name: str, api: Optional[ClientAPI] = None) -> str:
+    """'' unless the client reports `name` running; then its detail line
+    (e.g. "port 34872, AnimalUprising session 7e63a208")."""
+    api = api or discover()
+    if api is None:
+        return ""
+    try:
+        comp = api.component(name)
+    except ClientError:
+        return ""
+    if not comp or comp.get("state") != "running":
+        return ""
+    return str(comp.get("detail") or "running")[:160]
+
+
 def restart_component(name: str, *, force: bool = False, api: Optional[ClientAPI] = None) -> str:
     """Ask the client to restart `name` (rojo, kilo, ...). Returns '' on success,
     else why not (no client, unreachable, the component is not managed)."""

@@ -252,10 +252,19 @@ def repair(c, P, t: dict, sig: str, action: str) -> list[dict]:
                     add("stop_playtest", not why, why or "started")
         if sig in ("rojo", "rojo_stale"):
             from . import client_api
-            why = client_api.restart_component("rojo")
-            add("restart_rojo", not why, why or ("restart requested through the Foundry Client"
-                                                  + ("; the Studio plugin re-syncs the sources on "
-                                                     "reconnect" if sig == "rojo_stale" else "")))
+            serving = client_api.component_serving("rojo")
+            if serving:
+                # a running Rojo is left alone: a restart opens a new session, and the
+                # Studio plugin only reconnects on place open, so it would need a
+                # Connect click by hand (2026-10-27, GF-GATE1 05:24)
+                add("keep_rojo", True, f"Rojo is serving ({serving}); not restarted, a new "
+                                       f"session would need a Connect click in Studio")
+            else:
+                why = client_api.restart_component("rojo")
+                add("restart_rojo", not why, why or (
+                    "restart requested through the Foundry Client"
+                    + ("; the Studio plugin re-syncs the sources on reconnect"
+                       if sig == "rojo_stale" else "")))
     except Exception as e:                                       # noqa: BLE001
         add("repair", False, f"{type(e).__name__}: {e}")
     if out:

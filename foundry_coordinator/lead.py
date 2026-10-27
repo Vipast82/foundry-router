@@ -3518,27 +3518,48 @@ class LeadManager:
         return res
 
     def _withdraw_escalation(self, case: dict, reason: str) -> None:
-        """The case's still-open lead_escalation decision goes with the case:
-        withdrawn coordinator-side (kept for the audit) with an event."""
+        """Every still-open decision the case opened goes with the case: its
+        lead_escalation and the questions that block on the case itself
+        (`lead_case:<id>`, e.g. lead_test_change approvals). Withdrawn
+        coordinator-side (kept for the audit), one event each. Before 0.144.3
+        only the escalation went, and the rest stayed open with nothing behind them."""
+        cid = case["case_id"]
         did = case.get("decision_id") or ""
-        if not did:
-            return
+        tag = f"lead_case:{cid}"
+        gone = []
         try:
             with self.store.tx():
-                n = self.store.q("SELECT 1 FROM decisions WHERE decision_id=? AND status='open' "
-                                 "AND kind=?", (did, DECISION_KIND))
-                if n:
+                rows = []
+                if did:
+                    rows += self.store.q("SELECT decision_id, blocks FROM decisions WHERE "
+                                         "decision_id=? AND status='open' AND kind=?",
+                                         (did, DECISION_KIND))
+                rows += self.store.q("SELECT decision_id, blocks FROM decisions WHERE "
+                                     "project_id=? AND status='open' AND blocks LIKE ?",
+                                     (case["project_id"], f"%{tag}%"))
+                for r in rows:
+                    i = r["decision_id"]
+                    if i in gone:
+                        continue
+                    if i != did:
+                        try:
+                            blocks = json.loads(r.get("blocks") or "[]")
+                        except (TypeError, ValueError):
+                            blocks = []
+                        if tag not in (blocks if isinstance(blocks, list) else []):
+                            continue
                     self.store.x("UPDATE decisions SET status='withdrawn' WHERE decision_id=? "
-                                 "AND status='open' AND kind=?", (did, DECISION_KIND))
+                                 "AND status='open'", (i,))
+                    gone.append(i)
         except Exception:                                        # noqa: BLE001
             return
-        if n:
+        for i in gone:
             self.store.event(case["project_id"], case["task_id"], "decision_withdrawn", detail={
-                "decision_id": did, "by": "lead_manager", "case_id": case["case_id"],
-                "reason": f"lead recovery case {case['case_id']} closed: {reason}"[:500]})
-            self._act(case, "withdraw_decision", result=f"{did} withdrawn",
-                      detail={"decision_id": did, "reason": reason[:300]},
-                      op_key=f"{case['case_id']}:withdraw:{did}")
+                "decision_id": i, "by": "lead_manager", "case_id": cid,
+                "reason": f"lead recovery case {cid} closed: {reason}"[:500]})
+            self._act(case, "withdraw_decision", result=f"{i} withdrawn",
+                      detail={"decision_id": i, "reason": reason[:300]},
+                      op_key=f"{cid}:withdraw:{i}")
 
     # ------------------------------------------------------------------ operator controls
 

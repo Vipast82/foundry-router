@@ -469,3 +469,39 @@ def test_depends_on_drops_master_order_phase_labels(repo):
     assert a.describe(T).deps == ["AS-C16"]
     _write(ws, "docs/progress/D1_PLAN.md", "# D1 — a real sprint that looks like a phase\n")
     assert a.describe(T).deps == ["AS-C16", "D1"]
+
+
+def _scope_row(files):
+    from foundry_coordinator.adapters.base import FAIL, VerificationResult
+    return VerificationResult("au.done_check.SCOPE", FAIL, True, "",
+                              f"9 files changed by {T} commits; outside the plan list: "
+                              + ", ".join(files), "rev")
+
+
+def test_scope_forgives_only_coordinator_memory_commits(repo):
+    """The coordinator's own docs/memory note commits carry the sprint prefix, so
+    done_check's SCOPE counted them (GF-GATE1, 2026-10-27). Those alone pass; a
+    sprint commit of its own in docs/memory, or any other file, still fails."""
+    from foundry_coordinator.adapters.base import FAIL, PASS
+    ws, a = repo["ws"], repo["a"]
+    spec = a.describe(T)
+    _write(ws, "docs/memory/CONVENTIONS.md", "# conventions\n- a note\n")
+    git(ws, "add", "-A")
+    git(ws, "commit", "-q", "--no-verify", "-m", f"{T}: memory notes from session ses_x: "
+        "CONVENTIONS.md", "-m", "Coordinator memory commit (docs/memory). Scope override "
+        "AU_ALLOW_SCOPE set to exactly these paths by the coordinator.")
+    row = _scope_row(["docs/memory/CONVENTIONS.md"])
+    assert a._forgive_memory_scope(spec, [row]) and row.result == PASS
+    row = _scope_row(["docs/memory/CONVENTIONS.md", "src/server/Other.lua"])
+    assert not a._forgive_memory_scope(spec, [row]) and row.result == FAIL
+    _write(ws, "docs/memory/KNOWN_ISSUES.md", "# issues\n- by the session itself\n")
+    _commit(ws, f"{T}: session edits memory directly")
+    row = _scope_row(["docs/memory/CONVENTIONS.md", "docs/memory/KNOWN_ISSUES.md"])
+    assert not a._forgive_memory_scope(spec, [row]) and row.result == FAIL
+
+
+def test_memory_commit_mark_matches_the_memory_manager():
+    import inspect
+    from foundry_coordinator.memory import manager
+    from foundry_coordinator.projects.animaluprising import adapter
+    assert adapter._MEMORY_COMMIT_MARK in inspect.getsource(manager.MemoryManager.commit)

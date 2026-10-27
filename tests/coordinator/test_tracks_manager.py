@@ -126,7 +126,9 @@ def test_max_agents_one_keeps_a_track_sprint_waiting_and_a_live_change_lets_it_r
         c.tick()
     b1 = c.store.task("game", "B1")
     assert b1["state"] == S.READY and "writer slot" in (b1["next_action"] or "")
-    assert "max_agents 1" in b1["next_action"]
+    # 0.144.3: the note names the live cap and, with no slot held, why a track waits
+    assert ("max_agents 1" in b1["next_action"]
+            or "a track needs max_agents 2 or more (now 1" in b1["next_action"])
     assert c.store.task("game", "T1")["state"] not in (S.QUEUED, S.READY)   # main went first
     # the chat raises the cap live: no restart, no profile reload
     assert c.tracks.set_max_agents(P, 2, "victor") == 2

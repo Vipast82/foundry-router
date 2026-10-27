@@ -330,7 +330,21 @@ def _hb_health(state: str) -> tuple[bool, str]:
     pid = _heartbeat_raw_pid(state)
     if pid and not pid_alive(pid):
         return False, f"heartbeat {int(age)} s ago, but its process (pid {pid}) has ended"
-    return age < 90, f"heartbeat {int(age)} s ago"
+    busy = _heartbeat_busy(state)
+    return age < 90, f"heartbeat {int(age)} s ago" + (f"; busy: {busy}" if busy else "")
+
+
+def _heartbeat_busy(state_dir: str) -> str:
+    """The long step the coordinator's keep-alive beat names ("verify au/GF-GATE1, 4 min")."""
+    p = Path(expand(state_dir)) / "coordinator.heartbeat"
+    try:
+        hb = json.loads(p.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return ""
+    if not isinstance(hb, dict) or not hb.get("busy"):
+        return ""
+    mins = int(hb.get("busy_s") or 0) // 60
+    return f"{str(hb['busy'])[:80]}, {mins} min"
 
 
 def _heartbeat_raw_pid(state_dir: str) -> Optional[int]:

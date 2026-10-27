@@ -41,6 +41,7 @@ import argparse
 import json
 import os
 import sys
+import threading
 import time
 
 from . import states as S
@@ -93,9 +94,56 @@ class _ProcessFiles:
                 self._write(self.pid_path, str(os.getpid()))
         else:
             self._write(self.pid_path, str(os.getpid()))
+        # a first heartbeat before the first tick: a coordinator whose first tick
+        # is a long verify must not look dead (an older pid's stale heartbeat would
+        # be all the client sees, and it would start a second coordinator)
+        self._last_beat: dict = {}
+        self._hb_lock = threading.Lock()
+        self._beat({"ok": True, "errors": [], "lead_ready": None, "lead_detail": "",
+                    "starting": True})
+        self._stop_keepalive = threading.Event()
+        self._keepalive = threading.Thread(target=self._keepalive_loop, daemon=True,
+                                           name="coordinator-keepalive")
+        self._keepalive.start()
+
+    KEEPALIVE_S = 15
+
+    def _beat(self, fields: dict) -> None:
+        from . import __version__
+        try:
+            from foundry_router import __version__ as release
+        except Exception:                                        # noqa: BLE001
+            release = ""
+        doc = {"pid": os.getpid(), "ts": time.time(), "release": release,
+               "version": __version__, **fields}
+        with self._hb_lock:
+            self._last_beat = dict(fields)
+            try:
+                self._write(self.hb_path, json.dumps(doc))
+            except OSError:
+                pass                     # a reader holds the file (Windows): the next beat
+
+    def _keepalive_loop(self) -> None:
+        """Refresh the heartbeat while the engine is inside a declared long step
+        (keepalive.busy); silent otherwise, so a hung tick still goes stale."""
+        from . import keepalive
+        while not self._stop_keepalive.wait(self.KEEPALIVE_S):
+            self.keepalive_once(keepalive.current())
+
+    def keepalive_once(self, step) -> bool:
+        """One keep-alive beat for `step` ({label, elapsed_s} or None)."""
+        if step is None:
+            return False
+        with self._hb_lock:
+            fields = dict(self._last_beat)
+        fields.pop("starting", None)
+        fields["busy"] = step["label"]
+        fields["busy_s"] = step["elapsed_s"]
+        self._beat(fields)
+        return True
 
     def _write(self, path: str, text: str) -> None:
-        tmp = path + ".tmp"
+        tmp = f"{path}.{threading.get_ident()}.tmp"
         with open(tmp, "w", encoding="utf-8") as f:
             f.write(text)
         os.replace(tmp, path)
@@ -225,19 +273,13 @@ class _ProcessFiles:
             ok = False
             problems.append(f"{errs} engine error event(s) since the last heartbeat")
         self._last_ts = time.time()
-        from . import __version__
-        try:
-            from foundry_router import __version__ as release
-        except Exception:                                        # noqa: BLE001
-            release = ""
-        self._write(self.hb_path, json.dumps({
-            "pid": os.getpid(), "ts": time.time(), "ok": ok, "errors": problems,
-            "release": release, "version": __version__, "lead_ready": lead_ready,
-            "lead_detail": detail}))
+        self._beat({"ok": ok, "errors": problems, "lead_ready": lead_ready,
+                    "lead_detail": detail})
         if self._stop_requested():
             raise _StopRequested()
 
     def close(self) -> None:
+        self._stop_keepalive.set()
         for p in (self.pid_path,):
             try:
                 if not os.path.exists(p):

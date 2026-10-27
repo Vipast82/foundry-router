@@ -751,3 +751,22 @@ def test_source_install_runs_children_from_the_console_python(tmp_path, monkeypa
     assert C.console_python(str(tmp_path / "python.exe")) == str(tmp_path / "python.exe")
     monkeypatch.setattr(C.sys, "platform", "linux")
     assert C.console_python(str(w)) == str(w)
+
+
+def test_git_config_env_names_are_not_secrets():
+    """GIT_CONFIG_KEY_0 = "core.abbrev" (the AU gate) tripped the "_KEY" check and
+    every settings save failed with 400 (2026-10-27)."""
+    for n in ("GIT_CONFIG_COUNT", "GIT_CONFIG_KEY_0", "GIT_CONFIG_VALUE_12",
+              "GIT_CONFIG_PARAMETERS"):
+        assert not config._secretish(n), n
+    for n in ("OPENAI_API_KEY", "MY_TOKEN", "GIT_CONFIG_KEY", "DB_PASSWORD"):
+        assert config._secretish(n), n
+
+
+def test_heartbeat_health_names_the_long_step(tmp_path, monkeypatch):
+    import time as _t
+    monkeypatch.setattr(C, "pid_alive", lambda pid: True)
+    (tmp_path / "coordinator.heartbeat").write_text(json.dumps(
+        {"pid": 1, "ts": _t.time(), "busy": "verify game/T1", "busy_s": 300}), encoding="utf-8")
+    ok, why = C._hb_health(str(tmp_path))
+    assert ok and "busy: verify game/T1, 5 min" in why

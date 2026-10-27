@@ -19,6 +19,7 @@ import time
 import uuid
 from typing import Callable, Optional
 
+from . import keepalive
 from . import review as R
 from . import states as S
 from . import training_hook
@@ -44,6 +45,10 @@ ROUTE_RETRY_S = 300
 
 
 class Coordinator:
+    # ceiling of the heartbeat cover over one verify / closeout check run
+    # (keepalive.busy); past it a stuck check lets the heartbeat go stale
+    VERIFY_COVER_S = 3600
+
     def __init__(self, store: Store, projects: list[Project], state_dir: str,
                  max_writers: Optional[int] = None, clock: Callable[[], float] = time.time,
                  log: Callable[[str], None] = lambda m: None, playbook_path: str = ""):
@@ -1321,11 +1326,15 @@ class Coordinator:
         elif self.tracks.is_track(P):
             # a track sprint: the project's Studio-free checks in its worktree; the
             # Studio gate runs at merge time in the main checkout (tracks/merge.py)
-            results += self.tracks.verify_track(P, spec, head,
-                                                t["data"].get("task_base") or t["base_sha"])
+            with keepalive.busy(f"verify {pid}/{tid} (track checks)", self.VERIFY_COVER_S):
+                results += self.tracks.verify_track(P, spec, head,
+                                                    t["data"].get("task_base") or t["base_sha"])
         else:
-            results += P.adapter.verify(spec, "verify", head,
-                                        t["data"].get("task_base") or t["base_sha"])
+            # project test suites can hold this tick for many minutes: keep the
+            # heartbeat covered so the client does not restart a busy coordinator
+            with keepalive.busy(f"verify {pid}/{tid}", self.VERIFY_COVER_S):
+                results += P.adapter.verify(spec, "verify", head,
+                                            t["data"].get("task_base") or t["base_sha"])
             for sess in self.store.sessions(pid, tid):
                 if sess["run_id"] == t["run_id"] and sess["role"] == "implementer":
                     try:
@@ -2215,7 +2224,8 @@ class Coordinator:
                                          data={**t["data"], "closeout_session": None,
                                                "closeout_done": None})
         results = self._generic_checks(P, t, spec, head, phase="closeout")
-        results += P.adapter.verify(spec, "closeout", head, t["reviewed_sha"])
+        with keepalive.busy(f"closeout checks {pid}/{tid}", self.VERIFY_COVER_S):
+            results += P.adapter.verify(spec, "closeout", head, t["reviewed_sha"])
         # a templated closeout has no session to push: the coordinator pushes (B7)
         published = self._publish(P, t, head, results, push=templated)
         cid = self.store.save_verification(pid, tid, head, "closeout", results)
@@ -5562,9 +5572,15 @@ class Coordinator:
                     return None
             self.store.release(pid, tid, [r for r in resources if r not in before])
             busy = [l for l in self.store.locks() if l["resource"].startswith("writer:")]
-            self._note(P, t, "waiting for a writer slot (held by "
-                             + ", ".join(f"{l['project_id']}/{l['task_id']}" for l in busy)
-                             + f"; max_agents {self.max_writers})")
+            cap = self.tracks.max_agents()      # the live cap, not the static --max-writers
+            if not busy and self.tracks.is_track(P) and cap < 2:
+                self._note(P, t, f"waiting for a writer slot: a track needs max_agents 2 or "
+                                 f"more (now {cap}; the main checkout counts first)")
+            else:
+                self._note(P, t, "waiting for a writer slot (held by "
+                                 + (", ".join(f"{l['project_id']}/{l['task_id']}" for l in busy)
+                                    or "no one")
+                                 + f"; max_agents {cap})")
             return {"resource": "writer"}
         self._journal_locks(P, t, [r for r in resources if r not in before], "acquire")
         return None

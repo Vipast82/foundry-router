@@ -2,6 +2,44 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.144.3 — automation runs unattended through long verifies, stale questions and Rojo
+
+Seven places where the AU test sprint (2026-10-27) stopped and waited for Victor:
+
+- **Long verify, restart loop.** A verify runs the project's suites inside one tick (AU:
+  Lune twice, minutes each) and wrote no heartbeat meanwhile, so the Foundry Client took
+  the busy coordinator for hung and restarted it every ~6.5 min, killing the verify each
+  time. Verify and closeout checks now run under `keepalive.busy` (ceiling 1 h): a
+  background thread refreshes the heartbeat and names the step ("busy: verify …" in the
+  client). A tick that hangs outside a declared step still goes stale and is restarted.
+- **First heartbeat at start.** A new coordinator beats before its first tick, so the
+  client never sees only a dead pid's heartbeat and starts a second coordinator.
+- **Closed lead case left its questions open.** Closing or cancelling a case withdrew
+  only its escalation; its `lead_test_change` approvals (anything blocking on
+  `lead_case:<id>`) stayed open with nothing behind them. All go with the case now.
+- **Separate questions were "contradictions".** Answering a newer question of the same
+  kind on a task raised DecisionConflict, so neither the lead nor the timeout default
+  could answer it. `lead_test_change` approvals now accumulate and a newer
+  `implementer_blocked` answer supersedes the older one; state-like kinds (budgets,
+  escalations) keep the guard.
+- **Coordinator memory commits failed AU SCOPE.** The coordinator's own `docs/memory`
+  note commits carry the sprint prefix, and done_check's SCOPE counted them. When those
+  are the only out-of-scope files, SCOPE (and the closeout verdict, if it was the only
+  FAIL) passes.
+- **max_agents fell back to 1.** Re-applying the same router revision replaced the
+  profile tables and dropped a chat/CLI-set `max_agents`, so a track sprint waited for
+  a writer slot forever. The stored value is restored after every apply unless the
+  revision itself changes `max_agents`. The writer-slot note now shows the live cap and
+  says when a track needs `max_agents` 2 or more.
+- **Auto-heal restarted a running Rojo.** A new Rojo session needs a Connect click in
+  Studio (the plugin reconnects only on place open). A serving Rojo is now left alone;
+  only a Rojo that is down is restarted.
+
+Foundry Client: `GIT_CONFIG_COUNT` / `GIT_CONFIG_KEY_n` / `GIT_CONFIG_VALUE_n` are no
+longer flagged as secrets (every settings save failed with them set).
+
+Coordinator restart needed; full client restart for the client part.
+
 ## v0.144.2 — coordinator: phase labels are not sprint dependencies; no flashing windows
 
 A plan whose `Depends on:` line named a MASTER_ORDER phase ("the A0 entry gate",

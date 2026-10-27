@@ -146,6 +146,18 @@ class DecisionConflict(ValueError):
     """An answer contradicts an active answered decision; supersede it instead."""
 
 
+# Kinds whose decisions are separate questions, not one setting answered twice.
+# The contradiction guard (same kind + shared blocker + different answer) is
+# meant for state such as an attempt budget ("extend by 2" vs "extend by 4").
+# Applied to these kinds it refused every newer question on the task, so the
+# lead and the timeout default could never answer it (2026-10-27, GF-GATE1 /
+# GF-NAME1). A different question (qhash) is never a contradiction here:
+#   accumulate: each approves its own subject (one test file); all stay active
+#   newest_wins: each describes the situation now; the newer answer supersedes
+ACCUMULATING_KINDS = frozenset({"lead_test_change"})
+NEWEST_WINS_KINDS = frozenset({"implementer_blocked"})
+
+
 class PhaseLocked(ValueError):
     """An obligation's phase can only change through an answered obligation_phase decision."""
 
@@ -996,11 +1008,18 @@ class Obligations:
                                   f"superseding decision instead")
         # A contradicting active answer must be superseded explicitly.
         blocks = set(d["blocks"])
+        replaced = []
         for other in self.active_decisions(d["project_id"], d["task_id"]):
             if other["decision_id"] == decision_id or other["status"] != "answered" or \
                     other["kind"] != d["kind"] or other["decision_id"] == d.get("supersedes"):
                 continue
             if (blocks & set(other["blocks"])) and _j(other["answer"]) != _j(answer):
+                other_q = other.get("qhash")
+                if d["kind"] in ACCUMULATING_KINDS and other_q != d.get("qhash"):
+                    continue
+                if d["kind"] in NEWEST_WINS_KINDS and other_q != d.get("qhash"):
+                    replaced.append(other["decision_id"])
+                    continue
                 raise DecisionConflict(
                     f"{decision_id} contradicts answered {other['decision_id']}; open a "
                     f"decision with supersedes={other['decision_id']}")
@@ -1011,6 +1030,8 @@ class Obligations:
             if d.get("supersedes"):
                 self._mark_superseded(d["supersedes"], decision_id, d["project_id"],
                                       d["task_id"])
+            for old in replaced:
+                self._mark_superseded(old, decision_id, d["project_id"], d["task_id"])
         return self.decision(decision_id)
 
     def _mark_superseded(self, old_id, new_id, project, task):

@@ -47,6 +47,8 @@ AMENDMENT_MARKER = "COORDINATOR-ADVANCEMENT"
 VERIFY_ROWS = ("COMMITS", "CLEAN", "SCOPE", "TEST", "GATE", "BOOT", "EVIDENCE", "TIER-C")
 CLOSEOUT_ROWS = VERIFY_ROWS + ("PLAN", "SUMMARY", "PATHS", "API", "STATE")
 _ROW = re.compile(r"^(PASS|FAIL|NOTE)\s+(\S+)\s+(.*)$")
+# the body line memory/manager.py writes into every coordinator memory commit
+_MEMORY_COMMIT_MARK = "Coordinator memory commit (docs/memory)"
 
 
 class AnimalUprisingAdapter(GenericAdapter):
@@ -602,15 +604,55 @@ Change no code or test file in this session; if one needs changing, stop and rep
             seen.add(name)
             res.append(VerificationResult(key, m.group(1), True, log, m.group(3), revision,
                                           duration_ms=int((time.time() - t0) * 1000)))
+        forgiven = self._forgive_memory_scope(spec, res)
         if phase == "closeout":
             final = re.search(r"^DONE-CHECK %s (PASS|FAIL)" % re.escape(spec.task_id), text, re.M)
-            res.append(VerificationResult("au.done_check", final.group(1) if final else UNKNOWN,
-                                          True, log, (final.group(0) if final else
-                                                      "no DONE-CHECK verdict line"), revision))
+            verdict = final.group(1) if final else UNKNOWN
+            detail = final.group(0) if final else "no DONE-CHECK verdict line"
+            fails = [m.group(2) for m in (_ROW.match(x.strip()) for x in text.splitlines())
+                     if m and m.group(1) == "FAIL"]
+            if verdict == FAIL and forgiven and fails and set(fails) == {"SCOPE"}:
+                verdict, detail = PASS, detail + " (only SCOPE, from coordinator memory commits)"
+            res.append(VerificationResult("au.done_check", verdict, True, log, detail, revision))
         if not res:
             res.append(VerificationResult("au.done_check", UNKNOWN, True, log,
                                           "done_check printed no rows: " + text[-300:], revision))
         return res
+
+    def _forgive_memory_scope(self, spec: TaskSpec, res: list) -> bool:
+        """done_check's SCOPE counts every '<ID>: ...' commit, the coordinator's
+        own docs/memory note commits included, and no plan lists docs/memory. A
+        SCOPE FAIL whose out-of-scope files are all docs/memory files touched
+        only by coordinator memory commits becomes a PASS. True when it did."""
+        row = next((x for x in res if x.check == "au.done_check.SCOPE"), None)
+        if row is None or row.result != FAIL:
+            return False
+        m = re.search(r"outside the plan list: (.+)$", row.detail or "", re.M)
+        if not m:
+            return False
+        files = [f.strip() for f in m.group(1).split(",") if f.strip()]
+        # done_check lists at most 6: a full list may hide files past the 6th
+        if not files or len(files) >= 6 or not all(f.startswith("docs/memory/") for f in files):
+            return False
+        try:
+            log = self._ws().run("log", "-n", "400", "--format=%H%x1f%s%x1f%b%x1e", "--",
+                                 *files, check=False)
+        except Exception:                                         # noqa: BLE001
+            return False
+        sid = spec.task_id
+        for rec in log.split("\x1e"):
+            parts = rec.strip("\n").split("\x1f")
+            if len(parts) < 3:
+                continue
+            subj, body = parts[1], parts[2]
+            if not (subj.startswith(sid + ":") or subj.startswith(sid + " ")):
+                continue
+            if _MEMORY_COMMIT_MARK not in body:
+                return False             # a sprint commit of its own touched docs/memory
+        row.result = PASS
+        row.detail += ("\nPASS by the coordinator: the only out-of-scope files are docs/memory "
+                       "notes the coordinator committed itself")
+        return True
 
     def _gate_binding(self, spec: TaskSpec, revision: str, ws=None) -> VerificationResult:
         """The last gate verdict must be PASS and the gate must have run at the
