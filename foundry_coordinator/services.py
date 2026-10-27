@@ -323,21 +323,30 @@ def track_kilo_config(track, *, profile=None, role_rules: Optional[dict] = None,
 
 # --------------------------------------------------------------------------- 2D assets
 
+# 2026-10-27 (Victor): 2D images come from ChatGPT first (the foundry-media tools and the
+# foundry-images skill), with Media_Gen's image tools as the fallback, and only after the
+# owner's answer. The three options of the 2D decision:
+IMG_GENERATE = "Generate them: ChatGPT first (foundry-media), Media_Gen fallback"
+IMG_PROVIDE = "I will provide the 2D assets myself"
+IMG_HOLD = "Hold this sprint"
+IMG_OPTIONS = [IMG_GENERATE, IMG_PROVIDE, IMG_HOLD]
+# the v0.148-v0.150 options, still read from decisions opened before this change
 IMG_CHATGPT = "I will provide the 2D assets (ChatGPT); run it without Media_Gen image tools"
 IMG_MEDIA_GEN = "Use Media_Gen's image tools for the 2D assets"
-IMG_HOLD = "Hold this sprint"
-IMG_OPTIONS = [IMG_CHATGPT, IMG_MEDIA_GEN, IMG_HOLD]
+IMG_OPTIONS_V148 = [IMG_CHATGPT, IMG_MEDIA_GEN, IMG_HOLD]
+_CHOICE = {IMG_GENERATE: "generate", IMG_PROVIDE: "provide",
+           IMG_CHATGPT: "provide", IMG_MEDIA_GEN: "generate"}
 
 
 def images_decision(c, pid: str, tid: str):
     """The newest open or answered 2D-asset decision of the task, or None."""
     rows = [d for d in c.obligations.active_decisions(pid, tid, "approval")
-            if list(d.get("options") or []) == IMG_OPTIONS]
+            if list(d.get("options") or []) in (IMG_OPTIONS, IMG_OPTIONS_V148)]
     return rows[-1] if rows else None
 
 
 def images_choice(c, pid: str, tid: str) -> str:
-    """'chatgpt' | 'media_gen' | 'hold' (answered) | 'open' | '' (never asked)."""
+    """'generate' | 'provide' | 'hold' (answered) | 'open' | '' (never asked)."""
     d = images_decision(c, pid, tid)
     if d is None:
         return ""
@@ -347,8 +356,8 @@ def images_choice(c, pid: str, tid: str) -> str:
     ans = d.get("answer")
     if isinstance(ans, dict):
         ans = ans.get("option") or ans.get("choice") or ""
-    pick = match_option(IMG_OPTIONS, ans)
-    return {IMG_CHATGPT: "chatgpt", IMG_MEDIA_GEN: "media_gen"}.get(pick, "hold")
+    pick = match_option(list(d.get("options") or IMG_OPTIONS), ans)
+    return _CHOICE.get(pick, "hold")
 
 
 def images_mode(P) -> str:
@@ -360,17 +369,31 @@ def images_mode(P) -> str:
     return mode if mode in ("ask", "allow", "deny") else "ask"
 
 
+def images_allowed(c, P, t: dict, needs: list) -> bool:
+    """May this sprint's session generate 2D images (foundry-media first, Media_Gen's image
+    tools as the fallback)? Only a sprint that needs `images`, and only when
+    [automation] media_gen_images is 'allow' or the owner answered "Generate them"."""
+    if "images" not in needs:
+        return False
+    mode = images_mode(P)
+    if mode == "allow":
+        return True
+    if mode == "deny":
+        return False
+    return images_choice(c, P.id, t["task_id"]) == "generate"
+
+
 def images_hold(c, P, t: dict, needs: list) -> bool:
     """2026-10-27 (Victor): "if there is anything that needs 2D assets, let me know
-    first" (they come from ChatGPT for now). A sprint that needs `images` waits on an
-    operator decision unless [automation] media_gen_images is 'allow' or 'deny'. The
-    answer lives in the decision itself (task data can be rewritten by a transition);
-    "Hold" keeps the sprint waiting. True = do not start it now."""
+    first". A sprint that needs `images` waits on an operator decision unless
+    [automation] media_gen_images is 'allow' or 'deny'. The answer lives in the
+    decision itself (task data can be rewritten by a transition); "Hold" keeps the
+    sprint waiting. True = do not start it now."""
     if "images" not in needs or images_mode(P) != "ask":
         return False
     tid = t["task_id"]
     choice = images_choice(c, P.id, tid)
-    if choice in ("chatgpt", "media_gen"):
+    if choice in ("generate", "provide"):
         return False
     d = images_decision(c, P.id, tid)
     if choice == "hold":
@@ -379,15 +402,33 @@ def images_hold(c, P, t: dict, needs: list) -> bool:
         return True
     if d is None:
         q = (f"{tid} needs 2D image assets (icons, textures, decals, portraits or UI art). "
-             f"They come from you (ChatGPT) for now: provide them, let Media_Gen make them, "
-             f"or hold the sprint?")
+             f"Generate them (ChatGPT first through foundry-media, Media_Gen's image tools as "
+             f"the fallback), provide them yourself, or hold the sprint?")
         did = c.obligations.open_decision(P.id, tid, "approval", q, evidence={"needs": needs},
-                                          options=list(IMG_OPTIONS), recommendation=IMG_CHATGPT,
+                                          options=list(IMG_OPTIONS), recommendation=IMG_GENERATE,
                                           blocks=[tid])
         c.store.event(P.id, tid, "operator_notice", detail={
             "text": f"{tid} needs 2D image assets and waits for your answer (decision {did}): "
-                    f"provide them (ChatGPT), use Media_Gen, or hold.", "decision_id": did})
+                    f"generate them (ChatGPT first, Media_Gen fallback), provide them yourself, "
+                    f"or hold.", "decision_id": did})
     else:
         did = d["decision_id"]
     c._note(P, t, f"waiting for the operator: 2D image assets (decision {did})")
     return True
+
+
+def images_brief(c, P, t: dict, needs: list) -> str:
+    """The BUILD prompt's 2D paragraph for a sprint that needs `images` ('' otherwise)."""
+    if "images" not in needs:
+        return ""
+    if images_allowed(c, P, t, needs):
+        return ("\n## 2D images\nThe owner allowed image generation for this sprint. Use the "
+                "`foundry-images` skill (the foundry-media tools: ChatGPT images) first; use "
+                "Media_Gen's image tools only when foundry-media refuses or fails. Check a "
+                "running job once per completed step (never a polling loop), and never call "
+                "generate_image / edit_image twice for the same request. Generated images are "
+                "unapproved: stage them, list them in your report, and wire in only what the "
+                "plan says.\n")
+    return ("\n## 2D images\nThe owner provides this sprint's 2D assets: do not generate images "
+            "(the image tools are off). Use the files the plan or the owner names; if one is "
+            "missing, report BLOCKED `user_action` naming the exact file.\n")

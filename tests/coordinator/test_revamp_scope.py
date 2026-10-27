@@ -214,7 +214,8 @@ def test_a_denied_request_is_told_once_then_the_stop_is_ordinary(tmp_path):
     c.obligations.answer(d["decision_id"], "deny: keep the file list", "victor", "operator",
                          channel="control")
     assert run_until(c, lambda: c.store.task("game", "T1")["state"] == S.BLOCKED, 30)
-    assert sum("scope request(s) were denied" in p for p in prompts) == 1
+    told = [p for p in prompts if "Answer to your scope request(s): NOT granted" in p]
+    assert len(told) == 1 and "denied by victor" in told[0]   # told once, with the reason
 
 
 def test_the_au_plan_file_list_gets_the_grant_line(tmp_path):

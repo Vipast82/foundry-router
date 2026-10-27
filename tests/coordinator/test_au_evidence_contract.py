@@ -27,9 +27,12 @@ def test_recovery_policy_uses_current_vision_and_input_authority(repo):
     policy = a.recovery_policy("UI-02")
     assert "frontier vision reviewer gives final visual approval" in policy
     assert "do not request Victor's visual approval" in policy
-    assert "actual mouse, touch and controller operator flows are required in UI-GT1" in policy
-    assert "not in this sprint" in policy
-    assert "never count them as physical-input proof or ask Victor" in policy
+    # 2026-10-27 rules streamline: no dead sprint ids (UI-GT1 / UI-0x were cancelled) and
+    # no "use the enabled vision helper" step (helpers run on demand)
+    assert "attempt the available Roblox Studio input tools first" in policy
+    assert "user_action" in policy
+    for dead in ("UI-GT1", "UI-06", "vision helper", "OBSERVATION"):
+        assert dead not in policy, dead
 
 
 def _view(tool, inp, output, *, status="completed", started=None, ended=None, part="p1",

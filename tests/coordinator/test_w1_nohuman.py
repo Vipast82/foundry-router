@@ -98,14 +98,16 @@ def test_blocked_report_with_the_models_own_recommendation(tmp_path):
 
     def agent(ctx):
         return {"final": report("BLOCKED", blocker="x", options=["a", "b"], recommended="b",
-                                blocker_kind="tooling")}
+                                blocker_kind="product")}
     root, _ = make_repo(tmp_path, "game", [T1])
     prof = write_profile(tmp_path, "game", root, extra=LC)
     c = coordinator(tmp_path, [prof], {"game": agent}, clock=clock)
     c.approve("game", "T1", [], "victor")
     assert run_until(c, lambda: _state(c) == S.BLOCKED, limit=12)
     [d] = _decisions(c, "T1", "implementer_blocked")
-    assert json.loads(d["recommended"]) == "b" and d["evidence"]["blocker_kind"] == "tooling"
+    assert json.loads(d["recommended"]) == "b" and d["evidence"]["blocker_kind"] == "product"
+    # (2026-10-27 one stop protocol: a `tooling` blocker never becomes a decision, even
+    # with options; it goes to auto-heal / the lead: test_rules_streamline.py)
 
 
 def test_blocked_report_without_options_or_with_an_infra_signature_takes_the_old_path(tmp_path):

@@ -15,8 +15,10 @@ Verification  tools/guard/done_check.py (run, rows parsed), the gate verdict in
               Lune inputs are unchanged: lune_cache.py), and the Kilo session audit
               (kilo_checkpoint.py) as advisory evidence.
 Sessions      BUILD session(s) implement + run the gate; a CLOSE session writes
-              the summary/STATE rows, runs done_check and the one plain
-              `git push origin master` (AGENT_RULES §9, §24, §34 BUILD/CLOSE).
+              the summary/STATE rows and runs done_check (AGENT_RULES §9, §34
+              BUILD/CLOSE). No session pushes: the coordinator pushes master after
+              the closeout checks (2026-10-27, `[publish] mode = "push"`; the old
+              `verify_only` reads the same), and a track never pushes.
 Approval      tier-B / visual sprints require revision-bound evidence image
               approval; the configured vision reviewer may provide it.
 
@@ -55,6 +57,10 @@ _ROW = re.compile(r"^(PASS|FAIL|NOTE)\s+(\S+)\s+(.*)$")
 
 
 class AnimalUprisingAdapter(GenericAdapter):
+    # the BUILD / repair / CLOSE prompts carry the track notice themselves (2026-10-27):
+    # the engine does not append its generic TRACK_BRIEF
+    TRACK_AWARE = True
+
     def __init__(self, profile, state_dir):
         super().__init__(profile, state_dir)
         self.cfg = dict(profile.raw.get("animaluprising") or {})
@@ -182,26 +188,21 @@ class AnimalUprisingAdapter(GenericAdapter):
         return (self.p.raw.get("approval") or {}).get("visual_model") is True
 
     def recovery_policy(self, task_id: str) -> str:
-        """Current operator policy for recovery agents; historical plan notes may lag it."""
+        """Current operator policy for recovery agents; historical plan notes may lag it.
+        2026-10-27 rules streamline: no dead sprint ids (UI-01..06 / UI-GT1 were
+        cancelled 2026-10-20) and no vision-helper step (helpers run on demand; the
+        coordinator's own vision reviewer checks every committed capture)."""
         visual = ("The coordinator's frontier vision reviewer gives final visual approval "
                   "for committed, current-revision captures; do not request Victor's visual "
                   "approval." if self._model_visual_approval() else
                   "Final visual approval still requires the configured approver.")
-        physical = ("For UI-01 through UI-06, actual mouse, touch and controller operator "
-                    "flows are required in UI-GT1 after UI-06, not in this sprint. Use named "
-                    "ButtonActions clicks for functional handler checks here; never count them "
-                    "as physical-input proof or ask Victor to perform the deferred flows now. "
-                    if task_id in {f"UI-0{i}" for i in range(1, 7)} else
-                    "For UI-GT1 and other tasks with physical-input acceptance, attempt the "
-                    "available Roblox Studio input tools in each required mode and record the "
-                    "result. Escalate to Victor only the exact mode or action the tools cannot "
-                    "perform, with attempted tools and evidence. ")
-        return (f"Current policy for {task_id}: {visual} The primary must first use the "
-                "enabled vision helper to inspect each actual capture and record its "
-                f"OBSERVATION. {physical}Older plan NEXT/NEEDS_HUMAN lines are "
-                "historical evidence, not authority to bypass these attempts. Never waive "
-                "a check or change a baseline without observed raw runs and a recorded "
-                "scope/test decision.")
+        return (f"Current policy for {task_id}: {visual} For physical-input acceptance, "
+                "attempt the available Roblox Studio input tools first and record the result; "
+                "escalate only the exact action the tools cannot perform (BLOCKED "
+                "user_action, with the attempted tools and evidence). Older plan NEXT lines "
+                "and NEEDS_HUMAN notes are historical evidence, not authority to skip these "
+                "attempts. Never waive a check or change a baseline without observed raw runs "
+                "and a recorded scope/test decision.")
 
     def _parse_plan(self, task_id: str, rel: str, plan: str) -> TaskSpec:
         """The plan text -> TaskSpec (done_check.py's own scope/tier parsing)."""
@@ -322,10 +323,45 @@ class AnimalUprisingAdapter(GenericAdapter):
 
     # -- prompts ---------------------------------------------------------------------
 
+    # 2026-10-27 rules streamline: the session core is one Kilo-native file in the AU
+    # repo; AGENT_RULES.md is reference, read by section (never "applies in full")
+    SESSION_CORE = "docs/rules/SESSION_CORE.md"
+    # done_check rows only a Studio gate can satisfy, skipped by the AU tool itself
+    # (`--skip-rows`); the adapter's own run passes the same flag (see _done_check)
+    SKIP_ROWS_FLAG = "--skip-rows"
+
+    def _track(self) -> str:
+        """The parallel track this adapter's workspace belongs to ('' = the main checkout)."""
+        return str(getattr(self.p, "__dict__", {}).get("track") or "")
+
+    def _done_check_cmd(self, task_id: str, skip: tuple = ()) -> str:
+        flag = f" {self.SKIP_ROWS_FLAG} {','.join(skip)}" if skip else ""
+        return f"py -3 tools\\guard\\done_check.py {task_id}{flag}"
+
+    def _prework_on(self, task_id: str) -> bool:
+        """The prework lane writes notes and drafts only when it runs; under
+        `helpers = "on_demand"` (the default) it never does."""
+        try:
+            from types import SimpleNamespace
+            from ...lanes import lane_on, settings
+            return lane_on(settings(SimpleNamespace(profile=self.p), task_id), "prework")
+        except Exception:                                         # noqa: BLE001
+            return False
+
     def rules_text(self, spec: TaskSpec) -> str:
-        return ("Project rules: AGENT_RULES.md (full) and .clinerules / .kilo rules (core) apply "
-                "in full, including the coordinator amendment (marker "
-                f"{AMENDMENT_MARKER}). You run exactly one sprint in this session: {spec.task_id}.")
+        ws = self.p.workspace
+        where = (f"Your workspace is `{ws}`: every path in the rules (AGENT_RULES' project root "
+                 f"included) means this directory; never cd to or write another checkout.")
+        if os.path.isfile(os.path.join(ws, *self.SESSION_CORE.split("/"))):
+            core = (f"Project rules: {self.SESSION_CORE} is the session core; read it first. "
+                    "AGENT_RULES.md is reference: read only the sections the session core, a "
+                    "skill or the plan points to.")
+        else:
+            core = ("Project rules: the Kilo-loaded core (docs/rules/CLINERULES_CORE.md, "
+                    ".kilo/rules); AGENT_RULES.md is reference: read only the sections you "
+                    "need.")
+        return (f"{core} The coordinator amendment (marker {AMENDMENT_MARKER}) applies. You run "
+                f"exactly one sprint in this session: {spec.task_id}. {where}")
 
     # -- fast lane (UI-T0, [fast_lane] in the profile) ---------------------------------
 
@@ -347,20 +383,22 @@ class AnimalUprisingAdapter(GenericAdapter):
         gm = settings(P).get("gate_module") or "foundry_coordinator.projects.animaluprising.studio_gate"
         runner = f"py -m {gm} --repo {self.p.workspace}"
         local = is_local_primary(P, t)
+        prework = self._prework_on(t)
         authorship = (
             "This sprint's primary is LOCAL (training-eligible): helpers give guidance, "
             "interfaces, stories, fixtures, wiring checks, API notes and reviews; you write the "
             "implementation. Never request, copy or paraphrase a helper's implementation. A "
-            "helper-drafted step (ladder step 3) is its own commit with `(helper:<unit>)` in the "
-            "message. After repeated red full gates the coordinator may hand the sprint to the "
-            "frontier primary in this same session; you never switch models yourself."
+            "helper-drafted step is its own commit with `(helper:<unit>)` in the message. After "
+            "repeated red full gates the coordinator may hand the sprint to the frontier "
+            "primary in this same session; you never switch models yourself."
             if local else
-            "This sprint's primary is FRONTIER: helper PREWORK patches may be applied after you "
-            "verify each one (plan files only, compiles at HEAD, its story/spec passes).")
+            "This sprint's primary is FRONTIER: a helper patch may be applied after you verify "
+            "it (plan files only, compiles at HEAD, its story/spec passes).")
+        drafts = f" Helper drafts and notes: .plan/tmp/prework/{t}/." if prework else ""
         return f"""BUILD session for fast-lane sprint {t} — {spec.title} (coordinator run {ctx.get('run_id')}, attempt {ctx.get('attempt')}).
 
-Fast lane: load the `au-fast-lane` skill first (plus `au-ui-v3` and `au-roblox-ui-development` for UI work). The rules card {self.FAST_LANE_RULES}, that skill and the one-page plan replace the AGENT_RULES ceremony for this task; AGENT_RULES.md still governs anything the card doesn't mention. You run exactly one sprint in this session: {t}.
-Plan (the whole spec, read all of it): docs/progress/{t}_PLAN.md. Gate manifest (stories, sizes, wiring checks): docs/progress/{t}_gate.json. Helper drafts and notes: .plan/tmp/prework/{t}/.
+Fast lane: load the `au-fast-lane` skill first (plus `au-ui-v3` and `au-roblox-ui-development` for UI work). The rules card {self.FAST_LANE_RULES}, that skill and the one-page plan replace the AGENT_RULES ceremony for this task. {self.rules_text(spec)}
+Plan (the whole spec, read all of it): docs/progress/{t}_PLAN.md. Gate manifest (stories, sizes, wiring checks): docs/progress/{t}_gate.json.{drafts}
 
 {spec.spec}
 
@@ -369,23 +407,20 @@ Plan (the whole spec, read all of it): docs/progress/{t}_PLAN.md. Gate manifest 
 Runner (flags fixed by UI-T0; run `--help` once if one is rejected):
   {runner} doctor
   {runner} stories --sprint {t} [--story NAME ...]      # Edit-mode stories, the fast inner loop
-Inner loop: write code -> stories -> fix -> repeat; Lune specs for the models you touched. Run stories and Lune only: never run `sprint` (or `regression`) yourself. The coordinator runs the one full gate when you report DONE, re-runs only checks whose inputs changed, reads the verdict JSON under .plan/tmp/gate/{t}/ and sends any red check or vision finding back into THIS session. Commit by explicit path from the plan's file list, message starting "{t}: " (no --no-verify, force, rebase, amend or tag). The runner writes captures under docs/evidence/UI-v3/{t}/ and its evidence log; the coordinator commits those itself, so leave them uncommitted.
-While a gate holds Studio, do not call Studio tools yourself. Put scratch files under `.plan/tmp/` (git-ignored).
-Do NOT write {t}_SUMMARY.md, the STATE.md row or the MASTER_ORDER status, and do NOT push: a short CLOSE session does that after a green gate, the vision approval and the review.
+Inner loop: write code -> stories -> fix -> repeat; Lune specs for the models you touched. Run stories and Lune only: never run `sprint` (or `regression`) yourself, not even after a fix. The coordinator runs the one full gate when you report DONE, re-runs only checks whose inputs changed, reads the verdict JSON under .plan/tmp/gate/{t}/ and sends any red check or vision finding back into THIS session. Commit by explicit path from the plan's file list, message starting "{t}: " (no --no-verify, force, rebase, amend or tag). The runner writes captures under docs/evidence/UI-v3/{t}/ and its evidence log; the coordinator commits those itself, so leave them uncommitted.
+While a gate holds Studio, do not call Studio tools yourself. Put scratch files under `.plan/tmp/` (git-ignored; you may write there).
+Do NOT write {t}_SUMMARY.md, the STATE.md row or the MASTER_ORDER status, and never push: a short CLOSE session writes those after a green gate, the vision approval and the review, and the coordinator pushes master after the CLOSE checks.
 The coordinator refreshes `{self.LIVE_CHECKPOINT}` (read-only) while you work; never call the Kilo server or port 4096 yourself.
-Stop (BLOCKED, with 2-4 `options` and the one you `recommended`; nobody is asked mid-session, the coordinator decides) only for a contract the plan doesn't settle, a product decision, a doctor failure you can't fix, or a §24 safety stop. A needed file outside the file list is a SCOPE_REQUEST block, not a stop. A routine red check is not a stop. Vision CHANGES come back into this session once; after that the coordinator accepts with notes.
+Stop BLOCKED only for a contract the plan doesn't settle or a product decision (`product`, with 2-4 options and the one you recommend), a doctor failure you can't fix (`tooling`, no options), or something only the owner can physically do (`user_action`). A needed file outside the file list is a SCOPE_REQUEST block, not a stop. A routine red check is not a stop. Vision CHANGES come back into this session once; after that the coordinator accepts with notes.
 
 {report_instructions()}
 """
 
-    def implement_prompt(self, spec: TaskSpec, ctx: dict) -> str:
-        if self._fast_lane(spec.task_id):
-            return self.fast_lane_prompt(spec, ctx)
-        planning = ""
-        menu_actions = ""
-        if spec.task_id.startswith("UI-") or any(
-                path.startswith("src/client/UI/") for path in spec.scope):
-            menu_actions = """
+    def _menu_actions(self, spec: TaskSpec) -> str:
+        if not (spec.task_id.startswith("UI-") or any(
+                path.startswith("src/client/UI/") for path in spec.scope)):
+            return ""
+        return """
 For Studio client menu setup and functional button tests, use
 `require(game.Players.LocalPlayer.PlayerScripts.Client.UI.ButtonActions)`:
 `List()` gives current names/paths, `Click(nameOrPath)` invokes the same handler,
@@ -397,70 +432,128 @@ stable descriptive name. The headless ButtonActions spec guards this contract.
 Named handler calls are for setup and functional menu tests. They do not prove
 pointer hit testing, dragging, or actual mouse/touch/controller input.
 """
-            if spec.task_id in {f"UI-0{i}" for i in range(1, 7)}:
-                menu_actions += """
-Victor's 2026-10-19 phase decision transfers actual mouse, touch and
-controller operator flows to required UI-GT1 after UI-06. In this sprint,
-finish the named-handler, authoritative-state, input-mode-state, layout,
-Studio suite, visual, gate and closeout checks. UI-02 c11 handler results may
-use named actions; c11 physical target testing and c12 operator flows belong
-to UI-GT1. Do not request Victor's physical clicks here. Historical NEXT lines
-in pre-coded plans do not restore the old physical-input requirement.
-"""
-            elif spec.task_id == "UI-GT1":
-                menu_actions += """
-UI-GT1 is the required physical-input phase. Use actual Studio mouse, touch
-and controller input for every transferred matrix row, with raw before/after
-evidence. ButtonActions.Click may prepare state or isolate a handler, but it
-never satisfies a physical-input row.
-"""
-        if self.p.roles.get("planner"):
-            planning = """
-The approved plan and its checklist are this attempt's plan: do not spawn planner or vision subagents (only the read-only `explore` subagent is available; the coordinator plans, and its own vision reviewer checks every committed capture). Integrate any advice into the approved BUILD work in this Code session; advice is never acceptance evidence or permission to widen scope. The primary alone writes and controls Studio. Record measured validity lines for each capture and recapture invalid, stale, occluded or wrong-subject frames; an inability of this primary model to see images is not a human blocker. Use Studio MCP to attempt physical input tests only when this sprint's current plan requires them; UI-01 through UI-06 operator flows are deferred to UI-GT1. {SIGN_OFF}Stop for Victor only for a genuinely unavailable human-only interaction, credentials/OS action, a product decision outside the plan, or an unresolved blocker after configured recovery. Never waive a failed/unknown gate or weaken a test to avoid a stop.
-"""
-            # final sign-off is delegated only when [approval] visual_model is on;
-            # otherwise the operator's visual approval still closes the sprint
-            planning = planning.replace("{SIGN_OFF}", (
-                "Victor delegated final screenshot sign-off to the coordinator vision "
-                "reviewer; submit current committed frames for that review instead of "
-                "waiting for his visual approval. ") if self._model_visual_approval() else "")
-        return f"""BUILD session for sprint {spec.task_id} — {spec.title} (coordinator run {ctx.get('run_id')}, attempt {ctx.get('attempt')}).
 
+    def _planning(self) -> str:
+        if not self.p.roles.get("planner"):
+            return ""
+        sign_off = ("Victor delegated final screenshot sign-off to the coordinator vision "
+                    "reviewer; submit current committed frames for that review instead of "
+                    "waiting for his visual approval. ") if self._model_visual_approval() else ""
+        # final sign-off is delegated only when [approval] visual_model is on;
+        # otherwise the operator's visual approval still closes the sprint
+        return f"""
+The approved plan and its checklist are this attempt's plan: do not spawn planner or vision subagents (only the read-only `explore` subagent is available; the coordinator plans, and its own vision reviewer checks every committed capture). Integrate any advice into the approved BUILD work in this Code session; advice is never acceptance evidence or permission to widen scope. The primary alone writes and controls Studio. Record measured validity lines for each capture and recapture invalid, stale, occluded or wrong-subject frames; an inability of this primary model to see images is not a human blocker. Use Studio MCP to attempt physical input tests only when this sprint's current plan requires them. {sign_off}Never waive a failed/unknown gate or weaken a test to avoid a stop.
+"""
+
+    def _session_prompt(self, spec: TaskSpec, ctx: dict, findings=None) -> str:
+        """The BUILD prompt (findings None) or the repair prompt (findings given) of a
+        non-fast-lane sprint. 2026-10-27 rules streamline: track-aware (a track never
+        gets Studio steps or the main checkout's path), a repair reruns only the
+        affected checks (never rerun passed work), nobody pushes, no dead prompt text."""
+        t = spec.task_id
+        tier = spec.data.get("tier", "A")
+        track = self._track()
+        repair = findings is not None
+        head = ("REPAIR" if repair else "BUILD") + f" session for sprint {t} — {spec.title}"
+        notice = ""
+        if track:
+            notice = (f"\nTRACK SPRINT (track `{track}`, worktree `{self.p.workspace}`): no Studio "
+                      "here. The main sprint owns Studio and Rojo. Never run tools/gate.ps1, a "
+                      "playtest or a boot check, never take or wait for studio.lock, never touch "
+                      "the main checkout. The coordinator runs the Studio gate on the merge "
+                      "result when this track merges.\n")
+        a = ctx.get("assignment") if isinstance(ctx.get("assignment"), dict) else {}
+        rerun = [str(x) for x in (a.get("affected_checks_to_rerun") or [])][:20]
+        rerun_txt = (", ".join(rerun) if rerun else "the checks the findings below name")
+        studio_free = (f"the Lune specs for the modules you touched and "
+                       f"`{self._done_check_cmd(t, STUDIO_ROWS)}` (GATE, BOOT and EVIDENCE come "
+                       f"from the merge gate)")
+        if track and not repair:
+            job = (f"This session's job: the plan's remaining BUILD steps, each committed by "
+                   f"explicit path with a message starting \"{t}: \", then the Studio-free checks "
+                   f"only: {studio_free}.")
+        elif track:
+            job = (f"This repair session's job: fix the findings below (each fix committed by "
+                   f"explicit path, message starting \"{t}: \"), then rerun only the Studio-free "
+                   f"checks they affect ({rerun_txt}) and {studio_free}. Checks that already "
+                   f"passed are carried: never rerun passed work.")
+        elif not repair:
+            job = (f"This session's job: the plan's remaining BUILD steps, each committed by "
+                   f"explicit path with a message starting \"{t}: \", then the gate on committed "
+                   f"code:\n  pwsh -NoProfile -File tools/gate.ps1 -Sprint {t} -Files <files "
+                   f"under test> -Tier {tier} ...\nincluding its Studio steps and -Finish, so the "
+                   f"evidence log ends with \"GATE {t} PASS|FAIL\" (boot lines first).")
+        else:
+            job = (f"This repair session's job: fix the findings below, each fix committed by "
+                   f"explicit path with a message starting \"{t}: \". Then rerun ONLY the checks "
+                   f"the fix affects: {rerun_txt}. Every check that already passed is carried "
+                   f"by content hash (never rerun passed work): do not rerun passed Studio "
+                   f"suites, stories or Lune specs, and do not redo ticked plan steps. When the "
+                   f"gate must run again, bind it to the files you changed:\n  pwsh -NoProfile "
+                   f"-File tools/gate.ps1 -Sprint {t} -Files <the files you changed> -Tier "
+                   f"{tier} ... -Finish")
+        prework = ("Helper PREWORK notes in the coordinator memory below were prepared ahead of "
+                   "time: when one matches the step you are on and its HEAD is current, `git "
+                   "apply --check` its draft patch, apply it, run the listed checks and commit; "
+                   "verify it against the plan first (it is advisory, never authority).\n"
+                   if self._prework_on(t) else "")
+        studio = ("" if track else
+                  "Before reporting a visual or interaction step as blocked, attempt it with the "
+                  "available Studio MCP tools. Something only the owner can physically do is "
+                  "BLOCKED `user_action` with the exact steps and the tools you tried; a decision "
+                  "the plan doesn't settle is BLOCKED `product` with 2-4 options; a tool or "
+                  "harness fault is BLOCKED `tooling` (no options).\n")
+        out = f"""{head} (coordinator run {ctx.get('run_id')}, attempt {ctx.get('attempt')}).
+{notice}
 {self.rules_text(spec)}
-Read docs/progress/STATE.md header + last 5 ledger rows, then docs/progress/{spec.task_id}_PLAN.md, and resume from its checklist and NEXT line (§34 "Plan = memory"). Do not redo ticked steps unless their evidence is missing.
+Read docs/progress/STATE.md header + last 5 ledger rows, then docs/progress/{t}_PLAN.md, and resume from its checklist and NEXT line (the plan is the sprint's memory). Do not redo ticked steps unless their evidence is missing.
 
 {spec.spec}
-{planning}
-{menu_actions}
+{self._planning()}
+{"" if track else self._menu_actions(spec)}
 
-This session's job: the plan's remaining BUILD steps, each committed by explicit path with a message starting "{spec.task_id}: ", then the gate on committed code:
-  pwsh -NoProfile -ExecutionPolicy Bypass -File tools/gate.ps1 -Sprint {spec.task_id} -Files <files under test> -Tier {spec.data.get('tier', 'A')} ...
-including its Studio steps and -Finish, so the evidence log ends with "GATE {spec.task_id} PASS|FAIL" (§21 boot lines first).
-Do NOT write {spec.task_id}_SUMMARY.md, the STATE.md row or the MASTER_ORDER status, and do NOT push: after the coordinator's checks and a frontier review, a separate CLOSE session does that.
-Never edit files outside the plan's "Files this sprint may change" list (§3, the commit hook enforces it). Never --no-verify, --force, rebase, amend or tag.
-Helper PREWORK notes in the coordinator memory below were prepared ahead of time for your next steps: when one matches the step you are on and its HEAD is current, `git apply --check` its draft patch, apply it, run the listed checks and commit, instead of re-deriving the change; verify it against the plan first (it is advisory, never authority). Put verification scratch and one-off generated files under `.plan/tmp/` (git-ignored), never elsewhere in the repo.
-§34 checkpoints: the coordinator audits this session itself and refreshes `{self.LIVE_CHECKPOINT}` (read-only) about every two minutes while you work; read it for the KILO-CHECKPOINT verdict and act on CONTINUE/STOP-AND-REPLAN. Do not run kilo_checkpoint against the Kilo server or call port 4096 (it needs credentials you don't have); if the file is missing or its header time is more than 10 minutes old, note "KILO-CHECKPOINT pending (coordinator audit)" and continue.
-Before reporting NEEDS_HUMAN for a visual or interaction step, use the available Studio MCP tools as described above. If the step still needs Victor (an ACTION NEEDED FROM VICTOR block, §22) or a decision the plan doesn't settle (§10), stop and report NEEDS_HUMAN or BLOCKED with the exact attempted tools and blocker text, plus 2-4 `options` and the one you `recommended` (the coordinator decides; nobody is asked mid-session).
-
+{job}
+Do NOT write {t}_SUMMARY.md, the STATE.md row or the MASTER_ORDER status, and never push: after the coordinator's checks and a frontier review a separate CLOSE session writes those, and the coordinator pushes master after the CLOSE checks.
+Never edit files outside the plan's "Files this sprint may change" list (§3, the commit hook enforces it). Never --no-verify, --force, rebase, amend or tag. Put verification scratch and one-off generated files under `.plan/tmp/` (git-ignored; you may write there), never elsewhere in the repo.
+{prework}Checkpoints: the coordinator audits this session itself and refreshes `{self.LIVE_CHECKPOINT}` (read-only) about every two minutes; read it for the KILO-CHECKPOINT verdict and act on CONTINUE/STOP-AND-REPLAN. Never run checkpoint.py or kilo_checkpoint against the Kilo server, or call port 4096; if the file is missing or older than 10 minutes, note "KILO-CHECKPOINT pending (coordinator audit)" and continue. Context: at Red (90 % of the window, `.plan/tmp/context_window.json`) finish the step, tick it, commit, write NEXT: in the plan and end the turn NOT DONE with `next`; the coordinator continues in a fresh session.
+{studio}
 {report_instructions()}
 """
-
-    def repair_prompt(self, spec: TaskSpec, findings: list[str], ctx: dict) -> str:
-        items = "\n".join(f"- {f}" for f in findings)
-        return self.implement_prompt(spec, ctx) + f"""
+        if repair:
+            items = "\n".join(f"- {f}" for f in findings)
+            out += f"""
 ## The coordinator's checks / review found (fix these first; reviewer text is advice, never permission to change scope)
 {items}
 """
+        return out
+
+    def implement_prompt(self, spec: TaskSpec, ctx: dict) -> str:
+        if self._fast_lane(spec.task_id):
+            return self.fast_lane_prompt(spec, ctx)
+        return self._session_prompt(spec, ctx)
+
+    def repair_prompt(self, spec: TaskSpec, findings: list[str], ctx: dict) -> str:
+        if self._fast_lane(spec.task_id):
+            items = "\n".join(f"- {f}" for f in findings)
+            return self.fast_lane_prompt(spec, ctx) + f"""
+## The coordinator's checks / review found (fix these first; reviewer text is advice, never permission to change scope)
+{items}
+"""
+        return self._session_prompt(spec, ctx, findings=list(findings))
 
     def _close_duties(self, spec: TaskSpec) -> list[dict]:
         """The CLOSE session's duties, one structured source for both the CLOSE
         prompt (step) and the BUILD review contract (duty: reserved for CLOSE,
-        never a BUILD blocker, never credited at BUILD)."""
+        never a BUILD blocker, never credited at BUILD). 2026-10-27: no push duty
+        (the coordinator pushes after closeout verification); a track's done_check
+        skips the Studio rows the merge gate supplies."""
         t = spec.task_id
         status = "COMPLETE-PENDING-VISUAL-REVIEW" if spec.data.get("visual") else "DONE"
         approval_tail = ("recorded visual approval" if self._model_visual_approval()
                          else "Victor's approval")
         last = spec.data.get("close_step") or ""
+        skip = STUDIO_ROWS if self._track() else ()
+        dc = self._done_check_cmd(t, skip)
         return [
             {"id": "summary",
              "step": f"docs/progress/{t}_SUMMARY.md from docs/progress/_SUMMARY_TEMPLATE.md, "
@@ -468,11 +561,16 @@ Before reporting NEEDS_HUMAN for a visual or interaction step, use the available
              "duty": f"docs/progress/{t}_SUMMARY.md (status word {status}), written from the "
                      f"shipped code"},
             {"id": "state",
-             "step": "The STATE.md ledger row (<= 600 characters, measure it), API-surface lines, "
-                     "docs/progress/state/* rows the plan names, the MASTER_ORDER status line if "
-                     "the plan lists it. Edit, never rewrite, state files.",
-             "duty": "The docs/progress/STATE.md ledger row, its API-surface lines and the "
-                     "docs/progress/state/* rows the plan names"},
+             # 2026-10-27: one memory store. docs/progress/state/* and STATE.md's API
+             # section are read-only history; decisions, conventions, API facts and known
+             # issues go to docs/memory through MEMORY_NOTE lines (the coordinator commits)
+             "step": "The STATE.md ledger row (<= 600 characters, measure it) and the "
+                     "MASTER_ORDER status line if the plan lists it; edit, never rewrite. "
+                     "Decisions, API-surface facts, conventions and known issues go to "
+                     "docs/memory as MEMORY_NOTE lines in your final message: never append to "
+                     "docs/progress/state/* or STATE.md's API section (read-only history).",
+             "duty": "The docs/progress/STATE.md ledger row, and the sprint's decisions / "
+                     "API facts recorded as MEMORY_NOTE lines (docs/memory)"},
             {"id": "master_order",
              "step": None,                    # part of step 2 in the prompt
              "duty": "The docs/MASTER_ORDER.md status line (if the plan lists it)"},
@@ -481,16 +579,18 @@ Before reporting NEEDS_HUMAN for a visual or interaction step, use the available
              "duty": "Ticking the plan's final CLOSE step" + (f" ({last})" if last else "")
                      + " with its evidence line"},
             {"id": "done_check",
-             "step": f"py -3 tools\\guard\\done_check.py {t} until it prints DONE-CHECK {t} "
-                     f"PASS; paste its output into the evidence log.",
+             "step": f"{dc} until it prints DONE-CHECK {t} PASS; paste its output into the "
+                     f"evidence log.",
              "duty": f"tools/guard/done_check.py {t} printing DONE-CHECK {t} PASS (its output "
                      f"pasted into the evidence log)"},
-            {"id": "push",
+            {"id": "commit",
              "step": f'Commit only those closeout files by explicit path, message "{t}: '
-                     f'closeout"; then one plain `git push origin master` and confirm '
-                     f"`git ls-remote origin master` equals HEAD. No tags (the Sprint Manager "
-                     f"issues tags after DONE / {approval_tail}).",
-             "duty": f'The "{t}: closeout" commit and the one plain `git push origin master`'},
+                     f'closeout". Never push: the coordinator pushes master after its closeout '
+                     f"checks" + (" (a track never pushes; its merge publishes)" if self._track()
+                                  else "")
+                     + f". No tags (the Sprint Manager issues tags after DONE / "
+                       f"{approval_tail}).",
+             "duty": f'The "{t}: closeout" commit (the coordinator pushes it)'},
         ]
 
     def closeout_duties(self, spec: TaskSpec) -> list[str]:
@@ -543,11 +643,15 @@ Before reporting NEEDS_HUMAN for a visual or interaction step, use the available
                  f"{ctx['retry_reason']}\n") if ctx.get("retry_reason") else ""
         steps = "\n".join(f"{i}. {step}" for i, step in
                           enumerate((d["step"] for d in self._close_duties(spec) if d["step"]), 1))
+        track = self._track()
+        passed = ("the Studio-free checks passed (the merge gate runs Studio when the track "
+                  "merges)" if track else "the gate passed")
+        studio = (" No Studio, gate, playtest or studio.lock in this session." if track else "")
         return f"""CLOSE session for sprint {spec.task_id} — {spec.title}.
 {self.rules_text(spec)}
-The code is committed, the gate passed and a frontier review approved commit {ctx.get('base', '')[:12]}. Do only closeout (§9, §31, §34 CLOSE):
+The code is committed, {passed} and a frontier review approved commit {ctx.get('base', '')[:12]}. Do only closeout (§9, §31, §34 CLOSE):
 {steps}
-Change no code or test file in this session; if one needs changing, stop and report BLOCKED.{retry}
+Change no code or test file in this session; if one needs changing, stop and report BLOCKED.{studio}{retry}
 
 {report_instructions()}
 """
@@ -604,13 +708,22 @@ Change no code or test file in this session; if one needs changing, stop and rep
 
     def _done_check(self, spec: TaskSpec, phase: str, revision: str,
                     skip: tuple = ()) -> list:
-        cmd = self._python() + [os.path.join("tools", "guard", "done_check.py"), spec.task_id]
+        base_cmd = self._python() + [os.path.join("tools", "guard", "done_check.py"),
+                                     spec.task_id]
+        # 2026-10-27: AU's done_check skips the Studio rows itself (`--skip-rows
+        # GATE,BOOT,EVIDENCE`); an older checkout without the flag is run without it,
+        # and the post-filter below drops those rows as before
+        cmd = base_cmd + ([self.SKIP_ROWS_FLAG, ",".join(skip)] if skip else [])
         t0 = time.time()
         log = os.path.join(evidence_dir(self.state_dir, self.p.id, spec.task_id, revision),
                            f"done_check-{phase}.log")
         try:
             r = subprocess.run(cmd, cwd=self.p.workspace, capture_output=True, text=True,
                                timeout=600, encoding="utf-8", errors="replace")
+            if skip and r.returncode == 2 and "unrecognized arguments" in (r.stderr or ""):
+                cmd = base_cmd
+                r = subprocess.run(cmd, cwd=self.p.workspace, capture_output=True, text=True,
+                                   timeout=600, encoding="utf-8", errors="replace")
         except (OSError, subprocess.TimeoutExpired) as e:
             return [VerificationResult("au.done_check", UNKNOWN, True, "", str(e), revision)]
         text = r.stdout + (("\n[stderr]\n" + r.stderr) if r.stderr.strip() else "")
@@ -1164,9 +1277,10 @@ Change no code or test file in this session; if one needs changing, stop and rep
                   {"permission": "bash", "pattern": "git push -f*", "action": "deny"},
                   {"permission": "bash", "pattern": "git commit --no-verify*", "action": "deny"},
                   {"permission": "bash", "pattern": "git push --tags*", "action": "deny"},
-                  {"permission": "bash", "pattern": "git tag*", "action": "deny"}]
-        if phase != "closeout":
-            rules.append({"permission": "bash", "pattern": "git push*", "action": "deny"})
+                  {"permission": "bash", "pattern": "git tag*", "action": "deny"},
+                  # 2026-10-27 (Victor): the coordinator pushes master after closeout
+                  # verification; no session pushes, in any phase (CLOSE included)
+                  {"permission": "bash", "pattern": "git push*", "action": "deny"}]
         return rules
 
     def doctor(self) -> list:

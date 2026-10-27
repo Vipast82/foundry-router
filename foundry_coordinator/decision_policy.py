@@ -88,6 +88,22 @@ def _option(options: list, prefix: str) -> Optional[str]:
     return None
 
 
+# an option that only a person can carry out (the owner clicks, logs in, provides,
+# installs ...): a timeout must never "apply" it
+_HUMAN_ACT = re.compile(
+    r"\b(?:victor|the owner|the operator|a human|a person|manually|by hand|in person)\b"
+    r"|\b(?:owner|operator|human|person|user|you)\s+(?:must\s+|will\s+|to\s+|should\s+)?"
+    r"(?:clicks?|opens?|logs?\s+in|signs?\s+in|installs?|approves?|provides?|uploads?|"
+    r"purchases?|buys?|pays?|presses?|connects?|restarts?|plugs?|reboots?|enters?|types?)\b",
+    re.I)
+
+
+def needs_human_act(option) -> bool:
+    """Does this option need a person to do something (so a timeout can't apply it)?"""
+    label = option.get("label") if isinstance(option, dict) else option
+    return bool(_HUMAN_ACT.search(str(label or "")))
+
+
 def meta(P, kind: str, evidence: Optional[dict], options: list,
          recommendation: str = "") -> dict:
     """{decision_class, recommended (JSON text or None), timeout_minutes} for a
@@ -111,6 +127,13 @@ def meta(P, kind: str, evidence: Optional[dict], options: list,
                 if got is not None:
                     rec = got
                     break
+            # 2026-10-27 one stop protocol: a timeout never applies an option that needs
+            # a human act (a `user_action` blocker, or a recommended "Victor clicks
+            # Connect"): nobody did it, so the next session would hit the same blocker.
+            # The recommendation is still shown; the decision waits for the owner.
+            if rec is not None and (str(ev.get("blocker_kind") or "") == "user_action"
+                                    or needs_human_act(rec)):
+                rec = None
     try:
         timeout = int(auto_get(P, "decision_timeout_minutes") or 0)
     except Exception:                                            # noqa: BLE001
@@ -182,6 +205,15 @@ def sweep(c, force: bool = False) -> list[str]:
         try:
             answer = json.loads(d["recommended"])
         except (TypeError, ValueError):
+            continue
+        if needs_human_act(answer):
+            # (a decision opened before 2026-10-27 may still carry one): never applied by
+            # a timeout; it waits for the owner
+            c.store.x("UPDATE decisions SET deadline_ts=NULL WHERE decision_id=?",
+                      (d["decision_id"],))
+            c.store.event(d["project_id"], d["task_id"], "decision_timeout_skipped", detail={
+                "decision_id": d["decision_id"], "recommended": answer,
+                "why": "the recommended option needs a human act; it waits for the owner"})
             continue
         try:
             c.obligations.answer(d["decision_id"], answer, TIMEOUT_ACTOR, TIMEOUT_AUTHORITY)

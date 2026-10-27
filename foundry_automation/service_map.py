@@ -156,6 +156,28 @@ def media_gen_denied(audio: bool, images: bool) -> list[str]:
     allow -= set(MEDIA_GEN_NEVER)
     every = MEDIA_GEN_AUDIO + MEDIA_GEN_IMAGES + MEDIA_GEN_VIDEO + MEDIA_GEN_JOBS
     return [f"Media_Gen_{t}" for t in dict.fromkeys(every) if t not in allow]
+# 2026-10-27 (Victor): ChatGPT images first. The foundry-media MCP server
+# (contrib/media-adapter/foundry_media_mcp.py; Kilo names "foundry-media_<tool>") and the
+# foundry-images skill are gated by the same 2D decision as Media_Gen's image tools.
+FOUNDRY_MEDIA_TOOLS = ("generate_image", "edit_image", "image_job_status", "list_image_jobs",
+                       "image_settings")
+FOUNDRY_MEDIA_PREFIX = "foundry-media_"
+FOUNDRY_IMAGES_SKILL = "foundry-images"
+
+
+def foundry_media_denied(images: bool) -> list[dict]:
+    """Kilo session rules that turn the ChatGPT image path off ([] when 2D images are
+    allowed for the sprint): every foundry-media tool (the wildcard and each name) and
+    the foundry-images skill."""
+    if images:
+        return []
+    out = [{"permission": FOUNDRY_MEDIA_PREFIX + "*", "pattern": "*", "action": "deny"}]
+    out += [{"permission": FOUNDRY_MEDIA_PREFIX + t, "pattern": "*", "action": "deny"}
+            for t in FOUNDRY_MEDIA_TOOLS]
+    out.append({"permission": "skill", "pattern": FOUNDRY_IMAGES_SKILL, "action": "deny"})
+    return out
+
+
 NEEDS_TOOLS = {"blender": ("blender-mcp_*", "blender_mcp_*"),
                "audio": tuple(f"Media_Gen_{t}" for t in MEDIA_GEN_AUDIO)
                + ("acestep-music_*", "stable-audio_*", "kokoro-tts_*", "chatterbox-tts_*"),

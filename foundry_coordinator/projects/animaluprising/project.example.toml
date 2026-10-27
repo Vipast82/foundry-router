@@ -129,9 +129,10 @@ stage = "after_close"
 artifacts = ["docs/evidence/{task}/*.png"]
 
 [publish]
-# AGENT_RULES §9/§24: the CLOSE session runs one plain `git push origin master`;
-# the coordinator only verifies that origin/master equals HEAD. Never tags.
-mode = "verify_only"
+# 2026-10-27 (Victor): the coordinator pushes master after closeout verification,
+# always; sessions never push (git push* is denied in every phase). Never tags.
+# (The old "verify_only" reads the same: no session is there to push.)
+mode = "push"
 remote = "origin"
 branch = "master"
 

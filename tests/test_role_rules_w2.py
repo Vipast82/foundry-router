@@ -172,8 +172,13 @@ def test_history_rewrites_and_shell_secret_reads_are_hard_denied():
             assert RR.decide(lst, "bash", cmd)[0] == "deny", (role, cmd)
     lst = RR.agent_block_rules("implementer", wide, WS)
     for cmd in ("git status", "git commit -m \"UI-02b: hud\"", "git log --oneline -5",
-                "git push origin master", "python -m pytest tests -q", "git reset HEAD~1 --soft"):
+                "python -m pytest tests -q", "git reset HEAD~1 --soft"):
         assert RR.decide(lst, "bash", cmd)[0] == "allow", cmd
+    # 2026-10-27: the coordinator pushes master; a plain push is a hard deny for every role
+    for role in RR.RULE_ROLES:
+        lst2 = RR.agent_block_rules(role, wide, WS)
+        for cmd in ("git push", "git push origin master"):
+            assert RR.decide(lst2, "bash", cmd)[0] == "deny", (role, cmd)
     for perm in ("read", "edit", "write", "grep"):
         assert RR.decide(lst, perm, "config/workstation-credentials.xml")[0] == "deny"
 

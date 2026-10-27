@@ -121,7 +121,8 @@ def test_an_unanswered_scope_decision_times_out_to_its_default_and_is_journaled(
     assert "timed out after 30 min" in ev["operator_notice"]["text"]
     for _ in range(3):
         c.tick()
-    assert any("were denied" in p for p in prompts)      # the default was applied
+    # the default was applied, and the session is told why (2026-10-27)
+    assert any("NOT granted" in p and "decision timeout" in p for p in prompts)
 
 
 def test_lead_questions_may_carry_options_and_a_recommendation():

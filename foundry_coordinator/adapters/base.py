@@ -160,25 +160,69 @@ def parse_report(text: str) -> Optional[dict]:
     return d if isinstance(d, dict) else None
 
 
+# The one stop protocol (2026-10-27 rules streamline): BLOCKED + blocker_kind.
+#   product      a real decision the plan does not settle: 2-4 options + recommended
+#   tooling      tools / harness / environment: no options; auto-heal or the lead
+#   user_action  only the owner can physically do it: no timeout, an operator notice
+# NEEDS_HUMAN (the old status word) is still parsed: BLOCKED + user_action.
+BLOCKER_KINDS = ("product", "tooling", "user_action")
+_TOOLING_WORDS = ("tooling", "harness", "environment", "infra", "infrastructure", "coordinator")
+_USER_WORDS = ("user_action", "user-action", "useraction", "user", "human", "owner", "operator",
+               "operator_action")
+
+
+def blocker_kind(report: Optional[dict]) -> str:
+    """'product' | 'tooling' | 'user_action' for a BLOCKED report. A legacy
+    NEEDS_HUMAN status is user_action; an unknown or missing kind is product."""
+    rep = report or {}
+    if str(rep.get("status") or "").strip().upper() == "NEEDS_HUMAN":
+        return "user_action"
+    k = str(rep.get("blocker_kind") or "").strip().lower().replace(" ", "_")
+    if k in _TOOLING_WORDS:
+        return "tooling"
+    if k in _USER_WORDS:
+        return "user_action"
+    return "product"
+
+
+def report_status(report: Optional[dict]) -> str:
+    """The report's status word, upper case; the legacy NEEDS_HUMAN reads as BLOCKED."""
+    st = str((report or {}).get("status") or "").strip().upper()
+    return "BLOCKED" if st == "NEEDS_HUMAN" else st
+
+
 def report_instructions() -> str:
     return (f"When you stop, end your final message with this block (it is recorded, but the "
             f"coordinator decides completion only from the verification checks):\n"
             f"```{REPORT_FENCE}\n"
-            '{"status": "DONE | NOT DONE | BLOCKED | NEEDS_HUMAN", "summary": "<one line>", '
-            '"blocker": "<what you need, if BLOCKED or NEEDS_HUMAN>", '
-            '"options": ["<2-4 concrete ways to resolve the blocker>"], '
-            '"recommended": "<the option you recommend>", '
-            '"blocker_kind": "product | tooling"}\n```\n'
+            '{"status": "DONE | NOT DONE | BLOCKED", "summary": "<one line>", '
+            '"next": "<the plan\'s next step, if NOT DONE>", '
+            '"blocker": "<what blocks you, if BLOCKED>", '
+            '"blocker_kind": "product | tooling | user_action", '
+            '"options": ["<product only: 2-4 concrete choices>"], '
+            '"recommended": "<product only: the option you recommend>"}\n```\n'
             "Nobody answers questions during a session (the question tool is off): decide "
-            "within the plan; if a decision the plan does not settle truly blocks you, commit "
-            "safe partial work and report BLOCKED with 2-4 options and the one you recommend. "
-            "The coordinator decides (the recommended option applies after its timeout) and "
-            "continues the sprint. "
+            "within the plan. Stop BLOCKED only after committing safe partial work, with one "
+            "blocker_kind: `product` = a decision the plan does not settle (2-4 options and "
+            "the one you recommend; the coordinator decides and continues the sprint); "
+            "`tooling` = tools, harness, Studio/Rojo, gate or environment trouble (no options: "
+            "the coordinator retries it or sends its lead); `user_action` = something only "
+            "the owner can physically do (say the exact steps in `blocker`; it waits for the "
+            "owner, never for a timeout). "
             "Need a file outside the task's file list (e.g. a harness row)? Don't edit it: "
             "add a ```SCOPE_REQUEST``` block with {\"path\": \"<file>\", \"reason\": "
-            "\"<one line>\"} and stop; the coordinator grants allow-listed harness lines "
-            "itself and continues this session.\n"
+            "\"<one line>\"}, carry on with the steps that don't need it, then end your turn; "
+            "the coordinator answers in this session (a grant, or a denial with the reason).\n"
             + memory_note_instructions())
+
+
+def report_pointer() -> str:
+    """The short reminder a continuation turn carries instead of the full block: the
+    session got report_instructions() once, in its first prompt."""
+    return (f"End this turn with the same ```{REPORT_FENCE}``` block as before (status DONE | "
+            "NOT DONE | BLOCKED, summary, next; for BLOCKED: blocker, blocker_kind product | "
+            "tooling | user_action, options only for product) and any MEMORY_NOTE / "
+            "SCOPE_REQUEST lines in the same format as before.")
 
 
 def memory_note_instructions() -> str:

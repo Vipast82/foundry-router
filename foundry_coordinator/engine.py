@@ -25,7 +25,8 @@ from . import states as S
 from . import training_hook
 from . import handoff
 from .adapters import Project
-from .adapters.base import FAIL, PASS, UNKNOWN, SessionState, VerificationResult
+from .adapters.base import (FAIL, PASS, UNKNOWN, SessionState, VerificationResult,
+                            blocker_kind)
 from .adapters.foundry import FoundryDenied, FoundryError
 from .adapters.git import GitError
 from .adapters.project import AdapterError, failed_findings
@@ -43,9 +44,9 @@ This sprint runs on the parallel track `{track}` (git worktree `{workspace}`), b
 main sprint, which owns Studio and Rojo. Do not run the Studio gate, a playtest or a boot
 check, and do not take or wait for studio.lock: the coordinator runs the Studio gate on the
 merge result in the main checkout when this track merges. Finish the code, the
-Studio-free checks (Lune, the sprint's unit checks, done_check without GATE / BOOT /
-EVIDENCE) and the plan, commit, and report DONE. Never report BLOCKED on Studio or
-studio.lock.
+Studio-free checks (Lune, the sprint's unit checks, and done_check with
+`--skip-rows GATE,BOOT,EVIDENCE`) and the plan, commit, and report DONE. Never push
+(the merge publishes) and never report BLOCKED on Studio or studio.lock.
 """
 # a track session's BLOCKED report about Studio, Rojo, the gate or studio.lock
 TRACK_REVIEW_NOTE = ("track sprint: this work ran in a git worktree without Studio. The "
@@ -638,9 +639,11 @@ class Coordinator:
         prompt = (P.adapter.repair_prompt(spec, findings, ctx) if findings
                   else P.adapter.implement_prompt(spec, ctx))
         prompt += lc_extra
-        if self.tracks.is_track(P):
+        if self.tracks.is_track(P) and not getattr(P.adapter, "TRACK_AWARE", False):
+            # an adapter whose prompts are track-aware (AU) states this itself, at the top
             prompt += TRACK_BRIEF.format(track=self.tracks.track_name(P),
                                          workspace=P.profile.workspace)
+        prompt += self._images_brief(P, spec)
         if inter:
             prompt += ("\n## Intermediate gate outputs\nThese task-owned files are untracked "
                        "intermediate gate output: " + ", ".join(inter[:8]) + ". They do not "
@@ -648,7 +651,7 @@ class Coordinator:
                        "gate regenerate them). Final verification requires a clean tree.\n")
         if carry_own:
             prompt += ("\n## Unfinished task-owned BUILD work\nInspect and finish these "
-                       "files left by the prior UI-02 session: " + ", ".join(carry_own[:8])
+                       "files left by the prior session: " + ", ".join(carry_own[:8])
                        + ". Commit each only after its required evidence check. They remain "
                        "unaccepted until final clean-tree verification.\n")
         if adopted:
@@ -774,28 +777,48 @@ class Coordinator:
     IMPLEMENTER_DENIES = ({"permission": "question", "pattern": "*", "action": "deny"},)
 
     def _session_rules(self, P: Project, spec, phase: str, role: str) -> list[dict]:
+        from foundry_automation import service_map as SM
         rules = [dict(r) for r in (P.adapter.session_permissions(spec, phase) or [])]
         rules += [{"permission": name, "pattern": "*", "action": "deny"}
                   for name in self._media_gen_denied(P, spec, role)]
+        # the ChatGPT image path (foundry-media tools + foundry-images skill) is gated by
+        # the same 2D decision as Media_Gen's image tools
+        rules += SM.foundry_media_denied(self._images_allowed(P, spec, role))
         if role == "implementer":
             rules += [dict(r) for r in self.IMPLEMENTER_DENIES]
         return rules
 
+    def _images_allowed(self, P: Project, spec, role: str) -> bool:
+        """May this session generate 2D images? Only an implementer of a sprint that
+        needs `images`, once [automation] media_gen_images is 'allow' or the owner
+        answered "Generate them" (services.images_allowed)."""
+        if role != "implementer" or spec is None:
+            return False
+        from . import services as SV
+        t = self.store.task(P.id, spec.task_id) or {"task_id": spec.task_id}
+        return SV.images_allowed(self, P, {**t, "task_id": spec.task_id}, SV.needs_of(t, spec))
+
+    def _images_brief(self, P: Project, spec) -> str:
+        """The BUILD prompt's 2D paragraph (services.images_brief); '' without `images`."""
+        from . import services as SV
+        try:
+            t = self.store.task(P.id, spec.task_id) or {"task_id": spec.task_id}
+            return SV.images_brief(self, P, {**t, "task_id": spec.task_id}, SV.needs_of(t, spec))
+        except Exception:                                         # noqa: BLE001
+            return ""
+
     def _media_gen_denied(self, P: Project, spec, role: str) -> list[str]:
         """2026-10-27: a session gets only the Media_Gen tools its sprint needs: the
-        audio family for `audio`, the image family for `images` once 2D assets are
-        approved for Media_Gen ([automation] media_gen_images), nothing for reviewers."""
+        audio family for `audio`, the image family (the fallback after foundry-media)
+        for `images` once the owner allowed 2D generation ([automation]
+        media_gen_images), nothing for reviewers."""
         from foundry_automation import service_map as SM
         if role != "implementer":
             return SM.media_gen_denied(False, False)
         from . import services as SV
         t = self.store.task(P.id, spec.task_id) or {}
         needs = SV.needs_of(t, spec)
-        mode = SV.images_mode(P)
-        images = "images" in needs and (
-            mode == "allow" or (mode == "ask" and
-                                SV.images_choice(self, P.id, spec.task_id) == "media_gen"))
-        return SM.media_gen_denied("audio" in needs, images)
+        return SM.media_gen_denied("audio" in needs, self._images_allowed(P, spec, role))
 
     def _bind(self, P: Project, sid: str, tid: str, run_id: str, role: str, persona: str,
               parent: str = "", purpose: str = "") -> None:
@@ -886,11 +909,17 @@ class Coordinator:
             blocked = False
         if blocked:
             self.store.release(pid, tid)
+            kind = blocker_kind(rep)
+            if kind == "user_action" and self._user_action_stop(P, self.store.task(pid, tid),
+                                                                rep, status):
+                return                   # only the owner can do it: no timeout, no lead
             if self._blocked_decision(P, self.store.task(pid, tid), rep, status):
-                return                   # W1.1: a BLOCKED-with-options report is a decision
+                return                   # W1.1: a product BLOCKED with options is a decision
+            # a tooling blocker (or one without options) goes to auto-heal / the lead
             return self._stop(P, t, S.BLOCKED, {
                 "blocker": f"session reported {status}: {rep.get('blocker') or rep.get('summary')}",
-                "session_id": t["session_id"]}, cls="session_" + status.lower(),
+                "session_id": t["session_id"], "blocker_kind": kind},
+                cls="session_" + status.lower(),
                 blocker=str(rep.get("blocker") or status)[:500])
         # A committed, partially ticked BUILD plan is progress, not a failed
         # final submission. Keep final verification and every required check for
@@ -957,11 +986,14 @@ class Coordinator:
         report that carries 2-4 `options` (and optionally `recommended`) becomes an
         `implementer_blocked` decision: recommended = the first option unless the
         report names one, the standard timeout applies, and the task waits BLOCKED
-        on it (decision_wait). A tooling question (`blocker_kind: tooling`, or any
-        blocker text without options) still goes the auto-heal / lead way; an
-        infrastructure signature always does. True when a decision now holds the
-        task."""
+        on it (decision_wait). 2026-10-27 (one stop protocol): a `tooling` blocker
+        never becomes a decision, options or not: it goes the auto-heal / lead way,
+        as does any blocker text without options or with an infrastructure
+        signature. A `user_action` decision gets no timeout (decision_policy). True
+        when a decision now holds the task."""
         if not self._lc(P):
+            return False
+        if blocker_kind(rep) == "tooling":
             return False
         pid, tid = P.id, t["task_id"]
         options = rep.get("options")
@@ -977,21 +1009,18 @@ class Coordinator:
             return False                 # deterministic retry / repair first
         from . import decision_policy as DP
         rec = DP.match_option(options, rep.get("recommended")) or options[0]
-        kind_hint = str(rep.get("blocker_kind") or "").strip().lower()
-        tooling = kind_hint in ("tooling", "harness", "environment", "infra", "infrastructure",
-                                "coordinator")
+        kind = blocker_kind(rep)
         q = f"the {status.lower()} report of {tid}: {blocker[:700] or '(no blocker text)'}"
         did = self.obligations.open_decision(
             pid, tid, "implementer_blocked", q,
             evidence={"blocker": blocker[:1000], "session_id": t.get("session_id") or "",
                       "recommended": rec, "options": options,
-                      "blocker_kind": "tooling" if tooling else "product",
+                      "blocker_kind": kind,
                       "summary": str(rep.get("summary") or "")[:500]},
             options=options, recommendation=rec, blocks=[tid])
         self.store.event(pid, tid, "implementer_blocked_decision", session_id=t.get("session_id"),
                          detail={"decision_id": did, "options": options, "recommended": rec,
-                                 "blocker_kind": "tooling" if tooling else "product",
-                                 "blocker": blocker[:300]})
+                                 "blocker_kind": kind, "blocker": blocker[:300]})
         d = self.obligations.decision(did) or {}
         if d.get("status") == "answered":
             # the same question was decided before: apply it without waiting
@@ -1006,10 +1035,43 @@ class Coordinator:
                                  or [f"decision {did} answered earlier"])},
                 next_action=f"continue per decision {did}")
             return True
-        self._lc_wait(P, self.store.task(pid, tid), [did],
-                      f"the session's BLOCKED report offered options; recommended "
-                      f"{rec!r} applies after the timeout", S.READY,
+        timed = bool((self.obligations.decision(did) or {}).get("deadline_ts"))
+        why = (f"the session's BLOCKED report offered options; recommended {rec!r} applies "
+               f"after the timeout" if timed else
+               f"the session's BLOCKED report needs the owner (recommended {rec!r}); no "
+               f"timeout applies to an action only a person can take")
+        self._lc_wait(P, self.store.task(pid, tid), [did], why, S.READY,
                       evidence={"session_id": t.get("session_id") or ""})
+        return True
+
+    def _user_action_stop(self, P: Project, t: dict, rep: dict, status: str) -> bool:
+        """2026-10-27 one stop protocol: BLOCKED `user_action` (or the legacy
+        NEEDS_HUMAN) is something only the owner can physically do. With 2-4 options
+        it is an `implementer_blocked` decision that no timeout answers; without, the
+        task stops BLOCKED with an operator notice carrying the session's steps. No
+        lead case either way (a model cannot do it). A blocker with a known
+        infrastructure signature (e.g. "click Connect in the Rojo plugin") still goes
+        to auto-heal first: False then, and the caller takes the ordinary path."""
+        from .autoheal import infra_signature
+        pid, tid = P.id, t["task_id"]
+        blocker = str(rep.get("blocker") or rep.get("summary") or "").strip()
+        if infra_signature(blocker):
+            return False
+        if self._blocked_decision(P, t, rep, status):
+            self.store.event(pid, tid, "operator_notice", session_id=t.get("session_id"), detail={
+                "text": f"{tid} needs you: {blocker[:400] or '(no blocker text)'} (the "
+                        f"decision waits for your answer; no timeout)",
+                "blocker_kind": "user_action"})
+            return True
+        text = f"session reported {status} (user_action): {blocker or '(no blocker text)'}"
+        self.store.event(pid, tid, "operator_notice", session_id=t.get("session_id"), detail={
+            "text": f"{tid} needs you: {blocker[:400] or '(no blocker text)'}",
+            "blocker_kind": "user_action"})
+        self._release_session(P, t)
+        self.store.transition(pid, tid, S.BLOCKED, {
+            "blocker": text[:1000], "session_id": t.get("session_id") or "",
+            "blocker_kind": "user_action", "blocker_class": "user_action"},
+            blocker=text[:500])
         return True
 
     def _scope_requests(self, P: Project, tid: str, s, rep: dict) -> bool:
@@ -2380,8 +2442,8 @@ class Coordinator:
         if heavy is None:
             return
         results = self._generic_checks(P, t, spec, head, phase="closeout") + heavy
-        # a templated closeout has no session to push: the coordinator pushes (B7)
-        published = self._publish(P, t, head, results, push=templated)
+        # the coordinator pushes after closeout verification, session or templated (B7)
+        published = self._publish(P, t, head, results, push=True)
         cid = self.store.save_verification(pid, tid, head, "closeout", results)
         bad = [r for r in results if r.required and r.result != PASS]
         if bad:
@@ -2568,13 +2630,17 @@ class Coordinator:
 
     def _publish(self, P: Project, t: dict, head: str, results: list,
                  push: bool = False) -> str:
-        """Push (or check the agent's push) exactly once per commit. A push is
-        a backup, not a verdict: it is the last step after every check. push=True
-        (a coordinator-templated closeout, B7): verify_only pushes too, since no
-        session is there to push."""
+        """Push exactly once per commit, after closeout verification. A push is
+        a backup, not a verdict: it is the last step after every check.
+
+        2026-10-27 (Victor): the coordinator pushes master, always; sessions never
+        push (`git push*` is denied in every phase, CLOSE included). `verify_only`
+        (the old "the CLOSE session pushes, the coordinator checks") is therefore read
+        as `push`: no session is there to push, templated closeout (B7) or not. A
+        track (publish mode `none`) never pushes: its merge stage handles master."""
         pub = P.profile.publish
         mode = pub.get("mode", "none")
-        if push and mode == "verify_only":
+        if mode == "verify_only":
             mode = "push"
         if mode == "none":
             return "not published (policy: none)"
@@ -2594,12 +2660,6 @@ class Coordinator:
                                               f"{remote}/{branch}", f"{remote}/{branch} = {head[:12]}",
                                               head))
             return f"{remote}/{branch}@{head[:12]}"
-        if mode == "verify_only":
-            results.append(VerificationResult(
-                "coordinator.published", FAIL, True, f"{remote}/{branch}",
-                f"{remote}/{branch} is {str(cur)[:40]}, expected {head[:12]} (the closeout "
-                f"session must push)", head))
-            return ""
         key = f"push:{pid}:{tid}:{head}"
         if self.store.op_begin(key, pid, tid, "push") is None:
             try:
