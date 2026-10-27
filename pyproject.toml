@@ -46,5 +46,6 @@ testpaths = ["tests"]
 # Parallel by default (pytest-xdist): `-n auto` is one worker per physical core,
 # capped by free memory, and serial for a single named test (tests/conftest.py,
 # pytest_xdist_auto_num_workers). `-n 0` runs everything in one process (pdb,
-# print debugging); `-n 4` picks a count.
+# print debugging); `-n 4` picks a count. worksteal balanced the long
+# coordinator tests best (docs/CONVENTIONS.md, "Tests run in parallel").
 addopts = "-n auto --dist worksteal"

@@ -71,7 +71,10 @@ test can touch at the same time:
   them (a "closed" port stays bound without listening);
 - no waits on real clocks that a fake clock or a direct call can replace.
 
-A test that truly cannot share the machine gets
-`@pytest.mark.xdist_group("name")` and a reason; skipping or weakening it to
-make it parallel-safe is not an option. Compare with `pytest -n 0` when a
-failure only shows in parallel.
+The default `--dist worksteal` balanced this suite best (8 workers: 10.5 min
+against 13 min for `--dist load`; 12 workers were slower and left under 2 GB
+free). No test needs serializing today. One that truly cannot share the
+machine gets `@pytest.mark.xdist_group("name")` with its reason, and addopts
+then switches to `--dist loadgroup` (worksteal ignores groups); skipping or
+weakening a test to make it parallel-safe is not an option. Compare with
+`pytest -n 0` when a failure only shows in parallel.
