@@ -159,6 +159,19 @@ class TrackManager:
 
     # ------------------------------------------------------------------ track projects
 
+    # check kinds that need Studio: a track sprint has none, the merge gate runs them (0.145.3)
+    STUDIO_CHECK_KINDS = ("suite", "boot", "capture", "gate", "regression", "plan", "call",
+                          "runtime")
+
+    @classmethod
+    def merge_gate_owns(cls, kind, ref) -> bool:
+        """Evidence a track sprint can't produce: Studio checks and the gate log.
+        The merge gate in the main checkout runs them on the merge result."""
+        ref = str(ref or "")
+        if kind == "check":
+            return ref.partition(":")[0] in cls.STUDIO_CHECK_KINDS
+        return "_EVIDENCE_RAW.log" in ref.replace("\\", "/")
+
     @staticmethod
     def is_track(P) -> bool:
         return bool(getattr(P.profile, "__dict__", {}).get("track"))

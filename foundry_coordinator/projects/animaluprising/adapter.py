@@ -715,7 +715,9 @@ Change no code or test file in this session; if one needs changing, stop and rep
         if not full:
             return VerificationResult("au.gate_bound_to_head", FAIL, True, rel,
                                       f"gate HEAD {gate_head} is not a commit here", revision)
-        exempt = self.exempt_paths(spec) + [f"docs/progress/{spec.task_id}_*"]
+        # 0.145.3: docs/memory is the coordinator's project memory, not code. Its own
+        # memory-notes commit after a passed gate failed GF-GATE1 here on 2026-10-27.
+        exempt = self.exempt_paths(spec) + [f"docs/progress/{spec.task_id}_*", "docs/memory/"]
         code = [c for c in changed if not matches_any(c, exempt)]
         if code:
             return VerificationResult("au.gate_bound_to_head", FAIL, True, rel,

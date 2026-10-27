@@ -86,3 +86,13 @@ def _no_live_foundry_client(tmp_path_factory, monkeypatch):
             return empty / "FoundryClient"
         return real()
     monkeypatch.setattr(client_api, "config_dir", guarded)
+
+
+@pytest.fixture(autouse=True)
+def _no_live_kilo_services(monkeypatch):
+    """No test reads this machine's global Kilo config (0.145.3): its MCP servers
+    (blender-mcp, roblox) are probed on live ports, so a track test passed with
+    Blender open and waited on 'blender-mcp' with it closed. A test that wants a
+    global config passes global_path or patches global_kilo_paths itself."""
+    from foundry_automation import service_map as SM
+    monkeypatch.setattr(SM, "global_kilo_paths", lambda: [])

@@ -24,6 +24,7 @@ refused (`obligations.directive_violations`) and BUILD checks always stay in
 from __future__ import annotations
 
 import hashlib
+import json
 import re
 import time
 from typing import Callable, Optional
@@ -844,11 +845,17 @@ class Recovery:
 
     def gate_submission(self, P, t, head: str, ledger=None,
                         obligations: Optional[Obligations] = None, *, spec=None,
-                        evidence_items: Optional[list] = None) -> list[dict]:
+                        evidence_items: Optional[list] = None,
+                        deferred=None) -> list[dict]:
         """Everything that must hold before a paid review: every BUILD obligation
         verified at `head`, no missing/stale required evidence (ledger and
         priority <= 2 packet items), no open obligation_conflict decision.
-        Empty list = submit."""
+        Empty list = submit.
+
+        `deferred(kind, ref) -> bool` names evidence another stage owns (a track
+        sprint's Studio evidence: the merge gate runs it in the main checkout);
+        an obligation all of whose evidence is deferred is not asked for here."""
+        owns = deferred or (lambda kind, ref: False)
         obs = obligations or self._obs()
         task = _tid(t)
         trow = t if isinstance(t, dict) else (self.store.task(P.id, task) or {"task_id": task})
@@ -865,19 +872,30 @@ class Recovery:
         for o in obs.all(P.id, task):
             if o["phase"] != "BUILD" or o["status"] in ("waived", "superseded"):
                 continue
+            req = o.get("required_evidence") or []
+            if isinstance(req, str):
+                try:
+                    req = json.loads(req)
+                except ValueError:
+                    req = []
+            if deferred and req and all(isinstance(r, dict) and owns(r.get("kind"), r.get("ref"))
+                                        for r in req):
+                continue
             if o["status"] != "verified" or o.get("verified_rev") != head:
                 out.append({"class": "missing_evidence", "action": act,
                             "item": {"obligation_id": o["obligation_id"], "title": o["title"],
                                      "required_evidence": o["required_evidence"],
                                      "reason": o.get("blocking_reason") or "not verified at head"}})
         for m in missing:
+            if owns("check", m.get("check_id")):
+                continue
             out.append({"class": "missing_evidence", "action": act,
                         "item": {"check_id": m.get("check_id"), "reason": m.get("reason"),
                                  "detail": str(m.get("detail") or "")[:300]}})
         if evidence_items:
             from .review import normalize_evidence
             for it in normalize_evidence(evidence_items):
-                if it["status"] in ("missing", "stale") and it["priority"] <= 2:
+                if it["status"] in ("missing", "stale") and it["priority"] <= 2                         and not owns("file", it["path"]):
                     out.append({"class": "missing_evidence", "action": act,
                                 "item": {"path": it["path"], "title": it["title"],
                                          "status": it["status"], "note": it["note"]}})

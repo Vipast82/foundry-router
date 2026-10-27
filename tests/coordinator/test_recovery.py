@@ -685,3 +685,28 @@ def test_progress_marks_migrate_to_the_new_columns(tmp_path):
     assert {"work_files", "checklist"} <= cols
     r = st.q("SELECT * FROM progress_marks WHERE session_id='old'")[0]
     assert r["work_files"] is None and r["checklist"] is None       # unknown, not zero
+
+
+def test_gate_leaves_deferred_evidence_to_the_merge_gate(store):
+    """0.145.3: a track sprint has no Studio; the merge gate owns its Studio
+    evidence, so the submission gate doesn't ask for it (GF-NAME1 looped)."""
+    ob, rec, P, t = setup(store)
+    P.adapter.describe = lambda tid: spec(tid)
+    led = FakeLedger(current={"au.gate": GATE_PASS})
+    assert rec.gate_submission(P, t, "h2", led, ob)                     # missing without deferral
+    assert rec.gate_submission(P, t, "h2", led, ob, deferred=lambda kind, ref: True) == []
+    out = rec.gate_submission(P, t, "h3", led, ob, deferred=lambda kind, ref: kind == "file",
+                              evidence_items=[{"path": CAP, "status": "stale", "priority": 1}])
+    assert CAP not in [o["item"].get("path") for o in out]
+
+
+def test_merge_gate_owns_studio_evidence_only():
+    from foundry_coordinator.tracks.manager import TrackManager
+    owns = TrackManager.merge_gate_owns
+    for ref in ("suite:GF_NAME1", "gate:GF-NAME1", "boot:server", "capture:hud", "regression:X"):
+        assert owns("check", ref), ref
+    for ref in ("au.lune", "done_check:GF-NAME1", "au.done_check.SCOPE", ""):
+        assert not owns("check", ref), ref
+    assert owns("log_marker", "docs/progress/GF-NAME1_EVIDENCE_RAW.log::GATE GF-NAME1 PASS")
+    assert owns("file", "docs\progress\GF-NAME1_EVIDENCE_RAW.log")
+    assert not owns("file", "src/shared/Enemies.lua")
