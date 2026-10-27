@@ -2,6 +2,29 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.147.1 — Media_Gen replaces the four audio MCP servers
+
+Victor 2026-10-27: one Media-Gen MCP server (TrueNAS `media-mcp`, streamable HTTP at
+`http://192.168.0.206:8190/mcp`, 20 tools: music, BGM, SFX, speech, dialogue, voices,
+images, video, jobs) replaces acestep-music, stable-audio, kokoro-tts and
+chatterbox-tts. The router's aggregator already has it as `Media_Gen`.
+
+- **Service registry:** a sprint that needs `audio` now waits on `Media_Gen` (one server
+  instead of all four). `images` is satisfied by Media_Gen, comfy-mcp or the
+  foundry-media adapter. "media-gen" and "media_gen" count as audio words in plans.
+- **Track Kilo configs:** a track that needs audio or images gets Media_Gen switched on.
+  The four replaced servers are always off in tracks. Media_Gen's tools are denied per
+  family: an images-only track keeps `generate_image` / `edit_image` /
+  `remove_background` / `upscale_image` and is denied the audio tools, and the reverse
+  for an audio-only track.
+- **Global Kilo config** (workstation, not in the repo): a `Media_Gen` remote entry,
+  disabled by default, so sessions that don't need it don't carry its 20 tool
+  definitions. The backup is `kilo.jsonc.bak-2026-10-27`.
+- The Foundry Client components for the four old servers stay for now (they are off);
+  the router's OpenAI speech endpoint still maps to kokoro-tts (see the follow-up).
+
+Coordinator restart needed (services and track configs).
+
 ## v0.147.0 — Studio evidence counts; checks never freeze the coordinator
 
 Plan: reports/V0147_STUDIO_EVIDENCE_AND_BACKGROUND_VERIFY_PLAN.md (Victor approved

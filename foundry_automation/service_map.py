@@ -51,7 +51,7 @@ ALIASES = {
     "blender-mcp": "blender", "3d": "blender", "models": "blender", "mesh": "blender",
     "music": "audio", "sfx": "audio", "tts": "audio", "sound": "audio", "voice": "audio",
     "acestep-music": "audio", "stable-audio": "audio", "kokoro-tts": "audio",
-    "chatterbox-tts": "audio",
+    "chatterbox-tts": "audio", "media-gen": "audio", "media_gen": "audio",
     "image": "images", "comfy": "images", "comfy-mcp": "images", "media": "images",
     "foundry-media": "images", "textures": "images",
     "llm": "gpu", "local_model": "gpu", "local-model": "gpu", "model": "gpu",
@@ -89,11 +89,12 @@ SERVICES: dict[str, Service] = {s.name: s for s in (
     Service("blender-mcp", "mcp", "mcp", "external", ("blender",), "Blender MCP", "blender",
             also_port=BLENDER_PORT,
             note="the Blender add-on's socket must be connected; Kilo spawns the server"),
-    Service("acestep-music", "mcp", "mcp", "external", ("audio",), "ACE-Step music", "acestep-music"),
-    Service("stable-audio", "mcp", "mcp", "external", ("audio",), "Stable Audio SFX", "stable-audio"),
-    Service("kokoro-tts", "mcp", "mcp", "external", ("audio",), "Kokoro speech", "kokoro-tts"),
-    Service("chatterbox-tts", "mcp", "mcp", "external", ("audio",), "Chatterbox speech",
-            "chatterbox-tts"),
+    # 2026-10-27: one Media-Gen server (TrueNAS media-mcp, streamable HTTP) replaced the
+    # acestep-music, stable-audio, kokoro-tts and chatterbox-tts servers
+    Service("Media_Gen", "mcp", "mcp", "external", ("audio", "images"),
+            "Media-Gen (music, SFX, speech, images, video)",
+            note="TrueNAS media-mcp at 192.168.0.206:8190; jobs return a job_id, "
+                 "results via media_check_job; library 'game' for AU assets"),
     Service("comfy-mcp", "mcp", "mcp", "external", ("images",), "Comfy MCP"),
     Service("foundry-media", "mcp", "mcp", "external", ("images",), "Foundry media adapter"),
     Service("local-model", "backend", "http", "backend", ("gpu",), "Local model backend",
@@ -106,8 +107,8 @@ SERVICES: dict[str, Service] = {s.name: s for s in (
 NEEDS_SERVICES: dict[str, list] = {
     "studio": ["rojo", "robloxstudio-mcp", "kilo"],
     "blender": ["blender-mcp"],
-    "audio": ["acestep-music", "stable-audio", "kokoro-tts", "chatterbox-tts"],
-    "images": [("comfy-mcp", "foundry-media")],
+    "audio": ["Media_Gen"],
+    "images": [("Media_Gen", "comfy-mcp", "foundry-media")],
     "gpu": ["local-model"],
     "backend": ["router"],
     "none": [],
@@ -117,15 +118,25 @@ NEEDS_SERVICES: dict[str, list] = {
 NEEDS_MCP: dict[str, tuple] = {
     "studio": ("Roblox_Studio", "robloxstudio-mcp"),
     "blender": ("blender-mcp",),
-    "audio": ("acestep-music", "stable-audio", "kokoro-tts", "chatterbox-tts"),
-    "images": ("comfy-mcp", "foundry-media"),
+    "audio": ("Media_Gen",),
+    "images": ("Media_Gen", "comfy-mcp", "foundry-media"),
 }
 # every server some need controls (an unlisted server is left as the source has it)
-CONTROLLED_MCP = tuple(dict.fromkeys(m for v in NEEDS_MCP.values() for m in v))
+# servers Media_Gen replaced (2026-10-27): no need enables them, a track always has them off
+LEGACY_MCP = ("acestep-music", "stable-audio", "kokoro-tts", "chatterbox-tts")
+CONTROLLED_MCP = tuple(dict.fromkeys([m for v in NEEDS_MCP.values() for m in v]
+                                     + list(LEGACY_MCP)))
 # tool-name prefixes denied for a role when the track lacks the need
+# Media_Gen serves both audio and images: its tools are denied per family, not per server
+MEDIA_GEN_AUDIO = ("generate_music", "generate_bgm", "generate_sfx", "generate_speech",
+                   "generate_dialogue", "register_voice", "list_voices",
+                   "generate_song_personal")
+MEDIA_GEN_IMAGES = ("generate_image", "edit_image", "remove_background", "upscale_image")
 NEEDS_TOOLS = {"blender": ("blender-mcp_*", "blender_mcp_*"),
-               "audio": ("acestep-music_*", "stable-audio_*", "kokoro-tts_*", "chatterbox-tts_*"),
-               "images": ("comfy-mcp_*", "foundry-media_*")}
+               "audio": tuple(f"Media_Gen_{t}" for t in MEDIA_GEN_AUDIO)
+               + ("acestep-music_*", "stable-audio_*", "kokoro-tts_*", "chatterbox-tts_*"),
+               "images": tuple(f"Media_Gen_{t}" for t in MEDIA_GEN_IMAGES)
+               + ("comfy-mcp_*", "foundry-media_*")}
 
 
 def normalize_needs(x) -> list[str]:

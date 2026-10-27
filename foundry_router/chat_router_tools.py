@@ -578,8 +578,8 @@ def register(eng) -> None:                    # noqa: C901 - the catalog in one 
               "(a client key name, or 'keyless' for requests without a key, e.g. an untracked "
               "AnythingLLM) sends its own tools. value: default (follow the persona), off, all, "
               "dedupe (skip persona tools that duplicate the client's own by name or purpose), "
-              "or a comma list of MCP server/tool names, e.g. 'acestep-music, stable-audio, "
-              "kokoro-tts, chatterbox-tts, searxng'. Wins over the persona's "
+              "or a comma list of MCP server/tool names, e.g. 'Media_Gen, "
+              "searxng'. Wins over the persona's "
               "mcp_with_client_tools; never adds tools the persona isn't granted. "
               "config.yaml, versioned.",
               "persona", {"client": S, "value": {"type": "string", "max": 600}},

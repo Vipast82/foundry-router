@@ -72,8 +72,10 @@ def test_a_ui_track_gets_studio_and_never_blender(tmp_path, src):
 
 def test_a_server_only_the_global_config_knows_is_added_as_a_stub(tmp_path, src):
     mcp = load(services.track_kilo_config(Track(tmp_path, ["audio"], "a"), source=src))["mcp"]
-    assert mcp["acestep-music"] == {"enabled": True} and mcp["stable-audio"] == {"enabled": True}
-    assert mcp["kokoro-tts"]["enabled"] is True
+    assert mcp["Media_Gen"] == {"enabled": True}          # the global config defines it
+    # the servers Media_Gen replaced stay off even for an audio track
+    assert mcp["kokoro-tts"]["enabled"] is False
+    assert "acestep-music" not in mcp                    # not in the source: nothing to turn off
 
 
 def test_agent_blocks_follow_role_rules_and_the_needs(tmp_path, src):

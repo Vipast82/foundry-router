@@ -63,6 +63,8 @@ _SERVER_NEED = {
     "comfy-mcp": "images", "comfy": "images",
     "stable-audio": "audio", "acestep-music": "audio", "ace-step": "audio", "kokoro": "audio",
     "kokoro-tts": "audio", "chatterbox-tts": "audio", "chatterbox": "audio",
+    "media-gen": "audio", "media_gen": "audio", "generate_sfx": "audio",
+    "generate_music": "audio", "generate_bgm": "audio", "generate_speech": "audio",
 }
 _STUDIO_IDLE = re.compile(r"roblox_studio\s*\(?[^.;)]*\b(idle|no studio work)\b", re.I)
 

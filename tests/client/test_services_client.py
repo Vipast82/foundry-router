@@ -86,7 +86,7 @@ def test_no_kilo_file_is_an_empty_report_not_an_error(cfg):
 
 def test_services_report_marks_client_provided_services(cfg, tmp_path):
     rows = [{"name": "robloxstudio-mcp", "available": True, "detail": "npx.cmd found"},
-            {"name": "kokoro-tts", "available": False, "detail": "host:1 is not reachable"}]
+            {"name": "Media_Gen", "available": False, "detail": "host:1 is not reachable"}]
     comp = {"rojo": {"state": "running", "enabled": True}, "kilo": {"state": "stopped", "enabled": False}}
     out = {r["name"]: r for r in C.services_report(cfg, rows, comp, port_fn=lambda h, p, *a: p == 34872,
                                                    http_fn=lambda url: "")}
@@ -94,7 +94,7 @@ def test_services_report_marks_client_provided_services(cfg, tmp_path):
     assert out["rojo"]["enabled"] is True and out["rojo"]["component_state"] == "running"
     assert out["kilo"]["status"] == "down" and out["kilo"]["enabled"] is False
     assert out["robloxstudio-mcp"]["status"] == "up" and out["robloxstudio-mcp"]["provider"] == "external"
-    assert out["kokoro-tts"]["status"] == "down" and out["kokoro-tts"]["needed_by"] == ["audio"]
+    assert out["Media_Gen"]["status"] == "down" and out["Media_Gen"]["needed_by"] == ["audio", "images"]
     assert out["local-model"]["provider"] == "backend" and out["local-model"]["status"] == "up"
     assert out["blender-mcp"]["status"] == "unknown"             # nothing defines it here
     assert out["blender-mcp"]["provider"] == "external"          # no `blender` component in this comp map

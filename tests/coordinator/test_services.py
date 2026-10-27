@@ -19,6 +19,7 @@ KILO = """{
     "blender-mcp": {"enabled": false},
     "acestep-music": {"enabled": false},
     "kokoro-tts": {"enabled": false},
+    "Media_Gen": {"enabled": false},
     "foundry-media": {"type": "local", "command": ["powershell.exe", "-NoProfile", "-File", "%PS1%"], "enabled": true},
     "roblox-docs": {"type": "remote", "url": "http://192.168.0.114:8931/sse", "enabled": true}
   }
@@ -28,7 +29,8 @@ GLOBAL = """{
     "robloxstudio-mcp": {"type": "local", "command": ["C:\\\\Windows\\\\System32\\\\cmd.exe", "/c", "npx.cmd", "-y", "x"]},
     "blender-mcp": {"type": "local", "command": ["C:\\\\Windows\\\\System32\\\\cmd.exe", "/c", "uvx.exe", "blender-mcp"]},
     "acestep-music": {"type": "remote", "url": "http://192.168.0.115:8937/sse"},
-    "kokoro-tts": {"type": "remote", "url": "http://192.168.0.115:8934/sse"}
+    "kokoro-tts": {"type": "remote", "url": "http://192.168.0.115:8934/sse"},
+    "Media_Gen": {"type": "remote", "url": "http://192.168.0.206:8190/mcp"}
   }
 }"""
 
@@ -38,9 +40,10 @@ GLOBAL = """{
 def test_needs_map_services_per_need():
     assert S.services_for(["studio"]) == ["rojo", "robloxstudio-mcp", "kilo"]
     assert S.services_for("blender") == ["blender-mcp"]
-    assert S.services_for(["audio"]) == ["acestep-music", "stable-audio", "kokoro-tts",
-                                         "chatterbox-tts"]
-    assert S.services_for(["images"]) == ["comfy-mcp", "foundry-media"]
+    # 2026-10-27: one Media_Gen server replaced the four audio servers
+    assert S.services_for(["audio"]) == ["Media_Gen"]
+    assert S.services_for(["images"]) == ["Media_Gen", "comfy-mcp", "foundry-media"]
+    assert S.normalize_needs("media-gen sfx") == ["audio"]
     assert S.services_for(["gpu"]) == ["local-model"]
     assert S.services_for(["backend"]) == ["router"] and S.services_for(["none"]) == []
     # words are normalised: aliases, case, unknowns dropped, order-free
@@ -76,10 +79,12 @@ def test_ready_without_a_db_uses_the_probe_directly():
 
 
 def test_unknown_is_not_missing_and_an_any_of_group_needs_one_member():
-    assert S.ready(["audio"], probe=probe_of(kokoro_tts=None))[0] is True
-    assert S.ready(["images"], probe=probe_of(comfy_mcp=False))[0] is True        # foundry-media is up
-    ok, missing = S.ready(["images"], probe=probe_of(comfy_mcp=False, foundry_media=False))
-    assert not ok and missing == ["comfy-mcp/foundry-media"]
+    assert S.ready(["audio"], probe=probe_of(Media_Gen=None))[0] is True
+    assert S.ready(["audio"], probe=probe_of(Media_Gen=False)) == (False, ["Media_Gen"])
+    assert S.ready(["images"], probe=probe_of(comfy_mcp=False))[0] is True        # Media_Gen is up
+    ok, missing = S.ready(["images"], probe=probe_of(Media_Gen=False, comfy_mcp=False,
+                                                      foundry_media=False))
+    assert not ok and missing == ["Media_Gen/comfy-mcp/foundry-media"]
 
 
 def test_ready_stores_probes_and_trusts_them_for_the_ttl(tmp_path):
@@ -134,14 +139,14 @@ def fake_fs():
 
 def test_make_probe_resolves_stubs_against_the_global_config(kilo_files):
     proj, g = kilo_files
-    up_ports = {("192.168.0.115", 8937)}
+    up_ports = {("192.168.0.206", 8190)}
     mcp = SM.merged_mcp(project_path=str(proj), global_path=str(g))
     assert mcp["acestep-music"]["url"].endswith(":8937/sse") and mcp["acestep-music"]["enabled"] is False
     fs = fake_fs()
     probe = S.make_probe(mcp=mcp, overrides={}, port_fn=lambda h, p, *a: (h, p) in up_ports,
                          which=fs["which"], isfile=fs["isfile"])
-    assert probe("acestep-music")[0] is True                 # remote, port open
-    assert probe("kokoro-tts")[0] is False                   # remote, port closed
+    assert probe("Media_Gen")[0] is True                     # remote, port open
+    assert probe("kokoro-tts") == (None, "not in the service catalog")   # replaced by Media_Gen
     ok, why = probe("robloxstudio-mcp")                      # cmd.exe wrapper -> npx.cmd, not found
     assert ok is False and "npx.cmd" in why
     assert probe("blender-mcp")[0] is False                  # uvx found, but the add-on socket is closed
@@ -275,3 +280,19 @@ def test_client_start_request_is_rate_limited_per_service(eng, monkeypatch):
     assert first == again                                     # nobody was asked twice within 10 min
     names = sorted(r["detail"]["service"] for r in client_requests.pending(eng.state_dir))
     assert names == ["kilo", "rojo"]                          # robloxstudio-mcp has no client component
+
+
+def test_media_gen_tools_are_denied_per_family():
+    """Media_Gen serves audio and images (2026-10-27): a track with only one of the two
+    needs keeps that family's tools and is denied the other family's."""
+    from foundry_coordinator.kilo_config import track_rules
+    from foundry_automation import role_rules as RR
+    rules = {role: {} for role in RR.RULE_ROLES}
+    img = track_rules(rules, ["images"])["implementer"]["deny_tools"]
+    assert "Media_Gen_generate_sfx" in img and "Media_Gen_generate_speech" in img
+    assert "Media_Gen_generate_image" not in img and "Media_Gen_remove_background" not in img
+    aud = track_rules(rules, ["audio"])["implementer"]["deny_tools"]
+    assert "Media_Gen_generate_image" in aud and "Media_Gen_generate_sfx" not in aud
+    both = track_rules(rules, ["audio", "images"])["implementer"]["deny_tools"]
+    assert not [t for t in both if t.startswith("Media_Gen_")]
+    assert "Media_Gen" in SM.CONTROLLED_MCP and "kokoro-tts" in SM.CONTROLLED_MCP
