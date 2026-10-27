@@ -11,7 +11,8 @@ Dependencies  the plan's **Depends on:** line. A dependency finished before the
 Verification  tools/guard/done_check.py (run, rows parsed), the gate verdict in
               docs/progress/<ID>_EVIDENCE_RAW.log bound to the commit the gate
               ran at (R-C live-to-HEAD), the Lune suites + negative control
-              re-run by the coordinator itself, and the Kilo session audit
+              re-run by the coordinator itself (a PASS is carried when the
+              Lune inputs are unchanged: lune_cache.py), and the Kilo session audit
               (kilo_checkpoint.py) as advisory evidence.
 Sessions      BUILD session(s) implement + run the gate; a CLOSE session writes
               the summary/STATE rows, runs done_check and the one plain
@@ -35,6 +36,7 @@ import stat
 import subprocess
 import sys
 import time
+from concurrent.futures import ThreadPoolExecutor, wait
 
 from ...adapters.base import (FAIL, PASS, UNKNOWN, EVIDENCE_ITEM_CHARS, TaskSpec,
                               VerificationResult, bound_text, checklist_mark, duty_bullets,
@@ -42,6 +44,7 @@ from ...adapters.base import (FAIL, PASS, UNKNOWN, EVIDENCE_ITEM_CHARS, TaskSpec
 from ...adapters.git import GitError
 from ...adapters.project import AdapterError, GenericAdapter
 from ...profile import matches_any
+from . import lune_cache
 
 AMENDMENT_MARKER = "COORDINATOR-ADVANCEMENT"
 VERIFY_ROWS = ("COMMITS", "CLEAN", "SCOPE", "TEST", "GATE", "BOOT", "EVIDENCE", "TIER-C")
@@ -552,11 +555,13 @@ Change no code or test file in this session; if one needs changing, stop and rep
     # -- verification ------------------------------------------------------------------
 
     def verify(self, spec: TaskSpec, phase: str, revision: str, base: str, ws=None) -> list:
-        out = self._done_check(spec, phase, revision)
+        # done_check, the gate binding and Lune run side by side; rows keep this order
+        jobs = [lambda: self._done_check(spec, phase, revision)]
         if phase == "verify" and spec.data.get("tier") in ("A", "B"):
             # tier C has no gate (§30): its proof is the empty src/tests diff in done_check
-            out.append(self._gate_binding(spec, revision, ws))
-            out += self._lune(spec, revision)
+            jobs += [lambda: [self._gate_binding(spec, revision, ws)],
+                     lambda: self._lune(spec, revision)]
+        out = [r for rows in _concurrently(jobs) for r in rows]
         out += super().verify(spec, phase, revision, base)       # extra profile checks
         return out
 
@@ -571,9 +576,10 @@ Change no code or test file in this session; if one needs changing, stop and rep
         0.145.0 a track sprint failed them every time, its session then tried to
         run the gate itself, hit the main sprint's Studio lock and went BLOCKED
         (GF-NAME1, 2026-10-27)."""
-        out = self._done_check(spec, phase, revision, skip=STUDIO_ROWS)
+        jobs = [lambda: self._done_check(spec, phase, revision, skip=STUDIO_ROWS)]
         if phase == "verify" and spec.data.get("tier") in ("A", "B"):
-            out += self._lune(spec, revision)
+            jobs.append(lambda: self._lune(spec, revision))
+        out = [r for rows in _concurrently(jobs) for r in rows]
         out += GenericAdapter.verify(self, spec, phase, revision, base)
         return out
 
@@ -731,31 +737,123 @@ Change no code or test file in this session; if one needs changing, stop and rep
         except (TypeError, ValueError):
             return self.LUNE_TIMEOUT_S
 
+    def _lune_reuse(self) -> bool:
+        """[animaluprising] lune_reuse (default true): carry a Lune PASS to a
+        revision whose Lune inputs are the same (lune_cache.py)."""
+        v = self.cfg.get("lune_reuse", True)
+        return str(v).strip().lower() not in ("0", "false", "no", "off", "")
+
+    def _lune_workers(self) -> int | None:
+        """[animaluprising] lune_workers: AU_LUNE_WORKERS for run.luau's parallel
+        mode; unset leaves the environment alone."""
+        try:
+            n = int(self.cfg.get("lune_workers") or 0)
+        except (TypeError, ValueError):
+            return None
+        return n if n >= 1 else None
+
+    LUNE_RUNS = (("au.lune", "normal", [], r"^LUNE \d+/\d+ PASS"),
+                 ("au.lune_negative", "negative", ["--", "--negative"],
+                  r"^NEGATIVE CONTROL PASS"))
+
     def _lune(self, spec: TaskSpec, revision: str) -> list:
+        """The Lune suite and its negative control, side by side. A PASS whose
+        inputs are unchanged is carried instead of run again."""
         lune = self.cfg.get("lune") or shutil.which("lune")
         if not lune:
             return [VerificationResult("au.lune", UNKNOWN, True, "", "lune not on PATH (rokit "
                                        "install)", revision)]
-        out = []
-        for name, args, pat in (("au.lune", [], r"^LUNE \d+/\d+ PASS"),
-                                ("au.lune_negative", ["--", "--negative"],
-                                 r"^NEGATIVE CONTROL PASS")):
-            log = os.path.join(evidence_dir(self.state_dir, self.p.id, spec.task_id, revision),
-                               name + ".log")
-            try:
-                r = subprocess.run([lune, "run", "tests/lune/run.luau", *args],
-                                   cwd=self.p.workspace, capture_output=True, text=True,
-                                   timeout=self._lune_timeout(), encoding="utf-8", errors="replace")
-                text = r.stdout + r.stderr
-            except (OSError, subprocess.TimeoutExpired) as e:
-                out.append(VerificationResult(name, UNKNOWN, True, "", str(e), revision))
-                continue
-            with open(log, "w", encoding="utf-8") as f:
-                f.write(text)
-            ok = re.search(pat, text, re.M)
-            out.append(VerificationResult(name, PASS if ok else FAIL, True, log,
-                                          (ok.group(0) if ok else text[-500:]), revision))
+        edir = evidence_dir(self.state_dir, self.p.id, spec.task_id, revision)
+        cpath = lune_cache.cache_path(self.state_dir, self.p.id)
+        version = self._lune_version(lune) if self._lune_reuse() else ""
+        info = lune_cache.input_key(self.p.workspace, revision, version) if version else None
+        out, todo = [None] * len(self.LUNE_RUNS), []
+        for i, (name, mode, args, pat) in enumerate(self.LUNE_RUNS):
+            key = lune_cache.mode_key(info, mode)
+            hit = self._lune_carried(name, pat, key, cpath, edir, revision) if key else None
+            if hit is not None:
+                out[i] = hit
+            else:
+                todo.append((i, name, mode, args, pat, key))
+        workers = self._lune_workers()
+        jobs = []
+        for i, name, mode, args, pat, key in todo:
+            n = workers
+            if n and len(todo) > 1:
+                # the negative control is small: one worker, the suite the rest
+                n = 1 if mode == "negative" else max(1, n - 1)
+            jobs.append(lambda name=name, args=args, pat=pat, n=n:
+                        [self._lune_run(lune, name, args, pat, n, edir, revision)])
+        for (i, *_), rows in zip(todo, _concurrently(jobs)):
+            out[i] = rows[0]
+        if any(t[5] for t in todo):
+            self._lune_store(todo, out, info, cpath, revision, version)
         return out
+
+    def _lune_version(self, lune: str) -> str:
+        try:
+            r = subprocess.run([lune, "--version"], capture_output=True, text=True, timeout=60,
+                               encoding="utf-8", errors="replace")
+        except (OSError, subprocess.TimeoutExpired):
+            return ""
+        return (r.stdout or "").strip() if r.returncode == 0 else ""
+
+    def _lune_carried(self, name, pat, key, cpath, edir, revision):
+        """This revision's row from a cached PASS with the same key, or None."""
+        e = lune_cache.get(cpath, key)
+        if not e:
+            return None
+        src = e.get("log") or ""
+        try:
+            with open(src, encoding="utf-8", errors="replace") as f:
+                text = f.read()
+        except OSError:
+            return None                          # its log is gone: run again
+        if not re.search(pat, text, re.M):
+            return None
+        rev = str(e.get("rev") or "")[:12]
+        log = os.path.join(edir, name + ".log")
+        if os.path.normcase(os.path.abspath(src)) != os.path.normcase(os.path.abspath(log)):
+            with open(log, "w", encoding="utf-8") as f:
+                f.write(f"# carried from {src} (run at {rev}, same Lune inputs, "
+                        f"key {key[:16]})\n{text}")
+        detail = (f"carried from a run at {rev} with the same inputs (key {key[:16]}): "
+                  f"{e.get('detail', '')}; original log {src}")
+        return VerificationResult(name, PASS, True, log, detail, revision)
+
+    def _lune_run(self, lune, name, args, pat, workers, edir, revision):
+        log = os.path.join(edir, name + ".log")
+        env = dict(os.environ, AU_LUNE_WORKERS=str(workers)) if workers else None
+        t0 = time.time()
+        try:
+            r = subprocess.run([lune, "run", "tests/lune/run.luau", *args],
+                               cwd=self.p.workspace, capture_output=True, text=True, env=env,
+                               timeout=self._lune_timeout(), encoding="utf-8", errors="replace")
+            text = (r.stdout or "") + (r.stderr or "")
+        except (OSError, subprocess.TimeoutExpired) as e:
+            return VerificationResult(name, UNKNOWN, True, "", str(e), revision)
+        with open(log, "w", encoding="utf-8") as f:
+            f.write(text)
+        ok = re.search(pat, text, re.M)
+        return VerificationResult(name, PASS if ok else FAIL, True, log,
+                                  (ok.group(0) if ok else text[-500:]), revision,
+                                  duration_ms=int((time.time() - t0) * 1000))
+
+    def _lune_store(self, todo, out, info, cpath, revision, version):
+        """Cache the PASS rows; a PASS only when the inputs didn't move while it
+        ran. FAIL/UNKNOWN drop the key."""
+        after = lune_cache.input_key(self.p.workspace, revision, version)
+        same = bool(after.get("key")) and after.get("key") == (info or {}).get("key")
+        for i, name, mode, args, pat, key in todo:
+            res = out[i]
+            if not key or (res.result == PASS and not same):
+                continue
+            try:
+                lune_cache.put(cpath, key, {"result": res.result, "rev": revision,
+                                            "log": res.evidence, "detail": res.detail,
+                                            "check": name, "lune": version})
+            except OSError:
+                pass
 
     def session_audit(self, spec: TaskSpec, session_id: str, transcript: list,
                       revision: str) -> list:
@@ -1799,6 +1897,17 @@ Change no code or test file in this session; if one needs changing, stop and rep
                 res("au.studio.live_sync", "runtime_sync", m, why,
                     blocking=m is False)
         return out
+
+
+def _concurrently(jobs: list) -> list:
+    """Run each job (a no-arg callable) in its own thread; results in job order.
+    A job's exception is raised here after every job has finished."""
+    if len(jobs) <= 1:
+        return [j() for j in jobs]
+    with ThreadPoolExecutor(max_workers=len(jobs)) as ex:
+        futs = [ex.submit(j) for j in jobs]
+        wait(futs)
+    return [f.result() for f in futs]
 
 
 def _view_input(view: dict) -> str:
