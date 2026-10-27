@@ -708,5 +708,5 @@ def test_merge_gate_owns_studio_evidence_only():
     for ref in ("au.lune", "done_check:GF-NAME1", "au.done_check.SCOPE", ""):
         assert not owns("check", ref), ref
     assert owns("log_marker", "docs/progress/GF-NAME1_EVIDENCE_RAW.log::GATE GF-NAME1 PASS")
-    assert owns("file", "docs\progress\GF-NAME1_EVIDENCE_RAW.log")
+    assert owns("file", r"docs\progress\GF-NAME1_EVIDENCE_RAW.log")
     assert not owns("file", "src/shared/Enemies.lua")

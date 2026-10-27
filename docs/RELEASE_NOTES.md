@@ -2,6 +2,22 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.146.2 — a track that merged master can land; tests need no network
+
+- **Track merge keeps merge commits.** The merge stage ran `git rebase <master>` in the
+  track's worktree. A track that had already merged master (GF-NAME1 merged it to pick
+  up GF-GATE1's work) lost its merge commits and its edits were replayed over master,
+  conflicting by construction; the Lead diagnosed it (case rc-bb1526ee). Now: master
+  already in the track -> nothing to integrate, straight to the fast-forward; the track
+  has merge commits -> master is merged in; otherwise the rebase as before. The
+  `track_rebased` event says which (`how`).
+- **Tests need no network.** A lookup of a name that isn't local fails at once (router
+  tests upserted MCP servers like `http://x/mcp`, about 2.7 s each on Windows), and the
+  "nothing listens here" endpoint `127.0.0.1:9` fails at once instead of after 2 s of
+  SYN retries. `FOUNDRY_TEST_NETWORK=1` turns the guard off.
+
+Coordinator restart needed.
+
 ## v0.146.1 — track plan analysis 11x faster
 
 `tracks analyze` / `tracks propose` compared every pair of open sprints' "may change"
