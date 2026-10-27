@@ -556,10 +556,14 @@ Change no code or test file in this session; if one needs changing, stop and rep
 
     def verify(self, spec: TaskSpec, phase: str, revision: str, base: str, ws=None) -> list:
         # done_check, the gate binding and Lune run side by side; rows keep this order
-        jobs = [lambda: self._done_check(spec, phase, revision)]
+        from ...check_progress import track
+        pid, tid = self.p.id, spec.task_id
+        jobs = [lambda: track(pid, tid, "done_check",
+                              lambda: self._done_check(spec, phase, revision))]
         if phase == "verify" and spec.data.get("tier") in ("A", "B"):
             # tier C has no gate (§30): its proof is the empty src/tests diff in done_check
-            jobs += [lambda: [self._gate_binding(spec, revision, ws)],
+            jobs += [lambda: track(pid, tid, "gate binding",
+                                   lambda: [self._gate_binding(spec, revision, ws)]),
                      lambda: self._lune(spec, revision)]
         out = [r for rows in _concurrently(jobs) for r in rows]
         out += super().verify(spec, phase, revision, base)       # extra profile checks
@@ -576,7 +580,10 @@ Change no code or test file in this session; if one needs changing, stop and rep
         0.145.0 a track sprint failed them every time, its session then tried to
         run the gate itself, hit the main sprint's Studio lock and went BLOCKED
         (GF-NAME1, 2026-10-27)."""
-        jobs = [lambda: self._done_check(spec, phase, revision, skip=STUDIO_ROWS)]
+        from ...check_progress import track
+        pid, tid = self.p.id, spec.task_id
+        jobs = [lambda: track(pid, tid, "done_check",
+                              lambda: self._done_check(spec, phase, revision, skip=STUDIO_ROWS))]
         if phase == "verify" and spec.data.get("tier") in ("A", "B"):
             jobs.append(lambda: self._lune(spec, revision))
         out = [r for rows in _concurrently(jobs) for r in rows]
@@ -770,10 +777,13 @@ Change no code or test file in this session; if one needs changing, stop and rep
         version = self._lune_version(lune) if self._lune_reuse() else ""
         info = lune_cache.input_key(self.p.workspace, revision, version) if version else None
         out, todo = [None] * len(self.LUNE_RUNS), []
+        from ...check_progress import carried, track
+        label = {"normal": "Lune suite", "negative": "Lune negative control"}
         for i, (name, mode, args, pat) in enumerate(self.LUNE_RUNS):
             key = lune_cache.mode_key(info, mode)
             hit = self._lune_carried(name, pat, key, cpath, edir, revision) if key else None
             if hit is not None:
+                carried(self.p.id, spec.task_id, label.get(mode, name))
                 out[i] = hit
             else:
                 todo.append((i, name, mode, args, pat, key))
@@ -784,8 +794,9 @@ Change no code or test file in this session; if one needs changing, stop and rep
             if n and len(todo) > 1:
                 # the negative control is small: one worker, the suite the rest
                 n = 1 if mode == "negative" else max(1, n - 1)
-            jobs.append(lambda name=name, args=args, pat=pat, n=n:
-                        [self._lune_run(lune, name, args, pat, n, edir, revision)])
+            jobs.append(lambda name=name, mode=mode, args=args, pat=pat, n=n: track(
+                self.p.id, spec.task_id, label.get(mode, name),
+                lambda: [self._lune_run(lune, name, args, pat, n, edir, revision)]))
         for (i, *_), rows in zip(todo, _concurrently(jobs)):
             out[i] = rows[0]
         if any(t[5] for t in todo):

@@ -2,6 +2,25 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.150.2 — the control center shows the coordinator's background checks
+
+Victor 2026-10-27: "how do I know from the control center what is happening right now? I see
+it's on verifying, but I don't see any actions". Since v0.147.0 verify and closeout checks run
+on worker threads, outside any session, so the activity view said "nothing running" while the
+Lune suite ran for minutes.
+
+- **Each check records its progress** (`check_progress.py`): done_check, gate binding, Lune
+  suite, Lune negative control; a reused Lune pass shows as "PASS (reused)". It records the
+  start, the end and the result.
+- **The task note** (the coordinator line in the control center) lists them, for example
+  "verify checks running in the background (324 s) at 7111ae8da98a: done_check PASS 41 s ·
+  Lune suite running 5m02s".
+- **The activity graph:** the coordinator heartbeat carries the running checks (`checks`),
+  and the graph shows the Coordinator, then "<task> verify checks", then one node per check.
+  Each node is active while running, completed or failed when done.
+
+Coordinator restart (the note) and a router backend rebuild (the graph) needed.
+
 ## v0.150.1 — a track's merge no longer waits on untracked files
 
 GF-NAME1 completed and its track was ready to merge, but the merge stage waited for a "clean"

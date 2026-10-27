@@ -1522,8 +1522,10 @@ class Coordinator:
             self._note(P, t, f"{kind} checks queued: {val} check run(s) already in the "
                              f"background ([automation] max_parallel_checks = {cap})")
         else:
+            from . import check_progress
+            detail = check_progress.summary(P.id, t["task_id"])
             self._note(P, t, f"{kind} checks running in the background ({val} s) at "
-                             f"{head[:12]}")
+                             f"{head[:12]}" + (f": {detail}" if detail else ""))
         return None
 
     def _generic_checks(self, P: Project, t: dict, spec, head: str, phase: str,

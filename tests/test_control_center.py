@@ -593,3 +593,28 @@ def test_unacknowledged_alert_that_comes_back_is_new(cc):
     cc._resolve("k:x", "ok")
     b = cc.raise_alert("k:x", "quota_source", "warning", "t", "d", {})
     assert b["status"] == "new" and b["alert_id"] == a["alert_id"]
+
+
+def test_route_graph_shows_the_coordinators_background_checks(client, cc):
+    """2026-10-27 (Victor: "I see it's on verifying, but I don't see any actions"): the
+    project checks a coordinator runs in the background show in the activity graph."""
+    client.post("/v1/foundry/telemetry/heartbeat", headers=COORD, json={
+        "source": {"id": "coordinator:ws", "kind": "coordinator"}, "sent_ts": time.time(),
+        "checks": [{"project": "proj", "task": "T1", "kind": "verify", "head": "7111ae8da98a",
+                    "seconds": 330, "checks": [
+                        {"name": "done_check", "state": "PASS", "seconds": 41},
+                        {"name": "Lune suite", "state": "running", "seconds": 302},
+                        {"name": "gate binding", "state": "FAIL", "seconds": 3}]}]})
+    g = cc.route_graph([], "proj", "T1", 30)
+    nodes = {n["id"]: n for n in g["nodes"]}
+    assert "chk:proj:T1" in nodes and nodes["chk:proj:T1"]["kind"] == "checks"
+    lune = nodes["chk:proj:T1:Lune suite"]
+    assert lune["label"] == "Lune suite running 5m02s"
+    edges = {e["id"]: e for e in g["edges"]}
+    assert edges["coordinator->chk:proj:T1"]["state"] == "active"
+    assert edges["chk:proj:T1->chk:proj:T1:Lune suite"]["state"] == "active"
+    assert edges["chk:proj:T1->chk:proj:T1:done_check"]["state"] == "completed"
+    assert edges["chk:proj:T1->chk:proj:T1:gate binding"]["state"] == "failed"
+    # another task's view does not show them
+    assert not [n for n in cc.route_graph([], "proj", "T2", 30)["nodes"]
+                if n["id"].startswith("chk:")]

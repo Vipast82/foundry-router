@@ -3111,7 +3111,7 @@ function renderGraph() {
   };
   const g = P.graphActiveOnly ? activeSubgraph(S.graph) : S.graph;
   if (P.graphActiveOnly && !g.nodes.length) {
-    host.innerHTML = `<p class="dim" style="padding:8px">Nothing is running or queued right now (no busy session, in-flight call, running tool or helper, and no queued, waiting or deferred lane work). Untick <b>Active only</b> for the last ${esc(S.graphMin || 30)} min of history.</p>`;
+    host.innerHTML = `<p class="dim" style="padding:8px">Nothing is running or queued right now (no busy session, in-flight call, running tool or helper, no coordinator checks, and no queued, waiting or deferred lane work). Untick <b>Active only</b> for the last ${esc(S.graphMin || 30)} min of history.</p>`;
     const zl = $("#g-zoom"); if (zl) zl.textContent = "";
     return;
   }

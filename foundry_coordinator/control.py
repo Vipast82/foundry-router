@@ -230,6 +230,13 @@ class ControlChannel:
                 continue
         return False
 
+    def _checks_running(self) -> list:
+        try:
+            from . import check_progress
+            return check_progress.running()[:20]
+        except Exception:                                         # noqa: BLE001
+            return []
+
     def _beat(self) -> dict:
         tasks = self.store.tasks()
         lead_on = self._lead_on()
@@ -259,6 +266,9 @@ class ControlChannel:
                 # Team Lead tracks per project (the Tracks tab reads it from the
                 # coordinator source's heartbeat): max_agents, tracks, Studio timeline
                 "tracks": self._tracks_status(),
+                # 2026-10-27: the project checks running in the background (verify /
+                # closeout), per check, for the control center's activity view
+                "checks": self._checks_running(),
                 # per project: {paused, mode, note, actor, since, busy_sessions,
                 # running_helpers, running_reviews, safe_to_upgrade}
                 "project_pause": {pid: self._pause_status(pid) for pid in sorted(self.c.projects)},

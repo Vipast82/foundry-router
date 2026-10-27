@@ -57,6 +57,9 @@ class BackgroundChecks:
                 busy = sum(1 for j in self._jobs.values() if not j["future"].done())
                 if busy >= max(1, int(cap)):
                     return "queued", busy
+                from . import check_progress
+                check_progress.reset(key[0], key[1], kind=key[2] if len(key) > 2 else "",
+                                     head=key[3] if len(key) > 3 else "")
                 job = {"future": self._executor().submit(fn), "wall": time.time()}
                 self._jobs[key] = job
         try:

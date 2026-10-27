@@ -647,6 +647,16 @@ class ControlCenter:
             "contract", "coordinator_version", "foundry_version", "boot_id", "store_schema",
             "features", "overall", "client_version", "tracks")
             if payload.get(k) is not None})
+        if isinstance(payload.get("checks"), list):
+            # the coordinator's background project checks (verify / closeout), bounded
+            detail["checks"] = [
+                {"project": _s(r.get("project"), 120), "task": _s(r.get("task"), 120),
+                 "kind": _s(r.get("kind"), 20), "head": _s(r.get("head"), 40),
+                 "seconds": int(_f(r.get("seconds")) or 0),
+                 "checks": [{"name": _s(c.get("name"), 60), "state": _s(c.get("state"), 30),
+                             "seconds": int(_f(c.get("seconds")) or 0)}
+                            for c in (r.get("checks") or [])[:12] if isinstance(c, dict)]}
+                for r in payload["checks"][:20] if isinstance(r, dict)]
         if kind == "client":
             # the stack summary a Foundry Client reports: bounded fields, no free text
             comps = payload.get("components")
@@ -2183,6 +2193,42 @@ class ControlCenter:
                 "requests": reqs, "inflight": inflight, "denied": denied, "media": media,
                 "totals": tot, "window": f"last {limit} requests"}
 
+    def _check_lineage(self, nodes: dict, edge, projects: list, project: str = "",
+                       task: str = "") -> None:
+        """The coordinator's background checks (verify / closeout: done_check, gate
+        binding, the Lune suite...) from the freshest coordinator heartbeat, so the
+        activity view never says "nothing running" while they run (2026-10-27)."""
+        best = None
+        for src in self.sources(projects):
+            if src.get("kind") != "coordinator":
+                continue
+            if best is None or (src.get("last_seen") or 0) > (best.get("last_seen") or 0):
+                best = src
+        if best is None:
+            return
+        d = best.get("detail") if isinstance(best.get("detail"), dict) else _uj(best.get("detail"), {})
+        state_of = {"running": "active", "PASS": "completed", "PASS (reused)": "completed",
+                    "FAIL": "failed", "UNKNOWN": "failed", "error": "failed"}
+        for run in (d or {}).get("checks") or []:
+            pid, tid = run.get("project") or "", run.get("task") or ""
+            if (projects and pid not in projects) or (project and pid != project) or                     (task and tid != task):
+                continue
+            rn = f"chk:{pid}:{tid}"
+            secs = int(run.get("seconds") or 0)
+            nodes[rn] = {"id": rn, "kind": "checks",
+                         "label": f"{tid} {run.get('kind') or 'verify'} checks {secs // 60}m",
+                         "ref": {"task": tid, "head": run.get("head")}}
+            edge("coordinator", rn, "checks", "active", {"task": tid, "head": run.get("head")})
+            for c in run.get("checks") or []:
+                cn = f"{rn}:{c.get('name')}"
+                cs = int(c.get("seconds") or 0)
+                dur = f"{cs // 60}m{cs % 60:02d}s" if cs >= 60 else f"{cs}s"
+                nodes[cn] = {"id": cn, "kind": "check",
+                             "label": f"{c.get('name')} {c.get('state')} {dur}",
+                             "ref": {"task": tid, "check": c.get("name")}}
+                edge(rn, cn, "check", state_of.get(str(c.get("state")), "completed"),
+                     {"task": tid, "check": c.get("name"), "state": c.get("state")})
+
     def route_graph(self, projects: list, project: str = "", task: str = "",
                     minutes: float = 30) -> dict:
         """Nodes and edges from causal ids only. An edge is `active` only while
@@ -2293,6 +2339,7 @@ class ControlCenter:
                 edge(f"s:{r['session_id']}", mn, "tool", st,
                      {"part": r["part_id"], "session": r["session_id"], "tool": t.get("name")})
         self._lane_lineage(nodes, edge, ids, since, where, wa, pf, pa)
+        self._check_lineage(nodes, edge, projects, project, task)
         unassoc = self.db.query("SELECT id, op, status, backend, created_ts FROM media_jobs WHERE "
                                 "(session_id IS NULL OR session_id='') AND created_ts >= ? LIMIT 20",
                                 (since,))
