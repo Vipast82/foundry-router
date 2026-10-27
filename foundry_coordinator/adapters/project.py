@@ -222,7 +222,13 @@ class GenericAdapter(ReviewContractDefaults):
         return duty_bullets(str(self.p.closeout.get("steps_text") or ""))
 
     def exempt_paths(self, spec: TaskSpec) -> list[str]:
-        return self.p.exempt(spec.task_id)
+        # 0.147.0: docs/memory is the coordinator's project memory, never a sprint's
+        # code: its memory-notes commits must not unbind a gate, stale the gate block
+        # in the review packet, or invalidate a review (GF-GATE1, 2026-10-27)
+        from ..memory.layout import MEMORY_DIR
+        out = list(self.p.exempt(spec.task_id))
+        mem = MEMORY_DIR.rstrip("/") + "/"
+        return out if mem in out else out + [mem]
 
     # -- approvals --------------------------------------------------------------------
 

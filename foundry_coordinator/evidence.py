@@ -863,15 +863,80 @@ class EvidenceLedger:
                                    "runtime check without a runtime identity")
             rt = self.runtime(P.id, rid)
             loaded = (rt or {}).get("loaded_fp") or ""
+            via = ""
             if not loaded:
-                return "unknown", f"runtime {rid} has no loaded fingerprint"
+                bound = self._bind_runtime(P, r, rt, globs, m_src)
+                if bound is None:
+                    return "unknown", f"runtime {rid} has no loaded fingerprint"
+                loaded, via = bound
             if expected is None:
                 return "fresh", (f"dependencies unchanged ({len(m_rev)} files); runtime "
-                                 f"{rid} loaded {loaded} (no expected fingerprint to compare)")
+                                 f"{rid} loaded {loaded} (no expected fingerprint to compare)"
+                                 + via)
             if loaded != str(expected):
-                return "stale", f"runtime loaded {loaded}, revision expects {expected}"
-            return "fresh", f"dependencies unchanged ({len(m_rev)} files); runtime matches"
+                return "stale", f"runtime loaded {loaded}, revision expects {expected}" + via
+            return "fresh", f"dependencies unchanged ({len(m_rev)} files); runtime matches" + via
         return "fresh", f"dependencies unchanged ({len(m_rev)} files); runtime unverified"
+
+    BIND_WINDOW_S = 1800
+
+    def _bind_window(self, P) -> float:
+        raw = (getattr(P.profile, "raw", None) or {}).get("lifecycle") or {}
+        try:
+            return float(raw.get("runtime_bind_window_s", self.BIND_WINDOW_S))
+        except (TypeError, ValueError):
+            return float(self.BIND_WINDOW_S)
+
+    @staticmethod
+    def _rec_ts(r: dict) -> float:
+        return float(r.get("ended_ts") or r.get("started_ts") or r.get("created_ts") or 0)
+
+    def _bind_runtime(self, P, r: dict, rt: Optional[dict], globs: list,
+                      m_src: dict) -> Optional[tuple]:
+        """0.147.0: one Studio session prints its boot, suite and verifyLive output in
+        separate tool calls, and each call named its own runtime, so only the
+        verifyLive runtime carried a loaded fingerprint and boot/suite records were
+        never fresh (GF-GATE1, 2026-10-27). A record whose runtime has no fingerprint
+        borrows the fingerprint of the nearest verifyLive PASS of the SAME session,
+        within [lifecycle] runtime_bind_window_s (default 1800, 0 = off), run against
+        byte-identical dependencies, with no failed verifyLive in between and the same
+        place when both know it. Returns (loaded_fp, note) or None."""
+        window = self._bind_window(P)
+        sid = r.get("session_id") or ""
+        if window <= 0 or not sid or r.get("check_id") == "runtime:verify_live":
+            return None
+        t_r = self._rec_ts(r)
+        vs = [v for v in self.records(P.id, r["task_id"], "runtime:verify_live")
+              if v.get("session_id") == sid and v["exec_status"] != "excluded"
+              and not v.get("superseded_by") and v.get("tier") != "claim"]
+        vs = [v for v in vs if abs(self._rec_ts(v) - t_r) <= window]
+        if not vs:
+            return None
+        vs.sort(key=lambda v: abs(self._rec_ts(v) - t_r))
+        v = vs[0]
+        t_v = self._rec_ts(v)
+        lo, hi = min(t_v, t_r), max(t_v, t_r)
+        if any(x["result"] != "PASS" or x.get("truncated")
+               for x in vs if lo <= self._rec_ts(x) <= hi):
+            return None                          # a failed or partial verifyLive in between
+        vrt = self.runtime(P.id, v.get("runtime_id") or "") or {}
+        fp = vrt.get("loaded_fp") or ""
+        if not fp:
+            return None
+        pr = (_uj((rt or {}).get("detail"), {}) or {}).get("place_id")
+        pv = (_uj(vrt.get("detail"), {}) or {}).get("place_id")
+        if pr and pv and str(pr) != str(pv):
+            return None
+        vsrc = v.get("source_revision") or ""
+        if not vsrc:
+            return None
+        if vsrc != (r.get("source_revision") or ""):
+            m_v = self._manifest(P, globs, vsrc)
+            if m_v is None or m_v != m_src:
+                return None                      # the verified code is not this record's code
+        dt = int(abs(t_r - t_v))
+        return fp, (f"; runtime bound to {v.get('runtime_id')} (verifyLive PASS in the same "
+                    f"session at {vsrc[:12]}, {dt} s {'before' if t_v <= t_r else 'after'})")
 
     # -- current / missing / chains ------------------------------------------------
 
