@@ -2,6 +2,50 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.146.0 — faster verify and tests; three more stops that weren't the sprint's
+
+Victor 2026-10-27: "make EVERYTHING faster ... use all the cores ... keep quality high",
+and find the automation gaps.
+
+**Speed**
+
+- **AU verify runs its checks side by side.** done_check, the gate binding, the Lune
+  suite and its negative control now run concurrently instead of one after another; rows
+  keep their order and a timeout is still UNKNOWN.
+- **Lune passes are carried by content.** A Lune PASS is reused at a revision whose Lune
+  inputs are identical: src, tests, the project file and every `$path` in it (Packages by
+  disk content), wally/rokit files, every path a Lune script names, the Lune version and
+  the mode. Only a PASS is stored (`<state_dir>/cache/lune/`), only for a clean HEAD.
+  `[animaluprising] lune_reuse` (default true) and `lune_workers` (AU_LUNE_WORKERS for
+  the parallel run.luau; the suite gets n-1, the negative control 1).
+- **pytest uses all cores by default.** `-n auto` (pytest-xdist, now a dev dependency):
+  one worker per physical core, capped by free memory; one named test still runs
+  serially, `-n 0` turns it off. The full suite (3259 tests) runs in about 13 min on
+  the workstation while sprints run (the coordinator tests alone: about 42 min serial,
+  about 9 min parallel). Tests made parallel-safe: no test reads the machine's global Kilo
+  config or probes live ports (track tests passed only while Blender was open), the
+  chat-engine fixture stopped sleeping 20 s per client action, and shared temp roots
+  became per-test. See docs/CONVENTIONS.md, "Tests run in parallel".
+
+**Stops fixed (AU, 2026-10-27)**
+
+- **The coordinator's own memory commit unbound a passed gate.** GF-GATE1's gate passed
+  at the session's commit; the coordinator then committed its memory notes and verified
+  that commit, and `au.gate_bound_to_head` failed because "files changed since the gate".
+  `docs/memory/` (project memory, not code) may now change after the gate.
+- **A track sprint was asked for Studio evidence.** GF-NAME1 (a track, no Studio) passed
+  every check and was still refused review for missing `suite:`, `gate:` and `boot:`
+  evidence and the gate log, until "findings repeat" parked it. The submission gate of a
+  track sprint leaves the Studio evidence to the merge gate (which runs it on the merge
+  result in the main checkout), and the reviewer is told the same.
+- **Reword noise on tracks.** A track that merged master listed master's commits (other
+  sprints') as its own unprefixed commits on every verify (`commits_not_reworded`). Only
+  the track's own commits are checked now.
+
+Coordinator restart needed. The parallel AU Lune runner (tests/lune/run.luau, about
+904 s serial to about 340 s on 12 workers, identical results) is an AU-side change and
+lands as a separate "prep:" commit in the AU repo.
+
 ## v0.145.2 — no more parks mid-repair; a repair with nothing left to fix passes
 
 Two stops from the AU test sprint (2026-10-27) that needed Victor:
