@@ -178,10 +178,12 @@ def session_ok(c, P, tid: str) -> None:
                            == "session" else data.get("infra_wait"))
 
 
-def over_ceiling(P, s, rep: dict) -> Optional[str]:
+def over_ceiling(P, s, rep: dict, persona: str = "") -> Optional[str]:
     """The handoff reason when an idle session's context passed the ceiling and
-    it stopped before DONE (else None)."""
-    ceil = int(auto_get(P, "context_ceiling_tokens") or 0)
+    it stopped before DONE (else None). The ceiling is a share of the session
+    model's usable window (context_window.py), else context_ceiling_tokens."""
+    from . import context_window as CW
+    ceil = CW.ceiling(P, persona)
     ctx = getattr(s, "context", None)
     if not ceil or ctx is None or int(ctx) < ceil:
         return None

@@ -811,6 +811,18 @@ class MediaConfig(BaseModel):
     # Long-running tools (mcp_servers[].long_running): how long a chat request
     # waits before handing the model a job id instead.
     tool_inline_wait_seconds: int = 90
+    # -- fallback (Victor 2026-10-27: "ChatGPT first, Media_Gen fallback") --
+    # When gpt-image can't make the image (backend down or removed, timeout,
+    # 5xx, its quota or the image budget used up) the job runs on this MCP
+    # server's generate_image / edit_image instead. A content refusal (4xx) is
+    # never sent elsewhere. "" = no fallback; it also needs the server to be one
+    # of Foundry's MCP servers.
+    fallback_server: str = "Media_Gen"
+    fallback_library: str = "personal"   # Media_Gen library for the fallback images
+    # client_id -> library, e.g. the coordinator's media key -> "game" (AU assets)
+    fallback_libraries: dict[str, str] = Field(default_factory=dict)
+    fallback_timeout_seconds: int = 600
+    fallback_poll_seconds: float = 3.0
 
 
 class TrainingCaptureConfig(BaseModel):

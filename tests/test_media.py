@@ -58,6 +58,9 @@ async def _router(req: httpx.Request):
     if mode == "429":
         return httpx.Response(429, headers={"retry-after": "120"},
                               json={"error": {"message": "usage limit reached"}})
+    if mode == "400":
+        return httpx.Response(400, json={"error": {"message": "request was rejected by the "
+                                                              "safety system"}})
     n = int(body.get("n") or 1)
     return httpx.Response(200, json={"created": 1, "data": [
         {"b64_json": base64.b64encode(png(tag=b"%d" % i)).decode(), "revised_prompt": "rp"}
@@ -316,3 +319,116 @@ def test_mcp_media_tools(media, client):
         return await agg._media_call("image_job_status", {"job_id": view["job_id"]})
     again = json.loads(client.portal.call(status)[0].text)
     assert again["job_id"] == view["job_id"] and len(HITS) == 1
+
+
+# -- ChatGPT first, Media_Gen fallback (Victor 2026-10-27) ---------------------------------
+
+MG_URL = "http://192.168.0.206:8190"
+
+
+@pytest.fixture()
+def media_gen(media):
+    """Media_Gen as Foundry's MCP server: generate_image / edit_image queue a job,
+    media_check_job reports it done with png links on its own host."""
+    from foundry_router.config import MCPServerConfig
+    from foundry_router.tools.mcp_client import ToolResult
+    svc = media
+    calls = []
+    old = (dict(svc.mcp.servers), svc.mcp.call_tool_rich, svc.http)
+    svc.mcp.servers["Media_Gen"] = MCPServerConfig(name="Media_Gen", url=MG_URL + "/mcp")
+    svc.config_store.config.media.fallback_poll_seconds = 0.05
+
+    async def fake_rich(server, tool, args, **kw):
+        calls.append((server, tool, args))
+        if tool in ("generate_image", "edit_image"):
+            return ToolResult([{"type": "text", "text": "job_id: 6c4746124a10  (seed 1)\n"
+                                                         "STATUS: queued"}])
+        n = int((calls[0][2] or {}).get("variations") or 1)
+        files = "".join(f"  png: {MG_URL}/files/personal/image/x_{i}.png\n" for i in range(n))
+        return ToolResult([{"type": "text", "text": "job_id: 6c4746124a10\nSTATUS: done\n"
+                                                     "Files (URLs on the remote server):\n"
+                                                     + files}])
+    svc.mcp.call_tool_rich = fake_rich
+
+    async def route(req: httpx.Request):
+        if req.url.host == "192.168.0.206":
+            if req.url.path == "/upload":
+                MG_UPLOADS.append(len(req.content))
+                return httpx.Response(200, json={"uploads": [{"ref": "upload:ab12_input.png",
+                                                              "kind": "image"}], "errors": []})
+            return httpx.Response(200, content=png(32, 32, b"mg"))
+        return await _router(req)
+    svc.http = httpx.AsyncClient(transport=httpx.MockTransport(route))
+    MG_UPLOADS.clear()
+    yield svc, calls
+    svc.mcp.servers, svc.mcp.call_tool_rich, svc.http = old
+
+
+MG_UPLOADS: list = []
+
+
+def test_gpt_image_down_falls_back_to_media_gen(media_gen, client):
+    svc, calls = media_gen
+    STATE["mode"] = "connect"
+    job = _done(client, _submit(client, size="1536x1024", n=2).json()["job_id"], wait=15)
+    assert job["status"] == "succeeded", job
+    assert len(HITS) == 2                                  # gpt-image tried first (max_attempts)
+    assert calls[0][:2] == ("Media_Gen", "generate_image")
+    assert calls[0][2]["library"] == "personal" and calls[0][2]["aspect_ratio"] == "3:2"
+    assert calls[0][2]["variations"] == 2
+    assert [c[1] for c in calls[1:]] == ["media_check_job"]
+    assert len(job["artifacts"]) == 2
+    row = svc.media.get(job["job_id"])
+    assert row["backend"] == "Media_Gen"
+
+
+def test_quota_and_budget_fall_back_but_a_content_refusal_does_not(media_gen, client):
+    svc, calls = media_gen
+    STATE["mode"] = "429"
+    job = _done(client, _submit(client, prompt="quota").json()["job_id"], wait=15)
+    assert job["status"] == "succeeded" and svc.media.get(job["job_id"])["backend"] == "Media_Gen"
+    # the image budget used up at submit (the quota job above counted): the job is made
+    # on Media_Gen and gpt-image is never hit
+    STATE["mode"] = "ok"
+    svc.config_store.config.media.jobs_per_5h = 1
+    HITS.clear()
+    r = _submit(client, prompt="over budget")
+    assert r.status_code in (200, 202), r.text
+    job = _done(client, r.json()["job_id"], wait=15)
+    assert job["status"] == "succeeded" and len(HITS) == 0
+    assert svc.media.get(job["job_id"])["backend"] == "Media_Gen"
+    svc.config_store.config.media.jobs_per_5h = 0
+    # a 4xx from gpt-image (e.g. a content refusal) is never sent to another model
+    STATE["mode"] = "400"
+    n = len(calls)
+    job = _done(client, _submit(client, prompt="refused").json()["job_id"], wait=15)
+    assert job["status"] == "failed" and job["error"]["code"] == "backend_rejected"
+    assert len(calls) == n
+
+
+def test_edit_falls_back_with_uploaded_inputs(media_gen, client):
+    svc, calls = media_gen
+    STATE["mode"] = "connect"
+    img = "data:image/png;base64," + base64.b64encode(png()).decode()
+    r = client.post("/media/jobs", json={"op": "edit", "prompt": "make it red", "images": [img]})
+    job = _done(client, r.json()["job_id"], wait=15)
+    assert job["status"] == "succeeded", job
+    assert calls[0][1] == "edit_image" and calls[0][2]["images"] == ["upload:ab12_input.png"]
+    assert len(MG_UPLOADS) == 1
+
+
+def test_a_failed_media_gen_job_fails_the_image_job(media_gen, client):
+    svc, calls = media_gen
+    from foundry_router.tools.mcp_client import ToolResult
+
+    async def failing(server, tool, args, **kw):
+        calls.append((server, tool, args))
+        if tool == "generate_image":
+            return ToolResult([{"type": "text", "text": "job_id: 6c4746124a10\nSTATUS: queued"}])
+        return ToolResult([{"type": "text", "text": "job_id: 6c4746124a10\nSTATUS: failed\n"
+                                                     "error: ComfyUI not ready"}])
+    svc.mcp.call_tool_rich = failing
+    STATE["mode"] = "connect"
+    job = _done(client, _submit(client, prompt="both down").json()["job_id"], wait=15)
+    assert job["status"] == "failed" and job["error"]["code"] == "fallback_failed"
+    assert "ComfyUI not ready" in job["error"]["message"]

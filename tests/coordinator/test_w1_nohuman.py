@@ -579,7 +579,9 @@ def test_an_invalid_review_is_resent_once_with_the_error_appended(tmp_path):
 def test_profile_drift_doctor_rows(tmp_path):
     from foundry_coordinator import profile_drift
     raw = {"fast_lane": {"enabled": True, "max_vision_rounds": 2},
-           "automation": {"lead_hard_max_calls": 8, "preflight_endpoints": []},
+           # a fixed ceiling (pct 0) is what can disagree with fixed telemetry checkpoints
+           "automation": {"lead_hard_max_calls": 8, "preflight_endpoints": [],
+                          "context_ceiling_pct": 0},
            "lead_manager": {"max_lead_calls_per_task": 12},
            "lanes": {"enabled": True},
            "helpers": {"max_units_per_task": 24, "max_running": 6},

@@ -715,6 +715,10 @@ class Coordinator:
                 self.store.add_session(sid, P.id, tid, run_id, role, phase, attempt,
                                        P.client.name, persona)
             self._bind(P, sid, tid, run_id, role, persona)
+            if role == "implementer":
+                # the session's window and zones for the project's checkpoint tool
+                from . import context_window as CW
+                CW.write_file(P, persona, sid)
         if not res.get("prompt_ts") and res.get("prompting_ts"):
             # died between sending and recording: Kilo may hold the prompt, so it
             # is never sent twice (an unanswered session ends by session_timeout)
@@ -836,7 +840,8 @@ class Coordinator:
             self._lc_session_ended(P, t, t["session_id"], head, rep)
         from . import infra
         infra.session_ok(self, P, tid)
-        handoff = infra.over_ceiling(P, s, rep)
+        srow = self.store.session(t["session_id"]) if t.get("session_id") else None
+        handoff = infra.over_ceiling(P, s, rep, persona=str((srow or {}).get("persona") or ""))
         if handoff:
             # revamp B12: a fresh session continues instead of compacting until Kilo
             # gives up (UI-02b lost 85 min that way); no attempt is charged

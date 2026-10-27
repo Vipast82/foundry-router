@@ -76,7 +76,10 @@ LANE_DEFAULTS = {
                  "skills": ["au-luau-development", "au-roblox-development"],
                  "ui_skills": ["au-roblox-ui-development"]},
     "evidence": {"max_per_task": 3, "max_running": 1},
-    "handoff": {"max_per_task": 2, "max_running": 1, "context_threshold": 140000},
+    "handoff": {"max_per_task": 2, "max_running": 1, "context_threshold": 140000,
+                # 2026-10-27: share of the session model's usable window (context_window.py);
+                # context_threshold only when the window is unknown
+                "context_pct": 90},
     "visual": {"max_per_task": 6, "max_running": 1, "debounce_seconds": 20,
                "persona": "Foundry-Kilo-Visual-Review",
                "capture_globs": ["docs/evidence/{task}/*.png", "docs/evidence/{task}/*.jpg"],

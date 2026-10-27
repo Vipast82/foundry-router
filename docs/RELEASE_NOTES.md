@@ -2,6 +2,38 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.150.0 — context thresholds follow each model's window; images ChatGPT first, Media_Gen fallback
+
+Victor 2026-10-27: "we are allowing 262k context and output reserve is currently at 32768" and,
+for images, "ChatGPT first, Media_Gen fallback".
+
+- **Context thresholds are shares of the session model's usable window.**
+  - The usable window is Kilo's `limit.context` minus `limit.output`, read per persona from
+    the project's (then the global) `kilo.jsonc` (`context_window.py`).
+  - **The coordinator hands off at `[automation] context_ceiling_pct` = 95%:**
+    - local Qwen (262,144 / 32,768): about 217.9k, where the old fixed ceiling was 160k
+      (GF-GATE1 was handed off three times at 165k–212k);
+    - a 200k Claude persona: about 182k.
+  - The handoff lane fires at `[lanes.handoff] context_pct` = 90%.
+  - The fixed `context_ceiling_tokens` / `context_threshold` apply only when the window is
+    unknown.
+  - At each implementer session start the coordinator writes
+    `<workspace>/.plan/tmp/context_window.json` (usable, amber 75%, red 90%, handoff) for
+    AU's `checkpoint.py`. Its AU side lands as a prep commit.
+- **Router images: gpt-image first, Media_Gen fallback.**
+  - When gpt-image can't make the image (backend down or removed, timeout, 5xx, its quota or
+    the image budget used up), the job runs on `media.fallback_server` (`Media_Gen`):
+    - `generate_image` (aspect ratio from the size, variations from `n`, a transparent
+      background);
+    - or `edit_image` (the inputs are uploaded to its `/upload`);
+    - then `media_check_job` and the download.
+  - A 4xx from gpt-image (a content refusal) is never sent to another model.
+  - Library: `media.fallback_library` (personal), or per client in
+    `media.fallback_libraries`.
+  - The fallback needs the server to be one of the router's MCP servers.
+
+Coordinator restart and a router backend rebuild needed.
+
 ## v0.149.0 — speech, sound and 2D on Media_Gen; local ComfyUI retired
 
 Victor 2026-10-27: "Any reference to the old ComfyUI (local) should now go to Media_Gen, any

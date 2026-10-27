@@ -182,6 +182,9 @@ AUTOMATION_DEFAULTS: dict = {
     "preflight": True,
     "preflight_endpoints": [],
     "context_ceiling_tokens": 160000,
+    # 2026-10-27: the handoff ceiling is this share of the session model's usable window
+    # (Kilo limit.context - limit.output); context_ceiling_tokens when the window is unknown
+    "context_ceiling_pct": 95,
     "memory_delta": True,
     "project_memory": True,
     "memory_slice_tokens": 3000,
@@ -602,7 +605,11 @@ _AUTO_DESC = {
     "infra_backoff_seconds": "First infra retry delay (doubles, capped at 15 min).",
     "preflight": "Check Kilo / Rojo / Studio MCP / local model before a session starts.",
     "preflight_endpoints": "Extra endpoints the preflight probes (name=url; tcp:// or http(s)://).",
-    "context_ceiling_tokens": "A session over this context hands off to a fresh one (0 = off).",
+    "context_ceiling_tokens": "A session over this context hands off to a fresh one (0 = off). "
+                              "Used when the session model's window is unknown.",
+    "context_ceiling_pct": "Hand off at this percentage of the session model's usable window "
+                             "(Kilo context minus output reserve); 0 = use "
+                             "context_ceiling_tokens.",
     "memory_delta": "Send operator notes / memory once per session, then only changes.",
     "project_memory": "Project memory (docs/memory in the repo): slices in prompts, MEMORY_NOTE "
                       "report lines committed by the coordinator.",

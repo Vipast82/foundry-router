@@ -93,6 +93,8 @@ def checks(P) -> list[tuple[str, str, str]]:
 
     # 6. context ceiling vs telemetry checkpoints
     ceil = int(auto.get("context_ceiling_tokens") or 0)
+    if int(auto.get("context_ceiling_pct") or 0) > 0:
+        ceil = 0          # the ceiling follows each model's window: no fixed number to align
     cps = (raw.get("telemetry") or {}).get("context_checkpoints") if isinstance(
         raw.get("telemetry"), dict) else None
     if ceil and isinstance(cps, list) and cps:

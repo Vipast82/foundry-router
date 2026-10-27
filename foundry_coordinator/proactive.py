@@ -140,8 +140,12 @@ class Proactive(VisualMixin, AdvisoryMixin):
                 for ev in L.classify(tv, t["task_id"], ls):
                     ev["part_id"] = tv["part_id"]
                     new += self._event(P, t, ev, sid)
-        thr = int(ls["lanes"]["handoff"].get("context_threshold") or 0) \
-            if L.lane_on(ls, "handoff") else 0
+        thr = 0
+        if L.lane_on(ls, "handoff"):
+            from . import context_window as CW
+            srow = self.store.session(sid) if sid else None
+            thr = CW.lane_threshold(P, str((srow or {}).get("persona") or ""),
+                                    ls["lanes"]["handoff"])
         ctx = L.context_tokens(last_info) if last_info else None
         if thr and ctx is not None and ctx >= thr:
             new += self._event(P, t, {"kind": "context", "key": f"context:{sid}:{thr}",

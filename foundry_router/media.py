@@ -176,6 +176,22 @@ def decode_image_input(value, max_bytes: int, what: str = "image") -> bytes:
     return raw
 
 
+_MG_JOB = re.compile(r"job_id:\s*([0-9a-f]{12})")
+_MG_STATUS = re.compile(r"STATUS:\s*([a-z]+)", re.I)
+_MG_FILE = re.compile(r"^\s*([a-z0-9]+):\s*(https?://\S+)", re.I | re.M)
+_MG_RATIOS = {"1:1": 1.0, "2:3": 2 / 3, "3:2": 1.5, "3:4": 0.75, "4:3": 4 / 3,
+              "9:16": 9 / 16, "16:9": 16 / 9, "21:9": 21 / 9}
+
+
+def _aspect_ratio(size) -> Optional[str]:
+    """The Media_Gen aspect_ratio nearest an OpenAI size ('1536x1024'); None for auto."""
+    m = re.match(r"^\s*(\d+)\s*x\s*(\d+)\s*$", str(size or ""))
+    if not m or not int(m.group(2)):
+        return None
+    r = int(m.group(1)) / int(m.group(2))
+    return min(_MG_RATIOS, key=lambda k: abs(_MG_RATIOS[k] - r))
+
+
 def _data_url(raw: bytes) -> str:
     mime = image_info(raw)[0] or "image/png"
     return f"data:{mime};base64,{base64.b64encode(raw).decode()}"
@@ -483,7 +499,13 @@ class MediaService:
             raise MediaError(400, "invalid_request", "input images belong to edit_image")
 
         model_id, persona = self.resolve_model(model)
-        state, info = self.resolve_backend(model_id, self.persona_backend(persona))
+        fallback = ""
+        try:
+            state, info = self.resolve_backend(model_id, self.persona_backend(persona))
+        except MediaError as e:
+            if not self.can_fall_back(e):
+                raise
+            state, info, fallback = None, {}, self.fallback_server()
         from . import client_auth
         client = client or client_auth.current()
         cid = client.get("client_id") or "anonymous"
@@ -503,7 +525,13 @@ class MediaService:
             dup = self._find_duplicate(cid, key, window)
             if dup:
                 return dup, True
-        await self._check_budget(model_id, info, cid)
+        if not fallback:
+            try:
+                await self._check_budget(model_id, info, cid)
+            except MediaError as e:
+                if not self.can_fall_back(e):
+                    raise
+                fallback = self.fallback_server()
         if idempotency_key or window is not None:      # re-check: the budget check awaited
             dup = self._find_duplicate(cid, key, window)
             if dup:
@@ -513,7 +541,8 @@ class MediaService:
             "INSERT INTO media_jobs (id, created_at, created_ts, op, status, model, backend, "
             "persona, client_id, session_id, task_id, idem_key, params) "
             "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
-            (job_id, utcnow(), time.time(), op, "queued", model_id, state.config.name, persona,
+            (job_id, utcnow(), time.time(), op, "queued", model_id,
+             fallback or state.config.name, persona,
              cid, client.get("session_id"), client.get("task_id"), key, json.dumps(params)))
         self._inputs[job_id] = (raw_images, raw_mask)
         self._events[job_id] = asyncio.Event()
@@ -558,7 +587,15 @@ class MediaService:
                     return
                 started = time.time()
                 self._update(job_id, status="running", started_ts=started)
-                data = await self._call_backend(row)
+                if row["backend"] == self.fallback_server():
+                    data = await self._media_gen(row, "gpt-image unavailable at submit")
+                else:
+                    try:
+                        data = await self._call_backend(row)
+                    except MediaError as e:
+                        if not self.can_fall_back(e):
+                            raise
+                        data = await self._media_gen(row, f"{e.code}: {e.message}"[:200])
                 artifacts = await self._store(job_id, data)
                 self._update(job_id, status="succeeded", finished_ts=time.time(),
                              duration_ms=round((time.time() - started) * 1000, 1),
@@ -607,6 +644,105 @@ class MediaService:
                 body["input_fidelity"] = params["input_fidelity"]
             path = "images/edits"
         return path, body
+
+    # -- Media_Gen fallback (2026-10-27) ----------------------------------------
+
+    FALLBACK_CODES = frozenset({"backend_unreachable", "backend_timeout", "backend_error",
+                                "quota_exceeded", "media_backend_unavailable",
+                                "model_unavailable", "budget_denied"})
+
+    def fallback_server(self) -> str:
+        """The configured fallback MCP server when Foundry has it, else ''."""
+        name = str(getattr(self.cfg, "fallback_server", "") or "")
+        servers = getattr(getattr(self.svc, "mcp", None), "servers", None) or {}
+        return name if name and name in servers else ""
+
+    def can_fall_back(self, err: "MediaError") -> bool:
+        if not self.fallback_server():
+            return False
+        if err.code == "backend_rejected":
+            return err.status >= 500           # a 4xx (content refusal) never falls back
+        return err.code in self.FALLBACK_CODES
+
+    async def _mg_upload(self, server: str, raw: bytes) -> str:
+        """Upload an input image to the Media_Gen server; its `upload:` reference."""
+        scfg = self.svc.mcp.servers[server]
+        base = str(getattr(scfg, "url", "") or "").rstrip("/")
+        for tail in ("/mcp", "/sse"):
+            if base.endswith(tail):
+                base = base[: -len(tail)]
+        mime, _, _ = image_info(raw)
+        ext = _EXT.get(mime or "", "png")
+        r = await self.svc.http.post(f"{base}/upload", timeout=120.0,
+                                     files={"file": (f"input.{ext}", raw, mime or "image/png")})
+        r.raise_for_status()
+        ups = (r.json() or {}).get("uploads") or []
+        if not ups or not ups[0].get("ref"):
+            raise MediaError(502, "fallback_failed", f"{server} upload returned no reference")
+        return ups[0]["ref"]
+
+    async def _media_gen(self, row: dict, reason: str = "") -> dict:
+        """Run the job on the Media_Gen server: submit generate_image / edit_image,
+        poll media_check_job, download the files. Returns an OpenAI-shaped dict
+        for _store()."""
+        cfg = self.cfg
+        server = self.fallback_server()
+        if not server:
+            raise MediaError(503, "fallback_failed", "no fallback image server is configured")
+        params = _jl(row["params"], {})
+        lib = (cfg.fallback_libraries or {}).get(row.get("client_id") or "",
+                                                 cfg.fallback_library) or "personal"
+        args: dict = {"prompt": params["prompt"], "library": lib}
+        n = int(params.get("n") or 1)
+        if n > 1:
+            args["variations"] = min(4, n)
+        ar = _aspect_ratio(params.get("size"))
+        if ar:
+            args["aspect_ratio"] = ar
+        if params.get("background") == "transparent":
+            args["transparent_background"] = True
+        tool = "generate_image"
+        if row["op"] == "edit":
+            imgs, _mask = self._inputs.get(row["id"], ([], None))
+            if not imgs:
+                raise MediaError(500, "internal_error", "input images for this job are gone")
+            args["images"] = [await self._mg_upload(server, b) for b in imgs[:4]]
+            tool = "edit_image"
+        self._update(row["id"], backend=server)
+        self.db.log_event("info", "media", f"image job {row['id']} falls back to {server}"
+                          + (f" ({reason})" if reason else ""))
+        sub = await self.svc.mcp.call_tool_rich(server, tool, args)
+        m = _MG_JOB.search(getattr(sub, "text", "") or "")
+        if not m:
+            raise MediaError(502, "fallback_failed",
+                             f"{server}/{tool} returned no job_id: {(sub.text or '')[:200]}")
+        jid = m.group(1)
+        deadline = time.time() + max(10, int(cfg.fallback_timeout_seconds))
+        while True:
+            await asyncio.sleep(max(0.1, float(cfg.fallback_poll_seconds)))
+            chk = await self.svc.mcp.call_tool_rich(server, "media_check_job", {"job_id": jid})
+            text = getattr(chk, "text", "") or ""
+            st = (_MG_STATUS.search(text) or [None, ""])[1].lower()
+            if st == "done":
+                break
+            if st in ("failed", "cancelled", "canceled", "error"):
+                raise MediaError(502, "fallback_failed", f"{server} job {jid} {st}: {text[:300]}")
+            if time.time() >= deadline:
+                raise MediaError(504, "fallback_timeout",
+                                 f"{server} job {jid} not done after "
+                                 f"{cfg.fallback_timeout_seconds} s (it may still finish there)")
+        urls = [u.rstrip(".,;") for kind, u in _MG_FILE.findall(text)
+                if kind.lower() in ("png", "jpg", "jpeg", "webp")]
+        if not urls:
+            raise MediaError(502, "fallback_failed", f"{server} job {jid} lists no image: "
+                                                     f"{text[:200]}")
+        data = []
+        for u in urls[:max(1, cfg.max_images_per_job)]:
+            r = await self.svc.http.get(u, timeout=120.0)
+            r.raise_for_status()
+            data.append({"b64_json": base64.b64encode(r.content).decode(),
+                         "revised_prompt": None})
+        return {"data": data, "fallback": {"server": server, "job_id": jid, "reason": reason}}
 
     async def _call_backend(self, row: dict) -> dict:
         cfg = self.cfg
