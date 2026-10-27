@@ -91,14 +91,25 @@ def test_endpoints_are_probed(tmp_path):
         assert infra.check_endpoint(f"tcp://127.0.0.1:{port}") == ""
     finally:
         srv.close()
-    assert infra.check_endpoint(f"tcp://127.0.0.1:{port}")          # closed now
-    clock = Clock()
-    c = env(tmp_path, FlakyKilo(good, down=False), clock,
-            extra=f'\n[automation]\npreflight_endpoints = ["rojo=tcp://127.0.0.1:{port}"]\n')
-    for _ in range(3):
-        c.tick()
-    w = c.store.task("game", "T1")["data"]["infra_wait"]
-    assert w["why"].startswith("rojo: tcp://127.0.0.1")
+    # keep the closed port reserved (bound, never listening: connects are refused) so
+    # no other test process can be handed it by a bind to port 0 and answer on it
+    dead = socket.socket()
+    try:
+        dead.bind(("127.0.0.1", port))
+    except OSError:                                 # taken in between: reserve another
+        dead.bind(("127.0.0.1", 0))
+        port = dead.getsockname()[1]
+    try:
+        assert infra.check_endpoint(f"tcp://127.0.0.1:{port}")      # closed now
+        clock = Clock()
+        c = env(tmp_path, FlakyKilo(good, down=False), clock,
+                extra=f'\n[automation]\npreflight_endpoints = ["rojo=tcp://127.0.0.1:{port}"]\n')
+        for _ in range(3):
+            c.tick()
+        w = c.store.task("game", "T1")["data"]["infra_wait"]
+        assert w["why"].startswith("rojo: tcp://127.0.0.1")
+    finally:
+        dead.close()
 
 
 def test_an_infra_session_failure_costs_no_attempt(tmp_path):

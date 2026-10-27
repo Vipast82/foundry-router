@@ -10,6 +10,33 @@ os.environ["FOUNDRY_TRAINING_AUTO"] = "0"
 
 import pytest
 
+# A worker plus the git / pytest / fake-coordinator subprocesses its tests start
+# peaks around this much memory (workers sit near 200 MB resident).
+_WORKER_MB = 400
+
+
+def pytest_xdist_auto_num_workers(config):
+    """`-n auto` (the default in pyproject.toml): one worker per physical core,
+    capped by the memory that is free now (this workstation also runs Studio,
+    Kilo and the live stack), and no workers at all for a run of one named test
+    (`pytest tests/x.py::test_y` stays a plain serial run). Running a handful of
+    named tests gets at most one worker per test. PYTEST_XDIST_AUTO_NUM_WORKERS
+    still overrides all of this; `-n 0` turns xdist off."""
+    if os.environ.get("PYTEST_XDIST_AUTO_NUM_WORKERS"):
+        return None                                   # xdist's own hook reads it
+    try:
+        import psutil
+        cores = psutil.cpu_count(logical=False) or psutil.cpu_count() or 1
+        by_memory = int(psutil.virtual_memory().available / 2**20 // _WORKER_MB)
+    except ImportError:
+        cores = max(1, (os.cpu_count() or 2) // 2)
+        by_memory = cores
+    n = max(1, min(cores, by_memory))
+    args = [a for a in config.args if a.strip()]
+    if args and all("::" in a for a in args):
+        n = min(n, len(args))
+    return n if n > 1 else 0
+
 if os.name == "nt":
     # no test subprocess (git, pwsh, fake coordinators, venv launchers) may open
     # a console window and steal focus from the desktop
@@ -86,3 +113,25 @@ def _no_live_foundry_client(tmp_path_factory, monkeypatch):
             return empty / "FoundryClient"
         return real()
     monkeypatch.setattr(client_api, "config_dir", guarded)
+
+
+@pytest.fixture(autouse=True)
+def _no_live_services(monkeypatch):
+    """No test may depend on which services happen to run on this machine. The
+    coordinator's service probe (a sprint's `needs`) read the real global Kilo
+    config and probed real ports and LAN hosts, so a track sprint needing Blender
+    passed while Blender was open and waited forever once it was closed. Here
+    the global Kilo config is empty, an unconfigured port check is "cannot
+    tell" (never blocks) and an http check is unreachable. Tests that exercise
+    the probe pass their own port_fn / http_fn / mcp (tests/coordinator/
+    test_services.py); tests/client/conftest.py adds its own guards."""
+    from foundry_automation import service_map as SM
+    from foundry_coordinator import services as SV
+    monkeypatch.setattr(SM, "global_kilo_paths", lambda: [])
+    real = SV.make_probe
+
+    def hermetic_probe(*a, **kw):
+        kw.setdefault("port_fn", lambda host, port, *x, **y: None)
+        kw.setdefault("http_fn", lambda url: "no live services in tests")
+        return real(*a, **kw)
+    monkeypatch.setattr(SV, "make_probe", hermetic_probe)
