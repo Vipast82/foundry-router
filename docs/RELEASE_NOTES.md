@@ -2,6 +2,25 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.145.2 — no more parks mid-repair; a repair with nothing left to fix passes
+
+Two stops from the AU test sprint (2026-10-27) that needed Victor:
+
+- **A timeout default fired while the lead was still working.** "Findings repeat"
+  escalations carry a 30-minute timeout whose default is "park the sprint". The lead case
+  opened for that same stop was still repairing when the timeout fired, so GF-NAME1
+  (09:51) and GF-GATE1 (10:20) were parked mid-repair and the case cancelled. The sweep now
+  moves the deadline to the lead case's own bound while the case is diagnosing, repairing,
+  upgrading, resuming or deferred (`decision_timeout_deferred`); once the lead gives up
+  (NEEDS_VICTOR) or the case closes, the default applies as before.
+- **Stale findings after an unpark.** An unparked sprint kept its old findings, so its next
+  session was a "repair"; with nothing left to fix it committed nothing and failed
+  `coordinator.repair_changed` alone, which went straight to "findings repeat". When every
+  other required check passes at the head, that check passes ("nothing left to repair").
+  Findings from a code review still need a change (they are not in the check results).
+
+Coordinator restart needed.
+
 ## v0.145.1 — verify stops failing on project memory, merged tracks and slow Lune
 
 Three verify failures that parked or re-looped the AU sprints on 2026-10-27, none of

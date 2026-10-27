@@ -1390,7 +1390,12 @@ class Coordinator:
                         results.append(VerificationResult("coordinator.session_audit", UNKNOWN,
                                                           False, "", f"transcript unavailable: "
                                                           f"{e}", head))
-        _nothing_left_to_repair(results)
+        # only findings the checks themselves raised can be seen to have cleared; a
+        # code review's findings are not in `results`, so they still need a change
+        last_cr = next((h for h in reversed(self.store.history(pid, tid))
+                        if h["to_state"] == S.CHANGES_REQUIRED), None)
+        if not last_cr or last_cr["from_state"] != S.REVIEWING:
+            _nothing_left_to_repair(results)
         vid = self.store.save_verification(pid, tid, head, "verify", results)
         fails = [r for r in results if r.required and r.result == FAIL]
         unknown = [r for r in results if r.required and r.result == UNKNOWN]
