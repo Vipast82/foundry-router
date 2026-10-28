@@ -2321,8 +2321,16 @@ Change no code or test file in this session; if one needs changing, stop and rep
         res("au.lune", "tooling", bool(lune), lune or "lune not on PATH",
             blocking=spec.data.get("tier") in ("A", "B"), remedy="" if lune else "rokit install")
         ok, detail = _kilo_mcp_studio(os.path.join(self.p.workspace, "kilo.jsonc"))
-        res("au.mcp.roblox_studio_configured", "environment", ok, detail,
-            remedy="" if ok else "add the Roblox Studio MCP server to kilo.jsonc")
+        if ctx.get("track") and not ok:
+            # 2026-10-28 AS-D13: a track worktree's kilo.jsonc turns Studio off by design
+            # (Studio belongs to the main checkout; a track's gate gets a Studio lease at
+            # merge), so a track session is never blocked on it
+            res("au.mcp.roblox_studio_configured", "environment", None,
+                f"track {ctx['track']}: Studio is off in track worktrees by design ({detail})",
+                blocking=False)
+        else:
+            res("au.mcp.roblox_studio_configured", "environment", ok, detail,
+                remedy="" if ok else "add the Roblox Studio MCP server to kilo.jsonc")
         probe = ctx.get("studio_probe") or self.studio_probe
         if probe is None:
             res("au.studio.live_sync", "runtime_sync", None,

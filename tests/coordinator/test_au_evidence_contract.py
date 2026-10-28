@@ -410,6 +410,10 @@ def test_readiness_classes_and_offline_live_hook(repo):
     assert _res(r, "au.tool.tools/guard/done_check.py")["ok"] is True
     mcp = _res(r, "au.mcp.roblox_studio_configured")
     assert mcp["ok"] is False and mcp["cls"] == "environment" and mcp["blocking"]
+    # AS-D13 2026-10-28: in a track worktree Studio is off by design: reported, never blocking
+    tr = _res(a.readiness(spec, "implement", {"track": "assets-local"}),
+              "au.mcp.roblox_studio_configured")
+    assert tr["ok"] is None and not tr["blocking"] and "assets-local" in tr["detail"]
     live = _res(r, "au.studio.live_sync")
     assert live["cls"] == "runtime_sync" and live["ok"] is None and not live["blocking"]
     # tools present + kilo.jsonc listing Roblox Studio (comments, URLs, trailing commas)

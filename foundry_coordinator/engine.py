@@ -604,7 +604,8 @@ class Coordinator:
         if self._lc(P, "readiness"):
             # [lifecycle] the environment/tooling must be ready before a session
             # is started; a blocking failure consumes no attempt
-            r = self._lc_readiness(P, t, spec, {"attempt": attempt, "base": t["base_sha"]})
+            r = self._lc_readiness(P, t, spec, {"attempt": attempt, "base": t["base_sha"],
+                                                "track": self.tracks.track_name(P)})
             if r:
                 return self._lc_block_readiness(P, t, r)
         if self.fast_lane.on(P, tid):
