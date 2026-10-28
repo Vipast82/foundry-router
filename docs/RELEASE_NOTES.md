@@ -2,6 +2,47 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.154.0 — the Studio half of the gate can run as a script (off by default)
+
+Victor 2026-10-27: "plan moving the Studio half of the gate (the CALLs the LLM runs one by one)
+to the scripted studio_gate runner, so the LLM only reads the results". Plan:
+`reports/STUDIO_GATE_SCRIPTED_PLAN.md`. S17 and other 2-player rows are MANUAL for now.
+
+- **`studio_gate calls`** runs a gate's Studio CALLs with no model:
+  - selection: gate.ps1's D3 selection, `subset:` and `-Suites`;
+  - checks: PRE/POST-play verifyLive, and HEAD unchanged;
+  - DYNARG values read from JSON as well;
+  - budgets: 10 min per suite group, 30 / 150 min per run;
+  - locks: the runner lock and AU's `studio.lock`.
+  - **Outputs:**
+    - `docs/progress/<ID>_studio_lines.txt`, written per CALL in the format `-Finish` and the
+      live tracker read;
+    - `calls.json`;
+    - a failures-only summary.
+  - `--rerun failed` reuses rows that passed and whose files didn't change. `--dry-run` touches
+    nothing; for GF-GATE1 full it gives 69 rows / 331 CALLs, S17 manual.
+- **`foundry_coordinator/studio_calls.py`:** a session ends its turn with a `STUDIO_GATE` block,
+  or the coordinator starts the run itself (`auto_verify`, or `studio-calls run <project>
+  <task>`). It then:
+  1. runs host half → CALLs → `gate.ps1 -Finish` as one background pipeline;
+  2. writes verified evidence records (runtime identity, run id, lines sha256);
+  3. commits the `docs/progress/<ID>_*` outputs;
+  4. sends the session one prompt listing only the failing rows.
+  While a run is active the session isn't prompted and memory-note commits wait.
+- **A Studio lock left by a dead session is released.**
+  - GF-GATE1's session took AU's `studio.lock` at 19:37, crashed at 21:45 (context overflow)
+    and never released it, so the next sprint's session would have waited forever.
+  - Every minute the coordinator releases a `studio.lock` (held over 2 min) when all of these
+    hold:
+    - its task is one of the project's;
+    - the task isn't IMPLEMENTING, CLOSING or AWAITING_HUMAN;
+    - no scripted run of that task is active.
+  - It only removes the exact line it read, and logs a `studio_lock_released` event.
+  - Operator locks, other projects and the `studio_gate` runner's own lock are left alone.
+- **Turn it on per task:** `[studio_calls] enabled = true, tasks = ["GF-GATE1"]`. Off by default;
+  `enabled = false` restores today's flow. It still needs a live Studio smoke test before the
+  pilot.
+
 ## v0.153.1 — every training setting in the UI; the live tracker reads AU's per-spec Lune cache
 
 Victor 2026-10-28: "Why is capture on option not in the UI, so I can turn on / off, everything

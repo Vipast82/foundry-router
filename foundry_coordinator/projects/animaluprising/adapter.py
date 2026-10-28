@@ -739,6 +739,34 @@ Change no code or test file in this session; if one needs changing, stop and rep
         out += GenericAdapter.verify(self, spec, phase, revision, base)
         return out
 
+    STUDIO_LOCK_GRACE_S = 120
+
+    def studio_lock_holder(self) -> dict | None:
+        """AU's studio.lock as {owner, sprint, line, age_s}, or None when free."""
+        p = os.path.join(os.environ.get("AU_LOCK_DIR", "C:/Roblox/_scratch"), "studio.lock")
+        try:
+            with open(p, encoding="utf-8") as f:
+                line = f.read().strip()
+            age = time.time() - os.path.getmtime(p)
+        except OSError:
+            return None
+        if not line:
+            return None
+        parts = line.split(" ", 3)
+        return {"owner": parts[0], "sprint": parts[2] if len(parts) > 2 else "",
+                "line": line[:300], "age_s": age, "path": p}
+
+    def release_studio_lock(self, holder: dict) -> bool:
+        """Remove studio.lock if it still holds exactly `holder`'s line."""
+        try:
+            with open(holder["path"], encoding="utf-8") as f:
+                if f.read().strip()[:300] != holder["line"]:
+                    return False
+            os.remove(holder["path"])
+            return True
+        except OSError:
+            return False
+
     def studio_busy(self, task_id: str) -> str:
         """'' when AU's shared studio.lock (tools/coord/lock.py) is free or held for
         `task_id` itself, else who holds it: a Studio auto-reopen (0.145.0) never

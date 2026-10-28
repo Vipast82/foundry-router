@@ -323,6 +323,10 @@ class Coordinator:
                 self.memory.tick(P)
             except Exception as e:                                # noqa: BLE001
                 self.log(f"{pid}: memory tick failed: {type(e).__name__}: {e}")
+            try:
+                self._orphan_studio_lock(P)
+            except Exception as e:                                # noqa: BLE001
+                self.log(f"{pid}: studio lock sweep failed: {type(e).__name__}: {e}")
             for t in self.store.tasks(pid):
                 # 0.147.0: re-read the row right before its step. An earlier task's
                 # long step (a 13-min verify) left this snapshot stale, and an
@@ -3443,6 +3447,44 @@ class Coordinator:
         except Exception as e:                                    # noqa: BLE001
             self.log(f"{P.id}: memory review note failed: {type(e).__name__}: {e}")
             return ""
+
+    ORPHAN_LOCK_EVERY_S = 60.0
+
+    def _orphan_studio_lock(self, P: Project) -> None:
+        """A session that died holding the project's Studio lock (AU's studio.lock) never
+        gives it back: GF-GATE1's session took it at 19:37, crashed at 21:45 (context
+        overflow), and the next sprint's session would have waited on it forever. The lock
+        is released when its task is one of this project's, has no open session, isn't
+        IMPLEMENTING or CLOSING, and has no scripted Studio run. Other holders (an operator,
+        another project, a studio_gate runner) are left alone."""
+        holder_fn = getattr(P.adapter, "studio_lock_holder", None)
+        if not callable(holder_fn):
+            return
+        last = self.__dict__.setdefault("_orphan_lock_at", {})
+        if self.clock() - last.get(P.id, -1e18) < self.ORPHAN_LOCK_EVERY_S:
+            return
+        last[P.id] = self.clock()
+        h = holder_fn()
+        if not h or h.get("age_s", 0) < getattr(P.adapter, "STUDIO_LOCK_GRACE_S", 120):
+            return
+        if str(h.get("owner") or "").startswith("studio_gate"):
+            return                               # the scripted runner cleans up its own
+        t = self.store.task(P.id, h.get("sprint") or "")
+        # a session runs only while its task is IMPLEMENTING / CLOSING, or waits on a
+        # question mid-turn (AWAITING_HUMAN): then the lock may be in use
+        if not t or t["state"] in (S.IMPLEMENTING, S.CLOSING, S.AWAITING_HUMAN):
+            return
+        try:
+            if self.studio_calls.active(P, t["task_id"]):
+                return
+        except Exception:                                         # noqa: BLE001
+            return
+        if P.adapter.release_studio_lock(h):
+            self.store.event(P.id, t["task_id"], "studio_lock_released",
+                             detail={"line": h["line"], "state": t["state"],
+                                     "why": "no session of this task holds Studio"})
+            self.log(f"{P.id}/{t['task_id']}: released a studio.lock its {t['state']} task "
+                     f"left behind: {h['line'][:120]}")
 
     LIVE_TEST_STATES = (S.IMPLEMENTING, S.VERIFYING, S.CLOSING)
     LIVE_TEST_EVERY_S = 3.0
