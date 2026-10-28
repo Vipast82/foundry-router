@@ -23,8 +23,8 @@ def _fleet(models: dict, types_: dict):
 
 def test_llamacpp_reasoning_model_advertises_thinking():
     # Strata: openai-compatible, registry caps without `thinking` (the live case)
-    svc = _fleet({"qwen3.8-flash-next-iq3_xxs": {"capabilities": json.dumps(["completion"])}},
-                 {"qwen3.8-flash-next-iq3_xxs": "openai-compatible"})
+    svc = _fleet({"qwen3.8-flash-next-iq3_s": {"capabilities": json.dumps(["completion"])}},
+                 {"qwen3.8-flash-next-iq3_s": "openai-compatible"})
     assert "thinking" in _persona_capabilities(svc, {})
 
 
@@ -50,11 +50,11 @@ def test_claude_route_advertises_thinking():
 
 def test_strict_persona_thinking_from_its_served_model(monkeypatch):
     from foundry_router.facade import ollama_api as oa
-    svc = _fleet({"qwen3.8-flash-next-iq3_xxs": {"context_length": 262144}},
-                 {"qwen3.8-flash-next-iq3_xxs": "openai-compatible"})
-    monkeypatch.setattr(oa, "strict_candidates", lambda s, p: ["qwen3.8-flash-next-iq3_xxs"])
+    svc = _fleet({"qwen3.8-flash-next-iq3_s": {"context_length": 262144}},
+                 {"qwen3.8-flash-next-iq3_s": "openai-compatible"})
+    monkeypatch.setattr(oa, "strict_candidates", lambda s, p: ["qwen3.8-flash-next-iq3_s"])
     p = {"virtual_name": "Kilo-Local", "routing": "strict",
-         "model_allowlist": json.dumps(["qwen3.8-flash-next-iq3_xxs"])}
+         "model_allowlist": json.dumps(["qwen3.8-flash-next-iq3_s"])}
     meta = persona_meta(svc, p)
     assert "thinking" in meta["capabilities"]
     entry = oa.openai_model_entry(svc, p, 0)

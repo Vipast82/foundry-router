@@ -26,7 +26,7 @@ turn on the **route footer** for those keys: Clients & Keys → Edit → "show
 which model and backend answered" (or per persona: Personas → "route footer").
 Each answer then ends with:
 
-    — via qwen3.8-flash-next-iq3_xxs @ strata (local) · routed by brain <model> · 3 model calls
+    — via qwen3.8-flash-next-iq3_s @ strata (local) · routed by brain <model> · 3 model calls
 
 and buffered (non-streamed) replies also carry the route line in their
 reasoning (`reasoning_content` on the OpenAI dialect, `thinking` on Ollama).
