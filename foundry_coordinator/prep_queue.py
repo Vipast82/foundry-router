@@ -330,13 +330,13 @@ def run_now(c, project_id: str, actor: str = "operator") -> dict:
 # --------------------------------------------------------------------------- holds
 
 def hold(c, project_id: str, task_id: str, owner: str, reason: str, minutes: int) -> str:
+    t = c.store.task(project_id, task_id)
+    if t is None:
+        return f"hold on {task_id}: no such task (nothing held)"
     fn = getattr(c, "hold", None)
     if callable(fn):
         fn(project_id, task_id, owner, reason, minutes)
         return f"hold on {task_id} ({minutes} min)"
-    t = c.store.task(project_id, task_id)
-    if t is None:
-        return f"hold on {task_id}: no such task (nothing held)"
     paused = False
     if t["state"] in (S.QUEUED, S.READY):
         c.pause(project_id, task_id, f"hold: {reason}"[:300], actor=owner)
@@ -348,14 +348,14 @@ def hold(c, project_id: str, task_id: str, owner: str, reason: str, minutes: int
 
 
 def release_hold(c, project_id: str, task_id: str, owner: str) -> str:
+    t = c.store.task(project_id, task_id)
+    h = ((t or {}).get("data") or {}).get("hold") or {}
+    if not t or not isinstance(h, dict) or not str(h.get("owner") or "") == owner:
+        return f"no hold of {owner} on {task_id}"     # never someone else's hold
     fn = getattr(c, "release_hold", None)
     if callable(fn):
         fn(project_id, task_id, owner)
         return f"released the hold on {task_id}"
-    t = c.store.task(project_id, task_id)
-    h = ((t or {}).get("data") or {}).get("hold") or {}
-    if not t or not isinstance(h, dict) or not str(h.get("owner") or "") == owner:
-        return f"no hold of {owner} on {task_id}"
     c.store.merge_data(project_id, task_id, hold=None)
     if h.get("paused") and t["state"] == S.PAUSED:
         c.resume(project_id, task_id, actor=owner, note="prep queue hold released")

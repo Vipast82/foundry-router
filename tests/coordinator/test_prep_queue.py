@@ -376,7 +376,11 @@ def test_removing_an_entry_releases_its_holds(game, tmp_path):
 def test_hold_uses_the_coordinator_api_when_present(game, tmp_path):
     c, P, root, *_ = game
     calls = []
-    c.hold = lambda *a: calls.append(("hold", *a))
+    c.approve("game", "T1", [], "victor")            # a task the coordinator knows
+    def fake_hold(*a):
+        calls.append(("hold", *a))                   # like Coordinator.hold: records the owner
+        c.store.merge_data(a[0], a[1], hold={"owner": a[2], "reason": a[3]})
+    c.hold = fake_hold
     c.release_hold = lambda *a: calls.append(("release", *a))
     e = PQ.add(c, "game", "patch", "prep: x",
                source=make_patch(root, tmp_path, "x", {"src/x.txt": "x\n"}),

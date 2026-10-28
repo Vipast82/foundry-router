@@ -2,6 +2,56 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.156.0 — self-driving: no watch, no watcher
+
+Victor 2026-10-28: "I shouldn't have to have a watcher on for the automation process to work."
+Plan: `reports/SELF_DRIVING_PLAN.md`.
+
+- **Only product decisions can stop a sprint (part 1).**
+  - Every decision has a `category`: product, user_action or automation. It is stored on the
+    decision, in notices, and in the router's decision rows.
+  - An automation decision never times out to PARK. Its default is a capped, audited
+    self-repair:
+    - **budget:** a `policy` ledger extension, e.g. +1 review for a head that was never reviewed
+      after a passed verification. That is today's 06:01 GF-GATE1 case.
+    - **repeated findings:** a Lead round with the finding text, then a fresh "different
+      approach" session, then one frontier session.
+    - **tooling:** a backoff retry.
+  - When the daily caps run out, it parks quietly, with a digest entry and the alert class
+    `self_repair_exhausted`.
+  - Settings: `[automation] self_repair*`.
+- **The self-repair sweep inside the coordinator (part 2):** `selfheal.py`, every minute, capped
+  per task per day, every action a `self_heal` event. It handles:
+  - dead implementer and Lead sessions (seen on two sweeps);
+  - Lead cases with no live call;
+  - tasks BLOCKED by a bug a newer release fixed (`FIXED_SIGNATURES`), which get a re-verify;
+  - stale runner, studio and coordinator locks;
+  - expired or ownerless holds;
+  - a one-time `pause_forgotten` notice for a pause with no owner;
+  - and `unblock --reset-attempts` resets every budget counter.
+- **Holds (part 2).** `Coordinator.hold(project, task, owner, reason, minutes)` /
+  `release_hold`, and `pause --owner/--minutes`.
+- **CLI version guard.** Writing commands refuse when the CLI's code is another version than
+  the running coordinator ("run it from C:\Users\shock\foundry-deploy", or `--force`).
+- **Repo changes queue (part 3):** `prep_queue.py`, the `prep add|list|remove|move|run-now|status`
+  CLI, and Automation → Repo changes in the UI.
+  - Patches, branches and scripts land on the main checkout at a safe point.
+  - A batch is all or nothing through the project's hooks, followed by one push and the
+    after-actions (kilo-config apply, Kilo reload, copy, resume…).
+  - Entries can hold tasks until they land.
+  - `tools/migrate_au_watcher.py` queues the 11 AU prep commits the bash watcher carried.
+  - A hold is placed only on a task the coordinator knows, and released only by its owner.
+- **Alerts and digest (parts 4-5):**
+  - **Down alert:** the router raises `stack_down` / `stack_recovered` when the coordinator's
+    heartbeat is stale for over 10 min.
+  - **Webhook:** pushes go to a webhook (ntfy or JSON) only for product decisions, user_action,
+    image asks, stack down, self-repair exhausted, prep failed and pause forgotten. Each is a
+    toggle.
+  - **Daily digest:** at `digest_hour`, also "Build digest now".
+  - **Settings:** Monitor → Alerts & digest.
+  - **Start at boot:** `foundry_client install-autostart --at-boot` adds a Task Scheduler task at
+    startup; Windows asks for the password itself.
+
 ## v0.155.2 — the scripted Studio gate fetches long plans in pages
 
 GF-GATE1's scripted full regression triage, 2026-10-28:
