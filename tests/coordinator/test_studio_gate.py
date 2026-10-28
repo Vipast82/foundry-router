@@ -4,8 +4,11 @@ The fake official server's tally is a pure-Python GateRunner.tally (fixtures/
 fake_mcp_server.py mirror_tally: countLines + the bootBad rule), so these tests prove
 the runner itself fails closed instead of trusting a canned tally answer."""
 
+import glob
 import json
 import os
+import re
+import shutil
 import subprocess
 import sys
 import threading
@@ -328,6 +331,7 @@ def fakes(tmp_path, monkeypatch):
     log = tmp_path / "calls.jsonl"
     state = tmp_path / "state.json"
     monkeypatch.setattr(G, "SETTLE_S", 0.0)
+    monkeypatch.setattr(G, "VIEWPORT_SETTLE_S", 0.0, raising=False)
 
     def set_rules(official=(), community=()):
         if state.exists():
@@ -818,6 +822,103 @@ def test_bridge_serves_tests_from_head_only(repo):
                 urllib.request.urlopen(f"http://127.0.0.1:{port}{bad}", timeout=10)
     finally:
         b.stop()
+
+
+# ---- bridge execution shapes (GF-GATE1 full run 2026-10-28) ------------------------------
+def _lune():
+    """A runnable Lune: AU_LUNE, rokit's tool storage (the rokit shim needs a project
+    manifest in cwd), else lune on PATH."""
+    stored = sorted(glob.glob(os.path.join(os.path.expanduser("~"), ".rokit", "tool-storage",
+                                           "lune-org", "lune", "*", "lune*")))
+    return os.environ.get("AU_LUNE") or (stored[-1] if stored else shutil.which("lune"))
+
+
+LUNE = _lune()
+BRIDGE_CASES = {
+    # S00-S03: a script that prints its lines and returns nothing
+    "script": 'local r = {}\ntable.insert(r, "PASS: a")\ntable.insert(r, "FAIL: b - why")\n'
+              'print(table.concat(r, "\\n"))',
+    # S05-S43: prints AND returns the same report (must not be doubled)
+    "module": 'local out = "PASS: m1\\nPASS: m2"\nprint(out)\nreturn out',
+    # S44: "module returns a function (call it for the report)"
+    "function": 'local x = 1\nreturn function()\n    return "PASS: f" .. x\nend',
+    # a suite that dies after printing: lines kept, the error named
+    "crash": '--!nonstrict\nprint("PASS: before")\nlocal t = nil\nlocal y = t.field\nreturn "never"',
+    # an early top-level return (failAll) inside a branch
+    "early": 'local function failAll(r) return "FAIL: all - " .. r end\n'
+             'if true then\n    return failAll("no Server")\nend\nprint("PASS: unreachable")',
+}
+
+
+@pytest.mark.skipif(LUNE is None, reason="lune (Luau runtime) not installed")
+def test_bridge_wrapper_runs_every_suite_shape_under_luau(tmp_path):
+    """The Luau the bridge builds, run for real (Lune's luau.load stands in for require of
+    the throwaway ModuleScript). On the old bridge the script shape returned nothing
+    ("Module code did not return exactly one value") and the function shape printed
+    `function: 0x...` (S44 pass=0 fail=0)."""
+    body = ["local luau = require(\"@lune/luau\")", G.BRIDGE_FORMAT]
+    for name, src in BRIDGE_CASES.items():
+        body.append(f"do local chunk = luau.load({G.luau_long(G.BRIDGE_PREFIX)} .. "
+                    f"{G.luau_long(src)} .. {G.luau_long(G.BRIDGE_SUFFIX)}, {{debugName = \"{name}\"}})\n"
+                    f"print(\"<<{name}>>\" .. __gateFormat(\"{name}.lua\", chunk()) .. \"<<end>>\") end")
+    script = tmp_path / "bridge_shapes.luau"
+    script.write_text("\n".join(body), encoding="utf-8")
+    p = subprocess.run([LUNE, "run", str(script)], capture_output=True, text=True, encoding="utf-8",
+                       timeout=60)
+    assert p.returncode == 0, p.stderr + p.stdout
+    got = dict(re.findall(r"<<(\w+)>>(.*?)<<end>>", p.stdout, re.S))
+    assert got["script"] == "PASS: a\nFAIL: b - why"
+    assert got["module"] == "PASS: m1\nPASS: m2"
+    assert got["function"] == "PASS: f1"
+    assert got["crash"].startswith("PASS: before\nFAIL: GATE bridge crash.lua — error: ")
+    assert ":4: attempt to index nil" in got["crash"]               # the suite's own line number
+    assert got["early"] == "FAIL: all - no Server"
+
+
+def test_bridge_limits_name_what_the_runner_cannot_provide():
+    assert "io.*" in G.bridge_limits('local s = io.read("C:/x")')
+    assert G.bridge_limits('-- io.read(path) in a comment only\nreturn "PASS: x"') is None
+    src = '-- start tools/runner_s136.py first\nlocal B = "http://127.0.0.1:8436"\nreturn 1'
+    why = G.bridge_limits(src, port_open=lambda p: False)
+    assert "127.0.0.1:8436 (tools/runner_s136.py)" in why
+    assert G.bridge_limits(src, port_open=lambda p: True) is None
+    assert G.capability_gaps("PASS: a\nFAIL: c1 - Needs a 2-client playtest (got 1 player)") != []
+    assert G.capability_gaps("FAIL: C6 x - needs a Studio PLAY session with the client relay armed") != []
+    assert G.capability_gaps("FAIL: c1 - Needs a 2-client playtest\nFAIL: c2 - hp 0 want 5") == []
+    assert G.capability_gaps("PASS: a") == []
+
+
+def test_bridge_payload_wraps_hands_over_and_skips_reboot_where_the_runbook_says(repo):
+    """S33 gets AbilityService (HEAD) on _G.S33_ABILITY_SOURCE; S20 runs without the runner's
+    ServiceLoader re-boot; every bridge wraps the source and formats through __gateFormat."""
+    (repo / "src" / "server" / "Services").mkdir(parents=True)
+    (repo / "src" / "server" / "Services" / "AbilityService.lua").write_text(
+        "local AbilityService = {}\nreturn AbilityService", encoding="utf-8")
+    for stem in ("S33_check", "S20_check", "S30_check"):
+        (repo / "tests" / f"{stem}.lua").write_text('print("PASS: x")', encoding="utf-8")
+    commit(repo, "suites")
+    g = G.Gate(str(repo), "U1", "regression", create_dir=False)
+    sent = {}
+
+    def fake_call(label, payload, fn):
+        sent[label.split()[-1]] = payload
+        return "PASS: x", False
+    g._call = fake_call
+    g.console_lines = lambda: []
+    try:
+        for stem in ("S33_check", "S20_check", "S30_check"):
+            assert g.run_bridge({"n": 3, "file": f"{stem}.lua", "vm": "server"}) == ("PASS: x", False)
+    finally:
+        g.close()
+    s33, s20, s30 = sent["S33_check.lua"], sent["S20_check.lua"], sent["S30_check.lua"]
+    assert "_G.S33_ABILITY_SOURCE = [[\nlocal AbilityService = {}\nreturn AbilityService]]" in s33
+    assert s33.index("_G.S33_ABILITY_SOURCE = [[") < s33.index("pcall(require, mod)") \
+        < s33.index("_G.S33_ABILITY_SOURCE = nil")
+    assert "_G.S33_ABILITY_SOURCE" not in s30
+    assert "if false then" in s20 and "if true then" in s30          # S20: no runner re-boot
+    for code in (s33, s20, s30):
+        assert G.BRIDGE_PREFIX in code and G.BRIDGE_SUFFIX in code
+        assert "return __gateFormat(file, res)" in code and "__PREFIX__" not in code
 
 
 def test_runner_lock_refuses_a_second_runner(repo):

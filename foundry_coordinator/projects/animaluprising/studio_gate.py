@@ -60,6 +60,7 @@ import json
 import os
 import re
 import shutil
+import socket
 import socketserver
 import subprocess
 import sys
@@ -77,7 +78,23 @@ DEVICES = [("AU_1920x1080", 1920, 1080), ("AU_1366x768", 1366, 768), ("AU_1024x7
 SIZE_NAMES = [f"{w}x{h}" for _, w, h in DEVICES]
 UI_SHARED_FILES = {"src/shared/Config/Strings.lua", "src/shared/Config/Ui.lua"}
 REMOTES_FILE = "src/shared/Net/Remotes.lua"
-NO_REBOOT_BRIDGE = {"S11_5_boot_check"}      # the boot gate itself: never manufacture a boot (§21)
+# Bridges that must NOT get the runner's ServiceLoader re-boot. S11_5_boot_check: the boot
+# gate itself, never manufacture a boot (§21). S20_check: its runbook runs it against the
+# eval thread's never-booted require cache (it never boots itself; GF-FX3b baseline 7/0); a
+# re-booted service set has no generated map, so EnemyService:Spawn dies in
+# MapService:GetBackbone ("call Generate first", GF-GATE1 full run 2026-10-28).
+NO_REBOOT_BRIDGE = {"S11_5_boot_check", "S20_check"}
+# Values a bridge suite's runbook says the runner hands over on _G in the SAME Server VM right
+# before requiring it, read from HEAD (stem -> {_G key: repo path}). S33 W3 scans
+# AbilityService's source, which a Server VM may not read (RegressionIndex S33 notes).
+BRIDGE_HANDOFFS = {"S33_check": {"S33_ABILITY_SOURCE": "src/server/Services/AbilityService.lua"}}
+BRIDGE_LIMIT = "UNKNOWN: GATE bridge not runner-executable"
+# The regression lane's play viewport (UI_01 c21a-c25a, GF_UI1 fixtures("1920x1080")) and
+# AU's recipe for it (RegressionIndex GF_UI1 notes, ENVIRONMENT.md "The five sizes"): the
+# device-simulator resolution override on the PLAY client, settle >= 1.2 s, re-read.
+PLAY_VIEWPORT = (1920, 1080)
+VIEWPORT_TOLERANCE_PX = 2
+VIEWPORT_SETTLE_S = 1.2
 DEFAULT_ROJO_PORT = 34872
 WAIT_MAX_MINUTES = 9.0
 WAIT_DEFAULT_MINUTES = 8.0
@@ -101,9 +118,55 @@ HASH_RE = re.compile(r"^HASH_FNV (\d+) files at [0-9a-f]+ PASS$")
 CONSOLE_ERR_RE = re.compile(
     r"(Stack Begin|^\s*\[?(?:error|ERROR)\]?[:\s]|^\s*\S+:\d+: |attempt to (?:index|call|perform|compare|concatenate)"
     r"|is not a valid member of|Requested module experienced an error)")
+# A suite's own FAIL line saying the leg needs a session shape the runner did not give it
+# (S03 C4/C5, S06 C5, S09 C6 in the Edit VM, S43 without a 2nd client): not a product FAIL.
+CAPABILITY_RE = re.compile(
+    r"needs? an? \d-(?:client|player) playtest|needs? an? (?:Studio )?PLAY session"
+    r"|run in a Studio PLAY session|verified in (?:a )?play session|needs a live client", re.I)
+# A step's own Luau raised inside a live eval (robloxstudio-mcp envelope `error`, e.g.
+# "ERROR: ServerScriptService.Server.Services.MatchService:437: ..."): the step RAN and
+# crashed - a suite/product FAIL, not a tool error (UI_03a/04a/05a/V1, 2026-10-28).
+LUAU_RAISE_RE = re.compile(r"^ERROR: (?!.*no player in world)[^\n:]+:\d+: ", re.M)
 
 
 # ---- small pure helpers ----------------------------------------------------------
+def host_port_open(port: int, timeout: float = 0.5) -> bool:
+    try:
+        with socket.create_connection(("127.0.0.1", int(port)), timeout=timeout):
+            return True
+    except OSError:
+        return False
+
+
+def strip_luau_comments(src: str) -> str:
+    src = re.sub(r"--\[(=*)\[.*?\]\1\]", "", src, flags=re.S)
+    return re.sub(r"--[^\n]*", "", src)
+
+
+def bridge_limits(src: str, port_open: Optional[Callable] = None) -> Optional[str]:
+    """Why the runner cannot run this bridge suite as its header runbook says, or None.
+    Never a FAIL: these become UNKNOWN with the reason (GF-GATE1 full run 2026-10-28)."""
+    port_open = port_open or host_port_open
+    code = strip_luau_comments(src)
+    if re.search(r"\bio\.(?:read|open|file)\s*\(", code):
+        return ("it reads the host filesystem through io.* - Studio has no io library and the "
+                "runner serves only tests/ from HEAD (run it with its host io shim per its header)")
+    tool = re.search(r"tools[/\\][\w./\\-]+\.py", src)
+    for p in sorted({int(x) for x in re.findall(r"127\.0\.0\.1:(\d{2,5})", code)}):
+        if not port_open(p):
+            return (f"it needs a host runner on 127.0.0.1:{p} "
+                    f"({tool.group(0) if tool else 'named in its header'}) and nothing listens there")
+    return None
+
+
+def capability_gaps(text: str) -> list:
+    """The suite's FAIL lines when EVERY one of them says the leg needs a session shape the
+    runner did not give it (a 2nd client, a play session with an armed relay); else []."""
+    fails = [ln.strip() for ln in str(text or "").splitlines()
+             if ln.strip().startswith("FAIL: ") and not ln.strip().startswith("FAIL: GATE")]
+    return fails if fails and all(CAPABILITY_RE.search(ln) for ln in fails) else []
+
+
 def luau_long(s: str) -> str:
     """A Luau long-bracket literal holding s exactly (leading newline protected)."""
     s = str(s)
@@ -811,6 +874,11 @@ SDS:SetScalingModeAsync(Enum.DeviceSimulatorScalingMode.ActualResolution); task.
 return "DEVICE AU_1920x1080"
 '''
 
+VIEWPORT_READ = ('local cam = workspace.CurrentCamera; '
+                 'if cam == nil then return "VIEWPORT none" end; '
+                 'return string.format("VIEWPORT %dx%d", math.floor(cam.ViewportSize.X + 0.5), '
+                 'math.floor(cam.ViewportSize.Y + 0.5))')
+
 FOCUS_STORY = FRESH_LIB + r'''
 local H = __freshRequire("StoryHarness")
 local F = __freshRequire("FocusWalk")
@@ -887,23 +955,90 @@ end
 return HS:JSONEncode(out)
 '''
 
-BRIDGE = r'''
+# The bridge runs a suite file the way its header runbook does, whatever its shape (GF-GATE1
+# full run 2026-10-28: 10 of 48 bridges died in the old plain `require`): the source is
+# wrapped as the body of a function inside the throwaway ModuleScript (a Server VM has no
+# loadstring; ENVIRONMENT.md "Running tests in the Server VM"), with `print` captured, so
+#   * a SCRIPT that prints its PASS/FAIL lines and returns nothing (S00-S03) yields its
+#     printed lines instead of "Module code did not return exactly one value";
+#   * a module that RETURNS A FUNCTION (S44: "call it for the report") is called;
+#   * a runtime error keeps the lines printed before it and names the error + traceback
+#     instead of "Requested module experienced an error while loading".
+# Prefix and suffix stay on one line each, so the suite's line numbers are unchanged.
+BRIDGE_PREFIX = (
+    'local __gateLines = {}; local print = function(...) local __n = select("#", ...); '
+    'local __s = {}; for __i = 1, __n do __s[__i] = tostring((select(__i, ...))) end; '
+    'table.insert(__gateLines, table.concat(__s, " ")) end; '
+    'local __gateTrace = function(e) return {msg = tostring(e), trace = debug.traceback("", 2)} end; '
+    'local __gateOk, __gateRet = xpcall(function(...) ')
+BRIDGE_SUFFIX = (
+    '\nend, __gateTrace); if __gateOk and type(__gateRet) == "function" then '
+    '__gateOk, __gateRet = xpcall(__gateRet, __gateTrace) end; '
+    'return {gateBridge = true, ok = __gateOk, ret = __gateRet, lines = __gateLines}')
+# Turns the wrapper's {ok, ret, lines} into the CALL's text: the returned report when it holds
+# PASS/FAIL lines (unchanged for every suite that already worked), else the printed lines.
+BRIDGE_FORMAT = r'''
+local function __gateFormat(file, res)
+    local function asText(v)
+        if type(v) == "table" then
+            local parts = {}
+            for _, x in ipairs(v) do parts[#parts + 1] = tostring(x) end
+            return table.concat(parts, "\n")
+        elseif v == nil then
+            return ""
+        end
+        return tostring(v)
+    end
+    local function hasVerdict(s)
+        return s:find("^PASS: ") ~= nil or s:find("\nPASS: ") ~= nil
+            or s:find("^FAIL: ") ~= nil or s:find("\nFAIL: ") ~= nil
+    end
+    if type(res) ~= "table" or res.gateBridge ~= true then
+        return asText(res)
+    end
+    local ret = res.ok and asText(res.ret) or ""
+    local printed = table.concat(res.lines, "\n")
+    local out
+    if hasVerdict(ret) then
+        out = ret
+    elseif hasVerdict(printed) then
+        out = printed
+    elseif ret ~= "" then
+        out = ret
+    else
+        out = printed
+    end
+    if not res.ok then
+        local e = res.ret
+        local msg = type(e) == "table" and tostring(e.msg) or tostring(e)
+        local trace = type(e) == "table" and tostring(e.trace or "") or ""
+        trace = string.sub((trace:gsub("%s*\n%s*", " | ")), 1, 400)
+        out = out .. (out ~= "" and "\n" or "") .. "FAIL: GATE bridge " .. file .. " — error: " .. msg
+            .. ((trace ~= "" and trace ~= " | ") and (" [" .. trace .. "]") or "")
+    end
+    return out
+end
+'''
+
+BRIDGE = BRIDGE_FORMAT + r'''
 local HttpService = game:GetService("HttpService")
 local file = __FILE__
-local src = HttpService:GetAsync("http://127.0.0.1:__PORT__/tests/" .. file)
+local okGet, src = pcall(function() return HttpService:GetAsync("http://127.0.0.1:__PORT__/tests/" .. file) end)
+if not okGet then return "FAIL: GATE bridge " .. file .. " — the runner's repo bridge did not answer: " .. tostring(src) end
 if __REBOOT__ then
     local okSL, SL = pcall(function() return require(game:GetService("ServerScriptService"):WaitForChild("Server"):WaitForChild("ServiceLoader")) end)
     if okSL and type(SL) == "table" and SL.HeartbeatConn == nil and SL.Boot then SL:Boot() end
 end
 local mod = Instance.new("ModuleScript")
 mod.Name = "__GateBridge_" .. file:gsub("%W", "_")
-mod.Source = src
+mod.Source = __PREFIX__ .. src .. __SUFFIX__
 mod.Parent = game:GetService("ServerStorage")
-local ok, out = pcall(require, mod)
+__HANDOFF__
+local ok, res = pcall(require, mod)
 mod:Destroy()
-if not ok then return "FAIL: GATE bridge " .. file .. " — " .. tostring(out) end
-if type(out) == "table" then out = table.concat(out, "\n") end
-return tostring(out)
+__HANDOFF_CLEAR__
+if not ok then return "FAIL: GATE bridge " .. file .. " — " .. tostring(res) end
+return __gateFormat(file, res)
 '''
 
 
@@ -1209,6 +1344,9 @@ class Gate:
             return
         dn = self._dn(c["n"])
         tool = call_tool_name(c)
+        # a bridge line's "capture ... as CALL <n>'s result" carries Studio's (page-local) plan
+        # number; the lines file speaks display numbers (2026-10-28: "CALL 44 ... as CALL 3's")
+        payload = re.sub(r"\bas CALL \d+'s result", f"as CALL {dn}'s result", str(payload))
         start = self.lines.count + 1
         self.lines.line(f"CALL {dn} [vm={c.get('vm')}] {tool}{note} :: {one_line(payload, 4000)}")
         self.lines.raw(text if not err or str(text).startswith("FAIL: GATE")
@@ -1592,6 +1730,45 @@ class Gate:
         self.stop_playtest()
         return False
 
+    def set_play_viewport(self, label: str, sink: list) -> Optional[str]:
+        """Pin the playtest client's viewport to PLAY_VIEWPORT the way AU's recipe says
+        (set_device_simulator target=client-1 deviceId=average_laptop + resolution override,
+        pixelDensity 96, ActualResolution; settle 1.2 s) and read it back. The Edit-time
+        StudioDeviceSimulatorService device set before the plan does not hold in play
+        (GF-GATE1 2026-10-28: the play client measured 1920x1060 and GF_UI1/GF_UI1b FAILed
+        `SIZE 1920x1080`). None when verified; else the honest tooling reason (recorded as
+        an UNKNOWN check; the group's client CALLs are UNKNOWN, never a product FAIL)."""
+        w, h = PLAY_VIEWPORT
+        args = {"target": "client-1", "deviceId": "average_laptop",
+                "resolution": {"width": w, "height": h}, "pixelDensity": 96,
+                "scalingMode": "ActualResolution"}
+        set_err = None
+        try:
+            r = self.community.call_tool("set_device_simulator", args, timeout=self.call_timeout)
+            self.raw(f"set_device_simulator [{label}]", json.dumps(args), r["text"])
+            if r["is_error"] or '"success":false' in r["text"].replace(" ", ""):
+                set_err = one_line(r["text"], 200)
+        except M.McpError as e:
+            set_err = one_line(e, 200)
+            self.raw(f"set_device_simulator [{label}] [tool error]", json.dumps(args), set_err)
+        time.sleep(VIEWPORT_SETTLE_S)
+        text, err = self.vm("client", VIEWPORT_READ, f"viewport [{label}]", 30)
+        m = re.search(r"VIEWPORT (\d+)x(\d+)", flatten_value(text) or "")
+        got = f"{m.group(1)}x{m.group(2)}" if m else None
+        if not err and m and abs(int(m.group(1)) - w) <= VIEWPORT_TOLERANCE_PX \
+                and abs(int(m.group(2)) - h) <= VIEWPORT_TOLERANCE_PX:
+            sink.append(check(f"regression.viewport.{label}", "PASS",
+                              f"play client viewport {got} (set_device_simulator client-1, settled "
+                              f"{VIEWPORT_SETTLE_S:g}s)", required=False))
+            self.emit(f"VIEWPORT {label} {got} (set_device_simulator target=client-1 average_laptop "
+                      f"{w}x{h} ActualResolution, settled {VIEWPORT_SETTLE_S:g}s)")
+            return None
+        why = (f"the play client viewport is {got or 'unreadable (' + one_line(text, 120) + ')'}, not "
+               f"{w}x{h}" + (f"; set_device_simulator failed: {set_err}" if set_err else ""))
+        sink.append(check(f"regression.viewport.{label}", "UNKNOWN", "tooling: " + why))
+        self.emit(f"VIEWPORT {label} tooling error - {why}")
+        return why
+
     def stop_playtest(self):
         with contextlib.suppress(M.McpError):
             r = self.community.call_tool("solo_playtest", {"action": "stop"}, timeout=self.call_timeout)
@@ -1777,7 +1954,20 @@ class Gate:
                     chk.append(check(f"regression.tight{dn}", "UNKNOWN",
                                      f"tightBefore CALL {dn} issued {gap:.0f}ms after CALL {dn - 1}"))
             self._last_end = time.monotonic()
-            if err:
+            if err and kind == "bridge" and str(text).startswith(BRIDGE_LIMIT):
+                # the runner cannot run this suite as its runbook says: UNKNOWN with the
+                # reason, never a FAIL, and no fresh-playtest retry (it would not help)
+                why = str(text)[len(BRIDGE_LIMIT):].lstrip(" :")
+                res[n] = f"FAIL: GATE call {dn} not runner-executable — {one_line(why)}"
+                tool_err.append(n)
+                att.setdefault("limit", []).append(n)
+                chk.append(check(f"regression.call{dn}", "UNKNOWN", "not runner-executable: " + one_line(why)))
+            elif err and kind in ("server", "client") and LUAU_RAISE_RE.search(str(text)):
+                # the step ran and its own Luau raised: a suite/product FAIL, not a tool error
+                res[n] = f"FAIL: GATE call {dn} raised — {one_line(text)}"
+                chk.append(check(f"regression.call{dn}", "FAIL",
+                                 "the step's own code raised (it ran; not a tool error): " + one_line(text)))
+            elif err:
                 # never hand a failed call's printed lines to the tally as if it ran (H2)
                 res[n] = f"FAIL: GATE call {dn} error — {one_line(text)}"
                 tool_err.append(n)
@@ -1790,6 +1980,15 @@ class Gate:
                     chk.append(check(f"regression.call{dn}", "FAIL", res[n]))
                 else:
                     res[n] = text
+                    gaps = capability_gaps(text) if kind == "bridge" else []
+                    if gaps:
+                        chk.append(check(f"regression.call{dn}", "UNKNOWN",
+                                         f"every FAIL line ({len(gaps)}) is a leg the suite says needs a "
+                                         f"session shape this run did not give it, not a product FAIL: "
+                                         + one_line(gaps[0], 200)))
+                    if kind == "client" and att.get("viewport_bad"):
+                        chk.append(check(f"regression.call{dn}", "UNKNOWN",
+                                         "client CALL ran at an unverified viewport: " + att["viewport_bad"]))
             self.emit_call(c, payload, res[n], bool(err) or n in tool_err,
                            " DYNARG" if c.get("dynarg") else (" tight" if c.get("tight") else ""))
             att["order"].append(n)
@@ -1836,6 +2035,8 @@ class Gate:
                     return att
             if self.lines is not None and not self.boot_text:
                 self.boot_text = "\n".join(att["boot"][b["n"]] for b in boot)
+            if any(c["kind"] == "client" for c in play):
+                att["viewport_bad"] = self.set_play_viewport(g["label"], att["chk"])
             for e in g["entries"]:                          # per-entry setup steps
                 for k, step in enumerate(e.get("setup") or [], 1):
                     sp = step_payload(e, str(step))
@@ -2034,8 +2235,8 @@ class Gate:
                     self.emit_call(c, c.get("payload") or "", results[c["n"]], True)
                 continue
             att = self._run_group(g, boot, entry_of)
-            if att["tool_err"] and not att["boot_bad"] and not self._assert_fail(att) and mapped \
-                    and not att.get("budget"):
+            if set(att["tool_err"]) - set(att.get("limit") or []) and not att["boot_bad"] \
+                    and not self._assert_fail(att) and mapped and not att.get("budget"):
                 self.raw(f"RETRY {g['label']}", "",
                          f"first run had tool errors/timeouts at {att['tool_err']} and no assertion "
                          f"FAIL: re-running once in a fresh playtest (both runs are in this log)")
@@ -2072,22 +2273,54 @@ class Gate:
             self.add(check("regression.boot", "PASS", f"boot gate PASS in {played} playtest(s)"))
         return results
 
+    def _bridge_handoff(self, stem: str) -> tuple:
+        """(set code, clear code, problem) for the _G values a suite's runbook hands over."""
+        sets, clears = [], []
+        for key, path in (BRIDGE_HANDOFFS.get(stem) or {}).items():
+            rc, txt = self.run_cmd(["git", "show", f"{self.head or 'HEAD'}:{path}"], self.repo, 30)
+            if rc != 0 or not txt:
+                return "", "", f"its runbook hands {path} over on _G.{key} and git show failed"
+            sets.append(f"_G.{key} = {luau_long(txt)}")
+            clears.append(f"_G.{key} = nil")
+        return "\n".join(sets), "\n".join(clears), None
+
     def run_bridge(self, c: dict) -> tuple:
         f = c.get("file")
         if not f:
-            return "UNKNOWN: bridge file not named in the CALL line", True
+            return f"{BRIDGE_LIMIT}: the CALL line names no file", True
         if c["vm"] == "client":
-            return "UNKNOWN: bridge suites in the client VM are not runner-executable (no HttpService)", True
-        port = self.bridge.start()
+            return f"{BRIDGE_LIMIT} {f}: client-VM bridge suites need HttpService (client VM has none)", True
+        body = self.bridge.content(f"/tests/{f}")
+        if body is None:
+            return f"{BRIDGE_LIMIT} {f}: tests/{f} is not in HEAD", True
+        why = bridge_limits(body.decode("utf-8", "replace"))
+        if why:
+            return f"{BRIDGE_LIMIT} {f}: {why}", True
         stem = os.path.splitext(os.path.basename(f))[0]
+        handoff, clear, why = self._bridge_handoff(stem)
+        if why:
+            return f"{BRIDGE_LIMIT} {f}: {why}", True
+        port = self.bridge.start()
         code = fill(BRIDGE, file=luau_long(f), port=str(port),
-                    reboot="false" if stem in NO_REBOOT_BRIDGE or c["vm"] == "edit" else "true")
+                    reboot="false" if stem in NO_REBOOT_BRIDGE or c["vm"] == "edit" else "true",
+                    prefix=luau_long(BRIDGE_PREFIX), suffix=luau_long(BRIDGE_SUFFIX),
+                    handoff_clear=clear, handoff=handoff)
         label = f"CALL {c['n']} bridge {f}"
-        if c["vm"] == "edit":
-            return self.edit(code, label, self.call_timeout * 3)
         before = self.console_lines()
-        text, err = self._call(label, code, lambda: unwrap_community(self.community.call_tool(
-            "execute_luau", {"code": code, "target": "server"}, timeout=self.call_timeout * 3)))
+        if c["vm"] == "edit":
+            text, err = self.edit(code, label, self.call_timeout * 3)
+        else:
+            text, err = self._call(label, code, lambda: unwrap_community(self.community.call_tool(
+                "execute_luau", {"code": code, "target": "server"}, timeout=self.call_timeout * 3)))
+        if not err and "Requested module experienced an error while loading" in (text or ""):
+            # a module the suite requires failed to load: its real error is only in the console
+            cause = [ln.strip() for ln in console_delta(before, self.console_lines())
+                     if CONSOLE_ERR_RE.search(ln)
+                     and "Requested module experienced an error" not in ln][:3]
+            if cause:
+                text = (text.rstrip() + " [console: " + " | ".join(one_line(x, 300) for x in cause)
+                        + "]")
+                self.raw(f"{label} console cause", "get_console_output delta", " | ".join(cause))
         if not err and not flatten_value(text).strip():
             # a suite that print()s instead of returning: its lines only reach the console
             got = []

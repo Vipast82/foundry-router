@@ -24,7 +24,11 @@ import zlib
 OFFICIAL = ["list_roblox_studios", "execute_luau", "screen_capture", "get_studio_state",
             "start_stop_play", "get_console_output", "skill", "subagent"]
 COMMUNITY = ["capture_screenshot", "eval_server_runtime", "eval_client_runtime", "execute_luau",
-             "solo_playtest", "capture_device_matrix", "get_connected_instances"]
+             "solo_playtest", "capture_device_matrix", "get_connected_instances",
+             "set_device_simulator"]
+# The play client's viewport before set_device_simulator lands on it: the Edit-time device
+# does not hold in play (GF-GATE1 2026-10-28 measured 1920x1060).
+PLAY_VIEWPORT_DEFAULT = (1920, 1060)
 
 
 def tally_results(code: str) -> dict:
@@ -163,6 +167,10 @@ def main():
                 if a.state:
                     with open(a.state, "w", encoding="utf-8") as f:
                         json.dump(state, f)
+            if name == "solo_playtest" and args.get("action") == "stop" \
+                    and (state.pop("pw", None), state.pop("ph", None)) != (None, None) and a.state:
+                with open(a.state, "w", encoding="utf-8") as f:   # the play client is gone
+                    json.dump(state, f)
             used = state.setdefault(f"used.{a.kind}", {})
             rule = next((r for i, r in enumerate(rules) if r.get("tool", name) == name
                          and re.search(r.get("match", ""), blob, re.S)
@@ -187,6 +195,19 @@ def main():
                     w, h = rule["png"] if rule["png"] != "state" else (state["w"], state["h"])
                     content.append({"type": "image", "mimeType": "image/png",
                                     "data": base64.b64encode(png(w, h)).decode()})
+            elif name == "set_device_simulator":
+                res = args.get("resolution") or {}
+                if args.get("target") == "client-1" and res.get("width") and res.get("height"):
+                    state["pw"], state["ph"] = int(res["width"]), int(res["height"])
+                    if a.state:
+                        with open(a.state, "w", encoding="utf-8") as f:
+                            json.dump(state, f)
+                content.append({"type": "text", "text": json.dumps({"success": True})})
+            elif name == "eval_client_runtime" and "ViewportSize" in str(args.get("code") or ""):
+                pw = state.get("pw", PLAY_VIEWPORT_DEFAULT[0])
+                ph = state.get("ph", PLAY_VIEWPORT_DEFAULT[1])
+                content.append({"type": "text", "text": json.dumps(
+                    {"ok": True, "bridge": "ok", "result": f"VIEWPORT {pw}x{ph}", "output": []})})
             elif name == "get_connected_instances":
                 content.append({"type": "text", "text": json.dumps(
                     {"instances": [{"id": "I1", "placeName": "AnimalUprising", "placeId": 1}],

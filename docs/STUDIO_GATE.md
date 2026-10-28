@@ -43,7 +43,10 @@ The CALL plan is executed exactly as `GateRunner` prints it:
 | `vm=server` | community `eval_server_runtime` |
 | `vm=client` | community `eval_client_runtime` |
 | `vm=edit` | official `execute_luau`, datamodel Edit |
-| `MANUAL (bridge)` in the server VM | serves the AU repo on a free `127.0.0.1` port, loads the suite through `HttpService:GetAsync` into a temporary ModuleScript, `require`s it through community `execute_luau target="server"`. Re-boots `ServiceLoader` first if `HeartbeatConn == nil`, except for `S11_5_boot_check` (never manufacture a boot). |
+| `MANUAL (bridge)` in the server VM | serves the AU repo on a free `127.0.0.1` port, loads the suite through `HttpService:GetAsync` into a temporary ModuleScript, `require`s it through community `execute_luau target="server"`. Re-boots `ServiceLoader` first if `HeartbeatConn == nil`, except for `S11_5_boot_check` (never manufacture a boot) and `S20_check` (its runbook runs it on the never-booted eval cache; a re-booted set has no generated map). The source runs as a function body with `print` captured, so a script that only prints its lines, a module that returns its report, and a module that returns a function (called for the report, S44) all work; a crash keeps the lines printed before it and names the error and traceback, and a dependency that fails to load gets its console error attached. Values a runbook hands over on `_G` (S33: `S33_ABILITY_SOURCE` = AbilityService at HEAD) are set right before the `require`. |
+| `MANUAL (bridge)` in the Edit VM | the same wrapper through official `execute_luau` (Edit), no re-boot |
+| bridge the runner cannot run | `UNKNOWN` with the reason, never sent, never retried: a suite that reads the host filesystem through `io.*` (S00), or needs a host runner on a `127.0.0.1` port that is not listening (S05 `:8431`, S13.6 `:8436`) |
+| bridge whose every `FAIL:` line says the session shape is missing | `UNKNOWN` (the raw lines stay in the tally): "Needs a 2-client playtest", "needs a Studio PLAY session", "verified in play session", "needs a live client" |
 | `MANUAL (bridge)` in the client VM | not executable: recorded `UNKNOWN` |
 | `SKIP offstudio` | recorded as SKIP, never as PASS |
 | other `MANUAL` | not executed; no evidence (the tally sees it missing) |
@@ -59,6 +62,20 @@ assertion `FAIL:`) is retried once in a fresh playtest; both runs are in the
 raw log and a non-required `regression.<suite>.retry` SKIP check records it.
 When the CALL plan does not match `tests/RegressionIndex.lua` at HEAD, the
 suites run in one shared playtest and `regression.mapping` is UNKNOWN.
+
+**Play viewport.** In every playtest that has a client CALL, after the boot
+gate, the runner applies AU's recipe on the play client (`set_device_simulator
+target=client-1 deviceId=average_laptop resolution=1920x1080 pixelDensity=96
+scalingMode=ActualResolution`), waits 1.2 s and reads
+`workspace.CurrentCamera.ViewportSize` back (a `VIEWPORT` line). The Edit-time
+device set before the plan does not hold in play (GF-GATE1 2026-10-28 measured
+1920x1060). When the read-back is off by more than 2 px the
+`regression.viewport.<group>` check is UNKNOWN (tooling) and that group's
+client CALLs are UNKNOWN, so a `FAIL: SIZE ...` line is never a product FAIL.
+
+**A step that raised.** When a step's own Luau raises inside a live eval
+(`ERROR: <script>:<line>: ...`), the step ran: its CALL is `FAIL: GATE call n
+raised` (a FAIL check, no retry), not a tool UNKNOWN.
 
 `tests/RegressionIndex.lua` entry fields the runner reads (all optional):
 

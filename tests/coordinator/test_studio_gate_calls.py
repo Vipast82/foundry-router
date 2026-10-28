@@ -473,3 +473,123 @@ def test_a_long_plan_is_fetched_in_pages_and_renumbered(repo):
     g.edit = lambda code, label: (cut, None)
     g.PLAN_PAGE_STEPS = 1000
     assert "cut off" in g.plan(",".join(ids))["error"]
+
+
+# ---- GF-GATE1 full-run triage 2026-10-28: bridge rows, viewport, step raises ------------------
+def starts(calls):
+    return sum(1 for c in calls() if c["tool"] == "solo_playtest" and c["args"].get("action") == "start")
+
+
+@pytest.mark.parametrize("src, why", [
+    ('local function rd(p) if io and io.read then return io.read(p) end end\nprint("PASS: x")',
+     "reads the host filesystem through io.*"),
+    ('-- start tools/run_s05.py first\nlocal u = "http://127.0.0.1:8431/api/grep"\nreturn "PASS: x"',
+     "needs a host runner on 127.0.0.1:8431 (tools/run_s05.py)"),
+])
+def test_a_bridge_the_runner_cannot_run_is_unknown_not_fail(fakes, repo, monkeypatch, src, why):
+    """S00 (io shim) / S05 + S13.6 (host runner ports): an honest UNKNOWN with the reason,
+    never sent to Studio, never retried in a second playtest (old code: FAIL rows)."""
+    monkeypatch.setattr(G, "host_port_open", lambda port, timeout=0.5: False)
+    set_rules, calls = fakes
+    (repo / "tests" / "S28_check.lua").write_text(src, encoding="utf-8")
+    commit(repo, "S28 needs the host")
+    set_rules(*rules(UI))
+    host_half(repo, "BL")
+    rc, out = run_calls(repo, "BL", "--regression", "subset:ui")
+    assert rc == 1, out
+    v = json.load(open(gate_file(repo, "BL", "latest/calls.json")))
+    assert v["rows"]["S28"]["verdict"] == "UNKNOWN"
+    assert {k: r["verdict"] for k, r in v["rows"].items() if k != "S28"} == {
+        "S46": "PASS", "S49": "PASS", "S45": "PASS", "S04": "SKIP"}
+    chk = next(c for c in v["checks"] if c["id"] == "regression.call3")
+    assert chk["result"] == "UNKNOWN" and why in chk["detail"]
+    assert not any("GetAsync" in c["args"].get("code", "") for c in calls())    # never sent
+    assert starts(calls) == 3                                                    # no retry
+    assert re.search(r"^FAIL: GATE call 3 not runner-executable - .*" + re.escape(why[:20]),
+                     lines_of(repo, "BL"), re.M)
+
+
+def test_suite_fail_lines_that_only_say_the_session_shape_is_missing_are_unknown(fakes, repo):
+    """S43 in a solo playtest ("Needs a 2-client playtest"), S06/S09 relay legs in the Edit VM:
+    UNKNOWN with the reason; one real FAIL among them keeps the row FAIL."""
+    set_rules, calls = fakes
+    gap = json.dumps({"returnValue": "FAIL: c1 - Needs a 2-client playtest (got 1 player)\n"
+                                     "FAIL: c2 - Needs a 2-client playtest (got 1 player)",
+                      "success": True, "output": []})
+    off, comm = rules(UI, extra_comm=[{"tool": "execute_luau", "match": "GetAsync", "text": gap}])
+    set_rules(off, comm)
+    host_half(repo, "CG")
+    rc, out = run_calls(repo, "CG", "--regression", "subset:ui")
+    v = json.load(open(gate_file(repo, "CG", "latest/calls.json")))
+    assert v["rows"]["S28"]["verdict"] == "UNKNOWN", v["rows"]["S28"]
+    assert "session shape" in next(c for c in v["checks"] if c["id"] == "regression.call3")["detail"]
+    real = json.dumps({"returnValue": "FAIL: c1 - Needs a 2-client playtest (got 1 player)\n"
+                                      "FAIL: c2 - hp 0 want 5", "success": True, "output": []})
+    off, comm = rules(UI, extra_comm=[{"tool": "execute_luau", "match": "GetAsync", "text": real}])
+    set_rules(off, comm)
+    host_half(repo, "CR")
+    rc, out = run_calls(repo, "CR", "--regression", "subset:ui")
+    v = json.load(open(gate_file(repo, "CR", "latest/calls.json")))
+    assert v["rows"]["S28"]["verdict"] == "FAIL"
+
+
+def test_each_playtest_pins_the_client_viewport_with_the_device_simulator(fakes, repo):
+    """GF_UI1/GF_UI1b FAILed `SIZE 1920x1080 - the viewport is 1920x1060`: the Edit-time device
+    does not hold in play. Every playtest with a client CALL now applies AU's recipe on
+    client-1 after start + boot and reads the viewport back before any suite CALL."""
+    set_rules, calls = fakes
+    set_rules(*rules(UI))
+    host_half(repo, "VP")
+    rc, out = run_calls(repo, "VP", "--regression", "subset:ui")
+    assert rc == 0, out
+    log = calls()
+    sims = [c for c in log if c["tool"] == "set_device_simulator"]
+    assert len(sims) == 2                               # S49 and S46 have client CALLs; S28 none
+    assert all(s["args"] == {"target": "client-1", "deviceId": "average_laptop",
+                             "resolution": {"width": 1920, "height": 1080}, "pixelDensity": 96,
+                             "scalingMode": "ActualResolution"} for s in sims)
+    i_sim = log.index(sims[0])
+    i_read = next(i for i, c in enumerate(log) if "ViewportSize" in c["args"].get("code", ""))
+    i_seed = next(i for i, c in enumerate(log) if "S.seed" in c["args"].get("code", ""))
+    i_boot = max(i for i, c in enumerate(log[:i_sim]) if "boot()" in c["args"].get("code", ""))
+    assert i_boot < i_sim < i_read < i_seed                # after start + boot, before the suite
+    assert "VIEWPORT S49 1920x1080 (set_device_simulator target=client-1" in lines_of(repo, "VP")
+
+
+def test_a_viewport_that_will_not_set_is_a_tooling_unknown_never_a_ui_fail(fakes, repo):
+    set_rules, calls = fakes
+    off, comm = rules(UI, extra_comm=[
+        {"tool": "set_device_simulator", "text": "client-1 not found", "is_error": True},
+        {"tool": "eval_client_runtime", "match": "clientFog",
+         "text": "FAIL: SIZE 1920x1080 - the viewport is 1920x1060 but the row claims 1920x1080"}])
+    set_rules(off, comm)
+    host_half(repo, "VB")
+    rc, out = run_calls(repo, "VB", "--regression", "subset:ui")
+    assert rc == 1, out
+    v = json.load(open(gate_file(repo, "VB", "latest/calls.json")))
+    assert v["rows"]["S46"]["verdict"] == "UNKNOWN"           # the UI FAIL is the tooling's
+    vp = next(c for c in v["checks"] if c["id"] == "regression.viewport.S46")
+    assert vp["result"] == "UNKNOWN" and "1920x1060, not 1920x1080" in vp["detail"] \
+        and "client-1 not found" in vp["detail"]
+    assert "VIEWPORT S46 tooling error - the play client viewport is 1920x1060" in lines_of(repo, "VB")
+
+
+def test_a_step_whose_own_luau_raises_is_a_fail_not_a_tool_unknown(fakes, repo):
+    """UI_03a/04a/05a/V1 were UNKNOWN because MatchService:ForcePhase raised inside the step
+    ("no wave config for wave 0 in phase Combat"): the step ran and crashed - FAIL, no retry."""
+    set_rules, calls = fakes
+    raised = json.dumps({"ok": False, "bridge": "ok", "result": None, "output": [],
+                         "error": "ServerScriptService.Server.Services.MatchService:437: MatchService: "
+                                  "no wave config for wave 0 in phase Combat\nuser_code:1"})
+    off, comm = rules(UI, extra_comm=[{"tool": "eval_client_runtime", "match": "clientFog",
+                                       "text": raised}])
+    set_rules(off, comm)
+    host_half(repo, "LR")
+    rc, out = run_calls(repo, "LR", "--regression", "subset:ui")
+    assert rc == 1, out
+    v = json.load(open(gate_file(repo, "LR", "latest/calls.json")))
+    assert v["rows"]["S46"]["verdict"] == "FAIL"
+    chk = next(c for c in v["checks"] if c["id"] == "regression.call5")
+    assert chk["result"] == "FAIL" and "MatchService:437" in chk["detail"]
+    assert starts(calls) == 3                                                    # no retry
+    assert re.search(r"^FAIL: GATE call 5 raised - ERROR: ServerScriptService", lines_of(repo, "LR"), re.M)
