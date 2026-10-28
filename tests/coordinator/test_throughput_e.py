@@ -160,8 +160,10 @@ def test_review_beside_checks_can_be_turned_off(tmp_path):
 # ------------------------------------------------------------------ 1b. merge gate off the tick
 
 def test_the_studio_free_merge_gate_runs_in_bg_checks_and_holds_main_sessions(tmp_path):
-    c, P, clock, root = TM.env(tmp_path, extra=TM.EXTRA + "inline_check_wait_s = 0\n")
+    from foundry_coordinator.automation import set_live
+    c, P, clock, root = TM.env(tmp_path)
     TM.finish_track(c, P, "blender", ["B1"])
+    set_live(P, "inline_check_wait_s", 0)                     # ticks never wait from here
     gate = threading.Event()
     real = P.adapter.verify
 
@@ -187,6 +189,7 @@ def test_the_studio_free_merge_gate_runs_in_bg_checks_and_holds_main_sessions(tm
     assert t1["state"] in (S.QUEUED, S.READY) and t1["session_id"] in (None, "")
     assert "merge gate of track blender" in t1["next_action"]
     gate.set()
+    set_live(P, "inline_check_wait_s", 2)                     # the rest at the normal pace
     assert run_until(c, lambda: c.store.track("game", "blender")["state"] == "merged", limit=20)
     assert not c.tracks.merger.checks_busy(P)
     assert run_until(c, lambda: c.store.task("game", "T1")["state"] == S.COMPLETE, limit=40)
