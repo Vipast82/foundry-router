@@ -476,6 +476,21 @@ class Recovery:
     def repeats(self, project, task, min_count: int = 2) -> list[dict]:
         return [r for r in self.findings(project, task) if r["count"] >= min_count]
 
+    def live_repeats(self, project, task, *, passing: frozenset = frozenset(),
+                     min_count: int = 2) -> list[dict]:
+        """Repeats that are still happening: seen again in the latest round of findings
+        and not on a check that passes now. 2026-10-28 GF-GATE1 15:11 / 15:36: scope and
+        gate-binding findings fixed attempts ago (both PASS at the head) kept counting as
+        repeats, so a review with two new doc points stopped the sprint as "findings repeat
+        with no materially different strategy"."""
+        rows = self.findings(project, task)
+        if not rows:
+            return []
+        latest = max(int(r.get("last_seen_attempt") or 0) for r in rows)
+        return [r for r in rows if r["count"] >= min_count
+                and int(r.get("last_seen_attempt") or 0) >= latest
+                and not (r.get("check_id") and r["check_id"] in passing)]
+
     # -- repairs / assignment ---------------------------------------------------------------
 
     def repairs(self, project, task) -> list[dict]:
@@ -554,7 +569,16 @@ class Recovery:
                                    str(it.get("note") or "")[:300]})
         overlooked.sort(key=lambda x: (x["status"] == "ok", x["path"]))
 
-        reps = self.repeats(P.id, task)
+        passing: set = set()
+        if ledger is not None and spec is not None and callable(getattr(ledger, "current", None)):
+            try:
+                cur = ledger.current(P, spec, head) or {}
+                passing = {cid for cid, v in cur.items()
+                           if isinstance(v, dict) and v.get("result") == "PASS"
+                           and not v.get("flaky")}
+            except Exception:                                     # noqa: BLE001
+                passing = set()
+        reps = self.live_repeats(P.id, task, passing=frozenset(passing))
         repeats = [{"fingerprint": r["fingerprint"], "class": r["class"],
                     "check_id": r["check_id"], "path": r["path"], "count": r["count"],
                     "text": (r["samples"][-1]["text"] if r["samples"] else "")[:300]}

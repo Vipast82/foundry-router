@@ -2,6 +2,16 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.156.9 — only live repeats stop a sprint
+
+GF-GATE1, 2026-10-28 15:11 and 15:36: scope and gate-binding findings fixed attempts earlier
+(both PASS at the head) still counted as repeats, so a review with two new doc points stopped
+the sprint as "findings repeat with no materially different strategy".
+
+- **`Recovery.live_repeats`.** The repeat guard counts a repeat only when it was seen again in
+  the latest round of findings and its check does not pass at the head. The finding history is
+  kept; a fixed finding that comes back counts again.
+
 ## v0.156.8 — the scripted Studio gate's PASS is never "flaky"
 
 GF-GATE1, 2026-10-28 15:21: the coordinator's scripted Studio gate passed (2/2), but the

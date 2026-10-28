@@ -121,6 +121,25 @@ def test_record_findings_counts_distinct_attempts(store):
     assert len(rec.findings("game", "UI-01")) == 2
 
 
+def test_only_live_repeats_count(store):
+    """GF-GATE1 15:36 replay: a scope finding repeated in attempts 2-3 and fixed since
+    must not make attempt 4's new review finding a "repeat"; nor does a repeat whose
+    check passes now. A repeat seen again in the latest round still counts."""
+    ob, rec, P, t = setup(store)
+    it = lambda text: {"class": "missing_evidence", "check_id": "au.freshness", "text": text}
+    rec.record_findings(P, t, 2, [it(A2)])
+    rec.record_findings(P, t, 3, [it(A3)])
+    assert [r["check_id"] for r in rec.live_repeats("game", "UI-01")] == ["au.freshness"]
+    assert rec.live_repeats("game", "UI-01", passing=frozenset({"au.freshness"})) == []
+    doc = {"class": "docs_inconsistency", "check_id": "review:major",
+           "text": "the NEXT block of the plan is stale"}
+    rec.record_findings(P, t, 4, [doc])
+    assert rec.live_repeats("game", "UI-01") == []            # fixed: not seen in round 4
+    assert len(rec.repeats("game", "UI-01")) == 1             # history is kept
+    rec.record_findings(P, t, 5, [it(A2)])                    # it comes back: live again
+    assert [r["check_id"] for r in rec.live_repeats("game", "UI-01")] == ["au.freshness"]
+
+
 # -- assignment ----------------------------------------------------------------------------------
 
 def test_assignment_lists_only_unresolved_work_and_affected_checks(store):
