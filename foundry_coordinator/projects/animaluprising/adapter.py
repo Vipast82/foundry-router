@@ -46,6 +46,7 @@ from ...adapters.base import (FAIL, PASS, UNKNOWN, EVIDENCE_ITEM_CHARS, TaskSpec
 from ...adapters.git import GitError
 from ...adapters.project import AdapterError, GenericAdapter
 from ...profile import matches_any
+from ... import check_cache, procjob
 from . import lune_cache
 
 AMENDMENT_MARKER = "COORDINATOR-ADVANCEMENT"
@@ -703,6 +704,10 @@ Change no code or test file in this session; if one needs changing, stop and rep
 
     # -- verification ------------------------------------------------------------------
 
+    # E (2026-10-28): the check_progress names whose PASS lets the engine start the code
+    # review while Lune still runs (engine._review_beside_checks)
+    EARLY_REVIEW_CHECKS = ("done_check", "gate binding")
+
     def verify(self, spec: TaskSpec, phase: str, revision: str, base: str, ws=None) -> list:
         # done_check, the gate binding and Lune run side by side; rows keep this order
         from ...check_progress import track
@@ -786,8 +791,70 @@ Change no code or test file in this session; if one needs changing, stop and rep
             return ""
         return f"studio.lock is held: {line[:160]}"
 
+    @staticmethod
+    def _run_log(edir: str, name: str) -> str:
+        """E (2026-10-28): every check run writes its own log (a run left over from a
+        restart can't write into the new run's file)."""
+        import uuid
+        return os.path.join(edir, f"{name}.{time.strftime('%Y%m%d-%H%M%S')}-"
+                                  f"{uuid.uuid4().hex[:6]}.log")
+
+    def _tree_key(self, revision: str, *extra: str) -> str:
+        """What done_check reads besides the revision: HEAD must be the revision, plus
+        the working tree's status (every changed / untracked file with size and mtime)
+        and tools/guard's own files. '' = not cacheable now."""
+        import hashlib
+        ws = self.p.workspace
+        try:
+            head = subprocess.run(["git", "-C", ws, "rev-parse", "HEAD"], capture_output=True,
+                                  text=True, timeout=60).stdout.strip()
+            if not head or head != revision:
+                return ""
+            st = subprocess.run(["git", "-C", ws, "status", "--porcelain=v1", "-uall", "-z"],
+                                capture_output=True, timeout=120)
+            if st.returncode != 0:
+                return ""
+        except (OSError, subprocess.TimeoutExpired):
+            return ""
+        h = hashlib.sha256("\0".join((revision,) + extra).encode())
+        for ent in (st.stdout or b"").split(b"\0"):
+            if len(ent) < 4:
+                continue
+            rel = ent[3:].decode("utf-8", "replace")
+            h.update(ent)
+            try:
+                s_ = os.stat(os.path.join(ws, rel))
+                h.update(f"{s_.st_size}:{s_.st_mtime_ns}".encode())
+            except OSError:
+                h.update(b"-")
+        guard = os.path.join(ws, "tools", "guard")
+        try:
+            for name in sorted(os.listdir(guard)):
+                fp = os.path.join(guard, name)
+                if os.path.isfile(fp):
+                    s_ = os.stat(fp)
+                    h.update(f"{name}:{s_.st_size}:{s_.st_mtime_ns}".encode())
+        except OSError:
+            pass
+        return h.hexdigest()[:32]
+
     def _done_check(self, spec: TaskSpec, phase: str, revision: str,
                     skip: tuple = ()) -> list:
+        # E (2026-10-28): finished rows are kept across a restart (check_cache)
+        ikey = self._tree_key(revision, phase, ",".join(skip))
+        kind = f"done_check:{phase}"
+        hit = check_cache.get(self.state_dir, self.p.id, spec.task_id, kind, revision,
+                              ikey) if ikey else None
+        if hit is not None:
+            return hit
+        rows = self._done_check_run(spec, phase, revision, skip)
+        if ikey:
+            check_cache.put(self.state_dir, self.p.id, spec.task_id, kind, revision, ikey,
+                            rows)
+        return rows
+
+    def _done_check_run(self, spec: TaskSpec, phase: str, revision: str,
+                        skip: tuple = ()) -> list:
         base_cmd = self._python() + [os.path.join("tools", "guard", "done_check.py"),
                                      spec.task_id]
         # 2026-10-27: AU's done_check skips the Studio rows itself (`--skip-rows
@@ -795,15 +862,16 @@ Change no code or test file in this session; if one needs changing, stop and rep
         # and the post-filter below drops those rows as before
         cmd = base_cmd + ([self.SKIP_ROWS_FLAG, ",".join(skip)] if skip else [])
         t0 = time.time()
-        log = os.path.join(evidence_dir(self.state_dir, self.p.id, spec.task_id, revision),
-                           f"done_check-{phase}.log")
+        log = self._run_log(evidence_dir(self.state_dir, self.p.id, spec.task_id, revision),
+                            f"done_check-{phase}")
         try:
-            r = subprocess.run(cmd, cwd=self.p.workspace, capture_output=True, text=True,
-                               timeout=600, encoding="utf-8", errors="replace")
+            # E: procjob ties the run to the coordinator (killed with it on a restart)
+            r = procjob.run(cmd, cwd=self.p.workspace, capture_output=True, text=True,
+                            timeout=600, encoding="utf-8", errors="replace")
             if skip and r.returncode == 2 and "unrecognized arguments" in (r.stderr or ""):
                 cmd = base_cmd
-                r = subprocess.run(cmd, cwd=self.p.workspace, capture_output=True, text=True,
-                                   timeout=600, encoding="utf-8", errors="replace")
+                r = procjob.run(cmd, cwd=self.p.workspace, capture_output=True, text=True,
+                                timeout=600, encoding="utf-8", errors="replace")
         except (OSError, subprocess.TimeoutExpired) as e:
             return [VerificationResult("au.done_check", UNKNOWN, True, "", str(e), revision)]
         text = r.stdout + (("\n[stderr]\n" + r.stderr) if r.stderr.strip() else "")
@@ -876,6 +944,23 @@ Change no code or test file in this session; if one needs changing, stop and rep
         return True
 
     def _gate_binding(self, spec: TaskSpec, revision: str, ws=None) -> VerificationResult:
+        """The binding (below), kept across a restart: it reads only the revision and the
+        exempt paths, so (task, revision, exempt list) is its whole input."""
+        import hashlib
+        exempt = self.exempt_paths(spec)
+        ikey = hashlib.sha256(("\0".join([self.p.workspace] + list(exempt))).encode()
+                              ).hexdigest()[:32] if ws is None else ""
+        hit = check_cache.get(self.state_dir, self.p.id, spec.task_id, "gate_binding",
+                              revision, ikey) if ikey else None
+        if hit:
+            return hit[0]
+        row = self._gate_binding_run(spec, revision, ws)
+        if ikey:
+            check_cache.put(self.state_dir, self.p.id, spec.task_id, "gate_binding", revision,
+                            ikey, [row])
+        return row
+
+    def _gate_binding_run(self, spec: TaskSpec, revision: str, ws=None) -> VerificationResult:
         """The last gate verdict must be PASS and the gate must have run at the
         reviewed code: only closeout-exempt files (the evidence log itself,
         studio lines) may change between the gate's HEAD and this revision.
@@ -1068,7 +1153,7 @@ Change no code or test file in this session; if one needs changing, stop and rep
         """One Lune run. Its output goes straight to the evidence log, so the
         control center can count the tests while it runs (2026-10-27)."""
         import threading
-        log = os.path.join(edir, name + ".log")
+        log = self._run_log(edir, name)
         env = dict(os.environ, AU_LUNE_WORKERS=str(workers)) if workers else None
         t0 = time.time()
         stop, th = threading.Event(), None
@@ -1077,10 +1162,11 @@ Change no code or test file in this session; if one needs changing, stop and rep
                 if progress:
                     th = self._lune_watch(log, progress, stop)
                 try:
-                    r = subprocess.run([lune, "run", "tests/lune/run.luau", *args],
-                                       cwd=self.p.workspace, stdout=out,
-                                       stderr=subprocess.STDOUT, env=env,
-                                       timeout=self._lune_timeout())
+                    # E: its own job object (killed with the coordinator), its own log
+                    r = procjob.run([lune, "run", "tests/lune/run.luau", *args],
+                                    cwd=self.p.workspace, stdout=out,
+                                    stderr=subprocess.STDOUT, env=env,
+                                    timeout=self._lune_timeout())
                 finally:
                     stop.set()
             if r.stdout is not None or r.stderr is not None:

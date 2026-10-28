@@ -526,6 +526,8 @@ def test_done_check_gets_the_skip_rows_flag_and_falls_back_without_it(repo, monk
     real = subprocess.run
 
     def fake(cmd, **kw):
+        if cmd and cmd[0] == "git":
+            return real(cmd, **kw)           # E: the check cache's tree key (real git)
         calls.append(list(cmd))
         if "--skip-rows" in cmd:
             return subprocess.CompletedProcess(cmd, 2, "", "done_check.py: error: "

@@ -273,15 +273,25 @@ class _ProcessFiles:
             ok = False
             problems.append(f"{errs} engine error event(s) since the last heartbeat")
         self._last_ts = time.time()
-        checks = []
+        checks, reviews = [], 0
         bg = getattr(self.c, "bg_checks", None)
         if bg is not None:
             try:
-                checks = [f"{j['label']} {j['seconds']} s" for j in bg.running()][:6]
+                checks = [f"{j['label']} {j['seconds']} s" for j in bg.running()]
             except Exception:                                     # noqa: BLE001
                 checks = []
+        try:
+            reviews = sum(1 for e in (getattr(self.c, "_early_reviews", None) or {}).values()
+                          if not e[0].done())
+        except Exception:                                         # noqa: BLE001
+            reviews = 0
+        # E (2026-10-28): `checks` empty and `checks_running` false = no background check
+        # (verify / closeout / merge gate) runs: a safe point to restart the coordinator
+        # without losing a check run. `reviews_running`: review calls in flight (a restart
+        # repeats such a call). docs/CLIENT_MANAGER.md
         self._beat({"ok": ok, "errors": problems, "lead_ready": lead_ready,
-                    "lead_detail": detail, "checks": checks})
+                    "lead_detail": detail, "checks": checks[:6],
+                    "checks_running": bool(checks), "reviews_running": reviews})
         if self._stop_requested():
             raise _StopRequested()
 
