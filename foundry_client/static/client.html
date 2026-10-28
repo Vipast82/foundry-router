@@ -63,6 +63,8 @@
   <section id="v-logs" hidden></section>
 </main>
 <script>
+// 2026-10-28: Media_Gen replaced these local services; their cards show only when switched back on
+const RETIRED_MEDIA = ["acestep-music", "stable-audio", "kokoro-tts", "chatterbox-tts"];
 "use strict";
 const $ = s => document.querySelector(s);
 const esc = s => String(s ?? "").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
@@ -120,7 +122,7 @@ function renderStatus() {
         <span class="dim">${esc(r.url || "")}${r.version ? " · v" + esc(r.version) : ""}${r.latency_ms != null ? " · " + r.latency_ms + " ms" : ""}</span></div>
       ${r.error ? `<div class="bad">${esc(r.error)}</div>` : ""}<div class="dim">${r.checked_at ? "checked " + ago(r.checked_at) : ""}${u.checked_at ? " · updates checked " + ago(u.checked_at) + (u.error ? " (" + esc(u.error) + ")" : "") : ""}</div>
       <div class="row"><button class="act" data-do="link-check">Check now</button><button class="act" data-do="update-check">Check for updates</button></div></div>`;
-  $("#v-status").innerHTML = banners + `<div class="cards">${st.components.map(compCard).join("")}${link}</div>
+  $("#v-status").innerHTML = banners + `<div class="cards">${st.components.filter(c => !(RETIRED_MEDIA.includes(c.name) && !c.enabled)).map(compCard).join("")}${link}</div>
     <h3 style="margin-top:16px">Kilo configuration</h3>
     <div class="dim">Writes the router's role rules into the agent blocks of kilo.jsonc (a backup is kept, the file is checked afterwards) and reloads Kilo at the next safe point.</div>
     <div class="row"><button class="act" data-do="kilo-preview">Preview changes</button><button class="act primary" data-do="kilo-apply">Apply role rules to kilo.jsonc</button></div>

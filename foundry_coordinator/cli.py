@@ -789,6 +789,9 @@ def main(argv=None, clients=None, foundry=None) -> int:
     x1 = xs.add_parser("status"); x1.add_argument("project"); x1.add_argument("--json", action="store_true")
     x1 = xs.add_parser("set-max-agents"); x1.add_argument("project"); x1.add_argument("n", type=int)
     x1.add_argument("--by", default="operator")
+    x1 = xs.add_parser("set-needs", help="change a track's needs and rewrite its kilo.jsonc")
+    x1.add_argument("project"); x1.add_argument("name"); x1.add_argument("needs", nargs="+")
+    x1.add_argument("--by", default="operator")
     m = sub.add_parser("memory", help="project memory: docs/memory in the game repo, indexed "
                                       "here and sliced per session")
     ms = m.add_subparsers(dest="mcmd", required=True)
@@ -1168,6 +1171,10 @@ def _tracks(c: Coordinator, a) -> int:
                       f"{(sv['lease'] or {}).get('track') or '-'}")
         elif a.tcmd == "set-max-agents":
             print(f"max_agents {tm.set_max_agents(P, a.n, a.by)}")
+        elif a.tcmd == "set-needs":
+            row = tm.set_needs(P, a.name, a.needs, a.by)
+            print(f"track {a.name} needs {', '.join(row['needs'])}; kilo.jsonc "
+                  f"{(row.get('data') or {}).get('kilo_config') or '(not written)'}")
     except TrackError as e:
         print(f"error: {e}", file=sys.stderr)
         return 2

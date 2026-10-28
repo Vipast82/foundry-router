@@ -236,3 +236,19 @@ def test_coordinator_restart_never_kills_the_detached_runner_tree(cfg, tmp_path,
     coord, kilo = calls
     assert "/T" not in coord and coord[:3] == ["taskkill", "/PID", str(coord[2])]
     assert "/T" in kilo                                           # other trees still go
+
+
+def test_a_running_blender_is_adopted_and_retired_media_cards_hide():
+    """2026-10-28: Blender ran outside the client; the Blender component must adopt it by
+    its add-on port, never start a second one. The four media services Media_Gen replaced
+    are hidden in the status cards unless switched back on."""
+    import os
+    import foundry_client.components as C
+    from foundry_client.config import DEFAULTS
+    cfg = copy.deepcopy(DEFAULTS)
+    cfg["components"]["blender"].update(enabled=True, port=9876)
+    spec = C.build(cfg)["blender"]
+    assert spec.owner_pid is not None and spec.health is None
+    html = open(os.path.join(os.path.dirname(C.__file__), "static", "client.html"),
+                encoding="utf-8").read()
+    assert "RETIRED_MEDIA" in html and "chatterbox-tts" in html

@@ -422,6 +422,26 @@ class TrackManager:
                                                            "sprints": row["sprints"]})
         return row
 
+    def set_needs(self, P, name: str, needs: list[str], actor: str = "operator") -> dict:
+        """Change a track's needs (studio, blender, audio, images, gpu, backend) and rewrite
+        its kilo.jsonc, so its MCP servers follow (2026-10-28: the assets-local track was
+        started with `blender` only, so Media_Gen stayed off for its asset sprints)."""
+        from foundry_automation import service_map as SM
+        P = self.main_of(P)
+        row = self.store.track(P.id, name)
+        if row is None:
+            raise TrackError(f"no track {name}")
+        new = SM.normalize_needs(needs)
+        if not new:
+            raise TrackError(f"no valid needs in {needs!r} (one of {', '.join(SM.NEEDS)})")
+        row = self.store.update_track(P.id, name, needs=new)
+        kc = self._kilo_config(P, row)
+        row = self.store.update_track(P.id, name, data={**(row.get("data") or {}),
+                                                        "kilo_config": kc})
+        self.store.event(P.id, "", "track_needs_changed", detail={
+            "track": name, "needs": new, "kilo_config": kc, "actor": actor})
+        return row
+
     def stop(self, P, name: str, actor: str = "operator", reason: str = "") -> dict:
         """Cancel the track's unfinished sprints (their sessions aborted), release
         its resources; the worktree and branch are kept for inspection."""

@@ -2,6 +2,17 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.157.2 — client adopts a running Blender, hides retired media; tracks set-needs
+
+- **Blender adopted, never started twice.** The client's Blender component adopts a Blender
+  already listening on its add-on port (owner pid by port, like Rojo). Blender has no health
+  check: its socket opens only after Connect in the add-on.
+- **Retired media hidden.** ACE-Step, Stable Audio, Kokoro and Chatterbox (replaced by Media_Gen
+  on 2026-10-27) no longer show as cards on the client's Status page unless switched back on.
+- **`tracks set-needs <project> <track> <needs...>`.** Changes a running track's needs and
+  rewrites its kilo.jsonc, so its MCP servers follow (assets-local was started with `blender`
+  only, so Media_Gen stayed off).
+
 ## v0.157.1 — the Lead hands a stop it cannot work to self-repair; tracks never wait on Studio
 
 - **Why the Lead deferred (GF-GATE1, HK-CLOSE1, 2026-10-28).** Its readiness check failed on

@@ -266,11 +266,15 @@ def build(cfg: dict) -> dict[str, Spec]:
         out[name] = Spec(name, labels[name], [prog, *c.get("args", [])],
                          cwd=expand(c.get("cwd") or ""), env=c.get("env") or {},
                          secrets=c.get("secrets") or [], health=health, port=sport,
-                         owner_pid=(lambda p=sport: port_owner_pid(p)) if sport and name != "blender"
-                         else None,
+                         # a Blender already listening on its add-on port is adopted, never
+                         # started twice (2026-10-28: Blender ran outside the client)
+                         owner_pid=(lambda p=sport: port_owner_pid(p)) if sport else None,
                          problem="" if prog and os.path.isfile(prog) else
                          f"set the program path for {labels[name]} in Settings")
     return out
+
+
+RETIRED_MEDIA = ("acestep-music", "stable-audio", "kokoro-tts", "chatterbox-tts")
 
 
 def _port_health(port: int) -> tuple:

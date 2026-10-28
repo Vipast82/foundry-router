@@ -77,6 +77,21 @@ def test_create_makes_a_worktree_and_branch_under_dot_tracks(tmp_path):
     assert c.tracks.is_track(TP) and not c.tracks.is_track(P)
 
 
+def test_set_needs_rewrites_the_track_and_records_it(tmp_path):
+    """2026-10-28 assets-local: started with blender only, so Media_Gen stayed off; the
+    operator adds images (and audio) to a running track."""
+    c, P, root = env(tmp_path)
+    c.tracks.create(P, "blender", ["B1", "B2"], actor="victor")
+    row = c.tracks.set_needs(P, "blender", ["blender", "textures", "bogus"], "victor")
+    assert row["needs"] == ["blender", "images"]
+    assert row["data"]["kilo_config"].endswith("kilo.jsonc")
+    assert tracks_events(c, "track_needs_changed")[0]["detail"]["needs"] == ["blender", "images"]
+    import pytest
+    from foundry_coordinator.tracks.manager import TrackError
+    with pytest.raises(TrackError):
+        c.tracks.set_needs(P, "blender", ["bogus"], "victor")
+
+
 def test_create_refuses_bad_names_unknown_sprints_and_duplicates(tmp_path):
     c, P, _ = env(tmp_path)
     with pytest.raises(TrackError, match="track name"):
