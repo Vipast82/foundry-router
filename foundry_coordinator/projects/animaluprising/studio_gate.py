@@ -733,10 +733,24 @@ def rojo_mounts(project: dict) -> list:
     return out
 
 
+# file types Rojo turns into instances; anything else in a mounted folder (README.md, ...)
+# never reaches Studio (2026-10-28 GF-GATE1 14:18: tests/checks/README.md counted as
+# "unresolved" and failed PRE-PLAY verify as stale sync, though every script matched)
+ROJO_SYNCED = (".lua", ".luau", ".json", ".txt", ".csv", ".toml", ".rbxm", ".rbxmx")
+
+
+def rojo_synced(repo_path: str) -> bool:
+    f = repo_path.replace("\\", "/").lower()
+    return f.endswith(ROJO_SYNCED) and not f.endswith(".meta.json")
+
+
 def rojo_resolve(mounts: list, repo_path: str) -> list:
-    """Datamodel paths ("Service.A.B") a repo file is mounted at (all of them)."""
+    """Datamodel paths ("Service.A.B") a repo file is mounted at (all of them); none for a
+    file type Rojo does not sync."""
     f = repo_path.replace("\\", "/")
     out = []
+    if not rojo_synced(f):
+        return out
     for src, dm in mounts:
         if f == src:
             out.append(".".join(dm))
@@ -1447,7 +1461,10 @@ class Gate:
         src/ and its MOUNTED_TESTS; files it reports `SKIP (unmounted)` are resolved here
         from default.project.json at HEAD (tests/lib/* -> ReplicatedStorage.TestLib.*;
         live run 2026-10-20 reported matched=0/0 for the three TestLib files). Never PASS
-        with 0 matched; a Studio-loaded file mounted nowhere is UNKNOWN with its name."""
+        with 0 matched; a Studio-loaded file mounted nowhere is UNKNOWN with its name.
+        File types Rojo never syncs (README.md, .gitkeep, *.meta.json) are not sent:
+        GateRunner would look for them in Studio and count them unresolved."""
+        expect = {p: h for p, h in (expect or {}).items() if rojo_synced(p)}
         if not expect:
             self.add(check(cid, "UNKNOWN", "no hash map for the files under test"))
             return
@@ -1489,7 +1506,7 @@ class Gate:
                     detail.append(f"MISMATCH {p} live={'/'.join(lives)} head={want}")
         # tests/lune/** run headless in Lune and are never mounted in Studio (UI-02a, 2026-10-20)
         studio = [p for p in unmounted if p.startswith(("src/", "tests/"))
-                  and not p.startswith("tests/lune/")]
+                  and not p.startswith("tests/lune/") and rojo_synced(p)]
         summary = f"matched={matched}/{total} mismatched={mism} unresolved={unres}"
         if extra:
             self.last_verify_text += (f"\nVERIFY {summary} skipped=0 (with the Rojo-mounted "

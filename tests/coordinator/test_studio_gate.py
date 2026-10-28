@@ -260,6 +260,10 @@ def test_rojo_mount_resolution():
     assert G.rojo_resolve(m, "src/shared/Net/init.lua") == ["ReplicatedStorage.Shared.Net"]
     assert G.rojo_resolve(m, "tests/GateRunner.lua") == ["ServerScriptService.GateRunner"]
     assert G.rojo_resolve(m, "docs/x.md") == []
+    # a file type Rojo never syncs, inside a mounted folder (GF-GATE1 14:18 replay)
+    assert G.rojo_resolve(m, "tests/lib/README.md") == []
+    assert G.rojo_resolve(m, "src/shared/Net/init.meta.json") == []
+    assert G.rojo_resolve(m, "src/shared/Data.json")             # still synced
 
 
 # ---- evidence block (H6) ---------------------------------------------------------

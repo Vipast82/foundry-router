@@ -2,6 +2,22 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.156.6 — no repeat question on a handoff; README.md no longer fails Studio verify
+
+GF-GATE1, 2026-10-28 14:13: after a context-ceiling handoff, the repeat guard opened "Findings
+repeat across attempts" and the engine withdrew it in the same second (v0.156.2). The notice
+had already reached Victor.
+
+- **No question in the first place.** `Recovery.assignment` takes `free` and skips the repeat
+  guard for a free continuation (context handoff, infra retry, operator reset). The engine's
+  withdraw step stays as a safety net.
+- **Studio verify skips files Rojo never syncs.** GF-GATE1 14:18: PRE-PLAY verify matched
+  15/16 code files with none different, but `tests/checks/README.md` (new with the prep
+  commits, in a Rojo-mounted folder) was "missing" in Studio, so the run stopped as "stale
+  sync". The verify map now leaves out types Rojo does not sync (README.md, .gitkeep,
+  *.meta.json): GateRunner never looks for them and `rojo_resolve` gives them no Studio path.
+  An AU audit found 8 such files in mounted folders (2 README.md, 6 .gitkeep).
+
 ## v0.156.5 — the prep queue's safe point ignores an idle paused session
 
 After v0.156.4 freed paused GF-GATE1's lock, the prep queue still refused: "session

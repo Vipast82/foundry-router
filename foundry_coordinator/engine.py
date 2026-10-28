@@ -4885,7 +4885,8 @@ class Coordinator:
                     obligations=self.obligations, ws=P.ws, strategy=strategy,
                     trusted_strategy=bool(lead_a),
                     adviser=self._lc_adviser(P, tid), evidence_items=items, last_report=last,
-                    spec=spec, cap=int(self._lcv(P, "prompt_cap", 6000)))
+                    spec=spec, cap=int(self._lcv(P, "prompt_cap", 6000)),
+                    free=free and not lead_a)
             except AssignmentInvariant as e:
                 self.store.event(pid, tid, "warning", detail={"assignment": str(e)[:400]})
                 a = None

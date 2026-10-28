@@ -1154,9 +1154,11 @@ extra_attempts = 1
     c.unblock("game", "T1", "fresh budget", reset_attempts=True)
     # the same findings, but the next start is a free continuation (e.g. a context handoff)
     c.store.merge_data("game", "T1", free_retry=True, lead_assignment=None)
+    n0 = c.store.q("SELECT COUNT(*) AS n FROM decisions WHERE task_id='T1'")[0]["n"]
     c.tick()
     t = c.store.task("game", "T1")
     assert t["state"] != S.BLOCKED, t["blocker"]
     assert not (t["data"].get("decision_wait") or {}).get("ids")
-    kinds = [r["kind"] for r in c.store.q("SELECT kind FROM events WHERE task_id='T1'")]
-    assert "repeat_guard_skipped" in kinds
+    # no question is opened at all (an opened-then-withdrawn one still notified Victor)
+    n1 = c.store.q("SELECT COUNT(*) AS n FROM decisions WHERE task_id='T1'")[0]["n"]
+    assert n1 == n0, "a free continuation opened a question"

@@ -491,7 +491,8 @@ class Recovery:
                    ws=None, strategy: str = "", trusted_strategy: bool = False,
                    adviser: Optional[Callable] = None,
                    evidence_items: Optional[list] = None, last_report: str = "",
-                   spec=None, max_items: int = 3, cap: int = PROMPT_CAP) -> dict:
+                   spec=None, max_items: int = 3, cap: int = PROMPT_CAP,
+                   free: bool = False) -> dict:
         """One bounded repair assignment for attempt t['attempt'], or
         {'decision': id} when findings repeat with an unchanged strategy and no
         adviser offers a different one. Idempotent per attempt (a restart
@@ -614,7 +615,11 @@ class Recovery:
                         "reason": "answered by a fresh lead recovery strategy",
                         "strategy_fp": sfp})
                     lead_withdrawn.append(d["decision_id"])
-        if reps and (same or max_count >= 3) and not fresh_lead_strategy:
+        # a free continuation (context handoff, infra retry, operator reset) is the same
+        # work carrying on, not the same strategy failing again: never ask (2026-10-28
+        # GF-GATE1 14:13: the question opened and was withdrawn in the same second, but its
+        # notice had already gone out)
+        if reps and (same or max_count >= 3) and not fresh_lead_strategy and not free:
             base_q = self._escalation_question(reps)
             key = _sha(base_q, 16)
             chain = self._escalations(obs, P.id, task, base_q, key)
