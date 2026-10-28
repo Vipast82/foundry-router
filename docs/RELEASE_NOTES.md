@@ -2,6 +2,15 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.156.5 — the prep queue's safe point ignores an idle paused session
+
+After v0.156.4 freed paused GF-GATE1's lock, the prep queue still refused: "session
+ses_e7c5... (implementer) of GF-GATE1 is open". The store keeps a paused task's session
+open so resume can continue it.
+
+- **Same rule as the lock fix.** The safe point now skips the open session of a PAUSED task
+  whose session is not busy in Kilo. A busy session, or Kilo unreachable, still blocks.
+
 ## v0.156.4 — a paused task with an idle session gives up its locks
 
 GF-GATE1, 2026-10-28 13:19: the task was paused and its session finished its turn, but the

@@ -404,6 +404,11 @@ def _main_tasks(c, P) -> list[dict]:
     return out
 
 
+def _paused_idle(c, P, t: dict) -> bool:
+    from .selfheal import _paused_idle as idle
+    return idle(c, P, t)
+
+
 def safe_point(c, P, cfg: Optional[dict] = None) -> tuple[bool, str]:
     """(True, "") when the main checkout is quiet and clean, else (False, why)."""
     cfg = cfg or settings(P)
@@ -427,6 +432,11 @@ def safe_point(c, P, cfg: Optional[dict] = None) -> tuple[bool, str]:
                        "WHERE project_id=? AND ended_ts IS NULL AND created_ts>=?",
                        (pid, horizon)):
         if s["task_id"] in main_ids:
+            # a paused task whose session finished its turn is not working in the
+            # checkout (2026-10-28: paused GF-GATE1 stalled the queue this way)
+            t = next(x for x in tasks if x["task_id"] == s["task_id"])
+            if _paused_idle(c, P, t):
+                continue
             return False, f"session {s['session_id']} ({s['role'] or 'session'}) of " \
                           f"{s['task_id']} is open"
     try:
