@@ -24,6 +24,7 @@ from . import review as R
 from . import states as S
 from . import training_hook
 from . import handoff
+from . import selfheal
 from .adapters import Project
 from .adapters.base import (FAIL, PASS, UNKNOWN, SessionState, VerificationResult,
                             blocker_kind)
@@ -336,6 +337,7 @@ class Coordinator:
                 self._orphan_studio_lock(P)
             except Exception as e:                                # noqa: BLE001
                 self.log(f"{pid}: studio lock sweep failed: {type(e).__name__}: {e}")
+            selfheal.sweep(self, P)          # self-repair sweep (never raises; once a minute)
             for t in self.store.tasks(pid):
                 # 0.147.0: re-read the row right before its step. An earlier task's
                 # long step (a 13-min verify) left this snapshot stale, and an
@@ -3230,6 +3232,8 @@ class Coordinator:
             raise ValueError(f"{project_id}/{task_id} is {t['state']}, not PAUSED")
         target = t["resume_state"] or S.READY
         data = dict(t["data"])
+        data.pop("hold", None)                   # a resume ends the hold (selfheal rule 5)
+        data.pop("pause_forgotten_noticed", None)
         sid = data.pop("resume_session", None)
         action = data.pop("resume_action", None)
         if target in (S.IMPLEMENTING, S.CLOSING) and action == "continue" and sid:
@@ -3288,7 +3292,53 @@ class Coordinator:
                                      {"resumed": note or f"resumed by {actor}"}, actor=actor,
                                      data=data)
 
-    def pause(self, project_id: str, task_id: str, reason: str, actor: str = "operator") -> dict:
+    def hold(self, project_id: str, task_id: str, owner: str, reason: str,
+             minutes: float = 0, actor: str = "operator") -> dict:
+        """Pause the task (if it is not PAUSED yet) with a hold: task data
+        `hold = {owner, reason, expires_ts, set_ts, actor}`. The self-repair sweep
+        (selfheal.py) resumes it once `expires_ts` passes or its owner is gone
+        (`pid:<n>`, `session:<id>`, `task:<project>/<task>`, `case:<id>`, or a kind
+        registered with selfheal.register_hold_owner, e.g. the prep queue's). An owner
+        it can't check only expires. No more open-ended "short hold"."""
+        owner = str(owner or "").strip()
+        if not owner:
+            raise ValueError("a hold needs an owner")
+        minutes = float(minutes or 0)
+        if minutes < 0:
+            raise ValueError("hold minutes must be >= 0")
+        t = self.store.task(project_id, task_id)
+        if t is None:
+            raise ValueError(f"unknown task {project_id}/{task_id}")
+        if t["state"] != S.PAUSED:
+            self.pause(project_id, task_id, reason, actor=actor)
+        now = self.clock()
+        hold = {"owner": owner, "reason": str(reason or "")[:500], "actor": actor,
+                "set_ts": now, "expires_ts": (now + minutes * 60) if minutes else None}
+        self.store.merge_data(project_id, task_id, hold=hold)
+        self.store.event(project_id, task_id, "hold_set", detail=hold)
+        return self.store.task(project_id, task_id)
+
+    def release_hold(self, project_id: str, task_id: str, actor: str = "operator",
+                     note: str = "", resume: bool = True) -> dict:
+        """Drop the task's hold; a PAUSED task resumes (unless resume=False)."""
+        t = self.store.task(project_id, task_id)
+        if t is None:
+            raise ValueError(f"unknown task {project_id}/{task_id}")
+        hold = (t.get("data") or {}).get("hold")
+        if hold:
+            self.store.merge_data(project_id, task_id, hold=None)
+            self.store.event(project_id, task_id, "hold_released", detail={
+                "hold": hold, "by": actor, "note": str(note or "")[:300]})
+        if resume and t["state"] == S.PAUSED:
+            return self.resume(project_id, task_id, actor=actor,
+                               note=note or f"hold released by {actor}")
+        return self.store.task(project_id, task_id)
+
+    def pause(self, project_id: str, task_id: str, reason: str, actor: str = "operator",
+              owner: str = "", minutes: float = 0) -> dict:
+        if owner or minutes:
+            # an owned / expiring pause is a hold (selfheal resumes it)
+            return self.hold(project_id, task_id, owner or actor, reason, minutes, actor=actor)
         P = self._task_project(project_id, task_id)
         t = self.store.task(project_id, task_id)
         if t["state"] in S.WRITING and t["session_id"]:
@@ -3415,8 +3465,12 @@ class Coordinator:
                 # passed verification, and was parked at its very first review because
                 # the earlier attempts' 3 review calls still counted ("review budget used
                 # 3/3"): an operator's fresh budget covers the reviews it needs
-                for counter in ("attempt_ordinary", "sessions", "review_calls"):
-                    self.obligations.reset(P, t, counter, f"unblock: {resolution}"[:300],
+                # (selfheal rule 6) generic: every budget counter in obligations.LIMITS,
+                # measured on the reset task row (the guided allowance after on_reset)
+                from .obligations import LIMITS
+                fresh = self.store.task(project_id, task_id) or t
+                for counter in dict.fromkeys(v[0] for v in LIMITS.values()):
+                    self.obligations.reset(P, fresh, counter, f"unblock: {resolution}"[:300],
                                            actor, f"unblock:{n}")
             return out
 
