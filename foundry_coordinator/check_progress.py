@@ -72,7 +72,23 @@ def track(project: str, task: str, name: str, fn: Callable[[], list]) -> list:
         finish(project, task, name, "error")
         raise
     finish(project, task, name, _worst(rows))
+    with _lock:
+        r = ((_runs.get((project, task)) or {}).get("checks") or {}).get(name)
+        if r is not None:
+            r["rows"] = list(rows or [])
     return rows
+
+
+def finished_rows(project: str, task: str, head: str = "") -> dict:
+    """{check name: its result rows} of the checks of the current run that finished
+    (E, 2026-10-28: the engine starts the review once done_check and the gate binding
+    passed, while Lune still runs). Empty when the run is for another head."""
+    with _lock:
+        run = _runs.get((project, task)) or {}
+        if head and run.get("head") and run["head"] != head:
+            return {}
+        return {n: list(r["rows"]) for n, r in (run.get("checks") or {}).items()
+                if r.get("rows") is not None and r["state"] != "running"}
 
 
 def carried(project: str, task: str, name: str) -> None:

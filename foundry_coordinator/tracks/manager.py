@@ -69,6 +69,9 @@ class TrackManager:
         self.merger = MergeManager(self)
         self._projects: dict = {}            # (pid, name, worktree) -> Project
         self._observed: dict = {}            # session id -> last transcript read
+        # E (2026-10-28): each project's max_agents as its profile file says it (None =
+        # not set there), read before any chat/CLI value is applied over it
+        self._profile_max: dict = {P.id: self._raw_max_agents(P) for P in c.projects.values()}
         self._restore_max_agents()
 
     # ------------------------------------------------------------------ settings
@@ -77,17 +80,41 @@ class TrackManager:
         from ..automation import get
         return get(P, key)
 
+    @staticmethod
+    def _raw_max_agents(P):
+        try:
+            v = ((getattr(P.profile, "raw", None) or {}).get("automation") or {}).get(
+                "max_agents")
+        except AttributeError:
+            return None
+        return v if isinstance(v, int) and not isinstance(v, bool) else None
+
     def _restore_max_agents(self) -> None:
         """A chat-set max_agents survives a restart (store meta) until the router
-        deploys a revision with another value."""
+        deploys a revision with another value, or the profile file's own
+        `[automation] max_agents` changed since it was set (E, 2026-10-28: the
+        profile setting then wins; before, an old chat value hid it for good). A
+        value stored before 0.155 has no profile stamp: it is kept and stamped."""
         from ..automation import set_live
         for P in self.c.projects.values():
             v = self.store.meta(f"max_agents:{P.id}")
-            if v and v.isdigit():
-                try:
-                    set_live(P, "max_agents", max(1, min(MAX_AGENTS_LIMIT, int(v))))
-                except Exception:                                 # noqa: BLE001
-                    pass
+            if not (v and v.isdigit()):
+                continue
+            prof = self._profile_max.get(P.id)
+            stamp = self.store.meta(f"max_agents_profile:{P.id}")
+            if stamp and stamp != str(prof):
+                self.store.set_meta(f"max_agents:{P.id}", "")
+                self.store.set_meta(f"max_agents_profile:{P.id}", "")
+                self.store.event(P.id, "", "max_agents_changed", detail={
+                    "to": prof if prof is not None else 1, "from_override": int(v),
+                    "actor": "profile file", "override": False})
+                continue
+            if not stamp:
+                self.store.set_meta(f"max_agents_profile:{P.id}", str(prof))
+            try:
+                set_live(P, "max_agents", max(1, min(MAX_AGENTS_LIMIT, int(v))))
+            except Exception:                                     # noqa: BLE001
+                pass
 
     @staticmethod
     def _doc_max_agents(doc):
@@ -143,6 +170,7 @@ class TrackManager:
         before = self.max_agents()
         set_live(P, "max_agents", n)
         self.store.set_meta(f"max_agents:{P.id}", str(n))
+        self.store.set_meta(f"max_agents_profile:{P.id}", str(self._profile_max.get(P.id)))
         self.store.event(P.id, "", "max_agents_changed",
                          detail={"from": before, "to": n, "actor": actor,
                                  "override": bool(getattr(self.c, "max_writers_override", None))})

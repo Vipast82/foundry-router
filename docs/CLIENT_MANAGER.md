@@ -53,6 +53,13 @@ what it names.
 pid that owns their port (Kilo, Rojo) or the pid in the coordinator heartbeat. A restart that
 could not stop the old process reports `failed: ...` and is not counted.
 
+**Coordinator safe point.** The coordinator heartbeat carries `checks` (the background check runs:
+verify, closeout, track merge gate) and `checks_running` (true while any runs). `checks: []` with
+`checks_running: false` is a safe point: a restart then loses no check run. Check processes die
+with the coordinator anyway (job object) and finished done_check / binding rows are reused after
+it, so a restart outside a safe point only reruns the check that was in flight. `reviews_running`
+counts paid review calls in flight; a restart repeats such a call.
+
 **Media adapter.** Removed as a component: it is a stdio MCP server that Kilo spawns itself. An
 old `[components.media]` table is dropped from `client.toml` on load (the previous file is kept
 as `client.toml.before-migration`). The Doctor checks that `kilo.jsonc` has a `foundry-media`

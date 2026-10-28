@@ -37,6 +37,11 @@ from ..adapters.project import failed_findings
 from .manager import TrackError, _git
 
 DECISION_DEFAULT = "stop this track"
+# D (2026-10-28): a merge gate that ends in a tooling fault (a runner that exited without
+# a verdict, an ERROR/UNKNOWN result, checks that could not run) is retried this many times
+# with this backoff (doubling) before the track fails
+GATE_TOOLING_RETRIES = 2
+GATE_RETRY_BACKOFF_S = 60
 DECISION_OPTIONS = (DECISION_DEFAULT, "retry the merge", "keep the branch, no merge")
 
 
@@ -66,7 +71,8 @@ class MergeManager:
             raise TrackError(f"track {name} failed with unfinished sprints "
                              f"({', '.join(open_[:4])}); stop it or re-queue them")
         data = {k: v for k, v in row["data"].items()
-                if k not in ("conflict", "decision", "gate", "failed", "merge_wait")}
+                if k not in ("conflict", "decision", "gate", "failed", "merge_wait",
+                             "gate_retries", "gate_retry_at", "merge_bg")}
         data.update(merge_stage="wait", merge_requested_by=actor)
         row = self.store.update_track(P.id, name, state="merging", data=data)
         self.store.event(P.id, "", "track_merge_requested", detail={"track": name, "actor": actor})
@@ -110,6 +116,11 @@ class MergeManager:
         elif stage == "ff":
             self._ff(P, row)
         elif stage == "gate":
+            at = float(data.get("gate_retry_at") or 0)
+            if at and self.clock() < at:
+                self._wait(P, row, f"merge gate retry {data.get('gate_retries')}/"
+                                   f"{GATE_TOOLING_RETRIES} after a tooling fault")
+                return
             self._gate(P, row)
         elif stage == "gate_running":
             self._poll_gate(P, row)
@@ -331,7 +342,7 @@ class MergeManager:
                 proc = fl._spawn(cmd, log, run_id)
             except OSError as e:
                 self.tm.resources.release_studio(P, row["name"], "gate could not start")
-                self.tm.fail(P, row, f"merge gate could not start: {e}")
+                self._tooling_fault(P, row, f"merge gate could not start: {e}")
                 return
             self._set(P, row, merge_stage="gate_running", merge_wait=None,
                       gate={"head": head, "started": self.clock(), "wall": time.time(),
@@ -340,17 +351,29 @@ class MergeManager:
             self.store.event(P.id, "", "track_gate_started", detail={
                 "track": row["name"], "head": head[:12], "pid": proc.pid, "files": files[:40]})
             return
-        # no Studio: the adapter's checks on the merged head, now
-        try:
-            results = P.adapter.verify(spec, "verify", head, base)
-        except Exception as e:                                    # noqa: BLE001
-            self.tm.fail(P, row, f"merge gate error: {type(e).__name__}: {e}")
+        # no Studio: the adapter's checks on the merged head, in the background
+        # (E, 2026-10-28: bg_checks kind "merge"; the tick goes on, main sessions wait)
+        st, val = self._bg_verify(P, row, spec, head, base)
+        if st != "done":
             return
+        if isinstance(val, BaseException):
+            self._tooling_fault(P, self.store.track(P.id, row["name"]) or row,
+                                f"merge gate error: {type(val).__name__}: {val}")
+            return
+        results = list(val or [])
+        row = self.store.track(P.id, row["name"]) or row
         vid = self.store.save_verification(P.id, f"track:{row['name']}", head, "merge", results)
         bad = [r for r in results if r.required and r.result in (FAIL, UNKNOWN)]
         rec = {"head": head, "result": FAIL if bad else PASS, "verification_id": vid,
                "checks": {r.check: r.result for r in results}, "studio": False,
                "findings": failed_findings([r for r in bad if r.result == FAIL])[:20]}
+        if bad and all(r.result == UNKNOWN for r in bad):
+            self._set(P, row, gate=rec)
+            self._tooling_fault(P, self.store.track(P.id, row["name"]) or row,
+                                "merge gate checks could not run: " + "; ".join(
+                                    f"{r.check} ({(r.detail or '').splitlines()[0][:120]})"
+                                    if r.detail else r.check for r in bad[:3]))
+            return
         if bad:
             self._set(P, row, gate=rec, merge_stage=None)
             self.tm.fail(P, self.store.track(P.id, row["name"]),
@@ -399,13 +422,20 @@ class MergeManager:
                         "track": row["name"], "minutes": self.tm.resources.max_minutes(P)})
                 return
             self.tm.resources.release_studio(P, row["name"], "runner ended without a verdict")
-            self._set(P, row, gate={**run, "result": "ERROR"}, merge_stage=None)
-            self.tm.fail(P, self.store.track(P.id, row["name"]),
-                         "merge gate: the runner ended without a verdict")
+            self._set(P, row, gate={**run, "result": "ERROR"})
+            self._tooling_fault(P, self.store.track(P.id, row["name"]) or row,
+                                "merge gate: the runner ended without a verdict", run)
             return
         self.tm.resources.release_studio(P, row["name"], f"gate {v.get('result')}")
         from ..fast_lane import effective_result, failed_check_lines
         res = effective_result(v)
+        if str(v.get("result") or "").upper() in ("ERROR", "UNKNOWN") or res == "ERROR":
+            self._set(P, row, gate={**run, "result": "ERROR", "finished": self.clock(),
+                                    "findings": failed_check_lines(v)[:20]})
+            self._tooling_fault(P, self.store.track(P.id, row["name"]) or row,
+                                f"merge gate: the runner reported {v.get('result')}: "
+                                + "; ".join(failed_check_lines(v)[:2]), run)
+            return
         rec = {**run, "result": res, "finished": self.clock(),
                "findings": failed_check_lines(v)[:20] if res != PASS else []}
         if res != PASS:
@@ -417,6 +447,94 @@ class MergeManager:
         self.store.event(P.id, "", "track_gate_green", detail={"track": row["name"],
                                                                "head": run["head"][:12]})
         self._finish(P, self.store.track(P.id, row["name"]))
+
+    # ------------------------------------------------------------------ background / retries
+
+    def _bg_verify(self, P, row: dict, spec, head: str, base: str) -> tuple:
+        """The adapter's verify of the merged head as a bg_checks job (kind "merge"):
+        ("done", rows | exception) once finished, else (state, value) while it runs or
+        waits for a slot; a note (merge_wait) says so and `merge_bg` holds main
+        sessions (checks_busy)."""
+        try:
+            cap = int(self.tm.setting(P, "max_parallel_checks") or 2)
+            wait = float(self.tm.setting(P, "inline_check_wait_s") or 0)
+        except (KeyError, TypeError, ValueError):
+            cap, wait = 2, 2.0
+        name = row["name"]
+        key = (P.id, f"track:{name}", "merge", head)
+        if not (row.get("data") or {}).get("merge_bg"):
+            self._set(P, row, merge_bg={"head": head, "since": self.clock()})
+        st, val = self.c.bg_checks.run(
+            key, lambda: list(P.adapter.verify(spec, "verify", head, base)), wait, cap)
+        if st == "done":
+            self._set(P, row, merge_bg=None, merge_wait=None)
+            return st, val
+        self._wait(P, self.store.track(P.id, name) or row,
+                   f"merge gate checks {'queued' if st == 'queued' else 'running'} in the "
+                   f"background at {head[:12]}")
+        return st, val
+
+    def checks_busy(self, P) -> str:
+        """The track whose merge gate checks run in P's main checkout ('' = none)."""
+        try:
+            P = self.tm.main_of(P)
+            for r in self.store.tracks(P.id):
+                d = r.get("data") or {}
+                if r["state"] == "merging" and d.get("merge_bg") and \
+                        d.get("merge_stage") == "gate":
+                    return r["name"]
+        except Exception:                                         # noqa: BLE001
+            return ""
+        return ""
+
+    def keeps_check(self, key: tuple) -> bool:
+        """bg_checks sweep: a "merge" job lives while its track still merges at the gate."""
+        tid = str(key[1])
+        if not tid.startswith("track:"):
+            return False
+        r = self.store.track(key[0], tid[len("track:"):])
+        return bool(r and r["state"] == "merging"
+                    and (r.get("data") or {}).get("merge_stage") == "gate")
+
+    def _tooling_fault(self, P, row: dict, why: str, run: Optional[dict] = None) -> None:
+        """D: a merge gate that failed on tooling, not on the code: clear a stale runner
+        lock and retry the gate (GATE_TOOLING_RETRIES times, backoff doubling) before
+        the track fails."""
+        data = row.get("data") or {}
+        n = int(data.get("gate_retries") or 0)
+        if n >= GATE_TOOLING_RETRIES:
+            self._set(P, row, merge_stage=None, merge_bg=None, gate_retry_at=None)
+            self.tm.fail(P, self.store.track(P.id, row["name"]) or row,
+                         f"{why} (after {n} retr{'y' if n == 1 else 'ies'})")
+            return
+        cleared = self._clear_runner_lock(P, run)
+        delay = GATE_RETRY_BACKOFF_S * (2 ** n)
+        self._set(P, row, merge_stage="gate", merge_bg=None, gate_retries=n + 1,
+                  gate_retry_at=self.clock() + delay, gate_last_fault=why[:400])
+        self.store.event(P.id, "", "track_gate_retry", detail={
+            "track": row["name"], "retry": n + 1, "of": GATE_TOOLING_RETRIES,
+            "in_s": delay, "why": why[:400], "runner_lock_cleared": cleared})
+
+    def _clear_runner_lock(self, P, run: Optional[dict]) -> bool:
+        """Remove the studio_gate runner lock (<main>/.plan/tmp/gate/runner.lock) when
+        it names the ended run's pid or a dead process. True when removed."""
+        import json
+        from ..fast_lane import GATE_DIR
+        p = os.path.join(P.profile.workspace, *GATE_DIR.split("/"), "runner.lock")
+        try:
+            with open(p, encoding="utf-8") as f:
+                cur = json.load(f)
+        except (OSError, ValueError):
+            return False
+        pid = cur.get("pid") if isinstance(cur, dict) else None
+        ours = bool(run and run.get("pid") and pid == run.get("pid"))
+        if not ours and pid and self._pid_alive(int(pid)):
+            return False
+        try:
+            os.remove(p)
+            return True
+        except OSError:
+            return False
 
     @staticmethod
     def _pid_alive(pid: int) -> bool:
@@ -432,6 +550,7 @@ class MergeManager:
         data = row.get("data") or {}
         head = data.get("merge_head") or P.ws.head()
         self.tm.resources.release_studio(P, row["name"], "merged")
+        data = {k: v for k, v in data.items() if k not in ("merge_bg", "gate_retry_at")}
         self.tm.resources.release_for_track(P, row["name"])
         removed = self.tm.remove_worktree(P, row, "merged")
         self.store.update_track(P.id, row["name"], state="merged", merged_sha=head,
