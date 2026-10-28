@@ -134,6 +134,11 @@ class CodingClient:
     def transcript(self, session_id: str, *, directory: str) -> list:
         return []
 
+    def recent(self, session_id: str, *, directory: str, n: int = 4) -> list:
+        """The last `n` transcript messages, oldest first (E, 2026-10-28: the context
+        guard reads only these). A client that can't page returns the transcript's tail."""
+        return list(self.transcript(session_id, directory=directory) or [])[-max(1, n):]
+
     def children(self, session_id: str, *, directory: str) -> list[dict]:
         return []
 

@@ -5,7 +5,9 @@ Verified against Kilo CLI 7.8.8 (`@kilocode/sdk` 7.8.8 types plus live calls):
   POST /session/{id}/prompt_async {agent, model:{providerID,modelID}, parts:[{type:text,text}]} -> 204
   GET  /session/status?directory= {sessionID: {type: busy|retry|offline}}; idle sessions absent
   GET  /session/{id}/message      [{info, parts}]; assistant info: time.completed, finish,
-                                   error, tokens, modelID
+                                   error, tokens, modelID. `?limit=N` (Kilo 7.8.8,
+                                   MessageV2.page): the newest N messages, oldest first
+                                   (a Link header pages further back with `before`)
   GET  /session/{id}              404 when the session doesn't exist
   GET  /session/{id}/children     subagent sessions (Kilo `task` tool)
   POST /session/{id}/abort
@@ -52,6 +54,9 @@ class KiloClient(CodingClient):
         self.timeout = timeout
         self._auth = ("Basic " + base64.b64encode(f"{username}:{password}".encode()).decode()
                       if password else "")
+        # E (2026-10-28): token totals of a finished turn, by (session, last message id,
+        # message count): an idle session polled again is never re-read in full
+        self._totals: dict = {}
 
     # -- http ----------------------------------------------------------------------
 
@@ -114,6 +119,33 @@ class KiloClient(CodingClient):
         return self._req("GET", f"/session/{session_id}/message",
                          query={"directory": directory}) or []
 
+    def recent(self, session_id: str, *, directory: str, n: int = 4) -> list:
+        """The newest `n` messages, oldest first (`?limit=n`; a server that ignores the
+        limit returns them all and the tail is kept). E (2026-10-28): a 262k-token
+        transcript is no longer fetched whole on every poll."""
+        n = max(1, int(n))
+        rows = self._req("GET", f"/session/{session_id}/message",
+                         query={"directory": directory, "limit": n}) or []
+        return list(rows)[-n:]
+
+    def _token_totals(self, session_id: str, directory: str, last: dict) -> dict:
+        """{input, output} over every message of the session (SessionState.tokens): one
+        full read per finished turn, cached by the last message's id."""
+        info = (last or {}).get("info") or {}
+        key = (session_id, info.get("id") or "", (info.get("time") or {}).get("completed"))
+        hit = self._totals.get(key)
+        if hit is not None and info.get("id"):
+            return dict(hit)
+        tokens = {"input": 0, "output": 0}
+        for m in self.messages(session_id, directory):
+            t = ((m.get("info") or {}).get("tokens") or {})
+            tokens["input"] += int(t.get("input") or 0)
+            tokens["output"] += int(t.get("output") or 0)
+        if len(self._totals) > 256:
+            self._totals.clear()
+        self._totals[key] = dict(tokens)
+        return tokens
+
     def state(self, session_id, *, directory, since_ts) -> SessionState:
         if not self.exists(session_id, directory=directory):
             return SessionState(status="missing", error="Kilo has no such session")
@@ -129,7 +161,9 @@ class KiloClient(CodingClient):
                 s.error = str(st.get("message") or "")[:300]
                 s.denial = foundry_denial(s.error)
             return s
-        msgs = self.messages(session_id, directory)
+        # E (2026-10-28): status first (above), then only the newest message; the whole
+        # transcript is read once, for the token totals of a finished turn
+        msgs = self.recent(session_id, directory=directory, n=2)
         last = msgs[-1] if msgs else None
         info = (last or {}).get("info") or {}
         times = info.get("time") or {}
@@ -151,11 +185,7 @@ class KiloClient(CodingClient):
                          if p.get("type") == "text")
         err = info.get("error") or {}
         err_text = json.dumps(err)[:1500] if err else ""
-        tokens = {"input": 0, "output": 0}
-        for m in msgs:
-            t = ((m.get("info") or {}).get("tokens") or {})
-            tokens["input"] += int(t.get("input") or 0)
-            tokens["output"] += int(t.get("output") or 0)
+        tokens = self._token_totals(session_id, directory, last)
         lt = info.get("tokens") or {}
         cache = lt.get("cache") or {}
         context = (int(lt.get("input") or 0) + int(cache.get("read") or 0)
