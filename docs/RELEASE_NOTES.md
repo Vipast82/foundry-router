@@ -2,6 +2,17 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.156.7 — landed prep commits never count against a sprint's scope
+
+GF-GATE1, 2026-10-28 15:11: its Studio gate passed, but verification failed scope on
+`.clinerules`, `AGENT_RULES.md`, `docs/...`: files the 11 AU prep commits changed when the
+prep queue landed them mid-sprint. Scope trusts only the coordinator's own commit list, which
+the prep commits were not on, so the repeat guard stopped the sprint.
+
+- **Credited as coordinator commits.** Every queue tick adds each landed prep commit to the
+  `coord_commits` list of every open main-checkout task (idempotent), so scope and memory
+  hygiene checks never blame a session for them.
+
 ## v0.156.6 — no repeat question on a handoff; README.md no longer fails Studio verify
 
 GF-GATE1, 2026-10-28 14:13: after a context-ceiling handoff, the repeat guard opened "Findings

@@ -101,6 +101,14 @@ def test_entries_land_in_order_each_with_its_sha_and_one_push(game, tmp_path):
     assert ev and [x["id"] for x in ev[0]["detail"]["entries"]] == [e1["id"], e2["id"]]
     assert land(c, P) is None                     # nothing pending: nothing happens
     assert len(pushes) == 1
+    # GF-GATE1 15:11 replay: an open task's checks treat landed prep commits as the
+    # coordinator's, never the session's (scope / memory hygiene)
+    from foundry_coordinator import bookkeeping as BK
+    c.approve("game", "T1", [], "victor")
+    land(c, P)
+    t = c.store.task("game", "T1")
+    assert {a["sha"], b["sha"]} <= BK.commits(t)
+    assert BK.only_coordinator(P, t, start, b["sha"], ["src/a.txt"]) == ["src/a.txt"]
 
 
 def test_reorder_and_remove(game, tmp_path):

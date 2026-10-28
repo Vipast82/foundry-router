@@ -832,11 +832,43 @@ def tick(c) -> None:
             c.log(f"{pid}: prep queue tick failed: {type(e).__name__}: {e}")
 
 
+def credit_landed(c, P) -> int:
+    """Record every landed prep commit as a coordinator commit of each open main-checkout
+    task (bookkeeping `coord_commits`, the SHA list scope and hygiene checks trust), so a
+    sprint whose range spans a prep landing is never blamed for its files. 2026-10-28
+    GF-GATE1 15:11: the 11 AU prep commits (.clinerules, AGENT_RULES.md, docs/...) failed
+    its scope check and the repeat guard then stopped it. Idempotent; returns how many
+    task lists changed."""
+    from . import bookkeeping as BK
+    from . import states as S
+    shas = [r["sha"] for r in c.store.q(
+        "SELECT sha FROM prep_queue WHERE project_id=? AND status='landed' AND sha<>'' "
+        "ORDER BY landed_ts", (P.id,))]
+    if not shas:
+        return 0
+    n = 0
+    for t in _main_tasks(c, P):
+        if t["state"] in S.TERMINAL or t["task_id"] == TASK:
+            continue
+        have = BK.commits(t)
+        new = [s for s in shas if s not in have]
+        if not new:
+            continue
+        kept = list((t.get("data") or {}).get(BK.KEY) or []) + new
+        c.store.merge_data(P.id, t["task_id"], **{BK.KEY: kept[-BK.MAX_KEPT:]})
+        n += 1
+    return n
+
+
 def tick_project(c, P, force: bool = False) -> Optional[dict]:
     cfg = settings(P)
     if not cfg["enabled"]:
         return None
     _recover(c, P)
+    try:
+        credit_landed(c, P)
+    except Exception as e:                                        # noqa: BLE001
+        c.log(f"{P.id}: prep queue: crediting landed commits failed: {type(e).__name__}: {e}")
     pid, store = P.id, c.store
     if not store.q("SELECT 1 FROM prep_queue WHERE project_id=? AND status='pending' LIMIT 1",
                    (pid,)):
