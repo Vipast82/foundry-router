@@ -899,8 +899,65 @@ FIELDS: list[Field] = [
       "coordinator.telemetry", "restart", item_type="int"),
     F("telemetry.key_env", "str", "", "Env var with a telemetry key.", "telemetry",
       "coordinator.telemetry", "restart", "local"),
-    F("training", "table", {}, "Training capture (all sub-tables kept verbatim).", "telemetry",
-      "coordinator.training_hook"),
+    # 2026-10-28 (Victor: "everything should be configurable in UI"): every pipeline
+    # setting is its own control; only the per-dataset policy rules stay a raw table
+    *[F(f"training.{k}", t, d, desc, "telemetry", "training.pipeline", **kw)
+      for k, t, d, desc, kw in (
+        ("enabled", "bool", False, "Build training data for this project (the coordinator writes "
+         "a manifest per attempt; the pipeline ingests, curates and exports).", {}),
+        ("sources", "list", ["kilo", "foundry", "coordinator", "git"], "What the pipeline "
+         "reads: kilo, foundry, coordinator, git, cline.", {"item_type": "str"}),
+        ("artifact_roots", "list", [], "Folders screenshots may be read from.",
+         {"item_type": "str"}),
+        ("allowed_email_domains", "list", [], "E-mail domains kept unredacted.",
+         {"item_type": "str"}),
+        ("local_models", "list", [], "Model names that count as the local model (authorship).",
+         {"item_type": "str"}),
+        ("local_personas", "list", [], "Personas that count as the local model.",
+         {"item_type": "str"}),
+        ("unbound_project", "str", "", "Pseudo-project for Foundry captures with no project "
+         "(Cline, Chat, AnythingLLM, brain): they feed the call-level dataset. Empty = skipped.",
+         {}),
+        ("split.eval_fraction", "float", 0.15, "Share of tasks held out for evaluation.",
+         {"min": 0, "max": 0.9}),
+        ("split.seed", "str", "v1", "Split seed (changing it reshuffles train/eval).", {}),
+        ("split.heldout_projects", "list", [], "Projects that go to eval only.",
+         {"item_type": "str"}),
+        ("split.time_cutoff", "str", "", "ISO date: tasks first seen at/after it go to eval.",
+         {}),
+        ("retention.raw_days", "int", 30, "Days raw ingested data is kept.", {"min": 1}),
+        ("retention.normalized_days", "int", 180, "Days normalized episodes are kept.",
+         {"min": 1}),
+        ("export.targets", "list", ["canonical", "chatml-tools"], "Export formats: canonical, "
+         "chatml-tools.", {"item_type": "str"}),
+        ("export.allow_frontier_targets", "bool", False, "Let frontier-model text be a training "
+         "target (check the provider's terms first).", {}),
+        ("export.include_reasoning", "bool", False, "Keep each turn's reasoning "
+         "(reasoning_content) in exports.", {}),
+        ("export.calls_quality", "enum", "verified", "Call-level dataset: verified = a positive "
+         "coordinator label; ok = succeeded and not rated down.",
+         {"enum": ["verified", "ok"]}),
+        ("export.calls_purposes", "list", ["agent_turn"], "Call-level dataset: which capture "
+         "purposes (agent_turn, brain_route, frontier_assist, research, ...).",
+         {"item_type": "str"}),
+        ("auto.enabled", "bool", True, "Run the pipeline automatically after each sprint.", {}),
+        ("auto.upload", "bool", True, "Upload validated datasets to this Foundry.", {}),
+        ("auto.kinds", "list", ["sft", "correction", "multimodal"], "Datasets the automatic run "
+         "builds: sft, correction, multimodal, calls, preference.", {"item_type": "str"}),
+        ("auto.targets", "list", [], "Formats the automatic run exports (empty = the export "
+         "targets).", {"item_type": "str"}),
+        ("auto.foundry_url", "str", "", "Upload URL (empty = the profile's Foundry URL).", {}),
+        ("auto.kilo_url", "str", "", "Kilo URL for ingest (empty = the profile's client URL).",
+         {}),
+        ("auto.library", "str", "", "Workstation dataset library folder (empty = default).", {}),
+        ("capture.on_failure", "enum", "warn", "When a training manifest can't be written: "
+         "ignore, warn, or hold the task.", {"enum": ["ignore", "warn", "hold"]}),
+        ("tags.widgets", "list", [], "Extra widget names to tag.", {"item_type": "str"}),
+      )],
+    F("training.auto.key_env", "str", "", "Env var with the upload key.", "telemetry",
+      "training.pipeline", "live", "local"),
+    F("training.policy", "table", {}, "Per-dataset curation rules ({sft: {require: [...], "
+      "max_tokens}, correction: {...}, ...}).", "telemetry", "training.pipeline"),
     # router-wide ----------------------------------------------------------------
     F("backends.*.cutoff_pct", "float", 95.0, "Stop using this backend's subscription at this "
       "usage % (writes the backend's usage_limit_pct).", "router", "router.quota_gate",

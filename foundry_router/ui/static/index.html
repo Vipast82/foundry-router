@@ -2966,12 +2966,18 @@ async function tabTraining() {
         <label title="Also capture calls no coordinator project is bound to (plain Chat, Research, Cline), for every persona ticked below."><input type="checkbox" id="cap-unbound" ${c.include_unbound ? "checked" : ""}> calls outside a coordinator project</label>
         <label title="The Automation chat's own model calls. Off by default: it is the operator's console, not client traffic."><input type="checkbox" id="cap-opchat" ${c.operator_chat ? "checked" : ""}> operator chat</label>
         <label>keep <input type="number" id="cap-ret" min="1" max="3650" style="width:70px" value="${c.retention_days}"> days</label>
+        <label title="A call body larger than this keeps only its head (inline images are stored by reference and don't count).">body limit <input type="number" id="cap-max" min="0.1" max="256" step="0.1" style="width:70px" value="${((c.max_body_bytes || 4000000) / 1e6).toFixed(1)}"> MB</label>
         <button class="act primary" id="cap-save">Save</button></div>
       <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:8px 24px;margin:8px 0">
         <div><h4 style="margin:4px 0">Backends <span class="hint">captured today: ${(c.today || {}).total ?? 0}</span></h4>${capBoxes("backends", capBackends, ((c.today || {}).backends) || {})}</div>
         <div><h4 style="margin:4px 0">Personas</h4>${capBoxes("personas", capPersonas, ((c.today || {}).personas) || {})}</div>
         <div><h4 style="margin:4px 0">Purposes <span class="hint">what the call was for</span></h4>${capBoxes("purposes", capPurposes, ((c.today || {}).purposes) || {})}</div></div>
       <p class="hint">Untick to leave a backend or persona out. A persona left ticked while others are not is captured even outside a coordinator project. Counts are model calls recorded since midnight. Every backend works, local or not; what a frontier model's output may be used for is decided later by the project's <code>allow_frontier_targets</code> (provider terms).</p>
+      <div class="row" style="flex-wrap:wrap;gap:6px 18px">
+        <label title="Coordinator projects to capture (comma-separated globs). Empty = every bound project.">projects <input type="text" id="cap-proj" style="width:200px" placeholder="all bound" value="${esc((c.projects || []).join(", "))}"></label>
+        <label title="Projects never captured (comma-separated globs).">except <input type="text" id="cap-xproj" style="width:160px" value="${esc((c.exclude_projects || []).join(", "))}"></label>
+        <label title="Client ids to capture (comma-separated globs). Empty = every client.">clients <input type="text" id="cap-clients" style="width:160px" placeholder="all" value="${esc((c.clients || []).join(", "))}"></label>
+        <label title="E-mail domains left unredacted (comma-separated).">keep e-mail domains <input type="text" id="cap-mail" style="width:160px" value="${esc((c.allowed_email_domains || []).join(", "))}"></label></div>
       <p class="hint">projects: ${esc((c.projects || []).join(", ") || (c.enabled ? "all bound" : "—"))}${(c.exclude_projects || []).length ? " · excluded: " + esc(c.exclude_projects.join(", ")) : ""}${c.errors ? ` · <span class="pill bad">${c.errors} capture errors</span> ${esc(c.last_error || "")}` : ""}${c.store_error ? ` · <span class="pill bad">store: ${esc(c.store_error)}</span>` : ""}</p>
       <div class="row" style="flex-wrap:wrap;gap:6px 12px"><b>Download captured calls</b>
         <select id="cap-dl-q" title="ok = the router saw the call succeed with no thumbs-down and no failed gate/review; verified = ok plus a gate PASS, review APPROVED or vision approval from the coordinator"><option value="">all calls</option><option value="ok">router ok</option><option value="verified">verified by the coordinator</option></select>
@@ -2998,8 +3004,12 @@ async function tabTraining() {
     const bk = picked("backends"), pe = picked("personas"), pu = picked("purposes");
     if (bk.length === 0 && total("backends")) { toast("Tick at least one backend (or untick the master switch)", true); return; }
     if (pe.length === 0 && total("personas")) { toast("Tick at least one persona (or untick the master switch)", true); return; }
+    const csv = id => $(id).value.split(",").map(x => x.trim()).filter(Boolean);
     const body = {enabled: $("#cap-on").checked, include_unbound: $("#cap-unbound").checked,
       operator_chat: $("#cap-opchat").checked, retention_days: +$("#cap-ret").value || 30,
+      max_body_bytes: Math.round((+$("#cap-max").value || 4) * 1e6),
+      projects: csv("#cap-proj"), exclude_projects: csv("#cap-xproj"), clients: csv("#cap-clients"),
+      allowed_email_domains: csv("#cap-mail"),
       purposes: pu.length === total("purposes") ? [] : pu, exclude_purposes: [],
       backends: bk.length === total("backends") ? [] : bk, exclude_backends: [],
       personas: pe.length === total("personas") ? [] : pe, exclude_personas: []};

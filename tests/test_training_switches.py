@@ -192,3 +192,20 @@ def test_held_received_record_is_written_once_across_sibling_tasks(ledgered):
     asyncio.run(main())
     kinds = [r["kind"] for r in cap.records()]
     assert kinds.count("received") == 1 and kinds.count("backend_call") == 2
+
+
+def test_every_capture_setting_is_editable_from_the_ui(ledgered, client):
+    """2026-10-28 (Victor: "everything should be configurable in UI"): the body limit,
+    project / client lists and e-mail domains are saved from the Training card too."""
+    r = client.post("/admin/api/training/capture", json={
+        "max_body_bytes": 16000000, "projects": ["animaluprising"], "exclude_projects": ["x*"],
+        "clients": ["kilo-*"], "allowed_email_domains": ["foundrytech.icu"]})
+    assert r.status_code == 200
+    cfg = ledgered.config_store.config.training_capture
+    assert (cfg.max_body_bytes, cfg.projects, cfg.exclude_projects, cfg.clients,
+            cfg.allowed_email_domains) == (16000000, ["animaluprising"], ["x*"], ["kilo-*"],
+                                           ["foundrytech.icu"])
+    tiny = client.post("/admin/api/training/capture", json={"max_body_bytes": 5})
+    assert tiny.json()["training_capture"]["max_body_bytes"] == 65536      # clamped
+    assert client.post("/admin/api/training/capture",
+                       json={"max_body_bytes": "big"}).status_code == 400

@@ -2,6 +2,37 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.153.1 — every training setting in the UI; the live tracker reads AU's per-spec Lune cache
+
+Victor 2026-10-28: "Why is capture on option not in the UI, so I can turn on / off, everything
+should be configurable in UI".
+
+- **Router, Logs → Training → Foundry capture.** The card already had the master switch,
+  "calls outside a coordinator project", operator chat, days kept and the backend / persona /
+  purpose boxes. It now also edits:
+  - the body limit (MB);
+  - the projects to capture, and the projects never captured;
+  - the clients to capture;
+  - the e-mail domains left unredacted.
+  All of it is live, with no restart and no config.yaml edit.
+- **Automation → Settings → Telemetry & training.** The project's `[training]` section was one
+  JSON block. Each setting is now its own control:
+  - switches: enabled, include reasoning, allow frontier targets, auto run / upload;
+  - text: the unbound project (Cline / Chat / AnythingLLM / brain → the call-level dataset);
+  - choices: the call-level quality (verified / ok);
+  - lists: dataset kinds, export targets, call purposes, sources;
+  - numbers: retention days and the eval split.
+  The curation `policy` rules stay a raw block. The upload key's env var is
+  workstation-only.
+
+- **Reused tests are counted.** AU's Lune runner, landing as an AU prep commit, reuses a spec
+  file's PASS when nothing it loaded changed. Those lines end with ` (cached)`, and the summary
+  line ends with `(C cached, R run)`. The live tracker counts the reused tests, and the control
+  center shows "· N cached" beside the pass/fail counts.
+- **`au.lune` / `au.lune_negative` details keep the whole summary line**, e.g.
+  `LUNE 1618/1618 PASS (4353 ms) (1588 cached, 30 run)`.
+- Includes v0.153.0 (capture every model call for fine-tuning).
+
 ## v0.153.0 — capture every model call for fine-tuning the local model
 
 Victor 2026-10-27: "track EVERYTHING so I can use for finetuning the local model". Plan:

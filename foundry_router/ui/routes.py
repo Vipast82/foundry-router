@@ -1188,6 +1188,11 @@ async def training_capture_set(request: Request):
             updates["retention_days"] = max(1, min(3650, int(body["retention_days"])))
         except (TypeError, ValueError):
             return JSONResponse({"error": "retention_days must be a number"}, status_code=400)
+    if "max_body_bytes" in body:
+        try:
+            updates["max_body_bytes"] = max(65536, min(256_000_000, int(body["max_body_bytes"])))
+        except (TypeError, ValueError):
+            return JSONResponse({"error": "max_body_bytes must be a number"}, status_code=400)
     for k in _CAPTURE_LISTS:
         if k in body:
             v = body[k]
