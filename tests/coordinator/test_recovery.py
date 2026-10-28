@@ -397,12 +397,28 @@ def test_gate_blocks_while_build_evidence_missing_then_passes(store):
 def test_gate_blocks_on_open_obligation_conflict_and_spent_continuations(store):
     ob, rec, P, t = setup(store)
     P.adapter.describe = lambda tid: spec(tid)
-    ob.screen_text(P, "UI-01", "Defer captures to CLOSE", "last_report")
+    ob.open_decision("game", "UI-01", "obligation_conflict", "the plan lists a capture outside "
+                     "the scope", options=["fix the plan or scope", "operator decision"],
+                     recommendation="fix the plan or scope", blocks=["cap-gallery_desktop"])
     for _ in range(2):
         ob.charge("game", "UI-01", "same_session_continuations", 1, "x", "coordinator")
     out = rec.gate_submission(P, t, "h2", FakeLedger(), ob)
     assert any(o["action"] == "decision" for o in out)
     assert {o["action"] for o in out if o["class"] == "missing_evidence"} == {"changes_required"}
+
+
+def test_a_refused_phase_move_is_recorded_answered_and_never_blocks_review(store):
+    """GF-GATE1 15:21 replay: 'On gate PASS hand off to CLOSE' in a model report opened
+    three obligation_conflict decisions that blocked review until the operator confirmed
+    the default already in force. The refusal stands; the record is answered at once."""
+    ob, rec, P, t = setup(store)
+    P.adapter.describe = lambda tid: spec(tid)
+    [c] = ob.screen_text(P, "UI-01", "Defer captures to CLOSE", "last_report")
+    d = ob.decision(c["decision_id"])
+    assert d["status"] == "answered" and d["authority"] == "refusal_default"
+    assert ob.get("game", "UI-01", c["obligation_id"])["phase"] == "BUILD"
+    out = rec.gate_submission(P, t, "h2", FakeLedger(), ob)
+    assert not any(o["action"] == "decision" for o in out)
 
 
 # -- review routing ---------------------------------------------------------------------------------------

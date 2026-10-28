@@ -439,6 +439,16 @@ def test_docs_memory_is_on_the_default_allow_list():
     assert SC.rule_for(P, "GF-GATE1", "docs/other.md") is None
 
 
+def test_the_regression_index_count_spec_is_granted_without_asking():
+    """HK-CLOSE1 16:02 replay: a new index row needs the pinned row count bumped in
+    tests/lune/specs/RegressionIndex.spec.luau; the owner was asked for it."""
+    from types import SimpleNamespace
+    P = SimpleNamespace(profile=SimpleNamespace(raw={}))
+    r = SC.rule_for(P, "HK-CLOSE1", "tests/lune/specs/RegressionIndex.spec.luau")
+    assert r and r["name"] == "regression_index_count_spec"
+    assert SC.rule_for(P, "HK-CLOSE1", "tests/lune/specs/MapV2Lane.spec.luau") is None
+
+
 def _scope_game(tmp_path, first_final):
     prompts = []
 

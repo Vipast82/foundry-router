@@ -125,7 +125,9 @@ def test_stale_next_cannot_move_build_capture_to_close(store):
     assert {"cap-gallery_desktop", "gate"} <= moved
     assert ob.get("game", "UI-01", "cap-gallery_desktop")["phase"] == "BUILD"
     decs = ob.active_decisions("game", "UI-01", "obligation_conflict")
-    assert decs and all(d["status"] == "open" for d in decs)
+    # refused and recorded with the default at once (v0.157: never waits on the operator)
+    assert decs and all(d["status"] == "answered" and d["authority"] == "refusal_default"
+                        for d in decs)
     # idempotent: the same stale line does not open a second decision
     again = ob.reconcile(P, spec(), STALE_NEXT)
     assert {c["decision_id"] for c in again if c["kind"] == "phase_move"} <= \

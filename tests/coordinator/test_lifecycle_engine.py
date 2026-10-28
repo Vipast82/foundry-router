@@ -639,9 +639,12 @@ def test_report_moving_build_captures_to_closeout_opens_a_decision_never_a_move(
     c.approve("game", "T1", [], "victor")
     assert run_until(c, lambda: _state(c) == S.BLOCKED, limit=30)
     t = c.store.task("game", "T1")
-    did = t["data"]["decision_wait"]["ids"][0]
-    d = c.obligations.decision(did)
-    assert d["kind"] == "obligation_conflict" and "refused" in d["question"]
+    # the move is refused and recorded (answered with the default at once); the task never
+    # waits on the operator for it (v0.157, GF-GATE1 15:21)
+    [d] = c.obligations.active_decisions("game", "T1", "obligation_conflict")
+    assert "refused" in d["question"] and d["status"] == "answered"
+    waits = (t["data"].get("decision_wait") or {}).get("ids") or []
+    assert d["decision_id"] not in waits
     assert all(o["phase"] == "BUILD" for o in c.obligations.all("game", "T1")
                if o["obligation_id"].startswith("check:ui.shot"))
     assert ff.chats == []                                    # never reviewed

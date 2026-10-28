@@ -574,9 +574,24 @@ class Obligations:
                              "obligation_phase decision"],
                     recommendation="keep BUILD: captures and reruns are BUILD evidence",
                     blocks=[ob["obligation_id"]])
+                self._apply_refusal_default(did)
                 conflicts.append({"kind": "phase_move", "obligation_id": ob["obligation_id"],
                                   "source": source, "line": line[:500], "decision_id": did})
         return conflicts
+
+    def _apply_refusal_default(self, decision_id: str) -> None:
+        """A refused phase move is already enforced (the obligation stays BUILD), so its
+        record is answered with that default at once instead of waiting on the operator.
+        2026-10-28 GF-GATE1 15:21: three such records blocked review for 15 minutes; the
+        operator could only confirm what was already in force. Moving an obligation stays
+        possible through an obligation_phase decision."""
+        d = self.decision(decision_id) if decision_id else None
+        if not d or d["status"] != "open":
+            return
+        self.store.x("UPDATE decisions SET status='answered', answer=?, actor=?, authority=?, "
+                     "answered_ts=? WHERE decision_id=? AND status='open'",
+                     (_j("keep BUILD (default)"), "coordinator", "refusal_default",
+                      self.clock(), decision_id))
 
     def reconcile(self, P, spec, plan_text_at_rev: str = "") -> list[dict]:
         task = spec.task_id

@@ -197,6 +197,10 @@ DEFAULT_SCOPE_RULES = [
     # grant keeps SCOPE green; the files stay the coordinator's (never in the edit scope)
     {"name": "coordinator_project_memory", "path": "docs/memory/**",
      "reason": "project memory written by the coordinator (MEMORY_NOTE)"},
+    # 2026-10-28 HK-CLOSE1: a new tests/RegressionIndex.lua row always bumps the row count
+    # the Lune spec pins (112 -> 113); asking the owner for that file stopped the sprint
+    {"name": "regression_index_count_spec", "path": "tests/lune/specs/RegressionIndex.spec.luau",
+     "reason": "the Lune spec pins the regression index row count; a new index row bumps it"},
 ]
 AUTOMATION_DEFAULTS: dict = {
     "helpers": "on_demand",
