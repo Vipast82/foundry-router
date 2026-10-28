@@ -2,6 +2,23 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.157.1 — the Lead hands a stop it cannot work to self-repair; tracks never wait on Studio
+
+- **Why the Lead deferred (GF-GATE1, HK-CLOSE1, 2026-10-28).** Its readiness check failed on
+  `route_chain` before any call: the last-resort local Qwen route was unloaded, so
+  `routes != expected_models`, classed transient, deferred at 5, 10, 20, 40 minutes, and the
+  decision sweep treated a DEFERRED case as working and pushed the timeout hours out.
+- **Readiness:** with `allow_local_route` on, only a down TAIL of `expected_models` passes
+  `route_chain`; a primary route down is still transient.
+- **`LeadManager.hand_back`:** a decision-wait case for an open automation decision that cannot
+  make its call (readiness, quota/admission, start refusal, infra, already DEFERRED) is cancelled
+  and the decision is due now: the capped self-repair applies (different approach, frontier
+  implementer, quiet park when the caps are spent). Never for product decisions, a paid session in
+  flight, or `self_repair = false`. The strategy text now carries the latest refused submission
+  items, the repeated findings and the strategy that failed.
+- **Tracks never wait on Studio.** A track worktree's kilo.jsonc turns the Studio MCP off by
+  design; readiness reports it for a track session and never blocks (AS-D13).
+
 ## v0.157.0 — fewer stops: alerts dismiss and auto-clear, mechanical asks answered, non-sprint deps ignored
 
 From the 2026-10-28 AU run (GF-GATE1, HK-CLOSE1, AS-D13), where the operator was asked things the
