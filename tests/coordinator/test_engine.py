@@ -730,6 +730,22 @@ def test_session_touching_unrelated_wip_fails_verification(game):
     assert any("pre-existing uncommitted changes were modified: notes.md" in x for x in f)
 
 
+def test_coordinator_rewriting_kilo_config_mid_sprint_is_not_the_sessions(game):
+    """AS-D13 2026-10-28 replay: `tracks set-needs` rewrote the worktree's (untracked)
+    kilo.jsonc and left kilo.jsonc.bak-* beside it; unrelated_preserved blamed the session."""
+    tmp, root, _, prof = game
+    (root / "kilo.jsonc").write_text('{"mcp": {}}')
+
+    def work(ctx):
+        return {"writes": {"src/a.txt": "OK"}, "commit": "T1: x",
+                "run": [[sys.executable, "-c",
+                         "from pathlib import Path; Path('kilo.jsonc').write_text('{}'); "
+                         "Path('kilo.jsonc.bak-20261028-181531').write_text('{}')"]]}
+    c = coordinator(tmp, [prof], {"game": work})
+    c.approve("game", "T1", [], "victor")
+    assert run_until(c, lambda: _state(c, "game", "T1") == S.COMPLETE)
+
+
 def test_unknown_required_check_blocks(tmp_path):
     root, _ = make_repo(tmp_path, "u", [T1])
     prof = write_profile(tmp_path, "u", root, checks='''

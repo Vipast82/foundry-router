@@ -2,6 +2,15 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.157.4 — the coordinator's own kilo.jsonc rewrites never fail a session
+
+AS-D13, 2026-10-28 18:5x: `tracks set-needs` rewrote the track worktree's untracked
+kilo.jsonc and left `kilo.jsonc.bak-*` beside it; `coordinator.unrelated_preserved` blamed the
+session ("pre-existing uncommitted changes were modified") and the repeat guard stopped it.
+
+- **kilo.jsonc and its backups are coordinator-managed** in that check (sessions are denied
+  edits to them anyway).
+
 ## v0.157.3 — Blender in the client's Settings, and a running Blender is adopted
 
 - **Settings page: Blender section** (run it, blender.exe path, add-on port). It had no UI;

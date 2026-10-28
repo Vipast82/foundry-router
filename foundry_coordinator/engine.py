@@ -2126,10 +2126,16 @@ class Coordinator:
         pre_task = set(t["data"].get("task_baseline_dirty") or [])
         task_left = {p for p in baseline if p not in pre_task
                      and (matches_any(p, spec.scope) or matches_any(p, exempt))}
+        # the session's tool config is the coordinator's (kilo apply / a track's needs
+        # rewrite it and keep a backup beside it) and a session may never edit it
+        # (2026-10-28 AS-D13: `tracks set-needs` rewrote the track's kilo.jsonc mid-sprint)
+        managed = ("kilo.jsonc", "kilo.json", "kilo.jsonc.bak-*", "kilo.json.bak-*")
         touched = [p for p, h in baseline.items() if P.ws.file_hash(p) != h
-                   and not matches_any(p, runner_caps) and p not in task_left]
+                   and not matches_any(p, runner_caps) and p not in task_left
+                   and not matches_any(p, managed)]
         new_dirty = [p for _, p in dirty if p not in baseline and p not in in_scope_dirty
-                     and not (intermediate and (p in inter or p in pending_task))]
+                     and not (intermediate and (p in inter or p in pending_task))
+                     and not matches_any(p, managed)]
         add("unrelated_preserved", FAIL if touched or new_dirty else PASS,
             "; ".join(x for x in (
                 ("pre-existing uncommitted changes were modified: " + ", ".join(touched[:8]))
