@@ -1129,3 +1129,34 @@ def test_an_unblock_with_reset_also_resets_the_review_budget(tmp_path):
     assert lim["remaining"] == lim["base_max"] and lim["used"] == 4      # raw count kept
     rows = c.obligations.ledger("game", "T1")
     assert any(r["counter"] == "authorized:review_calls" for r in rows)
+
+
+def test_a_free_continuation_is_not_a_repeat(tmp_path):
+    """2026-10-28 (GF-GATE1 11:53): the context guard handed a session off (a FREE retry);
+    the repeat guard then asked "findings repeat with no materially different strategy",
+    the lead escalated to Victor and the sprint stopped. A free continuation starts the
+    next session without a question; a paid repeat still asks."""
+    def script(ctx):
+        return {"writes": {"src/ui.txt": f"BAD {ctx['attempt']}", "src/core.txt": "OK",
+                           "docs/progress/T1_LOG.md": "OK"},
+                "commit": f"T1: try {ctx['attempt']}", "final": report()}
+    ff = Adviser()
+    c, client, _, _, _ = _game(tmp_path, script, foundry=ff, extra=f'''
+[retry_guidance]
+enabled = true
+persona = "{OPUS}"
+extra_attempts = 1
+''')
+    P = c.projects["game"]
+    P.profile.limits["max_attempts"] = 1
+    c.approve("game", "T1", [], "victor")
+    assert run_until(c, lambda: _state(c) == S.FAILED, limit=40)
+    c.unblock("game", "T1", "fresh budget", reset_attempts=True)
+    # the same findings, but the next start is a free continuation (e.g. a context handoff)
+    c.store.merge_data("game", "T1", free_retry=True, lead_assignment=None)
+    c.tick()
+    t = c.store.task("game", "T1")
+    assert t["state"] != S.BLOCKED, t["blocker"]
+    assert not (t["data"].get("decision_wait") or {}).get("ids")
+    kinds = [r["kind"] for r in c.store.q("SELECT kind FROM events WHERE task_id='T1'")]
+    assert "repeat_guard_skipped" in kinds

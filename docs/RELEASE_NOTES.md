@@ -2,6 +2,22 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.156.2 — a free continuation is not a repeat
+
+GF-GATE1, 2026-10-28:
+1. At 11:52 the context guard stopped its local session at 206k tokens (by design), and the
+   session had committed its work.
+2. At 11:53 the repeat guard (`_lc_before_session`) still asked "findings repeat with no
+   materially different strategy".
+3. The Lead's calls were used up, so it escalated to Victor, and the sprint stopped.
+
+- **No repeat question on a free continuation.** A free start (a context handoff, an infra
+  retry, an operator reset with BUILD progress) no longer opens that question: the
+  continuation is the same work carrying on. The question is withdrawn and recorded as
+  `repeat_guard_skipped`, and the next session gets the normal continuation prompt.
+- **Unchanged:** a paid repeat still asks, and a Lead assignment still crosses the guard as
+  before.
+
 ## v0.156.1 — the scripted Studio gate runs bridge rows by their runbooks and sets the viewport
 
 GF-GATE1's first live full triage (68 rows): 28 pass, 35 fail, 4 unknown, mostly runner bugs.

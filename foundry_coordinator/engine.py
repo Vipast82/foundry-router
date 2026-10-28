@@ -4893,6 +4893,20 @@ class Coordinator:
                 # No adviser inference happened. Leave the task READY; the next
                 # tick retries admission after its bounded backoff.
                 return {"stopped": True}
+            if a and a.get("decision") and free and not lead_a:
+                # 2026-10-28 (GF-GATE1 11:53): a FREE continuation (a context handoff, an
+                # infra retry, an operator reset) is the same work carrying on, never "the same
+                # strategy failed again": the repeat guard asked a question, the lead (calls used
+                # up) escalated to Victor, and a session the context guard had just handed off
+                # stopped. No question: the next session gets the normal continuation prompt.
+                self.store.event(pid, tid, "repeat_guard_skipped", detail={
+                    "why": "free continuation (handoff / infra / operator reset)"})
+                self.store.x("UPDATE decisions SET status='withdrawn' WHERE decision_id=? AND "
+                             "status='open'", (a["decision"],))
+                self.store.event(pid, tid, "decision_withdrawn", detail={
+                    "decision_id": a["decision"], "by": "engine",
+                    "reason": "a free continuation is not a repeat"})
+                a = None
             if a and a.get("decision"):
                 self._lc_wait(P, t, [a["decision"]], "findings repeat with no materially "
                               "different strategy (adviser consulted at most once)", S.READY)
