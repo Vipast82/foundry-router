@@ -1054,7 +1054,7 @@ def test_quota_and_readiness_deferral_wait_without_paid_calls_then_resume(tmp_pa
         raise FoundryError("helper admission: 503")
     ff.admission[LEAD] = admission_down
     e = make_game(tmp_path, primary_script(log, good_when=None,
-                                           status_first="provider quota exhausted (429)"),
+                                           status_first="provider subscription window used up"),
                   lead=lambda ctx: lead_reply({
                       "classification": "provider_quota",
                       "hypothesis": "The subscription quota window is exhausted until reset.",

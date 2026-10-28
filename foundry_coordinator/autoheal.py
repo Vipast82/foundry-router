@@ -40,13 +40,24 @@ from typing import Optional
 from . import states as S
 from .automation import get as auto_get
 
+# a number followed by a unit is a quantity, not a status code
+_NOT_A_QUANTITY = (r"(?!\s*(?:ms|s|secs?|seconds?|milliseconds?|m|mins?|minutes?|h|hours?|"
+                   r"tokens?|bytes?|kb|mb|gb|lines?|files?|%)\b)")
 # known infrastructure signatures (01_issue_audit.md F10) -> name
 INFRA_SIGNATURES = (
     ("kilo_not_admitted", re.compile(r"did not admit the prompt|prompt_not_admitted", re.I)),
     ("kilo_aborted", re.compile(r"MessageAbortedError|aborted every turn", re.I)),
-    ("backend_5xx", re.compile(r"\b(?:HTTP\s*)?5(?:00|02|03|04)\b|Bad Gateway|Service "
-                               r"Unavailable|Gateway Time-?out", re.I)),
-    ("connection", re.compile(r"ECONNREFUSED|ECONNRESET|connection (?:refused|reset|aborted)|"
+    # Kilo sat in "retry" (router or model outage) until the coordinator stopped it
+    ("kilo_retry", re.compile(r"kept retrying the model call", re.I)),
+    # a status code, never a quantity ("500 ms", "took 503 seconds", "504 tokens")
+    ("backend_5xx", re.compile(r"\b(?:HTTP\s*)?5(?:00|02|03|04)\b" + _NOT_A_QUANTITY +
+                               r"|Bad Gateway|Service Unavailable|Gateway Time-?out", re.I)),
+    ("rate_limit", re.compile(r"\b429\b" + _NOT_A_QUANTITY + r"|rate[ -]limit(?:ed| exceeded| reached)|"
+                              r"rate_limit(?:_error|_exceeded)|RateLimitError|too many "
+                              r"requests|quota (?:exceeded|exhausted)|exceeded (?:your )?"
+                              r"(?:current )?quota|insufficient_quota", re.I)),
+    ("connection", re.compile(r"ECONNREFUSED|ECONNRESET|ETIMEDOUT|ENOTFOUND|EAI_AGAIN|"
+                              r"socket hang up|fetch failed|connection (?:refused|reset|aborted)|"
                               r"timed out connecting|could not connect", re.I)),
     # the Studio plugin is not connected to a running Rojo (a person would click Connect)
     ("rojo_connect", re.compile(r"Rojo\s*(?:→|->|>|-)\s*Connect|rojo[^.\n]{0,40}plugin[^.\n]{0,40}"
@@ -62,7 +73,8 @@ INFRA_SIGNATURES = (
     ("python_path", re.compile(r"No module named '?foundry_coordinator|foundry_coordinator"
                                r"[^.\n]{0,30}not importable", re.I)),
     ("context_overflow", re.compile(r"ContextOverflowError|Compaction exhausted|context "
-                                    r"(?:window )?(?:exceeded|overflow)", re.I)),
+                                    r"(?:window )?(?:exceeded|overflow)|exceeds the available "
+                                    r"context size", re.I)),
     ("kilo_auth", re.compile(r"Kilo[^.\n]{0,40}\b401\b", re.I)),
 )
 # stop classes whose blocker is the gate / check tooling, not the code

@@ -1452,9 +1452,10 @@ class LeadManager:
                                   f"'authorize_attempts')", tuple(ids)):
                 d = _uj(a.get("detail"), {}) or {}
                 if a["kind"] == "lead_call":
-                    # a call counts once it may have been sent (charged before the prompt)
-                    if d.get("phase") not in (None, "creating", "created", "bound") or \
-                            a["status"] in ("done", "uncertain"):
+                    # a call counts once it may have been sent (charged before the prompt);
+                    # one that died on infrastructure never counts (C, 2026-10-28)
+                    if (d.get("phase") not in (None, "creating", "created", "bound") or
+                            a["status"] in ("done", "uncertain")) and not d.get("infra"):
                         out["lead_calls"] += 1
                 else:
                     out["extra_attempts"] += int(d.get("n") or 0)
@@ -1988,10 +1989,21 @@ class LeadManager:
             return {"status": "pending"}
         # poll
         prompt_ts = float(d.get("prompt_ts") or d.get("prompting_ts") or self.clock())
+        abort_s = self._infra_abort_seconds(P)
         try:
             st = client.state(sid, directory=directory, since_ts=prompt_ts)
         except Exception as e:                                   # noqa: BLE001
+            # Kilo unreachable: pending, but not forever (no timeout runs while it is)
+            now = self.clock()
+            since = float(d.get("poll_error_since") or 0)
+            if not since:
+                self._upd(key, poll_error_since=now)
+            elif abort_s and now - since >= abort_s:
+                return self._infra_defer(P, case, key, sid, directory,
+                                         f"Kilo unreachable for {int(now - since)} s: {e}")
             return {"status": "pending", "error": str(e)}
+        if d.get("poll_error_since"):
+            d = self._upd(key, poll_error_since=0)["detail"]
         now = self.clock()
         if st.status == "busy":
             if st.denial and st.denial.get("category") in ("budget", "pause", "route"):
@@ -2000,6 +2012,19 @@ class LeadManager:
                 self._end_session(P, key, "refused")
                 return {"status": "deferred", "reason": f"Foundry refused the lead call "
                         f"({st.denial.get('category')})", "retry": st.denial.get("retry_after")}
+            cw0 = d.get("ctx_wrapup") or {}
+            if cw0.get("stage") == "aborted" and (st.unanswered or getattr(st, "stalled", False)):
+                # our context stop ended the turn and Kilo runs nothing (no abort message)
+                return self._lead_wrapup_prompt(P, case, key, sid, directory, persona, agent,
+                                                cw0)
+            # C: Kilo "retry" (router or model outage) or a turn Kilo no longer runs
+            # (dead session): an infra wait, never a counted call
+            dead = self._stall(key, d, st, now, abort_s)
+            if dead:
+                return self._infra_defer(P, case, key, sid, directory, dead)
+            wrap = self._lead_context_guard(P, case, key, d, sid, persona, directory, now)
+            if wrap is not None:
+                return wrap
             if now - prompt_ts > timeout_s:
                 self._abort(P, sid, directory)
                 self._upd(key, status="failed", result=f"timeout after {int(timeout_s / 60)} min")
@@ -2021,14 +2046,207 @@ class LeadManager:
             self._act(case, "session_request_refused", result=_cut(q.get("text") or "", 300),
                       detail={"op_key": key, "kind": q.get("kind")})
             return {"status": "pending"}
+        if d.get("retry_since") or d.get("stall_since"):
+            d = self._upd(key, retry_since=0, stall_since=0)["detail"]
+        from .autoheal import infra_signature
+        denied = st.denial and st.denial.get("category") in ("budget", "pause", "route")
+        sig = "" if denied else ("session_missing" if st.status == "missing" else
+                                 infra_signature(st.error) if st.status == "error" else "")
+        cw = d.get("ctx_wrapup") or {}
+        if cw.get("stage") == "aborted" and st.status != "missing" and \
+                not (st.status == "error" and sig and sig != "kilo_aborted"):
+            # the coordinator's own context stop ended the turn: one wrap-up prompt
+            return self._lead_wrapup_prompt(P, case, key, sid, directory, persona, agent, cw)
+        if sig:
+            # a dead lead session (Kilo lost it, or it died on infrastructure, e.g.
+            # ContextOverflowError) while the coordinator still had it running
+            return self._infra_defer(P, case, key, sid, directory,
+                                     f"dead lead session ({sig}): session {st.status}"
+                                     + (f": {_cut(st.error, 300)}" if st.error else ""),
+                                     abort=False)
         if st.status in ("missing", "error"):
             self._upd(key, status="failed", result=f"session {st.status}: {_cut(st.error, 300)}")
             self._end_session(P, key, "lost" if st.status == "missing" else "error")
-            if st.denial and st.denial.get("category") in ("budget", "pause", "route"):
+            if denied:
                 return {"status": "deferred", "reason": f"Foundry refused the lead call "
                         f"({st.denial.get('category')})", "retry": st.denial.get("retry_after")}
             return {"status": "failed", "reason": f"session {st.status}"}
+        if cw.get("stage") in ("prompting", "prompted"):
+            rep, _err = parse_lead_report(st.final_text)
+            if rep is None:
+                # the wrap-up turn ended without a usable report: end the call and
+                # retry the case later with a fresh session (the call stays counted)
+                self._upd(key, status="failed", result="context wrap-up ended without a "
+                                                       "lead-report")
+                self._end_session(P, key, "context_handoff")
+                return {"status": "deferred", "retry": None,
+                        "reason": f"the lead session reached {cw.get('context')} context "
+                                  f"tokens and wrapped up without a report"}
         return {"status": "idle", "state": st, "session_id": sid, "action": self._action(key)}
+
+    # -- C: infrastructure is never a counted lead call -------------------------------------
+
+    LEAD_WRAPUP_PROMPT = (
+        "The coordinator stopped your last step: this session's context is at {ctx:,} tokens "
+        "and the next large tool result would overflow it. Do NOT investigate further. End "
+        "this turn now with your " + REPORT_FENCE + " block: your best diagnosis from what you "
+        "have found so far (classification, hypothesis, evidence and the action). If you "
+        "changed or committed anything, say exactly what.")
+
+    MAX_MISMATCH_DEFERRALS = 3
+
+    def _mismatch_defer(self, P, case: dict, s: dict, key: str, detail: str, back: str):
+        """A served-model mismatch is almost always a router failover (the primary
+        route was down for a moment): the discarded call is refunded like any infra
+        failure and the case re-checks readiness after the backoff and retries,
+        instead of asking Victor. Only MAX_MISMATCH_DEFERRALS mismatches in a row
+        reach him (None = escalate)."""
+        v = case.get("validation") or {}
+        n = int(v.get("served_mismatch_deferrals") or 0)
+        if n >= self.MAX_MISMATCH_DEFERRALS:
+            return None
+        if "local or unknown source" in detail and "not routes of" not in detail:
+            return None                  # the chain itself is misconfigured: no retry helps
+        self._infra_refund(case, key, f"served-model mismatch: {detail}")
+        self._merge_validation(case["case_id"], served_mismatch_deferrals=n + 1)
+        return self._defer(P, self.case(case["case_id"]), s,
+                           f"served-model mismatch (router failover?): {detail}; the call "
+                           f"is not counted and the case re-checks and retries "
+                           f"({n + 1}/{self.MAX_MISMATCH_DEFERRALS})", None, back=back)
+
+    @staticmethod
+    def _infra_abort_seconds(P) -> int:
+        try:
+            return int(P.profile.limit("infra_retry_abort_seconds", 300) or 0)
+        except Exception:                                        # noqa: BLE001
+            return 300
+
+    @staticmethod
+    def _charged(a: dict) -> bool:
+        """The call's counters were charged (prompt possibly sent): lifetime_calls'
+        rule."""
+        d = (a or {}).get("detail") or {}
+        return d.get("phase") not in (None, "creating", "created", "bound") or \
+            (a or {}).get("status") in ("done", "uncertain")
+
+    def _infra_refund(self, case: dict, key: str, why: str) -> None:
+        """An infrastructure failure costs no diagnosis and no paid call: the
+        counters charged before the prompt are given back once, and the action is
+        marked `infra` (task_totals / lifetime_calls / the hard cap skip it)."""
+        a = self._action(key)
+        if not a or (a.get("detail") or {}).get("infra"):
+            return
+        with self.store.tx():
+            if self._charged(a):
+                c = self.case(case["case_id"])
+                counters = dict(c["counters"])
+                counters["quota_calls"] = max(0, int(counters.get("quota_calls", 0)) - 1)
+                if a["kind"] == "lead_call":
+                    counters["diagnoses"] = max(0, int(counters.get("diagnoses", 0)) - 1)
+                self._save(case["case_id"], counters=counters)
+            self._upd(key, infra=_cut(why, 300))
+
+    def _infra_defer(self, P, case: dict, key: str, sid: str, directory: str, why: str,
+                     abort: bool = True) -> dict:
+        """End the call as an infra wait: (abort,) refund, end the session, defer."""
+        if abort:
+            self._abort(P, sid, directory)
+        self._infra_refund(case, key, why)
+        self._upd(key, status="failed", result=_cut(f"infra: {why}", 500))
+        self._end_session(P, key, "infra")
+        self._act(case, "infra_wait", result=_cut(why, 500), detail={"op_key": key})
+        return {"status": "deferred", "reason": _cut(f"infrastructure: {why}", 300),
+                "retry": None, "infra": True}
+
+    def _stall(self, key: str, d: dict, st, now: float, abort_s: int) -> str:
+        """Why the busy session is dead ('' = it is not): Kilo kept the call in
+        "retry" (router or model outage), or reports a turn it no longer runs (a
+        stalled transcript or a compaction with no continuation), continuously for
+        [limits] infra_retry_abort_seconds."""
+        retry = bool(getattr(st, "retry", False))
+        stalled = bool(getattr(st, "stalled", False) or getattr(st, "compaction", None))
+        upd = {}
+        for name, on in (("retry_since", retry), ("stall_since", stalled)):
+            if on and not d.get(name):
+                upd[name] = now
+            elif not on and d.get(name):
+                upd[name] = 0
+        if upd:
+            d = self._upd(key, **upd)["detail"]
+        if not abort_s:
+            return ""
+        if retry and now - float(d.get("retry_since") or now) >= abort_s:
+            return (f"Kilo kept retrying the model call for "
+                    f"{int(now - float(d['retry_since']))} s (router or model outage)"
+                    + (f": {_cut(st.error, 200)}" if st.error else ""))
+        if stalled and now - float(d.get("stall_since") or now) >= abort_s:
+            return (f"Kilo has not run the session's turn for "
+                    f"{int(now - float(d['stall_since']))} s (dead session"
+                    + (": compacted with no continuation" if st.compaction else "") + ")")
+        return ""
+
+    def _lead_context_guard(self, P, case: dict, key: str, d: dict, sid: str, persona: str,
+                            directory: str, now: float) -> Optional[dict]:
+        """The implementer's busy-session context guard (engine._context_guard) for a
+        lead / repair session: at the wrap-up line the turn is stopped and one prompt
+        asks for the report now; past the hard stop while wrapping up, the call ends
+        as deferred. None = nothing to do this poll."""
+        from . import context_window as CW
+        try:
+            every = float(P.profile.limit("context_guard_seconds", 30) or 0)
+        except Exception:                                        # noqa: BLE001
+            every = 30.0
+        if not every:
+            return None
+        last = self.__dict__.setdefault("_ctx_guard_ts", {})
+        if now - last.get(key, -1e18) < every:
+            return None
+        last[key] = now
+        try:
+            wrap = CW.wrapup(P, persona)
+            if not wrap:
+                return None
+            ctx = CW.context_of(P.client.transcript(sid, directory=directory))
+        except Exception:                                        # noqa: BLE001
+            return None
+        if ctx is None:
+            return None
+        cw = d.get("ctx_wrapup") or {}
+        if cw:
+            if cw.get("stage") in ("prompting", "prompted") and ctx >= CW.hard_stop(P, persona):
+                self._abort(P, sid, directory)
+                self._upd(key, status="failed", result=f"context hard stop at {ctx} tokens "
+                                                       f"while wrapping up")
+                self._end_session(P, key, "context_handoff")
+                return {"status": "deferred", "retry": None,
+                        "reason": f"the lead session reached {ctx} context tokens while "
+                                  f"wrapping up and was stopped"}
+            return None
+        if ctx < wrap:
+            return None
+        self._abort(P, sid, directory)
+        self._upd(key, ctx_wrapup={"stage": "aborted", "context": ctx, "threshold": wrap,
+                                   "ts": now})
+        self._act(case, "context_wrapup", result=f"context at {ctx:,} tokens (stop line "
+                                                 f"{wrap:,}): the turn was stopped for a report",
+                  detail={"op_key": key, "context": ctx, "threshold": wrap})
+        return {"status": "pending"}
+
+    def _lead_wrapup_prompt(self, P, case: dict, key: str, sid: str, directory: str,
+                            persona: str, agent: str, cw: dict) -> dict:
+        """One wrap-up prompt to the stopped lead session (journaled before it is
+        sent; never resent)."""
+        self._upd(key, ctx_wrapup={**cw, "stage": "prompting"})
+        try:
+            P.client.prompt(sid, self.LEAD_WRAPUP_PROMPT.format(ctx=int(cw.get("context") or 0)),
+                            directory=directory, persona=persona, agent=agent)
+        except Exception as e:                                   # noqa: BLE001
+            self._upd(key, status="failed", result=f"context wrap-up prompt failed: {e}"[:500])
+            self._end_session(P, key, "context_handoff")
+            return {"status": "deferred", "retry": None,
+                    "reason": f"context wrap-up prompt failed: {e}"[:300]}
+        self._upd(key, ctx_wrapup={**cw, "stage": "prompted"}, prompt_ts=self.clock())
+        return {"status": "pending"}
 
     # -- the session guard: workspace lock + before/after snapshots -------------------------
 
@@ -2419,13 +2637,18 @@ class LeadManager:
             self._upd(key, status="failed", result=f"served-model check {verdict}: {detail} "
                       f"(report discarded, no fallback)")
             self._end_session(P, key, f"served_model_{verdict}")
+            deferred = self._mismatch_defer(P, case, s, key, detail, back="DIAGNOSING")
+            if deferred is not None:
+                return deferred
             return self._escalate(
-                P, t, case, "served_model_mismatch",
+                P, t, self.case(case["case_id"]), "served_model_mismatch",
                 f"The lead persona {s['persona']} was {detail}. The call was aborted and "
                 f"its report discarded (fail closed, no fallback). Fix the persona's route "
                 f"chain so it is served only by {s['expected_models']}, or change "
                 f"[lead_manager] expected_models; should the case then retry?")
         self._save(case["case_id"], lead_model=",".join(models))
+        if (case.get("validation") or {}).get("served_mismatch_deferrals"):
+            self._merge_validation(case["case_id"], served_mismatch_deferrals=None)
         rep, err = parse_lead_report(st.final_text)
         errors = [err] if err else []
         clean = None
@@ -2499,8 +2722,8 @@ class LeadManager:
                               "recovery_cases c ON a.case_id=c.case_id WHERE c.project_id=? AND "
                               "c.task_id=? AND a.kind='lead_call'", (project_id, task_id)):
             d = _uj(a.get("detail"), {}) or {}
-            if d.get("phase") not in (None, "creating", "created", "bound") or \
-                    a["status"] in ("done", "uncertain"):
+            if (d.get("phase") not in (None, "creating", "created", "bound") or
+                    a["status"] in ("done", "uncertain")) and not d.get("infra"):
                 n += 1
         return n
 
@@ -2680,7 +2903,11 @@ class LeadManager:
                 f"{b['name']}: {b['detail']}" for b in transient)[:400], None, back=back)
         if bad and back == "DIAGNOSING":
             return self._readiness_failed(P, t, case, bad)
+        if bad and back == "REPAIRING":
+            return self._readiness_failed(P, t, case, bad)
         self._act(case, "recheck", result=f"deterministic recheck passed; -> {back}")
+        if back == "REPAIRING":
+            return self._save(case["case_id"], state="REPAIRING", next_check_ts=None)
         if back == "RESUMING":
             pa = dict(case.get("proposed_action") or {})
             pa.setdefault("kind", "wait")
@@ -2787,7 +3014,8 @@ class LeadManager:
             return self.case(case["case_id"])
         path = rep.get("path") or ""
         if phase == "session":
-            key = f"repair:{case['case_id']}:{n}:session"
+            tries = int(rep.get("session_try") or 0)      # C: a retry after an infra wait
+            key = f"repair:{case['case_id']}:{n}:session" + (f":{tries}" if tries else "")
             if self._action(key) is None and self._bound_exhausted(case, s, "quota_calls"):
                 return self._escalate_bound(P, t, case, "quota_calls")
             agent = s["repair_agent"] or (P.profile.client or {}).get("agent") or "code"
@@ -2802,6 +3030,13 @@ class LeadManager:
             case = self.case(case["case_id"])
             if r["status"] == "pending":
                 return case
+            if r["status"] == "deferred" and r.get("infra"):
+                # the session died on infrastructure: the same repair runs again in a
+                # fresh session after the backoff (not counted, not a rejected candidate)
+                self._merge_validation(case["case_id"],
+                                       repair={**rep, "session_try": tries + 1})
+                return self._defer(P, self.case(case["case_id"]), s, r["reason"],
+                                   r.get("retry"), back="REPAIRING")
             if r["status"] in ("failed", "deferred"):
                 return self._reject(P, t, case, s, [f"repair session: {r.get('reason')}"],
                                     "session")
@@ -2818,7 +3053,15 @@ class LeadManager:
                 self._abort(P, r["session_id"], path)
                 self._upd(key, status="failed", result=f"served-model mismatch: {detail}")
                 self._end_session(P, key, "served_model_mismatch")
-                return self._escalate(P, t, case, "served_model_mismatch",
+                # its work is discarded: the case goes back to diagnosing after the backoff
+                # (a router failover is not Victor's question); repeated mismatches escalate
+                self._merge_validation(case["case_id"], repair=None, last_rejection={
+                    "phase": "session", "reasons": [f"served-model mismatch: {detail}"]})
+                deferred = self._mismatch_defer(P, self.case(case["case_id"]), s, key, detail,
+                                                back="DIAGNOSING")
+                if deferred is not None:
+                    return deferred
+                return self._escalate(P, t, self.case(case["case_id"]), "served_model_mismatch",
                                       f"The coordinator repair session was {detail}; its work "
                                       f"is discarded (fail closed). Fix the lead persona's route "
                                       f"chain; should the case retry?")

@@ -56,6 +56,27 @@ def check_endpoint(url: str, timeout: float = 3.0) -> str:
         return f"{type(e).__name__}: {e}"[:200]
 
 
+def router_probe(P) -> list[str]:
+    """["router=<base>/health"] when the project talks to a Foundry router (the
+    profile's [foundry] url, through the project's Foundry client) and
+    preflight_endpoints does not name a router already. Every model call of a
+    session goes through the router: a session started while it is down only
+    dies on its first call."""
+    if not str(((getattr(P.profile, "foundry", None) or {}).get("url")) or "").strip():
+        return []
+    url = str(getattr(getattr(P, "foundry", None), "url", "") or "").strip()
+    if not url.startswith(("http://", "https://")):
+        return []
+    named = {_endpoint(s)[0].lower() for s in auto_get(P, "preflight_endpoints") or []}
+    if named & {"router", "foundry"}:
+        return []
+    base = url.rstrip("/")
+    for tail in ("/v1", "/api"):
+        if base.endswith(tail):
+            base = base[:-len(tail)]
+    return [f"router={base}/health"]
+
+
 def preflight(c, P, persona: str) -> list[dict]:
     """The failing infra checks ([] = ready). Cached for CACHE_SECONDS per project
     so a waiting task doesn't re-probe every tick."""
@@ -84,7 +105,7 @@ def preflight(c, P, persona: str) -> list[dict]:
             why = f"Kilo config unreadable: {e}"
         if why:
             bad.append({"name": "kilo.persona", "detail": str(why)[:300]})
-    for spec in auto_get(P, "preflight_endpoints") or []:
+    for spec in [*router_probe(P), *(auto_get(P, "preflight_endpoints") or [])]:
         name, url = _endpoint(spec)
         why = check_endpoint(url)
         if why:
@@ -193,3 +214,139 @@ def over_ceiling(P, s, rep: dict, persona: str = "") -> Optional[str]:
     return (f"context ceiling: the previous session reached {int(ctx)} tokens (ceiling "
             f"{ceil}) and was handed off; continue from the committed state and the plan's "
             f"checklist/NEXT line" + (f". Its last report: {summary}" if summary else ""))
+
+
+# -- C (2026-10-28): outages are infra waits, not failures --------------------------------
+
+ACTIVE_STATES = ("IMPLEMENTING", "VERIFYING", "REVIEWING", "CLOSING")
+
+
+def active_seconds(c, t: dict, now: Optional[float] = None) -> float:
+    """Seconds the task spent in ACTIVE_STATES since its started_ts, summed from its
+    transitions (their timestamps are wall time). Idle, parked, paused, blocked and
+    waiting time never counts against max_task_minutes."""
+    import time as _time
+    started = float(t.get("started_ts") or 0)
+    rows = c.store.history(t["project_id"], t["task_id"])
+    end_now = float(now if now is not None else _time.time())
+    total = 0.0
+    for i, r in enumerate(rows):
+        if r["to_state"] not in ACTIVE_STATES:
+            continue
+        a = float(r["ts"])
+        b = float(rows[i + 1]["ts"]) if i + 1 < len(rows) else end_now
+        a = max(a, started)
+        if b > a:
+            total += b - a
+    return total
+
+
+def kilo_retry(c, P, t: dict, sid: str, s, phase: str) -> bool:
+    """Kilo reports the session in "retry" (its provider call keeps failing: the
+    router or the model is down). The start of a continuous retry is recorded per
+    session (task data kilo_retry); after [limits] infra_retry_abort_seconds (300;
+    0 = never) the session is stopped and the task waits like any infra failure:
+    free, with the doubling infra backoff. True = stopped this poll."""
+    pid, tid = P.id, t["task_id"]
+    rs = (t.get("data") or {}).get("kilo_retry") or {}
+    if not getattr(s, "retry", False):
+        if rs:
+            c.store.merge_data(pid, tid, kilo_retry=None)
+        return False
+    now = c.clock()
+    err = str(getattr(s, "error", "") or "")[:300]
+    if rs.get("session_id") != sid:
+        c.store.merge_data(pid, tid, kilo_retry={"session_id": sid, "since": now,
+                                                 "error": err})
+        c.store.event(pid, tid, "kilo_retry", session_id=sid,
+                      detail={"phase": phase, "error": err})
+        return False
+    limit = int(P.profile.limit("infra_retry_abort_seconds", 300) or 0)
+    held = now - float(rs.get("since") or now)
+    if not limit or held < limit:
+        return False
+    why = (f"Kilo kept retrying the model call for {int(held)} s (router or model outage)"
+           + (f": {err}" if err else ""))
+    P.client.abort(sid, directory=P.profile.workspace)
+    c._end_session(P, sid, "infra_retry")
+    c.store.merge_data(pid, tid, kilo_retry=None)
+    c.store.event(pid, tid, "kilo_retry_abort", session_id=sid,
+                  detail={"phase": phase, "seconds": int(held), "error": err})
+    if phase == "closeout":
+        # the CLOSE session restarts after the backoff; no closeout attempt is used
+        c._release_session(P, t)
+        c.store.merge_data(pid, tid, closeout_session=None, closeout_done=None)
+        w = _schedule(c, P, t, why, "closeout")
+        c._note(P, t, f"{why}; a fresh closeout session starts in "
+                      f"{int(w['retry_at'] - c.clock())} s (no attempt is used)")
+        return True
+    c._session_failed(P, t, why, phase, free=True)
+    return True
+
+
+def closeout_waiting(c, P, t: dict) -> Optional[str]:
+    """The note while a closeout infra wait (kilo_retry) is not due yet, else None
+    (a due wait is cleared)."""
+    w = ((t.get("data") or {}).get("infra_wait") or {})
+    if w.get("kind") != "closeout":
+        return None
+    note = waiting(c, P, t)
+    if note is None:
+        c.store.merge_data(P.id, t["task_id"], infra_wait=None)
+    return note
+
+
+# -- push retry: a failed push is an infra wait in CLOSING, never a finding ----------------
+
+PUBLISH_CHECK = "coordinator.published"
+
+
+def push_failed_only(results: list) -> bool:
+    """Every required result passed except the coordinator's own push."""
+    bad = [r for r in results if r.required and r.result != "PASS"]
+    return bool(bad) and all(r.check == PUBLISH_CHECK for r in bad)
+
+
+def push_wait(c, P, t: dict, head: str, results: list, why: str) -> dict:
+    """Schedule the next push of `head` (doubling infra backoff, capped at 15 min;
+    an operator notice after infra_retry_max tries, and it keeps retrying). The
+    passing closeout results are kept so the retry needs no checks again."""
+    from dataclasses import asdict
+    data = c.store.task(P.id, t["task_id"])["data"] or {}
+    pw = dict(data.get("push_wait") or {})
+    if pw.get("head") != head:
+        pw = {"head": head, "n": 0, "since": c.clock()}
+    n = int(pw.get("n") or 0)
+    delay = min(MAX_BACKOFF, max(1, int(auto_get(P, "infra_backoff_seconds") or 0)) * (2 ** n))
+    keep = []
+    for r in results:
+        if r.check == PUBLISH_CHECK:
+            continue
+        d = asdict(r)
+        d["detail"] = str(d.get("detail") or "")[:500]
+        keep.append(d)
+    pw.update(n=n + 1, retry_at=c.clock() + delay, why=why[:500], results=keep)
+    lim = int(auto_get(P, "infra_retry_max") or 0)
+    if lim and n + 1 >= lim and not pw.get("noticed"):
+        pw["noticed"] = True
+        c.store.event(P.id, t["task_id"], "operator_notice", detail={
+            "text": f"{t['task_id']}: the push of {head[:12]} still fails after {n + 1} tries "
+                    f"({why[:200]}); the coordinator keeps retrying every "
+                    f"{MAX_BACKOFF // 60} min at most. Closeout passed; nothing else waits.",
+            "kind": "push"})
+    c.store.merge_data(P.id, t["task_id"], push_wait=pw)
+    c.store.event(P.id, t["task_id"], "push_wait", detail={
+        "head": head, "n": n + 1, "delay_s": delay, "why": why[:300]})
+    return pw
+
+
+def push_results(pw: dict) -> list:
+    """The kept closeout results of a push wait, as VerificationResults."""
+    from .adapters.base import VerificationResult
+    out = []
+    for d in pw.get("results") or []:
+        try:
+            out.append(VerificationResult(**d))
+        except TypeError:
+            continue
+    return out

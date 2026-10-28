@@ -64,6 +64,7 @@ LIFECYCLE_DEFAULTS = {"enabled": False, "evidence": True, "obligations": True, "
 
 # [lead_manager] (v0.123): the last automated recovery tier (lead.py). Off by
 # default; disabled means the engine behaves exactly as without it.
+LEAD_WRITE_TIMEOUT_MINUTES = 90            # lead_timeout_minutes default with write_access
 LEAD_MANAGER_DEFAULTS = {
     "enabled": False,
     "persona": "Foundry-Kilo-Lead-Manager",
@@ -88,7 +89,7 @@ LEAD_MANAGER_DEFAULTS = {
     "max_extra_attempts_per_task": 2,
     "max_upgrade_minutes": 120,               # UPGRADING longer than this -> Victor
     "max_resuming_minutes": 60,               # RESUMING the engine never applied -> Victor
-    "lead_timeout_minutes": 45,
+    "lead_timeout_minutes": 45,               # 90 when write_access is on and this is unset
     "extra_attempts": 1,
     "defer_seconds": 300,                     # first DEFERRED backoff (doubles, capped)
     "acceptance_tests": [],                   # game globs a lead assignment may only change
@@ -350,6 +351,10 @@ def lifecycle_table(path: str, raw) -> dict:
 
 def lead_manager_table(path: str, raw) -> dict:
     out = _typed_table("lead_manager", raw, LEAD_MANAGER_DEFAULTS, path, nonempty_str=False)
+    if out.get("write_access") and not (isinstance(raw, dict) and "lead_timeout_minutes" in raw):
+        # a write-access lead edits, tests and commits: its unset timeout is 90 min
+        out["lead_timeout_minutes"] = max(int(out["lead_timeout_minutes"]),
+                                          LEAD_WRITE_TIMEOUT_MINUTES)
     if not out["expected_models"]:
         raise SettingsError(f"{path}: lead_manager.expected_models must name the route chain "
                             f"(first = the primary route)", "lead_manager.expected_models")
@@ -606,7 +611,7 @@ _LM_DESC = {
     "max_extra_attempts_per_task": "Delegated extra attempts per task.",
     "max_upgrade_minutes": "UPGRADING longer than this goes to the operator.",
     "max_resuming_minutes": "RESUMING the engine never applied goes to the operator.",
-    "lead_timeout_minutes": "Lead session timeout.",
+    "lead_timeout_minutes": "Lead session timeout (default 90 with write_access).",
     "extra_attempts": "Ordinary attempts a lead game assignment may use.",
     "defer_seconds": "First DEFERRED backoff (doubles, capped at 1 h).",
     "acceptance_tests": "Game test globs an assignment must declare to change.",
@@ -943,7 +948,11 @@ FIELDS: list[Field] = [
     F("limits.max_review_calls", "int", 4, "Review calls per task.", "limits", C, min=1),
     F("limits.max_closeout_attempts", "int", 2, "Closeout attempts.", "limits", C, min=1),
     F("limits.session_timeout_minutes", "int", 240, "Session timeout.", "limits", C, min=1),
-    F("limits.max_task_minutes", "int", 1440, "Wall time per task.", "limits", C, min=1),
+    F("limits.max_task_minutes", "int", 1440, "Active time per task (implementing, "
+      "verifying, reviewing, closing; idle and parked time not counted).", "limits", C, min=1),
+    F("limits.infra_retry_abort_seconds", "int", 300, "Continuous Kilo retry (router or "
+      "model outage) before the session is stopped as a free infra wait (0 = never).",
+      "limits", C, min=0),
     F("limits.auto_resume_after_budget_reset", "bool", True, "Resume after a budget window "
       "resets.", "limits", C),
     F("limits.live_checkpoint_seconds", "int", 120, "Kilo checkpoint refresh (0 = off).",

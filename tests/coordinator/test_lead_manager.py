@@ -437,18 +437,30 @@ def test_bounds_exhausted_reaches_victor_with_precise_question(env):
 
 
 def test_served_model_mismatch_fails_closed(env):
+    """C (2026-10-28): a mismatch (a router failover) still discards the report (fail
+    closed, never re-routed within the call), but defers and retries uncounted; only
+    MAX_MISMATCH_DEFERRALS mismatches in a row reach Victor."""
     env["ff"].default_served = [OPUS, "qwen-local"]
     env["replies"].append(reply(report()))
     case = drive(env, open_case(env), state_is("NEEDS_VICTOR", "RESUMING", "DEFERRED"))
-    assert case["state"] == "NEEDS_VICTOR"
+    assert case["state"] == "DEFERRED"
     assert case["proposed_action"] == {}                      # the report was discarded
     acts = env["lm"].actions(case["case_id"])
     sm = next(a for a in acts if a["kind"] == "served_model")
     assert sm["status"] == "failed" and sm["detail"]["verdict"] == "mismatch"
     call = next(a for a in acts if a["kind"] == "lead_call")
     assert call["status"] == "failed" and "no fallback" in call["result"]
+    assert call["detail"]["infra"]                            # not counted
+    assert case["counters"]["diagnoses"] == 0 and case["counters"]["quota_calls"] == 0
     assert env["P"].client.starts[0]["session_id"] in env["fake"].aborts
     assert len(lead_prompts(env)) == 1 and len(env["P"].client.starts) == 1   # never re-routed
+    for _ in range(LeadManager.MAX_MISMATCH_DEFERRALS):
+        env["replies"].append(reply(report()))
+        env["lm"]._save(case["case_id"], next_check_ts=time.time() - 1)
+        case = drive(env, case, lambda k: k["state"] == "NEEDS_VICTOR" or (
+            k["state"] == "DEFERRED" and float(k.get("next_check_ts") or 0) > time.time()))
+    assert case["state"] == "NEEDS_VICTOR"
+    assert len(env["P"].client.starts) == LeadManager.MAX_MISMATCH_DEFERRALS + 1
     assert "qwen-local" in env["c"].obligations.decision(case["decision_id"])["question"]
 
 
@@ -931,7 +943,7 @@ def test_invalid_report_session_is_ended(env):
 def test_served_model_mismatch_session_is_ended(env):
     env["ff"].default_served = [OPUS, "qwen-local"]
     env["replies"].append(reply(report()))
-    case = drive(env, open_case(env), state_is("NEEDS_VICTOR"))
+    case = drive(env, open_case(env), state_is("NEEDS_VICTOR", "DEFERRED"))
     sid = env["P"].client.starts[0]["session_id"]
     assert env["ff"].ended == [(sid, "served_model_mismatch")]
     assert _ended(env, sid)[:2] == ("ended", "served_model_mismatch")
@@ -1176,7 +1188,9 @@ def test_served_backend_must_be_a_chain_route(env, mode):
         env["lm"].readiness = lambda P, fresh=False: [
             r for r in LeadManager.readiness(env["lm"], P, fresh) if r["name"] != "no_local_route"]
     case = drive(env, case, state_is("NEEDS_VICTOR", "RESUMING", "DEFERRED"))
-    assert case["state"] == "NEEDS_VICTOR" and case["proposed_action"] == {}
+    # a wrong backend is a router failover: deferred, uncounted (C, 2026-10-28)
+    assert case["state"] == ("DEFERRED" if mode == "wrong_backend" else "NEEDS_VICTOR")
+    assert case["proposed_action"] == {}
     sm = next(a for a in env["lm"].actions(case["case_id"]) if a["kind"] == "served_model")
     assert sm["detail"]["verdict"] == "mismatch"
 
