@@ -720,6 +720,20 @@ def create_app(config_path: Optional[Path] = None,
     app.add_middleware(ClientAuthMiddleware, get_config=lambda: config_store.config,
                        get_agent_tokens=lambda: dict(_rc._agent_tokens))
     app.add_middleware(RequestIdMiddleware)
+
+    @app.exception_handler(Exception)
+    async def _unhandled(request, exc):
+        """An admin-API crash answers JSON naming the exception, so a UI tab
+        shows what failed instead of a blank "failed to load:" (Starlette's
+        default is a bare text/plain "Internal Server Error")."""
+        from fastapi.responses import JSONResponse, PlainTextResponse
+        from .errors import describe_exception
+        if not request.url.path.startswith("/admin/api/"):
+            return PlainTextResponse("Internal Server Error", status_code=500)
+        return JSONResponse({"error": {"message": describe_exception(exc),
+                                       "type": type(exc).__name__, "code": "internal_error"}},
+                            status_code=500)
+
     @app.get("/health")
     async def health() -> dict:
         w = services.warmup

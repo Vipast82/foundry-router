@@ -1121,16 +1121,30 @@ async def work_scorecard(request: Request, project: str = "", task: str = "",
                            hours=max(0.0, min(float(hours), 24 * 365)), limit=limit)
 
 
+def _episode_card(r) -> dict:
+    """A stored episode card; a row that does not parse (an older Foundry cut
+    long cards mid-JSON) becomes a stub from its columns instead of a 500."""
+    from ..jsonfit import loads_or
+    d = loads_or(r["data"], None)
+    if isinstance(d, dict):
+        return d
+    return {"episode_id": r["episode_id"], "project_id": r["project_id"],
+            "task_id": r["task_id"], "kind": r["kind"], "status": r["status"],
+            "reasons": ["card_unreadable: re-push from the workstation"], "turns": []}
+
+
 @router.get("/admin/api/training")
 async def training_view(request: Request, project: str = "", status: str = ""):
     """Training data: Foundry's own capture status, and what the training
     pipeline reported (counts, gaps, datasets, episode summaries)."""
-    import json as _json
+    from ..jsonfit import loads_or
     svc = _svc(request)
     pipes = []
     for r in svc.db.query("SELECT * FROM training_status ORDER BY updated_ts DESC"):
-        d = _json.loads(r["data"] or "{}")
-        pipes.append({"pipeline_id": r["pipeline_id"], "updated_ts": r["updated_ts"], **d})
+        d = loads_or(r["data"], None)
+        if not isinstance(d, dict):              # one bad row must not blank the whole tab
+            d = {"error": "stored status does not parse; it is replaced on the next push"}
+        pipes.append({**d, "pipeline_id": r["pipeline_id"], "updated_ts": r["updated_ts"]})
     q, args = "SELECT * FROM training_episodes WHERE 1=1", []
     if project:
         q += " AND project_id=?"
@@ -1140,7 +1154,7 @@ async def training_view(request: Request, project: str = "", status: str = ""):
         args.append(status)
     eps = []
     for r in svc.db.query(q + " ORDER BY updated_ts DESC LIMIT 300", tuple(args)):
-        d = _json.loads(r["data"] or "{}")
+        d = _episode_card(r)
         eps.append({k: d.get(k) for k in ("episode_id", "project_id", "task_id", "kind", "status",
                                           "reasons", "split", "outcome", "sources", "turns",
                                           "summary")})
@@ -1248,15 +1262,23 @@ async def training_capture_download(request: Request, hours: float = 0, backend:
 @router.get("/admin/api/training/datasets")
 async def training_datasets(request: Request, project: str = ""):
     """Fine-tuning datasets uploaded by the training pipeline (newest first)."""
-    import json as _json
+    import os
+    from ..jsonfit import loads_or
     q, args = "SELECT * FROM training_datasets", ()
     if project:
         q, args = q + " WHERE project_id=?", (project,)
     out = []
     for r in _svc(request).db.query(q + " ORDER BY uploaded_ts DESC LIMIT 500", args):
-        m = _json.loads(r.pop("manifest") or "{}")
+        m = loads_or(r.pop("manifest"), None)
+        if not isinstance(m, dict):              # an older Foundry cut long manifests
+            try:
+                with open(os.path.join(r["path"], "manifest.json"), encoding="utf-8") as f:
+                    m = loads_or(f.read(), None)
+            except OSError:
+                m = None
+        m = m if isinstance(m, dict) else {}
         r["validation_ok"] = bool((m.get("validation") or {}).get("ok"))
-        r["episodes"] = len(m.get("episodes") or [])
+        r["episodes"] = m.get("episode_count") or len(m.get("episodes") or [])
         r["created"] = m.get("created")
         out.append(r)
     return {"datasets": out}
@@ -1280,12 +1302,11 @@ async def training_dataset_file(request: Request, dataset_id: str, name: str):
 
 @router.get("/admin/api/training/episodes/{episode_id}")
 async def training_episode(request: Request, episode_id: str):
-    import json as _json
-    rows = _svc(request).db.query("SELECT data FROM training_episodes WHERE episode_id=?",
+    rows = _svc(request).db.query("SELECT * FROM training_episodes WHERE episode_id=?",
                                   (episode_id,))
     if not rows:
         return JSONResponse({"error": "unknown episode"}, status_code=404)
-    return _json.loads(rows[0]["data"] or "{}")
+    return _episode_card(rows[0])
 
 
 @router.get("/admin/api/routes")
