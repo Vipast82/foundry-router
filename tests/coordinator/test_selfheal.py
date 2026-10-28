@@ -250,6 +250,26 @@ def test_locks_of_a_live_task_are_kept(tmp_path):
     assert selfheal.stale_locks(c, P) == [] and c.store.locks()
 
 
+def test_a_paused_task_with_an_idle_session_gives_up_its_locks(tmp_path):
+    """Replay 2026-10-28: paused GF-GATE1's idle session kept the main checkout locked,
+    so the prep queue never landed. A busy session keeps them; resume takes them back."""
+    c, P, clk, client, _, _ = game(tmp_path)
+    sid = client.start_session(directory=P.profile.workspace, title="x", persona="p",
+                               agent="code", metadata={}, permissions=[])
+    c.store.update_task("game", "T1", state=S.PAUSED, session_id=sid,
+                        resume_state=S.IMPLEMENTING)
+    c.store.merge_data("game", "T1", resume_session=sid, resume_action="continue")
+    c.store.acquire(c._workspace_locks(P), "game", "T1")
+    c.store.x("UPDATE locks SET acquired_ts=?", (time.time() - 3600,))
+    from types import SimpleNamespace
+    status = {"v": "busy"}
+    P.client.state = lambda *a, **k: SimpleNamespace(status=status["v"])
+    assert selfheal.stale_locks(c, P) == [] and c.store.locks()          # busy: keep
+    status["v"] = "idle"                                                 # idle: release
+    [act] = selfheal.stale_locks(c, P)
+    assert act["evidence"]["state"] == S.PAUSED and c.store.locks() == []
+
+
 def test_gate_runner_lock_with_a_dead_pid_is_released(tmp_path):
     from foundry_coordinator.autoheal import runner_lock_path
     c, P, clk, *_ = game(tmp_path)

@@ -2,6 +2,17 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.156.4 — a paused task with an idle session gives up its locks
+
+GF-GATE1, 2026-10-28 13:19: the task was paused and its session finished its turn, but the
+task kept the main-checkout lock. The prep queue waited on "main checkout in use by
+animaluprising/GF-GATE1" with 11 AU commits ready to land.
+
+- **Self-heal releases it.** The stale-lock rule now also frees the coordinator locks of a
+  PAUSED task whose session is not busy in Kilo (after `self_heal_stale_lock_minutes`).
+  Resume takes the locks back before it continues the session, as before. A busy session,
+  or Kilo being unreachable, keeps the locks.
+
 ## v0.156.3 — an operator fresh budget also refills the Lead's call cap
 
 GF-GATE1, 2026-10-28 12:57: the Lead's hard cap (`lead_hard_max_calls` = 12) counted every

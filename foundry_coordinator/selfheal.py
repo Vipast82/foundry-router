@@ -564,6 +564,24 @@ def _task_busy(c, P, t: dict) -> str:
     return ""
 
 
+def _paused_idle(c, P, t: dict) -> bool:
+    """A PAUSED task whose session finished its turn holds nothing: resume takes the
+    locks back (engine.resume re-acquires them before it continues the session).
+    2026-10-28: a paused GF-GATE1 kept the main-checkout lock for good after its session
+    went idle, so the prep queue never reached a safe point."""
+    if t["state"] != S.PAUSED:
+        return False
+    sid = (t.get("data") or {}).get("resume_session") or t.get("session_id")
+    if not sid:
+        return True
+    try:
+        st = P.client.state(sid, directory=c.tracks.project_for(P, t).profile.workspace,
+                            since_ts=0)
+    except Exception:                                            # noqa: BLE001
+        return False                 # Kilo unreachable: unknown, keep the locks
+    return st.status != "busy"
+
+
 def stale_locks(c, P) -> list[dict]:
     from .autoheal import _read_json, clear_stale_runner_lock, pid_alive, runner_lock_path
     out = []
@@ -609,7 +627,7 @@ def stale_locks(c, P) -> list[dict]:
         by_task.setdefault(lk["task_id"], []).append(lk["resource"])
     for tid, res in by_task.items():
         t = c.store.task(P.id, tid)
-        if t is None or t["state"] not in LOCKLESS_STATES:
+        if t is None or (t["state"] not in LOCKLESS_STATES and not _paused_idle(c, P, t)):
             continue                 # a track lease / a live state: not ours to judge
         if _task_busy(c, P, t) or not _allowed(c, P, tid):
             continue
