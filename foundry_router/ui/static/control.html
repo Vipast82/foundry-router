@@ -438,7 +438,8 @@ body.noanim * { animation:none !important; transition:none !important; }
   <div class="dhead"><b>Action required</b>
     <select id="inbox-filter"><option value="open">open</option><option value="new">new</option>
       <option value="acknowledged">acknowledged</option><option value="answered">answered</option>
-      <option value="resolved">resolved</option><option value="expired">expired</option><option value="">all</option></select>
+      <option value="resolved">resolved</option><option value="dismissed">dismissed</option><option value="expired">expired</option><option value="">all</option></select>
+    <button id="inbox-dismiss-info" title="Dismiss every open info alert (completions, queue empty...). They stay stored under the dismissed filter.">Dismiss all info</button>
     <span class="spacer"></span><button id="inbox-close" aria-label="Close inbox">✕</button></div>
   <div class="dbody" id="inbox-body"></div>
 </aside>
@@ -2767,6 +2768,13 @@ function openInbox() { $("#inbox").classList.add("open"); renderInbox(); }
 $("#bell").onclick = openInbox;
 $("#inbox-close").onclick = () => $("#inbox").classList.remove("open");
 $("#inbox-filter").onchange = () => renderInbox();
+$("#inbox-dismiss-info").onclick = async () => {
+  try {
+    const r = await api("alerts/dismiss-info", {method: "POST", body: {}});
+    for (const id of r.alert_ids || []) { const a = S.alerts.get(id); if (a) S.alerts.set(id, {...a, status: "dismissed"}); stopRepeat(id); }
+    toast(`${r.dismissed || 0} info alert(s) dismissed`); renderBell(); renderInbox();
+  } catch (e) { toast(esc(e.message), "bad"); }
+};
 async function renderInbox() {
   const f = $("#inbox-filter").value;
   try { S.inboxData = await api("inbox"); } catch (e) { S.inboxData = null; }
@@ -2786,12 +2794,14 @@ async function renderInbox() {
       <div class="dim">${esc(a.kind)} · ${esc(tsText(a.created_ts, "datetime"))}${a.ack_by ? ` · acknowledged by ${esc(a.ack_by)}` : ""}${a.resolution ? ` · ${esc(a.resolution)}` : ""}${a.project_id ? ` · ${esc(a.project_id)}/${esc(a.task_id)}` : ""}</div>
       <div class="row">${a.status === "new" ? `<button data-ack="${esc(a.alert_id)}" title="Marks it seen. It does not answer, approve or resolve anything.">Acknowledge</button>` : ""}
         ${a.request_id && S.pending.has(a.request_id) ? `<button class="primary" data-answer="${esc(a.request_id)}">Answer</button>` : ""}
-        ${a.session_id ? `<button data-view="${esc(a.session_id)}">Open session</button>` : ""}${a.task_id ? `<button data-task="${esc(a.project_id)}/${esc(a.task_id)}">Open task</button>` : ""}</div>
+        ${a.session_id ? `<button data-view="${esc(a.session_id)}">Open session</button>` : ""}${a.task_id ? `<button data-task="${esc(a.project_id)}/${esc(a.task_id)}">Open task</button>` : ""}
+        ${a.status === "new" || a.status === "acknowledged" ? `<button data-dismiss="${esc(a.alert_id)}" title="Hides it from the bell and the open list. It stays stored (filter: dismissed); nothing is answered or resolved.">Dismiss</button>` : ""}</div>
       ${(a.log || []).length ? `<details><summary class="dim">Delivery & acknowledgement history</summary><ul class="list">${a.log.map(l => `<li class="dim">${esc(tsText(l.ts, "datetime"))} ${esc(l.event)} ${esc(l.actor)} ${esc(l.detail || "")}</li>`).join("")}</ul></details>` : ""}
     </div>`).join("") || '<p class="dim">Nothing here.</p>') +
-    `<p class="src">Alerts are stored in Foundry and stay here until resolved. Sound and notifications only reach an open page; nothing plays when every control-center tab is closed.</p>`;
+    `<p class="src">Alerts are stored in Foundry and stay here until dismissed or resolved; an alert whose condition is gone (task resumed or complete, old error, read info) resolves itself. Sound and notifications only reach an open page; nothing plays when every control-center tab is closed.</p>`;
   const body = $("#inbox-body");
   body.querySelectorAll("[data-ack]").forEach(b => b.onclick = async () => { try { const a = await api(`alerts/${b.dataset.ack}/ack`, {method: "POST", body: {}}); S.alerts.set(a.alert_id, a); stopRepeat(a.alert_id); if (BC) BC.postMessage({type: "ack", id: a.alert_id}); renderBell(); renderInbox(); } catch (e) { toast(esc(e.message), "bad"); } });
+  body.querySelectorAll("[data-dismiss]").forEach(b => b.onclick = async () => { try { const a = await api(`alerts/${b.dataset.dismiss}/dismiss`, {method: "POST", body: {}}); S.alerts.set(a.alert_id, a); stopRepeat(a.alert_id); if (BC) BC.postMessage({type: "ack", id: a.alert_id}); renderBell(); renderInbox(); } catch (e) { toast(esc(e.message), "bad"); } });
   body.querySelectorAll("[data-answer]").forEach(b => b.onclick = () => { selectRequest(b.dataset.answer); $("#inbox").classList.remove("open"); });
   body.querySelectorAll("[data-decide-task]").forEach(b => b.onclick = () => {
     const [p, t] = b.dataset.decideTask.split("/"); selectTask(p, t);
@@ -3695,7 +3705,9 @@ async function loadServerSettings() {
       collect_reasoning: "Store reasoning text Kilo publishes", collect_tool_output: "Store (redacted, capped) tool results",
       max_part_chars: "Cap per text/reasoning part", max_tool_chars: "Cap per tool input/output", coordinator_expiry_s: "Watchdog: coordinator silent for",
       bridge_expiry_s: "Watchdog: bridge silent for", action_ttl_s: "Unclaimed action expires after (s)", max_instruction_chars: "Longest reply/instruction",
-      rate_per_minute: "Operator actions per minute", session_hours: "Operator sign-in lasts (h)", min_refresh_s: "Polling floor for pages (s)"};
+      rate_per_minute: "Operator actions per minute", session_hours: "Operator sign-in lasts (h)", min_refresh_s: "Polling floor for pages (s)",
+      alert_autoclear: "Alerts clear themselves when their condition is gone", alert_error_quiet_hours: "Coordinator error clears after no recurrence for (h)",
+      alert_info_hours: "Info alerts (completion, queue empty) clear after (h)"};
     box.innerHTML = Object.entries(s).map(([k, v]) => `<div class="setting"><label for="srv-${k}">${esc(help[k] || k)}</label>${typeof v === "boolean" ? `<input type="checkbox" id="srv-${k}" data-srv="${k}" ${v ? "checked" : ""}>` : `<input type="number" id="srv-${k}" data-srv="${k}" value="${v}" min="${(lim[k] || [0])[0]}" max="${(lim[k] || [0, 1e9])[1]}">`}</div>`).join("") + `<button id="srv-save">Save capture settings</button>`;
     $("#srv-save").onclick = async () => {
       const patch = {}; box.querySelectorAll("[data-srv]").forEach(el => { patch[el.dataset.srv] = el.type === "checkbox" ? el.checked : +el.value; });
