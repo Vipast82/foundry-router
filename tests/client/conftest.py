@@ -17,6 +17,15 @@ def _never_touch_real_processes(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _never_touch_task_scheduler(monkeypatch):
+    """No test may query, create or delete a real Windows scheduled task."""
+    import subprocess
+    from foundry_client import autostart
+    monkeypatch.setattr(autostart, "_RUN", lambda argv, **kw: subprocess.CompletedProcess(
+        argv, 1, b"", b"ERROR: The system cannot find the file specified."))
+
+
+@pytest.fixture(autouse=True)
 def _never_probe_the_real_network(monkeypatch):
     """MCP / service probing opens sockets (the audio MCPs live on the LAN) and reads the real
     global Kilo config; tests get neither unless they pass their own."""

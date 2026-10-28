@@ -134,7 +134,33 @@ SCHEMA = [
     """CREATE TABLE IF NOT EXISTS cc_batches (
       source_id TEXT, batch_id TEXT, boot_id TEXT, ts REAL, result TEXT,
       PRIMARY KEY (source_id, batch_id))""",
+    # coordinator events the digest and the alert policy read (alerts.py):
+    # self_heal, operator_notice, decision outcomes, prep queue results
+    """CREATE TABLE IF NOT EXISTS cc_coord_events (
+      event_id TEXT PRIMARY KEY, project_id TEXT, task_id TEXT, kind TEXT, ts REAL,
+      detail TEXT, received_ts REAL)""",
+    "CREATE INDEX IF NOT EXISTS idx_cc_coord_events_ts ON cc_coord_events(ts)",
 ]
+# coordinator event kinds (or detail.alert_class values) that raise their own
+# alert; the policy in alerts.py decides which of them are pushed
+EVENT_ALERT_CLASSES = ("self_repair_exhausted", "prep_failed", "pause_forgotten")
+
+
+def event_alert_class(kind: str, detail: dict) -> str:
+    """The alert class a coordinator event asks for ('' = none, digest only).
+    Read defensively: detail.alert_class / detail.alert name it, or the event
+    kind is the class itself, or a self_heal event says the caps ran out."""
+    d = detail if isinstance(detail, dict) else {}
+    for k in ("alert_class", "alert"):
+        v = d.get(k)
+        if isinstance(v, str) and v in EVENT_ALERT_CLASSES:
+            return v
+    if kind in EVENT_ALERT_CLASSES:
+        return kind
+    if kind == "self_heal" and (d.get("exhausted") is True
+                                or str(d.get("outcome") or "") == "exhausted"):
+        return "self_repair_exhausted"
+    return ""
 LANE_STATUS_EDGE = {"pending": "queued", "deferred": "deferred", "running": "waiting",
                     "done": "completed", "delivered": "completed", "failed": "failed",
                     "timed_out": "failed", "cancelled": "stale", "skipped": "stale"}
@@ -1254,6 +1280,24 @@ class ControlCenter:
         return []
 
     def _in_coord_event(self, c, o, st, now, src):
+        eid = _s(o.get("event_id"), 80)
+        kind = _s(o.get("kind"), 40)
+        detail = o.get("detail") if isinstance(o.get("detail"), dict) else {}
+        if eid and kind:
+            c.execute("INSERT OR IGNORE INTO cc_coord_events (event_id, project_id, task_id, kind, "
+                      "ts, detail, received_ts) VALUES (?,?,?,?,?,?,?)",
+                      (eid, _s(o.get("project_id"), 120), _s(o.get("task_id"), 120), kind,
+                       _f(o.get("ts")) or now, _j(detail), now))
+        cls = event_alert_class(kind, detail)
+        if cls and eid:
+            text = _s(detail.get("text") or detail.get("reason") or detail.get("error")
+                      or detail.get("why"), 600)
+            what = {"self_repair_exhausted": "self-repair exhausted",
+                    "prep_failed": "a queued repo change did not land",
+                    "pause_forgotten": "a pause or hold looks forgotten"}[cls]
+            return [("raise", f"{cls}:{eid}", cls, "high",
+                     f"{o.get('task_id') or o.get('project_id') or 'coordinator'}: {what}",
+                     text, {"project_id": o.get("project_id"), "task_id": o.get("task_id")})]
         if o.get("kind") == "error":
             return [("raise", f"coord_error:{_s(o.get('event_id'), 80)}", "coordinator_error",
                      "high", f"Coordinator error on {o.get('task_id') or o.get('project_id')}",
@@ -3805,7 +3849,8 @@ class ControlCenter:
                          ("DELETE FROM cc_drafts WHERE updated_ts < ?", cut),
                          ("DELETE FROM cc_lane_units WHERE received_ts < ?", cut),
                          ("DELETE FROM cc_artifacts WHERE received_ts < ?", cut),
-                         ("DELETE FROM cc_batches WHERE ts < ?", cut)):
+                         ("DELETE FROM cc_batches WHERE ts < ?", cut),
+                         ("DELETE FROM cc_coord_events WHERE received_ts < ?", cut)):
             n += self.db.execute_count(sql, (arg,))
         return n
 

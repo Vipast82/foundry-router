@@ -152,6 +152,9 @@ class Services:
         set_registry(self.work)
         from .control_center import ControlCenter
         self.control = ControlCenter(db, secrets_fn=lambda: secret_values(self))
+        # stack-down alert, alert policy, webhook push and the daily digest
+        from .alerts import AlertService
+        self.alerts = AlertService(self.control, lambda: self.config_store.config.alerts)
         from .automation_store import AutomationStore
         self.automation = AutomationStore(db)
         # operator chat (W3): threads, tool catalog, confirm cards; its model
@@ -475,6 +478,10 @@ class Services:
         while True:
             try:
                 await asyncio.to_thread(self.control.watchdog)
+                try:
+                    await asyncio.to_thread(self.alerts.tick)
+                except Exception:
+                    log.exception("alerts tick failed")
                 if n % 240 == 0:
                     await asyncio.to_thread(self.control.prune)
             except Exception:
@@ -761,5 +768,7 @@ def create_app(config_path: Optional[Path] = None,
     from .chat_api import router as chat_router
     app.include_router(chat_router)
     services.chat.app = app
+    from .ui.alerts_routes import router as alerts_router
+    app.include_router(alerts_router)
     app.include_router(ui_router)
     return app

@@ -1061,6 +1061,36 @@ def budgets_view(t: dict, limits: dict, ledger: list, reviews: int, now: float,
             "source": "budget_ledger" if (ledger or sums) else "task row + profile limits"}
 
 
+# coordinator events the router keeps for its daily digest and alert policy
+# (foundry_router/alerts.py); any event whose detail names an alert_class or
+# sets digest: true travels too
+DIGEST_EVENT_KINDS = frozenset({
+    "self_heal", "operator_notice", "decision_answered", "decision_timeout_applied",
+    "decision_stop", "decision_withdrawn", "prep_failed", "prep_landed",
+    "pause_forgotten", "self_repair_exhausted"})
+
+
+def digest_event(kind: str, detail) -> bool:
+    d = detail if isinstance(detail, dict) else {}
+    return (kind in DIGEST_EVENT_KINDS or bool(d.get("alert_class"))
+            or d.get("digest") is True)
+
+
+def digest_detail(detail) -> dict:
+    """Bounded scalars (and short scalar lists) of an event's detail: never the
+    whole blob."""
+    out = {}
+    for k, v in list((detail if isinstance(detail, dict) else {}).items())[:24]:
+        if v is None or isinstance(v, (bool, int, float)):
+            out[str(k)[:40]] = v
+        elif isinstance(v, str):
+            out[str(k)[:40]] = _cap(v, 600)
+        elif isinstance(v, list):
+            out[str(k)[:40]] = [x if isinstance(x, (bool, int, float)) else _cap(x, 200)
+                                for x in v[:10] if not isinstance(x, (dict, list))]
+    return out
+
+
 def decisions_view(rows: list) -> list:
     out = []
     for r in rows:
@@ -1626,6 +1656,11 @@ class TelemetryBridge:
                 obs.append({"type": "coord_event", "kind": "error", "event_id": e["event_id"],
                             "project_id": e["project_id"], "task_id": e["task_id"],
                             "detail": {"error": _cap((e["detail"] or {}).get("error"), 600)}})
+            elif e["project_id"] in self.projects and digest_event(e["kind"], e["detail"]):
+                # the router's digest and alert policy (foundry_router/alerts.py)
+                obs.append({"type": "coord_event", "kind": e["kind"], "event_id": e["event_id"],
+                            "project_id": e["project_id"], "task_id": e["task_id"],
+                            "ts": e.get("ts"), "detail": digest_detail(e["detail"])})
         if evs:
             last_e = evs[-1]["id"]
             commits.append(lambda v=last_e: setattr(self, "cursor_events", v))

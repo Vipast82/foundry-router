@@ -219,6 +219,38 @@ its own crash. The page tells apart:
 - Sleep and quiet execution can't be told apart from outside. A quiet busy session is
   labelled, not called a crash.
 
+### Coordinator down, pushed alerts and the daily digest (`alerts.py`)
+
+Settings: dashboard → Monitor → **Alerts & digest** (stored under `alerts:` in config.yaml).
+
+- **Coordinator down.** When the freshest coordinator heartbeat is older than
+  `coordinator_down_minutes` (10), one critical `stack_down` alert is raised, and one
+  `stack_recovered` alert when heartbeats return. The state is in the database: a router
+  restart neither repeats it nor raises a false one (the coordinator gets the full window
+  after a router start).
+- **Push policy.** Every alert stays on this page. Only these classes are pushed to the
+  webhook, each switchable: `product_decision` (decisions of class product, approvals,
+  Kilo questions), `user_action` (user_action blockers and decisions, Kilo permissions),
+  `image_ask` (the 2D-asset decision), `stack_down`, `self_repair_exhausted`,
+  `prep_failed`, `pause_forgotten`. The decision class is read from `class` (then
+  `alert_class`, `decision_class`); a coordinator without classes falls back to the kind
+  (recovery/no-progress/review-access/lead escalations are automation: digest only).
+  Coordinator events raise the last three when their kind, or `detail.alert_class`, names
+  the class (or a `self_heal` event has `exhausted: true`).
+- **Webhook.** `webhook_url` empty = page only. An ntfy URL gets the text body with
+  `Title`, `Priority` and `Tags` headers; anything else gets JSON `{title, text, class,
+  severity, ts, source}`. Optional bearer `webhook_token` (write-only in the UI). Sends go
+  through an outbox: retries after 30 s, 1, 2, 4, 8 min; a 4xx other than 408/429 is
+  final. Log lines name the host only, never the URL or token.
+- **Daily digest** at `digest_hour` (8, router local time; caught up later the same day if
+  the router was down): completed sprints, transitions, self-heal actions with reasons,
+  parked tasks, decisions by class, stops avoided (automation decisions resolved without
+  you), time per state and Foundry-measured tokens per sprint. The **Digest** button here
+  shows the last 7 and builds one on demand; the webhook gets it when
+  `digest_to_webhook` is on. The coordinator forwards the events the digest needs
+  (`self_heal`, `operator_notice`, decision outcomes, `prep_*`, and any event whose detail
+  has `alert_class` or `digest: true`) as `coord_event` observations.
+
 ## Answering and acting
 
 ### Operator actions
