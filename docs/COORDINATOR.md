@@ -196,7 +196,32 @@ fails preservation. New or task-owned uncommitted closeout files still fail CLEA
   `rojo:34872`) and one global writer slot while a session writes.
   The writer cap is the live `[automation] max_agents` setting (default 1:
   one implementation writer across all projects); `--max-writers N` overrides
-  it for the process.
+  it for the process. `max_agents = 2` in the profile's `[automation]` table lets
+  one Studio-free track sprint (a worktree, no Studio or Rojo) run beside the
+  main sprint; its Studio checks run at merge time. A value set from the chat or
+  CLI survives a restart, but a later edit of the profile's own value wins.
+- **Throughput (audit 2026-10-28, E).** The paid review call runs on the review
+  pool, not the tick (a note says "code review in flight"; an answer within
+  `inline_check_wait_s` is applied in the same tick). While Lune runs, the review
+  starts once done_check and the gate binding pass (`[automation]
+  review_beside_checks`, default on, not the fast lane); a revision that then
+  fails its checks drops that review (`early_review_discarded`) and is reviewed
+  again. A Studio-free track merge gate runs as a background check (kind
+  `merge`); main sessions wait for it. A merge gate tooling fault (runner ended
+  without a verdict, ERROR/UNKNOWN) clears a stale `runner.lock` and retries
+  twice (60 s, 120 s) before the track fails (`track_gate_retry`).
+- **Restart safety.** Lune and done_check run in a Windows job object with
+  KILL_ON_JOB_CLOSE (`procjob.py`; elsewhere a process group, PDEATHSIG on Linux)
+  and a pid file under `<state>/procs/`, so they die with the coordinator and a
+  leftover is killed at startup. Each run writes its own log
+  (`au.lune.<time>-<id>.log`). Finished done_check and gate-binding rows are kept
+  in `<state>/check_cache/<project>.json` by (task, kind, head, input key), so a
+  restart reuses them. The studio_gate runner stays detached and is adopted by pid.
+  The heartbeat's `checks` list (empty) and `checks_running` (false) mark a safe
+  point to restart; `reviews_running` counts review calls in flight.
+- **Kilo polling.** `state()` reads status first and, when idle, only the newest
+  messages (`GET /session/{id}/message?limit=2`); the full transcript is read once
+  per finished turn for token totals. The context guard reads the last 6 messages.
 - **Parallel tracks (Team Lead, 2026-10-22; `foundry_coordinator/tracks/`).**
   `tracks analyze PROJECT` reads every sprint plan and prints which sprints can
   run side by side (needs: studio, blender, audio, images, gpu, backend; explicit
