@@ -857,6 +857,8 @@ class Coordinator:
             # continuation, verification -> review) runs when the project resumes
             return
         pid, tid = P.id, t["task_id"]
+        if self._context_wrapup_prompt(P, t):
+            return                       # the stopped session commits and reports first
         # W1.4: commit messages without the task prefix are the coordinator's to fix,
         # on its own unpushed commits, before anything (gate, review, approvals) is
         # bound to this head; the session is never asked to rebase
@@ -870,7 +872,10 @@ class Coordinator:
         from . import infra
         infra.session_ok(self, P, tid)
         srow = self.store.session(t["session_id"]) if t.get("session_id") else None
-        handoff = infra.over_ceiling(P, s, rep, persona=str((srow or {}).get("persona") or ""))
+        handoff = infra.over_ceiling(P, s, rep, persona=str((srow or {}).get("persona") or "")) \
+            or self._context_wrapup_handoff(t, rep)
+        if (t["data"] or {}).get("context_wrapup"):
+            self.store.merge_data(pid, tid, context_wrapup=None)
         if handoff:
             # revamp B12: a fresh session continues instead of compacting until Kilo
             # gives up (UI-02b lost 85 min that way); no attempt is charged
@@ -1102,6 +1107,97 @@ class Coordinator:
         # session's state may reach the caller
         return s if isinstance(s, SessionState) else None
 
+    WRAPUP_PROMPT = (
+        "The coordinator stopped your last step: this session's context is at {ctx:,} tokens "
+        "of {usable:,} usable, and the next large tool result would overflow it (Kilo cannot "
+        "compact a context this full; the work would be lost). Do NOT start new work and make "
+        "no more Studio or test calls. In as few steps as possible: (1) write what you have "
+        "found so far into the sprint's plan/evidence files and commit it (a work-in-progress "
+        "commit with the task prefix; never push); (2) end this turn with your report block: "
+        "status NOT DONE, a summary of what is committed, and a `next` line saying exactly "
+        "where the next session picks up. A fresh session continues from your commit.")
+
+    def _context_guard(self, P: Project, t: dict, sid: str) -> bool:
+        """A BUSY implement session near its window: stop the turn (Kilo abort) so it can
+        commit and report before Kilo overflows; the idle path then prompts it
+        (_context_wrapup_prompt) and hands off (_context_wrapup_handoff). Measured from
+        the transcript every `context_guard_seconds` (30). True = handled this poll."""
+        from . import context_window as CW
+        every = float(P.profile.limit("context_guard_seconds", 30) or 0)
+        if not every:
+            return False
+        last = self.__dict__.setdefault("_context_guard_ts", {})
+        if self.clock() - last.get(sid, -1e18) < every:
+            return False
+        last[sid] = self.clock()
+        persona = str((self.store.session(sid) or {}).get("persona") or "")
+        wrap = CW.wrapup(P, persona)
+        if not wrap:
+            return False
+        try:
+            ctx = CW.context_of(P.client.transcript(sid, directory=P.profile.workspace))
+        except Exception:                                         # noqa: BLE001
+            return False
+        w = (t["data"] or {}).get("context_wrapup") or {}
+        if w.get("session_id") == sid:
+            # asked to wrap up and still running: stop it outright before Kilo overflows
+            if ctx is not None and ctx >= CW.hard_stop(P, persona):
+                P.client.abort(sid, directory=P.profile.workspace)
+                self._end_session(P, sid, "context_handoff")
+                self.store.merge_data(P.id, t["task_id"], context_wrapup=None)
+                self.store.event(P.id, t["task_id"], "context_handoff", session_id=sid,
+                                 detail={"context": ctx, "why": "hard stop while wrapping up"})
+                self._session_failed(P, t, f"context hard stop: the session reached {ctx} "
+                                           f"tokens while wrapping up and was stopped; continue "
+                                           f"from the committed state", "implement", free=True)
+                return True
+            return False
+        if ctx is None or ctx < wrap:
+            return False
+        P.client.abort(sid, directory=P.profile.workspace)
+        self.store.merge_data(P.id, t["task_id"], context_wrapup={
+            "session_id": sid, "stage": "aborted", "context": ctx, "threshold": wrap,
+            "usable": CW.usable(P, persona), "ts": self.clock()})
+        self.store.event(P.id, t["task_id"], "context_wrapup", session_id=sid,
+                         detail={"context": ctx, "threshold": wrap})
+        self._note(P, t, f"context at {ctx:,} tokens (stop line {wrap:,}): the session's "
+                         f"turn was stopped so it can commit and report before handing off")
+        return True
+
+    def _context_wrapup_prompt(self, P: Project, t: dict) -> bool:
+        """After a context stop: one prompt asking the same session to commit and
+        report. True = sent (wait for that turn)."""
+        w = (t["data"] or {}).get("context_wrapup") or {}
+        if w.get("session_id") != t["session_id"] or w.get("stage") != "aborted":
+            return False
+        text = self.WRAPUP_PROMPT.format(ctx=int(w.get("context") or 0),
+                                         usable=int(w.get("usable") or 0))
+        sent = False
+        try:
+            sent = self._prompt_primary(P, t, text, "context_wrapup")
+        except Exception as e:                                    # noqa: BLE001
+            self.log(f"{P.id}/{t['task_id']}: context wrap-up prompt failed: {e}")
+        self.store.merge_data(P.id, t["task_id"], context_wrapup={**w, "stage": "prompted"})
+        if sent:
+            self._note(P, t, "context wrap-up: the session is committing its work and "
+                             "reporting; a fresh session continues after it")
+        return sent
+
+    @staticmethod
+    def _context_wrapup_handoff(t: dict, rep: dict) -> Optional[str]:
+        """The wrap-up turn ended: hand off to a fresh session (no attempt charged),
+        unless it finished (DONE) or reported a real blocker."""
+        w = (t["data"] or {}).get("context_wrapup") or {}
+        if w.get("session_id") != t["session_id"]:
+            return None
+        if str((rep or {}).get("status") or "").upper() in ("DONE", "BLOCKED", "NEEDS_HUMAN"):
+            return None
+        summary = str((rep or {}).get("summary") or (rep or {}).get("next") or "").strip()[:600]
+        return (f"context wrap-up: the previous session was stopped at {w.get('context')} "
+                f"tokens (stop line {w.get('threshold')}) and committed its work; continue "
+                f"from the committed state and the plan's checklist/NEXT line"
+                + (f". Its last report: {summary}" if summary else ""))
+
     def _live_checkpoint(self, P: Project, t: dict, sid: str) -> None:
         """Refresh the adapter's live checkpoint file for a working session, at
         most every `live_checkpoint_seconds` (0 = off). The session reads the
@@ -1181,6 +1277,8 @@ class Coordinator:
                                                   f"stopped", phase)
             if s.compaction:
                 return self._compacted(P, t, sid, phase, s.compaction)
+            if phase == "implement" and self._context_guard(P, t, sid):
+                return None
             if phase != "closeout":
                 self._live_checkpoint(P, t, sid)
             self._note(P, t, f"{phase} session working")
@@ -1206,6 +1304,11 @@ class Coordinator:
             return self._session_failed(P, t, "the coding session disappeared (Kilo restarted?); "
                                               "a fresh session resumes from the recorded state",
                                         phase, free=True)
+        cw = (t["data"] or {}).get("context_wrapup") or {}
+        if s.status == "error" and phase == "implement" and cw.get("session_id") == sid and \
+                cw.get("stage") == "aborted" and re.search(r"abort", s.error or "", re.I):
+            s.status = "idle"            # the coordinator's own context stop: not an error
+            return s
         if s.status == "error":
             self._end_session(P, sid, "error")
             if s.denial:

@@ -61,7 +61,14 @@ def test_the_local_model_is_not_handed_off_at_165k_any_more(tmp_path):
 
 
 def test_the_window_file_for_the_checkpoint_tool(tmp_path):
+    import subprocess
+    subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
     P = project(tmp_path)
+    # a project whose git does not ignore it never gets the file (it would be an
+    # untracked change that fails the clean / unrelated_preserved checks)
+    assert CW.write_file(P, "Foundry-Kilo-Local", "ses_1") is None
+    assert not (tmp_path / ".plan" / "tmp" / "context_window.json").exists()
+    (tmp_path / ".gitignore").write_text("tmp/\n", encoding="utf-8")       # AU's rule
     doc = CW.write_file(P, "Foundry-Kilo-Local", "ses_1")
     on_disk = json.loads((tmp_path / ".plan" / "tmp" / "context_window.json").read_text())
     assert on_disk == doc

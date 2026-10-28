@@ -2,6 +2,30 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.152.1 — a running session is stopped before its context overflows
+
+GF-GATE1, 2026-10-27 21:44: the local-model session went from 207k to 230k tokens in a single
+Studio call (a 22k-token result). That passed the 229k usable window, and Kilo's compaction
+gave up ("Compaction exhausted"). About two hours of uncommitted Studio triage were lost. The
+95% handoff (218k) only applied to an IDLE session, and one tool result can jump past it.
+
+- **Running-session stop line:** min(Red 90%, usable − 24k), so 205k for the local model.
+  - The coordinator measures a BUSY implement session's context from its transcript every
+    `[limits] context_guard_seconds` (30).
+  - Past the line it stops the turn (Kilo abort) and sends ONE prompt: write what it found into
+    the plan/evidence files, make a work-in-progress commit, and report NOT DONE with a `next`
+    line.
+  - When that turn ends, a fresh session continues from the commit. No attempt is charged.
+    A DONE or BLOCKED report is handled as usual.
+  - A session still running near the window after the prompt (usable − 6k) is stopped outright.
+  - The margin is `[limits] context_wrapup_margin_tokens` (24000).
+  - Events: `context_wrapup`, then `context_handoff`.
+- **The coordinator's own abort is not an error.** The aborted turn's MessageAbortedError no
+  longer fails the session.
+- **`.plan/tmp/context_window.json` is written only where git ignores it** (AU ignores
+  `tmp/`). In any other project it would have been an untracked file and failed the
+  clean / unrelated_preserved checks.
+
 ## v0.152.0 — live test tracker: "8 of 30 done, 1 failed" while tests run
 
 Victor 2026-10-27: "When it does the sessions for Lua and gate running for the testing, is there
