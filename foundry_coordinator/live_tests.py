@@ -5,7 +5,8 @@ way to have a status bar, with 8 out of 30 tests completed, pass / fail values, 
 tracker?"
 
 The counts come from what the runs already write, line by line:
-  - `PASS: ...` / `FAIL: ...`    one test (the Lune runner, the gate scripts, Studio checks)
+  - `PASS: ...` / `FAIL: ...`    one test (the Lune runner, the gate scripts, Studio checks);
+                                 a ` (cached)` suffix = reused from AU's per-spec cache
   - `LUNE n/m PASS|FAIL`         the Lune suite finished: n of m passed
   - `NEGATIVE CONTROL PASS|FAIL` the negative control finished
   - `-> N CALLs` / `CALL n `     a Studio gate plan and the CALL being run
@@ -33,6 +34,7 @@ _LUNE = re.compile(r"^LUNE (\d+)/(\d+) (PASS|FAIL)")
 _NEG = re.compile(r"^NEGATIVE CONTROL (PASS|FAIL)")
 _PLAN = re.compile(r"->\s*(\d{1,5}) CALLs\b")
 _CALL = re.compile(r"^CALL (\d{1,5})\b")
+_CACHED = re.compile(r"\(cached\)\s*$")
 _GATE = re.compile(r"^GATE \S+ (PASS|FAIL)\b")
 _EXIT = re.compile(r"^EXIT=(-?\d+)")
 _CMD = re.compile(r"^CMD: (.*)")
@@ -48,10 +50,10 @@ class Counts:
     """Running totals over a stream of lines."""
 
     __slots__ = ("passed", "failed", "call", "calls", "total", "result", "exit", "cmd",
-                 "expected", "_seg", "_tail")
+                 "expected", "cached", "_seg", "_tail")
 
     def __init__(self):
-        self.passed = self.failed = self.call = self.expected = 0
+        self.passed = self.failed = self.call = self.expected = self.cached = 0
         self._seg = [0, 0]                        # PASS/FAIL lines since the last summary line
         self.calls = self.total = None
         self.result = self.exit = self.cmd = None
@@ -65,6 +67,8 @@ class Counts:
             self.line(ln.rstrip("\r"))
 
     def line(self, ln: str) -> None:
+        if _CACHED.search(ln) and (_PASS.match(ln) or _FAIL.match(ln)):
+            self.cached += 1                     # AU's per-spec cache: reused, not run
         if _PASS.match(ln):
             self.passed += 1
             self._seg[0] += 1
@@ -108,8 +112,11 @@ class Counts:
             total = None                           # a different count: don't draw a bar
         res = self.result or (("PASS" if self.exit == 0 else "FAIL") if self.exit is not None
                               else None)
-        return {"done": done, "total": total, "pass": self.passed, "fail": self.failed,
-                "result": res}
+        out = {"done": done, "total": total, "pass": self.passed, "fail": self.failed,
+               "result": res}
+        if self.cached:
+            out["cached"] = self.cached          # reused from AU's per-spec cache
+        return out
 
 
 _lock = threading.Lock()

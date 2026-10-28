@@ -209,3 +209,17 @@ def test_a_passed_negative_control_s_fails_are_not_failures():
     c = live_tests.Counts()
     c.feed("FAIL: a\nPASS: b\nNEGATIVE CONTROL FAIL (1/2)\n")
     assert c.row()["fail"] == 1
+
+
+def test_cached_lines_from_aus_per_spec_cache_are_counted():
+    c = live_tests.Counts()
+    c.feed("PASS: A :: a (cached)\nPASS: A :: b (cached)\nPASS: B :: c\n"
+           "LUNE 3/3 PASS (40 ms) (2 cached, 1 run)\n")
+    r = c.row()
+    assert (r["done"], r["total"], r["pass"], r["cached"], r["result"]) == (3, 3, 3, 2, "PASS")
+    check_progress.reset("p", "T9")
+    check_progress.start("p", "T9", "Lune suite")
+    check_progress.counts("p", "T9", "Lune suite", r)
+    assert "3/3, 2 cached" in check_progress.summary("p", "T9")
+    check_progress.clear("p", "T9")
+    assert "cached" not in live_tests.Counts().row()

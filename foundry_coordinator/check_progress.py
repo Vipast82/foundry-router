@@ -45,7 +45,8 @@ def counts(project: str, task: str, name: str, row: dict) -> None:
     with _lock:
         r = ((_runs.get((project, task)) or {}).get("checks") or {}).get(name)
         if r is not None:
-            r["counts"] = {k: row.get(k) for k in ("done", "total", "pass", "fail", "estimated")
+            r["counts"] = {k: row.get(k) for k in ("done", "total", "pass", "fail", "estimated",
+                                                    "cached")
                            if row.get(k) is not None}
 
 
@@ -98,7 +99,8 @@ def _n(r: dict) -> str:
         return ""
     tot = f"/{'~' if r.get('estimated') else ''}{r['total']}" if r.get("total") else ""
     fail = f", {r['fail']} fail" if r.get("fail") else ""
-    return f" {r['done']}{tot}{fail}"
+    cached = f", {r['cached']} cached" if r.get("cached") else ""
+    return f" {r['done']}{tot}{fail}{cached}"
 
 
 def summary(project: str, task: str) -> str:

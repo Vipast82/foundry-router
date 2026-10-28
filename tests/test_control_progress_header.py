@@ -185,3 +185,10 @@ def test_test_runs_show_live_counts_with_pass_fail_and_a_bar(tmp_path):
                     compact=True)["html"]
     assert "812</b> of <b class=\"num\">~1609</b>" in folded and "2 failed" in folded
     assert "Test runs" not in _model(tmp_path, task("VERIFYING"))["html"]
+
+
+def test_cached_tests_are_shown_beside_pass_fail(tmp_path):
+    rows = [{"name": "Lune suite", "state": "PASS", "source": "coordinator", "done": 1588,
+             "total": 1588, "pass": 1588, "fail": 0, "cached": 1490}]
+    h = _model(tmp_path, task("VERIFYING", view={"tests": rows}), {"now": 1300.0})["html"]
+    assert "1490</b> cached" in h

@@ -880,9 +880,11 @@ Change no code or test file in this session; if one needs changing, stop and rep
             return None
         return n if n >= 1 else None
 
-    LUNE_RUNS = (("au.lune", "normal", [], r"^LUNE \d+/\d+ PASS"),
+    # the whole summary line is the row's detail: with AU's per-spec cache it says how
+    # many were reused, e.g. "LUNE 1588/1588 PASS (9120 ms) (1490 cached, 98 run)"
+    LUNE_RUNS = (("au.lune", "normal", [], r"^LUNE \d+/\d+ PASS[^\r\n]*"),
                  ("au.lune_negative", "negative", ["--", "--negative"],
-                  r"^NEGATIVE CONTROL PASS"))
+                  r"^NEGATIVE CONTROL PASS[^\r\n]*"))
 
     def _lune(self, spec: TaskSpec, revision: str) -> list:
         """The Lune suite and its negative control, side by side. A PASS whose

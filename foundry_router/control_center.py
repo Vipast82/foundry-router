@@ -655,7 +655,8 @@ class ControlCenter:
                  "seconds": int(_f(r.get("seconds")) or 0),
                  "checks": [{"name": _s(c.get("name"), 60), "state": _s(c.get("state"), 30),
                              "seconds": int(_f(c.get("seconds")) or 0),
-                             **{k: int(_f(c.get(k))) for k in ("done", "total", "pass", "fail")
+                             **{k: int(_f(c.get(k))) for k in ("done", "total", "pass", "fail",
+                                                                "cached")
                                 if _f(c.get(k)) is not None and _f(c.get(k)) >= 0}}
                             for c in (r.get("checks") or [])[:12] if isinstance(c, dict)]}
                 for r in payload["checks"][:20] if isinstance(r, dict)]
@@ -1818,7 +1819,7 @@ class ControlCenter:
                    "source": _s(r.get("source"), 20), "file": _s(r.get("file"), 200),
                    "estimated": r.get("estimated") is True,
                    **{k: num(r.get(k)) for k in ("done", "total", "pass", "fail", "seconds",
-                                                 "started_ts", "updated_ts")}}
+                                                 "started_ts", "updated_ts", "cached")}}
             if row["total"] is not None and (row["done"] or 0) > row["total"]:
                 row["total"] = None
             out.append(row)

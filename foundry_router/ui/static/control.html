@@ -1770,6 +1770,7 @@ function sprintModel(t, ctx) {
     return {name: String(r.name || "test run"), state: String(r.state || ""), source: r.source || "",
       file: r.file || "", done, total, pass: Number.isInteger(r.pass) ? r.pass : null,
       fail: Number.isInteger(r.fail) ? r.fail : null, estimated: !!r.estimated,
+      cached: Number.isInteger(r.cached) && r.cached > 0 ? r.cached : 0,
       pct: total !== null && done !== null ? clamp(100 * done / total, 0, 100) : null,
       elapsed: r.source === "coordinator" && t0 && r.state === "running" ? Math.max(0, now - t0) : (Number.isFinite(r.seconds) ? r.seconds : null),
       age: upd ? Math.max(0, now - upd) : null};
@@ -1866,7 +1867,7 @@ function testsHtml(m) {
     const count = r.done === null ? "" : r.total !== null
       ? `<b class="num">${esc(r.done)}</b> of <b class="num">${r.estimated ? "~" : ""}${esc(r.total)}</b> ${unit}`
       : `<b class="num">${esc(r.done)}</b> ${unit} so far`;
-    const pf = r.pass === null && r.fail === null ? "" : `<span><span class="ok-t">✓ <b class="num">${esc(r.pass ?? 0)}</b></span> <span class="${r.fail ? "bad-t" : "dim"}">✗ <b class="num">${esc(r.fail ?? 0)}</b></span></span>`;
+    const pf = r.pass === null && r.fail === null ? "" : `<span><span class="ok-t">✓ <b class="num">${esc(r.pass ?? 0)}</b></span> <span class="${r.fail ? "bad-t" : "dim"}">✗ <b class="num">${esc(r.fail ?? 0)}</b></span>${r.cached ? ` <span class="dim" title="Reused from AU's per-spec cache: their files did not change since they passed">· <b class="num">${esc(r.cached)}</b> cached</span>` : ""}</span>`;
     const where = r.source === "session" ? "the session's run" : "coordinator check";
     const bar = r.pct === null ? "" : `<span class="sp-bar bg${r.fail ? " has-fail" : ""}" role="progressbar" aria-valuemin="0" aria-valuemax="${esc(r.total)}" aria-valuenow="${esc(r.done)}" aria-label="${esc(r.name)} ${unit} done"><i style="width:${r.pct.toFixed(1)}%"></i></span>`;
     return `<div class="bg-row"><span class="bg-k" title="${esc(where)}${r.file ? " · " + esc(r.file) : ""}">${esc(r.name)}</span>${st}${bar}<span>${count}</span>${pf}<span class="dim">${r.elapsed !== null && r.elapsed !== undefined ? `<b class="num">${esc(mmss(r.elapsed))}</b>` : ""}${running && r.age !== null && r.age > 120 ? ` · last line ${esc(agoText(r.age))}` : ""}</span></div>`;

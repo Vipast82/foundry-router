@@ -448,7 +448,7 @@ def live_tests_view(task: dict) -> Optional[list]:
                     "source": _cap(r.get("source"), 20), "file": _cap(r.get("file"), 200),
                     "estimated": r.get("estimated") is True,
                     **{k: num(r.get(k)) for k in ("done", "total", "pass", "fail", "seconds",
-                                                  "started_ts", "updated_ts")}})
+                                                  "started_ts", "updated_ts", "cached")}})
     return out or None
 
 
