@@ -174,7 +174,19 @@ ACTION_KINDS = ("answer_question", "reply_permission", "approve_review", "reject
                 "track_status", "set_max_agents",
                 "client_service_enable",
                 "memory_add", "memory_edit", "playbook_add", "playbook_edit",
-                "queue_approve", "queue_reorder", "queue_deps", "queue_requeue")
+                "queue_approve", "queue_reorder", "queue_deps", "queue_requeue",
+                "prep_add", "prep_remove", "prep_reorder", "prep_run_now")
+# Repo changes (self-driving part 3, 2026-10-28): project-scoped edits of the
+# coordinator's prep queue (foundry_coordinator/prep_queue.py; payloads in its
+# control.py PREP_KINDS), handed only to a coordinator that declares the
+# `prep_queue` feature. The queue arrives as the heartbeat's `prep_queue` block
+# (prep_view); the Automation page's Repo changes tab reads and edits it through
+# /admin/api/automation/prep (automation_api.py).
+PREP_ACTIONS = ("prep_add", "prep_remove", "prep_reorder", "prep_run_now")
+PREP_KINDS_OF_ENTRY = ("patch", "branch", "script")
+PREP_ID_RE = re.compile(r"^pq-[0-9a-f]{10}$")
+MAX_PREP_TEXT = 8000
+MAX_PREP_PATCH = 2_000_000
 # Team Lead tracks (2026-10-22): project-scoped, operator sessions, claimed by a
 # coordinator that declares the `tracks` feature (foundry_coordinator/control.py
 # TRACK_KINDS has the payloads). The coordinator's heartbeat carries `tracks`
@@ -294,7 +306,8 @@ FEATURE_GATED_ACTIONS = {"decision_answer": "decision_answer", "project_pause": 
                          **{k: "tracks" for k in TRACK_ACTIONS},
                          **{k: "project_memory" for k in MEMORY_ACTIONS},
                          **{k: "playbook" for k in PLAYBOOK_ACTIONS},
-                         **{k: "queue" for k in QUEUE_ACTIONS}}
+                         **{k: "queue" for k in QUEUE_ACTIONS},
+                         **{k: "prep_queue" for k in PREP_ACTIONS}}
 # observation types that only make sense inside a project: an empty project_id
 # would bypass the per-key project allowlist, so they are refused
 PROJECT_SCOPED_TYPES = ("task", "lane_unit", "artifact", "mcp", "config", "capabilities", "todo",
@@ -645,7 +658,7 @@ class ControlCenter:
             "kilo", "coordinator_owner", "projects", "sessions_tracked", "tick", "uptime_s",
             "backoff_s", "errors", "capture_boundary", "event_stream", "monotonic_s",
             "contract", "coordinator_version", "foundry_version", "boot_id", "store_schema",
-            "features", "overall", "client_version", "tracks")
+            "features", "overall", "client_version", "tracks", "prep_queue")
             if payload.get(k) is not None})
         if isinstance(payload.get("checks"), list):
             # the coordinator's background project checks (verify / closeout), bounded
@@ -2623,6 +2636,8 @@ class ControlCenter:
             return self._create_memory_action(actor, projects, body, scopes, kind, idem, pid)
         if kind in QUEUE_ACTIONS:
             return self._create_queue_action(actor, projects, body, scopes, kind, idem, pid, tid)
+        if kind in PREP_ACTIONS:
+            return self._create_prep_action(actor, projects, body, scopes, kind, idem, pid)
         if not pid or not tid:
             raise ControlError("project_id and task_id are required")
         if projects and pid not in projects:
@@ -3042,6 +3057,125 @@ class ControlCenter:
             raise
         self._notify()
         return self.action_view(aid)
+
+    @staticmethod
+    def _prep_payload(kind: str, body: dict) -> dict:
+        """The validated payload of a prep_* action (the coordinator checks again:
+        files, task ids, after-action syntax); ControlError otherwise."""
+        if kind == "prep_run_now":
+            return {}
+        if kind in ("prep_remove", "prep_reorder"):
+            eid = _s(body.get("id"), 20)
+            if not PREP_ID_RE.match(eid):
+                raise ControlError("id must be a prep entry id (pq-…)")
+            if kind == "prep_remove":
+                return {"id": eid}
+            pos = body.get("position")
+            if isinstance(pos, bool) or not isinstance(pos, int) or not 1 <= pos <= 1000:
+                raise ControlError("position must be a whole number 1..1000")
+            return {"id": eid, "position": pos}
+        ek = _s(body.get("entry_kind") or body.get("kind_of_entry") or "patch", 10)
+        if ek not in PREP_KINDS_OF_ENTRY:
+            raise ControlError(f"entry_kind must be one of {', '.join(PREP_KINDS_OF_ENTRY)}")
+        msg = " ".join(str(body.get("message") or "").split())
+        if not msg or len(msg) > 300:
+            raise ControlError("message: the commit subject, 1-300 characters")
+        out: dict = {"kind": ek, "message": msg}
+        for k, cap in (("source", 1000), ("command", 2000), ("after_task", 80),
+                       ("after_state", 20)):
+            v = str(body.get(k) or "").strip()
+            if len(v) > cap:
+                raise ControlError(f"{k} is over {cap} characters")
+            if v:
+                out[k] = v
+        bd = str(body.get("body") or "").strip()
+        if len(bd) > MAX_PREP_TEXT:
+            raise ControlError(f"body is over {MAX_PREP_TEXT} characters")
+        if bd:
+            out["body"] = bd
+        pt = str(body.get("patch_text") or "")
+        if len(pt) > MAX_PREP_PATCH:
+            raise ControlError("patch_text is over 2 MB; queue a patch file path instead")
+        if pt.strip():
+            out["patch_text"] = pt
+        for k in ("after_actions", "hold_tasks", "paths"):
+            v = body.get(k)
+            if v in (None, ""):
+                continue
+            if not isinstance(v, list) or len(v) > 40 or any(
+                    not isinstance(x, str) or not x.strip() or len(x) > 2000 for x in v):
+                raise ControlError(f"{k} must be a list of up to 40 non-empty strings")
+            out[k] = [x.strip() for x in v]
+        for k in ("hold_minutes", "position"):
+            v = body.get(k)
+            if v in (None, "", 0):
+                continue
+            if isinstance(v, bool) or not isinstance(v, int) or not 1 <= v <= 100000:
+                raise ControlError(f"{k} must be a positive whole number")
+            out[k] = v
+        if ek in ("patch", "branch") and not out.get("source") and not out.get("patch_text"):
+            raise ControlError("a patch needs a file path (or pasted patch text); a branch "
+                               "needs its name")
+        if ek == "script" and not out.get("command"):
+            raise ControlError("a script entry needs a command")
+        return out
+
+    def _create_prep_action(self, actor: str, projects: list, body: dict, scopes, kind: str,
+                            idem: str, pid: str) -> dict:
+        if scopes is not None and not {"operator", "admin"} & set(scopes or []):
+            raise ControlError("repo changes need an operator session", "forbidden", 403)
+        if not pid:
+            raise ControlError("project_id is required")
+        if projects and pid not in projects:
+            raise ControlError("this operator may not act on that project", "forbidden", 403)
+        payload = self._prep_payload(kind, body)
+        if not self.rate_ok(actor):
+            raise ControlError("too many control actions; wait a minute", "rate_limited", 429)
+        st = self.settings()
+        now = self.clock()
+        aid = f"act-{uuid.uuid4().hex[:16]}"
+        summary = self._summary(kind, payload, pid)
+        stored = payload
+        try:
+            with self._tx() as c:
+                seq = self._feed(c, "action", pid, "", aid)
+                c.execute("INSERT INTO cc_actions (action_id, idem_key, actor, kind, project_id, "
+                          "task_id, run_id, session_id, request_id, payload, summary, expected, "
+                          "status, status_detail, created_ts, expires_ts, updated_ts, seq) VALUES "
+                          "(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                          (aid, idem, actor, kind, pid, "", "", "", "", _j(stored), summary,
+                           _j({}), "accepted",
+                           "stored by Foundry; waiting for the coordinator to claim it", now,
+                           now + st["action_ttl_s"], now, seq))
+                c.execute("INSERT INTO cc_action_log (action_id, ts, status, actor, detail) "
+                          "VALUES (?,?,?,?,?)", (aid, now, "accepted", actor, summary))
+        except Exception as e:                                   # noqa: BLE001
+            if "UNIQUE" in str(e) and "idem" in str(e):
+                ex = self.db.query_one("SELECT action_id FROM cc_actions WHERE idem_key=?", (idem,))
+                return {**self.action_view(ex["action_id"]), "duplicate": True}
+            raise
+        self._notify()
+        return self.action_view(aid)
+
+    def prep_view(self, projects: list, project: str = "") -> dict:
+        """The `prep_queue` block of the freshest coordinator heartbeat, per project
+        (the Repo changes tab): {project: {enabled, settings, entries, state, last}}."""
+        best, out = None, {}
+        for s in self.sources(projects):
+            if s.get("kind") != "coordinator":
+                continue
+            d = s.get("detail") if isinstance(s.get("detail"), dict) else _uj(s.get("detail"), {})
+            pq = (d or {}).get("prep_queue")
+            if not isinstance(pq, dict):
+                continue
+            if best is None or (s.get("last_seen") or 0) > (best.get("last_seen") or 0):
+                best, out = s, pq
+        if projects:
+            out = {k: v for k, v in out.items() if k in projects}
+        if project:
+            out = {k: v for k, v in out.items() if k == project}
+        return {"prep_queue": out, "source": (best or {}).get("source_id"),
+                "age_s": (round(self.clock() - (best.get("last_seen") or 0)) if best else None)}
 
     def tracks_view(self, projects: list, project: str = "") -> dict:
         """The `tracks` block of the freshest coordinator heartbeat, per project
@@ -3591,6 +3725,15 @@ class ControlCenter:
             return f"{tid} depends on {', '.join(p.get('deps') or []) or 'nothing'}"[:300]
         if kind == "queue_requeue":
             return f"re-queue {tid}: {p.get('reason') or ''}"[:300]
+        if kind == "prep_add":
+            return (f"queue repo change ({p.get('kind')}) in {tid}: {p.get('message') or ''}"
+                    + (f" after {p.get('after_task')}" if p.get("after_task") else ""))[:300]
+        if kind == "prep_remove":
+            return f"remove repo change {p.get('id')} ({tid})"
+        if kind == "prep_reorder":
+            return f"move repo change {p.get('id')} to position {p.get('position')} ({tid})"
+        if kind == "prep_run_now":
+            return f"land repo changes in {tid} at the next safe point (retry failed)"
         if kind == "decision_answer":
             return (f"answer decision {p.get('decision_id')} ({p.get('decision_kind') or '?'}) as "
                     f"{p.get('authority')}" + (" · option chosen" if p.get("option") else "")

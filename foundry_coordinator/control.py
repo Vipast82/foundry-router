@@ -72,6 +72,12 @@ TRACK_KINDS = ("tracks_analyze", "tracks_propose", "track_start", "track_stop", 
 #   queue_requeue {reason}                 reopen a CANCELLED task (COMPLETE
 #                                          stays closed: passed work never reruns)
 QUEUE_KINDS = ("queue_approve", "queue_reorder", "queue_deps", "queue_requeue")
+# Repo changes (self-driving part 3, prep_queue.py): project-scoped edits of the prep
+# queue. Payloads: prep_add {kind, message, source?, patch_text?, body?, after_task?,
+# after_state?, after_actions?, hold_tasks?, hold_minutes?, paths?, command?, position?};
+# prep_remove {id}; prep_reorder {id, position}; prep_run_now {}. The queue itself
+# reaches the router as the heartbeat's `prep_queue` block.
+PREP_KINDS = ("prep_add", "prep_remove", "prep_reorder", "prep_run_now")
 
 
 class ControlChannel:
@@ -248,7 +254,7 @@ class ControlChannel:
                                            "reject_review", "pause", "resume", "cancel", "unblock",
                                            "instruction", "withdraw_instruction",
                                            "decision_answer", *PROJECT_KINDS, *ASSISTANT_KINDS,
-                                           *TRACK_KINDS, *QUEUE_KINDS,
+                                           *TRACK_KINDS, *QUEUE_KINDS, *PREP_KINDS,
                                            *(LEAD_KINDS if lead_on else ()),
                                            *(MEMORY_KINDS if mem_on else ()),
                                            *(PLAYBOOK_KINDS if pb_on else ())]}},
@@ -260,12 +266,15 @@ class ControlChannel:
                 # lead_escalation decisions even when no project runs the lifecycle)
                 "features": (["decision_answer", "lifecycle"] if self._lifecycle_on() else
                              ["decision_answer"] if lead_on else [])
-                + ["project_pause", "tracks", "queue"] + (["lead_manager"] if lead_on else [])
+                + ["project_pause", "tracks", "queue", "prep_queue"]
+                + (["lead_manager"] if lead_on else [])
                 + (["project_memory"] if mem_on else [])
                 + (["playbook"] if pb_on else []),
                 # Team Lead tracks per project (the Tracks tab reads it from the
                 # coordinator source's heartbeat): max_agents, tracks, Studio timeline
                 "tracks": self._tracks_status(),
+                # self-driving part 3: the prep queue per project (Automation -> Repo changes)
+                "prep_queue": self._prep_status(),
                 # 2026-10-27: the project checks running in the background (verify /
                 # closeout), per check, for the control center's activity view
                 "checks": self._checks_running(),
@@ -331,6 +340,8 @@ class ControlChannel:
             return self._playbook_action(a, f"{a.get('actor') or 'operator'} (control center)")
         if a["kind"] in QUEUE_KINDS:
             return self._queue_action(a, f"{a.get('actor') or 'operator'} (control center)")
+        if a["kind"] in PREP_KINDS:
+            return self._prep_action(a, f"{a.get('actor') or 'operator'} (control center)")
         t = self.store.task(pid, tid)
         if not t:
             return self._report(a, "rejected", f"{pid}/{tid} is not on this coordinator's queue")
@@ -444,6 +455,50 @@ class ControlChannel:
         except TrackError as e:
             return self._report(a, "rejected", str(e)[:500])
         return self._report(a, "rejected", f"unsupported track action {kind!r}")
+
+    # ------------------------------------------------------------------ prep queue
+
+    def _prep_status(self) -> dict:
+        from . import prep_queue as PQ
+        out = {}
+        for pid, P in sorted(self.c.projects.items()):
+            try:
+                out[pid] = PQ.snapshot(self.c, P)
+            except Exception as e:                               # noqa: BLE001
+                out[pid] = {"error": f"{type(e).__name__}: {e}"[:200]}
+        return out
+
+    def _prep_action(self, a, actor):
+        """prep_add / prep_remove / prep_reorder / prep_run_now (prep_queue.py)."""
+        from . import prep_queue as PQ
+        pid, p, kind = a["project_id"], a.get("payload") or {}, a["kind"]
+        try:
+            if kind == "prep_add":
+                e = PQ.add(self.c, pid, str(p.get("kind") or "patch"), str(p.get("message") or ""),
+                           source=str(p.get("source") or ""), body=str(p.get("body") or ""),
+                           condition=PQ.parse_condition(str(p.get("after_task") or ""),
+                                                        str(p.get("after_state") or "")),
+                           after_actions=list(p.get("after_actions") or []),
+                           hold_tasks=list(p.get("hold_tasks") or []),
+                           hold_minutes=int(p.get("hold_minutes") or 0),
+                           paths=list(p.get("paths") or []), command=str(p.get("command") or ""),
+                           patch_text=str(p.get("patch_text") or ""),
+                           position=int(p.get("position") or 0), actor=actor)
+                return self._report(a, "applied", f"queued {e['id']} at position {e['ord']}",
+                                    {"id": e["id"], "order": e["ord"]})
+            if kind == "prep_remove":
+                PQ.remove(self.c, pid, str(p.get("id") or ""), actor)
+                return self._report(a, "applied", f"removed {p.get('id')}", {"id": p.get("id")})
+            if kind == "prep_reorder":
+                e = PQ.move(self.c, pid, str(p.get("id") or ""), int(p.get("position") or 1), actor)
+                return self._report(a, "applied", f"{e['id']} moved to position {e['ord']}",
+                                    {"id": e["id"], "order": e["ord"]})
+            out = PQ.run_now(self.c, pid, actor)
+            return self._report(a, "applied", "run now: the next tick looks for a safe point"
+                                + (f"; retrying {', '.join(out['reset'])}" if out["reset"] else ""),
+                                out)
+        except (PQ.PrepError, TypeError, ValueError) as e:
+            return self._report(a, "rejected", str(e)[:500])
 
     # ------------------------------------------------------------------ queue
 

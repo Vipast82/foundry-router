@@ -318,6 +318,7 @@ class Coordinator:
                                 == want.get(k[2]))
         except Exception as e:                                    # noqa: BLE001
             self.log(f"background checks sweep failed: {type(e).__name__}: {e}")
+        __import__(f"{__package__}.prep_queue", fromlist=["tick"]).tick(self)  # SD part 3
         rr = int(self.store.meta("rr") or 0) % len(ids)
         order = ids[rr:] + ids[:rr]
         self.store.set_meta("rr", str(rr + 1))

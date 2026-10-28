@@ -1122,6 +1122,61 @@ FIELDS: list[Field] = [
 ]
 del F
 
+# --------------------------------------------------------------------------- [prep_queue]
+# Self-driving part 3 (2026-10-28, foundry_coordinator/prep_queue.py): queued repo changes
+# (patch, branch or script) land on the main checkout at a safe point, all or nothing,
+# through the project's hooks, then one push and the entries' after-actions. The queue's
+# entries live in the coordinator store (Automation -> Repo changes); these are its knobs.
+PREP_QUEUE_DEFAULTS = {
+    "enabled": True,
+    "check_every_seconds": 60,                # safe-point check interval while entries wait
+    "pull": True,                             # fast-forward pull before landing
+    "push": True,                             # one push per landed batch (publish policy)
+    "commit_timeout_seconds": 600,            # one commit through the project's hooks
+    "script_timeout_seconds": 600,            # a script entry / a run: after-action
+    "hold_minutes": 1440,                     # default expiry of an entry's task holds
+    "live_session_max_age_minutes": 360,      # an unended session older than this is ignored
+    "block_states": ["IMPLEMENTING", "VERIFYING", "REVIEWING", "CHANGES_REQUIRED", "APPROVED",
+                     "CLOSING"],              # a main-checkout task here = mid-sprint
+}
+_PQ_DESC = {
+    "enabled": "Land queued repo changes (Automation → Repo changes) at a safe point.",
+    "check_every_seconds": "How often the coordinator looks for a safe point while entries wait.",
+    "pull": "Fast-forward pull the main checkout before landing a batch.",
+    "push": "Push once after a batch lands (the project's publish policy still applies).",
+    "commit_timeout_seconds": "Time one commit may take through the project's hooks.",
+    "script_timeout_seconds": "Time a script entry or a run: after-action may take.",
+    "hold_minutes": "Default expiry of the task holds an entry places.",
+    "live_session_max_age_minutes": "An unended session row older than this does not block "
+                                    "landing (the self-heal sweep ends dead sessions).",
+    "block_states": "Task states that mean a sprint is mid-way in the main checkout; nothing "
+                    "lands while a main-checkout task is in one.",
+}
+
+
+def prep_queue_table(path: str, raw) -> dict:
+    tbl = {k: v for k, v in raw.items() if k in PREP_QUEUE_DEFAULTS} \
+        if isinstance(raw, dict) else raw
+    out = _typed_table("prep_queue", tbl, PREP_QUEUE_DEFAULTS, path, nonempty_str=True)
+    for k in ("check_every_seconds", "commit_timeout_seconds", "script_timeout_seconds",
+              "hold_minutes", "live_session_max_age_minutes"):
+        if out[k] < 1:
+            raise SettingsError(f"{path}: prep_queue.{k} must be at least 1", f"prep_queue.{k}")
+    out["block_states"] = [s.strip().upper() for s in out["block_states"]]
+    return out
+
+
+TABLES.append(Table("prep_queue", "Repo changes (prep queue)", "git",
+                    "Queued patches, branches and scripts that land on the main checkout at a "
+                    "safe point, all or nothing, through the project's hooks."))
+TABLES_BY_NAME["prep_queue"] = TABLES[-1]
+FIELDS.extend(
+    Field(f"prep_queue.{k}", {bool: "bool", int: "int", list: "list"}[type(v)], v,
+      _PQ_DESC.get(k, ""), "git", "coordinator.prep_queue",
+      item_type="str" if isinstance(v, list) else None,
+      min=1 if isinstance(v, int) and not isinstance(v, bool) else None)
+    for k, v in PREP_QUEUE_DEFAULTS.items())
+
 FIELDS_BY_KEY = {f.key: f for f in FIELDS}
 LOCAL_KEYS = tuple(f.key for f in FIELDS if f.scope == "local")
 
