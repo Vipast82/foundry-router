@@ -22,6 +22,7 @@ from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse
 
 from .. import client_auth
+from ..jsonfit import dumps_fit
 from ..orchestration import WorkError
 
 router = APIRouter()
@@ -485,26 +486,40 @@ async def put_training_dataset(dataset_id: str, request: Request):
     db.execute("INSERT INTO training_datasets (dataset_id, project_id, kind, target, examples, "
                "sha256, bytes, path, manifest, client_id, uploaded_ts) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
                (dataset_id, pid, str(m.get("kind") or ""), str(m.get("target") or ""), len(lines),
-                sha, len(data.encode()), str(base), _json.dumps(m)[:200000],
+                sha, len(data.encode()), str(base), _manifest_for_db(m),
                 client_auth.current().get("client_id") or "", time.time()))
     return {"ok": True, "path": str(base), "examples": len(lines)}
 
 
+# Stored JSON is shrunk to fit, never sliced (jsonfit.py): a sliced JSON string
+# does not parse, and one such row made GET /admin/api/training a plain 500.
+_EPISODE_KEEP = ("episode_id", "project_id", "task_id", "kind", "status", "split", "reasons",
+                 "outcome", "sources")
+_STATUS_KEEP = ("interrupted_runs", "store")
+
+
+def _manifest_for_db(m: dict) -> str:
+    """The manifest copy kept in the database (the full one is manifest.json on
+    disk): the episode count is kept even when the episode list is cut."""
+    m = dict(m)
+    m.setdefault("episode_count", len(m.get("episodes") or []))
+    return dumps_fit(m, 200000, keep=("kind", "target", "purpose", "created", "projects",
+                                      "validation", "episode_count"))
+
+
 @router.put("/v1/foundry/training/status/{pipeline_id}")
 async def put_training_status(pipeline_id: str, request: Request):
-    import json as _json
     data = await request.json()
     request.app.state.services.db.execute(
         "INSERT INTO training_status (pipeline_id, data, updated_ts) VALUES (?,?,?) "
         "ON CONFLICT(pipeline_id) DO UPDATE SET data=excluded.data, updated_ts=excluded.updated_ts",
-        (pipeline_id[:80], _json.dumps(data, default=str)[:200000], time.time()))
+        (pipeline_id[:80], dumps_fit(data, 200000, keep=_STATUS_KEEP), time.time()))
     return {"ok": True}
 
 
 @router.post("/v1/foundry/training/episodes/{pipeline_id}")
 async def put_training_episodes(pipeline_id: str, request: Request):
     """Episode summaries (redacted previews only). Re-sending replaces."""
-    import json as _json
     from foundry_training.redact import scan
     body = await request.json()
     n = 0
@@ -520,6 +535,7 @@ async def put_training_episodes(pipeline_id: str, request: Request):
                    "kind=excluded.kind, updated_ts=excluded.updated_ts",
                    (str(e["episode_id"])[:120], pipeline_id[:80], str(e.get("project_id") or ""),
                     str(e.get("task_id") or ""), str(e.get("kind") or ""),
-                    str(e.get("status") or ""), _json.dumps(e, default=str)[:60000], time.time()))
+                    str(e.get("status") or ""), dumps_fit(e, 60000, keep=_EPISODE_KEEP),
+                    time.time()))
         n += 1
     return {"ok": True, "recorded": n}

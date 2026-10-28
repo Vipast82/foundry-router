@@ -413,7 +413,10 @@ async function api(path, opts={}) {
     headers, ...opts,
     body: opts.body !== undefined ? JSON.stringify(opts.body) : undefined,
   });
-  const data = await r.json().catch(() => ({}));
+  const raw = await r.text().catch(() => "");
+  let data = {};
+  try { data = raw ? JSON.parse(raw) : {}; } catch (e) { data = {}; }
+  if (!data || typeof data !== "object") data = {};
   if (!opts.method && seq !== _renderSeq) {
     const stale = new Error("stale render"); stale.stale = true; throw stale;
   }
@@ -426,8 +429,13 @@ async function api(path, opts={}) {
     }
   }
   if (!r.ok) {
+    // Never a blank message: the server's error, else its status line or body,
+    // always with the HTTP status (HTTP/2 has no statusText).
     const e = data.error;
-    throw new Error((e && e.message) || e || r.statusText);
+    const why = (e && typeof e === "object" ? (e.message || e.type) : e)
+      || (typeof data.detail === "string" ? data.detail : "")
+      || r.statusText || raw.replace(/<[^>]*>/g, " ").trim().slice(0, 200) || "no response body";
+    throw new Error(`${why} (HTTP ${r.status})`);
   }
   return data;
 }
@@ -1139,7 +1147,8 @@ function render() {
   const seq = ++_renderSeq;
   TABS[current]().then(() => { if (seq === _renderSeq) postRender(); }).catch(e => {
     if ((e && e.stale) || seq !== _renderSeq) return;      // user already left this tab
-    $("#main").innerHTML = `<p class="hint">failed to load: ${esc(e.message)}</p>`;
+    const why = (e && (e.message || e.name)) || String(e || "") || "unknown error";
+    $("#main").innerHTML = `<p class="hint">failed to load: ${esc(why)}</p>`;
   });
 }
 
@@ -2918,7 +2927,7 @@ async function tabTraining() {
     const ds = (p.datasets || []).map(x => `<tr><td class="nw"><code>${esc(x.dataset_id)}</code></td><td class="nw">${esc(x.kind)}</td><td class="nw">${esc(x.target)}</td>
       <td class="nw">${esc(x.purpose)}</td><td class="nw">${x.examples ?? "—"}</td><td class="nw">${pill(x.status, x.status === "valid" ? "ok" : "bad")}${x.errors ? ` <span class="hint">${x.errors} errors</span>` : ""}</td><td class="nw hint">${when(x.created_ts)}</td></tr>`).join("");
     const gaps = (p.gaps || []).slice(-15).reverse().map(g => `<tr><td class="nw">${esc(g.project_id || "")}</td><td class="nw">${esc(g.source_adapter || "")}</td><td class="nw">${esc(g.kind || "")}</td><td class="hint" style="white-space:normal">${esc((g.detail || "").slice(0, 240))}</td></tr>`).join("");
-    return `<div class="card"><h3>Pipeline <code>${esc(p.pipeline_id)}</code> <span class="hint">reported ${when(p.updated_ts)}${p.interrupted_runs ? ` · ${p.interrupted_runs} interrupted ingestion runs (re-run the same ingest)` : ""}</span></h3>
+    return `<div class="card"><h3>Pipeline <code>${esc(p.pipeline_id)}</code> <span class="hint">reported ${when(p.updated_ts)}${p.error ? ` · <span class="pill bad">${esc(p.error)}</span>` : ""}${p.interrupted_runs ? ` · ${p.interrupted_runs} interrupted ingestion runs (re-run the same ingest)` : ""}</span></h3>
       ${projs ? `<div class="tscroll"><table><tr><th>project</th><th>capture</th><th>sessions by source</th><th>episodes</th><th>excluded because</th><th>redaction</th><th>artifacts</th><th>gaps</th></tr>${projs}</table></div>` : '<p class="hint">No projects.</p>'}
       ${runs ? `<h4>Ingestion runs</h4><div class="tscroll"><table><tr><th>source</th><th>status</th><th>counts</th><th>error</th><th>started</th></tr>${runs}</table></div>` : ""}
       ${ds ? `<h4>Datasets exported on the workstation</h4><div class="tscroll"><table><tr><th>dataset</th><th>kind</th><th>target</th><th>purpose</th><th>examples</th><th>validation</th><th>created</th></tr>${ds}</table></div>` : ""}

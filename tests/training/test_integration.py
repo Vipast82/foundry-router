@@ -220,3 +220,92 @@ def test_closeout_session_is_measured_by_the_closeout_checks(tmp_path):
     assert ep["outcome"]["verification"]["status"] == "PASS"
     assert ep["outcome"]["verification"]["checks"][0]["check"] == "coordinator.publish"
     assert ep["outcome"]["review"] is None             # the pre-closeout review isn't relabelled
+
+
+def _coord_client(ledgered):
+    ledgered.config_store.config.clients.append(
+        ClientConfig(name="coordinator", key="coord-key", scopes=["orchestration", "admin"]))
+
+
+def test_long_episode_card_is_stored_as_valid_json_and_the_tab_loads(ledgered, client):
+    """v0.151.0 live bug: cards over 60 000 chars were stored sliced mid-JSON and
+    GET /admin/api/training answered a text/plain 500 (the tab: "failed to load:")."""
+    _coord_client(ledgered)
+    big = {"episode_id": "big", "project_id": "fixture-game", "task_id": "FX-9",
+           "kind": "trajectory", "status": "excluded", "split": "train",
+           "reasons": ["review_missing"],
+           "turns": [{"role": "assistant", "text": "word " * 60} for _ in range(40)],
+           "summary": {"feedback": ["finding " * 400 for _ in range(60)],
+                       "checks": [{"name": f"c{i}", "detail": "x" * 900} for i in range(80)]}}
+    assert len(json.dumps(big)) > 60000
+    r = client.post("/v1/foundry/training/episodes/ws1", headers=COORD, json={"episodes": [big]})
+    assert r.json()["recorded"] == 1
+    stored = ledgered.db.query_one("SELECT data FROM training_episodes WHERE episode_id='big'")
+    assert len(stored["data"]) <= 60000
+    card = json.loads(stored["data"])                    # valid JSON, not a slice
+    assert card["truncated_for_storage"] is True and card["status"] == "excluded"
+    v = client.get("/admin/api/training?status=excluded")
+    assert v.status_code == 200
+    ep, = v.json()["episodes"]
+    assert ep["episode_id"] == "big" and ep["reasons"] == ["review_missing"]
+    assert client.get("/admin/api/training/episodes/big").status_code == 200
+
+
+def test_rows_sliced_by_an_older_foundry_do_not_break_the_tab(ledgered, client):
+    """Rows already stored cut in half (live database) show as stubs."""
+    db = ledgered.db
+    whole = json.dumps({"episode_id": "cut", "turns": [{"text": "y" * 500}] * 10})
+    db.execute("INSERT INTO training_episodes (episode_id, pipeline_id, project_id, task_id, "
+               "kind, status, data, updated_ts) VALUES (?,?,?,?,?,?,?,?)",
+               ("cut", "ws1", "fixture-game", "FX-2", "trajectory", "eval", whole[:1000],
+                time.time()))
+    db.execute("INSERT INTO training_episodes (episode_id, pipeline_id, project_id, task_id, "
+               "kind, status, data, updated_ts) VALUES (?,?,?,?,?,?,?,?)",
+               ("nan", "ws1", "fixture-game", "", "trajectory", "eval",
+                '{"episode_id": "nan", "summary": {"score": NaN}}', time.time() - 1))
+    db.execute("INSERT INTO training_status (pipeline_id, data, updated_ts) VALUES (?,?,?)",
+               ("ws1", '{"projects": {"fixture-game": {"capt', time.time()))
+    db.execute("INSERT INTO training_datasets (dataset_id, project_id, kind, target, examples, "
+               "sha256, bytes, path, manifest, client_id, uploaded_ts) VALUES "
+               "(?,?,?,?,?,?,?,?,?,?,?)", ("ds1", "fixture-game", "sft", "chatml", 3, "x", 9,
+                                            "/nonexistent", '{"validation": {"ok": tr', "",
+                                            time.time()))
+    v = client.get("/admin/api/training")
+    assert v.status_code == 200
+    ep, nan = v.json()["episodes"]
+    assert nan["summary"]["score"] is None               # NaN never reaches JSONResponse
+    assert ep["episode_id"] == "cut" and ep["status"] == "eval" and ep["task_id"] == "FX-2"
+    assert ep["reasons"][0].startswith("card_unreadable")
+    p, = v.json()["pipelines"]
+    assert p["pipeline_id"] == "ws1" and "does not parse" in p["error"]
+    assert client.get("/admin/api/training/episodes/cut").json()["episode_id"] == "cut"
+    d, = client.get("/admin/api/training/datasets").json()["datasets"]
+    assert d["dataset_id"] == "ds1" and d["validation_ok"] is False
+
+
+def test_long_status_is_stored_as_valid_json(ledgered, client):
+    _coord_client(ledgered)
+    status = {"projects": {"fixture-game": {"gaps": 3}}, "interrupted_runs": 2,
+              "gaps": [{"detail": "z" * 2000} for _ in range(200)]}
+    assert client.put("/v1/foundry/training/status/ws1", headers=COORD,
+                      json=status).status_code == 200
+    raw = ledgered.db.query_one("SELECT data FROM training_status")["data"]
+    assert len(raw) <= 200000 and json.loads(raw)["interrupted_runs"] == 2
+    assert client.get("/admin/api/training").status_code == 200
+
+
+def test_admin_api_crash_answers_json_naming_the_error(ledgered, app, monkeypatch):
+    """Any admin-API crash names its exception, so no UI tab shows a blank error."""
+    from fastapi.testclient import TestClient
+
+    class Boom(Exception):
+        pass
+
+    def boom(*a, **k):
+        raise Boom()
+    monkeypatch.setattr(ledgered.capture, "status", boom)
+    with TestClient(app, raise_server_exceptions=False) as c:
+        r = c.get("/admin/api/training")
+    assert r.status_code == 500
+    err = r.json()["error"]
+    assert err["type"] == "Boom" and "Boom" in err["message"]
