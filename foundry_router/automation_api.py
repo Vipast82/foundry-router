@@ -269,6 +269,59 @@ async def role_rules_test(request: Request):
     return RR.test(role, rules, op, value, str(b.get("workspace") or ""))
 
 
+# --------------------------------------------------------------------------- repo changes
+# Self-driving part 3: the coordinator's prep queue (foundry_coordinator/prep_queue.py).
+# Reads come from the coordinator heartbeat's `prep_queue` block; edits are typed
+# control actions (prep_add / prep_remove / prep_reorder / prep_run_now) that the
+# coordinator claims and applies on its next tick (control_center.py PREP_ACTIONS).
+
+PREP_VERBS = {"add": "prep_add", "remove": "prep_remove", "reorder": "prep_reorder",
+              "run_now": "prep_run_now"}
+
+
+def _control(request: Request):
+    return request.app.state.services.control
+
+
+def _control_err(e) -> JSONResponse:
+    return JSONResponse({"error": str(e), "code": getattr(e, "code", "invalid"),
+                         **(getattr(e, "extra", None) or {})},
+                        status_code=getattr(e, "status", 400))
+
+
+@router.get(P + "/prep")
+@_guard
+async def prep_list(request: Request, project: str = ""):
+    return _control(request).prep_view([], project.strip())
+
+
+@router.post(P + "/prep/actions")
+@_guard
+async def prep_action(request: Request):
+    from .control_center import ControlError
+    _mutating(request)
+    b = await _body(request)
+    verb = str(b.get("action") or "")
+    if verb not in PREP_VERBS:
+        raise StoreError(f"action must be one of {', '.join(PREP_VERBS)}", "invalid")
+    body = {k: v for k, v in b.items() if k not in ("action", "kind")}
+    body.update(kind=PREP_VERBS[verb], project_id=str(b.get("project") or ""),
+                idempotency_key=str(b.get("idempotency_key") or ""))
+    try:
+        return _control(request).create_action(_actor(request), [], body, scopes=None)
+    except ControlError as e:
+        return _control_err(e)
+
+
+@router.get(P + "/prep/actions/{action_id}")
+@_guard
+async def prep_action_status(request: Request, action_id: str):
+    a = _control(request).action_view(action_id, with_log=False)
+    if not a or not str(a.get("kind") or "").startswith("prep_"):
+        raise StoreError("no such repo-change action", "not_found", 404)
+    return a
+
+
 # --------------------------------------------------------------------------- coordinator
 
 def _coord_project(project: str) -> str:

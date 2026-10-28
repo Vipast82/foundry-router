@@ -753,6 +753,48 @@ def main(argv=None, clients=None, foundry=None) -> int:
     x.add_argument("--dry-run", dest="dry_run", action="store_true",
                    help="list rows / CALLs / DYNARG / bridges / manual rows / carry; no Studio")
     x.add_argument("--poll", type=float, default=10.0)
+    pqp = sub.add_parser("prep", help="pending repo changes (self-driving part 3): patches, "
+                                      "branches and scripts that land on the main checkout at a "
+                                      "safe point, all or nothing")
+    pqs = pqp.add_subparsers(dest="pqcmd", required=True)
+    x = pqs.add_parser("add", help="queue one change")
+    x.add_argument("project")
+    x.add_argument("--kind", choices=["patch", "branch", "script"], default="patch")
+    x.add_argument("--source", default="", help="patch file path, or branch/ref")
+    x.add_argument("--message", "-m", required=True, help="the commit subject")
+    x.add_argument("--body", action="append", default=[],
+                   help="a commit body paragraph (repeatable; joined by blank lines)")
+    x.add_argument("--after-task", dest="after_task", default="",
+                   help="land only once this task reaches --after-state")
+    x.add_argument("--after-state", dest="after_state", default="COMPLETE")
+    x.add_argument("--after-action", dest="after_actions", action="append", default=[],
+                   help="kilo_config_apply | reload_kilo | resume:<task> | release_hold:<task> | "
+                        "copy:<src>=><dest> | move_aside:<rel> | run:<command> (repeatable)")
+    x.add_argument("--hold", dest="hold_tasks", action="append", default=[],
+                   help="hold this task until the entry lands (repeatable)")
+    x.add_argument("--hold-minutes", dest="hold_minutes", type=int, default=0)
+    x.add_argument("--path", dest="paths", action="append", default=[],
+                   help="script kind: a workspace-relative path to commit (repeatable; "
+                        "none = every tracked change)")
+    x.add_argument("--command", default="", help="script kind: the command ({python}, "
+                                                  "{workspace} are filled in)")
+    x.add_argument("--position", type=int, default=0, help="1-based place in the queue "
+                                                           "(default: the end)")
+    x.add_argument("--by", default="operator")
+    x = pqs.add_parser("list", help="the queue with status (and logs with --log)")
+    x.add_argument("project", nargs="?", default="")
+    x.add_argument("--log", action="store_true"); x.add_argument("--json", action="store_true")
+    x.add_argument("--all", action="store_true", help="include removed entries")
+    x = pqs.add_parser("remove"); x.add_argument("project"); x.add_argument("id")
+    x.add_argument("--by", default="operator")
+    x = pqs.add_parser("move", help="reorder: put an entry at a 1-based position")
+    x.add_argument("project"); x.add_argument("id"); x.add_argument("position", type=int)
+    x.add_argument("--by", default="operator")
+    x = pqs.add_parser("run-now", help="retry failed entries and look for a safe point at the "
+                                       "running coordinator's next tick")
+    x.add_argument("project"); x.add_argument("--by", default="operator")
+    x = pqs.add_parser("status", help="safe point, what waits and why, the last batch")
+    x.add_argument("project", nargs="?", default="")
     a = ap.parse_args(argv)
     try:
         c = build(a, clients=clients, foundry=foundry)
@@ -784,6 +826,74 @@ def _kilo_config(c: Coordinator, a) -> int:
         print(f"error: {e}", file=sys.stderr)
         return 2
     print(json.dumps(out, indent=2))
+    return 0
+
+
+def _prep_cmd(c: Coordinator, a) -> int:
+    """prep add | list | remove | move | run-now | status (prep_queue.py). Writes go to
+    the store; the running coordinator lands entries at its next safe point."""
+    from . import prep_queue as PQ
+    PQ.ensure(c.store)
+    try:
+        if a.pqcmd == "add":
+            e = PQ.add(c, a.project, a.kind, a.message, source=a.source,
+                       body="\n\n".join(b.strip() for b in a.body if b.strip()),
+                       condition=PQ.parse_condition(a.after_task, a.after_state),
+                       after_actions=a.after_actions, hold_tasks=a.hold_tasks,
+                       hold_minutes=a.hold_minutes, paths=a.paths, command=a.command,
+                       position=a.position, actor=a.by)
+            print(f"queued {e['id']} at position {e['ord']}: {e['message']}")
+            return 0
+        if a.pqcmd == "remove":
+            PQ.remove(c, a.project, a.id, a.by)
+            print(f"removed {a.id}")
+            return 0
+        if a.pqcmd == "move":
+            e = PQ.move(c, a.project, a.id, a.position, a.by)
+            print(f"{a.id} is now at position {e['ord']}")
+            return 0
+        if a.pqcmd == "run-now":
+            out = PQ.run_now(c, a.project, a.by)
+            print(f"run-now requested for {a.project}"
+                  + (f"; reset to pending: {', '.join(out['reset'])}" if out["reset"] else ""))
+            return 0
+    except PQ.PrepError as e:
+        print(f"error: {e}", file=sys.stderr)
+        return 2
+    pids = [p for p in sorted(c.projects) if not a.project or p == a.project]
+    if a.project and not pids:
+        print(f"error: unknown project {a.project!r}", file=sys.stderr)
+        return 2
+    for pid in pids:
+        P = c.projects[pid]
+        if a.pqcmd == "status":
+            snap = PQ.snapshot(c, P, log_lines=0)
+            ok, why = PQ.safe_point(c, P)
+            batch, stop = PQ.next_batch(c, P)
+            print(f"{pid}: prep queue {'on' if snap['enabled'] else 'OFF'}; {snap['pending']} "
+                  f"pending; safe point {'now' if ok else 'no: ' + why}")
+            print(f"  ready to land: {', '.join(e['id'] for e in batch) or 'nothing'}"
+                  + (f"; stops at: {stop}" if stop else ""))
+            if snap["last"]:
+                lt = snap["last"]
+                print(f"  last batch {lt.get('batch')} {lt.get('result')} at "
+                      f"{time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(lt.get('ts') or 0))}"
+                      f": {str(lt.get('detail') or '')[:200]}")
+            continue
+        rows = PQ.entries(c.store, pid, include_removed=a.all)
+        if a.json:
+            print(json.dumps({"project": pid, "entries": rows}, indent=1, default=str))
+            continue
+        print(f"{pid}:")
+        for e in rows:
+            cond = e["condition"]
+            print(f"  {e['ord']:>3}. {e['id']} {e['status']:<15} {e['kind']:<6} "
+                  f"{e['message'][:90]}" + (f"  [{e['sha'][:12]}]" if e["sha"] else "")
+                  + (f"  (after {cond['after_task']} {cond['state']})" if cond else ""))
+            if a.log:
+                for x in e["log"][-20:]:
+                    print(f"       {time.strftime('%m-%d %H:%M:%S', time.localtime(x['ts']))} "
+                          + str(x["msg"]).replace("\n", "\n       ")[:2000])
     return 0
 
 
@@ -981,6 +1091,8 @@ def _dispatch(a, c: Coordinator) -> int:
         return _playbook_cmd(c, a)
     if a.cmd == "studio-calls":
         return _studio_calls_cmd(c, a)
+    if a.cmd == "prep":
+        return _prep_cmd(c, a)
     if a.cmd == "queue":
         if a.qcmd == "approve":
             deps = [d.strip() for d in a.deps.split(",") if d.strip()]
