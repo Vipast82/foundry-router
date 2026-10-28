@@ -555,9 +555,12 @@ class Coordinator:
                 "reason": f"{t['sessions']} sessions used (max_sessions_per_task)"},
                 cls="sessions_exhausted")
         minutes = lim.limit("max_task_minutes", 0)
-        if minutes and t["started_ts"] and self.clock() - t["started_ts"] > minutes * 60:
+        from . import infra
+        if minutes and t["started_ts"] and infra.active_seconds(self, t) > minutes * 60:
+            # active time only: overnight idle, parked, paused and waiting time is free
             return self._stop(P, t, S.FAILED, {
-                "reason": f"over max_task_minutes ({minutes})"}, cls="task_minutes")
+                "reason": f"over max_task_minutes ({minutes} active minutes)"},
+                cls="task_minutes")
         try:
             spec = P.adapter.describe(tid)
         except AdapterError as e:
@@ -736,6 +739,12 @@ class Coordinator:
                                        "phase": phase, "attempt": attempt, "role": role},
                 permissions=self._session_rules(P, spec, phase, role))
             self.store.op_update(key, "started", {"session_id": sid})
+            try:
+                # the HEAD the session starts at: its progress (timeout wrap-up) is
+                # measured against it
+                meta = {**(meta or {}), "prompt_head": P.ws.head()}
+            except Exception:                                     # noqa: BLE001
+                pass
             if meta:
                 self.store.add_session(sid, P.id, tid, run_id, role, phase, attempt,
                                        P.client.name, persona, meta)
@@ -1152,6 +1161,73 @@ class Coordinator:
         "commit with the task prefix; never push); (2) end this turn with your report block: "
         "status NOT DONE, a summary of what is committed, and a `next` line saying exactly "
         "where the next session picks up. A fresh session continues from your commit.")
+    TIMEOUT_WRAPUP_PROMPT = (
+        "The coordinator stopped your last step: this session has run {minutes} of its "
+        "{timeout} minutes and is stopped at the limit. Do NOT start new work and make no more "
+        "Studio or test calls. In as few steps as possible: (1) write what you have found so "
+        "far into the sprint's plan/evidence files and commit it (a work-in-progress commit "
+        "with the task prefix; never push); (2) end this turn with your report block: status "
+        "NOT DONE, a summary of what is committed, and a `next` line saying exactly where the "
+        "next session picks up. A fresh session continues from your commit (no attempt is "
+        "used).")
+    TIMEOUT_WRAPUP_LEAD_S = 15 * 60
+
+    def _session_progressed(self, P: Project, t: dict, sid: str) -> Optional[str]:
+        """What the session did since it started ('' = nothing): HEAD moved past the
+        HEAD it started at, or the plan in the workspace has more ticked steps than
+        the plan at that HEAD."""
+        data = (self.store.session(sid) or {}).get("data") or {}
+        start = str(data.get("prompt_head") or data.get("head_start") or "")
+        if not start:
+            return ""
+        try:
+            head = P.ws.head()
+        except GitError:
+            return ""
+        if head and head != start:
+            return f"HEAD moved {start[:12]} -> {head[:12]}"
+        try:
+            spec = P.adapter.describe(t["task_id"])
+            plan = str((getattr(spec, "data", None) or {}).get("plan") or "")
+            if not plan:
+                return ""
+            ticked = re.compile(r"^\s*(?:[-*]|\d+[.)])\s*\[[xX]\]", re.M)
+            before = len(ticked.findall(P.ws.show_at(start, plan) or ""))
+            with open(os.path.join(P.profile.workspace, plan), encoding="utf-8",
+                      errors="replace") as f:
+                now = len(ticked.findall(f.read()))
+        except Exception:                                         # noqa: BLE001
+            return ""
+        return f"{now - before} plan step(s) ticked" if now > before else ""
+
+    def _timeout_wrapup(self, P: Project, t: dict, sid: str, prompt_ts: float,
+                        timeout: int) -> bool:
+        """TIMEOUT_WRAPUP_LEAD_S before session_timeout_minutes: a session that made
+        progress (_session_progressed) is stopped the context guard's way (abort,
+        one wrap-up prompt, free handoff) instead of a charged abort at the limit.
+        True = stopped this poll."""
+        now = self.clock()
+        if now - prompt_ts < timeout * 60 - self.TIMEOUT_WRAPUP_LEAD_S:
+            return False
+        if ((t["data"] or {}).get("context_wrapup") or {}).get("session_id") == sid:
+            return False                 # already wrapping up
+        last = self.__dict__.setdefault("_timeout_wrapup_ts", {})
+        if now - last.get(sid, -1e18) < 60:
+            return False                 # git is read at most once a minute per session
+        last[sid] = now
+        did = self._session_progressed(P, t, sid)
+        if not did:
+            return False
+        P.client.abort(sid, directory=P.profile.workspace)
+        minutes = int((now - prompt_ts) / 60)
+        self.store.merge_data(P.id, t["task_id"], context_wrapup={
+            "session_id": sid, "stage": "aborted", "reason": "timeout", "minutes": minutes,
+            "timeout": timeout, "progress": did, "ts": now})
+        self.store.event(P.id, t["task_id"], "timeout_wrapup", session_id=sid,
+                         detail={"minutes": minutes, "timeout": timeout, "progress": did})
+        self._note(P, t, f"session at {minutes} of {timeout} min with progress ({did}): its "
+                         f"turn was stopped so it can commit and report before a free handoff")
+        return True
 
     def _context_guard(self, P: Project, t: dict, sid: str) -> bool:
         """A BUSY implement session near its window: stop the turn (Kilo abort) so it can
@@ -1206,11 +1282,16 @@ class Coordinator:
         w = (t["data"] or {}).get("context_wrapup") or {}
         if w.get("session_id") != t["session_id"] or w.get("stage") != "aborted":
             return False
-        text = self.WRAPUP_PROMPT.format(ctx=int(w.get("context") or 0),
-                                         usable=int(w.get("usable") or 0))
+        timed = w.get("reason") == "timeout"
+        text = (self.TIMEOUT_WRAPUP_PROMPT.format(minutes=int(w.get("minutes") or 0),
+                                                  timeout=int(w.get("timeout") or 0))
+                if timed else
+                self.WRAPUP_PROMPT.format(ctx=int(w.get("context") or 0),
+                                          usable=int(w.get("usable") or 0)))
         sent = False
         try:
-            sent = self._prompt_primary(P, t, text, "context_wrapup")
+            sent = self._prompt_primary(P, t, text,
+                                        "timeout_wrapup" if timed else "context_wrapup")
         except Exception as e:                                    # noqa: BLE001
             self.log(f"{P.id}/{t['task_id']}: context wrap-up prompt failed: {e}")
         self.store.merge_data(P.id, t["task_id"], context_wrapup={**w, "stage": "prompted"})
@@ -1229,6 +1310,12 @@ class Coordinator:
         if str((rep or {}).get("status") or "").upper() in ("DONE", "BLOCKED", "NEEDS_HUMAN"):
             return None
         summary = str((rep or {}).get("summary") or (rep or {}).get("next") or "").strip()[:600]
+        if w.get("reason") == "timeout":
+            return (f"timeout wrap-up: the previous session was stopped {w.get('minutes')} min "
+                    f"into its {w.get('timeout')} min limit after making progress "
+                    f"({w.get('progress')}) and committed its work; continue from the committed "
+                    f"state and the plan's checklist/NEXT line"
+                    + (f". Its last report: {summary}" if summary else ""))
         return (f"context wrap-up: the previous session was stopped at {w.get('context')} "
                 f"tokens (stop line {w.get('threshold')}) and committed its work; continue "
                 f"from the committed state and the plan's checklist/NEXT line"
@@ -1306,11 +1393,25 @@ class Coordinator:
                 return self._session_failed(P, t, "Kilo did not admit the prompt within "
                                             "the admission window; a fresh session resumes "
                                             "from recorded state", phase, free=True)
+            from . import infra
+            if infra.kilo_retry(self, P, t, sid, s, phase):
+                return None              # 5 min of Kilo "retry": stopped as a free infra wait
+            cw = (t["data"] or {}).get("context_wrapup") or {}
             if timeout and self.clock() - prompt_ts > timeout * 60:
                 P.client.abort(sid, directory=directory)
                 self._end_session(P, sid, "timeout")
+                if phase == "implement" and cw.get("session_id") == sid:
+                    # it was already wrapping up (context or timeout): its committed
+                    # work is the handoff, never a charged attempt
+                    self.store.merge_data(P.id, t["task_id"], context_wrapup=None)
+                    return self._session_failed(P, t, f"session ran over {timeout} minutes "
+                                                      f"while wrapping up; continue from the "
+                                                      f"committed state", phase, free=True)
                 return self._session_failed(P, t, f"session ran over {timeout} minutes and was "
                                                   f"stopped", phase)
+            if phase == "implement" and timeout and self._timeout_wrapup(
+                    P, t, sid, prompt_ts, timeout):
+                return None
             if s.compaction:
                 return self._compacted(P, t, sid, phase, s.compaction)
             if phase == "implement" and self._context_guard(P, t, sid):
@@ -1491,9 +1592,11 @@ class Coordinator:
             # restarts the session timeout); end the session like a stall
             P.client.abort(sid, directory=P.profile.workspace)
             self._end_session(P, sid, "compaction_loop")
+            # Kilo's compaction loop is the client's failure, not the work's: free
             return self._session_failed(P, t, f"the session compacted its context {cap + 1} "
                                               "times without finishing; a fresh session "
-                                              "continues from the recorded state", phase)
+                                              "continues from the recorded state", phase,
+                                        free=True)
         nudges[sid] = int(nudges.get(sid) or 0) + 1
         self.store.merge_data(P.id, t["task_id"], compaction_nudges=nudges)
         spec = P.adapter.describe(t["task_id"])
@@ -2539,6 +2642,9 @@ class Coordinator:
             self.store.merge_data(pid, tid, training_hold=None)
             t = self.store.task(pid, tid)
         spec = P.adapter.describe(tid)
+        if t["data"].get("push_wait") and self._push_retry(P, t, spec):
+            return
+        t = self.store.task(pid, tid)
         mode = P.adapter.closeout_mode()
         templated = False
         if mode == "session" and not t["data"].get("closeout_session"):
@@ -2555,6 +2661,10 @@ class Coordinator:
             if not sid:
                 if self._held(P, t, "closeout session start"):
                     return
+                from . import infra
+                note = infra.closeout_waiting(self, P, t)
+                if note:
+                    return self._note(P, t, note)
                 if self._acquire(P, t, self._session_locks(P), writer=True):
                     return
                 run_id = f"{t['run_id']}-close{int(t['data'].get('closeout_attempts') or 0)}"
@@ -2605,10 +2715,56 @@ class Coordinator:
         published = self._publish(P, t, head, results, push=True)
         cid = self.store.save_verification(pid, tid, head, "closeout", results)
         bad = [r for r in results if r.required and r.result != PASS]
+        from . import infra
+        if bad and infra.push_failed_only(results):
+            # C: only the push failed (remote, network, auth outage): an infra wait in
+            # CLOSING with backoff, never a closeout/repair finding or a paid session
+            why = "; ".join(r.detail for r in bad if r.check == infra.PUBLISH_CHECK)
+            self._release_session(P, t)
+            pw = infra.push_wait(self, P, t, head, results, why)
+            return self._note(P, t, f"closeout passed; the push failed ({why[:200]}); retry "
+                                    f"#{pw['n']} in {int(pw['retry_at'] - self.clock())} s "
+                                    f"(infra wait, no attempt is used)")
         if bad:
             return self._closeout_retry(P, t, "; ".join(failed_findings(bad))[:1500], cid=cid)
         need = self._approvals_needed(P, t, spec, "after_close", head)
         self._finish_close(P, t, cid, head, need, published)
+
+    def _push_retry(self, P: Project, t: dict, spec) -> bool:
+        """A push wait (closeout passed, only the push failed): when due, push again
+        and finish the close with the kept closeout results; not due yet, a note.
+        False = no wait applies any more (HEAD moved: the full closeout runs again)."""
+        from . import infra
+        pid, tid = P.id, t["task_id"]
+        pw = t["data"].get("push_wait") or {}
+        head = P.ws.head()
+        if pw.get("head") != head:
+            self.store.merge_data(pid, tid, push_wait=None)
+            return False
+        now = self.clock()
+        if now < float(pw.get("retry_at") or 0):
+            self._note(P, t, f"closeout passed; the push failed ({str(pw.get('why'))[:200]}); "
+                             f"retry #{int(pw.get('n') or 0) + 1} in "
+                             f"{int(float(pw['retry_at']) - now)} s (infra wait, no attempt "
+                             f"is used)")
+            return True
+        results = infra.push_results(pw)
+        published = self._publish(P, t, head, results, push=True, attempt=int(pw.get("n") or 0))
+        if not published:
+            bad = [r for r in results if r.check == infra.PUBLISH_CHECK]
+            why = "; ".join(r.detail for r in bad) or "push failed"
+            pw = infra.push_wait(self, P, t, head, results, why)
+            self._note(P, t, f"closeout passed; the push failed again ({why[:200]}); retry "
+                             f"#{pw['n']} in {int(pw['retry_at'] - self.clock())} s (infra "
+                             f"wait, no attempt is used)")
+            return True
+        cid = self.store.save_verification(pid, tid, head, "closeout", results)
+        self.store.merge_data(pid, tid, push_wait=None)
+        self.store.event(pid, tid, "push_retry_ok", detail={"head": head,
+                                                             "tries": int(pw.get("n") or 0) + 1})
+        need = self._approvals_needed(P, t, spec, "after_close", head)
+        self._finish_close(P, self.store.task(pid, tid), cid, head, need, published)
+        return True
 
     def _finish_close(self, P: Project, t: dict, cid: str, head: str, need: list,
                       published) -> None:
@@ -2815,7 +2971,7 @@ class Coordinator:
                   "closeout_done": None, "closeout_attempts": 0})
 
     def _publish(self, P: Project, t: dict, head: str, results: list,
-                 push: bool = False) -> str:
+                 push: bool = False, attempt: int = 0) -> str:
         """Push exactly once per commit, after closeout verification. A push is
         a backup, not a verdict: it is the last step after every check.
 
@@ -2846,7 +3002,8 @@ class Coordinator:
                                               f"{remote}/{branch}", f"{remote}/{branch} = {head[:12]}",
                                               head))
             return f"{remote}/{branch}@{head[:12]}"
-        key = f"push:{pid}:{tid}:{head}"
+        # one journaled push per commit and try (a retry after a push wait is a new try)
+        key = f"push:{pid}:{tid}:{head}" + (f":retry{attempt}" if attempt else "")
         if self.store.op_begin(key, pid, tid, "push") is None:
             try:
                 out = P.ws.push(remote, branch)
@@ -2858,7 +3015,7 @@ class Coordinator:
         results.append(VerificationResult(
             "coordinator.published", PASS if ok else FAIL, True, f"{remote}/{branch}",
             f"{remote}/{branch} = {str(cur)[:40]}" + ("" if ok else f", expected {head[:12]}; "
-                                                       f"push not retried automatically"), head))
+                                                       f"retried with backoff"), head))
         return f"{remote}/{branch}@{head[:12]}" if ok else ""
 
     # -- human approval ----------------------------------------------------------------

@@ -140,7 +140,9 @@ class KiloClient(CodingClient):
             return SessionState(status="busy", error="waiting for the prompt to be admitted",
                                 unanswered=True)
         if not (info.get("time") or {}).get("completed") and not info.get("error"):
-            return SessionState(status="busy")
+            # Kilo's status list does not have it (busy/retry returned above): a turn
+            # nobody runs any more unless it completes within moments (a dead session)
+            return SessionState(status="busy", stalled=True)
         if _is_compaction(last) and not info.get("error"):
             # Kilo compacted the context; that summary is not the work's result.
             # Kilo stays the compaction manager: the coordinator only waits for

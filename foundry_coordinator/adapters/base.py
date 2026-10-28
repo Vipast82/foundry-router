@@ -104,6 +104,7 @@ class SessionState:
     children: list = field(default_factory=list)
     unanswered: bool = False                    # idle with no reply to the prompt yet
     retry: bool = False                         # the provider call is being retried (Kilo retry)
+    stalled: bool = False                       # busy only by its transcript: Kilo runs no turn
     compaction: Optional[dict] = None           # turn ended on Kilo's compaction summary
     context: Optional[int] = None               # context tokens of the last turn (B12)
 
