@@ -1167,21 +1167,26 @@ def test_served_model_mismatch_fails_closed_without_fallback(tmp_path, mode):
     e = make_game(tmp_path, primary_script([]), lead=lambda ctx: lead_reply(game_assignment()),
                   extra=lead_toml(expected=expected), ff=ff)
     e["c"].approve("game", TID, [], "victor")
-    assert run_until(e["c"], lambda: (case(e) or {}).get("state") == "NEEDS_VICTOR", limit=60), \
+    # C (2026-10-28): a served-model mismatch is a router failover: the report is still
+    # discarded (fail closed, never re-routed within the call), but the case defers and
+    # retries later with the call uncounted; a local route is refused before any call
+    want = "NEEDS_VICTOR" if mode == "local_route" else "DEFERRED"
+    assert run_until(e["c"], lambda: (case(e) or {}).get("state") == want, limit=60), \
         hist(e)
     k = case(e)
     assert k["proposed_action"] == {}                    # nothing from the report was used
-    d = e["c"].obligations.decision(k["decision_id"])
     if mode == "local_route":
+        d = e["c"].obligations.decision(k["decision_id"])
         assert not e["client"].lead_starts()             # readiness refused before any call
         assert "no_local_route" in d["question"]
     else:
-        assert len(e["client"].lead_starts()) == 1       # never re-routed / retried
+        assert len(e["client"].lead_starts()) == 1       # never re-routed within the call
         sm = next(a for a in acts(e, k["case_id"]) if a["kind"] == "served_model")
         assert sm["detail"]["verdict"] == "mismatch"
         assert e["client"].lead_starts()[0]["session_id"] in e["client"].aborts
-        assert "no fallback" in next(a for a in acts(e, k["case_id"])
-                                     if a["kind"] == "lead_call")["result"]
+        call = next(a for a in acts(e, k["case_id"]) if a["kind"] == "lead_call")
+        assert "no fallback" in call["result"] and call["detail"]["infra"]
+        assert k["counters"].get("diagnoses", 0) == 0
     for _ in range(3):
         e["c"].tick()
     assert state(e) == S.BLOCKED and len(e["client"].primary_starts()) == 3
