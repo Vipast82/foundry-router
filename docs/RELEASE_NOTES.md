@@ -2,6 +2,18 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.155.1 — an unblock with a fresh budget also resets the review budget
+
+GF-GATE1, 2026-10-28:
+1. It was unblocked with `--reset-attempts` at 04:15, worked on the local model, and passed
+   verification at 06:01.
+2. It was then refused at its very first review: "review budget used (3/3 review calls, budget
+   ledger)". The earlier attempts' reviews still counted.
+3. The Lead escalated, and the 30-min decision timeout parked the sprint ("stop the task").
+
+- **`unblock --reset-attempts` now also resets the `review_calls` budget**, not only attempts and
+  sessions. It adds an authorized ledger row; the raw count is kept for the audit.
+
 ## v0.155.0 — automation audit fixes: fewer loops, free outages, no stops for tooling
 
 Victor 2026-10-28: "do a deep check for automation gaps, time sinks, inefficiencies, blockers,

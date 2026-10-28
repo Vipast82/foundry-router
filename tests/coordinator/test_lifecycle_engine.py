@@ -1108,3 +1108,24 @@ def test_cli_decision_reevaluate_keeps_the_audit_and_never_touches_counters(tmp_
     # a withdrawn decision can't be re-evaluated again
     assert cli.main(argv, clients={"game": client}, foundry={"game": ff}) == 2
     assert P.id == "game"
+
+
+def test_an_unblock_with_reset_also_resets_the_review_budget(tmp_path):
+    """2026-10-28: GF-GATE1 was unblocked with a reset, passed verification, and was parked
+    at its first review because the earlier attempts' review calls still counted."""
+    c, client, _, _, _ = _game(tmp_path, lambda ctx: green_t1(ctx))
+    P = c.projects["game"]
+    c.approve("game", "T1", [], "victor")
+    t = c.store.task("game", "T1")
+    for i in range(4):
+        c.obligations.charge("game", "T1", "review_calls", 1, f"review:old:{i}", "engine")
+    lim = c.obligations.effective_limits(P, c.store.task("game", "T1"))["review_calls"]
+    assert lim["remaining"] <= 0
+    with c.store.tx():
+        c.store.transition("game", "T1", S.BLOCKED, {"blocker": "review budget used"},
+                           actor="engine", blocker="review budget used")
+    c.unblock("game", "T1", "fresh budget", reset_attempts=True)
+    lim = c.obligations.effective_limits(P, c.store.task("game", "T1"))["review_calls"]
+    assert lim["remaining"] == lim["base_max"] and lim["used"] == 4      # raw count kept
+    rows = c.obligations.ledger("game", "T1")
+    assert any(r["counter"] == "authorized:review_calls" for r in rows)

@@ -3411,7 +3411,11 @@ class Coordinator:
                     "decision_id": stop["decision_id"], "by": actor,
                     "reason": "the operator unblocked a task stopped by this answer"})
             if lc:
-                for counter in ("attempt_ordinary", "sessions"):
+                # 2026-10-28: the review budget too. GF-GATE1 was unblocked with a reset,
+                # passed verification, and was parked at its very first review because
+                # the earlier attempts' 3 review calls still counted ("review budget used
+                # 3/3"): an operator's fresh budget covers the reviews it needs
+                for counter in ("attempt_ordinary", "sessions", "review_calls"):
                     self.obligations.reset(P, t, counter, f"unblock: {resolution}"[:300],
                                            actor, f"unblock:{n}")
             return out
