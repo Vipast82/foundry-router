@@ -2,6 +2,27 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.157.0 — fewer stops: alerts dismiss and auto-clear, mechanical asks answered, non-sprint deps ignored
+
+From the 2026-10-28 AU run (GF-GATE1, HK-CLOSE1, AS-D13), where the operator was asked things the
+coordinator already knew the answer to.
+
+- **Alerts: Dismiss and auto-clear.** Each alert has Dismiss (and "Dismiss all info"); dismissed
+  alerts leave the bell and the open list and stay in history (filter "dismissed"). The router
+  watchdog resolves alerts whose condition is gone: a forgotten-pause alert once the task is not
+  PAUSED, a coordinator error after `alert_error_quiet_hours` (24) without a repeat or when the task
+  completes, completion / queue-exhausted info after acknowledgement or `alert_info_hours` (24). Both
+  windows and `alert_autoclear` are control-center settings.
+- **Regression index count spec auto-granted.** `tests/lune/specs/RegressionIndex.spec.luau` is on
+  the default scope allow-list: a new index row always bumps the pinned count (HK-CLOSE1 16:02).
+- **A refused phase move never waits on the operator.** "Move BUILD work to CLOSE" from a model
+  report stays refused; its obligation_conflict record is answered with the default at once
+  (`refusal_default`). Moving an obligation is still possible with an obligation_phase decision
+  (GF-GATE1 15:21: three such cards blocked review).
+- **Non-sprint ids in a spec's deps are ignored.** AS-D13's deps named "Q1" (a CC0 asset pack);
+  the AU adapter's `is_known_task` checks SPRINT_STATUS / MASTER_ORDER / STATE rows, docs/SPRINTS*
+  headings and plan files; an unknown id is logged and never blocks.
+
 ## v0.156.9 — only live repeats stop a sprint
 
 GF-GATE1, 2026-10-28 15:11 and 15:36: scope and gate-binding findings fixed attempts earlier
