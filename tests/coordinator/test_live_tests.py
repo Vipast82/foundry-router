@@ -223,3 +223,17 @@ def test_cached_lines_from_aus_per_spec_cache_are_counted():
     assert "3/3, 2 cached" in check_progress.summary("p", "T9")
     check_progress.clear("p", "T9")
     assert "cached" not in live_tests.Counts().row()
+
+
+def test_the_gates_full_lune_logs_are_counted_and_labelled(tmp_path):
+    ws = tmp_path / "ws"
+    d = ws / "tmp" / "guard" / "lune"
+    d.mkdir(parents=True)
+    (d / "abc123def456-specs.log").write_text("PASS: A :: a\nFAIL: A :: b\n", encoding="utf-8")
+    (d / "abc123def456-negative.log").write_text(
+        "FAIL: N :: n\nNEGATIVE CONTROL PASS: 1/1 deliberately failing\n", encoding="utf-8")
+    pats = ["tmp/guard/cmd/*.log", "tmp/guard/lune/*.log"]
+    rows = {r["name"]: r for r in live_tests.collect(str(ws), "GF-X", pats)}
+    assert rows["Lune suite · abc123def456-specs"]["fail"] == 1
+    neg = rows["Lune negative control · abc123def456-negative"]
+    assert (neg["fail"], neg["state"]) == (0, "PASS")

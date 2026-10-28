@@ -2,6 +2,69 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.155.0 — automation audit fixes: fewer loops, free outages, no stops for tooling
+
+Victor 2026-10-28: "do a deep check for automation gaps, time sinks, inefficiencies, blockers,
+incompatibilities". Audit: `reports/AUTOMATION_GAP_AUDIT_2026-10-28.md`. GF-GATE1 used 404M
+tokens and looped 9 times on one evidence finding.
+
+- **Gate bound to content (A).**
+  - `au.gate_bound_to_head` stays PASS when only `docs/progress/**`, `docs/memory/**` or
+    `.plan/**` changed since the gate.
+  - Runtime evidence isn't staled by those paths.
+  - AU's `gate.ps1 -Finish` gets the same rule; it lands as an AU prep commit.
+- **Decisions never wait forever on tooling (D):**
+  - a `review_access` fault rebuilds and retries the packet, then the alternate reviewer, then
+    a Lead case;
+  - `review_access` and `scope_request` go to the Lead first;
+  - a "human act" wording keeps the timeout unless the blocker is `user_action`;
+  - an unmatched recommendation parks with the timeout.
+- **Hook-safe coordinator commits (D).**
+  - Bookkeeping, Lead, scope-grant and closeout commits pass the adapter's commit env (AU:
+    `AU_ALLOW_SCOPE`).
+  - stylua runs before a Lead commit.
+  - A refused commit unstages its paths.
+- **Outages are free (C):**
+  - Kilo "retry" for 5 min becomes an infra wait, with no attempt charged.
+  - Lead infra failures defer without using the Lead's caps.
+  - A dead Lead session is detected.
+  - Lead sessions get the context guard.
+  - The Lead timeout is 90 min with write access.
+  - A served-model mismatch defers.
+  - A failed push retries with backoff.
+  - The infra signatures cover 429, rate limits, ETIMEDOUT, fetch failures and llama.cpp's
+    context error; "500 ms" no longer reads as a 5xx error.
+  - Preflight also probes the router.
+  - The session timeout wraps up and hands off for free when the session made progress.
+  - A compaction loop ends free.
+  - `max_task_minutes` counts active states only.
+- **Throughput (E):**
+  - Review and the track merge gate run off the coordinator tick.
+  - Review starts beside Lune once the other checks pass.
+  - Check subprocesses run in a kill-on-close job, each run gets its own log, and done_check
+    and binding results survive a restart. The heartbeat reports `checks_running`.
+  - Kilo polling reads the status first, then only the newest messages.
+  - A merge-gate tooling fault retries.
+  - A write-access Lead keeps its studio.lock.
+  - The profile's `max_agents` wins (2 for Studio-free tracks).
+- **Memory notes:** `memory_note_max_chars` defaults to 400 (was 1500): CONVENTIONS and KNOWN_ISSUES had 6 KB lines that every resume re-read.
+- **Live tracker:** it also reads the gate's full Lune logs (`tmp/guard/lune/*.log`), since the
+  gate now runs Lune `--quiet`.
+
+AU side (prep commits through the safe-point watcher):
+- **Gate:** `-Finish` across evidence/memory/plan-only commits; Lune `--quiet` with `--log`; the
+  gate runs the suite and the negative control in parallel and puts only a summary in the
+  evidence log; gate.ps1 is ASCII-only and reads UTF-8 explicitly.
+- **Lune cache:** the key leaves out the `tests/` mounts; `AU_LUNE_CACHE_DIR` shares the cache.
+- **New checks:** a `tests/checks/` folder mount, so a new check needs no Rojo restart.
+- **Tools:** run.py runs commands directly, streams to the log, and has `--bg` / `--wait`;
+  hash_fnv uses one git batch call.
+- **Rules:** the contradictions are fixed and evidence is cited by `path:lines` instead of
+  pasted.
+- **Plans and checks:** `plan_new --set-next` (with a plan history file);
+  `done_check --phase build`; outline `--width`; checkpoint counts bytes; lock.py reports stale
+  locks; plans drop "stop and ask"; STEP 0 runs in the first session only.
+
 ## v0.154.0 — the Studio half of the gate can run as a script (off by default)
 
 Victor 2026-10-27: "plan moving the Studio half of the gate (the CALLs the LLM runs one by one)

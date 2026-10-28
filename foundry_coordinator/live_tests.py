@@ -158,7 +158,9 @@ def _label(path: str, c: Counts, kind: str) -> str:
     name = os.path.basename(path)
     m = re.match(r"^\d{8}-\d{6}_(.+)\.log$", name)
     nm = m.group(1) if m else os.path.splitext(name)[0]
-    if "lune run" in cmd:
+    if not cmd and "/lune/" in path.replace("\\", "/"):
+        what = "Lune negative control" if "negative" in name else "Lune suite"
+    elif "lune run" in cmd:
         what = "Lune negative control" if "--negative" in cmd else "Lune suite"
     elif "gate.ps1" in cmd:
         what = "gate (host steps)"

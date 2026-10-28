@@ -222,7 +222,7 @@ AUTOMATION_DEFAULTS: dict = {
     "project_memory": True,
     "memory_slice_tokens": 3000,
     "memory_decisions": 8,
-    "memory_note_max_chars": 1500,
+    "memory_note_max_chars": 400,          # 2026-10-28 audit: long notes bloat every resume read
     # A1 playbook (2026-10-23): the cross-project knowledge base; both keys are
     # inert until the coordinator is started with a playbook path
     "playbook": True,

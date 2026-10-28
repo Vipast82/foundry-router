@@ -60,7 +60,7 @@ class MemoryManager:
         return {"enabled": bool(s.get("project_memory", True)),
                 "budget": int(s.get("memory_slice_tokens", slices.DEFAULT_BUDGET) or 0),
                 "decisions": int(s.get("memory_decisions", slices.DEFAULT_DECISIONS) or 0),
-                "note_max": int(s.get("memory_note_max_chars", 1500) or 1500)}
+                "note_max": int(s.get("memory_note_max_chars", 400) or 400)}
 
     @staticmethod
     def workspace(P, workspace: str = "") -> str:

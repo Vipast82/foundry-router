@@ -1255,7 +1255,7 @@ Change no code or test file in this session; if one needs changing, stop and rep
     # what a session's runs write as they go: AU's command runner (tools/guard/run.py)
     # logs every Lune / gate run there, and the Studio half of a gate writes its raw CALL
     # lines to the sprint's studio_lines file (SESSION_CORE: append as each CALL returns)
-    LIVE_TEST_SOURCES = ("tmp/guard/cmd/*.log", "docs/progress/{task}_studio_lines.txt")
+    LIVE_TEST_SOURCES = ("tmp/guard/cmd/*.log", "tmp/guard/lune/*.log", "docs/progress/{task}_studio_lines.txt")
 
     def live_test_sources(self, task_id: str) -> list:
         v = self.cfg.get("live_test_sources")
