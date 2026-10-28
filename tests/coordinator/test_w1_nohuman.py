@@ -178,19 +178,38 @@ def test_no_progress_continues_once_then_parks(tmp_path):
     assert run_until(c, lambda: len(turns) > n_before, limit=20)
     assert c.obligations.decision(d["decision_id"])["authority"] == "timeout_default"
     assert events({"c": c}, "no_progress_continue_once")
-    # the next stall opens the second decision, whose default is to park
+    # the next stall opens the second decision. Self-driving part 1 (2026-10-28): its
+    # default is no longer to park but the capped self-repair (a no_progress decision is
+    # an automation decision): one session with a "different approach" brief
     assert run_until(c, lambda: len(_decisions(c, "T1", "no_progress")) == 2, limit=30)
     d2 = [x for x in _decisions(c, "T1", "no_progress") if x["decision_id"] != d["decision_id"]][0]
-    assert json.loads(d2["recommended"]) == DP.PARK and "continuation was used" in d2["question"]
+    assert json.loads(d2["recommended"]) == DP.SELF_REPAIR and "continuation was used" in \
+        d2["question"] and d2["category"] == "automation"
+    # (room for one more attempt after the different approach: max_attempts is 3 here)
+    bx = c.obligations.open_decision("game", "T1", "budget_extension", "two more attempts")
+    c.obligations.answer(bx, {"counter": "ordinary", "n": 2}, "victor", "operator",
+                         channel="control")
+    c.obligations.authorize("game", "T1", "attempt_ordinary", 2, "test", "victor", bx)
+    clock.advance(31 * 60)
+    assert run_until(c, lambda: len(turns) > n_before + 1, limit=20)
+    assert c.obligations.decision(d2["decision_id"])["answer"]["self_repair"]["trigger"] == \
+        "findings"
+    # the self-repair answer is good for that one session: the next stall asks again,
+    # and with no frontier persona the ladder is exhausted -> it parks, quietly
+    assert run_until(c, lambda: len(_decisions(c, "T1", "no_progress")) == 3, limit=30)
+    d3 = [x for x in _decisions(c, "T1", "no_progress")
+          if x["decision_id"] not in (d["decision_id"], d2["decision_id"])][0]
+    assert "self-repair tried 1x" in d3["question"]
     clock.advance(31 * 60)
     for _ in range(4):
         c.tick()
     t = c.store.task("game", "T1")
     assert t["state"] == S.BLOCKED and t["blocker"].startswith("parked")
-    assert t["data"]["lc_stop"]["decision_id"] == d2["decision_id"]
+    assert t["data"]["lc_stop"]["decision_id"] == d3["decision_id"]
     [parked] = events({"c": c}, "sprint_parked")
-    assert parked["decision_id"] == d2["decision_id"] and parked["task_id"] == "T1"
-    assert len(turns) == n_before + 1                        # exactly one continuation
+    assert parked["decision_id"] == d3["decision_id"] and parked["task_id"] == "T1"
+    assert parked["alert_class"] == "self_repair_exhausted" and parked["digest"] is True
+    assert len(turns) == n_before + 2          # one continuation, one different approach
 
 
 def test_a_lead_bound_parks_the_sprint_after_the_timeout_and_the_queue_moves_on(tmp_path):
@@ -204,8 +223,10 @@ def test_a_lead_bound_parks_the_sprint_after_the_timeout_and_the_queue_moves_on(
         return blocked("which gallery layout is approved?")
     # (the project check reads every task's files: T1's file must not fail T2's check)
     root, _ = make_repo(tmp_path, "game", [TASK, t2], extra_files={"src/a.txt": "OK start\n"})
+    # (self-driving part 1 replaced this park with a capped self-repair by default; the
+    # park itself, with self_repair off, is what this test pins)
     prof = write_profile(tmp_path, "game", root, extra=UI_OVERRIDE + lead_toml(max_diagnoses=1)
-                         + "\n[automation]\nlead_report_repairs = 0\n")
+                         + "\n[automation]\nlead_report_repairs = 0\nself_repair = false\n")
     client = E2EClient(primary, lambda ctx: {"final": "I could not tell."})
     c = coordinator(tmp_path, [prof], {"game": client}, foundry={"game": E2EFoundry()},
                     clock=clock, store_path=tmp_path / "state" / "coordinator.sqlite")
@@ -241,7 +262,8 @@ def test_recovery_escalation_and_obligation_conflict_carry_a_default():
     P0 = SimpleNamespace(profile=SimpleNamespace(raw={}))
     m = DP.meta(P0, "recovery_escalation", {"recommended": DP.PARK},
                 [DP.STRATEGY, DP.MORE_BUDGET, DP.PARK])
-    assert json.loads(m["recommended"]) == DP.PARK and m["timeout_minutes"] == 30
+    # self-driving part 1: an automation decision's default is the capped self-repair
+    assert json.loads(m["recommended"]) == DP.SELF_REPAIR and m["timeout_minutes"] == 30
     m = DP.meta(P0, "obligation_conflict", {}, ["fix the plan or scope", "operator decision"],
                 recommendation="fix the plan or scope")
     assert json.loads(m["recommended"]) == "fix the plan or scope"

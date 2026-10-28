@@ -37,17 +37,18 @@ def test_meta_gives_a_default_only_when_one_is_safe():
     opts = ["approve: add x", "deny: keep the file list"]
     m = DP.meta(P0, "scope_request", {}, opts)
     assert m == {"decision_class": "decision", "recommended": json.dumps(opts[1]),
-                 "timeout_minutes": 30}
+                 "timeout_minutes": 30, "category": "product"}
     # no recommended option -> no timeout (it waits for the operator)
     assert DP.meta(P0, "no_progress", {}, ["stop the task"])["timeout_minutes"] == 0
     # the recommendation= text names the default too (W1.2), when it is one of the options
     m = DP.meta(P0, "obligation_conflict", {}, ["keep BUILD (default)", "operator decision"],
                 recommendation="keep BUILD: captures are BUILD evidence")
     assert m == {"decision_class": "decision", "recommended": json.dumps("keep BUILD (default)"),
-                 "timeout_minutes": 30}
-    # audit D: an unmatched recommendation parks (with the timeout) instead of waiting
+                 "timeout_minutes": 30, "category": "product"}
+    # audit D: an unmatched recommendation parks (with the timeout) instead of waiting;
+    # self-driving part 1: for an automation decision that default is the self-repair
     assert DP.meta(P0, "no_progress", {}, ["a", "b"], recommendation="something else")[
-        "recommended"] == json.dumps(DP.PARK)
+        "recommended"] == json.dumps(DP.SELF_REPAIR)
     assert DP.meta(P0, "review_access", {"recommended": "x"}, ["x"])["recommended"] == \
         json.dumps("x")
     lead = DP.meta(P0, "lead_escalation", {"reason": "lead_asks", "recommended": "layout B"},

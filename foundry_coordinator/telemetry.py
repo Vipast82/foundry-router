@@ -1061,6 +1061,14 @@ def budgets_view(t: dict, limits: dict, ledger: list, reviews: int, now: float,
             "source": "budget_ledger" if (ledger or sums) else "task row + profile limits"}
 
 
+def _decision_category(r: dict) -> str:
+    try:
+        from .decision_policy import decision_category
+        return decision_category(r)
+    except Exception:                                             # noqa: BLE001
+        return ""
+
+
 def decisions_view(rows: list) -> list:
     out = []
     for r in rows:
@@ -1085,6 +1093,8 @@ def decisions_view(rows: list) -> list:
                     "superseded_by": r.get("superseded_by"),
                     # revamp B11: decision vs defect, the default and when it applies
                     "decision_class": r.get("decision_class"),
+                    # self-driving part 1: product | user_action | automation
+                    "category": r.get("category") or _decision_category(r),
                     "recommended": _cap(r.get("recommended"), 800),
                     "timeout_minutes": r.get("timeout_minutes"),
                     "deadline_ts": r.get("deadline_ts")})
