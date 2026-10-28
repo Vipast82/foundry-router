@@ -122,6 +122,14 @@ class Coordinator:
         self.studio_calls = StudioCalls(self, clock=clock)
         from .bg_checks import BackgroundChecks
         self.bg_checks = BackgroundChecks()      # 0.147.0: verify/closeout off the tick
+        try:
+            # E (2026-10-28): check processes die with the coordinator (procjob); any a
+            # crashed coordinator left behind are killed now
+            from . import procjob
+            procjob.set_registry(state_dir)
+            procjob.reap(state_dir, log)
+        except Exception:                                         # noqa: BLE001
+            pass
         from .memory import MemoryManager
         # Team Lead piece 4: project memory (docs/memory in the repo), indexed here and
         # sliced per session; inert for a project without the layout
@@ -304,7 +312,8 @@ class Coordinator:
             # 0.147.0: forget background check runs of tasks that left the state
             # they were started in (cancelled, paused, unblocked, head moved on)
             want = {"verify": S.VERIFYING, "closeout": S.CLOSING}
-            self.bg_checks.drop(lambda k: (self.store.task(k[0], k[1]) or {}).get("state")
+            self.bg_checks.drop(lambda k: self.tracks.merger.keeps_check(k) if k[2] == "merge"
+                                else (self.store.task(k[0], k[1]) or {}).get("state")
                                 == want.get(k[2]))
         except Exception as e:                                    # noqa: BLE001
             self.log(f"background checks sweep failed: {type(e).__name__}: {e}")
@@ -1171,7 +1180,13 @@ class Coordinator:
         if not wrap:
             return False
         try:
-            ctx = CW.context_of(P.client.transcript(sid, directory=P.profile.workspace))
+            # E (2026-10-28): the newest messages only; the whole transcript just when
+            # none of them is an assistant turn with token counts yet
+            recent = getattr(P.client, "recent", None)
+            ctx = CW.context_of(recent(sid, directory=P.profile.workspace, n=6)) \
+                if callable(recent) else None
+            if ctx is None:
+                ctx = CW.context_of(P.client.transcript(sid, directory=P.profile.workspace))
         except Exception:                                         # noqa: BLE001
             return False
         w = (t["data"] or {}).get("context_wrapup") or {}
@@ -1616,6 +1631,7 @@ class Coordinator:
             heavy = self._bg_checks(P, t, "verify", head,
                                     lambda: self._verify_heavy(P, t, spec, head))
             if heavy is None:
+                self._review_beside_checks(P, t, spec, head)
                 return
         results = self._generic_checks(P, t, spec, head, phase="verify")
         if self.fast_lane.on(P, tid):
@@ -1640,6 +1656,11 @@ class Coordinator:
         unknown = [r for r in results if r.required and r.result == UNKNOWN]
         self.store.event(pid, tid, "verification", detail={
             "set": vid, "revision": head, "results": {r.check: r.result for r in results}})
+        if (fails or unknown) and not self.fast_lane.on(P, tid):
+            # E: a review started beside Lune is not this revision's review any more
+            if self._discard_early_review(P, t, head, "the revision failed its checks: "
+                                          + ", ".join(r.check for r in (fails or unknown)[:6])):
+                t = self.store.task(pid, tid) or t
         if fails:
             findings = failed_findings(fails)
             if self._lc(P, "recovery"):
@@ -1711,6 +1732,49 @@ class Coordinator:
                     out.append(VerificationResult("coordinator.session_audit", UNKNOWN, False,
                                                   "", f"transcript unavailable: {e}", head))
         return out
+
+    def _review_beside_checks(self, P: Project, t: dict, spec, head: str) -> bool:
+        """E (2026-10-28): while the project's verify checks run in the background,
+        start the code review as soon as the checks the adapter names in
+        EARLY_REVIEW_CHECKS (AU: done_check and the gate binding) finished with every
+        required row PASS and the coordinator's own checks pass, so the review runs
+        beside Lune instead of after it. A revision that then fails its checks drops
+        that review (_discard_early_review). [automation] review_beside_checks = false
+        turns it off. True when a review is running or was started now."""
+        from .automation import get as auto_get
+        from . import check_progress
+        pid, tid = P.id, t["task_id"]
+        names = tuple(getattr(P.adapter, "EARLY_REVIEW_CHECKS", ()) or ())
+        try:
+            if not names or not auto_get(P, "review_beside_checks"):
+                return False
+        except KeyError:
+            return False
+        k = (pid, tid, head)
+        if k in (getattr(self, "_early_reviews", None) or {}):
+            return True
+        if k in (getattr(self, "_early_tried", None) or set()):
+            return False
+        done = check_progress.finished_rows(pid, tid, head)
+        snap = {r["name"]: r["state"] for r in check_progress.snapshot(pid, tid)}
+        mine = [n for n in names if n in snap]
+        if not mine or any(n not in done for n in mine):
+            return False                      # not started / still running
+        if not any(s == "running" for n, s in snap.items() if n not in names):
+            return False                      # nothing left to overlap: the normal path
+        rows = [r for n in mine for r in done[n]]
+        if any(r.required and r.result != PASS for r in rows):
+            return False
+        generic = self._generic_checks(P, t, spec, head, phase="verify")
+        if any(r.required and r.result != PASS for r in generic):
+            return False
+        vid = self.store.save_verification(pid, tid, head, "verify", generic + rows)
+        started = self.early_review_start(P, self.store.task(pid, tid) or t, head, vid)
+        if started:
+            self.store.event(pid, tid, "review_beside_checks", detail={
+                "head": head, "checks": mine, "still_running": sorted(
+                    n for n, s in snap.items() if s == "running")})
+        return started
 
     def _bg_checks(self, P: Project, t: dict, kind: str, head: str, fn) -> Optional[list]:
         """The results of `fn` (a check run) for this task, kind and head, or None
@@ -1958,17 +2022,34 @@ class Coordinator:
         # paid for twice
         early = self.early_review_collect(P, t, head)
         if early == "running":
-            return self._note(P, t, f"code review in flight at {head[:12]} (started with "
-                                    f"the vision review)")
+            return self._review_running_note(P, t, head)
+        if early == "applied":
+            return
         prep = self._review_prepare(P, t, head)
         if prep is None:
             return
         if prep.get("apply"):
             return self._apply_review(P, t, prep["apply"])
-        text, meta, err = self._review_call(P, prep)
-        rev = self._review_finish(P, t, prep, text, meta, err)
-        if rev is not None:
-            self._apply_review(P, t, rev)
+        # 2026-10-28 (E): the paid call runs on the review pool, never on the tick; a
+        # quick answer (within inline_check_wait_s) is still applied in this tick
+        self._review_submit(P, t, head, prep, early=False)
+        if self.early_review_collect(P, t, head, wait_s=self._inline_wait(P)) == "running":
+            self._review_running_note(P, t, head)
+
+    def _inline_wait(self, P: Project) -> float:
+        from .automation import get as auto_get
+        try:
+            return float(auto_get(P, "inline_check_wait_s") or 0)
+        except (KeyError, TypeError, ValueError):
+            return 2.0
+
+    def _review_running_note(self, P: Project, t: dict, head: str) -> None:
+        ent = (getattr(self, "_early_reviews", None) or {}).get((P.id, t["task_id"], head))
+        meta = ent[3] if ent and len(ent) > 3 else {"early": True, "wall": time.time()}
+        how = "started early" if meta["early"] else "in the background"
+        self._note(P, t, f"code review in flight at {head[:12]} ({how}, "
+                         f"{int(time.time() - meta['wall'])} s"
+                         + (f", {ent[1]['persona']}" if ent else "") + ")")
 
     def _review_prepare(self, P: Project, t: dict, head: str,
                         early: bool = False) -> Optional[dict]:
@@ -1995,6 +2076,9 @@ class Coordinator:
         again = set(t["data"].get("lc_rereview") or []) if self._lc(P) else set()
         # [lifecycle] a review routed evidence_incomplete/access_blocked is kept
         # for the audit but not reused: the commit is reviewed again
+        # E (2026-10-28): a review started beside Lune for a revision that then failed
+        # its checks is never reused
+        again |= set(t["data"].get("early_review_discarded") or [])
         valid = [r for r in valid if r["review_id"] not in again]
         if valid:
             return None if early else {"apply": valid[-1]}
@@ -2308,32 +2392,83 @@ class Coordinator:
         prep = self._review_prepare(P, tt, head, early=True)
         if not prep or prep.get("apply"):
             return False
-        from concurrent.futures import ThreadPoolExecutor
-        ex = getattr(self, "_early_pool", None)
-        if ex is None:
-            ex = self._early_pool = ThreadPoolExecutor(max_workers=2,
-                                                       thread_name_prefix="early-review")
-        pool[k] = (ex.submit(self._review_call, P, prep), prep, tt)
+        self._review_submit(P, tt, head, prep, early=True)
         self.store.event(pid, tid, "early_review_started", detail={
             "head": head, "persona": prep["persona"], "key": prep["key"],
             "incremental_from": prep["meta_packet"].get("incremental_from")})
         return True
 
-    def early_review_collect(self, P: Project, t: dict, head: str):
-        """"running" while the early review for `head` is in flight; the stored review
-        once it finished (saved here, on the engine thread); None when there is none."""
+    REVIEW_POOL_MAX = 4
+
+    def _review_submit(self, P: Project, t: dict, head: str, prep: dict,
+                       early: bool) -> None:
+        """The paid review call on the review pool (worker threads; _review_call
+        touches no store). An early one (B4 / beside Lune) only stores its review
+        when collected; an ordinary one (REVIEWING) is also applied then."""
+        from concurrent.futures import ThreadPoolExecutor
+        ex = getattr(self, "_early_pool", None)
+        if ex is None:
+            ex = self._early_pool = ThreadPoolExecutor(max_workers=self.REVIEW_POOL_MAX,
+                                                       thread_name_prefix="review-call")
+        pool = getattr(self, "_early_reviews", None)
+        if pool is None:
+            pool = self._early_reviews = {}
+        pool[(P.id, t["task_id"], head)] = (ex.submit(self._review_call, P, prep), prep, t,
+                                            {"early": bool(early), "wall": time.time()})
+
+    def early_review_collect(self, P: Project, t: dict, head: str, wait_s: float = 0.0):
+        """"running" while the review call for `head` is in flight; for an early
+        review the stored review once it finished (saved here, on the engine
+        thread); "applied" once an ordinary REVIEWING call finished and its result
+        was handled; None when there is none."""
         pool = getattr(self, "_early_reviews", None) or {}
         k = (P.id, t["task_id"], head)
         if k not in pool:
             return None
-        fut, prep, tt = pool[k]
+        fut, prep, tt, *rest = pool[k]
+        early = bool(rest[0]["early"]) if rest else True
         if not fut.done():
-            return "running"
+            if wait_s > 0:
+                from concurrent.futures import wait as fwait
+                fwait([fut], timeout=wait_s)
+            if not fut.done():
+                return "running"
         pool.pop(k, None)
         text, meta, err = fut.result()
-        return self._review_finish(P, {**(self.store.task(P.id, t["task_id"]) or tt),
-                                       "verification_id": tt["verification_id"]},
-                                   prep, text, meta, err, early=True)
+        cur = self.store.task(P.id, t["task_id"]) or tt
+        if early:
+            return self._review_finish(P, {**cur, "verification_id": tt["verification_id"]},
+                                       prep, text, meta, err, early=True)
+        rev = self._review_finish(P, cur, prep, text, meta, err)
+        if rev is not None:
+            self._apply_review(P, self.store.task(P.id, t["task_id"]) or cur, rev)
+        return "applied"
+
+    def _discard_early_review(self, P: Project, t: dict, head: str, why: str) -> bool:
+        """A review started beside Lune (E, 2026-10-28) whose revision then failed its
+        checks: an in-flight call is dropped (its result is never stored), a stored one
+        is never reused for this revision (the next REVIEWING calls again)."""
+        pid, tid = P.id, t["task_id"]
+        k = (pid, tid, head)
+        ent = (getattr(self, "_early_reviews", None) or {}).get(k)
+        dropped, marked = "", []
+        if ent is not None and (len(ent) < 4 or ent[3]["early"]):
+            self._early_reviews.pop(k, None)
+            prep = ent[1]
+            self.store.x("DELETE FROM ops WHERE key=?", (prep["key"],))
+            self._end_review_binding(P, prep["rsid"], "discarded")
+            dropped = prep["key"]
+        for r in self.store.reviews(pid, tid, head):
+            if ((r.get("result") or {}).get("packet") or {}).get("early"):
+                marked.append(r["review_id"])
+        if marked:
+            cur = (self.store.task(pid, tid) or t)["data"].get("early_review_discarded") or []
+            self.store.merge_data(pid, tid, early_review_discarded=sorted(
+                set(cur) | set(marked))[-50:])
+        if dropped or marked:
+            self.store.event(pid, tid, "early_review_discarded", detail={
+                "head": head, "in_flight": dropped, "reviews": marked, "why": why[:300]})
+        return bool(dropped or marked)
 
     def _review_evidence_delta(self, P: Project, evidence: list, dbase: str, head: str,
                                last: dict) -> tuple[list, int]:
@@ -3477,6 +3612,9 @@ class Coordinator:
         try:
             if self.studio_calls.active(P, t["task_id"]):
                 return
+            lw = getattr(self, "_lead_writer_open", None)
+            if callable(lw) and lw(P, t["task_id"]):
+                return                           # E: a write-access Lead session may hold it
         except Exception:                                         # noqa: BLE001
             return
         if P.adapter.release_studio_lock(h):
@@ -3485,6 +3623,20 @@ class Coordinator:
                                      "why": "no session of this task holds Studio"})
             self.log(f"{P.id}/{t['task_id']}: released a studio.lock its {t['state']} task "
                      f"left behind: {h['line'][:120]}")
+
+    def _lead_writer_open(self, P: Project, task_id: str) -> bool:
+        """E (2026-10-28): the task's open Lead case has a lead call in flight (started or
+        uncertain) and [lead_manager] write_access is on: that session may drive Studio,
+        so its studio.lock is not an orphan. Read-only: lead.py's own tables."""
+        L = self._lead_any()
+        if L is None:
+            return False
+        case = L.active_case(P.id, task_id)
+        if not case:
+            return False
+        if not L.settings(P).get("write_access"):
+            return False
+        return L._open_call(case["case_id"], "lead_call") is not None
 
     LIVE_TEST_STATES = (S.IMPLEMENTING, S.VERIFYING, S.CLOSING)
     LIVE_TEST_EVERY_S = 3.0
@@ -6049,6 +6201,15 @@ class Coordinator:
             self._note(P, t, f"waiting for {held['resource']} (held by "
                              f"{held['project_id']}/{held['task_id']})")
             return held
+        if writer and not self.tracks.is_track(P):
+            busy = self.tracks.merger.checks_busy(P)
+            if busy:
+                # E (2026-10-28): a track's merge gate checks the main checkout in the
+                # background; no main session writes there meanwhile
+                self.store.release(pid, tid, [r for r in resources if r not in before])
+                self._note(P, t, f"waiting for the merge gate of track {busy} (its checks "
+                                 f"run in the main checkout)")
+                return {"resource": f"merge gate {busy}"}
         if writer and not any(r.startswith("writer:") for r in before):
             # the main checkout may take any slot, a track slot 1.. only: the main
             # sprint is counted first against max_agents (tracks/manager.py)
