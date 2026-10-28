@@ -2012,6 +2012,11 @@ class LeadManager:
                 self._end_session(P, key, "refused")
                 return {"status": "deferred", "reason": f"Foundry refused the lead call "
                         f"({st.denial.get('category')})", "retry": st.denial.get("retry_after")}
+            cw0 = d.get("ctx_wrapup") or {}
+            if cw0.get("stage") == "aborted" and (st.unanswered or getattr(st, "stalled", False)):
+                # our context stop ended the turn and Kilo runs nothing (no abort message)
+                return self._lead_wrapup_prompt(P, case, key, sid, directory, persona, agent,
+                                                cw0)
             # C: Kilo "retry" (router or model outage) or a turn Kilo no longer runs
             # (dead session): an infra wait, never a counted call
             dead = self._stall(key, d, st, now, abort_s)
