@@ -2,6 +2,27 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.156.1 — the scripted Studio gate runs bridge rows by their runbooks and sets the viewport
+
+GF-GATE1's first live full triage (68 rows): 28 pass, 35 fail, 4 unknown, mostly runner bugs.
+
+- **Bridge rows.**
+  - **How they run:** the suite source runs as a function body with `print` captured, so
+    print-only scripts (S00–S03) and returned functions (S44) work. A crash keeps the lines
+    printed so far and its traceback.
+  - **Per-suite exceptions:** S20 runs without the ServiceLoader re-boot (it needs the generated
+    map). S33 gets `_G.S33_ABILITY_SOURCE` from HEAD.
+  - **Honest UNKNOWN:** suites the runner can't serve become UNKNOWN with a reason, never FAIL.
+    That covers `io.*` file access, host runners on a port that isn't listening (S05 :8431,
+    S13.6 :8436), and lines that only say the session shape is missing (2 clients, a play
+    session).
+- **Viewport:** every playtest with client CALLs applies AU's device recipe
+  (`set_device_simulator` 1920x1080, ActualResolution), waits 1.2 s and reads it back. A
+  mismatch makes that group's client CALLs UNKNOWN, never `FAIL: SIZE`.
+- **Luau errors:** a Luau error raised inside a live eval (`ERROR: <script>:<line>:`) is a FAIL
+  of that CALL (no retry), not a tool error. The 4 UNKNOWN UI rows were really `ForcePhase` at
+  wave 0, which is an AU step-order issue.
+
 ## v0.156.0 — self-driving: no watch, no watcher
 
 Victor 2026-10-28: "I shouldn't have to have a watcher on for the automation process to work."
