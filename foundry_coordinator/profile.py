@@ -26,8 +26,9 @@ from typing import Any, Optional
 
 from foundry_automation.schema import (  # noqa: F401  (re-exported; the shared schema)
     FAST_LANE_DEFAULTS, LEAD_MANAGER_DEFAULTS, LEAD_SUPERVISOR_MODES, LIFECYCLE_DEFAULTS,
-    PROFILE_ROLES as ROLES, PROFILE_SCHEMA, SettingsError, fast_lane_table, lead_manager_table,
-    lifecycle_table, role_overrides_table, roles_table, walk_secrets as _walk_secrets)
+    PROFILE_ROLES as ROLES, PROFILE_SCHEMA, STUDIO_CALLS_DEFAULTS, SettingsError, fast_lane_table,
+    lead_manager_table, lifecycle_table, role_overrides_table, roles_table, studio_calls_table,
+    walk_secrets as _walk_secrets)
 from foundry_automation.schema import ID_RE as _ID  # noqa: F401
 from foundry_automation.schema import SECRETY_KEY as _SECRETY_KEY  # noqa: F401
 from foundry_automation.schema import SECRETY_VAL as _SECRETY_VAL  # noqa: F401
@@ -48,6 +49,13 @@ def _fast_lane_table(path: str, raw) -> dict:
     from .lanes import LANES                       # (lanes imports profile: lazily)
     try:
         return fast_lane_table(path, raw, tuple(LANES))
+    except SettingsError as e:
+        raise ProfileError(str(e)) from None
+
+
+def _studio_calls_table(path: str, raw) -> dict:
+    try:
+        return studio_calls_table(path, raw)
     except SettingsError as e:
         raise ProfileError(str(e)) from None
 
@@ -118,6 +126,21 @@ class Profile:
         "foundry_coordinator.automation", fromlist=["defaults"]).defaults())
     fast_lane: dict = field(default_factory=lambda: {
         k: (list(v) if isinstance(v, list) else v) for k, v in FAST_LANE_DEFAULTS.items()})
+
+    # [studio_calls] (2026-10-27): the scripted Studio half of the gate; off by default.
+    studio_calls: dict = field(default_factory=lambda: {
+        k: (list(v) if isinstance(v, list) else v) for k, v in STUDIO_CALLS_DEFAULTS.items()})
+
+    def studio_calls_task(self, task_id: str, tier: str = "") -> bool:
+        """True when [studio_calls] is enabled and covers this task: named in `tasks`,
+        or (with `tasks` empty) its tier is one of `tiers`."""
+        sc = self.studio_calls or {}
+        if not sc.get("enabled") or not task_id:
+            return False
+        tasks = list(sc.get("tasks") or [])
+        if tasks:
+            return task_id in tasks
+        return str(tier or "").upper() in {str(x).upper() for x in sc.get("tiers") or []}
 
     def fast_lane_task(self, task_id: str) -> bool:
         """True when [fast_lane] is enabled and names this task."""
@@ -293,6 +316,7 @@ def from_raw(raw: dict, path: str, digest: str = "") -> Profile:
         raise ProfileError(str(e)) from None
     lead_manager = _lead_manager_table(path, raw.get("lead_manager"))
     fast_lane = _fast_lane_table(path, raw.get("fast_lane"))
+    studio_calls = _studio_calls_table(path, raw.get("studio_calls"))
     # [automation] (revamp B5-B13): validated settings with defaults (automation.py)
     from .automation import AutomationError, table as _automation_table
     try:
@@ -312,7 +336,7 @@ def from_raw(raw: dict, path: str, digest: str = "") -> Profile:
         closeout=dict(raw.get("closeout") or {}), prompts=dict(raw.get("prompts") or {}),
         artifacts=dict(raw.get("artifacts") or {}), commit=dict(raw.get("commit") or {}),
         lifecycle=lifecycle, lead_manager=lead_manager, fast_lane=fast_lane,
-        automation=automation)
+        automation=automation, studio_calls=studio_calls)
 
 
 def check_isolation(profiles: list[Profile]) -> None:

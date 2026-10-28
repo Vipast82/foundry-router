@@ -13,6 +13,10 @@ Usage (any cwd; --repo is the AU checkout):
     stories  --sprint ID [--story NAME ...]  Edit-mode stories only (fast loop)
     sprint   --sprint ID --files a,b [--selection SEL] [--tier B] [--background]
     regression --selection ui|full|S45,S46 [--sprint ID] [--background]
+    calls    --sprint ID --suites a,b --regression none|full|subset:ui|S45,S46 [--tier A]
+             [--rerun failed|affected|all] [--budget-min N] [--group-min 10] [--background]
+             [--dry-run]   the session gate's Studio half (needs gate.ps1's host half PASS at
+             HEAD): writes docs/progress/<ID>_studio_lines.txt for gate.ps1 -Finish
     status   --sprint ID [--wait MINUTES]    read status.json / latest.json (--wait blocks <= 9 min)
 Exit codes: 0 PASS, 1 FAIL, 2 not ready / tooling error / still running. The last
 printed line is `GATE <ID> PASS|FAIL` (status while running: `GATE <ID> RUNNING ...`).
@@ -50,6 +54,7 @@ from __future__ import annotations
 import argparse
 import collections
 import contextlib
+import hashlib
 import http.server
 import json
 import os
@@ -60,6 +65,7 @@ import subprocess
 import sys
 import threading
 import time
+import unicodedata
 import urllib.request
 from typing import Callable, Optional
 
@@ -305,10 +311,13 @@ def mirror_verdict(entry: dict, texts: list, offstudio: bool = False) -> tuple:
 
 
 def _dyn_value(tok: str, raw: str) -> Optional[str]:
-    """The last `tok=value` / `tok: value` in raw. *Json tokens take a balanced JSON
-    value up to the end of the line; scalars must be [\\w.-]+ (no trailing , or ))."""
+    """The last `tok=value` / `tok: value` / JSON `"tok": value` in raw (2026-10-27: a
+    suite that returns a JSON object printed `"unitId": 77`, which the plain form
+    missed). *Json tokens take a balanced JSON value up to the end of the line (or a
+    JSON string holding one); scalars must be [\\w.-]+ (no trailing , or )), quoted or not."""
     val = None
-    for m in re.finditer(re.escape(tok) + r"\s*[=:]\s*", raw or ""):
+    isjson = tok.lower().endswith("json")
+    for m in re.finditer(r'(?<![\w"])"?' + re.escape(tok) + r'"?\s*[=:]\s*', raw or ""):
         rest = raw[m.end():].split("\n", 1)[0]
         if rest[:1] in ("{", "["):
             try:
@@ -317,8 +326,23 @@ def _dyn_value(tok: str, raw: str) -> Optional[str]:
                 continue
             except ValueError:
                 pass
+        if rest[:1] == '"':
+            try:
+                s, _ = json.JSONDecoder().raw_decode(rest)
+            except ValueError:
+                s = None
+            if isinstance(s, str):
+                if isjson and s.strip()[:1] in ("{", "["):
+                    try:
+                        json.loads(s)
+                        val = s.strip()
+                    except ValueError:
+                        pass
+                elif not isjson and re.fullmatch(r"[\w.\-]+", s):
+                    val = s
+            continue
         sm = re.match(r"[\w.\-]+", rest)
-        if sm and not tok.lower().endswith("json"):
+        if sm and not isjson:
             val = sm.group(0)
     return val
 
@@ -1034,7 +1058,8 @@ class GateInterrupted(Exception):
 class Gate:
     def __init__(self, repo: str, sprint: str, mode: str, *, place: Optional[str] = None,
                  official=None, community=None, run_cmd: Callable = default_run_cmd,
-                 call_timeout: float = 120.0, out=print, run_id: str = ""):
+                 call_timeout: float = 120.0, out=print, run_id: str = "",
+                 create_dir: bool = True):
         self.repo = os.path.abspath(repo)
         self.sprint, self.mode = sprint, mode
         self.run_id = run_id or ""
@@ -1055,7 +1080,8 @@ class Gate:
         self.head = None
         self.index = None
         self.gate_dir = os.path.join(self.repo, ".plan", "tmp", "gate", sprint)
-        os.makedirs(self.gate_dir, exist_ok=True)
+        if create_dir:                       # a --dry-run never writes into the repo
+            os.makedirs(self.gate_dir, exist_ok=True)
         self.raw_path = None
         self.verdict_path = None
         self._raw = []
@@ -1064,6 +1090,17 @@ class Gate:
         self._playing = False
         self._last_end = None
         self._all_results: dict = {}
+        # `calls` mode (2026-10-27, STUDIO_GATE_SCRIPTED_PLAN.md): the live lines file, the
+        # display CALL numbers (the full selection's numbering), budgets and the MCP
+        # failure counter. All inert (None / empty / 0) in the other modes.
+        self.lines = None                    # LinesWriter
+        self.disp: dict = {}                 # studio CALL n -> display CALL n
+        self.group_budget_s: Optional[float] = None
+        self._group_deadline: Optional[float] = None
+        self.mcp_fail_limit = 0              # consecutive MCP transport failures -> tooling
+        self._mcp_fail = 0
+        self.last_verify_text = ""
+        self.boot_text = ""                  # the first green boot pair (ledger evidence)
 
     # ---- clients ----------------------------------------------------------------
     def _connect(self, kind: str) -> M.McpClient:
@@ -1144,10 +1181,39 @@ class Gate:
         try:
             r = fn()
             text, err = r["text"], r["is_error"]
+            self._mcp_fail = 0
         except M.McpError as e:
             text, err = f"UNKNOWN: {e}", True
+            if is_transport_failure(e):
+                self._mcp_fail += 1
         self.raw(label + (" [tool error]" if err else ""), payload, text)
+        if self.mcp_fail_limit and self._mcp_fail >= self.mcp_fail_limit:
+            # calls mode: the MCP servers are gone (Studio closed, plugin disconnected):
+            # a tooling ERROR, never a red gate built from tool errors
+            raise GateTooling(f"{self._mcp_fail} MCP connect/transport failures in a row "
+                              f"(last: {one_line(text, 300)})")
         return text, err
+
+    # ---- calls-mode output hooks (no-ops without a LinesWriter) -------------------
+    def _dn(self, n) -> int:
+        """The display CALL number of a studio CALL number (identity outside calls mode)."""
+        return self.disp.get(n, n) if isinstance(n, int) else n
+
+    def emit(self, text: str) -> None:
+        if self.lines is not None:
+            self.lines.line(text)
+
+    def emit_call(self, c: dict, payload: str, text: str, err: bool, note: str = "") -> None:
+        """A CALL header plus its raw result, as the session's lines file shows it."""
+        if self.lines is None:
+            return
+        dn = self._dn(c["n"])
+        tool = call_tool_name(c)
+        start = self.lines.count + 1
+        self.lines.line(f"CALL {dn} [vm={c.get('vm')}] {tool}{note} :: {one_line(payload, 4000)}")
+        self.lines.raw(text if not err or str(text).startswith("FAIL: GATE")
+                       else f"FAIL: GATE call {dn} error - {one_line(text)}")
+        self.lines.mark(dn, start)
 
     # ---- host checks (tools/gate.ps1 port) --------------------------------------
     def host_checks(self, files: list, tier: str = "B") -> dict:
@@ -1238,21 +1304,22 @@ class Gate:
         except (OSError, ValueError):
             return {}
 
-    def live_verify(self, expect: dict):
+    def live_verify(self, expect: dict, cid: str = "host.live_hash"):
         """Studio sources == HEAD for the files under test. GateRunner.verifyLive knows
         src/ and its MOUNTED_TESTS; files it reports `SKIP (unmounted)` are resolved here
         from default.project.json at HEAD (tests/lib/* -> ReplicatedStorage.TestLib.*;
         live run 2026-10-20 reported matched=0/0 for the three TestLib files). Never PASS
         with 0 matched; a Studio-loaded file mounted nowhere is UNKNOWN with its name."""
         if not expect:
-            self.add(check("host.live_hash", "UNKNOWN", "no hash map for the files under test"))
+            self.add(check(cid, "UNKNOWN", "no hash map for the files under test"))
             return
         code = (FRESH_GATE + 'return __freshGate()'
                 f".verifyLive({luau_value(expect)})")
         text, err = self.edit(code, "verifyLive")
+        self.last_verify_text = flatten_value(text) if not err else f"UNKNOWN: {one_line(text)}"
         m = VERIFY_RE.search(text or "")
         if err or not m:
-            self.add(check("host.live_hash", "UNKNOWN", (text or "")[:200]))
+            self.add(check(cid, "UNKNOWN", (text or "")[:200]))
             return
         matched, total, mism, unres = map(int, m.groups())
         skipped = [p for p in re.findall(r"^SKIP \(unmounted\) (\S+)", text or "", re.M) if p in expect]
@@ -1266,12 +1333,14 @@ class Gate:
             t2, e2 = self.edit(fill(LIVE_HASH, paths=luau_value(paths)), "live hash (Rojo mounts)")
             got = None if e2 else extract_json(t2)
             if not isinstance(got, dict):
-                self.add(check("host.live_hash", "UNKNOWN", "Rojo-mount hash read failed: " + one_line(t2)))
+                self.add(check(cid, "UNKNOWN", "Rojo-mount hash read failed: " + one_line(t2)))
                 return
             for p, dm in sorted(extra.items()):
                 lives = [str(got.get(d) or "missing") for d in dm]
                 want = str(expect.get(p))
                 total += 1
+                word = "MATCH" if all(x == want for x in lives) else "MISMATCH"
+                self.last_verify_text += f"\n{word} {p} live={'/'.join(lives)} head={want}"
                 if all(x == want for x in lives):
                     matched += 1
                 elif "missing" in lives:
@@ -1284,16 +1353,19 @@ class Gate:
         studio = [p for p in unmounted if p.startswith(("src/", "tests/"))
                   and not p.startswith("tests/lune/")]
         summary = f"matched={matched}/{total} mismatched={mism} unresolved={unres}"
+        if extra:
+            self.last_verify_text += (f"\nVERIFY {summary} skipped=0 (with the Rojo-mounted "
+                                      f"files GateRunner reported unmounted)")
         if mism or unres:
-            self.add(check("host.live_hash", "FAIL", "; ".join([summary] + detail[1:])))
+            self.add(check(cid, "FAIL", "; ".join([summary] + detail[1:])))
         elif studio:
-            self.add(check("host.live_hash", "UNKNOWN", f"{summary}; not mounted anywhere in Studio "
+            self.add(check(cid, "UNKNOWN", f"{summary}; not mounted anywhere in Studio "
                            f"(GateRunner or default.project.json): " + ", ".join(studio)))
         elif matched == 0:
-            self.add(check("host.live_hash", "SKIP", f"{summary}; no Studio-loaded file under test",
+            self.add(check(cid, "SKIP", f"{summary}; no Studio-loaded file under test",
                            required=False))
         else:
-            self.add(check("host.live_hash", "PASS", summary))
+            self.add(check(cid, "PASS", summary))
 
     # ---- stories ----------------------------------------------------------------
     def run_mock(self, stories: list, only: Optional[list] = None):
@@ -1500,6 +1572,11 @@ class Gate:
             if self._playing or "timed out" in str(e):
                 self._playing = True
                 self.stop_playtest()
+            if is_transport_failure(e):
+                self._mcp_fail += 1
+                if self.mcp_fail_limit and self._mcp_fail >= self.mcp_fail_limit:
+                    raise GateTooling(f"{self._mcp_fail} MCP connect/transport failures in a row "
+                                      f"(last: solo_playtest start: {one_line(e, 300)})")
             return False
         self.status("playtest", "waiting for a player")
         end = time.monotonic() + wait
@@ -1591,20 +1668,37 @@ class Gate:
         res, chk, tool_err = att["res"], att["chk"], att["tool_err"]
         for i, c in enumerate(calls, 1):
             n, kind = c["n"], c["kind"]
+            dn = self._dn(n)
             if not c.get("tight"):           # nothing between a tight pair (M6)
-                self.status("regression", f"{g['label']} {i - 1}/{len(calls)}")
+                self.status("regression" if self.lines is None else "calls",
+                            f"{g['label']} {i - 1}/{len(calls)}"
+                            + (f" (CALL {dn})" if self.lines is not None else ""))
             if kind == "skip":
                 res[n] = "SKIP offstudio — recorded as SKIP, never as PASS"
                 self.raw(f"CALL {n} skip", c["line"], res[n])
+                self.emit_call(c, "recorded as SKIP, never as PASS", res[n], False)
                 continue
             if kind == "manual":
                 self.raw(f"CALL {n} manual", c["line"], "not executable by the runner (no evidence)")
-                chk.append(check(f"regression.call{n}", "UNKNOWN",
+                chk.append(check(f"regression.call{dn}", "UNKNOWN",
                                  "MANUAL call: not executable by the runner, no evidence"))
+                self.emit_call(c, c.get("payload") or "", f"FAIL: GATE call {dn} MANUAL - not "
+                               f"executable by the runner (no evidence)", True)
+                continue
+            if self._group_deadline is not None and time.monotonic() > self._group_deadline:
+                # calls mode: a hung suite group becomes UNKNOWN and the run moves on
+                res[n] = (f"FAIL: GATE call {dn} timeout — suite group {g['label']} over its "
+                          f"{(self.group_budget_s or 0) / 60:g} min budget (not run)")
+                tool_err.append(n)
+                att["budget"] = True
+                chk.append(check(f"regression.call{dn}", "UNKNOWN", res[n]))
+                self.emit_call(c, c.get("payload") or "", res[n], True)
+                att["order"].append(n)
                 continue
             if g["waits"].get(n):
                 time.sleep(g["waits"][n])
             t0 = time.monotonic()
+            payload = c.get("payload") or ""
             if kind == "bridge":
                 text, err = self.run_bridge(c)
             else:
@@ -1619,35 +1713,40 @@ class Gate:
                         _, still = resolve_dynarg(c["payload"], missing, others)
                         why = (" (found only in another suite's output)" if mine is not None
                                and len(still) < len(missing) else "")
-                        res[n] = f"FAIL: GATE dynarg CALL {n} — unresolved <{'>, <'.join(missing)}>{why}"
+                        res[n] = f"FAIL: GATE dynarg CALL {dn} — unresolved <{'>, <'.join(missing)}>{why}"
                         self.raw(f"CALL {n} dynarg", c["payload"], res[n])
-                        chk.append(check(f"regression.call{n}", "UNKNOWN" if why else "FAIL", res[n]))
+                        chk.append(check(f"regression.call{dn}", "UNKNOWN" if why else "FAIL", res[n]))
+                        self.emit_call(c, c["payload"], res[n], True, " DYNARG")
                         att["order"].append(n)
                         continue
                 text, err = self.vm(kind, payload, f"CALL {n}" + (" tight" if c["tight"] else ""))
             if c.get("tight") and self._last_end is not None:
                 gap = 1000 * (t0 - self._last_end)
                 if gap > TIGHT_GAP_MS:
-                    chk.append(check(f"regression.tight{n}", "UNKNOWN",
-                                     f"tightBefore CALL {n} issued {gap:.0f}ms after CALL {n - 1}"))
+                    chk.append(check(f"regression.tight{dn}", "UNKNOWN",
+                                     f"tightBefore CALL {dn} issued {gap:.0f}ms after CALL {dn - 1}"))
             self._last_end = time.monotonic()
             if err:
                 # never hand a failed call's printed lines to the tally as if it ran (H2)
-                res[n] = f"FAIL: GATE call {n} error — {one_line(text)}"
+                res[n] = f"FAIL: GATE call {dn} error — {one_line(text)}"
                 tool_err.append(n)
-                chk.append(check(f"regression.call{n}", "UNKNOWN", "tool error/timeout: " + one_line(text)))
+                chk.append(check(f"regression.call{dn}", "UNKNOWN", "tool error/timeout: " + one_line(text)))
             else:
                 text = flatten_value(text)
                 if kind == "bridge" and not text.strip():
-                    res[n] = f"FAIL: GATE call {n} empty reply"
+                    res[n] = f"FAIL: GATE call {dn} empty reply"
                     tool_err.append(n)
-                    chk.append(check(f"regression.call{n}", "FAIL", res[n]))
+                    chk.append(check(f"regression.call{dn}", "FAIL", res[n]))
                 else:
                     res[n] = text
+            self.emit_call(c, payload, res[n], bool(err) or n in tool_err,
+                           " DYNARG" if c.get("dynarg") else (" tight" if c.get("tight") else ""))
             att["order"].append(n)
 
     def _run_group(self, g: dict, boot: list, entry_of: dict) -> dict:
         att = {"res": {}, "chk": [], "tool_err": [], "order": [], "boot_bad": False, "boot": {}}
+        self._group_deadline = (time.monotonic() + self.group_budget_s
+                                if self.group_budget_s else None)
         ins = [c["n"] for c in g["calls"]]
         for c in g["calls"]:
             if c.get("tight") and c["n"] - 1 in ins:
@@ -1661,23 +1760,31 @@ class Gate:
         if not any(self._needs_play(c) for c in play):
             self._exec_calls(play, g, att, entry_of)
             return att
-        self.status("playtest", g["label"])
+        self.status("playtest" if self.lines is None else "calls", g["label"])
         if not self.start_playtest(cid=f"regression.playtest.{g['label']}", sink=att["chk"]):
+            self.emit(f"PLAYTEST {g['label']} did not start: "
+                      + one_line((att["chk"][-1] if att["chk"] else {}).get("detail") or "?"))
             for c in play:
                 if self._needs_play(c):
-                    att["res"][c["n"]] = f"FAIL: GATE call {c['n']} error — no playtest"
+                    att["res"][c["n"]] = f"FAIL: GATE call {self._dn(c['n'])} error — no playtest"
                     att["tool_err"].append(c["n"])
+                    self.emit_call(c, c.get("payload") or "", att["res"][c["n"]], True)
             return att
+        self.emit(f"PLAYTEST {g['label']} started (fresh solo playtest, player in world)")
         try:
             for b in boot:                                  # boot gate per playtest (H1)
                 text, err = self.vm(b["kind"], b["payload"], f"CALL {b['n']} boot [{g['label']}]")
                 ok, why = boot_ok(text, err)
                 att["boot"][b["n"]] = flatten_value(text) if ok else f"FAIL: GATE boot CALL {b['n']} — {why}"
+                self.emit_call(b, b["payload"], att["boot"][b["n"]], not ok,
+                               f" (boot gate, playtest for {g['label']})")
                 if not ok:
                     att["boot_bad"] = True
                     att["chk"].append(check("regression.boot", "UNKNOWN" if err else "FAIL",
                                             f"CALL {b['n']} in the playtest for {g['label']}: {why}"))
                     return att
+            if self.lines is not None and not self.boot_text:
+                self.boot_text = "\n".join(att["boot"][b["n"]] for b in boot)
             for e in g["entries"]:                          # per-entry setup steps
                 for k, step in enumerate(e.get("setup") or [], 1):
                     sp = step_payload(e, str(step))
@@ -1688,6 +1795,9 @@ class Gate:
                     text, err = self.vm(sp[0], sp[1], f"setup {e.get('id')} {k}")
                     res, detail = lines_result(flatten_value(text) + "\nPASS: setup ran", "PASS:", err)
                     att["chk"].append(check(cid, res, detail if res != "PASS" else one_line(text) or "ok"))
+                    if self.lines is not None:
+                        self.emit(f"SETUP {e.get('id')} {k} [vm={sp[0]}] :: {one_line(sp[1], 4000)}")
+                        self.lines.raw(one_line(text) if err else flatten_value(text))
                     if err:
                         att["tool_err"].append(f"setup{k}")
             self._exec_calls(play, g, att, entry_of)
@@ -1720,10 +1830,13 @@ class Gate:
     # verdict), or an ancestor commit whose diff to HEAD touches nothing the check covers.
     # Failed checks never carry. Each passed suite comes from the newest verdict that still
     # covers it; passed stories carry one by one and only failed stories re-run.
-    def _store_verdicts(self) -> list:
+    STORE_SUFFIXES = (".sprint.json", ".baseline.json")
+    CALLS_STORE_SUFFIXES = (".calls.json", ".sprint.json", ".baseline.json")
+
+    def _store_verdicts(self, suffixes: Optional[tuple] = None) -> list:
         out = []
         for name in sorted(os.listdir(self.gate_dir)) if os.path.isdir(self.gate_dir) else []:
-            if not name.endswith((".sprint.json", ".baseline.json")):
+            if not name.endswith(tuple(suffixes or self.STORE_SUFFIXES)):
                 continue
             v = _read_json_file(os.path.join(self.gate_dir, name))
             if isinstance(v, dict) and v.get("head") and isinstance(v.get("checks"), list) \
@@ -1761,13 +1874,17 @@ class Gate:
         memo[prev] = res
         return res
 
-    def carry_plan(self, selection: str, plan_file: str) -> dict:
+    def carry_plan(self, selection: str, plan_file: str, suffixes: Optional[tuple] = None) -> dict:
+        """B2 carry, generalized (2026-10-27): `suffixes` picks which stored results may
+        carry (calls mode adds its own <head12>.calls.json runs). A suite carries only
+        from a PASS on HEAD's history whose files are untouched since; FAIL / UNKNOWN
+        never carry; any harness change carries nothing."""
         out = {"from": None, "suites": [], "stories": False, "changed": [],
                "suite_from": {}, "story_from": None, "stories_failed": []}
         head = self.head
         if not head:
             return out
-        verdicts = self._store_verdicts()
+        verdicts = self._store_verdicts(suffixes)
         if not verdicts:
             return out
         memo: dict = {}
@@ -1841,14 +1958,38 @@ class Gate:
         else:
             groups = self.suite_groups(mapping, calls, select_entries(index, selection))
             entry_of = {n: e.get("id") for n, (e, _) in mapping.items()}
+        results = self._run_groups(groups, boot, entry_of, bool(mapping))
+        self.status("tally", "")
+        _record_tally(self, selection, self.tally(selection, results))
+
+    def _run_groups(self, groups: list, boot: list, entry_of: dict, mapped: bool,
+                    run_deadline: Optional[float] = None, run_budget_min: float = 0) -> dict:
+        """Run every suite group (a fresh playtest each, a tool-error-only group retried
+        once) and return the results keyed by studio CALL number for GateRunner.tally.
+        calls mode: past `run_deadline` the remaining groups are not run (each CALL a
+        `FAIL: GATE call n not run` line), and a group stopped by its own budget is
+        never retried."""
         results, boots, played = {}, {}, 0
         self._all_results = results
         for gi, g in enumerate(groups):
+            if run_deadline is not None and time.monotonic() > run_deadline:
+                for c in g["calls"]:
+                    if c["kind"] == "skip":
+                        results[c["n"]] = "SKIP offstudio — recorded as SKIP, never as PASS"
+                        continue
+                    results[c["n"]] = (f"FAIL: GATE call {self._dn(c['n'])} not run — the run "
+                                       f"budget ({run_budget_min:g} min) was spent")
+                    self.add(check(f"regression.call{self._dn(c['n'])}", "UNKNOWN", results[c["n"]]))
+                    self.emit_call(c, c.get("payload") or "", results[c["n"]], True)
+                continue
             att = self._run_group(g, boot, entry_of)
-            if att["tool_err"] and not att["boot_bad"] and not self._assert_fail(att) and mapping:
+            if att["tool_err"] and not att["boot_bad"] and not self._assert_fail(att) and mapped \
+                    and not att.get("budget"):
                 self.raw(f"RETRY {g['label']}", "",
                          f"first run had tool errors/timeouts at {att['tool_err']} and no assertion "
                          f"FAIL: re-running once in a fresh playtest (both runs are in this log)")
+                self.emit(f"RETRY {g['label']}: the first run had only tool errors/timeouts (no "
+                          f"assertion FAIL); re-running once in a fresh playtest")
                 first = att
                 att = self._run_group(g, boot, entry_of)
                 att["chk"].append(check(f"regression.{g['label']}.retry", "SKIP",
@@ -1873,12 +2014,12 @@ class Gate:
                 if left:
                     self.add(check("regression.stopped", "FAIL", "boot gate failed: not run: "
                                    + ", ".join(left)))
+                    self.emit("FAIL: GATE boot - the boot gate failed: not run: " + ", ".join(left))
                 break
         results.update(boots)
         if played and not any(c["id"] == "regression.boot" for c in self.checks):
             self.add(check("regression.boot", "PASS", f"boot gate PASS in {played} playtest(s)"))
-        self.status("tally", "")
-        _record_tally(self, selection, self.tally(selection, results))
+        return results
 
     def run_bridge(self, c: dict) -> tuple:
         f = c.get("file")
@@ -2527,6 +2668,759 @@ def _record_tally(g: Gate, selection: str, t: dict):
                     "tally": raw}
 
 
+# ---- calls mode (2026-10-27, reports/STUDIO_GATE_SCRIPTED_PLAN.md) ----------------------
+# The Studio half of tools/gate.ps1 (the CALLs a session ran one by one) as a script: the
+# same selection as gate.ps1 (D3: `full` = pinned rows only), PRE-PLAY verifyLive, every
+# CALL in a fresh playtest per suite group with the boot gate, POST-PLAY verifyLive,
+# GateRunner.tally, a HEAD check. The live lines file docs/progress/<ID>_studio_lines.txt
+# is written and flushed as each CALL returns (ASCII, the session's shapes) so
+# `gate.ps1 -Finish -StudioFile` and the control center's tracker read it unchanged.
+# Rows needing more than one player (S17) are MANUAL (Victor 2026-10-27): listed, never run,
+# never a red gate; the session runs just those with multiplayer_playtest.
+STUDIO_LOCK_OWNER = "studio_gate"
+MANUAL_WHY = "needs a 2-player playtest (session runs it with multiplayer_playtest)"
+LINES_REL = "docs/progress/{sprint}_studio_lines.txt"
+GROUP_BUDGET_MIN = 10.0
+RUN_BUDGET_FULL_MIN = 150.0
+RUN_BUDGET_MIN = 30.0
+BOOT_SERVER = 'return (require(game:GetService("ServerScriptService"):WaitForChild("GateRunner")).boot())'
+BOOT_CLIENT = ('return (require(game:GetService("StarterPlayer"):WaitForChild("StarterPlayerScripts")'
+               ':WaitForChild("GateRunner")).boot())')
+# Studio-sourced CALL output that would read as a verdict/marker line of the gate itself
+# is indented so it can never forge one (a FAIL: GATE line stays: it fails closed)
+_FORGE_RE = re.compile(r"^(?:GATE \S+ (?:PASS|FAIL)\b|PASS: GATE HEAD\b|VERDICT\b|=== GATE\b"
+                       r"|GATE RUN\b|SUITE \S+ pass=|(?:PASS|SKIP): GATE (?:suite|regression)\b"
+                       r"|GATE regression\b|STUDIO LINES:|R1 plan:|R3 tally:|PRE-PLAY VERIFY"
+                       r"|POST-PLAY VERIFY|SCRIPTED )")
+_ASCII_MAP = {"\u2014": "-", "\u2013": "-", "\u2012": "-", "\u2212": "-", "\u2018": "'",
+              "\u2019": "'", "\u201c": '"', "\u201d": '"', "\u2026": "...", "\u00a0": " ",
+              "\u2192": "->", "\u2190": "<-", "\u2264": "<=", "\u2265": ">=", "\u00d7": "x",
+              "\u2022": "*", "\u00b7": "."}
+
+
+class GateTooling(Exception):
+    """calls mode: the tooling failed (MCP gone, Studio stale, plan mismatch, HEAD
+    moved): an ERROR verdict (exit 2), never a red gate."""
+
+
+def is_transport_failure(e: Exception) -> bool:
+    """An MCP failure that means the server/connection is gone (not a timeout of
+    one call, not an RPC error answered by a live server)."""
+    if isinstance(e, M.McpTimeout):
+        return False
+    return not re.search(r" error (?:-?\d+|None): ", str(e))
+
+
+def ascii_fold(s) -> str:
+    """One line of text as plain ASCII (the earlier paste defect: -Finish read a
+    UTF-8 file through Get-Content as cp1252)."""
+    s = "".join(_ASCII_MAP.get(ch, ch) for ch in str(s))
+    out = []
+    for ch in unicodedata.normalize("NFKD", s):
+        if ch == "\t" or 32 <= ord(ch) < 127:
+            out.append(ch)
+        elif ord(ch) < 32 or unicodedata.combining(ch):
+            out.append(" " if ord(ch) < 32 else "")
+        else:
+            out.append("?")
+    return "".join(out).rstrip()
+
+
+class LinesWriter:
+    """docs/progress/<ID>_studio_lines.txt, rewritten per run, one flush per write."""
+
+    def __init__(self, path: str):
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        self.path = path
+        self.f = open(path, "w", encoding="ascii", newline="\n")
+        self.count = 0
+        self.spans: dict = {}                # display CALL n -> (first line, last line)
+
+    def _put(self, s: str) -> None:
+        self.f.write(s + "\n")
+        self.count += 1
+
+    def line(self, text) -> None:
+        """Runner / tally text (trusted shapes): ASCII-folded, kept at column 0."""
+        for ln in str(text).splitlines() or [""]:
+            self._put(ascii_fold(ln))
+        self.f.flush()
+
+    def raw(self, text) -> None:
+        """A Studio CALL result: ASCII-folded; a line shaped like a gate marker or
+        verdict is indented (never forged)."""
+        lines = str(text or "").splitlines()
+        if not lines or not any(x.strip() for x in lines):
+            lines = ["(empty result)"]
+        for ln in lines:
+            ln = ascii_fold(ln)
+            self._put(("  | " + ln) if _FORGE_RE.match(ln) else ln)
+        self.f.flush()
+
+    def mark(self, n, start: int) -> None:
+        first = self.spans.get(n, (start, 0))[0]
+        self.spans[n] = (first, self.count)
+
+    def close(self) -> None:
+        with contextlib.suppress(Exception):
+            self.f.close()
+
+
+def call_tool_name(c: dict) -> str:
+    kind, vm = c.get("kind"), c.get("vm")
+    if kind == "bridge":
+        how = "execute_luau (datamodel Edit)" if vm == "edit" else "execute_luau target=server"
+        return f"bridge {how} tests/{c.get('file') or '?'}"
+    if kind == "skip":
+        return "SKIP (offstudio)"
+    if kind == "manual":
+        return "MANUAL"
+    if vm == "edit":
+        return "execute_luau (datamodel Edit)"
+    tool = str(c.get("tool") or "").split()
+    return tool[-1] if tool else str(kind)
+
+
+def split_ids(v) -> list:
+    if isinstance(v, (list, tuple)):
+        v = ",".join(str(x) for x in v)
+    return [x for x in re.split(r"[,\s]+", str(v or "")) if x]
+
+
+def is_manual(e: dict) -> bool:
+    try:
+        return int(e.get("players") or 1) > 1
+    except (TypeError, ValueError):
+        return False
+
+
+def select_gate(index: dict, regression: str, suites=()) -> dict:
+    """Port of tools/gate.ps1 Get-GateSelection (+ -Suites): the rows a gate run covers,
+    in order (the -Regression selection as gate.ps1 numbers it, then any of the sprint's
+    own -Suites it does not hold).
+    none | full (D3: a row with expectPass = nil stays OUT) | subset:<name> (a bare
+    subset name is accepted too) | a comma/space list of ids. Problems are FAIL:
+    lines, never ids. `manual` = rows with players > 1."""
+    entries = [e for e in index.get("entries") or [] if isinstance(e, dict) and e.get("id")]
+    subsets = index.get("subsets") or {}
+    by = {e["id"]: e for e in entries}
+    problems, picked = [], []
+    reg = str(regression or "none").strip()
+    if reg in ("", "none"):
+        pass
+    elif reg == "full":
+        picked = [e for e in entries if "expectPass" not in e or e["expectPass"] is not None]
+    else:
+        m = re.fullmatch(r"subset:(.+)", reg)
+        name = m.group(1) if m else (reg if reg in subsets and reg not in by else None)
+        if name is not None:
+            ids = subsets.get(name)
+            if not isinstance(ids, list):
+                problems.append(f"FAIL: GATE selection - unknown subset '{name}' in "
+                                f"tests/RegressionIndex.lua")
+            else:
+                for i in ids:
+                    if i in by:
+                        picked.append(by[i])
+                    else:
+                        problems.append(f"FAIL: GATE selection - subset '{name}' names '{i}', "
+                                        f"which has no index row")
+        else:
+            for i in split_ids(reg):
+                if i in by:
+                    picked.append(by[i])
+                else:
+                    problems.append(f"FAIL: GATE selection - '{i}' has no index row (every gate "
+                                    f"run must be indexed)")
+    own = []
+    for s in split_ids(suites):
+        if s in by:
+            own.append(by[s])
+        else:
+            problems.append(f"FAIL: GATE index suites - -Suites {s} has no index row")
+    for e in picked:
+        if "expectPass" not in e:
+            problems.append(f"FAIL: GATE index suites - row {e['id']} has no expectPass field")
+        elif e["expectPass"] is None:
+            problems.append(f"FAIL: GATE index suites - {e['id']} is selected but unpinned (a "
+                            f"gate run gates on a pinned expectPass)")
+    # the -Regression order first (so CALL numbers match gate.ps1's NEXT preview), then any
+    # own suite the selection does not already hold
+    rows, seen = [], set()
+    for e in picked + own:
+        if e["id"] not in seen:
+            seen.add(e["id"])
+            rows.append(e)
+    if not rows and reg not in ("", "none"):
+        problems.append("FAIL: GATE index suites - the -Regression selection resolved to no suites")
+    return {"rows": rows, "suites": [e["id"] for e in own], "regression": [e["id"] for e in picked],
+            "problems": problems, "manual": [e["id"] for e in rows if is_manual(e)],
+            "pinned": sum(1 for e in entries if e.get("expectPass") is not None)}
+
+
+def display_numbers(rows: list) -> tuple:
+    """({(row id, step index): CALL n}, last CALL n): the numbering of the full
+    selection (CALL 1-2 = boot), as gate.ps1's NEXT preview counts it."""
+    out, n = {}, 2
+    for e in rows:
+        for si, _ in enumerate(e.get("steps") or [], 1):
+            n += 1
+            out[(e["id"], si)] = n
+    return out, n
+
+
+def _row_calls(disp: dict, sid: str) -> list:
+    return sorted(n for (i, _), n in disp.items() if i == sid)
+
+
+def _span(ns: list) -> str:
+    if not ns:
+        return "-"
+    return f"{ns[0]}" if ns[0] == ns[-1] else f"{ns[0]}-{ns[-1]}"
+
+
+def step_kind(step: str, e: dict) -> tuple:
+    """(kind, vm) of one index step, as GateRunner.emitCall prints it."""
+    vm = step_vm(str(step), e)
+    if vm == "offstudio":
+        return "skip", "host"
+    if e.get("loader") == "bridge" or step == "main":
+        return "bridge", vm
+    if vm in ("server", "client", "edit"):
+        return vm, vm
+    return "manual", vm
+
+
+def studio_lock_path() -> str:
+    return os.path.join(os.environ.get("AU_LOCK_DIR", "C:/Roblox/_scratch"), "studio.lock")
+
+
+def studio_lock_read() -> Optional[str]:
+    try:
+        with open(studio_lock_path(), encoding="utf-8") as f:
+            return f.read().strip()
+    except FileNotFoundError:
+        return None
+    except OSError as e:
+        return f"(unreadable: {e})"
+
+
+def studio_lock_acquire(sprint: str, what: str) -> Optional[str]:
+    """AU's shared studio.lock (tools/coord/lock.py format: one line "<owner> <ISO>
+    <SPRINT> <what>"), taken atomically. None when taken, else the holder line."""
+    p = studio_lock_path()
+    stamp = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    what = " ".join(str(what or "").split())
+    line = f"{STUDIO_LOCK_OWNER} {stamp} {sprint} {what}"
+    try:
+        os.makedirs(os.path.dirname(p), exist_ok=True)
+        fd = os.open(p, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+    except FileExistsError:
+        return studio_lock_read() or "a lock that is being written"
+    except OSError as e:
+        return f"studio.lock cannot be created: {e}"
+    with os.fdopen(fd, "w", encoding="utf-8") as f:
+        f.write(line + "\n")
+    return None if studio_lock_read() == line else (studio_lock_read() or "a race")
+
+
+def studio_lock_release(sprint: str, owner: str = STUDIO_LOCK_OWNER) -> bool:
+    """Remove studio.lock only when it names `owner` and `sprint` (never anyone else's)."""
+    line = studio_lock_read()
+    parts = (line or "").split()
+    if len(parts) > 2 and parts[0] == owner and parts[2] == sprint:
+        with contextlib.suppress(OSError):
+            os.remove(studio_lock_path())
+            return True
+    return False
+
+
+def calls_preconditions(repo: str, sprint: str, head: str) -> tuple:
+    """(problem | None, expect map): the host half passed at THIS HEAD
+    (<ID>_gate_verdicts.json: headSha == HEAD, every step true) and its file map
+    (<ID>_gate_expect.json) exists."""
+    vrel = f"docs/progress/{sprint}_gate_verdicts.json"
+    erel = f"docs/progress/{sprint}_gate_expect.json"
+    try:
+        with open(os.path.join(repo, *vrel.split("/")), encoding="utf-8-sig") as f:
+            v = json.load(f)
+    except (OSError, ValueError):
+        return f"{vrel} missing or unreadable: run the host half (tools/gate.ps1 without " \
+               f"-Finish) at HEAD first", {}
+    if not isinstance(v, dict):
+        return f"{vrel} is not a JSON object", {}
+    if str(v.get("headSha") or "") != head:
+        return (f"{vrel} is stamped {str(v.get('headSha') or '(none)')[:12]}, HEAD is {head[:12]}: "
+                f"the host half must pass at the current HEAD"), {}
+    bad = sorted(k for k, x in v.items() if k not in ("headSha", "sprint", "tier") and x is not True)
+    if bad:
+        return f"the host half did not pass at {head[:12]}: " + ", ".join(bad), {}
+    try:
+        with open(os.path.join(repo, *erel.split("/")), encoding="utf-8-sig") as f:
+            files = (json.load(f) or {}).get("files") or {}
+    except (OSError, ValueError, AttributeError):
+        files = {}
+    if not isinstance(files, dict) or not files:
+        return f"{erel} (the gate's file map) is missing or empty", {}
+    return None, files
+
+
+def _calls_refuse(g: "Gate", out, why: str) -> int:
+    g.status("done", "")
+    out(f"CALLS {g.sprint} NOT READY: {why}")
+    return 2
+
+
+def _studio_is_playing(g: "Gate") -> bool:
+    try:
+        st = g.official.call("get_studio_state", {}, timeout=min(g.call_timeout, 60))
+    except M.McpError:
+        return False
+    return not st.get("is_error") and studio_mode(st.get("text") or "") == "play"
+
+
+def _boot_only(g: "Gate") -> None:
+    """Every row is carried or manual: one fresh playtest with the boot gate only, so
+    the lines still prove the build boots at HEAD (-Finish needs both boot PASS lines)."""
+    boot = [{"n": 1, "vm": "server", "kind": "server", "payload": BOOT_SERVER,
+             "tool": "robloxstudio-mcp eval_server_runtime"},
+            {"n": 2, "vm": "client", "kind": "client", "payload": BOOT_CLIENT,
+             "tool": "robloxstudio-mcp eval_client_runtime"}]
+    sink: list = []
+    if not g.start_playtest(cid="regression.playtest.boot-only", sink=sink):
+        g.checks.extend(sink)
+        g.emit("FAIL: GATE boot - no playtest for the boot gate: "
+               + one_line((sink[-1] if sink else {}).get("detail") or "?"))
+        return
+    g.checks.extend(sink)
+    try:
+        for b in boot:
+            text, err = g.vm(b["kind"], b["payload"], f"CALL {b['n']} boot [boot-only]")
+            ok, why = boot_ok(text, err)
+            g.emit_call(b, b["payload"], flatten_value(text) if ok else
+                        f"FAIL: GATE boot CALL {b['n']} - {why}", not ok, " (boot gate only)")
+            if not ok:
+                g.add(check("regression.boot", "UNKNOWN" if err else "FAIL", f"CALL {b['n']}: {why}"))
+                return
+        g.add(check("regression.boot", "PASS", "boot gate PASS (boot-only playtest)"))
+    finally:
+        g.stop_playtest()
+
+
+def _calls_lane(g: "Gate", exec_rows: list, disp: dict, total: int, rows: list,
+                carry: dict, run_deadline: float, budget_min: float) -> dict:
+    """The CALL plan for exactly `exec_rows` (Studio gets the explicit ordered id list),
+    then every suite group. Returns the context for the tally."""
+    sel = ",".join(e["id"] for e in exec_rows)
+    try:
+        g.edit(SET_DESKTOP_DEVICE, "regression viewport AU_1920x1080")
+    except GateTooling:
+        raise
+    except Exception as e:                                    # noqa: BLE001
+        g.raw("regression viewport", "", f"could not set AU_1920x1080: {e}")
+    plan = g.plan(sel)
+    if plan["error"]:
+        raise GateTooling(f"GateRunner.run for the {len(exec_rows)} selected rows failed: "
+                          f"{one_line(plan['error'], 300)} (Studio's RegressionIndex differs from HEAD?)")
+    calls = {c["n"]: c for c in plan["calls"]}
+    boot = [calls[n] for n in (1, 2) if n in calls and BOOT_RE.search(calls[n]["payload"])
+            and calls[n]["kind"] in ("server", "client")]
+    if len(boot) != 2:
+        raise GateTooling("CALL 1-2 of Studio's plan are not the boot gate")
+    mapping = map_calls(plan, g.index or {}, sel)
+    if mapping is None:
+        raise GateTooling("Studio's CALL plan does not match tests/RegressionIndex.lua at HEAD "
+                          "(count, numbering or VMs differ): Studio is not at HEAD")
+    g.disp = {1: 1, 2: 2}
+    for n, (e, si) in mapping.items():
+        g.disp[n] = disp[(e["id"], si)]
+    parts = []
+    for e in rows:
+        ns = _row_calls(disp, e["id"])
+        tag = " MANUAL" if is_manual(e) else (" CARRIED" if e["id"] in carry else "")
+        parts.append(f"{e['id']} {_span(ns)}{tag}")
+    g.emit(f"R1 plan: GateRunner.run(\"{sel if len(sel) <= 120 else sel[:117] + '...'}\") -> "
+           f"{total} CALLs (boot 1-2, " + ", ".join(parts) + ")")
+    entries = select_entries(g.index or {}, sel) or []
+    groups = g.suite_groups(mapping, calls, entries)
+    entry_of = {n: e.get("id") for n, (e, _) in mapping.items()}
+    results = g._run_groups(groups, boot, entry_of, True, run_deadline=run_deadline,
+                            run_budget_min=budget_min)
+    return {"sel": sel, "results": results, "entry_of": entry_of, "mapping": mapping,
+            "studio_calls": len(plan["calls"])}
+
+
+def run_calls(a, out=print, official=None, community=None, run_cmd=default_run_cmd) -> int:
+    """`calls`: refuse unless the host half passed at HEAD; take the runner lock and
+    AU's studio.lock; run; release both."""
+    sprint = a.sprint
+    if getattr(a, "dry_run", False):
+        return calls_dry_run(a, out=out, run_cmd=run_cmd)
+    run_id = getattr(a, "run_id", None) or os.environ.get("FOUNDRY_GATE_RUN_ID") or ""
+    busy = acquire_lock(a.repo, sprint, "calls")
+    if busy:
+        out(f"CALLS {sprint} BUSY: another studio_gate runner is driving Studio ({busy})")
+        return 2
+    try:
+        held = studio_lock_acquire(sprint, f"studio_gate calls run {run_id or '-'}")
+        if held:
+            out(f"CALLS {sprint} BUSY: studio.lock is held: {held}")
+            return 2
+        try:
+            return _run_calls(a, sprint, run_id, out, official, community, run_cmd)
+        finally:
+            studio_lock_release(sprint)
+    finally:
+        release_lock(a.repo)
+
+
+def _run_calls(a, sprint, run_id, out, official, community, run_cmd) -> int:
+    g = Gate(a.repo, sprint, "calls", place=a.place, official=official, community=community,
+             run_cmd=run_cmd, call_timeout=a.timeout, out=out, run_id=run_id)
+    g.status("starting", "")
+    rc, head = run_cmd(["git", "rev-parse", "HEAD"], g.repo, 30)
+    head = (head or "").strip()
+    if rc != 0 or not re.fullmatch(r"[0-9a-f]{40}", head):
+        return _calls_refuse(g, out, "git rev-parse HEAD failed: " + head[:200])
+    g.head = head
+    problem, expect = calls_preconditions(g.repo, sprint, head)
+    if problem:
+        return _calls_refuse(g, out, problem)
+    g.index = load_index(g.repo, head)
+    sel = select_gate(g.index, a.regression, a.suites)
+    if sel["problems"]:
+        return _calls_refuse(g, out, "; ".join(sel["problems"])[:800])
+    rows = sel["rows"]
+    if not rows:
+        return _calls_refuse(g, out, "nothing selected (-Suites and -Regression are both empty)")
+    disp, total = display_numbers(rows)
+    manual = [e for e in rows if is_manual(e)]
+    carry: dict = {}
+    if a.rerun != "all":
+        cands = [e["id"] for e in rows if e["id"] not in sel["suites"] and not is_manual(e)]
+        if cands:
+            # only regression rows carry: the sprint's own -Suites always run
+            carry = g.carry_plan(",".join(cands), plan_rel(sprint),
+                                 suffixes=Gate.CALLS_STORE_SUFFIXES).get("suite_from") or {}
+    exec_rows = [e for e in rows if not is_manual(e) and e["id"] not in carry]
+    budget = float(a.budget_min or (RUN_BUDGET_FULL_MIN if str(a.regression).strip() == "full"
+                                    else RUN_BUDGET_MIN))
+    g.group_budget_s = max(0.05, float(a.group_min or GROUP_BUDGET_MIN)) * 60
+    g.mcp_fail_limit = 2
+    lines_rel = LINES_REL.format(sprint=sprint)
+    start = time.monotonic()
+    ctx: dict = {}
+    error = None
+    tooling = ""
+    try:
+        # both MCP servers up and bound to one Studio BEFORE the lines file is rewritten
+        # (Studio closed = an ERROR that leaves the last lines file untouched)
+        g.status("preflight", "")
+        g.preflight()
+        g.lines = LinesWriter(os.path.join(g.repo, *lines_rel.split("/")))
+        g.emit(f"{sprint} scripted Studio run at HEAD {head} (studio_gate calls, run_id "
+               f"{run_id or '-'}; executor studio_gate; ASCII-only; provenance "
+               f".plan/tmp/gate/{sprint}/{head[:12]}.calls.json)")
+        g.emit(f"SELECTION suites=[{','.join(sel['suites'])}] regression={a.regression} "
+               f"tier={a.tier} rerun={a.rerun}: {len(rows)} row(s), {total - 2} step CALL(s); "
+               f"run {len(exec_rows)}, carried {len(carry)}, manual {len(manual)}")
+        for e in manual:
+            g.emit(f"NOTE MANUAL {e['id']} (players={e.get('players')}) CALL "
+                   f"{_span(_row_calls(disp, e['id']))}: {MANUAL_WHY}")
+        if _studio_is_playing(g):
+            g.emit("NOTE Studio was in a playtest at the start: stopped it first")
+            g._playing = True
+            g.stop_playtest()
+        g.status("verify", "pre-play")
+        g.live_verify(expect, cid="calls.verify_pre")
+        pre = g.checks[-1]
+        ctx["verify_pre"] = g.last_verify_text
+        g.emit(f"PRE-PLAY VERIFY (GateRunner.verifyLive, Edit DM, fresh GateRunner clone, map "
+               f"docs/progress/{sprint}_gate_expect.json): {pre['result']}")
+        g.lines.raw(g.last_verify_text)
+        if pre["result"] not in ("PASS", "SKIP"):
+            tooling = "verify"
+            g.emit(f"FAIL: GATE verify PRE-PLAY - {one_line(pre['detail'], 400)}")
+            raise GateTooling("PRE-PLAY verify: Studio's loaded sources are not HEAD's ("
+                              + one_line(pre["detail"], 300) + "); no CALL ran (Rojo / plugin "
+                              "sync is stale)")
+        if exec_rows:
+            ctx.update(_calls_lane(g, exec_rows, disp, total, rows, carry,
+                                   start + budget * 60, budget))
+        else:
+            g.emit(f"R1 plan: nothing to run in Studio (every row carried or manual) -> {total} "
+                   f"CALLs (boot 1-2 only)")
+            _boot_only(g)
+        g.status("verify", "post-play")
+        g.live_verify(expect, cid="calls.verify_post")
+        post = g.checks[-1]
+        ctx["verify_post"] = g.last_verify_text
+        g.emit(f"POST-PLAY VERIFY (GateRunner.verifyLive, identical map to PRE-PLAY): "
+               f"{post['result']}")
+        g.lines.raw(g.last_verify_text)
+        if post["result"] not in ("PASS", "SKIP"):
+            g.emit(f"FAIL: GATE verify POST-PLAY - {one_line(post['detail'], 400)}")
+        if exec_rows:
+            g.status("tally", "")
+            t = g.tally(ctx["sel"], ctx["results"])
+            _record_tally(g, ctx["sel"], t)
+            ctx["tally"] = t.get("raw") or ""
+            g.emit(f"R3 tally: GateRunner.tally(<the {len(exec_rows)} rows run>, "
+                   f"{{[1..{ctx.get('studio_calls')}] = the raw CALL results}}) - scored in "
+                   f"Studio (Edit DM, fresh GateRunner clone); its CALL keys are Studio's plan "
+                   f"numbers for the rows run")
+            if t["verdict"] == "UNKNOWN":
+                g.emit(f"FAIL: GATE tally - no verdict: {one_line(t.get('raw'), 300)}")
+            else:
+                g.lines.line(t.get("raw") or "")
+        for sid, src in carry.items():
+            tag = str(src.get("head") or "")[:12] + (" (baseline)" if src.get("mode") == "baseline"
+                                                     else "")
+            c = next(c for c in src.get("checks") or []
+                     if isinstance(c, dict) and c.get("id") == f"regression.{sid}")
+            for k, n in enumerate(_row_calls(disp, sid), 1):
+                g.emit(f"CALL {n} CARRIED from {tag} PASS ({sid} step {k})")
+            m = _SUITE_RE.search(str(c.get("detail") or ""))
+            e = next(x for x in rows if x["id"] == sid)
+            g.emit(f"SUITE {sid} pass={m.group(1) if m else '?'} fail={m.group(2) if m else '?'} "
+                   f"expect={e.get('expectPass')} designedFails={int(e.get('designedFails') or 0)} "
+                   f"VERDICT PASS - CARRIED from {tag} (no file it covers changed)")
+            g.emit(f"PASS: GATE suite {sid} - CARRIED from {tag}")
+            g.add(dict(c, detail=f"CARRIED from {tag} (no file it covers changed): "
+                                 + str(c.get("detail") or "")))
+        for e in manual:
+            for k, n in enumerate(_row_calls(disp, e["id"]), 1):
+                step = (e.get("steps") or ["?"])[k - 1]
+                g.emit(f"CALL {n} [vm={step_vm(str(step), e)}] MANUAL (players={e.get('players')}) "
+                       f":: {e['id']} - {MANUAL_WHY}")
+            g.emit(f"SKIP: GATE suite {e['id']} - MANUAL: {MANUAL_WHY}")
+            g.add(check(f"regression.{e['id']}", "SKIP", f"MANUAL: {MANUAL_WHY}", required=False))
+        rc2, now = run_cmd(["git", "rev-parse", "HEAD"], g.repo, 30)
+        now = (now or "").strip()
+        if now != head:
+            g.emit(f"FAIL: GATE HEAD moved during the run: {head[:12]} -> {now[:12] or '?'}")
+            raise GateTooling(f"HEAD moved during the run ({head[:12]} -> {now[:12] or '?'}): the "
+                              f"lines describe no single commit")
+        g.add(check("calls.head", "PASS", f"HEAD {head[:12]} unchanged through the run"))
+        covered = {f"regression.{s}" for s in (g.regression or {}).get("suites") or {}} | {
+            "regression.verdict"}
+        bad = [c for c in g.checks if c.get("required") and c.get("result") != "PASS"
+               and c.get("id") not in covered and not str(c.get("id", "")).startswith("calls.verify")]
+        if bad:
+            g.emit("RUNNER CHECKS (required, not PASS):")
+            for c in bad:
+                g.emit(f"FAIL: GATE {c['id']} - {c['result']}: {one_line(c.get('detail'), 300)}")
+    except GateTooling as e:
+        error = f"tooling: {e}"
+    except Exception as e:                                   # noqa: BLE001
+        error = f"{type(e).__name__}: {e}"
+    finally:
+        with contextlib.suppress(Exception):
+            if g._playing:
+                g.stop_playtest()
+        g.close()
+    try:
+        v = finish_calls(g, a, error, tooling, ctx, rows, disp, carry, manual, sel, lines_rel,
+                         time.monotonic() - start)
+    finally:
+        if g.lines is not None:
+            g.lines.close()
+    for ln in v.get("summary") or []:
+        out(ln)
+    if error:
+        out(f"ERROR: {error}")
+    out(f"VERDICT {rel(g.repo, g.verdict_path)}")
+    out(f"CALLS {sprint} {v['result']} (the gate verdict is gate.ps1 -Finish's)")
+    return 2 if v["result"] == "ERROR" else (0 if v["result"] == "PASS" else 1)
+
+
+def finish_calls(g: "Gate", a, error, tooling, ctx, rows, disp, carry, manual, sel, lines_rel,
+                 elapsed) -> dict:
+    """<head12>.calls.json (per-row verdicts + raw results, the carry store),
+    latest/calls.json, calls_summary.txt (failures only), the raw log, status done."""
+    head = g.head or "0" * 40
+    result = "ERROR" if error else overall(g.checks)
+    tally = (g.regression or {}).get("suites") or {}
+    results = ctx.get("results") or {}
+    entry_of = ctx.get("entry_of") or {}
+    unknown_calls = {int(m.group(1)) for c in g.checks if c.get("result") == "UNKNOWN"
+                     for m in [re.fullmatch(r"regression\.call(\d+)", str(c.get("id")))] if m}
+    raw_by_row: dict = collections.defaultdict(list)
+    for n, txt in sorted(results.items()):
+        sid = entry_of.get(n)
+        if sid:
+            raw_by_row[sid].append(str(txt))
+    spans = g.lines.spans if g.lines is not None else {}
+    out_rows, failures = {}, []
+    for e in rows:
+        sid = e["id"]
+        ns = _row_calls(disp, sid)
+        sp = [spans[n] for n in ns if n in spans]
+        span = [min(x[0] for x in sp), max(x[1] for x in sp)] if sp else None
+        chk = next((c for c in reversed(g.checks) if c.get("id") == f"regression.{sid}"), None)
+        if is_manual(e):
+            verdict, fresh = "MANUAL", False
+        elif sid in carry:
+            verdict, fresh = "PASS", False
+        elif sid in tally:
+            verdict, fresh = str(tally[sid]), True
+            if verdict == "FAIL" and unknown_calls & set(ns):
+                verdict = "UNKNOWN"
+        else:
+            verdict, fresh = "UNKNOWN", False
+        fl = [ln.strip() for t in raw_by_row.get(sid, []) for ln in t.splitlines()
+              if ln.strip().startswith("FAIL:")][:5]
+        row = {"verdict": verdict, "fresh": fresh, "calls": ns, "lines": span,
+               "detail": (chk or {}).get("detail") or "", "fail_lines": fl,
+               "players": e.get("players"), "carried_from": str((carry.get(sid) or {}).get("head")
+                                                                or "")[:40] or None}
+        out_rows[sid] = row
+        if verdict in ("FAIL", "UNKNOWN"):
+            failures.append({"row": sid, **row})
+    counts = {"rows": len(rows), "fresh": sum(1 for r in out_rows.values() if r["fresh"]),
+              "carried": len(carry), "passed": sum(1 for r in out_rows.values() if r["verdict"] == "PASS"),
+              "failed": sum(1 for r in out_rows.values() if r["verdict"] == "FAIL"),
+              "unknown": sum(1 for r in out_rows.values() if r["verdict"] == "UNKNOWN"),
+              "manual": len(manual)}
+    lines_path = os.path.join(g.repo, *lines_rel.split("/"))
+    try:
+        g.lines.f.flush()
+        with open(lines_path, "rb") as f:
+            lines_sha = hashlib.sha256(f.read()).hexdigest()
+    except (OSError, AttributeError):
+        lines_sha = ""
+    summary = [f"GATE {g.sprint} scripted Studio half {result} at {head[:12]} (run "
+               f"{g.run_id or '-'}): fresh={counts['fresh']} carried={counts['carried']} "
+               f"failed={counts['failed']} unknown={counts['unknown']} manual={counts['manual']}"]
+    if error:
+        summary.append(f"ERROR {error}")
+    for f_ in failures:
+        where = (f"; {lines_rel} lines {f_['lines'][0]}-{f_['lines'][1]}" if f_["lines"] else "")
+        summary.append(f"{f_['verdict']} {f_['row']} (CALL {_span(f_['calls'])}{where}): "
+                       f"{one_line(f_['detail'], 300)}")
+        for ln in f_["fail_lines"]:
+            summary.append(f"    {one_line(ln, 300)}")
+    row_checks = {f"regression.{e['id']}" for e in rows} | {"regression.verdict"}
+    for c in g.checks:
+        cid = str(c.get("id") or "")
+        if c.get("required") and c.get("result") != "PASS" and cid not in row_checks \
+                and not re.fullmatch(r"regression\.call\d+", cid):
+            summary.append(f"CHECK {cid} {c.get('result')}: {one_line(c.get('detail'), 300)}")
+    for e in manual:
+        summary.append(f"MANUAL {e['id']} (CALL {_span(_row_calls(disp, e['id']))}): {MANUAL_WHY}")
+    v = {"schema": 1, "sprint": g.sprint, "head": head, "mode": "calls", "run_id": g.run_id,
+         "started": g.started, "finished": time.time(), "elapsed_s": round(elapsed, 1),
+         "result": result, "error": error, "tooling": tooling or ("error" if error else ""),
+         "selection": {"suites": sel["suites"], "regression": a.regression, "tier": a.tier,
+                       "rerun": a.rerun, "rows": [e["id"] for e in rows]},
+         "counts": counts, "rows": out_rows, "failures": failures,
+         "manual": [{"row": e["id"], "players": e.get("players"),
+                     "calls": _row_calls(disp, e["id"]), "why": MANUAL_WHY} for e in manual],
+         "checks": g.checks, "regression": g.regression,
+         "lines_file": lines_rel, "lines_sha256": lines_sha,
+         "evidence": {"verify_pre": ctx.get("verify_pre") or "", "boot": g.boot_text or "",
+                      "verify_post": ctx.get("verify_post") or "", "tally": ctx.get("tally") or ""},
+         "raw_results": {str(g._dn(n)): str(t)[:20000] for n, t in sorted(results.items())},
+         "summary": summary, "summary_line": f"CALLS {g.sprint} {result}"}
+    if g.head:
+        with contextlib.suppress(Exception):
+            tree = g._tree(g.head)
+            if tree:
+                v["tree"] = tree
+    path = os.path.join(g.gate_dir, verdict_name(head, "calls"))
+    g.verdict_path = path
+    g.raw_path = os.path.join(g.gate_dir, f"{head[:12]}.calls.raw.log")
+    with open(g.raw_path, "a", encoding="utf-8") as f:
+        f.write("".join(g._raw))
+    write_json(path, v)
+    write_json(os.path.join(g.gate_dir, "latest", "calls.json"), v)
+    with open(os.path.join(g.gate_dir, "calls_summary.txt"), "w", encoding="utf-8",
+              newline="\n") as f:
+        f.write("\n".join(summary) + "\n")
+    g.status("done", "")
+    return v
+
+
+def calls_dry_run(a, out=print, run_cmd=default_run_cmd) -> int:
+    """What a `calls` run would do, without Studio, locks or writes: rows, CALL counts,
+    DYNARG tokens, bridges, manual rows, suite groups and the carry plan."""
+    sprint, repo = a.sprint, a.repo
+    rc, head = run_cmd(["git", "rev-parse", "HEAD"], repo, 30)
+    head = (head or "").strip() if rc == 0 else ""
+    index = load_index(repo, head or "HEAD")
+    entries = index.get("entries") or []
+    sel = select_gate(index, a.regression, a.suites)
+    rows = sel["rows"]
+    disp, total = display_numbers(rows)
+    out(f"DRY-RUN {sprint} head={head[:12] or '?'} regression={a.regression} "
+        f"suites=[{','.join(sel['suites'])}] rerun={a.rerun} tier={a.tier} (no Studio, no locks, "
+        f"nothing written)")
+    for p in sel["problems"]:
+        out(p)
+    out(f"ROWS {len(rows)} (index rows={len(entries)}, pinned={sel['pinned']}); STEP CALLs "
+        f"{total - 2} (+ boot CALL 1-2 = {total} CALL numbers, gate.ps1 NEXT numbering)")
+    manual = [e for e in rows if is_manual(e)]
+    out(f"MANUAL {len(manual)}" + (": " + ", ".join(
+        f"{e['id']} (players={e.get('players')}, CALL {_span(_row_calls(disp, e['id']))})"
+        for e in manual) + f" - {MANUAL_WHY}; never run, never a red gate" if manual else ""))
+    carry: dict = {}
+    if a.rerun != "all" and head:
+        g = Gate(repo, sprint, "calls", run_cmd=run_cmd, create_dir=False)
+        g.head, g.index = head, index
+        cands = [e["id"] for e in rows if e["id"] not in sel["suites"] and not is_manual(e)]
+        if cands:
+            carry = g.carry_plan(",".join(cands), plan_rel(sprint),
+                                 suffixes=Gate.CALLS_STORE_SUFFIXES).get("suite_from") or {}
+    out(f"CARRY {len(carry)} row(s)" + (": " + ", ".join(
+        f"{sid} from {str(v.get('head') or '')[:12]}" for sid, v in sorted(carry.items()))
+        if carry else " (no earlier PASS on HEAD's history that still covers a row)"
+        if a.rerun != "all" else " (--rerun all)"))
+    exec_rows = [e for e in rows if not is_manual(e) and e["id"] not in carry]
+    exec_steps = sum(len(e.get("steps") or []) for e in exec_rows)
+    out(f"RUN {len(exec_rows)} row(s) / {exec_steps} step CALL(s) in Studio (+ boot CALL 1-2 per "
+        f"playtest)")
+    dyn = []
+    for e in rows:
+        for si, step in enumerate(e.get("steps") or [], 1):
+            toks = list(dict.fromkeys(TOKEN_RE.findall(str(step))))
+            if toks:
+                dyn.append((disp[(e["id"], si)], e["id"], si, toks))
+    out(f"DYNARG {len(dyn)} CALL(s)" + (": " + "; ".join(
+        f"CALL {n} {sid} step {si} <{'>, <'.join(t)}>" for n, sid, si, t in dyn) if dyn else ""))
+    lt = sum(1 for e in rows for s in e.get("steps") or [] if "<" in str(s) and s != "main")
+    out(f"  (gate.ps1's NEXT preview marks {lt} step(s) DYNARG: any '<' in a step, comparison "
+        f"operators included; GateRunner marks only <token> placeholders)")
+    bridges = [e for e in rows if e.get("loader") == "bridge" or (e.get("steps") or []) == ["main"]]
+    byvm = collections.Counter(str(e.get("vm")) for e in bridges)
+    client_br = [e["id"] for e in bridges if e.get("vm") == "client"]
+    out(f"BRIDGES {len(bridges)} row(s) (gate.ps1 rule: loader=bridge or steps={{main}}): "
+        + ", ".join(f"{k}={v}" for k, v in sorted(byvm.items()))
+        + (f"; client-VM bridges are not runner-executable (UNKNOWN): {', '.join(client_br)}"
+           if client_br else ""))
+    out("  " + ", ".join(e["id"] for e in bridges))
+    off = [e["id"] for e in rows if e.get("vm") == "offstudio"]
+    out(f"OFFSTUDIO {len(off)} row(s) recorded as SKIP (never PASS)" + (": " + ", ".join(off) if off else ""))
+    # suite groups exactly as the runner would form them (a fresh playtest per group)
+    mapping, calls, n = {}, {}, 2
+    for e in exec_rows:
+        for si, step in enumerate(e.get("steps") or [], 1):
+            n += 1
+            kind, vm = step_kind(str(step), e)
+            mapping[n] = (e, si)
+            calls[n] = {"n": n, "kind": kind, "vm": vm}
+    groups = Gate.suite_groups(None, mapping, calls, exec_rows) if exec_rows else []
+    plays = sum(1 for gr in groups if any(Gate._needs_play(c) for c in gr["calls"]))
+    out(f"GROUPS {len(groups)} suite group(s), {plays} fresh playtest(s) (bridge suites alone; "
+        f"S46 / runLast last; rerunAfter repeats included)")
+    budget = float(a.budget_min or (RUN_BUDGET_FULL_MIN if str(a.regression).strip() == "full"
+                                    else RUN_BUDGET_MIN))
+    out(f"BUDGETS per CALL {float(a.timeout):g} s, per suite group {float(a.group_min):g} min, "
+        f"whole run {budget:g} min")
+    ok = not sel["problems"]
+    out(f"DRY-RUN {sprint} {'OK' if ok else 'PROBLEMS'}")
+    return 0 if ok else 2
+
+
 # ---- background + status ---------------------------------------------------------
 def _pid_alive(pid: int) -> bool:
     if not pid:
@@ -2742,6 +3636,25 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--selection", required=True)
     s.add_argument("--sprint", default=None)
     s.add_argument("--background", action="store_true")
+    s = sub.add_parser("calls", help="the session gate's Studio half (gate.ps1 NEXT CALLs) as a "
+                                     "script: lines file, -Finish-ready")
+    s.add_argument("--sprint", required=True)
+    s.add_argument("--suites", default="", help="the sprint's own suites (never carried)")
+    s.add_argument("--regression", default="none",
+                   help="none | full (pinned rows, D3) | subset:<name> | S45,S46")
+    s.add_argument("--tier", choices=["A", "B", "C"], default="A")
+    s.add_argument("--rerun", choices=["failed", "affected", "all"], default="failed",
+                   help="failed/affected: a regression row passed earlier and untouched since "
+                        "carries; all: nothing carries")
+    s.add_argument("--budget-min", dest="budget_min", type=float, default=0.0,
+                   help=f"whole-run budget (default {RUN_BUDGET_FULL_MIN:g} for full, "
+                        f"{RUN_BUDGET_MIN:g} otherwise)")
+    s.add_argument("--group-min", dest="group_min", type=float, default=GROUP_BUDGET_MIN,
+                   help="per suite group budget (a hung group becomes UNKNOWN)")
+    s.add_argument("--background", action="store_true")
+    s.add_argument("--dry-run", dest="dry_run", action="store_true",
+                   help="list rows, CALLs, DYNARG, bridges, manual rows and the carry plan; "
+                        "no Studio, no locks, nothing written")
     s = sub.add_parser("status")
     s.add_argument("--sprint", required=True)
     s.add_argument("--wait", type=float, nargs="?", const=WAIT_DEFAULT_MINUTES, default=None,
@@ -2782,6 +3695,12 @@ def main(argv=None, out=print, **inject) -> int:
         return run_status(a.repo, a.sprint, a.wait, out=out, poll=inject.get("poll"))
     if a.cmd == "stop-playtest":
         return stop_playtest_cmd(a.repo, a.place, out=out, community=inject.get("community"))
+    if a.cmd == "calls":
+        if a.dry_run:
+            return calls_dry_run(a, out=out, run_cmd=inject.get("run_cmd") or default_run_cmd)
+        if a.background:
+            return start_background(argv, a.repo, a.sprint, out=out)
+        return run_calls(a, out=out, **inject)
     if getattr(a, "background", False):
         sprint = a.sprint or f"regression-{re.sub(r'[^A-Za-z0-9]+', '_', a.selection or 'x')}"[:64]
         if not a.sprint:

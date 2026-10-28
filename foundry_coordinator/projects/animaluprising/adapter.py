@@ -377,6 +377,33 @@ class AnimalUprisingAdapter(GenericAdapter):
         fn = getattr(self.p, "fast_lane_task", None)
         return bool(fn(task_id)) if callable(fn) else False
 
+    # -- scripted Studio gate ([studio_calls], 2026-10-27) --------------------------------
+
+    def _studio_calls(self, spec: TaskSpec) -> bool:
+        fn = getattr(self.p, "studio_calls_task", None)
+        try:
+            return bool(fn(spec.task_id, spec.data.get("tier", "A"))) if callable(fn) else False
+        except Exception:                                         # noqa: BLE001
+            return False
+
+    def scripted_gate_text(self, spec: TaskSpec) -> str:
+        """The prompt paragraph of a sprint whose gate's Studio half the coordinator runs
+        (SESSION_CORE §5): the session ends its turn with a STUDIO_GATE block instead of
+        running gate.ps1, the CALLs or -Finish itself."""
+        t, tier = spec.task_id, spec.data.get("tier", "A")
+        return (f"SCRIPTED STUDIO GATE (on for this sprint, SESSION_CORE §5): the coordinator runs "
+                f"the gate. Never run tools/gate.ps1, a gate CALL, a gate playtest or -Finish "
+                f"yourself, and never take studio.lock for it. When the BUILD work is committed, "
+                f"end your turn with exactly one block (your coordinator-report block follows it):\n"
+                f"```STUDIO_GATE\n{{\"suites\": \"<this sprint's own suite ids>\", "
+                f"\"regression\": \"<none | full | subset:<name> | ids>\", \"tier\": \"{tier}\", "
+                f"\"rerun\": \"failed\"}}\n```\n"
+                f"The coordinator runs the host half, every CALL and -Finish at your HEAD, commits "
+                f"docs/progress/{t}_studio_lines.txt and the evidence log, and sends you only the "
+                f"failing rows (passed rows are carried). Rows that need two players (players > 1, "
+                f"e.g. S17) are MANUAL: never run by the script, never a red gate; run just those "
+                f"with multiplayer_playtest when the coordinator asks.")
+
     def fast_lane_prompt(self, spec: TaskSpec, ctx: dict) -> str:
         """The BUILD prompt of a fast-lane sprint: the rules card and the
         au-fast-lane skill instead of the AGENT_RULES ceremony, the one-page plan,
@@ -483,12 +510,24 @@ The approved plan and its checklist are this attempt's plan: do not spawn planne
                    f"explicit path, message starting \"{t}: \"), then rerun only the Studio-free "
                    f"checks they affect ({rerun_txt}) and {studio_free}. Checks that already "
                    f"passed are carried: never rerun passed work.")
+        elif not repair and self._studio_calls(spec):
+            job = (f"This session's job: the plan's remaining BUILD steps, each committed by "
+                   f"explicit path with a message starting \"{t}: \", then ask for the gate on "
+                   f"the committed code with the STUDIO_GATE block below.\n"
+                   + self.scripted_gate_text(spec))
         elif not repair:
             job = (f"This session's job: the plan's remaining BUILD steps, each committed by "
                    f"explicit path with a message starting \"{t}: \", then the gate on committed "
                    f"code:\n  pwsh -NoProfile -File tools/gate.ps1 -Sprint {t} -Files <files "
                    f"under test> -Tier {tier} ...\nincluding its Studio steps and -Finish, so the "
                    f"evidence log ends with \"GATE {t} PASS|FAIL\" (boot lines first).")
+        elif self._studio_calls(spec):
+            job = (f"This repair session's job: fix the findings below, each fix committed by "
+                   f"explicit path with a message starting \"{t}: \". Then rerun ONLY the "
+                   f"headless checks the fix affects ({rerun_txt}) and ask for the gate again "
+                   f"with the STUDIO_GATE block: only failed and affected rows rerun (passed rows "
+                   f"are carried by content hash; never rerun passed work).\n"
+                   + self.scripted_gate_text(spec))
         else:
             job = (f"This repair session's job: fix the findings below, each fix committed by "
                    f"explicit path with a message starting \"{t}: \". Then rerun ONLY the checks "
@@ -1234,6 +1273,14 @@ Change no code or test file in this session; if one needs changing, stop and rep
                     status = "unverified"
             if cut:
                 notes.append(f"{omitted} lines of the block cut")
+            scripted = next((m for m in (_SCRIPTED_RUN.match(x) for x in lines[start:end + 1])
+                             if m and m.group(1) == t), None)
+            if scripted:
+                # [studio_calls]: the review sees who ran the Studio half
+                notes.append(f"scripted Studio half: executor studio_gate, run {scripted.group(3)} "
+                             f"at {scripted.group(2)[:12]}; the coordinator ran every CALL and "
+                             f"-Finish with no session watching and recorded verified ledger "
+                             f"records carrying the lines file's sha256 (provenance)")
             out.append(evidence_item(f"{t} last gate block", path=rel, revision=revision, blob=blob,
                                      lines=f"{start + 1}-{end + 1}", text=head + "\n" + body,
                                      status=status, truncated=cut, priority=0,
@@ -2574,6 +2621,9 @@ _SHORT_TALLY = re.compile(r"^(S\d{1,3}[a-z]?|[A-Z]{1,5}_[A-Za-z0-9]+)\s+(PASS|FA
                           r"\s*$")
 _LUNE = re.compile(r"^LUNE\s+(\d+)/(\d+)\s+(PASS|FAIL)\b")
 _GATE_VERDICT = re.compile(r"^GATE\s+(\S+)\s+(PASS|FAIL)\b")
+# the header line studio_gate's `calls` mode writes first in the lines file ([studio_calls])
+_SCRIPTED_RUN = re.compile(r"^(\S+) scripted Studio run at HEAD ([0-9a-f]{40}) \(studio_gate "
+                           r"calls, run_id (\S+?);")
 _GATE_WORDS = {"regression", "suite", "HEAD", "RUN", "FINISH", "START"}
 _GATE_HEAD = re.compile(r"^PASS: GATE HEAD ([0-9a-f]{7,40})")
 _BOOT = re.compile(r"^BOOT\((server|client)\)\s+loaded=(\d+)\s+errors=(\d+)")

@@ -372,6 +372,22 @@ cooldown_minutes = 60
 #                                         # one round; the doctor flags anything else)
 # lanes = []                              # revamp B5: no proactive lane by default
 
+# OPTIONAL (2026-10-27, reports/STUDIO_GATE_SCRIPTED_PLAN.md): the scripted Studio half
+# of the session gate. A covered sprint's session ends its turn with a STUDIO_GATE block;
+# the coordinator runs gate.ps1's host half -> every CALL (studio_gate `calls`, which
+# takes studio.lock and writes docs/progress/<ID>_studio_lines.txt live) -> -Finish,
+# records verified evidence, commits the outputs and sends back only the failing rows.
+# Rows with players > 1 (S17) are MANUAL. Off by default (= today's flow). Pilot first:
+# tasks = ["GF-GATE1"] (or `foundry studio-calls run animaluprising GF-GATE1`).
+# [studio_calls]
+# enabled = true
+# tasks = ["GF-GATE1"]                    # empty = every task of `tiers`
+# tiers = ["A", "B"]
+# auto_verify = false                     # VERIFYING runs it when the gate is missing/stale
+# group_budget_minutes = 10               # a hung suite group -> UNKNOWN, the run moves on
+# run_budget_minutes = 30                 # whole run (150 for regression = full)
+# full_run_budget_minutes = 150
+
 # OPTIONAL (v0.123): the lead sprint manager, the last automated recovery tier
 # before a blocker reaches the operator (docs/LEAD_SPRINT_MANAGER.md). OFF by
 # default: disabled, the coordinator behaves exactly as without it. When on, a
