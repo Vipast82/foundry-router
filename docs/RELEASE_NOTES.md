@@ -2,6 +2,17 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.156.3 — an operator fresh budget also refills the Lead's call cap
+
+GF-GATE1, 2026-10-28 12:57: the Lead's hard cap (`lead_hard_max_calls` = 12) counted every
+Lead call of the task's whole life. Once GF-GATE1 had used 12, every later escalation went
+straight to Victor ("raise lead_hard_max_calls or decide the sprint"), even after his
+fresh-budget unblocks.
+
+- **The cap counts from the last fresh budget.** It now counts Lead calls since the last
+  `unblock --reset-attempts`, the operator's fresh budget, like attempts, sessions and reviews
+  (v0.156.0). A delegated round still never refills it.
+
 ## v0.156.2 — a free continuation is not a repeat
 
 GF-GATE1, 2026-10-28:

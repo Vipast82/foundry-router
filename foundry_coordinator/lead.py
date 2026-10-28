@@ -2714,13 +2714,31 @@ class LeadManager:
             per_task = 0
         return max(hard, per_task)
 
+    def last_operator_reset_ts(self, project_id: str, task_id: str) -> float:
+        """When an operator last unblocked this task with a fresh budget
+        (`unblock --reset-attempts`), or 0."""
+        for r in self.store.q("SELECT ts, evidence, actor FROM transitions WHERE project_id=? "
+                              "AND task_id=? AND to_state='READY' ORDER BY id DESC LIMIT 200",
+                              (project_id, task_id)):
+            ev = _uj(r.get("evidence"), {}) or {}
+            if isinstance(ev, dict) and ev.get("reset_attempts"):
+                return float(r.get("ts") or 0)
+        return 0.0
+
     def lifetime_calls(self, project_id: str, task_id: str) -> int:
-        """Lead calls ever charged on a task, across every case and budget round
-        (a budget reset or a delegated round never refills this)."""
+        """Lead calls charged on a task since the operator last granted a fresh budget
+        (`unblock --reset-attempts`), across every case and budget round; a delegated
+        round never refills this. 2026-10-28: the cap counted the whole task's life, so
+        once GF-GATE1 had used 12 calls every later escalation went straight to Victor
+        ("raise lead_hard_max_calls or decide the sprint"), even after his fresh-budget
+        unblocks."""
+        since = self.last_operator_reset_ts(project_id, task_id)
         n = 0
-        for a in self.store.q("SELECT a.detail, a.status FROM recovery_actions a JOIN "
-                              "recovery_cases c ON a.case_id=c.case_id WHERE c.project_id=? AND "
-                              "c.task_id=? AND a.kind='lead_call'", (project_id, task_id)):
+        for a in self.store.q("SELECT a.detail, a.status, a.ts FROM recovery_actions a "
+                              "JOIN recovery_cases c ON a.case_id=c.case_id WHERE c.project_id=? "
+                              "AND c.task_id=? AND a.kind='lead_call'", (project_id, task_id)):
+            if since and float(a.get("ts") or 0) < since:
+                continue
             d = _uj(a.get("detail"), {}) or {}
             if (d.get("phase") not in (None, "creating", "created", "bound") or
                     a["status"] in ("done", "uncertain")) and not d.get("infra"):
