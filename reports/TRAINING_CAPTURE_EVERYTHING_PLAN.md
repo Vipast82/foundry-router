@@ -1,7 +1,6 @@
 # Plan: capture every model call for fine-tuning the local model
 
 Status: **approved 2026-10-27 with the recommended defaults (D1-D4) and built in v0.153.0** (not tagged or pushed).
-(the number is settled with the session that releases from `_base` when this lands).
 
 Victor, 2026-10-27: "track EVERYTHING so I can use for finetuning the local model".
 
