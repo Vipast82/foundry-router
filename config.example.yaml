@@ -474,6 +474,14 @@ training_capture:
   exclude_backends: []
   personas: []
   exclude_personas: []
+  # What each call is for: agent_turn, brain_route, frontier_assist, research,
+  # agent_external (Hermes tasks), media (job metadata + artifact hashes, no bytes).
+  # Globs; empty include = every purpose.
+  purposes: []
+  exclude_purposes: []
+  operator_chat: false             # also capture the Automation chat (its own switch)
+  max_body_bytes: 4000000          # a record bigger than this keeps only its head;
+                                   # inline images never count (stored as references)
 
 # Performance history. perf_samples and the engine-metrics history (server_samples,
 # Performance tab -> Inference servers) are kept this long. subscription_rates

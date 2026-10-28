@@ -31,6 +31,10 @@ Exclusion reasons (each a requirement that wasn't met):
   loop              the same tool call repeated (blind retries)
   missing_artifact  a referenced image's bytes aren't available
   no_feedback       (correction) the repair prompt carried no feedback
+  attempt_blocked / attempt_failed / attempt_abandoned
+                    the attempt ended BLOCKED / FAILED / CANCELLED (outcome.attempt_end,
+                    from the coordinator's transitions): a labelled negative, kept for
+                    evaluation sets and as the rejected side of preference pairs
 Failed episodes are kept (status excluded, outcome FAIL) and remain
 available to evaluation datasets; they are never positive training data.
 """
@@ -48,6 +52,8 @@ from .redact import scan
 from .schema import content_hash
 
 NEAR_DUP = 0.9
+ATTEMPT_NEGATIVE = {"BLOCKED": "attempt_blocked", "FAILED": "attempt_failed",
+                    "CANCELLED": "attempt_abandoned"}
 
 
 def _shingles(text: str, k: int = 5) -> set:
@@ -156,6 +162,9 @@ def requirements(ep: dict, cfg, known_secrets=()) -> list[str]:
     if "artifacts_present" in need and any(a.get("status") != "present"
                                            for a in f.get("artifacts") or []):
         reasons.append("missing_artifact")
+    end = (oc.get("attempt_end") or {}).get("state")
+    if end in ATTEMPT_NEGATIVE:
+        reasons.append(ATTEMPT_NEGATIVE[end])
     if scan({"m": ep.get("messages"), "d": (ep.get("diff") or {}).get("patch")},
             known_secrets).count:
         reasons.append("secret_exposure")
@@ -268,44 +277,152 @@ def run(store, project_id: str, episodes: list[dict], cfg, known_secrets=()) -> 
              json.dumps(ep["outcome"]), json.dumps(ep["sources"]), json.dumps(ep["event_ids"]),
              ep["content_hash"], json.dumps([sig[0][:4], sig[1][:4]]), json.dumps(reasons),
              json.dumps(data, default=str), ph, dup_of))
-    pairs = preferences(store, project_id, episodes)
+    pairs = preferences(store, project_id, episodes, cfg)
     counts["preference_pairs"] = len(pairs)
     return dict(counts)
 
 
-def preferences(store, project_id: str, episodes: list[dict]) -> list[dict]:
-    """Chosen/rejected only for the SAME decision: two model calls with an
-    identical request context (messages + tools), different responses, and a
-    justified preference: opposite verified outcomes of their sessions, or a
-    recorded human judgment. A later response with more information is never
-    paired with an earlier one."""
+def prompt_prefix(messages: list[dict]) -> list[dict]:
+    """The task prompt of a trajectory: leading system turns + the first user turn."""
+    out = []
+    for m in messages:
+        out.append(m)
+        if m["role"] == "user":
+            return out
+        if m["role"] != "system":
+            return []
+    return []
+
+
+def _local_only(authors, allow_frontier: bool) -> bool:
+    kinds = {a[0] for a in authors or []}
+    return allow_frontier or ("local" in kinds and not kinds - {"local", "helper"})
+
+
+def _attempt_good(ep: dict) -> bool:
+    oc = ep["outcome"]
+    rv = (oc.get("review") or {}).get("verdict")
+    gates = [g.get("result") for g in (ep.get("labels") or {}).get("gate") or []]
+    end = (oc.get("attempt_end") or {}).get("state")
+    return end not in ATTEMPT_NEGATIVE and oc["verification"]["status"] != "FAIL" and (
+        rv == "APPROVED" or (gates and gates[-1] == "PASS")
+        or (rv is None and oc["verification"]["status"] == "PASS"))
+
+
+def _attempt_bad(ep: dict) -> bool:
+    oc = ep["outcome"]
+    rv = (oc.get("review") or {}).get("verdict")
+    gates = [g.get("result") for g in (ep.get("labels") or {}).get("gate") or []]
+    end = (oc.get("attempt_end") or {}).get("state")
+    return end in ATTEMPT_NEGATIVE or oc["verification"]["status"] == "FAIL" or \
+        rv in ("CHANGES_REQUIRED", "BLOCKED") or bool(gates and gates[-1] == "FAIL")
+
+
+def preferences(store, project_id: str, episodes: list[dict], cfg=None) -> list[dict]:
+    """Chosen/rejected only for a justified preference:
+
+      same context   two model calls with an identical request context
+                     (messages + tools) and different responses, preferred by
+                     opposite verified outcomes of their sessions, by the
+                     router's labels on the calls themselves (review APPROVED /
+                     gate PASS / vision approved vs review CHANGES / gate FAIL /
+                     vision CHANGES, posted by the coordinator after a frontier
+                     review or the gate), or a recorded human judgment
+      same task      (stored as "ep:<episode id>") two attempts at one task with
+                     the identical task prompt (system + first user turn): the
+                     attempt the reviewer approved or the gate passed vs one
+                     with review CHANGES, gate FAIL, failed verification or an
+                     attempt that ended BLOCKED / FAILED / CANCELLED
+
+    Both sides must be the local model's own work unless the project allows
+    frontier targets. A later response with more information is never paired
+    with an earlier one."""
+    from .labels import quality_state
+    allow = bool(cfg is not None and cfg.export.get("allow_frontier_targets", False))
     ev = store.events(project_id, "event_type='model_call'")
     outcome_by_session = {e["session_id"]: e["outcome"]["verification"]["status"]
                           for e in episodes if e["kind"] == "trajectory"}
+    local = (lambda e: True) if (allow or cfg is None) else (
+        lambda e: (e["actual_model"] in cfg.local_models)
+        or (e["requested_persona"] in cfg.local_personas))
+    labels = defaultdict(list)
+    for o in store.events(project_id, "event_type='router_outcome'"):
+        if o.get("request_id"):
+            labels[o["request_id"]].append({"label": o["facts"].get("label")})
+
+    def router(e):
+        q = e["facts"].get("quality") or {}
+        return quality_state(q, (q.get("labels") or []) + labels.get(e.get("request_id"), []))
     by_ctx = defaultdict(list)
     for e in ev:
         if e["facts"].get("status") != "ok":
             continue
+        if (e["facts"].get("purpose") or "agent_turn") != "agent_turn":
+            continue
         ctx = content_hash([e["facts"].get("messages"), e["facts"].get("tools")])
         by_ctx[ctx].append(e)
     out = []
+    # derived pairs are rebuilt from the evidence on every pass (a rule change or
+    # a corrected label never leaves a stale pair); human judgments are kept
+    store.cur.x("DELETE FROM preferences WHERE project_id=? AND judge != 'human'", (project_id,))
+
+    def add(ctx, chosen, rejected, basis, judge):
+        store.cur.x("INSERT OR IGNORE INTO preferences (project_id, context_hash, "
+                    "chosen_event, rejected_event, basis, judge, ts) VALUES "
+                    "(?,?,?,?,?,?,strftime('%s','now'))",
+                    (project_id, ctx, chosen, rejected, basis, judge))
+        out.append({"context": ctx, "chosen": chosen, "rejected": rejected, "judge": judge})
     for ctx, calls in by_ctx.items():
         if len(calls) < 2:
             continue
+        calls = [c for c in calls if local(c)]
         good = [c for c in calls if outcome_by_session.get(c["session_id"]) == "PASS"]
         bad = [c for c in calls if outcome_by_session.get(c["session_id"]) == "FAIL"]
+        pairs = [(g, b, "verified outcome (PASS vs FAIL) from the same request context",
+                  "verification") for g in good for b in bad]
+        rs = {c["event_id"]: router(c) for c in calls}
+        rgood = [c for c in calls if rs[c["event_id"]]["positive"] and rs[c["event_id"]]["ok"]]
+        rbad = [c for c in calls if rs[c["event_id"]]["negative"]]
+        done = {(g["event_id"], b["event_id"]) for g, b, _, _ in pairs}
+        pairs += [(g, b, "router labels on the same request context: "
+                   + ",".join(rs[g["event_id"]]["positive"]) + " vs "
+                   + ",".join(rs[b["event_id"]]["negative"]), "router_label")
+                  for g in rgood for b in rbad if (g["event_id"], b["event_id"]) not in done]
+        for g, b, basis, judge in pairs:
+            if (g["facts"].get("content"), g["facts"].get("tool_calls")) == \
+                    (b["facts"].get("content"), b["facts"].get("tool_calls")):
+                continue
+            add(ctx, g["event_id"], b["event_id"], basis, judge)
+    # same task, same task prompt: an approved attempt vs a rejected one
+    by_prompt = defaultdict(list)
+    for e in episodes:
+        if e["kind"] != "trajectory" or not e["task_id"] or e.get("role") == "helper":
+            continue
+        pre = prompt_prefix(e.get("messages") or [])
+        if not pre or len(pre) >= len(e["messages"]):
+            continue
+        if not _local_only((e.get("flags") or {}).get("authors"), allow):
+            continue
+        by_prompt[(e["task_id"], content_hash(canonical_text(pre)))].append(e)
+    for (task, ph), eps in by_prompt.items():
+        good = [e for e in eps if _attempt_good(e)]
+        bad = [e for e in eps if _attempt_bad(e) and not _attempt_good(e)]
         for g in good:
             for b in bad:
-                if (g["facts"].get("content"), g["facts"].get("tool_calls")) == \
-                        (b["facts"].get("content"), b["facts"].get("tool_calls")):
+                if g["content_hash"] == b["content_hash"]:
                     continue
-                store.cur.x("INSERT OR IGNORE INTO preferences (project_id, context_hash, "
-                            "chosen_event, rejected_event, basis, judge, ts) VALUES "
-                            "(?,?,?,?,?,?,strftime('%s','now'))",
-                            (project_id, ctx, g["event_id"], b["event_id"],
-                             "verified outcome (PASS vs FAIL) from the same request context",
-                             "verification"))
-                out.append({"context": ctx, "chosen": g["event_id"], "rejected": b["event_id"]})
+                why = []
+                rv = (b["outcome"].get("review") or {}).get("verdict")
+                if rv:
+                    why.append(f"review {rv}")
+                end = (b["outcome"].get("attempt_end") or {}).get("state")
+                if end in ATTEMPT_NEGATIVE:
+                    why.append(f"attempt ended {end}")
+                if b["outcome"]["verification"]["status"] == "FAIL":
+                    why.append("verification FAIL")
+                add(ph, "ep:" + g["episode_id"], "ep:" + b["episode_id"],
+                    f"same task prompt ({task}): approved attempt vs "
+                    + (", ".join(why) or "gate FAIL"), "review")
     for r in store.cur.q("SELECT * FROM preferences WHERE project_id=? AND judge='human'",
                          (project_id,)):
         out.append({"context": r["context_hash"], "chosen": r["chosen_event"],

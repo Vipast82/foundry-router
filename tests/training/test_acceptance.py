@@ -228,7 +228,11 @@ def test_kilo_only_episode_is_kept_but_excluded_for_missing_context(world, tmp_p
 
 # 5 ------------------------------------------------------------------------------------
 
-def test_truncated_tool_output_is_rejected(world, tmp_path):
+def test_kilo_tool_paging_is_not_a_truncated_tool_output(world, tmp_path):
+    """v0.153.0: Kilo's metadata.truncated is the tool paging its output
+    ("Showing lines 1-120 of 304. Use offset=121 to continue."); the stored
+    output is exactly what the model saw. The live store had 152 episodes
+    excluded for it, none of them a capture cut."""
     tmp, ws, base, head, prof = world
     exp = kilo_export()
     for m in exp["messages"]:
@@ -242,8 +246,13 @@ def test_truncated_tool_output_is_rejected(world, tmp_path):
     p.ingest_coordinator(st.path)
     p.curate(PID)
     ep, = _episodes(p, kind="trajectory")
-    assert ep["status"] == "excluded" and "truncated_tool_output" in ep["reasons"]
-    assert export(p.store, [PID], "sft", "chatml-tools", {PID: p._cfg(PID)})["examples"] == 0
+    assert ep["status"] == "selected", ep["reasons"]
+    assert ep["data"]["flags"]["truncated_results"] == []
+    res = [e for e in p.store.events(PID, "event_type='tool_result'")
+           if e["source_adapter"] == "kilo" and e["facts"].get("name") == "bash"]
+    assert res and all(e["capture_status"] == "complete" and e["facts"]["tool_paged"]
+                       for e in res)
+    assert export(p.store, [PID], "sft", "chatml-tools", {PID: p._cfg(PID)})["examples"] == 1
 
 
 def test_cut_off_stream_and_unfinished_tool_are_rejected(world, tmp_path):

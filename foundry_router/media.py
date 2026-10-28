@@ -621,9 +621,43 @@ class MediaService:
         finally:
             self._inputs.pop(job_id, None)
             self._tasks.pop(job_id, None)
+            self.capture_job(job_id)
             ev = self._events.pop(job_id, None)
             if ev is not None:
                 ev.set()
+
+    def capture_job(self, job_id: str) -> None:
+        """One `media_job` training-capture record when a job ends (purpose
+        media): the prompt and settings, input image hashes and the artifacts'
+        ids / sha256 / size. Image bytes are never copied; they stay in the
+        media store with its own retention."""
+        cap = getattr(self.svc, "capture", None)
+        if cap is None:
+            return
+        try:
+            row = self.get(job_id) or {}
+            if row.get("status") not in TERMINAL:
+                return
+            params = _jl(row.get("params"), {})
+            arts = [{k: a.get(k) for k in ("id", "mime", "bytes", "width", "height", "sha256",
+                                            "revised_prompt") if a.get(k) is not None}
+                    for a in _jl(row.get("artifacts"), []) if isinstance(a, dict)]
+            cap.record_event(
+                "media_job", {
+                    "request": {"op": row.get("op"), "model": row.get("model"),
+                                "prompt": params.get("prompt") or "",
+                                "settings": {k: v for k, v in params.items()
+                                             if k not in ("prompt",)}},
+                    "response": {"artifacts": arts, "result_text": row.get("result_text") or "",
+                                 "usage": _jl(row.get("usage"), {})},
+                    "job_id": job_id, "error": row.get("error") or "",
+                    "error_code": row.get("error_code") or "",
+                    "duration_ms": row.get("duration_ms")},
+                purpose="media", backend=row.get("backend") or "", model=row.get("model") or "",
+                status="ok" if row.get("status") == "succeeded" else str(row.get("status")),
+                persona=row.get("persona") or "")
+        except Exception:                            # noqa: BLE001
+            log.debug("media job capture failed", exc_info=True)
 
     def _request_body(self, row: dict) -> tuple[str, dict]:
         params = _jl(row["params"], {})
@@ -889,6 +923,7 @@ class MediaService:
                      duration_ms=round((time.time() - started) * 1000, 1),
                      artifacts=json.dumps(artifacts or []),
                      result_text=result_text, error=error, error_code=error_code)
+        self.capture_job(job_id)
 
     def artifact_path(self, job_id: str, index: int) -> Optional[tuple[Path, dict]]:
         row = self.get(job_id)

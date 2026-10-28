@@ -15,11 +15,25 @@
                 prefix fits, the example is left out.
   dpo           {"prompt", "chosen", "rejected", "basis"} for preference pairs.
 
+Kinds: sft / correction / multimodal (curated episodes), preference (pairs),
+and calls: one example per captured model call (the effective prompt, the reply
+as the only target turn, earlier turns weight 0), selected by the router's own
+signal on that call (`[training.export] calls_quality` = "verified" (default:
+succeeded, not rated down, no negative label, plus a positive coordinator label)
+or "ok" (the weaker router_ok)) and purpose (`calls_purposes`, default
+["agent_turn"]). Its final turn may be a tool call: the target is the action.
+Every line and the manifest say which label strength they carry.
+
 Training datasets go to <root>/datasets/<id>/, evaluation sets to
 <root>/eval/<id>/; an episode in an evaluation set can never be exported for
 training (and vice versa), checked by group and by content hash.
-Reasoning channels are never exported (include_reasoning has no effect
-until a target that supports them is added).
+Reasoning: with `[training.export] include_reasoning = true` the target
+assistant turns of chatml-tools lines carry `reasoning_content` (the field the
+Qwen3 chat template renders as <think>...</think>; it drops <think> from turns
+before the last user message, so the calls kind is the cleanest reasoning set)
+and canonical records keep each turn's `reasoning`. Off (the default), no
+reasoning field is written anywhere; validation checks this against the
+manifest's `reasoning_included`.
 
 Targets per turn: with allow_frontier_targets = false only the local model's
 own assistant turns are targets. A helper step (a local turn that carried out
@@ -117,7 +131,22 @@ def weights(ep: dict, msgs: list[dict], allow_frontier: bool) -> Optional[list]:
     return w if any(x == 0 for x in w) else None
 
 
-def to_chatml(messages: list[dict], tools: list[dict], weight: Optional[list] = None) -> dict:
+def strip_reasoning(obj):
+    """A copy without any message `reasoning` field (include_reasoning off)."""
+    if isinstance(obj, dict):
+        return {k: strip_reasoning(v) for k, v in obj.items() if k != "reasoning"}
+    if isinstance(obj, list):
+        return [strip_reasoning(v) for v in obj]
+    return obj
+
+
+def closed_end(messages: list[dict]) -> bool:
+    return bool(messages) and messages[-1]["role"] == "assistant" and \
+        not messages[-1].get("tool_calls")
+
+
+def to_chatml(messages: list[dict], tools: list[dict], weight: Optional[list] = None,
+              reasoning: bool = False) -> dict:
     out = []
     for i, m in enumerate(messages):
         if m["role"] == "tool":
@@ -133,6 +162,9 @@ def to_chatml(messages: list[dict], tools: list[dict], weight: Optional[list] = 
                                for tc in m["tool_calls"]]
         if weight is not None and m["role"] == "assistant":
             o["weight"] = weight[i]
+        if reasoning and m["role"] == "assistant" and m.get("reasoning") and (
+                weight is None or weight[i] == 1):
+            o["reasoning_content"] = m["reasoning"]
         out.append(o)
     ex = {"messages": out}
     if tools:
@@ -140,7 +172,9 @@ def to_chatml(messages: list[dict], tools: list[dict], weight: Optional[list] = 
     return ex
 
 
-def check_chatml(ex: dict) -> list[str]:
+def check_chatml(ex: dict, allow_open_final: bool = False) -> list[str]:
+    """`allow_open_final`: a call-level example may end on an assistant turn
+    with tool calls (the call itself is the target)."""
     msgs = ex["messages"]
     p = []
     if not msgs:
@@ -172,7 +206,9 @@ def check_chatml(ex: dict) -> list[str]:
                     p.append(f"message {k}: tool call arguments aren't JSON")
                 open_calls.add(tc.get("id"))
         prev = r
-    if prev != "assistant" or open_calls:
+    last_open = {tc.get("id") for tc in (msgs[-1].get("tool_calls") or [])} \
+        if msgs and msgs[-1].get("role") == "assistant" else set()
+    if prev != "assistant" or (open_calls and not (allow_open_final and open_calls <= last_open)):
         p.append("must end on an assistant turn with no open tool calls")
     if "tools" in ex:
         for t in ex["tools"]:
@@ -183,7 +219,8 @@ def check_chatml(ex: dict) -> list[str]:
 
 
 def segment(messages: list[dict], tools: list[dict], limit: int, tokenizer=None):
-    """Longest prefix ending at a complete assistant turn that fits."""
+    """Longest prefix ending at a complete assistant turn that fits (also how
+    an episode that ends on tool results is cut to a valid end)."""
     for end in range(len(messages), 0, -1):
         m = messages[end - 1]
         if m["role"] != "assistant" or m.get("tool_calls"):
@@ -229,10 +266,23 @@ def export(store, projects: list, kind: str, target: str, cfgs: dict, purpose: s
     eval_guard = _eval_groups(store) if purpose == "train" else set()
     train_guard = _training_groups(store) if purpose == "eval" else set()
     token_method = None
+    reasoning_on = target != "dpo" and any(
+        bool(cfgs[p].export.get("include_reasoning", False)) for p in projects)
+    label_strengths: set = set()
     if kind == "preference":
         lines = _preference_lines(store, projects, target)
         for ln in lines:
             members[ln["_episode"]] += 1
+    elif kind == "calls":
+        if target == "dpo":
+            raise ExportError("the calls kind exports chatml-tools or canonical")
+        for pid in projects:
+            for ln in call_lines(store, pid, cfgs[pid], target, purpose, tok,
+                                 eval_guard if purpose == "train" else train_guard, skipped):
+                label_strengths.add(ln["meta"]["label_strength"])
+                token_method = ln["meta"].get("token_count") or token_method
+                lines.append(ln)
+                members[ln["_episode"]] += 1
     else:
         want_kind = "correction" if kind == "correction" else "trajectory"
         status = "eval" if purpose == "eval" else "selected"
@@ -263,8 +313,11 @@ def export(store, projects: list, kind: str, target: str, cfgs: dict, purpose: s
                         skipped["missing_artifact"] += 1
                         continue
                 allow = bool(cfg.export.get("allow_frontier_targets", False))
+                rsn = bool(cfg.export.get("include_reasoning", False))
                 if target == "canonical":
-                    lines.append({"_episode": r["episode_id"], **canonical(ep, r, allow)})
+                    c = canonical(ep, r, allow)
+                    lines.append({"_episode": r["episode_id"],
+                                  **(c if rsn else strip_reasoning(c))})
                     members[r["episode_id"]] += 1
                     continue
                 msgs, tools = ep["messages"], ep.get("tools") or []
@@ -272,18 +325,21 @@ def export(store, projects: list, kind: str, target: str, cfgs: dict, purpose: s
                 if w is not None and not any(x == 1 for x in w):
                     skipped["no_target_turn"] += 1
                     continue
-                ex = to_chatml(msgs, tools, w)
+                ex = to_chatml(msgs, tools, w, reasoning=rsn)
                 n, token_method = _tokens(_render_chatml(ex["messages"], tools), tok)
                 seg = False
-                if n > limit:
+                if n > limit or not closed_end(msgs):
+                    # too long, or the session stopped on tool results (an unanswered
+                    # final call was trimmed): the longest valid prefix that fits
                     cut, n, token_method = segment(msgs, tools, limit, tok)
                     if cut is None:
-                        skipped["too_long"] += 1
+                        skipped["too_long" if closed_end(msgs) else "no_complete_prefix"] += 1
                         continue
                     if w is not None and not any(x == 1 for x in w[:len(cut)]):
                         skipped["no_target_turn"] += 1     # the cut kept only context turns
                         continue
-                    ex, seg = to_chatml(cut, tools, w[:len(cut)] if w else None), True
+                    ex, seg = to_chatml(cut, tools, w[:len(cut)] if w else None,
+                                        reasoning=rsn), True
                 ex["meta"] = {"episode_id": r["episode_id"], "project_id": pid,
                               "task_id": r["task_id"], "kind": r["kind"], "segmented": seg,
                               "tokens": n, "token_count": token_method,
@@ -303,14 +359,16 @@ def export(store, projects: list, kind: str, target: str, cfgs: dict, purpose: s
     os.chmod(data_path, 0o600)
     val = validate_dataset(str(data_path), target, known_secrets,
                            eval_hashes=_eval_groups(store) if purpose == "train" else set(),
-                           store=store)
+                           store=store, reasoning_allowed=reasoning_on)
     manifest = {
         "dataset_id": ds_id, "schema_version": SCHEMA_VERSION, "kind": kind, "target": target,
         "purpose": purpose, "created": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         "projects": projects, "policy_hashes": {p: cfgs[p].policy_hash() for p in projects},
         "split_policy": {p: cfgs[p].split for p in projects}, "examples": len(lines),
         "episodes": sorted(members), "skipped": dict(skipped), "validation": val,
-        "token_count": token_method, "reasoning_included": False, "tags": list(tags or []),
+        "token_count": token_method, "reasoning_included": reasoning_on,
+        "tags": list(tags or []),
+        **({"label_strength": sorted(label_strengths)} if kind == "calls" else {}),
         "restrictions": RESTRICTIONS,
         "lineage": {"episode_ids_hash": content_hash(sorted(members))},
     }
@@ -368,11 +426,155 @@ def canonical(ep: dict, row: dict, allow_frontier: bool = False) -> dict:
     return base
 
 
+CALL_QUALITY = ("verified", "ok")
+
+
+def call_lines(store, pid: str, cfg, target: str, purpose: str, tok, guard: set,
+               skipped) -> list[dict]:
+    """The calls kind for one project (see the module docstring)."""
+    from .curate import split_of
+    from .episodes import _author
+    from .labels import quality_state
+    from .messages import neutral, neutral_tools
+    from .schema import content_hash as _ch
+    quality = str(cfg.export.get("calls_quality") or "verified")
+    if quality not in CALL_QUALITY:
+        raise ExportError(f"calls_quality must be one of {CALL_QUALITY}")
+    purposes = set(cfg.export.get("calls_purposes") or ["agent_turn"])
+    allow = bool(cfg.export.get("allow_frontier_targets", False))
+    rsn = bool(cfg.export.get("include_reasoning", False))
+    limit = int((cfg.policy.get("sft") or {}).get("max_tokens") or 32768)
+    labels: dict = defaultdict(list)
+    for e in store.events(pid, "event_type='router_outcome'"):
+        if e.get("request_id"):
+            labels[e["request_id"]].append({"label": e["facts"].get("label")})
+    seen, out = set(), []
+    # cheap filters in SQL first: a store holds thousands of ~400 KB calls
+    where = ("event_type='model_call' AND capture_status='complete' AND "
+             "json_extract(facts, '$.status')='ok'")
+    args: tuple = ()
+    if not allow:
+        names = [m for m in cfg.local_models if m]
+        pers = [x for x in cfg.local_personas if x]
+        if not names and not pers:
+            skipped["call_non_local_author"] += 1
+            return []
+        conds = []
+        if names:
+            conds.append(f"actual_model IN ({','.join('?' * len(names))})")
+        if pers:
+            conds.append(f"requested_persona IN ({','.join('?' * len(pers))})")
+        local_sql = "(" + " OR ".join(conds) + ")"
+        args = (*names, *pers)
+        n = store.norm.q(f"SELECT COUNT(*) AS n FROM events WHERE project_id=? AND deleted=0 AND "
+                         f"{where} AND NOT {local_sql}", (pid, *args))[0]["n"]
+        if n:
+            skipped["call_non_local_author"] += n
+        where += " AND " + local_sql
+    for e in store.events(pid, where, args):
+        f = e["facts"]
+        if (f.get("purpose") or "agent_turn") not in purposes:
+            skipped["call_purpose"] += 1
+            continue
+        if f.get("status") != "ok" or e["capture_status"] != "complete" or not f.get("messages"):
+            skipped["call_incomplete"] += 1
+            continue
+        if not (f.get("content") or f.get("tool_calls")):
+            skipped["call_empty"] += 1
+            continue
+        q = f.get("quality") or {}
+        st = quality_state(q, (q.get("labels") or []) + labels.get(e.get("request_id"), []))
+        if not st["ok"] or (quality == "verified" and not st["positive"]):
+            skipped["call_quality"] += 1
+            continue
+        author = _author(e["actual_model"], e["requested_persona"], cfg)
+        if not allow and author["kind"] != "local":
+            skipped["call_non_local_author"] += 1
+            continue
+        group = f"{pid}:{e['task_id'] or ('session:' + (e['session_id'] or e['event_id']))}"
+        split = split_of(group, pid, e["timestamp"], cfg)
+        if (purpose == "train" and split == "eval") or (purpose == "eval" and split != "eval"):
+            skipped["call_other_split"] += 1
+            continue
+        if group in guard:
+            skipped["eval_leakage_blocked" if purpose == "train" else
+                    "already_in_training"] += 1
+            continue
+        msgs = [neutral(m) for m in f["messages"] if isinstance(m, dict)]
+        final = neutral({"role": "assistant", "content": f.get("content") or "",
+                         "tool_calls": f.get("tool_calls")}, author)
+        if f.get("reasoning"):
+            final["reasoning"] = f["reasoning"]
+        msgs.append(final)
+        key = _ch([canonical_text(msgs)])
+        if key in seen:
+            skipped["call_duplicate"] += 1
+            continue
+        seen.add(key)
+        tools = neutral_tools(f.get("tools"))
+        strength = "router_verified" if st["positive"] else "router_ok"
+        if target == "canonical":
+            rec = {"schema_version": SCHEMA_VERSION, "call_id": e["event_id"],
+                   "project_id": pid, "task_id": e["task_id"], "session_id": e["session_id"],
+                   "request_id": e.get("request_id"), "kind": "call", "split": split,
+                   "group_id": group, "messages": msgs, "tools": tools,
+                   "target": len(msgs) - 1, "label_strength": strength,
+                   "quality": st, "purpose": f.get("purpose") or "agent_turn",
+                   "provenance": {"sources": ["foundry"], "event_ids": [e["event_id"]]}}
+            out.append({"_episode": "call:" + e["event_id"], "meta": {"label_strength": strength},
+                        **(rec if rsn else strip_reasoning(rec))})
+            continue
+        w = [None if m["role"] != "assistant" else 0 for m in msgs]
+        w[-1] = 1
+        ex = to_chatml(msgs, tools, w, reasoning=rsn)
+        n, how = _tokens(_render_chatml(ex["messages"], tools), tok)
+        if n > limit:
+            skipped["too_long"] += 1
+            continue
+        ex["meta"] = {"call_id": e["event_id"], "project_id": pid, "task_id": e["task_id"],
+                      "kind": "call", "request_id": e.get("request_id"),
+                      "label_strength": strength, "labels": st["labels"],
+                      "purpose": f.get("purpose") or "agent_turn", "tokens": n,
+                      "token_count": how, "authors": [[author["kind"], author.get("model")
+                                                       or ""]],
+                      "frontier_targets_allowed": allow,
+                      "context_only": [i for i, x in enumerate(w) if x == 0]}
+        out.append({"_episode": "call:" + e["event_id"], **ex})
+    return out
+
+
+def _episode_pair_line(store, p, target) -> Optional[dict]:
+    """A same-task-prompt pair (curate P2): shared prompt (system + first
+    user turn), the two attempts' remaining turns as chosen / rejected."""
+    ids = (p["chosen_event"][3:], p["rejected_event"][3:])
+    rows = {r["episode_id"]: json.loads(r["data"]) for r in store.cur.q(
+        "SELECT episode_id, data FROM episodes WHERE episode_id IN (?,?) AND deleted=0", ids)}
+    if len(rows) != 2:
+        return None
+    c, r = rows[ids[0]], rows[ids[1]]
+    from .curate import prompt_prefix
+    k = len(prompt_prefix(c["messages"]))
+    tools = c.get("tools") or []
+
+    def rest(ep):
+        return to_chatml(ep["messages"][k:], [])["messages"]
+    prompt = c["messages"][:k]
+    return {"prompt": to_chatml(prompt, tools)["messages"] if target == "dpo" else prompt,
+            "tools": to_chatml([], tools).get("tools", []),
+            "chosen": rest(c), "rejected": rest(r), "basis": p["basis"], "judge": p["judge"],
+            "project_id": p["project_id"], "_episode": f"pref:{p['id']}"}
+
+
 def _preference_lines(store, projects, target) -> list[dict]:
     from .messages import neutral, neutral_tools
     out = []
     for pid in projects:
         for p in store.cur.q("SELECT * FROM preferences WHERE project_id=?", (pid,)):
+            if str(p["chosen_event"]).startswith("ep:"):
+                ln = _episode_pair_line(store, p, target)
+                if ln:
+                    out.append(ln)
+                continue
             ev = {r["event_id"]: r for r in store.events(pid, "event_id IN (?,?)",
                                                          (p["chosen_event"], p["rejected_event"]))}
             if len(ev) != 2:

@@ -307,6 +307,7 @@ class Coordinator:
         rr = int(self.store.meta("rr") or 0) % len(ids)
         order = ids[rr:] + ids[:rr]
         self.store.set_meta("rr", str(rr + 1))
+        auto_queue: dict = {}
         for pid in order:
             P = self.projects[pid]
             self._queue_approved_followups(P)
@@ -343,9 +344,19 @@ class Coordinator:
                 if after and after["state"] != before[0]:
                     acted.append(f"{pid}/{t['task_id']}: {before[0]} -> {after['state']}")
                     # closeout finalizes capture itself; these exits are best effort
-                    if after["state"] == S.FAILED or (after["state"] == S.COMPLETE
-                                                      and before[0] == S.AWAITING_HUMAN):
+                    if after["state"] == S.COMPLETE and before[0] == S.AWAITING_HUMAN:
                         self._training(P, after, after["state"])
+                if after:
+                    # a stopped attempt (BLOCKED / FAILED) becomes a labelled negative,
+                    # once per run; also a task that was already BLOCKED
+                    self._training_negative(P, after, queue=auto_queue)
+        # one automatic pipeline run per project for this tick's negative manifests
+        # (the first tick after an upgrade may queue many already-stopped tasks)
+        for P_, t_ in auto_queue.values():
+            try:
+                training_hook.launch_auto(self.store, P_, t_, self.state_dir)
+            except Exception as e:                                # noqa: BLE001
+                self.log(f"{P_.id}: training auto run failed to start: {e}")
         self.flush()
         return acted
 
@@ -2593,14 +2604,41 @@ class Coordinator:
             "closeout_id": cid, "review_valid": True, "published": published},
             closeout_id=cid, head_sha=head, next_action="", data=data)
 
-    def _training(self, P: Project, t: dict, outcome: str) -> bool:
+    def _training_negative(self, P: Project, t: dict, queue: Optional[dict] = None) -> bool:
+        """Queue a manifest for an attempt that stopped BLOCKED / FAILED /
+        CANCELLED (training_hook.NEGATIVE), at most once per task + run +
+        state. A BLOCKED task the lead's recovery case still works on waits."""
+        st = t.get("state")
+        if st not in training_hook.NEGATIVE or not training_hook.enabled(P.profile):
+            return False
+        data = t.get("data") or {}
+        if st == S.BLOCKED and data.get("recovery_case"):
+            return False
+        key = training_hook.manifest_key(t, st)
+        done = list(data.get("training_manifests") or [])
+        if key in done:
+            return False
+        try:
+            self.store.merge_data(P.id, t["task_id"], training_manifests=(done + [key])[-50:])
+        except Exception as e:                                    # noqa: BLE001
+            self.log(f"{P.id}/{t['task_id']}: training manifest bookkeeping failed: {e}")
+            return False
+        if queue is None:
+            self._training(P, t, st)
+        else:                           # the tick starts one auto run per project
+            self._training(P, t, st, auto=False)
+            queue.setdefault(P.id, (P, t))
+        return True
+
+    def _training(self, P: Project, t: dict, outcome: str, auto: bool = True) -> bool:
         """Queue the task's capture manifest. False only when it failed and
         the profile's policy is `hold`; capture never fails a task."""
         if not training_hook.enabled(P.profile):
             return True
         try:
             training_hook.finalize(self.store, P, t, outcome, self.state_dir)
-            training_hook.launch_auto(self.store, P, t, self.state_dir)
+            if auto:
+                training_hook.launch_auto(self.store, P, t, self.state_dir)
             return True
         except Exception as e:                                    # noqa: BLE001
             pol = training_hook.policy(P.profile)
@@ -2954,8 +2992,13 @@ class Coordinator:
             if L is not None:
                 L.cancel(case_id, f"task cancelled by {actor}: {reason}"[:300], actor=actor, P=P)
         self.store.release(project_id, task_id)
-        return self.store.transition(project_id, task_id, S.CANCELLED, {"reason": reason},
-                                     actor=actor)
+        out = self.store.transition(project_id, task_id, S.CANCELLED, {"reason": reason},
+                                    actor=actor)
+        try:
+            self._training_negative(P, self.store.task(project_id, task_id) or out)
+        except Exception as e:                                    # noqa: BLE001
+            self.log(f"{project_id}/{task_id}: training manifest failed: {e}")
+        return out
 
     def unblock(self, project_id: str, task_id: str, resolution: str, reset_attempts: bool = False,
                 actor: str = "operator") -> dict:

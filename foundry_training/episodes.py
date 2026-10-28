@@ -19,6 +19,20 @@ templates, widgets, device sizes) and per-step authorship (helper prework
 patches / harvested pre-code models are context, never targets) come from
 labels.py.
 
+Only the session's own turns build it: Foundry calls tagged with another
+purpose (brain_route, frontier_assist, research, operator_chat, ...) made
+during the session are not its conversation. Each assistant turn keeps the
+reasoning its call returned in a separate `reasoning` field (never in
+content; exported only with include_reasoning). A session that stopped on a
+tool call nobody answered (its next call cancelled, or the session ended)
+ends at the turn before it (`flags.trimmed_open_tail`). Kilo's tool paging
+("Showing lines 1-120 of 304") is what the model saw, not a truncation.
+
+`outcome.attempt_end`: how this attempt ended, from the coordinator's own
+task transitions: the last of BLOCKED / FAILED / CANCELLED / COMPLETE /
+AWAITING_HUMAN after the session started and before the task's next attempt
+started. A later attempt that completes never relabels an earlier one.
+
 Context source, best first:
   foundry-capture     the session's last complete model_call: Foundry's
                       effective request (system prompt, tool definitions, every
@@ -40,6 +54,37 @@ from .messages import canonical_text, neutral, neutral_tools, pairing
 from .schema import content_hash, stable_id
 
 LOOP_REPEATS = 3
+AGENT_TURN = "agent_turn"
+ATTEMPT_END_STATES = ("BLOCKED", "FAILED", "CANCELLED", "COMPLETE", "AWAITING_HUMAN")
+
+
+def agent_turn(e: dict) -> bool:
+    """A Foundry call that is one of the session's own turns (rows captured
+    before v0.153.0 carry no purpose: they were all agent turns)."""
+    return (e["facts"].get("purpose") or AGENT_TURN) == AGENT_TURN
+
+
+def _turn_key(content, tool_calls) -> str:
+    from .messages import tool_calls as _tcs
+    return json.dumps([(content or "").strip(),
+                       [[t["name"], t["arguments"]] for t in _tcs(tool_calls)]],
+                      sort_keys=True, default=str)
+
+
+def attempt_end(ev: list[dict], task_id: Optional[str], start_ts: float,
+                next_start: Optional[float]) -> Optional[dict]:
+    if not task_id:
+        return None
+    end = None
+    for t in _transitions(ev, task_id):
+        if t["timestamp"] < start_ts or (next_start is not None and t["timestamp"] >= next_start):
+            continue
+        to = t["facts"].get("to")
+        if to in ATTEMPT_END_STATES:
+            evd = t["facts"].get("evidence") or {}
+            end = {"state": to, "ts": t["timestamp"],
+                   "blocker": str(evd.get("blocker") or evd.get("reason") or "")[:300]}
+    return end
 
 
 def _sessions(ev: list[dict]) -> dict:
@@ -155,26 +200,47 @@ def _from_foundry(calls: list[dict], cfg) -> Optional[dict]:
         return None
     last = ok[-1]
     authors = {}
+    reasoning = {}
     for c in ok:
         sig = (c["facts"].get("content") or "").strip()
         authors[sig] = _author(c["actual_model"], c["requested_persona"], cfg)
+        if c["facts"].get("reasoning"):
+            reasoning[_turn_key(c["facts"].get("content"), c["facts"].get("tool_calls"))] = \
+                c["facts"]["reasoning"]
     msgs = []
     for m in last["facts"]["messages"]:
         nm = neutral(m)
         if nm["role"] == "assistant":
             nm["author"] = authors.get((nm.get("content") or "").strip()) or \
                 _author(last["actual_model"], last["requested_persona"], cfg)
+            r = reasoning.get(_turn_key(nm.get("content"), nm.get("tool_calls")))
+            if r:
+                nm["reasoning"] = r
         msgs.append(nm)
     final = neutral({"role": "assistant", "content": last["facts"].get("content") or "",
                      "tool_calls": last["facts"].get("tool_calls")},
                     _author(last["actual_model"], last["requested_persona"], cfg))
-    msgs.append(final)
+    if last["facts"].get("reasoning"):
+        final["reasoning"] = last["facts"]["reasoning"]
+    trimmed = []
+    later = [c for c in calls if c["timestamp"] > last["timestamp"]]
+    if final.get("tool_calls"):
+        # Nobody answered these calls: the next call was cancelled / failed, or
+        # the session ended here. End on the turn before (never invent results).
+        trimmed = [tc["name"] for tc in final["tool_calls"]]
+    else:
+        msgs.append(final)
+    if trimmed and not any(m["role"] == "assistant" for m in msgs):
+        msgs.append(final)                # nothing before it: keep it, flagged open
+        trimmed = []
     shrank = any(len(c["facts"]["messages"]) > len(last["facts"]["messages"]) for c in ok[:-1])
     return {"messages": msgs, "tools": neutral_tools(last["facts"].get("tools")),
             "context_source": "foundry-capture", "system_and_tools_known": True,
             "context_replaced": shrank, "event_ids": [c["event_id"] for c in ok],
             "actual_model": last["actual_model"], "actual_backend": last["actual_backend"],
-            "final_open_tool_calls": bool(final.get("tool_calls"))}
+            "final_open_tool_calls": bool(msgs and msgs[-1] is final and final.get("tool_calls")),
+            "trimmed_open_tail": trimmed,
+            "next_call_status": (later[0]["facts"].get("status") if later else None)}
 
 
 def _from_client(sev: list[dict], cfg, persona: Optional[str]) -> dict:
@@ -209,7 +275,10 @@ def _from_client(sev: list[dict], cfg, persona: Optional[str]) -> dict:
                 {"id": e["tool_call_id"], "name": f.get("name"), "arguments": f.get("arguments") or {}})
             ids.append(e["event_id"])
         elif t == "tool_result":
-            if e["capture_status"] == "truncated":
+            # Kilo's `truncated` is the tool paging its output (stored exactly as
+            # the model saw it); only a record the capture itself cut counts
+            if e["capture_status"] == "truncated" and not (
+                    e["source_adapter"] == "kilo" and f.get("truncated")):
                 truncated.append(e["tool_call_id"])
             if e["capture_status"] == "missing":
                 missing.append(e["tool_call_id"])
@@ -261,7 +330,7 @@ def build(store, project_id: str, cfg, diff_fn=None) -> list[dict]:
                                          and e["facts"].get("role")), None)
         if role in REVIEW_ROLES:
             continue                      # reviews are outcome labels, not trajectories
-        calls = [e for e in sev if e["event_type"] == "model_call"]
+        calls = [e for e in sev if e["event_type"] == "model_call" and agent_turn(e)]
         persona = info.get("persona") or next((e["requested_persona"] for e in sev
                                                if e["requested_persona"]), None)
         built = _from_foundry(calls, cfg)
@@ -310,11 +379,13 @@ def build(store, project_id: str, cfg, diff_fn=None) -> list[dict]:
             "outcome": oc,
             "flags": {"complete_tool_sequence": pair["ok"] and not trunc and not miss
                       and not convo.get("final_open_tool_calls"),
+                      "trimmed_open_tail": convo.get("trimmed_open_tail") or [],
                       "pairing_problems": pair["problems"][:5], "truncated_results": trunc,
                       "missing_results": miss, "compaction": compaction,
                       "system_and_tools_known": convo["system_and_tools_known"],
                       "authors": [list(a) for a in authors], "loop": _loop(msgs),
                       "reasoning_excluded": sum(1 for e in sev if e["event_type"] == "reasoning"),
+                      "reasoning_turns": sum(1 for m in msgs if m.get("reasoning")),
                       "artifacts": arts, "gaps": gaps,
                       "tool_errors": sum(1 for m in msgs if m["role"] == "tool"
                                          and (m.get("content") or "").startswith("ERROR:"))},
@@ -338,6 +409,19 @@ def build(store, project_id: str, cfg, diff_fn=None) -> list[dict]:
         ep["tags"] = L.episode_tags(ep, cfg, ep["labels"], ep["flags"]["label_artifacts"])
         ep["content_hash"] = content_hash(canonical_text(msgs))
         episodes.append(ep)
+    # how each attempt ended: bounded by the start of the task's next attempt
+    starts = defaultdict(list)
+    for ep in episodes:
+        if ep["task_id"] and ep["role"] not in ("helper",):
+            starts[ep["task_id"]].append((ep["first_ts"], ep.get("run_id")))
+    for ep in episodes:
+        if not ep["task_id"] or ep["role"] == "helper":
+            ep["outcome"]["attempt_end"] = None
+            continue
+        nxt = [ts for ts, run in starts[ep["task_id"]]
+               if ts > ep["first_ts"] and run != ep.get("run_id")]
+        ep["outcome"]["attempt_end"] = attempt_end(ev, ep["task_id"], ep["first_ts"],
+                                                   min(nxt) if nxt else None)
     inline = []
     for ep in episodes:
         inline += L.inline_corrections(ep, project_id, diff_fn)

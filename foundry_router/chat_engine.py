@@ -805,10 +805,13 @@ class ChatEngine:
         errors = []
         for backend, model in routes:
             tok = request_context.pin_backend(backend)
+            from . import capture as _capture
             try:
-                res, served = await self.svc.pool.chat(
-                    model, messages, options={"temperature": 0}, max_tokens=MAX_TOKENS,
-                    fmt=OUTPUT_SCHEMA)
+                # captured only with training_capture.operator_chat: true
+                with _capture.purpose("operator_chat"):
+                    res, served = await self.svc.pool.chat(
+                        model, messages, options={"temperature": 0}, max_tokens=MAX_TOKENS,
+                        fmt=OUTPUT_SCHEMA)
             except Exception as e:                               # noqa: BLE001
                 errors.append(f"{model}@{backend}: {str(e)[:160]}")
                 continue

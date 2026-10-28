@@ -123,6 +123,11 @@ class _Run:
         self.input_chars = input_chars
         self.output_chars = 0
         self.row_id: Optional[int] = None
+        # training capture (purpose agent_external): what went in, what came back
+        self.input: list = []
+        self.output = ""
+        self.progress: list[str] = []
+        self.captured = False
 
     def first_output(self) -> None:
         if self.ttft_ms is None:
@@ -133,6 +138,7 @@ class AgentManager:
     def __init__(self, agents: list[AgentConfig], http: httpx.AsyncClient, db: Database):
         self.http = http
         self.db = db
+        self.capture = None          # training capture (main.py sets it)
         self.agents: dict[str, AgentConfig] = {}
         self._health: dict[str, dict] = {}
         self._runs: dict[str, _Run] = {}          # run_id -> book-keeping (tool mode)
@@ -332,6 +338,8 @@ class AgentManager:
         attr = request_context.mcp_attribution()
         caller = ":".join(x for x in (attr.get("source"), attr.get("caller")) if x)
         run = _Run(a.name, "tool", caller, len(task) + len(str(args.get("context") or "")))
+        run.input = ([{"role": "system", "content": str(args["context"])}]
+                     if args.get("context") else []) + [{"role": "user", "content": task}]
         body: dict = {"input": task}
         if args.get("context"):
             body["instructions"] = str(args["context"])
@@ -415,6 +423,7 @@ class AgentManager:
                 elif event == "tool.started":
                     tool = (data or {}).get("tool") or "tool"
                     run.tools.append(str(tool))
+                    run.progress.append(progress_line(data)[:300])
                     await progress(progress_line(data))
                 elif event == "tool.completed":
                     if isinstance(data, dict) and data.get("error"):
@@ -443,6 +452,7 @@ class AgentManager:
                 final = info.get("output")
         output = final if final is not None else "".join(text)
         run.output_chars = len(output or "")
+        run.output = str(output or "")
         self._record(run, status, error=error)
         self._runs.pop(run.run_id, None)
         if status != "completed":
@@ -474,6 +484,7 @@ class AgentManager:
             self._record(run, "failed", error=str(e))
             raise
         run.output_chars = len("".join(out))
+        run.output = "".join(out)
         self._record(run, "completed")
         return self._result_text(a, run, "".join(out))
 
@@ -512,6 +523,7 @@ class AgentManager:
                     st = str(info["status"])
                     self._absorb(run, info)
                     run.output_chars = len(str(info.get("output") or ""))
+                    run.output = str(info.get("output") or "")
                     self._runs.pop(rid, None)
                     self._record(run, st, error=str(info.get("error") or "")
                                  if st != "completed" else "")
@@ -591,6 +603,8 @@ class AgentManager:
         body = {"model": self.model_for(a), "stream": True,
                 "messages": [self._plain_message(m) for m in messages],
                 "stream_options": {"include_usage": True}}
+        run.input = body["messages"]
+        out_parts: list[str] = []
         out_chars = 0
         usage: dict = {}
         finish = "stop"
@@ -615,6 +629,7 @@ class AgentManager:
                         d0 = data if isinstance(data, dict) else {}
                         tool = d0.get("tool") or d0.get("name") or "tool"
                         run.tools.append(str(tool))
+                        run.progress.append(progress_line(data)[:300])
                         run.first_output()
                         yield {"thinking": progress_line(data) + "\n", "progress": True,
                                "tool": str(tool)}
@@ -639,6 +654,7 @@ class AgentManager:
                         if c:
                             run.first_output()
                             out_chars += len(c)
+                            out_parts.append(c)
                             yield {"content": c}
                         if ch.get("finish_reason"):
                             finish = ch["finish_reason"]
@@ -659,6 +675,7 @@ class AgentManager:
                          "completion_tokens": usage.get("completion_tokens"),
                          "cache_read_tokens": usage.get("cache_read_tokens")}
             run.output_chars = out_chars
+            run.output = "".join(out_parts)
             if _run is None:
                 self._record(run, status, error=error)
         yield {"done": True, "finish_reason": finish,
@@ -693,8 +710,32 @@ class AgentManager:
 
     # -- metrics ----------------------------------------------------------------------------
 
+    def _capture(self, run: _Run, status: str, error: str) -> None:
+        """One `agent_run` capture record when the task ends (purpose
+        agent_external). The agent's own model calls back into Foundry are
+        captured separately, as that client's agent turns."""
+        if self.capture is None or run.captured or status in ("running", "handed_off"):
+            return
+        run.captured = True
+        try:
+            self.capture.record_event(
+                "agent_run", {"request": {"agent": run.agent, "mode": run.mode,
+                                          "messages": run.input},
+                              "response": {"content": run.output,
+                                           "progress": run.progress[-200:],
+                                           "tools_used": list(dict.fromkeys(run.tools))[:40],
+                                           "usage": run.usage or {}},
+                              "run_id": run.run_id, "agent_session_id": run.session_id,
+                              "error": (error or "")[:2000],
+                              "duration_ms": int((time.monotonic() - run.t0) * 1000)},
+                purpose="agent_external", backend=f"agent:{run.agent}", model=run.model,
+                status="ok" if status == "completed" else status)
+        except Exception:                                        # noqa: BLE001
+            log.debug("agent run capture failed", exc_info=True)
+
     def _record(self, run: _Run, status: str, error: str = "") -> Optional[int]:
         """Insert (first call) or update the agent_runs row for this task."""
+        self._capture(run, status, error)
         u = run.usage or {}
         vals = (status, int((time.monotonic() - run.t0) * 1000), run.ttft_ms,
                 len(run.tools), ",".join(list(dict.fromkeys(run.tools))[:40])[:1000],

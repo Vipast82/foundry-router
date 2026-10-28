@@ -34,7 +34,7 @@ Settings (profile, all optional):
   foundry_url = ""               # default: the profile's [foundry] url
   key_env = "FOUNDRY_TRAINING_KEY"   # falls back to [foundry] key_env
   kilo_url = ""                  # default: the profile's [client] url
-  kinds = ["sft", "correction", "multimodal"]
+  kinds = ["sft", "correction", "multimodal"]   # + "calls", "preference"
   targets = []                   # default: [training.export] targets or ["chatml-tools", "canonical"]
   library = ""                   # default: <training store>/library
 """
@@ -52,7 +52,8 @@ import urllib.request
 from pathlib import Path
 from typing import Optional
 
-KINDS = ("sft", "correction", "multimodal")
+KINDS = ("sft", "correction", "multimodal", "calls", "preference")
+DEFAULT_KINDS = ["sft", "correction", "multimodal"]
 README = """# Foundry fine-tuning datasets
 
 Written automatically after each coordinator sprint by `foundry_training auto`.
@@ -90,7 +91,7 @@ def auto_settings(cfg) -> dict:
                                     foundry.get("key_env")) if e],
             "kilo_url": str(a.get("kilo_url") or client.get("url") or ""),
             "kilo_password_env": str(client.get("password_env") or "KILO_SERVER_PASSWORD"),
-            "kinds": [k for k in (a.get("kinds") or list(KINDS)) if k in KINDS],
+            "kinds": [k for k in (a.get("kinds") or list(DEFAULT_KINDS)) if k in KINDS],
             "targets": [x for x in (a.get("targets") or (t.get("export") or {}).get("targets")
                                     or ["chatml-tools", "canonical"])
                         if x in ("chatml-tools", "canonical")],
@@ -200,6 +201,9 @@ def upload(entry: dict, foundry_url: str, key: str, timeout: float = 120) -> dic
 
 
 def _selected_hash(store, pid: str, kind: str) -> tuple[int, str]:
+    if kind in ("calls", "preference"):
+        # selected at export time: export, then compare the dataset's lineage
+        return 1, ""
     want = "correction" if kind == "correction" else "trajectory"
     rows = store.cur.q("SELECT episode_id, content_hash, data FROM episodes WHERE project_id=? AND "
                        "kind=? AND deleted=0 AND status='selected' ORDER BY episode_id",
@@ -262,7 +266,9 @@ def auto_run(pipeline, spool: str, override: Optional[dict] = None, log=print,
             n, h = _selected_hash(pipeline.store, c.id, kind)
             if not n:
                 continue
-            for target in st["targets"]:
+            targets = ["dpo"] if kind == "preference" else \
+                [t for t in st["targets"] if t != "dpo"]
+            for target in targets:
                 if kind == "multimodal" and target == "dpo":
                     continue
                 try:

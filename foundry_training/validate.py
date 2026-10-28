@@ -5,7 +5,8 @@ role order, every tool call answered, JSON arguments, ends on an assistant
 turn; dpo: prompt/chosen/rejected present; canonical: schema version and
 provenance); no secret-looking text left (redact.scan); no example whose
 episode or content belongs to an evaluation set (leakage); no reasoning
-fields. A dataset that fails validation is recorded as invalid and must not
+fields unless the export included reasoning (`reasoning_allowed`, the
+manifest's `reasoning_included`). A dataset that fails validation is recorded as invalid and must not
 be used.
 """
 
@@ -19,7 +20,7 @@ from .schema import content_hash
 
 
 def validate_dataset(path: str, target: str, known_secrets=(), eval_hashes=frozenset(),
-                     store=None) -> dict:
+                     store=None, reasoning_allowed: bool = False) -> dict:
     from .export import check_chatml
     errors, warnings = [], []
     n = 0
@@ -38,10 +39,12 @@ def validate_dataset(path: str, target: str, known_secrets=(), eval_hashes=froze
             except ValueError as e:
                 errors.append(f"line {i}: not JSON ({e})")
                 continue
-            if {"reasoning", "reasoning_content", "thinking"} & set(_keys(ex)):
+            if not reasoning_allowed and \
+                    {"reasoning", "reasoning_content", "thinking"} & set(_keys(ex)):
                 errors.append(f"line {i}: has a reasoning field")
             if target == "chatml-tools":
-                for p in check_chatml(ex):
+                call = (ex.get("meta") or {}).get("kind") == "call"
+                for p in check_chatml(ex, allow_open_final=call):
                     errors.append(f"line {i}: {p}")
                 for p in _target_problems(ex):
                     errors.append(f"line {i}: {p}")
@@ -56,6 +59,9 @@ def validate_dataset(path: str, target: str, known_secrets=(), eval_hashes=froze
                     errors.append(f"line {i}: schema_version {ex.get('schema_version')}")
                 if not (ex.get("provenance") or {}).get("event_ids"):
                     errors.append(f"line {i}: no provenance")
+                if ex.get("kind") == "call" and ex.get("label_strength") not in (
+                        "router_ok", "router_verified"):
+                    errors.append(f"line {i}: call without a label strength")
                 for where, d in (("diff", ex.get("diff")),
                                  ("original.diff", (ex.get("original") or {}).get("diff")),
                                  ("accepted_correction.diff",

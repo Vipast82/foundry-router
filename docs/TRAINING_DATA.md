@@ -283,8 +283,17 @@ sprint closes only the `export --tag` step is manual.
 
 Every dataset gets `manifest.json`: projects, policy hashes, split policy,
 episode ids, skip counts, validation result, token method,
-`reasoning_included: false` and the restrictions below. A dataset that fails
-validation is recorded as `invalid`.
+`reasoning_included` (true only with `[training.export] include_reasoning = true`:
+target turns then carry `reasoning_content`) and the restrictions below. A
+dataset that fails validation is recorded as `invalid`.
+
+`--kind calls` (v0.153.0) is the looser call-level set beside the curated
+episodes: one example per captured model call, the reply as the only target,
+filtered by the router's own signal (`calls_quality = "verified"` or `"ok"`)
+and purpose (`calls_purposes`, default `["agent_turn"]`); local-authored replies
+only while `allow_frontier_targets = false`. `[training] unbound_project` sends
+captures with no coordinator project (Cline, Chat, AnythingLLM, the brain) to a
+pseudo-project that feeds only this kind.
 
 ## Storage, privacy and security
 

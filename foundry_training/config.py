@@ -9,6 +9,9 @@ artifact_roots = ["docs/evidence"]        # images may be read only from here
 allowed_email_domains = []
 local_models = ["qwen3.8-flash-next-iq3_s"]   # authorship: what counts as the local model
 local_personas = ["Foundry-Kilo-Local"]
+unbound_project = ""                      # e.g. "foundry-unbound": Foundry captures with no
+                                          # project (Cline, Chat, AnythingLLM, brain) go to this
+                                          # pseudo-project; they feed only the calls kind
 
 [training.policy.sft]                     # one table per dataset type
 require = ["verification_pass", "review_approved_at_revision", "complete_tool_sequence",
@@ -29,7 +32,9 @@ normalized_days = 180
 [training.export]
 targets = ["canonical", "chatml-tools"]
 allow_frontier_targets = false            # provider terms: see docs/TRAINING_DATA.md
-include_reasoning = false
+include_reasoning = false                 # true: target turns carry reasoning_content
+calls_quality = "verified"                # calls kind: "verified" | "ok" (router_ok)
+calls_purposes = ["agent_turn"]           # calls kind: which capture purposes
 [training.capture]
 on_failure = "warn"                       # coordinator: ignore | warn | hold
 [training.tags]
@@ -75,6 +80,8 @@ class TrainingProject:
     capture: dict = field(default_factory=dict)
     fast_lane_tasks: list = field(default_factory=list)
     tags: dict = field(default_factory=dict)
+    unbound_project: str = ""
+    unbound: bool = False               # the pseudo-project of unbound Foundry captures
 
     def require(self, kind: str) -> list[str]:
         return list((self.policy.get(kind) or {}).get("require") or DEFAULT_REQUIRE.get(kind, []))
@@ -111,7 +118,17 @@ def load(path: str) -> TrainingProject:
         capture=dict(t.get("capture") or {}),
         fast_lane_tasks=[str(x) for x in (fl.get("tasks") or [])]
         if fl.get("enabled", True) else [],
-        tags=dict(t.get("tags") or {}))
+        tags=dict(t.get("tags") or {}),
+        unbound_project=str(t.get("unbound_project") or ""))
+
+
+def unbound_of(p: TrainingProject) -> TrainingProject:
+    """The pseudo-project for Foundry captures no coordinator project bound,
+    declared by `p` (its authorship, export, split and auto settings)."""
+    import dataclasses
+    return dataclasses.replace(p, id=p.unbound_project, workspace="", sources=["foundry"],
+                               artifact_roots=[], fast_lane_tasks=[], unbound_project="",
+                               unbound=True)
 
 
 def find(paths: list[str]) -> list[TrainingProject]:

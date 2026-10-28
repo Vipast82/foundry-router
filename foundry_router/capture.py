@@ -23,6 +23,17 @@ wire-format translation (e.g. OpenAI -> Anthropic Messages).
 Reasoning text is stored in its own field and marked as such; training
 exports leave it out by default.
 
+Every row carries a `purpose`: agent_turn (a client's turn through the pool, the
+default), brain_route (the brain's own routing / assist / background calls),
+frontier_assist (a frontier helper call inside a client turn), research
+(Research's extraction call), agent_external (an external agent's task: Hermes
+as a backend or as a tool), media (an image job, metadata only) and
+operator_chat (the Automation chat, captured only with `operator_chat: true`).
+`purposes` / `exclude_purposes` (globs) switch purposes on and off. Inline
+images in a request are replaced by a `capture-media:sha256:<hex>:<mime>:<bytes>`
+reference and their bytes written once to <store dir>/capture-media/, so a
+screenshot never pushes a record past `max_body_bytes`.
+
 Which requests: `projects` (empty = every project a coordinator bound) minus
 `exclude_projects`; unbound traffic only with `include_unbound` or when its
 persona is listed in `personas`. Per call, `backends` / `exclude_backends` and
@@ -39,11 +50,16 @@ idempotent.
 
 from __future__ import annotations
 
+import base64
+import binascii
+import contextlib
 import contextvars
 import fnmatch
+import hashlib
 import json
 import logging
 import os
+import re
 import sqlite3
 import threading
 import time
@@ -61,7 +77,7 @@ CREATE TABLE IF NOT EXISTS capture_records (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   record_uid TEXT UNIQUE,
   ts REAL,
-  kind TEXT,                 -- received | backend_call
+  kind TEXT,                 -- received | backend_call | agent_run | media_job
   request_id TEXT,
   attempt INTEGER,
   client_id TEXT, session_id TEXT, parent_task_id TEXT,
@@ -76,6 +92,14 @@ CREATE TABLE IF NOT EXISTS capture_records (
 CREATE INDEX IF NOT EXISTS idx_capture_project ON capture_records(project_id, id);
 CREATE INDEX IF NOT EXISTS idx_capture_ts ON capture_records(ts);
 """
+PURPOSES = ("agent_turn", "brain_route", "frontier_assist", "research", "agent_external",
+            "media", "operator_chat")
+DEFAULT_PURPOSE = "agent_turn"
+IMAGE_MIN_CHARS = 1024           # smaller inline images stay inline
+IMAGE_REF = "capture-media:sha256:"
+_DATA_URL = re.compile(r"^data:(image/[a-z0-9.+-]+);base64,(.+)$", re.I | re.S)
+_EXT = {"image/png": "png", "image/jpeg": "jpg", "image/jpg": "jpg", "image/webp": "webp",
+        "image/gif": "gif"}
 
 _decision: contextvars.ContextVar = contextvars.ContextVar("foundry_capture_decision",
                                                            default=None)
@@ -88,6 +112,85 @@ _unbound: contextvars.ContextVar = contextvars.ContextVar("foundry_capture_unbou
 # a `received` record held back until a persona-allowed backend call starts
 _pending: contextvars.ContextVar = contextvars.ContextVar("foundry_capture_pending",
                                                           default=None)
+# what the model calls made in this context are for (PURPOSES; "" = agent_turn)
+_purpose: contextvars.ContextVar = contextvars.ContextVar("foundry_capture_purpose", default="")
+
+
+@contextlib.contextmanager
+def purpose(name: str):
+    """Tag the capture rows of every model call made inside this block."""
+    tok = _purpose.set(name)
+    try:
+        yield
+    finally:
+        _purpose.reset(tok)
+
+
+def current_purpose() -> str:
+    return _purpose.get() or DEFAULT_PURPOSE
+
+
+def _image_ref(raw: bytes, mime: str, media_dir: Optional[Path]) -> str:
+    sha = hashlib.sha256(raw).hexdigest()
+    if media_dir is not None:
+        try:
+            media_dir.mkdir(parents=True, exist_ok=True)
+            p = media_dir / f"{sha}.{_EXT.get(mime.lower(), 'bin')}"
+            if not p.exists():
+                tmp = p.with_suffix(p.suffix + ".tmp")
+                tmp.write_bytes(raw)
+                try:
+                    os.chmod(tmp, 0o600)
+                except OSError:
+                    pass
+                os.replace(tmp, p)
+        except OSError as e:
+            log.warning("capture media write failed: %s", e)
+    return f"{IMAGE_REF}{sha}:{mime.lower()}:{len(raw)}"
+
+
+def externalize_images(obj: Any, media_dir: Optional[Path]) -> tuple[Any, int]:
+    """(copy of obj with inline images replaced by references, how many).
+    Data URLs anywhere, and the plain base64 strings of an Ollama message's
+    `images` list."""
+    n = 0
+
+    def walk(v, key=""):
+        nonlocal n
+        if isinstance(v, dict):
+            return {k: walk(x, k) for k, x in v.items()}
+        if isinstance(v, list):
+            if key == "images":
+                return [img(x) for x in v]
+            return [walk(x) for x in v]
+        if isinstance(v, str) and len(v) >= IMAGE_MIN_CHARS and v[:11].lower() == "data:image/":
+            m = _DATA_URL.match(v)
+            if m:
+                try:
+                    raw = base64.b64decode(m.group(2), validate=False)
+                except (binascii.Error, ValueError):
+                    return v
+                n += 1
+                return _image_ref(raw, m.group(1), media_dir)
+        return v
+
+    def img(x):
+        nonlocal n
+        if not isinstance(x, str) or len(x) < IMAGE_MIN_CHARS:
+            return walk(x)
+        if x[:11].lower() == "data:image/":
+            return walk(x)
+        try:
+            raw = base64.b64decode(x, validate=True)
+        except (binascii.Error, ValueError):
+            return x
+        n += 1
+        mime = ("image/png" if raw[:8] == b"\x89PNG\r\n\x1a\n" else
+                "image/jpeg" if raw[:3] == b"\xff\xd8\xff" else
+                "image/webp" if raw[8:12] == b"WEBP" else
+                "image/gif" if raw[:4] == b"GIF8" else "application/octet-stream")
+        return _image_ref(raw, mime, media_dir)
+    return walk(obj), n
 
 
 def glob_match(globs, name: str) -> bool:
@@ -109,6 +212,11 @@ class CaptureStore:
         self.conn.row_factory = sqlite3.Row
         self.conn.execute("PRAGMA journal_mode=WAL")
         self.conn.executescript(SCHEMA)
+        cols = {r[1] for r in self.conn.execute("PRAGMA table_info(capture_records)")}
+        if "purpose" not in cols:          # a store written before v0.153.0
+            self.conn.execute("ALTER TABLE capture_records ADD COLUMN purpose TEXT DEFAULT ''")
+        self.conn.execute("CREATE INDEX IF NOT EXISTS idx_capture_purpose ON "
+                          "capture_records(purpose, id)")
         if new:
             try:
                 os.chmod(self.path, 0o600)
@@ -159,7 +267,11 @@ class Capture:
     # -- what to capture -------------------------------------------------------------
 
     def wanted(self) -> bool:
-        """Decided once per request from the client context (cached)."""
+        """Decided once per request from the client context (cached). The
+        operator chat has its own switch, whatever its client context is."""
+        if _purpose.get() == "operator_chat":
+            cfg = self.cfg
+            return bool(cfg and cfg.enabled and getattr(cfg, "operator_chat", False))
         d = _decision.get()
         if d is not None:
             return d
@@ -183,11 +295,23 @@ class Capture:
         _decision.set(ok)
         return ok
 
-    def allowed(self, backend: str = "", persona: str = "", check_backend: bool = True) -> bool:
-        """The per-call switches: backend and persona include / exclude globs.
-        A persona named in `personas` is captured even with no coordinator
-        project; an unbound call with no such persona needs include_unbound."""
+    def allowed(self, backend: str = "", persona: str = "", check_backend: bool = True,
+                purpose: Optional[str] = None) -> bool:
+        """The per-call switches: purpose, backend and persona include / exclude
+        globs. A persona named in `personas` is captured even with no
+        coordinator project; an unbound call with no such persona needs
+        include_unbound. The operator chat needs `operator_chat: true`."""
         cfg = self.cfg
+        p = purpose or current_purpose()
+        if glob_match(getattr(cfg, "exclude_purposes", None), p):
+            return False
+        inc = getattr(cfg, "purposes", None)
+        if inc and p != "operator_chat" and not glob_match(inc, p):   # it has its own switch
+            return False
+        if p == "operator_chat":
+            return bool(getattr(cfg, "operator_chat", False)) and not (
+                check_backend and backend and (glob_match(cfg.exclude_backends, backend) or (
+                    cfg.backends and not glob_match(cfg.backends, backend))))
         if check_backend and backend:
             if glob_match(cfg.exclude_backends, backend):
                 return False
@@ -216,6 +340,9 @@ class Capture:
         from . import client_auth, request_context
         cfg = self.cfg
         c = client_auth.current()
+        body, images = externalize_images(body, self.store.path.parent / "capture-media")
+        if images:
+            body = {**body, "images_externalized": images}
         red, findings = Redactor(self._known_secrets(),
                                  allowed_email_domains=cfg.allowed_email_domains).obj(body)
         text = json.dumps(red, default=str, ensure_ascii=False)
@@ -234,7 +361,7 @@ class Capture:
                 "persona": (request_context.route() or {}).get("persona") or "",
                 "redaction": json.dumps({"status": findings.status(), "kinds": findings.kinds()}),
                 "boundary": BOUNDARY, "body": text, "bytes": len(text.encode()),
-                "truncated": truncated, **extra}
+                "truncated": truncated, "purpose": current_purpose(), **extra}
 
     def _write(self, row: dict) -> None:
         try:
@@ -268,20 +395,47 @@ class Capture:
         from . import request_context
         return (request_context.route() or {}).get("persona") or ""
 
-    def begin_call(self, backend: str = "", persona: Optional[str] = None) -> Optional[dict]:
-        """Start one backend call record (None when not capturing this call)."""
-        if not self.wanted():
-            return None
-        persona = self._persona() if persona is None else persona
-        if not self.allowed(backend, persona):
-            return None
-        pend = _pending.get()
-        if pend:
-            row = pend.pop(0)             # popped in place: a sibling task's call won't repeat it
-            self._write(self._row(row[0], row[1], **row[2]))
-        n = _attempt.get() + 1
-        _attempt.set(n)
-        return {"attempt": n, "t0": time.time()}
+    def begin_call(self, backend: str = "", persona: Optional[str] = None,
+                   purpose: Optional[str] = None) -> Optional[dict]:
+        """Start one backend call record (None when not capturing this call).
+        `purpose` overrides the context's (capture.purpose())."""
+        tok = _purpose.set(purpose) if purpose else None
+        try:
+            if not self.wanted():
+                return None
+            persona = self._persona() if persona is None else persona
+            if not self.allowed(backend, persona):
+                return None
+            pend = _pending.get()
+            if pend:
+                row = pend.pop(0)         # popped in place: a sibling task's call won't repeat it
+                self._write(self._row(row[0], row[1], **row[2]))
+            n = _attempt.get() + 1
+            _attempt.set(n)
+            return {"attempt": n, "t0": time.time(), "purpose": current_purpose()}
+        finally:
+            if tok is not None:
+                _purpose.reset(tok)
+
+    def record_event(self, kind: str, body: dict, *, purpose: str, backend: str = "",
+                     model: str = "", status: str = "ok", persona: Optional[str] = None,
+                     stream: bool = False) -> bool:
+        """One self-contained record that is not a pool call: an external
+        agent's task (`agent_run`) or a media job (`media_job`). Same switches
+        and redaction as a backend call. True when written."""
+        tok = _purpose.set(purpose)
+        try:
+            if not self.wanted():
+                return False
+            persona = self._persona() if persona is None else persona
+            if not self.allowed(backend, persona):
+                return False
+            self._write(self._row(kind, body, backend=backend, model=model, status=status,
+                                  stream=1 if stream else 0, reconstruction="n/a",
+                                  **({"persona": persona} if persona else {})))
+            return True
+        finally:
+            _purpose.reset(tok)
 
     def finish_call(self, tok: Optional[dict], *, model: str, backend: str, messages: list,
                     tools: Any, settings: dict, result: Any = None, error: str = "",
@@ -310,15 +464,17 @@ class Capture:
                 "response": out, "error": error[:2000] if error else "",
                 "duration_ms": int((time.time() - tok["t0"]) * 1000),
                 "reasoning_field": "response.reasoning (exclude from default training exports)"}
+        extra = {"purpose": tok["purpose"]} if tok.get("purpose") else {}
         self._write(self._row("backend_call", body, attempt=tok["attempt"], backend=backend,
                               model=model, stream=1 if stream else 0, status=status,
-                              reconstruction=reconstruction or ("n/a" if not stream else "")))
+                              reconstruction=reconstruction or ("n/a" if not stream else ""),
+                              **extra))
 
     # -- reading ----------------------------------------------------------------------
 
     def records(self, after_id: int = 0, limit: int = 200, project: str = "", *,
                 backend: str = "", persona: str = "", kind: str = "", since: float = 0.0,
-                db=None) -> list[dict]:
+                db=None, purpose: str = "") -> list[dict]:
         """Oldest first after `after_id`. With `db` (the router database) each
         row also carries `quality`: request outcome, feedback, perf and the
         coordinator's labels (training_quality.attach)."""
@@ -329,6 +485,10 @@ class Capture:
             if v:
                 q += f" AND {col} = ?"
                 args.append(v)
+        if purpose:
+            # rows written before v0.153.0 have no purpose: they were all agent turns
+            q += " AND COALESCE(NULLIF(purpose, ''), 'agent_turn') = ?"
+            args.append(purpose)
         if since:
             q += " AND ts >= ?"
             args.append(since)
@@ -338,6 +498,7 @@ class Capture:
         for r in rows:
             r["body"] = json.loads(r["body"] or "{}")
             r["redaction"] = json.loads(r["redaction"] or "{}")
+            r["purpose"] = r.get("purpose") or DEFAULT_PURPOSE
         if db is not None:
             from . import training_quality
             training_quality.attach(db, rows)
@@ -347,12 +508,19 @@ class Capture:
         """Backend calls captured since local midnight, by backend and persona."""
         lt = time.localtime()
         midnight = time.mktime((lt.tm_year, lt.tm_mon, lt.tm_mday, 0, 0, 0, 0, 0, -1))
-        out: dict = {"since": midnight, "backends": {}, "personas": {}, "total": 0}
+        out: dict = {"since": midnight, "backends": {}, "personas": {}, "purposes": {},
+                     "total": 0}
         for col, key in (("backend", "backends"), ("persona", "personas")):
             for r in self.store.query(
                     f"SELECT {col} AS k, COUNT(*) AS n FROM capture_records "
                     f"WHERE kind='backend_call' AND ts >= ? GROUP BY {col}", (midnight,)):
                 out[key][r["k"] or ""] = r["n"]
+        # every record that stands for a model call or a job (not `received`)
+        for r in self.store.query(
+                "SELECT COALESCE(NULLIF(purpose, ''), 'agent_turn') AS k, COUNT(*) AS n "
+                "FROM capture_records WHERE kind != 'received' AND ts >= ? GROUP BY k",
+                (midnight,)):
+            out["purposes"][r["k"]] = r["n"]
         out["total"] = sum(out["backends"].values())
         return out
 
@@ -365,6 +533,10 @@ class Capture:
                "exclude_backends": list(cfg.exclude_backends or []),
                "personas": list(cfg.personas or []),
                "exclude_personas": list(cfg.exclude_personas or []),
+               "purposes": list(getattr(cfg, "purposes", None) or []),
+               "exclude_purposes": list(getattr(cfg, "exclude_purposes", None) or []),
+               "operator_chat": bool(getattr(cfg, "operator_chat", False)),
+               "known_purposes": list(PURPOSES), "max_body_bytes": cfg.max_body_bytes,
                "boundary": BOUNDARY, "errors": self.errors, "last_error": self.last_error}
         if self._store is not None or (cfg and cfg.enabled):
             try:
