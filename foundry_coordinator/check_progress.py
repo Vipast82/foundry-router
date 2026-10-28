@@ -39,6 +39,23 @@ def finish(project: str, task: str, name: str, result: str) -> None:
             row.update(state=result or "done", end=time.time())
 
 
+def counts(project: str, task: str, name: str, row: dict) -> None:
+    """Live test counts of a running check ({done, total, pass, fail}, see
+    live_tests.Counts.row), for the control center's progress bar."""
+    with _lock:
+        r = ((_runs.get((project, task)) or {}).get("checks") or {}).get(name)
+        if r is not None:
+            r["counts"] = {k: row.get(k) for k in ("done", "total", "pass", "fail", "estimated")
+                           if row.get(k) is not None}
+
+
+def _row(n: str, r: dict, now: float) -> dict:
+    out = {"name": n, "state": r["state"], "seconds": int((r["end"] or now) - r["start"]),
+           "started_ts": r["start"]}
+    out.update(r.get("counts") or {})
+    return out
+
+
 def _worst(rows) -> str:
     seen = {str(getattr(r, "result", "") or "") for r in rows or []
             if getattr(r, "required", True)}
@@ -69,17 +86,24 @@ def snapshot(project: str, task: str) -> list[dict]:
     with _lock:
         run = _runs.get((project, task)) or {}
         rows = sorted((run.get("checks") or {}).items(), key=lambda kv: kv[1]["start"])
-        return [{"name": n, "state": r["state"],
-                 "seconds": int((r["end"] or now) - r["start"])} for n, r in rows]
+        return [_row(n, r, now) for n, r in rows]
 
 
 def _dur(s: int) -> str:
     return f"{s // 60}m{s % 60:02d}s" if s >= 60 else f"{s} s"
 
 
+def _n(r: dict) -> str:
+    if r.get("done") is None:
+        return ""
+    tot = f"/{'~' if r.get('estimated') else ''}{r['total']}" if r.get("total") else ""
+    fail = f", {r['fail']} fail" if r.get("fail") else ""
+    return f" {r['done']}{tot}{fail}"
+
+
 def summary(project: str, task: str) -> str:
-    """'done_check PASS 41 s · Lune suite running 5m02s · ...' or ''."""
-    return " · ".join(f"{r['name']} {r['state']} {_dur(r['seconds'])}"
+    """'done_check PASS 41 s · Lune suite running 812/~1609, 2 fail 5m02s · ...' or ''."""
+    return " · ".join(f"{r['name']} {r['state']}{_n(r)} {_dur(r['seconds'])}"
                       for r in snapshot(project, task))
 
 
@@ -95,8 +119,7 @@ def running() -> list[dict]:
             out.append({"project": pid, "task": tid, "kind": run.get("kind") or "",
                         "head": (run.get("head") or "")[:12],
                         "seconds": int(now - run.get("start", now)),
-                        "checks": [{"name": n, "state": r["state"],
-                                    "seconds": int((r["end"] or now) - r["start"])}
+                        "checks": [_row(n, r, now)
                                    for n, r in sorted(checks.items(),
                                                       key=lambda kv: kv[1]["start"])]})
     return out

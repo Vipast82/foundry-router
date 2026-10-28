@@ -160,3 +160,28 @@ def test_helpers_in_progress_show_their_last_report(tmp_path):
     h = out["html"]
     assert "last report 50 s ago" in h and "last report 15 min ago" in h and "warn-t" in h
     assert "Background work" not in _model(tmp_path, task("IMPLEMENTING"))["html"]
+
+
+# ----------------------------------------------------------- test runs (v0.152)
+
+def test_test_runs_show_live_counts_with_pass_fail_and_a_bar(tmp_path):
+    rows = [{"name": "Lune suite", "state": "running", "source": "coordinator", "done": 812,
+             "total": 1609, "pass": 810, "fail": 2, "estimated": True, "started_ts": 1000.0,
+             "updated_ts": 1290.0},
+            {"name": "Studio gate CALLs", "state": "running", "source": "session", "done": 8,
+             "total": 30, "pass": 8, "fail": 0, "file": "docs/progress/" + HOSTILE,
+             "seconds": 95, "updated_ts": 1299.0},
+            {"name": "gate (host steps) · a8", "state": "PASS", "source": "session", "done": 40,
+             "total": None, "pass": 40, "fail": 0}]
+    out = _model(tmp_path, task("VERIFYING", view={"tests": rows}), {"now": 1300.0})
+    m, h = out["m"], out["html"]
+    assert [round(r["pct"]) if r["pct"] is not None else None for r in m["tests"]] == [50, 27, None]
+    assert m["tests"][0]["elapsed"] == 300                      # counted live from the start
+    assert "Test runs" in h and "812</b> of <b class=\"num\">~1609</b> tests" in h
+    assert "8</b> of <b class=\"num\">30</b> CALLs" in h and "40</b> tests so far" in h
+    assert "has-fail" in h and "bad-t" in h and 'aria-valuenow="8"' in h
+    assert "<img" not in h and "&lt;img" in h
+    folded = _model(tmp_path, task("VERIFYING", view={"tests": rows}), {"now": 1300.0},
+                    compact=True)["html"]
+    assert "812</b> of <b class=\"num\">~1609</b>" in folded and "2 failed" in folded
+    assert "Test runs" not in _model(tmp_path, task("VERIFYING"))["html"]

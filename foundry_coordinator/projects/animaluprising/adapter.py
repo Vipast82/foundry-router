@@ -56,6 +56,12 @@ STUDIO_ROWS = ("GATE", "BOOT", "EVIDENCE")
 _ROW = re.compile(r"^(PASS|FAIL|NOTE)\s+(\S+)\s+(.*)$")
 
 
+def _text(v) -> str:
+    if v is None:
+        return ""
+    return v.decode("utf-8", errors="replace") if isinstance(v, bytes) else str(v)
+
+
 class AnimalUprisingAdapter(GenericAdapter):
     # the BUILD / repair / CLOSE prompts carry the track notice themselves (2026-10-27):
     # the engine does not append its generic TRACK_BRIEF
@@ -907,9 +913,12 @@ Change no code or test file in this session; if one needs changing, stop and rep
             if n and len(todo) > 1:
                 # the negative control is small: one worker, the suite the rest
                 n = 1 if mode == "negative" else max(1, n - 1)
-            jobs.append(lambda name=name, mode=mode, args=args, pat=pat, n=n: track(
-                self.p.id, spec.task_id, label.get(mode, name),
-                lambda: [self._lune_run(lune, name, args, pat, n, edir, revision)]))
+            lab = label.get(mode, name)
+            jobs.append(lambda name=name, mode=mode, args=args, pat=pat, n=n, lab=lab: track(
+                self.p.id, spec.task_id, lab,
+                lambda: [self._lune_run(lune, name, args, pat, n, edir, revision,
+                                        progress=self._lune_progress(spec.task_id, lab,
+                                                                     mode))]))
         for (i, *_), rows in zip(todo, _concurrently(jobs)):
             out[i] = rows[0]
         if any(t[5] for t in todo):
@@ -947,19 +956,82 @@ Change no code or test file in this session; if one needs changing, stop and rep
                   f"{e.get('detail', '')}; original log {src}")
         return VerificationResult(name, PASS, True, log, detail, revision)
 
-    def _lune_run(self, lune, name, args, pat, workers, edir, revision):
+    def _lune_progress(self, task_id: str, label: str, mode: str):
+        """A callback that turns the log's lines so far into live counts
+        (check_progress.counts), with the last full run's total while it runs."""
+        from ... import check_progress, live_tests
+        key = "lune:negative" if mode == "negative" else "lune:full"
+
+        def cb(c, final: bool = False):
+            row = c.row()
+            if mode == "negative":
+                # every spec must FAIL here: a FAIL line is the expected outcome and
+                # a PASS line is the problem
+                row["pass"], row["fail"] = row["fail"] + c.expected, row["pass"]
+            if final:
+                if c.result and row.get("total"):
+                    live_tests.remember_total(self.state_dir, key, row["total"])
+            elif row.get("total") is None:
+                row["total"] = live_tests._known_total(self.state_dir, key)
+                row["estimated"] = row["total"] is not None or None
+                if row["total"] is not None and row["done"] > row["total"]:
+                    row["total"] = row["estimated"] = None
+            check_progress.counts(self.p.id, task_id, label, row)
+        return cb
+
+    LUNE_POLL_S = 1.0
+
+    def _lune_watch(self, log: str, progress, stop):
+        """Read the log as Lune writes it and report the counts every second."""
+        import threading
+        from ...live_tests import read
+
+        def loop():
+            while not stop.wait(self.LUNE_POLL_S):
+                c = read(log)
+                if c is not None:
+                    progress(c)
+        th = threading.Thread(target=loop, daemon=True, name="lune-progress")
+        th.start()
+        return th
+
+    def _lune_run(self, lune, name, args, pat, workers, edir, revision, progress=None):
+        """One Lune run. Its output goes straight to the evidence log, so the
+        control center can count the tests while it runs (2026-10-27)."""
+        import threading
         log = os.path.join(edir, name + ".log")
         env = dict(os.environ, AU_LUNE_WORKERS=str(workers)) if workers else None
         t0 = time.time()
+        stop, th = threading.Event(), None
         try:
-            r = subprocess.run([lune, "run", "tests/lune/run.luau", *args],
-                               cwd=self.p.workspace, capture_output=True, text=True, env=env,
-                               timeout=self._lune_timeout(), encoding="utf-8", errors="replace")
-            text = (r.stdout or "") + (r.stderr or "")
+            with open(log, "w", encoding="utf-8") as out:
+                if progress:
+                    th = self._lune_watch(log, progress, stop)
+                try:
+                    r = subprocess.run([lune, "run", "tests/lune/run.luau", *args],
+                                       cwd=self.p.workspace, stdout=out,
+                                       stderr=subprocess.STDOUT, env=env,
+                                       timeout=self._lune_timeout())
+                finally:
+                    stop.set()
+            if r.stdout is not None or r.stderr is not None:
+                text = _text(r.stdout) + _text(r.stderr)     # a runner that captured it
+                with open(log, "w", encoding="utf-8") as f:
+                    f.write(text)
+            else:
+                with open(log, encoding="utf-8", errors="replace") as f:
+                    text = f.read()
         except (OSError, subprocess.TimeoutExpired) as e:
+            stop.set()
             return VerificationResult(name, UNKNOWN, True, "", str(e), revision)
-        with open(log, "w", encoding="utf-8") as f:
-            f.write(text)
+        finally:
+            if th is not None:
+                th.join(timeout=5)
+        if progress:
+            from ...live_tests import Counts
+            c = Counts()
+            c.feed(text + "\n")
+            progress(c, final=True)
         ok = re.search(pat, text, re.M)
         return VerificationResult(name, PASS if ok else FAIL, True, log,
                                   (ok.group(0) if ok else text[-500:]), revision,
@@ -980,6 +1052,15 @@ Change no code or test file in this session; if one needs changing, stop and rep
                                             "check": name, "lune": version})
             except OSError:
                 pass
+
+    # what a session's runs write as they go: AU's command runner (tools/guard/run.py)
+    # logs every Lune / gate run there, and the Studio half of a gate writes its raw CALL
+    # lines to the sprint's studio_lines file (SESSION_CORE: append as each CALL returns)
+    LIVE_TEST_SOURCES = ("tmp/guard/cmd/*.log", "docs/progress/{task}_studio_lines.txt")
+
+    def live_test_sources(self, task_id: str) -> list:
+        v = self.cfg.get("live_test_sources")
+        return list(v) if isinstance(v, list) else list(self.LIVE_TEST_SOURCES)
 
     def session_audit(self, spec: TaskSpec, session_id: str, transcript: list,
                       revision: str) -> list:

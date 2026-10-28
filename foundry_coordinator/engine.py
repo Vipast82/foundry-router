@@ -334,6 +334,12 @@ class Coordinator:
                     self.store.event(pid, t["task_id"], "error", detail={"error": str(e)[:500]})
                     self.log(f"{pid}/{t['task_id']}: {type(e).__name__}: {e}")
                 after = self.store.task(pid, t["task_id"])
+                try:
+                    if after:
+                        self._live_tests(self.tracks.project_for(P, after), after)
+                except Exception as e:                            # noqa: BLE001
+                    self.log(f"{pid}/{t['task_id']}: live test counts failed: "
+                             f"{type(e).__name__}: {e}")
                 if after and after["state"] != before[0]:
                     acted.append(f"{pid}/{t['task_id']}: {before[0]} -> {after['state']}")
                     # closeout finalizes capture itself; these exits are best effort
@@ -3257,6 +3263,46 @@ class Coordinator:
         except Exception as e:                                    # noqa: BLE001
             self.log(f"{P.id}: memory review note failed: {type(e).__name__}: {e}")
             return ""
+
+    LIVE_TEST_STATES = (S.IMPLEMENTING, S.VERIFYING, S.CLOSING)
+    LIVE_TEST_EVERY_S = 3.0
+
+    def _live_tests(self, P: Project, t: dict) -> None:
+        """data.live_tests: the test runs in progress for this task, with counts
+        (live_tests.py): the coordinator's own background checks and the session's
+        runs the adapter names. Display only (the control center's progress bars).
+        Written only when a count changed; removed when the task leaves these states."""
+        from . import check_progress, live_tests
+        d = t.get("data") or {}
+        if t["state"] not in self.LIVE_TEST_STATES:
+            if d.get("live_tests") is not None:
+                self.store.merge_data(P.id, t["task_id"], live_tests=None)
+            return
+        now = self.clock()
+        last = self.__dict__.setdefault("_live_tests_at", {})
+        key = (P.id, t["task_id"])
+        if now - last.get(key, 0) < self.LIVE_TEST_EVERY_S:
+            return
+        last[key] = now
+        rows = []
+        if t["state"] in (S.VERIFYING, S.CLOSING):
+            for c in check_progress.snapshot(P.id, t["task_id"]):
+                if c.get("done") is not None or c["state"] == "running":
+                    rows.append({**c, "source": "coordinator"})
+        srcs = getattr(P.adapter, "live_test_sources", None)
+        pats = srcs(t["task_id"]) if callable(srcs) else []
+        if pats:
+            rows += live_tests.collect(P.profile.workspace, t["task_id"], pats,
+                                       self.state_dir, now=time.time())
+        rows = rows[:8]
+        sig = [{k: v for k, v in r.items() if k not in ("seconds", "updated_ts")}
+               for r in rows]
+        old = [{k: v for k, v in r.items() if k not in ("seconds", "updated_ts")}
+               for r in ((d.get("live_tests") or {}).get("rows") or [])]
+        if sig == old:
+            return
+        self.store.merge_data(P.id, t["task_id"], live_tests={"rows": rows, "ts": time.time()}
+                              if rows else None)
 
     def _notes_requeue(self, ids: list[str]) -> None:
         """The prompt carrying these notes was refused (nothing sent): they wait

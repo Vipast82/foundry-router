@@ -2,6 +2,38 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.152.0 — live test tracker: "8 of 30 done, 1 failed" while tests run
+
+Victor 2026-10-27: "When it does the sessions for Lua and gate running for the testing, is there
+a way to have a status bar, with 8 out of 30 tests completed, pass / fail values, live tracker?"
+
+- **Control center, task header:** a new "Test runs" block. Each run in progress (and each one
+  that finished in the last 15 minutes) shows:
+  - a progress bar with done / total;
+  - ✓ pass and ✗ fail counts, the elapsed time and the state.
+  The folded header keeps a one-line count of the running suite.
+- **What is counted** (`foundry_coordinator/live_tests.py`, from the runs' own output lines;
+  only the bytes added since the last read are read):
+  - **The coordinator's Lune runs (VERIFY/CLOSE):** Lune now writes straight to the evidence
+    log and a watcher reports the counts every second. While a run is going, its total is
+    the last full run's count, shown as `~1609`.
+  - **The session's runs through AU's `tools/guard/run.py`** (Lune, gate host steps):
+    `tmp/guard/cmd/*.log`.
+  - **The Studio half of a gate:** `docs/progress/<ID>_studio_lines.txt`. The bar is CALL
+    n of the plan's `-> N CALLs`. AU's SESSION_CORE now says to append each CALL's lines as
+    it returns; this AU rule lands with the AU prep commits.
+  - A negative control's expected FAIL lines are not counted as failures.
+- **Where it shows:**
+  - The task view (`task_view.tests`) and the bridge (`live_tests`) carry the rows only while
+    the task is IMPLEMENTING, VERIFYING or CLOSING.
+  - The heartbeat's background checks carry the counts too, and the activity graph labels
+    them: `Lune suite running 812/1609 (2 fail)`.
+  - The task note reads, for example, `Lune suite running 812/~1609, 2 fail 5m02s`.
+- **Adapters:** `live_test_sources(task_id)` names the files to watch. The generic adapter has
+  none; AU sets them, and `[animaluprising] live_test_sources` overrides them.
+- Display only: nothing decides on these numbers. Engine writes happen only when a count
+  changes, at most every 3 s.
+
 ## v0.151.0 — rules streamline: one source of truth, no hand-offs to the owner
 
 Victor 2026-10-27: "go through all the rules, make sure we have continuity on all the rules, look

@@ -654,7 +654,9 @@ class ControlCenter:
                  "kind": _s(r.get("kind"), 20), "head": _s(r.get("head"), 40),
                  "seconds": int(_f(r.get("seconds")) or 0),
                  "checks": [{"name": _s(c.get("name"), 60), "state": _s(c.get("state"), 30),
-                             "seconds": int(_f(c.get("seconds")) or 0)}
+                             "seconds": int(_f(c.get("seconds")) or 0),
+                             **{k: int(_f(c.get(k))) for k in ("done", "total", "pass", "fail")
+                                if _f(c.get(k)) is not None and _f(c.get(k)) >= 0}}
                             for c in (r.get("checks") or [])[:12] if isinstance(c, dict)]}
                 for r in payload["checks"][:20] if isinstance(r, dict)]
         if kind == "client":
@@ -1799,6 +1801,29 @@ class ControlCenter:
             out["persona"] = _s(b.get("persona"), 120)
         return out
 
+    @staticmethod
+    def _tests_view(d: dict, eff: str) -> Optional[list]:
+        """Test runs in progress with live counts (the coordinator's live_tests:
+        its own Lune runs and the session's Lune / gate / Studio CALL runs), bounded
+        for the progress bars. Only while a session or the checks can be running."""
+        rows = d.get("live_tests")
+        if eff not in ("IMPLEMENTING", "VERIFYING", "CLOSING") or not isinstance(rows, list):
+            return None
+        num = lambda v: v if isinstance(v, (int, float)) and not isinstance(v, bool) and v >= 0 else None  # noqa: E731
+        out = []
+        for r in rows[:8]:
+            if not isinstance(r, dict):
+                continue
+            row = {"name": _s(r.get("name"), 80), "state": _s(r.get("state"), 30),
+                   "source": _s(r.get("source"), 20), "file": _s(r.get("file"), 200),
+                   "estimated": r.get("estimated") is True,
+                   **{k: num(r.get(k)) for k in ("done", "total", "pass", "fail", "seconds",
+                                                 "started_ts", "updated_ts")}}
+            if row["total"] is not None and (row["done"] or 0) > row["total"]:
+                row["total"] = None
+            out.append(row)
+        return out or None
+
     def _safe_task_view(self, task: dict) -> dict:
         try:
             return self.task_view(task)
@@ -1864,6 +1889,7 @@ class ControlCenter:
                 "build": self._build_continuing(d, eff),
                 # the fast lane's gate / vision batches (v0.130): not Kilo sessions
                 "background": self._background_view(d, eff),
+                "tests": self._tests_view(d, eff),
                 "readiness": {"items": ready,
                               "failing": sum(1 for r in ready if r.get("ok") is not True
                                              and r.get("blocking")),
@@ -2223,8 +2249,11 @@ class ControlCenter:
                 cn = f"{rn}:{c.get('name')}"
                 cs = int(c.get("seconds") or 0)
                 dur = f"{cs // 60}m{cs % 60:02d}s" if cs >= 60 else f"{cs}s"
+                cnt = ""
+                if c.get("done") is not None:
+                    cnt = f" {c['done']}" + (f"/{c['total']}" if c.get("total") else "") +                         (f" ({c['fail']} fail)" if c.get("fail") else "")
                 nodes[cn] = {"id": cn, "kind": "check",
-                             "label": f"{c.get('name')} {c.get('state')} {dur}",
+                             "label": f"{c.get('name')} {c.get('state')}{cnt} {dur}",
                              "ref": {"task": tid, "check": c.get("name")}}
                 edge(rn, cn, "check", state_of.get(str(c.get("state")), "completed"),
                      {"task": tid, "check": c.get("name"), "state": c.get("state")})

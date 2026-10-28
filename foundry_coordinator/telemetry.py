@@ -426,6 +426,32 @@ def background_work(task: dict) -> Optional[dict]:
     return out
 
 
+_LT_STATES = ("IMPLEMENTING", "VERIFYING", "CLOSING")
+
+
+def live_tests_view(task: dict) -> Optional[list]:
+    """The test runs in progress for one task with their counts (engine
+    _live_tests / live_tests.py), bounded for the control center's progress
+    bars. Only in the states that write them: a record left behind never shows."""
+    if (task or {}).get("state") not in _LT_STATES:
+        return None
+    lt = ((task or {}).get("data") or {}).get("live_tests")
+    rows = lt.get("rows") if isinstance(lt, dict) else None
+    if not isinstance(rows, list) or not rows:
+        return None
+    num = lambda v: v if isinstance(v, (int, float)) and not isinstance(v, bool) and v >= 0 else None  # noqa: E731
+    out = []
+    for r in rows[:8]:
+        if not isinstance(r, dict):
+            continue
+        out.append({"name": _cap(r.get("name"), 80), "state": _cap(r.get("state"), 30),
+                    "source": _cap(r.get("source"), 20), "file": _cap(r.get("file"), 200),
+                    "estimated": r.get("estimated") is True,
+                    **{k: num(r.get(k)) for k in ("done", "total", "pass", "fail", "seconds",
+                                                  "started_ts", "updated_ts")}})
+    return out or None
+
+
 def project_pause_meta(q, project_id: str) -> dict:
     """The project-pause record the control channel writes (meta
     project_pause:<pid>, JSON), or {}."""
@@ -1712,6 +1738,7 @@ class TelemetryBridge:
              "build_continuing": build_continuation(self.reader.task_transitions(
                  t["project_id"], t["task_id"])),
              "background": background_work(t),
+             "live_tests": live_tests_view(t),
              "limits": {k: P.profile.limit(k, v) for k, v in (
                  ("max_attempts", 3), ("max_sessions_per_task", 8), ("max_review_calls", 4),
                  ("max_closeout_attempts", 2), ("session_timeout_minutes", 0),

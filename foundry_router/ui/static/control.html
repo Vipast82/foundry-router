@@ -169,6 +169,9 @@ body.noanim .sp-bar i { transition:none; }
 #sprint .sp-path { overflow-wrap:anywhere; font-size:11.5px; color:var(--dim); }
 #sprint .bg-find { margin:2px 0 4px 96px; font-size:12px; }
 #sprint .bad-t { color:var(--bad); } #sprint .warn-t { color:var(--warn); }
+#sprint .ok-t { color:var(--ok); }
+#sprint .sp-bar.bg.has-fail i { background:linear-gradient(90deg, var(--info), var(--info) 85%, var(--bad)); }
+#sprint .sp-tests { margin-top:6px; }
 @media (max-width: 760px) {
   #sprint .bg-find { margin-left:0; }
   #sprint.show { grid-template-columns:minmax(0, 1fr); padding:6px 8px; }
@@ -1758,8 +1761,21 @@ function sprintModel(t, ctx) {
       persona: String(u.persona || ""), age: u.updated_ts ? Math.max(0, now - u.updated_ts) : null}));
   const bgDoing = bg && bg.kind === "gate" ? "Running the studio gate (a script, not a Kilo session)"
     : bg && bg.kind === "vision" ? "Vision review of the captured frames (model calls, not a Kilo session)" : "";
+  // test runs with live counts: the coordinator's own Lune runs and the session's
+  // Lune / gate / Studio CALL runs (coordinator live_tests, v0.152)
+  const tests = (Array.isArray(v.tests) ? v.tests : []).slice(0, 8).map(r => {
+    const total = Number.isInteger(r.total) && r.total > 0 ? r.total : null;
+    const done = Number.isInteger(r.done) ? r.done : null;
+    const t0 = r.started_ts || null, upd = r.updated_ts || null;
+    return {name: String(r.name || "test run"), state: String(r.state || ""), source: r.source || "",
+      file: r.file || "", done, total, pass: Number.isInteger(r.pass) ? r.pass : null,
+      fail: Number.isInteger(r.fail) ? r.fail : null, estimated: !!r.estimated,
+      pct: total !== null && done !== null ? clamp(100 * done / total, 0, 100) : null,
+      elapsed: r.source === "coordinator" && t0 && r.state === "running" ? Math.max(0, now - t0) : (Number.isFinite(r.seconds) ? r.seconds : null),
+      age: upd ? Math.max(0, now - upd) : null};
+  });
   return {task: t.task_id, project: t.project_id, state, phase, mode, phases, build, obligations, todo, needs,
-    bg, helpers,
+    bg, helpers, tests,
     doing: bgDoing || STATE_DOING[state] || state || "No state reported",
     detail: d.next_action && d.next_action !== STATE_DOING[state] ? String(d.next_action) : "",
     attempt: d.attempt ?? null, sessions: d.sessions ?? null,
@@ -1799,9 +1815,11 @@ function sprintHtml(m, compact) {
     <span class="spacer"></span><button class="ghost" id="sprint-toggle" aria-expanded="${compact ? "false" : "true"}" title="${compact ? "Show the full progress header" : "Fold the progress header to one line"}">${compact ? "▸" : "▾"}</button></div>`;
   if (compact) {
     const brief = B.known && !B.complete ? `<div class="sp-line"><span class="sp-k">BUILD steps</span><span>${B.total !== null ? `<b class="num">${B.atMost ? "≤ " : ""}${esc(B.done)}</b> of <b class="num">${esc(B.total)}</b> ticked` : `<b class="num">${esc(B.open)}${B.atMost ? "+" : ""}</b> open`}</span></div>` : "";
-    return `<div class="sp-main">${head}${pour}${brief}</div><div class="sp-side">${needs}</div>`;
+    const tr = (m.tests || []).find(r => r.state === "running" && r.done !== null);
+    const tbrief = tr ? `<div class="sp-line"><span class="sp-k">${esc(tr.name.split(" · ")[0])}</span><span><b class="num">${esc(tr.done)}</b>${tr.total !== null ? ` of <b class="num">${tr.estimated ? "~" : ""}${esc(tr.total)}</b>` : ""}${tr.fail ? ` <span class="bad-t">· ${esc(tr.fail)} failed</span>` : ""}</span></div>` : "";
+    return `<div class="sp-main">${head}${pour}${brief}${tbrief}</div><div class="sp-side">${needs}</div>`;
   }
-  return `<div class="sp-main">${head}${pour}${bar}${subs.length ? `<div class="sp-subs">${subs.join("")}</div>` : ""}${backgroundHtml(m)}</div><div class="sp-side">${doing}${needs}</div>`;
+  return `<div class="sp-main">${head}${pour}${bar}${subs.length ? `<div class="sp-subs">${subs.join("")}</div>` : ""}${testsHtml(m)}${backgroundHtml(m)}</div><div class="sp-side">${doing}${needs}</div>`;
 }
 const mmss = s => s === null || s === undefined ? "" : `${Math.floor(s / 60)}:${String(Math.floor(s % 60)).padStart(2, "0")}`;
 const agoText = s => s === null || s === undefined ? "" : s < 90 ? `${Math.round(s)} s ago` : s < 5400 ? `${Math.round(s / 60)} min ago` : `${(s / 3600).toFixed(1)} h ago`;
@@ -1832,6 +1850,29 @@ function backgroundHtml(m) {
       <span class="${h.age !== null && h.age > 600 ? "warn-t" : "dim"}">${h.age !== null ? "last report " + esc(agoText(h.age)) : "no report yet"}</span></div>`);
   if (!rows.length) return "";
   return `<div class="sp-bg" role="group" aria-label="Background work"><div class="sp-k">Background work <span class="dim">· runs outside a Kilo session, so the panes can look quiet</span></div>${rows.join("")}</div>`;
+}
+// "Test runs": live pass/fail counts while a suite, a gate or the Studio CALLs run.
+// The bar is done / total; the total of a run still going is the last full run's
+// count ("~") until the run prints its own.
+function testsHtml(m) {
+  const rows = (m.tests || []).map(r => {
+    const running = r.state === "running";
+    const st = running ? `<span class="pill info">running</span>`
+      : /^PASS/.test(r.state) ? `<span class="pill ok">${esc(r.state)}</span>`
+      : /^(FAIL|UNKNOWN|error)/.test(r.state) ? `<span class="pill bad">${esc(r.state)}</span>`
+      : `<span class="pill">${esc(r.state || "done")}</span>`;
+    const isCalls = /CALL/.test(r.name);
+    const unit = isCalls ? "CALLs" : "tests";
+    const count = r.done === null ? "" : r.total !== null
+      ? `<b class="num">${esc(r.done)}</b> of <b class="num">${r.estimated ? "~" : ""}${esc(r.total)}</b> ${unit}`
+      : `<b class="num">${esc(r.done)}</b> ${unit} so far`;
+    const pf = r.pass === null && r.fail === null ? "" : `<span><span class="ok-t">✓ <b class="num">${esc(r.pass ?? 0)}</b></span> <span class="${r.fail ? "bad-t" : "dim"}">✗ <b class="num">${esc(r.fail ?? 0)}</b></span></span>`;
+    const where = r.source === "session" ? "the session's run" : "coordinator check";
+    const bar = r.pct === null ? "" : `<span class="sp-bar bg${r.fail ? " has-fail" : ""}" role="progressbar" aria-valuemin="0" aria-valuemax="${esc(r.total)}" aria-valuenow="${esc(r.done)}" aria-label="${esc(r.name)} ${unit} done"><i style="width:${r.pct.toFixed(1)}%"></i></span>`;
+    return `<div class="bg-row"><span class="bg-k" title="${esc(where)}${r.file ? " · " + esc(r.file) : ""}">${esc(r.name)}</span>${st}${bar}<span>${count}</span>${pf}<span class="dim">${r.elapsed !== null && r.elapsed !== undefined ? `<b class="num">${esc(mmss(r.elapsed))}</b>` : ""}${running && r.age !== null && r.age > 120 ? ` · last line ${esc(agoText(r.age))}` : ""}</span></div>`;
+  });
+  if (!rows.length) return "";
+  return `<div class="sp-bg sp-tests" role="group" aria-label="Test runs"><div class="sp-k">Test runs <span class="dim">· live counts from the run's own output</span></div>${rows.join("")}</div>`;
 }
 /*progress-end*/
 function renderSprint() {

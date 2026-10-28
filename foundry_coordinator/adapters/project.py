@@ -218,6 +218,12 @@ class GenericAdapter(ReviewContractDefaults):
         results; the generic adapter has none)."""
         return []
 
+    def live_test_sources(self, task_id: str) -> list:
+        """Files (globs relative to the workspace, `{task}` = the task id) a
+        session's test runs write line by line; live_tests.py counts their
+        PASS:/FAIL: lines for the control center. None by default."""
+        return []
+
     def closeout_mode(self) -> str:
         """none (engine just publishes), commands (closeout-phase checks run
         commands that write closeout files), session (a fresh coding session)."""
