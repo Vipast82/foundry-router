@@ -10,6 +10,7 @@ import json
 import uuid
 
 from .adapters.foundry import FoundryError
+from .infra import active_seconds as _active_seconds
 
 SYSTEM = """You are the read-only recovery adviser for an approved coding task whose ordinary repair attempts are exhausted. Diagnose why the previous approach failed and propose a materially different, concrete repair within the existing scope. You cannot waive checks, change acceptance/test expectations, access credentials, grant permissions, approve visuals or expand scope. If any of those is needed, say needs_human. You have no tools. Missing evidence remains unknown. Return only JSON with action (repair|needs_human|stop), summary, and steps (1-6 concrete strings for repair; otherwise an empty array). Do not recommend repeating the same unsuccessful approach."""
 
@@ -125,7 +126,7 @@ class RetryGuidance:
                 "ts": self.c.clock()}
         if (t["sessions"] >= P.profile.limit("max_sessions_per_task", 8) or
                 (P.profile.limit("max_task_minutes", 0) and t.get("started_ts") and
-                 self.c.clock() - t["started_ts"] > P.profile.limit("max_task_minutes", 0) * 60)):
+                 _active_seconds(self.c, t) > P.profile.limit("max_task_minutes", 0) * 60)):
             self._record(P, t, {**base, "status": "skipped", "reason": "hard session/time limit reached"})
             return False
         if not P.foundry or not cfg["persona"] or cfg["persona"] == P.profile.persona("implementer", t["task_id"]):
