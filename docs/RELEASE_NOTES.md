@@ -2,6 +2,16 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.156.8 — the scripted Studio gate's PASS is never "flaky"
+
+GF-GATE1, 2026-10-28 15:21: the coordinator's scripted Studio gate passed (2/2), but the
+session's earlier `gate.ps1 -Finish` FAIL (the Studio half it no longer runs itself) on the
+same dependencies made the verdict "flaky", and the submission was refused.
+
+- **Same rule as the fast-lane gate (B1).** The newest PASS from the coordinator's own
+  revision-bound scripted Studio run (`tool=studio_gate`, `source=coordinator`) is the verdict;
+  older FAILs no longer make it flaky. Session runs keep the flaky rule.
+
 ## v0.156.7 — landed prep commits never count against a sprint's scope
 
 GF-GATE1, 2026-10-28 15:11: its Studio gate passed, but verification failed scope on

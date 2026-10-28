@@ -995,7 +995,12 @@ class EvidenceLedger:
         if decisive:
             newest = decisive[0]
             fails = [r for r in decisive if r["result"] == "FAIL"]
-            if cid == "fast_lane.gate" and newest["result"] == "PASS":
+            scripted = (newest.get("tool") == "studio_gate" and
+                        newest.get("source") == "coordinator")
+            if (cid == "fast_lane.gate" or scripted) and newest["result"] == "PASS":
+                # 2026-10-28 GF-GATE1 15:21: the coordinator's scripted Studio gate (studio_calls)
+                # is the same kind of revision-bound run; a session's earlier `gate.ps1
+                # -Finish` FAIL (the Studio half it can no longer run itself) read as flaky.
                 # B1 (2026-10-21): the fast-lane gate is the coordinator's own, revision-bound
                 # run of everything that changed; its newest PASS supersedes any older FAIL
                 # (a timeout, a harness or gate-manifest fix outside the record's dependency

@@ -156,6 +156,36 @@ def test_newest_fast_lane_gate_pass_is_never_flaky(tmp_path):
     assert [m["check_id"] for m in led.missing(P, spec(), r1)] == ["other.check"]
 
 
+def test_newest_scripted_studio_gate_pass_is_never_flaky(tmp_path):
+    """GF-GATE1 15:21 replay: the session's own gate.ps1 FAIL, then the coordinator's
+    scripted Studio gate PASS on unchanged dependencies, read as flaky and blocked review.
+    A session PASS after a FAIL keeps the flaky rule."""
+    from foundry_coordinator.evidence import EvidenceLedger
+    from foundry_coordinator.store import Store
+    from tests.coordinator.fixtures_evidence import FakeAdapter, make_P, make_ws, spec
+    store = Store(str(tmp_path / "s.sqlite"))
+    clock = iter(range(10_000, 20_000))
+    led = EvidenceLedger(store, str(tmp_path / "st"), clock=lambda: float(next(clock)))
+    ws, r1 = make_ws(tmp_path, {"src/a.lua": "1"})
+    req = [{"check_id": c, "chain_id": "", "seq": None, "prereqs": [], "runtime": False}
+           for c in ("gate:T1", "other.check")]
+    P = make_P("p", ws, {}, FakeAdapter(required=req, deps={"gate:T1": ["src/**"],
+                                                             "other.check": ["src/**"]}))
+    rows = [("gate:T1", "FAIL", "bash", "transcript"), ("gate:T1", "PASS", "studio_gate",
+                                                         "coordinator"),
+            ("other.check", "FAIL", "bash", "transcript"), ("other.check", "PASS", "bash",
+                                                             "transcript")]
+    for n, (cid, res, tool, src) in enumerate(rows):
+        led.record(project_id="p", task_id="T1", check_id=cid, idem_key=f"k{n}", run_id="r",
+                   tool=tool, source=src, check_kind="verification", exec_status="completed",
+                   result=res, tier="verified", source_revision=r1, started_ts=100.0 + n,
+                   ended_ts=101.0 + n, provenance={"summary_line": f"GATE T1 {res}"},
+                   output=res)
+    cur = led.current(P, spec(), r1)
+    assert cur["gate:T1"]["result"] == "PASS" and not cur["gate:T1"].get("flaky")
+    assert [m["check_id"] for m in led.missing(P, spec(), r1)] == ["other.check"]
+
+
 def test_tick_lines_ticks_verified_rows_but_never_the_close_row():
     plan = ("# Plan\n- [ ] 1. Build the HUD\n- [ ] 2. Run the sprint gate green\n"
             "- [x] 3. Stories render\n- [ ] 4. Captures committed for vision\n"
