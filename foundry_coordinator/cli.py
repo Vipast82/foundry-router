@@ -22,7 +22,10 @@ Commands
                                            read-only telemetry bridge for the control center:
                                            Kilo + this store -> Foundry. Safe to run next to a
                                            live `run`; changes nothing, makes no model calls
-  pause PROJECT TASK --reason TEXT         stop a task (its session is aborted)
+  pause PROJECT TASK --reason TEXT [--owner KIND:REF] [--minutes N]
+                                           stop a task (its session is aborted); with an
+                                           owner / minutes it is a hold the self-repair
+                                           sweep resumes when the owner is gone or it expires
   resume PROJECT TASK
   cancel PROJECT TASK --reason TEXT
   pause-project PROJECT [--note]  /  resume-project PROJECT
@@ -33,6 +36,11 @@ Commands
   history PROJECT TASK  /  events [PROJECT]  /  reviews PROJECT TASK
   playbook init|status|reindex|search|add    the cross-project playbook (A1): its own
                                            repo, --playbook or $FOUNDRY_PLAYBOOK
+
+Writing commands (unblock, approve, reject, answer, resume, pause, cancel, decision,
+queue approve, pause/resume-project, tracks and frontier changes) refuse to run when
+the running coordinator (its heartbeat in the state dir) is another version than this
+CLI: run them from the deploy checkout, or pass --force.
 """
 
 from __future__ import annotations
@@ -327,6 +335,80 @@ class _ProcessFiles:
 def _state_dir(a) -> str:
     return os.path.abspath(os.path.expanduser(
         a.state or os.environ.get("FOUNDRY_COORD_STATE") or "~/.foundry-coordinator"))
+
+
+DEPLOY_CHECKOUT = r"C:\Users\shock\foundry-deploy"
+# (command, subcommand or None) pairs that change coordinator state
+_WRITING = {("unblock", None), ("approve", None), ("reject", None), ("answer", None),
+            ("resume", None), ("pause", None), ("cancel", None), ("decision", None),
+            ("pause-project", None), ("resume-project", None), ("queue", "approve"),
+            ("tracks", "start"), ("tracks", "stop"), ("tracks", "merge"),
+            ("tracks", "set-max-agents"), ("frontier", "request"), ("frontier", "return"),
+            ("prep", None)}
+
+
+def _writes(a) -> bool:
+    cmd = a.cmd
+    sub = getattr(a, "qcmd", None) or getattr(a, "tcmd", None) or getattr(a, "action", None)
+    return (cmd, None) in _WRITING or (cmd, sub) in _WRITING
+
+
+def running_version(state_dir: str) -> tuple[str, str]:
+    """(version, why) of the coordinator running on this state dir, from its heartbeat
+    ('' when none runs: no heartbeat, a dead pid, or a heartbeat older than 10 min)."""
+    from . import supervisor as SV
+    from .autoheal import pid_alive
+    p = os.path.join(state_dir, SV.HEARTBEAT_FILE)
+    try:
+        with open(p, encoding="utf-8") as f:
+            hb = json.load(f)
+    except (OSError, ValueError):
+        return "", "no heartbeat"
+    if not isinstance(hb, dict) or not hb.get("version"):
+        return "", "no version in the heartbeat"
+    pid = hb.get("pid")
+    fresh = time.time() - float(hb.get("ts") or 0) < _ProcessFiles.STALE_S
+    if not fresh or (pid and not pid_alive(pid)):
+        return "", "the heartbeat's coordinator is not running"
+    return str(hb["version"]), ""
+
+
+def version_guard(a) -> str:
+    """'' when the command may run, else why not: a writing command from a CLI whose
+    version differs from the running coordinator's (2026-10-28: an unblock ran old dev
+    code from the OneDrive folder and missed the fix the deploy had)."""
+    if not _writes(a) or getattr(a, "force_version", False):
+        return ""
+    from . import __version__
+    running, _ = running_version(_state_dir(a))
+    if not running or running == __version__:
+        return ""
+    here = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    deploy = os.environ.get("FOUNDRY_DEPLOY_DIR") or DEPLOY_CHECKOUT
+    return (f"this CLI is v{__version__} from {here}, the running coordinator is v{running}: "
+            f"run it from {deploy} (or pass --force)")
+
+
+def _add_force(ap) -> None:
+    """--force (dest force_version) on every writing (sub)command: it skips the
+    version guard."""
+    def subs(p):
+        for act in p._actions:                                   # noqa: SLF001
+            if isinstance(act, argparse._SubParsersAction):      # noqa: SLF001
+                return act.choices
+        return {}
+    for cmd, p in subs(ap).items():
+        kids = subs(p)
+        if (cmd, None) in _WRITING:
+            targets = list(kids.values()) or [p]
+        elif kids:
+            targets = [sp for name, sp in kids.items() if (cmd, name) in _WRITING]
+        else:                        # a positional action (frontier request|return|status)
+            targets = [p] if any(w[0] == cmd for w in _WRITING) else []
+        for t in targets:
+            if not any("--force" in a.option_strings for a in t._actions):  # noqa: SLF001
+                t.add_argument("--force", dest="force_version", action="store_true",
+                               help="run even when the running coordinator is another version")
 
 
 def _profile_paths(a) -> list[str]:
@@ -648,6 +730,13 @@ def main(argv=None, clients=None, foundry=None) -> int:
     for name in ("pause", "cancel"):
         x = sub.add_parser(name); x.add_argument("project"); x.add_argument("task")
         x.add_argument("--reason", required=True)
+        if name == "pause":
+            x.add_argument("--owner", default="",
+                           help="hold owner (pid:N, session:ID, task:PROJECT/TASK, case:ID, "
+                                "prep:...); the self-repair sweep resumes the task once the "
+                                "owner is gone")
+            x.add_argument("--minutes", type=float, default=0,
+                           help="hold expiry: the sweep resumes the task after this long")
     x = sub.add_parser("resume"); x.add_argument("project"); x.add_argument("task")
     x = sub.add_parser("pause-project"); x.add_argument("project"); x.add_argument("--note", default="")
     x = sub.add_parser("resume-project"); x.add_argument("project")
@@ -753,7 +842,12 @@ def main(argv=None, clients=None, foundry=None) -> int:
     x.add_argument("--dry-run", dest="dry_run", action="store_true",
                    help="list rows / CALLs / DYNARG / bridges / manual rows / carry; no Studio")
     x.add_argument("--poll", type=float, default=10.0)
+    _add_force(ap)
     a = ap.parse_args(argv)
+    why = version_guard(a)
+    if why:
+        print(f"error: {why}", file=sys.stderr)
+        return 2
     try:
         c = build(a, clients=clients, foundry=foundry)
     except (ProfileError, ValueError) as e:
@@ -1072,7 +1166,7 @@ def _dispatch(a, c: Coordinator) -> int:
             br.stop()
         return 0
     if a.cmd == "pause":
-        c.pause(a.project, a.task, a.reason)
+        c.pause(a.project, a.task, a.reason, owner=a.owner, minutes=a.minutes)
     elif a.cmd == "resume":
         c.resume(a.project, a.task)
     elif a.cmd == "cancel":

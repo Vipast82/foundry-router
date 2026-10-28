@@ -254,6 +254,15 @@ AUTOMATION_DEFAULTS: dict = {
     "track_append_safe": ["docs/progress/STATE.md", "docs/progress/state/**",
                           "docs/progress/STATE_ARCHIVE*.md", "docs/MASTER_ORDER.md",
                           "docs/design/ASSET_LEDGER.md", "docs/memory/**"],
+    # self-repair sweep (foundry_coordinator/selfheal.py, 2026-10-28): what the chat watch
+    # did by hand, every minute, bounded per task per day, each action a self_heal event
+    "self_heal": True,
+    "self_heal_max_actions_per_task_per_day": 6,
+    "self_heal_dead_session_minutes": 2,
+    "self_heal_stuck_case_minutes": 30,
+    "self_heal_stale_lock_minutes": 10,
+    "self_heal_unowned_pause_hours": 12,
+    "self_heal_reverify_fixed": True,
 }
 _SCOPE_RULE_KEYS = {"name", "path", "lines", "blocks", "json_paths_in_plan", "reason"}
 
@@ -761,6 +770,29 @@ _AUTO_DESC = {
                                 "interrupted mid-run).",
     "track_append_safe": "Shared files two sprints may both change without being serial "
                          "(append-only ledgers the rebase merges row by row).",
+    "self_heal": "Self-repair sweep (every minute): ends dead sessions, cancels stuck Lead "
+                 "cases, re-verifies blocks a newer release fixed, releases stale locks, "
+                 "resumes expired or ownerless holds. Each action is a self_heal event in "
+                 "the digest.",
+    "self_heal_max_actions_per_task_per_day": "Most self-repair actions per task in 24 h; "
+                                              "past it the task is left as it is, with a "
+                                              "digest entry.",
+    "self_heal_dead_session_minutes": "A session Kilo reports missing or ended with an error "
+                                      "for this long, while the coordinator still records "
+                                      "it as running, is ended (an implementer gets a free "
+                                      "retry; a Lead call is cancelled and the Lead starts a "
+                                      "new one).",
+    "self_heal_stuck_case_minutes": "A Lead case with no live call and no progress for this "
+                                    "long is cancelled with a note.",
+    "self_heal_stale_lock_minutes": "A lock (coordinator workspace/session lock, gate runner "
+                                    "lock, studio_gate studio.lock) older than this whose "
+                                    "holder has no live session, check or run is released.",
+    "self_heal_unowned_pause_hours": "A task paused with no hold owner for this long gets "
+                                     "one operator notice (alert class pause_forgotten); it "
+                                     "is never resumed automatically.",
+    "self_heal_reverify_fixed": "A BLOCKED task whose blocker a newer running release fixes "
+                                "(selfheal.FIXED_SIGNATURES) is re-verified once, with no "
+                                "attempt charged.",
 }
 
 C = "coordinator"
