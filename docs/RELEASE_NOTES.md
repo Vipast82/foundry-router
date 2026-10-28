@@ -2,6 +2,68 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.151.0 — rules streamline: one source of truth, no hand-offs to the owner
+
+Victor 2026-10-27: "go through all the rules, make sure we have continuity on all the rules, look
+for rules that are deprecated, and look for rules that would cause issues, also try to streamline
+everything". Plan: reports/RULES_STREAMLINE_PLAN.md. Audits: 59 AU findings and 53 Foundry
+findings. Decision: "Coordinator pushes, always; sessions never push."
+
+- **Push:**
+  - The coordinator pushes master after closeout verifies. `publish.mode = "verify_only"` is
+    read as `push`, so the live profile works unchanged.
+  - Every `git push` is a hard deny for every role and phase. A CLOSE session has no push
+    duty, and a track never pushes.
+- **One stop protocol:** BLOCKED with `blocker_kind` = `product` (options, a decision),
+  `tooling` (no options; auto-heal or the Lead, never a decision for the owner) or
+  `user_action` (only what the owner can physically do: a notice, no Lead case, no timeout).
+  - A legacy NEEDS_HUMAN report is read as `user_action`.
+  - A decision timeout never applies an option that needs a human act (when the decision
+    opens and in the sweep).
+- **Prompts:**
+  - A repair reruns only the affected checks (`-Files` the changed files), never the whole gate.
+  - Track sprints get a track-aware prompt: no Studio steps, `done_check --skip-rows
+    GATE,BOOT,EVIDENCE`, no push, and their workspace named.
+  - The kickoff points to `docs/rules/SESSION_CORE.md`; AGENT_RULES is reference only, no
+    longer "applies in full".
+  - Same-session continuations send a short pointer instead of the whole report block.
+  - Dead text is gone: UI-GT1, UI-0x, PREWORK, the vision-helper requirement,
+    `.clinerules`, `-ExecutionPolicy Bypass`.
+- **Lead:** one authority text (write mode means it fixes the blocker), and a diagnosis
+  that still holds may repeat with a new action.
+- **Scope:**
+  - `docs/memory/**` is auto-approved (the coordinator's own memory).
+  - Every SCOPE_REQUEST answer (granted, denied by rule, by the owner or by timeout) is
+    told to the session with its reason.
+  - kilo.jsonc, hooks and secrets are denied by rule.
+- **Edit scope:** `.plan/tmp/**` is editable (prompts send scratch there); `docs/memory` is
+  never editable.
+- **Kilo permissions:** robloxstudio-mcp `upload_asset`, `manage_experience`, `import_rbxm`
+  and the Studio `publish*` tools are hard denies for every role. The Lead gets the
+  implementer's skill map.
+- **2D:**
+  - The images decision offers three options: "Generate them: ChatGPT first (foundry-media),
+    Media_Gen fallback" (recommended), "I will provide the 2D assets myself", and "Hold".
+  - `foundry-media` tools and the `foundry-images` skill are gated like Media_Gen's image
+    tools.
+- **Kilo `instructions`:** `kilo-config` drops KILO_MCP_PROFILES.md and loads SESSION_CORE
+  when the workspace has it.
+- **Report schema:** gains `next`; the helper prompt names `helper_feedback`;
+  COORDINATOR_FORMATS documents the report, MEMORY_NOTE and SCOPE_REQUEST formats.
+- **Live AU profile cleaned** (workstation, not in the repo):
+  - removed the dead `[lanes]` and UI role overrides, the closed fast-lane tasks and the
+    fixed context checkpoints;
+  - one vision round; helpers 3/8;
+  - `[automation]` preflight endpoints (Rojo, local model), `lead_hard_max_calls = 12` and
+    `decision_timeout_minutes = 30`.
+
+The AU side lands as two "prep:" commits (rules phases 1 and 2): SESSION_CORE.md,
+done_check `--skip-rows` / memory / clean-tree fixes, checkpoint.py under Kilo, and the
+trimmed rules.
+
+Coordinator restart needed; run `kilo-config animaluprising --apply` after the AU phase 2
+commit.
+
 ## v0.150.3 — a gate run through AU's command runner counts as a gate run
 
 AU sessions run the gate through `py -3 tools/guard/run.py --name ... -- pwsh -File
