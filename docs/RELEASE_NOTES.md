@@ -33,6 +33,16 @@ a way to have a status bar, with 8 out of 30 tests completed, pass / fail values
   none; AU sets them, and `[animaluprising] live_test_sources` overrides them.
 - Display only: nothing decides on these numbers. Engine writes happen only when a count
   changes, at most every 3 s.
+- **Training tab loads again** (Victor: "training is not working?"):
+  - **Cause:** episode cards over 60,000 characters were stored as sliced JSON
+    (`json.dumps(e)[:60000]`), and `GET /admin/api/training` answered a plain-text 500.
+    The UI then showed a blank "failed to load:".
+  - **Fix:** `foundry_router/jsonfit.py` (`dumps_fit` shrinks the object until it fits and
+    never slices it; `loads_or` never raises), used for episodes, pipeline status and
+    dataset manifests.
+  - Rows already broken show as stubs ("re-push from the workstation"); no migration needed.
+  - An `/admin/api/*` crash now answers JSON naming the exception.
+  - The UI always shows a reason and the HTTP status.
 
 ## v0.151.0 — rules streamline: one source of truth, no hand-offs to the owner
 
