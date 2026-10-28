@@ -413,6 +413,32 @@ async def put_settings(request: Request):
     return {"settings": _cc(request).update_settings(await _body(request), s["actor"])}
 
 
+# --------------------------------------------------------------------------- daily digest
+
+@router.get("/control/api/digests")
+@_guard
+async def digests(request: Request):
+    """The last 7 daily digests (alerts.py). They span every project, so a
+    project-restricted operator gets none."""
+    s = _op(request)
+    al = request.app.state.services.alerts
+    if s["projects"]:
+        return {"digests": [], "note": "digests cover every project; this session is restricted"}
+    return {"digests": await asyncio.to_thread(al.digests, 7),
+            "digest_hour": al.cfg().digest_hour}
+
+
+@router.post("/control/api/digests")
+@_guard
+async def build_digest(request: Request):
+    s = _op(request, mutate=True)
+    if s["projects"]:
+        raise ControlError("digests cover every project; this session is restricted",
+                           "forbidden", 403)
+    al = request.app.state.services.alerts
+    return {"digest": await asyncio.to_thread(al.build_digest, "manual", s["actor"])}
+
+
 @router.get("/control/api/drafts")
 @_guard
 async def drafts(request: Request):

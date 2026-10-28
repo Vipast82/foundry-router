@@ -1051,13 +1051,14 @@ const TABS = {
   "Training":       tabTraining,
   "Clients & Keys": tabClients,
   "Helpers & Limits": tabLimits,
+  "Alerts & digest": tabAlerts,
   "Client":         tabClient,
 };
 // Primary nav groups -> their leaf tabs (the secondary row): the overview
 // first, then watching (Monitor), then what you configure, then records.
 const GROUPS = [
   ["Overview",    ["Overview"]],
-  ["Monitor",     ["Live", "Active Use", "Performance", "Cost", "Scoreboard", "Compare", "Work"]],
+  ["Monitor",     ["Live", "Active Use", "Performance", "Cost", "Scoreboard", "Compare", "Work", "Alerts & digest"]],
   ["Backends",    ["Pool", "Model Registry", "Host Admin"]],
   ["Routing",     ["Personas", "Guardrails", "Routes"]],
   // its own page (operator sign-in, drafts, deploy): the group button opens it
@@ -1091,6 +1092,7 @@ const TAB_HELP = {
   Cost: "What the tokens would cost on paid APIs vs self-hosting.",
   Scoreboard: "Which models win on quality and speed.", Compare: "Side-by-side model comparison.",
   Work: "Coordinator tasks and sessions. Opens the control center for live control.",
+  "Alerts & digest": "Coordinator-down alert, which alerts reach your phone (webhook), and the daily digest.",
   Pool: "Backends, their health and the models they serve.", "Model Registry": "Every known model and its settings.",
   "Host Admin": "Manage the inference hosts.", Personas: "Routing personas and their settings.",
   Guardrails: "Spending and quota rules for paid backends.", Routes: "Map of which routes requests took.",
@@ -3289,6 +3291,65 @@ async function tabLimits() {
     if (body.queue_timeout_seconds === "") delete body.queue_timeout_seconds;
     run(api("setup/limits", {method: "POST", body}));
   });
+}
+
+// Alerts & digest (alerts.py): the coordinator-down alert, which alert classes
+// are pushed to a webhook (a phone via ntfy), and the daily digest.
+async function tabAlerts() {
+  const [d, g] = await Promise.all([api("alerts/settings"), api("alerts/digests?limit=7")]);
+  const s = d.settings, labels = d.labels || {};
+  const fmtTs = t => t ? new Date(t * 1000).toLocaleString() : "—";
+  const co = s.coordinator || {};
+  const coState = co.age_s == null ? "no coordinator heartbeat seen yet"
+    : co.down ? `DOWN since ${fmtTs(co.since)}` : `up (last heartbeat ${Math.round(co.age_s)} s ago)`;
+  const classRows = d.classes.map(c => `<label style="display:block"><input type="checkbox" data-cls="${esc(c)}" ${s.classes[c] ? "checked" : ""}> ${esc(labels[c] || c)} <span class="hint">(${esc(c)})</span></label>`).join("");
+  const outbox = (s.outbox || []).map(o => `<tr><td class="nw">${esc(fmtTs(o.ts))}</td><td>${esc(o.cls)}</td><td>${esc(o.title)}</td><td>${esc(o.status)}${o.attempts > 1 ? " · " + o.attempts + " tries" : ""}</td><td class="hint">${esc(o.last_error || "")}</td></tr>`).join("");
+  const digests = (g.digests || []).map(x => `<details class="card" style="margin:6px 0"><summary><b>${esc(fmtTs(x.ts))}</b> <span class="hint">${esc(x.trigger)}${x.actor && x.actor !== "foundry" ? " by " + esc(x.actor) : ""}${x.sent ? " · webhook " + esc(x.sent) : ""}</span></summary><pre style="white-space:pre-wrap">${esc(x.text || "")}</pre></details>`).join("");
+  $("#main").innerHTML = `
+    <h2>Alerts &amp; digest</h2>
+    <p class="hint">Every alert stays in the control center (bell, browser notification). Only the classes ticked below are
+      also <b>pushed</b> to the webhook (for example an <a href="https://ntfy.sh" target="_blank" rel="noopener">ntfy</a> topic your phone subscribes to);
+      everything else waits for the daily digest. Coordinator: <b>${esc(coState)}</b>.</p>
+    <div class="card"><div class="card-h">Alerts &amp; digest settings</div>
+      <label style="display:block"><input type="checkbox" id="al-enabled" ${s.enabled ? "checked" : ""}> Alerts and digest on</label>
+      <p><label>Coordinator down after <input type="number" id="al-down" min="1" max="1440" style="width:80px" value="${esc(s.coordinator_down_minutes)}"> minutes without a heartbeat</label></p>
+      <p><label>Webhook URL <input type="url" id="al-url" style="width:min(520px,100%)" placeholder="https://ntfy.sh/your-private-topic (empty = page only)" value="${esc(s.webhook_url || "")}"></label>
+        <label>format <select id="al-fmt">${["auto", "ntfy", "json"].map(f => `<option ${s.webhook_format === f ? "selected" : ""}>${f}</option>`).join("")}</select></label></p>
+      <p><label>Access token (optional) <input type="password" id="al-token" autocomplete="off" style="width:240px" placeholder="${s.webhook_token_set ? "set (leave empty to keep)" : "none"}"></label>
+        ${s.webhook_token_set ? `<label><input type="checkbox" id="al-clear-token"> remove the stored token</label>` : ""}
+        <span class="hint">auto = ntfy when the host name contains "ntfy", else JSON {title, text, class, severity, ts}.</span></p>
+      <fieldset><legend>Push these alert classes</legend>${classRows}</fieldset>
+      <p><label><input type="checkbox" id="al-dg-on" ${s.digest_enabled ? "checked" : ""}> Daily digest</label>
+        at <input type="number" id="al-dg-hour" min="0" max="23" style="width:64px" value="${esc(s.digest_hour)}">:00 (router local time)
+        <label><input type="checkbox" id="al-dg-hook" ${s.digest_to_webhook ? "checked" : ""}> also send it to the webhook</label></p>
+      <p><button class="act primary" id="al-save">Save</button>
+        <button class="act" id="al-test" title="One alert in the control center, and a push to the webhook right now">Send test alert</button>
+        <button class="act" id="al-digest" title="Build a digest of the last 24 h now">Build digest now</button></p>
+    </div>
+    <div class="card"><div class="card-h">Recent pushes</div>${outbox ? `<div class="tscroll"><table><tr><th>when</th><th>class</th><th>title</th><th>status</th><th>last error</th></tr>${outbox}</table></div>` : '<p class="hint">Nothing pushed yet.</p>'}</div>
+    <div class="card"><div class="card-h">Last 7 digests</div>${digests || '<p class="hint">No digest yet.</p>'}</div>`;
+  $("#al-save").onclick = () => {
+    const classes = {};
+    document.querySelectorAll("[data-cls]").forEach(i => { classes[i.dataset.cls] = i.checked; });
+    const body = {enabled: $("#al-enabled").checked, coordinator_down_minutes: +$("#al-down").value,
+      webhook_url: $("#al-url").value.trim(), webhook_format: $("#al-fmt").value, classes,
+      digest_enabled: $("#al-dg-on").checked, digest_hour: +$("#al-dg-hour").value,
+      digest_to_webhook: $("#al-dg-hook").checked, webhook_token: $("#al-token").value};
+    const ct = $("#al-clear-token"); if (ct && ct.checked) body.clear_token = true;
+    run(api("alerts/settings", {method: "PUT", body}));
+  };
+  $("#al-test").onclick = async () => {
+    try {
+      const r = await api("alerts/test", {method: "POST", body: {}});
+      toast(r.webhook === "sent" ? `Test alert sent (page + ${r.host})` : r.webhook === "not set"
+        ? "Test alert on the page; no webhook set" : `Webhook failed: ${r.error}`, r.webhook === "failed");
+      render();
+    } catch (e) { toast(e.message, true); }
+  };
+  $("#al-digest").onclick = async () => {
+    try { await api("alerts/digest", {method: "POST", body: {}}); toast("Digest built"); render(); }
+    catch (e) { toast(e.message, true); }
+  };
 }
 
 // Route view (routes_view.py): the routing graph generated from the live

@@ -194,7 +194,11 @@ def create_app(mgr: Manager, token: str, cfg_path: Optional[Path] = None) -> Fas
 
     @app.get("/api/autostart")
     def get_autostart():
-        return {"enabled": autostart.is_enabled()}
+        # `enabled` is the sign-in entry this page toggles; `mode` also covers the
+        # boot task (install-autostart --at-boot, CLI only: it needs a password prompt)
+        m = autostart.mode()
+        return {"enabled": autostart.is_enabled(), "mode": m,
+                "mode_text": autostart.MODE_TEXT.get(m, "")}
 
     @app.post("/api/autostart")
     async def set_autostart(request: Request):

@@ -156,6 +156,21 @@ The first run starts nothing and opens the settings page.
 `foundry-client doctor`, `foundry-client apply-kilo-config [--dry-run]`,
 `foundry-client install-service` / `remove-service` (Linux `systemd --user`).
 
+### Start at boot (Windows)
+
+`install-autostart` (or `--at-logon`) writes the Startup-folder entry: the stack starts when
+you sign in. `install-autostart --at-boot [--user DOMAIN\name]` instead creates the Task
+Scheduler task `FoundryClient-Boot`: at startup (1 min delay), whether or not anyone is signed
+in, it runs `pythonw -m foundry_client run --headless` in the checkout it was installed from
+(run it from the deploy checkout). It runs as you, without the 72 h run limit, at normal
+priority, restarting on failure. `schtasks /RP *` makes **Windows** ask for your password
+once in the console; Foundry never takes or stores it. If schtasks answers "Access is denied",
+run it from a terminal started with *Run as administrator*. The sign-in entry is removed (a
+second start would only open the settings page). `remove-autostart` removes both;
+`status` and `doctor` say which mode is installed (boot, logon, boot+logon, off). A task
+that runs without a sign-in has no desktop: no tray icon, and Studio windows it opens are
+not visible.
+
 ### Migrating this workstation
 
 1. Run `foundry-stack.ps1 stop -All` and `foundry-stack.ps1 remove-autostart`, and disable the

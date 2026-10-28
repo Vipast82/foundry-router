@@ -423,6 +423,7 @@ body.noanim * { animation:none !important; transition:none !important; }
     <button id="btn-inspector" title="Show/hide the inspector sidebar">Inspector</button>
     <button id="btn-chrome" class="hide-narrow" title="Focus mode: hide the header, composer and banners (Esc restores)">Focus</button>
     <a id="btn-automation" class="btnlink" href="/ui/automation#queue" title="Queue editor, routing, settings and role rules (same sign-in)">Automation</a>
+    <button id="btn-digest" class="hide-narrow" title="Daily digest: the last 7, or build one now">Digest</button>
     <button id="btn-settings" title="Settings">⚙</button>
     <button id="btn-logout" title="Sign out" class="ghost">⎋</button>
   </div>
@@ -445,6 +446,9 @@ body.noanim * { animation:none !important; transition:none !important; }
 <dialog id="settings"><div class="dlg-head"><b>Settings</b><span class="spacer"></span>
   <button id="set-reset">Reset display defaults</button><button id="set-close">Close</button></div>
   <div class="dlg-body" id="settings-body"></div></dialog>
+<dialog id="digest-dlg" aria-labelledby="digest-h"><div class="dlg-head"><b id="digest-h">Daily digest</b><span class="spacer"></span>
+  <button id="digest-build" title="Build a digest of the last 24 h now">Build digest now</button><button onclick="this.closest('dialog').close()">Close</button></div>
+  <div class="dlg-body" id="digest-body"></div></dialog>
 <dialog id="detail"><div class="dlg-head"><b id="detail-title">Details</b><span class="spacer"></span>
   <button onclick="this.closest('dialog').close()">Close</button></div><div class="dlg-body" id="detail-body"></div></dialog>
 <dialog id="pause-dlg" aria-labelledby="pause-h"><div class="dlg-head"><b id="pause-h">Pause project</b><span class="spacer"></span>
@@ -3699,6 +3703,24 @@ async function loadServerSettings() {
     };
   } catch (e) { box.textContent = e.message; }
 }
+/* ======================================================================== digest */
+async function renderDigests() {
+  const box = $("#digest-body");
+  box.innerHTML = `<p class="dim">Loading…</p>`;
+  try {
+    const r = await api("digests");
+    const ds = r.digests || [];
+    box.innerHTML = (r.note ? `<p class="dim">${esc(r.note)}</p>` : "")
+      + `<p class="dim">Built every day at ${esc(r.digest_hour ?? 8)}:00 (router time) from the last 24 h; the webhook gets it too when one is set. Settings: <a href="/ui#Alerts%20%26%20digest" target="_blank" rel="noopener">Alerts &amp; digest</a>.</p>`
+      + (ds.length ? ds.map((d, i) => `<details ${i === 0 ? "open" : ""}><summary><b>${esc(fullTs(d.ts))}</b> <span class="dim">${esc(d.trigger)}${d.actor && d.actor !== "foundry" ? " by " + esc(d.actor) : ""}</span></summary><pre class="code" style="white-space:pre-wrap">${esc(d.text || "")}</pre></details>`).join("")
+        : `<p class="dim">No digest yet.</p>`);
+  } catch (e) { box.innerHTML = `<p class="dim">${esc(e.message)}</p>`; }
+}
+$("#btn-digest").onclick = () => { renderDigests(); $("#digest-dlg").showModal(); };
+$("#digest-build").onclick = async () => {
+  try { await api("digests", {method: "POST", body: {}}); toast("Digest built"); renderDigests(); }
+  catch (e) { toast(esc(e.message), "bad"); }
+};
 $("#btn-settings").onclick = () => { renderSettings(); $("#settings").showModal(); };
 $("#set-close").onclick = () => $("#settings").close();
 $("#set-reset").onclick = () => { if (!confirm("Reset all display settings to their defaults? (Capture settings in Foundry are not changed.)")) return; P = migratePrefs(null); savePrefs(); applyDisplay(); renderSettings(); layout(); for (const p of S.panes) renderPane(p); };

@@ -106,6 +106,9 @@ def run(mgr) -> dict:
         checks.append(_c("studio_reopen", "Studio auto-reopen", "info",
                          "off: a lost Rojo connection waits for Plugins → Rojo → Connect"))
 
+    # autostart: does the stack come back after a reboot nobody signs in to?
+    checks.append(autostart_check())
+
     # router
     if not mgr.link.state["checked_at"]:
         mgr.link.poll()
@@ -118,6 +121,16 @@ def run(mgr) -> dict:
         checks.append(_c("router", "Foundry router", "fail", f"{link['url']}: {link['error']}"))
 
     return {"checks": checks, "ok": not any(c["status"] == "fail" for c in checks)}
+
+
+def autostart_check() -> dict:
+    from . import autostart
+    try:
+        m = autostart.mode()
+    except Exception as e:                                       # noqa: BLE001
+        return _c("autostart", "Autostart", "warn", f"could not read: {type(e).__name__}: {e}")
+    status = "ok" if m in ("boot", "boot+logon", "service") else "warn"
+    return _c("autostart", "Autostart", status, f"{m}: {autostart.MODE_TEXT.get(m, '')}")
 
 
 def _version(exe: str) -> str:

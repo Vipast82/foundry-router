@@ -971,6 +971,34 @@ class OperatorChatConfig(BaseModel):
     routes: list[OperatorChatRoute] = Field(default_factory=list)
 
 
+# the classes that may push an alert (alerts.py); everything else is digest-only
+ALERT_CLASSES = ("product_decision", "user_action", "image_ask", "stack_down",
+                 "self_repair_exhausted", "prep_failed", "pause_forgotten")
+
+
+class AlertsConfig(BaseModel):
+    """Stack-down alert, alert policy and the daily digest (alerts.py; Admin ->
+    Alerts & digest). The control-center page always shows every alert; only the
+    classes switched on here are pushed to the webhook (a phone, e.g. ntfy)."""
+    enabled: bool = True
+    # no coordinator heartbeat for this long -> one "coordinator down" alert
+    # (and one "recovered" alert when it comes back)
+    coordinator_down_minutes: int = Field(default=10, ge=1, le=1440)
+    # optional push target: an ntfy topic URL (text + Title header) or any URL
+    # that takes JSON {title, text, class, severity, ts}. Empty = page only.
+    webhook_url: str = ""
+    webhook_format: Literal["auto", "ntfy", "json"] = "auto"
+    # optional bearer token for the webhook (ntfy access token); never shown
+    webhook_token: Optional[str] = None
+    classes: dict[str, bool] = Field(default_factory=lambda: {c: True for c in ALERT_CLASSES})
+    digest_enabled: bool = True
+    digest_hour: int = Field(default=8, ge=0, le=23)      # router local time
+    digest_to_webhook: bool = True
+
+    def class_on(self, cls: str) -> bool:
+        return bool(self.classes.get(cls, True)) if cls in ALERT_CLASSES else False
+
+
 class AppConfig(BaseModel):
     # Config file format version (see migrate_raw); stamped on load.
     config_version: int = 1
@@ -1003,6 +1031,7 @@ class AppConfig(BaseModel):
     health: HealthConfig = Field(default_factory=HealthConfig)
     operator_chat: OperatorChatConfig = Field(default_factory=OperatorChatConfig)
     audio: AudioConfig = Field(default_factory=AudioConfig)
+    alerts: AlertsConfig = Field(default_factory=AlertsConfig)
 
 
 # --------------------------------------------------------------------------- #

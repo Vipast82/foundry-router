@@ -3,7 +3,8 @@
   foundry-client run [--headless] [--no-start]   manager + local API + tray
   foundry-client status                            component states (from the running client)
   foundry-client restart <component> [--force] [--wait]
-  foundry-client install-autostart | remove-autostart
+  foundry-client install-autostart [--at-logon | --at-boot [--user DOMAIN\\name]]
+  foundry-client remove-autostart                  removes the sign-in entry and the boot task
   foundry-client install-service | remove-service   systemd --user unit (Linux, headless)
   foundry-client doctor                            checks of this workstation (running client)
   foundry-client apply-kilo-config [--dry-run]     role rules -> kilo.jsonc, then reload Kilo
@@ -144,8 +145,17 @@ def main(argv=None) -> int:
     x.add_argument("component", choices=config.COMPONENTS)
     x.add_argument("--force", action="store_true", help="don't wait for a safe point")
     x.add_argument("--wait", action="store_true", help="return once it is running again")
-    sub.add_parser("install-autostart")
-    sub.add_parser("remove-autostart")
+    ia = sub.add_parser("install-autostart",
+                        help="start the client at sign-in (default) or at boot")
+    g = ia.add_mutually_exclusive_group()
+    g.add_argument("--at-logon", action="store_true",
+                   help="Startup-folder entry: starts when you sign in (default)")
+    g.add_argument("--at-boot", action="store_true",
+                   help="Windows Task Scheduler task 'At startup, run whether the user is "
+                        "logged on or not'; Windows asks for your password itself")
+    ia.add_argument("--user", default="",
+                    help="account the boot task runs as (default: you, DOMAIN\\name)")
+    sub.add_parser("remove-autostart", help="remove the sign-in entry and the boot task")
     sub.add_parser("install-service")
     sub.add_parser("remove-service")
     sub.add_parser("doctor")
@@ -159,6 +169,8 @@ def main(argv=None) -> int:
     if a.cmd in (None, "run"):
         return cmd_run(cfg, getattr(a, "headless", False), getattr(a, "no_start", False))
     if a.cmd == "status":
+        am = autostart.mode()
+        print(f"{'Autostart':<20} {am:<10} {autostart.MODE_TEXT.get(am, '')}")
         try:
             st = _api(cfg, "/api/status")
         except (urllib.error.URLError, OSError):
@@ -235,11 +247,31 @@ def main(argv=None) -> int:
         print("systemd unit removed")
         return 0
     if a.cmd == "install-autostart":
-        print(f"autostart: {autostart.enable()}")
+        if a.at_boot:
+            exe, args, root = autostart.boot_command()
+            print(f"Creating the Task Scheduler task {autostart.BOOT_TASK}: at startup, whether "
+                  f"or not anyone is signed in, run\n  {exe} {args}\n  in {root}\n"
+                  f"Windows now asks for the password of {a.user or autostart.boot_user()} "
+                  f"(typed into Windows' own prompt; Foundry never sees or stores it).",
+                  flush=True)
+            try:
+                r = autostart.enable_boot(a.user)
+            except RuntimeError as e:
+                print(e)
+                return 2
+            if not r["ok"]:
+                print(f"schtasks failed (exit {r['returncode']}). If it said 'Access is denied', "
+                      f"run this again from a terminal opened with 'Run as administrator'.")
+                return 1
+            print(f"autostart: at boot (task {r['task']}, runs as {r['user']}); the sign-in "
+                  f"entry was removed")
+            return 0
+        print(f"autostart: at sign-in ({autostart.enable()})")
         return 0
     if a.cmd == "remove-autostart":
         autostart.disable()
-        print("autostart removed")
+        boot = autostart.disable_boot()
+        print("autostart removed (sign-in entry" + (" and boot task)" if boot else ")"))
         return 0
     if a.cmd == "import-legacy-secrets":
         done = secrets.migrate_legacy(config.expand(cfg["client"]["state_dir"]))
