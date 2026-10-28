@@ -292,6 +292,16 @@ class Manager:
                     pr.state, pr.detail = "error", f"{why}; the port is held by another process"
                     pr.next_try = now + 30
                     return
+            elif pr.spec.port and pr.spec.owner_pid and _components.port_open(pr.spec.port):
+                # 2026-10-28: a component with no health check (Blender: its add-on socket opens
+                # only after Connect) that already listens on its port was started outside the
+                # client: adopt it, never start a second copy
+                pid = pr.spec.owner_pid()
+                if pid:
+                    pr.adopted, pr.info = True, {"pid": pid}
+                    pr.state, pr.detail = "running", (f"port {pr.spec.port} held by pid {pid} "
+                                                      f"(started outside the client)")
+                    return
             if any(self.procs[d].want and self.procs[d].state not in ("running",)
                    for d in pr.spec.after if d in self.procs):
                 pr.state, pr.detail = "waiting", "waiting for " + ", ".join(pr.spec.after)

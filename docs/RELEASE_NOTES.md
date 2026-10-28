@@ -2,6 +2,15 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.157.3 — Blender in the client's Settings, and a running Blender is adopted
+
+- **Settings page: Blender section** (run it, blender.exe path, add-on port). It had no UI;
+  the path could only be set in client.toml.
+- **Adoption without a health check.** A component with no health probe that already listens
+  on its port (Blender's add-on, 9876) is adopted as started outside the client instead of
+  launching a second copy (v0.157.2 set the owner pid but adoption only ran for health-checked
+  components).
+
 ## v0.157.2 — client adopts a running Blender, hides retired media; tracks set-needs
 
 - **Blender adopted, never started twice.** The client's Blender component adopts a Blender

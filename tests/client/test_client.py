@@ -252,3 +252,29 @@ def test_a_running_blender_is_adopted_and_retired_media_cards_hide():
     html = open(os.path.join(os.path.dirname(C.__file__), "static", "client.html"),
                 encoding="utf-8").read()
     assert "RETIRED_MEDIA" in html and "chatterbox-tts" in html
+
+
+def test_a_component_without_health_is_adopted_by_its_port(monkeypatch):
+    """2026-10-28: Blender was running (add-on on 9876) when the client enabled its
+    component; the client must adopt it, not start a second Blender."""
+    import foundry_client.components as C
+    cfg = copy.deepcopy(config.DEFAULTS)
+    cfg["components"]["blender"].update(enabled=True, port=9876, path=sys.executable)
+    launched = []
+    monkeypatch.setattr(C, "port_open", lambda port, *a, **k: port == 9876)
+    monkeypatch.setattr(C, "port_owner_pid", lambda port: 4242 if port == 9876 else None)
+    m = Manager(cfg, popen=lambda argv, **kw: launched.append(argv))
+    m.procs["blender"].want = True
+    m.step()
+    st = m.status("blender")
+    assert st["state"] == "running" and "started outside" in st["detail"]
+    assert not any("blender" in str(a).lower() or a == [sys.executable] for a in launched)
+
+
+def test_the_settings_page_has_a_blender_section():
+    import os
+    import foundry_client.components as C
+    html = open(os.path.join(os.path.dirname(C.__file__), "static", "client.html"),
+                encoding="utf-8").read()
+    assert '["Blender", [["components.blender.enabled"' in html
+    assert '"components.blender.path"' in html and '"components.blender.port"' in html

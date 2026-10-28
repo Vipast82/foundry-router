@@ -159,6 +159,7 @@ const FIELDS = [
   ["Watchdog", [["client.unhealthy_restart_seconds", "Restart a component that stays unhealthy this many seconds (0 = never)", "number"], ["client.safe_restart_max_wait_minutes", "Warn when a safe-point restart has waited this many minutes (0 = never)", "number"], ["client.update_check", "Look for a newer Foundry Client release on GitHub", "bool"], ["client.relay", "Take stack requests from the Foundry router", "bool"]]],
   ["Kilo server", [["components.kilo.enabled", "Run the Kilo server", "bool"], ["components.kilo.path", "kilo executable (empty = find it)", "text"], ["components.kilo.port", "Port", "number"]]],
   ["Coordinator", [["components.coordinator.enabled", "Run the coordinator", "bool"], ["components.coordinator.poll_seconds", "Poll seconds", "number"], ["components.supervisor.enabled", "Run the upgrade supervisor", "bool"]]],
+  ["Blender", [["components.blender.enabled", "Run Blender (blender-mcp add-on; a running Blender is adopted)", "bool"], ["components.blender.path", "blender.exe (e.g. C:\\Program Files\\Blender Foundation\\Blender 4.5\\blender.exe)", "text"], ["components.blender.port", "Add-on port", "number"]]],
   ["Rojo", [["components.rojo.enabled", "Run rojo serve", "bool"], ["components.rojo.path", "rojo executable (empty = find it)", "text"], ["components.rojo.project", "Project folder (empty = game folder)", "text"], ["components.rojo.port", "Port", "number"]]],
 ];
 const get = (o, p) => p.split(".").reduce((a, k) => a == null ? a : a[k], o);
