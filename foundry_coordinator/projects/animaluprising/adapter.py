@@ -53,6 +53,9 @@ VERIFY_ROWS = ("COMMITS", "CLEAN", "SCOPE", "TEST", "GATE", "BOOT", "EVIDENCE", 
 CLOSEOUT_ROWS = VERIFY_ROWS + ("PLAN", "SUMMARY", "PATHS", "API", "STATE")
 # rows only a Studio gate can satisfy: a track sprint leaves them to the merge gate
 STUDIO_ROWS = ("GATE", "BOOT", "EVIDENCE")
+# 2026-10-28 (audit A): evidence, project memory and plan files. A HEAD whose difference
+# from the gate's HEAD touches only these keeps the gate bound (gate.ps1 -Finish: same rule)
+GATE_NONCODE_PATHS = ("docs/progress/**", "docs/memory/**", ".plan/**")
 _ROW = re.compile(r"^(PASS|FAIL|NOTE)\s+(\S+)\s+(.*)$")
 
 
@@ -910,16 +913,24 @@ Change no code or test file in this session; if one needs changing, stop and rep
                                       f"gate HEAD {gate_head} is not a commit here", revision)
         # 0.145.3: docs/memory is the coordinator's project memory, not code. Its own
         # memory-notes commit after a passed gate failed GF-GATE1 here on 2026-10-27.
-        exempt = self.exempt_paths(spec) + [f"docs/progress/{spec.task_id}_*", "docs/memory/"]
+        # 2026-10-28 (audit A): docs/progress/**, docs/memory/** and .plan/** are never
+        # code; a commit touching only those (evidence, memory, plan) keeps the gate bound.
+        exempt = self.exempt_paths(spec) + [f"docs/progress/{spec.task_id}_*"]             + list(GATE_NONCODE_PATHS)
         code = [c for c in changed if not matches_any(c, exempt)]
         if code:
             return VerificationResult("au.gate_bound_to_head", FAIL, True, rel,
                                       f"the gate ran at {gate_head}, but these files changed "
                                       f"since: {', '.join(code[:8])} — re-run the gate on the "
                                       f"committed code (R-C)", revision)
+        if not changed:
+            return VerificationResult("au.gate_bound_to_head", PASS, True, rel,
+                                      f"GATE {spec.task_id} PASS at {gate_head}; nothing changed "
+                                      f"since", revision)
         return VerificationResult("au.gate_bound_to_head", PASS, True, rel,
-                                  f"GATE {spec.task_id} PASS at {gate_head}; only evidence files "
-                                  f"changed since ({len(changed)})", revision)
+                                  f"GATE {spec.task_id} PASS at {gate_head}; only evidence/memory/"
+                                  f"plan files changed since the gate: {', '.join(changed[:8])}"
+                                  + (f" (+{len(changed) - 8} more)" if len(changed) > 8 else ""),
+                                  revision)
 
     # one `lune run tests/lune/run.luau` took ~12 min on the workstation (1588 specs,
     # 2026-10-27, with sessions running beside it); 600 s timed out and made the
@@ -1355,7 +1366,7 @@ Change no code or test file in this session; if one needs changing, stop and rep
                          "to a revision")
         status = "ok" if heads else "unverified"
         # the gate's own captures: the post-PASS capture commit always lands after the gate
-        exempt = self.exempt_paths(spec) + [f"docs/progress/{t}_*", f"docs/evidence/UI-v3/{t}/**"]
+        exempt = self.exempt_paths(spec) + [f"docs/progress/{t}_*", f"docs/evidence/UI-v3/{t}/**"]             + list(GATE_NONCODE_PATHS)
         for label, sha in named:
             full = ws.run("rev-parse", "--verify", "--quiet", sha + "^{commit}",
                           check=False).strip()
