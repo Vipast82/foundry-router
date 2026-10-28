@@ -20,7 +20,7 @@ as the coordinator (only their [training] section and workspace are used);
   ingest gate --project P                       studio_gate verdict JSON (labels + captures)
   queue --spool DIR [--foundry-url U] [--kilo-url U]   coordinator closeout manifests
   curate --project P [--map SESSION=TASK ...]
-  export --project P [...] --kind sft|correction|preference|multimodal --target canonical|chatml-tools|dpo
+  export --project P [...] --kind sft|correction|preference|multimodal|calls --target canonical|chatml-tools|dpo
          [--purpose train|eval] [--tokenizer tokenizer.json]
   validate DATASET_DIR --target T
   status [--json]   inspect EPISODE   gaps [--project P]
@@ -88,7 +88,7 @@ def main(argv=None) -> int:
     ex = sub.add_parser("export")
     ex.add_argument("--project", action="append", required=True)
     ex.add_argument("--kind", required=True, choices=["sft", "correction", "preference",
-                                                      "multimodal"])
+                                                      "multimodal", "calls"])
     ex.add_argument("--target", required=True, choices=["canonical", "chatml-tools", "dpo"])
     ex.add_argument("--purpose", default="train", choices=["train", "eval"])
     ex.add_argument("--tokenizer")
@@ -230,7 +230,12 @@ def _run(a, p: Pipeline) -> int:
     elif a.cmd == "validate":
         from .validate import validate_dataset
         path = a.dataset if a.dataset.endswith(".jsonl") else os.path.join(a.dataset, "data.jsonl")
-        out = validate_dataset(path, a.target, p.known)
+        man = os.path.join(os.path.dirname(path), "manifest.json")
+        rsn = False
+        if os.path.isfile(man):
+            with open(man, encoding="utf-8") as f:
+                rsn = bool(json.load(f).get("reasoning_included"))
+        out = validate_dataset(path, a.target, p.known, reasoning_allowed=rsn)
     elif a.cmd == "status":
         s = p.status()
         if a.json:

@@ -225,6 +225,17 @@ class TrainingStore:
                     (stable_id(project_id, session_id, source, kind, detail), project_id,
                      session_id, source, kind, detail[:500], time.time()))
 
+    def resolve_gaps(self, project_id: str, kind: str, sessions) -> int:
+        """Remove `kind` gaps of these sessions (the source has since supplied
+        what was missing)."""
+        sessions = [s for s in sessions if s]
+        n = 0
+        for i in range(0, len(sessions), 400):
+            part = sessions[i:i + 400]
+            n += self.norm.x("DELETE FROM gaps WHERE project_id=? AND kind=? AND session_id IN "
+                             f"({','.join('?' * len(part))})", (project_id, kind, *part)) or 0
+        return n
+
     def gaps(self, project_id: Optional[str] = None) -> list[dict]:
         return self.norm.q("SELECT * FROM gaps" + (" WHERE project_id=?" if project_id else "")
                            + " ORDER BY ts", (project_id,) if project_id else ())

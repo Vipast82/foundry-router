@@ -117,6 +117,7 @@ class Services:
                                Path(getattr(db, "path", data_dir() / "foundry.sqlite")).parent,
                                secrets_fn=lambda: secret_values(self))
         self.pool.capture = self.capture
+        self.agents.capture = self.capture
         from . import perf_history, usage as _usage
 
         def _backend_kind(name):
@@ -127,6 +128,7 @@ class Services:
                                backend_kind=_backend_kind)
         _usage.set_subscription_rates(lambda: self.config_store.config.perf.subscription_rates)
         self.brain = BrainClient(cfg.agent_brain, self.http, db=db)
+        self.brain.capture = self.capture
         self.research = ResearchAgent(
             cfg.registry.research, db, self.registry, self.mcp,
             llm=self._research_llm, available_models=lambda: list(self.pool.available_models()))
@@ -201,9 +203,11 @@ class Services:
                         need = cfg.corpus_char_limit // 4 + 1024 + 4096
                     model_max = (self.registry.get(research_model) or {}).get("context_length")
                     options = {"num_ctx": min(need, int(model_max)) if model_max else need}
-                result, backend = await self.pool.chat(
-                    research_model, [{"role": "user", "content": prompt}],
-                    options=options, max_tokens=4096)
+                from . import capture as _capture
+                with _capture.purpose("research"):
+                    result, backend = await self.pool.chat(
+                        research_model, [{"role": "user", "content": prompt}],
+                        options=options, max_tokens=4096)
                 from . import telemetry
                 telemetry.record_call(self.db, self.registry, model=research_model,
                                       backend=backend, result=result, mode="research",
@@ -370,6 +374,7 @@ class Services:
     def rebuild_brain(self) -> None:
         self.brain = BrainClient(self.config_store.config.agent_brain, self.http,
                                  db=self.db)
+        self.brain.capture = self.capture
         self.agent.brain = self.brain
         # New brain config — invalidate the health snapshot (unknown until the
         # next probe reflects the new endpoint/model).

@@ -102,16 +102,24 @@ def test_preference_pairs_need_the_same_decision_and_a_justification(tmp_path):
     p.ingest_coordinator(st.path)
     res = p.curate("fixture-game")
     # only the first call shares its request context (system + same prompt);
-    # later calls saw different tool results, so they are never paired
-    assert res["preference_pairs"] == 1
-    pair, = p.store.cur.q("SELECT * FROM preferences")
+    # later calls saw different tool results, so they are never paired.
+    # v0.153.0: the two attempts also share the task prompt, so the passing
+    # attempt vs the failing one is a same-task pair (judge "review")
+    assert res["preference_pairs"] == 2
+    pair, = p.store.cur.q("SELECT * FROM preferences WHERE judge='verification'")
+    task_pair, = p.store.cur.q("SELECT * FROM preferences WHERE judge='review'")
+    assert task_pair["chosen_event"].startswith("ep:") and "verification FAIL" in task_pair["basis"]
     calls = {e["event_id"]: e for e in p.store.events("fixture-game", "event_type='model_call'")}
     assert calls[pair["chosen_event"]]["session_id"] == SESSION
     assert calls[pair["rejected_event"]]["session_id"] == s2
     assert "PASS vs FAIL" in pair["basis"]
     m = export(p.store, ["fixture-game"], "preference", "dpo", {"fixture-game": p._cfg("fixture-game")})
-    assert m["validation"]["ok"] and m["examples"] == 1
-    line = json.loads((p.store.root / "datasets" / m["dataset_id"] / "data.jsonl").read_text())
+    assert m["validation"]["ok"] and m["examples"] == 2
+    lines = [json.loads(x) for x in (p.store.root / "datasets" / m["dataset_id"] / "data.jsonl")
+             .read_text().splitlines()]
+    line = next(x for x in lines if x["judge"] == "verification")
+    trip = next(x for x in lines if x["judge"] == "review")
+    assert trip["prompt"][-1]["role"] == "user" and trip["chosen"] and trip["rejected"]
     chosen = json.loads(line["chosen"][0]["tool_calls"][0]["function"]["arguments"])
     rejected = json.loads(line["rejected"][0]["tool_calls"][0]["function"]["arguments"])
     assert (chosen["content"], rejected["content"]) == ("OK hello\n", "hello\n")

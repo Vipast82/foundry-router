@@ -277,14 +277,17 @@ def normalize(session: dict, project_id: str, raw_ref: str, redaction: dict,
                                 **{**base, "part": pid + ":call"}))
                 status = st.get("status")
                 meta = st.get("metadata") or {}
-                cap = ("missing" if status in ("pending", "running", None) else
-                       "truncated" if meta.get("truncated") else "complete")
+                # metadata.truncated is the TOOL paging its output ("Showing lines
+                # 1-120 of 304. Use offset=121 to continue."): the stored output is
+                # exactly what the model saw, so it is complete, not a capture cut
+                cap = "missing" if status in ("pending", "running", None) else "complete"
                 ev.append(Event(ADAPTER, sid, "tool_result", actor_role="tool", tool_call_id=cid,
                                 capture_status=cap,
                                 facts={"name": p.get("tool"), "status": status,
                                        "output": st.get("output") if status == "completed" else None,
                                        "error": st.get("error") if status == "error" else None,
                                        "truncated": bool(meta.get("truncated")),
+                                       "tool_paged": bool(meta.get("truncated")),
                                        "exit": meta.get("exit"), "title": st.get("title")},
                                 **{**base, "part": pid + ":result",
                                    "timestamp": ((st.get("time") or {}).get("end") or 0) / 1000.0

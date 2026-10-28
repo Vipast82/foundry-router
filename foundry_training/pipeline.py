@@ -17,7 +17,7 @@ from typing import Optional
 
 from . import correlate, curate as C, episodes as E
 from .adapters import cline, coordinator, foundry, gate, git as G, kilo
-from .config import TrainingProject
+from .config import TrainingProject, unbound_of
 from .ingest import Ingestor
 from .store import TrainingStore
 
@@ -27,6 +27,10 @@ class Pipeline:
                  known_secrets=()):
         self.store = store
         self.projects = {p.id: p for p in projects}
+        for p in projects:
+            if p.unbound_project and p.unbound_project not in self.projects:
+                self.projects[p.unbound_project] = unbound_of(p)
+        self.unbound_project = next((p.id for p in self.projects.values() if p.unbound), "")
         self.known = list(known_secrets)
         self.ing = Ingestor(store, self.known)
 
@@ -93,10 +97,9 @@ class Pipeline:
                 if pid and s.get("_sanitized"):
                     self.store.gap(pid, s["info"].get("id"), "kilo", "sanitized-export",
                                    "kilo export --sanitize: text and tool data are placeholders")
+            for pid in {kilo.project_of(s, plist)[0] for s in sessions}:
                 if pid and self._allowed(pid, "kilo"):
-                    self.store.gap(pid, s["info"].get("id"), "kilo", "no-system-prompt",
-                                   "Kilo records don't include the system prompt or tool "
-                                   "definitions (Foundry capture does)")
+                    self.context_gaps(pid)
             return counts
         finally:
             if snap:
@@ -107,7 +110,8 @@ class Pipeline:
         key_name = f"foundry:{url or capture_db}"
         after = int(self.store.checkpoint(key_name) or 0)
         rows = foundry.from_api(url, key, after) if url else foundry.from_db(capture_db, after)
-        out = self.ing.run(key_name, self._filter(foundry.records(rows, project_map), "foundry"),
+        out = self.ing.run(key_name, self._filter(foundry.records(
+            rows, project_map, self.unbound_project), "foundry"),
                            foundry.normalize,
                            cursor_of=lambda rid, payload: payload.get("id") or 0)
         if url:
@@ -186,10 +190,36 @@ class Pipeline:
         res["precode_records"] = pre.get("records", 0)
         return res
 
+    NO_SYSTEM_PROMPT = ("Kilo records don't include the system prompt or tool definitions, "
+                        "and no Foundry capture of this session was found")
+
+    def context_gaps(self, pid: str) -> dict:
+        """`no-system-prompt` for exactly the Kilo sessions no Foundry capture
+        (a `received` or `backend_call` row with the same session id) covers;
+        a gap whose session is covered now is removed. Run after Kilo ingestion
+        and again at every curate, since Foundry is often ingested after Kilo."""
+        q = self.store.norm.q
+        kilo_s = {r["session_id"] for r in q(
+            "SELECT DISTINCT session_id FROM events WHERE project_id=? AND source_adapter='kilo' "
+            "AND session_id IS NOT NULL AND deleted=0", (pid,))}
+        covered = {r["session_id"] for r in q(
+            "SELECT DISTINCT session_id FROM events WHERE project_id=? AND "
+            "source_adapter='foundry' AND event_type IN ('model_call','model_request') AND "
+            "session_id IS NOT NULL AND deleted=0", (pid,))}
+        missing = sorted(kilo_s - covered)
+        for sid in missing:
+            self.store.gap(pid, sid, "kilo", "no-system-prompt", self.NO_SYSTEM_PROMPT)
+        resolved = self.store.resolve_gaps(pid, "no-system-prompt", sorted(covered))
+        return {"missing": len(missing), "resolved": resolved}
+
     # -- curation ------------------------------------------------------------------------
 
     def curate(self, pid: str, explicit_links: Optional[dict] = None) -> dict:
         cfg = self._cfg(pid)
+        if cfg.unbound:
+            # no task, no workspace: its calls feed only the calls kind
+            return {"episodes": 0, "unbound": True}
+        gaps = self.context_gaps(pid)
         links = correlate.run(self.store, pid, explicit_links)
         red = self.ing.redactor(cfg.allowed_email_domains)
 
@@ -200,7 +230,7 @@ class Pipeline:
             return red.text(d), cut
         eps = E.build(self.store, pid, cfg, diff_fn=diff_fn)
         counts = C.run(self.store, pid, eps, cfg, self.known)
-        return {"correlations": links, "episodes": len(eps), **counts}
+        return {"correlations": links, "episodes": len(eps), "context_gaps": gaps, **counts}
 
     # -- coordinator closeout queue -------------------------------------------------------
 

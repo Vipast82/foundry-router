@@ -1,7 +1,13 @@
 """Training-data hook at task closeout (profile `[training]`).
 
 When a task closes (COMPLETE, closed awaiting approval, or FAILED), the
-coordinator writes a capture manifest into the training spool: every session
+coordinator writes a capture manifest into the training spool. Since v0.153.0
+it also writes one when an attempt stops BLOCKED (once the lead's recovery case,
+if any, has ended) or the task is CANCELLED, so failed attempts reach the
+pipeline as labelled negatives (`attempt_end`: state, blocker, run, attempt).
+One manifest per task + run + state (`task.data.training_manifests`), so a task
+bouncing BLOCKED -> READY -> BLOCKED in one run is not queued twice. The
+manifest lists every session
 it started for the task (implementation, repair, closeout, helpers), the
 verified revision, verification set ids with their evidence pointers, review
 ids and verdicts, approvals, and its own store path. `foundry_training
@@ -35,6 +41,13 @@ def spool_dir(profile, state_dir: str) -> str:
     return os.path.expanduser(t.get("spool") or os.path.join(state_dir, "training-spool"))
 
 
+NEGATIVE = ("BLOCKED", "FAILED", "CANCELLED")
+
+
+def manifest_key(t: dict, outcome: str) -> str:
+    return f"{t.get('run_id') or ('attempt-' + str(t.get('attempt') or 0))}:{outcome}"
+
+
 def finalize(store, P, t: dict, outcome: str, state_dir: str) -> dict:
     """Write the manifest (atomically). Raises on failure; returns it."""
     pid, tid = P.id, t["task_id"]
@@ -64,6 +77,12 @@ def finalize(store, P, t: dict, outcome: str, state_dir: str) -> dict:
                            for s in sessions},
          "verification_sets": ver, "evidence": evidence, "reviews": reviews,
          "approvals": approvals, "coordinator_db": store.path,
+         "run_id": t.get("run_id"), "attempt": t.get("attempt"),
+         "attempt_end": ({"state": outcome, "blocker": str(t.get("blocker") or "")[:500],
+                          "class": str((t.get("data") or {}).get("blocker_class")
+                                       or (t.get("data") or {}).get("stop_class") or ""),
+                          "run_id": t.get("run_id"), "attempt": t.get("attempt")}
+                         if outcome in NEGATIVE else None),
          "completeness": {"sessions": len(sessions), "verification_sets": len(ver),
                           "reviews": len(reviews), "gaps": gaps}}
     d = spool_dir(P.profile, state_dir)

@@ -45,6 +45,8 @@ EVENT_TYPES = (
     "router_outcome",       # Foundry: a coordinator-verified outcome label (gate_pass,
                             # review_approved, vision_approved, ...) for a request id
     "capture_gap",          # something the source could not provide
+    "agent_run",            # Foundry: an external agent's whole task (input, final text, progress)
+    "media_job",            # Foundry: an image / media job (prompt, settings, artifact hashes)
 )
 CAPTURE = ("complete", "partial", "missing", "truncated")
 VERIFICATION = ("PASS", "FAIL", "UNKNOWN", "n/a")

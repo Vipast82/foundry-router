@@ -2948,8 +2948,12 @@ async function tabTraining() {
   const wouldCapture = (inc, exc, name) => !globHit(exc, name) && (!(inc || []).length || globHit(inc, name));
   const capBackends = [...new Set([...((d.options || {}).backends || []), ...Object.keys((c.today || {}).backends || {}).filter(Boolean)])].sort();
   const capPersonas = [...new Set([...((d.options || {}).personas || []), ...Object.keys((c.today || {}).personas || {}).filter(Boolean)])].sort();
+  // what each call is for (capture.PURPOSES); the operator chat has its own switch
+  const capPurposes = (c.known_purposes || []).filter(x => x !== "operator_chat");
   const capBoxes = (kind, names, counts) => names.length ? names.map(n => {
-    const on = kind === "backends" ? wouldCapture(c.backends, c.exclude_backends, n) : wouldCapture(c.personas, c.exclude_personas, n);
+    const on = kind === "backends" ? wouldCapture(c.backends, c.exclude_backends, n)
+      : kind === "purposes" ? wouldCapture(c.purposes, c.exclude_purposes, n)
+      : wouldCapture(c.personas, c.exclude_personas, n);
     return `<label style="display:block"><input type="checkbox" class="cap-${kind}" value="${esc(n)}" ${on ? "checked" : ""}> ${esc(n)}${counts[n] ? ` <span class="pill">${counts[n]} today</span>` : ""}</label>`;
   }).join("") : '<span class="hint">none configured</span>';
   $("#main").innerHTML = `
@@ -2960,11 +2964,13 @@ async function tabTraining() {
       <div class="row" style="flex-wrap:wrap;gap:6px 18px">
         <label title="Master switch. Live: the next model call follows it, no restart."><input type="checkbox" id="cap-on" ${c.enabled ? "checked" : ""}> <b>Capture model calls</b></label>
         <label title="Also capture calls no coordinator project is bound to (plain Chat, Research, Cline), for every persona ticked below."><input type="checkbox" id="cap-unbound" ${c.include_unbound ? "checked" : ""}> calls outside a coordinator project</label>
+        <label title="The Automation chat's own model calls. Off by default: it is the operator's console, not client traffic."><input type="checkbox" id="cap-opchat" ${c.operator_chat ? "checked" : ""}> operator chat</label>
         <label>keep <input type="number" id="cap-ret" min="1" max="3650" style="width:70px" value="${c.retention_days}"> days</label>
         <button class="act primary" id="cap-save">Save</button></div>
       <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:8px 24px;margin:8px 0">
         <div><h4 style="margin:4px 0">Backends <span class="hint">captured today: ${(c.today || {}).total ?? 0}</span></h4>${capBoxes("backends", capBackends, ((c.today || {}).backends) || {})}</div>
-        <div><h4 style="margin:4px 0">Personas</h4>${capBoxes("personas", capPersonas, ((c.today || {}).personas) || {})}</div></div>
+        <div><h4 style="margin:4px 0">Personas</h4>${capBoxes("personas", capPersonas, ((c.today || {}).personas) || {})}</div>
+        <div><h4 style="margin:4px 0">Purposes <span class="hint">what the call was for</span></h4>${capBoxes("purposes", capPurposes, ((c.today || {}).purposes) || {})}</div></div>
       <p class="hint">Untick to leave a backend or persona out. A persona left ticked while others are not is captured even outside a coordinator project. Counts are model calls recorded since midnight. Every backend works, local or not; what a frontier model's output may be used for is decided later by the project's <code>allow_frontier_targets</code> (provider terms).</p>
       <p class="hint">projects: ${esc((c.projects || []).join(", ") || (c.enabled ? "all bound" : "—"))}${(c.exclude_projects || []).length ? " · excluded: " + esc(c.exclude_projects.join(", ")) : ""}${c.errors ? ` · <span class="pill bad">${c.errors} capture errors</span> ${esc(c.last_error || "")}` : ""}${c.store_error ? ` · <span class="pill bad">store: ${esc(c.store_error)}</span>` : ""}</p>
       <div class="row" style="flex-wrap:wrap;gap:6px 12px"><b>Download captured calls</b>
@@ -2989,11 +2995,12 @@ async function tabTraining() {
   const total = kind => document.querySelectorAll(`.cap-${kind}`).length;
   $("#cap-save").onclick = async () => {
     // all ticked = no filter (new backends and personas are included automatically)
-    const bk = picked("backends"), pe = picked("personas");
+    const bk = picked("backends"), pe = picked("personas"), pu = picked("purposes");
     if (bk.length === 0 && total("backends")) { toast("Tick at least one backend (or untick the master switch)", true); return; }
     if (pe.length === 0 && total("personas")) { toast("Tick at least one persona (or untick the master switch)", true); return; }
     const body = {enabled: $("#cap-on").checked, include_unbound: $("#cap-unbound").checked,
-      retention_days: +$("#cap-ret").value || 30,
+      operator_chat: $("#cap-opchat").checked, retention_days: +$("#cap-ret").value || 30,
+      purposes: pu.length === total("purposes") ? [] : pu, exclude_purposes: [],
       backends: bk.length === total("backends") ? [] : bk, exclude_backends: [],
       personas: pe.length === total("personas") ? [] : pe, exclude_personas: []};
     try { await api("training/capture", {method: "POST", body}); toast("Capture settings saved — live, no restart"); render(); }

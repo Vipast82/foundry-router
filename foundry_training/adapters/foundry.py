@@ -100,11 +100,14 @@ def from_db(path: str, after_id: int = 0) -> Iterator[dict]:
         c.close()
 
 
-def records(rows, project_map: dict | None = None) -> Iterator[tuple[str, str, dict, dict]]:
+def records(rows, project_map: dict | None = None,
+            default_project: str = "") -> Iterator[tuple[str, str, dict, dict]]:
     """Unbound traffic (no project) is skipped unless explicitly mapped
-    (project_map: session_id -> project)."""
+    (project_map: session_id -> project) or a `default_project` (the profile's
+    `[training] unbound_project`) takes it."""
     for r in rows:
-        pid = r.get("project_id") or (project_map or {}).get(r.get("session_id") or "", "")
+        pid = r.get("project_id") or (project_map or {}).get(r.get("session_id") or "", "") \
+            or default_project
         yield (f"capture:{r['record_uid']}", pid, r,
                {"adapter": ADAPTER, "record_id": r["id"], "boundary": r.get("boundary"),
                 "foundry_redaction": r.get("redaction"), "sanitization": "foundry-redacted"})
@@ -133,6 +136,18 @@ def normalize(r: dict, project_id: str, raw_ref: str, redaction: dict) -> list[E
                       **common)]
     resp = body.get("response") or {}
     status = r.get("status") or ""
+    purpose = r.get("purpose") or "agent_turn"      # rows before v0.153.0 carry none
+    if r.get("kind") in ("agent_run", "media_job"):
+        return [Event(ADAPTER, f"capture:{r['record_uid']}", r["kind"], timestamp=r["ts"],
+                      actor_role="assistant", actor_model=r.get("model") or None,
+                      actual_backend=r.get("backend") or None,
+                      actual_model=r.get("model") or None,
+                      capture_status="truncated" if r.get("truncated") else "complete",
+                      facts={"purpose": purpose, "status": status,
+                             "request": body.get("request") or {}, "response": resp,
+                             "error": body.get("error"), "duration_ms": body.get("duration_ms"),
+                             "client_id": r.get("client_id"), "boundary": r.get("boundary")},
+                      **common)]
     cap = ("truncated" if r.get("truncated") else
            "complete" if status == "ok" and r.get("reconstruction") in ("complete", "n/a", "", None)
            else "partial")
@@ -141,7 +156,7 @@ def normalize(r: dict, project_id: str, raw_ref: str, redaction: dict) -> list[E
                   actor_role="assistant", actor_model=r.get("model"),
                   actual_backend=r.get("backend"), actual_model=r.get("model"),
                   capture_status=cap,
-                  facts={"attempt": r.get("attempt"), "status": status,
+                  facts={"attempt": r.get("attempt"), "status": status, "purpose": purpose,
                          "stream": bool(r.get("stream")), "reconstruction": r.get("reconstruction"),
                          "messages": req.get("messages"), "tools": req.get("tools"),
                          "settings": req.get("settings"), "content": resp.get("content"),

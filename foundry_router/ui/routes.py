@@ -1168,7 +1168,8 @@ async def training_view(request: Request, project: str = "", status: str = ""):
 
 
 _CAPTURE_LISTS = ("projects", "exclude_projects", "clients", "backends", "exclude_backends",
-                  "personas", "exclude_personas", "allowed_email_domains")
+                  "personas", "exclude_personas", "purposes", "exclude_purposes",
+                  "allowed_email_domains")
 
 
 @router.post("/admin/api/training/capture")
@@ -1179,7 +1180,7 @@ async def training_capture_set(request: Request):
     svc = _svc(request)
     body = await request.json()
     updates: dict = {}
-    for k in ("enabled", "include_unbound"):
+    for k in ("enabled", "include_unbound", "operator_chat"):
         if k in body:
             updates[k] = bool(body[k])
     if "retention_days" in body:

@@ -370,7 +370,8 @@ async def denials(request: Request, session: str = "", run: str = "", since: flo
 
 @router.get("/v1/foundry/capture/records")
 async def capture_records(request: Request, after_id: int = 0, limit: int = 200,
-                          project: str = "", backend: str = "", persona: str = ""):
+                          project: str = "", backend: str = "", persona: str = "",
+                          purpose: str = ""):
     """Captured inference records (already redacted), oldest first, after
     `after_id`: the training pipeline's incremental, idempotent source. Each
     row carries `quality` (request outcome, feedback, perf, coordinator labels)
@@ -379,7 +380,8 @@ async def capture_records(request: Request, after_id: int = 0, limit: int = 200,
     cap = svc.capture
     if not cap.cfg.enabled and cap._store is None:
         return {"records": [], "enabled": False, "next_after_id": after_id}
-    rows = cap.records(after_id, limit, project, backend=backend, persona=persona, db=svc.db)
+    rows = cap.records(after_id, limit, project, backend=backend, persona=persona,
+                       purpose=purpose, db=svc.db)
     return {"records": rows, "enabled": bool(cap.cfg.enabled),
             "next_after_id": rows[-1]["id"] if rows else after_id, "boundary": rows[0]["boundary"]
             if rows else None}

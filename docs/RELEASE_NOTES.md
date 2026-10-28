@@ -2,6 +2,106 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.153.0 — capture every model call for fine-tuning the local model
+
+Victor 2026-10-27: "track EVERYTHING so I can use for finetuning the local model". Plan:
+`reports/TRAINING_CAPTURE_EVERYTHING_PLAN.md` (approved with the recommended defaults:
+`allow_frontier_targets` stays false, operator chat opt-in, media metadata only, 30-day retention).
+
+- **Every call has a purpose** (`capture_records.purpose`; older stores are migrated, and their
+  rows count as `agent_turn`):
+  - `agent_turn`: a client's turn through the pool (the default).
+  - `brain_route`: the brain's own routing / assist / background calls. These were never
+    captured before; backend `brain:<provider>`.
+  - `frontier_assist`: a frontier helper call inside a Kilo turn. It used to be recorded as one
+    of the session's turns and could become the "last call" an episode was built from.
+  - `research`: Research's extraction call.
+  - `agent_external`: one `agent_run` record per Hermes task (as a backend or as a tool):
+    input, final text, tool-progress lines and run id. Hermes' own model calls back into Foundry
+    are still captured as that client's agent turns.
+  - `media`: one `media_job` record per finished image / tool-media job: prompt, settings and
+    artifact ids / sha256 / size. Bytes are never copied.
+  - `operator_chat`: the Automation chat, captured only with `operator_chat: true`, whatever
+    `include_unbound` says. Internal clients (health probes, persona validation) are still
+    never captured.
+- **New switches** (Training tab card, live): `purposes` / `exclude_purposes` (globs) and
+  `operator_chat`. The card shows today's counts per purpose. `GET /v1/foundry/capture/records`
+  takes `purpose=`.
+- **Inline images become references.** They are replaced by
+  `capture-media:sha256:<hex>:<mime>:<bytes>`, and the bytes are written once to
+  `<data>/training/capture-media/`. 74 visual-reviewer calls had been cut at 4 MB by their
+  screenshots.
+- **Reasoning survives** with `[training.export] include_reasoning = true`.
+  - Each episode turn keeps the reasoning its call returned, in its own `reasoning` field.
+  - chatml-tools target turns carry `reasoning_content` (Qwen3's `<think>` field), and the
+    manifest says `reasoning_included: true`.
+  - Off (the default), nothing carries reasoning. Validation follows the manifest.
+- **Source fixes for the excluded episodes** (live store: 152 truncated_tool_output, 208
+  broken_tool_sequence):
+  - Kilo's `metadata.truncated` is the `read` / `grep` tool paging its output ("Showing lines
+    1-120 of 304"). All 262 flagged results in captured context were byte-identical to what the
+    model saw. It is now `tool_paged`, not a truncation.
+  - A session that stopped on a tool call nobody answered (the next call was cancelled, or the
+    session ended) is trimmed to the turn before it (`flags.trimmed_open_tail`). Export cuts it
+    to its longest valid prefix.
+  - Results that are really missing still exclude the episode.
+- **Failed attempts are labelled negatives.**
+  - The coordinator writes a training manifest when an attempt stops BLOCKED, FAILED or
+    CANCELLED. A BLOCKED attempt waits until the lead's recovery case ends. There is one
+    manifest per task + run + state (`task.data.training_manifests`), and tasks already
+    BLOCKED get one on the first tick.
+  - Episodes get `outcome.attempt_end`: the last BLOCKED / FAILED / CANCELLED / COMPLETE /
+    AWAITING_HUMAN before the task's next attempt started. A later success does not relabel an
+    earlier attempt.
+  - Curation excludes these attempts with `attempt_blocked` / `attempt_failed` /
+    `attempt_abandoned`. They are kept for eval sets and as rejected sides.
+- **Call-level dataset** (`foundry_training export --kind calls`, `[training.auto] kinds`):
+  - One example per captured call: the effective prompt, plus the reply as the only target
+    turn. The reply may be a tool call.
+  - `[training.export] calls_quality = "verified"` (default: a positive coordinator label) or
+    `"ok"` (succeeded, not rated down, no negative label). `calls_purposes` defaults to
+    `["agent_turn"]`.
+  - Local-authored replies only, while `allow_frontier_targets = false`.
+  - Every line and the manifest carry `label_strength`.
+- **Preference pairs from reviews and gates:**
+  - Same request context, preferred by the router's labels on the two calls
+    (`judge = "router_label"`).
+  - Same task prompt: the approved / gate-passed attempt vs one with review CHANGES, gate FAIL,
+    failed verification, or a BLOCKED / FAILED end (`judge = "review"`, stored as `ep:<id>`).
+  - Both sides must be local work.
+  - Derived pairs are rebuilt on each curate. Human pairs are kept.
+- **Unbound traffic reaches the pipeline.** `[training] unbound_project = "foundry-unbound"`
+  maps capture rows with no project (Cline, Chat, AnythingLLM, brain) to a pseudo-project that
+  feeds only the calls kind. Without the setting, these rows are still skipped.
+- **Capture gaps are true.** `no-system-prompt` is recorded only for Kilo sessions that no
+  Foundry capture (with the same session id) covers. The check runs after Kilo ingestion and at
+  every curate, so a gap is removed once Foundry's rows arrive. On the live store, 144 of 175
+  gaps were false; 31 remain.
+
+**To switch it on: router host, `/config/config.yaml`**, then restart the router:
+```yaml
+training_capture:
+  enabled: true
+  projects: []              # every coordinator-bound project
+  include_unbound: true     # Cline, Chat, Research, AnythingLLM, brain, media
+  retention_days: 30
+  max_body_bytes: 4000000   # inline images no longer count toward this
+  operator_chat: false      # true = also capture the Automation chat
+```
+**Pipeline side** (the project profile, e.g. AU's `project.toml`):
+```toml
+[training]
+unbound_project = "foundry-unbound"
+[training.auto]
+kinds = ["sft", "correction", "multimodal", "calls", "preference"]
+[training.export]
+include_reasoning = true     # optional
+calls_quality = "verified"   # or "ok" for the weaker label
+```
+Storage: today's 13k captured calls take ~22 GB (raw + normalized, ~400 KB per call, because
+each Kilo call re-sends its history). Capturing everything grows that, so keep an eye on disk.
+Storing each call as a delta of the previous one is a proposed follow-up.
+
 ## v0.152.1 — a running session is stopped before its context overflows
 
 GF-GATE1, 2026-10-27 21:44: the local-model session went from 207k to 230k tokens in a single

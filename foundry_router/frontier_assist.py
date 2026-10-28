@@ -158,9 +158,11 @@ async def call_frontier(svc, cfg: dict, persona: dict, conversation_key: str,
             reasons.append(f"{m}: {v.reason}")
             continue
         try:
-            res, backend = await svc.pool.chat(
-                m, [{"role": "system", "content": system}, {"role": "user", "content": user}],
-                max_tokens=max_tokens)
+            from . import capture as _capture
+            with _capture.purpose("frontier_assist"):    # not one of the agent's own turns
+                res, backend = await svc.pool.chat(
+                    m, [{"role": "system", "content": system}, {"role": "user", "content": user}],
+                    max_tokens=max_tokens)
         except Exception as e:                                     # noqa: BLE001
             reasons.append(f"{m}: {str(e)[:120]}")
             continue

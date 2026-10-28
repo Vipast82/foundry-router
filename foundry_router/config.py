@@ -844,6 +844,14 @@ class TrainingCaptureConfig(BaseModel):
     exclude_backends: list[str] = Field(default_factory=list)
     personas: list[str] = Field(default_factory=list)
     exclude_personas: list[str] = Field(default_factory=list)
+    # What each call is for (capture.PURPOSES: agent_turn, brain_route,
+    # frontier_assist, research, agent_external, media, operator_chat); globs,
+    # empty include = every purpose.
+    purposes: list[str] = Field(default_factory=list)
+    exclude_purposes: list[str] = Field(default_factory=list)
+    # The Automation chat is captured only with this on (its own switch: it is
+    # the operator's console, not client traffic).
+    operator_chat: bool = False
 
 
 class PerfConfig(BaseModel):

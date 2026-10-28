@@ -55,6 +55,7 @@ class BrainClient:
     def __init__(self, cfg: AgentBrainConfig, client: httpx.AsyncClient, db=None):
         self.cfg = cfg
         self.db = db  # optional — retry events land in the troubleshooting log
+        self.capture = None  # training capture (main.py sets it); purpose brain_route
         self.protocol = make_protocol(
             _PROVIDER_TO_PROTOCOL[cfg.provider], cfg.endpoint, cfg.api_key, client,
             meridian_profile=getattr(cfg, "meridian_profile", None))
@@ -181,18 +182,43 @@ class BrainClient:
         finally:
             self._active.pop(call_id, None)
 
+    def _capture_begin(self):
+        cap = self.capture
+        if cap is None:
+            return None
+        try:
+            return cap.begin_call(f"brain:{self.cfg.provider}", purpose="brain_route")
+        except Exception:                                          # noqa: BLE001
+            return None                  # capture never touches the brain call
+
+    def _capture_finish(self, ctok, msgs, tools, purpose, result=None, error="") -> None:
+        if ctok is None:
+            return
+        try:
+            self.capture.finish_call(
+                ctok, model=self.cfg.model, backend=f"brain:{self.cfg.provider}",
+                messages=msgs, tools=tools,
+                settings={"options": self.cfg.options or None, "max_tokens": self.cfg.max_tokens,
+                          "brain_purpose": purpose},
+                result=result, error=error, status="ok" if result is not None else "error")
+        except Exception:                                          # noqa: BLE001
+            log.exception("brain capture failed")
+
     async def _chat_attempts(self, msgs, tools, on_retry, purpose, t0, who) -> ChatResult:
         for attempt in (1, 2):
+            ctok = self._capture_begin()
             try:
                 res = await self.protocol.chat(
                     self.cfg.model, msgs, tools=tools,
                     options=self.cfg.options or None,
                     keep_alive=self.cfg.keep_alive if self.cfg.provider == "ollama" else None,
                     max_tokens=self.cfg.max_tokens)
+                self._capture_finish(ctok, msgs, tools, purpose, result=res)
                 self._record(purpose, t0, "ok" if attempt == 1 else "retried", res, who=who)
                 return res
             except Exception as e:
                 emsg = str(e)
+                self._capture_finish(ctok, msgs, tools, purpose, error=emsg[:2000])
                 # Malformed tool-call JSON: the brain isn't down, it made a
                 # mistake — retry ONCE with corrective feedback before
                 # degrading. Gated on `tools` because the correction tells the
