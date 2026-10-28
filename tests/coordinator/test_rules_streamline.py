@@ -200,14 +200,16 @@ def test_a_legacy_needs_human_report_with_options_is_a_decision_no_timeout_answe
     assert "no timeout" in c.store.task("game", "T1")["blocker"]
 
 
-def test_a_product_recommendation_that_needs_a_human_act_gets_no_timeout(tmp_path):
+def test_a_product_recommendation_that_needs_a_human_act_parks_after_the_timeout(tmp_path):
+    """audit D (2026-10-28): only a user_action blocker waits without a timeout; a
+    human act nobody did is never applied, the sprint parks instead."""
     c, _ = _game(tmp_path, lambda ctx: {"final": report(
         "BLOCKED", blocker="Rojo plugin state", blocker_kind="product",
         options=["Victor clicks Connect in Studio", "drop the live check"],
         recommended="Victor clicks Connect in Studio")})
     assert run_until(c, lambda: _state(c) == S.BLOCKED, limit=12)
     [d] = _decisions(c, "T1", "implementer_blocked")
-    assert d["recommended"] is None and not d.get("deadline_ts")
+    assert json.loads(d["recommended"]) == DP.PARK and d.get("deadline_ts")
     assert d["recommendation"] == "Victor clicks Connect in Studio"      # still shown
 
 
@@ -219,7 +221,7 @@ def test_human_act_options_and_the_sweep_guard(tmp_path):
                "use the server-side counter", "show the user a toast"):
         assert not DP.needs_human_act(no), no
     # a decision opened before the change may still carry a timed human act: the sweep
-    # never applies it
+    # never applies it; audit D: it parks instead of waiting forever
     clock = Clock()
     c, _ = _game(tmp_path, lambda ctx: {"final": report("DONE")}, clock=clock)
     did = c.obligations.open_decision("game", "T1", "implementer_blocked", "q?",
@@ -229,7 +231,7 @@ def test_human_act_options_and_the_sweep_guard(tmp_path):
               "WHERE decision_id=?", (json.dumps("Victor clicks Connect"), clock() - 1, did))
     DP.sweep(c, force=True)
     d = c.obligations.decision(did)
-    assert d["status"] == "open" and not d.get("deadline_ts")
+    assert d["status"] == "answered" and d["answer"] == DP.PARK
     assert _events(c, "decision_timeout_skipped")
 
 

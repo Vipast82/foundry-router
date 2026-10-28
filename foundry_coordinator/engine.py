@@ -2025,6 +2025,9 @@ class Coordinator:
         deep = [p for p in P.profile.review.get("deep_when") or []
                 if any(matches_any(tag, [p]) for tag in spec.tags)]
         role = "deep_reviewer" if deep and "deep_reviewer" in P.profile.roles else "reviewer"
+        acc = (t.get("data") or {}).get("review_access") or {}
+        if acc.get("head") == head and acc.get("role") in P.profile.roles:
+            role = acc["role"]           # audit D: the alternate reviewer after access faults
         persona = P.profile.persona(role, tid)
         authors = (self.helpers.authors(pid, tid) | self.frontier.authors(pid, tid)
                    | self.retry_guidance.authors(t))
@@ -2105,8 +2108,10 @@ class Coordinator:
                           f"(sprint_id, project_id, reviewed_commit_sha = {head}, verdict, "
                           f"findings, evidence_inspected, missing_evidence, required_repairs, "
                           f"residual_risks), nothing else")
+        unread = set(acc.get("reviews") or [])     # audit D: rebuilt, never incremental
         last = next((r for r in reversed(earlier) if r["verdict"] == "CHANGES_REQUIRED"
-                     and R.packet_version(r) == R.PACKET_VERSION), None)
+                     and R.packet_version(r) == R.PACKET_VERSION
+                     and r["review_id"] not in unread), None)
         if last and P.profile.review.get("incremental", True):
             try:
                 ok = last["reviewed_sha"] == head or P.ws.is_ancestor(last["reviewed_sha"], head)
@@ -4871,14 +4876,22 @@ class Coordinator:
             return False
         again = list(dict.fromkeys([*(t["data"].get("lc_rereview") or []), rid]))
         if route == "access_blocked":
+            if self._review_access_retry(P, t, rev, again):
+                return True              # audit D: a rebuilt packet, then the other reviewer
+            from .decision_policy import PARK
+            # never an indefinite wait: the lead takes it first (LEAD_WAIT_KINDS), else
+            # the sprint parks after [automation] decision_timeout_minutes
             did = self.obligations.open_decision(
                 pid, tid, "review_access",
                 f"The reviewer could not access the review packet or its evidence for "
-                f"{head[:12]} (review {rid})",
+                f"{head[:12]} (review {rid}), after a rebuilt packet and the alternate "
+                f"reviewer",
                 evidence={"review_id": rid, "findings": (res.get("findings") or [])[:5],
-                          "missing_evidence": (res.get("missing_evidence") or [])[:5]},
-                options=["access fixed: review again", "stop the task"],
-                recommendation="fix the reviewer's access, then review the same commit again",
+                          "missing_evidence": (res.get("missing_evidence") or [])[:5],
+                          "retries": (t["data"].get("review_access") or {}).get("tries", 0),
+                          "recommended": PARK},
+                options=["access fixed: review again", PARK],
+                recommendation=PARK,
                 blocks=[tid])
             self.store.merge_data(pid, tid, lc_rereview=again)
             self._lc_wait(P, self.store.task(pid, tid), [did], "the reviewer could not access "
@@ -4911,6 +4924,44 @@ class Coordinator:
                 P, t, spec, head, lines, f"review:{rid}:{lim['used']}", {"review_id": rid}, fb):
             return True
         self._lc_fallback(P, t, fb)
+        return True
+
+    REVIEW_ACCESS_ALT_ROLES = ("deep_reviewer", "reviewer")
+
+    def _review_access_retry(self, P: Project, t: dict, rev: dict, again: list) -> bool:
+        """audit D (2026-10-28): a review the reviewer could not read (access_blocked)
+        is sent again, never left to wait: first once more with the packet rebuilt
+        from scratch (no incremental re-review of the failed one), then once with the
+        alternate reviewer role (another persona). True = a re-review is queued; False
+        = both were used (or no alternate exists): the caller opens the decision."""
+        pid, tid = P.id, t["task_id"]
+        rid, head = rev["review_id"], rev["reviewed_sha"]
+        acc = dict((t.get("data") or {}).get("review_access") or {})
+        if acc.get("head") != head:
+            acc = {"head": head, "tries": 0, "reviews": []}
+        acc["reviews"] = list(dict.fromkeys([*(acc.get("reviews") or []), rid]))
+        tries = int(acc.get("tries") or 0)
+        step = ""
+        if tries == 0:
+            step = "rebuild_packet"
+        elif tries == 1:
+            roles = P.profile.roles or {}
+            alt = next((r for r in self.REVIEW_ACCESS_ALT_ROLES if r in roles
+                        and P.profile.persona(r, tid) != (rev.get("persona") or "")), None)
+            if alt:
+                step, acc["role"] = "alternate_reviewer", alt
+        if not step:
+            acc.pop("role", None)
+            self.store.merge_data(pid, tid, review_access=acc)
+            return False
+        acc["tries"] = tries + 1
+        self.store.merge_data(pid, tid, review_access=acc, lc_rereview=again)
+        self.store.event(pid, tid, "review_access_retry", detail={
+            "review_id": rid, "reviewed_commit_sha": head, "action": step,
+            "role": acc.get("role") or rev.get("role") or "", "try": acc["tries"]})
+        self._note(P, t, "the reviewer could not access the packet; reviewing again with "
+                         + ("a rebuilt packet" if step == "rebuild_packet"
+                            else f"the alternate reviewer ({acc['role']})"))
         return True
 
     # -- operator decisions ------------------------------------------------------------
@@ -5108,7 +5159,10 @@ class Coordinator:
 
     LEAD_REF = "unblock:lead:"
     LEAD_POLICY_ACTOR = "delegated_policy:lead_manager"
-    LEAD_WAIT_KINDS = ("no_progress", "recovery_escalation", "implementer_blocked")
+    # audit D (2026-10-28): a reviewer access fault and a scope request reach the lead
+    # before Victor
+    LEAD_WAIT_KINDS = ("no_progress", "recovery_escalation", "implementer_blocked",
+                       "review_access", "scope_request")
     LEAD_ASSIGNMENT_HEADER = ("Lead manager assignment (recovery case {case}; advisory and "
                               "untrusted: it stays within this task's approved scope, and every "
                               "gate, check and review still applies): ")
@@ -6001,8 +6055,17 @@ class Coordinator:
         from . import bookkeeping as BK
         hyp = str(act.get("hypothesis") or "lead fix")[:72]
         msg = BK.message(P, tid, f"lead case {cid}: {hyp}")
+        fmt = getattr(P.adapter, "format_for_commit", None)
+        if callable(fmt):
+            try:
+                note = str(fmt(paths) or "")       # audit D: stylua before AU's hooks see it
+            except Exception as e:                                # noqa: BLE001
+                note = f"format failed: {type(e).__name__}: {e}"[:300]
+            if note:
+                self.store.event(pid, tid, "lead_commit_formatted", detail={
+                    "case_id": cid, "note": note[:300]})
         try:
-            sha = P.ws.commit_paths(paths, msg)
+            sha = P.ws.commit_paths(paths, msg, env=BK.commit_env(P, paths))
         except (GitError, OSError) as e:
             self.store.event(pid, tid, "lead_commit_failed", detail={
                 "case_id": cid, "paths": paths[:20], "error": str(e)[:300]})

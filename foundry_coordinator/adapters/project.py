@@ -234,6 +234,16 @@ class GenericAdapter(ReviewContractDefaults):
         a BUILD review must neither require nor credit them."""
         return duty_bullets(str(self.p.closeout.get("steps_text") or ""))
 
+    def commit_env(self, paths: list[str]) -> dict:
+        """Environment for a coordinator commit of exactly `paths` (the project's
+        hooks read their overrides there). Generic: none."""
+        return {}
+
+    def format_for_commit(self, paths: list[str]) -> str:
+        """Format `paths` the way the project's commit hooks require, before a
+        coordinator commit of model-written code. Returns a note ('' = nothing done)."""
+        return ""
+
     def exempt_paths(self, spec: TaskSpec) -> list[str]:
         # 0.147.0: docs/memory is the coordinator's project memory, never a sprint's
         # code: its memory-notes commits must not unbind a gate, stale the gate block

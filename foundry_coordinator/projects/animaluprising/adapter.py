@@ -98,6 +98,39 @@ class AnimalUprisingAdapter(GenericAdapter):
     def _python(self) -> list[str]:
         return list(self.cfg.get("python") or [sys.executable])
 
+    def commit_env(self, paths: list[str]) -> dict:
+        """audit D (2026-10-28): AU's commit hooks refuse files outside the sprint's
+        plan list unless AU_ALLOW_SCOPE names them; every coordinator commit
+        (bookkeeping, closeout, Lead, scope grant) sets it to exactly its paths, as
+        the memory commits already did."""
+        from ...memory.manager import COMMIT_ENV
+        joined = ";".join(sorted(str(p).replace("\\", "/") for p in paths if p))
+        return {k: v.replace("{paths}", joined) for k, v in COMMIT_ENV.items()} if joined \
+            else {}
+
+    STYLUA_TIMEOUT_S = 120
+
+    def format_for_commit(self, paths: list[str]) -> str:
+        """stylua over the .lua/.luau files among `paths` (AU's hooks check stylua;
+        Lead-written Luau was refused). '' when there is nothing to format; a note
+        otherwise (stylua missing or failing is reported, the commit still runs)."""
+        lua = [p for p in paths if str(p).lower().endswith((".lua", ".luau"))
+               and os.path.isfile(os.path.join(self.p.workspace, p))]
+        if not lua:
+            return ""
+        exe = self.cfg.get("stylua") or shutil.which("stylua")
+        if not exe:
+            return "stylua not on PATH: Luau not formatted"
+        try:
+            r = subprocess.run([exe, *lua], cwd=self.p.workspace, capture_output=True,
+                               text=True, timeout=self.STYLUA_TIMEOUT_S, encoding="utf-8",
+                               errors="replace")
+        except (OSError, subprocess.TimeoutExpired) as e:
+            return f"stylua failed: {e}"[:300]
+        if r.returncode != 0:
+            return f"stylua exit {r.returncode}: {(r.stderr or r.stdout).strip()[:300]}"
+        return f"stylua formatted {len(lua)} file(s)"
+
     def _read(self, rel: str) -> str:
         with open(os.path.join(self.p.workspace, rel), encoding="utf-8", errors="replace") as f:
             return f.read()
