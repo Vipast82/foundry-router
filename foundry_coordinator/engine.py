@@ -5917,6 +5917,13 @@ class Coordinator:
         data = t.get("data") or {}
         if data.get("recovery_case"):
             return
+        # a decision a lead case already handed back to the capped self-repair (the
+        # lead could not run: lead.hand_back) is not given to another case; the
+        # decision sweep answers it
+        handed = data.get("lead_handback") or {}
+        decisions = [d for d in decisions if d["decision_id"] not in handed]
+        if not decisions:
+            return
         dw = data.get("decision_wait") or {}
         d0 = decisions[0]
         reason = f"decision {d0['decision_id']} ({d0['kind']}): {dw.get('why') or ''}: " \
