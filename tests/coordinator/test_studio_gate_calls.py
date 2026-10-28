@@ -57,6 +57,8 @@ def plan_for(index_text: str, ids: list) -> str:
                     "client": "robloxstudio-mcp eval_client_runtime",
                     "edit": "Roblox_Studio execute_luau (datamodel Edit)"}[vm]
             out.append(f"CALL {n} [vm={vm}] {tool} :: {G.step_payload(e, step)[1]}")
+    # GateRunner.run always ends its plan with this NOTE (a cut-off reply lacks it)
+    out.append("NOTE when all CALLs are done: run GateRunner.tally(...)")
     return "\n".join(out)
 
 
@@ -441,3 +443,33 @@ def test_studio_lock_held_by_another_sprint_refuses_and_is_left_alone(fakes, rep
     assert G.studio_lock_read().split()[0] == G.STUDIO_LOCK_OWNER and "x y" in G.studio_lock_read()
     assert G.studio_lock_acquire("L2", "z").startswith(G.STUDIO_LOCK_OWNER)
     assert G.studio_lock_release("L2") is False and G.studio_lock_release("L1") is True
+
+
+def test_a_long_plan_is_fetched_in_pages_and_renumbered(repo):
+    """2026-10-28: Studio's MCP reply is cut at ~100,000 characters; GF-GATE1's full plan
+    (68 rows, 330 CALLs) came back as 254 CALLs and every row was refused. The plan is
+    fetched in pages and renumbered as one plan; a cut-off page is a clear error."""
+    text = (repo / "tests" / "RegressionIndex.lua").read_text(encoding="utf-8")
+    idx = G.parse_regression_index(text)
+    ids = [e["id"] for e in idx["entries"]][:5]
+    g = G.Gate.__new__(G.Gate)
+    g.index = idx
+    g.PLAN_PAGE_STEPS = 2                       # force several pages
+    asked = []
+
+    def edit(code, label):
+        sel = re.search(r"\.run\(\[(=*)\[(.*?)\]\1\]\)", code, re.S).group(2).strip()
+        asked.append(sel)
+        return plan_for(text, sel.split(",")), None
+    g.edit = edit
+    whole = G.parse_plan(plan_for(text, ids))
+    paged = g.plan(",".join(ids))
+    assert paged["error"] is None and len(asked) > 1
+    assert [(c["n"], c["vm"], c["payload"]) for c in paged["calls"]] == \
+        [(c["n"], c["vm"], c["payload"]) for c in whole["calls"]]
+    assert G.map_calls(paged, idx, ",".join(ids)) is not None
+    # a page that comes back cut off (no closing NOTE) is reported, never guessed
+    cut = plan_for(text, ids).rsplit("\nNOTE when", 1)[0] + "... (truncated)"
+    g.edit = lambda code, label: (cut, None)
+    g.PLAN_PAGE_STEPS = 1000
+    assert "cut off" in g.plan(",".join(ids))["error"]

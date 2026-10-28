@@ -1599,14 +1599,65 @@ class Gate:
         self._playing = False
 
     # ---- regression CALL plan ---------------------------------------------------
-    def plan(self, selection: str) -> dict:
+    # Studio's MCP reply is cut at ~100,000 characters ("... (truncated)"): a full
+    # regression plan (68 rows, 330 CALLs, 2026-10-28) is bigger, so the plan is fetched in
+    # pages of at most PLAN_PAGE_STEPS steps and renumbered into one plan (the numbering
+    # GateRunner.run / tally use for the whole selection: boot 1-2, then every step in order).
+    PLAN_PAGE_STEPS = 40
+    PLAN_END = "when all CALLs are done"
+
+    def _plan_one(self, selection: str) -> dict:
         code = (FRESH_GATE + 'return __freshGate()'
                 f".run({luau_long(selection)})")
         text, err = self.edit(code, "GateRunner.run")
         p = parse_plan("" if err else text)
         if err:
             p["error"] = "GateRunner.run tool error: " + (text or "")[:200]
+        elif p.get("calls") and self.PLAN_END not in (text or ""):
+            p["error"] = ("GateRunner.run output was cut off before its end (the Studio tool "
+                          "truncates long replies): " + str(len(text or "")) + " characters")
         return p
+
+    def _plan_pages(self, ids: list) -> list:
+        steps = {e.get("id"): len(e.get("steps") or []) for e in (self.index or {}).get(
+            "entries") or [] if isinstance(e, dict)}
+        pages, cur, n = [], [], 0
+        for i in ids:
+            k = max(1, steps.get(i, 1))
+            if cur and n + k > self.PLAN_PAGE_STEPS:
+                pages.append(cur)
+                cur, n = [], 0
+            cur.append(i)
+            n += k
+        if cur:
+            pages.append(cur)
+        return pages
+
+    def plan(self, selection: str) -> dict:
+        ids = re.findall(r"[^,\s]+", selection or "")
+        pages = self._plan_pages(ids) if len(ids) > 1 else [ids]
+        if len(pages) <= 1:
+            return self._plan_one(selection)
+        boot, merged, notes, offset = {}, [], [], 2
+        for page in pages:
+            p = self._plan_one(",".join(page))
+            if p.get("error"):
+                p["error"] = f"page {','.join(page)}: {p['error']}"
+                return p
+            notes += p.get("notes") or []
+            top = 2
+            for c in p.get("calls") or []:
+                if c["n"] in (1, 2):
+                    boot.setdefault(c["n"], c)
+                    continue
+                c = dict(c)
+                c["n"] = offset + (c["n"] - 2)
+                c["line"] = re.sub(r"^CALL \d+", f"CALL {c['n']}", c.get("line") or "")
+                top = max(top, c["n"])
+                merged.append(c)
+            offset = top
+        return {"calls": [boot[k] for k in sorted(boot)] + merged, "error": None,
+                "notes": notes, "pages": len(pages)}
 
     @staticmethod
     def _is_edit_call(c: dict) -> bool:

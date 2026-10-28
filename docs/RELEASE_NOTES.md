@@ -2,6 +2,20 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.155.2 — the scripted Studio gate fetches long plans in pages
+
+GF-GATE1's scripted full regression triage, 2026-10-28:
+- The smoke run of the sprint's own two suites gave GATE PASS live.
+- The full run (68 rows, 330 CALLs) refused every row with "Studio's CALL plan does not match
+  RegressionIndex at HEAD". Studio's MCP reply is cut at about 100,000 characters, so
+  `GateRunner.run` came back with 254 of its 332 CALLs and ended in "... (truncated)".
+
+- **Plans are fetched in pages.** `Gate.plan` requests rows in pages of at most 40 steps and
+  renumbers them into the plan `GateRunner.run` / `tally` use for the whole selection: boot 1-2,
+  then every step in order. The timing and DYNARG flags stay with their CALLs.
+- **A cut-off reply is reported.** A page that comes back without the plan's closing NOTE is
+  reported as "output was cut off", never matched as a short plan.
+
 ## v0.155.1 — an unblock with a fresh budget also resets the review budget
 
 GF-GATE1, 2026-10-28:
