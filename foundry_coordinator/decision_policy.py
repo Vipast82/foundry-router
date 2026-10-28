@@ -290,6 +290,30 @@ def _lead_handling(c, d: dict) -> Optional[dict]:
     return None
 
 
+def _lead_hands_back(c, P, d: dict, case: dict) -> bool:
+    """2026-10-28: an automation decision past its deadline whose lead case never made
+    its call (DEFERRED on readiness / quota / admission, or not started): the case is
+    handed back (lead.hand_back cancels it) and the self-repair answers now, instead
+    of following the case's own multi-hour bound."""
+    if decision_category(d) != AUTOMATION or case.get("state") not in ("DEFERRED",
+                                                                        "DIAGNOSING"):
+        return False
+    L = getattr(c, "lead", None)
+    fn = getattr(L, "hand_back", None)
+    if not callable(fn):
+        return False
+    try:
+        full = L.case(case["case_id"])
+        if not any(x["decision_id"] == d["decision_id"]
+                   for x in L.handback_decisions(P, full)):
+            return False
+        return bool(fn(P, full, f"decision {d['decision_id']} timed out while the lead "
+                                f"case was {case.get('state')} without a lead call",
+                       sweep=False))
+    except Exception:                                             # noqa: BLE001
+        return False
+
+
 # -- self-repair (self-driving part 1) -------------------------------------------------
 
 LEAD_ROUND = "authorize another bounded round"          # lead.Lead.ESCALATION_OPTIONS[1]
@@ -367,14 +391,50 @@ def repair_trigger(c, d: dict) -> tuple[str, str]:
     return "findings", ""
 
 
-def _finding_text(d: dict, t: dict, cap: int = 1800) -> str:
+def _refused_items(c, d: dict) -> list[str]:
+    """The items of the task's latest refused submission (the engine's
+    `submission_refused` event): what the verifier still refuses right now."""
+    try:
+        rows = c.store.q("SELECT detail FROM events WHERE project_id=? AND task_id=? AND "
+                         "kind='submission_refused' ORDER BY id DESC LIMIT 1",
+                         (d["project_id"], d["task_id"]))
+        items = (json.loads(rows[0]["detail"]) or {}).get("items") or [] if rows else []
+    except Exception:                                             # noqa: BLE001
+        return []
+    out = []
+    for it in items:
+        x = (it or {}).get("item") or {} if isinstance(it, dict) else {}
+        s = " ".join(str(v) for v in (x.get("title"), x.get("reason") or x.get("detail"))
+                     if v)
+        s = s or str(x.get("check_id") or "")
+        if s and s not in out:
+            out.append(s)
+    return out
+
+
+def _finding_text(d: dict, t: dict, cap: int = 2400, c=None) -> str:
+    """The concrete strategy material: what the verifier still refuses (the latest
+    refused submission, the repeated findings of the decision), the strategy that
+    did not clear them, then the latest review's findings."""
     ev = _evidence(d)
     lines = []
+    refused = _refused_items(c, d) if c is not None else []
+    for s in refused[:4]:
+        lines.append("- still refused: " + s[:400])
+    for r in (ev.get("repeats") or [])[:4]:
+        s = str((r or {}).get("text") or "").strip() if isinstance(r, dict) else ""
+        if s and not any(s[:120] in x for x in lines):
+            lines.append(f"- repeats x{(r or {}).get('count') or 2}: " + s[:400])
+    if ev.get("last_strategy"):
+        lines.append("- the earlier strategy that did not clear them: "
+                     + str(ev["last_strategy"]).split("\n", 1)[0][:300])
+    nf = 0
     for f in ((t or {}).get("data") or {}).get("findings") or []:
         s = str(f).strip()
         if s and not s.startswith("Self-repair"):
             lines.append("- " + s[:400])
-        if len(lines) >= 4:
+            nf += 1
+        if nf >= 4:
             break
     for k in ("trigger", "hypothesis"):
         if ev.get(k):
@@ -452,7 +512,7 @@ def self_repair_plan(c, P, d: dict) -> dict:
     now = c.clock()
     recent = repair_log(t, now)
     trig, counter = repair_trigger(c, full)
-    text = _finding_text(full, t)
+    text = _finding_text(full, t, c=c)
     sr = {"decision_id": did, "trigger": trig}
 
     def exhausted(why: str) -> dict:
@@ -564,6 +624,8 @@ def sweep(c, force: bool = False) -> list[str]:
         if P is None:
             continue
         case = _lead_handling(c, d)
+        if case and _lead_hands_back(c, P, d, case):
+            case = None                  # the case could not run: the self-repair answers
         if case:
             # 0.145.2: a lead case is still working this very stop. The timeout
             # default (often "park the sprint") fired mid-repair and parked

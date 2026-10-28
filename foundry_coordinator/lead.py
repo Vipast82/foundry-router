@@ -1280,10 +1280,21 @@ class LeadManager:
             it = iter(expected)
             subset = bool(models) and len(models) < len(expected) and \
                 len(set(models)) == len(models) and all(m in it for m in models)
-            res("route_chain", models == expected,
+            # 2026-10-28 (GF-GATE1 / HK-CLOSE1): with [lead_manager] allow_local_route the
+            # LAST expected model is the last-resort local fallback. When only that tail
+            # is down (the local model is unloaded or busy) the primary routes still
+            # serve the lead: the chain is ready (the served-model check still pins
+            # every call to expected_models). Before, a down local Qwen held every lead
+            # case DEFERRED for hours.
+            tail_down = subset and bool(self.settings(P).get("allow_local_route")) and \
+                models == expected[:len(models)]
+            res("route_chain", models == expected or tail_down,
                 f"routes {models} " + ("== " if models == expected else "!= ")
                 + f"expected_models {expected}"
-                + (" (an ordered subset: the missing route is down; retried later)"
+                + (" (only the last-resort fallback route(s) "
+                   f"{expected[len(models):]} are down; the primary routes serve the lead)"
+                   if tail_down else
+                   " (an ordered subset: the missing route is down; retried later)"
                    if subset else ""), cls="transient" if subset else "config")
             local = [f"{r.get('backend')}/{r.get('model')}" for r in routes
                      if isinstance(r, dict) and str(r.get("source") or "") == "local"]
@@ -2609,7 +2620,8 @@ class LeadManager:
         if r["status"] in ("pending", "failed"):
             return case
         if r["status"] == "deferred":
-            return self._defer(P, case, s, r["reason"], r.get("retry"), back="DIAGNOSING")
+            return self._defer_or_hand_back(P, case, s, r["reason"], r.get("retry"),
+                                            back="DIAGNOSING")
         sid, st = r["session_id"], r["state"]
         changes = self._guard_verify(P, t, case, key, ws)
         if changes:
@@ -2910,6 +2922,11 @@ class LeadManager:
                           outcome=f"deferred: {reason}"[:500])
 
     def _deferred(self, P, t, case, s):
+        # a case deferred before its lead call (a case from before the hand-back, or a
+        # refusal) never holds an automation stop until the backoff ends
+        if self.hand_back(P, case, (case.get("validation") or {}).get("deferred_reason")
+                          or case.get("outcome") or "lead case deferred"):
+            return self.case(case["case_id"])
         if self.clock() < float(case.get("next_check_ts") or 0):
             return case
         v = case.get("validation") or {}
@@ -2917,7 +2934,7 @@ class LeadManager:
         bad = self._blocking(self.readiness(P, fresh=True))
         transient = [b for b in bad if b["cls"] == "transient"]
         if transient:
-            return self._defer(P, case, s, "still not ready: " + "; ".join(
+            return self._defer_or_hand_back(P, case, s, "still not ready: " + "; ".join(
                 f"{b['name']}: {b['detail']}" for b in transient)[:400], None, back=back)
         if bad and back == "DIAGNOSING":
             return self._readiness_failed(P, t, case, bad)
@@ -2934,13 +2951,95 @@ class LeadManager:
                               next_check_ts=None)
         return self._save(case["case_id"], state="DIAGNOSING", next_check_ts=None)
 
+    # -- hand-back: a lead that cannot run never holds an automation stop -----------------
+
+    def handback_decisions(self, P, case: Optional[dict]) -> list[dict]:
+        """The open automation decisions a decision-wait case was opened for that the
+        capped self-repair (decision_policy) can answer instead of this case, or [].
+
+        Only while the case holds no paid work: DIAGNOSING / DEFERRED back to
+        DIAGNOSING, with no lead or repair session still running (a held report, a
+        repair in flight or an upgrade is never discarded)."""
+        if not case or P is None or case["state"] not in ("DIAGNOSING", "DEFERRED"):
+            return []
+        if (case.get("validation") or {}).get("deferred_back", "DIAGNOSING") not in \
+                (None, "", "DIAGNOSING"):
+            return []
+        try:
+            from . import decision_policy as DP
+            if not DP.self_repair_on(P):
+                return []
+            if any(a["status"] == "started" for a in self.actions(case["case_id"])):
+                return []
+            origs = self._wait_originals(P, case)
+        except Exception:                                        # noqa: BLE001
+            return []
+        if not origs or any(DP.decision_category(d) != DP.AUTOMATION or
+                            d.get("recommended") in (None, "") for d in origs):
+            return []
+        return origs
+
+    def hand_back(self, P, case: Optional[dict], why: str, sweep: bool = True) -> bool:
+        """2026-10-28 (GF-GATE1 / HK-CLOSE1 repeat stops): the lead cannot run now
+        (route not ready, quota / admission refusal, infrastructure). Instead of a
+        multi-hour DEFERRED case that holds the automation decision (the sweep
+        follows a working case's deadline), the case is cancelled and the decision
+        is due now, so the capped self-repair answers it with a concrete strategy
+        from the latest findings (a different approach, then the frontier
+        implementer; a quiet park only when the caps are exhausted). No check is
+        waived and no lead cap changes. True when handed back."""
+        origs = self.handback_decisions(P, case)
+        if not origs:
+            return False
+        now = self.clock()
+        ids = [d["decision_id"] for d in origs]
+        for did in ids:
+            self.store.x("UPDATE decisions SET deadline_ts=? WHERE decision_id=? AND "
+                         "status='open' AND recommended IS NOT NULL AND "
+                         "(deadline_ts IS NULL OR deadline_ts>?)", (now, did, now))
+        tid = case["task_id"]
+        try:
+            prev = dict(((self.store.task(P.id, tid) or {}).get("data") or {})
+                        .get("lead_handback") or {})
+            prev.update({did: now for did in ids})
+            self.store.merge_data(P.id, tid, lead_handback=prev)
+        except Exception:                                        # noqa: BLE001
+            pass
+        reason = (f"lead unavailable ({_cut(why, 300)}): the capped self-repair answers "
+                  f"{', '.join(ids)} now instead of a deferred lead case")
+        self._act(case, "hand_back", result=reason[:500], detail={"decisions": ids})
+        self.cancel(case["case_id"], reason, actor="lead_manager", P=P)
+        self.store.event(P.id, tid, "lead_handback", detail={
+            "case_id": case["case_id"], "decisions": ids, "why": _cut(why, 400),
+            "category": "automation"})
+        if sweep and not getattr(self, "_in_handback_sweep", False):
+            self._in_handback_sweep = True
+            try:
+                from . import decision_policy as DP
+                DP.sweep(self.c, force=True)
+            except Exception as e:                               # noqa: BLE001
+                (getattr(self.c, "log", None) or (lambda m: None))(
+                    f"lead hand-back sweep failed: {e}")
+            finally:
+                self._in_handback_sweep = False
+        return True
+
+    def _defer_or_hand_back(self, P, case, s, reason: str, retry, back: str):
+        """A defer that leaves the case's lead call unmade (readiness, refusal,
+        infrastructure): an automation decision-wait case hands the stop back to the
+        capped self-repair instead (hand_back); anything else defers as before."""
+        if back == "DIAGNOSING" and self.hand_back(P, self.case(case["case_id"]), reason):
+            return self.case(case["case_id"])
+        return self._defer(P, case, s, reason, retry, back=back)
+
     def _readiness_failed(self, P, t, case, bad: list[dict]):
         detail = "; ".join(f"{b['name']}: {b['detail']}" for b in bad)
         self._act(case, "readiness", status="failed", result=detail[:1500],
                   detail={"failed": bad})
         if all(b["cls"] == "transient" for b in bad):
-            return self._defer(P, case, self.settings(P), f"lead not ready: {detail}", None,
-                               back="DIAGNOSING")
+            return self._defer_or_hand_back(P, case, self.settings(P),
+                                            f"lead not ready: {detail}", None,
+                                            back="DIAGNOSING")
         return self._escalate(
             P, t, case, "readiness",
             f"The lead manager cannot run for this blocker because its route is not ready: "
