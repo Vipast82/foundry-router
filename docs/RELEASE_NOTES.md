@@ -102,6 +102,22 @@ Storage: today's 13k captured calls take ~22 GB (raw + normalized, ~400 KB per c
 each Kilo call re-sends its history). Capturing everything grows that, so keep an eye on disk.
 Storing each call as a delta of the previous one is a proposed follow-up.
 
+## v0.152.2 — a task's own leftover file is not "someone else's work"
+
+GF-GATE1, 2026-10-27 22:33 and 22:50: the session that died at 21:45 (context overflow)
+left its own untracked `docs/progress/GF_GATE1_hashes.json`. The next session started with
+that file in the "pre-existing dirty" baseline and regenerated it. Final verification then
+failed `coordinator.unrelated_preserved` ("pre-existing uncommitted changes were
+modified"). That opened a decision and a Lead case, twice: the Lead's reverify hit the same
+check.
+
+- **`unrelated_preserved`:** a baseline file that was not dirty when the task began
+  (`task_baseline_dirty`), and that matches the task's scope or exempt paths, is the task's
+  own leftover. It is never counted as "modified unrelated work". Work that was dirty before
+  the task began is still protected byte for byte.
+- **`{task}` patterns** in `[closeout] exempt_paths` also match the id with `_` for `-`.
+  AU names test and evidence files `GF_GATE1_*` for sprint GF-GATE1.
+
 ## v0.152.1 — a running session is stopped before its context overflows
 
 GF-GATE1, 2026-10-27 21:44: the local-model session went from 207k to 230k tokens in a single

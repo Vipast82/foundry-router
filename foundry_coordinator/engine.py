@@ -1893,8 +1893,16 @@ class Coordinator:
             ("uncommitted changes in task files: " + ", ".join(in_scope_dirty[:10])
              + (f"; {note}" if note and not intermediate else ""))
             if in_scope_dirty else "task files are committed and clean")
+        # a file this task's own earlier session left uncommitted (not dirty when the
+        # task began; in its scope or its exempt paths) is task work, not someone
+        # else's: a session that died mid-work (GF-GATE1 21:45, context overflow) left
+        # docs/progress/GF_GATE1_hashes.json, the next session updated it, and the
+        # check failed as "pre-existing changes modified" -> a decision, a lead case
+        pre_task = set(t["data"].get("task_baseline_dirty") or [])
+        task_left = {p for p in baseline if p not in pre_task
+                     and (matches_any(p, spec.scope) or matches_any(p, exempt))}
         touched = [p for p, h in baseline.items() if P.ws.file_hash(p) != h
-                   and not matches_any(p, runner_caps)]
+                   and not matches_any(p, runner_caps) and p not in task_left]
         new_dirty = [p for _, p in dirty if p not in baseline and p not in in_scope_dirty
                      and not (intermediate and (p in inter or p in pending_task))]
         add("unrelated_preserved", FAIL if touched or new_dirty else PASS,
