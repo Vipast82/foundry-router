@@ -710,10 +710,21 @@ class Coordinator:
                     task_base=data.get("task_base") or base, closeout_session=None,
                     closeout_attempts=0, review_errors=0)
         data = {k: v for k, v in data.items() if v is not None}
-        self.store.merge_data(pid, tid, pending_start={"run_id": run_id, "attempt": attempt})
+        # self-driving part 1: the last self-repair step is ONE session on the frontier
+        # persona; the first start after it claims it (by run id, restart-safe)
+        from .decision_policy import FRONTIER_KEY
+        srf = dict(data.get(FRONTIER_KEY) or {})
+        if srf.get("persona") and srf.get("run_id") in (None, "", run_id):
+            srf["run_id"] = run_id
+            data[FRONTIER_KEY] = srf
+        else:
+            srf = {}
+        self.store.merge_data(pid, tid, pending_start={"run_id": run_id, "attempt": attempt},
+                              **({FRONTIER_KEY: srf} if srf else {}))
         try:
             sid = self._start_session(P, tid, spec, "implement", "implementer", run_id, attempt,
-                                      prompt, meta=self._lc_session_meta(P, base))
+                                      prompt, meta=self._lc_session_meta(P, base),
+                                      **({"persona": str(srf["persona"])} if srf else {}))
         except Exception as e:                                    # noqa: BLE001
             self._release_session(P, t)
             return self._note(P, t, f"could not start a session: {e}")
@@ -733,10 +744,14 @@ class Coordinator:
                 next_action="session working", data=data)
 
     def _start_session(self, P: Project, tid: str, spec, phase: str, role: str, run_id: str,
-                       attempt: int, prompt: str, meta: Optional[dict] = None) -> str:
+                       attempt: int, prompt: str, meta: Optional[dict] = None,
+                       persona: str = "") -> str:
         key = f"session:{P.id}:{tid}:{run_id}:{phase}"
         existing = self.store.op_begin(key, P.id, tid, "session")
-        persona = P.profile.persona(role, tid)
+        # persona: a self-repair frontier session (decision_policy.FRONTIER_KEY)
+        if persona:
+            meta = {**(meta or {}), "self_repair": "frontier"}
+        persona = persona or P.profile.persona(role, tid)
         agent = P.profile.client.get("agent") or "code"
         directory = P.profile.workspace
         res = (existing or {}).get("result") or {}
@@ -1126,12 +1141,12 @@ class Coordinator:
             self.store.event(pid, tid, "operator_notice", session_id=t.get("session_id"), detail={
                 "text": f"{tid} needs you: {blocker[:400] or '(no blocker text)'} (the "
                         f"decision waits for your answer; no timeout)",
-                "blocker_kind": "user_action"})
+                "blocker_kind": "user_action", "category": "user_action"})
             return True
         text = f"session reported {status} (user_action): {blocker or '(no blocker text)'}"
         self.store.event(pid, tid, "operator_notice", session_id=t.get("session_id"), detail={
             "text": f"{tid} needs you: {blocker[:400] or '(no blocker text)'}",
-            "blocker_kind": "user_action"})
+            "blocker_kind": "user_action", "category": "user_action"})
         self._release_session(P, t)
         self.store.transition(pid, tid, S.BLOCKED, {
             "blocker": text[:1000], "session_id": t.get("session_id") or "",
@@ -2245,6 +2260,9 @@ class Coordinator:
             # a call already charged under this key (a retried error) is not refused
             self._lc_backfill(P, t)
             lim = self.obligations.effective_limits(P, t)["review_calls"]
+            if lim["remaining"] <= 0 and not early and \
+                    self._policy_review_extension(P, t, head, prior):
+                lim = self.obligations.effective_limits(P, t)["review_calls"]
             if lim["remaining"] <= 0:
                 if not early:
                     self.store.release(pid, tid)
@@ -3995,8 +4013,57 @@ class Coordinator:
             self._obligations = Obligations(self.store, clock=self.clock,
                                             unblock_validator=self._unblock_ref_ok,
                                             lead_validator=self._lead_authority_ok,
-                                            decision_policy=self._decision_meta)
+                                            decision_policy=self._decision_meta,
+                                            policy_cap=self._policy_cap,
+                                            policy_validator=self._policy_ref_ok)
         return self._obligations
+
+    def _policy_cap(self, project: str, counter: str) -> int:
+        """Self-driving part 1: policy extensions of `counter` per task per day."""
+        from . import decision_policy
+        return decision_policy.policy_cap(self.projects.get(project), counter)
+
+    def _policy_ref_ok(self, project: str, task: str, ref: str, counter: str) -> bool:
+        """The condition of a `policy:<counter>:<key>` extension. <key> is either an
+        open automation decision of this task (its timeout's self-repair) or, for
+        review_calls, a head of this task that was never reviewed."""
+        from . import decision_policy
+        key = ref.split(":", 2)[2] if ref.count(":") >= 2 else ""
+        if key.startswith("dec-"):
+            d = self.obligations.decision(key)
+            return bool(d and d["project_id"] == project and d["task_id"] == task
+                        and d["status"] == "open"
+                        and decision_policy.decision_category(d) == decision_policy.AUTOMATION)
+        if counter == "review_calls" and key:
+            return not self.store.reviews(project, task, key)
+        return False
+
+    def _policy_review_extension(self, P: Project, t: dict, head: str, prior: list) -> bool:
+        """Self-driving part 1 (GF-GATE1, 2026-10-28 06:01): a verified head that was never
+        reviewed gets its review through an audited +1 review_calls extension authorized
+        by `policy` (capped per task per day), instead of a review_budget stop."""
+        from . import decision_policy
+        from .obligations import POLICY_ACTOR, LedgerRefused
+        pid, tid = P.id, t["task_id"]
+        if prior or not decision_policy.self_repair_on(P):
+            return False
+        rows = self.store.verification(t.get("verification_id") or "", pid, tid)
+        if not rows or any(r.get("required") and r.get("result") != PASS for r in rows):
+            return False
+        ref = f"policy:review_calls:{head}"
+        try:
+            self.obligations.authorize(pid, tid, "review_calls", 1,
+                                       f"self-repair: +1 review for {head[:12]}, verified and "
+                                       f"never reviewed (policy)", POLICY_ACTOR, ref)
+        except LedgerRefused as e:
+            self.store.event(pid, tid, "self_repair_refused", detail={
+                "counter": "review_calls", "head": head, "why": str(e)[:300],
+                "category": decision_policy.AUTOMATION})
+            return False
+        decision_policy.record_step(self, pid, tid, "policy_extension", {
+            "counter": "review_calls", "head": head, "ref": ref,
+            "why": "the head reaching review passed verification and was never reviewed"})
+        return True
 
     def _decision_meta(self, project: str, task: str, kind: str, evidence: dict,
                        options: list, recommendation: str = "") -> dict:
@@ -4458,11 +4525,24 @@ class Coordinator:
             "dependents_waiting": waiting[:20],
             "resume": "operator: unblock / answer a superseding decision; the queue continues "
                       "with independent sprints meanwhile"}
+        # self-driving part 1: a park after the self-repair caps ran out is quiet (a
+        # digest entry; the alert class lets the alerting decide, e.g. only when the
+        # whole queue is stuck)
+        from . import decision_policy as DP
+        dec = self.obligations.decision(decision_id) if decision_id and \
+            self._lc(P, "obligations") else None
+        ans = (dec or {}).get("answer")
+        quiet = isinstance(ans, dict) and bool((ans.get("self_repair") or {}).get("exhausted"))
+        extra = {"category": DP.decision_category(dec)} if dec else {}
+        if quiet:
+            extra.update(digest=True, alert_class="self_repair_exhausted",
+                         self_repair=ans.get("self_repair"))
+        summary.update(extra)
         self.store.event(pid, tid, "sprint_parked", detail=summary)
         self.store.event(pid, tid, "operator_notice", detail={
             "text": (f"{tid}: parked BLOCKED ({str(why)[:200]}); the queue continues"
                      + (f"; waiting on it: {', '.join(waiting[:6])}" if waiting else "")),
-            "kind": "sprint_parked", "decision_id": decision_id, "task_id": tid})
+            "kind": "sprint_parked", "decision_id": decision_id, "task_id": tid, **extra})
 
     def _lc_rewait(self, P: Project, t: dict, ids: list) -> None:
         """The task keeps waiting, now on these (current) decision ids."""
@@ -4672,6 +4752,12 @@ class Coordinator:
                      f"another broad retry would repeat them")
                 if continued:
                     q += " (the one continuation was used)"
+                # self-driving part 1: a self-repair answer is good for one session; the
+                # next stall asks again (a new question replacing it), so the timeout
+                # takes the next capped self-repair step instead of reusing this one
+                repaired = list(t["data"].get("no_progress_self_repairs") or [])
+                if repaired:
+                    q += f" (self-repair tried {len(repaired)}x)"
                 # W1.2 (Victor 2026-10-22): the default is to continue once, then park the
                 # sprint BLOCKED with a summary so the queue moves on; the timeout applies
                 did = self.obligations.open_decision(
@@ -4681,7 +4767,8 @@ class Coordinator:
                     recommendation=DP.PARK if continued else DP.CONTINUE_ONCE,
                     blocks=[tid],
                     # the second question replaces the answered "continue once"
-                    supersedes=continued.get("decision_id") or None)
+                    supersedes=(repaired[-1] if repaired else continued.get("decision_id"))
+                    or None)
                 consulted = (t["data"].get("lc_stall_consult") or {}).get("stalls")
                 if not self._lc_decided(did) and pr["recommendation"] == "consult" \
                         and consulted != pr["stalls"]:
@@ -4712,6 +4799,11 @@ class Coordinator:
                         act, val = "continue", ""
                     else:
                         act, val = Recovery._escalation_answer(d)
+                    ans = d.get("answer")
+                    if act != "stop" and isinstance(ans, dict) and ans.get("self_repair") and \
+                            d["decision_id"] not in repaired:
+                        self.store.merge_data(pid, tid, no_progress_self_repairs=(
+                            repaired + [d["decision_id"]])[-10:])
                     if act == "stop":
                         self._lc_stop_block(P, t, d, val)
                         return {"stopped": True}

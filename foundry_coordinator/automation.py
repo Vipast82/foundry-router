@@ -28,6 +28,17 @@ equal.
                              the allow-list doesn't cover: "deny" | "approve"
   decision_timeout_minutes   product decisions apply their recommended option after
                              this long (0 = wait for the operator)
+  self_repair                an automation decision (tooling, budget, infra, repeated
+                             findings) self-repairs at its timeout instead of parking
+                             (decision_policy); false = park as before
+  self_repair_max_attempts_per_day / _reviews_per_day / _sessions_per_day
+                             policy ledger extensions per task per rolling day
+                             (2 / 2 / 3)
+  self_repair_max_retries_per_day, self_repair_retry_minutes
+                             tooling retries per task per day (3) and the first
+                             backoff (10 min, doubling)
+  self_repair_frontier       the last repeated-findings step is one session on the
+                             [frontier_primary] persona
   no_progress_sessions       sessions in a row with no commit, no verified delta and
                              no plan step before a no-progress decision
   auto_heal_retries          deterministic re-runs of a tooling / infra stop before a

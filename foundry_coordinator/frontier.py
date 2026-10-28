@@ -81,6 +81,11 @@ class FrontierPhase:
         ph = self.phase(P.id, t["task_id"], ("active",))
         if ph and ph["session_id"] == t.get("session_id"):
             return ph["persona"]
+        # self-driving part 1: the self-repair frontier session keeps its persona for
+        # every prompt of that run (decision_policy.FRONTIER_KEY, claimed by run id)
+        srf = (t.get("data") or {}).get("self_repair_frontier") or {}
+        if srf.get("persona") and srf.get("run_id") and srf.get("run_id") == t.get("run_id"):
+            return str(srf["persona"])
         return P.profile.persona("implementer", t["task_id"])
 
     def purpose(self, P, t: dict) -> str:

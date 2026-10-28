@@ -3150,7 +3150,8 @@ class ControlCenter:
                        "task_state": t["state"],
                        **{k: x.get(k) for k in ("decision_id", "kind", "question", "options",
                                                 "recommendation", "recommended",
-                                                "decision_class", "timeout_minutes",
+                                                "decision_class", "category",
+                                                "timeout_minutes",
                                                 "deadline_ts", "opened_ts")},
                        "question_hash": _hash(x.get("question") or "")}
                 if x.get("decision_id") in live:

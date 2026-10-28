@@ -34,12 +34,13 @@ P0 = SimpleNamespace(profile=SimpleNamespace(raw={}))
 
 # ------------------------------------------------------------------ decision policy
 
-def test_review_access_is_a_decision_that_parks_after_the_timeout():
+def test_review_access_is_a_decision_that_self_repairs_after_the_timeout():
     assert DP.classify("review_access", {}) == "decision"
     m = DP.meta(P0, "review_access", {"recommended": DP.PARK},
                 ["access fixed: review again", DP.PARK])
-    assert m == {"decision_class": "decision", "recommended": json.dumps(DP.PARK),
-                 "timeout_minutes": 30}
+    # self-driving part 1: an automation decision's default is the capped self-repair
+    assert m == {"decision_class": "decision", "recommended": json.dumps(DP.SELF_REPAIR),
+                 "timeout_minutes": 30, "category": "automation"}
 
 
 def test_an_unmatched_lead_recommendation_parks_with_the_normal_timeout():
@@ -47,8 +48,12 @@ def test_an_unmatched_lead_recommendation_parks_with_the_normal_timeout():
                                         "recommended": "something the options don't say"},
                 ["layout A", "layout B"])
     assert m["recommended"] == json.dumps(DP.PARK) and m["timeout_minutes"] == 30
-    # a kind with its own stop option parks on that option
+    # a kind with its own stop option parks on that option -- unless it is an automation
+    # decision (self-driving part 1): then the default is the capped self-repair
     m = DP.meta(P0, "no_progress", {}, ["a", "stop the task"], recommendation="zzz")
+    assert m["recommended"] == json.dumps(DP.SELF_REPAIR) and m["timeout_minutes"] == 30
+    off = SimpleNamespace(profile=SimpleNamespace(raw={"automation": {"self_repair": False}}))
+    m = DP.meta(off, "no_progress", {}, ["a", "stop the task"], recommendation="zzz")
     assert m["recommended"] == json.dumps("stop the task") and m["timeout_minutes"] == 30
     # a kind that understands no stop keeps waiting (as before)
     assert DP.meta(P0, "obligation_conflict", {}, ["a", "b"],
@@ -93,7 +98,8 @@ def test_access_fault_retries_with_a_rebuilt_packet_then_the_alternate_reviewer(
     did, = t["data"]["decision_wait"]["ids"]
     d = c.obligations.decision(did)
     assert d["kind"] == "review_access" and d["decision_class"] == "decision"
-    assert json.loads(d["recommended"]) == DP.PARK and d["deadline_ts"]
+    assert json.loads(d["recommended"]) == DP.SELF_REPAIR and d["deadline_ts"]
+    assert d["category"] == "automation"
     assert len(client.sessions) == 1                   # never a new implement session
 
 

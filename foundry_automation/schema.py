@@ -206,6 +206,16 @@ AUTOMATION_DEFAULTS: dict = {
     "scope_auto_approve": [dict(r) for r in DEFAULT_SCOPE_RULES],
     "scope_unlisted_default": "deny",
     "decision_timeout_minutes": 30,
+    # 2026-10-28 self-driving part 1: an automation decision (tooling, budget, infra,
+    # repeated findings) never times out to "park": it self-repairs, capped per task per
+    # day (rolling 24 h); it parks quietly only when the caps are exhausted
+    "self_repair": True,
+    "self_repair_max_attempts_per_day": 2,
+    "self_repair_max_reviews_per_day": 2,
+    "self_repair_max_sessions_per_day": 3,
+    "self_repair_max_retries_per_day": 3,
+    "self_repair_retry_minutes": 10,
+    "self_repair_frontier": True,
     "no_progress_sessions": 2,
     "auto_heal_retries": 2,
     "lead_hard_max_calls": 8,
@@ -683,6 +693,21 @@ _AUTO_DESC = {
                               "allow-list doesn't cover.",
     "decision_timeout_minutes": "Product decisions apply their recommended option after this "
                                 "long (0 = wait for the operator).",
+    "self_repair": "Automation decisions (tooling, budget, infra, repeated findings) self-repair "
+                   "at their timeout instead of parking the sprint: a policy budget extension, "
+                   "a lead repair, a different-approach session, then the frontier implementer. "
+                   "Off = park as before.",
+    "self_repair_max_attempts_per_day": "Policy extensions of the attempt budget per task per "
+                                        "day (rolling 24 h).",
+    "self_repair_max_reviews_per_day": "Policy extensions of the review budget per task per day "
+                                       "(e.g. +1 review for a verified head never reviewed).",
+    "self_repair_max_sessions_per_day": "Policy extensions of the session budget per task per "
+                                        "day.",
+    "self_repair_max_retries_per_day": "Backoff retries of a tooling / infrastructure decision "
+                                       "per task per day before it parks quietly.",
+    "self_repair_retry_minutes": "First backoff of a tooling retry (doubles with each retry).",
+    "self_repair_frontier": "The last self-repair step for repeated findings is one session "
+                            "on the [frontier_primary] persona.",
     "no_progress_sessions": "Sessions in a row with no progress before a no-progress decision.",
     "auto_heal_retries": "Deterministic re-runs of a tooling/infra stop before a lead case.",
     "lead_hard_max_calls": "Absolute lead calls per task (delegation never raises it).",

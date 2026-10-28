@@ -41,7 +41,7 @@ from .evidence import glob_match
 from .profile import matches_any
 
 SCHEMA_NAME = "schema:obligations"
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
 PHASES = ("BUILD", "REVIEW", "CLOSE", "APPROVAL")
 STATUSES = ("open", "in_progress", "evidenced", "verified", "waived", "superseded")
@@ -79,6 +79,13 @@ COUNTERS = ("attempt_ordinary", "attempt_guided", "sessions", "closeout", "revie
             "review_errors", "provider_retries", "same_session_continuations")
 # The design's `attempt_authorized` is `authorized:attempt_ordinary` here.
 AUTH_PREFIX = "authorized:"
+# Self-driving part 1 (2026-10-28): the coordinator's own capped self-repair policy
+# authorizes one unit of a budget counter with a `policy:<counter>:<key>` reference,
+# never an operator unblock. Only POLICY_ACTOR may write it, one unit per reference,
+# and at most `policy_cap(project, counter)` such rows per task in a rolling day.
+POLICY_ACTOR = "policy"
+POLICY_REF = "policy:"
+POLICY_WINDOW_SECONDS = 86400.0
 
 # effective_limits key -> (counter, profile limit key, default max)
 LIMITS = {
@@ -135,6 +142,8 @@ _STEPS = [
          ("decisions", "timeout_minutes", "INTEGER"),
          ("decisions", "deadline_ts", "REAL"),
          "CREATE INDEX IF NOT EXISTS idx_dec_deadline ON decisions(status, deadline_ts)"]),
+    # self-driving part 1: who a decision is for (product | user_action | automation)
+    (4, [("decisions", "category", "TEXT")]),
 ]
 
 
@@ -377,7 +386,8 @@ def _ob_categories(ob: dict) -> set[str]:
 
 class Obligations:
     def __init__(self, store, clock=time.time, *, operator_actors: Optional[Iterable[str]] = None,
-                 unblock_validator=None, lead_validator=None, decision_policy=None):
+                 unblock_validator=None, lead_validator=None, decision_policy=None,
+                 policy_cap=None, policy_validator=None):
         """operator_actors: names allowed to carry `operator` authority outside
         the control channel (default none: only channel='control' answers
         carry it). unblock_validator(project, task, ref, actor) -> bool checks
@@ -393,6 +403,12 @@ class Obligations:
         # decision_policy(project, task, kind, evidence, options) -> {decision_class,
         # recommended (JSON text | None), timeout_minutes} for a new decision (B11)
         self.decision_policy = decision_policy
+        # policy_cap(project, counter) -> int: policy extensions of `counter` a task may
+        # get per rolling day (0 = none); policy_validator(project, task, ref, counter) ->
+        # bool: the engine's check of the reference's own condition (e.g. the head the
+        # review is for was never reviewed). Without policy_cap no policy row is valid.
+        self.policy_cap = policy_cap
+        self.policy_validator = policy_validator
         migrate(store)
 
     # -- rows ---------------------------------------------------------------------
@@ -921,16 +937,22 @@ class Obligations:
                     meta = {}
             now = self.clock()
             minutes = int(meta.get("timeout_minutes") or 0)
+            # self-driving part 1: every decision names who it is for; without a policy
+            # hook the shared classifier still decides (never NULL for a new row)
+            cat = meta.get("category")
+            if not cat:
+                from .decision_policy import category as _category
+                cat = _category(kind, evidence or {})
             self.store.x(
                 "INSERT INTO decisions (decision_id, project_id, task_id, kind, question, "
                 "evidence, options, recommendation, blocks, status, scope, supersedes, qhash, "
-                "opened_ts, decision_class, recommended, timeout_minutes, deadline_ts) "
-                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                "opened_ts, decision_class, recommended, timeout_minutes, deadline_ts, "
+                "category) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (did, project, task, kind, str(question)[:2000], _j(evidence or {}),
                  _j(list(options or [])), str(recommendation or "")[:1000],
                  _j(list(blocks or [])), "open", _j(scope or {}), supersedes, qhash,
                  now, meta.get("decision_class"), meta.get("recommended"), minutes or None,
-                 (now + minutes * 60) if minutes and meta.get("recommended") else None))
+                 (now + minutes * 60) if minutes and meta.get("recommended") else None, cat))
         return did
 
     def is_operator(self, actor: str, channel: Optional[str]) -> bool:
@@ -1146,6 +1168,9 @@ class Obligations:
             raise LedgerRefused(f"actor {actor!r} cannot authorize budget")
         if counter and self._used(project, task, decision_id, counter):
             raise LedgerRefused(f"{decision_id} already authorized {counter} once")
+        if decision_id.startswith(POLICY_REF):
+            self._require_policy(project, task, decision_id, actor, counter, n)
+            return
         if decision_id.startswith("unblock:"):
             if callable(self.unblock_validator):
                 try:
@@ -1178,6 +1203,48 @@ class Obligations:
                 raise LedgerRefused(f"{decision_id}'s answer grants no n") from None
             if granted < int(n):
                 raise LedgerRefused(f"{decision_id} grants {granted} {counter}, {n} requested")
+
+    def policy_extensions(self, project, task, counter: str,
+                          window: float = POLICY_WINDOW_SECONDS) -> int:
+        """Units of `counter` the self-repair policy authorized for the task in the
+        last `window` seconds (the per-task, per-day cap counts these)."""
+        rows = self.store.q(
+            "SELECT COALESCE(SUM(delta), 0) AS n FROM budget_ledger WHERE project_id=? AND "
+            "task_id=? AND counter=? AND decision_id LIKE ? AND ts>=?",
+            (project, task, AUTH_PREFIX + counter, POLICY_REF + "%", self.clock() - window))
+        return int((rows[0]["n"] if rows else 0) or 0)
+
+    def _require_policy(self, project, task, ref: str, actor: str, counter: str,
+                        n: int) -> None:
+        """A `policy:<counter>:<key>` extension: written by the policy actor only, one
+        unit of the counter its reference names, within the per-day cap, and only
+        when the engine's validator accepts the reference's own condition. It never
+        needs (or stands in for) an operator unblock."""
+        if actor != POLICY_ACTOR:
+            raise LedgerRefused(f"{ref}: only the {POLICY_ACTOR!r} actor writes policy "
+                                f"extensions (not {actor!r})")
+        parts = ref.split(":")
+        if len(parts) < 3 or not parts[2] or parts[1] != counter or counter not in COUNTERS:
+            raise LedgerRefused(f"{ref} does not name counter {counter} and a key")
+        if int(n) != 1:
+            raise LedgerRefused(f"{ref}: a policy extension is one unit, not {n}")
+        cap = 0
+        if callable(self.policy_cap):
+            try:
+                cap = max(0, int(self.policy_cap(project, counter) or 0))
+            except Exception:                                     # noqa: BLE001
+                cap = 0
+        used = self.policy_extensions(project, task, counter)
+        if used + int(n) > cap:
+            raise LedgerRefused(f"self-repair cap reached: {used}/{cap} policy extensions of "
+                                f"{counter} for {project}/{task} in the last day")
+        if callable(self.policy_validator):
+            try:
+                ok = bool(self.policy_validator(project, task, ref, counter))
+            except Exception:                                     # noqa: BLE001
+                ok = False
+            if not ok:
+                raise LedgerRefused(f"{ref}: the policy condition does not hold")
 
     def authorize(self, project, task, counter: str, n: int, reason: str, actor: str,
                   decision_id: str) -> int:

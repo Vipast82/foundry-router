@@ -3371,6 +3371,11 @@ class LeadManager:
             prev = list(v.get("approved_test_changes") or [])
             self._merge_validation(cid, approved_test_changes=prev + [
                 str(x) for x in ans["approved_test_changes"] if str(x) not in prev])
+        if isinstance(ans, dict) and (ans.get("self_repair") or {}).get("action") == "reverify":
+            # self-driving part 1: the review budget was extended by policy; the head is
+            # verified and reviewed again (no paid implementer session)
+            return self._save(cid, state="RESUMING", proposed_action={
+                "kind": "reverify", "decision_id": did, "self_repair": True})
         if how in ("stop", "strategy"):
             return self._save(cid, state="RESUMING", proposed_action={
                 "kind": "victor_answer", "decision_id": did, "answer": ans, "how": how,
@@ -3586,7 +3591,9 @@ class LeadManager:
         # W1.2 (Victor 2026-10-22): every escalation carries options and a recommended
         # one. A lead question brings its own; a bound, hard cap or coordinator defect
         # defaults to PARK (the task stays BLOCKED with a summary, the queue moves on)
-        # after [automation] decision_timeout_minutes
+        # after [automation] decision_timeout_minutes. Self-driving part 1: such an
+        # escalation is an automation decision, so decision_policy.meta turns that PARK
+        # into the capped self-repair (it parks only once the caps are exhausted)
         from .decision_policy import PARK
         options = list((report or {}).get("options") or [])
         recommended = str((report or {}).get("recommended") or "")
