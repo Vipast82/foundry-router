@@ -349,6 +349,20 @@ async def ack(request: Request, alert_id: str):
     return _cc(request).acknowledge(alert_id, s["actor"], s["projects"])
 
 
+@router.post("/control/api/alerts/{alert_id}/dismiss")
+@_guard
+async def dismiss(request: Request, alert_id: str):
+    s = _op(request, mutate=True)
+    return _cc(request).dismiss(alert_id, s["actor"], s["projects"])
+
+
+@router.post("/control/api/alerts/dismiss-info")
+@_guard
+async def dismiss_info(request: Request):
+    s = _op(request, mutate=True)
+    return _cc(request).dismiss_info(s["actor"], s["projects"])
+
+
 @router.post("/control/api/alerts/{alert_id}/delivery")
 @_guard
 async def delivery(request: Request, alert_id: str):

@@ -35,12 +35,15 @@ from __future__ import annotations
 import contextlib
 import hashlib
 import json
+import logging
 import re
 import secrets
 import threading
 import time
 import uuid
 from typing import Any, Callable, Iterable, Optional
+
+log = logging.getLogger(__name__)
 
 CONTRACT = "foundry.cc.v1"
 
@@ -182,6 +185,11 @@ DEFAULTS: dict[str, Any] = {
     "rate_per_minute": 30,           # operator mutations per actor
     "session_hours": 12,             # operator browser session lifetime
     "min_refresh_s": 2,              # server-enforced floor for polling clients
+    # alert auto-clear (watchdog sweep, autoclear_alerts): an alert whose
+    # condition is gone resolves itself (stored, never deleted)
+    "alert_autoclear": True,
+    "alert_error_quiet_hours": 24,   # coordinator_error: no recurrence for this long
+    "alert_info_hours": 24,          # completion / queue_exhausted records age out
 }
 SETTING_LIMITS = {
     "retention_days": (1, 365), "action_retention_days": (7, 3650),
@@ -189,6 +197,7 @@ SETTING_LIMITS = {
     "coordinator_expiry_s": (30, 3600), "bridge_expiry_s": (30, 3600),
     "action_ttl_s": (60, 86400), "max_instruction_chars": (1000, 100000),
     "rate_per_minute": (1, 600), "session_hours": (1, 168), "min_refresh_s": (1, 60),
+    "alert_error_quiet_hours": (1, 720), "alert_info_hours": (1, 720),
 }
 
 ACTION_KINDS = ("answer_question", "reply_permission", "approve_review", "reject_review",
@@ -353,6 +362,12 @@ SEVERITIES = ("info", "warning", "high", "critical")
 # an acknowledged alert that clears and comes back within this window reopens
 # still acknowledged instead of alerting again (flapping sources)
 REOPEN_QUIET_SECONDS = 6 * 3600
+OPEN_ALERT = ("new", "acknowledged")
+# info records: they say something happened, nothing waits on the operator
+INFO_RECORD_KINDS = ("completion", "queue_exhausted")
+# raised again on every observation while true: once resolved (acknowledged or
+# aged out) the same key stays resolved instead of ringing again
+STICKY_RESOLVED_KINDS = ("queue_exhausted",)
 PERMISSION_REPLIES = ("once", "reject")       # "always" creates a persistent rule: not offered
 
 
@@ -1482,6 +1497,11 @@ class ControlCenter:
             row = self._rows(c, "SELECT * FROM cc_alerts WHERE dedupe_key=?", (key,))
             if row and row[0]["status"] in ("new", "acknowledged"):
                 return row[0]                       # same event: no new alert, no repeat sound
+            if row and (row[0]["status"] == "dismissed" or (
+                    row[0]["status"] == "resolved" and row[0]["kind"] in STICKY_RESOLVED_KINDS)):
+                # the operator dismissed this occurrence (or the record was
+                # cleared): it stays out of the bell until its condition clears
+                return row[0]
             if row:
                 # it was resolved and happened again (a new occurrence)
                 aid = row[0]["alert_id"]
@@ -1529,7 +1549,8 @@ class ControlCenter:
         with self._tx() as c:
             row = self._rows(c, "SELECT alert_id, status, project_id, session_id FROM cc_alerts "
                                 "WHERE dedupe_key=?", (key,))
-            if not row or row[0]["status"] not in ("new", "acknowledged"):
+            # a dismissed alert resolves too, so a later occurrence alerts again
+            if not row or row[0]["status"] not in ("new", "acknowledged", "dismissed"):
                 return
             aid = row[0]["alert_id"]
             seq = self._feed(c, "alert", row[0]["project_id"], row[0]["session_id"], aid)
@@ -1577,7 +1598,91 @@ class ControlCenter:
             c.execute("INSERT INTO cc_alert_log (alert_id, ts, event, actor, detail) VALUES "
                       "(?,?,?,?,?)", (alert_id, now, "acknowledged", actor, ""))
         self._notify()
+        if a["kind"] in INFO_RECORD_KINDS and self.settings().get("alert_autoclear", True):
+            # an info record has nothing left to wait on once it is read
+            self._resolve(a["dedupe_key"], "auto-cleared: info record acknowledged")
         return self.alert(alert_id)
+
+    def dismiss(self, alert_id: str, actor: str, projects: list) -> dict:
+        """Hide an alert from the bell and the open list. It stays stored (filter
+        "dismissed") with who dismissed it; nothing is answered or resolved."""
+        a = self.alert(alert_id)
+        if not a or (projects and a["project_id"] and a["project_id"] not in projects):
+            raise ControlError("no such alert", "not_found", 404)
+        if a["status"] in OPEN_ALERT:
+            self._dismiss_rows([a], actor)
+        return self.alert(alert_id)
+
+    def dismiss_info(self, actor: str, projects: list) -> dict:
+        """Bulk: dismiss every open info-severity alert the operator can see."""
+        rows = [a for a in self.alerts(projects, "open", 500) if a["severity"] == "info"]
+        self._dismiss_rows(rows, actor)
+        return {"dismissed": len(rows), "alert_ids": [a["alert_id"] for a in rows]}
+
+    def _dismiss_rows(self, rows: list, actor: str) -> None:
+        if not rows:
+            return
+        now = self.clock()
+        with self._tx() as c:
+            for a in rows:
+                seq = self._feed(c, "alert", a["project_id"], a["session_id"], a["alert_id"])
+                c.execute("UPDATE cc_alerts SET status='dismissed', resolved_ts=?, resolution=?, "
+                          "updated_ts=?, seq=? WHERE alert_id=? AND status IN "
+                          "('new','acknowledged')",
+                          (now, f"dismissed by {actor}"[:300], now, seq, a["alert_id"]))
+                c.execute("INSERT INTO cc_alert_log (alert_id, ts, event, actor, detail) VALUES "
+                          "(?,?,?,?,?)", (a["alert_id"], now, "dismissed", actor, ""))
+        self._notify()
+
+    def autoclear_alerts(self) -> list[str]:
+        """Resolve open alerts whose condition is gone (status resolved with an
+        "auto-cleared: ..." reason; never deleted). Run by the watchdog sweep:
+          pause_forgotten   the task is no longer PAUSED
+          completion /      acknowledged, or older than alert_info_hours
+            queue_exhausted
+          any task alert    the task is COMPLETE or CANCELLED (completion
+                            records excepted: they age out instead)
+          coordinator_error no new error on that task for alert_error_quiet_hours
+        Returns the dedupe keys it resolved."""
+        st = self.settings()
+        if not st.get("alert_autoclear", True):
+            return []
+        now = self.clock()
+        rows = self.db.query("SELECT * FROM cc_alerts WHERE status IN ('new','acknowledged')")
+        if not rows:
+            return []
+        states = {(r["project_id"], r["task_id"]): r["state"]
+                  for r in self.db.query("SELECT project_id, task_id, state FROM cc_tasks")}
+        info_s = float(st["alert_info_hours"]) * 3600
+        quiet_s = float(st["alert_error_quiet_hours"]) * 3600
+        last_err: dict = {}
+        for r in self.db.query("SELECT project_id, task_id, MAX(updated_ts) AS t FROM cc_alerts "
+                               "WHERE kind='coordinator_error' GROUP BY project_id, task_id"):
+            last_err[(r["project_id"] or "", r["task_id"] or "")] = float(r["t"] or 0)
+        out = []
+        for a in rows:
+            kind, tid = a["kind"], a["task_id"] or ""
+            key = (a["project_id"] or "", tid)
+            tstate = states.get(key) if tid else None
+            why = ""
+            if kind == "pause_forgotten":
+                if tstate and tstate != "PAUSED":
+                    why = f"{tid} is {tstate} now (no longer paused)"
+            elif kind in INFO_RECORD_KINDS:
+                if a["status"] == "acknowledged":
+                    why = "info record acknowledged"
+                elif now - float(a["updated_ts"] or 0) >= info_s:
+                    why = f"info record older than {st['alert_info_hours']} h"
+            if not why and kind != "completion" and tstate in ("COMPLETE", "CANCELLED"):
+                why = f"{tid} is {tstate}"
+            if not why and kind == "coordinator_error":
+                if now - last_err.get(key, float(a["updated_ts"] or 0)) >= quiet_s:
+                    why = (f"no new coordinator error on {tid or a['project_id'] or 'it'} for "
+                           f"{st['alert_error_quiet_hours']} h")
+            if why:
+                self._resolve(a["dedupe_key"], f"auto-cleared: {why}")
+                out.append(a["dedupe_key"])
+        return out
 
     def delivery(self, alert_id: str, actor: str, channel: str, result: str, detail: str = "") -> None:
         if channel not in ("visual", "audio", "notification", "test"):
@@ -1618,6 +1723,12 @@ class ControlCenter:
                                ") AND expires_ts < ?", (now,)):
             self._set_action(a["action_id"], "expired", "foundry",
                              "not claimed by the coordinator before it expired; nothing was sent")
+        # alerts whose condition is gone resolve themselves (not part of `out`:
+        # that lists the stale sources this pass raised)
+        try:
+            self.autoclear_alerts()
+        except Exception:                                        # noqa: BLE001
+            log.exception("alert auto-clear failed")
         return out
 
     def sources(self, projects: Optional[list] = None) -> list[dict]:
