@@ -50,7 +50,14 @@ FAKE_PIPELINE = textwrap.dedent('''\
     def save(**kw):
         d = {"run_id": rid, "sprint": sprint, "pid": os.getpid(), "head": head,
              "updated": time.time(), **kw}
-        json.dump(d, open(pj + ".tmp", "w")); os.replace(pj + ".tmp", pj)
+        with open(pj + ".tmp", "w") as f:
+            json.dump(d, f)
+        for _ in range(100):        # the coordinator may be reading it (Windows)
+            try:
+                os.replace(pj + ".tmp", pj)
+                break
+            except PermissionError:
+                time.sleep(0.05)
     save(phase="calls")
     json.dump({"sprint": sprint, "pid": os.getpid(), "phase": "calls", "progress": "S51 0/3",
                "updated": time.time(), "mode": "calls", "playing": False},
@@ -171,7 +178,7 @@ def drive(e, pred, limit=400, step=5.0):
         if pred(t):
             return t
         time.sleep(0.02)
-    raise AssertionError(f"timed out in {task(e)['state']}: {task(e)['next_action']}")
+    raise AssertionError(f"timed out in {task(e)['state']}: {task(e)['next_action']} blocker={task(e)['blocker']}")
 
 
 def events(e, kind):

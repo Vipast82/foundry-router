@@ -585,9 +585,11 @@ class StudioCalls:
             return self._consume(P, t, s, run, pj)
         proc = self._procs.get((P.id, tid))
         if proc is not None and proc.poll() is not None:
-            pj = self._pipeline(P, tid, run)
-            if pj and pj.get("phase") == "done":
-                return self._consume(P, t, s, run, pj)
+            for _ in range(10):              # a read racing the final os.replace (Windows)
+                pj = self._pipeline(P, tid, run)
+                if pj and pj.get("phase") == "done":
+                    return self._consume(P, t, s, run, pj)
+                time.sleep(0.1)
             return self._consume(P, t, s, run, {
                 "result": "ERROR", "stage": (pj or {}).get("phase") or "start",
                 "error": f"the pipeline exited with code {proc.returncode} without a result; log "
