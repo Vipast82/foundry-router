@@ -726,6 +726,23 @@ def main(argv=None, clients=None, foundry=None) -> int:
     x = pbs.add_parser("add", help="append an entry under a heading (a coordinator commit)")
     x.add_argument("file"); x.add_argument("heading"); x.add_argument("text", nargs="+")
     x.add_argument("--by", default="operator")
+    scp = sub.add_parser("studio-calls", help="the scripted Studio half of a sprint gate "
+                                              "([studio_calls], 2026-10-27)")
+    scs = scp.add_subparsers(dest="sccmd", required=True)
+    x = scs.add_parser("run", help="host half -> every Studio CALL -> -Finish for a task with no "
+                                   "session (the GF-GATE1 pilot); failing rows become its findings")
+    x.add_argument("project"); x.add_argument("task")
+    x.add_argument("--suites", default="", help="the sprint's own suites (never carried)")
+    x.add_argument("--regression", default="full",
+                   help="none | full (pinned rows) | subset:<name> | S45,S46 (default full)")
+    x.add_argument("--tier", default="", choices=["", "A", "B", "C"],
+                   help="default: the task's tier")
+    x.add_argument("--rerun", default="failed", choices=["failed", "affected", "all"])
+    x.add_argument("--files", default="", help="files under test (default: the task's changed "
+                                                "files outside docs/)")
+    x.add_argument("--dry-run", dest="dry_run", action="store_true",
+                   help="list rows / CALLs / DYNARG / bridges / manual rows / carry; no Studio")
+    x.add_argument("--poll", type=float, default=10.0)
     a = ap.parse_args(argv)
     try:
         c = build(a, clients=clients, foundry=foundry)
@@ -813,6 +830,66 @@ def _playbook_cmd(c: Coordinator, a) -> int:
     return 0 if not (isinstance(out, dict) and (out.get("error") or out.get("ok") is False)) else 1
 
 
+def _studio_calls_cmd(c: Coordinator, a, out=print, sleep=time.sleep) -> int:
+    """`studio-calls run PROJECT TASK [--dry-run]`: the scripted Studio half with no
+    session (STUDIO_GATE_SCRIPTED_PLAN.md rollout step 3). Exit 0 PASS, 1 FAIL, 2 ERROR."""
+    import subprocess
+    from . import studio_calls as SC
+    P = c.projects.get(a.project)
+    if P is None:
+        print(f"error: unknown project {a.project!r}", file=sys.stderr)
+        return 2
+    tid = a.task
+    if not SC.ID_RE.fullmatch(tid):
+        print(f"error: bad task id {tid!r}", file=sys.stderr)
+        return 2
+    try:
+        spec = P.adapter.describe(tid)
+    except Exception as e:                                        # noqa: BLE001
+        print(f"error: {tid}: {e}", file=sys.stderr)
+        return 2
+    tier = a.tier or str((getattr(spec, "data", None) or {}).get("tier") or "A").upper()
+    req = SC.parse_request("```STUDIO_GATE\n" + json.dumps({
+        "suites": a.suites, "regression": a.regression, "tier": tier, "rerun": a.rerun,
+        "files": a.files}) + "\n```")
+    if not req or req.get("error"):
+        print(f"error: {(req or {}).get('error') or 'bad request'}", file=sys.stderr)
+        return 2
+    st = SC.settings(P)
+    if a.dry_run:
+        cmd = (SC._module_cmd(st["runner_module"])
+               + ["--repo", P.profile.workspace, "--timeout", str(st["call_timeout_seconds"]),
+                  "calls", "--sprint", tid, "--regression", req["regression"], "--rerun",
+                  req["rerun"], "--tier", tier, "--group-min", str(st["group_budget_minutes"]),
+                  "--dry-run"] + (["--suites", ",".join(req["suites"])] if req["suites"] else []))
+        env = dict(os.environ)
+        env["PYTHONPATH"] = SC.ROUTER_ROOT + (os.pathsep + env["PYTHONPATH"]
+                                              if env.get("PYTHONPATH") else "")
+        p = subprocess.run(cmd, cwd=SC.ROUTER_ROOT, capture_output=True, text=True,
+                           encoding="utf-8", errors="replace", env=env)
+        out(((p.stdout or "") + (p.stderr or "")).rstrip())
+        return p.returncode
+    t = c.store.task(P.id, tid)
+    if t is None:
+        print(f"error: {P.id}/{tid} is not a coordinator task (approve it first)", file=sys.stderr)
+        return 2
+    if t["state"] in S.WRITING:
+        print(f"error: {tid} is {t['state']}: its session owns Studio; it asks for the run with a "
+              f"STUDIO_GATE block instead", file=sys.stderr)
+        return 2
+    if c.studio_calls.active(P, tid):
+        print(f"error: a scripted run is already active for {tid}", file=sys.stderr)
+        return 2
+    if not P.profile.studio_calls_task(tid, tier):
+        out(f"note: [studio_calls] does not cover {tid} (enabled/tasks/tiers): running it anyway "
+            f"because the operator asked")
+    res = c.studio_calls.run_now(P, t, req, poll=a.poll, out=out, sleep=sleep)
+    out(json.dumps({k: v for k, v in res.items() if k != "prompt"}, indent=1, default=str))
+    if res.get("prompt"):
+        out(res["prompt"].rstrip())
+    return {"PASS": 0, "FAIL": 1}.get(str(res.get("result")), 2)
+
+
 def _tracks(c: Coordinator, a) -> int:
     """`tracks analyze PROJECT` prints the ordered tracks (deterministic, no model
     call); the other subcommands drive tracks/manager.py like the chat does."""
@@ -892,6 +969,8 @@ def _dispatch(a, c: Coordinator) -> int:
         return _memory_cmd(c, a)
     if a.cmd == "playbook":
         return _playbook_cmd(c, a)
+    if a.cmd == "studio-calls":
+        return _studio_calls_cmd(c, a)
     if a.cmd == "queue":
         if a.qcmd == "approve":
             deps = [d.strip() for d in a.deps.split(",") if d.strip()]

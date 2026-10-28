@@ -152,6 +152,32 @@ FAST_LANE_DEFAULTS = {
     "runner_captures": ["docs/evidence/UI-v3/{task}/**"],
 }
 
+# [studio_calls] (2026-10-27, reports/STUDIO_GATE_SCRIPTED_PLAN.md): the Studio half of a
+# sprint gate (the CALLs a session ran one by one) runs as a script (studio_calls.py +
+# studio_gate `calls`). Off by default: `enabled = false` is today's flow. With it on, a
+# task in `tasks` (or, when `tasks` is empty, every task of `tiers`) asks for the run with a
+# STUDIO_GATE block and gets only the failing rows back.
+STUDIO_CALLS_DEFAULTS = {
+    "enabled": False,
+    "tasks": [],                              # explicit task ids; empty = every task of `tiers`
+    "tiers": ["A", "B"],
+    "auto_verify": False,                     # VERIFYING runs it when the gate is missing/stale
+    "runner_module": "foundry_coordinator.projects.animaluprising.studio_gate",
+    "pipeline_module": "foundry_coordinator.studio_calls",
+    "call_timeout_seconds": 120,              # one MCP CALL
+    "group_budget_minutes": 10,               # one suite group (a hung group -> UNKNOWN)
+    "run_budget_minutes": 30,                 # a whole run (regression other than full)
+    "full_run_budget_minutes": 150,           # a whole `full` run
+    "host_timeout_minutes": 30,               # gate.ps1's host half (Lune included)
+    "stale_status_minutes": 6,                # no CALL progress this long -> killed (tooling)
+    "failure_lines": 5,                       # raw failure lines per failing row in the prompt
+    # the runner's files the coordinator commits after a run ({task} = the task id; all
+    # closeout-exempt docs/progress/{task}_*, so the gate binding stays PASS)
+    "outputs": ["docs/progress/{task}_studio_lines.txt", "docs/progress/{task}_EVIDENCE_RAW.log",
+                "docs/progress/{task}_gate_verdicts.json", "docs/progress/{task}_gate_expect.json",
+                "docs/progress/{task}_gate_expect_full.json"],
+}
+
 
 # [automation] (revamp B5-B13): the coordinator's own policy knobs. Same keys,
 # defaults and rules as foundry_coordinator/automation.py on branch
@@ -374,6 +400,30 @@ def fast_lane_table(path: str, raw, known_lanes=KNOWN_LANES) -> dict:
     return out
 
 
+def studio_calls_table(path: str, raw) -> dict:
+    out = _typed_table("studio_calls", raw, STUDIO_CALLS_DEFAULTS, path, nonempty_str=True)
+    if any(c in t for t in out["tasks"] for c in "*?[]") or \
+            len(set(out["tasks"])) != len(out["tasks"]):
+        raise SettingsError(f"{path}: studio_calls.tasks needs explicit, distinct task IDs",
+                            "studio_calls.tasks")
+    bad = sorted({x for x in out["tiers"] if x.upper() not in ("A", "B", "C")})
+    if bad:
+        raise SettingsError(f"{path}: studio_calls.tiers: unknown tiers {bad} (A, B, C)",
+                            "studio_calls.tiers")
+    out["tiers"] = [x.upper() for x in out["tiers"]]
+    for k in ("call_timeout_seconds", "group_budget_minutes", "run_budget_minutes",
+              "full_run_budget_minutes", "host_timeout_minutes", "failure_lines"):
+        if out[k] < 1:
+            raise SettingsError(f"{path}: studio_calls.{k} must be at least 1",
+                                f"studio_calls.{k}")
+    for k in ("runner_module", "pipeline_module"):
+        m = out[k].strip()
+        if not (m.endswith(".py") or re.match(r"^[A-Za-z_][\w]*(\.[A-Za-z_][\w]*)*$", m)):
+            raise SettingsError(f"{path}: studio_calls.{k} must be a dotted module name "
+                                f"(or a .py script path)", f"studio_calls.{k}")
+    return out
+
+
 def role_overrides_table(path: str, raw) -> dict:
     overrides = raw or {}
     if not isinstance(overrides, dict):
@@ -516,6 +566,9 @@ TABLES = [
     Table("helpers", "Helpers", "helpers"),
     Table("lanes", "Proactive lanes", "helpers"),
     Table("fast_lane", "Fast lane", "fast_lane", strict=True),
+    Table("studio_calls", "Scripted Studio gate", "fast_lane",
+          "The Studio half of a sprint gate runs as a script (STUDIO_GATE request); the session "
+          "gets only the failing rows. Off by default.", strict=True),
     Table("lead_manager", "Lead manager", "lead", strict=True),
     Table("frontier_primary", "Frontier primary", "recovery"),
     Table("retry_guidance", "Retry guidance", "recovery"),
@@ -586,6 +639,25 @@ _FL_DESC = {
     "lanes": "Lanes that run for fast-lane tasks.",
     "runner_outputs": "Files the runner rewrites every run (never a hygiene failure).",
     "runner_captures": "Runner capture globs (must be committed).",
+}
+
+_SC_DESC = {
+    "enabled": "Scripted Studio gate: the coordinator runs the gate's Studio CALLs; the "
+               "session asks with a STUDIO_GATE block and gets only failing rows.",
+    "tasks": "Explicit task ids (the pilot); empty = every task of `tiers`.",
+    "tiers": "Sprint tiers covered when `tasks` is empty.",
+    "auto_verify": "VERIFYING runs the scripted gate for a tier A/B sprint whose gate is "
+                   "missing or stale at HEAD (once per HEAD).",
+    "runner_module": "The studio_gate runner (its `calls` mode).",
+    "pipeline_module": "The pipeline (host half -> calls -> -Finish).",
+    "call_timeout_seconds": "One MCP CALL.",
+    "group_budget_minutes": "One suite group; a hung group becomes UNKNOWN and the run moves on.",
+    "run_budget_minutes": "A whole run (any regression except full).",
+    "full_run_budget_minutes": "A whole `full` run.",
+    "host_timeout_minutes": "gate.ps1's host half (Lune included).",
+    "stale_status_minutes": "No CALL progress this long: the run is stopped (tooling).",
+    "failure_lines": "Raw failure lines per failing row in the prompt.",
+    "outputs": "Runner files the coordinator commits after a run ({task} = task id).",
 }
 
 _AUTO_ENUMS = {"helpers": HELPER_MODES, "scope_unlisted_default": SCOPE_DEFAULTS}
@@ -772,6 +844,14 @@ FIELDS: list[Field] = [
                         "vision_parallel", "vision_batch_frames")
              else 0 if isinstance(v, int) and not isinstance(v, bool) else None))
       for k, v in FAST_LANE_DEFAULTS.items()],
+    # scripted Studio gate ---------------------------------------------------------
+    *[F(f"studio_calls.{k}", {bool: "bool", int: "int", str: "str", list: "list"}[type(v)], v,
+        _SC_DESC.get(k, ""), "fast_lane", "coordinator.studio_calls",
+        item_type="str" if isinstance(v, list) else None,
+        min=(1 if k in ("call_timeout_seconds", "group_budget_minutes", "run_budget_minutes",
+                        "full_run_budget_minutes", "host_timeout_minutes", "failure_lines")
+             else 0 if isinstance(v, int) and not isinstance(v, bool) else None))
+      for k, v in STUDIO_CALLS_DEFAULTS.items()],
     # helpers & lanes ------------------------------------------------------------
     F("helpers.enabled", "bool", False, "Read-only coding helpers on frontier quota.", "helpers",
       "coordinator.helpers"),

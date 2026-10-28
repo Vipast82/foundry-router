@@ -116,6 +116,10 @@ class Coordinator:
         # [fast_lane] (UI-T0): studio_gate-verified one-session sprints; inert
         # for every task the profile's [fast_lane] table doesn't name
         self.fast_lane = FastLane(self, clock=clock)
+        from .studio_calls import StudioCalls
+        # [studio_calls] (2026-10-27): the gate's Studio half as a coordinator-run script;
+        # inert unless the profile enables it for a task
+        self.studio_calls = StudioCalls(self, clock=clock)
         from .bg_checks import BackgroundChecks
         self.bg_checks = BackgroundChecks()      # 0.147.0: verify/closeout off the tick
         from .memory import MemoryManager
@@ -868,6 +872,11 @@ class Coordinator:
             # continuation, verification -> review) runs when the project resumes
             return
         pid, tid = P.id, t["task_id"]
+        if self.studio_calls.active(P, tid):
+            # [studio_calls]: the coordinator runs the Studio half for this idle session;
+            # nothing else touches it (no prompt, no commit) until the run's one result prompt
+            self.studio_calls.tick(P, t, s)
+            return
         if self._context_wrapup_prompt(P, t):
             return                       # the stopped session commits and reports first
         # W1.4: commit messages without the task prefix are the coordinator's to fix,
@@ -877,7 +886,11 @@ class Coordinator:
         head = P.ws.head()
         rep = s.report or {}
         data = self.store.merge_data(pid, tid, last_report=rep or None)
-        self._memory_notes(P, t, s)          # MEMORY_NOTE lines: committed by the coordinator
+        # [studio_calls]: a STUDIO_GATE request holds HEAD for the scripted run, so this
+        # turn's MEMORY_NOTE commits wait for its end (studio_calls._consume applies them)
+        studio_req = self.studio_calls.wants(P, tid, s)
+        if not studio_req:
+            self._memory_notes(P, t, s)      # MEMORY_NOTE lines: committed by the coordinator
         if self._lc(P):
             self._lc_session_ended(P, t, t["session_id"], head, rep)
         from . import infra
@@ -893,6 +906,8 @@ class Coordinator:
             self.store.event(pid, tid, "context_handoff", session_id=t["session_id"],
                              detail={"context": getattr(s, "context", None),
                                      "why": handoff[:300]})
+            if studio_req:
+                self._memory_notes(P, t, s)  # no scripted run follows: commit them now
             return self._session_failed(P, t, handoff, "implement", free=True)
         status = str(rep.get("status") or "").upper()
         # A session can commit legitimate BUILD progress and still hit a hard
@@ -908,7 +923,13 @@ class Coordinator:
         if self.helpers.enabled(P) and rep.get("helper_feedback"):
             self.helpers.record_feedback(P, self.store.task(pid, tid), rep)
         if self._scope_requests(P, tid, s, rep):
+            if studio_req:
+                self._memory_notes(P, t, s)
             return                       # revamp B10: granted and continued, or a decision waits
+        if studio_req:
+            if self.studio_calls.on_request(P, self.store.task(pid, tid), s, studio_req):
+                return                   # the scripted Studio half runs (or the block was refused)
+            self._memory_notes(P, t, s)
         if self.frontier.on_idle(P, self.store.task(pid, tid), rep):
             return                       # a frontier phase started, continued or handed back
         if not blocked and self.helpers.enabled(P) and \
@@ -1582,6 +1603,10 @@ class Coordinator:
             return                       # a pending continuation at this head: never re-verified
         spec = P.adapter.describe(tid)
         head = P.ws.head()
+        if not self.fast_lane.on(P, tid) and self.studio_calls.verify_hold(P, t, spec, head):
+            # [studio_calls] auto_verify: the gate was missing or stale at HEAD; the scripted
+            # Studio half runs first (PASS commits its outputs, FAIL -> CHANGES_REQUIRED)
+            return
         if not self.fast_lane.on(P, tid):
             # 0.147.0: the project's checks run in the background; the tick goes on
             heavy = self._bg_checks(P, t, "verify", head,
@@ -2983,6 +3008,7 @@ class Coordinator:
         self.helpers.abort_running(P, task_id, "cancelled", f"task cancelled: {reason}"[:300])
         if self.fast_lane.on(P, task_id):
             self.fast_lane.abort(P, task_id, f"task cancelled: {reason}"[:300])
+        self.studio_calls.abort(P, task_id, f"task cancelled: {reason}"[:300])
         case_id = (t.get("data") or {}).get("recovery_case")
         if case_id:
             # [lead_manager] the case goes with the task: its lead / repair sessions
