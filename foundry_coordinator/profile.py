@@ -155,8 +155,16 @@ class Profile:
         return p
 
     def exempt(self, task_id: str) -> list[str]:
-        """Closeout-only paths: changes there after a review don't invalidate it."""
-        return [p.replace("{task}", task_id) for p in self.closeout.get("exempt_paths", [])]
+        """Closeout-only paths: changes there after a review don't invalidate it.
+        A `{task}` pattern also matches the task id with "_" for "-" (AU names test and
+        evidence files GF_GATE1_* for sprint GF-GATE1)."""
+        out = []
+        for p in self.closeout.get("exempt_paths", []):
+            for v in dict.fromkeys((task_id, task_id.replace("-", "_"))):
+                q = p.replace("{task}", v)
+                if q not in out:
+                    out.append(q)
+        return out
 
     def in_workspace(self, rel_or_abs: str) -> bool:
         p = os.path.realpath(os.path.join(self.workspace, rel_or_abs))
