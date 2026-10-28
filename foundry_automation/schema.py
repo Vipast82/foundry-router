@@ -233,6 +233,9 @@ AUTOMATION_DEFAULTS: dict = {
     # 2026-10-27: 2D assets (images) come from the operator (ChatGPT) unless approved
     "media_gen_images": "ask",
     "inline_check_wait_s": 2,
+    # 2026-10-28 (E): the code review starts once done_check and the gate binding pass,
+    # beside the Lune suite (dropped when the revision then fails)
+    "review_beside_checks": True,
     # Team Lead tracks (2026-10-22): parallel sprints on git worktrees
     "max_agents": 1,
     "studio_idle_minutes": 10,
@@ -712,8 +715,16 @@ _AUTO_DESC = {
                            "starting and steering other sprints meanwhile.",
     "inline_check_wait_s": "Seconds a tick waits for a check run before leaving it in the "
                            "background (quick checks still finish within the tick).",
+    "review_beside_checks": "Start a sprint's code review as soon as its quick checks "
+                            "(done_check, the gate binding) pass, while the Lune suite still "
+                            "runs; a revision that then fails its checks drops that review "
+                            "and is reviewed again later.",
     "max_agents": "Sprints running at once across the main checkout and parallel tracks "
-                  "(the main sprint always counts first; 1 = no parallel tracks). Live.",
+                  "(the main sprint always counts first; 1 = no parallel tracks). 2 lets "
+                  "one Studio-free track sprint (a git worktree, no Studio or Rojo) run "
+                  "beside the main sprint; its Studio checks run at merge time in the "
+                  "main checkout. Live; a profile value wins over an older chat/CLI value "
+                  "set while the profile said something else.",
     "studio_idle_minutes": "A track's merge gate may take Studio only after the main sprint "
                            "has not used it for this long.",
     "studio_track_max_minutes": "Longest Studio lease of a track's merge gate (one run; never "
