@@ -43,6 +43,20 @@ model saw. The Kilo adapter (`foundry_training/adapters/kilo.py:281`) turns Kilo
 4 MB, and the record then keeps only its head. **Fix:** capture replaces inline images with
 `{sha256, bytes, mime}` and writes the bytes once to `<data>/training/capture-media/`.
 
+### The Training tab's "Capture gaps" list is mostly false `no-system-prompt` rows
+Reported from the "Full thinking stream" session (Victor's screenshot, v0.152.1). Today all
+175 gap rows in the store are `no-system-prompt`, one per Kilo session. `pipeline.ingest_kilo`
+(~line 96) records that gap for every Kilo session it ingests and never checks the Foundry
+capture.
+- **144 of the 175 (82%) are false.** The session's Foundry capture (with the system prompt and
+  tool definitions) is already in the store under the **same session id**. The join keys line
+  up: Kilo's `ses_…` id is the session id Foundry records. Those episodes already use the
+  captured context.
+- **31 are real.** No Foundry capture exists at all in their time window (mostly 10-17, before
+  capture was on for them). 1 session has a captured call nearby under another session id,
+  probably a child session. That one is checked during the build.
+- The tab shows the last 50 gaps, so the false rows hide the real ones.
+
 ### Smaller findings
 - `frontier_assist` calls run inside a Kilo request, so today they are captured **under the
   same session** as the agent's turns. `_from_foundry` builds the episode from the session's
@@ -130,6 +144,19 @@ model saw. The Kilo adapter (`foundry_training/adapters/kilo.py:281`) turns Kilo
     Conversational chosen/rejected lists in TRL's format.
   - Both sides must be local-authored while `allow_frontier_targets = false`.
 
+### F. Capture gaps that are true
+- `ingest_kilo` no longer writes `no-system-prompt` unconditionally. Foundry capture is often
+  ingested *after* Kilo in the same run (`process_queue` runs Kilo before Foundry), so the gap is
+  decided once both are in: at `curate()`, a Kilo session gets the gap only when no Foundry
+  `model_call` / `model_request` row carries its session id.
+- Stale rows are removed the same way. Each curate pass deletes the `no-system-prompt` gap of
+  every session the join now covers. The 144 false rows go away on the next pipeline run, with
+  no manual cleanup.
+- `store.resolve_gaps(project, kind, sessions)` is a small new helper. Other gap kinds are left
+  alone.
+- If the join turns out to miss real matches (the one child-session case above), the build fixes
+  the join through the `parent_child` correlation rather than hiding the gap.
+
 ### E. Release note with the router-host keys
 Written into the release note exactly like this (Victor flips them in `/config/config.yaml` on
 the router host, then restarts the router):
@@ -156,6 +183,9 @@ And on the pipeline side (the profile's `[training]`), to get data out of it:
 - export: `include_reasoning` on/off, validation follows the manifest; the calls dataset
   (quality filters, local-only, eval guard); preference P1/P2.
 - coordinator: BLOCKED / CANCELLED manifests, dedupe, recovery-case wait, labels survive a later COMPLETE.
+- capture gaps: a Kilo session with a Foundry capture row of the same session id gets no
+  `no-system-prompt` gap, even when Foundry is ingested after Kilo. A session without one still
+  does. An old false gap row is removed on the next curate.
 - Full suite before the release note.
 
 ## 3. What this yields today (estimate on the current store)
@@ -169,6 +199,7 @@ And on the pipeline side (the profile's `[training]`), to get data out of it:
 | Calls, `quality=ok`, local | **~1,477** | weak label: succeeded, nobody rated it down, no negative label |
 | DPO P1/P2, local both sides | a handful | only 5 tasks have local trajectories |
 | Reasoning-bearing calls | 5,192 | usable once `include_reasoning = true` |
+| `no-system-prompt` gaps | 175 → 31 | only sessions with no Foundry capture stay |
 
 Data grows from here on: B and C start labelling every new local attempt, and E brings in
 Cline, Chat and AnythingLLM traffic.
