@@ -494,7 +494,17 @@ class Coordinator:
         problem = P.adapter.preflight_task(spec)
         if problem:
             return self._block(P, t, problem)
-        undeclared = [d for d in spec.deps if d not in q["deps"]
+        # 2026-10-28 AS-D13: a spec's deps line named "Q1" (a CC0 asset pack, not a
+        # sprint); an id the project does not know as a sprint is never a dependency
+        known = getattr(P.adapter, "is_known_task", None)
+        not_tasks = [d for d in spec.deps if callable(known) and not self.store.task(P.id, d)
+                     and known(d) is False]
+        if not_tasks and not (t["data"].get("deps_not_tasks") == not_tasks):
+            self.store.merge_data(P.id, t["task_id"], deps_not_tasks=not_tasks)
+            self.store.event(P.id, t["task_id"], "warning", detail={
+                "deps": f"ignored {', '.join(not_tasks)}: named in the task source's deps but "
+                        f"not a sprint of this project"})
+        undeclared = [d for d in spec.deps if d not in q["deps"] and d not in not_tasks
                       and not self._dep_satisfied(P, self.store.task(P.id, d) or {})
                       and not self._dep_done_outside(P, d)]
         if undeclared:

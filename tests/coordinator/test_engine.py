@@ -288,6 +288,19 @@ def test_undeclared_dependency_from_the_task_source_blocks(game):
     assert "needs T1" in c.store.task("game", "T2")["blocker"]
 
 
+def test_a_deps_entry_that_is_not_a_sprint_is_ignored(game):
+    """AS-D13 2026-10-28 replay: the spec's deps named Q1, a CC0 asset pack. An id the
+    adapter says is not a sprint of the project never blocks; a known one still does."""
+    tmp, _, _, prof = game
+    c = coordinator(tmp, [prof], {"game": write_ok("src/b.txt")})
+    P = c.projects["game"]
+    P.adapter.is_known_task = lambda d: False                  # T1 is 'not a sprint' here
+    c.approve("game", "T2", [], "victor")
+    assert run_until(c, lambda: _state(c, "game", "T2") != S.QUEUED)
+    t = c.store.task("game", "T2")
+    assert t["state"] != S.BLOCKED and t["data"]["deps_not_tasks"] == ["T1"]
+
+
 def test_one_writer_across_projects_and_fair_turns(tmp_path):
     r1, _ = make_repo(tmp_path, "g1", [T1])
     r2, _ = make_repo(tmp_path, "g2", [T1])

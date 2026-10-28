@@ -348,6 +348,42 @@ class AnimalUprisingAdapter(GenericAdapter):
             return f"{spec.task_id}_PLAN.md has no 'Files this sprint may change' list"
         return None
 
+    _SPRINT_LISTS = ("docs/progress/SPRINT_STATUS.md", "docs/MASTER_ORDER.md",
+                     "docs/progress/STATE.md")
+
+    def is_known_task(self, dep: str):
+        """True when `dep` is a sprint of this project (a row of SPRINT_STATUS /
+        MASTER_ORDER / STATE, a `### <ID>` heading of docs/SPRINTS*.md, or a plan file);
+        False when none of them name it (e.g. "Q1", an asset pack an asset spec cites);
+        None when the lists can't be read (callers then keep the dependency)."""
+        pat_row = re.compile(r"^\|\s*\**%s\**\s*\|" % re.escape(dep), re.M)
+        pat_head = re.compile(r"^#+\s+\**%s\b" % re.escape(dep), re.M)
+        read_any = False
+        for rel in self._SPRINT_LISTS:
+            try:
+                text = self._read(rel)
+            except OSError:
+                continue
+            read_any = True
+            if pat_row.search(text):
+                return True
+        try:
+            names = os.listdir(os.path.join(self.p.workspace, "docs"))
+        except OSError:
+            names = []
+        for n in names:
+            if n.startswith("SPRINTS") and n.endswith(".md"):
+                try:
+                    text = self._read("docs/" + n)
+                except OSError:
+                    continue
+                read_any = True
+                if pat_head.search(text):
+                    return True
+        if os.path.isfile(os.path.join(self.p.workspace, _plan_rel(dep))):
+            return True
+        return False if read_any else None
+
     def dependency_done(self, dep: str) -> bool:
         """Finished before the coordinator: the STATE.md ledger row says so."""
         try:
