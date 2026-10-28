@@ -166,7 +166,17 @@ class Workspace:
                                           "--no-renames").splitlines() if p.strip() in want]
             if not staged:
                 return ""
-            self.run("commit", "-q", "-m", message, f"--pathspec-from-file={spec}", env=env)
+            try:
+                self.run("commit", "-q", "-m", message, f"--pathspec-from-file={spec}", env=env)
+            except (GitError, OSError) as e:
+                # audit D: a commit a hook refused left the paths staged, and the next
+                # track merge (or any later commit) stalled on them. Unstage exactly them.
+                try:
+                    self.run("reset", "-q", f"--pathspec-from-file={spec}", check=False)
+                except (GitError, OSError):
+                    pass
+                raise GitError(f"{e} (the coordinator unstaged the {len(paths)} path(s) "
+                               f"again)") from e
         finally:
             try:
                 os.remove(spec)

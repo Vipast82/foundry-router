@@ -21,9 +21,11 @@ P0 = SimpleNamespace(profile=SimpleNamespace(raw={}))
 
 def test_classification():
     # W1.2: every lead escalation and obligation conflict is a decision with a default;
-    # only the reviewer-access / flaky-check kinds stay defects
+    # only the flaky-check kinds stay defects (audit D 2026-10-28: review_access is a
+    # decision that parks after its timeout)
     assert DP.classify("obligation_conflict", {}) == "decision"
-    assert DP.classify("review_access", {}) == "defect"
+    assert DP.classify("review_access", {}) == "decision"
+    assert DP.classify("flaky_check", {}) == "defect"
     assert DP.classify("lead_escalation", {"reason": "guard_violation"}) == "decision"
     assert DP.classify("lead_escalation", {"reason": "max_diagnoses"}) == "decision"
     assert DP.classify("lead_escalation", {"reason": "lead_asks"}) == "decision"
@@ -43,9 +45,11 @@ def test_meta_gives_a_default_only_when_one_is_safe():
                 recommendation="keep BUILD: captures are BUILD evidence")
     assert m == {"decision_class": "decision", "recommended": json.dumps("keep BUILD (default)"),
                  "timeout_minutes": 30}
+    # audit D: an unmatched recommendation parks (with the timeout) instead of waiting
     assert DP.meta(P0, "no_progress", {}, ["a", "b"], recommendation="something else")[
-        "recommended"] is None
-    assert DP.meta(P0, "review_access", {"recommended": "x"}, ["x"])["recommended"] is None
+        "recommended"] == json.dumps(DP.PARK)
+    assert DP.meta(P0, "review_access", {"recommended": "x"}, ["x"])["recommended"] == \
+        json.dumps("x")
     lead = DP.meta(P0, "lead_escalation", {"reason": "lead_asks", "recommended": "layout B"},
                    ["layout A", "layout B"])
     assert lead["recommended"] == json.dumps("layout B") and lead["timeout_minutes"] == 30

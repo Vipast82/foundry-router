@@ -775,3 +775,42 @@ def test_gate_binding_ignores_coordinator_memory_commits(repo):
     code = _commit(ws, f"{T}: code after the gate")
     g = a._gate_binding(spec, code, w)
     assert g.result == FAIL and "src/after_gate.lua" in g.detail
+
+
+def test_gate_binding_survives_evidence_memory_and_plan_only_commits(repo):
+    """2026-10-28 audit A: GF-GATE1 attempts 5-9 reran a 14-min gate because docs-only
+    commits moved HEAD. A difference touching only docs/progress/**, docs/memory/** or
+    .plan/** keeps the gate bound, with a detail naming those files."""
+    a, w, ws = repo["a"], repo["w"], repo["ws"]
+    spec = a.describe_at(T, repo["head"], w)
+    _write(ws, "docs/progress/STATE_NOTES.md", "- shared progress note\n")
+    _write(ws, "docs/memory/CONVENTIONS.md", "- a convention\n")
+    _write(ws, ".plan/next.md", "next steps\n")
+    docs = _commit(ws, f"{T}: progress, memory and plan notes")
+    g = a._gate_binding(spec, docs, w)
+    assert g.result == PASS, g.detail
+    assert "only evidence/memory/plan files changed since the gate" in g.detail
+    assert ".plan/next.md" in g.detail and "docs/progress/STATE_NOTES.md" in g.detail
+    # the review packet's gate block agrees (same rule)
+    ev = w.show_at(docs, LOG_REL)
+    status, notes = a._gate_staleness(spec, ev, [], docs, w)
+    assert status == "ok", notes
+    # code is still code
+    _write(ws, "tests/after_gate_check.lua", "return true\n")
+    code = _commit(ws, f"{T}: a test after the gate")
+    g = a._gate_binding(spec, code, w)
+    assert g.result == FAIL and "tests/after_gate_check.lua" in g.detail
+    assert a._gate_staleness(spec, w.show_at(code, LOG_REL), [], code, w)[0] == "stale"
+
+
+def test_runtime_check_dependencies_never_include_docs_memory_or_plan(repo):
+    """audit A: boot:/suite:/gate: records must not go stale on docs-only commits."""
+    a = repo["a"]
+    spec = a.describe_at(T, repo["head"], repo["w"])
+    for cid in ("boot:server", "suite:S45", "regression:S45", "call:1", "runtime:verify_live",
+                "lune", f"gate:{T}", "fast_lane.gate", "plan:x"):
+        globs = a.check_dependencies(spec, cid)
+        assert globs, cid
+        for p in ("docs/progress/GF-GATE1_EVIDENCE_RAW.log", "docs/memory/KNOWN_ISSUES.md",
+                  ".plan/notes.md"):
+            assert not matches_any(p, globs), (cid, p)

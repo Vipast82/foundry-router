@@ -35,13 +35,27 @@ def commits(t: dict) -> set:
     return set((t.get("data") or {}).get(KEY) or [])
 
 
+def commit_env(P, paths: list) -> Optional[dict]:
+    """The project's environment for a coordinator commit of exactly `paths`
+    (adapter.commit_env: AU_ALLOW_SCOPE for AU's hooks); None when it gives none."""
+    fn = getattr(getattr(P, "adapter", None), "commit_env", None)
+    if not callable(fn):
+        return None
+    try:
+        env = fn(sorted(str(p) for p in paths))
+    except Exception:                                             # noqa: BLE001
+        return None
+    return dict(env) if isinstance(env, dict) and env else None
+
+
 def commit(c, P, t: dict, paths: list, text: str, kind: str) -> tuple[str, str]:
     """Commit exactly `paths` in the workspace as the coordinator. (sha, "") on a
-    commit, ("", "") when there was nothing to commit, ("", error) on failure."""
+    commit, ("", "") when there was nothing to commit, ("", error) on failure (the
+    paths are unstaged again by commit_paths)."""
     tid = t["task_id"]
     msg = message(P, tid, text)
     try:
-        sha = P.ws.commit_paths(sorted(paths), msg)
+        sha = P.ws.commit_paths(sorted(paths), msg, env=commit_env(P, paths))
     except (GitError, OSError) as e:
         c.store.event(P.id, tid, "coordinator_commit_failed", detail={
             "kind": kind, "paths": sorted(paths)[:40], "error": str(e)[:400]})

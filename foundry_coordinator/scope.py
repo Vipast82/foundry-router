@@ -259,11 +259,14 @@ def _grant(c, P, t: dict, spec, path: str, reason: str, rule_name: str, rule: di
         return ""
     prefix = P.profile.commit.get("prefix", "{task}").replace("{task}", tid)
     sep = "" if prefix.endswith((":", ": ")) else ":"
+    from . import bookkeeping as BK
     try:
-        P.ws.run("add", "--", rel)
-        P.ws.run("commit", "-q", "-m", f"{prefix}{sep} scope grant {path} ({rule_name})",
-                 "--", rel)
-        sha = P.ws.head()
+        # audit D: the project's hook env (AU_ALLOW_SCOPE) like every coordinator commit;
+        # a refused commit is unstaged by commit_paths
+        sha = P.ws.commit_paths([rel], f"{prefix}{sep} scope grant {path} ({rule_name})",
+                                env=BK.commit_env(P, [rel]))
+        if not sha:
+            raise RuntimeError(f"nothing to commit for {rel}")
     except Exception as e:                                       # noqa: BLE001
         try:
             P.ws.run("checkout", "--", rel, check=False)

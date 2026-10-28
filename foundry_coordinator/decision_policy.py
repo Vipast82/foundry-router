@@ -16,11 +16,19 @@ to the next sprint (a dependent sprint waits, an independent one starts).
 `no_progress` continues once first, then parks.
 
   class "decision"  carries a recommended answer and a deadline
-  class "defect"    review_access / flaky_check / quarantine_check: the reviewer
-                    can't read the packet or a check flips; never auto-answered
+  class "defect"    flaky_check / quarantine_check: a check flips; never
+                    auto-answered
 
-A decision whose recommendation matches none of its options keeps
-recommended = None and waits for the operator: a timeout never invents an answer.
+Audit D (2026-10-28), nothing waits on a person for a tooling fault:
+  * review_access is a decision: the engine retries the review with a rebuilt
+    packet, then the alternate reviewer; then the lead takes it, else it parks
+    after the timeout (recommended PARK).
+  * Only a `user_action` blocker (a person must do something) cancels the
+    timeout. A recommended option that reads as a human act ("Victor clicks
+    ...") under any other blocker kind is never applied: PARK is the default.
+  * A recommendation that matches none of the options defaults to PARK with
+    the normal timeout (never an indefinite wait). With no recommendation at
+    all the decision waits for the operator.
 """
 
 from __future__ import annotations
@@ -33,7 +41,7 @@ from .automation import get as auto_get
 
 TIMEOUT_AUTHORITY = "timeout_default"
 TIMEOUT_ACTOR = "timeout_default"
-DEFECT_KINDS = frozenset({"review_access", "flaky_check", "quarantine_check"})
+DEFECT_KINDS = frozenset({"flaky_check", "quarantine_check"})
 SWEEP_SECONDS = 30.0
 
 # The standard options of a tooling-limit decision (W1.2). PARK is recognised by
@@ -104,6 +112,21 @@ def needs_human_act(option) -> bool:
     return bool(_HUMAN_ACT.search(str(label or "")))
 
 
+# decision kinds whose answer may be "stop the task" (Recovery._escalation_answer,
+# engine.LC_STOP_KINDS, the lead's NEEDS_VICTOR step): PARK is a valid default for them
+PARK_KINDS = frozenset({"recovery_escalation", "no_progress", "review_access",
+                        "implementer_blocked", "lead_escalation"})
+
+
+def _park_option(kind: str, options: list) -> Optional[str]:
+    """The PARK default of a decision: its own stop option, else PARK for a kind that
+    understands a stop; None for any other kind (it waits as before)."""
+    own = _option(options, "stop")
+    if own is not None:
+        return own
+    return PARK if kind in PARK_KINDS else None
+
+
 def meta(P, kind: str, evidence: Optional[dict], options: list,
          recommendation: str = "") -> dict:
     """{decision_class, recommended (JSON text or None), timeout_minutes} for a
@@ -122,17 +145,24 @@ def meta(P, kind: str, evidence: Optional[dict], options: list,
         if kind == "scope_request":
             rec = _option(options, str(auto_get(P, "scope_unlisted_default") or "deny"))
         else:
-            for cand in (ev.get("recommended"), recommendation):
-                got = match_option(options, cand) if cand else None
+            cands = [c for c in (ev.get("recommended"), recommendation) if c]
+            for cand in cands:
+                got = match_option(options, cand)
                 if got is not None:
                     rec = got
                     break
-            # 2026-10-27 one stop protocol: a timeout never applies an option that needs
-            # a human act (a `user_action` blocker, or a recommended "Victor clicks
-            # Connect"): nobody did it, so the next session would hit the same blocker.
-            # The recommendation is still shown; the decision waits for the owner.
-            if rec is not None and (str(ev.get("blocker_kind") or "") == "user_action"
-                                    or needs_human_act(rec)):
+            park = _park_option(kind, options)
+            if rec is None and cands:
+                # audit D: an unmatched recommendation (often a lead's free text) parks
+                # with the normal timeout instead of waiting forever
+                rec = park
+            elif rec is not None and needs_human_act(rec):
+                # a timeout never applies a human act nobody did (the next session would
+                # hit the same blocker); it parks instead. The recommendation is shown.
+                rec = park
+            # 2026-10-27 one stop protocol, narrowed by audit D: only a `user_action`
+            # blocker (a person must act) waits for the owner with no timeout
+            if str(ev.get("blocker_kind") or "") == "user_action":
                 rec = None
     try:
         timeout = int(auto_get(P, "decision_timeout_minutes") or 0)
@@ -207,14 +237,14 @@ def sweep(c, force: bool = False) -> list[str]:
         except (TypeError, ValueError):
             continue
         if needs_human_act(answer):
-            # (a decision opened before 2026-10-27 may still carry one): never applied by
-            # a timeout; it waits for the owner
-            c.store.x("UPDATE decisions SET deadline_ts=NULL WHERE decision_id=?",
-                      (d["decision_id"],))
+            # (a decision opened before 2026-10-27 may still carry one): a human act is
+            # never applied by a timeout; audit D: it parks instead of waiting forever
+            c.store.x("UPDATE decisions SET recommended=? WHERE decision_id=?",
+                      (json.dumps(PARK), d["decision_id"]))
             c.store.event(d["project_id"], d["task_id"], "decision_timeout_skipped", detail={
                 "decision_id": d["decision_id"], "recommended": answer,
-                "why": "the recommended option needs a human act; it waits for the owner"})
-            continue
+                "why": "the recommended option needs a human act; the timeout parks instead"})
+            answer = PARK
         try:
             c.obligations.answer(d["decision_id"], answer, TIMEOUT_ACTOR, TIMEOUT_AUTHORITY)
         except Exception as e:                                   # noqa: BLE001

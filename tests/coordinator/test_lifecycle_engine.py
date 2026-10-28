@@ -608,10 +608,12 @@ def test_access_blocked_review_opens_a_decision_and_starts_no_session(tmp_path):
              "message": "could not open the attached screenshot: access denied"}])
     c, client, ff, _, _ = _game(tmp_path, green_t1, foundry=FakeFoundry(reviewer))
     c.approve("game", "T1", [], "victor")
-    assert run_until(c, lambda: _state(c) == S.BLOCKED, limit=40)
+    assert run_until(c, lambda: _state(c) == S.BLOCKED, limit=60)
     t = c.store.task("game", "T1")
     did, = t["data"]["decision_wait"]["ids"]
     assert c.obligations.decision(did)["kind"] == "review_access"
+    # audit D: a rebuilt packet and the alternate reviewer were tried first
+    assert len(ff.chats) == 3
     n_sessions = len(client.sessions)
     for _ in range(3):
         c.tick()
@@ -621,7 +623,7 @@ def test_access_blocked_review_opens_a_decision_and_starts_no_session(tmp_path):
     c.decision_answer("game", "T1", did, "access fixed: review again", actor="victor",
                       channel="control")
     assert run_until(c, lambda: _state(c) == S.COMPLETE, limit=40)
-    assert len(client.sessions) == 1 and len(ff.chats) == 2
+    assert len(client.sessions) == 1 and len(ff.chats) == 4
 
 
 # -- 9. screening a model's report ------------------------------------------------------
