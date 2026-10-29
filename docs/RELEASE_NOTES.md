@@ -2,6 +2,21 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.157.7 — a track's merge Studio-tests its sprints in one batch
+
+2026-10-28: the Blender track (AS-D13, AS-V00..V03, local model, no Studio) would have merged
+with no Studio test: the merge gate used Studio only for fast-lane tracks. Victor: build the
+assets first, then one batch of Studio tests.
+
+- **New merge stage `studio_batch`.** After the merge gate's verify passes, the coordinator takes
+  ONE Studio lease (it waits like the fast-lane merge gate while the main sprint uses Studio)
+  and runs the scripted Studio gate on the main checkout: each sprint with its own suites runs
+  them, then ONE full regression covers every suite-less sprint (asset sprints). All green ->
+  `track_merged`; red -> the track fails with the sprint(s) and rows named and the findings on
+  the sprint; a tooling ERROR retries that run only.
+- **Settings ([automation], in the UI):** `merge_studio_batch` (on), `merge_studio_batch_max_minutes`
+  (0 = `studio_track_max_minutes` x runs). `admit_studio` takes a lease length.
+
 ## v0.157.6 — a scope grant gets a fresh session with the granted files
 
 AS-P5, 2026-10-28 19:56: three scope requests (tests/S24, S25, S26_check.lua) were granted and the
