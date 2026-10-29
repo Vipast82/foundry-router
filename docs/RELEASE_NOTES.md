@@ -2,6 +2,22 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.157.17 — the Lead repairs a track's merge conflict
+
+backend-1 (S57a), 2026-10-28: `tracks/merge.py` asked the Lead through `open_track_repair`,
+which the Lead never implemented, so a conflict went straight to a decision whose timeout
+default stopped the track and finished work never reached master.
+
+- **`LeadManager.open_track_repair`:** a Lead case (trigger `track_conflict`) for the track's last
+  sprint; the coordinator merges master into the track worktree (docs/memory conflicts resolved
+  automatically), one bounded Lead session resolves the rest and commits in the worktree only
+  (no branch moves, nothing outside it), then the coordinator verifies (merge concluded, no
+  markers, clean tree, both heads in HEAD) and the merge retries by itself. Caps, readiness and
+  the served-model check apply; a Lead that cannot run leaves the decision.
+- **Timeout never drops finished work silently:** while a repair runs the default is "retry the
+  merge after the Lead repair"; only with no Lead does "stop this track" apply, and then an
+  operator notice names the COMPLETE sprints whose work did not reach master.
+
 ## v0.157.16 — scope never blames a sprint for another sprint's commits
 
 AS-P5, 2026-10-28 23:10-23:58: master moved under the long sprint (UI-SKIN2's captures,
