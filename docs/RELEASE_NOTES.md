@@ -2,6 +2,15 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.157.50 — the frame the runner takes is committed with the run's outputs
+
+2026-10-29 12:42: AS-P5's scripted run took its CAPTURE_READY frame (v0.157.47), but the outputs
+commit covered only docs/progress/<ID>_*, so the PNG stayed uncommitted and the clean-tree checks
+failed; the sprint parked on repeated findings.
+
+- **Scripted run commit:** the captures the run logged as `PASS: CAPTURE <path>` (under
+  `docs/evidence/<ID>/` only) are committed with its lines, evidence and gate files.
+
 ## v0.157.49 — an idle leftover session never blocks a landing
 
 2026-10-29 12:2x: right after v0.157.48, MV2-0's helper session from its earlier track run (MV2-0

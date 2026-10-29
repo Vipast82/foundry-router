@@ -809,6 +809,20 @@ class StudioCalls:
         self.c._lc_safe(P, tid, "studio_calls_record", rec)
         return n[0]
 
+    def _run_captures(self, P, tid: str, run: dict) -> list:
+        """The frames this run took (`PASS: CAPTURE <path>` in its verdict's captures log),
+        only paths under docs/evidence/<tid>/."""
+        head = str(run.get("head") or "")
+        v = _read_json(os.path.join(self._gate_dir(P, tid), f"{head[:12]}.calls.json")) or {}
+        text = str(((v.get("raw_results") or {}).get("captures")) or "")
+        want = f"docs/evidence/{tid}/"
+        out = []
+        for m in re.finditer(r"^PASS: CAPTURE (\S+\.png)\b", text, re.M):
+            pth = m.group(1).replace("\\", "/")
+            if pth.startswith(want) and ".." not in pth.split("/"):
+                out.append(pth)
+        return out
+
     def _commit(self, P, t: dict, run: dict, result: str) -> tuple:
         """The runner's outputs (docs/progress/<ID>_* by default), committed by the
         coordinator: (sha, "") | ("", "") nothing to commit | ("", error)."""
@@ -820,6 +834,13 @@ class StudioCalls:
         except Exception as e:                                    # noqa: BLE001
             return "", str(e)[:300]
         paths = [p for p in BK.runner_paths(dirty, pats, set()) if P.profile.in_workspace(p)]
+        # 2026-10-29 AS-P5: the frame the runner took at CAPTURE_READY (v0.157.47) was left
+        # uncommitted and the clean-tree checks failed; the captures the run logged as
+        # `PASS: CAPTURE <path>` (under docs/evidence/<ID>/ only) are its outputs too
+        for cap in self._run_captures(P, tid, run):
+            if cap not in paths and P.profile.in_workspace(cap) and any(
+                    str(d[1]).replace("\\", "/") == cap for d in dirty):
+                paths.append(cap)
         if not paths:
             return "", ""
         return BK.commit(self.c, P, t, paths,

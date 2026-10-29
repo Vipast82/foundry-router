@@ -511,3 +511,20 @@ def test_gate_ps1_cmd_drops_files_deleted_at_head(tmp_path):
                            regression="none", suites="")
     cmd = SC.gate_ps1_cmd(a)
     assert cmd[cmd.index("-Files") + 1] == "src/a.lua"
+
+
+def test_the_runs_own_captures_are_its_outputs(tmp_path):
+    """2026-10-29 AS-P5: the runner-taken frame was left uncommitted (clean-tree FAIL)."""
+    import json as _j
+    from types import SimpleNamespace as NS
+    ws = tmp_path / "ws"
+    gd = ws / ".plan" / "tmp" / "gate" / "AS-P5"
+    gd.mkdir(parents=True)
+    (gd / "abcdef012345.calls.json").write_text(_j.dumps({"raw_results": {"captures": "\n".join([
+        "CAPTURE docs/evidence/AS-P5/f.png runtime=playtest",
+        "PASS: CAPTURE docs/evidence/AS-P5/f.png 1920x1080 written by the runner at CAPTURE_READY",
+        "PASS: CAPTURE docs/evidence/OTHER/x.png 1x1",
+        "FAIL: CAPTURE docs/evidence/AS-P5/g.png - no PNG"])}}))
+    sc = SC.StudioCalls.__new__(SC.StudioCalls)
+    P = NS(profile=NS(workspace=str(ws)))
+    assert sc._run_captures(P, "AS-P5", {"head": "abcdef0123456789"}) == ["docs/evidence/AS-P5/f.png"]
