@@ -2126,8 +2126,11 @@ Change no code or test file in this session; if one needs changing, stop and rep
             deps = ui or src
             if not deps:
                 return None
-            own = [s for s in spec.scope if s.startswith("tests/") and "_check." in s]
-            return sorted(set(deps + own + ["default.project.json"]))
+            # 2026-10-29 AS-P5: the sprint's own tests/*_check.lua is no capture dependency;
+            # the session edits it right after capturing (ticking the capture row) and every
+            # fresh screenshot went stale at once (00:33, 00:40, 00:59; 8 attempts). The gate
+            # re-runs the check at the reviewed head, so a scene-setup change is still caught.
+            return sorted(set(deps + ["default.project.json"]))
         if kind == "done_check":
             return None                    # reads the whole repo state: not path-bounded
         return None

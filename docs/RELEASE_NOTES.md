@@ -2,6 +2,15 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.157.25 — a screenshot does not go stale when the sprint edits its own check
+
+AS-P5, 2026-10-29 00:33-01:59: every fresh runtime capture (PASS, with runtime identity) was
+stale at once, "dependency changed since ...: tests/AS_P5_check.lua": the session ticks the
+capture row in its check right after capturing. Eight attempts went on it.
+
+- **AU capture dependencies** are the sprint's UI/src files and default.project.json; its own
+  tests/*_check.lua is no longer one (the gate re-runs the check at the reviewed head).
+
 ## v0.157.24 — a drained sprint gives the checkout back
 
 2026-10-29 01:28: the landing itself takes the checkout lock, and UI-SKIN2 (between sessions,

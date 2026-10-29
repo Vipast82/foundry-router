@@ -376,7 +376,10 @@ def test_check_dependencies_docs_change_vs_src_change(repo):
     spec = a.describe_at(T, head, w)
     suite = a.check_dependencies(spec, "suite:S45")
     cap = a.check_dependencies(spec, f"capture:docs/evidence/{T}/gallery_desktop.png")
-    assert "src/client/Kit.lua" in cap and "tests/UX_01_check.lua" in cap
+    assert "src/client/Kit.lua" in cap
+    # AS-P5 2026-10-29: the sprint's own check is not a capture dependency (it is edited
+    # right after capturing; the gate re-runs it at the reviewed head)
+    assert "tests/UX_01_check.lua" not in cap
     assert a.check_dependencies(spec, "mystery:thing") is None
     _write(ws, "docs/notes.md", "unrelated\n")
     docs = _commit(ws, "docs only")
