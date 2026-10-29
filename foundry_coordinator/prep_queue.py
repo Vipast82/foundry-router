@@ -404,6 +404,16 @@ def _main_tasks(c, P) -> list[dict]:
     return out
 
 
+def _session_busy(c, P, t: dict, sid: str) -> bool:
+    """Kilo says this session is running a turn (False when Kilo cannot say)."""
+    try:
+        st = P.client.state(sid, directory=c.tracks.project_for(P, t).profile.workspace,
+                            since_ts=0)
+    except Exception:                                            # noqa: BLE001
+        return False
+    return getattr(st, "status", "") == "busy"
+
+
 def _paused_idle(c, P, t: dict) -> bool:
     from .selfheal import _paused_idle as idle
     return idle(c, P, t)
@@ -466,6 +476,12 @@ def safe_point(c, P, cfg: Optional[dict] = None) -> tuple[bool, str]:
             # 2026-10-29: a COMPLETE / CANCELLED sprint's leftover session (GF-FX5's helper,
             # never marked ended after its track merged) held every landing for 45 minutes
             if t.get("state") in ("COMPLETE", "CANCELLED"):
+                continue
+            # ... and a sprint that is not mid-sprint (READY / BLOCKED / CHANGES_REQUIRED /
+            # QUEUED) only blocks while Kilo reports that session busy (MV2-0's helper from
+            # its earlier track run held the landing the same way)
+            if (t.get("state") not in block and t.get("state") != "PAUSED"
+                    and not _session_busy(c, P, t, s["session_id"])):
                 continue
             # a paused task whose session finished its turn is not working in the
             # checkout (2026-10-28: paused GF-GATE1 stalled the queue this way)

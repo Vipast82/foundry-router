@@ -2,6 +2,14 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.157.49 — an idle leftover session never blocks a landing
+
+2026-10-29 12:2x: right after v0.157.48, MV2-0's helper session from its earlier track run (MV2-0
+READY, not running) held the same prep landing.
+
+- **Prep safe point:** a session of a sprint that is not mid-sprint (READY / BLOCKED /
+  CHANGES_REQUIRED / QUEUED / PAUSED) blocks only while Kilo reports it busy.
+
 ## v0.157.48 — a finished sprint's session never blocks a landing; Studio checks wait for the batch
 
 2026-10-29 11:35-12:20: every main sprint waited behind prep entry pq-644516b79d, whose safe
