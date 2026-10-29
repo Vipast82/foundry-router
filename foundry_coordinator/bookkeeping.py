@@ -71,11 +71,30 @@ def commit(c, P, t: dict, paths: list, text: str, kind: str) -> tuple[str, str]:
     return sha, ""
 
 
+# a sprint id: capitalised, with a digit somewhere (UI-SKIN2, AS-V01, GF-GATE1, S57a, S24)
+_PREFIX = re.compile(r"^([A-Z][A-Za-z0-9]*(?:-[A-Za-z0-9.]+)*):")
+
+
+def other_sprint(subject: str, tid: str) -> bool:
+    """A commit subject that starts with ANOTHER sprint's id prefix ("UI-SKIN2: ...") is
+    that sprint's work. 2026-10-28 AS-P5: master moved under a long sprint (UI-SKIN2
+    captures, coordinator commits for AS-V0x / AS-D13 docs); its scope check blamed it for
+    them, it asked for scope grants on other sprints' files, and each grant restarted it."""
+    m = _PREFIX.match(str(subject or ""))
+    return bool(m) and any(ch.isdigit() for ch in m.group(1)) and m.group(1) != tid
+
+
 def agent_files(P, t: dict, base: str, head: str) -> Optional[set]:
-    """Files changed base..head by commits the coordinator did NOT make, or None
-    when git can't say (callers then treat every changed file as the agent's)."""
+    """Files changed base..head by commits the coordinator did NOT make and no other
+    sprint made, or None when git can't say (callers then treat every changed file as the
+    agent's)."""
     mine = commits(t)
-    if not mine:
+    tid = str(t.get("task_id") or "")
+    try:
+        others = {sha for sha, subj in P.ws.commits(base, head) if other_sprint(subj, tid)}
+    except Exception:                                             # noqa: BLE001
+        others = set()
+    if not mine and not others:
         return None
     try:
         per = P.ws.commit_files(base, head)
@@ -83,7 +102,7 @@ def agent_files(P, t: dict, base: str, head: str) -> Optional[set]:
         return None
     out: set = set()
     for sha, files in per:
-        if sha not in mine:
+        if sha not in mine and sha not in others:
             out.update(f.replace("\\", "/") for f in files)
     return out
 

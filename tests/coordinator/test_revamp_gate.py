@@ -865,3 +865,23 @@ def test_coordinator_commits_never_invalidate_the_review(env):
     why = e.c._review_still_valid(P, task(e), spec, P.ws.head())
     assert why and "src/a.txt" in why and "MASTER_ORDER" not in why
     assert t["reviewed_sha"]
+
+
+def test_scope_never_blames_a_sprint_for_another_sprints_commits():
+    """AS-P5 2026-10-28 replay: UI-SKIN2's captures and coordinator commits for AS-V0x /
+    AS-D13 landed on master mid-sprint; AS-P5's scope check blamed it and every scope
+    grant it then asked for restarted it (sessions at 23:38, 23:47, 23:58)."""
+    from types import SimpleNamespace
+    from foundry_coordinator.bookkeeping import agent_files, other_sprint
+    assert other_sprint("UI-SKIN2: hero captures", "AS-P5")
+    assert other_sprint("S57a: balance rows", "AS-P5")
+    assert not other_sprint("AS-P5: fix the S24 fixture", "AS-P5")
+    assert not other_sprint("prep: rules streamline", "AS-P5")
+    assert not other_sprint("Merge branch 'x'", "AS-P5")
+    ws = SimpleNamespace(
+        commits=lambda b, h: [("a1", "AS-P5: own work"), ("b2", "UI-SKIN2: captures"),
+                              ("c3", "AS-V01: docs (coordinator)")],
+        commit_files=lambda b, h: [("a1", ["src/x.lua"]), ("b2", ["docs/evidence/UI-SKIN2/h.jpg"]),
+                                   ("c3", ["docs/progress/AS-V01_PLAN.md"])])
+    P = SimpleNamespace(ws=ws)
+    assert agent_files(P, {"task_id": "AS-P5", "data": {}}, "base", "head") == {"src/x.lua"}

@@ -2,6 +2,17 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.157.16 — scope never blames a sprint for another sprint's commits
+
+AS-P5, 2026-10-28 23:10-23:58: master moved under the long sprint (UI-SKIN2's captures,
+coordinator commits for AS-V0x / AS-D13 docs). AS-P5's scope check counted them as AS-P5's,
+the session asked for scope grants on other sprints' files, and every grant restarted it
+(23:38, 23:47, 23:58).
+
+- **`bookkeeping.agent_files`** leaves out commits whose subject starts with ANOTHER sprint's
+  id prefix (`UI-SKIN2: ...`, `S57a: ...`); the project's commit hook only lets a sprint commit
+  under its own prefix.
+
 ## v0.157.15 — track merges keep both sides of a memory-notes conflict
 
 backend-1 (S57a), 2026-10-28 23:47: S57a was COMPLETE, but the track's rebase onto master
