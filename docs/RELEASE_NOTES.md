@@ -2,6 +2,15 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.157.46 — a sprint cancelled before it starts leaves its track
+
+2026-10-29 11:24: MV2-1 (queued by mistake behind MV2-0 on track gpt-2) was cancelled; the track
+failed on it and MV2-0 moved to the main checkout mid-sprint, away from its staged work.
+
+- **Tracks:** a sprint cancelled before it ever started is dropped from its track
+  (`track_sprints_dropped`); the track carries on. A started sprint that fails or is cancelled
+  still fails the track.
+
 ## v0.157.45 — a re-sent coordinator event never reopens its alert (router)
 
 2026-10-29: "Coordinator error on GF-ENT1" (four errors from 2026-10-28 18:00, long fixed, the

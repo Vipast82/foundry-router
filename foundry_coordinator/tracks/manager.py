@@ -522,6 +522,19 @@ class TrackManager:
         if row["state"] not in LIVE_STATES:
             return
         if row["state"] == "running":
+            # 2026-10-29: a sprint cancelled before it ever started (MV2-1, queued by mistake)
+            # leaves the track; it never fails it (the failed track moved MV2-0 to the main
+            # checkout mid-sprint, away from its staged work)
+            dropped = [s for s in row["sprints"]
+                       if (self.store.task(P.id, s) or {}).get("state") == S.CANCELLED
+                       and not (self.store.task(P.id, s) or {}).get("started_ts")
+                       and not int((self.store.task(P.id, s) or {}).get("attempt") or 0)]
+            if dropped and len(dropped) < len(row["sprints"]):
+                keep = [s for s in row["sprints"] if s not in dropped]
+                row = self.store.update_track(P.id, row["name"], sprints=keep)
+                self.store.event(P.id, "", "track_sprints_dropped", detail={
+                    "track": row["name"], "sprints": dropped,
+                    "why": "cancelled before it started"})
             states = {s: (self.store.task(P.id, s) or {}).get("state") for s in row["sprints"]}
             cur = next((s for s, st in states.items() if st != S.COMPLETE), "")
             if cur != row.get("current_sprint"):

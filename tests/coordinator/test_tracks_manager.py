@@ -254,3 +254,19 @@ def test_cli_tracks_analyze_prints_and_status_json(tmp_path, capsys):
     rc = cli._tracks(c, type("A", (), {"tcmd": "stop", "project": "game", "name": "nope",
                                        "reason": "", "by": "v"})())
     assert rc == 2 and "no track nope" in capsys.readouterr().err
+
+
+def test_a_sprint_cancelled_before_it_started_leaves_the_track(tmp_path):
+    """2026-10-29: MV2-1 was cancelled while it waited behind MV2-0 on track gpt-2; the track
+    failed and MV2-0 was moved off its worktree mid-sprint. Now the never-started sprint is
+    dropped and the track carries on."""
+    c, P, root = env(tmp_path, extra="\n[automation]\nmax_agents = 2\n")
+    c.tracks.create(P, "blender", ["B1", "B2"])
+    c.tracks.start(P, "blender", "victor")
+    assert run_until(c, lambda: c.store.task("game", "B1")["state"] == S.IMPLEMENTING, limit=10)
+    c.cancel("game", "B2", "queued by mistake")
+    c.tick()
+    row = c.store.track("game", "blender")
+    assert row["state"] == "running" and row["sprints"] == ["B1"]
+    assert tracks_events(c, "track_sprints_dropped")[0]["detail"]["sprints"] == ["B2"]
+    assert not tracks_events(c, "track_failed")
