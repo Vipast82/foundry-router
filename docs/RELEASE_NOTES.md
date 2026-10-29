@@ -2,6 +2,15 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.157.37 — scope grants work on plans with mixed line endings
+
+2026-10-29 06:44: GF-SAVE1's plan is LF with three CRLF lines. The AU scope grant split it on
+CRLF, never found 'Files this sprint may change', and the approved grant of the regenerated
+localization exports failed ("the plan's file list could not be edited").
+
+- **The AU scope grant** splits the plan on LF (CRLF lines keep their ending) and writes the
+  new line with the file's majority ending.
+
 ## v0.157.36 — a retry after an upgrade gets attempts when they ran out
 
 2026-10-29 06:18: v0.157.34 retried AS-P5 after the upgrade, but its case had opened because

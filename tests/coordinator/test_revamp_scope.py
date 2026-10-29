@@ -240,3 +240,26 @@ def test_the_au_plan_file_list_gets_the_grant_line(tmp_path):
     # the line sits inside the list, before the next section
     assert text.index("tests/GateRunner.lua") < text.index("## Checklist")
     assert a.grant_scope(spec2, "tests/GateRunner.lua", "again") == ""      # idempotent
+
+
+def test_the_au_grant_works_on_a_plan_with_mixed_line_endings(tmp_path):
+    """2026-10-29 GF-SAVE1: a mostly-LF plan with a few CRLF lines; the grant split it on
+    CRLF, never found the heading and every scope grant failed."""
+    from foundry_coordinator.projects.animaluprising.adapter import AnimalUprisingAdapter
+    from tests.coordinator.test_au_review_evidence import (DONE_CHECK_STUB, PLAN, PLAN_REL, T,
+                                                           _profile, _write)
+    ws = tmp_path / "au"
+    ws.mkdir()
+    _write(ws, "tools/guard/done_check.py", DONE_CHECK_STUB)
+    lines = PLAN.replace("\r\n", "\n").split("\n")
+    lines[1] = lines[1] + "\r"                               # one CRLF line, the rest LF
+    (ws / PLAN_REL).parent.mkdir(parents=True, exist_ok=True)
+    (ws / PLAN_REL).write_bytes("\n".join(lines).encode("utf-8"))
+    a = AnimalUprisingAdapter(_profile(ws), str(tmp_path / "state"))
+    spec = a.describe(T)
+    assert a.grant_scope(spec, "docs/localization/LocalizationTable.csv", "regenerated") == \
+        PLAN_REL
+    raw = (ws / PLAN_REL).read_bytes()
+    assert b"- `docs/localization/LocalizationTable.csv` -- regenerated\n" in raw
+    assert raw.count(b"\r\n") == 1                           # the other lines are untouched
+    assert "docs/localization/LocalizationTable.csv" in a.describe(T).scope

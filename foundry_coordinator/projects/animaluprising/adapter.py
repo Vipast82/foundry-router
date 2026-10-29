@@ -316,7 +316,13 @@ class AnimalUprisingAdapter(GenericAdapter):
         full = os.path.join(self.p.workspace, rel)
         with open(full, encoding="utf-8", newline="") as f:
             text = f.read()
-        nl = "\r\n" if "\r\n" in text else "\n"
+        # 2026-10-29 GF-SAVE1: a mostly-LF plan with three CRLF lines was split on "\r\n",
+        # the heading was never a line of its own and every scope grant failed. Split on
+        # "\n" (a CRLF line keeps its "\r", which strip() ignores and the join restores);
+        # an inserted line takes the file's majority ending.
+        crlf = text.count("\r\n")
+        cr = "\r" if crlf and crlf * 2 >= text.count("\n") else ""
+        nl = "\n"
         lines = text.split(nl)
         start = next((i for i, l in enumerate(lines) if self._FILES_HEADING.match(l.strip())),
                      None)
@@ -332,7 +338,7 @@ class AnimalUprisingAdapter(GenericAdapter):
                 if s.split("`")[1].strip() == path:
                     return ""
         why = re.sub(r"\s+", " ", reason or "").strip()[:200]
-        lines.insert(last + 1, f"- `{path}` -- {why}" if why else f"- `{path}`")
+        lines.insert(last + 1, (f"- `{path}` -- {why}" if why else f"- `{path}`") + cr)
         with open(full, "w", encoding="utf-8", newline="") as f:
             f.write(nl.join(lines))
         if path not in self._parse_plan(spec.task_id, rel, nl.join(lines)).scope:
