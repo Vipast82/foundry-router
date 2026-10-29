@@ -309,6 +309,22 @@ def test_a_source_dependency_already_on_the_queue_is_waited_for(game):
     assert t2_ready >= t1_done
 
 
+def test_an_unblocked_sprint_still_waits_for_its_plan_dependency(game):
+    """2026-10-29 AS-R7: unblocked to READY while AS-P5 (named in its plan, on the queue)
+    was not done; it started at once. A first start now waits for such a dep."""
+    tmp, _, _, prof = game
+    c = coordinator(tmp, [prof], {"game": by_task({"T1": write_ok("src/a.txt"),
+                                                   "T2": write_ok("src/b.txt")})})
+    c.approve("game", "T2", [], "victor")                      # T2 needs T1 per tasks.json
+    c.store.transition("game", "T2", S.READY, {"deps_satisfied": ["(none)"]}, actor="test")
+    c.approve("game", "T1", [], "victor")
+    assert run_until(c, lambda: _state(c, "game", "T2") == S.COMPLETE)
+    t1_done = next(h["ts"] for h in c.store.history("game", "T1") if h["to_state"] == S.COMPLETE)
+    t2_impl = next(h["ts"] for h in c.store.history("game", "T2")
+                   if h["to_state"] == S.IMPLEMENTING)
+    assert t2_impl >= t1_done
+
+
 def test_a_deps_entry_that_is_not_a_sprint_is_ignored(game):
     """AS-D13 2026-10-28 replay: the spec's deps named Q1, a CC0 asset pack. An id the
     adapter says is not a sprint of the project never blocks; a known one still does."""

@@ -388,4 +388,7 @@ def test_e2e_state_doc_never_advances_a_coordinator_owned_dependency(tmp_path, m
     c.pause("game", "T1", "hold")                   # T1 exists but is not complete
     c.tick()
     t2row = c.store.task("game", "T2")
-    assert t2row["state"] == S.BLOCKED and "needs T1" in t2row["blocker"]
+    # v0.157.55: a source dep already on the queue is waited for (not a block); either way
+    # the STATE.md 'DONE' never lets T2 advance past a coordinator-owned dependency
+    assert t2row["state"] == S.QUEUED and "waiting for T1" in (t2row["next_action"] or "")
+    assert c.store.queue_entry("game", "T2")["deps"] == ["T1"]

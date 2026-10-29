@@ -2,6 +2,17 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.157.57 — a first start waits for the plan's dependencies
+
+2026-10-29 15:09: AS-R7 was unblocked to READY (an unblock skips the QUEUED dependency check)
+and started on the main checkout while AS-P5, which its plan needs, was still open.
+
+- **First start:** a sprint about to start for the first time waits ("waiting for …") while a
+  queue dep or a task-source dep that is on the queue is not satisfied. A resumed sprint
+  (attempt > 0) is unaffected.
+- Test update: the lifecycle e2e test now expects v0.157.55's wait (not a block) for a
+  source dep already on the queue.
+
 ## v0.157.56 — one non-code list for both gate checks
 
 2026-10-29 15:07: AS-P5's verification passed (`au.gate_bound_to_head` included, v0.157.52), but

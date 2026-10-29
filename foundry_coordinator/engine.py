@@ -527,6 +527,23 @@ class Coordinator:
         self.store.transition(P.id, t["task_id"], S.READY,
                               {"deps_satisfied": q["deps"] or ["(none)"]})
 
+    def _unmet_start_deps(self, P: Project, t: dict) -> list:
+        """Queue deps and task-source deps already on the queue that are not satisfied, for
+        a sprint about to start for the first time ([] = free to start)."""
+        q = self.store.queue_entry(P.id, t["task_id"]) or {"deps": []}
+        try:
+            src = list(P.adapter.describe(t["task_id"]).deps or [])
+        except Exception:                                         # noqa: BLE001
+            src = []
+        out = []
+        for d in list(q["deps"]) + [x for x in src if x not in q["deps"]]:
+            dt = self.store.task(P.id, d)
+            if dt is None or dt.get("state") in (S.FAILED, S.CANCELLED):
+                continue                     # not on the queue: the QUEUED check owns that
+            if not self._dep_satisfied(P, dt) and not self._dep_done_outside(P, d):
+                out.append(f"{d} ({dt['state']})")
+        return out
+
     def _dep_satisfied(self, P: Project, dt: dict) -> bool:
         if not dt:
             return False
@@ -552,6 +569,12 @@ class Coordinator:
 
     def _start_implementation(self, P: Project, t: dict) -> None:
         pid, tid = P.id, t["task_id"]
+        if not int(t.get("attempt") or 0) and not t.get("started_ts"):
+            wait = self._unmet_start_deps(P, t)
+            if wait:
+                # 2026-10-29 AS-R7: an operator unblock moved it BLOCKED -> READY (skipping
+                # the QUEUED dep check) and it started before AS-P5, which its plan needs
+                return self._note(P, t, "waiting for " + ", ".join(wait))
         lim = P.profile
         free = bool(t["data"].get("free_retry"))
         attempt = t["attempt"] + (0 if free else 1)
