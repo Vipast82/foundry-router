@@ -607,6 +607,13 @@ class Coordinator:
             return self._note(P, t, f"waiting for {landing} to land first (landing drain)")
         other = self._main_sprint_in_flight(P, t)
         if other:
+            # 2026-10-29 07:00: AS-P5 (restarted by an attempt reset, so later than HK-CLEAN1)
+            # yielded to HK-CLEAN1 but kept the checkout lock, and HK-CLEAN1 waited for that
+            # lock: a deadlock. A sprint that yields gives its checkout and session locks back.
+            held = set(self.store.holds(P.id, t["task_id"]))
+            give = [r for r in self._workspace_locks(P) + self._session_locks(P) if r in held]
+            if give:
+                self.store.release(P.id, t["task_id"], give)
             return self._note(P, t, f"waiting for {other} to finish (one started main-checkout "
                                     f"sprint at a time)")
         held = self._acquire(P, t, self._workspace_locks(P) + self._session_locks(P),

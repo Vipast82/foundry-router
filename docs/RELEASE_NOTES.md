@@ -2,6 +2,15 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.157.38 — a sprint that yields the checkout gives back its lock
+
+2026-10-29 07:00-07:20: AS-P5 (restarted by an attempt reset, so later than HK-CLEAN1) yielded
+to HK-CLEAN1 under the one-started-sprint rule but kept the checkout lock; HK-CLEAN1 waited for
+the lock and nothing ran.
+
+- **A main sprint waiting for an earlier started one** releases its checkout and session locks,
+  as a drained sprint does; its next session start takes them again.
+
 ## v0.157.37 — scope grants work on plans with mixed line endings
 
 2026-10-29 06:44: GF-SAVE1's plan is LF with three CRLF lines. The AU scope grant split it on

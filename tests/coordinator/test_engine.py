@@ -907,3 +907,19 @@ def test_a_drained_sprint_gives_back_the_checkout_lock(game):
     c._start_implementation(P, c.store.task("game", "T1"))
     assert not c.store.holds("game", "T1")
     assert "landing drain" in (c.store.task("game", "T1")["next_action"] or "")
+
+
+def test_a_sprint_that_yields_to_an_earlier_one_gives_back_the_checkout_lock(game):
+    """2026-10-29 07:00 replay: AS-P5 (restarted by an attempt reset) yielded to the earlier
+    started HK-CLEAN1 but kept the checkout lock; HK-CLEAN1 waited for the lock: deadlock."""
+    tmp, _, _, prof = game
+    c = coordinator(tmp, [prof], {"game": write_ok("src/b.txt")})
+    P = c.projects["game"]
+    c.approve("game", "T1", [], "victor")
+    c.approve("game", "T2", [], "victor")
+    c.store.update_task("game", "T1", state=S.READY, started_ts=100.0)
+    c.store.update_task("game", "T2", state=S.CHANGES_REQUIRED, started_ts=200.0)
+    c.store.acquire(c._workspace_locks(P), "game", "T2")
+    c._start_implementation(P, c.store.task("game", "T2"))
+    assert not c.store.holds("game", "T2")
+    assert "waiting for T1" in (c.store.task("game", "T2")["next_action"] or "")
