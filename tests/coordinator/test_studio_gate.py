@@ -840,6 +840,26 @@ def test_live_verify_ignores_unmounted_check_of_a_suite_not_run(fakes, repo):
         g.close()
 
 
+def test_live_verify_leaves_model_files_out(fakes, repo):
+    """2026-10-29 AS-REG1: 31 .rbxm files came back live=missing (no Source to hash) and
+    blocked the run as a stale sync with mismatched=0. Model files are noted, not counted."""
+    set_rules, calls = fakes
+    set_rules([{"tool": "execute_luau", "match": "verifyLive",
+                "text": "VERIFY matched=1/1 mismatched=0 unresolved=0 skipped=0"}])
+    g = G.Gate(str(repo), "L4", "sprint", call_timeout=10)
+    try:
+        g.live_verify({"src/a.lua": "1", "assets/roblox/Bosses/BS-KING.rbxm": "2",
+                       "assets/roblox/Props/P.rbxmx": "3"})
+        assert g.checks[-1]["result"] == "PASS"
+        assert "2 model file(s)" in g.last_verify_text
+        g.live_verify({"assets/roblox/Bosses/BS-KING.rbxm": "2"})
+        assert g.checks[-1]["result"] == "SKIP" and g.checks[-1]["required"] is False
+    finally:
+        g.close()
+    sent = [c["args"]["code"] for c in calls() if "verifyLive" in c["args"].get("code", "")]
+    assert sent and all(".rbxm" not in c for c in sent)
+
+
 def test_hash_maps_reject_unsafe_names(repo):
     seen = []
     g = G.Gate(str(repo), "H1", "sprint", run_cmd=lambda *a: seen.append(a) or (0, ""))

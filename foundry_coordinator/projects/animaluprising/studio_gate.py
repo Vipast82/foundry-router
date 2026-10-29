@@ -1564,13 +1564,27 @@ class Gate:
         File types Rojo never syncs (README.md, .gitkeep, *.meta.json) are not sent:
         GateRunner would look for them in Studio and count them unresolved."""
         expect = {p: h for p, h in (expect or {}).items() if rojo_synced(p)}
+        # 2026-10-29 AS-REG1: binary model files (.rbxm/.rbxmx) have no Source for verifyLive
+        # to hash; all 31 came back live=missing ("unresolved") and blocked the run as a
+        # stale sync with mismatched=0. They are not source-verifiable: noted, not counted
+        models = sorted(p for p in expect if p.lower().endswith((".rbxm", ".rbxmx")))
+        expect = {p: h for p, h in expect.items() if p not in models}
+        model_note = ("\n" + f"NOTE {len(models)} model file(s) (.rbxm/.rbxmx) are not "
+                      f"source-verifiable in Studio, not counted: " + ", ".join(models[:8])
+                      + (" ..." if len(models) > 8 else "")) if models else ""
         if not expect:
+            if models:
+                self.last_verify_text = model_note.strip()
+                self.add(check(cid, "SKIP", "only model files under test (not source-"
+                               "verifiable)", required=False))
+                return
             self.add(check(cid, "UNKNOWN", "no hash map for the files under test"))
             return
         code = (FRESH_GATE + 'return __freshGate()'
                 f".verifyLive({luau_value(expect)})")
         text, err = self.edit(code, "verifyLive")
-        self.last_verify_text = flatten_value(text) if not err else f"UNKNOWN: {one_line(text)}"
+        self.last_verify_text = (flatten_value(text) if not err
+                                 else f"UNKNOWN: {one_line(text)}") + model_note
         m = VERIFY_RE.search(text or "")
         if err or not m:
             self.add(check(cid, "UNKNOWN", (text or "")[:200]))

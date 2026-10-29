@@ -2,6 +2,16 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.157.63 — model files are not counted by Studio's source check
+
+2026-10-29 17:35: AS-REG1's scripted run stopped at the pre-play verify: matched 4/35,
+mismatched 0, unresolved 31. The 31 were `.rbxm` models, which have no Source for
+`GateRunner.verifyLive` to hash, so they always read `live=missing`.
+
+- **studio_gate live_verify:** `.rbxm`/`.rbxmx` files are left out of the source-hash map and
+  listed in a NOTE ("not source-verifiable"); a run with only model files under test is SKIP
+  (not required). Scripts are checked as before.
+
 ## v0.157.62 — the lead's calls may step down to the allowed local model
 
 2026-10-29 17:35: Claude reached its usage cutoff and AS-REG1's lead calls stepped down to the
