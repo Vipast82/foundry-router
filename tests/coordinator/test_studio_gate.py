@@ -266,6 +266,22 @@ def test_rojo_mount_resolution():
     assert G.rojo_resolve(m, "src/shared/Data.json")             # still synced
 
 
+def test_an_unmapped_new_file_is_the_sprints_to_fix_not_stale_sync(monkeypatch):
+    """UI-SKIN2 2026-10-28 replay: tests/UI_SKIN2_check.lua had no default.project.json
+    mount; PRE-PLAY verify called it stale sync. Every unresolved file unmapped -> the
+    session's fix; any mapped unresolved file -> real staleness (tooling)."""
+    proj = {"tree": {"$className": "DataModel", "ServerScriptService": {
+        "GF_ENT1_check": {"$path": "tests/GF_ENT1_check.lua"},
+        "Checks": {"$path": "tests/checks"}}}}
+    monkeypatch.setattr(G, "project_at", lambda repo, rev="HEAD": proj)
+    t = "MATCH x" + chr(10) + "UNRESOLVED tests/UI_SKIN2_check.lua live=missing head=1"
+    assert G.unmapped_unresolved(t, "r", "HEAD") == ["tests/UI_SKIN2_check.lua"]
+    t2 = t + chr(10) + "UNRESOLVED tests/GF_ENT1_check.lua live=missing head=2"
+    assert G.unmapped_unresolved(t2, "r", "HEAD") == []
+    assert G.unmapped_unresolved("UNRESOLVED tests/checks/A_check.lua live=missing", "r",
+                                 "HEAD") == []
+
+
 # ---- evidence block (H6) ---------------------------------------------------------
 def _v(head, result="FAIL", checks=None):
     return {"mode": "sprint", "head": head, "result": result, "run_id": "r-1",

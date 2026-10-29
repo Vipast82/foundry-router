@@ -819,6 +819,16 @@ class StudioCalls:
             if run.get("cli"):
                 self.c.store.release(P.id, tid, self.c._session_locks(P))
                 return outcome
+            cur = self.store.task(P.id, tid) or t
+            if "PROJECT: not mapped in default.project.json" in str(outcome["error"]) and \
+                    cur.get("session_id"):
+                # the sprint's own file is unmapped (UI-SKIN2 2026-10-28): the session fixes it
+                outcome["sent"] = self._prompt(
+                    P, cur, "The scripted Studio gate did not run: "
+                    + str(outcome["error"]).split("tooling: ", 1)[-1][:1200],
+                    f"studio-calls:{run['run_id']}")
+                if outcome["sent"]:
+                    return outcome
             return self._tooling(P, t, outcome, run, f"scripted Studio gate: {outcome['error']}"
                                  or "scripted Studio gate ERROR") or outcome
         lines_sha = self._lines_sha(P, tid)

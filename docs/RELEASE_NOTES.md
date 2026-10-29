@@ -2,6 +2,17 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.157.5 — an unmapped new file goes to the session, not to "stale sync"
+
+UI-SKIN2, 2026-10-28 19:4x: the sprint added tests/UI_SKIN2_check.lua with no
+default.project.json mount, so Rojo never synced it; PRE-PLAY verify reported "Studio's loaded
+sources are not HEAD's ... Rojo / plugin sync is stale", a tooling ERROR, and the task stopped.
+
+- **`unmapped_unresolved`:** when every UNRESOLVED file has no Rojo mount at HEAD, the run ends
+  with a `PROJECT: not mapped in default.project.json` message naming the files and the fix
+  (move a check into tests/checks/ or add its mounts); studio_calls sends it to the live
+  session instead of blocking. A mapped unresolved file is still real staleness (tooling).
+
 ## v0.157.4 — the coordinator's own kilo.jsonc rewrites never fail a session
 
 AS-D13, 2026-10-28 18:5x: `tracks set-needs` rewrote the track worktree's untracked

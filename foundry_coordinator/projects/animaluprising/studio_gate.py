@@ -2999,6 +2999,27 @@ _ASCII_MAP = {"\u2014": "-", "\u2013": "-", "\u2012": "-", "\u2212": "-", "\u201
               "\u2022": "*", "\u00b7": "."}
 
 
+# 2026-10-28 UI-SKIN2: a new tests/UI_SKIN2_check.lua with no default.project.json mount
+# never reaches Studio; PRE-PLAY verify called that "stale sync" (tooling) and the task
+# stopped. A file Rojo cannot map at HEAD is the sprint's to fix: the pipeline hands it to
+# the session (studio_calls, PROJECT_UNMAPPED marker) instead of blocking.
+PROJECT_UNMAPPED = "PROJECT: not mapped in default.project.json at HEAD, so Rojo never syncs it: "
+UNMAPPED_FIX = (". Move a new check into tests/checks/ (folder-mounted for server and client, "
+                "found by name) or add its mounts to default.project.json like the other "
+                "tests/*_check.lua rows, commit, then request the gate again; no CALL ran")
+
+
+def unmapped_unresolved(verify_text: str, repo: str, rev: str) -> list:
+    """UNRESOLVED paths of a verify text that no Rojo mount at `rev` covers (all of them,
+    or [] when any unresolved path IS mounted: then it is real sync staleness)."""
+    paths = re.findall(r"^UNRESOLVED (\S+)", verify_text or "", re.M)
+    if not paths:
+        return []
+    mounts = rojo_mounts(project_at(repo, rev) or {})
+    out = [p for p in dict.fromkeys(paths) if not rojo_resolve(mounts, p)]
+    return out if len(out) == len(dict.fromkeys(paths)) else []
+
+
 class GateTooling(Exception):
     """calls mode: the tooling failed (MCP gone, Studio stale, plan mismatch, HEAD
     moved): an ERROR verdict (exit 2), never a red gate."""
@@ -3442,6 +3463,9 @@ def _run_calls(a, sprint, run_id, out, official, community, run_cmd) -> int:
         if pre["result"] not in ("PASS", "SKIP"):
             tooling = "verify"
             g.emit(f"FAIL: GATE verify PRE-PLAY - {one_line(pre['detail'], 400)}")
+            unmounted = unmapped_unresolved(g.last_verify_text, g.repo, g.head or "HEAD")
+            if unmounted:
+                raise GateTooling(PROJECT_UNMAPPED + ", ".join(unmounted[:8]) + UNMAPPED_FIX)
             raise GateTooling("PRE-PLAY verify: Studio's loaded sources are not HEAD's ("
                               + one_line(pre["detail"], 300) + "); no CALL ran (Rojo / plugin "
                               "sync is stale)")
