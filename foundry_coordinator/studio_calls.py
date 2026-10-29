@@ -906,7 +906,11 @@ class StudioCalls:
         if outcome["result"] != "PASS":
             findings = findings_lines(outcome, self._calls_verdict(P, tid, outcome) or {})
             cur = self.store.task(P.id, tid) or t
+            # 2026-10-28 AS-P5: VERIFYING -> CHANGES_REQUIRED needs a verification_id; without
+            # it the transition was refused (swallowed), the task stayed VERIFYING, the run's
+            # own output commit made the gate look stale and it ran again: 9 FAIL runs in 16 min
             self.store.transition(P.id, tid, S.CHANGES_REQUIRED, {
+                "verification_id": f"studio_calls:{outcome['run_id']}",
                 "findings": findings, "studio_calls": outcome["run_id"]},
                 data={**(cur.get("data") or {}), "findings": findings})
         return outcome
@@ -960,6 +964,11 @@ class StudioCalls:
             return True
         if d.get("auto_head") == head or self.gate_fresh(P, tid, head):
             return False
+        if self._failed_at_same_code(P, tid, d.get("last") or {}, head):
+            # the last automatic run FAILED and only its own outputs changed since: never
+            # re-run the same code; the failing rows go to a session (AS-P5 2026-10-28)
+            self._after_verify(P, t, d["last"])
+            return True
         req = self.default_request(P, tid, spec)
         if req is None:
             return False
@@ -969,6 +978,20 @@ class StudioCalls:
         self.store.event(P.id, tid, "studio_calls_auto", detail={"head": head, "request": req})
         self._start(P, self.store.task(P.id, tid) or t, d["pending"])
         return True
+
+    def _failed_at_same_code(self, P, tid: str, last: dict, head: str) -> bool:
+        if not last.get("auto") or last.get("result") != "FAIL" or not last.get("head"):
+            return False
+        from .profile import matches_any
+        try:
+            if not P.ws.is_ancestor(last["head"], head):
+                return False
+            changed = P.ws.changed_files(last["head"], head)
+        except Exception:                                         # noqa: BLE001
+            return False
+        pats = [x.replace("{task}", tid) for x in
+                list(EXEMPT) + list(settings(P).get("outputs") or [])]
+        return all(matches_any(f, pats) for f in changed)
 
     def gate_fresh(self, P, tid: str, head: str) -> bool:
         """The evidence log's last `GATE <ID>` verdict is PASS and the gate's verdicts

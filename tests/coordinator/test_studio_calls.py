@@ -460,3 +460,20 @@ def test_cli_dry_run_uses_the_real_runner_without_studio(env):
     assert _studio_calls_cmd(e.c, a, out=out.append) == 0, out
     assert "ROWS 5 (index rows=7, pinned=5)" in out[-1] and "DRY-RUN T1 OK" in out[-1]
     assert not (e.repo / ".plan").exists()
+
+
+def test_a_failed_auto_verify_run_sends_the_rows_to_a_session_never_reruns(env):
+    """AS-P5 2026-10-28 replay: auto_verify's FAIL tried VERIFYING -> CHANGES_REQUIRED
+    without a verification_id; the refused transition left the task VERIFYING, the run's
+    output commit made the gate stale and it ran again (9 FAIL runs in 16 minutes)."""
+    e = env([{"result": "FAIL"}])
+    P = e.c.projects["game"]
+    e.c.store.update_task("game", "T1", state="VERIFYING")
+    outcome = {"run_id": "r-auto-1", "head": P.ws.head(), "result": "FAIL", "auto": True,
+               "failures": [{"row": "S24", "verdict": "FAIL", "calls": "5-6", "lines": []}]}
+    e.c.studio_calls._after_verify(P, task(e), outcome)
+    t = task(e)
+    assert t["state"] == "CHANGES_REQUIRED" and t["data"]["findings"]
+    # and a FAIL whose code did not change since is never re-run
+    d = dict(sc(e)); d["last"] = outcome
+    assert e.c.studio_calls._failed_at_same_code(P, "T1", outcome, P.ws.head())

@@ -2,6 +2,18 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.157.8 — a failed auto-verify Studio run goes to a session, never reruns
+
+AS-P5, 2026-10-28 22:07-22:23: `auto_verify` ran the scripted Studio gate at VERIFYING; on FAIL it
+moved the task to CHANGES_REQUIRED without the `verification_id` that transition needs. The
+refused transition was swallowed, the task stayed VERIFYING, the run's own output commit moved
+HEAD so the gate looked stale, and it ran again: 9 FAIL runs (S24, S26) in 16 minutes.
+
+- **The transition carries `verification_id`** (`studio_calls:<run_id>`), so the failing rows reach
+  a session as findings.
+- **Same code is never re-run:** when the last automatic run FAILED and only its own outputs
+  changed since, verification sends the rows to a session instead of starting another run.
+
 ## v0.157.7 — a track's merge Studio-tests its sprints in one batch
 
 2026-10-28: the Blender track (AS-D13, AS-V00..V03, local model, no Studio) would have merged
