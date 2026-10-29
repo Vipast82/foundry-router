@@ -2,6 +2,16 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.157.60 — an upgrade retry also refreshes a used review or session budget
+
+2026-10-29 15:54: the Lead retried HK-STORE1 on the new code (retry_after_upgrade) after the
+SPRINT_STATUS loop was fixed, but kept the review budget the loop had used (5/5); the task
+re-blocked 30 s later and parked when self-repair ran out.
+
+- **Lead retry_after_upgrade:** a case opened for a spent budget (attempts, review calls or
+  sessions) retries with a fresh one (`unblock --reset-attempts`); any other trigger keeps
+  its budget.
+
 ## v0.157.59 — SPRINT_STATUS.md never voids a review
 
 2026-10-29 15:15-15:37: HK-STORE1 (track gpt-6) was APPROVED five times; each CLOSE session

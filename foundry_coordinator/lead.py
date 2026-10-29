@@ -2626,10 +2626,13 @@ class LeadManager:
         self._act(case, "retry_after_upgrade", result=why)
         self.cancel(case["case_id"], why, actor="lead_manager", P=P)
         trig = case.get("trigger") or {}
-        # a case opened because the attempts ran out: the retry needs a budget, or the
-        # engine fails it again at once (AS-P5, 2026-10-29 06:18)
-        spent = (str(trig.get("class") or "") == "attempts_exhausted"
-                 or "implementation attempts used" in str(trig.get("reason") or ""))
+        # a case opened because a budget ran out: the retry needs a fresh one, or the
+        # engine stops it again at once (AS-P5 attempts, 2026-10-29 06:18; HK-STORE1 review
+        # budget 15:56: a coordinator bug used 5/5 review calls, the retry re-blocked in 30 s)
+        cls, reason = str(trig.get("class") or ""), str(trig.get("reason") or "")
+        spent = (cls in ("attempts_exhausted", "review_budget", "sessions_exhausted")
+                 or any(x in reason for x in ("implementation attempts used",
+                                              "review budget used", "sessions used")))
         try:
             self.c.unblock(P.id, case["task_id"], why, reset_attempts=spent,
                            actor="lead_manager")

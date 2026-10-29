@@ -57,3 +57,18 @@ def test_an_attempts_exhausted_case_retries_with_a_fresh_budget():
                       "reason": "8 implementation attempts used (max_attempts 8)"})
     assert lm.retry_after_upgrade(P, BLOCKED, c, started=200.0) is True
     assert seen["unblock"] == [("T1", True)]
+
+
+def test_a_used_review_or_session_budget_is_refreshed_too():
+    """HK-STORE1 15:56: a coordinator bug used 5/5 review calls; the retry kept the spent
+    review budget and re-blocked 30 s later."""
+    for trig in ({"class": "review_budget", "reason": "review budget used (5/5 review calls)"},
+                 {"class": "", "reason": "review budget used (5/5 review calls, budget ledger)"},
+                 {"class": "sessions_exhausted", "reason": "8 sessions used"}):
+        lm, seen = _lead()
+        assert lm.retry_after_upgrade(P, BLOCKED, case(trigger=trig), started=200.0) is True
+        assert seen["unblock"] == [("T1", True)], trig
+    lm, seen = _lead()                       # any other trigger keeps its budget
+    lm.retry_after_upgrade(P, BLOCKED, case(trigger={"class": "review_blocked",
+                                                      "reason": "reviewer: x"}), started=200.0)
+    assert seen["unblock"] == [("T1", False)]
