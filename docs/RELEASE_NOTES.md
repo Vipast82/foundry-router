@@ -2,6 +2,23 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.157.58 — the always-approved scope classes are granted at once
+
+2026-10-29 permissions review (Victor: "if there is constant permission issues then we need to
+adjust our permissions"): 80 scope decisions in 3 days, 79 approved, 75 of them only after the
+decision timeout. Each one stalled the sprint, and a grant often restarted its session. Kilo
+tool denials in the last 12 h were few (read-only helper/lead sessions, as designed).
+
+- **Default allow-list** (`[automation] scope_auto_approve`) gains the classes approved every
+  time: the sprint's own `docs/progress/<ID>_*`, its check file `tests/checks/<ID_>_check.lua`
+  / `tests/<ID_>_check.lua`, `tests/RegressionIndex.lua`, the generated
+  `docs/localization/LocalizationTable.*`, asset `assets/source/*/*/checklist.md`, and hand-off
+  lines in another sprint's `docs/progress/*_PLAN.md`. These are in the session's edit scope
+  from the start. `src/**`, other sprints' tests, Lune specs and tools still ask.
+- **`{task_}`** placeholder (the id with `_` for `-`) for allow-list paths (`scope.rule_pattern`).
+- The router's Automation settings show the new defaults after a backend rebuild (optional; the
+  coordinator applies them now).
+
 ## v0.157.57 — a first start waits for the plan's dependencies
 
 2026-10-29 15:09: AS-R7 was unblocked to READY (an unblock skips the QUEUED dependency check)

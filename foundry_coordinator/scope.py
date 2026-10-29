@@ -84,10 +84,17 @@ def parse_requests(text: str = "", report: Optional[dict] = None) -> list[dict]:
 
 # ------------------------------------------------------------------ policy
 
+def rule_pattern(r: dict, task_id: str) -> str:
+    """An allow-list rule's path for this task: {task} = the id, {task_} = the id with
+    "_" for "-" (check files: tests/checks/HK_STORE1_check.lua)."""
+    return (str((r or {}).get("path") or "").replace("{task_}", task_id.replace("-", "_"))
+            .replace("{task}", task_id))
+
+
 def rule_for(P, task_id: str, path: str) -> Optional[dict]:
     """The allow-list rule that covers `path` for this task, or None."""
     for r in auto_get(P, "scope_auto_approve") or []:
-        pat = str(r.get("path") or "").replace("{task}", task_id)
+        pat = rule_pattern(r, task_id)
         if pat and (fnmatch.fnmatchcase(path, pat) or path == pat):
             return r
     return None

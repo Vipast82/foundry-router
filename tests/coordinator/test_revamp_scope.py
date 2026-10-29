@@ -263,3 +263,26 @@ def test_the_au_grant_works_on_a_plan_with_mixed_line_endings(tmp_path):
     assert b"- `docs/localization/LocalizationTable.csv` -- regenerated\n" in raw
     assert raw.count(b"\r\n") == 1                           # the other lines are untouched
     assert "docs/localization/LocalizationTable.csv" in a.describe(T).scope
+
+
+def test_the_always_approved_classes_are_on_the_allow_list():
+    """2026-10-29 permissions review: 79 of 80 scope decisions in 3 days were approved,
+    mostly after the timeout. Those classes are granted at once; code still asks."""
+    P = SimpleNamespace(profile=SimpleNamespace(raw={}))
+    yes = {"HK-STORE1": ["docs/progress/HK-STORE1_PLAN_HISTORY.md",
+                         "tests/checks/HK_STORE1_check.lua", "tests/HK_STORE1_check.lua",
+                         "tests/RegressionIndex.lua", "docs/localization/LocalizationTable.csv",
+                         "docs/localization/LocalizationTable.json",
+                         "assets/source/vfx/VFX-LOWHP/checklist.md"],
+           "AS-R7": ["docs/progress/AS-P7_PLAN.md"]}
+    for tid, paths in yes.items():
+        for p in paths:
+            assert SC.rule_for(P, tid, p), (tid, p)
+    no = ["src/server/Services/MiniBossService.lua", "tests/S24_check.lua",
+          "tests/checks/OTHER_check.lua", "docs/progress/AS-P5_EVIDENCE_RAW.log",
+          "tests/lune/specs/LocalizationExport.spec.luau", "tools/gate.ps1",
+          "docs/design/03-technical-architecture.md"]
+    for p in no:
+        assert SC.rule_for(P, "HK-STORE1", p) is None, p
+    assert SC.rule_pattern({"path": "tests/checks/{task_}_check.lua"}, "GF-SEC1") == \
+        "tests/checks/GF_SEC1_check.lua"

@@ -205,6 +205,23 @@ DEFAULT_SCOPE_RULES = [
     # a grant restarted the session; a sprint's own evidence folder is always its own
     {"name": "sprint_own_evidence", "path": "docs/evidence/{task}/**",
      "reason": "the sprint's own evidence and captures"},
+    # 2026-10-29 permissions review: 80 scope decisions in 3 days, 79 approved (75 only
+    # after the timeout, each stalling the sprint and often restarting its session). The
+    # classes below were approved every time; src/** and other sprints' tests still ask.
+    {"name": "sprint_own_progress", "path": "docs/progress/{task}_*",
+     "reason": "the sprint's own plan, plan history, evidence log and summary"},
+    {"name": "sprint_own_check", "path": "tests/checks/{task_}_check.lua",
+     "reason": "the sprint check file done_check requires"},
+    {"name": "sprint_own_check_root", "path": "tests/{task_}_check.lua",
+     "reason": "the sprint check file done_check requires"},
+    {"name": "regression_index_row", "path": "tests/RegressionIndex.lua",
+     "reason": "a sprint registers its own suite row in the regression index"},
+    {"name": "localization_export", "path": "docs/localization/LocalizationTable.*",
+     "reason": "the generated string export (export_strings.luau) after a string change"},
+    {"name": "asset_checklist", "path": "assets/source/*/*/checklist.md",
+     "reason": "an asset's checklist (docs) ticked by the sprint that touched the asset"},
+    {"name": "handoff_note_in_another_plan", "path": "docs/progress/*_PLAN.md",
+     "reason": "a hand-off line added to a later sprint's plan (e.g. AS-R4/AS-R7 -> AS-P7)"},
 ]
 AUTOMATION_DEFAULTS: dict = {
     "helpers": "on_demand",

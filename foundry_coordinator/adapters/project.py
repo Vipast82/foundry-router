@@ -293,7 +293,8 @@ class GenericAdapter(ReviewContractDefaults):
             pass
         from ..automation import get as auto_get
         for r in auto_get(self.p, "scope_auto_approve") or []:
-            pat = str((r or {}).get("path") or "").replace("{task}", spec.task_id)
+            from ..scope import rule_pattern
+            pat = rule_pattern(r, spec.task_id)
             if pat:
                 out.append(pat)
         # 2026-10-27 rules streamline: prompts send scratch work to the git-ignored
