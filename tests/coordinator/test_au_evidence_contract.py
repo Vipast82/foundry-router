@@ -840,3 +840,15 @@ def test_a_gate_runner_capture_line_is_a_capture_record(repo):
     r = _by(a.classify_tool_result(_view(v["tool"], v["input"], bad, part="p2"),
                                    {"task_id": T}), "capture:" + path)
     assert r["result"] == FAIL
+
+
+def test_a_designed_fail_does_not_turn_a_suite_pass_unknown(repo):
+    """2026-10-29 HK-TEST1: `pass=10 fail=1 expect=10 designedFails=1 VERDICT PASS` (its
+    negative control FAILs by design) was recorded UNKNOWN on every run; the sprint parked."""
+    a = repo["a"]
+    v = _view("robloxstudio-mcp_execute_luau", {"target": "edit", "code": "return GR.tally()"},
+              _env(["SUITE HK_TEST1 pass=10 fail=1 expect=10 designedFails=1 VERDICT PASS"]))
+    assert _by(a.classify_tool_result(v, {"task_id": T}), "suite:HK_TEST1")["result"] == PASS
+    v = _view(v["tool"], v["input"], _env(
+        ["SUITE HK_TEST1 pass=10 fail=2 expect=10 designedFails=1 VERDICT PASS"]), part="p2")
+    assert _by(a.classify_tool_result(v, {"task_id": T}), "suite:HK_TEST1")["result"] == UNKNOWN

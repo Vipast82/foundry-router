@@ -2,6 +2,15 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.157.41 — a suite's designed FAILs do not make its PASS unknown
+
+2026-10-29 06:02-08:54: HK-TEST1's suite printed `pass=10 fail=1 expect=10 designedFails=1
+VERDICT PASS` (its negative control FAILs by design) on six scripted runs; each was recorded
+UNKNOWN ("verdict PASS with fail=1"), the plan's suite obligation never closed and the sprint
+was parked after its self-repair ran out.
+
+- **AU evidence** accepts a suite PASS whose fail count is within its designedFails.
+
 ## v0.157.40 — rows already red on master never fail a sprint
 
 2026-10-29: legacy regression rows (S39 'no active profile', S48, S00/S03/S06/S14, UI_0xa,

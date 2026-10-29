@@ -2726,13 +2726,16 @@ def _built_in_input(line: str, inp: str) -> bool:
 
 
 def _count_check(verdict: str, counts: dict | None) -> tuple[str, str]:
-    """A PASS whose own counts contradict it is UNKNOWN: fail > 0, or pass !=
-    expect where expect is known. FAIL stays FAIL."""
+    """A PASS whose own counts contradict it is UNKNOWN: fail > designedFails (the
+    suite's deliberate negative-control FAILs; 2026-10-29 HK-TEST1: `pass=10 fail=1
+    expect=10 designedFails=1 VERDICT PASS` was recorded UNKNOWN on every run and the
+    sprint was parked), or pass != expect where expect is known. FAIL stays FAIL."""
     if verdict != PASS or not counts:
         return verdict, ""
     p, f, e = counts.get("pass"), counts.get("fail"), counts.get("expect")
-    if f:
-        return UNKNOWN, f"verdict PASS with fail={f}"
+    designed = int(counts.get("designed_fails") or 0)
+    if f and f > designed:
+        return UNKNOWN, f"verdict PASS with fail={f} (designedFails={designed})"
     if e is not None and p is not None and p != e:
         return UNKNOWN, f"verdict PASS with pass={p} != expect={e}"
     return verdict, ""
