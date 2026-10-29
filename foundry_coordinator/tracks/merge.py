@@ -45,6 +45,48 @@ from ..adapters.project import failed_findings
 from .manager import TrackError, _git
 
 DECISION_DEFAULT = "stop this track"
+
+# coordinator project memory: notes are appended on both sides, so a conflict there is two
+# new sections, never a real disagreement (2026-10-28 backend-1/S57a: CONVENTIONS.md stopped
+# the merge and the decision timeout applied "stop this track")
+MEMORY_PREFIX = "docs/memory/"
+
+
+def union_text(text: str) -> str:
+    """Every conflict hunk becomes ours, a blank line, then theirs (both kept)."""
+    import re
+    nl = "\r\n" if "\r\n" in text else "\n"
+    return re.sub(r"<<<<<<< [^\r\n]*\r?\n(.*?)(?:\|\|\|\|\|\|\| [^\r\n]*\r?\n.*?)?=======\r?\n"
+                  r"(.*?)>>>>>>> [^\r\n]*\r?\n",
+                  lambda m: m.group(1).rstrip("\r\n") + nl + nl + m.group(2), text, flags=re.S)
+
+
+def _resolve_memory_conflicts(wt: str, how: str, limit: int = 50) -> bool:
+    """Resolve rebase/merge conflicts that touch ONLY docs/memory/** by keeping both sides,
+    continuing a rebase step by step. False (nothing changed beyond the attempt) when any
+    other file conflicts: the caller aborts and opens the usual decision."""
+    for _ in range(limit):
+        files = [l.strip() for l in _git(wt, "diff", "--name-only", "--diff-filter=U",
+                                         check=False).stdout.splitlines() if l.strip()]
+        if not files:
+            return True
+        if not all(f.replace("\\", "/").startswith(MEMORY_PREFIX) for f in files):
+            return False
+        for f in files:
+            p = os.path.join(wt, f)
+            with open(p, encoding="utf-8", newline="") as fh:
+                text = fh.read()
+            with open(p, "w", encoding="utf-8", newline="") as fh:
+                fh.write(union_text(text))
+            _git(wt, "add", "--", f, check=False)
+        if how == "rebase":
+            r = _git(wt, "-c", "core.editor=true", "rebase", "--continue", check=False)
+            if r.returncode == 0:
+                return True
+        else:
+            r = _git(wt, "commit", "--no-edit", check=False)
+            return r.returncode == 0
+    return False
 # D (2026-10-28): a merge gate that ends in a tooling fault (a runner that exited without
 # a verdict, an ERROR/UNKNOWN result, checks that could not run) is retried this many times
 # with this backoff (doubling) before the track fails
@@ -190,6 +232,8 @@ class MergeManager:
         if how != "none":
             cmd = ["rebase", ref] if how == "rebase" else ["merge", "--no-edit", ref]
             r = _git(wt, *cmd, check=False)
+            if r.returncode != 0 and _resolve_memory_conflicts(wt, how):
+                r = _git(wt, "rev-parse", "HEAD", check=False)       # resolved: carry on
             if r.returncode != 0:
                 conflicts = [l.strip() for l in _git(wt, "diff", "--name-only",
                                                      "--diff-filter=U", check=False

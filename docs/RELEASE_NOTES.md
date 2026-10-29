@@ -2,6 +2,17 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.157.15 — track merges keep both sides of a memory-notes conflict
+
+backend-1 (S57a), 2026-10-28 23:47: S57a was COMPLETE, but the track's rebase onto master
+conflicted in docs/memory/CONVENTIONS.md (each side appended a section). `_conflict` asks the
+Lead through `open_track_repair`, which the Lead does not implement, so it opened a decision
+whose timeout default stopped the track; the work never reached master.
+
+- **Memory-only conflicts are merged:** when every conflicting file is under docs/memory/**, each
+  hunk keeps both sides (ours, then theirs) and the rebase/merge continues. Any other
+  conflicting file still aborts to the decision.
+
 ## v0.157.14 — a stale client Settings page cannot overwrite newer settings
 
 2026-10-28 23:27: a Settings page opened before Blender was switched on was saved (to turn the

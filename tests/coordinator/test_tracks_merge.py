@@ -274,3 +274,32 @@ def test_untracked_files_in_the_main_checkout_do_not_block_the_merge(tmp_path):
     assert c.tracks.merger._main_dirty(P) == []
     open(os.path.join(root, "verify.py"), "a").write("# tracked edit\n")
     assert c.tracks.merger._main_dirty(P) == ["verify.py"]
+
+
+def test_memory_only_conflicts_are_merged_keeping_both_sides(tmp_path):
+    """backend-1 / S57a 2026-10-28 replay: master and the track each appended a section to
+    docs/memory/CONVENTIONS.md; the merge stopped and the timeout stopped the track. A
+    conflict only in docs/memory/** keeps both sides and the rebase continues; any other
+    conflicting file still aborts."""
+    import subprocess
+    from foundry_coordinator.tracks.merge import _resolve_memory_conflicts
+
+    def g(*a):
+        return subprocess.run(["git", "-C", str(tmp_path), *a], capture_output=True, text=True)
+    g("init", "-q", "-b", "main"); g("config", "user.email", "t@t"); g("config", "user.name", "t")
+    (tmp_path / "docs" / "memory").mkdir(parents=True)
+    f = tmp_path / "docs" / "memory" / "CONVENTIONS.md"
+    f.write_text("# Conventions\n")
+    g("add", "-A"); g("commit", "-qm", "base")
+    g("checkout", "-qb", "track")
+    f.write_text("# Conventions\n## Tests: config pins\n- track note\n")
+    g("commit", "-qam", "track note")
+    g("checkout", "-q", "main")
+    f.write_text("# Conventions\n## API surface\n- main note\n")
+    g("commit", "-qam", "main note")
+    g("checkout", "-q", "track")
+    assert g("rebase", "main").returncode != 0
+    assert _resolve_memory_conflicts(str(tmp_path), "rebase") is True
+    text = f.read_text()
+    assert "main note" in text and "track note" in text and "<<<<<<<" not in text
+    assert g("status", "--porcelain").stdout.strip() == ""
