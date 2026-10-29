@@ -171,8 +171,13 @@ def test_safe_point_detection(game, tmp_path):
     # a workspace lock held by a task
     wl = f"workspace:{os.path.normcase(os.path.realpath(P.profile.workspace))}"
     c.store.acquire([wl], "game", "T1")
+    c.store.update_task("game", "T1", state=S.VERIFYING)
     ok, why = PQ.safe_point(c, P)
-    assert not ok and "in use by game/T1" in why
+    assert not ok and "T1" in why
+    # 2026-10-29: a holder between sessions (CHANGES_REQUIRED) does not block a landing
+    c.store.update_task("game", "T1", state=S.CHANGES_REQUIRED)
+    assert PQ.safe_point(c, P)[0] or "in use by" not in PQ.safe_point(c, P)[1]
+    c.store.update_task("game", "T1", state=S.BLOCKED)
     c.store.release("game", "T1")
     # an open session of a main-checkout task
     c.store.add_session("ses-1", "game", "T1", "run-1", "implementer", "IMPLEMENT", 1,

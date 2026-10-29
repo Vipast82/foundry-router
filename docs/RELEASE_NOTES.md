@@ -2,6 +2,15 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.157.23 — the landing drain cannot deadlock on a between-sessions lock
+
+2026-10-29 01:21: with the drain on (v0.157.22), UI-SKIN2 sat in CHANGES_REQUIRED still holding
+the checkout lock; the prep landing waited for that lock and the drain kept UI-SKIN2 from its
+next session.
+
+- **Prep safe point:** a checkout lock blocks a landing only when its holder is in a mid-sprint
+  state (`block_states`); a holder between sessions does not.
+
 ## v0.157.22 — merges and prep landings get the main checkout
 
 2026-10-28 21:50 -> 2026-10-29 01:2x: the assets-local track (5 COMPLETE sprints) and two prep

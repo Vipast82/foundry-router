@@ -418,10 +418,16 @@ def safe_point(c, P, cfg: Optional[dict] = None) -> tuple[bool, str]:
         return False, "project paused"
     ws = P.profile.workspace
     wlock = f"workspace:{os.path.normcase(os.path.realpath(ws))}"
+    block = set(cfg["block_states"])
     for lk in c.store.locks():
         if lk["resource"] == wlock and lk["task_id"] != TASK:
+            # 2026-10-29: a sprint between sessions (CHANGES_REQUIRED / READY) keeps the
+            # checkout lock; with the landing drain holding its next session, that lock
+            # deadlocked the landing. Only a holder in a mid-sprint state blocks.
+            holder = c.store.task(lk["project_id"], lk["task_id"]) or {}
+            if holder.get("state") not in block:
+                continue
             return False, f"main checkout in use by {lk['project_id']}/{lk['task_id']}"
-    block = set(cfg["block_states"])
     tasks = _main_tasks(c, P)
     for t in tasks:
         if t["state"] in block:
