@@ -1575,6 +1575,16 @@ class Gate:
                 self.last_verify_text += ("\nNOTE unmounted check file(s) of suites this run "
                                           "does not execute: " + ", ".join(idle))
                 studio = [p for p in studio if p not in idle]
+        # 2026-10-29 GF-SAVE1: a bridge suite's file (loader = "bridge", e.g. S05_check) is
+        # served to Studio from HEAD by the runner's bridge, never mounted: Studio's loaded
+        # copy does not matter, so it is never "not mounted anywhere"
+        bridged = {f"tests/{e.get('file')}.lua" for e in (self.index or {}).get("entries") or []
+                   if isinstance(e, dict) and e.get("file") and is_bridge_entry(e)}
+        served = [p for p in studio if p in bridged]
+        if served:
+            self.last_verify_text += ("\nNOTE bridge suite file(s) served from HEAD by the "
+                                      "runner (no mount needed): " + ", ".join(served))
+            studio = [p for p in studio if p not in served]
         summary = f"matched={matched}/{total} mismatched={mism} unresolved={unres}"
         if extra:
             self.last_verify_text += (f"\nVERIFY {summary} skipped=0 (with the Rojo-mounted "

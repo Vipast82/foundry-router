@@ -2,6 +2,15 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.157.42 — a bridge suite's file never needs a Studio mount
+
+2026-10-29 09:3x: GF-SAVE1 ran S05 (loader = bridge) and PRE-PLAY verify stopped on
+"tests/S05_check.lua not mounted anywhere". The runner's bridge serves a bridge suite's source
+from HEAD, so Studio's loaded copy never matters.
+
+- **PRE-PLAY / POST-PLAY verify** notes a bridge suite's unmounted check file instead of
+  stopping on it.
+
 ## v0.157.41 — a suite's designed FAILs do not make its PASS unknown
 
 2026-10-29 06:02-08:54: HK-TEST1's suite printed `pass=10 fail=1 expect=10 designedFails=1

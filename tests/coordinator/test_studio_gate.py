@@ -1277,3 +1277,21 @@ def test_absent_at_lists_files_deleted_at_head(tmp_path):
     sp.run(["git", "-C", r, "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qam", "2"], check=True)
     assert G._absent_at(r, "HEAD", ["src/a.lua", "src/b.lua"]) == ["src/b.lua"]
     assert G._absent_at(r, "nope", ["src/a.lua"]) == []                     # git cannot say
+
+
+def test_live_verify_never_needs_a_mount_for_a_bridge_suite_file(fakes, repo):
+    """2026-10-29 GF-SAVE1: S05 (loader = bridge) ran, and PRE-PLAY stopped on
+    'tests/S05_check.lua not mounted anywhere' though the bridge serves it from HEAD."""
+    set_rules, _ = fakes
+    set_rules([{"tool": "execute_luau", "match": "verifyLive",
+                "text": "SKIP (unmounted) tests/S05_check.lua\nVERIFY matched=1/1 mismatched=0 "
+                        "unresolved=0 skipped=1"}])
+    g = G.Gate(str(repo), "L4", "sprint", call_timeout=10)
+    try:
+        g.index = {"entries": [{"id": "S05", "file": "S05_check", "vm": "edit",
+                                "steps": ["main"], "loader": "bridge"}]}
+        g.live_verify({"src/a.lua": "1", "tests/S05_check.lua": "2"}, running={"S05_check"})
+        assert g.checks[-1]["result"] == "PASS"
+        assert "bridge suite file(s) served from HEAD" in g.last_verify_text
+    finally:
+        g.close()
