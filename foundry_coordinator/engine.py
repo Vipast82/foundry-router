@@ -2093,7 +2093,9 @@ class Coordinator:
                     "the report's memory_notes): " + ", ".join(by_session[:8]), required=False)
         if outside:
             from . import bookkeeping as BK
-            mine = set(BK.only_coordinator(P, t, base, head, outside))
+            from . import prep_queue as PQ
+            mine = set(BK.only_coordinator(P, t, base, head, outside,
+                                           PQ.messages(self.store, P.id)))
             outside = [f for f in outside if f not in mine]
         from . import scope as _scope           # revamp B10: granted files keep to their rule
         auto = []

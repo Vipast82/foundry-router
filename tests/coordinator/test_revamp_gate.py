@@ -917,3 +917,21 @@ def test_review_packet_leaves_out_files_only_other_sprints_changed(env):
     assert sorted(f["path"] for f in files) == ["both.txt", "mine.txt"]
     assert left == ["theirs.txt"]
     assert all(not s.startswith("UI-SKIN2:") for _, s in commits) and len(commits) == 2
+
+
+def test_scope_never_blames_a_sprint_for_a_prep_queue_landing():
+    """2026-10-29 MV2-0: the operator's TIER-C prep (tools/guard/done_check.py) was
+    cherry-picked into its range; scope blamed MV2-0 and it ran out of attempts."""
+    from types import SimpleNamespace
+    from foundry_coordinator.bookkeeping import agent_files
+    entry = "prep: done_check TIER-C accepts a src/ or tests/ file the plan lists by exact path"
+    ws = SimpleNamespace(
+        commits=lambda b, h: [("a1", "MV2-0: docs"), ("b2", entry + " (MV2-0's spec fix)"),
+                              ("c3", "prep: something no entry names")],
+        commit_files=lambda b, h: [("a1", ["docs/x.md"]), ("b2", ["tools/guard/done_check.py"]),
+                                   ("c3", ["tools/other.py"])])
+    P = SimpleNamespace(ws=ws)
+    t = {"task_id": "MV2-0", "data": {}}
+    assert agent_files(P, t, "b", "h", (entry,)) == {"docs/x.md", "tools/other.py"}
+    # without the entry list (review/gate callers) every file counts as the sprint's
+    assert agent_files(P, t, "b", "h") is None

@@ -2,6 +2,16 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.157.53 — scope never blames a sprint for a prep-queue landing
+
+2026-10-29 14:16: the operator's TIER-C prep (`tools/guard/done_check.py`) was cherry-picked
+onto master inside MV2-0's range. `coordinator.scope` counted it as MV2-0's change, MV2-0 used
+its last attempt and parked.
+
+- **Scope check:** a commit whose subject starts with a prep-queue entry's message is the
+  operator's landing (or a cherry-pick of its branch), like another sprint's commit. Review and
+  gate freshness checks still count its files.
+
 ## v0.157.52 — the gate binding check accepts the sprint's own committed frame
 
 2026-10-29 14:09: once v0.157.51 ended the AS-P5 re-run loop, verification failed

@@ -126,6 +126,15 @@ def entries(store, project_id: str, include_removed: bool = False) -> list[dict]
     return [_row(r) for r in rows]
 
 
+def messages(store, project_id: str) -> tuple:
+    """Every prep entry's commit subject (landed or pending; removed ones never landed)."""
+    try:
+        return tuple(str(e.get("message") or "").strip() for e in entries(store, project_id)
+                     if str(e.get("message") or "").strip())
+    except Exception:                                             # noqa: BLE001
+        return ()
+
+
 def _set(store, entry_id: str, **fields) -> None:
     for k in ("condition", "after_actions", "hold_tasks", "paths", "log"):
         if k in fields and not isinstance(fields[k], str):

@@ -99,14 +99,23 @@ def sprint_owner(subject: str) -> str:
     return owner
 
 
-def agent_files(P, t: dict, base: str, head: str) -> Optional[set]:
+def prep_commit(subject: str, prep: tuple = ()) -> bool:
+    """A commit whose subject starts with a prep-queue entry's message is the operator's
+    prep landing (or a cherry-pick of its branch), never a session's change.
+    2026-10-29 MV2-0: the TIER-C prep was cherry-picked into its range; scope blamed it."""
+    s = str(subject or "")
+    return any(m and s.startswith(m) for m in prep)
+
+
+def agent_files(P, t: dict, base: str, head: str, prep: tuple = ()) -> Optional[set]:
     """Files changed base..head by commits the coordinator did NOT make and no other
-    sprint made, or None when git can't say (callers then treat every changed file as the
-    agent's)."""
+    sprint made (nor a prep-queue landing, when `prep` lists entry messages), or None when
+    git can't say (callers then treat every changed file as the agent's)."""
     mine = commits(t)
     tid = str(t.get("task_id") or "")
     try:
-        others = {sha for sha, subj in P.ws.commits(base, head) if other_sprint(subj, tid)}
+        others = {sha for sha, subj in P.ws.commits(base, head)
+                  if other_sprint(subj, tid) or prep_commit(subj, prep)}
     except Exception:                                             # noqa: BLE001
         others = set()
     if not mine and not others:
@@ -122,9 +131,9 @@ def agent_files(P, t: dict, base: str, head: str) -> Optional[set]:
     return out
 
 
-def only_coordinator(P, t: dict, base: str, head: str, files: list) -> list:
+def only_coordinator(P, t: dict, base: str, head: str, files: list, prep: tuple = ()) -> list:
     """The subset of `files` that only coordinator commits touched in base..head."""
-    agent = agent_files(P, t, base, head)
+    agent = agent_files(P, t, base, head, prep)
     if agent is None:
         return []
     return [f for f in files if f.replace("\\", "/") not in agent]
