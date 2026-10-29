@@ -135,6 +135,25 @@ def test_put_settings_merges_onto_current_settings_not_defaults(cfg):
     assert config.load()["workspace"]["profiles"] == cfg["workspace"]["profiles"]
 
 
+def test_a_stale_settings_page_cannot_overwrite_newer_settings(cfg):
+    """2026-10-28: a Settings page opened before Blender was switched on was saved later
+    and switched it back off. A save naming an old revision is refused (409)."""
+    m = mk(cfg)
+    config.save(cfg)
+    c = TestClient(api.create_app(m, "t" * 40), base_url="http://127.0.0.1")
+    h = {"X-Client-Token": "t" * 40}
+    old_rev = c.get("/api/settings", headers=h).json()["rev"]
+    m.cfg["components"]["blender"].update(enabled=True, path=sys.executable)  # changed elsewhere
+    r = c.put("/api/settings", headers=h, json={"rev": old_rev, "settings": {
+        "components": {"blender": {"enabled": False}}}})
+    assert r.status_code == 409 and r.json()["stale"] is True
+    assert m.cfg["components"]["blender"]["enabled"] is True
+    new_rev = c.get("/api/settings", headers=h).json()["rev"]
+    r = c.put("/api/settings", headers=h, json={"rev": new_rev, "settings": {
+        "client": {"relay_enabled": True}}})
+    assert r.status_code == 200 and m.cfg["components"]["blender"]["enabled"] is True
+
+
 # --------------------------------------------------------------- stale detail
 
 def test_disabled_or_stopped_component_does_not_keep_an_old_error(cfg, monkeypatch, killed):

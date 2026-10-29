@@ -4,6 +4,7 @@ fragment, which never reaches the server or a log. Host-header check against DNS
 rebinding. Secrets are write-only."""
 from __future__ import annotations
 
+import json
 import os
 import secrets as _rnd
 import threading
@@ -151,10 +152,15 @@ def create_app(mgr: Manager, token: str, cfg_path: Optional[Path] = None) -> Fas
             bool((body or {}).get("dry_run")), bool((body or {}).get("reload", True)))
         return JSONResponse(res, status_code=200 if res.get("ok") else 400)
 
+    def _rev() -> str:
+        import hashlib
+        return hashlib.sha256(json.dumps(mgr.cfg, sort_keys=True, default=str)
+                              .encode()).hexdigest()[:16]
+
     @app.get("/api/settings")
     def get_settings():
         return {"settings": mgr.cfg, "path": str(cfg_path or config.config_path()),
-                "problems": config.validate(mgr.cfg)}
+                "problems": config.validate(mgr.cfg), "rev": _rev()}
 
     @app.put("/api/settings")
     async def put_settings(request: Request):
@@ -162,6 +168,12 @@ def create_app(mgr: Manager, token: str, cfg_path: Optional[Path] = None) -> Fas
         what it names. (A full document, as the settings page sends, replaces every value in it.)"""
         body = await request.json()
         incoming = body.get("settings") or {}
+        # 2026-10-28: a Settings page left open saved its stale copy over newer settings
+        # (Blender switched back off). A page that names the revision it loaded must match.
+        if body.get("rev") and body["rev"] != _rev():
+            return JSONResponse({"error": "the settings changed since this page was opened; "
+                                          "reload the page and save again",
+                                 "stale": True}, status_code=409)
         config.migrate(incoming)                   # an old page may still send a retired table
         return await run_in_threadpool(_save_settings, incoming)
 

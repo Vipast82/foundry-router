@@ -2,6 +2,16 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.157.14 — a stale client Settings page cannot overwrite newer settings
+
+2026-10-28 23:27: a Settings page opened before Blender was switched on was saved (to turn the
+relay on) and sent its whole stale copy back: Blender went off with no path and the client
+stopped it.
+
+- **The page sends only the fields on its form**, merged onto the current settings.
+- **Revision check:** `GET /api/settings` returns `rev`; a save naming an older `rev` gets 409
+  "the settings changed since this page was opened; reload".
+
 ## v0.157.13 — client restart helper: Windows-only flags only on Windows
 
 - `selfrestart` helper: the detach flags were applied on every platform by operator

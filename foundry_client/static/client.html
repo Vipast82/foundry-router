@@ -186,12 +186,14 @@ function renderSettings() {
   $("#autostart").onchange = async e => { try { await api("autostart", "POST", {enabled: e.target.checked}); toast("Startup setting saved"); } catch (err) { toast(err.message, true); } };
   $("#sf").onsubmit = async e => {
     e.preventDefault();
-    const s2 = structuredClone(s);
+    // only the fields on this form, merged server-side onto the current settings (a stale
+    // copy of everything else must never overwrite newer values)
+    const s2 = {};
     for (const [, fs] of FIELDS) for (const [p, , t] of fs) {
       const el = document.getElementsByName(p)[0];
       put(s2, p, t === "bool" ? el.checked : t === "number" ? Number(el.value) : t === "list" ? el.value.split("\n").map(x => x.trim()).filter(Boolean) : el.value.trim());
     }
-    try { const r = await api("settings", "PUT", {settings: s2}); toast(r.note || "Saved"); S.settings = null; await refresh(); }
+    try { const r = await api("settings", "PUT", {settings: s2, rev: S.settings && S.settings.rev}); toast(r.note || "Saved"); S.settings = null; await refresh(); }
     catch (err) { toast(err.message, true); }
   };
 }
