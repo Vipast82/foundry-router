@@ -821,3 +821,22 @@ def test_runtime_check_dependencies_never_include_docs_memory_or_plan(repo):
         for p in ("docs/progress/GF-GATE1_EVIDENCE_RAW.log", "docs/memory/KNOWN_ISSUES.md",
                   ".plan/notes.md"):
             assert not matches_any(p, globs), (cid, p)
+
+
+def test_a_gate_runner_capture_line_is_a_capture_record(repo):
+    """2026-10-29 AS-P5: the scripted run's A10 leg printed 'CAPTURE <path> runtime=playtest'
+    + 'PASS: A10' every run, but only capture-window.ps1's format made a capture record, so
+    the plan's capture obligation never saw a fresh record and the sprint cycled."""
+    a = repo["a"]
+    path = "docs/evidence/AS-P5/proxy_telegraph_20s-20261028-232940-704.png"
+    out = _env(["CAPTURE " + path + " runtime=playtest place=1 universe=2 subject=FieldRat#38",
+                "PASS: A10", "SUITE AS_P5 pass=12 fail=0 expect=12 designedFails=0 VERDICT PASS"])
+    v = _view("robloxstudio-mcp_execute_luau",
+              {"target": "edit", "code": 'return require(game.ServerScriptService.GateRunner)'},
+              out)
+    r = _by(a.classify_tool_result(v, {"task_id": T}), "capture:" + path)
+    assert r["result"] == PASS and r["artifact_path"] == path and r["check_kind"] == "capture"
+    bad = _env(["CAPTURE " + path + " runtime=playtest", "FAIL: A10 subject never telegraphed"])
+    r = _by(a.classify_tool_result(_view(v["tool"], v["input"], bad, part="p2"),
+                                   {"task_id": T}), "capture:" + path)
+    assert r["result"] == FAIL

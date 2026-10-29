@@ -108,6 +108,7 @@ FAKE_PIPELINE = textwrap.dedent('''\
          "rows": {"S51": {"verdict": "PASS"}, "S46": {"verdict": res}},
          "evidence": {"verify_pre": "\\n".join(lines[3:5]), "boot": "\\n".join(lines[6:8] + lines[9:11]),
                       "tally": "\\n".join(tally)},
+         "raw_results": {"4": "CAPTURE docs/evidence/T1/frame.png runtime=playtest place=1\\nPASS: A10"},
          "summary": [f"GATE {sprint} scripted Studio half {res}"]}
     json.dump(v, open(os.path.join(gd, head[:12] + ".calls.json"), "w"))
     save(phase="done", result=res, stage="done", finish_line=f"GATE {sprint} {res}")
@@ -420,6 +421,8 @@ def test_records_are_verified_with_runtime_identity_and_provenance(env, tmp_path
         assert r["provenance"]["executor"] == "studio_gate"
         assert r["provenance"]["run_id"] == run_id and len(r["provenance"]["lines_sha256"]) == 64
         assert r["runtime_id"]
+    cap = recs["capture:docs/evidence/T1/frame.png"]                # a check's own capture
+    assert cap["result"] == "PASS" and cap["runtime_id"] == recs["suite:S51"]["runtime_id"]
     rt = e.c.ledger.runtime("game", recs["suite:S51"]["runtime_id"])
     assert rt and rt["loaded_fp"]                                  # PRE-PLAY verify fingerprint
     assert recs["gate:T1"]["source_revision"] == sc(e)["last"]["head"]

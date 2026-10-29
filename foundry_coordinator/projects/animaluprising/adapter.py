@@ -1820,6 +1820,27 @@ Change no code or test file in this session; if one needs changing, stop and rep
                 artifact_path=path, lines=c.get("lines", [])[:10],
                 note=c.get("reason") or "")
 
+        # 7b. captures a GateRunner check took in the playtest (2026-10-29 AS-P5: its A10 leg
+        # printed "CAPTURE <path> runtime=playtest ..." + "PASS: A10" at every scripted run,
+        # but only capture-window.ps1's record format was read, so the plan's capture never
+        # had a fresh record and the sprint cycled for a day). The next PASS:/FAIL: line
+        # after it is the leg's verdict; the record rides the run's runtime like the suite.
+        seen_caps = {r["check_id"] for r in recs}
+        for i, l in enumerate(lines):
+            m = _GATE_CAPTURE.match(l.strip())
+            if not m:
+                continue
+            path = self._rel_path(m.group(1))
+            if f"capture:{path}" in seen_caps:
+                continue
+            nxt = next((x.group(1) for x in (_STEP_RESULT.match(y.strip())
+                                              for y in lines[i + 1:i + 6]) if x), None)
+            rec(f"capture:{path}", "capture", {"PASS": PASS, "FAIL": FAIL}.get(nxt, UNKNOWN),
+                artifact_path=path, lines=[l.strip()] + ([f"{nxt}: (next leg line)"]
+                                                         if nxt else []),
+                note="" if nxt else "no PASS/FAIL line after the CAPTURE line")
+            seen_caps.add(f"capture:{path}")
+
         # 8. individual PASS/FAIL lines with no verdict at all: UNKNOWN with counts
         if not recs:
             p_, f_ = _step_counts(lines)
@@ -2846,6 +2867,10 @@ _SCRIPTED_RUN = re.compile(r"^(\S+) scripted Studio run at HEAD ([0-9a-f]{40}) \
 _GATE_WORDS = {"regression", "suite", "HEAD", "RUN", "FINISH", "START"}
 _GATE_HEAD = re.compile(r"^PASS: GATE HEAD ([0-9a-f]{7,40})")
 _BOOT = re.compile(r"^BOOT\((server|client)\)\s+loaded=(\d+)\s+errors=(\d+)")
+# a capture a GateRunner check took in the playtest: "CAPTURE <path> runtime=playtest ..."
+# (no WxH: that form is capture-window.ps1's, parsed by artifacts.parse_capture_output)
+_GATE_CAPTURE = re.compile(r"^CAPTURE\s+(\S+\.(?:png|jpe?g))\s+runtime=(\S+)", re.I)
+_STEP_RESULT = re.compile(r"^(PASS|FAIL):")
 _BOOT_VERDICT = re.compile(r"^(PASS|FAIL):\s+BOOT\b.*?\((server|client)\b")
 _VERIFY_LIVE = re.compile(r"^VERIFY\s+matched=(\d+)/(\d+)\s+mismatched=(\d+)\s+unresolved=(\d+)"
                           r"(?:\s+skipped=(\d+))?")

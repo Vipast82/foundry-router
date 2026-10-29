@@ -768,8 +768,14 @@ class StudioCalls:
                     "calls_json": f"{GATE_DIR}/{tid}/{head[:12]}.calls.json",
                     "gate_head": head, "pipeline_result": pj.get("result"),
                     "finish_line": pj.get("finish_line") or "", "counts": v.get("counts")}
+            # 2026-10-29 AS-P5: a check's own playtest capture ("CAPTURE <path> runtime=...")
+            # is in its CALL output; without this section the plan's capture never had a
+            # fresh record bound to the run's runtime
+            calls_text = "\n".join(str(x) for _, x in sorted(
+                (v.get("raw_results") or {}).items(), key=lambda kv: str(kv[0])))
             sections = (("boot+verify", boot_text, ("boot", "runtime")),
                         ("tally", ev.get("tally") or "", ("suite",)),
+                        ("captures", calls_text, ("capture",)),
                         ("finish", self._finish_block(P, tid), ("gate",)))
             started = float(v.get("started") or 0) or None
             ended = float(v.get("finished") or 0) or None

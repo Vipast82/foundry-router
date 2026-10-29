@@ -2,6 +2,19 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.157.39 — a check's own playtest capture counts as the plan's capture
+
+2026-10-28/29: AS-P5's A10 leg took its proxy-telegraph frame in the scripted playtest and
+printed `CAPTURE <path> runtime=playtest ...` + `PASS: A10` at every run, but only
+capture-window.ps1's record format made a capture record, and the scripted run's call output
+was never read for captures. The plan's capture obligation never had a fresh record, and the
+sprint cycled for a day on "no fresh verified record".
+
+- **AU evidence** reads a GateRunner `CAPTURE <path> runtime=...` line as a capture record; the
+  next PASS:/FAIL: line is its verdict.
+- **The scripted Studio run** records captures from its call output, bound to the run's
+  runtime and gate HEAD like its suites.
+
 ## v0.157.38 — a sprint that yields the checkout gives back its lock
 
 2026-10-29 07:00-07:20: AS-P5 (restarted by an attempt reset, so later than HK-CLEAN1) yielded
