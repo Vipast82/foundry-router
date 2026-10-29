@@ -201,6 +201,10 @@ DEFAULT_SCOPE_RULES = [
     # the Lune spec pins (112 -> 113); asking the owner for that file stopped the sprint
     {"name": "regression_index_count_spec", "path": "tests/lune/specs/RegressionIndex.spec.luau",
      "reason": "the Lune spec pins the regression index row count; a new index row bumps it"},
+    # 2026-10-29 AS-P5: its own capture docs/evidence/AS-P5/proxy_telegraph_*.png failed scope,
+    # a grant restarted the session; a sprint's own evidence folder is always its own
+    {"name": "sprint_own_evidence", "path": "docs/evidence/{task}/**",
+     "reason": "the sprint's own evidence and captures"},
 ]
 AUTOMATION_DEFAULTS: dict = {
     "helpers": "on_demand",

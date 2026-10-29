@@ -558,3 +558,12 @@ def test_done_check_gets_the_skip_rows_flag_and_falls_back_without_it(repo, monk
     a._done_check(spec, "verify", head)
     assert "--skip-rows" not in calls[0]                     # the main checkout: every row
     assert sys and os                                        # (imports kept for helpers)
+
+
+def test_a_sprints_own_evidence_folder_is_granted_without_asking():
+    """AS-P5 2026-10-29 replay: docs/evidence/AS-P5/proxy_telegraph_*.png failed scope."""
+    from types import SimpleNamespace
+    P = SimpleNamespace(profile=SimpleNamespace(raw={}))
+    r = SC.rule_for(P, "AS-P5", "docs/evidence/AS-P5/proxy_telegraph_20s-20261028-232940-704.png")
+    assert r and r["name"] == "sprint_own_evidence"
+    assert SC.rule_for(P, "AS-P5", "docs/evidence/UI-SKIN2/hero_desktop.jpg") is None

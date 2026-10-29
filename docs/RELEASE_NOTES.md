@@ -2,6 +2,14 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.157.18 — a sprint's own evidence folder is always in scope
+
+AS-P5, 2026-10-29 00:06: its own capture docs/evidence/AS-P5/proxy_telegraph_*.png failed
+coordinator.scope; the scope grant then restarted the session.
+
+- **Default scope allow-list:** `docs/evidence/{task}/**` (`sprint_own_evidence`), granted silently
+  at verification.
+
 ## v0.157.17 — the Lead repairs a track's merge conflict
 
 backend-1 (S57a), 2026-10-28: `tracks/merge.py` asked the Lead through `open_track_repair`,
