@@ -1029,13 +1029,23 @@ Change no code or test file in this session; if one needs changing, stop and rep
                        "(project memory, the coordinator's)")
         return True
 
+    def gate_noncode(self, spec: TaskSpec) -> list:
+        """Paths that never unbind a gate from the code it ran on: closeout-exempt files, the
+        sprint's own progress files, its captures, memory and plan files. ONE list for the
+        binding check and the review/submission evidence check (2026-10-29 AS-P5: the two
+        lists drifted; the frame fix reached one, the other sent the sprint back)."""
+        t = spec.task_id
+        return (self.exempt_paths(spec) + [f"docs/progress/{t}_*", f"docs/evidence/{t}/*.png",
+                                           f"docs/evidence/UI-v3/{t}/**"]
+                + list(GATE_NONCODE_PATHS))
+
     def _gate_binding(self, spec: TaskSpec, revision: str, ws=None) -> VerificationResult:
         """The binding (below), kept across a restart: it reads only the revision and the
         exempt paths, so (task, revision, exempt list) is its whole input."""
         import hashlib
         exempt = self.exempt_paths(spec)
-        # "frames1": v0.157.52 added the sprint's own evidence frames to the exempt set
-        ikey = hashlib.sha256(("\0".join([self.p.workspace, "frames1"] + list(exempt))).encode()
+        # "noncode2": v0.157.56 one shared non-code list (gate_noncode); old results not reused
+        ikey = hashlib.sha256(("\0".join([self.p.workspace, "noncode2"] + list(exempt))).encode()
                               ).hexdigest()[:32] if ws is None else ""
         hit = check_cache.get(self.state_dir, self.p.id, spec.task_id, "gate_binding",
                               revision, ikey) if ikey else None
@@ -1084,11 +1094,7 @@ Change no code or test file in this session; if one needs changing, stop and rep
         # memory-notes commit after a passed gate failed GF-GATE1 here on 2026-10-27.
         # 2026-10-28 (audit A): docs/progress/**, docs/memory/** and .plan/** are never
         # code; a commit touching only those (evidence, memory, plan) keeps the gate bound.
-        # 2026-10-29 AS-P5: the frame the scripted run commits with its outputs (v0.157.50)
-        # is evidence, not code; it failed this check right after a PASS gate
-        exempt = (self.exempt_paths(spec) + [f"docs/progress/{spec.task_id}_*",
-                                             f"docs/evidence/{spec.task_id}/*.png"]
-                  + list(GATE_NONCODE_PATHS))
+        exempt = self.gate_noncode(spec)
         code = [c for c in changed if not matches_any(c, exempt)]
         if code:
             return VerificationResult("au.gate_bound_to_head", FAIL, True, rel,
@@ -1539,8 +1545,7 @@ Change no code or test file in this session; if one needs changing, stop and rep
             notes.append("no 'PASS: GATE HEAD <sha>' before the verdict: the gate is not bound "
                          "to a revision")
         status = "ok" if heads else "unverified"
-        # the gate's own captures: the post-PASS capture commit always lands after the gate
-        exempt = self.exempt_paths(spec) + [f"docs/progress/{t}_*", f"docs/evidence/UI-v3/{t}/**"]             + list(GATE_NONCODE_PATHS)
+        exempt = self.gate_noncode(spec)
         for label, sha in named:
             full = ws.run("rev-parse", "--verify", "--quiet", sha + "^{commit}",
                           check=False).strip()

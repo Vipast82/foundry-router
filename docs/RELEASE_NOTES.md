@@ -2,6 +2,17 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.157.56 — one non-code list for both gate checks
+
+2026-10-29 15:07: AS-P5's verification passed (`au.gate_bound_to_head` included, v0.157.52), but
+the submission evidence check kept its own copy of the exempt paths without the sprint's frame.
+It called the gate stale and sent AS-P5 back; the session then BLOCKED on a "tooling" fault.
+
+- **AU adapter:** `gate_noncode(spec)` is the one list of paths that never unbind a gate
+  (closeout-exempt, `docs/progress/<ID>_*`, `docs/evidence/<ID>/*.png`,
+  `docs/evidence/UI-v3/<ID>/**`, memory, plan). `_gate_binding` and `_gate_staleness` both
+  use it. The binding cache key changed so older results are not reused.
+
 ## v0.157.55 — a dependency named in the plan that is already queued is waited for
 
 2026-10-29 15:01: AS-R7's plan names AS-P5, which was approved and running, but its queue

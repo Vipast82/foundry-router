@@ -4,6 +4,7 @@ Synthetic AU-like repositories only (the fixture of test_au_review_evidence),
 never the real game repository. Suite ids and counts are deliberately not
 UI-01's: the parsers are generic."""
 
+import os
 import json
 from types import SimpleNamespace
 
@@ -808,6 +809,27 @@ def test_gate_binding_survives_evidence_memory_and_plan_only_commits(repo):
     g = a._gate_binding(spec, code, w)
     assert g.result == FAIL and "tests/after_gate_check.lua" in g.detail
     assert a._gate_staleness(spec, w.show_at(code, LOG_REL), [], code, w)[0] == "stale"
+
+
+def test_both_gate_checks_accept_the_sprints_own_frame(repo):
+    """2026-10-29 AS-P5: the binding check accepted the runner's committed frame (v0.157.52)
+    but the submission evidence check still called the gate stale and sent the sprint back.
+    Both now read one list (gate_noncode)."""
+    a, w, ws = repo["a"], repo["w"], repo["ws"]
+    spec = a.describe_at(T, repo["head"], w)
+    os.makedirs(os.path.join(ws, "docs", "evidence", T), exist_ok=True)
+    with open(os.path.join(ws, "docs", "evidence", T, "frame.png"), "wb") as f:
+        f.write(b"png")
+    frame = _commit(ws, f"{T}: scripted gate PASS frame (coordinator)")
+    assert a._gate_binding(spec, frame, w).result == PASS
+    status, notes = a._gate_staleness(spec, w.show_at(frame, LOG_REL), [], frame, w)
+    assert status == "ok", notes
+    os.makedirs(os.path.join(ws, "docs", "evidence", "OTHER-1"), exist_ok=True)
+    with open(os.path.join(ws, "docs", "evidence", "OTHER-1", "f.png"), "wb") as f:
+        f.write(b"png")
+    other = _commit(ws, f"{T}: another sprint's frame")
+    assert a._gate_binding(spec, other, w).result == FAIL
+    assert a._gate_staleness(spec, w.show_at(other, LOG_REL), [], other, w)[0] == "stale"
 
 
 def test_runtime_check_dependencies_never_include_docs_memory_or_plan(repo):
