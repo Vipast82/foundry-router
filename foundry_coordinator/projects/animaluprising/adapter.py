@@ -66,6 +66,15 @@ def _text(v) -> str:
     return v.decode("utf-8", errors="replace") if isinstance(v, bytes) else str(v)
 
 
+def deps_in_field(text: str) -> list:
+    """Sprint ids of a plan's **Depends on:** value. "none" means none, and a "; ..."
+    clause is commentary (2026-10-28 S57a: "none; must land before S52's Studio gate" made
+    S52 a dependency; AS-C20's "...; consumed by UI-SKIN1" made UI-SKIN1 one)."""
+    field = str(text or "").split("**")[0]
+    field = "" if re.match(r"\s*none\b", field, re.I) else field.split(";")[0]
+    return re.findall(r"\b([A-Z]{1,5}[0-9]?-?[A-Za-z0-9.-]*[0-9][A-Za-z0-9]*)\b", field)
+
+
 class AnimalUprisingAdapter(GenericAdapter):
     # the BUILD / repair / CLOSE prompts carry the track notice themselves (2026-10-27):
     # the engine does not append its generic TRACK_BRIEF
@@ -267,8 +276,7 @@ class AnimalUprisingAdapter(GenericAdapter):
         m = re.search(r"\*\*Depends on:\*\*\s*([^\n]+)", plan)
         if m:
             from ...tracks.analysis import drop_phase_labels
-            deps = [d for d in re.findall(r"\b([A-Z]{1,5}[0-9]?-?[A-Za-z0-9.-]*[0-9][A-Za-z0-9]*)\b",
-                                          m.group(1).split("**")[0]) if d != task_id]
+            deps = [d for d in deps_in_field(m.group(1)) if d != task_id]
             # "the A0 entry gate" names a MASTER_ORDER phase, not a sprint
             deps = drop_phase_labels(deps, lambda d: os.path.isfile(os.path.join(
                 self.p.workspace, "docs", "progress", f"{d}_PLAN.md")))

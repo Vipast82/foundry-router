@@ -2,6 +2,14 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.157.11 — "Depends on: none; ..." is no dependency
+
+S57a, 2026-10-28 23:06: its plan says `**Depends on:** none; must land before S52's Studio gate`;
+the AU parser took S52 as a dependency and the sprint stopped at once on its new track.
+
+- **`deps_in_field`:** "none" means none, and a `; ...` clause is commentary (it also drops false
+  dependencies like AS-C20's "...; consumed by UI-SKIN1").
+
 ## v0.157.10 — cancelled sprints hidden from the control center's task picker
 
 - **Task picker:** CANCELLED sprints are left out unless "Show cancelled" is ticked (a

@@ -293,3 +293,12 @@ def test_plan_deps_ignore_phase_labels_unless_a_plan_exists(tmp_path):
     (tmp_path / "B2_PLAN.md").write_text("# B2\n", encoding="utf-8")
     info = A.parse_plan("GF-GATE1", text, path=str(tmp_path / "GF-GATE1_PLAN.md"))
     assert info.deps == ["GF-SEC2", "B2"]
+
+
+def test_depends_on_none_and_semicolon_commentary_are_no_dependencies():
+    """S57a 2026-10-28 replay: "none; must land before S52's Studio gate" blocked S57a on S52."""
+    from foundry_coordinator.projects.animaluprising.adapter import deps_in_field
+    assert deps_in_field(" none; must land before S52's Studio gate (owner rule)") == []
+    assert deps_in_field(" AS-C20 (batch pipeline); consumed by UI-SKIN1") == ["AS-C20"]
+    assert deps_in_field(" AS-R1 + AS-P5 + ref sheets") == ["AS-R1", "AS-P5"]
+    assert deps_in_field(" GF-ENT1, AS-P5 ** ignored S9") == ["GF-ENT1", "AS-P5"]
