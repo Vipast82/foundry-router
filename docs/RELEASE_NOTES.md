@@ -2,6 +2,16 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.157.32 — a track's merge batch runs the rows its files touch, not the full index
+
+2026-10-29 04:27: the assets-local merge batch ran the full regression (80 rows) and failed on 20
+legacy rows (Studio bridge and player-profile harness faults, balance rows moved by S57a) that its
+VFX files never touch, which failed the track.
+
+- **The merge Studio batch** runs, for sprints with no suites of their own, the regression rows
+  the merged files map to directly (the runner's `merge_regression`), falling back to the
+  affected selection; no run when nothing maps. Runners without it still run the full index.
+
 ## v0.157.31 — gate.ps1 is not handed files deleted at HEAD
 
 2026-10-29 04:03: UI-SKIN2's 16th attempt failed its host stage because HK-CLEAN1 had deleted

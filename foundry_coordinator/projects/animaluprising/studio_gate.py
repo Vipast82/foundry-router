@@ -614,6 +614,42 @@ def affected_selection(files: list, index: dict, *, suite_text: Optional[Callabl
     return ",".join(e["id"] for e in entries if e.get("id") in ids)
 
 
+def merge_regression(repo: str, files: list, rev: str = "HEAD") -> str:
+    """The regression a track's merge Studio batch runs for its suite-less sprints: the rows
+    the merged files map to directly (their tests/<file>.lua, `files`, mount leaf or module
+    name), not the `ui` fallback for unmapped src/ and not the full index. 2026-10-29: the
+    full regression of assets-local failed 20 legacy rows (bridge/profile harness faults,
+    balance rows S57a moved) none of which its VFX files touch. Falls back to the affected
+    selection when no row maps directly; "" when nothing maps at all."""
+    index = load_index(repo, rev)
+    reader = suite_reader(repo, rev)
+    direct: set = set()
+    for f in files or []:
+        f = f.replace("\\", "/").strip().removeprefix("./")
+        if f:
+            direct |= _direct_hits(f, index, reader)
+    if direct:
+        return ",".join(e["id"] for e in index.get("entries") or [] if e.get("id") in direct)
+    return affected_selection(files, index, suite_text=reader)
+
+
+def _direct_hits(f: str, index: dict, reader) -> set:
+    stem = os.path.splitext(os.path.basename(f))[0]
+    if stem == "init":
+        stem = os.path.basename(os.path.dirname(f))
+    out = set()
+    for e in index.get("entries") or []:
+        efile = e.get("file") or ""
+        leafs = {str(p).split(".")[-1] for p in (e.get("mounts") or {}).values()}
+        if f == f"tests/{efile}.lua" or f in (e.get("files") or []) or (
+                f.startswith("tests/") and stem in leafs):
+            out.add(e["id"])
+        elif f.startswith("src/") and len(stem) >= 4 and re.search(
+                r"\b" + re.escape(stem) + r"\b", reader(efile) or ""):
+            out.add(e["id"])
+    return out
+
+
 # ---- CALL -> suite mapping (mirror of GateRunner selectEntries/buildPlan/stepVm) ----
 def select_entries(index: dict, selection: str) -> Optional[list]:
     entries = [e for e in index.get("entries") or [] if isinstance(e, dict)]

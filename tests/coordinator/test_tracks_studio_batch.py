@@ -254,3 +254,23 @@ def test_an_uncovered_track_keeps_todays_merge_gate(env, covered, automation):
     assert row["data"]["gate"]["checks"] == {"project-check": "PASS"}
     assert run_args(pf) == [] and not events(c, "studio_calls_started")
     assert not leases(c)
+
+
+def test_batch_regression_is_the_rows_the_merged_files_touch(env, tmp_path, monkeypatch):
+    """2026-10-29 assets-local: a full regression failed 20 legacy rows the VFX files never
+    touch. A runner with merge_regression() picks the rows; "" means no regression run."""
+    from foundry_coordinator import studio_calls as SC
+    (tmp_path / "fake_runner_mr.py").write_text(
+        "import os\n"
+        "def merge_regression(repo, files):\n"
+        "    return os.environ.get('FAKE_MERGE_REG', '')\n")
+    monkeypatch.syspath_prepend(str(tmp_path))
+    real = SC.settings
+    monkeypatch.setattr(SC, "settings", lambda P: {**real(P), "runner_module": "fake_runner_mr"})
+    monkeypatch.setenv("FAKE_MERGE_REG", "S7,S9")
+    c, P, clock, root, pf = env([{"result": "PASS"}])
+    assert c.tracks.merger._batch_regression(P, ["art/b1.txt"]) == "S7,S9"
+    monkeypatch.setenv("FAKE_MERGE_REG", "")
+    assert c.tracks.merger._batch_regression(P, ["art/b1.txt"]) == ""
+    monkeypatch.setattr(SC, "settings", lambda P: {**real(P), "runner_module": "no_such_mod_x"})
+    assert c.tracks.merger._batch_regression(P, ["art/b1.txt"]) == "full"

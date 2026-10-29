@@ -702,10 +702,31 @@ class MergeManager:
         if bare:
             last = row["sprints"][-1]
             tier = sc._tier(P, last)
-            plan.append({"key": "regression", "sprint": last, "tier": tier, "covers": bare,
-                         "req": {"suites": [], "regression": "full", "tier": tier,
-                                 "rerun": "failed", "files": files or list(DEFAULT_FILES)}})
+            reg = self._batch_regression(P, files)
+            if reg:
+                plan.append({"key": "regression", "sprint": last, "tier": tier, "covers": bare,
+                             "req": {"suites": [], "regression": reg, "tier": tier,
+                                     "rerun": "failed", "files": files or list(DEFAULT_FILES)}})
+            else:
+                self.store.event(P.id, "", "track_studio_batch_no_rows", detail={
+                    "track": row["name"], "covers": bare,
+                    "why": "no regression row maps to the merged files"})
         return plan
+
+    def _batch_regression(self, P, files: list) -> str:
+        """The rows the merged files touch (the project runner's merge_regression), else
+        "full" when the runner cannot say. 2026-10-29: a full regression failed the
+        assets-local merge on 20 legacy rows its files never touch."""
+        try:
+            import importlib
+            from ..studio_calls import settings as sc_settings
+            mod = importlib.import_module(str(sc_settings(P)["runner_module"]).strip())
+            fn = getattr(mod, "merge_regression", None)
+            if not callable(fn):
+                return "full"
+            return str(fn(P.profile.workspace, files) or "")
+        except Exception:                                         # noqa: BLE001
+            return "full"
 
     def _batch_minutes(self, P, n: int) -> float:
         try:
