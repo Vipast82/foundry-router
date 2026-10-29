@@ -186,8 +186,11 @@ class ResourceManager:
         except ValueError:
             return None
 
-    def admit_studio(self, P, track: str, purpose: str) -> tuple[bool, str]:
-        """Take the Studio lease for a track's merge gate, or say why not."""
+    def admit_studio(self, P, track: str, purpose: str,
+                     minutes: Optional[float] = None) -> tuple[bool, str]:
+        """Take the Studio lease for a track's merge gate, or say why not. `minutes`
+        bounds the lease (default studio_track_max_minutes; a merge Studio batch
+        passes its own bound)."""
         owner = self.owner_id(track)
         cur = self.lease(P)
         if cur and cur.get("owner") == owner:
@@ -203,12 +206,14 @@ class ResourceManager:
             self._wait(P, owner, purpose, why)
             return False, why
         now = self.clock()
+        mins = float(minutes) if minutes else self.max_minutes(P)
         lease = {"owner": owner, "track": track, "purpose": purpose, "since": now,
-                 "until": now + self.max_minutes(P) * 60, "resources": self.studio_resources(P)}
+                 "until": now + mins * 60, "minutes": mins,
+                 "resources": self.studio_resources(P)}
         self.store.set_meta(f"studio_lease:{P.id}", json.dumps(lease))
         self._wait_noted.pop((owner, "studio"), None)
         self.store.journal("studio", P.id, owner, "acquire", purpose,
-                           {"lease_minutes": self.max_minutes(P),
+                           {"lease_minutes": mins,
                             "resources": lease["resources"]}, ts=now)
         self.store.event(P.id, "", "studio_lease", detail={"track": track, "purpose": purpose,
                                                            "until": lease["until"]})
@@ -222,7 +227,8 @@ class ResourceManager:
             held = self.clock() - float(lease.get("since") or self.clock())
             self.store.journal("studio", P.id, owner, "release", lease.get("purpose") or "",
                                {"held_s": round(held), "why": why,
-                                "over_lease": held > self.max_minutes(P) * 60})
+                                "over_lease": held > float(lease.get("minutes") or
+                                                           self.max_minutes(P)) * 60})
         self.store.release(P.id, owner)
 
     def lease_over(self, P) -> bool:

@@ -519,7 +519,9 @@ class StudioCalls:
         tid = t["task_id"]
         if self.c._held(P, t, "scripted Studio gate start"):
             return False
-        if self.c._acquire(P, t, self.c._session_locks(P)):
+        # a track's merge Studio batch runs under the track's Studio lease (it holds the
+        # same rows), so it takes no task locks of its own
+        if not pend.get("track") and self.c._acquire(P, t, self.c._session_locks(P)):
             return False                          # another task holds Studio: wait
         if not self._studio_lock_free(P, t):
             return False
@@ -541,7 +543,7 @@ class StudioCalls:
             d = self._d(P, tid)
             d.pop("pending", None)
             why = f"the scripted Studio gate could not start: {e}"
-            if pend.get("cli"):
+            if pend.get("cli") or pend.get("track"):
                 d["last"] = {"result": "ERROR", "error": why, "stage": "start", "run_id": run_id,
                              "head": head}
                 self._save(P, tid, d)
@@ -556,6 +558,7 @@ class StudioCalls:
                     "started": self.clock(), "wall": time.time(), "req": req, "tier": tier,
                     "files": files[:60], "session_id": pend.get("session_id") or "",
                     "auto": bool(pend.get("auto")), "cli": bool(pend.get("cli")),
+                    "track": str(pend.get("track") or ""),
                     "limit_s": self._limit_s(P, req), "cmd": [str(x)[:200] for x in cmd[:24]]}
         d["runs"] = int(d.get("runs") or 0) + 1
         self._save(P, tid, d)
@@ -803,7 +806,8 @@ class StudioCalls:
                                 for f in (v or {}).get("failures") or []][:40],
                    "manual": [m.get("row") for m in (v or {}).get("manual") or []],
                    "duration_s": round(max(0.0, time.time() - float(run.get("wall") or time.time())), 1),
-                   "auto": bool(run.get("auto")), "cli": bool(run.get("cli"))}
+                   "auto": bool(run.get("auto")), "cli": bool(run.get("cli")),
+                   "track": str(run.get("track") or "")}
         if s is not None:
             self.c._memory_notes(P, t, s)            # deferred while the run held HEAD
         d = self._d(P, tid)
@@ -816,7 +820,8 @@ class StudioCalls:
             sha, cerr = self._commit(P, t, run, "ERROR")
             outcome["commit"], outcome["commit_error"] = sha, cerr
             self.store.event(P.id, tid, "studio_calls_error", detail=outcome)
-            if run.get("cli"):
+            if run.get("cli") or run.get("track"):
+                # no session to block: the CLI prints it, a track's merge batch retries
                 self.c.store.release(P.id, tid, self.c._session_locks(P))
                 return outcome
             cur = self.store.task(P.id, tid) or t
@@ -842,7 +847,7 @@ class StudioCalls:
         self._save(P, tid, d)
         self.store.event(P.id, tid, "studio_calls_done", detail={
             k: x for k, x in outcome.items() if k != "prompt"})
-        if run.get("cli"):
+        if run.get("cli") or run.get("track"):
             return self._after_cli(P, t, outcome)
         if run.get("auto"):
             return self._after_verify(P, t, outcome)

@@ -18,6 +18,13 @@ recorded in the track's data (`merge_stage`) so a restart resumes:
             under a Studio lease when the track needs Studio, else the adapter's
             verify; a green gate of the last sprint that still carries to the
             merged head (fast_lane._carries) is reused
+  studio_batch  (2026-10-28, [automation] merge_studio_batch) after a green verify:
+            the scripted Studio gate ([studio_calls], studio_calls.py) in the main
+            checkout for each sprint of the track that [studio_calls] covers, in order,
+            back to back under ONE Studio lease (it waits like the gate's lease above).
+            The assets are built first, Studio-tested once at the end; a failing sprint
+            fails the track naming it and its rows (and gets them as its findings); a
+            tooling ERROR retries that sprint, never re-running the ones that passed
   done      record `track_merged`, remove the worktree (the branch is kept)
 
 A red gate leaves the merged commits on master and the track `failed` with the
@@ -72,7 +79,7 @@ class MergeManager:
                              f"({', '.join(open_[:4])}); stop it or re-queue them")
         data = {k: v for k, v in row["data"].items()
                 if k not in ("conflict", "decision", "gate", "failed", "merge_wait",
-                             "gate_retries", "gate_retry_at", "merge_bg")}
+                             "gate_retries", "gate_retry_at", "merge_bg", "studio_batch")}
         data.update(merge_stage="wait", merge_requested_by=actor)
         row = self.store.update_track(P.id, name, state="merging", data=data)
         self.store.event(P.id, "", "track_merge_requested", detail={"track": name, "actor": actor})
@@ -88,6 +95,12 @@ class MergeManager:
                 pass
         if (row.get("data") or {}).get("merge_stage") == "rebase":
             _git(row["worktree"], "rebase", "--abort", check=False)
+        cur = ((row.get("data") or {}).get("studio_batch") or {}).get("current") or {}
+        if cur.get("sprint"):
+            try:
+                self.c.studio_calls.abort(P, cur["sprint"], why)
+            except Exception:                                     # noqa: BLE001
+                pass
 
     # ------------------------------------------------------------------ the step
 
@@ -124,6 +137,13 @@ class MergeManager:
             self._gate(P, row)
         elif stage == "gate_running":
             self._poll_gate(P, row)
+        elif stage == "studio_batch":
+            at = float(data.get("gate_retry_at") or 0)
+            if at and self.clock() < at:
+                self._wait(P, row, f"merge Studio batch retry {data.get('gate_retries')}/"
+                                   f"{GATE_TOOLING_RETRIES} after a tooling fault")
+                return
+            self._batch_step(P, row)
         elif stage == "done":
             self._finish(P, row)
 
@@ -380,6 +400,16 @@ class MergeManager:
                          "merge gate red: " + "; ".join(rec["findings"][:3] or [
                              f"{r.check} {r.result}" for r in bad[:3]]))
             return
+        plan = self._batch_plan(P, row)
+        if plan:
+            self._set(P, row, merge_stage="studio_batch", gate=rec, gate_retries=0,
+                      gate_retry_at=None,
+                      studio_batch={"sprints": plan, "results": [], "current": None,
+                                    "leased": False, "head": head})
+            self.store.event(P.id, "", "track_studio_batch_planned", detail={
+                "track": row["name"], "sprints": [x["sprint"] for x in plan]})
+            self._batch_step(P, self.store.track(P.id, row["name"]))
+            return
         self._set(P, row, merge_stage="done", gate=rec)
         self._finish(P, self.store.track(P.id, row["name"]))
 
@@ -448,6 +478,209 @@ class MergeManager:
                                                                "head": run["head"][:12]})
         self._finish(P, self.store.track(P.id, row["name"]))
 
+    # ------------------------------------------------------------------ the Studio batch
+
+    def _batch_on(self, P) -> bool:
+        try:
+            return bool(self.tm.setting(P, "merge_studio_batch"))
+        except (KeyError, TypeError):
+            return True
+
+    def _batch_plan(self, P, row: dict) -> list:
+        """The track's sprints [studio_calls] covers, in track order, each with the
+        scripted request it runs with (studio_calls.default_request: its last host-half
+        parameters, else its own suites). A covered sprint with neither (a Blender sprint
+        built Studio-free) gets the full pinned regression: boot, verifyLive and the
+        pinned rows on the merged assets."""
+        if not self._batch_on(P):
+            return []
+        fn = getattr(P.profile, "studio_calls_task", None)
+        sc = getattr(self.c, "studio_calls", None)
+        if not callable(fn) or sc is None:
+            return []
+        from ..studio_calls import DEFAULT_FILES, PATH_RE
+        files = [f.replace("\\", "/") for f in (row.get("data") or {}).get("merged_files") or []]
+        files = [f for f in files if not f.startswith("docs/") and PATH_RE.fullmatch(f)][:200]
+        plan = []
+        for sid in row["sprints"]:
+            try:
+                spec = P.adapter.describe(sid)
+            except Exception:                                     # noqa: BLE001
+                spec = None
+            tier = sc._tier(P, sid, spec)
+            if not fn(sid, tier):
+                continue
+            req = None
+            if spec is not None:
+                try:
+                    req = sc.default_request(P, sid, spec)
+                except Exception:                                 # noqa: BLE001
+                    req = None
+            if req is None:
+                req = {"suites": [], "regression": "full", "tier": tier, "rerun": "failed",
+                       "files": []}
+            req = {**req, "files": list(req.get("files") or []) or files or list(DEFAULT_FILES)}
+            plan.append({"sprint": sid, "tier": tier, "req": req})
+        return plan
+
+    def _batch_minutes(self, P, n: int) -> float:
+        try:
+            m = float(self.tm.setting(P, "merge_studio_batch_max_minutes") or 0)
+        except (KeyError, TypeError, ValueError):
+            m = 0.0
+        return m if m > 0 else self.tm.resources.max_minutes(P) * max(1, n)
+
+    def _batch_set(self, P, row: dict, batch: dict, **kv) -> dict:
+        return self._set(P, row, studio_batch=batch, **kv)
+
+    def _batch_step(self, P, row: dict) -> None:
+        """One step of the merge Studio batch: take (or keep) the Studio lease, start the
+        next sprint's scripted run, poll the running one, record its outcome; when every
+        sprint ran, the merge completes or the track fails naming the red sprints."""
+        name = row["name"]
+        batch = dict((row.get("data") or {}).get("studio_batch") or {})
+        plan = list(batch.get("sprints") or [])
+        done = {r["sprint"] for r in batch.get("results") or []}
+        todo = [x for x in plan if x["sprint"] not in done]
+        if not todo:
+            self._batch_end(P, row, batch)
+            return
+        sc = self.c.studio_calls
+        ok, why = self.tm.resources.admit_studio(P, name, "merge Studio batch",
+                                                 minutes=self._batch_minutes(P, len(plan)))
+        if not ok:
+            self._wait(P, row, f"Studio: {why}")
+            return
+        if not batch.get("leased"):
+            batch.update(leased=True, lease_started=self.clock())
+            self._batch_set(P, row, batch, merge_wait=None)
+            self.store.event(P.id, "", "track_studio_batch_started", detail={
+                "track": name, "sprints": [x["sprint"] for x in todo]})
+        item = todo[0]
+        sid = item["sprint"]
+        t = self.store.task(P.id, sid)
+        if t is None:
+            batch["results"] = list(batch.get("results") or []) + [
+                {"sprint": sid, "result": "SKIPPED",
+                 "why": "not a coordinator task"}]
+            self._batch_set(P, row, batch)
+            self._batch_step(P, self.store.track(P.id, name))
+            return
+        cur = dict(batch.get("current") or {})
+        d = sc._d(P, sid)
+        outcome = None
+        if cur.get("sprint") != sid:
+            if d.get("run") or d.get("pending"):
+                self._wait(P, row, f"merge Studio batch: {sid} already has a scripted run")
+                return
+            cur = {"sprint": sid, "since": self.clock(),
+                   "before": (d.get("last") or {}).get("run_id") or ""}
+            d["pending"] = {"req": dict(item["req"]), "session_id": "", "track": name,
+                            "ts": time.time()}
+            sc._save(P, sid, d)
+            batch["current"] = cur
+            self._batch_set(P, row, batch)
+            self.store.event(P.id, sid, "track_studio_batch_run", detail={
+                "track": name, "sprint": sid, "request": item["req"]})
+            sc._start(P, self.store.task(P.id, sid) or t, d["pending"])
+            d = sc._d(P, sid)
+            if d.get("run"):
+                cur["run_id"] = d["run"].get("run_id")
+                batch["current"] = cur
+                self._batch_set(P, row, batch, merge_wait=None)
+                return
+            last = d.get("last") or {}
+            if d.get("pending") or not last or last.get("run_id") == cur["before"]:
+                why = (self.store.task(P.id, sid) or {}).get("next_action") or "Studio"
+                self._wait(P, row, f"merge Studio batch: {sid} waits to start ({why})")
+                return
+            outcome = last                                # it could not start (ERROR)
+        elif d.get("run") or d.get("pending"):
+            outcome = sc.tick(P, self.store.task(P.id, sid) or t, None)
+            if outcome is None:
+                run = sc._d(P, sid).get("run") or {}
+                if run.get("run_id") and cur.get("run_id") != run["run_id"]:
+                    cur["run_id"] = run["run_id"]
+                    batch["current"] = cur
+                    self._batch_set(P, row, batch)
+                self._batch_over_lease(P, row, batch)
+                return
+        else:
+            last = d.get("last") or {}
+            if last.get("run_id") and last.get("run_id") != cur.get("before"):
+                outcome = last                            # consumed by another tick
+            else:
+                batch["current"] = None                   # lost: start it again
+                self._batch_set(P, row, batch)
+                return
+        self._batch_record(P, self.store.track(P.id, name) or row, item, outcome or {})
+
+    def _batch_over_lease(self, P, row: dict, batch: dict) -> None:
+        """Never interrupted mid-run; an overrun of the lease bound is noted once."""
+        if self.tm.resources.lease_over(P) and not batch.get("over_noted"):
+            batch["over_noted"] = True
+            self._batch_set(P, row, batch)
+            self.store.event(P.id, "", "track_gate_over_lease", detail={
+                "track": row["name"], "batch": True,
+                "minutes": (self.tm.resources.lease(P) or {}).get("minutes")})
+
+    def _batch_record(self, P, row: dict, item: dict, outcome: dict) -> None:
+        name, sid = row["name"], item["sprint"]
+        batch = dict((row.get("data") or {}).get("studio_batch") or {})
+        res = str(outcome.get("result") or "ERROR").upper()
+        if res not in ("PASS", "FAIL"):
+            # a tooling fault (no verdict): retry this sprint later, the ones that passed
+            # stay passed; after GATE_TOOLING_RETRIES the track fails as a tooling fault
+            batch.update(current=None, leased=False)
+            self._batch_set(P, row, batch)
+            self.tm.resources.release_studio(P, name, "Studio batch tooling fault")
+            self._tooling_fault(P, self.store.track(P.id, name) or row,
+                                f"merge Studio batch: {sid} tooling error: "
+                                f"{str(outcome.get('error') or 'no verdict')[:300]}",
+                                stage="studio_batch")
+            return
+        failing = [f"row {f.get('row')} {f.get('verdict')}" for f in outcome.get("failures") or []]
+        if res == "FAIL" and not failing:
+            failing = ["the host half (tools/gate.ps1) did not pass"
+                       if outcome.get("stage") == "host" else
+                       (outcome.get("finish_line") or "gate FAIL")]
+        rec = {"sprint": sid, "result": res, "run_id": outcome.get("run_id"),
+               "head": outcome.get("head"), "counts": outcome.get("counts") or {},
+               "failures": failing[:20], "stage": outcome.get("stage"),
+               "finish_line": outcome.get("finish_line") or "", "commit": outcome.get("commit")}
+        batch["results"] = list(batch.get("results") or []) + [rec]
+        batch["current"] = None
+        self._batch_set(P, row, batch)
+        self.store.event(P.id, sid, "track_studio_batch_result", detail={
+            "track": name, **{k: v for k, v in rec.items() if k != "counts"}})
+        self._batch_step(P, self.store.track(P.id, name))
+
+    def _batch_end(self, P, row: dict, batch: dict) -> None:
+        name = row["name"]
+        results = list(batch.get("results") or [])
+        red = [r for r in results if r.get("result") not in ("PASS", "SKIPPED")]
+        self.tm.resources.release_studio(P, name, "Studio batch " + ("red" if red else "green"))
+        batch.update(leased=False, current=None, finished=self.clock())
+        gate = dict((row.get("data") or {}).get("gate") or {})
+        gate.update(studio=True, studio_batch=[{k: r.get(k) for k in
+                                                ("sprint", "result", "run_id", "failures")}
+                                               for r in results])
+        if red:
+            findings = [f"{r['sprint']} {r['result']}: " + "; ".join(r.get("failures") or [])
+                        for r in red]
+            gate.update(result=FAIL, findings=findings[:20])
+            self._set(P, row, studio_batch=batch, gate=gate, merge_stage=None)
+            self.store.event(P.id, "", "track_studio_batch_red", detail={
+                "track": name, "sprints": [r["sprint"] for r in red], "findings": findings[:10]})
+            self.tm.fail(P, self.store.track(P.id, name),
+                         "merge Studio batch red: " + " | ".join(findings[:4]))
+            return
+        gate.update(result=PASS)
+        self._set(P, row, studio_batch=batch, gate=gate, merge_stage="done")
+        self.store.event(P.id, "", "track_studio_batch_green", detail={
+            "track": name, "sprints": [r["sprint"] for r in results]})
+        self._finish(P, self.store.track(P.id, name))
+
     # ------------------------------------------------------------------ background / retries
 
     def _bg_verify(self, P, row: dict, spec, head: str, base: str) -> tuple:
@@ -483,6 +716,9 @@ class MergeManager:
                 if r["state"] == "merging" and d.get("merge_bg") and \
                         d.get("merge_stage") == "gate":
                     return r["name"]
+                if r["state"] == "merging" and d.get("merge_stage") == "studio_batch" and \
+                        (d.get("studio_batch") or {}).get("leased"):
+                    return r["name"]          # its scripted Studio runs need HEAD to stay put
         except Exception:                                         # noqa: BLE001
             return ""
         return ""
@@ -496,7 +732,8 @@ class MergeManager:
         return bool(r and r["state"] == "merging"
                     and (r.get("data") or {}).get("merge_stage") == "gate")
 
-    def _tooling_fault(self, P, row: dict, why: str, run: Optional[dict] = None) -> None:
+    def _tooling_fault(self, P, row: dict, why: str, run: Optional[dict] = None,
+                       stage: str = "gate") -> None:
         """D: a merge gate that failed on tooling, not on the code: clear a stale runner
         lock and retry the gate (GATE_TOOLING_RETRIES times, backoff doubling) before
         the track fails."""
@@ -509,7 +746,7 @@ class MergeManager:
             return
         cleared = self._clear_runner_lock(P, run)
         delay = GATE_RETRY_BACKOFF_S * (2 ** n)
-        self._set(P, row, merge_stage="gate", merge_bg=None, gate_retries=n + 1,
+        self._set(P, row, merge_stage=stage, merge_bg=None, gate_retries=n + 1,
                   gate_retry_at=self.clock() + delay, gate_last_fault=why[:400])
         self.store.event(P.id, "", "track_gate_retry", detail={
             "track": row["name"], "retry": n + 1, "of": GATE_TOOLING_RETRIES,

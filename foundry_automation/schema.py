@@ -255,6 +255,11 @@ AUTOMATION_DEFAULTS: dict = {
     "max_agents": 1,
     "studio_idle_minutes": 10,
     "studio_track_max_minutes": 45,
+    # 2026-10-28: a track's merge runs the scripted Studio gate ([studio_calls]) for each of
+    # its covered sprints, back to back under one Studio lease (0 = studio_track_max_minutes
+    # per sprint in the batch)
+    "merge_studio_batch": True,
+    "merge_studio_batch_max_minutes": 0,
     "track_append_safe": ["docs/progress/STATE.md", "docs/progress/state/**",
                           "docs/progress/STATE_ARCHIVE*.md", "docs/MASTER_ORDER.md",
                           "docs/design/ASSET_LEDGER.md", "docs/memory/**"],
@@ -772,6 +777,15 @@ _AUTO_DESC = {
                            "has not used it for this long.",
     "studio_track_max_minutes": "Longest Studio lease of a track's merge gate (one run; never "
                                 "interrupted mid-run).",
+    "merge_studio_batch": "When a track merges, run the scripted Studio gate ([studio_calls]) "
+                          "in the main checkout for each of its sprints that [studio_calls] "
+                          "covers, in order, back to back under one Studio lease, after the "
+                          "project's checks pass (assets are built first, Studio-tested once "
+                          "at the end). A failing sprint fails the merge with that sprint and "
+                          "its rows named; a tooling error retries. Off: today's merge gate.",
+    "merge_studio_batch_max_minutes": "Studio lease bound of a track's merge Studio batch "
+                                      "(0 = studio_track_max_minutes for each sprint in the "
+                                      "batch). Never interrupted mid-run; an overrun is noted.",
     "track_append_safe": "Shared files two sprints may both change without being serial "
                          "(append-only ledgers the rebase merges row by row).",
     "self_heal": "Self-repair sweep (every minute): ends dead sessions, cancels stuck Lead "
