@@ -2211,6 +2211,97 @@ class Gate:
         memo[prev] = res
         return res
 
+    def _own_files(self, memo: dict) -> set:
+        """Files this sprint's own commits ("<ID>: ...") changed on HEAD's history."""
+        if "__own__" in memo:
+            return memo["__own__"]
+        out: set = set()
+        rc, txt = self.run_cmd(["git", "log", "-n", "400", "--format=@@C@@%s", "--name-only",
+                                self.head or "HEAD"], self.repo, 60)
+        if rc == 0:
+            cur = False
+            for ln in (txt or "").splitlines():
+                if ln.startswith("@@C@@"):
+                    cur = ln[5:].startswith(f"{self.sprint}:")
+                elif cur and ln.strip():
+                    out.add(ln.strip().replace("\\", "/"))
+        memo["__own__"] = out
+        return out
+
+    def preexisting_plan(self, ids: list, plan_file: str) -> dict:
+        """2026-10-29 (assets-local merge, HK-CLEAN1): legacy regression rows (S39 'no active
+        profile', S48, UI_02a..UI_V1) were red on master and failed every sprint whose
+        selection held them. A row is PRE-EXISTING (not run, never a failure of this sprint)
+        when the newest scripted run of it on HEAD's history - any sprint's
+        .plan/tmp/gate/*/<head12>.calls.json - found it red, nothing changed since maps to
+        it directly (its tests/<file>.lua, `files`, mount leaf or module name), the harness
+        is unchanged since (as for carry), and no commit of this sprint ever touched a file
+        that maps to it. Returns {row: {head, sprint, run_id, fail}}."""
+        out: dict = {}
+        head = self.head
+        if not head or not ids:
+            return out
+        root = os.path.dirname(self.gate_dir)
+        found = []
+        for d in sorted(os.listdir(root)) if os.path.isdir(root) else []:
+            sub = os.path.join(root, d)
+            # this sprint's own earlier red run is no baseline: it may be the sprint's doing
+            if not os.path.isdir(sub) or d == self.sprint:
+                continue
+            for name in os.listdir(sub):
+                if not name.endswith(".calls.json"):
+                    continue
+                v = _read_json_file(os.path.join(sub, name))
+                if isinstance(v, dict) and v.get("head") and v.get("result") != "ERROR" \
+                        and isinstance(v.get("rows"), dict):
+                    found.append(v)
+        found.sort(key=lambda v: float(v.get("finished") or 0), reverse=True)
+        index = self.index or {}
+        reader = suite_reader(self.repo, head)
+        memo: dict = {}
+        own = self._own_files(memo)
+        # this sprint changed the harness itself (GateRunner, mounts, tests/lib): nothing it
+        # runs can be called pre-existing
+        if any(f in self.CARRY_INVALIDATORS[1:] or f.startswith("tests/lib/") for f in own):
+            return out
+        harness_files = set(self.CARRY_INVALIDATORS)
+        own_hits: set = set()
+        for f in own:
+            if f.startswith(("src/", "tests/")) and f not in harness_files:
+                own_hits |= _direct_hits(f, index, reader)
+        entries = {e.get("id"): e for e in index.get("entries") or [] if isinstance(e, dict)}
+        decided: set = set()
+        for v in found:
+            todo = [x for x in ids if x not in decided and isinstance(v["rows"].get(x), dict)
+                    and v["rows"][x].get("fresh")
+                    and v["rows"][x].get("verdict") in ("PASS", "FAIL", "UNKNOWN")]
+            if not todo:
+                continue
+            changed = self._changed_since(v, head, memo)
+            if changed is None:
+                continue                          # not on HEAD's history: says nothing here
+            hit: set = set()
+            for f in changed:
+                if f.startswith(("src/", "tests/")) and f not in harness_files:
+                    hit |= _direct_hits(f, index, reader)
+            old_entries = None
+            if "tests/RegressionIndex.lua" in changed:
+                # other sprints pin their own rows all the time: only THIS row's entry counts
+                old_entries = {e.get("id"): e for e in
+                               (load_index(self.repo, str(v["head"])) or {}).get("entries") or []
+                               if isinstance(e, dict)}
+            for x in todo:
+                decided.add(x)                    # the newest run of a row decides it
+                r = v["rows"][x]
+                if r.get("verdict") == "PASS" or x in hit or x in own_hits:
+                    continue
+                if old_entries is not None and old_entries.get(x) != entries.get(x):
+                    continue
+                out[x] = {"head": str(v["head"]), "sprint": v.get("sprint") or "",
+                          "run_id": v.get("run_id") or "",
+                          "fail": str((r.get("fail_lines") or [r.get("detail") or ""])[0])[:300]}
+        return out
+
     def carry_plan(self, selection: str, plan_file: str, suffixes: Optional[tuple] = None) -> dict:
         """B2 carry, generalized (2026-10-27): `suffixes` picks which stored results may
         carry (calls mode adds its own <head12>.calls.json runs). A suite carries only
@@ -3492,7 +3583,18 @@ def _run_calls(a, sprint, run_id, out, official, community, run_cmd) -> int:
             # only regression rows carry: the sprint's own -Suites always run
             carry = g.carry_plan(",".join(cands), plan_rel(sprint),
                                  suffixes=Gate.CALLS_STORE_SUFFIXES).get("suite_from") or {}
-    exec_rows = [e for e in rows if not is_manual(e) and e["id"] not in carry]
+    pre_existing: dict = {}
+    if a.rerun != "all":
+        rest = [e["id"] for e in rows if e["id"] not in sel["suites"] and not is_manual(e)
+                and e["id"] not in carry]
+        if rest:
+            try:
+                pre_existing = g.preexisting_plan(rest, plan_rel(sprint))
+            except Exception as ex:                            # noqa: BLE001
+                g.raw("pre-existing rows", "", f"skipped: {type(ex).__name__}: {ex}")
+    exec_rows = [e for e in rows if not is_manual(e) and e["id"] not in carry
+                 and e["id"] not in pre_existing]
+    ctx_pre = pre_existing
     budget = float(a.budget_min or (RUN_BUDGET_FULL_MIN if str(a.regression).strip() == "full"
                                     else RUN_BUDGET_MIN))
     g.group_budget_s = max(0.05, float(a.group_min or GROUP_BUDGET_MIN)) * 60
@@ -3513,7 +3615,8 @@ def _run_calls(a, sprint, run_id, out, official, community, run_cmd) -> int:
                f".plan/tmp/gate/{sprint}/{head[:12]}.calls.json)")
         g.emit(f"SELECTION suites=[{','.join(sel['suites'])}] regression={a.regression} "
                f"tier={a.tier} rerun={a.rerun}: {len(rows)} row(s), {total - 2} step CALL(s); "
-               f"run {len(exec_rows)}, carried {len(carry)}, manual {len(manual)}")
+               f"run {len(exec_rows)}, carried {len(carry)}, manual {len(manual)}, "
+               f"pre-existing {len(pre_existing)}")
         for e in manual:
             g.emit(f"NOTE MANUAL {e['id']} (players={e.get('players')}) CALL "
                    f"{_span(_row_calls(disp, e['id']))}: {MANUAL_WHY}")
@@ -3582,6 +3685,14 @@ def _run_calls(a, sprint, run_id, out, official, community, run_cmd) -> int:
             g.emit(f"PASS: GATE suite {sid} - CARRIED from {tag}")
             g.add(dict(c, detail=f"CARRIED from {tag} (no file it covers changed): "
                                  + str(c.get("detail") or "")))
+        for sid, src in pre_existing.items():
+            why = (f"PRE-EXISTING: red at {src['head'][:12]} ({src['sprint']} run "
+                   f"{src['run_id'] or '-'}) and nothing that maps to it changed since; not "
+                   f"run, not this sprint's failure ({one_line(src['fail'], 200)})")
+            for k, n in enumerate(_row_calls(disp, sid), 1):
+                g.emit(f"CALL {n} PRE-EXISTING ({sid} step {k})")
+            g.emit(f"SKIP: GATE suite {sid} - {why}")
+            g.add(check(f"regression.{sid}", "SKIP", why, required=False))
         for e in manual:
             for k, n in enumerate(_row_calls(disp, e["id"]), 1):
                 step = (e.get("steps") or ["?"])[k - 1]
@@ -3613,6 +3724,7 @@ def _run_calls(a, sprint, run_id, out, official, community, run_cmd) -> int:
             if g._playing:
                 g.stop_playtest()
         g.close()
+    ctx["pre_existing"] = ctx_pre
     try:
         v = finish_calls(g, a, error, tooling, ctx, rows, disp, carry, manual, sel, lines_rel,
                          time.monotonic() - start)
@@ -3654,6 +3766,8 @@ def finish_calls(g: "Gate", a, error, tooling, ctx, rows, disp, carry, manual, s
         chk = next((c for c in reversed(g.checks) if c.get("id") == f"regression.{sid}"), None)
         if is_manual(e):
             verdict, fresh = "MANUAL", False
+        elif sid in (ctx.get("pre_existing") or {}):
+            verdict, fresh = "PRE_EXISTING", False
         elif sid in carry:
             verdict, fresh = "PASS", False
         elif sid in tally:
@@ -3676,6 +3790,8 @@ def finish_calls(g: "Gate", a, error, tooling, ctx, rows, disp, carry, manual, s
               "failed": sum(1 for r in out_rows.values() if r["verdict"] == "FAIL"),
               "unknown": sum(1 for r in out_rows.values() if r["verdict"] == "UNKNOWN"),
               "manual": len(manual)}
+    if ctx.get("pre_existing"):
+        counts["pre_existing"] = len(ctx["pre_existing"])
     lines_path = os.path.join(g.repo, *lines_rel.split("/"))
     try:
         g.lines.f.flush()

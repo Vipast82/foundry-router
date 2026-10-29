@@ -528,7 +528,8 @@ def test_suite_fail_lines_that_only_say_the_session_shape_is_missing_are_unknown
     off, comm = rules(UI, extra_comm=[{"tool": "execute_luau", "match": "GetAsync", "text": real}])
     set_rules(off, comm)
     host_half(repo, "CR")
-    rc, out = run_calls(repo, "CR", "--regression", "subset:ui")
+    # --rerun all: CG's red S28 at this HEAD would make it PRE-EXISTING for CR (v0.157.40)
+    rc, out = run_calls(repo, "CR", "--regression", "subset:ui", "--rerun", "all")
     v = json.load(open(gate_file(repo, "CR", "latest/calls.json")))
     assert v["rows"]["S28"]["verdict"] == "FAIL"
 
@@ -593,3 +594,77 @@ def test_a_step_whose_own_luau_raises_is_a_fail_not_a_tool_unknown(fakes, repo):
     assert chk["result"] == "FAIL" and "MatchService:437" in chk["detail"]
     assert starts(calls) == 3                                                    # no retry
     assert re.search(r"^FAIL: GATE call 5 raised - ERROR: ServerScriptService", lines_of(repo, "LR"), re.M)
+
+
+def _pre_gate(tmp_path, monkeypatch, own=(), changed=(), old_entry=None):
+    """A Gate with two stored scripted runs: B1 (older, S39 PASS) and C1 (newer, S39/S48 red)."""
+    import json as _j
+    from foundry_coordinator.projects.animaluprising import studio_gate as SG
+    repo = tmp_path / "game"
+    for sprint, head, fin, rows in (
+            ("B1", "a" * 40, 100.0, {"S39": "PASS", "S48": "PASS", "UI_1": "FAIL"}),
+            ("C1", "b" * 40, 200.0, {"S39": "FAIL", "S48": "UNKNOWN"})):
+        d = repo / ".plan" / "tmp" / "gate" / sprint
+        d.mkdir(parents=True)
+        (d / f"{head[:12]}.calls.json").write_text(_j.dumps({
+            "head": head, "sprint": sprint, "run_id": f"{sprint}-r", "finished": fin,
+            "result": "FAIL", "rows": {k: {"verdict": v, "fresh": True,
+                                           "fail_lines": [f"FAIL: {k} broke"]}
+                                       for k, v in rows.items()}}))
+    g = SG.Gate.__new__(SG.Gate)
+    g.repo, g.sprint, g.head = str(repo), "X1", "c" * 40
+    g.gate_dir = str(repo / ".plan" / "tmp" / "gate" / "X1")
+    entries = [{"id": "S39", "file": "S39_check"}, {"id": "S48", "file": "S48_check"},
+               {"id": "UI_1", "file": "UI_1_check"}]
+    g.index = {"entries": entries}
+    monkeypatch.setattr(SG, "suite_reader", lambda repo, rev: (lambda f: ""))
+    monkeypatch.setattr(SG, "load_index", lambda repo, rev: {"entries": [
+        old_entry or entries[0]] + entries[1:]})
+    g._changed_since = lambda v, head, memo: list(changed)
+    g._own_files = lambda memo: set(own)
+    return g
+
+
+def test_rows_red_on_master_and_untouched_are_pre_existing(tmp_path, monkeypatch):
+    """2026-10-29: legacy rows red on master failed every sprint whose selection held them.
+    The newest run on HEAD's history decides; a red row nothing touched since is skipped."""
+    g = _pre_gate(tmp_path, monkeypatch, changed=["docs/x.md", "tests/RegressionIndex.lua"])
+    out = g.preexisting_plan(["S39", "S48", "UI_1"], "docs/progress/X1_PLAN.md")
+    assert sorted(out) == ["S39", "S48", "UI_1"]
+    assert out["S39"]["sprint"] == "C1" and out["S39"]["fail"] == "FAIL: S39 broke"
+
+
+def test_a_touched_or_own_or_changed_entry_row_is_never_pre_existing(tmp_path, monkeypatch):
+    g = _pre_gate(tmp_path, monkeypatch, changed=["tests/S39_check.lua"])
+    assert "S39" not in g.preexisting_plan(["S39", "S48"], "p")          # changed since
+    g = _pre_gate(tmp_path / "b", monkeypatch, own=["tests/S48_check.lua"])
+    assert "S48" not in g.preexisting_plan(["S39", "S48"], "p")          # the sprint touched it
+    g = _pre_gate(tmp_path / "c", monkeypatch, own=["tests/GateRunner.lua"])
+    assert g.preexisting_plan(["S39", "S48"], "p") == {}                  # it changed the harness
+    g = _pre_gate(tmp_path / "d", monkeypatch, changed=["tests/RegressionIndex.lua"],
+                  old_entry={"id": "S39", "file": "S39_check", "expectPass": 3})
+    out = g.preexisting_plan(["S39", "S48"], "p")
+    assert "S39" not in out and "S48" in out                              # its own entry moved
+
+
+def test_another_sprints_red_row_is_pre_existing_and_never_fails_the_run(fakes, repo):
+    """2026-10-29 end to end: sprint CG saw S28 red; sprint CR at the same code skips it as
+    PRE-EXISTING (a SKIP line, not run, not a failure) and its finish can pass."""
+    set_rules, calls = fakes
+    gap = json.dumps({"returnValue": "FAIL: c1 - hp 0 want 5", "success": True, "output": []})
+    off, comm = rules(UI, extra_comm=[{"tool": "execute_luau", "match": "GetAsync", "text": gap}])
+    set_rules(off, comm)
+    host_half(repo, "CG")
+    run_calls(repo, "CG", "--regression", "subset:ui")
+    v = json.load(open(gate_file(repo, "CG", "latest/calls.json")))
+    assert v["rows"]["S28"]["verdict"] == "FAIL"
+    set_rules(*rules([x for x in UI if x != "S28"]))          # Studio runs the rest only
+    host_half(repo, "CR")
+    rc, out = run_calls(repo, "CR", "--regression", "subset:ui")
+    assert rc == 0, out
+    v = json.load(open(gate_file(repo, "CR", "latest/calls.json")))
+    assert v["rows"]["S28"]["verdict"] == "PRE_EXISTING" and v["counts"]["pre_existing"] >= 1
+    assert "S28" not in [f["row"] for f in v["failures"]]
+    text = lines_of(repo, "CR")
+    assert "SKIP: GATE suite S28 - PRE-EXISTING: red at" in text and "(CG run" in text
+    assert "FAIL: GATE suite S28" not in text

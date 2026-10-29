@@ -2,6 +2,19 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.157.40 — rows already red on master never fail a sprint
+
+2026-10-29: legacy regression rows (S39 'no active profile', S48, S00/S03/S06/S14, UI_0xa,
+UI_V1) were red on master and failed every sprint whose selection held them: the assets-local
+merge batch, HK-CLEAN1 (three times), and others.
+
+- **Scripted Studio runs** skip a regression row as PRE-EXISTING (a `SKIP: GATE suite` line, a
+  non-required check, verdict `PRE_EXISTING`, never a failure) when the newest scripted run of
+  it by ANOTHER sprint on HEAD's history found it red, nothing that maps to it directly changed
+  since, its own RegressionIndex entry is unchanged, and none of this sprint's commits touched a
+  file that maps to it or the harness. A sprint's own suites always run; `--rerun all` runs
+  everything.
+
 ## v0.157.39 — a check's own playtest capture counts as the plan's capture
 
 2026-10-28/29: AS-P5's A10 leg took its proxy-telegraph frame in the scripted playtest and
