@@ -6648,7 +6648,8 @@ class Coordinator:
                 raw = row.get("data")
                 d = (json.loads(raw) if isinstance(raw, str) and raw else raw) or {}
                 since = float(d.get("merge_wait_since") or row.get("updated_ts") or 0)
-                if d.get("merge_stage") in (None, "", "wait") and since and since < cutoff:
+                if d.get("merge_stage") in (None, "", "wait", "studio_batch") and since and \
+                        since < cutoff:
                     return f"track {row['name']}'s merge"
         except Exception:                                         # noqa: BLE001
             pass

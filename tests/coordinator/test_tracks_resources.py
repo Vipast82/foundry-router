@@ -163,3 +163,18 @@ def test_track_capacity_resources_and_the_main_sprint_journal(tmp_path):
     rm.on_locks(P, t, ["workspace:x", "studio:ws", "rojo:34872", "writer:0"], "acquire")
     assert [r["resource"] for r in c.store.journal_rows(None, "game")][-2:] == ["studio:ws",
                                                                               "rojo:34872"]
+
+
+def test_a_main_sprint_held_by_the_coordinator_does_not_claim_studio():
+    """2026-10-29 replay: the assets-local merge's Studio batch waited all night on "main X
+    is READY (about to use Studio)" for sprints the landing drain / one-sprint rule held."""
+    from types import SimpleNamespace
+    from foundry_coordinator.tracks.resources import ResourceManager as Resources
+    r = Resources.__new__(Resources)
+    held = {"task_id": "UI-SKIN2", "state": "READY", "session_id": None,
+            "next_action": "waiting for prep entry pq-1 to land first (landing drain)"}
+    free = {"task_id": "GF-FIX1", "state": "READY", "session_id": None, "next_action": ""}
+    r.main_tasks = lambda P: [held]
+    assert r.main_pending(SimpleNamespace()) == ""
+    r.main_tasks = lambda P: [held, free]
+    assert "GF-FIX1" in r.main_pending(SimpleNamespace())

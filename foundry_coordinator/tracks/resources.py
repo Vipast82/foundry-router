@@ -167,6 +167,12 @@ class ResourceManager:
             if t["state"] in MAIN_STUDIO_STATES and t.get("session_id"):
                 return f"main {t['task_id']} is {t['state']} with a live session"
             if t["state"] in MAIN_PENDING_STATES:
+                # 2026-10-29: a main sprint the coordinator itself is holding back (landing
+                # drain, one-started-sprint rule) is not about to use Studio; counting it
+                # starved the assets-local merge's Studio batch all night
+                held = str(t.get("next_action") or "")
+                if "(landing drain)" in held or "one started main-checkout sprint" in held:
+                    continue
                 return f"main {t['task_id']} is {t['state']} (about to use Studio)"
         return ""
 

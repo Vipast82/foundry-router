@@ -2,6 +2,15 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.157.28 — a track's Studio batch is not starved by held main sprints
+
+2026-10-29 02:05-03:10: the assets-local merge reached its Studio batch and waited on "main X is
+READY (about to use Studio)" for sprints the coordinator itself was holding (landing drain,
+one-started-sprint rule).
+
+- **Studio admission** skips a main sprint the coordinator is holding back.
+- **The landing drain** also covers a track waiting in its `studio_batch` stage.
+
 ## v0.157.27 — no more history rewrites; branch landings survive one
 
 2026-10-28/29: commit rewording rewrote the main checkout's history four times in a night (22:20,
