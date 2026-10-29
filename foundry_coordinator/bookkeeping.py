@@ -80,8 +80,23 @@ def other_sprint(subject: str, tid: str) -> bool:
     that sprint's work. 2026-10-28 AS-P5: master moved under a long sprint (UI-SKIN2
     captures, coordinator commits for AS-V0x / AS-D13 docs); its scope check blamed it for
     them, it asked for scope grants on other sprints' files, and each grant restarted it."""
-    m = _PREFIX.match(str(subject or ""))
-    return bool(m) and any(ch.isdigit() for ch in m.group(1)) and m.group(1) != tid
+    owner = sprint_owner(subject)
+    return bool(owner) and owner != tid
+
+
+def sprint_owner(subject: str) -> str:
+    """The sprint a commit subject belongs to: its id prefix, or the INNER one of a double
+    prefix ("UI-SKIN2: AS-P5: ..." is AS-P5's: 2026-10-29 UI-SKIN2's verification reworded
+    AS-P5's commits before v0.157.19, and those subjects stay in history). '' = none."""
+    s = str(subject or "")
+    owner = ""
+    for _ in range(3):
+        m = _PREFIX.match(s)
+        if not m or not any(ch.isdigit() for ch in m.group(1)):
+            break
+        owner = m.group(1)
+        s = s[m.end():].lstrip()
+    return owner
 
 
 def agent_files(P, t: dict, base: str, head: str) -> Optional[set]:

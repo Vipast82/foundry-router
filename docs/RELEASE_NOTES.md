@@ -2,6 +2,15 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.157.20 — a double-prefixed commit belongs to its inner sprint
+
+2026-10-29 01:05: the commits reworded to "UI-SKIN2: AS-P5: ..." before v0.157.19 stay in history;
+UI-SKIN2's scope check counted them as its own and it asked 10 scope questions about AS-D13,
+AS-V0x and AS-P5 files, while AS-P5 lost its own re-shot capture.
+
+- **`bookkeeping.sprint_owner`:** the inner id of a double prefix owns the commit; scope and
+  rewording use it.
+
 ## v0.157.19 — a sprint's verification never rewords another sprint's commits
 
 2026-10-29 00:3x-00:5x: UI-SKIN2 and AS-P5 shared the main checkout; UI-SKIN2's verification

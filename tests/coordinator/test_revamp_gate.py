@@ -885,3 +885,14 @@ def test_scope_never_blames_a_sprint_for_another_sprints_commits():
                                    ("c3", ["docs/progress/AS-V01_PLAN.md"])])
     P = SimpleNamespace(ws=ws)
     assert agent_files(P, {"task_id": "AS-P5", "data": {}}, "base", "head") == {"src/x.lua"}
+
+
+def test_a_double_prefixed_commit_belongs_to_its_inner_sprint():
+    """2026-10-29: commits reworded to "UI-SKIN2: AS-P5: ..." before v0.157.19 stay in
+    history; they are AS-P5's (UI-SKIN2 then asked for scope on AS-P5's files)."""
+    from foundry_coordinator.bookkeeping import other_sprint, sprint_owner
+    s = "UI-SKIN2: AS-P5: R-B frame re-shot at the reviewed HEAD"
+    assert sprint_owner(s) == "AS-P5"
+    assert other_sprint(s, "UI-SKIN2") and not other_sprint(s, "AS-P5")
+    assert sprint_owner("UI-SKIN2: hero captures") == "UI-SKIN2"
+    assert sprint_owner("prep: rules") == ""
