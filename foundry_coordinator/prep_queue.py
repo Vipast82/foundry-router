@@ -462,9 +462,13 @@ def safe_point(c, P, cfg: Optional[dict] = None) -> tuple[bool, str]:
                        "WHERE project_id=? AND ended_ts IS NULL AND created_ts>=?",
                        (pid, horizon)):
         if s["task_id"] in main_ids:
+            t = next(x for x in tasks if x["task_id"] == s["task_id"])
+            # 2026-10-29: a COMPLETE / CANCELLED sprint's leftover session (GF-FX5's helper,
+            # never marked ended after its track merged) held every landing for 45 minutes
+            if t.get("state") in ("COMPLETE", "CANCELLED"):
+                continue
             # a paused task whose session finished its turn is not working in the
             # checkout (2026-10-28: paused GF-GATE1 stalled the queue this way)
-            t = next(x for x in tasks if x["task_id"] == s["task_id"])
             if _paused_idle(c, P, t):
                 continue
             return False, f"session {s['session_id']} ({s['role'] or 'session'}) of " \

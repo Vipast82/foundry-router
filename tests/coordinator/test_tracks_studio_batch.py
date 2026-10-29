@@ -274,3 +274,14 @@ def test_batch_regression_is_the_rows_the_merged_files_touch(env, tmp_path, monk
     assert c.tracks.merger._batch_regression(P, ["art/b1.txt"]) == ""
     monkeypatch.setattr(SC, "settings", lambda P: {**real(P), "runner_module": "no_such_mod_x"})
     assert c.tracks.merger._batch_regression(P, ["art/b1.txt"]) == "full"
+
+
+def test_studio_owned_merge_checks_wait_for_the_batch():
+    """2026-10-29 GF-SEC1 (tier A on a backend track): the merge gate failed on the gate
+    verdict / boot / evidence log that only the merge's Studio batch produces."""
+    from foundry_coordinator.tracks.merge import _studio_owned
+    for c in ("au.done_check.GATE", "au.done_check.BOOT", "au.done_check.EVIDENCE",
+              "au.gate_bound_to_head"):
+        assert _studio_owned(c), c
+    for c in ("au.done_check.SCOPE", "au.lune", "au.done_check.CLEAN", "coordinator.scope"):
+        assert not _studio_owned(c), c

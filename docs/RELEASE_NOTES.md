@@ -2,6 +2,17 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.157.48 — a finished sprint's session never blocks a landing; Studio checks wait for the batch
+
+2026-10-29 11:35-12:20: every main sprint waited behind prep entry pq-644516b79d, whose safe
+point was blocked by GF-FX5's helper session (GF-FX5 COMPLETE, its track merged, the session never
+marked ended). Track gpt-3 (GF-SEC1, tier A on a backend track) failed its merge gate on the gate
+verdict, boot lines and evidence log that only the merge's Studio batch produces.
+
+- **Prep safe point:** sessions of COMPLETE / CANCELLED sprints are ignored.
+- **Track merge gate:** with a Studio batch planned, the project's Studio-owned checks (gate
+  verdict, boot, evidence log, gate bound to head) are owed to the batch, not a red gate.
+
 ## v0.157.47 — the scripted Studio runner takes the frame at CAPTURE_READY
 
 2026-10-29 11:59: AS-P5's suite staged its telegraph frame and printed `CAPTURE_READY <path>`,

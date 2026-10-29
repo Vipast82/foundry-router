@@ -197,6 +197,9 @@ def test_safe_point_detection(game, tmp_path):
     status["v"] = "idle"
     assert PQ.safe_point(c, P)[0]
     P.client.state = real_state
+    # 2026-10-29: a COMPLETE sprint's leftover (never-ended) session never blocks a landing
+    c.store.update_task("game", "T1", state=S.COMPLETE)
+    assert PQ.safe_point(c, P)[0]
     c.store.update_task("game", "T1", state=S.BLOCKED)
     c.store.x("UPDATE sessions SET ended_ts=? WHERE session_id='ses-1'", (c.clock(),))
     # paused project

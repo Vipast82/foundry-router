@@ -112,6 +112,16 @@ def _repair_running(data: dict) -> Optional[dict]:
     return None
 
 
+_STUDIO_OWNED_SUFFIXES = (".GATE", ".BOOT", ".EVIDENCE")
+
+
+def _studio_owned(check: str) -> bool:
+    """Checks only a Studio run in the main checkout can satisfy (the project's gate
+    verdict, boot lines, evidence log, gate bound to the head)."""
+    c = str(check or "")
+    return c.endswith(_STUDIO_OWNED_SUFFIXES) or "gate_bound" in c
+
+
 class MergeManager:
     def __init__(self, tm):
         self.tm = tm
@@ -561,7 +571,14 @@ class MergeManager:
         row = self.store.track(P.id, row["name"]) or row
         vid = self.store.save_verification(P.id, f"track:{row['name']}", head, "merge", results)
         bad = [r for r in results if r.required and r.result in (FAIL, UNKNOWN)]
+        # 2026-10-29 GF-SEC1 (tier A on a backend track): the gate verdict, boot lines and
+        # evidence log only exist after the merge's Studio batch, which runs after this gate;
+        # with a batch planned those checks are owed to it, never a red merge gate
+        plan = self._batch_plan(P, row)
+        owed = [r for r in bad if plan and _studio_owned(r.check)]
+        bad = [r for r in bad if r not in owed]
         rec = {"head": head, "result": FAIL if bad else PASS, "verification_id": vid,
+               "owed_to_studio_batch": [r.check for r in owed],
                "checks": {r.check: r.result for r in results}, "studio": False,
                "findings": failed_findings([r for r in bad if r.result == FAIL])[:20]}
         if bad and all(r.result == UNKNOWN for r in bad):
@@ -577,7 +594,6 @@ class MergeManager:
                          "merge gate red: " + "; ".join(rec["findings"][:3] or [
                              f"{r.check} {r.result}" for r in bad[:3]]))
             return
-        plan = self._batch_plan(P, row)
         if plan:
             self._set(P, row, merge_stage="studio_batch", gate=rec, gate_retries=0,
                       gate_retry_at=None,
