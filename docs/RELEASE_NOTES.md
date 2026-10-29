@@ -2,6 +2,16 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.157.55 — a dependency named in the plan that is already queued is waited for
+
+2026-10-29 15:01: AS-R7's plan names AS-P5, which was approved and running, but its queue
+entry listed only AS-R4. When AS-R4 completed, AS-R7 BLOCKED ("needs AS-P5, which is not
+approved/complete") and opened a lead case.
+
+- **QUEUED check:** a task-source dependency already on the queue (not FAILED/CANCELLED) is
+  added to the sprint's queue deps (`deps_added_from_source` event) and the sprint waits. Only
+  a dependency missing from the queue still blocks.
+
 ## v0.157.54 — a cancelled sprint moved onto a track is reopened there
 
 2026-10-29 14:43: HK-STORE1 was approved (READY on main), cancelled to move it onto the

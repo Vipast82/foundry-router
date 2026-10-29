@@ -508,6 +508,19 @@ class Coordinator:
         undeclared = [d for d in spec.deps if d not in q["deps"] and d not in not_tasks
                       and not self._dep_satisfied(P, self.store.task(P.id, d) or {})
                       and not self._dep_done_outside(P, d)]
+        # 2026-10-29 AS-R7: its plan names AS-P5, which was on the queue (running) but not in
+        # AS-R7's queue deps; it BLOCKED and opened a lead case. A dep that is already
+        # queued becomes a queue dep and the sprint waits for it.
+        live = [d for d in undeclared if (self.store.task(P.id, d) or {}).get("state")
+                not in (None, S.FAILED, S.CANCELLED)]
+        if live:
+            self.set_deps(P.id, t["task_id"], list(q["deps"]) + live, "coordinator")
+            self.store.event(P.id, t["task_id"], "deps_added_from_source", detail={
+                "deps": live, "why": "named in the task source and already on the queue"})
+            undeclared = [d for d in undeclared if d not in live]
+            if not undeclared:
+                return self._note(P, t, "waiting for " + ", ".join(
+                    f"{d} ({self.store.task(P.id, d)['state']})" for d in live))
         if undeclared:
             return self._block(P, t, f"the task source says {t['task_id']} needs "
                                      f"{', '.join(undeclared)}, which is not approved/complete")
