@@ -2,6 +2,17 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.157.52 — the gate binding check accepts the sprint's own committed frame
+
+2026-10-29 14:09: once v0.157.51 ended the AS-P5 re-run loop, verification failed
+`au.gate_bound_to_head`: the gate ran at 856a204 and the only change since was the run's own
+frame `docs/evidence/AS-P5/*.png`, which that check (separate from the scripted-run freshness
+check) still counted as code.
+
+- **au.gate_bound_to_head:** PNG frames under `docs/evidence/<ID>/` are evidence, not code.
+  Another sprint's evidence or any code change still unbinds the gate. The check's cache key
+  changed so earlier FAIL results at the same revision are not reused.
+
 ## v0.157.51 — a committed frame keeps the scripted gate fresh
 
 2026-10-29 13:27-14:02: after v0.157.50, each AS-P5 PASS run committed its frame under

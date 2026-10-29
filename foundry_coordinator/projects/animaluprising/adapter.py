@@ -1034,7 +1034,8 @@ Change no code or test file in this session; if one needs changing, stop and rep
         exempt paths, so (task, revision, exempt list) is its whole input."""
         import hashlib
         exempt = self.exempt_paths(spec)
-        ikey = hashlib.sha256(("\0".join([self.p.workspace] + list(exempt))).encode()
+        # "frames1": v0.157.52 added the sprint's own evidence frames to the exempt set
+        ikey = hashlib.sha256(("\0".join([self.p.workspace, "frames1"] + list(exempt))).encode()
                               ).hexdigest()[:32] if ws is None else ""
         hit = check_cache.get(self.state_dir, self.p.id, spec.task_id, "gate_binding",
                               revision, ikey) if ikey else None
@@ -1083,7 +1084,11 @@ Change no code or test file in this session; if one needs changing, stop and rep
         # memory-notes commit after a passed gate failed GF-GATE1 here on 2026-10-27.
         # 2026-10-28 (audit A): docs/progress/**, docs/memory/** and .plan/** are never
         # code; a commit touching only those (evidence, memory, plan) keeps the gate bound.
-        exempt = self.exempt_paths(spec) + [f"docs/progress/{spec.task_id}_*"]             + list(GATE_NONCODE_PATHS)
+        # 2026-10-29 AS-P5: the frame the scripted run commits with its outputs (v0.157.50)
+        # is evidence, not code; it failed this check right after a PASS gate
+        exempt = (self.exempt_paths(spec) + [f"docs/progress/{spec.task_id}_*",
+                                             f"docs/evidence/{spec.task_id}/*.png"]
+                  + list(GATE_NONCODE_PATHS))
         code = [c for c in changed if not matches_any(c, exempt)]
         if code:
             return VerificationResult("au.gate_bound_to_head", FAIL, True, rel,

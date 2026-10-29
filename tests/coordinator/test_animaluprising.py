@@ -101,6 +101,29 @@ def test_negative_control_code_change_after_the_gate_fails_binding(tmp_path):
     assert g.result == FAIL and "src/shared/Util/AssetImage.lua" in g.detail
 
 
+def test_the_sprints_own_frame_after_the_gate_keeps_binding(tmp_path):
+    """2026-10-29 AS-P5: the scripted run's committed frame failed the binding at ccf833e0
+    (gate at 856a2040, only its own outputs + docs/evidence/AS-P5/*.png changed since)."""
+    rev = "ccf833e02abb9897b58945faba79e2368e5dafec"
+    try:
+        _git(AU, "cat-file", "-e", rev)
+    except subprocess.CalledProcessError:
+        pytest.skip("AS-P5 frame commit not in the clone")
+    ws = _clone_at(tmp_path, rev)
+    a = _adapter(tmp_path, ws)
+    s = a.describe("AS-P5")
+    g = a._gate_binding(s, rev)
+    assert g.result == PASS, g.detail
+    # another sprint's frame is not this gate's output
+    os.makedirs(os.path.join(ws, "docs", "evidence", "OTHER-1"), exist_ok=True)
+    with open(os.path.join(ws, "docs", "evidence", "OTHER-1", "f.png"), "wb") as f:
+        f.write(b"png")
+    _git(ws, "add", "-A")
+    _git(ws, "commit", "-q", "--no-verify", "-m", "AS-P5: other frame (test)")
+    g = a._gate_binding(s, _git(ws, "rev-parse", "HEAD"))
+    assert g.result == FAIL and "docs/evidence/OTHER-1/f.png" in g.detail
+
+
 def test_active_sprint_is_not_done(tmp_path):
     a = _adapter(tmp_path, AU)
     rev = _git(AU, "rev-parse", "HEAD")
