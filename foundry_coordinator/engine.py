@@ -14,6 +14,7 @@ adapter.
 
 from __future__ import annotations
 
+import json
 import os
 import re
 import time
@@ -594,6 +595,9 @@ class Coordinator:
         from . import services                     # Team Lead 5: the sprint's needs are up
         if services.blocks(self, P, t, spec):
             return                                 # "waiting for <service>": no lock, no attempt
+        landing = self._landing_drain(P)
+        if landing:
+            return self._note(P, t, f"waiting for {landing} to land first (landing drain)")
         other = self._main_sprint_in_flight(P, t)
         if other:
             return self._note(P, t, f"waiting for {other} to finish (one started main-checkout "
@@ -6602,6 +6606,42 @@ class Coordinator:
 
     MAIN_IN_FLIGHT = (S.READY, S.IMPLEMENTING, S.VERIFYING, S.REVIEWING, S.CHANGES_REQUIRED,
                       S.APPROVED, S.CLOSING)
+
+    def _landing_drain(self, P: Project) -> str:
+        """What must land before a new main-checkout session starts ('' = nothing): a finished
+        track waiting to merge, or a ready prep-queue entry, that has waited longer than
+        [automation] landing_drain_minutes. 2026-10-29: with main sprints back to back the
+        assets-local merge and two prep landings waited from 21:50 on, never finding a quiet
+        main checkout."""
+        if self.tracks.is_track(P):
+            return ""
+        try:
+            from . import automation as A
+            minutes = float(A.get(P, "landing_drain_minutes") or 0)
+        except Exception:                                         # noqa: BLE001
+            minutes = 30.0
+        if minutes <= 0:
+            return ""
+        cutoff = self.clock() - minutes * 60
+        try:
+            for row in self.store.q("SELECT name, updated_ts, data FROM tracks WHERE "
+                                    "project_id=? AND state='merging'", (P.id,)):
+                raw = row.get("data")
+                d = (json.loads(raw) if isinstance(raw, str) and raw else raw) or {}
+                since = float(d.get("merge_wait_since") or row.get("updated_ts") or 0)
+                if d.get("merge_stage") in (None, "", "wait") and since and since < cutoff:
+                    return f"track {row['name']}'s merge"
+        except Exception:                                         # noqa: BLE001
+            pass
+        try:
+            r = self.store.q("SELECT id FROM prep_queue WHERE project_id=? AND status='pending' "
+                             "AND (condition IS NULL OR condition='' OR condition='{}') AND "
+                             "created_ts < ? ORDER BY ord LIMIT 1", (P.id, cutoff))
+            if r:
+                return f"prep entry {r[0]['id']}"
+        except Exception:                                         # noqa: BLE001
+            pass
+        return ""
 
     def _main_sprint_in_flight(self, P: Project, t: dict) -> str:
         """The started main-checkout sprint `t` must wait for ('' = none). 2026-10-29: AS-P5

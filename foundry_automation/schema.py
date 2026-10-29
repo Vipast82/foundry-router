@@ -215,6 +215,8 @@ AUTOMATION_DEFAULTS: dict = {
     "scope_unlisted_default": "deny",
     # 2026-10-29: one started main-checkout sprint at a time (tracks run beside it)
     "main_one_sprint_at_a_time": True,
+    # 2026-10-29: a track merge / prep landing waiting this long gets the main checkout next
+    "landing_drain_minutes": 30,
     "decision_timeout_minutes": 30,
     # 2026-10-28 self-driving part 1: an automation decision (tooling, budget, infra,
     # repeated findings) never times out to "park": it self-repairs, capped per task per
@@ -713,6 +715,10 @@ _AUTO_DESC = {
     "scope_auto_approve": "Scope allow-list: harness lines the coordinator adds to a sprint's "
                           "file list itself. Each entry {name, path (glob, {task}), blocks[], "
                           "lines[] (regexes), json_paths_in_plan, reason}.",
+    "landing_drain_minutes": "A finished track's merge or a prep-queue landing that has waited "
+                             "this many minutes for a quiet main checkout stops new main-sprint "
+                             "sessions from starting until it lands (0 = never drain). Back-to-"
+                             "back main sprints otherwise starve merges and landings.",
     "main_one_sprint_at_a_time": "Once a main-checkout sprint has started, other main-checkout "
                                  "sprints wait until it is complete, blocked or paused (parallel "
                                  "tracks are not affected). Interleaving sprints in one checkout "
@@ -1166,7 +1172,9 @@ PREP_QUEUE_DEFAULTS = {
     "script_timeout_seconds": 600,            # a script entry / a run: after-action
     "hold_minutes": 1440,                     # default expiry of an entry's task holds
     "live_session_max_age_minutes": 360,      # an unended session older than this is ignored
-    "block_states": ["IMPLEMENTING", "VERIFYING", "REVIEWING", "CHANGES_REQUIRED", "APPROVED",
+    # 2026-10-29: CHANGES_REQUIRED has no live session (between sessions), same as a track
+    # merge's quiet rule; with it here a landing never found a safe point between sprints
+    "block_states": ["IMPLEMENTING", "VERIFYING", "REVIEWING", "APPROVED",
                      "CLOSING"],              # a main-checkout task here = mid-sprint
 }
 _PQ_DESC = {

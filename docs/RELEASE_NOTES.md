@@ -2,6 +2,18 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.157.22 — merges and prep landings get the main checkout
+
+2026-10-28 21:50 -> 2026-10-29 01:2x: the assets-local track (5 COMPLETE sprints) and two prep
+landings (six enemy plans, S57a's merge) waited the whole night: main sprints ran back to back
+and a quiet main checkout never came.
+
+- **Landing drain ([automation] `landing_drain_minutes`, 30, in the UI):** a track merge or ready
+  prep entry waiting longer than that stops new main-sprint sessions until it lands; the running
+  step finishes first.
+- **Prep safe point:** CHANGES_REQUIRED (no live session) no longer counts as mid-sprint, the same
+  rule as a track merge; the clean-checkout check still applies.
+
 ## v0.157.21 — one started main-checkout sprint at a time
 
 2026-10-28/29: AS-P5 and UI-SKIN2 took turns in the main checkout between sessions. Each one's

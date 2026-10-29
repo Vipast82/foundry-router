@@ -868,3 +868,21 @@ def test_a_started_main_sprint_keeps_the_checkout_until_it_finishes(game):
     assert c._main_sprint_in_flight(P, c.store.task("game", "T1")) == ""
     c.store.update_task("game", "T1", state=S.BLOCKED)
     assert c._main_sprint_in_flight(P, c.store.task("game", "T2")) == ""
+
+
+def test_a_long_waiting_landing_drains_new_main_sessions(game):
+    """2026-10-29 replay: back-to-back main sprints starved the assets-local track merge and
+    two prep landings from 21:50 on. A landing waiting longer than landing_drain_minutes
+    stops new main sessions until it lands."""
+    import json as _json
+    tmp, _, _, prof = game
+    c = coordinator(tmp, [prof], {"game": write_ok("src/b.txt")})
+    P = c.projects["game"]
+    assert c._landing_drain(P) == ""
+    old = c.clock() - 3600
+    c.store.x("INSERT INTO tracks (project_id, name, kind, worktree, branch, base_sha, state, "
+              "current_sprint, needs, sprints, created_by, created_ts, updated_ts, data) VALUES "
+              "(?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+              ("game", "assets", "parallel", "wt", "track/assets", "x", "merging", "", "[]",
+               "[]", "t", old, old, _json.dumps({"merge_stage": "wait"})))
+    assert "assets" in c._landing_drain(P)
