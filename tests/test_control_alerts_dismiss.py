@@ -256,3 +256,22 @@ def test_watchdog_runs_autoclear_on_its_own_timer(env):
     clock.t += 25 * H
     assert c.watchdog() == []                               # no stale-source alerts
     assert c.alerts([], "open") == []
+
+
+def test_a_resent_coordinator_error_never_reopens_its_cleared_alert(env):
+    """2026-10-29: a GF-ENT1 'Coordinator error' from the day before kept popping back up: the
+    coordinator re-sends recent events on every restart and the cleared alert reopened."""
+    c, clock = env
+    err = {"type": "coord_event", "kind": "error", "event_id": "ev-ent1", "project_id": "au",
+           "task_id": "GF-ENT1", "detail": {"error": "VERIFYING -> BLOCKED needs evidence"}}
+    ingest(c, task("VERIFYING", tid="GF-ENT1"))
+    ingest(c, err)
+    assert len(by_kind(c, "coordinator_error")) == 1
+    ingest(c, task("COMPLETE", tid="GF-ENT1"))
+    c.watchdog()
+    assert by_kind(c, "coordinator_error") == []
+    ingest(c, err)                                         # the same event, re-sent
+    c.watchdog()
+    assert by_kind(c, "coordinator_error") == []
+    ingest(c, dict(err, event_id="ev-ent1-b"))              # a NEW error still alerts
+    assert len(by_kind(c, "coordinator_error")) == 1

@@ -2,6 +2,15 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.157.45 — a re-sent coordinator event never reopens its alert (router)
+
+2026-10-29: "Coordinator error on GF-ENT1" (four errors from 2026-10-28 18:00, long fixed, the
+sprint COMPLETE) kept popping up: the coordinator re-sends its recent events on every restart, and
+the router reopened the auto-cleared alert for each.
+
+- **Control center:** a coordinator event raises its alert only the first time the router stores
+  it. A new event still alerts. **Needs a router rebuild.**
+
 ## v0.157.44 — the Foundry Client watches memory and stops runaway dev / test jobs
 
 2026-10-29 (Victor): a stuck training run held 32 GB for 30 hours and nothing noticed.

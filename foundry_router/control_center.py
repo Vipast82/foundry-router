@@ -1311,11 +1311,18 @@ class ControlCenter:
         eid = _s(o.get("event_id"), 80)
         kind = _s(o.get("kind"), 40)
         detail = o.get("detail") if isinstance(o.get("detail"), dict) else {}
+        fresh = True
         if eid and kind:
-            c.execute("INSERT OR IGNORE INTO cc_coord_events (event_id, project_id, task_id, kind, "
-                      "ts, detail, received_ts) VALUES (?,?,?,?,?,?,?)",
-                      (eid, _s(o.get("project_id"), 120), _s(o.get("task_id"), 120), kind,
-                       _f(o.get("ts")) or now, _j(detail), now))
+            cur = c.execute("INSERT OR IGNORE INTO cc_coord_events (event_id, project_id, task_id, "
+                            "kind, ts, detail, received_ts) VALUES (?,?,?,?,?,?,?)",
+                            (eid, _s(o.get("project_id"), 120), _s(o.get("task_id"), 120), kind,
+                             _f(o.get("ts")) or now, _j(detail), now))
+            # 2026-10-29: the coordinator re-sends recent events (every restart); an event
+            # the router already has never raises its alert again (a cleared "Coordinator
+            # error on GF-ENT1" from the day before kept popping back up)
+            fresh = bool(cur.rowcount)
+        if not fresh:
+            return []
         cls = event_alert_class(kind, detail)
         if cls and eid:
             text = _s(detail.get("text") or detail.get("reason") or detail.get("error")
