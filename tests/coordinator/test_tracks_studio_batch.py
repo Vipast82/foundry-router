@@ -46,8 +46,12 @@ def env(tmp_path, monkeypatch):
     monkeypatch.setenv("AU_LOCK_DIR", str(tmp_path / "locks"))
     (tmp_path / "locks").mkdir()
 
-    def build(plan, covered=("B1", "B2", "B3"), automation=""):
-        root, _ = make_repo(tmp_path, "game", TASKS, extra_files={".gitignore": ".plan/\n"})
+    def build(plan, covered=("B1", "B2", "B3"), automation="", with_suites=()):
+        files = {".gitignore": ".plan/\n"}
+        for s in with_suites:          # a sprint with suites of its own (its last host half)
+            files[f"docs/progress/{s}_EVIDENCE_RAW.log"] = (
+                f"GATE RUN sprint={s} tier=A regression=none suites=[S51] files=[art/x]\n")
+        root, _ = make_repo(tmp_path, "game", TASKS, extra_files=files)
         pipe = tmp_path / "fake_pipeline.py"
         pipe.write_text(FAKE_PIPELINE)
         pf = tmp_path / "calls_plan.json"
@@ -100,13 +104,23 @@ def drive(c, clock, pred, limit=400, step=5.0):
                          f"{track(c)['data'].get('merge_wait')}")
 
 
-def run_args(pf):
+def run_info(pf):
+    """(sprint, regression, suites) of every pipeline run, in order."""
     out, n = [], 0
     while os.path.exists(f"{pf}.args.{n}"):
         a = json.loads(open(f"{pf}.args.{n}").read())
-        out.append(a[a.index("--sprint") + 1])
+        out.append((a[a.index("--sprint") + 1], a[a.index("--regression") + 1],
+                    a[a.index("--suites") + 1]))
         n += 1
     return out
+
+
+def run_args(pf):
+    return [x[0] for x in run_info(pf)]
+
+
+def detail(d):
+    return json.loads(d) if isinstance(d, str) else d
 
 
 def leases(c):
@@ -114,52 +128,73 @@ def leases(c):
             if r["owner"] == "track:blender" and r["event"] == "acquire"]
 
 
-def test_blender_track_gets_one_batched_studio_run_at_merge_in_order(env):
-    """Replay AS-D13/AS-V00..V03: every covered sprint is Studio-tested at the merge,
-    in track order, back to back, under a single Studio lease."""
+def test_blender_track_gets_one_batched_full_regression_at_merge(env):
+    """Replay AS-D13/AS-V00..V03: no sprint has suites of its own, so the merge runs ONE
+    full regression on the merged result (as the last sprint) that counts for all."""
     c, P, clock, root, pf = env([{"result": "PASS"}])
     build_track(c, P)
     drive(c, clock, lambda: track(c)["state"] == "merged")
-    assert run_args(pf) == SPRINTS                              # each sprint, in order
-    started = [e["task_id"] for e in sorted(events(c, "studio_calls_started"),
-                                            key=lambda e: e["id"])]
-    assert started == SPRINTS
-    assert len(leases(c)) == 1                                  # ONE lease for the batch
-    row = track(c)
-    gate = row["data"]["gate"]
+    assert run_info(pf) == [("B3", "full", "")]                 # one run, not three
+    assert len(leases(c)) == 1
+    gate = track(c)["data"]["gate"]
     assert gate["result"] == "PASS" and gate["studio"] is True
-    assert [r["sprint"] for r in gate["studio_batch"]] == SPRINTS
-    assert all(r["result"] == "PASS" for r in gate["studio_batch"])
+    [r] = gate["studio_batch"]
+    assert r["sprint"] == "B3" and r["covers"] == SPRINTS and r["result"] == "PASS"
     assert events(c, "track_studio_batch_green") and events(c, "track_merged")
     assert c.tracks.resources.lease(P) is None                  # released at the end
-    # each run is a normal scripted run: recorded on its sprint, outputs committed
-    for s in SPRINTS:
+    run_id = c.store.task("game", "B3")["data"]["studio_calls"]["last"]["run_id"]
+    for s in SPRINTS:                                           # it counts for every asset
         last = c.store.task("game", s)["data"]["studio_calls"]["last"]
-        assert last["result"] == "PASS" and last["track"] == "blender" and last["commit"]
+        assert last["result"] == "PASS" and last["track"] == "blender"
+        assert last["run_id"] == run_id
         assert c.store.task("game", s)["state"] == S.COMPLETE
-    # the lease bound covers the batch (studio_track_max_minutes per sprint)
-    acq = json.loads(leases(c)[0]["detail"]) if isinstance(leases(c)[0]["detail"], str) \
-        else leases(c)[0]["detail"]
-    assert acq["lease_minutes"] == 45 * 3
+    args = json.loads(open(f"{pf}.args.0").read())
+    assert args[args.index("--rerun") + 1] == "failed"
+    assert args[args.index("--files") + 1] == "art/b1.txt,art/b2.txt,art/b3.txt"
+    assert detail(leases(c)[0]["detail"])["lease_minutes"] == 45   # x runs executed (1)
+
+
+def test_a_sprint_with_suites_runs_them_then_one_full_regression(env):
+    c, P, clock, root, pf = env([{"result": "PASS"}], with_suites=("B2",))
+    build_track(c, P)
+    drive(c, clock, lambda: track(c)["state"] == "merged")
+    assert run_info(pf) == [("B2", "none", "S51"), ("B3", "full", "")]
+    gate = track(c)["data"]["gate"]
+    assert [(r["sprint"], r["covers"]) for r in gate["studio_batch"]] == [
+        ("B2", ["B2"]), ("B3", ["B1", "B3"])]
+    assert len(leases(c)) == 1
+    assert detail(leases(c)[0]["detail"])["lease_minutes"] == 45 * 2
 
 
 def test_a_failing_sprint_fails_the_merge_naming_it(env):
-    c, P, clock, root, pf = env([{"result": "PASS"}, {"result": "FAIL"}, {"result": "PASS"}])
+    c, P, clock, root, pf = env([{"result": "FAIL"}, {"result": "PASS"}], with_suites=("B2",))
     build_track(c, P)
     drive(c, clock, lambda: track(c)["state"] == "failed")
     row = track(c)
-    assert run_args(pf) == SPRINTS                              # the batch still ran them all
+    assert run_args(pf) == ["B2", "B3"]                         # the batch still ran them all
     why = row["data"]["failed"]["why"]
     assert "merge Studio batch red" in why and "B2 FAIL" in why and "row S46 FAIL" in why
     assert "B1" not in why and "B3" not in why
     assert row["data"]["gate"]["result"] == "FAIL"
     assert row["data"]["gate"]["findings"][0].startswith("B2 FAIL")
     assert git_head_has(root, row["data"]["merge_head"])        # landed, not reverted
-    # the failing rows are B2's findings (what a repair session gets)
     assert any("row S46 FAIL" in f for f in c.store.task("game", "B2")["data"]["findings"])
     assert not c.store.task("game", "B1")["data"].get("findings")
     assert c.tracks.resources.lease(P) is None
-    assert events(c, "track_studio_batch_red")[0]["detail"]
+
+
+def test_a_red_full_regression_names_every_suiteless_sprint(env):
+    c, P, clock, root, pf = env([{"result": "FAIL"}])
+    build_track(c, P)
+    drive(c, clock, lambda: track(c)["state"] == "failed")
+    why = track(c)["data"]["failed"]["why"]
+    assert "B1, B2, B3 (full regression, run as B3) FAIL" in why and "row S46 FAIL" in why
+    # the failing rows go to the last sprint's findings
+    assert any("row S46 FAIL" in f for f in c.store.task("game", "B3")["data"]["findings"])
+    assert not c.store.task("game", "B1")["data"].get("findings")
+    for s in SPRINTS:
+        assert c.store.task("game", s)["data"]["studio_calls"]["last"]["result"] == "FAIL"
+    assert detail(events(c, "track_studio_batch_red")[0]["detail"])["sprints"] == SPRINTS
 
 
 def git_head_has(root, sha):
@@ -180,7 +215,7 @@ def test_the_batch_waits_for_studio_while_the_main_sprint_holds_it(env):
     assert not events(c, "studio_calls_started") and run_args(pf) == []
     c.store.release("game", "T1", ["studio"])
     drive(c, clock, lambda: track(c)["state"] == "merged")
-    assert run_args(pf) == SPRINTS and len(leases(c)) == 1
+    assert run_args(pf) == ["B3"] and len(leases(c)) == 1
 
 
 def test_main_session_studio_use_also_holds_the_batch(env):
@@ -192,18 +227,18 @@ def test_main_session_studio_use_also_holds_the_batch(env):
     assert "main session used Studio" in (track(c)["data"].get("merge_wait") or "")
     assert run_args(pf) == []
     drive(c, clock, lambda: track(c)["state"] == "merged", step=60)
-    assert run_args(pf) == SPRINTS
+    assert run_args(pf) == ["B3"]
 
 
-def test_a_tooling_error_retries_that_sprint_only(env):
+def test_a_tooling_error_retries_that_run_only(env):
     c, P, clock, root, pf = env([{"result": "PASS"}, {"result": "ERROR", "error": "MCP gone"},
-                                 {"result": "PASS"}, {"result": "PASS"}])
+                                 {"result": "PASS"}], with_suites=("B2",))
     build_track(c, P)
     drive(c, clock, lambda: track(c)["state"] == "merged")
-    assert run_args(pf) == ["B1", "B2", "B2", "B3"]             # B1 never re-run
+    assert run_args(pf) == ["B2", "B3", "B3"]                   # B2's passed run never re-run
     assert events(c, "track_gate_retry")
     assert not events(c, "track_failed")
-    assert c.store.task("game", "B2")["state"] == S.COMPLETE    # never BLOCKED by it
+    assert c.store.task("game", "B3")["state"] == S.COMPLETE    # never BLOCKED by it
 
 
 @pytest.mark.parametrize("covered,automation", [

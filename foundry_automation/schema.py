@@ -257,7 +257,7 @@ AUTOMATION_DEFAULTS: dict = {
     "studio_track_max_minutes": 45,
     # 2026-10-28: a track's merge runs the scripted Studio gate ([studio_calls]) for each of
     # its covered sprints, back to back under one Studio lease (0 = studio_track_max_minutes
-    # per sprint in the batch)
+    # per run in the batch)
     "merge_studio_batch": True,
     "merge_studio_batch_max_minutes": 0,
     "track_append_safe": ["docs/progress/STATE.md", "docs/progress/state/**",
@@ -779,12 +779,14 @@ _AUTO_DESC = {
                                 "interrupted mid-run).",
     "merge_studio_batch": "When a track merges, run the scripted Studio gate ([studio_calls]) "
                           "in the main checkout for each of its sprints that [studio_calls] "
-                          "covers, in order, back to back under one Studio lease, after the "
+                          "covers that has suites of its own, in order, then ONE full "
+                          "regression for the sprints that have none, back to back under one "
+                          "Studio lease, after the "
                           "project's checks pass (assets are built first, Studio-tested once "
                           "at the end). A failing sprint fails the merge with that sprint and "
                           "its rows named; a tooling error retries. Off: today's merge gate.",
     "merge_studio_batch_max_minutes": "Studio lease bound of a track's merge Studio batch "
-                                      "(0 = studio_track_max_minutes for each sprint in the "
+                                      "(0 = studio_track_max_minutes for each run in the "
                                       "batch). Never interrupted mid-run; an overrun is noted.",
     "track_append_safe": "Shared files two sprints may both change without being serial "
                          "(append-only ledgers the rebase merges row by row).",

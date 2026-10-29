@@ -21,7 +21,8 @@ recorded in the track's data (`merge_stage`) so a restart resumes:
   studio_batch  (2026-10-28, [automation] merge_studio_batch) after a green verify:
             the scripted Studio gate ([studio_calls], studio_calls.py) in the main
             checkout for each sprint of the track that [studio_calls] covers, in order,
-            back to back under ONE Studio lease (it waits like the gate's lease above).
+            back to back under ONE Studio lease (it waits like the gate's lease above);
+            the sprints with no suites of their own share ONE full regression at the end.
             The assets are built first, Studio-tested once at the end; a failing sprint
             fails the track naming it and its rows (and gets them as its findings); a
             tooling ERROR retries that sprint, never re-running the ones that passed
@@ -407,7 +408,7 @@ class MergeManager:
                       studio_batch={"sprints": plan, "results": [], "current": None,
                                     "leased": False, "head": head})
             self.store.event(P.id, "", "track_studio_batch_planned", detail={
-                "track": row["name"], "sprints": [x["sprint"] for x in plan]})
+                "track": row["name"], "runs": [{"sprint": x["sprint"], "covers": x["covers"]} for x in plan]})
             self._batch_step(P, self.store.track(P.id, row["name"]))
             return
         self._set(P, row, merge_stage="done", gate=rec)
@@ -487,11 +488,12 @@ class MergeManager:
             return True
 
     def _batch_plan(self, P, row: dict) -> list:
-        """The track's sprints [studio_calls] covers, in track order, each with the
-        scripted request it runs with (studio_calls.default_request: its last host-half
-        parameters, else its own suites). A covered sprint with neither (a Blender sprint
-        built Studio-free) gets the full pinned regression: boot, verifyLive and the
-        pinned rows on the merged assets."""
+        """The runs of the batch. Each covered sprint ([studio_calls]) with suites of its
+        own (studio_calls.default_request: its last host-half parameters, else its own
+        suites) runs them, in track order. The covered sprints with none (Blender sprints
+        built Studio-free) share ONE full regression on the merged result at the end,
+        run as the track's last sprint (`covers` names them): one full regression per
+        merge, never one per asset."""
         if not self._batch_on(P):
             return []
         fn = getattr(P.profile, "studio_calls_task", None)
@@ -501,7 +503,7 @@ class MergeManager:
         from ..studio_calls import DEFAULT_FILES, PATH_RE
         files = [f.replace("\\", "/") for f in (row.get("data") or {}).get("merged_files") or []]
         files = [f for f in files if not f.startswith("docs/") and PATH_RE.fullmatch(f)][:200]
-        plan = []
+        plan, bare = [], []
         for sid in row["sprints"]:
             try:
                 spec = P.adapter.describe(sid)
@@ -517,10 +519,16 @@ class MergeManager:
                 except Exception:                                 # noqa: BLE001
                     req = None
             if req is None:
-                req = {"suites": [], "regression": "full", "tier": tier, "rerun": "failed",
-                       "files": []}
+                bare.append(sid)
+                continue
             req = {**req, "files": list(req.get("files") or []) or files or list(DEFAULT_FILES)}
-            plan.append({"sprint": sid, "tier": tier, "req": req})
+            plan.append({"key": sid, "sprint": sid, "tier": tier, "req": req, "covers": [sid]})
+        if bare:
+            last = row["sprints"][-1]
+            tier = sc._tier(P, last)
+            plan.append({"key": "regression", "sprint": last, "tier": tier, "covers": bare,
+                         "req": {"suites": [], "regression": "full", "tier": tier,
+                                 "rerun": "failed", "files": files or list(DEFAULT_FILES)}})
         return plan
 
     def _batch_minutes(self, P, n: int) -> float:
@@ -540,8 +548,8 @@ class MergeManager:
         name = row["name"]
         batch = dict((row.get("data") or {}).get("studio_batch") or {})
         plan = list(batch.get("sprints") or [])
-        done = {r["sprint"] for r in batch.get("results") or []}
-        todo = [x for x in plan if x["sprint"] not in done]
+        done = {r.get("key") or r["sprint"] for r in batch.get("results") or []}
+        todo = [x for x in plan if (x.get("key") or x["sprint"]) not in done]
         if not todo:
             self._batch_end(P, row, batch)
             return
@@ -557,11 +565,12 @@ class MergeManager:
             self.store.event(P.id, "", "track_studio_batch_started", detail={
                 "track": name, "sprints": [x["sprint"] for x in todo]})
         item = todo[0]
-        sid = item["sprint"]
+        sid, key = item["sprint"], item.get("key") or item["sprint"]
         t = self.store.task(P.id, sid)
         if t is None:
             batch["results"] = list(batch.get("results") or []) + [
-                {"sprint": sid, "result": "SKIPPED",
+                {"sprint": sid, "key": key, "covers": item.get("covers") or [sid],
+                 "result": "SKIPPED",
                  "why": "not a coordinator task"}]
             self._batch_set(P, row, batch)
             self._batch_step(P, self.store.track(P.id, name))
@@ -569,11 +578,11 @@ class MergeManager:
         cur = dict(batch.get("current") or {})
         d = sc._d(P, sid)
         outcome = None
-        if cur.get("sprint") != sid:
+        if cur.get("key", cur.get("sprint")) != key:
             if d.get("run") or d.get("pending"):
                 self._wait(P, row, f"merge Studio batch: {sid} already has a scripted run")
                 return
-            cur = {"sprint": sid, "since": self.clock(),
+            cur = {"sprint": sid, "key": key, "since": self.clock(),
                    "before": (d.get("last") or {}).get("run_id") or ""}
             d["pending"] = {"req": dict(item["req"]), "session_id": "", "track": name,
                             "ts": time.time()}
@@ -581,7 +590,8 @@ class MergeManager:
             batch["current"] = cur
             self._batch_set(P, row, batch)
             self.store.event(P.id, sid, "track_studio_batch_run", detail={
-                "track": name, "sprint": sid, "request": item["req"]})
+                "track": name, "sprint": sid, "covers": item.get("covers") or [sid],
+                "request": item["req"]})
             sc._start(P, self.store.task(P.id, sid) or t, d["pending"])
             d = sc._d(P, sid)
             if d.get("run"):
@@ -644,7 +654,19 @@ class MergeManager:
             failing = ["the host half (tools/gate.ps1) did not pass"
                        if outcome.get("stage") == "host" else
                        (outcome.get("finish_line") or "gate FAIL")]
-        rec = {"sprint": sid, "result": res, "run_id": outcome.get("run_id"),
+        covers = list(item.get("covers") or [sid])
+        if item.get("key") == "regression":
+            # the shared full regression counts for every suite-less sprint it covers
+            sc = self.c.studio_calls
+            for s in covers:
+                if s == sid:
+                    continue
+                d = sc._d(P, s)
+                d["last"] = {**{k: v for k, v in outcome.items() if k != "prompt"},
+                             "track": name, "run_as": sid}
+                sc._save(P, s, d)
+        rec = {"sprint": sid, "key": item.get("key") or sid, "covers": covers,
+               "result": res, "run_id": outcome.get("run_id"),
                "head": outcome.get("head"), "counts": outcome.get("counts") or {},
                "failures": failing[:20], "stage": outcome.get("stage"),
                "finish_line": outcome.get("finish_line") or "", "commit": outcome.get("commit")}
@@ -663,15 +685,19 @@ class MergeManager:
         batch.update(leased=False, current=None, finished=self.clock())
         gate = dict((row.get("data") or {}).get("gate") or {})
         gate.update(studio=True, studio_batch=[{k: r.get(k) for k in
-                                                ("sprint", "result", "run_id", "failures")}
+                                                ("sprint", "key", "covers", "result", "run_id",
+                                                 "failures")}
                                                for r in results])
         if red:
-            findings = [f"{r['sprint']} {r['result']}: " + "; ".join(r.get("failures") or [])
+            findings = [(f"{', '.join(r.get('covers') or [r['sprint']])} (full regression, run "
+                         f"as {r['sprint']})" if r.get("key") == "regression" else r["sprint"])
+                        + f" {r['result']}: " + "; ".join(r.get("failures") or [])
                         for r in red]
             gate.update(result=FAIL, findings=findings[:20])
             self._set(P, row, studio_batch=batch, gate=gate, merge_stage=None)
             self.store.event(P.id, "", "track_studio_batch_red", detail={
-                "track": name, "sprints": [r["sprint"] for r in red], "findings": findings[:10]})
+                "track": name, "sprints": sorted({c for r in red for c in r.get("covers") or [r["sprint"]]}),
+                "findings": findings[:10]})
             self.tm.fail(P, self.store.track(P.id, name),
                          "merge Studio batch red: " + " | ".join(findings[:4]))
             return
