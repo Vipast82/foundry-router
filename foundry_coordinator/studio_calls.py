@@ -515,13 +515,19 @@ class StudioCalls:
             return subprocess.Popen(cmd, cwd=ROUTER_ROOT, stdout=lf, stderr=subprocess.STDOUT,
                                     stdin=subprocess.DEVNULL, env=env, creationflags=flags)
 
+    def _run_locks(self, P) -> list:
+        return list(dict.fromkeys(self.c._workspace_locks(P) + self.c._session_locks(P)))
+
     def _start(self, P, t: dict, pend: dict) -> bool:
         tid = t["task_id"]
         if self.c._held(P, t, "scripted Studio gate start"):
             return False
         # a track's merge Studio batch runs under the track's Studio lease (it holds the
         # same rows), so it takes no task locks of its own
-        if not pend.get("track") and self.c._acquire(P, t, self.c._session_locks(P)):
+        # 2026-10-28 UI-SKIN2: the run writes docs/progress/<ID>_* into the main checkout and
+        # needs HEAD to hold still, so it also takes the checkout (another main sprint's
+        # clean checks failed on AS-P5's half-written gate files)
+        if not pend.get("track") and self.c._acquire(P, t, self._run_locks(P)):
             return False                          # another task holds Studio: wait
         if not self._studio_lock_free(P, t):
             return False
@@ -822,7 +828,7 @@ class StudioCalls:
             self.store.event(P.id, tid, "studio_calls_error", detail=outcome)
             if run.get("cli") or run.get("track"):
                 # no session to block: the CLI prints it, a track's merge batch retries
-                self.c.store.release(P.id, tid, self.c._session_locks(P))
+                self.c.store.release(P.id, tid, self._run_locks(P))
                 return outcome
             cur = self.store.task(P.id, tid) or t
             if "PROJECT: not mapped in default.project.json" in str(outcome["error"]) and \
@@ -891,7 +897,7 @@ class StudioCalls:
         """`studio-calls run`: the failing rows become the task's findings (the next
         BUILD session gets only those); Studio is released."""
         tid = t["task_id"]
-        self.c.store.release(P.id, tid, self.c._session_locks(P))
+        self.c.store.release(P.id, tid, self._run_locks(P))
         if outcome["result"] != "PASS":
             findings = findings_lines(outcome, self._calls_verdict(P, tid, outcome) or {})
             self.store.merge_data(P.id, tid, findings=findings)
@@ -930,9 +936,9 @@ class StudioCalls:
                 self._save(P, tid, d)
             why = (self.store.task(P.id, tid) or {}).get("next_action") or "Studio is busy"
             if d.get("last") != before and (d.get("last") or {}).get("result") == "ERROR":
-                self.c.store.release(P.id, tid, self.c._session_locks(P))
+                self.c.store.release(P.id, tid, self._run_locks(P))
                 return d["last"]
-            self.c.store.release(P.id, tid, self.c._session_locks(P))
+            self.c.store.release(P.id, tid, self._run_locks(P))
             return {"result": "ERROR", "error": f"not started: {why}", "stage": "start"}
         run = self._d(P, tid).get("run") or {}
         out(f"started {run.get('run_id')} at {str(run.get('head'))[:12]}; log {run.get('log')}")

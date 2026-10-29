@@ -477,3 +477,14 @@ def test_a_failed_auto_verify_run_sends_the_rows_to_a_session_never_reruns(env):
     # and a FAIL whose code did not change since is never re-run
     d = dict(sc(e)); d["last"] = outcome
     assert e.c.studio_calls._failed_at_same_code(P, "T1", outcome, P.ws.head())
+
+
+def test_a_scripted_run_holds_the_main_checkout(env):
+    """UI-SKIN2 2026-10-28 replay: AS-P5's gate run wrote docs/progress/AS-P5_* into the main
+    checkout while UI-SKIN2 verified there; UI-SKIN2's clean checks failed on them. A run
+    takes the checkout lock with Studio/Rojo, so another main sprint waits for it."""
+    e = env([{"result": "PASS"}])
+    P = e.c.projects["game"]
+    locks = e.c.studio_calls._run_locks(P)
+    assert set(e.c._workspace_locks(P)) <= set(locks)
+    assert set(e.c._session_locks(P)) <= set(locks)

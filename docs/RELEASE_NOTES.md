@@ -2,6 +2,16 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.157.9 — a scripted Studio run holds the main checkout
+
+UI-SKIN2, 2026-10-28 22:1x: AS-P5's scripted gate wrote docs/progress/AS-P5_* into the shared main
+checkout while UI-SKIN2 was verifying there; UI-SKIN2's `au.done_check.CLEAN` and
+`coordinator.clean` failed on another sprint's half-written files, five times, and its repeat
+guard handed it to the Lead.
+
+- **The run takes the checkout lock** with Studio/Rojo (and releases them together), so a second
+  main sprint waits for the run instead of interleaving with it.
+
 ## v0.157.8 — a failed auto-verify Studio run goes to a session, never reruns
 
 AS-P5, 2026-10-28 22:07-22:23: `auto_verify` ran the scripted Studio gate at VERIFYING; on FAIL it
