@@ -2,6 +2,17 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.157.6 — a scope grant gets a fresh session with the granted files
+
+AS-P5, 2026-10-28 19:56: three scope requests (tests/S24, S25, S26_check.lua) were granted and the
+same session was told to continue; its edit allow-list (`edit * deny` plus the sprint's files,
+fixed when the session starts) still denied them, and it reported BLOCKED.
+
+- **Fresh session after a grant.** When a grant adds files and the project's session rules deny
+  edits by default, the session ends and a free continuation starts with the granted files in
+  its edit permissions (no attempt charged). Projects without an edit allow-list keep the same
+  session.
+
 ## v0.157.5 — an unmapped new file goes to the session, not to "stale sync"
 
 UI-SKIN2, 2026-10-28 19:4x: the sprint added tests/UI_SKIN2_check.lua with no

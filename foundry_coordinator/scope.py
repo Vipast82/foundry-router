@@ -130,6 +130,17 @@ def grants(t: dict) -> list[dict]:
 
 # ------------------------------------------------------------------ the flow
 
+def _edits_allow_listed(P, spec) -> bool:
+    """Do this project's session rules deny edits by default (an allow-list built from the
+    plan's file list when the session starts)? Then a granted file needs a fresh session."""
+    try:
+        rules = P.adapter.session_permissions(spec, "implement") or []
+    except Exception:                                             # noqa: BLE001
+        return False
+    return any(r.get("permission") == "edit" and r.get("pattern") in ("*", "**")
+               and r.get("action") == "deny" for r in rules if isinstance(r, dict))
+
+
 def handle(c, P, t: dict, spec, reqs: list[dict]) -> Optional[str]:
     """Process the scope requests of an idle primary. Returns:
       "continued"  every request is granted (or already in scope); the same
@@ -208,6 +219,25 @@ def handle(c, P, t: dict, spec, reqs: list[dict]) -> Optional[str]:
                  "done_check's SCOPE row green, but never edit or revert those files; record "
                  "facts with MEMORY_NOTE lines in your final message.")
     key = "scope-grant:" + ",".join(sorted(x["path"] for x in granted))
+    new_files = [x for x in granted if x.get("rule") != "already in scope"]
+    sid = t.get("session_id") or ""
+    if new_files and sid and callable(getattr(c, "_session_failed", None)) and \
+            _edits_allow_listed(P, spec):
+        # 2026-10-28 AS-P5: a session's edit permissions are fixed when it starts (from the
+        # plan's file list), so a granted file stayed denied ("Session rule {permission:
+        # edit, pattern: *, action: deny}") and the session reported BLOCKED. A fresh
+        # session starts with the granted files; no attempt is charged.
+        cur = c.store.task(pid, tid) or t
+        phase = "closeout" if cur.get("state") == "CLOSING" else "implement"
+        try:
+            c._end_session(P, sid, "scope_grant")
+        except Exception:                                         # noqa: BLE001
+            pass
+        c._session_failed(P, cur, text + " (A fresh session: the granted files are in its "
+                          "edit permissions.)", phase, free=True)
+        c.store.event(pid, tid, "scope_continued", session_id=sid,
+                      detail={"granted": granted, "fresh_session": True})
+        return "continued"
     if not c._prompt_primary(P, t, text, key):
         return None
     c.store.event(pid, tid, "scope_continued", session_id=t.get("session_id"),

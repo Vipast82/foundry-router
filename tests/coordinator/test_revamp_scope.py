@@ -145,7 +145,8 @@ def test_an_allow_listed_harness_line_is_granted_and_the_same_session_continues(
     assert run_until(c, lambda: c.store.task("game", "T1")["state"] == S.COMPLETE, 60), \
         [(h["from_state"], h["to_state"]) for h in c.store.history("game", "T1")]
     t = c.store.task("game", "T1")
-    assert t["sessions"] == 1                               # the same session continued
+    # a fresh session (free) continues: a session's edit allow-list is fixed when it starts, so the granted file needs one (AS-P5 2026-10-28)
+    assert t["sessions"] == 2 and t["attempt"] <= 1
     assert "added these paths to this sprint's file list" in prompts[1]
     [g] = t["data"]["scope_grants"]
     assert g["path"] == "tests/GateRunner.lua" and g["rule"] == "gate_runner_boot_and_mounted_rows"
@@ -197,7 +198,7 @@ def test_an_unlisted_path_becomes_a_decision_and_its_answer_is_applied(tmp_path)
     c.obligations.answer(d["decision_id"], "approve: add src/b.txt to the file list", "victor",
                          "operator", channel="control")
     assert run_until(c, lambda: c.store.task("game", "T1")["state"] == S.COMPLETE, 60)
-    assert c.store.task("game", "T1")["sessions"] == 1
+    assert c.store.task("game", "T1")["sessions"] == 2      # fresh session after the grant
     assert "src/b.txt" in json.loads((root / "tasks.json").read_text())[0]["scope"]
 
 
