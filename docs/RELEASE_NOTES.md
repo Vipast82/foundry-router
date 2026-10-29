@@ -2,6 +2,15 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.157.33 — the review packet leaves out other sprints' changes
+
+2026-10-29 04:50: GF-FIX1's review range ran from an old task base and held 25 commits of
+UI-SKIN2, HK-CLEAN1 and HK-TEST1; the source diff came to 271 KB, over the 250 KB packet budget,
+and the review was refused.
+
+- **The review packet** sends only files the sprint's own (or the coordinator's) commits changed,
+  and the commit list without other sprints' commits; the packet notes the files it left out.
+
 ## v0.157.32 — a track's merge batch runs the rows its files touch, not the full index
 
 2026-10-29 04:27: the assets-local merge batch ran the full regression (80 rows) and failed on 20

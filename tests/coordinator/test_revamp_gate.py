@@ -896,3 +896,24 @@ def test_a_double_prefixed_commit_belongs_to_its_inner_sprint():
     assert other_sprint(s, "UI-SKIN2") and not other_sprint(s, "AS-P5")
     assert sprint_owner("UI-SKIN2: hero captures") == "UI-SKIN2"
     assert sprint_owner("prep: rules") == ""
+
+
+def test_review_packet_leaves_out_files_only_other_sprints_changed(env):
+    """2026-10-29 GF-FIX1: its review range held 25 commits of other sprints and the
+    packet went over budget. Files only other sprints' commits changed are left out."""
+    e = env([GREEN])
+    e.c.approve("game", "T1", [], "victor")
+    drive(e, lambda t: t["state"] == S.COMPLETE)
+    P = e.c.projects["game"]
+    base = P.ws.head()
+    for name, msg in (("mine.txt", "T1: my change"), ("theirs.txt", "UI-SKIN2: their change"),
+                      ("both.txt", "UI-SKIN2: their part")):
+        (e.repo / name).write_text(msg)
+        git(e.repo, "add", name)
+        git(e.repo, "commit", "-q", "-m", msg)
+    (e.repo / "both.txt").write_text("mine too")
+    git(e.repo, "commit", "-q", "-am", "T1: my part of both")
+    commits, files, left = e.c._review_own_changes(P, "T1", base, P.ws.head())
+    assert sorted(f["path"] for f in files) == ["both.txt", "mine.txt"]
+    assert left == ["theirs.txt"]
+    assert all(not s.startswith("UI-SKIN2:") for _, s in commits) and len(commits) == 2

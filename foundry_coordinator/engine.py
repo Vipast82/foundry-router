@@ -2405,10 +2405,15 @@ class Coordinator:
                 isinstance(e, dict) and str(e.get("status") or "") in ("missing", "stale")
                 and owns("file", e.get("path")))]
             dnotes.append(TRACK_REVIEW_NOTE)
+        rv_commits, rv_files, rv_left = self._review_own_changes(P, tid, dbase, head)
+        if rv_left:
+            dnotes.append(f"{len(rv_left)} file(s) changed only by other sprints' commits in "
+                          f"this range are not this sprint's work and are left out: "
+                          + ", ".join(rv_left[:20]) + (" ..." if len(rv_left) > 20 else ""))
         packet, info = R.build_packet(
             project_id=pid, task_id=tid, title=spec.title, spec=spec.spec, scope=spec.scope,
-            base=dbase, head=head, commits=P.ws.commits(dbase, head), verification=ver,
-            files=P.ws.diff_files(dbase, head), patch=lambda rel: P.ws.file_diff(dbase, head, rel),
+            base=dbase, head=head, commits=rv_commits, verification=ver,
+            files=rv_files, patch=lambda rel: P.ws.file_diff(dbase, head, rel),
             priority=priority, evidence=evidence, contract=contract,
             provenance={"spec_from": spec_from, "notes": list(spec_notes or []) + dnotes},
             budget=budget,
@@ -2642,6 +2647,30 @@ class Coordinator:
             self.store.event(pid, tid, "early_review_discarded", detail={
                 "head": head, "in_flight": dropped, "reviews": marked, "why": why[:300]})
         return bool(dropped or marked)
+
+    def _review_own_changes(self, P: Project, tid: str, base: str, head: str) -> tuple:
+        """(commits, diff files, left-out paths) for the review packet: base..head without
+        what ONLY other sprints' commits changed (bookkeeping.other_sprint). 2026-10-29
+        GF-FIX1: its range from an old task base held 25 commits of UI-SKIN2, HK-CLEAN1 and
+        HK-TEST1, the diff came to 271 KB and the review refused it as over budget. A file
+        this sprint also touched stays, with its whole range diff."""
+        commits = P.ws.commits(base, head)
+        files = P.ws.diff_files(base, head)
+        from . import bookkeeping as BK
+        others = {sha for sha, subj in commits if BK.other_sprint(subj, tid)}
+        if not others:
+            return commits, files, []
+        try:
+            per = P.ws.commit_files(base, head)
+        except Exception:                                         # noqa: BLE001
+            return commits, files, []
+        mine: set = set()
+        for sha, fs in per:
+            if sha not in others:
+                mine.update(f.replace("\\", "/") for f in fs)
+        kept = [f for f in files if str(f.get("path") or "").replace("\\", "/") in mine]
+        left = sorted(str(f.get("path") or "") for f in files if f not in kept)
+        return [c for c in commits if c[0] not in others], kept, left
 
     def _review_evidence_delta(self, P: Project, evidence: list, dbase: str, head: str,
                                last: dict) -> tuple[list, int]:
