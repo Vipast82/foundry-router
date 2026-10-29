@@ -2,6 +2,17 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.157.62 — the lead's calls may step down to the allowed local model
+
+2026-10-29 17:35: Claude reached its usage cutoff and AS-REG1's lead calls stepped down to the
+local Qwen listed in `[lead_manager] expected_models` (`allow_local_route = true`). The
+after-call served-model check still called the local route a mismatch, discarded three lead
+reports and escalated the case to the owner.
+
+- **Lead served-model check:** with `allow_local_route`, a local route serving a model in
+  `expected_models` is accepted (as the readiness check already did). An unknown backend or a
+  local model outside the list is still a mismatch.
+
 ## v0.157.61 — the coordinator commits a sprint's left-over plan history
 
 2026-10-29 16:18: AS-R7's verification failed `coordinator.clean` on an uncommitted

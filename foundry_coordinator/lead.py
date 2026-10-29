@@ -2559,6 +2559,14 @@ class LeadManager:
         unknown = [f"{b}/{m}" for b, m in served_routes if (b, m) not in chain]
         local = [f"{b}/{m}" for b, m in served_routes if (b, m) in chain and
                  chain[(b, m)] in ("local", "", "unknown")]
+        # 2026-10-29 AS-REG1: Claude hit its cutoff, the lead's calls stepped down to the local
+        # Qwen in expected_models as configured ([lead_manager] allow_local_route), and this
+        # after-call check threw the reports away; the readiness check already honoured it
+        if local and bool(self.settings(P).get("allow_local_route")):
+            local = [x for x in local if x.split("/", 1)[-1] not in expected]
+            if not local and not unknown:
+                return "ok", (f"served by {models} (local route allowed: [lead_manager] "
+                              f"allow_local_route)"), models
         if unknown or local:
             return "mismatch", (f"served by {[f'{b}/{m}' for b, m in served_routes]}; "
                                 + (f"{unknown} not routes of the persona's chain "
