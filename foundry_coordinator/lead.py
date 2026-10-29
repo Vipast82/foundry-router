@@ -2625,8 +2625,14 @@ class LeadManager:
                "task is retried once on the new code")
         self._act(case, "retry_after_upgrade", result=why)
         self.cancel(case["case_id"], why, actor="lead_manager", P=P)
+        trig = case.get("trigger") or {}
+        # a case opened because the attempts ran out: the retry needs a budget, or the
+        # engine fails it again at once (AS-P5, 2026-10-29 06:18)
+        spent = (str(trig.get("class") or "") == "attempts_exhausted"
+                 or "implementation attempts used" in str(trig.get("reason") or ""))
         try:
-            self.c.unblock(P.id, case["task_id"], why, actor="lead_manager")
+            self.c.unblock(P.id, case["task_id"], why, reset_attempts=spent,
+                           actor="lead_manager")
         except Exception as e:                                   # noqa: BLE001
             self.store.event(P.id, case["task_id"], "lead_retry_after_upgrade_failed",
                              detail={"case_id": case["case_id"], "error": str(e)[:300]})

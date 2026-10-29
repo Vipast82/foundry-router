@@ -2,6 +2,14 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.157.36 — a retry after an upgrade gets attempts when they ran out
+
+2026-10-29 06:18: v0.157.34 retried AS-P5 after the upgrade, but its case had opened because
+its 8 attempts were spent, so the engine failed it again within seconds.
+
+- **The Lead's retry after an upgrade** resets the attempt budget when the case was opened
+  because the attempts ran out.
+
 ## v0.157.35 — a never-admitted Lead session retries after a minute
 
 2026-10-29 05:39-05:45: two Lead repair sessions whose prompts Kilo never admitted ended after

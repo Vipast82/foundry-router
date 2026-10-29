@@ -14,7 +14,8 @@ def _lead(actions=()):
     lm.actions = lambda cid, limit=0: list(actions)
     lm._act = lambda case, kind, **kw: seen["acts"].append(kind)
     lm.cancel = lambda cid, why, actor="", P=None: seen["cancel"].append(cid)
-    lm.c = SimpleNamespace(unblock=lambda pid, tid, why, actor="": seen["unblock"].append(tid))
+    lm.c = SimpleNamespace(unblock=lambda pid, tid, why, reset_attempts=False, actor="":
+                           seen["unblock"].append((tid, reset_attempts)))
     lm.store = SimpleNamespace(event=lambda pid, tid, kind, detail=None:
                                seen["events"].append(kind))
     return lm, seen
@@ -34,7 +35,7 @@ def case(**kw):
 def test_a_coordinator_case_from_before_the_upgrade_retries_the_task():
     lm, seen = _lead()
     assert lm.retry_after_upgrade(P, BLOCKED, case(), started=200.0) is True
-    assert seen["cancel"] == ["rc1"] and seen["unblock"] == ["T1"]
+    assert seen["cancel"] == ["rc1"] and seen["unblock"] == [("T1", False)]
     assert "lead_retry_after_upgrade" in seen["events"]
 
 
@@ -47,3 +48,12 @@ def test_it_never_retries_a_newer_case_another_class_or_a_running_session():
         lm, seen = _lead(acts)
         assert lm.retry_after_upgrade(P, t, c, started=200.0) is False
         assert not seen["cancel"] and not seen["unblock"]
+
+
+def test_an_attempts_exhausted_case_retries_with_a_fresh_budget():
+    """AS-P5 06:18: the retry without attempts failed again at once."""
+    lm, seen = _lead()
+    c = case(trigger={"class": "attempts_exhausted",
+                      "reason": "8 implementation attempts used (max_attempts 8)"})
+    assert lm.retry_after_upgrade(P, BLOCKED, c, started=200.0) is True
+    assert seen["unblock"] == [("T1", True)]
