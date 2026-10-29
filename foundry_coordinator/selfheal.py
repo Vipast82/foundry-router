@@ -284,7 +284,8 @@ def stuck_cases(c, P) -> list[dict]:
         if not case:
             continue
         cid, tid = case["case_id"], case["task_id"]
-        if L._open_call(cid, "lead_call") or L._open_call(cid, "repair_session"):
+        if L._open_call(cid, "lead_call") or L._open_call(cid, "repair_session") or \
+                L._open_call(cid, "track_repair"):
             continue                 # a call is live (rule 1 ends it if it is dead)
         if case["state"] == "DEFERRED" and float(case.get("next_check_ts") or 0) > now:
             continue
@@ -559,7 +560,8 @@ def _task_busy(c, P, t: dict) -> str:
     if L is not None:
         case = L.active_case(P.id, tid)
         if case and (L._open_call(case["case_id"], "lead_call") or
-                     L._open_call(case["case_id"], "repair_session")):
+                     L._open_call(case["case_id"], "repair_session") or
+                     L._open_call(case["case_id"], "track_repair")):
             return "a Lead call"
     return ""
 
