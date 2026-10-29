@@ -2,6 +2,16 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.157.34 — a coordinator bug case retries its sprint after an upgrade
+
+2026-10-29 04:50-05:50: four Lead cases classified "coordinator" (gate file list, review packet,
+unmounted check) sat DEFERRED for an hour after v0.157.29-33 had shipped their fixes; the Lead's
+own repair sessions kept ending on infrastructure, and no sprint ran.
+
+- **The Lead** cancels a coordinator-class case opened before the running coordinator started
+  (no session in flight) and retries its BLOCKED sprint once on the new code. If the problem is
+  still there, a new case takes the normal route, so it never loops.
+
 ## v0.157.33 — the review packet leaves out other sprints' changes
 
 2026-10-29 04:50: GF-FIX1's review range ran from an old task base and held 25 commits of

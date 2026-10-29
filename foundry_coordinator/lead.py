@@ -186,6 +186,9 @@ TASK_BOUNDS = {"cases": "max_cases_per_task", "lead_calls": "max_lead_calls_per_
 # never writes recovery_cases: the UPGRADING step polls the request and moves
 # the case itself.
 UPGRADE_DONE = "done"
+# when this coordinator process started: a "coordinator" case opened before it may be fixed
+# by the upgrade it runs (retry_after_upgrade)
+PROCESS_START = time.time()
 UPGRADE_FAILED = ("rolled_back", "failed")
 
 _JSON_COLS = {"trigger": {}, "proposed_action": {}, "validation": {}, "counters": {},
@@ -2585,10 +2588,50 @@ class LeadManager:
             return self._escalate_bound(P, t, case, "upgrade_minutes")
         if st == "RESUMING" and now - since > float(s["max_resuming_minutes"]) * 60:
             return self._escalate_bound(P, t, case, "resuming_minutes")
+        if self.retry_after_upgrade(P, t, case):
+            return self.case(case["case_id"])
         fn = {"DIAGNOSING": self._diagnosing, "REPAIRING": self._repairing,
               "UPGRADING": self._upgrading, "DEFERRED": self._deferred,
               "NEEDS_VICTOR": self._needs_victor, "RESUMING": lambda P, t, c, s: c}[st]
         return fn(P, t, case, s)
+
+    def retry_after_upgrade(self, P, t: Optional[dict], case: dict,
+                            started: Optional[float] = None) -> bool:
+        """2026-10-29: four cases classified "coordinator" (gate -Files, review packet,
+        unmounted check) sat DEFERRED for an hour after the coordinator was upgraded with
+        their fixes; their repair sessions kept ending on infrastructure. A coordinator
+        case opened before this coordinator process started, holding no running session,
+        is cancelled and its BLOCKED task retried ONCE on the new code. If the problem is
+        still there the task blocks again and a new case (opened after the start) takes
+        the normal route, so this never loops."""
+        started = PROCESS_START if started is None else started
+        if str(case.get("classification") or "") != "coordinator":
+            return False
+        if float(case.get("created_ts") or 0) >= started:
+            return False
+        if case["state"] not in ("DIAGNOSING", "DEFERRED", "REPAIRING"):
+            return False
+        if t is None or t.get("state") != "BLOCKED":
+            return False
+        try:
+            if any(a.get("status") == "started" for a in self.actions(case["case_id"])):
+                return False
+        except Exception:                                        # noqa: BLE001
+            return False
+        why = ("the coordinator was upgraded after this coordinator-class case opened; the "
+               "task is retried once on the new code")
+        self._act(case, "retry_after_upgrade", result=why)
+        self.cancel(case["case_id"], why, actor="lead_manager", P=P)
+        try:
+            self.c.unblock(P.id, case["task_id"], why, actor="lead_manager")
+        except Exception as e:                                   # noqa: BLE001
+            self.store.event(P.id, case["task_id"], "lead_retry_after_upgrade_failed",
+                             detail={"case_id": case["case_id"], "error": str(e)[:300]})
+            return True
+        self.store.event(P.id, case["task_id"], "lead_retry_after_upgrade", detail={
+            "case_id": case["case_id"], "case_created": case.get("created_ts"),
+            "process_start": started})
+        return True
 
     @staticmethod
     def _limit(case: dict, s: dict, name: str) -> int:
