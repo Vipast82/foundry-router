@@ -403,6 +403,7 @@ body.noanim * { animation:none !important; transition:none !important; }
   <div class="grp">
     <label class="sr" for="sel-project">Project</label><select id="sel-project" title="Project"></select>
     <label class="sr" for="sel-task">Task</label><select id="sel-task" title="Task"></select>
+    <label class="dim" title="Cancelled sprints are kept (history, reviews, training captures) but hidden from this list unless ticked"><input type="checkbox" id="chk-show-cancelled"> Show cancelled</label>
     <span id="task-state"></span>
   </div>
   <div class="grp">
@@ -3743,7 +3744,12 @@ function renderTaskSelect() {
   const projects = [...new Set([...[...S.tasks.values()].map(t => t.project_id), ...Object.keys(S.projectStatus || {})])].sort();
   if (!S.project && projects.length) S.project = projects[0];
   $("#sel-project").innerHTML = projects.map(p => `<option ${p === S.project ? "selected" : ""}>${esc(p)}</option>`).join("") || "<option>(no projects reported)</option>";
-  const tasks = [...S.tasks.values()].filter(t => t.project_id === S.project).sort((a, b) => (b.received_ts || 0) - (a.received_ts || 0));
+  // 2026-10-28 Victor: cancelled sprints out of the picker by default (kept, never deleted)
+  const showCancelled = !!P.showCancelled;
+  const box = $("#chk-show-cancelled"); if (box) box.checked = showCancelled;
+  const tasks = [...S.tasks.values()].filter(t => t.project_id === S.project &&
+      (showCancelled || t.state !== "CANCELLED" || t.task_id === S.task))
+    .sort((a, b) => (b.received_ts || 0) - (a.received_ts || 0));
   if (!S.task || !tasks.find(t => t.task_id === S.task)) {
     const active = tasks.find(t => ["IMPLEMENTING", "CLOSING", "VERIFYING", "REVIEWING", "AWAITING_HUMAN"].includes(t.state)) || tasks[0];
     S.task = active ? active.task_id : "";
@@ -3763,6 +3769,10 @@ function selectTask(p, t) {
 }
 $("#sel-project").onchange = e => { S.project = e.target.value; S.task = ""; renderTaskSelect(); selectTask(S.project, S.task); };
 $("#sel-task").onchange = e => selectTask(S.project, e.target.value);
+if ($("#chk-show-cancelled")) $("#chk-show-cancelled").onchange = e => {
+  P.showCancelled = e.target.checked; savePrefs();
+  renderTaskSelect();
+};
 
 /* ======================================================================== boot */
 let graphTimer = null;

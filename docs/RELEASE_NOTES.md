@@ -2,6 +2,13 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.157.10 — cancelled sprints hidden from the control center's task picker
+
+- **Task picker:** CANCELLED sprints are left out unless "Show cancelled" is ticked (a
+  per-browser preference next to the picker; the selected task always stays listed). The
+  records are kept: history, reviews and training captures (Victor 2026-10-28 asked to delete
+  them; hiding keeps the data). Router rebuild needed (UI only).
+
 ## v0.157.9 — a scripted Studio run holds the main checkout
 
 UI-SKIN2, 2026-10-28 22:1x: AS-P5's scripted gate wrote docs/progress/AS-P5_* into the shared main
