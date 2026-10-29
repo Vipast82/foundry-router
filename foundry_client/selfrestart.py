@@ -26,7 +26,7 @@ while time.time() < deadline:
     finally:
         s.close()
     time.sleep(0.5)
-flags = 0x00000008 | 0x00000200 if sys.platform == "win32" else 0
+flags = (0x00000008 | 0x00000200) if sys.platform == "win32" else 0
 subprocess.Popen([exe, "-m", "foundry_client", "run"], cwd=cwd, creationflags=flags,
                  close_fds=True)
 """

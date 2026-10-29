@@ -2,6 +2,11 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.157.13 — client restart helper: Windows-only flags only on Windows
+
+- `selfrestart` helper: the detach flags were applied on every platform by operator
+  precedence; they are Windows-only.
+
 ## v0.157.12 — Restart client button
 
 - **Status page: Restart client.** Starts a fresh Foundry Client (new code and settings) that waits
