@@ -821,6 +821,25 @@ def test_live_hash_resolves_testlib_mounts(fakes, repo):
         g.close()
 
 
+def test_live_verify_ignores_unmounted_check_of_a_suite_not_run(fakes, repo):
+    set_rules, _ = fakes
+    set_rules([{"tool": "execute_luau", "match": "verifyLive",
+                "text": "SKIP (unmounted) tests/S57a_check.lua\nVERIFY matched=2/2 mismatched=0 "
+                        "unresolved=0 skipped=1"}])
+    g = G.Gate(str(repo), "L3", "sprint", call_timeout=10)
+    try:
+        exp = {"src/a.lua": "1", "src/b.lua": "2", "tests/S57a_check.lua": "3"}
+        g.live_verify(exp, running={"GF_FIX1_check"})
+        assert g.checks[-1]["result"] == "PASS"
+        assert "S57a_check.lua" in g.last_verify_text
+        g.live_verify(exp, running={"S57a_check"})                            # it runs: still UNKNOWN
+        assert g.checks[-1]["result"] == "UNKNOWN"
+        g.live_verify(exp)                                                    # no run set: unchanged
+        assert g.checks[-1]["result"] == "UNKNOWN"
+    finally:
+        g.close()
+
+
 def test_hash_maps_reject_unsafe_names(repo):
     seen = []
     g = G.Gate(str(repo), "H1", "sprint", run_cmd=lambda *a: seen.append(a) or (0, ""))

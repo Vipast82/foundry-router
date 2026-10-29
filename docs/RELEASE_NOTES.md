@@ -2,6 +2,15 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.157.29 — an unmounted check file of a suite the run skips does not block it
+
+2026-10-29 03:20: track backend-1 landed tests/S57a_check.lua without a Studio mount, and the
+PRE-PLAY verify of GF-FIX1, HK-TEST1 and UI-SKIN2 stopped with "not mounted anywhere in Studio"
+although none of them runs the S57a suite.
+
+- **Scripted Studio runs** note, rather than stop on, an unmounted `tests/*_check.lua` whose suite
+  the run does not execute. A run that executes that suite still stops as before.
+
 ## v0.157.28 — a track's Studio batch is not starved by held main sprints
 
 2026-10-29 02:05-03:10: the assets-local merge reached its Studio batch and waited on "main X is

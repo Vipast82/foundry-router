@@ -1456,7 +1456,8 @@ class Gate:
         except (OSError, ValueError):
             return {}
 
-    def live_verify(self, expect: dict, cid: str = "host.live_hash"):
+    def live_verify(self, expect: dict, cid: str = "host.live_hash",
+                    running: Optional[set] = None):
         """Studio sources == HEAD for the files under test. GateRunner.verifyLive knows
         src/ and its MOUNTED_TESTS; files it reports `SKIP (unmounted)` are resolved here
         from default.project.json at HEAD (tests/lib/* -> ReplicatedStorage.TestLib.*;
@@ -1507,6 +1508,16 @@ class Gate:
         # tests/lune/** run headless in Lune and are never mounted in Studio (UI-02a, 2026-10-20)
         studio = [p for p in unmounted if p.startswith(("src/", "tests/"))
                   and not p.startswith("tests/lune/") and rojo_synced(p)]
+        # 2026-10-29: a check file of a suite this run does not execute is not under test in
+        # Studio; track backend-1 landed tests/S57a_check.lua unmounted and it blocked three
+        # unrelated sprints' scripted runs (GF-FIX1, HK-TEST1, UI-SKIN2)
+        if running is not None:
+            idle = [p for p in studio if re.fullmatch(r"tests/[^/]+_check\.lua", p)
+                    and p[len("tests/"):-len(".lua")] not in running]
+            if idle:
+                self.last_verify_text += ("\nNOTE unmounted check file(s) of suites this run "
+                                          "does not execute: " + ", ".join(idle))
+                studio = [p for p in studio if p not in idle]
         summary = f"matched={matched}/{total} mismatched={mism} unresolved={unres}"
         if extra:
             self.last_verify_text += (f"\nVERIFY {summary} skipped=0 (with the Rojo-mounted "
@@ -3454,7 +3465,8 @@ def _run_calls(a, sprint, run_id, out, official, community, run_cmd) -> int:
             g._playing = True
             g.stop_playtest()
         g.status("verify", "pre-play")
-        g.live_verify(expect, cid="calls.verify_pre")
+        running = {str(e.get("file") or "") for e in exec_rows} - {""}
+        g.live_verify(expect, cid="calls.verify_pre", running=running)
         pre = g.checks[-1]
         ctx["verify_pre"] = g.last_verify_text
         g.emit(f"PRE-PLAY VERIFY (GateRunner.verifyLive, Edit DM, fresh GateRunner clone, map "
@@ -3477,7 +3489,7 @@ def _run_calls(a, sprint, run_id, out, official, community, run_cmd) -> int:
                    f"CALLs (boot 1-2 only)")
             _boot_only(g)
         g.status("verify", "post-play")
-        g.live_verify(expect, cid="calls.verify_post")
+        g.live_verify(expect, cid="calls.verify_post", running=running)
         post = g.checks[-1]
         ctx["verify_post"] = g.last_verify_text
         g.emit(f"POST-PLAY VERIFY (GateRunner.verifyLive, identical map to PRE-PLAY): "
