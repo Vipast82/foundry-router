@@ -1529,3 +1529,21 @@ def test_pending_served_calls_defer_instead_of_trusting_the_check(env):
     assert case["state"] == "DEFERRED"
     sm = next(a for a in env["lm"].actions(case["case_id"]) if a["kind"] == "served_model")
     assert sm["detail"]["verdict"] == "unverifiable" and "pending" in sm["result"]
+
+
+def test_a_lead_prompt_kilo_never_admits_is_a_stalled_session():
+    """AS-P5 2026-10-29 replay: the Lead's repair prompt (02:19) got no assistant turn for
+    30+ minutes; Kilo reported it idle/unanswered and the Lead kept waiting while the
+    landings and the main queue waited on it."""
+    from types import SimpleNamespace
+    from foundry_coordinator.lead import LeadManager
+    lm = LeadManager.__new__(LeadManager)
+    store = {}
+    lm._upd = lambda key, **kw: {"detail": {**store.setdefault(key, {}), **kw}} \
+        if not store.update({key: {**store.get(key, {}), **kw}}) else None
+    st = SimpleNamespace(retry=False, stalled=False, compaction=None, unanswered=True, error="")
+    d = {}
+    assert lm._stall("k", d, st, 1000.0, 300) == ""                 # first sight: start the clock
+    d = store["k"]
+    why = lm._stall("k", d, st, 1000.0 + 301, 300)
+    assert "never admitted" in why

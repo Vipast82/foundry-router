@@ -2,6 +2,16 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.157.26 — a Lead prompt Kilo never admits is a dead session
+
+AS-P5, 2026-10-29 02:19-02:50: the Lead's repair session got its prompt and no assistant turn
+ever followed (Kilo: idle, unanswered); the Lead kept waiting while both prep landings and the
+whole main queue waited on that open session.
+
+- **`LeadManager._stall`** treats `unanswered` like a stalled turn: after [limits]
+  infra_retry_abort_seconds the session is ended and the call deferred as an infra wait (never
+  a counted call), the same as the implementer path's admission timeout.
+
 ## v0.157.25 — a screenshot does not go stale when the sprint edits its own check
 
 AS-P5, 2026-10-29 00:33-01:59: every fresh runtime capture (PASS, with runtime identity) was

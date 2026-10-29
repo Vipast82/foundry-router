@@ -2204,7 +2204,11 @@ class LeadManager:
         stalled transcript or a compaction with no continuation), continuously for
         [limits] infra_retry_abort_seconds."""
         retry = bool(getattr(st, "retry", False))
-        stalled = bool(getattr(st, "stalled", False) or getattr(st, "compaction", None))
+        # 2026-10-29 AS-P5: a Lead repair prompt Kilo never admitted (idle, no assistant
+        # turn) sat 30+ minutes while the landings and the main queue waited on it; the
+        # implementer path ends such a session after the admission window (engine)
+        stalled = bool(getattr(st, "stalled", False) or getattr(st, "compaction", None)
+                       or getattr(st, "unanswered", False))
         upd = {}
         for name, on in (("retry_since", retry), ("stall_since", stalled)):
             if on and not d.get(name):
@@ -2222,7 +2226,9 @@ class LeadManager:
         if stalled and now - float(d.get("stall_since") or now) >= abort_s:
             return (f"Kilo has not run the session's turn for "
                     f"{int(now - float(d['stall_since']))} s (dead session"
-                    + (": compacted with no continuation" if st.compaction else "") + ")")
+                    + (": compacted with no continuation" if st.compaction else "")
+                    + (": the prompt was never admitted" if getattr(st, "unanswered", False)
+                       else "") + ")")
         return ""
 
     def _lead_context_guard(self, P, case: dict, key: str, d: dict, sid: str, persona: str,
