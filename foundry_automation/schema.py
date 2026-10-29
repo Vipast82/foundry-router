@@ -237,6 +237,11 @@ AUTOMATION_DEFAULTS: dict = {
     "reword_commits": False,
     # 2026-10-29: a track merge / prep landing waiting this long gets the main checkout next
     "landing_drain_minutes": 30,
+    # 2026-10-29: tool-written task files the coordinator commits itself when a sprint
+    # reaches verification ({task} = sprint id). plan_new.py --set-next writes the plan
+    # history; local sessions left it uncommitted 3x (AS-D13, AS-V03, AS-R7), each a
+    # failed clean check and a new session
+    "auto_commit_task_files": ["docs/progress/{task}_PLAN_HISTORY.md"],
     "decision_timeout_minutes": 30,
     # 2026-10-28 self-driving part 1: an automation decision (tooling, budget, infra,
     # repeated findings) never times out to "park": it self-repairs, capped per task per
@@ -735,6 +740,8 @@ _AUTO_DESC = {
     "scope_auto_approve": "Scope allow-list: harness lines the coordinator adds to a sprint's "
                           "file list itself. Each entry {name, path (glob, {task}), blocks[], "
                           "lines[] (regexes), json_paths_in_plan, reason}.",
+    "auto_commit_task_files": "Tool-written task files ({task} = sprint id) the coordinator "
+                              "commits itself when a sprint reaches verification.",
     "landing_drain_minutes": "A finished track's merge or a prep-queue landing that has waited "
                              "this many minutes for a quiet main checkout stops new main-sprint "
                              "sessions from starting until it lands (0 = never drain). Back-to-"

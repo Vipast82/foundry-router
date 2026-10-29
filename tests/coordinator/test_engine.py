@@ -960,3 +960,26 @@ def test_a_sprint_that_yields_to_an_earlier_one_gives_back_the_checkout_lock(gam
     c._start_implementation(P, c.store.task("game", "T2"))
     assert not c.store.holds("game", "T2")
     assert "waiting for T1" in (c.store.task("game", "T2")["next_action"] or "")
+
+
+def test_a_left_over_plan_history_is_committed_by_the_coordinator(game):
+    """2026-10-29 AS-R7 (and AS-D13, AS-V03): plan_new.py's PLAN_HISTORY was left
+    uncommitted; the clean check failed and a new session started. The coordinator now
+    commits the sprint's own tool-written files ([automation] auto_commit_task_files)."""
+    import os as _os
+    tmp, root, _, prof = game
+    c = coordinator(tmp, [prof], {"game": write_ok("src/a.txt")})
+    c.approve("game", "T1", [], "victor")
+    P = c.projects["game"]
+    t = c.store.task("game", "T1")
+    _os.makedirs(_os.path.join(root, "docs", "progress"), exist_ok=True)
+    for name in ("T1_PLAN_HISTORY.md", "T2_PLAN_HISTORY.md"):
+        with open(_os.path.join(root, "docs", "progress", name), "w") as f:
+            f.write("history\n")
+    head = P.ws.head()
+    assert c._auto_commit_task_files(P, t) is True
+    assert P.ws.head() != head
+    dirty = [p for _, p in P.ws.status()]
+    assert "docs/progress/T1_PLAN_HISTORY.md" not in dirty
+    assert "docs/progress/T2_PLAN_HISTORY.md" in dirty        # another sprint's: left alone
+    assert c._auto_commit_task_files(P, t) is False             # nothing left to commit

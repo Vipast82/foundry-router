@@ -2,6 +2,16 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.157.61 — the coordinator commits a sprint's left-over plan history
+
+2026-10-29 16:18: AS-R7's verification failed `coordinator.clean` on an uncommitted
+`docs/progress/AS-R7_PLAN_HISTORY.md` (written by `plan_new.py --set-next`). The same happened to
+AS-D13 and AS-V03; each cost a verify round and a new session.
+
+- **`[automation] auto_commit_task_files`** (default `["docs/progress/{task}_PLAN_HISTORY.md"]`):
+  when a sprint reaches VERIFYING, the coordinator commits those of its own files a session left
+  dirty, then verifies the new HEAD. Another sprint's files are never touched.
+
 ## v0.157.60 — an upgrade retry also refreshes a used review or session budget
 
 2026-10-29 15:54: the Lead retried HK-STORE1 on the new code (retry_after_upgrade) after the

@@ -527,6 +527,28 @@ class Coordinator:
         self.store.transition(P.id, t["task_id"], S.READY,
                               {"deps_satisfied": q["deps"] or ["(none)"]})
 
+    def _auto_commit_task_files(self, P: Project, t: dict) -> bool:
+        """Commit the sprint's own tool-written files ([automation] auto_commit_task_files)
+        that a session left dirty. True when a commit was made."""
+        from .automation import get as auto_get
+        from .profile import matches_any
+        from . import bookkeeping as BK
+        tid = t["task_id"]
+        pats = [str(x).replace("{task}", tid) for x in (auto_get(P, "auto_commit_task_files")
+                                                         or []) if str(x).strip()]
+        if not pats:
+            return False
+        try:
+            dirty = P.ws.status()
+        except Exception:                                         # noqa: BLE001
+            return False
+        paths = [p for p in BK.runner_paths(dirty, pats, set()) if P.profile.in_workspace(p)]
+        if not paths:
+            return False
+        sha, _ = BK.commit(self, P, t, paths, "tool-written task files left uncommitted "
+                           "(coordinator)", "auto_commit_task_files")
+        return bool(sha)
+
     def _unmet_start_deps(self, P: Project, t: dict) -> list:
         """Queue deps and task-source deps already on the queue that are not satisfied, for
         a sprint about to start for the first time ([] = free to start)."""
@@ -1817,6 +1839,8 @@ class Coordinator:
         if self._lc(P) and self._lc_resume_continuation(P, t):
             return                       # a pending continuation at this head: never re-verified
         spec = P.adapter.describe(tid)
+        if self._auto_commit_task_files(P, t):
+            return                       # HEAD moved: verify the new commit next tick
         head = P.ws.head()
         if not self.fast_lane.on(P, tid) and self.studio_calls.verify_hold(P, t, spec, head):
             # [studio_calls] auto_verify: the gate was missing or stale at HEAD; the scripted
