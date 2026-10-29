@@ -1294,6 +1294,7 @@ class Gate:
         # display CALL numbers (the full selection's numbering), budgets and the MCP
         # failure counter. All inert (None / empty / 0) in the other modes.
         self.lines = None                    # LinesWriter
+        self.capture_log: list = []          # CAPTURE_READY frames the runner took
         self.disp: dict = {}                 # studio CALL n -> display CALL n
         self.group_budget_s: Optional[float] = None
         self._group_deadline: Optional[float] = None
@@ -1402,6 +1403,46 @@ class Gate:
     def emit(self, text: str) -> None:
         if self.lines is not None:
             self.lines.line(text)
+
+    def capture_ready(self, text: str) -> None:
+        """2026-10-29 AS-P5: a suite CALL that stages a frame prints `CAPTURE_READY <path> ...`
+        and expects the host to take it before the next CALL restores the scene; the runner
+        never did, so the frame was never taken. Take the game viewport (capture_screenshot,
+        no Studio chrome) to <path> (only under docs/evidence/<sprint>/, .png) and log
+        `CAPTURE <path> runtime=...` + `PASS:`/`FAIL: CAPTURE ...` in the lines file and the
+        run's capture log (never in the suite's own text: its PASS count is the tally's)."""
+        for m in re.finditer(r"^CAPTURE_READY\s+(\S+\.png)\b(.*)$", text, re.M):
+            relp, rest = m.group(1).replace("\\", "/"), m.group(2).strip()
+            out = []
+            want = f"docs/evidence/{self.sprint}/"
+            path = os.path.abspath(os.path.join(self.repo, *relp.split("/")))
+            if not relp.startswith(want) or ".." in relp.split("/") or not path.startswith(
+                    os.path.abspath(os.path.join(self.repo, *want.rstrip("/").split("/")))):
+                out.append(f"FAIL: CAPTURE {relp} - refused: a capture path must be under {want}")
+            else:
+                png, why = None, ""
+                try:
+                    r = self.community.call_tool("capture_screenshot", {"format": "png"},
+                                                 timeout=self.call_timeout)
+                    png = None if r["is_error"] else next(
+                        (b for mime, b in r["images"] if "png" in mime), None)
+                    why = "" if png else one_line(r["text"], 200)
+                except Exception as e:                            # noqa: BLE001
+                    why = f"{type(e).__name__}: {e}"[:200]
+                if png is None:
+                    out.append(f"FAIL: CAPTURE {relp} - no PNG from capture_screenshot: {why}")
+                else:
+                    os.makedirs(os.path.dirname(path), exist_ok=True)
+                    with open(path, "wb") as f:
+                        f.write(png)
+                    got = png_size(png)
+                    size = f"{got[0]}x{got[1]}" if got else "?"
+                    out.append(f"CAPTURE {relp} {rest}".strip())
+                    out.append(f"PASS: CAPTURE {relp} {size} written by the runner at CAPTURE_READY")
+            self.capture_log.extend(out)
+            if self.lines is not None:
+                for ln in out:
+                    self.lines.line(ln)
 
     def emit_call(self, c: dict, payload: str, text: str, err: bool, note: str = "") -> None:
         """A CALL header plus its raw result, as the session's lines file shows it."""
@@ -2086,6 +2127,8 @@ class Gate:
                                          "client CALL ran at an unverified viewport: " + att["viewport_bad"]))
             self.emit_call(c, payload, res[n], bool(err) or n in tool_err,
                            " DYNARG" if c.get("dynarg") else (" tight" if c.get("tight") else ""))
+            if not err and "CAPTURE_READY " in str(res[n]):
+                self.capture_ready(str(res[n]))
             att["order"].append(n)
 
     def _run_group(self, g: dict, boot: list, entry_of: dict) -> dict:
@@ -3840,7 +3883,8 @@ def finish_calls(g: "Gate", a, error, tooling, ctx, rows, disp, carry, manual, s
          "lines_file": lines_rel, "lines_sha256": lines_sha,
          "evidence": {"verify_pre": ctx.get("verify_pre") or "", "boot": g.boot_text or "",
                       "verify_post": ctx.get("verify_post") or "", "tally": ctx.get("tally") or ""},
-         "raw_results": {str(g._dn(n)): str(t)[:20000] for n, t in sorted(results.items())},
+         "raw_results": {**{str(g._dn(n)): str(t)[:20000] for n, t in sorted(results.items())},
+                         **({"captures": "\n".join(g.capture_log)} if g.capture_log else {})},
          "summary": summary, "summary_line": f"CALLS {g.sprint} {result}"}
     if g.head:
         with contextlib.suppress(Exception):

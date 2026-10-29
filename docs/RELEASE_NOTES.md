@@ -2,6 +2,18 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.157.47 — the scripted Studio runner takes the frame at CAPTURE_READY
+
+2026-10-29 11:59: AS-P5's suite staged its telegraph frame and printed `CAPTURE_READY <path>`,
+expecting the host to take it before the next CALL restored the scene; the runner never did, so
+the evidence frame was never taken and the sprint blocked.
+
+- **studio_gate:** a CALL result with `CAPTURE_READY <path> ...` makes the runner take the game
+  viewport (`capture_screenshot`, no Studio chrome) to <path> before the next CALL — only under
+  `docs/evidence/<sprint>/` — and log `CAPTURE <path> ...` + `PASS:`/`FAIL: CAPTURE ...` in the
+  lines file and the run's record (`raw_results.captures`), where the coordinator records it as
+  the capture (v0.157.39). The suite's own text, and so its tally, is unchanged.
+
 ## v0.157.46 — a sprint cancelled before it starts leaves its track
 
 2026-10-29 11:24: MV2-1 (queued by mistake behind MV2-0 on track gpt-2) was cancelled; the track

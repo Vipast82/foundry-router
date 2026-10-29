@@ -668,3 +668,35 @@ def test_another_sprints_red_row_is_pre_existing_and_never_fails_the_run(fakes, 
     text = lines_of(repo, "CR")
     assert "SKIP: GATE suite S28 - PRE-EXISTING: red at" in text and "(CG run" in text
     assert "FAIL: GATE suite S28" not in text
+
+
+def test_capture_ready_is_taken_by_the_runner_before_the_next_call(fakes, repo):
+    """2026-10-29 AS-P5: the suite staged the frame and printed CAPTURE_READY, then the next
+    CALL restored the scene: nothing ever took the frame. The runner takes it now."""
+    set_rules, calls = fakes
+    off, comm = rules(UI, extra_comm=[
+        {"tool": "eval_client_runtime", "match": "clientFog",
+         "text": "PASS: fog\nCAPTURE_READY docs/evidence/CQ/frame.png runtime=playtest subject=Rat#1"},
+        {"tool": "capture_screenshot", "text": "{}", "png": [1920, 1080]}])
+    set_rules(off, comm)
+    host_half(repo, "CQ")
+    rc, out = run_calls(repo, "CQ", "--regression", "subset:ui", "--rerun", "all")
+    assert (repo / "docs" / "evidence" / "CQ" / "frame.png").is_file()
+    text = lines_of(repo, "CQ")
+    assert "CAPTURE docs/evidence/CQ/frame.png runtime=playtest subject=Rat#1" in text
+    assert "PASS: CAPTURE docs/evidence/CQ/frame.png 1920x1080" in text
+    v = json.load(open(gate_file(repo, "CQ", "latest/calls.json")))
+    assert "PASS: CAPTURE docs/evidence/CQ/frame.png" in v["raw_results"]["captures"]
+
+
+def test_capture_ready_outside_the_sprints_evidence_is_refused(fakes, repo):
+    set_rules, _ = fakes
+    off, comm = rules(UI, extra_comm=[
+        {"tool": "eval_client_runtime", "match": "clientFog",
+         "text": "PASS: fog\nCAPTURE_READY docs/evidence/OTHER/x.png runtime=playtest"},
+        {"tool": "capture_screenshot", "text": "{}", "png": [1920, 1080]}])
+    set_rules(off, comm)
+    host_half(repo, "CR2")
+    run_calls(repo, "CR2", "--regression", "subset:ui", "--rerun", "all")
+    assert not (repo / "docs" / "evidence" / "OTHER" / "x.png").exists()
+    assert "FAIL: CAPTURE docs/evidence/OTHER/x.png - refused" in lines_of(repo, "CR2")
