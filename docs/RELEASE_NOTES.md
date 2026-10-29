@@ -2,6 +2,21 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.157.44 — the Foundry Client watches memory and stops runaway dev / test jobs
+
+2026-10-29 (Victor): a stuck training run held 32 GB for 30 hours and nothing noticed.
+
+- **Resource watch** (`foundry_client/resources.py`, every 60 s): free RAM and the development /
+  testing jobs the stack runs (training runs, scripted Studio checks, gate.ps1, Lune, headless
+  Blender builds, `rojo build`, pytest, the game repo's tools/ scripts), each with its whole
+  process tree.
+- A job over its **memory limit** (two checks in a row) or **time limit** is stopped with its tree
+  when auto-stop is on; its work stays queued. Every stop is an event and an alert.
+- **Anything else is never touched**: Studio, Blender's window, the components and your apps only
+  appear in a low-RAM alert that names the biggest users.
+- A **Memory** card on the status page; every limit, the low-RAM level, the interval and
+  auto-stop are on the Settings page (Resource watch).
+
 ## v0.157.43 — the automatic training run reads shared sources once and has a watchdog
 
 2026-10-28 04:29 → 2026-10-29 10:5x: one automatic training run (`foundry_training auto`) held

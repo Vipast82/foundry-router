@@ -75,6 +75,14 @@ class Manager:
                                   "Vipast82/foundry-router", clock)
         from .client_requests import RequestQueue
         self.requests = RequestQueue(self)
+        from .resources import ResourceWatch
+        self.resources = ResourceWatch(
+            lambda: self.cfg.get("resources") or {},
+            alert=lambda key, text, level="warn": self._alert(key, text, level),
+            clear_alert=self._clear_alert,
+            event=self._event,
+            game=lambda: (self.cfg.get("workspace") or {}).get("game") or "",
+            protected=self._component_pids, clock=clock)
         from .studio import StudioReopen
         self.studio = StudioReopen(lambda: self.cfg.get("studio") or {},
                                    cfg["client"]["state_dir"],
@@ -119,6 +127,7 @@ class Manager:
             try:
                 self.step()
                 self.requests.poll()
+                self.resources.maybe_tick()
             except Exception as e:                                # noqa: BLE001
                 self._event("client", f"internal error: {type(e).__name__}: {e}")
             self.stop_evt.wait(interval)
@@ -449,6 +458,21 @@ class Manager:
     @staticmethod
     def _show(argv: list) -> str:
         return " ".join(str(a) for a in argv)          # argv never holds secrets
+
+    def _component_pids(self) -> set:
+        """The managed components' own processes: the resource watch never stops them."""
+        out = set()
+        for pr in list(self.procs.values()):
+            if pr.p is not None and getattr(pr.p, "pid", None):
+                out.add(int(pr.p.pid))
+            if pr.adopted and pr.spec.owner_pid:
+                try:
+                    pid = pr.spec.owner_pid()
+                except Exception:                                 # noqa: BLE001
+                    pid = None
+                if isinstance(pid, int) and pid > 0:
+                    out.add(pid)
+        return out
 
     def _event(self, name: str, text: str) -> None:
         self.events.append({"ts": self.clock(), "component": name, "text": text})

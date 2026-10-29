@@ -64,7 +64,8 @@ def create_app(mgr: Manager, token: str, cfg_path: Optional[Path] = None) -> Fas
     @app.get("/api/status")
     def status():
         return {**mgr.status(), "version": __version__,
-                "backend_url": mgr.cfg["client"]["backend_url"]}
+                "backend_url": mgr.cfg["client"]["backend_url"],
+                "resources": getattr(getattr(mgr, "resources", None), "last", {}) or {}}
 
     @app.get("/api/mcp")
     def mcp(fresh: bool = False):

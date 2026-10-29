@@ -50,6 +50,16 @@ DEFAULTS: dict[str, Any] = {
         "kilo_config": "",                              # kilo.jsonc (empty = <game>/kilo.jsonc)
         "project": "",                                  # coordinator project id (empty = the only one)
     },
+    # resource watch (resources.py): free RAM + the development / testing jobs the stack runs
+    "resources": {"enabled": True, "interval_seconds": 60, "low_ram_gb": 2, "auto_stop": True,
+                  "limits": {"training": {"gb": 6, "minutes": 120},
+                             "studio_check": {"gb": 3, "minutes": 240},
+                             "gate_ps1": {"gb": 2, "minutes": 90},
+                             "lune": {"gb": 2, "minutes": 60},
+                             "blender_build": {"gb": 8, "minutes": 120},
+                             "rojo_build": {"gb": 2, "minutes": 20},
+                             "pytest": {"gb": 4, "minutes": 60},
+                             "repo_script": {"gb": 2, "minutes": 120}}},
     # Studio auto-reopen (studio.py): off by default; the TEST place only
     "studio": {"auto_reopen": False, "place_id": 0, "universe_id": 0, "title_match": "",
                "never_place_ids": [], "idle_minutes": 2, "max_wait_minutes": 10,
@@ -152,6 +162,9 @@ def validate(cfg: dict) -> list[str]:
     for k in ("relay_enabled", "update_check"):
         if not isinstance(c.get(k), bool):
             errs.append(f"client.{k} must be true or false")
+    if isinstance(cfg.get("resources"), dict):
+        from .resources import validate as resources_validate
+        errs += resources_validate(cfg["resources"])
     if isinstance(cfg.get("studio"), dict):
         from .studio import DEFAULTS as STUDIO_DEFAULTS, validate as studio_validate
         errs += studio_validate({**STUDIO_DEFAULTS, **cfg["studio"]})
