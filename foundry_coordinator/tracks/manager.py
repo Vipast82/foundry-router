@@ -412,9 +412,16 @@ class TrackManager:
             raise TrackError(f"track {name} is {row['state']}, not planned")
         prev = ""
         for s in row["sprints"]:
-            if not self.store.task(P.id, s):
+            t = self.store.task(P.id, s)
+            if not t:
                 self.c.approve(P.id, s, [prev] if prev else [], actor,
                                note=f"on track {name}", track=name)
+            elif t["state"] == S.CANCELLED:
+                # 2026-10-29 HK-STORE1: a sprint cancelled off the main queue to move it
+                # onto a track was accepted here but stayed CANCELLED; the track failed 2 s
+                # later. It is reopened onto the track (fresh attempts).
+                self.c.reopen(P.id, s, [prev] if prev else [], actor,
+                              reason=f"on track {name}", track=name)
             prev = s
         row = self.store.update_track(P.id, name, state="running",
                                       current_sprint=row["sprints"][0])

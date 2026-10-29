@@ -209,12 +209,12 @@ class Coordinator:
         return entry
 
     def reopen(self, project_id: str, task_id: str, deps: list[str], approver: str,
-               reason: str = "") -> dict:
+               reason: str = "", track: str = "") -> dict:
         """Put a CANCELLED task back on the queue (fresh attempt counters, no run or
         session, cleared findings); the transition history keeps the earlier runs."""
         t = self.store.task(project_id, task_id)
         if t is None:
-            return self.approve(project_id, task_id, deps, approver, reason)
+            return self.approve(project_id, task_id, deps, approver, reason, track=track)
         if t["state"] != S.CANCELLED:
             raise ValueError(f"{project_id}/{task_id} is {t['state']}, not CANCELLED")
         for d in deps:
@@ -231,7 +231,7 @@ class Coordinator:
                                    reviewed_sha=None, review_id=None, verification_id=None,
                                    closeout_id=None, next_action=None, started_ts=None,
                                    data={**keep, "reopened": {"by": approver, "reason": reason}})
-            entry = self.store.approve(project_id, task_id, deps, approver, reason)
+            entry = self.store.approve(project_id, task_id, deps, approver, reason, track=track)
         return entry
 
     def move(self, project_id: str, task_id: str, position: int, actor: str) -> list[dict]:

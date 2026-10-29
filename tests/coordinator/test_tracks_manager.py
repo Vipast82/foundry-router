@@ -132,6 +132,22 @@ def test_a_track_sprint_runs_in_the_worktree_and_master_does_not_move(tmp_path):
     assert tracks_events(c, "track_ready_to_merge")
 
 
+def test_a_sprint_cancelled_off_main_is_reopened_onto_the_track(tmp_path):
+    """2026-10-29 HK-STORE1: cancelled off the main queue to move it onto a track, it was
+    accepted but stayed CANCELLED and the track failed at its first tick."""
+    c, P, _ = env(tmp_path, extra=chr(10).join(["", "[automation]", "max_agents = 2", ""]))
+    c.approve("game", "A1", [], "victor")
+    c.cancel("game", "A1", "move to a track")
+    c.tracks.create(P, "audio", ["A1"], actor="victor")
+    c.tracks.start(P, "audio", "victor")
+    t = c.store.task("game", "A1")
+    assert t["state"] == S.QUEUED and int(t["attempt"] or 0) == 0
+    assert c.store.task_track("game", "A1") == "audio"
+    c.tick()
+    assert c.store.track("game", "audio")["state"] != "failed"
+    assert run_until(c, lambda: c.store.task("game", "A1")["state"] == S.COMPLETE, limit=60)
+
+
 def test_max_agents_one_keeps_a_track_sprint_waiting_and_a_live_change_lets_it_run(tmp_path):
     c, P, _ = env(tmp_path)                                    # max_agents = 1
     c.tracks.create(P, "blender", ["B1"])

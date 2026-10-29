@@ -2,6 +2,15 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.157.54 — a cancelled sprint moved onto a track is reopened there
+
+2026-10-29 14:43: HK-STORE1 was approved (READY on main), cancelled to move it onto the
+ChatGPT track gpt-5, and `tracks start` accepted it, but the sprint stayed CANCELLED and the
+track failed 2 s later.
+
+- **tracks start:** a CANCELLED sprint is reopened onto the track (fresh attempt counters,
+  chained after the sprint before it). `reopen` takes a `track`.
+
 ## v0.157.53 — scope never blames a sprint for a prep-queue landing
 
 2026-10-29 14:16: the operator's TIER-C prep (`tools/guard/done_check.py`) was cherry-picked
