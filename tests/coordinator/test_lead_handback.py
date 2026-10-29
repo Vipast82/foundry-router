@@ -292,3 +292,20 @@ def test_a_case_with_a_lead_call_in_flight_is_not_handed_back(env):  # noqa: F81
     c.lead._act(case, "lead_call", op_key=f"lead:{case['case_id']}:1", status="started")
     assert c.lead.handback_decisions(P, c.lead.case(case["case_id"])) == []
     assert c.lead.hand_back(P, c.lead.case(case["case_id"]), "x") is False
+
+
+def test_a_never_admitted_session_retries_after_a_minute_twice(env):  # noqa: F811
+    """2026-10-29: Lead repair prompts Kilo never admitted were deferred 10 then 40 min."""
+    c, P = env["c"], env["P"]
+    did = _repeat_stop(env)
+    case = _lead_case(env, did)
+    L = c.lead
+    why = "infrastructure: Kilo has not run the session's turn for 301 s (dead session: " \
+          "the prompt was never admitted)"
+    waits = []
+    for _ in range(3):
+        before = c.clock()
+        case = L._defer(P, case, L.settings(P), why, None, back="REPAIRING")
+        waits.append(case["next_check_ts"] - before)
+    assert all(abs(w - 60) < 1 for w in waits[:2])
+    assert waits[2] > 61                                     # then the normal backoff

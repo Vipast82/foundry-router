@@ -2,6 +2,14 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.157.35 — a never-admitted Lead session retries after a minute
+
+2026-10-29 05:39-05:45: two Lead repair sessions whose prompts Kilo never admitted ended after
+300 s and the cases were deferred 10, then 40 minutes while every sprint waited.
+
+- **The Lead** retries a case whose session was never admitted after 60 s, twice per case, then
+  falls back to the normal backoff.
+
 ## v0.157.34 — a coordinator bug case retries its sprint after an upgrade
 
 2026-10-29 04:50-05:50: four Lead cases classified "coordinator" (gate file list, review packet,

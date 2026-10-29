@@ -189,6 +189,9 @@ UPGRADE_DONE = "done"
 # when this coordinator process started: a "coordinator" case opened before it may be fixed
 # by the upgrade it runs (retry_after_upgrade)
 PROCESS_START = time.time()
+# a Lead session whose prompt Kilo never admitted: a fresh try after a minute, twice per case
+NEVER_ADMITTED_RETRY_SECONDS = 60
+NEVER_ADMITTED_QUICK_RETRIES = 2
 UPGRADE_FAILED = ("rolled_back", "failed")
 
 _JSON_COLS = {"trigger": {}, "proposed_action": {}, "validation": {}, "counters": {},
@@ -2994,6 +2997,13 @@ class LeadManager:
         v = case.get("validation") or {}
         n = int(v.get("deferrals") or 0)
         delay = min(MAX_DEFER_SECONDS, max(int(retry or 0), int(s["defer_seconds"]) * (2 ** n)))
+        # 2026-10-29: Lead repair prompts Kilo never admitted were deferred 10, then 40
+        # minutes while every sprint waited; the implementer path just starts a fresh
+        # session. The first two such deferrals of a case retry after a minute.
+        quick = int(v.get("quick_retries") or 0)
+        if "never admitted" in str(reason) and quick < NEVER_ADMITTED_QUICK_RETRIES:
+            delay = NEVER_ADMITTED_RETRY_SECONDS
+            self._merge_validation(case["case_id"], quick_retries=quick + 1)
         self._merge_validation(case["case_id"], deferrals=n + 1, deferred_back=back,
                                deferred_reason=reason[:500])
         self._act(case, "defer", result=reason[:500], detail={"seconds": delay, "back": back})
