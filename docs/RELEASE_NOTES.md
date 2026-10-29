@@ -2,6 +2,14 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.157.31 — gate.ps1 is not handed files deleted at HEAD
+
+2026-10-29 04:03: UI-SKIN2's 16th attempt failed its host stage because HK-CLEAN1 had deleted
+six Kit files that were still in its files under test. v0.157.30 covered the Python hash map;
+the host stage runs the game's own tools/gate.ps1.
+
+- **The scripted run's host stage** passes `-Files` without files that do not exist at HEAD.
+
 ## v0.157.30 — files a sprint deleted are not hashed by the Studio gate
 
 2026-10-29 03:39: HK-CLEAN1 deleted six Kit files; they stayed in its files under test and

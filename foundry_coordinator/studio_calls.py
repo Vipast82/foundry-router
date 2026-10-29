@@ -200,11 +200,31 @@ def run_step(cmd: list, cwd: str, timeout: float, env: Optional[dict] = None) ->
         return 124, ((out or "") + f"\ntimed out after {timeout:.0f}s").strip()
 
 
+def _absent_at_head(repo: str, files: list) -> list:
+    """Files not present at HEAD (deleted by a sprint). [] when git cannot say."""
+    if not files:
+        return []
+    try:
+        r = subprocess.run(["git", "-C", repo, "ls-tree", "-r", "--name-only", "HEAD", "--", *files],
+                           capture_output=True, text=True, timeout=60)
+    except (OSError, subprocess.SubprocessError):
+        return []
+    if r.returncode != 0:
+        return []
+    have = set(r.stdout.splitlines())
+    return [f for f in files if f not in have]
+
+
 def gate_ps1_cmd(a, finish: bool = False) -> list:
     ps = shutil.which("pwsh") or shutil.which("powershell") or "pwsh"
     # no -ExecutionPolicy Bypass (AS-BDG2: AU's own rule for the gate command)
+    files = split_ids(a.files)
+    # 2026-10-29 (UI-SKIN2 attempt 16): files deleted at HEAD (HK-CLEAN1 removed six Kit
+    # files) made gate.ps1's hash_fnv step fail the whole host stage
+    gone = set(_absent_at_head(getattr(a, "repo", "") or ".", files))
+    files = [f for f in files if f not in gone]
     cmd = [ps, "-NoProfile", "-File", "tools/gate.ps1", "-Sprint", a.sprint,
-           "-Files", ",".join(split_ids(a.files) or DEFAULT_FILES), "-Tier", a.tier,
+           "-Files", ",".join(files or DEFAULT_FILES), "-Tier", a.tier,
            "-Regression", a.regression or "none"]
     if split_ids(a.suites):
         cmd += ["-Suites", ",".join(split_ids(a.suites))]

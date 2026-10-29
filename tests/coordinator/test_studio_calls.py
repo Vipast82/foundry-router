@@ -488,3 +488,23 @@ def test_a_scripted_run_holds_the_main_checkout(env):
     locks = e.c.studio_calls._run_locks(P)
     assert set(e.c._workspace_locks(P)) <= set(locks)
     assert set(e.c._session_locks(P)) <= set(locks)
+
+
+def test_gate_ps1_cmd_drops_files_deleted_at_head(tmp_path):
+    import argparse
+    import os
+    import subprocess as sp
+    from foundry_coordinator import studio_calls as SC
+    r = str(tmp_path)
+    sp.run(["git", "init", "-q", r], check=True)
+    os.makedirs(os.path.join(r, "src"))
+    for n in ("a.lua", "b.lua"):
+        open(os.path.join(r, "src", n), "w").write("x")
+    sp.run(["git", "-C", r, "add", "-A"], check=True)
+    sp.run(["git", "-C", r, "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "1"], check=True)
+    os.remove(os.path.join(r, "src", "b.lua"))
+    sp.run(["git", "-C", r, "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qam", "2"], check=True)
+    a = argparse.Namespace(repo=r, sprint="X1", files="src/a.lua,src/b.lua", tier="A",
+                           regression="none", suites="")
+    cmd = SC.gate_ps1_cmd(a)
+    assert cmd[cmd.index("-Files") + 1] == "src/a.lua"
