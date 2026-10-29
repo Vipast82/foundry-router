@@ -1262,3 +1262,18 @@ def test_carry_never_carries_a_failed_suite(tmp_path, monkeypatch):
             _rc("regression.S46", "PASS", "SUITE S46 pass=23 fail=0 expect=23 VERDICT PASS")]
     g = _carry_gate(tmp_path, ["docs/progress/UI-T0_PLAN.md"], prev)
     assert g.carry_plan("S45,S46", "docs/progress/UI-T0_gate.json")["suites"] == ["S46"]
+
+
+def test_absent_at_lists_files_deleted_at_head(tmp_path):
+    import subprocess as sp
+    r = str(tmp_path)
+    sp.run(["git", "init", "-q", r], check=True)
+    os.makedirs(os.path.join(r, "src"))
+    for n in ("a.lua", "b.lua"):
+        open(os.path.join(r, "src", n), "w").write("x")
+    sp.run(["git", "-C", r, "add", "-A"], check=True)
+    sp.run(["git", "-C", r, "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "1"], check=True)
+    os.remove(os.path.join(r, "src", "b.lua"))
+    sp.run(["git", "-C", r, "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qam", "2"], check=True)
+    assert G._absent_at(r, "HEAD", ["src/a.lua", "src/b.lua"]) == ["src/b.lua"]
+    assert G._absent_at(r, "nope", ["src/a.lua"]) == []                     # git cannot say

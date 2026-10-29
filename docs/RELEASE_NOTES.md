@@ -2,6 +2,13 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.157.30 — files a sprint deleted are not hashed by the Studio gate
+
+2026-10-29 03:39: HK-CLEAN1 deleted six Kit files; they stayed in its files under test and
+hash_fnv.ps1 failed the whole hash map on them.
+
+- **The gate's hash map** leaves out files that do not exist at HEAD and logs them.
+
 ## v0.157.29 — an unmounted check file of a suite the run skips does not block it
 
 2026-10-29 03:20: track backend-1 landed tests/S57a_check.lua without a Studio mount, and the

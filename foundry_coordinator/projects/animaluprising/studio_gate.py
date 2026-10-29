@@ -739,6 +739,21 @@ def rojo_mounts(project: dict) -> list:
 ROJO_SYNCED = (".lua", ".luau", ".json", ".txt", ".csv", ".toml", ".rbxm", ".rbxmx")
 
 
+def _absent_at(repo: str, rev: str, files: list) -> list:
+    """The files that do not exist at `rev` (deleted by the sprint). [] when git cannot say."""
+    if not files:
+        return []
+    try:
+        r = subprocess.run(["git", "-C", repo, "ls-tree", "-r", "--name-only", rev, "--", *files],
+                           capture_output=True, text=True, timeout=60)
+    except (OSError, subprocess.SubprocessError):
+        return []
+    if r.returncode != 0:
+        return []
+    have = set(r.stdout.splitlines())
+    return [f for f in files if f not in have]
+
+
 def rojo_synced(repo_path: str) -> bool:
     f = repo_path.replace("\\", "/").lower()
     return f.endswith(ROJO_SYNCED) and not f.endswith(".meta.json")
@@ -1427,6 +1442,12 @@ class Gate:
             self.add(check("host.hash_expect", "FAIL", "unsafe file name(s) under test: "
                            + ", ".join(repr(f) for f in unsafe)[:300]))
             return {}
+        # 2026-10-29 (HK-CLEAN1): a file the sprint deleted is not at HEAD; hash_fnv.ps1
+        # errored on it and the whole map failed. Deleted files are not under test in Studio.
+        gone = _absent_at(self.repo, self.head or "HEAD", files)
+        if gone:
+            self.raw("host hash_fnv", "files deleted at HEAD (not hashed)", "\n".join(gone))
+            files = [f for f in files if f not in gone]
 
         def q(s):
             return "'" + s.replace("'", "''") + "'"
