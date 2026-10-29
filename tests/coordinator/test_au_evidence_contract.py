@@ -890,3 +890,26 @@ def test_sprint_status_is_always_closeout_exempt():
     assert matches_any("docs/progress/HK-STORE1_SUMMARY.md", ex)
     assert not matches_any("src/shared/Config/Environment.lua", ex)
     assert ex.count("docs/progress/SPRINT_STATUS.md") == 1
+
+
+def test_a_complete_ledger_row_counts_as_done(tmp_path):
+    """2026-10-29: older STATE.md rows say COMPLETE (S14, S34, S45); dependency_done only
+    accepted DONE, so plans depending on them would block and track analysis proposed
+    re-running them."""
+    from types import SimpleNamespace as NS
+    from foundry_coordinator.projects.animaluprising.adapter import AnimalUprisingAdapter
+    (tmp_path / "docs" / "progress").mkdir(parents=True)
+    (tmp_path / "docs" / "progress" / "STATE.md").write_text(
+        "| S14 | MapGenerator — | COMPLETE | 2026-09-04 | 06da2cb | x |\n"
+        "| S20 | Thing | DONE | x |\n"
+        "| S21 | Thing | NOT DONE | x |\n"
+        "| AS-R9 | Rig | COMPLETE-PENDING-VISUAL-REVIEW | x |\n"
+        "| S22 | Thing | IN PROGRESS (COMPLETE soon) | x |\n", encoding="utf-8")
+    a = AnimalUprisingAdapter.__new__(AnimalUprisingAdapter)
+    a.p = NS(workspace=str(tmp_path), deps_accept_pending=[])
+    a._read = lambda rel: (tmp_path / rel).read_text(encoding="utf-8")
+    assert a.dependency_done("S14") and a.dependency_done("S20")
+    assert not a.dependency_done("S21") and not a.dependency_done("S22")
+    assert not a.dependency_done("AS-R9")
+    a.p.deps_accept_pending = ["visual"]
+    assert a.dependency_done("AS-R9")

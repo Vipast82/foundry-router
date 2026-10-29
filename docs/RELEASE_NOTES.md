@@ -2,6 +2,17 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.157.64 — a COMPLETE ledger row counts as done
+
+2026-10-29 look-ahead scan: `dependency_done` accepted only `DONE` in a STATE.md row, but older
+rows say `COMPLETE` (S14, S33, S34, S45, S51). Plans depending on them would block at QUEUED
+("needs S51, which is not approved/complete"), and `tracks propose` offered tracks that re-run
+S33/S34/S14.
+
+- **AU adapter dependency_done:** a row whose status column is exactly `COMPLETE` is done.
+  `COMPLETE-PENDING-VISUAL-REVIEW` keeps its own rule (`deps_accept_pending`), `NOT DONE` and
+  `IN PROGRESS` rows are not done.
+
 ## v0.157.63 — model files are not counted by Studio's source check
 
 2026-10-29 17:35: AS-REG1's scripted run stopped at the pre-play verify: matched 4/35,

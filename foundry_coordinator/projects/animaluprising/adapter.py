@@ -409,8 +409,11 @@ class AnimalUprisingAdapter(GenericAdapter):
             if re.match(r"^\|\s*%s\s*\|" % re.escape(dep), line):
                 if "NOT DONE" in line:
                     return False
-                if re.search(r"\bDONE\b", line) or (accept_pending and
-                                                    "COMPLETE-PENDING-VISUAL-REVIEW" in line):
+                # 2026-10-29: older ledger rows say COMPLETE, not DONE (S14, S34, S45...);
+                # they read as unfinished, so plans depending on them would block and track
+                # analysis proposed re-running them. COMPLETE-PENDING-... keeps its own rule
+                if re.search(r"\bDONE\b", line) or re.search(r"\|\s*COMPLETE\s*\|", line) \
+                        or (accept_pending and "COMPLETE-PENDING-VISUAL-REVIEW" in line):
                     return True
         return False
 
