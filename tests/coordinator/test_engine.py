@@ -886,3 +886,24 @@ def test_a_long_waiting_landing_drains_new_main_sessions(game):
               ("game", "assets", "parallel", "wt", "track/assets", "x", "merging", "", "[]",
                "[]", "t", old, old, _json.dumps({"merge_stage": "wait"})))
     assert "assets" in c._landing_drain(P)
+
+
+def test_a_drained_sprint_gives_back_the_checkout_lock(game):
+    """2026-10-29 replay: UI-SKIN2 (CHANGES_REQUIRED) kept the checkout lock while the drain
+    held it, and the landing could not take the checkout."""
+    from foundry_coordinator import prep_queue as PQ
+    tmp, _, _, prof = game
+    c = coordinator(tmp, [prof], {"game": write_ok("src/b.txt")})
+    P = c.projects["game"]
+    PQ.ensure(c.store)
+    c.approve("game", "T1", [], "victor")
+    c.store.update_task("game", "T1", state=S.READY)
+    c.store.acquire(c._workspace_locks(P), "game", "T1")
+    old = c.clock() - 3600
+    c.store.x("INSERT INTO prep_queue (id, project_id, ord, kind, source, message, condition, "
+              "status, created_ts, updated_ts) VALUES (?,?,?,?,?,?,?,?,?,?)",
+              ("pq-test", "game", 1, "patch", "x.patch", "prep: x", "{}", "pending", old, old))
+    assert "pq-test" in c._landing_drain(P)
+    c._start_implementation(P, c.store.task("game", "T1"))
+    assert not c.store.holds("game", "T1")
+    assert "landing drain" in (c.store.task("game", "T1")["next_action"] or "")

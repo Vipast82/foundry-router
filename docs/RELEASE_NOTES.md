@@ -2,6 +2,14 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.157.24 — a drained sprint gives the checkout back
+
+2026-10-29 01:28: the landing itself takes the checkout lock, and UI-SKIN2 (between sessions,
+held by the drain) still held it: "main checkout locked by animaluprising/UI-SKIN2".
+
+- **While the drain holds a sprint back, it releases its checkout and session locks**; its next
+  session start takes them again.
+
 ## v0.157.23 — the landing drain cannot deadlock on a between-sessions lock
 
 2026-10-29 01:21: with the drain on (v0.157.22), UI-SKIN2 sat in CHANGES_REQUIRED still holding

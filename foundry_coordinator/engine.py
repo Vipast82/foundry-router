@@ -597,6 +597,13 @@ class Coordinator:
             return                                 # "waiting for <service>": no lock, no attempt
         landing = self._landing_drain(P)
         if landing:
+            # a sprint between sessions gives the checkout back while it is drained, so the
+            # landing can take it (2026-10-29: UI-SKIN2's lock blocked pq-d752da05ec); its
+            # next session start takes the locks again
+            held = set(self.store.holds(P.id, t["task_id"]))
+            give = [r for r in self._workspace_locks(P) + self._session_locks(P) if r in held]
+            if give:
+                self.store.release(P.id, t["task_id"], give)
             return self._note(P, t, f"waiting for {landing} to land first (landing drain)")
         other = self._main_sprint_in_flight(P, t)
         if other:
