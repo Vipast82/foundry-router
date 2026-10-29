@@ -2,6 +2,18 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.157.43 — the automatic training run reads shared sources once and has a watchdog
+
+2026-10-28 04:29 → 2026-10-29 10:5x: one automatic training run (`foundry_training auto`) held
+32 GB committed for 30 hours and finished nothing after 20:36; every later sprint's run found
+its lock busy, and the machine ran out of RAM. For every queued manifest it re-read the whole
+coordinator DB (167 MB), Foundry, git and gate files and re-curated the project.
+
+- **process_queue** ingests each shared source once per pass and each manifest's own Kilo
+  sessions, then curates each project once and settles the manifests.
+- **`auto --max-minutes`** (default 90): a watchdog ends the run and removes its lock; the next
+  run resumes the spool (ingestion is idempotent, unfinished manifests stay queued).
+
 ## v0.157.42 — a bridge suite's file never needs a Studio mount
 
 2026-10-29 09:3x: GF-SAVE1 ran S05 (loader = bridge) and PRE-PLAY verify stopped on

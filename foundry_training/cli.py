@@ -119,6 +119,9 @@ def main(argv=None) -> int:
     au.add_argument("--library", default="")
     au.add_argument("--no-upload", action="store_true")
     au.add_argument("--lock", default="", help="lock file (one automatic run at a time)")
+    au.add_argument("--max-minutes", type=float, default=90.0,
+                    help="watchdog: the run ends itself after this long (its lock goes with "
+                         "it; the next run resumes the spool). 0 = no limit")
     pu = sub.add_parser("push")
     pu.add_argument("--foundry-url", required=True)
     pu.add_argument("--id", default="workstation")
@@ -150,6 +153,28 @@ def _pid_alive(pid: int) -> bool:
         return False
     except PermissionError:
         return True
+
+
+def _watchdog(minutes: float, lock: str) -> None:
+    """2026-10-29: an automatic run held 32 GB for 30 hours and blocked every later run.
+    After `minutes` the process removes its lock and ends itself; ingestion is
+    idempotent and unfinished manifests stay in the spool, so the next run resumes."""
+    if minutes <= 0:
+        return
+    import threading
+
+    def fire():
+        print(f"auto run: watchdog ended the run after {minutes:g} min (the next run "
+              f"resumes the spool)", file=sys.stderr, flush=True)
+        try:
+            os.remove(lock)
+        except OSError:
+            pass
+        os._exit(3)
+
+    t = threading.Timer(minutes * 60, fire)
+    t.daemon = True
+    t.start()
 
 
 def _take_lock(lock: str):
@@ -289,6 +314,7 @@ def _run(a, p: Pipeline) -> int:
             return 0
         os.write(fd, str(os.getpid()).encode())
         os.close(fd)
+        _watchdog(float(getattr(a, "max_minutes", 90.0) or 0), lock)
         try:
             ov = {"foundry_url": a.foundry_url, "kilo_url": a.kilo_url, "library": a.library,
                   "upload": False if a.no_upload else None}

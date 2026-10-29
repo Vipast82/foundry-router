@@ -242,6 +242,10 @@ class Pipeline:
         (and records why), never discards it."""
         out = []
         os.makedirs(os.path.join(spool, "done"), exist_ok=True)
+        done_dbs: set = set()
+        done_pids: set = set()
+        done_foundry = False
+        settle: list = []
         for path in sorted(glob.glob(os.path.join(spool, "*.json"))):
             try:
                 with open(path, encoding="utf-8") as f:
@@ -260,32 +264,55 @@ class Pipeline:
                 res["left"] = "no profile for this project in this run"
                 out.append(res)
                 continue
+            # 2026-10-29: the shared sources (the whole coordinator DB, Foundry, git, gate
+            # files) and curation were re-read for EVERY manifest; 33 queued manifests meant
+            # 33 full passes over a 167 MB DB, and one run held 32 GB for 30 hours. Phase 1
+            # ingests each shared source once per call and each manifest's own Kilo
+            # sessions; phase 2 curates each project once and settles the manifests.
             try:
                 if not self._allowed(pid, "coordinator"):
                     res["skipped"] = "training capture not enabled for this project"
-                else:
-                    if m.get("coordinator_db"):
-                        self.ingest_coordinator(m["coordinator_db"])
-                    roles = m.get("session_roles") or {}
-                    kilo_sessions = [s for s in m.get("sessions") or []
-                                     if (roles.get(s) or {}).get("client", "kilo") == "kilo"]
-                    if kilo_api and kilo_sessions:
-                        self.ingest_kilo(api={**kilo_api, "sessions": kilo_sessions,
-                                              "project_id": pid,
-                                              "directory": kilo_api.get("directory")
-                                              or self._cfg(pid).workspace})
-                    if foundry_url:
-                        self.ingest_foundry(url=foundry_url, key=foundry_key)
+                    os.replace(path, os.path.join(spool, "done", os.path.basename(path)))
+                    out.append(res)
+                    continue
+                db = m.get("coordinator_db")
+                if db and db not in done_dbs:
+                    self.ingest_coordinator(db)
+                    done_dbs.add(db)
+                roles = m.get("session_roles") or {}
+                kilo_sessions = [s for s in m.get("sessions") or []
+                                 if (roles.get(s) or {}).get("client", "kilo") == "kilo"]
+                if kilo_api and kilo_sessions:
+                    self.ingest_kilo(api={**kilo_api, "sessions": kilo_sessions,
+                                          "project_id": pid,
+                                          "directory": kilo_api.get("directory")
+                                          or self._cfg(pid).workspace})
+                if foundry_url and not done_foundry:
+                    self.ingest_foundry(url=foundry_url, key=foundry_key)
+                    done_foundry = True
+                if pid not in done_pids:
                     self.ingest_git(pid)
                     self.ingest_gate(pid)
-                    res["curation"] = self.curate(pid)
-                    have = {e["session_id"] for e in self.store.events(
-                        pid, "event_type IN ('user_message','assistant_message','model_call')")}
-                    missing = [s for s in kilo_sessions if s not in have]
-                    res["sessions_missing"] = missing
-                    for s in missing:
-                        self.store.gap(pid, s, "coordinator", "session-not-captured",
-                                       f"task {m['task_id']}: no conversation records for {s}")
+                    done_pids.add(pid)
+                settle.append((path, m, res, kilo_sessions))
+            except Exception as e:                                # noqa: BLE001
+                res["error"] = f"{type(e).__name__}: {e}"[:500]
+                self.store.gap(pid, "", "coordinator", "curation-failed", res["error"])
+                out.append(res)
+        curated: dict = {}
+        for path, m, res, kilo_sessions in settle:
+            pid = m["project_id"]
+            try:
+                if pid not in curated:
+                    curated[pid] = self.curate(pid)
+                res["curation"] = curated[pid]
+                have = {e["session_id"] for e in self.store.events(
+                    pid, "event_type IN ('user_message','assistant_message','model_call')")}
+                missing = [s for s in kilo_sessions if s not in have]
+                res["sessions_missing"] = missing
+                for s in missing:
+                    self.store.gap(pid, s, "coordinator", "session-not-captured",
+                                   f"task {m['task_id']}: no conversation records for {s}")
                 os.replace(path, os.path.join(spool, "done", os.path.basename(path)))
             except Exception as e:                                # noqa: BLE001
                 res["error"] = f"{type(e).__name__}: {e}"[:500]
