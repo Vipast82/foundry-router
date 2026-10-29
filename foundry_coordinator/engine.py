@@ -594,6 +594,10 @@ class Coordinator:
         from . import services                     # Team Lead 5: the sprint's needs are up
         if services.blocks(self, P, t, spec):
             return                                 # "waiting for <service>": no lock, no attempt
+        other = self._main_sprint_in_flight(P, t)
+        if other:
+            return self._note(P, t, f"waiting for {other} to finish (one started main-checkout "
+                                    f"sprint at a time)")
         held = self._acquire(P, t, self._workspace_locks(P) + self._session_locks(P),
                              writer=True)
         if held:
@@ -6595,6 +6599,40 @@ class Coordinator:
 
     def _workspace_locks(self, P: Project) -> list[str]:
         return [f"workspace:{os.path.normcase(os.path.realpath(P.profile.workspace))}"]
+
+    MAIN_IN_FLIGHT = (S.READY, S.IMPLEMENTING, S.VERIFYING, S.REVIEWING, S.CHANGES_REQUIRED,
+                      S.APPROVED, S.CLOSING)
+
+    def _main_sprint_in_flight(self, P: Project, t: dict) -> str:
+        """The started main-checkout sprint `t` must wait for ('' = none). 2026-10-29: AS-P5
+        and UI-SKIN2 took turns in the main checkout between sessions; each one's commits
+        staled the other's captures and gate, broke its scope check and got reworded, and
+        both cycled for hours. A started sprint (started_ts) keeps the checkout until it is
+        COMPLETE, BLOCKED, PAUSED or waiting on a person; the earliest started goes first."""
+        try:
+            from . import automation as A
+            if A.get(P, "main_one_sprint_at_a_time") is False:
+                return ""
+        except Exception:                                         # noqa: BLE001
+            pass
+        if self.tracks.is_track(P):
+            return ""
+        mine = float(t.get("started_ts") or 0) or float("inf")
+        best, best_ts = "", mine
+        for o in self.store.tasks(P.id):
+            if o["task_id"] == t["task_id"] or o["state"] not in self.MAIN_IN_FLIGHT:
+                continue
+            ots = float(o.get("started_ts") or 0)
+            if not ots:
+                continue
+            try:
+                if self.tracks.project_for(P, o) is not P:
+                    continue
+            except Exception:                                     # noqa: BLE001
+                continue
+            if ots < best_ts:
+                best, best_ts = o["task_id"], ots
+        return best
 
     def _session_locks(self, P: Project) -> list[str]:
         return list(P.profile.resources)

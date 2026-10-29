@@ -851,3 +851,20 @@ def test_store_owner_lock_of_a_dead_process_on_this_host_is_taken_over(tmp_path)
     s.set_meta("owner", json.dumps({"id": f"{socket.gethostname()}:0", "beat": time.time()}))
     with pytest.raises(RuntimeError, match="another coordinator"):
         Store(str(tmp_path / "x.sqlite")).claim_owner()    # pid 0 (System Idle) counts as alive
+
+
+def test_a_started_main_sprint_keeps_the_checkout_until_it_finishes(game):
+    """2026-10-29 replay: AS-P5 and UI-SKIN2 took turns in the main checkout between
+    sessions and staled each other's captures, gates and scope for hours. A second main
+    sprint waits while the earlier-started one is in flight; BLOCKED/PAUSED releases it."""
+    tmp, _, _, prof = game
+    c = coordinator(tmp, [prof], {"game": write_ok("src/b.txt")})
+    P = c.projects["game"]
+    c.approve("game", "T1", [], "victor")
+    c.approve("game", "T2", [], "victor")
+    c.store.update_task("game", "T1", state=S.CHANGES_REQUIRED, started_ts=100.0)
+    c.store.update_task("game", "T2", state=S.READY, started_ts=None)
+    assert c._main_sprint_in_flight(P, c.store.task("game", "T2")) == "T1"
+    assert c._main_sprint_in_flight(P, c.store.task("game", "T1")) == ""
+    c.store.update_task("game", "T1", state=S.BLOCKED)
+    assert c._main_sprint_in_flight(P, c.store.task("game", "T2")) == ""

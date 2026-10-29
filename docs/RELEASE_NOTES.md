@@ -2,6 +2,16 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.157.21 — one started main-checkout sprint at a time
+
+2026-10-28/29: AS-P5 and UI-SKIN2 took turns in the main checkout between sessions. Each one's
+commits staled the other's captures and gate, broke its scope check (v0.157.16, .20) and got
+reworded (v0.157.19); both cycled for hours.
+
+- **[automation] `main_one_sprint_at_a_time`** (default on, in the UI): once a main-checkout sprint
+  has started, other main-checkout sprints wait until it is COMPLETE, BLOCKED, PAUSED or waiting
+  on a person; the earliest started goes first. Parallel tracks are not affected.
+
 ## v0.157.20 — a double-prefixed commit belongs to its inner sprint
 
 2026-10-29 01:05: the commits reworded to "UI-SKIN2: AS-P5: ..." before v0.157.19 stay in history;

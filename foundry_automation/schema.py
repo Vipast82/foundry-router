@@ -213,6 +213,8 @@ AUTOMATION_DEFAULTS: dict = {
     "subagents_allowed": ["explore"],
     "scope_auto_approve": [dict(r) for r in DEFAULT_SCOPE_RULES],
     "scope_unlisted_default": "deny",
+    # 2026-10-29: one started main-checkout sprint at a time (tracks run beside it)
+    "main_one_sprint_at_a_time": True,
     "decision_timeout_minutes": 30,
     # 2026-10-28 self-driving part 1: an automation decision (tooling, budget, infra,
     # repeated findings) never times out to "park": it self-repairs, capped per task per
@@ -711,6 +713,10 @@ _AUTO_DESC = {
     "scope_auto_approve": "Scope allow-list: harness lines the coordinator adds to a sprint's "
                           "file list itself. Each entry {name, path (glob, {task}), blocks[], "
                           "lines[] (regexes), json_paths_in_plan, reason}.",
+    "main_one_sprint_at_a_time": "Once a main-checkout sprint has started, other main-checkout "
+                                 "sprints wait until it is complete, blocked or paused (parallel "
+                                 "tracks are not affected). Interleaving sprints in one checkout "
+                                 "staled each other's captures, gates and scope checks.",
     "scope_unlisted_default": "Recommended answer of a scope decision for a path the "
                               "allow-list doesn't cover.",
     "decision_timeout_minutes": "Product decisions apply their recommended option after this "
