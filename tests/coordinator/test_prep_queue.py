@@ -594,3 +594,25 @@ def test_migration_script_queues_the_eleven_watcher_entries_in_order(game, tmp_p
     assert rows[-1]["hold_tasks"] == ["HK-CLOSE1"]
     assert [r["message"] for r in rows[4:7]] == [
         f"prep: rules streamline phase {n} (owner-approved 2026-10-27)" for n in (1, 2, 3)]
+
+
+def test_a_branch_whose_base_was_rewritten_lands_only_its_own_commits(tmp_path):
+    """2026-10-29 replay: master's history was rewritten (commit rewording) after the plans
+    branch was cut; the merge-base diff replayed hours of other work and failed. Only the
+    branch's own commits (by content) are applied."""
+    import subprocess
+    from foundry_coordinator.prep_queue import _branch_own_diff
+
+    def g(*a):
+        return subprocess.run(["git", "-C", str(tmp_path), *a], capture_output=True, text=True)
+    g("init", "-q", "-b", "main"); g("config", "user.email", "t@t"); g("config", "user.name", "t")
+    (tmp_path / "a.txt").write_text("1\n"); g("add", "-A"); g("commit", "-qm", "base")
+    (tmp_path / "b.txt").write_text("work\n"); g("add", "-A"); g("commit", "-qm", "sprint work")
+    g("checkout", "-qb", "plans")
+    (tmp_path / "plan.md").write_text("# plan\n"); g("add", "-A"); g("commit", "-qm", "prep: plan")
+    g("checkout", "-q", "main")
+    g("commit", "-q", "--amend", "-m", "S1: sprint work")          # history rewritten
+    (tmp_path / "c.txt").write_text("later\n"); g("add", "-A"); g("commit", "-qm", "S1: later")
+    d = _branch_own_diff(str(tmp_path), "plans")
+    assert d.returncode == 0
+    assert "plan.md" in d.stdout and "b.txt" not in d.stdout and "c.txt" not in d.stdout

@@ -446,6 +446,8 @@ def test_the_coordinator_rewords_its_own_unpushed_commit_messages(tmp_path):
     root, _ = make_repo(tmp_path, "game", [T1])
     prof = write_profile(tmp_path, "game", root)
     c = coordinator(tmp_path, [prof], {"game": agent})
+    from foundry_coordinator import automation as A
+    A.set_live(c.projects["game"], "reword_commits", True)   # off by default since v0.157.27
     c.approve("game", "T1", [], "victor")
     assert run_until(c, lambda: _state(c) == S.COMPLETE), \
         [(h["from_state"], h["to_state"], h["evidence"]) for h in c.store.history("game", "T1")]

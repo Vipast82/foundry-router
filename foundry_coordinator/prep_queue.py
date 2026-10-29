@@ -409,6 +409,30 @@ def _paused_idle(c, P, t: dict) -> bool:
     return idle(c, P, t)
 
 
+def _branch_own_diff(ws: str, ref: str):
+    """The diff of the branch's OWN commits: those `git cherry HEAD ref` reports as not on
+    HEAD (matched by patch content). 2026-10-29: a merge-base diff (HEAD...ref) of a branch
+    whose base the coordinator's commit rewording had rewritten replayed hours of other
+    work and failed. Falls back to HEAD...ref when cherry cannot say."""
+    import types
+    ch = _git(ws, "cherry", "HEAD", ref)
+    if ch.returncode != 0:
+        return _git(ws, "diff", "--binary", f"HEAD...{ref}")
+    own = [l.split()[1] for l in (ch.stdout or "").splitlines() if l.startswith("+ ")]
+    if not own:
+        return types.SimpleNamespace(returncode=0, stdout="", stderr="")
+    first, last = own[0], own[-1]
+    parent = _git(ws, "rev-parse", "--verify", "--quiet", first + "^")
+    if parent.returncode != 0:
+        return _git(ws, "diff", "--binary", f"HEAD...{ref}")
+    # the own commits are consecutive at the branch's tip in the usual case (a branch cut
+    # from master plus its commits); then their combined diff is parent(first)..last
+    between = _git(ws, "rev-list", f"{first}^..{last}")
+    if between.returncode == 0 and len(between.stdout.split()) == len(own):
+        return _git(ws, "diff", "--binary", f"{first}^", last)
+    return _git(ws, "diff", "--binary", f"HEAD...{ref}")
+
+
 def safe_point(c, P, cfg: Optional[dict] = None) -> tuple[bool, str]:
     """(True, "") when the main checkout is quiet and clean, else (False, why)."""
     cfg = cfg or settings(P)
@@ -557,9 +581,9 @@ def _apply_one(c, P, e: dict, cfg: dict, tmpdir: str) -> tuple[Optional[str], st
         ref = e["source"]
         if _git(ws, "rev-parse", "--verify", "--quiet", ref + "^{commit}").returncode != 0:
             return None, f"branch or ref {ref!r} not found in the main checkout"
-        d = _git(ws, "diff", "--binary", f"HEAD...{ref}")
+        d = _branch_own_diff(ws, ref)
         if d.returncode != 0:
-            return None, f"git diff HEAD...{ref} failed: {_out(d)[-1000:]}"
+            return None, f"git diff of {ref}'s own commits failed: {_out(d)[-1000:]}"
         if not d.stdout.strip():
             return "", f"{ref} has no changes beyond HEAD"
         p = os.path.join(tmpdir, f"{e['id']}.patch")

@@ -1077,6 +1077,12 @@ class Coordinator:
         """W1.4: reword the coordinator's own unpushed commits that lack the task
         prefix (commits.reword); journaled, never a session's job."""
         try:
+            from . import automation as A
+            if not A.get(P, "reword_commits"):
+                return
+        except Exception:                                         # noqa: BLE001
+            return
+        try:
             spec = P.adapter.describe(t["task_id"])
         except AdapterError:
             return
@@ -2040,6 +2046,12 @@ class Coordinator:
             from . import commits as CM
             bad, exempt_commits = CM.unprefixed(P, commits, prefix)
             fixable = CM.rewordable(P, t, [c[0] for c in bad]) if bad else ""
+            try:
+                from . import automation as A
+                if bad and not A.get(P, "reword_commits"):
+                    fixable = fixable or "rewording is off ([automation] reword_commits)"
+            except Exception:                                     # noqa: BLE001
+                pass
             add("commit_messages", FAIL if (bad and not fixable) else PASS,
                 ("commits without the '" + prefix + "' prefix: "
                  + "; ".join(f"{c[0][:10]} {c[1][:60]}" for c in bad[:5])

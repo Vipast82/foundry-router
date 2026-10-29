@@ -2,6 +2,18 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.157.27 — no more history rewrites; branch landings survive one
+
+2026-10-28/29: commit rewording rewrote the main checkout's history four times in a night (22:20,
+22:47, 01:00, 01:57). Every branch cut from master before a rewrite lost its base: the plans
+landing failed twice ("patch does not apply" on hours of unrelated work), S57a's track merge
+had to be rebuilt.
+
+- **[automation] `reword_commits`** (default off, in the UI): the coordinator no longer rewrites
+  commits; an unprefixed commit is an advisory note on `coordinator.commit_messages`.
+- **Prep branch landings apply the branch's own commits** (`git cherry`, by patch content), not
+  a merge-base diff, so a rewritten base no longer replays unrelated work.
+
 ## v0.157.26 — a Lead prompt Kilo never admits is a dead session
 
 AS-P5, 2026-10-29 02:19-02:50: the Lead's repair session got its prompt and no assistant turn

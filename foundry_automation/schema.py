@@ -215,6 +215,9 @@ AUTOMATION_DEFAULTS: dict = {
     "scope_unlisted_default": "deny",
     # 2026-10-29: one started main-checkout sprint at a time (tracks run beside it)
     "main_one_sprint_at_a_time": True,
+    # 2026-10-29: rewording rewrote master's history 4x in a night (22:20, 22:47, 01:00,
+    # 01:57) and orphaned every branch cut from it (prep landings, tracks); off by default
+    "reword_commits": False,
     # 2026-10-29: a track merge / prep landing waiting this long gets the main checkout next
     "landing_drain_minutes": 30,
     "decision_timeout_minutes": 30,
@@ -719,6 +722,10 @@ _AUTO_DESC = {
                              "this many minutes for a quiet main checkout stops new main-sprint "
                              "sessions from starting until it lands (0 = never drain). Back-to-"
                              "back main sprints otherwise starve merges and landings.",
+    "reword_commits": "Before verification, rewrite the sprint's unpushed commits that lack its "
+                      "id prefix. Off: an unprefixed commit is an advisory note. Rewording "
+                      "rewrites the main checkout's history and orphans branches cut from it "
+                      "(prep landings, tracks).",
     "main_one_sprint_at_a_time": "Once a main-checkout sprint has started, other main-checkout "
                                  "sprints wait until it is complete, blocked or paused (parallel "
                                  "tracks are not affected). Interleaving sprints in one checkout "
