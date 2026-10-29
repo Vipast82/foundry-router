@@ -659,7 +659,7 @@ class Coordinator:
             # landing can take it (2026-10-29: UI-SKIN2's lock blocked pq-d752da05ec); its
             # next session start takes the locks again
             held = set(self.store.holds(P.id, t["task_id"]))
-            give = [r for r in self._workspace_locks(P) + self._session_locks(P) if r in held]
+            give = [r for r in self._workspace_locks(P) + self._session_locks(P, t) if r in held]
             if give:
                 self.store.release(P.id, t["task_id"], give)
             return self._note(P, t, f"waiting for {landing} to land first (landing drain)")
@@ -669,12 +669,12 @@ class Coordinator:
             # yielded to HK-CLEAN1 but kept the checkout lock, and HK-CLEAN1 waited for that
             # lock: a deadlock. A sprint that yields gives its checkout and session locks back.
             held = set(self.store.holds(P.id, t["task_id"]))
-            give = [r for r in self._workspace_locks(P) + self._session_locks(P) if r in held]
+            give = [r for r in self._workspace_locks(P) + self._session_locks(P, t) if r in held]
             if give:
                 self.store.release(P.id, t["task_id"], give)
             return self._note(P, t, f"waiting for {other} to finish (one started main-checkout "
                                     f"sprint at a time)")
-        held = self._acquire(P, t, self._workspace_locks(P) + self._session_locks(P),
+        held = self._acquire(P, t, self._workspace_locks(P) + self._session_locks(P, t),
                              writer=True)
         if held:
             return
@@ -2968,7 +2968,7 @@ class Coordinator:
                 note = infra.closeout_waiting(self, P, t)
                 if note:
                     return self._note(P, t, note)
-                if self._acquire(P, t, self._session_locks(P), writer=True):
+                if self._acquire(P, t, self._session_locks(P, t), writer=True):
                     return
                 run_id = f"{t['run_id']}-close{int(t['data'].get('closeout_attempts') or 0)}"
                 ctx = {"attempt": t["attempt"], "run_id": run_id, "base": t["reviewed_sha"],
@@ -3158,7 +3158,7 @@ class Coordinator:
             return "done" if st.get("head") == head else "none"
         if self._held(P, t, "closeout"):
             return "wait"
-        if self._acquire(P, t, self._session_locks(P), writer=True):
+        if self._acquire(P, t, self._session_locks(P, t), writer=True):
             return "wait"
 
         def failed(why: str) -> str:
@@ -3402,7 +3402,7 @@ class Coordinator:
             # unless it is gone: then a fresh session starts from the recorded state.
             if P.client.state(sid, directory=P.profile.workspace,
                               since_ts=0).status == "missing" or \
-                    self._acquire(P, t, self._session_locks(P), writer=True):
+                    self._acquire(P, t, self._session_locks(P, t), writer=True):
                 target = S.CHANGES_REQUIRED if target == S.IMPLEMENTING else S.CLOSING
                 self._notes_undeliverable(project_id, task_id, sid)
                 data["findings"] = data.get("findings") or ["continue the interrupted work"]
@@ -5380,7 +5380,7 @@ class Coordinator:
             self._note(P, t, f"project paused (evidence continuation waits): "
                              f"{proj.get('pause_note') or ''}")
             return True
-        if self._acquire(P, t, self._session_locks(P), writer=True):
+        if self._acquire(P, t, self._session_locks(P, t), writer=True):
             return True                   # waiting for the writer slot / resources
         text = (P.adapter.continue_prompt(spec, "the coordinator found evidence missing "
                                                 "before review")
@@ -6792,8 +6792,17 @@ class Coordinator:
                 best, best_ts = o["task_id"], ots
         return best
 
-    def _session_locks(self, P: Project) -> list[str]:
-        return list(P.profile.resources)
+    def _session_locks(self, P: Project, t: Optional[dict] = None) -> list[str]:
+        """The profile's exclusive resources, plus `gpu` for a sprint whose implementer is a
+        local persona. 2026-10-29: AS-R8 (main, local Qwen) and the assets-2 track's AS-D11
+        (local, holding `gpu`) ran at once; the local server serves one stream, refused
+        AS-D11 three times and each refusal cost it an attempt."""
+        out = list(P.profile.resources)
+        if t is not None and "gpu" not in out:
+            from .fast_lane import is_local_primary
+            if is_local_primary(P, t["task_id"]):
+                out.append("gpu")
+        return out
 
     def _acquire(self, P: Project, t: dict, resources: list[str],
                  writer: bool = False) -> Optional[dict]:
@@ -6847,7 +6856,7 @@ class Coordinator:
     def _release_session(self, P: Project, t: dict) -> None:
         pid, tid = P.id, t["task_id"]
         held = self.store.holds(pid, tid)
-        res = self._session_locks(P) + [r for r in held if r.startswith("writer:")]
+        res = self._session_locks(P, t) + [r for r in held if r.startswith("writer:")]
         self.store.release(pid, tid, res)
         self._journal_locks(P, t, [r for r in res if r in held and not r.startswith("writer:")],
                             "release")

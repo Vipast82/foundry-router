@@ -2,6 +2,18 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.157.65 — one local-model session at a time
+
+2026-10-29 18:29-18:45: AS-R8 (main track, local Qwen) and AS-D11 (assets-2 track, local, holding
+`gpu`) started local sessions together. The local server serves one stream and refused AS-D11
+three times ("serves the main stream only and 1 session(s) are active"); each refusal cost it an
+attempt.
+
+- **Session locks:** a sprint whose implementer is a local persona (`[training] local_personas`)
+  also takes the `gpu` lock, so a main sprint and a track sprint on the local model wait for each
+  other instead of colliding.
+- **Infra signature `local_busy`:** that refusal is a free, backed-off retry, never an attempt.
+
 ## v0.157.64 — a COMPLETE ledger row counts as done
 
 2026-10-29 look-ahead scan: `dependency_done` accepted only `DONE` in a STATE.md row, but older

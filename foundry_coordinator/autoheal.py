@@ -56,6 +56,9 @@ INFRA_SIGNATURES = (
                               r"rate_limit(?:_error|_exceeded)|RateLimitError|too many "
                               r"requests|quota (?:exceeded|exhausted)|exceeded (?:your )?"
                               r"(?:current )?quota|insufficient_quota", re.I)),
+    # 2026-10-29 AS-D11: the local server serves one stream; a second local session is
+    # refused ("serves the main stream only and 1 session(s) are active") - wait, no attempt
+    ("local_busy", re.compile(r"serves the main stream only|session\(s\) are active \(", re.I)),
     ("connection", re.compile(r"ECONNREFUSED|ECONNRESET|ETIMEDOUT|ENOTFOUND|EAI_AGAIN|"
                               r"socket hang up|fetch failed|connection (?:refused|reset|aborted)|"
                               r"timed out connecting|could not connect", re.I)),

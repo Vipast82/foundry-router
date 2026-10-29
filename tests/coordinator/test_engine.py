@@ -983,3 +983,30 @@ def test_a_left_over_plan_history_is_committed_by_the_coordinator(game):
     assert "docs/progress/T1_PLAN_HISTORY.md" not in dirty
     assert "docs/progress/T2_PLAN_HISTORY.md" in dirty        # another sprint's: left alone
     assert c._auto_commit_task_files(P, t) is False             # nothing left to commit
+
+
+def test_a_local_model_sprint_takes_the_gpu_lock(game):
+    """2026-10-29: AS-R8 (main, local) and AS-D11 (assets-2 track, holding gpu) ran local
+    sessions at once; the local server refused AS-D11 three times, an attempt each."""
+    tmp, root, _, prof = game
+    c = coordinator(tmp, [prof], {"game": write_ok("src/a.txt")})
+    c.approve("game", "T1", [], "victor")
+    P = c.projects["game"]
+    t = c.store.task("game", "T1")
+    import foundry_coordinator.fast_lane as FL
+    orig = FL.is_local_primary
+    try:
+        FL.is_local_primary = lambda P, tid: True
+        assert "gpu" in c._session_locks(P, t)
+        FL.is_local_primary = lambda P, tid: False
+        assert "gpu" not in c._session_locks(P, t)
+    finally:
+        FL.is_local_primary = orig
+    assert "gpu" not in c._session_locks(P)
+
+
+def test_a_busy_local_server_is_an_infra_failure():
+    from foundry_coordinator.autoheal import infra_signature
+    msg = ("session ended with an error: backend 'strata' serves the main stream only and 1 "
+           "session(s) are active (Foundry-Kilo-Local). Free in about 48s")
+    assert infra_signature(msg) == "local_busy"
