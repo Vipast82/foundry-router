@@ -121,7 +121,7 @@ function renderStatus() {
       <div>${r.reachable ? (r.warming_up ? "reachable, still warming up" : "reachable") : r.reachable === false ? '<span class="bad">not reachable</span>' : "not checked yet"}
         <span class="dim">${esc(r.url || "")}${r.version ? " · v" + esc(r.version) : ""}${r.latency_ms != null ? " · " + r.latency_ms + " ms" : ""}</span></div>
       ${r.error ? `<div class="bad">${esc(r.error)}</div>` : ""}<div class="dim">${r.checked_at ? "checked " + ago(r.checked_at) : ""}${u.checked_at ? " · updates checked " + ago(u.checked_at) + (u.error ? " (" + esc(u.error) + ")" : "") : ""}</div>
-      <div class="row"><button class="act" data-do="link-check">Check now</button><button class="act" data-do="update-check">Check for updates</button></div></div>`;
+      <div class="row"><button class="act" data-do="link-check">Check now</button><button class="act" data-do="update-check">Check for updates</button><button class="act" data-do="client-restart" title="Start a fresh client (new code and settings); Kilo, the coordinator, Rojo and Blender keep running">Restart client</button></div></div>`;
   $("#v-status").innerHTML = banners + `<div class="cards">${st.components.filter(c => !(RETIRED_MEDIA.includes(c.name) && !c.enabled)).map(compCard).join("")}${link}</div>
     <h3 style="margin-top:16px">Kilo configuration</h3>
     <div class="dim">Writes the router's role rules into the agent blocks of kilo.jsonc (a backup is kept, the file is checked afterwards) and reloads Kilo at the next safe point.</div>
@@ -137,6 +137,13 @@ $("#v-status").onclick = async e => {
   if (d === "logs") { S.logName = c; return setView("logs"); }
   try {
     if (d === "link-check") { await api("router-link/check", "POST", {}); await refresh(); return; }
+    if (d === "client-restart") {
+      if (!confirm("Restart the Foundry Client? Running components (Kilo, coordinator, Rojo, Blender) keep running.")) return;
+      const r = await api("client/restart", "POST", {});
+      toast(r.error ? "Restart failed: " + r.error : "Restarting the client: this page reconnects in a few seconds");
+      setTimeout(() => location.reload(), 8000);
+      return;
+    }
     if (d === "update-check") { const u = await api("update/check", "POST", {}); toast(u.error ? "Update check failed: " + u.error : u.available ? "Version " + u.latest + " is available" : "You have the latest version"); await refresh(); return; }
     if (d === "kilo-preview" || d === "kilo-apply") {
       if (d === "kilo-apply" && !confirm("Rewrite the agent permission blocks in kilo.jsonc from the role rules, then reload Kilo at the next safe point?")) return;

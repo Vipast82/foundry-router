@@ -125,6 +125,21 @@ def create_app(mgr: Manager, token: str, cfg_path: Optional[Path] = None) -> Fas
     def check_update():
         return mgr.update.poll()
 
+    @app.post("/api/client/restart")
+    def restart_client():
+        """2026-10-28 (Victor: "why can't we have a restart option from the client"): start a
+        fresh client that waits for this one's port to free, then exit WITHOUT stopping the
+        components; the new client adopts the running Kilo, coordinator, Rojo and Blender,
+        so no session is interrupted. Picks up new client code and settings."""
+        from . import selfrestart
+        try:
+            pid = selfrestart.spawn_successor(mgr.cfg["client"]["api_port"])
+        except Exception as e:                                    # noqa: BLE001
+            return JSONResponse({"error": f"could not start a new client: {e}"}, status_code=500)
+        selfrestart.exit_soon(mgr)
+        return {"ok": True, "successor_pid": pid,
+                "note": "the client restarts in a few seconds; components keep running"}
+
     @app.post("/api/kilo-config/apply")
     async def kilo_config_apply(request: Request):
         try:

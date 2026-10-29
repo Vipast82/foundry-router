@@ -105,7 +105,7 @@ def cmd_run(cfg, headless: bool, no_start: bool) -> int:
     finally:
         stop.set()
         server.should_exit = True
-        mgr.shutdown(stop_components=True)
+        mgr.shutdown(stop_components=not getattr(mgr, "keep_components_on_exit", False))
     return 0
 
 

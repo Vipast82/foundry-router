@@ -2,6 +2,13 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.157.12 — Restart client button
+
+- **Status page: Restart client.** Starts a fresh Foundry Client (new code and settings) that waits
+  for the old one's settings port to free, then the old client exits without stopping its
+  components; the new one adopts Kilo, the coordinator, Rojo and Blender, so no session is
+  interrupted (`POST /api/client/restart`, `foundry_client/selfrestart.py`).
+
 ## v0.157.11 — "Depends on: none; ..." is no dependency
 
 S57a, 2026-10-28 23:06: its plan says `**Depends on:** none; must land before S52's Studio gate`;

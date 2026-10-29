@@ -278,3 +278,28 @@ def test_the_settings_page_has_a_blender_section():
                 encoding="utf-8").read()
     assert '["Blender", [["components.blender.enabled"' in html
     assert '"components.blender.path"' in html and '"components.blender.port"' in html
+
+
+def test_restart_client_spawns_a_successor_and_keeps_components():
+    """Victor 2026-10-28: a Restart client button. The successor waits for the port and the
+    old client exits without stopping components, so the new one adopts them."""
+    import threading
+    from foundry_client import selfrestart
+    seen = {}
+
+    class P:
+        pid = 777
+    def popen(argv, **kw):
+        seen["argv"], seen["kw"] = argv, kw
+        return P()
+    assert selfrestart.spawn_successor(47811, exe="py.exe", cwd="C:/r", popen=popen) == 777
+    assert seen["argv"][0] == "py.exe" and seen["argv"][3:] == ["47811", "C:/r", "py.exe"]
+    assert "foundry_client" in seen["argv"][2]
+    mgr = type("M", (), {"stop_evt": threading.Event()})()
+    exited = []
+    t = selfrestart.exit_soon(mgr, delay=0.01, _exit=exited.append)
+    t.join(2)
+    assert mgr.keep_components_on_exit is True and exited == [0] and mgr.stop_evt.is_set()
+    html = open(__import__("os").path.join(__import__("os").path.dirname(selfrestart.__file__),
+                                           "static", "client.html"), encoding="utf-8").read()
+    assert 'data-do="client-restart"' in html and "client/restart" in html
