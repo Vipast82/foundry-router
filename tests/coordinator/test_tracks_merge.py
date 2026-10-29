@@ -146,6 +146,11 @@ def test_conflict_opens_a_decision_whose_default_stops_the_track(tmp_path):
     assert row["state"] == "stopped" and row["data"]["decision"]["status"] == "answered"
     assert row["data"]["decision"]["by"] == "coordinator (decision timeout)"
     assert os.path.isdir(row["worktree"])
+    # never silently: the COMPLETE sprint whose work did not merge is named in an alert
+    notes = [e for e in events(c, "operator_notice")
+             if e["detail"].get("category") == "track_work_unmerged"]
+    assert len(notes) == 1 and notes[0]["detail"]["unmerged_sprints"] == ["C1"]
+    assert notes[0]["detail"]["alert_class"] == "self_repair_exhausted"
 
 
 def test_conflict_decision_retry_after_the_operator_fixed_master(tmp_path):

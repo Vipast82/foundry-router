@@ -7,9 +7,12 @@ recorded in the track's data (`merge_stage`) so a restart resumes:
   wait      -> the main sprint is quiescent
   rebase    integrate <master> in the worktree (nothing when master is already in
             the track, a merge when the track has merge commits, else `git
-            rebase`); a conflict is aborted and
-            becomes a Lead repair (when a lead manager offers one) plus a
-            decision with the default "stop this track"
+            rebase`); a conflict (beyond docs/memory/**) is aborted and becomes
+            a Lead repair in the worktree (lead.open_track_repair: merge master,
+            resolve, commit; done -> the merge retries by itself) plus a decision
+            whose default waits for that repair ("retry the merge after the Lead
+            repair"); with no Lead repair the default is "stop this track", and
+            a timeout that stops it raises an alert naming the unmerged sprints
   ff        fast-forward master to the track branch in the main checkout; the
             track's commits are added to every open main task's coordinator
             commits (bookkeeping B1), so the main sprint's scope checks exempt them
@@ -92,7 +95,21 @@ def _resolve_memory_conflicts(wt: str, how: str, limit: int = 50) -> bool:
 # with this backoff (doubling) before the track fails
 GATE_TOOLING_RETRIES = 2
 GATE_RETRY_BACKOFF_S = 60
-DECISION_OPTIONS = (DECISION_DEFAULT, "retry the merge", "keep the branch, no merge")
+# 2026-10-28 (backend-1 / S57a): while a Lead repair of the conflict runs (lead.py
+# open_track_repair) the decision's default waits for it and retries the merge, so a timeout
+# never drops finished work; "stop this track" is the default only when no Lead repair runs
+DECISION_AFTER_REPAIR = "retry the merge after the Lead repair"
+DECISION_OPTIONS = (DECISION_DEFAULT, "retry the merge", "keep the branch, no merge",
+                    DECISION_AFTER_REPAIR)
+TIMEOUT_ACTOR = "coordinator (decision timeout)"
+
+
+def _repair_running(data: dict) -> Optional[dict]:
+    """The conflict's Lead repair while it runs, else None."""
+    lr = ((data or {}).get("conflict") or {}).get("lead_repair")
+    if isinstance(lr, dict) and lr.get("status") == "running" and lr.get("case_id"):
+        return lr
+    return None
 
 
 class MergeManager:
@@ -120,6 +137,8 @@ class MergeManager:
         if open_:
             raise TrackError(f"track {name} failed with unfinished sprints "
                              f"({', '.join(open_[:4])}); stop it or re-queue them")
+        self._cancel_repair(P, row, f"merge re-requested by {actor}")
+        row = self.store.track(P.id, name)
         data = {k: v for k, v in row["data"].items()
                 if k not in ("conflict", "decision", "gate", "failed", "merge_wait",
                              "gate_retries", "gate_retry_at", "merge_bg", "studio_batch")}
@@ -138,6 +157,7 @@ class MergeManager:
                 pass
         if (row.get("data") or {}).get("merge_stage") == "rebase":
             _git(row["worktree"], "rebase", "--abort", check=False)
+        self._cancel_repair(P, row, why)
         cur = ((row.get("data") or {}).get("studio_batch") or {}).get("current") or {}
         if cur.get("sprint"):
             try:
@@ -153,6 +173,9 @@ class MergeManager:
             return
         data = dict(row.get("data") or {})
         stage = data.get("merge_stage") or "wait"
+        if _repair_running(data):
+            self._drive_repair(P, row)             # the Lead repairs the conflict
+            return
         if data.get("decision") and data["decision"].get("status") == "open":
             return                                 # waiting on the conflict decision
         if stage == "wait":
@@ -259,21 +282,121 @@ class MergeManager:
                 repair = fn(P, row, files)
             except Exception as e:                                # noqa: BLE001
                 repair = {"error": f"{type(e).__name__}: {e}"[:300]}
-        timeout = float(self.tm.setting(P, "decision_timeout_minutes") or 0)
+        if repair is not None and not isinstance(repair, dict):
+            repair = {"error": str(repair)[:300]}
+        running = bool(repair and repair.get("status") == "running" and repair.get("case_id")
+                       and not repair.get("error"))
+        if repair and not running and not repair.get("error"):
+            repair = {**repair, "error": "the Lead repair did not start"}
         now = self.clock()
-        decision = {"id": "trd-" + secrets.token_hex(4), "status": "open",
-                    "question": f"Track {row['name']} does not rebase onto {P.profile.branch}: "
-                                f"conflicts in {', '.join(files[:6]) or 'unknown files'}. "
-                                f"What now?",
-                    "options": list(DECISION_OPTIONS), "default": DECISION_DEFAULT,
-                    "opened_ts": now, "deadline_ts": (now + timeout * 60) if timeout else None}
+        q = (f"Track {row['name']} does not rebase onto {P.profile.branch}: conflicts in "
+             f"{', '.join(files[:6]) or 'unknown files'}.")
+        if running:
+            q += (f" The Lead is repairing it in the track worktree (case {repair['case_id']}); "
+                  f"by default the merge retries when that repair finishes.")
+        elif repair:
+            q += f" No Lead repair: {str(repair.get('error'))[:200]}."
+        decision = self._decision(P, q + " What now?", running, now)
         self._set(P, row, merge_stage="wait",
                   conflict={"files": files[:40], "log": log, "ts": now,
                             "lead_repair": repair or "no lead repair available"},
                   decision=decision)
         self.store.event(P.id, "", "track_conflict", detail={
             "track": row["name"], "files": files[:20], "decision": decision["id"],
-            "default": DECISION_DEFAULT, "lead_repair": bool(repair and not repair.get("error"))})
+            "default": decision["default"], "lead_repair": running,
+            **({"lead_case": repair["case_id"]} if running else {})})
+
+    def _decision(self, P, question: str, repairing: bool, now: float) -> dict:
+        timeout = float(self.tm.setting(P, "decision_timeout_minutes") or 0)
+        opts = [o for o in DECISION_OPTIONS if repairing or o != DECISION_AFTER_REPAIR]
+        return {"id": "trd-" + secrets.token_hex(4), "status": "open", "question": question,
+                "options": opts,
+                "default": DECISION_AFTER_REPAIR if repairing else DECISION_DEFAULT,
+                "opened_ts": now, "deadline_ts": (now + timeout * 60) if timeout else None}
+
+    def _lead(self):
+        return getattr(self.c, "lead", None)
+
+    def _drive_repair(self, P, row: dict) -> None:
+        """One step of the conflict's Lead repair: done -> the merge retries (stage wait,
+        the conflict and its decision cleared); failed -> the decision applies (its default
+        becomes "stop this track"; a decision already answered by waiting for the repair is
+        opened again)."""
+        data = dict(row.get("data") or {})
+        lr = _repair_running(data) or {}
+        fn = getattr(self._lead(), "track_repair_step", None)
+        try:
+            res = fn(P, lr) if callable(fn) else {"status": "failed",
+                                                  "error": "no lead manager to run the repair"}
+        except Exception as e:                                    # noqa: BLE001
+            res = {"status": "failed", "error": f"{type(e).__name__}: {e}"[:300]}
+        st = (res or {}).get("status")
+        if st == "running":
+            return
+        now = self.clock()
+        conflict = dict(data.get("conflict") or {})
+        if st == "done":
+            self._set(P, row, merge_stage="wait", merge_wait=None, conflict=None, decision=None,
+                      lead_repaired={"case_id": lr.get("case_id"), "head": res.get("head"),
+                                     "files": conflict.get("files"), "ts": now})
+            self.store.event(P.id, "", "track_lead_repaired", detail={
+                "track": row["name"], "case_id": lr.get("case_id"),
+                "head": str(res.get("head") or "")[:12],
+                "files": (conflict.get("files") or [])[:20]})
+            return
+        err = str((res or {}).get("error") or "the Lead repair failed")[:400]
+        conflict["lead_repair"] = {**lr, "status": "failed", "error": err, "ended_ts": now}
+        d = dict(data.get("decision") or {})
+        note = f" The Lead repair (case {lr.get('case_id')}) failed: {err[:200]}."
+        if d.get("status") == "open":
+            d.update(options=[o for o in DECISION_OPTIONS if o != DECISION_AFTER_REPAIR],
+                     default=DECISION_DEFAULT, question=str(d.get("question") or "") + note)
+        else:
+            files = ", ".join((conflict.get("files") or [])[:6]) or "unknown files"
+            d = self._decision(P, f"Track {row['name']} does not rebase onto "
+                                  f"{P.profile.branch}: conflicts in {files}." + note
+                                  + " What now?", False, now)
+        self._set(P, row, conflict=conflict, decision=d)
+        self.store.event(P.id, "", "track_lead_repair_failed", detail={
+            "track": row["name"], "case_id": lr.get("case_id"), "error": err,
+            "decision": d.get("id"), "default": d.get("default")})
+
+    def _cancel_repair(self, P, row: dict, why: str) -> None:
+        """A running Lead repair of this track's conflict is cancelled (the worktree goes
+        back to the track's head): the track is stopped, re-requested or decided otherwise."""
+        lr = _repair_running((row or {}).get("data") or {})
+        if not lr:
+            return
+        fn = getattr(self._lead(), "cancel_track_repair", None)
+        if callable(fn):
+            try:
+                fn(P, lr, why)
+            except Exception as e:                                # noqa: BLE001
+                self.store.event(P.id, "", "warning", detail={
+                    "track_repair_cancel": f"{type(e).__name__}: {e}"[:300]})
+        conflict = dict(((row.get("data") or {}).get("conflict")) or {})
+        conflict["lead_repair"] = {**lr, "status": "cancelled", "error": why[:300]}
+        self._set(P, row, conflict=conflict)
+
+    def _unmerged_notice(self, P, row: dict, actor: str, d: dict) -> None:
+        """The track stops with finished work that never reached master: an alert the
+        control center raises (and pushes: self_repair_exhausted), naming those sprints."""
+        done = [s for s in row.get("sprints") or []
+                if (self.store.task(P.id, s) or {}).get("state") == S.COMPLETE]
+        if not done:
+            return
+        conflict = (row.get("data") or {}).get("conflict") or {}
+        lr = conflict.get("lead_repair")
+        why = (lr.get("error") if isinstance(lr, dict) else lr) or "no Lead repair"
+        text = (f"Track {row['name']} stopped by {actor} after a merge conflict: the work of "
+                f"COMPLETE sprint(s) {', '.join(done)} did NOT reach {P.profile.branch} "
+                f"(branch {row.get('branch')} kept at {row.get('worktree')}; Lead repair: "
+                f"{str(why)[:200]}). Merge it by hand or re-run the track.")
+        self.store.event(P.id, done[-1], "operator_notice", detail={
+            "text": text[:600], "alert_class": "self_repair_exhausted",
+            "category": "track_work_unmerged", "track": row["name"], "unmerged_sprints": done,
+            "branch": row.get("branch"), "decision": d.get("id"),
+            "conflict_files": (conflict.get("files") or [])[:20]})
 
     def decide(self, P, name: str, option: str, actor: str) -> dict:
         P = self.tm.main_of(P)
@@ -284,14 +407,23 @@ class MergeManager:
         if d.get("status") != "open":
             raise TrackError(f"track {name} has no open decision")
         option = str(option or d.get("default") or DECISION_DEFAULT)
-        if option not in DECISION_OPTIONS:
-            raise TrackError(f"option must be one of {', '.join(DECISION_OPTIONS)}")
+        opts = [o for o in (d.get("options") or DECISION_OPTIONS) if o in DECISION_OPTIONS]
+        if option not in opts:
+            raise TrackError(f"option must be one of {', '.join(opts)}")
         d = {**d, "status": "answered", "answer": option, "by": actor, "answered_ts": self.clock()}
         self._set(P, row, decision=d)
         self.store.event(P.id, "", "track_decision", detail={"track": name, "option": option,
                                                             "actor": actor})
+        if option == DECISION_AFTER_REPAIR and _repair_running(row["data"] or {}):
+            return self.store.track(P.id, name)  # step drives the repair, then retries
+        if option != DECISION_AFTER_REPAIR:
+            self._cancel_repair(P, self.store.track(P.id, name), f"decision: {option}")
         if option == DECISION_DEFAULT:
+            if actor == TIMEOUT_ACTOR:
+                self._unmerged_notice(P, self.store.track(P.id, name), actor, d)
             return self.tm.stop(P, name, actor, "merge conflict")
+        if option == DECISION_AFTER_REPAIR:
+            option = "retry the merge"           # the repair is over: a plain retry
         if option == "retry the merge":
             self._set(P, row, merge_stage="wait", conflict=None, decision=None)
             return self.store.track(P.id, name)
@@ -306,7 +438,7 @@ class MergeManager:
             if d.get("status") == "open" and dl and now >= float(dl):
                 try:
                     self.decide(P, row["name"], d.get("default") or DECISION_DEFAULT,
-                                "coordinator (decision timeout)")
+                                TIMEOUT_ACTOR)
                 except TrackError:
                     pass
 

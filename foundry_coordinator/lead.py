@@ -83,6 +83,11 @@ READINESS_TTL = 60.0
 MAX_DEFER_SECONDS = 3600
 LEAD_PURPOSE = "lead_manager"
 LEAD_ROLE = "coordinator"            # the binding role SERVER expects for the lead session
+# 2026-10-28 (backend-1 / S57a): a finished track whose integration of master conflicts gets
+# one bounded Lead session in the track worktree (open_track_repair / track_repair_step)
+TRACK_REPAIR_KIND = "track_repair"
+TRACK_REPAIR_CLASS = "track_conflict"
+PAID_CALL_KINDS = ("lead_call", TRACK_REPAIR_KIND)    # count toward the lead-call caps
 
 # What the lead's tools may never do in the game workspace.
 WRITE_TOOLS = ("edit", "write", "patch", "multiedit", "apply_patch", "todowrite", "task")
@@ -906,6 +911,28 @@ def repair_permissions(P, spec=None, python: str = "") -> list[dict]:
     return rules
 
 
+# what a track repair session may never run on top of LEAD_WRITE_BASH_DENY: it concludes the
+# merge the coordinator started (git add / git commit) and nothing else moves the branch
+TRACK_REPAIR_BASH_DENY = ("git switch*", "git checkout -b*", "git checkout -B*",
+                          "git checkout*--detach*", "git merge*", "git cherry-pick*",
+                          "git revert*", "git branch*", "git worktree*", "git stash*",
+                          "git reset*", "git am*", "git pull*", "git fetch*")
+
+
+def track_repair_permissions(P, spec=None) -> list[dict]:
+    """The Lead's track repair session (open_track_repair): the write rules of the lead
+    (lead_write_permissions: the adapter's rules for the lead role, no push, no history
+    rewrite, no hook / config change, the hard denies), confined to the session's directory
+    (the track worktree: external_directory denied) and with no git command that moves the
+    branch except concluding the merge with `git add` / `git commit`."""
+    rules = lead_write_permissions(P, spec)
+    rules.append({"permission": "external_directory", "pattern": "*", "action": "deny"})
+    for pat in TRACK_REPAIR_BASH_DENY:
+        rules.append({"permission": "bash", "pattern": pat, "action": "deny"})
+    rules += _hard_denies()
+    return rules
+
+
 def _accepts(fn, name: str) -> bool:
     import inspect
     try:
@@ -1460,9 +1487,9 @@ class LeadManager:
             q = ",".join("?" * len(ids))
             for a in self.store.q(f"SELECT kind, detail, status FROM recovery_actions WHERE "
                                   f"case_id IN ({q}) AND kind IN ('lead_call', "
-                                  f"'authorize_attempts')", tuple(ids)):
+                                  f"'track_repair', 'authorize_attempts')", tuple(ids)):
                 d = _uj(a.get("detail"), {}) or {}
-                if a["kind"] == "lead_call":
+                if a["kind"] in PAID_CALL_KINDS:
                     # a call counts once it may have been sent (charged before the prompt);
                     # one that died on infrastructure never counts (C, 2026-10-28)
                     if (d.get("phase") not in (None, "creating", "created", "bound") or
@@ -1881,8 +1908,10 @@ class LeadManager:
 
     def _session_call(self, P, t: dict, case: dict, key: str, kind: str, *, directory: str,
                       persona: str, agent: str, permissions: list, title: str, text_fn,
-                      timeout_s: float, diagnosis: bool) -> dict:
+                      timeout_s: float, diagnosis: bool,
+                      locks: Optional[list] = None) -> dict:
         """Start (once) and poll one paid Kilo session call journaled under `key`.
+        `locks` replaces the game workspace lock (a track repair locks its worktree).
         Returns {status: pending|idle|failed|deferred, ...}. The paid-call
         counters are charged BEFORE the prompt is sent, and a send whose outcome
         is unknown is never repeated (recorded `uncertain`)."""
@@ -1893,14 +1922,14 @@ class LeadManager:
             # the game workspace lock for the session's lifetime: no other writer
             # runs while the lead / repair session can see the workspace, so the
             # post-session guard can attribute any change to the session
-            locks = self._ws_locks(P)
+            locks = self._ws_locks(P) if locks is None else list(locks)
             held = self.store.acquire(locks, P.id, t["task_id"])
             if held:
                 return {"status": "pending", "waiting": f"workspace lock held by "
                         f"{held.get('project_id')}/{held.get('task_id')}"}
             guard = self._guard_snapshot(P, t["task_id"])
             a = self._act(case, kind, op_key=key, status="started", repo=(
-                "game" if kind == "lead_call" else "foundry-router"),
+                "game" if kind in PAID_CALL_KINDS else "foundry-router"),
                 detail={"phase": "creating", "marker": marker, "persona": persona,
                         "agent": agent, "directory": directory, "locks": locks,
                         "guard": guard})
@@ -2409,7 +2438,7 @@ class LeadManager:
             pass
 
     def _abort_sessions(self, P, case: dict, why: str) -> None:
-        for kind in ("lead_call", "repair_session"):
+        for kind in ("lead_call", "repair_session", TRACK_REPAIR_KIND):
             a = self._open_call(case["case_id"], kind)
             if a and a["detail"].get("session_id"):
                 self._abort(P, a["detail"]["session_id"], a["detail"].get("directory") or
@@ -2459,7 +2488,7 @@ class LeadManager:
         case is resolved, cancelled, escalated or taken over)."""
         P = self._project(case, P)
         for a in self.actions(case["case_id"]):
-            if a["kind"] in ("lead_call", "repair_session") and a["detail"].get("session_id") \
+            if a["kind"] in ("lead_call", "repair_session", TRACK_REPAIR_KIND) and                     a["detail"].get("session_id") \
                     and not a["detail"].get("ended"):
                 self._end_session(P, a["op_key"], outcome)
 
@@ -2748,7 +2777,8 @@ class LeadManager:
         n = 0
         for a in self.store.q("SELECT a.detail, a.status, a.ts FROM recovery_actions a "
                               "JOIN recovery_cases c ON a.case_id=c.case_id WHERE c.project_id=? "
-                              "AND c.task_id=? AND a.kind='lead_call'", (project_id, task_id)):
+                              "AND c.task_id=? AND a.kind IN ('lead_call','track_repair')",
+                              (project_id, task_id)):
             if since and float(a.get("ts") or 0) < since:
                 continue
             d = _uj(a.get("detail"), {}) or {}
@@ -3045,6 +3075,336 @@ class LeadManager:
             f"The lead manager cannot run for this blocker because its route is not ready: "
             f"{detail[:900]}. Fix that configuration (or turn [lead_manager] off); should the "
             f"case then retry the diagnosis?")
+
+    # -- track merge conflicts (2026-10-28, backend-1 / S57a) ----------------------------------
+    #
+    # tracks/merge.py `_conflict`: a finished track whose integration of master conflicts on
+    # real files asks open_track_repair for a Lead repair. The case belongs to the track's
+    # last sprint (COMPLETE: the engine never drives it), its trigger names the track, and
+    # merge.py drives it with track_repair_step on each merge step:
+    #   prepare  the coordinator merges master into the track branch in the worktree (one
+    #            conflict resolution; merge.py then finds master in the track and fast-
+    #            forwards, the 0.146.2 path for tracks with merge commits)
+    #   session  ONE bounded Lead session in the worktree resolves the files keeping both
+    #            sides' intent, runs the quick checks it can and commits the merge
+    #   verify   the coordinator checks the result (branch, no conflict left or marker,
+    #            master and the track's work both in HEAD, clean tree)
+    # done -> merge.py retries the merge (whose full gate still runs on master); failed ->
+    # the worktree is put back and the track's decision applies. The lead-call caps count
+    # the session (PAID_CALL_KINDS); nothing here waives a check.
+
+    @staticmethod
+    def _tgit(wt: str, *args):
+        from .tracks.manager import _git
+        return _git(wt, *args, check=False)
+
+    def _track_case(self, P, track: str) -> Optional[dict]:
+        """The open track repair case of `track`, or None."""
+        q = ",".join("?" * len(OPEN_STATES))
+        for r in self.store.q(f"SELECT case_id FROM recovery_cases WHERE project_id=? AND "
+                              f"state IN ({q}) ORDER BY created_ts DESC",
+                              (P.id, *OPEN_STATES)):
+            c = self.case(r["case_id"])
+            trig = (c or {}).get("trigger") or {}
+            if trig.get("class") == TRACK_REPAIR_CLASS and trig.get("track") == track:
+                return c
+        return None
+
+    def _track_refusal(self, P, tid: str, s: dict, rk: str = "") -> str:
+        """Why the Lead cannot repair a track conflict now ('' = it can): the caps
+        (lead_hard_max_calls, max_lead_calls_per_task, max_cases_per_task, repeats of the
+        same track's repairs) and readiness. Never raises a cap."""
+        hard = self.hard_cap(P)
+        used = self.lifetime_calls(P.id, tid)
+        if hard and used >= hard:
+            return (f"lead hard cap reached on {tid}: {used} calls ([automation] "
+                    f"lead_hard_max_calls = {hard})")
+        totals = self.task_totals(P.id, tid)
+        lim = self.task_limit(s, totals, "lead_calls")
+        if totals["lead_calls"] >= lim:
+            return f"lead calls on {tid} spent: {totals['lead_calls']} of {lim}"
+        if rk:
+            lim = self.task_limit(s, totals, "cases")
+            if totals["cases"] >= lim:
+                return f"lead cases on {tid} spent: {totals['cases']} of {lim}"
+            repeats = len(self.store.q(
+                "SELECT 1 FROM recovery_cases WHERE project_id=? AND task_id=? AND "
+                "created_ts>=? AND repeat_key=? AND state IN ('RESOLVED','CANCELLED')",
+                (P.id, tid, self._budget_epoch(P.id, tid), rk)))
+            rep_lim = int(s["max_fingerprint_repeats"]) + int(
+                totals["raised"].get("max_fingerprint_repeats", 0))
+            if repeats > rep_lim:
+                return (f"this track's conflict came back after {repeats} Lead repairs "
+                        f"(max_fingerprint_repeats = {rep_lim})")
+        try:
+            bad = self._blocking(self.readiness(P))
+        except Exception as e:                                   # noqa: BLE001
+            return f"lead readiness unknown: {type(e).__name__}: {e}"[:300]
+        if bad:
+            return "lead not ready: " + "; ".join(f"{b['name']}: {b['detail']}"
+                                                  for b in bad)[:600]
+        return ""
+
+    def open_track_repair(self, P, row: dict, files: list) -> Optional[dict]:
+        """A Lead repair of a track's merge conflict in its worktree (see above).
+        {case_id, status: running, ...} when a case runs; {error} when the Lead cannot
+        run now (caps, readiness, no sprint): the caller's decision applies; None when
+        [lead_manager] is off."""
+        if not self.enabled(P):
+            return None
+        name = str(row.get("name") or "")
+        wt = str(row.get("worktree") or "")
+        sprints = list(row.get("sprints") or [])
+        tid = sprints[-1] if sprints else ""
+        t = self.store.task(P.id, tid) if tid else None
+        if t is None:
+            return {"error": f"track {name} has no sprint task to hold a Lead case"}
+        if not wt or not os.path.isdir(wt):
+            return {"error": f"track {name}: worktree {wt or '?'} is gone"}
+        live = self._track_case(P, name)
+        if live is not None:
+            return {"case_id": live["case_id"], "status": "running", "task_id": live["task_id"],
+                    "reused": True}
+        s = self.settings(P)
+        files = [str(f) for f in (files or [])][:40]
+        base = str(getattr(P.profile, "branch", "") or "main")
+        rk = "rk-" + _sha(_j({"track": name, "class": TRACK_REPAIR_CLASS}))[:24]
+        why = self._track_refusal(P, tid, s, rk)
+        if why:
+            self.store.event(P.id, tid, "lead_track_repair_refused", detail={
+                "track": name, "why": why[:500]})
+            return {"error": why}
+        now = self.clock()
+        head = (self._tgit(wt, "rev-parse", "HEAD").stdout or "").strip()
+        parts = {"task": tid, "class": TRACK_REPAIR_CLASS, "track": name, "revision": head,
+                 "files": sorted(files), "obligations": [], "checks": []}
+        fp = "fp-" + _sha(_j(parts))[:24]
+        cid = "rc-" + _sha(f"{P.id}|{tid}|{fp}|{now}|{uuid.uuid4().hex}")[:16]
+        reason = (f"track {name} does not integrate {base}: conflicts in "
+                  f"{', '.join(files[:8]) or 'unknown files'}")
+        trig = {"state": "MERGING", "reason": reason, "class": TRACK_REPAIR_CLASS,
+                "track": name, "worktree": wt, "branch": row.get("branch") or "",
+                "base": base, "files": files, "sprints": sprints, "fingerprint_parts": parts}
+        counters = {n: 0 for n in COUNTER_NAMES}
+        self.store.x(
+            "INSERT INTO recovery_cases (case_id, project_id, task_id, run_id, trigger, "
+            "state, fingerprint, source_revision, proposed_action, validation, counters, "
+            "created_ts, updated_ts, deadline_ts, paused, instructions, needs_human, "
+            "repeat_key, state_ts, paused_total) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            (cid, P.id, tid, t.get("run_id") or "", _j(self._red(P.id, trig)), "REPAIRING",
+             fp, head, _j({"kind": TRACK_REPAIR_KIND, "files": files}), _j({}), _j(counters),
+             now, now, now + float(s["max_case_minutes"]) * 60, 0, _j([]), 0, rk, now, 0.0))
+        case = self.case(cid)
+        self._act(case, "open_case", result=f"MERGING: {_cut(reason, 300)}", repo="game",
+                  detail={"fingerprint": fp, "repeat_key": rk, "parts": parts, "track": name},
+                  scope_files=files, op_key=f"{cid}:open")
+        self.store.event(P.id, tid, "lead_case", detail={
+            "case_id": cid, "state": "REPAIRING", "trigger": "track_conflict", "track": name,
+            "class": TRACK_REPAIR_CLASS, "fingerprint": fp, "files": files[:20],
+            "reason": reason[:300]})
+        return {"case_id": cid, "status": "running", "task_id": tid}
+
+    def _track_fail(self, P, case: dict, why: str) -> dict:
+        """The repair did not hold: the worktree goes back to the track's head (a merge in
+        progress is aborted, a commit the session made is dropped: the track's own work is
+        untouched) and the case is cancelled; the track's decision applies."""
+        trig = case.get("trigger") or {}
+        wt = trig.get("worktree") or ""
+        pre = ((case.get("validation") or {}).get("track_repair") or {}).get("pre_head") or ""
+        if wt and os.path.isdir(wt):
+            if self._tgit(wt, "rev-parse", "-q", "--verify", "MERGE_HEAD").returncode == 0:
+                self._tgit(wt, "merge", "--abort")
+            cur = (self._tgit(wt, "rev-parse", "HEAD").stdout or "").strip()
+            if pre and cur and cur != pre:
+                self._act(case, "track_repair_dropped", status="done", repo="game",
+                          result=f"dropped {cur[:12]}; the track is back at {pre[:12]}",
+                          detail={"dropped": cur, "pre_head": pre})
+                self._tgit(wt, "reset", "--hard", pre)
+        self.cancel(case["case_id"], f"track repair failed: {why}"[:400], actor="lead_manager",
+                    P=P)
+        self.store.event(P.id, case["task_id"], "lead_track_repair", detail={
+            "case_id": case["case_id"], "track": trig.get("track"), "result": "failed",
+            "why": _cut(why, 400)})
+        return {"case_id": case["case_id"], "status": "failed", "error": _cut(why, 400)}
+
+    def cancel_track_repair(self, P, repair: dict, why: str) -> Optional[dict]:
+        """merge.py: the track was stopped, re-requested or decided otherwise while its
+        Lead repair ran: the session is aborted, the worktree put back, the case cancelled."""
+        case = self.case(str((repair or {}).get("case_id") or ""))
+        if case is None or case["state"] not in OPEN_STATES:
+            return case
+        return self._track_fail(P, case, f"cancelled: {why}")
+
+    def _track_prompt(self, P, case: dict, files: list) -> str:
+        trig = case.get("trigger") or {}
+        checks = [c for c in (getattr(P.profile, "checks", None) or [])
+                  if getattr(c, "phase", "verify") == "verify"]
+        ck = "; ".join(f"{c.name}: {' '.join(c.command)}" for c in checks[:8])
+        return "\n".join([
+            f"You are the Lead manager repairing a merge conflict for recovery case "
+            f"{case['case_id']}. The track {trig.get('track')} (branch {trig.get('branch')}) "
+            f"finished its sprints ({', '.join(trig.get('sprints') or [])}), all COMPLETE, but "
+            f"its work cannot reach {trig.get('base')} until this conflict is resolved.",
+            f"Work ONLY in this worktree: {trig.get('worktree')}. The coordinator has run "
+            f"`git merge --no-edit {trig.get('base')}` there; these files conflict: "
+            + (", ".join(files) or "(see git status)") + ".",
+            "1. Resolve every conflicting file keeping BOTH sides' intent: the track's "
+            "finished work and the newer work on " + str(trig.get("base")) + ". Never drop "
+            "either side's behaviour, and remove every conflict marker.",
+            "2. Run the project's quick checks you can run here for the files you touched"
+            + (f" ({ck})" if ck else "") + ". Never skip, weaken or edit a check or a test to "
+            "make it pass.",
+            "3. `git add` the resolved files, then `git commit --no-edit` to conclude the merge "
+            f"on {trig.get('branch')}.",
+            "Do not switch branches, rebase, reset, push, start another merge or touch any "
+            "other checkout. The coordinator verifies the result and retries the track's "
+            "merge, whose full gate still runs on " + str(trig.get("base")) + ".",
+            "When finished, summarize what you resolved in one short paragraph."])
+
+    def _track_verify(self, case: dict, tr: dict) -> list[str]:
+        trig = case.get("trigger") or {}
+        wt = trig.get("worktree") or ""
+        out = []
+        if not wt or not os.path.isdir(wt):
+            return [f"worktree {wt or '?'} is gone"]
+        br = (self._tgit(wt, "rev-parse", "--abbrev-ref", "HEAD").stdout or "").strip()
+        if trig.get("branch") and br != trig["branch"]:
+            out.append(f"the worktree is on {br or '?'}, not {trig['branch']}")
+        if self._tgit(wt, "rev-parse", "-q", "--verify", "MERGE_HEAD").returncode == 0:
+            out.append("the merge was not concluded (no commit)")
+        left = [l.strip() for l in (self._tgit(wt, "diff", "--name-only", "--diff-filter=U")
+                                    .stdout or "").splitlines() if l.strip()]
+        if left:
+            out.append("still conflicting: " + ", ".join(left[:8]))
+        dirty = [l for l in (self._tgit(wt, "status", "--porcelain", "--untracked-files=no")
+                             .stdout or "").splitlines() if l.strip()]
+        if dirty:
+            out.append("uncommitted changes: " + "; ".join(d.strip() for d in dirty[:6]))
+        for what, sha in (("the track's work", tr.get("pre_head")),
+                          (str(trig.get("base")), tr.get("base_sha"))):
+            if sha and self._tgit(wt, "merge-base", "--is-ancestor", sha,
+                                  "HEAD").returncode != 0:
+                out.append(f"{what} ({sha[:12]}) is not in the result")
+        for f in tr.get("files") or []:
+            p = os.path.join(wt, f)
+            if not os.path.isfile(p):
+                continue
+            try:
+                with open(p, encoding="utf-8", errors="replace", newline="") as fh:
+                    text = fh.read()
+            except OSError:
+                continue
+            if re.search(r"^(<<<<<<<|>>>>>>>) ", text, flags=re.M) or \
+                    re.search(r"^<<<<<<<$|^>>>>>>>$", text, flags=re.M):
+                out.append(f"conflict markers left in {f}")
+        return out
+
+    def track_repair_step(self, P, repair: dict) -> dict:
+        """One bounded step of a track repair (merge.py calls it while the track's
+        conflict waits). {status: running|done|failed, case_id, error?, head?}."""
+        cid = str((repair or {}).get("case_id") or "")
+        case = self.case(cid) if cid else None
+        if case is None:
+            return {"case_id": cid, "status": "failed", "error": "no such Lead case"}
+        if case["state"] == "RESOLVED":
+            return {"case_id": cid, "status": "done"}
+        if case["state"] not in OPEN_STATES:
+            return {"case_id": cid, "status": "failed",
+                    "error": case.get("outcome") or case["state"]}
+        if case["paused"]:
+            return {"case_id": cid, "status": "running", "paused": True}
+        if not self.enabled(P):
+            return self._track_fail(P, case, "[lead_manager] was disabled")
+        if self.clock() > float(case.get("deadline_ts") or 0):
+            return self._track_fail(P, case, "out of time (max_case_minutes)")
+        s = self.settings(P)
+        trig = case.get("trigger") or {}
+        wt = trig.get("worktree") or ""
+        t = self.store.task(P.id, case["task_id"]) or {"task_id": case["task_id"]}
+        tr = dict((case.get("validation") or {}).get("track_repair") or {})
+        phase = tr.get("phase") or "prepare"
+        if phase == "prepare":
+            if not wt or not os.path.isdir(wt):
+                return self._track_fail(P, case, f"worktree {wt or '?'} is gone")
+            ref = f"refs/heads/{trig.get('base') or 'main'}"
+            pre = (self._tgit(wt, "rev-parse", "HEAD").stdout or "").strip()
+            base_sha = (self._tgit(wt, "rev-parse", ref).stdout or "").strip()
+            if self._tgit(wt, "rev-parse", "-q", "--verify", "MERGE_HEAD").returncode != 0:
+                r = self._tgit(wt, "merge", "--no-edit", ref)
+                if r.returncode != 0:
+                    from .tracks.merge import _resolve_memory_conflicts
+                    _resolve_memory_conflicts(wt, "merge")
+            files = [l.strip() for l in (self._tgit(wt, "diff", "--name-only",
+                                                    "--diff-filter=U").stdout or "")
+                     .splitlines() if l.strip()]
+            if not files and self._tgit(wt, "rev-parse", "-q", "--verify",
+                                        "MERGE_HEAD").returncode == 0:
+                self._tgit(wt, "-c", "core.editor=true", "commit", "--no-edit")
+            tr = {"phase": "session" if files else "verify", "pre_head": pre,
+                  "base_sha": base_sha, "files": files or list(trig.get("files") or [])}
+            self._act(case, "track_merge_started", repo="game",
+                      result=(f"merged {ref} into {pre[:12]}: "
+                              + (f"{len(files)} conflicting file(s)" if files else
+                                 "no conflict left")),
+                      detail=tr, scope_files=files)
+            self._merge_validation(cid, track_repair=tr)
+            if files:
+                return {"case_id": cid, "status": "running"}
+            phase = "verify"
+        if phase == "session":
+            key = f"track:{cid}:1"
+            if self._action(key) is None:
+                why = self._track_refusal(P, case["task_id"], s)
+                if why:
+                    return self._track_fail(P, case, why)
+            agent = s.get("repair_agent") or s.get("agent") or \
+                (getattr(P.profile, "client", None) or {}).get("agent") or "code"
+            lock = f"workspace:{os.path.normcase(os.path.realpath(wt))}"
+            r = self._session_call(
+                P, t, case, key, TRACK_REPAIR_KIND, directory=wt, persona=s["persona"],
+                # no sprint spec: the conflict spans the whole track, not the last
+                # sprint's edit scope (the worktree confinement and denies still apply)
+                agent=agent, permissions=track_repair_permissions(P, None),
+                title=f"{P.id} track {trig.get('track')} merge repair",
+                text_fn=lambda: self._track_prompt(P, self.case(cid), tr.get("files") or []),
+                timeout_s=float(s["lead_timeout_minutes"]) * 60, diagnosis=False,
+                locks=[lock])
+            case = self.case(cid)
+            if r["status"] == "pending":
+                return {"case_id": cid, "status": "running"}
+            if r["status"] in ("failed", "deferred"):
+                return self._track_fail(P, case, f"repair session: {r.get('reason')}")
+            sid = r["session_id"]
+            verdict, detail, models = self._served_check(P, sid, s["persona"], wt)
+            self._act(case, "served_model", status="done" if verdict == "ok" else "failed",
+                      result=detail, detail={"op_key": key, "served_models": models,
+                                             "verdict": verdict})
+            if verdict != "ok":
+                self._abort(P, sid, wt)
+                self._upd(key, status="failed", result=f"served model {verdict}: {detail}")
+                self._end_session(P, key, f"served_model_{verdict}")
+                return self._track_fail(P, self.case(cid), f"served model {verdict}: {detail} "
+                                                           f"(fail closed)")
+            self._upd(key, status="done", result="track repair session finished")
+            self._end_session(P, key, "repair_done")
+            self._save(cid, lead_model=",".join(models))
+            tr["phase"] = "verify"
+            self._merge_validation(cid, track_repair=tr)
+            case = self.case(cid)
+        problems = self._track_verify(case, tr)
+        if problems:
+            return self._track_fail(P, case, "; ".join(problems))
+        head = (self._tgit(wt, "rev-parse", "HEAD").stdout or "").strip()
+        self._act(case, "track_repair_commit", repo="game", result=head,
+                  detail={"head": head, "pre_head": tr.get("pre_head"),
+                          "base_sha": tr.get("base_sha")},
+                  scope_files=tr.get("files") or [])
+        self.resolve(cid, f"track {trig.get('track')} repaired at {head[:12]}: the merge "
+                          f"retries", actor="lead_manager")
+        self.store.event(P.id, case["task_id"], "lead_track_repair", detail={
+            "case_id": cid, "track": trig.get("track"), "result": "repaired",
+            "head": head[:12], "files": (tr.get("files") or [])[:20]})
+        return {"case_id": cid, "status": "done", "head": head}
 
     # -- REPAIRING / UPGRADING ------------------------------------------------------------------
 

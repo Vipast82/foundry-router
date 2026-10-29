@@ -1829,7 +1829,9 @@ class ChatEngine:
         @self._add("track_merge", "Merge a finished track into master at the main sprint's next "
                    "quiet point (rebase, fast-forward, the gate on the merged files in the main "
                    "checkout). With `option`, answer the track's open conflict decision: "
-                   "'stop this track' (default), 'retry the merge', 'keep the branch, no merge'.",
+                   "'retry the merge after the Lead repair' (the default while a Lead repair of "
+                   "the conflict runs), 'stop this track' (the default otherwise), 'retry the "
+                   "merge', 'keep the branch, no merge'.",
                    "tracks", {"project": P, "name": {"type": "string", "max": 40},
                               "option": {"type": "string", "max": 60}}, ("project", "name"),
                    "project", lambda a: (f"track {a.get('name')}: {a['option']}" if a.get("option")
