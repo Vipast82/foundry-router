@@ -161,6 +161,7 @@ mode = "session"
 exempt_paths = [
   "docs/progress/{task}_*",
   "docs/progress/STATE.md",
+  "docs/progress/SPRINT_STATUS.md",
   "docs/progress/state/*",
   "docs/progress/STATE_ARCHIVE.md",
   "docs/MASTER_ORDER.md",

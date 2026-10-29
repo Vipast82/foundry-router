@@ -1029,6 +1029,16 @@ Change no code or test file in this session; if one needs changing, stop and rep
                        "(project memory, the coordinator's)")
         return True
 
+    # Files every AU CLOSE session writes (SESSION_CORE CLOSE: SUMMARY, STATE row,
+    # SPRINT_STATUS, done_check). 2026-10-29 HK-STORE1: SPRINT_STATUS.md was missing from the
+    # profile's closeout exempt list; each CLOSE edit voided the review, 5 review rounds in
+    # 25 min, review budget used, BLOCKED. Always exempt, whatever the profile lists.
+    CLOSE_DOCS = ("docs/progress/SPRINT_STATUS.md",)
+
+    def exempt_paths(self, spec: TaskSpec) -> list[str]:
+        out = super().exempt_paths(spec)
+        return out + [p for p in self.CLOSE_DOCS if p not in out]
+
     def gate_noncode(self, spec: TaskSpec) -> list:
         """Paths that never unbind a gate from the code it ran on: closeout-exempt files, the
         sprint's own progress files, its captures, memory and plan files. ONE list for the

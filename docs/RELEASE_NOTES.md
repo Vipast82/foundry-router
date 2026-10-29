@@ -2,6 +2,15 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.157.59 — SPRINT_STATUS.md never voids a review
+
+2026-10-29 15:15-15:37: HK-STORE1 (track gpt-6) was APPROVED five times; each CLOSE session
+edited `docs/progress/SPRINT_STATUS.md`, which the profile's closeout exempt list did not name,
+so the review was voided and run again until the review budget (5/5) was used and it BLOCKED.
+
+- **AU adapter:** `exempt_paths` always adds `docs/progress/SPRINT_STATUS.md` (a file every AU
+  CLOSE writes), whatever the profile lists. The example profile lists it too.
+
 ## v0.157.58 — the always-approved scope classes are granted at once
 
 2026-10-29 permissions review (Victor: "if there is constant permission issues then we need to

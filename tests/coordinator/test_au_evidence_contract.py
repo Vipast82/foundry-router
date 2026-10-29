@@ -874,3 +874,19 @@ def test_a_designed_fail_does_not_turn_a_suite_pass_unknown(repo):
     v = _view(v["tool"], v["input"], _env(
         ["SUITE HK_TEST1 pass=10 fail=2 expect=10 designedFails=1 VERDICT PASS"]), part="p2")
     assert _by(a.classify_tool_result(v, {"task_id": T}), "suite:HK_TEST1")["result"] == UNKNOWN
+
+
+def test_sprint_status_is_always_closeout_exempt():
+    """2026-10-29 HK-STORE1: each CLOSE edit of SPRINT_STATUS.md voided the review (5 rounds,
+    review budget used). The AU adapter exempts it whatever the profile lists."""
+    from types import SimpleNamespace as NS
+    from foundry_coordinator.projects.animaluprising.adapter import AnimalUprisingAdapter
+    from foundry_coordinator.profile import matches_any
+    a = AnimalUprisingAdapter.__new__(AnimalUprisingAdapter)
+    a.p = NS(exempt=lambda tid: [f"docs/progress/{tid}_*", "docs/progress/STATE.md"])
+    spec = NS(task_id="HK-STORE1")
+    ex = a.exempt_paths(spec)
+    assert matches_any("docs/progress/SPRINT_STATUS.md", ex)
+    assert matches_any("docs/progress/HK-STORE1_SUMMARY.md", ex)
+    assert not matches_any("src/shared/Config/Environment.lua", ex)
+    assert ex.count("docs/progress/SPRINT_STATUS.md") == 1
