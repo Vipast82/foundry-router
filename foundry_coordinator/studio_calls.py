@@ -65,7 +65,9 @@ ID_RE = re.compile(r"[A-Za-z0-9_.\-]{1,64}")
 SEL_RE = re.compile(r"(?:none|full|subset:[A-Za-z0-9_.\-]+|[A-Za-z0-9_.\-]+(?:[, ]+[A-Za-z0-9_.\-]+)*)")
 PATH_RE = re.compile(r"[A-Za-z0-9_./\-]+")
 DEFAULT_FILES = ["tests/RegressionIndex.lua", "tests/GateRunner.lua"]
-EXEMPT = ("docs/progress/{task}_*", "docs/memory/**")
+# 2026-10-29 AS-P5: the frames a PASS run commits (v0.157.50) are its own outputs too;
+# without them each outputs commit made the gate look stale -> ~60 PASS runs in 35 min
+EXEMPT = ("docs/progress/{task}_*", "docs/memory/**", "docs/evidence/{task}/*.png")
 _NO_WINDOW = 0x08000000 if os.name == "nt" else 0
 
 

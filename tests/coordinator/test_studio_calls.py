@@ -528,3 +528,24 @@ def test_the_runs_own_captures_are_its_outputs(tmp_path):
     sc = SC.StudioCalls.__new__(SC.StudioCalls)
     P = NS(profile=NS(workspace=str(ws)))
     assert sc._run_captures(P, "AS-P5", {"head": "abcdef0123456789"}) == ["docs/evidence/AS-P5/f.png"]
+
+
+def test_a_committed_frame_keeps_the_gate_fresh(tmp_path):
+    """2026-10-29 AS-P5: each PASS re-committed its frame; the gate went stale and re-ran."""
+    import json as _j
+    from types import SimpleNamespace as NS
+    from foundry_coordinator import studio_calls as SC
+    ws = tmp_path / "ws"
+    (ws / "docs" / "progress").mkdir(parents=True)
+    (ws / "docs" / "progress" / "AS-P5_EVIDENCE_RAW.log").write_text("GATE AS-P5 PASS" + chr(10))
+    (ws / "docs" / "progress" / "AS-P5_gate_verdicts.json").write_text(_j.dumps({"headSha": "aaa"}))
+    changed = []
+    P = NS(profile=NS(workspace=str(ws)),
+           ws=NS(is_ancestor=lambda a, b: True, changed_files=lambda a, b: list(changed)))
+    sc = SC.StudioCalls.__new__(SC.StudioCalls)
+    changed[:] = ["docs/progress/AS-P5_studio_lines.txt", "docs/evidence/AS-P5/proxy/f.png"]
+    assert sc.gate_fresh(P, "AS-P5", "bbb")
+    changed[:] = ["docs/evidence/AS-P5/f.png", "src/x.lua"]
+    assert not sc.gate_fresh(P, "AS-P5", "bbb")
+    changed[:] = ["docs/evidence/OTHER/f.png"]
+    assert not sc.gate_fresh(P, "AS-P5", "bbb")

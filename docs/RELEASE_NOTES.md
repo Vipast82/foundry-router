@@ -2,6 +2,17 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.157.51 — a committed frame keeps the scripted gate fresh
+
+2026-10-29 13:27-14:02: after v0.157.50, each AS-P5 PASS run committed its frame under
+`docs/evidence/AS-P5/`. The freshness check exempted only `docs/progress/<ID>_*` and
+`docs/memory/**`, so the outputs commit made the gate look stale, auto_verify ran again at the
+new HEAD, and ~60 PASS runs looped every ~40 s, holding the main checkout and the landing drain.
+
+- **Gate freshness / same-code check:** PNG frames under `docs/evidence/<ID>/` count as the
+  run's own outputs; any other change (src, tests, another sprint's evidence) still makes the
+  gate stale.
+
 ## v0.157.50 — the frame the runner takes is committed with the run's outputs
 
 2026-10-29 12:42: AS-P5's scripted run took its CAPTURE_READY frame (v0.157.47), but the outputs
