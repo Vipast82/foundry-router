@@ -2,6 +2,15 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.157.19 — a sprint's verification never rewords another sprint's commits
+
+2026-10-29 00:3x-00:5x: UI-SKIN2 and AS-P5 shared the main checkout; UI-SKIN2's verification
+reworded every unprefixed-looking commit in its range, including AS-P5's, to "UI-SKIN2: AS-P5:
+..."; AS-P5 then lost them (v0.157.16 skips other sprints' commits) and its capture never counted.
+
+- **`commits.unprefixed`** treats a commit already prefixed with another sprint's id as exempt
+  (never reworded); an unprefixed commit is still the sprint's to reword.
+
 ## v0.157.18 — a sprint's own evidence folder is always in scope
 
 AS-P5, 2026-10-29 00:06: its own capture docs/evidence/AS-P5/proxy_telegraph_*.png failed

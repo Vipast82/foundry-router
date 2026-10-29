@@ -793,3 +793,16 @@ def test_a_dead_gate_runner_is_tooling_not_a_45_minute_stall(tmp_path, monkeypat
     assert e.now[0] - run["started"] < 10 * 60               # not the 45-minute timeout
     assert FL.events(e, "fast_lane_runner_dead")
     assert not FL.fl(e).get("red_gates")                     # tooling, never a red gate
+
+
+def test_another_sprints_commits_are_never_reworded(monkeypatch):
+    """2026-10-29 replay: UI-SKIN2's verification reworded AS-P5's commits (same checkout)
+    to "UI-SKIN2: AS-P5: ..."; AS-P5 then lost them. Another sprint's prefixed commit is
+    exempt; an unprefixed one is still this sprint's to reword."""
+    from types import SimpleNamespace
+    from foundry_coordinator import commits as CM
+    monkeypatch.setattr(CM, "_is_merge", lambda P, sha: False)
+    P = SimpleNamespace()
+    bad, exempt = CM.unprefixed(P, [("a", "AS-P5: R-B frame re-shot"), ("b", "fix the ring"),
+                                    ("c", "UI-SKIN2: hero captures")], "UI-SKIN2: ")
+    assert [x[0] for x in bad] == ["b"] and "a" in [x[0] for x in exempt]

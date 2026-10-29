@@ -44,11 +44,15 @@ def _subject_ok(subject: str, prefix: str) -> bool:
 def unprefixed(P, commits: list, prefix: str) -> tuple[list, list]:
     """([(sha, subject)] lacking the prefix and not exempt, [(sha, subject)] exempt)
     for a base..head commit list (newest first). Merge commits are exempt."""
+    from .bookkeeping import other_sprint
+    own = str(prefix or "").strip().rstrip(":").strip()
     bad, exempt = [], []
     for sha, subject in commits:
         if _subject_ok(subject, prefix):
             continue
-        if EXEMPT.match(subject or "") or _is_merge(P, sha):
+        # 2026-10-29: UI-SKIN2's verification reworded AS-P5's commits (shared checkout) to
+        # "UI-SKIN2: AS-P5: ..."; another sprint's commit is that sprint's, never reworded
+        if EXEMPT.match(subject or "") or _is_merge(P, sha) or other_sprint(subject, own):
             exempt.append((sha, subject))
         else:
             bad.append((sha, subject))
