@@ -2,6 +2,18 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.157.91 — a scope grant is judged on the sprint's own commits
+
+2026-10-30 14:34/14:36: AS-P7's Studio evidence was finally fresh (v0.157.90), but its
+`coordinator.scope_grant` check failed: the pt and mv2-2 track merges had added their check
+mounts to default.project.json after AS-P7's base, and the rojo_mapping grant blamed AS-P7 for
+"tests/PT_1_check.lua is not a file the plan lists". Two sessions later AS-P7 hit its session
+budget (21) and went to a Lead case.
+
+- **scope.grant_checks:** when another sprint (by commit subject prefix) also changed the
+  granted file in base..head, the grant is checked on this sprint's own commits only, each
+  as commit^..commit. Without foreign commits nothing changes.
+
 ## v0.157.90 — a gate with nothing Studio-loaded under test still records what Studio loaded
 
 2026-10-30: AS-P7 (clip exporter; its files under test were clip JSON and models) passed its

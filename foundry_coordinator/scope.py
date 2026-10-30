@@ -362,7 +362,10 @@ def grant_checks(P, t: dict, spec, base: str, head: str) -> list:
             continue
         path = g["path"]
         try:
-            problems = check_change(P.ws, path, base, head, cons, list(spec.scope))
+            ranges = _own_ranges(P, t, path, base, head)
+            problems = []
+            for a, b in ranges:
+                problems += check_change(P.ws, path, a, b, cons, list(spec.scope))
         except Exception as e:                                   # noqa: BLE001
             problems = [f"could not read the change: {e}"]
         out.append(VerificationResult(
@@ -372,6 +375,29 @@ def grant_checks(P, t: dict, spec, base: str, head: str) -> list:
             f"{path} changed only as its grant allows ({g.get('rule')})",
             revision=head, evidence=f"git diff {base[:12]}..{head[:12]} -- {path}"))
     return out
+
+
+def _own_ranges(P, t: dict, path: str, base: str, head: str) -> list:
+    """The diff ranges a grant is judged on: base..head, unless another sprint (a track
+    merge, a prep landing) also changed `path` in that range; then only this sprint's own
+    commits that touched it, each as (commit^, commit). 2026-10-30 AS-P7: the pt and mv2-2
+    merges added their check mounts to default.project.json after AS-P7's base, and its
+    rojo_mapping grant failed on their lines ("tests/PT_1_check.lua is not a file the plan
+    lists"), sending a finished sprint back until its session budget ran out."""
+    from . import bookkeeping as BK
+    tid = str(t.get("task_id") or "")
+    try:
+        subj = dict(P.ws.commits(base, head))
+        per = P.ws.commit_files(base, head)
+    except Exception:                                             # noqa: BLE001
+        return [(base, head)]
+    norm = path.replace("\\", "/")
+    touching = [sha for sha, files in per
+                if norm in {f.replace("\\", "/") for f in files}]
+    foreign = [sha for sha in touching if BK.other_sprint(subj.get(sha, ""), tid)]
+    if not foreign:
+        return [(base, head)]
+    return [(f"{sha}^", sha) for sha in touching if sha not in foreign]
 
 
 _HUNK = re.compile(r"^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@")

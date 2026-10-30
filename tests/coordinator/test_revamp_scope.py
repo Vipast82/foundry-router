@@ -113,6 +113,34 @@ def test_a_rojo_mapping_only_for_files_the_plan_lists(tmp_path):
         ws, "default.project.json", base, ws.head(), cons, plan))
 
 
+def test_a_grant_is_judged_on_the_sprints_own_commits_when_others_changed_the_file(tmp_path):
+    """2026-10-30 AS-P7: the pt and mv2-2 merges added their check mounts to
+    default.project.json after AS-P7's base; its rojo_mapping grant failed on their lines."""
+    root, ws = _repo_with_runner(tmp_path)
+    base = ws.head()
+    d = json.loads((root / "default.project.json").read_text())
+    d.setdefault("tree", {})["Hud"] = {"$path": "src/client/Hud.lua"}
+    (root / "default.project.json").write_text(json.dumps(d, indent=2) + "\n")
+    git(root, "commit", "-qam", "T1: map Hud")
+    d["tree"]["Pt"] = {"$path": "tests/PT_1_check.lua"}               # another sprint's mount
+    (root / "default.project.json").write_text(json.dumps(d, indent=2) + "\n")
+    git(root, "commit", "-qam", "PT-1: mount the PT_1 check")
+    P = SimpleNamespace(ws=ws)
+    t = {"task_id": "T1", "data": {"scope_grants": [
+        {"path": "default.project.json", "rule": "rojo_mapping_for_plan_files",
+         "constraints": {"json_paths_in_plan": True}}]}}
+    spec = SimpleNamespace(scope=["src/client/Hud.lua", "default.project.json"])
+    (res,) = SC.grant_checks(P, t, spec, base, ws.head())
+    assert res.result == "PASS", res.detail
+    # the sprint's own out-of-plan mapping still fails
+    d["tree"]["Other"] = {"$path": "src/other.lua"}
+    (root / "default.project.json").write_text(json.dumps(d, indent=2) + "\n")
+    git(root, "commit", "-qam", "T1: map other")
+    (res,) = SC.grant_checks(P, t, spec, base, ws.head())
+    assert res.result == "FAIL" and "src/other.lua" in res.detail
+    assert "PT_1_check" not in res.detail
+
+
 # ------------------------------------------------------------------ the engine flow
 
 TASK = {"id": "T1", "title": "HUD", "spec": "Write src/a.txt with OK; boot count rises.",
