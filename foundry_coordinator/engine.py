@@ -3596,6 +3596,11 @@ class Coordinator:
             drop = drop + ("recovery_case", "lead_trigger")
         data = {k: v for k, v in t["data"].items() if k not in drop}
         stop = (t["data"].get("lc_stop") or {}) if lc_on else {}
+        if reset_attempts and t.get("started_ts") and not data.get("queue_ts"):
+            # 2026-10-30 GF-LOOP1: the reset cleared started_ts, so the published sprint
+            # looked unstarted and waited behind AS-P7 and AS-J08 trading the checkout at
+            # every handoff. Its place in the main-checkout line is kept (queue_ts).
+            data["queue_ts"] = float(t["started_ts"])
         if reset_attempts:
             # a fresh budget: see RetryGuidance.on_reset (guided extra not carried
             # over; a never-called, transiently skipped adviser re-armed, bounded)
@@ -6858,12 +6863,19 @@ class Coordinator:
             pass
         if self.tracks.is_track(P):
             return ""
-        mine = float(t.get("started_ts") or 0) or float("inf")
+        def line_ts(x: dict) -> float:
+            # a sprint whose attempts were reset keeps its place (unblock: queue_ts)
+            q = float(((x.get("data") or {}).get("queue_ts")) or 0)
+            s = float(x.get("started_ts") or 0)
+            return min(v for v in (q, s) if v) if (q or s) else 0.0
+
+        cur = self.store.task(P.id, t["task_id"]) or t
+        mine = line_ts(cur) or float("inf")
         best, best_ts = "", mine
         for o in self.store.tasks(P.id):
             if o["task_id"] == t["task_id"] or o["state"] not in self.MAIN_IN_FLIGHT:
                 continue
-            ots = float(o.get("started_ts") or 0)
+            ots = line_ts(o)
             if not ots:
                 continue
             try:

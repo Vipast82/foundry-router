@@ -1048,3 +1048,20 @@ def test_a_png_frame_rule_also_takes_jpg_frames():
     assert matches_any("docs/evidence/T1/a.jpg", [p.replace("{task}", "T1") for p in g])
     assert _frame_globs(["docs/evidence/{task}/*.png", "docs/evidence/{task}/*.jpg"]).count(
         "docs/evidence/{task}/*.jpg") == 1
+
+
+def test_an_attempt_reset_keeps_the_sprints_place_in_the_checkout_line(game):
+    """2026-10-30 GF-LOOP1: unblock --reset-attempts cleared started_ts; the published sprint
+    looked unstarted and waited while AS-P7 and AS-J08 traded the checkout at each handoff."""
+    tmp, _, _, prof = game
+    c = coordinator(tmp, [prof], {"game": write_ok("src/b.txt")})
+    P = c.projects["game"]
+    for tid in ("T1", "T2"):
+        c.approve("game", tid, [], "victor")
+    c.store.update_task("game", "T1", state=S.BLOCKED, started_ts=100.0, blocker="x")
+    c.store.update_task("game", "T2", state=S.CHANGES_REQUIRED, started_ts=200.0)
+    c.unblock("game", "T1", "fixed", reset_attempts=True)
+    t1 = c.store.task("game", "T1")
+    assert not t1["started_ts"] and t1["data"]["queue_ts"] == 100.0
+    assert c._main_sprint_in_flight(P, t1) == ""                # T1 goes first
+    assert c._main_sprint_in_flight(P, c.store.task("game", "T2")) == "T1"

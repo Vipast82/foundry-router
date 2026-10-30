@@ -2,6 +2,16 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.157.83 — an attempt reset keeps the sprint's place in the checkout line
+
+2026-10-30 04:2x-06:2x: GF-LOOP1 (closed and published, only its last checks left) was unblocked
+with --reset-attempts. The reset cleared started_ts, so the one-started-main-sprint rule treated
+it as unstarted and it waited while AS-P7 and AS-J08 traded the main checkout at every context
+handoff.
+
+- **unblock --reset-attempts** stores the old started_ts as data.queue_ts; the main-checkout
+  line orders by the earlier of queue_ts and started_ts. The time budget still restarts.
+
 ## v0.157.82 — a leftover playtest at PRE-PLAY verify is stopped, not "stale sync"
 
 2026-10-30 05:29: AS-P7's gate failed PRE-PLAY verify with "Edit datamodel is not available in
