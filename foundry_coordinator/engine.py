@@ -849,7 +849,7 @@ class Coordinator:
         key = f"session:{P.id}:{tid}:{run_id}:{phase}"
         existing = self.store.op_begin(key, P.id, tid, "session")
         # persona: a self-repair frontier session (decision_policy.FRONTIER_KEY)
-        if persona:
+        if persona and not (meta or {}).get("closeout_frontier"):
             meta = {**(meta or {}), "self_repair": "frontier"}
         persona = persona or P.profile.persona(role, tid)
         agent = P.profile.client.get("agent") or "code"
@@ -2990,8 +2990,11 @@ class Coordinator:
                         self.store.release(pid, tid, give)
                     return self._note(P, t, f"waiting for {landing} to land first (landing "
                                             f"drain)")
-                if self._acquire(P, t, self._workspace_locks(P) + self._session_locks(P, t),
-                                 writer=True):
+                locks = self._workspace_locks(P) + self._session_locks(P, t)
+                close_persona = self._closeout_frontier(P, t, locks)
+                if close_persona:
+                    locks = [r for r in locks if r != "gpu"]
+                if self._acquire(P, t, locks, writer=True):
                     return
                 run_id = f"{t['run_id']}-close{int(t['data'].get('closeout_attempts') or 0)}"
                 ctx = {"attempt": t["attempt"], "run_id": run_id, "base": t["reviewed_sha"],
@@ -3002,7 +3005,11 @@ class Coordinator:
                 try:
                     sid = self._start_session(P, tid, spec, "closeout", "implementer", run_id,
                                               t["attempt"], P.adapter.closeout_prompt(spec, ctx),
-                                              meta=self._lc_session_meta(P, P.ws.head()))
+                                              meta={**(self._lc_session_meta(P, P.ws.head())
+                                                       or {}),
+                                                    **({"closeout_frontier": True}
+                                                       if close_persona else {})},
+                                              persona=close_persona)
                 except Exception as e:                            # noqa: BLE001
                     self._release_session(P, t)
                     return self._note(P, t, f"could not start the closeout session: {e}")
@@ -5478,6 +5485,27 @@ class Coordinator:
                 it["priority"] = min(int(it.get("priority", 2)), 1)
         paths = {it["path"] for it in items if it.get("path")}
         return items + [e for e in evidence if not e.get("path") or e["path"] not in paths]
+
+    def _closeout_frontier(self, P: Project, t: dict, locks: list) -> str:
+        """The persona a main-checkout CLOSE session uses instead of a busy local model ('' =
+        its own). 2026-10-29 AS-R5: its CLOSE (docs only: summary, STATE row) waited 28 min for
+        `gpu` held by an asset track while the main checkout and its Claude/ChatGPT sprints
+        sat idle. CLOSE is no Blender work: it runs on the project's default implementer
+        (frontier first) when the GPU is taken."""
+        if "gpu" not in locks or self.tracks.is_track(P):
+            return ""
+        held = [l for l in self.store.locks() if l["resource"] == "gpu"
+                and not (l["project_id"] == P.id and l["task_id"] == t["task_id"])]
+        if not held:
+            return ""
+        default = str((P.profile.roles or {}).get("implementer") or "")
+        raw = getattr(P.profile, "raw", None) or {}
+        local = list((raw.get("training") or {}).get("local_personas") or [])
+        if not default or default in local:
+            return ""
+        self.store.event(P.id, t["task_id"], "closeout_frontier", detail={
+            "persona": default, "gpu_held_by": f"{held[0]['project_id']}/{held[0]['task_id']}"})
+        return default
 
     def _track_review_owed_only(self, P: Project, t: dict, rev: dict) -> dict:
         """A track sprint's review whose every finding asks only for evidence the merge gate

@@ -353,3 +353,18 @@ def test_a_track_review_asking_only_for_studio_evidence_is_an_approval(tmp_path)
          "message": "no GATE B1 PASS"}]}}
     assert c._track_review_owed_only(TP, b1, real)["verdict"] == "CHANGES_REQUIRED"
     assert c._track_review_owed_only(P, b1, owed)["verdict"] == "CHANGES_REQUIRED"   # main
+
+
+def test_a_main_close_runs_on_frontier_while_the_gpu_is_taken(tmp_path):
+    """2026-10-29 AS-R5: a docs-only CLOSE waited 28 min for `gpu` held by an asset track."""
+    c, P, _ = env(tmp_path, extra="\n[automation]\nmax_agents = 2\n".replace("\n", "\n"))
+    c.approve("game", "T1", [], "victor")
+    t = c.store.task("game", "T1")
+    P.profile.roles["implementer"] = "Frontier-Persona"
+    P.profile.raw.setdefault("training", {})["local_personas"] = ["Local-Persona"]
+    assert c._closeout_frontier(P, t, ["gpu"]) == ""            # GPU free: its own persona
+    c.store.acquire(["gpu"], "game", "B1")
+    assert c._closeout_frontier(P, t, ["gpu"]) == "Frontier-Persona"
+    assert c._closeout_frontier(P, t, ["writer:0"]) == ""       # not a local sprint
+    P.profile.roles["implementer"] = "Local-Persona"
+    assert c._closeout_frontier(P, t, ["gpu"]) == ""            # no frontier default

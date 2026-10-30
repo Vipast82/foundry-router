@@ -2,6 +2,17 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.157.72 — a main-checkout CLOSE never waits for the local GPU
+
+2026-10-29 20:52-21:20: AS-R5 (asset sprint, local model) was APPROVED; its CLOSE session (docs:
+summary, STATE row) waited 28 min for `gpu`, held by the assets-2 track, while the main checkout
+and its Claude/ChatGPT sprints (AS-REG1, GF-LOOP1) sat idle.
+
+- **CLOSE persona:** on the main checkout, when a local-model sprint's CLOSE would wait for a
+  `gpu` someone else holds, the CLOSE session runs on the project's default implementer persona
+  (frontier first) without taking `gpu` (`closeout_frontier` event). CLOSE is no Blender work.
+  Track sprints and frontier-default projects are unchanged.
+
 ## v0.157.71 — a track review that only asks for Studio evidence is an approval
 
 2026-10-29 20:36-20:49: after v0.157.69 MV2-5's reviewer still cited the plan's BUILD contract
