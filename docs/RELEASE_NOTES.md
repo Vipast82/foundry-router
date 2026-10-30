@@ -2,6 +2,22 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.157.88 — merges get Studio; an automatic gate ERROR never loops
+
+2026-10-30 11:41-12:50: five finished tracks (mv2-2, rt, shop1, ux, pt) waited to merge on
+"main AS-P7 is READY (about to use Studio)" while AS-P7 itself waited for the checkout, then on
+each next main sprint. 12:23-12:29: MV2-11's automatic gate run hit a tooling ERROR (its new
+check file was missing in Studio) 11 times: each ERROR committed its outputs, the new HEAD looked
+like new code, and auto-heal (keyed on HEAD) never ran out.
+
+- **Studio for merges:** a main sprint whose next action is "waiting for ..." (checkout, gpu,
+  writer slot, dependency) is not a pending Studio request; a merge waiting longer than
+  `merge_studio_priority_minutes` (default 20, Automation UI) goes before pending main sprints
+  (journal event `priority`).
+- **Auto-verify ERROR:** like a FAIL (v0.157.x AS-P5), an automatic run's ERROR is never re-run
+  when only its own outputs changed since; the sprint stops BLOCKED once, so auto-heal (Rojo
+  restart + Studio reopen) and the Lead take it.
+
 ## v0.157.87 — the track planner proposes ready work; an automatic pause keeps the checkout
 
 2026-10-30: `tracks propose` offered only S51B (finished as S51B-R) and MV2-4c (no file list),

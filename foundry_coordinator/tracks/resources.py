@@ -87,6 +87,7 @@ class ResourceManager:
         self.store = c.store
         self.clock = clock
         self._wait_noted: dict = {}
+        self._wait_since: dict = {}             # (owner, resource) -> first wait ts
 
     # ------------------------------------------------------------------ settings
 
@@ -173,6 +174,11 @@ class ResourceManager:
                 held = str(t.get("next_action") or "")
                 if "(landing drain)" in held or "one started main-checkout sprint" in held:
                     continue
+                # 2026-10-30: AS-P7 READY "waiting for workspace ... (held by AS-J08)" and
+                # sprints waiting for gpu / a writer slot / a dependency are not about to use
+                # Studio either; five finished tracks waited on them from 11:41
+                if held.startswith("waiting for"):
+                    continue
                 return f"main {t['task_id']} is {t['state']} (about to use Studio)"
         return ""
 
@@ -204,6 +210,15 @@ class ResourceManager:
         why = self.studio_in_use(P)
         if not why:
             why = self.main_pending(P)
+            since = self._wait_since.get((owner, "studio"))
+            prio = float(self.setting(P, "merge_studio_priority_minutes") or 20)
+            if why and since is not None and self.clock() - since >= prio * 60:
+                # 2026-10-30: a stream of main sprints kept a merge batch waiting for hours;
+                # past the priority window the merge goes first (main sessions wait on the
+                # Studio lock it takes)
+                self.store.journal("studio", P.id, owner, "priority", purpose,
+                                   {"waited_s": round(self.clock() - since), "over": why})
+                why = ""
         if not why:
             held = self.store.acquire(self.studio_resources(P), P.id, owner)
             if held:
@@ -218,6 +233,7 @@ class ResourceManager:
                  "resources": self.studio_resources(P)}
         self.store.set_meta(f"studio_lease:{P.id}", json.dumps(lease))
         self._wait_noted.pop((owner, "studio"), None)
+        self._wait_since.pop((owner, "studio"), None)
         self.store.journal("studio", P.id, owner, "acquire", purpose,
                            {"lease_minutes": mins,
                             "resources": lease["resources"]}, ts=now)
@@ -242,6 +258,7 @@ class ResourceManager:
         return bool(lease) and self.clock() > float(lease.get("until") or 0)
 
     def _wait(self, P, owner: str, purpose: str, why: str, resource: str = "studio") -> None:
+        self._wait_since.setdefault((owner, resource), self.clock())
         if self._wait_noted.get((owner, resource)) == why:
             return
         self._wait_noted[(owner, resource)] = why

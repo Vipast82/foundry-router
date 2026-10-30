@@ -178,3 +178,24 @@ def test_a_main_sprint_held_by_the_coordinator_does_not_claim_studio():
     assert r.main_pending(SimpleNamespace()) == ""
     r.main_tasks = lambda P: [held, free]
     assert "GF-FIX1" in r.main_pending(SimpleNamespace())
+
+
+def test_a_long_waiting_merge_gets_studio_before_pending_main_sprints(tmp_path):
+    """2026-10-30: mv2-2, rt, shop1, ux and pt waited from 11:41 on 'main AS-P7 is READY
+    (about to use Studio)' while AS-P7 itself waited for the checkout."""
+    c, P, clock, root = env(tmp_path)
+    rm = c.tracks.resources
+    c.approve("game", "T1", [], "victor")
+    c.tick()
+    c.store.update_task("game", "T1", state=S.READY,
+                        next_action="waiting for workspace:x (held by game/T9)")
+    assert rm.main_pending(P) == ""                      # waiting for something else
+    c.store.update_task("game", "T1", next_action="")
+    ok, why = rm.admit_studio(P, "rt", "merge Studio batch")
+    assert not ok and "main T1" in why
+    clock.t += 10 * 60
+    assert rm.admit_studio(P, "rt", "merge Studio batch")[0] is False
+    clock.t += 11 * 60                                   # past merge_studio_priority_minutes
+    ok, why = rm.admit_studio(P, "rt", "merge Studio batch")
+    assert ok and why == ""
+    assert any(r["event"] == "priority" for r in c.store.journal_rows("studio", "game"))

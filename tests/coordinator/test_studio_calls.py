@@ -563,3 +563,28 @@ def test_a_committed_frame_keeps_the_gate_fresh(tmp_path):
     assert not sc.gate_fresh(P, "AS-P5", "bbb")
     changed[:] = ["docs/evidence/OTHER/f.png"]
     assert not sc.gate_fresh(P, "AS-P5", "bbb")
+
+
+def test_an_auto_verify_error_on_unchanged_code_stops_once_never_reruns(env):
+    """2026-10-30 MV2-11: the automatic run's tooling ERROR committed its outputs; the new
+    HEAD looked like new code and the run repeated 11 times in 6 minutes."""
+    from types import SimpleNamespace as NS
+    e = env([{"result": "PASS"}])
+    P = e.c.projects["game"]
+    e.c.store.update_task("game", "T1", state="VERIFYING")
+    sc_ = e.c.studio_calls
+    last = {"run_id": "r-auto-2", "head": P.ws.head(), "result": "ERROR", "auto": True,
+            "error": "tooling: PRE-PLAY verify: UNRESOLVED tests/X_check.lua live=missing"}
+    d = sc_._d(P, "T1"); d["last"] = last; sc_._save(P, "T1", d)
+    assert sc_._failed_at_same_code(P, "T1", last, P.ws.head(), results=("ERROR",))
+    assert not sc_._failed_at_same_code(P, "T1", last, P.ws.head())       # FAIL-only default
+    stopped = []
+    sc_._tooling = lambda P_, t_, o, r, why: stopped.append(why)
+    sc_.on = lambda *a, **k: True
+    sc_._tier = lambda *a, **k: "A"
+    sc_.gate_fresh = lambda *a, **k: False
+    P.profile.studio_calls["auto_verify"] = True
+    started = []
+    sc_._start = lambda *a, **k: started.append(1)
+    assert sc_.verify_hold(P, task(e), NS(task_id="T1"), P.ws.head()) is True
+    assert stopped and "live=missing" in stopped[0] and not started

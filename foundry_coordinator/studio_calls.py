@@ -1051,6 +1051,17 @@ class StudioCalls:
             # re-run the same code; the failing rows go to a session (AS-P5 2026-10-28)
             self._after_verify(P, t, d["last"])
             return True
+        if self._failed_at_same_code(P, tid, d.get("last") or {}, head, results=("ERROR",)):
+            # 2026-10-30 MV2-11: the automatic run's tooling ERROR (Studio missing a new
+            # check file) committed its own outputs, the new HEAD looked like new code and
+            # the run repeated 11 times in 6 min; auto-heal keyed on the moving HEAD never
+            # ran out. Same code: stop BLOCKED once (auto-heal restarts Rojo / reopens).
+            last = d.get("last") or {}
+            d["auto_head"] = head
+            self._save(P, tid, d)
+            self._tooling(P, t, last, {"run_id": last.get("run_id") or ""},
+                          f"scripted Studio gate: {last.get('error') or 'ERROR'}")
+            return True
         req = self.default_request(P, tid, spec)
         if req is None:
             return False
@@ -1061,8 +1072,9 @@ class StudioCalls:
         self._start(P, self.store.task(P.id, tid) or t, d["pending"])
         return True
 
-    def _failed_at_same_code(self, P, tid: str, last: dict, head: str) -> bool:
-        if not last.get("auto") or last.get("result") != "FAIL" or not last.get("head"):
+    def _failed_at_same_code(self, P, tid: str, last: dict, head: str,
+                             results: tuple = ("FAIL",)) -> bool:
+        if not last.get("auto") or last.get("result") not in results or not last.get("head"):
             return False
         from .profile import matches_any
         try:
