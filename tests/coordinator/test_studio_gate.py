@@ -1315,3 +1315,26 @@ def test_live_verify_never_needs_a_mount_for_a_bridge_suite_file(fakes, repo):
         assert "bridge suite file(s) served from HEAD" in g.last_verify_text
     finally:
         g.close()
+
+
+def test_live_verify_checks_the_harness_baseline_when_nothing_loaded_is_under_test(fakes, repo):
+    """2026-10-30 AS-P7: only clip data/models under test -> PRE-PLAY verify SKIP -> no loaded
+    fingerprint -> every later gate PASS read 'unknown' in the ledger (19 sessions)."""
+    set_rules, calls = fakes
+    set_rules([{"tool": "execute_luau", "match": "verifyLive",
+                "text": "VERIFY matched=3/3 mismatched=0 unresolved=0 skipped=0"}])
+    prog = repo / "docs" / "progress"
+    prog.mkdir(parents=True, exist_ok=True)
+    (prog / "L5_gate_expect_full.json").write_text(json.dumps({"rev": "x", "files": {
+        "tests/GateRunner.lua": "aa", "tests/RegressionIndex.lua": "bb",
+        "tests/AS_P7_check.lua": "cc", "src/a.lua": "dd"}}), encoding="utf-8")
+    g = G.Gate(str(repo), "L5", "sprint", call_timeout=10)
+    try:
+        g.live_verify({"assets/roblox/Bosses/BS-KING.rbxm": "2"}, running={"AS_P7_check"})
+        assert g.checks[-1]["result"] == "PASS", g.checks[-1]
+        assert "harness baseline" in g.last_verify_text
+    finally:
+        g.close()
+    sent = [c["args"]["code"] for c in calls() if "verifyLive" in c["args"].get("code", "")]
+    assert sent and "GateRunner.lua" in sent[-1] and "AS_P7_check.lua" in sent[-1]
+    assert "src/a.lua" not in sent[-1] and ".rbxm" not in sent[-1]

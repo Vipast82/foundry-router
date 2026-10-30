@@ -1589,6 +1589,8 @@ class Gate:
                       + (" ..." if len(models) > 8 else "")) if models else ""
         if not expect:
             if models:
+                if self._verify_baseline(cid, running, model_note):
+                    return
                 self.last_verify_text = model_note.strip()
                 self.add(check(cid, "SKIP", "only model files under test (not source-"
                                "verifiable)", required=False))
@@ -1665,10 +1667,51 @@ class Gate:
             self.add(check(cid, "UNKNOWN", f"{summary}; not mounted anywhere in Studio "
                            f"(GateRunner or default.project.json): " + ", ".join(studio)))
         elif matched == 0:
+            if self._verify_baseline(cid, running, "\n" + self.last_verify_text):
+                return
             self.add(check(cid, "SKIP", f"{summary}; no Studio-loaded file under test",
                            required=False))
         else:
             self.add(check(cid, "PASS", summary))
+
+    BASELINE_FILES = ("tests/GateRunner.lua", "tests/RegressionIndex.lua")
+
+    def _verify_baseline(self, cid: str, running: Optional[set], note: str) -> bool:
+        """2026-10-30 AS-P7: only clip data / models were under test, so PRE-PLAY verify was a
+        SKIP and recorded no loaded fingerprint; every later gate PASS read 'unknown' in the
+        ledger and the sprint used 19 sessions. Verify the always-loaded harness files (and the
+        running suites' own check files) from the full HEAD map instead. True when done."""
+        if getattr(self, "_in_baseline", False):
+            return False
+        files = None
+        for p in (os.path.join(self.gate_dir, "gate_expect_full.json"),
+                  os.path.join(self.repo, "docs", "progress",
+                               f"{self.sprint}_gate_expect_full.json")):
+            try:
+                with open(p, encoding="utf-8-sig") as f:
+                    d = json.load(f)
+            except (OSError, ValueError):
+                continue
+            files = d.get("files") if isinstance(d, dict) and isinstance(d.get("files"), dict) \
+                else d
+            if isinstance(files, dict) and files:
+                break
+        if not isinstance(files, dict):
+            return False
+        # `running` holds GateRunner file names ("AS_P7_check")
+        want = list(self.BASELINE_FILES) + [f"tests/{s}.lua" for s in sorted(running or ())]
+        base = {p: files[p] for p in want if p in files}
+        if not base:
+            return False
+        self._in_baseline = True
+        try:
+            self.live_verify(base, cid=cid, running=running)
+        finally:
+            self._in_baseline = False
+        self.last_verify_text = ("NOTE nothing Studio-loaded is under test: verified the "
+                                 "harness baseline " + ", ".join(sorted(base))
+                                 + "\n" + self.last_verify_text + note)
+        return True
 
     # ---- stories ----------------------------------------------------------------
     def run_mock(self, stories: list, only: Optional[list] = None):

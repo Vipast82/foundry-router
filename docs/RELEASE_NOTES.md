@@ -2,6 +2,18 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.157.90 — a gate with nothing Studio-loaded under test still records what Studio loaded
+
+2026-10-30: AS-P7 (clip exporter; its files under test were clip JSON and models) passed its
+scripted Studio gate at 13:49 and 14:08, but PRE-PLAY verify was a SKIP ("no Studio-loaded file
+under test"), so the run's runtime had no loaded fingerprint and the ledger read each PASS as
+"unknown". The sprint cycled to 19 sessions (sessions_exhausted, Lead case).
+
+- **Gate runner (AU):** when no Studio-loaded file is under test (only models, or only unmounted
+  data), PRE-PLAY verify checks the harness baseline instead: tests/GateRunner.lua,
+  tests/RegressionIndex.lua and the running suites' check files, hashed from the run's full HEAD
+  map (`<ID>_gate_expect_full.json`). The run then carries a loaded fingerprint.
+
 ## v0.157.89 — the Lead repairs a red merge on the main checkout
 
 2026-10-30 13:21-13:30: track rt's merge Studio batch was red for GF-RT1..3 (their checks never
