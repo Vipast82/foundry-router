@@ -2,6 +2,16 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.157.81 — a carried Studio pass is not an order violation
+
+2026-10-30 03:57: GF-LOOP1's six carried regression suites now had fresh verified records
+(v0.157.76), but the ledger's chain order check refused them: "ran before prerequisite
+boot:server, boot:client". A carried record has this run's timestamps and the run's boot records
+are written after it. The sprint was parked when self-repair ran out.
+
+- **Evidence chains:** a record with provenance section "carried" is exempt from the
+  prerequisite-order check (it ran after its own boot in the earlier run it came from).
+
 ## v0.157.80 — visual approval reads .jpg frames
 
 2026-10-30 02:15: GF-LOOP1 closed and published (gate, review, closeout all passed), then the

@@ -834,3 +834,17 @@ def test_glob_star_does_not_cross_a_slash():
     assert not E.glob_match("src/ui/deep/b.lua", "src/ui/*.lua")
     assert E.glob_match("src/ui/deep/b.lua", "src/**")
     assert E.glob_match("src\\ui\\b.lua", "./src/ui/?.lua")
+
+
+def test_a_carried_pass_is_not_an_order_violation(store, led, tmp_path):
+    """2026-10-30 GF-LOOP1: studio_calls records a suite the runner CARRIED with this run's
+    times; the run's boot records are newer, and the order check refused 6 passed suites."""
+    import json as _json
+    P, r1 = _chain_P(store, tmp_path, [("S47_1", 10), ("S47_3", 20), ("S47_2", 30)])
+    led.recover(P, {"task_id": "T1"})
+    (rec,) = [r for r in led.records("p", "T1") if r["check_id"] == "S47_3"]
+    store.x("UPDATE ev_records SET provenance=? WHERE record_id=?",
+            (_json.dumps({"section": "carried", "executor": "studio_gate"}), rec["record_id"]))
+    (cs,) = led.chain_status(P, spec(), r1)
+    assert cs["status"] == "complete"
+    assert led.missing(P, spec(), r1) == []

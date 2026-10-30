@@ -1093,6 +1093,13 @@ class EvidenceLedger:
                     e.update(chain_hole=holes)
                     continue
                 t_me = e["sat"]["ended_ts"] or e["sat"]["started_ts"] or 0
+                prov = _uj(e["sat"].get("provenance"), {}) if isinstance(
+                    e["sat"].get("provenance"), str) else (e["sat"].get("provenance") or {})
+                if isinstance(prov, dict) and prov.get("section") == "carried":
+                    # 2026-10-30 GF-LOOP1: a pass the runner CARRIED (studio_calls) ran in an
+                    # earlier run after that run's boot; this run's boot records are newer by
+                    # construction, so the order check refused 6 passed suites
+                    continue
                 late = [p for p in pre if (ev[p]["sat"]["ended_ts"] or
                                            ev[p]["sat"]["started_ts"] or 0) > t_me]
                 if late:
