@@ -103,6 +103,13 @@ def plan(cls: str, reason: str) -> Optional[tuple[str, str]]:
         sig = infra_signature(reason)
         if sig:
             return sig, "restart"
+    if cls == "studio_calls_error":
+        # 2026-10-30 AS-P7/AS-J08: the scripted gate's PRE-PLAY verify found the mv2-2
+        # merge's new check files missing in Studio (live=missing): the Rojo restart and
+        # reopen (v0.157.74) never ran for this class; both sprints went to a lead case.
+        sig = infra_signature(reason)
+        if sig in STUDIO_SYNC_SIGS:
+            return sig, "restart"
     return None
 
 
@@ -156,7 +163,8 @@ def try_heal(c, P, t: dict, to: str, evidence: dict, cls: str, fields: dict) -> 
     c.store.release(pid, tid)
     out = c.store.transition(pid, tid, S.BLOCKED, ev, blocker=blocker, data=data,
                              next_action=blocker[:500], **extra)
-    repairs = repair(c, P, t, sig, action)        # W1.8: fix what can be fixed, then retry
+    # the stopped task (its blocker names what Studio is missing), not the pre-stop copy
+    repairs = repair(c, P, c.store.task(pid, tid) or t, sig, action)  # W1.8
     job = next((r.get("job") for r in repairs if r.get("job")), "")
     if job:
         # 0.145.0: the retry waits for the client's Studio reopen job (step())

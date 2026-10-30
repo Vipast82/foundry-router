@@ -195,3 +195,14 @@ def test_a_write_access_fix_is_reverified_even_when_the_lead_says_wait(tmp_path)
     assert "defer" not in kinds                               # never waited on a fix
     pa = c.lead.case(k["case_id"])["proposed_action"]
     assert pa["kind"] == "reverify" and pa["after_fix"] is True
+
+
+def test_a_studio_gate_sync_error_is_auto_healed():
+    """2026-10-30 AS-P7/AS-J08: a scripted gate's stale-sync error (class studio_calls_error)
+    never reached autoheal, so the Rojo restart + reopen never ran; both went to a lead case."""
+    from foundry_coordinator import autoheal
+    why = ("scripted Studio gate: tooling: PRE-PLAY verify: Studio's loaded sources are not "
+           "HEAD's (matched=10/14 unresolved=4; UNRESOLVED tests/MV2_10_check.lua live=missing "
+           "head=3b72b96a); no CALL ran (Rojo / plugin sync is stale)")
+    assert autoheal.plan("studio_calls_error", why) == ("rojo_stale", "restart")
+    assert autoheal.plan("studio_calls_error", "suite S06 FAIL: pass=5 (want 6)") is None

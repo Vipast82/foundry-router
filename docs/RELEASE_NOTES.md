@@ -2,6 +2,18 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.157.86 — a scripted gate's stale-sync error is auto-healed
+
+2026-10-30 12:12/12:17: after the mv2-2 merge added check files and mounts, AS-P7's and AS-J08's
+scripted Studio gates failed PRE-PLAY verify (live=missing). The stop class studio_calls_error
+was not one autoheal handles, so the v0.157.74 Rojo restart + Studio reopen never ran and both
+sprints went to lead cases; the three finished tracks' merge batches waited behind them.
+
+- **autoheal.plan:** studio_calls_error with a Studio-sync signature (rojo_stale, rojo,
+  rojo_connect, studio) is a free session restart after the deterministic repairs.
+- **autoheal.try_heal:** the repairs read the stopped task (its blocker names the missing files),
+  not the pre-stop copy, so the live=missing Rojo restart can match.
+
 ## v0.157.85 — a kept local profile edit stays kept
 
 2026-10-30 03:2x: roles.reviewer = Foundry-Kilo-Deep-Review (Victor's choice) was set in
