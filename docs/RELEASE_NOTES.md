@@ -2,6 +2,15 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.157.82 — a leftover playtest at PRE-PLAY verify is stopped, not "stale sync"
+
+2026-10-30 05:29: AS-P7's gate failed PRE-PLAY verify with "Edit datamodel is not available in
+Play mode" (a playtest the session left running; get_studio_state did not report play mode)
+and the sprint was BLOCKED as Rojo/plugin sync stale.
+
+- **Gate runner (AU):** when PRE-PLAY verify fails on Play mode, the runner stops the
+  playtest, waits 3 s and verifies once more (NOTE line in the lines file).
+
 ## v0.157.81 — a carried Studio pass is not an order violation
 
 2026-10-30 03:57: GF-LOOP1's six carried regression suites now had fresh verified records

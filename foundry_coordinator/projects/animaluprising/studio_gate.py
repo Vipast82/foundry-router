@@ -3710,6 +3710,19 @@ def _run_calls(a, sprint, run_id, out, official, community, run_cmd) -> int:
         running = {str(e.get("file") or "") for e in exec_rows} - {""}
         g.live_verify(expect, cid="calls.verify_pre", running=running)
         pre = g.checks[-1]
+        if pre["result"] not in ("PASS", "SKIP") and \
+                "not available in play mode" in str(pre.get("detail") or "").lower():
+            # 2026-10-30 AS-P7: the session left a playtest running that get_studio_state did
+            # not report; verify could not read the Edit DM and the sprint was BLOCKED as
+            # "stale sync". Stop it and verify once more.
+            g.emit("NOTE PRE-PLAY verify hit Play mode (a leftover playtest): stopped it and "
+                   "verified again")
+            g._playing = True
+            g.stop_playtest()
+            time.sleep(3)
+            g.checks.pop()
+            g.live_verify(expect, cid="calls.verify_pre", running=running)
+            pre = g.checks[-1]
         ctx["verify_pre"] = g.last_verify_text
         g.emit(f"PRE-PLAY VERIFY (GateRunner.verifyLive, Edit DM, fresh GateRunner clone, map "
                f"docs/progress/{sprint}_gate_expect.json): {pre['result']}")

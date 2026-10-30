@@ -720,3 +720,18 @@ def test_capture_ready_outside_the_sprints_evidence_is_refused(fakes, repo):
     run_calls(repo, "CR2", "--regression", "subset:ui", "--rerun", "all")
     assert not (repo / "docs" / "evidence" / "OTHER" / "x.png").exists()
     assert "FAIL: CAPTURE docs/evidence/OTHER/x.png - refused" in lines_of(repo, "CR2")
+
+
+def test_a_leftover_playtest_at_verify_is_stopped_and_verify_retried(fakes, repo):
+    """2026-10-30 AS-P7: a playtest the session left running made PRE-PLAY verify fail
+    ("Edit datamodel is not available in Play mode") and the sprint was BLOCKED as stale sync."""
+    set_rules, calls = fakes
+    playing = {"tool": "execute_luau", "match": "verifyLive", "times": 1, "is_error": True,
+               "text": "Edit datamodel is not available in Play mode"}
+    set_rules(*rules(UI, extra_off=[playing]))
+    host_half(repo, "PM")
+    rc, out = run_calls(repo, "PM", "--regression", "subset:ui")
+    text = lines_of(repo, "PM")
+    assert "NOTE PRE-PLAY verify hit Play mode" in text, text[-2000:]
+    assert "FAIL: GATE verify PRE-PLAY" not in text
+    assert tool_calls(calls, "solo_playtest")                      # stopped, then played
