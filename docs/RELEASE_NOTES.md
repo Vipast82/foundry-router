@@ -2,6 +2,21 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.157.74 — files missing in Studio restart Rojo, then reopen the place
+
+2026-10-29 22:16: the mv2-1 track merge added eight check files and their mounts to
+`default.project.json`. The running Rojo never re-reads its project file, so Studio had none of
+them (`live=missing`): GF-LOOP1's scripted gate and the merge's own Studio batch both failed the
+pre-play verify. The auto-heal kept the serving Rojo and only reopened the place, which cannot
+help; Rojo was restarted by hand at 22:23.
+
+- **Auto-heal:** a stale-sync stop whose verify lists UNRESOLVED files with `live=missing`
+  restarts Rojo through the Foundry Client, then reopens the TEST place so the plugin reconnects
+  to the new session. Other stale-sync stops keep the serving Rojo (reopen only), as before.
+- **Self-heal caps** count events on the coordinator's clock (they compared with the wall clock).
+- Test fix: two self-heal tests advanced the clock exactly one second past the 2-minute grace and
+  failed on a loaded machine; the margin is now 10 s.
+
 ## v0.157.73 — the track review note is the coordinator's recorded decision
 
 2026-10-29 21:22-21:49: MV2-5 used 11/11 review calls. With the Studio gate excused, the reviewer

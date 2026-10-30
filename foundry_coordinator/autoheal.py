@@ -332,6 +332,26 @@ def repair(c, P, t: dict, sig: str, action: str) -> list[dict]:
         if sig in STUDIO_SYNC_SIGS:
             from . import client_api
             serving = client_api.component_serving("rojo")
+            reason = " ".join(str(x or "") for x in (t.get("blocker"), (t.get("data") or {})
+                                                       .get("blocker_detail")))
+            if serving and "live=missing" in reason and "UNRESOLVED" in reason:
+                # 2026-10-29 22:16: a track merge added check files and their mounts to
+                # default.project.json; the running Rojo never re-reads its project file, so
+                # Studio had none of them (live=missing) and every Studio run failed its
+                # pre-play verify. Restart Rojo, then reopen the place so the plugin reconnects.
+                why = client_api.restart_component("rojo")
+                add("restart_rojo", not why, why or "restart requested: Studio was missing files "
+                    "(live=missing), so Rojo reloads its project file")
+                serving = "" if not why else serving
+                if not why:
+                    job, rwhy = request_studio_reopen(c, P, t)
+                    if job:
+                        out.append({"repair": "reopen_studio", "ok": True, "job": job,
+                                    "detail": f"client job {job}: reopening the TEST place so "
+                                              f"the Rojo plugin reconnects to the new session"})
+                    else:
+                        add("reopen_studio", False, f"not reopened: {rwhy}")
+                    serving = None
             if serving:
                 # a running Rojo is left alone: a restart opens a new session, and the
                 # Studio plugin only reconnects on place open, so it would need a
@@ -347,7 +367,7 @@ def repair(c, P, t: dict, sig: str, action: str) -> list[dict]:
                                           f"TEST place in Studio"})
                 else:
                     add("reopen_studio", False, f"not reopened: {why}")
-            elif sig != "studio":
+            elif serving is not None and sig != "studio":
                 why = client_api.restart_component("rojo")
                 add("restart_rojo", not why, why or (
                     "restart requested through the Foundry Client"

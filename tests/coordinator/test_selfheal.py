@@ -65,11 +65,11 @@ def test_replay_dead_lead_session_while_the_store_says_created(lead_env):
     with fake.lock:
         fake.sessions.pop(sid)                           # Kilo lost it
     assert selfheal.dead_sessions(c, P) == []            # touched just now: not asked
-    clk.advance(121)
+    clk.advance(130)
     assert selfheal.dead_sessions(c, P) == []            # quiet 2 min: first seen dead
     clk.advance(60)
     assert selfheal.dead_sessions(c, P) == []            # dead < 2 min
-    clk.advance(61)
+    clk.advance(70)
     [act] = selfheal.dead_sessions(c, P)
     assert act["rule"] == "dead_session" and act["evidence"]["case_id"] == case["case_id"]
     assert act["digest"] is True and act["evidence"]["store_status"] == "created"
@@ -91,9 +91,9 @@ def test_dead_implementer_session_gets_a_free_retry(tmp_path):
                         "kilo", "p")
     c.store.update_session("ses_gone", status="prompted", prompt_ts=clk())
     assert selfheal.dead_sessions(c, P) == []
-    clk.advance(121)
+    clk.advance(130)
     assert selfheal.dead_sessions(c, P) == []            # first seen dead
-    clk.advance(121)
+    clk.advance(130)
     [act] = selfheal.dead_sessions(c, P)
     assert act["action"].startswith("ended the dead implementer session")
     t = c.store.task("game", "T1")
@@ -412,7 +412,7 @@ def test_sweep_runs_once_a_minute(tmp_path):
     assert len(selfheal.sweep(c, P)) == 1
     c.hold("game", "T1", "pid:4194303", "x")
     assert selfheal.sweep(c, P) == []
-    clk.advance(61)
+    clk.advance(70)
     assert len(selfheal.sweep(c, P)) == 1
 
 

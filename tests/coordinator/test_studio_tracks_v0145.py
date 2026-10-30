@@ -163,3 +163,24 @@ def test_a_track_session_blocked_on_studio_goes_to_verify(tmp_path):
     assert ev and not [e for e in c.store.events("game", 200)
                        if e["kind"] == "implementer_blocked_decision"]
     assert "Track sprint: no Studio here" in prompts[0] and "`blender`" in prompts[0]
+
+
+def test_files_missing_in_studio_restart_rojo_then_reopen(tmp_path, monkeypatch):
+    """2026-10-29 22:16: a track merge added mounted check files to default.project.json;
+    the running Rojo never re-read it and Studio had none of them (live=missing)."""
+    c, P, t, calls = _env(tmp_path, monkeypatch)
+    restarted = []
+    monkeypatch.setattr(client_api, "restart_component",
+                        lambda name, api=None: restarted.append(name) or "")
+    t["blocker"] = ("scripted Studio gate: tooling: PRE-PLAY verify: Studio's loaded sources are "
+                    "not HEAD's (matched=3/11 mismatched=2 unresolved=6; UNRESOLVED "
+                    "tests/MV2_4_check.lua live=missing head=0a0ef0d1); Rojo / plugin sync is stale")
+    out = autoheal.repair(c, P, t, "rojo_stale", "verify")
+    assert restarted == ["rojo"] and calls == ["T1"]
+    names = [r["repair"] for r in out]
+    assert "restart_rojo" in names and "reopen_studio" in names and "keep_rojo" not in names
+    # without missing files a serving Rojo is still kept (reopen only)
+    c, P, t, calls = _env(tmp_path, monkeypatch)
+    restarted.clear()
+    autoheal.repair(c, P, t, "rojo_stale", "verify")
+    assert restarted == [] and calls == ["T1"]

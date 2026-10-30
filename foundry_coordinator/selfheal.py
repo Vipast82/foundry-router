@@ -95,10 +95,17 @@ def _setting(P, key):
 
 # ------------------------------------------------------------------ bookkeeping
 
+def _now(c) -> float:
+    """The coordinator's clock (its events are stamped with it): the daily caps compared
+    event times with the wall clock, so under a test clock they depended on the hour."""
+    clk = getattr(c, "clock", None)
+    return float(clk()) if callable(clk) else time.time()
+
+
 def _actions_today(c, pid: str, tid: str) -> int:
     return int(c.store.q("SELECT COUNT(*) AS n FROM events WHERE project_id=? AND task_id=? "
                          "AND kind='self_heal' AND ts>=?",
-                         (pid, tid, time.time() - DAY_S))[0]["n"] or 0)
+                         (pid, tid, _now(c) - DAY_S))[0]["n"] or 0)
 
 
 def _allowed(c, P, tid: str) -> bool:
@@ -106,7 +113,7 @@ def _allowed(c, P, tid: str) -> bool:
     if _actions_today(c, P.id, tid) < cap:
         return True
     if not c.store.q("SELECT 1 FROM events WHERE project_id=? AND task_id=? AND "
-                     "kind='self_heal_exhausted' AND ts>=?", (P.id, tid, time.time() - DAY_S)):
+                     "kind='self_heal_exhausted' AND ts>=?", (P.id, tid, _now(c) - DAY_S)):
         c.store.event(P.id, tid, "self_heal_exhausted", detail={
             "task": tid, "cap": cap, "digest": True,
             "note": "self-repair cap reached for today; the task is left as it is"})
