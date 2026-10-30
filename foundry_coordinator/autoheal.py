@@ -72,9 +72,15 @@ INFRA_SIGNATURES = (
                         r"websocket|refused|unreachable|code -1)", re.I)),
     # 2026-10-30 MV2-11: the session found the Studio session itself degraded (stale
     # errors, missing profile, timeouts) and asked for a fresh Studio / place reload
+    # 2026-10-30 18:19 GF-RT1 / MV2-11: Studio was running with no place open ("Place is not
+    # open", "need exactly one Studio instance, found 0", "place needs reopening")
     ("studio_reload", re.compile(r"(?:fresh|restart(?:ed)?|reload(?:ed)?|reopen(?:ed)?)\s+"
                                  r"(?:the\s+)?(?:roblox\s+)?(?:studio|place)\b|"
-                                 r"(?:studio|place)\s+(?:reload|reopen|restart)", re.I)),
+                                 r"(?:studio|place)\s+(?:reload|reopen|restart)|"
+                                 r"place is not open|no place (?:is )?open|"
+                                 r"studio instances?,? found 0|connected: none|"
+                                 r"lists no (?:studio )?instances|"
+                                 r"place needs (?:reopening|to be reopened)", re.I)),
     ("studio", re.compile(r"\bstudio\b[^.\n]{0,80}(?:not connected|disconnected|not "
                           r"running|plugin[^.\n]{0,30}(?:connect|timeout)|mcp[^.\n]{0,40}"
                           r"(?:unavailable|not connected|timed out))", re.I)),

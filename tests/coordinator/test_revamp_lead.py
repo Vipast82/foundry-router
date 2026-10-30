@@ -217,3 +217,16 @@ def test_a_session_asking_for_a_fresh_studio_gets_a_reopen():
     assert autoheal.plan("session_blocked", why) == ("studio_reload", "restart")
     assert autoheal.infra_signature("S48 c3 fails: gold accumulated on the profile") == ""
     assert autoheal.infra_signature("Device Simulator ignores Portrait") == ""
+
+
+def test_studio_with_no_place_open_gets_a_reopen():
+    """2026-10-30 18:19 GF-RT1 and MV2-11: Studio ran with no place open; both stops went to
+    Lead cases instead of the coordinator reopening the TEST place."""
+    from foundry_coordinator import autoheal
+    rt1 = ("session reported BLOCKED: Roblox_Studio get_studio_state returns 'Place is not open' "
+           "and robloxstudio-mcp lists no instances. The TEST place needs reopening")
+    mv2 = ("scripted Studio gate: McpError: community: need exactly one Studio instance, "
+           "found 0 (connected: none)")
+    assert autoheal.plan("session_blocked", rt1) == ("studio_reload", "restart")
+    assert autoheal.plan("studio_calls_error", mv2) == ("studio_reload", "restart")
+    assert autoheal.infra_signature("the shop panel is not open on mobile") == ""

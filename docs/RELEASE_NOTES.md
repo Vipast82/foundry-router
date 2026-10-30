@@ -2,6 +2,17 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.157.93 — Studio with no place open gets the place reopened
+
+2026-10-30 18:19: Studio was running with no place open. GF-RT1's session reported "Place is
+not open" / "lists no instances" / "the TEST place needs reopening", and MV2-11's scripted gate
+failed with "need exactly one Studio instance, found 0 (connected: none)". Neither wording
+matched the `studio_reload` signature, so both went to Lead cases and the main track stalled.
+
+- **autoheal:** `studio_reload` also matches "place is not open", "no place open",
+  "Studio instance(s), found 0", "connected: none", "lists no instances" and "place needs
+  reopening", so the coordinator reopens the TEST place and retries.
+
 ## v0.157.92 — a session that asks for a fresh Studio gets one
 
 2026-10-30 16:57: MV2-11's session reported BLOCKED: its gate rows failed from a degraded Studio
