@@ -2,6 +2,17 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.157.77 — a suite's freshness ignores other sprints' check files
+
+2026-10-30 00:42-00:48: after v0.157.76, GF-LOOP1 ran all 7 rows green at 9bb5ae07, then edited
+its own tests/GF_LOOP1_check.lua; the ledger staled S06/S07/S27/S28/S32/S50 again because every
+suite depended on tests/**.
+
+- **Suite dependencies (AU):** suite:<SID> / regression:<SID> depend on src/**,
+  default.project.json, tests/GateRunner.lua, tests/RegressionIndex.lua, tests/lib/**,
+  tests/<SID>_* and tests/checks/<SID>_*. Other sprints' check files no longer stale them.
+  Boot, call and runtime records keep the full tests/** set.
+
 ## v0.157.76 — carried Studio passes reach the ledger; gate captures may be .jpg
 
 2026-10-29 23:5x-00:12: GF-LOOP1 used all 6 attempts. Every Studio gate passed (its own suite

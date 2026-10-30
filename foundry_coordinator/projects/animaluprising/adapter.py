@@ -2172,6 +2172,15 @@ Change no code or test file in this session; if one needs changing, stop and rep
         code = ["src/**", "tests/**", "default.project.json"]
         if kind == "fast_lane.gate":
             return code                    # captures/evidence commits don't stale it
+        sid = ref.split(".")[-1] if kind == "regression" else ref
+        if kind in ("suite", "regression") and re.fullmatch(r"[A-Za-z0-9_]+", sid or ""):
+            # 2026-10-30 GF-LOOP1: with tests/** every edit to the sprint's own check staled
+            # S06/S07/S27/S28/S32/S50 (6 attempts, then again after the reset). A suite runs
+            # its own tests/<SID>_*.lua through the harness; other sprints' checks are not
+            # its inputs (the gate runner's carry rule says the same).
+            return ["src/**", "default.project.json", "tests/GateRunner.lua",
+                    "tests/RegressionIndex.lua", "tests/lib/**", f"tests/{sid}_*",
+                    f"tests/checks/{sid}_*"]
         if kind in ("suite", "regression", "boot", "call", "plan", "runtime"):
             return code
         if kind == "lune":

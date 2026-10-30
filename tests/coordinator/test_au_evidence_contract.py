@@ -832,6 +832,24 @@ def test_both_gate_checks_accept_the_sprints_own_frame(repo):
     assert a._gate_staleness(spec, w.show_at(other, LOG_REL), [], other, w)[0] == "stale"
 
 
+def test_a_suite_does_not_depend_on_other_sprints_checks(repo):
+    """2026-10-30 GF-LOOP1: every edit to tests/GF_LOOP1_check.lua staled S06..S50."""
+    a = repo["a"]
+    spec = a.describe_at(T, repo["head"], repo["w"])
+    for cid in ("suite:S06", "regression:S06"):
+        g = a.check_dependencies(spec, cid)
+        for p in ("tests/S06_check.lua", "tests/GateRunner.lua", "tests/RegressionIndex.lua",
+                  "tests/lib/UiFixtures.lua", "src/server/Services/MatchService.lua",
+                  "default.project.json", "tests/checks/S06_check.lua"):
+            assert matches_any(p, g), (cid, p)
+        for p in ("tests/GF_LOOP1_check.lua", "tests/S06b_check.lua",
+                  "tests/checks/HK_STORE1_check.lua", "tests/lune/x.lua"):
+            assert not matches_any(p, g), (cid, p)
+    s32 = a.check_dependencies(spec, "suite:S32")
+    assert matches_any("tests/S32_raw_evidence.lua", s32)
+    assert matches_any("tests/GF_LOOP1_check.lua", a.check_dependencies(spec, "boot:server"))
+
+
 def test_runtime_check_dependencies_never_include_docs_memory_or_plan(repo):
     """audit A: boot:/suite:/gate: records must not go stale on docs-only commits."""
     a = repo["a"]
