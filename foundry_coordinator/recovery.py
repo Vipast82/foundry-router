@@ -907,8 +907,13 @@ class Recovery:
                     req = json.loads(req)
                 except ValueError:
                     req = []
-            if deferred and req and all(isinstance(r, dict) and owns(r.get("kind"), r.get("ref"))
-                                        for r in req):
+            # 2026-10-29 S52: a capture obligation pairs a Studio check (capture:<png>) with its
+            # PNG path; only the check matched, so the track sprint was asked for a Studio
+            # capture it cannot take. An obligation that needs a deferred check is deferred.
+            if deferred and req and (
+                    all(isinstance(r, dict) and owns(r.get("kind"), r.get("ref")) for r in req)
+                    or any(isinstance(r, dict) and r.get("kind") == "check"
+                           and owns("check", r.get("ref")) for r in req)):
                 continue
             if o["status"] != "verified" or o.get("verified_rev") != head:
                 out.append({"class": "missing_evidence", "action": act,
@@ -924,7 +929,8 @@ class Recovery:
         if evidence_items:
             from .review import normalize_evidence
             for it in normalize_evidence(evidence_items):
-                if it["status"] in ("missing", "stale") and it["priority"] <= 2                         and not owns("file", it["path"]):
+                if it["status"] in ("missing", "stale") and it["priority"] <= 2                         and not owns("file", it["path"])                         and not (deferred and owns("check", str(it.get("title") or "")
+                                                   .split(" ")[0].strip("()"))):
                     out.append({"class": "missing_evidence", "action": act,
                                 "item": {"path": it["path"], "title": it["title"],
                                          "status": it["status"], "note": it["note"]}})

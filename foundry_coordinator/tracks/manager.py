@@ -200,6 +200,20 @@ class TrackManager:
             return ref.partition(":")[0] in cls.STUDIO_CHECK_KINDS
         return "_EVIDENCE_RAW.log" in ref.replace("\\", "/")
 
+    @classmethod
+    def merge_gate_owns_item(cls, e: dict) -> bool:
+        """An evidence item the merge gate owns: by its file, or by its check name
+        (2026-10-29 MV2-5: `gate:MV2-5` / `suite:MV2_5` items have no path; the reviewer
+        saw them MISSING and blocked the track sprint)."""
+        e = e or {}
+        if cls.merge_gate_owns("file", e.get("path")):
+            return True
+        for k in ("check_id", "check", "title"):
+            v = str(e.get(k) or "").strip()
+            if v and cls.merge_gate_owns("check", v.split()[0].strip("()")):
+                return True
+        return False
+
     @staticmethod
     def is_track(P) -> bool:
         return bool(getattr(P.profile, "__dict__", {}).get("track"))

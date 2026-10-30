@@ -2,6 +2,21 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.157.69 — track sprints are never asked for Studio evidence
+
+2026-10-29 20:0x-20:16: two track sprints looped into "findings repeat" decisions on evidence only
+the merge gate can produce. S52 was asked for its Studio captures (each capture obligation pairs
+`capture:<png>` with the PNG path, and only the check counted as the merge gate's). MV2-5's
+reviewer saw `gate:MV2-5` / `suite:MV2_5` listed MISSING (items with no path) and held that the
+plan's BUILD contract outranked the track note.
+
+- **Submission gate:** an obligation that needs a check the merge gate owns is deferred as a
+  whole; missing evidence items named by such a check are not asked for.
+- **Review packet:** missing/stale items owned by the merge gate are left out by file or by check
+  name (`TrackManager.merge_gate_owns_item`).
+- **Track review note:** says those plan lines (GATE PASS, suite tallies, boot counts, captures)
+  are owed to the merge gate.
+
 ## v0.157.68 — the main track gets the GPU first
 
 2026-10-29 19:48: AS-R5 (main track, local model, between sessions) waited for `gpu` held by the

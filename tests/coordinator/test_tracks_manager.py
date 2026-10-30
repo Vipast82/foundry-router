@@ -302,3 +302,14 @@ def test_a_main_sprint_waiting_for_the_gpu_goes_first(tmp_path):
     assert got and got["task_id"] == "T1" and "gpu" not in c.store.holds("game", "B1")
     c.store.update_task("game", "T1", next_action="implement session working")
     assert c._acquire(TP, b1, ["gpu"]) is None and "gpu" in c.store.holds("game", "B1")
+
+
+def test_the_merge_gate_owns_studio_check_items_and_capture_obligations():
+    """2026-10-29 MV2-5 / S52: a missing `gate:MV2-5` evidence item (no path) and a capture
+    obligation (capture:<png> + the png path) were demanded of track sprints."""
+    from foundry_coordinator.tracks.manager import TrackManager
+    owns = TrackManager.merge_gate_owns_item
+    assert owns({"title": "gate:MV2-5", "status": "missing", "path": ""})
+    assert owns({"title": "suite:MV2_5 tally", "status": "missing"})
+    assert owns({"path": "docs/progress/MV2-5_EVIDENCE_RAW.log"})
+    assert not owns({"title": "lune", "path": "docs/progress/MV2-5_PLAN.md"})

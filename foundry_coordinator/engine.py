@@ -54,8 +54,10 @@ Studio-free checks (Lune, the sprint's unit checks, and done_check with
 TRACK_REVIEW_NOTE = ("track sprint: this work ran in a git worktree without Studio. The "
                      "Studio gate, boot checks, Studio suites and the gate evidence log "
                      "are run by the merge gate in the main checkout on the merge result, "
-                     "so their absence here is expected: do not ask for them. Review the "
-                     "code, the Lune results and done_check.")
+                     "so their absence here is expected: do not ask for them, even where "
+                     "the plan's BUILD contract lists a GATE PASS, suite tallies, boot "
+                     "counts or Studio captures (those plan lines are owed to the merge "
+                     "gate). Review the code, the Lune results and done_check.")
 TRACK_STUDIO_BLOCKER = re.compile(r"studio\.lock|\bstudio\b|\brojo\b|playtest|studio[_ ]gate|"
                                   r"\bgate\b[^.\n]{0,40}\b(?:run|lock|studio)", re.I)
 
@@ -2472,7 +2474,7 @@ class Coordinator:
             owns = self.tracks.merge_gate_owns
             evidence = [e for e in evidence if not (
                 isinstance(e, dict) and str(e.get("status") or "") in ("missing", "stale")
-                and owns("file", e.get("path")))]
+                and self.tracks.merge_gate_owns_item(e))]
             dnotes.append(TRACK_REVIEW_NOTE)
         rv_commits, rv_files, rv_left = self._review_own_changes(P, tid, dbase, head)
         if rv_left:
