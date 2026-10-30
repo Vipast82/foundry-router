@@ -2,6 +2,15 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.157.79 — a SUPERSEDED/CANCELLED ledger row counts as done
+
+2026-10-30 01:28: track analysis proposed S51B and it was started; it had been rescoped and
+finished as S51B-R on 2026-10-10. Its STATE.md row says SUPERSEDED/CANCELLED, which
+dependency_done did not accept, so the sprint read as NOT-STARTED.
+
+- **AU dependency_done:** a ledger row whose status column is SUPERSEDED, CANCELLED or
+  SUPERSEDED/CANCELLED counts as done (never proposed or queued again).
+
 ## v0.157.78 — a frontier sprint that fell to the busy local model waits for the GPU
 
 2026-10-30 00:51-01:16: Claude's weekly window hit 100% and ChatGPT sat at its 95% cap, so the

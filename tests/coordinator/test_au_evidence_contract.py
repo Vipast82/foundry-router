@@ -922,12 +922,18 @@ def test_a_complete_ledger_row_counts_as_done(tmp_path):
         "| S20 | Thing | DONE | x |\n"
         "| S21 | Thing | NOT DONE | x |\n"
         "| AS-R9 | Rig | COMPLETE-PENDING-VISUAL-REVIEW | x |\n"
-        "| S22 | Thing | IN PROGRESS (COMPLETE soon) | x |\n", encoding="utf-8")
+        "| S22 | Thing | IN PROGRESS (COMPLETE soon) | x |\n"
+        "| S51B | ? | S | — | SUPERSEDED/CANCELLED | — | n/a | rescoped as S51B-R |\n"
+        "| S23 | Thing | CANCELLED | x |\n"
+        "| S24 | was CANCELLED once, now | IN PROGRESS | x |\n", encoding="utf-8")
     a = AnimalUprisingAdapter.__new__(AnimalUprisingAdapter)
     a.p = NS(workspace=str(tmp_path), deps_accept_pending=[])
     a._read = lambda rel: (tmp_path / rel).read_text(encoding="utf-8")
     assert a.dependency_done("S14") and a.dependency_done("S20")
     assert not a.dependency_done("S21") and not a.dependency_done("S22")
+    # 2026-10-30: S51B (finished as S51B-R) was proposed and started again
+    assert a.dependency_done("S51B") and a.dependency_done("S23")
+    assert not a.dependency_done("S24")
     assert not a.dependency_done("AS-R9")
     a.p.deps_accept_pending = ["visual"]
     assert a.dependency_done("AS-R9")
