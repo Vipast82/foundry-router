@@ -2,6 +2,16 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.157.67 — a RETIRED plan never runs
+
+2026-10-29 19:30: GF-FX4 was proposed by track analysis and started on track frontier-3, but its
+plan opens with "RETIRED 2026-10-10 — superseded by UI-02 ... Do not run GF-FX4."; the session
+refused it at once and a lead case opened.
+
+- **Track analysis:** a plan whose first non-empty line is a RETIRED banner counts as done (never
+  proposed, never "open").
+- **AU preflight:** a sprint with a RETIRED plan is refused before any session or attempt.
+
 ## v0.157.66 — a CLOSE session waiting for a resource gives the checkout to a landing
 
 2026-10-29 19:0x: AS-R8 (local model) was APPROVED and its CLOSE session waited for `gpu` (the

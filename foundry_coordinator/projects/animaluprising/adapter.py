@@ -358,6 +358,13 @@ class AnimalUprisingAdapter(GenericAdapter):
                 return ("AGENT_RULES.md has no coordinator amendment (marker "
                         f"{AMENDMENT_MARKER}); the one-sprint-per-session rule is not overridden "
                         "silently. Apply RULE_AMENDMENT.md through an HK sprint first.")
+        try:
+            from ...tracks.analysis import plan_retired
+            if plan_retired(self._read(f"docs/progress/{spec.task_id}_PLAN.md")):
+                return (f"{spec.task_id}_PLAN.md is RETIRED (its first line says so): the "
+                        f"sprint must not run; cancel it or un-retire the plan")
+        except OSError:
+            pass
         if not spec.scope:
             return f"{spec.task_id}_PLAN.md has no 'Files this sprint may change' list"
         return None

@@ -302,3 +302,14 @@ def test_depends_on_none_and_semicolon_commentary_are_no_dependencies():
     assert deps_in_field(" AS-C20 (batch pipeline); consumed by UI-SKIN1") == ["AS-C20"]
     assert deps_in_field(" AS-R1 + AS-P5 + ref sheets") == ["AS-R1", "AS-P5"]
     assert deps_in_field(" GF-ENT1, AS-P5 ** ignored S9") == ["GF-ENT1", "AS-P5"]
+
+
+def test_a_retired_plan_is_never_proposed():
+    """2026-10-29: GF-FX4's plan opens with a RETIRED banner; analysis offered it and a track
+    started it."""
+    from foundry_coordinator.tracks.analysis import parse_plan, plan_retired
+    txt = ("> **RETIRED 2026-10-10 — superseded by UI-02** (...). Do not run GF-FX4.\n\n"
+           "# GF-FX4 — x\n**Tier:** B\n")
+    assert plan_retired(txt) and parse_plan("GF-FX4", txt).done
+    live = "# UI-V1 — Batch verification\n\nA step: the old plan was RETIRED earlier.\n"
+    assert not plan_retired(live) and not parse_plan("UI-V1", live).done

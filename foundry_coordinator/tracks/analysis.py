@@ -259,7 +259,21 @@ def _normalize(needs: Iterable[str]) -> list[str]:
     return sorted(out, key=NEEDS.index)
 
 
+_RETIRED = re.compile(r"^\W*RETIRED\b", re.I)
+
+
+def plan_retired(text: str) -> bool:
+    """The plan's first non-empty line is a RETIRED banner ("> **RETIRED 2026-10-10 -
+    superseded by UI-02** ... Do not run"). 2026-10-29: GF-FX4 was proposed and started on a
+    track; its session refused it at once."""
+    for line in (text or "").splitlines():
+        if line.strip():
+            return bool(_RETIRED.match(line.strip()))
+    return False
+
+
 def parse_plan(task_id: str, text: str, path: str = "", done: bool = False) -> PlanInfo:
+    done = done or plan_retired(text)
     files = plan_files(text)
     stories = plan_stories(text)
     tier = plan_tier(text)
