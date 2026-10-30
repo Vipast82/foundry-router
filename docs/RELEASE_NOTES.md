@@ -2,6 +2,25 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.157.87 — the track planner proposes ready work; an automatic pause keeps the checkout
+
+2026-10-30: `tracks propose` offered only S51B (finished as S51B-R) and MV2-4c (no file list),
+listed the cancelled UI-02..06 on the main chain, and put ~40 open sprints in one chain, because
+a few files nearly every sprint touches linked them all; the rt, shop1, ux and pt tracks were
+picked by hand. Separately, GF-LOOP1 lost the main checkout for 1.5 h while it waited seconds on
+the model visual approval, and AS-P7's stale-sync block let AS-J08 in.
+
+- **Planner:** CANCELLED sprints count as done; a plan with no file list is never on a track
+  (`unplanned`, with a warning). The default `track_append_safe` adds default.project.json, the
+  regression index and its spec, SPRINT_STATUS.md, Strings.lua, Remotes.lua, Config/Ui.lua,
+  MatchResetContract.lua (+ MatchReset/RateLimit specs), the generated asset-id tables and the
+  localization tables (merge conflicts there go to the Lead repair).
+- **Ready tracks:** when grouping leaves fewer tracks than max_agents allows, `propose` adds
+  `ready_tracks`: sprints whose dependencies are all done, sharing no file with a running or
+  queued sprint, needing no blender/gpu, each with its direct follow-ons.
+- **Main checkout:** a sprint AWAITING_HUMAN only on the model visual approval, or BLOCKED on a
+  scheduled auto-heal retry, keeps its place; other main sprints wait for it.
+
 ## v0.157.86 — a scripted gate's stale-sync error is auto-healed
 
 2026-10-30 12:12/12:17: after the mv2-2 merge added check files and mounts, AS-P7's and AS-J08's

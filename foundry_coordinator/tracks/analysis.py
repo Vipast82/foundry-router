@@ -36,11 +36,21 @@ NEEDS = ("studio", "blender", "audio", "images", "gpu", "backend", "none")
 CAPACITY_ONE = ("blender", "gpu")
 # shared ledgers every AU sprint appends a row to: a rebase merges them (and a
 # conflict goes to the Lead repair), so they never make two sprints serial.
-# RegressionIndex.lua, Strings.lua, Ui.lua, default.project.json and GateRunner.lua
-# stay conflicts until the coordinator merges them from per-sprint fragments.
+# 2026-10-30: default.project.json, the regression index (+ its spec), SPRINT_STATUS.md and
+# Strings.lua, the remote/reset/UI-config registries, generated asset-id tables and the
+# localization tables joined them: nearly every sprint adds a line there, so treating them as
+# conflicts put every sprint on one chain; track merges resolved them (rt, shop1) through
+# the Lead repair. GateRunner.lua and service code stay conflicts.
 DEFAULT_APPEND_SAFE = ["docs/progress/STATE.md", "docs/progress/state/**",
                        "docs/progress/STATE_ARCHIVE*.md", "docs/MASTER_ORDER.md",
-                       "docs/design/ASSET_LEDGER.md", "docs/memory/**"]
+                       "docs/design/ASSET_LEDGER.md", "docs/memory/**",
+                       "default.project.json", "tests/RegressionIndex.lua",
+                       "tests/lune/specs/RegressionIndex.spec.luau",
+                       "docs/progress/SPRINT_STATUS.md", "src/shared/Config/Strings.lua",
+                       "tests/lib/MatchResetContract.lua", "src/shared/Net/Remotes.lua", "src/shared/Config/Ui.lua",
+                       "tests/lune/specs/MatchReset.spec.luau", "tests/lune/specs/RateLimit.spec.luau", "src/shared/Config/AssetIds.lua",
+                       "tests/lune/specs/AssetIds.spec.luau", "assets/models/model_ids.json", "assets/exports/ui192/upload_ids.json",
+                       "docs/localization/LocalizationTable.*"]
 PLAN_GLOB = "docs/progress/*_PLAN.md"
 ORDER_FILE = "docs/MASTER_ORDER.md"
 # a sprint id: UI-03a, AS-C-IMP4b, S51B-R, GF-FX1, T1, HK-COORD1
@@ -403,7 +413,10 @@ def analyze(plans: list[PlanInfo], append_safe: Optional[list[str]] = None,
     safe = list(DEFAULT_APPEND_SAFE if append_safe is None else append_safe)
     pos = {tid: i for i, tid in enumerate(order or [])}
     by_id = {p.task_id: p for p in plans}
-    open_ids = [p.task_id for p in plans if not p.done]
+    # 2026-10-30: a plan with no file list (MV2-4c, S51B) can't be checked for overlaps and
+    # can't start (preflight wants the list): never put it on a track, warn instead
+    unplanned = [p.task_id for p in plans if not p.done and not p.files]
+    open_ids = [p.task_id for p in plans if not p.done and p.files]
     deps = {p.task_id: [d for d in p.deps if d in by_id and not by_id[d].done]
             for p in plans}
     external = {p.task_id: [d for d in p.deps if d not in by_id] for p in plans}
@@ -451,11 +464,12 @@ def analyze(plans: list[PlanInfo], append_safe: Optional[list[str]] = None,
     for tid in open_ids:
         if external[tid]:
             warnings.append(f"{tid} depends on {', '.join(external[tid])}, which has no plan here")
-        if not by_id[tid].files:
-            warnings.append(f"{tid} lists no files it may change")
+    for tid in unplanned:
+        warnings.append(f"{tid} lists no files it may change (left off every track)")
     return {"tracks": tracks, "serial": serial, "append_safe": safe,
             "sprints": {p.task_id: p.to_json() for p in plans},
-            "open": open_ids, "done": [p.task_id for p in plans if p.done],
+            "open": open_ids, "unplanned": unplanned,
+            "done": [p.task_id for p in plans if p.done],
             "warnings": warnings}
 
 
@@ -491,12 +505,79 @@ def propose(analysis: dict, max_agents: int, running: Optional[Iterable[str]] = 
         taken.update(n for n in t["needs"] if n in CAPACITY_ONE)
         chosen.append(t)
     chosen.sort(key=lambda t: tracks.index(t))
+    if len(chosen) < max_agents - 1:
+        for t in ready_tracks(analysis, running, chosen, max_agents - 1 - len(chosen)):
+            chosen.append(t)
+            notes.append(f"{t['name']}: ready now and shares no file with a running sprint "
+                         f"({' -> '.join(t['sprints'])})")
     for t in chosen:
         if t.get("studio_at_merge"):
             notes.append(f"{t['name']}: needs Studio; its Studio work runs at merge time in the "
                          f"main checkout")
     return {"max_agents": max_agents, "agents": 1 + len(chosen), "main": main,
             "tracks": chosen, "notes": notes}
+
+
+def ready_tracks(analysis: dict, running: Iterable[str], chosen: list, limit: int,
+                 max_chain: int = 6) -> list[dict]:
+    """Parallel tracks cut from the open sprints when grouping by shared files leaves too few
+    (2026-10-30: across ~40 open AU sprints a handful of shared files linked everything into
+    one chain, and the planner offered nothing; the hand-picked rt, shop1, ux and pt tracks
+    ran and merged). A pick is ready (every dependency done), shares no file with a
+    running or queued sprint or an earlier pick, and needs no capacity-one resource (blender,
+    gpu: local work is queued on its own track). Its direct follow-ons ride along when they
+    only depend on done sprints and the chain itself."""
+    if limit <= 0:
+        return []
+    sp = {k: PlanInfo(**{f: v for f, v in d.items() if f in PlanInfo.__dataclass_fields__})
+          for k, d in (analysis.get("sprints") or {}).items()}
+    safe = tuple(analysis.get("append_safe") or DEFAULT_APPEND_SAFE)
+    done = set(analysis.get("done") or [])
+    open_ids = [i for i in (analysis.get("open") or []) if i in sp]
+    order = {}
+    for t in analysis.get("tracks") or []:
+        for i in t["sprints"]:
+            order.setdefault(i, len(order))
+    open_ids.sort(key=lambda i: (order.get(i, 10 ** 6), i))
+    running = set(running or [])
+    busy = [sp[i] for i in running if i in sp]
+    taken = {s for t in chosen for s in t["sprints"]}
+    for t in chosen:
+        busy += [sp[i] for i in t["sprints"] if i in sp]
+
+    def deps_ok(i, chain=()):
+        # a dependency with no plan here (GF-QUEEN1) is not known to be done: not ready
+        return all(d in done or d in chain for d in sp[i].deps)
+
+    def clear(i, extra=()):
+        return not any(shared_files(sp[i], b, list(safe)) or shared_files(b, sp[i], list(safe))
+                       for b in busy if b.task_id not in extra)
+
+    out = []
+    for i in open_ids:
+        if len(out) >= limit:
+            break
+        if i in running or i in taken or not deps_ok(i):
+            continue
+        if any(n in CAPACITY_ONE or n == "blender" for n in sp[i].needs) or not clear(i):
+            continue
+        chain = [i]
+        for j in open_ids:
+            if len(chain) >= max_chain:
+                break
+            if j in chain or j in running or j in taken or not any(d in chain for d in sp[j].deps):
+                continue
+            if not deps_ok(j, chain) or any(n in CAPACITY_ONE or n == "blender"
+                                            for n in sp[j].needs):
+                continue
+            if clear(j, extra=chain):
+                chain.append(j)
+        needs = _normalize(n for t in chain for n in sp[t].needs)
+        out.append({"name": _track_name(chain[0]), "sprints": chain, "needs": needs or ["none"],
+                    "studio_at_merge": "studio" in needs, "kind": "parallel", "ready": True})
+        taken.update(chain)
+        busy += [sp[t] for t in chain]
+    return out
 
 
 # ---------------------------------------------------------------------------- a project

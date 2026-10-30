@@ -6887,7 +6887,8 @@ class Coordinator:
         mine = line_ts(cur) or float("inf")
         best, best_ts = "", mine
         for o in self.store.tasks(P.id):
-            if o["task_id"] == t["task_id"] or o["state"] not in self.MAIN_IN_FLIGHT:
+            if o["task_id"] == t["task_id"] or not (o["state"] in self.MAIN_IN_FLIGHT
+                                                    or self._main_pause_is_automatic(P, o)):
                 continue
             ots = line_ts(o)
             if not ots:
@@ -6900,6 +6901,29 @@ class Coordinator:
             if ots < best_ts:
                 best, best_ts = o["task_id"], ots
         return best
+
+    def _main_pause_is_automatic(self, P: Project, o: dict) -> bool:
+        """A stop the coordinator itself ends in minutes keeps the sprint's place in the main
+        checkout: the model visual approval (AWAITING_HUMAN on approval: visual with
+        [approval] visual_model) and a scheduled auto-heal retry (BLOCKED, data.auto_heal).
+        2026-10-30: GF-LOOP1 waited 4 s on its visual check and AS-E09 took the checkout for
+        1.5 h; AS-P7's stale-sync block let AS-J08 in the same way."""
+        st = o.get("state")
+        if st == S.AWAITING_HUMAN:
+            aw = str(o.get("awaiting") or "")
+            if not aw.startswith("approval:"):
+                return False
+            kinds = {k.strip() for k in aw[len("approval:"):].split(",") if k.strip()}
+            try:
+                from . import visual_approval as VA
+                auto = VA.enabled(P)
+            except Exception:                                     # noqa: BLE001
+                auto = False
+            return bool(kinds) and kinds <= {"visual"} and auto
+        if st == S.BLOCKED:
+            ah = (o.get("data") or {}).get("auto_heal") or {}
+            return bool(ah.get("retry_at")) and str(o.get("blocker") or "").startswith("auto-heal")
+        return False
 
     def _session_locks(self, P: Project, t: Optional[dict] = None) -> list[str]:
         """The profile's exclusive resources, plus `gpu` for a sprint whose implementer is a

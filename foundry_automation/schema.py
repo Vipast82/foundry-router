@@ -295,7 +295,16 @@ AUTOMATION_DEFAULTS: dict = {
     "merge_studio_batch_max_minutes": 0,
     "track_append_safe": ["docs/progress/STATE.md", "docs/progress/state/**",
                           "docs/progress/STATE_ARCHIVE*.md", "docs/MASTER_ORDER.md",
-                          "docs/design/ASSET_LEDGER.md", "docs/memory/**"],
+                          "docs/design/ASSET_LEDGER.md", "docs/memory/**",
+                          # 2026-10-30: shared index files every sprint adds a line to; a
+                          # merge conflict there goes to the Lead repair (rt/shop1 merged so)
+                          "default.project.json", "tests/RegressionIndex.lua",
+                          "tests/lune/specs/RegressionIndex.spec.luau",
+                          "docs/progress/SPRINT_STATUS.md", "src/shared/Config/Strings.lua",
+                          "tests/lib/MatchResetContract.lua", "src/shared/Net/Remotes.lua", "src/shared/Config/Ui.lua",
+                          "tests/lune/specs/MatchReset.spec.luau", "tests/lune/specs/RateLimit.spec.luau", "src/shared/Config/AssetIds.lua",
+                          "tests/lune/specs/AssetIds.spec.luau", "assets/models/model_ids.json", "assets/exports/ui192/upload_ids.json",
+                          "docs/localization/LocalizationTable.*"],
     # self-repair sweep (foundry_coordinator/selfheal.py, 2026-10-28): what the chat watch
     # did by hand, every minute, bounded per task per day, each action a self_heal event
     "self_heal": True,

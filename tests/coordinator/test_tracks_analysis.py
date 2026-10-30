@@ -186,14 +186,15 @@ def test_shared_ledgers_are_not_conflicts_but_strings_lua_is():
 
 def test_strings_lua_overlap_without_a_dependency_is_serial_with_the_file_named():
     other = UI_NEXT_PLAN.replace("**Depends on:** UI-03a\n", "")
-    out = A.analyze(plans(**{"UI-03a": UI_PLAN, "UI-04a": other}))
+    # (2026-10-30: Strings.lua is append-safe by default now; the rule is shown without it)
+    old_safe = [x for x in A.DEFAULT_APPEND_SAFE if x != "src/shared/Config/Strings.lua"]
+    out = A.analyze(plans(**{"UI-03a": UI_PLAN, "UI-04a": other}), append_safe=old_safe)
     assert len(out["tracks"]) == 1 and out["tracks"][0]["sprints"] == ["UI-03a", "UI-04a"]
     s = out["serial"][0]
     assert s["files"] == ["src/shared/Config/Strings.lua"]
     assert "both change src/shared/Config/Strings.lua" in s["reason"]
     # widening append_safe makes them parallel
-    out2 = A.analyze(plans(**{"UI-03a": UI_PLAN, "UI-04a": other}),
-                     append_safe=A.DEFAULT_APPEND_SAFE + ["src/shared/Config/Strings.lua"])
+    out2 = A.analyze(plans(**{"UI-03a": UI_PLAN, "UI-04a": other}))
     assert len(out2["tracks"]) == 2
 
 
@@ -313,3 +314,32 @@ def test_a_retired_plan_is_never_proposed():
     assert plan_retired(txt) and parse_plan("GF-FX4", txt).done
     live = "# UI-V1 — Batch verification\n\nA step: the old plan was RETIRED earlier.\n"
     assert not plan_retired(live) and not parse_plan("UI-V1", live).done
+
+
+def test_cancelled_and_fileless_plans_are_never_on_a_track():
+    """2026-10-30: S51B (done elsewhere, CANCELLED here) and MV2-4c (no file list) were
+    proposed as tracks."""
+    nofiles = "# X\n**Tier:** C\n"
+    ps = plans(**{"UI-03a": UI_PLAN, "MV2-4c": nofiles})
+    out = A.analyze(ps)
+    assert out["unplanned"] == ["MV2-4c"] and "MV2-4c" not in out["open"]
+    assert all("MV2-4c" not in t["sprints"] for t in out["tracks"])
+    assert any("MV2-4c lists no files" in w for w in out["warnings"])
+
+
+def test_ready_sprints_become_tracks_when_grouping_links_everything():
+    """2026-10-30: shared files linked ~40 open sprints into one chain and nothing was
+    offered; ready sprints with no file shared with running work are offered instead."""
+    def plan(files, deps=""):
+        return ("**Tier:** B\n" + (f"**Depends on:** {deps}\n" if deps else "")
+                + "## Files this sprint may change\n" + "".join(f"- `{f}`\n" for f in files))
+    ps = plans(**{"A-1": plan(["src/a.lua", "src/hub.lua"]),
+                  "B-1": plan(["src/b.lua", "src/hub.lua"]),
+                  "C-1": plan(["src/c.lua", "src/hub2.lua"]),
+                  "C-2": plan(["src/c2.lua"], deps="C-1"),
+                  "D-1": plan(["src/d.lua", "src/hub2.lua"], deps="GF-NOPLAN1")})
+    out = A.analyze(ps)
+    # running: A-1 (main). B-1 shares hub.lua with it; D-1 waits on an unplanned dependency
+    got = A.ready_tracks(out, running=["A-1"], chosen=[], limit=3)
+    assert [t["sprints"] for t in got] == [["C-1", "C-2"]]
+    assert A.ready_tracks(out, running=["A-1", "C-1"], chosen=[], limit=3) == []

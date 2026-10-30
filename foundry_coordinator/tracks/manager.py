@@ -625,7 +625,10 @@ class TrackManager:
 
     def analyze(self, P) -> dict:
         P = self.main_of(P)
-        done = [t["task_id"] for t in self.store.tasks(P.id) if t["state"] == S.COMPLETE]
+        # 2026-10-30: a CANCELLED sprint (S51B: finished as S51B-R; the superseded UI-02..06)
+        # was proposed and listed on the main chain again; only an explicit start reopens one
+        done = [t["task_id"] for t in self.store.tasks(P.id)
+                if t["state"] in (S.COMPLETE, S.CANCELLED)]
         return AN.analyze_project(P, done=done, append_safe=self.setting(P, "track_append_safe"),
                                   main_sprint=self.main_running_sprint(P))
 

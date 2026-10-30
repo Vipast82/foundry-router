@@ -1093,3 +1093,25 @@ def test_a_review_cut_at_max_tokens_retries_with_more_room():
                                          {"persona": "x", "packet": "p", "rsid": "r",
                                           "max_tokens": 4000})
     assert err is not None and seen == [4000]
+
+
+def test_an_automatic_pause_keeps_the_main_checkout(game):
+    """2026-10-30: GF-LOOP1 waited seconds on the model visual approval and AS-E09 took the
+    main checkout for 1.5 h; a scheduled auto-heal retry let AS-J08 in the same way."""
+    tmp, _, _, prof = game
+    c = coordinator(tmp, [prof], {"game": write_ok("src/b.txt")})
+    P = c.projects["game"]
+    for tid in ("T1", "T2"):
+        c.approve("game", tid, [], "victor")
+    P.profile.raw.setdefault("approval", {})["visual_model"] = True
+    c.store.update_task("game", "T1", state=S.AWAITING_HUMAN, started_ts=100.0,
+                        awaiting="approval: visual")
+    c.store.update_task("game", "T2", state=S.READY, started_ts=None)
+    assert c._main_sprint_in_flight(P, c.store.task("game", "T2")) == "T1"
+    c.store.update_task("game", "T1", awaiting="question: which color?")     # a person's call
+    assert c._main_sprint_in_flight(P, c.store.task("game", "T2")) == ""
+    c.store.update_task("game", "T1", state=S.BLOCKED, blocker="auto-heal 1/2 (rojo_stale): x",
+                        data={"auto_heal": {"retry_at": 999.0}})
+    assert c._main_sprint_in_flight(P, c.store.task("game", "T2")) == "T1"
+    c.store.update_task("game", "T1", blocker="lead recovery: DIAGNOSING", data={})
+    assert c._main_sprint_in_flight(P, c.store.task("game", "T2")) == ""
