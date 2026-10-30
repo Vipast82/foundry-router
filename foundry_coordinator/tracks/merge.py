@@ -95,6 +95,7 @@ def _resolve_memory_conflicts(wt: str, how: str, limit: int = 50) -> bool:
 # with this backoff (doubling) before the track fails
 GATE_TOOLING_RETRIES = 2
 GATE_RETRY_BACKOFF_S = 60
+ROJO_RELOAD_WAIT_S = 120             # a Rojo restart + place reopen settles before the retry
 # 2026-10-28 (backend-1 / S57a): while a Lead repair of the conflict runs (lead.py
 # open_track_repair) the decision's default waits for it and retries the merge, so a timeout
 # never drops finished work; "stop this track" is the default only when no Lead repair runs
@@ -920,14 +921,73 @@ class MergeManager:
             self.store.event(P.id, "", "track_studio_batch_red", detail={
                 "track": name, "sprints": sorted({c for r in red for c in r.get("covers") or [r["sprint"]]}),
                 "findings": findings[:10]})
+            repaired = self._repair_red(P, row, red)
             self.tm.fail(P, self.store.track(P.id, name),
-                         "merge Studio batch red: " + " | ".join(findings[:4]))
+                         "merge Studio batch red: " + " | ".join(findings[:4])
+                         + (f" (Lead repair on main: {', '.join(repaired)})" if repaired else ""))
             return
         gate.update(result=PASS)
         self._set(P, row, studio_batch=batch, gate=gate, merge_stage="done")
         self.store.event(P.id, "", "track_studio_batch_green", detail={
             "track": name, "sprints": [r["sprint"] for r in results]})
         self._finish(P, self.store.track(P.id, name))
+
+    def _repair_red(self, P, row: dict, red: list) -> list:
+        """2026-10-30 (Victor: "Build Lead repair"): a red merge Studio batch left GF-RT1..3
+        COMPLETE with their code already on master and nothing to fix them; the track just
+        failed. The Lead reopens each red sprint on the main checkout (Studio is there) with
+        the failing rows as its assignment, in batch order, each after the previous one it
+        depends on. A sprint whose plan says another sprint verifies it (MV2-7 -> MV2-V1) is
+        owed there instead. Returns the reopened ids ([] = off or nothing to repair)."""
+        lead = getattr(self.c, "lead", None)
+        if not self.tm.setting(P, "merge_red_repair") or lead is None or not lead.enabled(P):
+            return []
+        owner_fn = getattr(P.adapter, "verification_owner", None)
+        name = row["name"]
+        out: list = []
+        owed: dict = {}
+        for r in red:
+            sid = str(r.get("sprint") or "")
+            t = self.store.task(P.id, sid) if sid else None
+            if t is None or t["state"] != S.COMPLETE:
+                continue
+            owner = ""
+            if callable(owner_fn):
+                try:
+                    owner = str(owner_fn(sid) or "")
+                except Exception:                                 # noqa: BLE001
+                    owner = ""
+            if owner:
+                owed[sid] = owner
+                continue
+            rows = "; ".join(str(x) for x in (r.get("failures") or [])[:12]) or r.get("result")
+            assignment = (
+                f"Lead repair (track {name} merge): {sid}'s code is already on the main branch, "
+                f"but the merge's scripted Studio gate was {r.get('result')} for it at "
+                f"{str(r.get('head') or '')[:12]}: {rows}. Read the gate's lines file and "
+                f"evidence log for the failing rows, find why each one fails in Studio (a check "
+                f"that never set up what it tests, e.g. a feature flag the plan says is on in "
+                f"the test only, or a code bug), fix it within the sprint's file list, request "
+                f"the scripted Studio gate, and report DONE when it is green. Do not weaken an "
+                f"assertion or pin a red baseline to make a row pass.")
+            deps = [d for d in out if d in self._plan_deps(P, sid)]
+            try:
+                self.c.repair_reopen(P.id, sid, deps, "lead_manager",
+                                     f"track {name} merge Studio batch", assignment)
+            except Exception as e:                                # noqa: BLE001
+                self.store.event(P.id, sid, "warning", detail={
+                    "merge_repair": f"{type(e).__name__}: {e}"[:300], "track": name})
+                continue
+            out.append(sid)
+        self.store.event(P.id, "", "track_studio_repair", detail={
+            "track": name, "reopened": out, "owed": owed})
+        return out
+
+    def _plan_deps(self, P, sid: str) -> list:
+        try:
+            return list(P.adapter.describe(sid).deps or [])
+        except Exception:                                         # noqa: BLE001
+            return []
 
     # ------------------------------------------------------------------ background / retries
 
@@ -994,11 +1054,33 @@ class MergeManager:
             return
         cleared = self._clear_runner_lock(P, run)
         delay = GATE_RETRY_BACKOFF_S * (2 ** n)
+        reloaded = ""
+        if "live=missing" in why and "UNRESOLVED" in why:
+            # 2026-10-30 track pt: the merge added PT_1_check.lua and its mount; the running
+            # Rojo never re-reads its project file, so Studio lacked it and both retries
+            # failed the same way. Restart Rojo, reopen the place, then retry.
+            reloaded = self._reload_studio(P, row)
+            delay = max(delay, ROJO_RELOAD_WAIT_S)
         self._set(P, row, merge_stage=stage, merge_bg=None, gate_retries=n + 1,
                   gate_retry_at=self.clock() + delay, gate_last_fault=why[:400])
         self.store.event(P.id, "", "track_gate_retry", detail={
             "track": row["name"], "retry": n + 1, "of": GATE_TOOLING_RETRIES,
-            "in_s": delay, "why": why[:400], "runner_lock_cleared": cleared})
+            "in_s": delay, "why": why[:400], "runner_lock_cleared": cleared,
+            "studio_reload": reloaded})
+
+    def _reload_studio(self, P, row: dict) -> str:
+        """Restart Rojo and ask the client to reopen the TEST place ('' on success, else
+        why not). Never raises."""
+        try:
+            from .. import client_api
+            why = client_api.restart_component("rojo")
+            if why:
+                return f"rojo restart: {why}"
+            sprints = list(row.get("sprints") or [])
+            job = client_api.studio_reopen(sprints[0] if sprints else row["name"])
+            return "" if job and job.get("job") else "studio reopen: no job"
+        except Exception as e:                                    # noqa: BLE001
+            return f"{type(e).__name__}: {e}"[:200]
 
     def _clear_runner_lock(self, P, run: Optional[dict]) -> bool:
         """Remove the studio_gate runner lock (<main>/.plan/tmp/gate/runner.lock) when

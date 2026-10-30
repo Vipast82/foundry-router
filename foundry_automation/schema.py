@@ -295,6 +295,9 @@ AUTOMATION_DEFAULTS: dict = {
     "merge_studio_batch_max_minutes": 0,
     # 2026-10-30: a merge waiting this long for Studio goes before pending main sprints
     "merge_studio_priority_minutes": 20,
+    # 2026-10-30: a red merge Studio batch reopens each red sprint on the main checkout as
+    # a Lead repair ([lead_manager] on); off = the track only fails (the old behaviour)
+    "merge_red_repair": True,
     "track_append_safe": ["docs/progress/STATE.md", "docs/progress/state/**",
                           "docs/progress/STATE_ARCHIVE*.md", "docs/MASTER_ORDER.md",
                           "docs/design/ASSET_LEDGER.md", "docs/memory/**",
@@ -848,6 +851,8 @@ _AUTO_DESC = {
                                       "batch). Never interrupted mid-run; an overrun is noted.",
     "merge_studio_priority_minutes": "A track merge that has waited this many minutes for "
                                      "Studio goes before pending main-checkout sprints.",
+    "merge_red_repair": "When a track merge's Studio check is red, the Lead reopens each red "
+                        "sprint on the main checkout with the failing rows as its assignment.",
     "track_append_safe": "Shared files two sprints may both change without being serial "
                          "(append-only ledgers the rebase merges row by row).",
     "self_heal": "Self-repair sweep (every minute): ends dead sessions, cancels stuck Lead "

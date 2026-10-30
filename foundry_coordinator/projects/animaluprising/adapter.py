@@ -429,6 +429,21 @@ class AnimalUprisingAdapter(GenericAdapter):
                     return True
         return False
 
+    _VERIFIED_INSIDE = re.compile(r"verified inside \*{0,2}([A-Z][A-Za-z0-9.-]*[0-9][A-Za-z0-9]*)",
+                                  re.I)
+
+    def verification_owner(self, task_id: str) -> str:
+        """The sprint that verifies `task_id` instead of its own run ('' = none): the plan's
+        "Verification moved ... verified inside **MV2-V1**" banner (owner 2026-10-23). A red
+        merge check for such a sprint is owed to that sprint, not repaired on its own."""
+        try:
+            text = self._read(f"docs/progress/{task_id}_PLAN.md")
+        except OSError:
+            return ""
+        head = "\n".join(text.splitlines()[:12])
+        m = self._VERIFIED_INSIDE.search(head)
+        return m.group(1) if m and m.group(1) != task_id else ""
+
     # -- prompts ---------------------------------------------------------------------
 
     # 2026-10-27 rules streamline: the session core is one Kilo-native file in the AU

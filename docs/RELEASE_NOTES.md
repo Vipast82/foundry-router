@@ -2,6 +2,24 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.157.89 — the Lead repairs a red merge on the main checkout
+
+2026-10-30 13:21-13:30: track rt's merge Studio batch was red for GF-RT1..3 (their checks never
+switched the retention flags on in the test, as MASTER_ORDER R4 says), mv2-2's was red for
+MV2-7..10, and pt stopped twice on Studio missing its new PT_1_check.lua. The merge had already
+fast-forwarded master, so the code was there; the tracks just failed and nothing fixed them.
+
+- **Lead repair (`merge_red_repair`, default on, Automation UI):** a red merge Studio batch
+  reopens each red sprint on the main checkout (`engine.repair_reopen`: COMPLETE -> QUEUED with
+  `repair_of` evidence, fresh attempts, deps on earlier repaired sprints it depends on). The
+  failing rows ride as a Lead assignment; the sprint then runs the normal BUILD -> Studio gate
+  -> review -> close. Event `track_studio_repair`.
+- **Owed elsewhere:** a sprint whose plan says it is "verified inside **X**" (AU adapter
+  `verification_owner`; MV2-7..10 -> MV2-V1) is not reopened; the event lists it as owed.
+- **States:** (COMPLETE, QUEUED) is allowed only with `repair_of` evidence.
+- **Merge tooling retry:** a Studio-missing-files fault (`UNRESOLVED ... live=missing`)
+  restarts Rojo and reopens the TEST place before the retry (waits 120 s).
+
 ## v0.157.88 — merges get Studio; an automatic gate ERROR never loops
 
 2026-10-30 11:41-12:50: five finished tracks (mv2-2, rt, shop1, ux, pt) waited to merge on

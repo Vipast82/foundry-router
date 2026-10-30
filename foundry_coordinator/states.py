@@ -94,6 +94,9 @@ TRANSITIONS: dict[tuple[str, str], object] = {
     # an operator (or the launch assistant on the operator's confirmation) reopens a
     # cancelled task so it can be queued again; its history stays (2026-10-21)
     (CANCELLED, QUEUED): ("reopened_by", "reason"),
+    # 2026-10-30: a track merge's Studio batch was red for sprints already on master; the
+    # Lead reopens each one on the main checkout as a repair (engine.repair_reopen)
+    (COMPLETE, QUEUED): ("repair_of", "reason"),
 }
 
 # Operator controls, allowed from any state that isn't terminal.
@@ -120,7 +123,8 @@ def required_evidence(frm: str, to: str):
 
 def check(frm: str, to: str, evidence: dict) -> None:
     """Raise TransitionError unless the transition is allowed with this evidence."""
-    if frm in TERMINAL and (frm, to) != (CANCELLED, QUEUED):   # an operator reopen
+    if frm in TERMINAL and (frm, to) not in ((CANCELLED, QUEUED),    # an operator reopen
+                                             (COMPLETE, QUEUED)):    # a Lead repair reopen
         raise TransitionError(f"{frm} is final")
     need = required_evidence(frm, to)
     options = need if isinstance(need, list) else [need]

@@ -285,3 +285,64 @@ def test_studio_owned_merge_checks_wait_for_the_batch():
         assert _studio_owned(c), c
     for c in ("au.done_check.SCOPE", "au.lune", "au.done_check.CLEAN", "coordinator.scope"):
         assert not _studio_owned(c), c
+
+
+def test_a_red_merge_is_repaired_by_the_lead_on_the_main_checkout(env):
+    """2026-10-30 (Victor: "Build Lead repair"): track rt's merge Studio batch was red for
+    GF-RT1..3, already on master; the track failed and nothing fixed them."""
+    c, P, clock, root, pf = env([{"result": "FAIL"}, {"result": "PASS"}], with_suites=("B2",))
+    from types import SimpleNamespace as _NS
+    c.lead = c.lead or _NS(enabled=lambda P_: True)
+    if hasattr(c.lead, "settings"):
+        c.lead.enabled = lambda P_: True
+    build_track(c, P)
+    drive(c, clock, lambda: track(c)["state"] == "failed")
+    why = track(c)["data"]["failed"]["why"]
+    assert "Lead repair on main: B2" in why
+    b2 = c.store.task("game", "B2")
+    assert b2["state"] in (S.QUEUED, S.READY, S.IMPLEMENTING, S.BLOCKED)
+    assert b2["data"]["repair"]["of"].startswith("track ")
+    la = b2["data"]["lead_assignment"]
+    assert la["via"] == "merge_repair" and "row S46 FAIL" in la["assignment"]
+    assert not c.store.task_track("game", "B2")                    # on the main checkout
+    assert c.store.task("game", "B1")["state"] == S.COMPLETE        # green ones stay done
+    ev = detail(events(c, "track_studio_repair")[0]["detail"])
+    assert ev["reopened"] == ["B2"] and ev["owed"] == {}
+    hist = [h for h in c.store.history("game", "B2") if h["to_state"] == S.QUEUED]
+    assert hist and "repair_of" in json.dumps(hist[-1])
+
+
+def test_a_red_sprint_verified_elsewhere_is_owed_not_reopened(env):
+    """MV2-7..10's plans say 'verified inside MV2-V1': their red rows belong to MV2-V1."""
+    c, P, clock, root, pf = env([{"result": "FAIL"}, {"result": "PASS"}], with_suites=("B2",))
+    from types import SimpleNamespace as _NS
+    c.lead = c.lead or _NS(enabled=lambda P_: True)
+    if hasattr(c.lead, "settings"):
+        c.lead.enabled = lambda P_: True
+    P.adapter.verification_owner = lambda s: "V1" if s == "B2" else ""
+    build_track(c, P)
+    drive(c, clock, lambda: track(c)["state"] == "failed")
+    assert c.store.task("game", "B2")["state"] == S.COMPLETE
+    ev = detail(events(c, "track_studio_repair")[0]["detail"])
+    assert ev["reopened"] == [] and ev["owed"] == {"B2": "V1"}
+
+
+def test_a_merge_missing_new_files_in_studio_reloads_rojo_before_retrying(env, monkeypatch):
+    """2026-10-30 track pt: the merge added PT_1_check.lua + its mount; Rojo never re-read the
+    project file and both retries failed the same way."""
+    from foundry_coordinator import client_api
+    calls = []
+    monkeypatch.setattr(client_api, "restart_component", lambda n: calls.append(("restart", n)) or "")
+    monkeypatch.setattr(client_api, "studio_reopen",
+                        lambda task, **k: calls.append(("reopen", task)) or {"job": "sr-1"})
+    c, P, clock, root, pf = env([{"result": "PASS"}])
+    build_track(c, P)
+    row = track(c)
+    c.tracks.merger._tooling_fault(P, row, "merge Studio batch: B1 tooling error: PRE-PLAY "
+                                          "verify: UNRESOLVED tests/X_check.lua live=missing")
+    assert calls == [("restart", "rojo"), ("reopen", "B1")]
+    ev = detail(events(c, "track_gate_retry")[-1]["detail"])
+    assert ev["studio_reload"] == "" and ev["in_s"] >= 120
+    calls.clear()
+    c.tracks.merger._tooling_fault(P, track(c), "merge gate: runner lock held")
+    assert calls == []

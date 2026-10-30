@@ -244,6 +244,38 @@ class Coordinator:
             entry = self.store.approve(project_id, task_id, deps, approver, reason, track=track)
         return entry
 
+    def repair_reopen(self, project_id: str, task_id: str, deps: list[str], actor: str,
+                      repair_of: str, assignment: str) -> dict:
+        """Put a COMPLETE sprint back on the main queue to repair what a later check found
+        (2026-10-30: track rt's merge Studio batch was red for GF-RT1..3, whose code was
+        already on master). Fresh attempts; the assignment rides as a Lead assignment so the
+        first session starts from the failing rows."""
+        t = self.store.task(project_id, task_id)
+        if t is None or t["state"] != S.COMPLETE:
+            raise ValueError(f"{project_id}/{task_id} is not COMPLETE")
+        deps = [d for d in deps if d != task_id and self.store.task(project_id, d)]
+        keep = {k: v for k, v in (t.get("data") or {}).items()
+                if k in ("baseline_dirty", "task_base")}
+        keep["repair"] = {"of": repair_of, "by": actor, "ts": self.clock()}
+        keep["lead_assignment"] = {
+            "case_id": f"repair:{repair_of}"[:120], "assignment": assignment[:4000],
+            "files": [], "tests": [], "extra_attempts": 0, "authorized": [],
+            "via": "merge_repair"}
+        with self.store.tx():
+            self.store.transition(project_id, task_id, S.QUEUED,
+                                  {"repair_of": repair_of, "reason": assignment[:300]},
+                                  actor=actor)
+            self.store.update_task(project_id, task_id, attempt=0, sessions=0, run_id=None,
+                                   session_id=None, phase=None, base_sha=None, head_sha=None,
+                                   reviewed_sha=None, review_id=None, verification_id=None,
+                                   closeout_id=None, next_action=None, started_ts=None,
+                                   data=keep)
+            entry = self.store.approve(project_id, task_id, deps, actor,
+                                       f"repair: {repair_of}"[:200], track="")
+            self.store.event(project_id, task_id, "repair_reopened", detail={
+                "repair_of": repair_of, "deps": deps, "actor": actor})
+        return entry
+
     def move(self, project_id: str, task_id: str, position: int, actor: str) -> list[dict]:
         """Move a queued row to a 1-based position (queue order = priority).
         Presentation of the queue only; no task changes state."""
