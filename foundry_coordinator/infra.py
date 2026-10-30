@@ -30,6 +30,7 @@ from urllib.parse import urlparse
 from .automation import get as auto_get
 
 MAX_BACKOFF = 900
+LOCAL_FALLBACK_S = 3600          # a frontier persona seen serving on the local model
 CACHE_SECONDS = 30.0
 
 
@@ -178,6 +179,13 @@ def session_failure(c, P, t: dict, why: str, free: bool) -> bool:
     n = int(data.get("infra_failures") or 0) + 1
     lim = int(auto_get(P, "infra_retry_max") or 0)
     c.store.merge_data(P.id, t["task_id"], infra_failures=n)
+    if sig == "local_busy":
+        # 2026-10-30: Claude weekly 100% + ChatGPT at its cap -> GF-LOOP1 and MV2-9 fell to the
+        # local model held by AS-D14 and failed a session every few minutes. The persona is
+        # serving locally now: queue for `gpu` like a local sprint (engine._session_locks).
+        c.store.merge_data(P.id, t["task_id"], local_fallback_until=c.clock() + LOCAL_FALLBACK_S)
+        c.store.event(P.id, t["task_id"], "local_fallback_gpu", detail={
+            "until": c.clock() + LOCAL_FALLBACK_S, "why": why[:200]})
     _schedule(c, P, t, why, "session")
     if sig and lim and n > lim:
         c.store.event(P.id, t["task_id"], "infra_retry_exhausted", detail={

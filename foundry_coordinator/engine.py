@@ -6885,6 +6885,13 @@ class Coordinator:
             from .fast_lane import is_local_primary
             if is_local_primary(P, t["task_id"]):
                 out.append("gpu")
+            else:
+                # infra.session_failure: the frontier persona fell back to the local model
+                # (quota) and found it busy: wait for `gpu` instead of failing sessions
+                cur = self.store.task(P.id, t["task_id"]) or t
+                until = float(((cur.get("data") or {}).get("local_fallback_until")) or 0)
+                if until > self.clock():
+                    out.append("gpu")
         return out
 
     def _acquire(self, P: Project, t: dict, resources: list[str],

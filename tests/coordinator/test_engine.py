@@ -1005,6 +1005,32 @@ def test_a_local_model_sprint_takes_the_gpu_lock(game):
     assert "gpu" not in c._session_locks(P)
 
 
+def test_a_frontier_sprint_that_fell_to_a_busy_local_model_waits_for_the_gpu(game):
+    """2026-10-30: Claude weekly 100% + ChatGPT capped: GF-LOOP1 and MV2-9 fell to the
+    local model AS-D14 held and failed a session every few minutes."""
+    from foundry_coordinator import infra
+    tmp, root, _, prof = game
+    c = coordinator(tmp, [prof], {"game": write_ok("src/a.txt")})
+    c.approve("game", "T1", [], "victor")
+    P = c.projects["game"]
+    t = c.store.task("game", "T1")
+    import foundry_coordinator.fast_lane as FL
+    orig = FL.is_local_primary
+    try:
+        FL.is_local_primary = lambda P, tid: False
+        assert "gpu" not in c._session_locks(P, t)
+        msg = ("session ended with an error: backend 'strata' serves the main stream only "
+               "and 1 session(s) are active (Foundry-Kilo-Local). Free in about 48s")
+        assert infra.session_failure(c, P, t, msg, False) is True
+        assert "gpu" in c._session_locks(P, c.store.task("game", "T1"))
+        c.store.merge_data("game", "T1", local_fallback_until=c.clock() - 1)   # expired
+        assert "gpu" not in c._session_locks(P, c.store.task("game", "T1"))
+        infra.session_failure(c, P, t, "session ended with an error: socket hang up", False)
+        assert "gpu" not in c._session_locks(P, c.store.task("game", "T1"))
+    finally:
+        FL.is_local_primary = orig
+
+
 def test_a_busy_local_server_is_an_infra_failure():
     from foundry_coordinator.autoheal import infra_signature
     msg = ("session ended with an error: backend 'strata' serves the main stream only and 1 "

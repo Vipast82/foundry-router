@@ -2,6 +2,17 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.157.78 — a frontier sprint that fell to the busy local model waits for the GPU
+
+2026-10-30 00:51-01:16: Claude's weekly window hit 100% and ChatGPT sat at its 95% cap, so the
+Implementer persona fell through to the local model. AS-D14 (assets-2) held it; GF-LOOP1 and
+MV2-9 started a session every few minutes and each one failed with "serves the main stream only".
+
+- **Local fallback:** a session failure with the local_busy signature sets the task's
+  local_fallback_until (1 hour, renewed by each such failure; event local_fallback_gpu). While it
+  is set, the task's session locks include `gpu`, so it queues behind the local sprint (main
+  track first) instead of starting sessions that fail.
+
 ## v0.157.77 — a suite's freshness ignores other sprints' check files
 
 2026-10-30 00:42-00:48: after v0.157.76, GF-LOOP1 ran all 7 rows green at 9bb5ae07, then edited
