@@ -1036,3 +1036,15 @@ def test_a_busy_local_server_is_an_infra_failure():
     msg = ("session ended with an error: backend 'strata' serves the main stream only and 1 "
            "session(s) are active (Foundry-Kilo-Local). Free in about 48s")
     assert infra_signature(msg) == "local_busy"
+
+
+def test_a_png_frame_rule_also_takes_jpg_frames():
+    """2026-10-30 GF-LOOP1: the plan's frame was a .jpg; the visual rule listed *.png only,
+    so the closed, published sprint was sent back ("no required visual frames")."""
+    from foundry_coordinator.profile import _frame_globs, matches_any
+    g = _frame_globs(["docs/evidence/{task}/*.png", "art/x.png"])
+    assert g[:2] == ["docs/evidence/{task}/*.png", "art/x.png"]
+    assert "docs/evidence/{task}/*.jpg" in g and "docs/evidence/{task}/*.jpeg" in g
+    assert matches_any("docs/evidence/T1/a.jpg", [p.replace("{task}", "T1") for p in g])
+    assert _frame_globs(["docs/evidence/{task}/*.png", "docs/evidence/{task}/*.jpg"]).count(
+        "docs/evidence/{task}/*.jpg") == 1

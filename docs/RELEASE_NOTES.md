@@ -2,6 +2,16 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.157.80 — visual approval reads .jpg frames
+
+2026-10-30 02:15: GF-LOOP1 closed and published (gate, review, closeout all passed), then the
+visual approval found "the plan names no required visual frames" and sent it back to
+CHANGES_REQUIRED: its frame is results_nextmatch_desktop.jpg and the AU visual rule listed
+docs/evidence/{task}/*.png only.
+
+- **Approval frames:** an approval rule's `*.png` artifact glob also matches `*.jpg` and
+  `*.jpeg` (profile load). The AU example profile lists all three.
+
 ## v0.157.79 — a SUPERSEDED/CANCELLED ledger row counts as done
 
 2026-10-30 01:28: track analysis proposed S51B and it was started; it had been rescoped and

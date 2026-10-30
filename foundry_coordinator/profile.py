@@ -225,6 +225,20 @@ def matches_any(path: str, patterns: list[str]) -> bool:
     return False
 
 
+def _frame_globs(globs: list) -> list:
+    """An approval rule's frame globs: a `*.png` glob also takes `*.jpg`/`*.jpeg` (2026-10-30
+    GF-LOOP1: its plan's frame was results_nextmatch_desktop.jpg; the visual approval found
+    "no required visual frames" and sent a closed, published sprint back)."""
+    out = [str(g) for g in globs]
+    for g in list(out):
+        if g.lower().endswith("*.png"):
+            for ext in (".jpg", ".jpeg"):
+                alt = g[:-4] + ext
+                if alt not in out:
+                    out.append(alt)
+    return out
+
+
 def load(path: str) -> Profile:
     path = os.path.abspath(path)
     try:
@@ -297,7 +311,7 @@ def from_raw(raw: dict, path: str, digest: str = "") -> Profile:
             raise ProfileError(f"{path}: approval stage must be before_close or after_close")
         rules.append(ApprovalRule(match=str(r["match"]), kind=str(r["kind"]),
                                   stage=r.get("stage", "after_close"),
-                                  artifacts=list(r.get("artifacts") or [])))
+                                  artifacts=_frame_globs(list(r.get("artifacts") or []))))
     tasks = dict(raw.get("tasks") or {})
     adapter = str((raw.get("adapter") or {}).get("module") or "")
     if not adapter and tasks.get("source") not in ("json", "toml"):

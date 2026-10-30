@@ -126,7 +126,7 @@ enabled = true
 match = "visual"
 kind = "visual"
 stage = "after_close"
-artifacts = ["docs/evidence/{task}/*.png"]
+artifacts = ["docs/evidence/{task}/*.png", "docs/evidence/{task}/*.jpg", "docs/evidence/{task}/*.jpeg"]
 
 [publish]
 # 2026-10-27 (Victor): the coordinator pushes master after closeout verification,
