@@ -193,6 +193,28 @@ def test_a_red_merge_gate_fails_the_track_with_findings(tmp_path):
     assert row["state"] == "merging" and row["data"]["merge_stage"] == "wait"
 
 
+def test_a_retried_merge_re_runs_the_gate_on_the_files_it_brought(tmp_path):
+    """2026-10-29 mv2-1: re-requested after a red check, the merge found its commits already
+    on master (0 new files) and passed "no code files" without re-checking anything."""
+    c, P, clock, root = env(tmp_path)
+    c.tracks.create(P, "blender", ["B1"])
+    c.tracks.start(P, "blender", "victor")
+    os.makedirs(os.path.join(root, "src"), exist_ok=True)
+    with open(os.path.join(root, "src", "a.txt"), "w") as f:
+        f.write("not ok at all")
+    git(root, "add", "src/a.txt")
+    git(root, "commit", "-q", "-m", "T1: a bad file on master")
+    assert run_until(c, lambda: c.store.task("game", "B1")["state"] == S.COMPLETE, limit=80)
+    assert run_until(c, lambda: c.store.track("game", "blender")["state"] == "failed", limit=6)
+    first = c.store.track("game", "blender")["data"]["merged_files"]
+    assert first
+    c.tracks.merger.request(P, "blender", "victor")      # nothing fixed: it must fail again
+    assert run_until(c, lambda: c.store.track("game", "blender")["state"] in ("failed", "merged"),
+                     limit=10)
+    row = c.store.track("game", "blender")
+    assert row["state"] == "failed" and row["data"]["merged_files"] == first
+
+
 def test_merge_request_before_the_sprints_finish_is_refused_and_after_is_honored(tmp_path):
     c, P, clock, root = env(tmp_path)
     c.tracks.create(P, "blender", ["B1"])

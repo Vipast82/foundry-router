@@ -2,6 +2,16 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.157.75 — a retried merge re-checks the files it brought
+
+2026-10-29 23:11-23:18: track mv2-1's merge Studio batch was red (MV2_1..6 rows, S49, S50). Its
+commits were already on master (fast-forwarded at 22:16); the merge was re-requested, the second
+fast-forward found 0 commits, and the gate passed "no code files" and marked the track merged
+without re-running anything.
+
+- **Merge retry:** when a retry fast-forwards nothing, the merge keeps the first merge's files,
+  commits and base, so the gate and the Studio batch run on them again.
+
 ## v0.157.74 — files missing in Studio restart Rojo, then reopen the place
 
 2026-10-29 22:16: the mv2-1 track merge added eight check files and their mounts to

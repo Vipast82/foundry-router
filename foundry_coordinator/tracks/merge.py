@@ -476,6 +476,15 @@ class MergeManager:
         except Exception:                                         # noqa: BLE001
             files, shas = [], []
         self._exempt_for_main(P, shas)
+        prev = row.get("data") or {}
+        if not shas and prev.get("merged_files"):
+            # 2026-10-29 mv2-1: a merge re-requested after a red Studio batch found its commits
+            # already on master (fast-forwarded the first time), saw 0 files, and the gate
+            # passed "no code files" without re-running the batch. A retry checks the files
+            # the first merge brought in.
+            files = list(prev.get("merged_files") or [])
+            shas = list(prev.get("merged_commits") or [])
+            pre = prev.get("merge_base") or pre
         self._set(P, row, merge_stage="gate", merge_base=pre, merge_head=post,
                   merged_files=files[:400], merged_commits=shas[:200])
         self.store.event(P.id, "", "track_fast_forwarded", detail={
