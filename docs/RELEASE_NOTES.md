@@ -2,6 +2,15 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.157.68 — the main track gets the GPU first
+
+2026-10-29 19:48: AS-R5 (main track, local model, between sessions) waited for `gpu` held by the
+assets-2 track's AS-D11. As a started main sprint it kept the main checkout, so AS-REG1 and
+GF-LOOP1 (Claude/ChatGPT) could not start either: the main track sat idle.
+
+- **GPU priority:** a track sprint does not take `gpu` while a main-checkout sprint is waiting for
+  it; the track sprint waits ("main sprint X goes first") and takes it after.
+
 ## v0.157.67 — a RETIRED plan never runs
 
 2026-10-29 19:30: GF-FX4 was proposed by track analysis and started on track frontier-3, but its

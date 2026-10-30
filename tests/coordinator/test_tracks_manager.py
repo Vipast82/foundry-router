@@ -286,3 +286,19 @@ def test_a_sprint_cancelled_before_it_started_leaves_the_track(tmp_path):
     assert row["state"] == "running" and row["sprints"] == ["B1"]
     assert tracks_events(c, "track_sprints_dropped")[0]["detail"]["sprints"] == ["B2"]
     assert not tracks_events(c, "track_failed")
+
+
+def test_a_main_sprint_waiting_for_the_gpu_goes_first(tmp_path):
+    """2026-10-29: AS-R5 (main, local) waited for `gpu` held by the assets-2 track; the main
+    checkout sat idle. A track sprint does not take the GPU while a main sprint waits for it."""
+    c, P, _ = env(tmp_path, extra="\n[automation]\nmax_agents = 3\n".replace("\n", "\n"))
+    c.tracks.create(P, "blender", ["B1"], actor="victor")
+    c.tracks.start(P, "blender", "victor")
+    c.approve("game", "T1", [], "victor")
+    b1 = c.store.task("game", "B1")
+    TP = c.tracks.project_for(P, b1)
+    c.store.update_task("game", "T1", next_action="waiting for gpu (held by game/B1)")
+    got = c._acquire(TP, b1, ["gpu"])
+    assert got and got["task_id"] == "T1" and "gpu" not in c.store.holds("game", "B1")
+    c.store.update_task("game", "T1", next_action="implement session working")
+    assert c._acquire(TP, b1, ["gpu"]) is None and "gpu" in c.store.holds("game", "B1")

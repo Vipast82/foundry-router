@@ -6827,6 +6827,18 @@ class Coordinator:
         what it is waiting for (and keeps nothing it newly took)."""
         pid, tid = P.id, t["task_id"]
         before = set(self.store.holds(pid, tid))
+        if "gpu" in resources and "gpu" not in before and self.tracks.is_track(P):
+            # 2026-10-29: AS-R5 (main, local, mid-sprint) waited for `gpu` held by the
+            # assets-2 track; the main checkout sat idle and its Claude/ChatGPT sprints could
+            # not start behind it. The main track is the bottleneck: it gets the GPU first.
+            waiting = self.store.q(
+                "SELECT task_id FROM tasks WHERE project_id=? AND next_action LIKE "
+                "'waiting for gpu%' AND task_id != ?", (pid, tid))
+            main_wait = [r["task_id"] for r in waiting
+                         if not self.store.task_track(pid, r["task_id"])]
+            if main_wait:
+                self._note(P, t, f"waiting for gpu (main sprint {main_wait[0]} goes first)")
+                return {"resource": "gpu", "project_id": pid, "task_id": main_wait[0]}
         held = self.store.acquire(resources, pid, tid)
         if held:
             self._note(P, t, f"waiting for {held['resource']} (held by "
