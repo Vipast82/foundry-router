@@ -676,7 +676,15 @@ class Obligations:
             rec = current.get(ref)
             at = (revision or "")[:12]
             if not isinstance(rec, dict) or ref in missing_ids:
-                return False, f"check {ref}: no fresh verified record at {at}"
+                why = f"check {ref}: no fresh verified record at {at}"
+                if ref.startswith("capture:"):
+                    # 2026-10-30 GF-LOOP1: the session re-took the frame with a window grab
+                    # every attempt; that has no runtime identity and never counts
+                    why += (f" (only a frame the Studio gate takes counts: the check's CALL "
+                            f"prints `CAPTURE_READY {ref[len('capture:'):]} runtime=playtest` "
+                            f"while the scene is staged, then request the gate; a "
+                            f"capture-window.ps1 grab has no runtime identity)")
+                return False, why
             # the record's phase is its session's phase (EvidenceLedger.current sets it)
             if ob["phase"] == "BUILD" and \
                     str(rec.get("phase") or "").upper() in ("CLOSE", "CLOSEOUT"):

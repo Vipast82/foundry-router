@@ -1411,7 +1411,8 @@ class Gate:
         no Studio chrome) to <path> (only under docs/evidence/<sprint>/, .png) and log
         `CAPTURE <path> runtime=...` + `PASS:`/`FAIL: CAPTURE ...` in the lines file and the
         run's capture log (never in the suite's own text: its PASS count is the tally's)."""
-        for m in re.finditer(r"^CAPTURE_READY\s+(\S+\.png)\b(.*)$", text, re.M):
+        # 2026-10-30 GF-LOOP1: plans also name .jpg frames; the PNG is converted (Pillow)
+        for m in re.finditer(r"^CAPTURE_READY\s+(\S+\.(?:png|jpe?g))\b(.*)$", text, re.M | re.I):
             relp, rest = m.group(1).replace("\\", "/"), m.group(2).strip()
             out = []
             want = f"docs/evidence/{self.sprint}/"
@@ -1432,11 +1433,25 @@ class Gate:
                 if png is None:
                     out.append(f"FAIL: CAPTURE {relp} - no PNG from capture_screenshot: {why}")
                 else:
-                    os.makedirs(os.path.dirname(path), exist_ok=True)
-                    with open(path, "wb") as f:
-                        f.write(png)
                     got = png_size(png)
                     size = f"{got[0]}x{got[1]}" if got else "?"
+                    data, why = png, ""
+                    if not relp.lower().endswith(".png"):
+                        try:
+                            import io
+                            from PIL import Image
+                            buf = io.BytesIO()
+                            Image.open(io.BytesIO(png)).convert("RGB").save(buf, "JPEG",
+                                                                            quality=92)
+                            data = buf.getvalue()
+                        except Exception as e:                    # noqa: BLE001
+                            data, why = None, f"{type(e).__name__}: {e}"[:200]
+                if png is not None and data is None:
+                    out.append(f"FAIL: CAPTURE {relp} - JPEG conversion failed: {why}")
+                elif png is not None:
+                    os.makedirs(os.path.dirname(path), exist_ok=True)
+                    with open(path, "wb") as f:
+                        f.write(data)
                     out.append(f"CAPTURE {relp} {rest}".strip())
                     out.append(f"PASS: CAPTURE {relp} {size} written by the runner at CAPTURE_READY")
             self.capture_log.extend(out)

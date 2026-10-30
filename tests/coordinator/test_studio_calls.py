@@ -109,6 +109,11 @@ FAKE_PIPELINE = textwrap.dedent('''\
          "evidence": {"verify_pre": "\\n".join(lines[3:5]), "boot": "\\n".join(lines[6:8] + lines[9:11]),
                       "tally": "\\n".join(tally)},
          "raw_results": {"4": "CAPTURE docs/evidence/T1/frame.png runtime=playtest place=1\\nPASS: A10"},
+         "checks": [{"id": "regression.S51", "result": "PASS", "detail": "SUITE S51 pass=2"},
+                    {"id": "regression.S07", "result": "PASS",
+                     "detail": "CARRIED from 4339f18e61af (no file it covers changed): SUITE S07"},
+                    {"id": "regression.S09", "result": "FAIL", "detail": "CARRIED from x: no"},
+                    {"id": "regression.verdict", "result": "PASS", "detail": "CARRIED from x"}],
          "summary": [f"GATE {sprint} scripted Studio half {res}"]}
     json.dump(v, open(os.path.join(gd, head[:12] + ".calls.json"), "w"))
     save(phase="done", result=res, stage="done", finish_line=f"GATE {sprint} {res}")
@@ -426,6 +431,15 @@ def test_records_are_verified_with_runtime_identity_and_provenance(env, tmp_path
     rt = e.c.ledger.runtime("game", recs["suite:S51"]["runtime_id"])
     assert rt and rt["loaded_fp"]                                  # PRE-PLAY verify fingerprint
     assert recs["gate:T1"]["source_revision"] == sc(e)["last"]["head"]
+    # a suite the runner CARRIED is recorded at this run's HEAD and runtime (GF-LOOP1:
+    # carried suites had no record and the submission refused them every attempt)
+    car = recs["suite:S07"]
+    assert car["result"] == "PASS" and car["tier"] == "verified"
+    assert car["provenance"]["section"] == "carried"
+    assert car["source_revision"] == sc(e)["last"]["head"]
+    assert car["runtime_id"] == recs["suite:S51"]["runtime_id"]
+    assert recs["suite:S51"]["provenance"]["section"] == "tally"      # ran: not re-recorded
+    assert "suite:S09" not in recs and "suite:verdict" not in recs
 
 
 # ---------------------------------------------------------------- CLI (no session)

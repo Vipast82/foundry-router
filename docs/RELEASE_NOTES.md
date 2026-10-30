@@ -2,6 +2,22 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.157.76 — carried Studio passes reach the ledger; gate captures may be .jpg
+
+2026-10-29 23:5x-00:12: GF-LOOP1 used all 6 attempts. Every Studio gate passed (its own suite
+fresh, 6 regression suites carried because no file they cover changed), but the runner wrote
+ledger records only for the suites it ran. The ledger staled the older S06/S07/S27/S28/S32/S50
+records (any tests/** change) and the submission refused them every attempt. The plan's
+results_nextmatch_desktop.jpg was re-taken with a window grab each time, which has no runtime
+identity and never counts; CAPTURE_READY accepted only .png.
+
+- **Carried suites:** a regression suite the runner marks CARRIED gets a verified record at the
+  run's HEAD and runtime (provenance section "carried").
+- **CAPTURE_READY .jpg/.jpeg:** the runner converts the screenshot (Pillow); the run's commit,
+  the gate binding and the evidence check treat docs/evidence/<ID>/*.jpg like *.png.
+- **Missing capture reason:** the refusal says only a gate-taken frame counts and names the
+  CAPTURE_READY line to print.
+
 ## v0.157.75 — a retried merge re-checks the files it brought
 
 2026-10-29 23:11-23:18: track mv2-1's merge Studio batch was red (MV2_1..6 rows, S49, S50). Its

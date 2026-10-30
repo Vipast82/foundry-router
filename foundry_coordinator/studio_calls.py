@@ -67,7 +67,8 @@ PATH_RE = re.compile(r"[A-Za-z0-9_./\-]+")
 DEFAULT_FILES = ["tests/RegressionIndex.lua", "tests/GateRunner.lua"]
 # 2026-10-29 AS-P5: the frames a PASS run commits (v0.157.50) are its own outputs too;
 # without them each outputs commit made the gate look stale -> ~60 PASS runs in 35 min
-EXEMPT = ("docs/progress/{task}_*", "docs/memory/**", "docs/evidence/{task}/*.png")
+EXEMPT = ("docs/progress/{task}_*", "docs/memory/**", "docs/evidence/{task}/*.png",
+          "docs/evidence/{task}/*.jpg", "docs/evidence/{task}/*.jpeg")
 _NO_WINDOW = 0x08000000 if os.name == "nt" else 0
 
 
@@ -808,6 +809,32 @@ class StudioCalls:
                         provenance={**prov, "section": name, "lines": list(it.get("lines") or [])[:10]},
                         output=text[:60000])
                     n[0] += int(bool(created))
+            # 2026-10-30 GF-LOOP1: a regression suite the runner CARRIED (no file it covers
+            # changed since its pass) is not in the tally, so it got no record; the ledger
+            # (tests/** deps) then staled the older one and the submission refused 6 passed
+            # suites every attempt until the budget ran out. The runner's carry is the proof:
+            # record it at this run's HEAD and runtime.
+            for c in v.get("checks") or []:
+                if not isinstance(c, dict):
+                    continue
+                m = re.fullmatch(r"regression\.([A-Za-z0-9_]+)", str(c.get("id") or ""))
+                det = str(c.get("detail") or "")
+                if not m or str(c.get("result") or "").upper() != "PASS" \
+                        or not det.startswith("CARRIED from ") \
+                        or m.group(1) in ("boot", "verdict", "selection"):
+                    continue
+                cid = f"suite:{m.group(1)}"
+                _, created = self.c.ledger.record(
+                    project_id=P.id, task_id=tid, check_id=cid,
+                    idem_key=f"{P.id}|{tid}|studio_calls|{run['run_id']}|{cid}|carried",
+                    run_id=t.get("run_id") or "", tool="studio_gate", source="coordinator",
+                    check_kind="suite", chain_id=m.group(1), seq=None, prereqs=[],
+                    started_ts=started, ended_ts=ended, exec_status="completed",
+                    result="PASS", counts={}, tier="verified", source_revision=head,
+                    runtime_id=rid,
+                    provenance={**prov, "section": "carried", "carried": det[:300]},
+                    output=det[:2000])
+                n[0] += int(bool(created))
         self.c._lc_safe(P, tid, "studio_calls_record", rec)
         return n[0]
 
@@ -819,7 +846,7 @@ class StudioCalls:
         text = str(((v.get("raw_results") or {}).get("captures")) or "")
         want = f"docs/evidence/{tid}/"
         out = []
-        for m in re.finditer(r"^PASS: CAPTURE (\S+\.png)\b", text, re.M):
+        for m in re.finditer(r"^PASS: CAPTURE (\S+\.(?:png|jpe?g))\b", text, re.M | re.I):
             pth = m.group(1).replace("\\", "/")
             if pth.startswith(want) and ".." not in pth.split("/"):
                 out.append(pth)

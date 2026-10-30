@@ -1056,6 +1056,7 @@ Change no code or test file in this session; if one needs changing, stop and rep
         lists drifted; the frame fix reached one, the other sent the sprint back)."""
         t = spec.task_id
         return (self.exempt_paths(spec) + [f"docs/progress/{t}_*", f"docs/evidence/{t}/*.png",
+                                           f"docs/evidence/{t}/*.jpg", f"docs/evidence/{t}/*.jpeg",
                                            f"docs/evidence/UI-v3/{t}/**"]
                 + list(GATE_NONCODE_PATHS))
 

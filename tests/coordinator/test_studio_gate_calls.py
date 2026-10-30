@@ -689,6 +689,26 @@ def test_capture_ready_is_taken_by_the_runner_before_the_next_call(fakes, repo):
     assert "PASS: CAPTURE docs/evidence/CQ/frame.png" in v["raw_results"]["captures"]
 
 
+def test_capture_ready_jpg_is_converted(fakes, repo):
+    """2026-10-30 GF-LOOP1: the plan's frame is a .jpg; CAPTURE_READY took only .png, so
+    the session grabbed the window instead and that capture never counted."""
+    set_rules, _ = fakes
+    off, comm = rules(UI, extra_comm=[
+        {"tool": "eval_client_runtime", "match": "clientFog",
+         "text": "PASS: fog\nCAPTURE_READY docs/evidence/CJ/next.jpg runtime=playtest"},
+        {"tool": "capture_screenshot", "text": "{}", "png": [64, 32]}])
+    set_rules(off, comm)
+    host_half(repo, "CJ")
+    run_calls(repo, "CJ", "--regression", "subset:ui", "--rerun", "all")
+    f = repo / "docs" / "evidence" / "CJ" / "next.jpg"
+    text = lines_of(repo, "CJ")
+    if "JPEG conversion failed" in text:
+        pytest.skip("the fake PNG is not decodable here")
+    assert f.is_file() and f.read_bytes()[:3] == b"\xff\xd8\xff"
+    assert "CAPTURE docs/evidence/CJ/next.jpg runtime=playtest" in text
+    assert "PASS: CAPTURE docs/evidence/CJ/next.jpg 64x32" in text
+
+
 def test_capture_ready_outside_the_sprints_evidence_is_refused(fakes, repo):
     set_rules, _ = fakes
     off, comm = rules(UI, extra_comm=[
