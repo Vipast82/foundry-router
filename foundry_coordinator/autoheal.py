@@ -70,6 +70,11 @@ INFRA_SIGNATURES = (
                               r"differ|studio[^.\n]{0,40}(?:out of date|behind HEAD)", re.I)),
     ("rojo", re.compile(r"\brojo\b[^.\n]{0,80}(?:exited|down|not running|not syncing|"
                         r"websocket|refused|unreachable|code -1)", re.I)),
+    # 2026-10-30 MV2-11: the session found the Studio session itself degraded (stale
+    # errors, missing profile, timeouts) and asked for a fresh Studio / place reload
+    ("studio_reload", re.compile(r"(?:fresh|restart(?:ed)?|reload(?:ed)?|reopen(?:ed)?)\s+"
+                                 r"(?:the\s+)?(?:roblox\s+)?(?:studio|place)\b|"
+                                 r"(?:studio|place)\s+(?:reload|reopen|restart)", re.I)),
     ("studio", re.compile(r"\bstudio\b[^.\n]{0,80}(?:not connected|disconnected|not "
                           r"running|plugin[^.\n]{0,30}(?:connect|timeout)|mcp[^.\n]{0,40}"
                           r"(?:unavailable|not connected|timed out))", re.I)),
@@ -272,7 +277,7 @@ def stop_playtest(P) -> str:
 
 
 # stops a Studio reopen can fix (the plugin lost Rojo, Studio not connected)
-STUDIO_SYNC_SIGS = ("rojo_connect", "rojo", "rojo_stale", "studio")
+STUDIO_SYNC_SIGS = ("rojo_connect", "rojo", "rojo_stale", "studio", "studio_reload")
 REOPEN_JOB_MAX_S = 1500          # a client job older than this counts as failed
 
 
@@ -337,6 +342,15 @@ def repair(c, P, t: dict, sig: str, action: str) -> list[dict]:
                 if lock["playing"]:
                     why = stop_playtest(P)
                     add("stop_playtest", not why, why or "started")
+        if sig == "studio_reload":
+            job, rwhy = request_studio_reopen(c, P, t)
+            if job:
+                out.append({"repair": "reopen_studio", "ok": True, "job": job,
+                            "detail": f"client job {job}: the session asked for a fresh "
+                                      f"Studio; reopening the TEST place"})
+            else:
+                add("reopen_studio", False, f"not reopened: {rwhy}")
+            return out
         if sig in STUDIO_SYNC_SIGS:
             from . import client_api
             serving = client_api.component_serving("rojo")

@@ -2,6 +2,16 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.157.92 — a session that asks for a fresh Studio gets one
+
+2026-10-30 16:57: MV2-11's session reported BLOCKED: its gate rows failed from a degraded Studio
+session (stale MatchService errors, no profile, timeouts) and it "needs a fresh Studio or place
+reload by the coordinator". That went to a Lead case instead of the deterministic reopen.
+
+- **autoheal:** new signature `studio_reload` (a fresh / restarted / reloaded / reopened Studio
+  or place); a session stop with it asks the client to reopen the TEST place and retries the
+  session for free, like the other Studio-sync signatures.
+
 ## v0.157.91 — a scope grant is judged on the sprint's own commits
 
 2026-10-30 14:34/14:36: AS-P7's Studio evidence was finally fresh (v0.157.90), but its

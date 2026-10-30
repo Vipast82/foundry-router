@@ -206,3 +206,14 @@ def test_a_studio_gate_sync_error_is_auto_healed():
            "head=3b72b96a); no CALL ran (Rojo / plugin sync is stale)")
     assert autoheal.plan("studio_calls_error", why) == ("rojo_stale", "restart")
     assert autoheal.plan("studio_calls_error", "suite S06 FAIL: pass=5 (want 6)") is None
+
+
+def test_a_session_asking_for_a_fresh_studio_gets_a_reopen():
+    """2026-10-30 MV2-11: the session found the Studio session degraded and asked for 'a fresh
+    Studio or place reload by the coordinator'; it went to a Lead case instead."""
+    from foundry_coordinator import autoheal
+    why = ("session reported BLOCKED: Gate rows fail from Studio session or harness faults. "
+           "Needs a fresh Studio or place reload by the coordinator, then a rerun of the gate")
+    assert autoheal.plan("session_blocked", why) == ("studio_reload", "restart")
+    assert autoheal.infra_signature("S48 c3 fails: gold accumulated on the profile") == ""
+    assert autoheal.infra_signature("Device Simulator ignores Portrait") == ""
