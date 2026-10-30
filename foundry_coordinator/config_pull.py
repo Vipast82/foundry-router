@@ -279,7 +279,9 @@ class ConfigPuller:
                                  "conflicts": report["conflicts"][:40]})
         rec = {k: body.get(k) for k in ("project", "rev", "hash", "ts", "actor", "doc")}
         rec["restart_pending"] = restart
-        rec["local"] = D.local_view(local)         # the TOML as it was at this apply
+        # the TOML as it was at this apply; a kept local edit keeps its old base value
+        rec["local"] = D.carry_local_base(D.local_view(local), local_base,
+                                          report["kept_local"])
         self._applied[pid] = rec
         try:
             self._write_cache(pid, rec)

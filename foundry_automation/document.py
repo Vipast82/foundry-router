@@ -149,6 +149,25 @@ def local_view(raw: dict) -> dict:
             "role_rules": {r: RR.normalize(r, v) for r, v in own.items() if r in RR.RULE_ROLES}}
 
 
+def carry_local_base(view: dict, old_base: Optional[dict], kept: list) -> dict:
+    """The local base to record after an apply: the TOML's view, except each `kept_local`
+    path keeps its OLD base value, so the operator's edit still reads as an edit at the
+    next apply or restart. (2026-10-30: roles.reviewer = Deep-Review was kept once, then the
+    recorded base became Deep-Review too, and the router's Foundry-Kilo-Review won at every
+    later start.)"""
+    out = copy.deepcopy(view)
+    if not isinstance(old_base, dict):
+        return out
+    for path in kept or []:
+        full = path if path.startswith("role_rules.") else "settings." + path
+        old = _get_path(old_base, full, _MISSING)
+        if old is _MISSING:
+            _pop_path(out, full)
+        else:
+            _set_path(out, full, copy.deepcopy(old))
+    return out
+
+
 def overlay(raw: dict, doc: dict, base: Optional[dict] = None,
             local_base: Optional[dict] = None) -> dict:
     """A local profile with the document on top (local-only keys stay local).

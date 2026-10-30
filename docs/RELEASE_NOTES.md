@@ -2,6 +2,17 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.157.85 — a kept local profile edit stays kept
+
+2026-10-30 03:2x: roles.reviewer = Foundry-Kilo-Deep-Review (Victor's choice) was set in
+project.toml. The first router apply kept it (router unchanged), then recorded the TOML as the
+new local base; at every later apply or restart the edit no longer read as an edit and the
+router's older Foundry-Kilo-Review won, so AS-E09's review stalled on capped models.
+
+- **Config apply:** for each kept_local path the recorded local base keeps its old value
+  (foundry_automation.document.carry_local_base), so the edit stays kept until the router
+  changes that key. A router change to a kept key is now logged as a conflict (router wins).
+
 ## v0.157.84 — a review cut at max_tokens retries with more room
 
 2026-10-30 09:00/09:14: with Claude and ChatGPT capped, AS-P7's and AS-J08's reviews ran on the

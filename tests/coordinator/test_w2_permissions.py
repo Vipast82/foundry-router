@@ -334,12 +334,13 @@ def test_local_toml_edits_survive_a_pull_and_conflicts_go_to_the_router(tmp_path
     drift = [e for e in c.store.events("game", 30) if e["kind"] == "config_local_drift"]
     assert drift and drift[0]["detail"]["kept_local"] == ["limits.max_sessions_per_task"]
     assert drift[0]["detail"]["conflicts"] == []
-    # a router change to a key the operator left alone since the last pull just applies
+    # the router then changes the key the operator kept locally: the router wins, and since
+    # the local edit is still an edit (v0.157.85 keeps its base), it is logged as a conflict
     f.deploy(_doc(P, max_attempts=4, max_closeout_attempts=3, max_sessions_per_task=6), 3)
     assert cp.sync("game", force=True) == "applied"
     assert P.profile.limits["max_sessions_per_task"] == 6
     drift = [e for e in c.store.events("game", 30) if e["kind"] == "config_local_drift"]
-    assert len(drift) == 1
+    assert len(drift) == 2 and drift[0]["detail"]["conflicts"] == ["limits.max_sessions_per_task"]
     # both sides change the same key since the last pull: the router wins, logged
     text = open(P.profile.path, encoding="utf-8").read()
     open(P.profile.path, "w", encoding="utf-8").write(
@@ -420,3 +421,33 @@ def test_restart_scoped_keys_wait_for_the_clients_restart(tmp_path):
     assert P.profile.client["provider"] == "other"
     assert cp2.applied("game")["restart_pending"] == []
     assert startup_overlay(c.state_dir, {"id": "nothing"}) == ({"id": "nothing"}, None)
+
+
+def test_a_kept_local_edit_survives_later_applies_and_restarts(tmp_path):
+    """2026-10-30: roles.reviewer = Deep-Review was kept once; the recorded local base then
+    became Deep-Review too, so at every later start the router's older value won."""
+    from foundry_coordinator.config_pull import startup_overlay
+    import tomllib
+    c, f, P = _setup(tmp_path)
+    _deploy(c, f, _doc(P, max_attempts=4), 1)
+    text = open(P.profile.path, encoding="utf-8").read()
+    open(P.profile.path, "w", encoding="utf-8").write(
+        text.replace("max_review_calls = 4", "max_review_calls = 4\nmax_sessions_per_task = 5"))
+    f.deploy(_doc(P, max_attempts=4, max_sessions_per_task=2), 2)
+    f.body["doc"]["settings"]["limits"]["max_sessions_per_task"] = 2
+    f.body["hash"] = D.doc_hash(f.body["doc"])
+    cp = ConfigPuller(c)
+    cp.sync("game", force=True)
+    # rev 2 changed the key on the router side: conflict, router wins (unchanged rule)
+    f.deploy(_doc(P, max_attempts=4, max_sessions_per_task=2), 2)
+    # the operator sets it locally again; the router does not change it
+    text = open(P.profile.path, encoding="utf-8").read()
+    open(P.profile.path, "w", encoding="utf-8").write(
+        text.replace("max_sessions_per_task = 5", "max_sessions_per_task = 8"))
+    for _ in range(3):                        # repeated applies (every safe point / restart)
+        f.deploy(_doc(P, max_attempts=4, max_sessions_per_task=2), 3)
+        assert ConfigPuller(c).sync("game", force=True) == "applied"
+        assert P.profile.limits["max_sessions_per_task"] == 8
+    raw = tomllib.loads(open(P.profile.path, encoding="utf-8").read())
+    merged, _ = startup_overlay(c.state_dir, raw)
+    assert merged["limits"]["max_sessions_per_task"] == 8
