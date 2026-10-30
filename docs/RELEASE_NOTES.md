@@ -2,6 +2,17 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.157.73 — the track review note is the coordinator's recorded decision
+
+2026-10-29 21:22-21:49: MV2-5 used 11/11 review calls. With the Studio gate excused, the reviewer
+kept asking for "an explicit coordinator or human decision" deferring it, for the D7 spike's
+measured numbers (a Studio measurement) and for unticking the steps whose Studio half is owed.
+
+- **TRACK_REVIEW_NOTE** now states it is the coordinator's recorded, binding decision; that ticks
+  for a step's code half are correct; and that Studio measurements (spikes, timings) are owed too.
+- **Owed-evidence pattern** also matches findings that only argue about that deferral (spike /
+  measurement, merge gate, explicit/coordinator/human decision, waive, defer).
+
 ## v0.157.72 — a main-checkout CLOSE never waits for the local GPU
 
 2026-10-29 20:52-21:20: AS-R5 (asset sprint, local model) was APPROVED; its CLOSE session (docs:

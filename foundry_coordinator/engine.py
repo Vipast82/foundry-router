@@ -51,17 +51,20 @@ Studio-free checks (Lune, the sprint's unit checks, and done_check with
 (the merge publishes) and never report BLOCKED on Studio or studio.lock.
 """
 # a track session's BLOCKED report about Studio, Rojo, the gate or studio.lock
-TRACK_REVIEW_NOTE = ("track sprint: this work ran in a git worktree without Studio. The "
+TRACK_REVIEW_NOTE = ("COORDINATOR DECISION (recorded, binding for this review): track sprint: this work ran in a git worktree without Studio. The "
                      "Studio gate, boot checks, Studio suites and the gate evidence log "
                      "are run by the merge gate in the main checkout on the merge result, "
                      "so their absence here is expected: do not ask for them, even where "
                      "the plan's BUILD contract lists a GATE PASS, suite tallies, boot "
                      "counts or Studio captures (those plan lines are owed to the merge "
-                     "gate). Review the code, the Lune results and done_check.")
+                     "gate; plan ticks for a step's code half with its Studio half owed "
+                     "are correct; Studio measurements such as spikes or timings are owed "
+                     "too). This note IS the coordinator's decision deferring them: do not "
+                     "ask for another. Review the code, the Lune results and done_check.")
 # evidence a track sprint can't produce (the merge gate's): a finding naming only these is owed
 TRACK_STUDIO_OWED = re.compile(r"EVIDENCE_RAW|GATE\s+[\w.-]+\s+(?:PASS|FAIL)|\bgate:|\bsuite:|"
                                r"suite tall|\bboot\b|studio|scripted gate|captur|\.png\b|"
-                               r"visual (?:approval|frame)|playtest", re.I)
+                               r"visual (?:approval|frame)|playtest|spike|measur|merge[- ]gate|(?:explicit|coordinator|human|recorded)[^.]{0,30}decision|waive|defer", re.I)
 TRACK_STUDIO_BLOCKER = re.compile(r"studio\.lock|\bstudio\b|\brojo\b|playtest|studio[_ ]gate|"
                                   r"\bgate\b[^.\n]{0,40}\b(?:run|lock|studio)", re.I)
 

@@ -368,3 +368,19 @@ def test_a_main_close_runs_on_frontier_while_the_gpu_is_taken(tmp_path):
     assert c._closeout_frontier(P, t, ["writer:0"]) == ""       # not a local sprint
     P.profile.roles["implementer"] = "Local-Persona"
     assert c._closeout_frontier(P, t, ["gpu"]) == ""            # no frontier default
+
+
+def test_a_track_review_arguing_only_about_the_deferral_is_an_approval(tmp_path):
+    """2026-10-29 MV2-5 (11 reviews): the reviewer asked for 'an explicit coordinator decision'
+    and for Studio spike numbers; both are the merge gate's on a track."""
+    c, P, _ = env(tmp_path, extra="\n[automation]\nmax_agents = 2\n".replace("\n", "\n"))
+    c.tracks.create(P, "blender", ["B1"], actor="victor")
+    c.tracks.start(P, "blender", "victor")
+    b1 = c.store.task("game", "B1")
+    TP = c.tracks.project_for(P, b1)
+    rev = {"verdict": "CHANGES_REQUIRED", "review_id": "r3", "result": {
+        "findings": [{"severity": "minor", "file": "docs/progress/B1_PLAN.md",
+                      "message": "The note is self-asserted; it is not a coordinator decision"}],
+        "required_repairs": ["Fill the SPIKE doc from measured numbers or obtain an explicit "
+                             "decision to defer the measurement"]}}
+    assert c._track_review_owed_only(TP, b1, rev)["verdict"] == "APPROVED"
