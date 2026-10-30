@@ -2911,7 +2911,9 @@ class Coordinator:
             # B7: the coordinator's own commits (templated closeout documents, runner
             # outputs) never invalidate the review they followed
             from . import bookkeeping as BK
-            mine = set(BK.only_coordinator(P, t, rs, head, code))
+            from . import prep_queue as PQ
+            # a prep-queue landing (operator work) never voids the review either
+            mine = set(BK.only_coordinator(P, t, rs, head, code, PQ.messages(self.store, P.id)))
             code = [f for f in code if f not in mine]
         if code:
             return "files changed after the review: " + ", ".join(code[:10])
@@ -2968,7 +2970,21 @@ class Coordinator:
                 note = infra.closeout_waiting(self, P, t)
                 if note:
                     return self._note(P, t, note)
-                if self._acquire(P, t, self._session_locks(P, t), writer=True):
+                landing = self._landing_drain(P)
+                if landing:
+                    # 2026-10-29 AS-R8: its CLOSE session waited for `gpu` (an asset track
+                    # held it) while keeping the main checkout, so pq-8755b41e44 could not
+                    # land and AS-REG1 waited too. Between sessions the checkout is given
+                    # back to a pending landing, as at an implement start.
+                    held = set(self.store.holds(pid, tid))
+                    give = [r for r in self._workspace_locks(P) + self._session_locks(P, t)
+                            if r in held]
+                    if give:
+                        self.store.release(pid, tid, give)
+                    return self._note(P, t, f"waiting for {landing} to land first (landing "
+                                            f"drain)")
+                if self._acquire(P, t, self._workspace_locks(P) + self._session_locks(P, t),
+                                 writer=True):
                     return
                 run_id = f"{t['run_id']}-close{int(t['data'].get('closeout_attempts') or 0)}"
                 ctx = {"attempt": t["attempt"], "run_id": run_id, "base": t["reviewed_sha"],

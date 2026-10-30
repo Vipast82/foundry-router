@@ -2,6 +2,20 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.157.66 — a CLOSE session waiting for a resource gives the checkout to a landing
+
+2026-10-29 19:0x: AS-R8 (local model) was APPROVED and its CLOSE session waited for `gpu` (the
+assets-2 track held it) while keeping the main checkout; prep entry pq-8755b41e44 could not land
+and AS-REG1 waited behind it.
+
+- **CLOSE start:** under the landing drain, a sprint whose CLOSE session has not started gives
+  its checkout and session locks back (as an implement start already did) and takes them again
+  when the session starts.
+- **Prep safe point:** a CLOSING sprint with no CLOSE session and no checkout lock is between
+  sessions, not mid-sprint.
+- **Review validity:** a prep-queue landing between the review and CLOSE never voids the review
+  (prep commits are operator work, as in the scope check since v0.157.53).
+
 ## v0.157.65 — one local-model session at a time
 
 2026-10-29 18:29-18:45: AS-R8 (main track, local Qwen) and AS-D11 (assets-2 track, local, holding

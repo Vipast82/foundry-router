@@ -623,3 +623,20 @@ def test_a_branch_whose_base_was_rewritten_lands_only_its_own_commits(tmp_path):
     d = _branch_own_diff(str(tmp_path), "plans")
     assert d.returncode == 0
     assert "plan.md" in d.stdout and "b.txt" not in d.stdout and "c.txt" not in d.stdout
+
+
+def test_a_closing_sprint_between_sessions_does_not_block_a_landing(game):
+    """2026-10-29 AS-R8: its CLOSE session waited for `gpu` while the sprint kept the checkout;
+    pq-8755b41e44 never landed. Without a close session and a checkout lock it is between
+    sessions; with either it is mid-sprint."""
+    c, P, *_ = game
+    c.approve("game", "T1", [], "victor")
+    c.store.update_task("game", "T1", state=S.CLOSING)
+    assert PQ.safe_point(c, P)[0]
+    wl = f"workspace:{os.path.normcase(os.path.realpath(P.profile.workspace))}"
+    c.store.acquire([wl], "game", "T1")
+    assert not PQ.safe_point(c, P)[0]
+    c.store.release("game", "T1")
+    c.store.merge_data("game", "T1", closeout_session="ses-close")
+    ok, why = PQ.safe_point(c, P)
+    assert not ok and "CLOSING" in why

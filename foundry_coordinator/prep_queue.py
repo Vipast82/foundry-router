@@ -472,8 +472,13 @@ def safe_point(c, P, cfg: Optional[dict] = None) -> tuple[bool, str]:
                 continue
             return False, f"main checkout in use by {lk['project_id']}/{lk['task_id']}"
     tasks = _main_tasks(c, P)
+    held_ws = {lk["task_id"] for lk in c.store.locks() if lk["resource"] == wlock}
     for t in tasks:
         if t["state"] in block:
+            # 2026-10-29 AS-R8: CLOSING but its CLOSE session not started (it waited for
+            # `gpu`) and the checkout given back to the landing: between sessions, not mid-run
+            if t["state"] == "CLOSING" and not (t.get("data") or {}).get("closeout_session")                     and t["task_id"] not in held_ws:
+                continue
             return False, f"{t['task_id']} is {t['state']} (mid-sprint)"
     main_ids = {t["task_id"] for t in tasks}
     horizon = c.clock() - cfg["live_session_max_age_minutes"] * 60
