@@ -2,6 +2,17 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.157.71 — a track review that only asks for Studio evidence is an approval
+
+2026-10-29 20:36-20:49: after v0.157.69 MV2-5's reviewer still cited the plan's BUILD contract
+("GATE MV2-5 PASS in the evidence log") on every round, and S52's submission still listed its
+capture PNGs as missing evidence items; both looped into decisions.
+
+- **Track review:** a CHANGES_REQUIRED/BLOCKED review of a track sprint whose every finding names
+  only evidence the merge gate owns (gate line, suite tallies, boot, captures, visual frames) is
+  treated as APPROVED (`track_review_owed_only` event). Any other finding keeps the review.
+- **Submission gate:** the files of a deferred capture obligation (its PNGs) are deferred too.
+
 ## v0.157.70 — a track sprint's visual approval is owed at the merge
 
 2026-10-29 19:52: S52 (track frontier-4) reached CLOSING and went to visual approval, which found

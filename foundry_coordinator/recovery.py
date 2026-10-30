@@ -898,6 +898,7 @@ class Recovery:
         lim = obs.effective_limits(P, trow)["missing_evidence_continuations"]
         act = "continue_same_session" if lim["remaining"] > 0 else "changes_required"
         out = []
+        deferred_paths: set = set()
         for o in obs.all(P.id, task):
             if o["phase"] != "BUILD" or o["status"] in ("waived", "superseded"):
                 continue
@@ -914,6 +915,9 @@ class Recovery:
                     all(isinstance(r, dict) and owns(r.get("kind"), r.get("ref")) for r in req)
                     or any(isinstance(r, dict) and r.get("kind") == "check"
                            and owns("check", r.get("ref")) for r in req)):
+                # its files (a capture's PNG) are the merge gate's too (S52 20:46)
+                deferred_paths.update(str(r.get("ref") or "") for r in req
+                                      if isinstance(r, dict) and r.get("kind") in ("path", "file"))
                 continue
             if o["status"] != "verified" or o.get("verified_rev") != head:
                 out.append({"class": "missing_evidence", "action": act,
@@ -929,7 +933,7 @@ class Recovery:
         if evidence_items:
             from .review import normalize_evidence
             for it in normalize_evidence(evidence_items):
-                if it["status"] in ("missing", "stale") and it["priority"] <= 2                         and not owns("file", it["path"])                         and not (deferred and owns("check", str(it.get("title") or "")
+                if it["status"] in ("missing", "stale") and it["priority"] <= 2                         and not owns("file", it["path"])                         and it["path"] not in deferred_paths                         and not (deferred and owns("check", str(it.get("title") or "")
                                                    .split(" ")[0].strip("()"))):
                     out.append({"class": "missing_evidence", "action": act,
                                 "item": {"path": it["path"], "title": it["title"],

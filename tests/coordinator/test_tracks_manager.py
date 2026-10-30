@@ -334,3 +334,22 @@ def test_a_track_sprint_owes_its_visual_approval_to_the_merge(tmp_path):
     c.approve("game", "T1", [], "victor")
     assert c._approvals_needed(P, c.store.task("game", "T1"), NS(tags=["visual"], task_id="T1"),
                                "after_close", "rev") == ["visual"]
+
+
+def test_a_track_review_asking_only_for_studio_evidence_is_an_approval(tmp_path):
+    """2026-10-29 MV2-5: five review rounds demanding the Studio gate line on a track."""
+    c, P, _ = env(tmp_path, extra="\n[automation]\nmax_agents = 2\n".replace("\n", "\n"))
+    c.tracks.create(P, "blender", ["B1"], actor="victor")
+    c.tracks.start(P, "blender", "victor")
+    b1 = c.store.task("game", "B1")
+    TP = c.tracks.project_for(P, b1)
+    owed = {"verdict": "CHANGES_REQUIRED", "review_id": "r1", "result": {"findings": [
+        {"severity": "blocker", "file": "docs/progress/B1_EVIDENCE_RAW.log",
+         "message": "The BUILD contract requires GATE B1 PASS in the evidence log"}]}}
+    assert c._track_review_owed_only(TP, b1, owed)["verdict"] == "APPROVED"
+    real = {"verdict": "CHANGES_REQUIRED", "review_id": "r2", "result": {"findings": [
+        {"severity": "major", "file": "art/b.txt", "message": "wrong value on line 3"},
+        {"severity": "blocker", "file": "docs/progress/B1_EVIDENCE_RAW.log",
+         "message": "no GATE B1 PASS"}]}}
+    assert c._track_review_owed_only(TP, b1, real)["verdict"] == "CHANGES_REQUIRED"
+    assert c._track_review_owed_only(P, b1, owed)["verdict"] == "CHANGES_REQUIRED"   # main

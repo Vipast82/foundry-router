@@ -58,6 +58,10 @@ TRACK_REVIEW_NOTE = ("track sprint: this work ran in a git worktree without Stud
                      "the plan's BUILD contract lists a GATE PASS, suite tallies, boot "
                      "counts or Studio captures (those plan lines are owed to the merge "
                      "gate). Review the code, the Lune results and done_check.")
+# evidence a track sprint can't produce (the merge gate's): a finding naming only these is owed
+TRACK_STUDIO_OWED = re.compile(r"EVIDENCE_RAW|GATE\s+[\w.-]+\s+(?:PASS|FAIL)|\bgate:|\bsuite:|"
+                               r"suite tall|\bboot\b|studio|scripted gate|captur|\.png\b|"
+                               r"visual (?:approval|frame)|playtest", re.I)
 TRACK_STUDIO_BLOCKER = re.compile(r"studio\.lock|\bstudio\b|\brojo\b|playtest|studio[_ ]gate|"
                                   r"\bgate\b[^.\n]{0,40}\b(?:run|lock|studio)", re.I)
 
@@ -2874,6 +2878,7 @@ class Coordinator:
 
     def _apply_review(self, P: Project, t: dict, rev: dict) -> None:
         pid, tid = P.id, t["task_id"]
+        rev = self._track_review_owed_only(P, t, rev)
         res = rev["result"]
         if self._lc(P) and self._lc_apply_review(P, t, rev):
             return
@@ -5473,6 +5478,26 @@ class Coordinator:
                 it["priority"] = min(int(it.get("priority", 2)), 1)
         paths = {it["path"] for it in items if it.get("path")}
         return items + [e for e in evidence if not e.get("path") or e["path"] not in paths]
+
+    def _track_review_owed_only(self, P: Project, t: dict, rev: dict) -> dict:
+        """A track sprint's review whose every finding asks only for evidence the merge gate
+        owns (the Studio gate line, suite tallies, boot counts, captures, visual frames) is an
+        approval. 2026-10-29 MV2-5: the reviewer kept citing the plan's BUILD contract for
+        "GATE MV2-5 PASS" despite the track note; 5 review rounds, then a decision."""
+        if rev.get("verdict") not in ("CHANGES_REQUIRED", "BLOCKED") or not self.tracks.is_track(P):
+            return rev
+        res = rev.get("result") or {}
+        fs = [f for f in res.get("findings") or [] if f.get("severity") in ("blocker", "major",
+                                                                            "minor")]
+        texts = ([f"{f.get('file') or ''} {f.get('message') or ''}" for f in fs]
+                 + [str(r) for r in res.get("required_repairs") or []]
+                 + [str(m) for m in res.get("missing_evidence") or []])
+        if not texts or any(not TRACK_STUDIO_OWED.search(x) for x in texts):
+            return rev
+        self.store.event(P.id, t["task_id"], "track_review_owed_only", detail={
+            "review_id": rev.get("review_id"), "findings": texts[:10],
+            "why": "every finding asks for evidence the merge gate owns"})
+        return {**rev, "verdict": "APPROVED"}
 
     def _lc_apply_review(self, P: Project, t: dict, rev: dict) -> bool:
         """Route a review (True = handled here). APPROVED: promote and link,
