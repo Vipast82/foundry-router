@@ -36,6 +36,7 @@ from .profile import matches_any
 from .store import Store
 
 REVIEW_ERRORS_BEFORE_BLOCK = 3
+REVIEW_MAX_TOKENS_CAP = 16000      # a review cut at max_tokens retries with 2x room up to this
 INVALID_REVIEWS_BEFORE_BLOCK = 2
 
 # every implementer prompt of a track sprint (0.145.0): its session tried to run
@@ -2538,14 +2539,27 @@ class Coordinator:
         (text, meta, None) or (None, None, exception)."""
         if prep.get("bind_error") is not None:
             return None, None, prep["bind_error"]
-        try:
-            text, meta = P.foundry.chat(prep["persona"], [
-                {"role": "system", "content": R.SYSTEM},
-                {"role": "user", "content": prep["packet"]}],
-                session_id=prep["rsid"], schema=R.SCHEMA, max_tokens=prep["max_tokens"])
-            return text, meta, None
-        except (FoundryDenied, FoundryError, RuntimeError) as e:
-            return None, None, e
+        mt = int(prep["max_tokens"] or 4000)
+        for _ in range(3):
+            try:
+                text, meta = P.foundry.chat(prep["persona"], [
+                    {"role": "system", "content": R.SYSTEM},
+                    {"role": "user", "content": prep["packet"]}],
+                    session_id=prep["rsid"], schema=R.SCHEMA, max_tokens=mt)
+                return text, meta, None
+            except FoundryDenied as e:
+                return None, None, e
+            except (FoundryError, RuntimeError) as e:
+                # 2026-10-30 AS-P7/AS-J08: the local fallback's verdict was cut at
+                # max_tokens 4000 ("structured output was incomplete (finish_reason=length)")
+                # three times each and both sprints were BLOCKED. Retry with more room.
+                msg = str(e)
+                if mt < REVIEW_MAX_TOKENS_CAP and ("finish_reason=length" in msg
+                                                   or "structured_output_failed" in msg):
+                    mt = min(mt * 2, REVIEW_MAX_TOKENS_CAP)
+                    continue
+                return None, None, e
+        return None, None, RuntimeError(f"review output still cut at max_tokens {mt}")
 
     def _review_finish(self, P: Project, t: dict, prep: dict, text, meta, err,
                        early: bool = False) -> Optional[dict]:

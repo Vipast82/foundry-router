@@ -1065,3 +1065,31 @@ def test_an_attempt_reset_keeps_the_sprints_place_in_the_checkout_line(game):
     assert not t1["started_ts"] and t1["data"]["queue_ts"] == 100.0
     assert c._main_sprint_in_flight(P, t1) == ""                # T1 goes first
     assert c._main_sprint_in_flight(P, c.store.task("game", "T2")) == "T1"
+
+
+def test_a_review_cut_at_max_tokens_retries_with_more_room():
+    """2026-10-30 AS-P7/AS-J08: the local fallback's verdict was cut at max_tokens 4000
+    (finish_reason=length) three times each and both sprints were BLOCKED."""
+    from types import SimpleNamespace as NS
+    from foundry_coordinator.engine import Coordinator
+    from foundry_coordinator.adapters.foundry import FoundryError
+    seen = []
+
+    def chat(persona, msgs, session_id, schema, max_tokens):
+        seen.append(max_tokens)
+        if max_tokens < 16000:
+            raise FoundryError("HTTP 502: structured output was incomplete (finish_reason=length)")
+        return "{}", {}
+    P = NS(foundry=NS(chat=chat))
+    text, meta, err = Coordinator._review_call(P, {"persona": "x", "packet": "p", "rsid": "r",
+                                                   "max_tokens": 4000})
+    assert err is None and seen == [4000, 8000, 16000]
+
+    def chat2(persona, msgs, session_id, schema, max_tokens):
+        seen.append(max_tokens)
+        raise FoundryError("HTTP 500: other")
+    seen.clear()
+    _, _, err = Coordinator._review_call(NS(foundry=NS(chat=chat2)),
+                                         {"persona": "x", "packet": "p", "rsid": "r",
+                                          "max_tokens": 4000})
+    assert err is not None and seen == [4000]

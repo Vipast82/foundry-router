@@ -2,6 +2,16 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.157.84 — a review cut at max_tokens retries with more room
+
+2026-10-30 09:00/09:14: with Claude and ChatGPT capped, AS-P7's and AS-J08's reviews ran on the
+local fallback; its verdict was cut at max_tokens 4000 ("structured output was incomplete
+(finish_reason=length)"), three times each, and both sprints were BLOCKED.
+
+- **Review call:** on finish_reason=length / structured_output_failed the call retries at
+  twice the output budget, up to 16,000 tokens (REVIEW_MAX_TOKENS_CAP), before it counts as a
+  review error.
+
 ## v0.157.83 — an attempt reset keeps the sprint's place in the checkout line
 
 2026-10-30 04:2x-06:2x: GF-LOOP1 (closed and published, only its last checks left) was unblocked
