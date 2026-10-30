@@ -3346,6 +3346,15 @@ class Coordinator:
         for rule in P.profile.approvals:
             if rule.stage != stage or not any(matches_any(tag, [rule.match]) for tag in spec.tags):
                 continue
+            if rule.kind == "visual" and self.tracks.is_track(P):
+                # 2026-10-29 S52: a track has no Studio, so it has no frames to approve; the
+                # visual sign-off belongs to the merge's Studio batch (Victor's batch approval)
+                if not (t.get("data") or {}).get("visual_owed_at_merge"):
+                    self.store.merge_data(P.id, t["task_id"], visual_owed_at_merge=True)
+                    self.store.event(P.id, t["task_id"], "visual_approval_deferred",
+                                     detail={"stage": stage, "why": "track sprint: owed at "
+                                             "the merge's Studio batch"})
+                continue
             if not self._valid_approval(P, t, spec, rule, revision):
                 need.append(rule.kind)
         return need

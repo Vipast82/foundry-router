@@ -313,3 +313,24 @@ def test_the_merge_gate_owns_studio_check_items_and_capture_obligations():
     assert owns({"title": "suite:MV2_5 tally", "status": "missing"})
     assert owns({"path": "docs/progress/MV2-5_EVIDENCE_RAW.log"})
     assert not owns({"title": "lune", "path": "docs/progress/MV2-5_PLAN.md"})
+
+
+def test_a_track_sprint_owes_its_visual_approval_to_the_merge(tmp_path):
+    """2026-10-29 S52: visual approval ran on a track sprint (no Studio, no frames) and sent it
+    back; it is owed at the merge's Studio batch."""
+    from types import SimpleNamespace as NS
+    c, P, _ = env(tmp_path, extra="\n[automation]\nmax_agents = 2\n".replace("\n", "\n"))
+    c.tracks.create(P, "blender", ["B1"], actor="victor")
+    c.tracks.start(P, "blender", "victor")
+    b1 = c.store.task("game", "B1")
+    TP = c.tracks.project_for(P, b1)
+    rule = NS(stage="after_close", match="*", kind="visual", artifacts=[])
+    TP.profile.approvals = [rule]
+    P.profile.approvals = [rule]
+    spec = NS(tags=["visual"], task_id="B1")
+    assert c._approvals_needed(TP, b1, spec, "after_close", "rev") == []
+    assert c.store.task("game", "B1")["data"].get("visual_owed_at_merge")
+    t1 = {"task_id": "T1", "data": {}}
+    c.approve("game", "T1", [], "victor")
+    assert c._approvals_needed(P, c.store.task("game", "T1"), NS(tags=["visual"], task_id="T1"),
+                               "after_close", "rev") == ["visual"]

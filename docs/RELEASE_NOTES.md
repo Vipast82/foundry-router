@@ -2,6 +2,17 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.157.70 — a track sprint's visual approval is owed at the merge
+
+2026-10-29 19:52: S52 (track frontier-4) reached CLOSING and went to visual approval, which found
+no frames ("the plan names no required visual frames") and sent it back. A track has no Studio;
+its frames come from the merge's Studio batch, and the visual sign-off is the owner's batch
+approval after it.
+
+- **Approvals:** a `visual` approval rule is skipped for a track sprint; the task records
+  `visual_owed_at_merge` and a `visual_approval_deferred` event. Main-checkout sprints are
+  unchanged.
+
 ## v0.157.69 — track sprints are never asked for Studio evidence
 
 2026-10-29 20:0x-20:16: two track sprints looped into "findings repeat" decisions on evidence only
