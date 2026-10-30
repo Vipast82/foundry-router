@@ -208,6 +208,28 @@ def test_community_binding_one_instance_unscoped_several_need_place():
         M.CommunityStudio(_StubClient(two), place="nope").resolve()
 
 
+def test_a_studio_with_no_place_open_is_not_a_gate_target():
+    """2026-10-30 18:49 MV2-11: a Studio on its start page (name null) next to the TEST
+    Studio failed every gate with 'need exactly one Studio, found 2'."""
+    class Off:
+        def call_tool(self, name, args, timeout=0):
+            return {"is_error": False, "images": [], "text": json.dumps({"studios": [
+                {"id": "S0", "name": None},
+                {"id": "S1", "name": "Animal Uprising [TEST] (placeId: 77417134434265)"}]})}
+    s = M.OfficialStudio(Off())
+    assert s.resolve() == "S1"
+    assert M.OfficialStudio(Off(), place="[TEST]").resolve() == "S1"
+    with pytest.raises(M.McpError, match="found 0"):
+        M.OfficialStudio(Off(), place="[SLOT-1]").resolve()
+    com = _StubClient([{"id": "I0", "placeName": "", "placeId": 0},
+                       {"id": "I1", "placeName": "Animal Uprising [TEST]", "placeId": 7}],
+                      ("code", "instance_id"))
+    c = M.CommunityStudio(com)
+    c.call_tool("eval_server_runtime", {"code": "x"})
+    assert c.place_name == "Animal Uprising [TEST]"
+    assert com.calls[-1] == ("eval_server_runtime", {"code": "x", "instance_id": "I1"})
+
+
 def test_community_resolve_waits_for_the_plugin_to_connect(monkeypatch):
     """Live 2026-10-20: a fresh server lists no instance, the plugin connects ~8 s later."""
     import json as _json

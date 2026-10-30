@@ -278,6 +278,35 @@ def test_pipeline_runs_host_calls_finish_in_order(tmp_path, monkeypatch):
     assert rec["result"] == "PASS" and rec["run_id"] == "rid-1"
 
 
+def test_pipeline_binds_the_test_studio_by_the_client_title_match(tmp_path, monkeypatch):
+    """2026-10-30 18:49: with two Studios open the gate could not tell which was TEST; the
+    calls stage now gets --place from the Foundry Client's studio.title_match."""
+    repo = tmp_path / "au"
+    (repo / "docs" / "progress").mkdir(parents=True)
+    seen = []
+
+    def run(cmd, cwd, timeout, env=None):
+        seen.append(cmd)
+        if cmd[:2] == ["git", "-C"]:
+            return 0, "e" * 40
+        if "calls" in cmd:
+            return 1, "boom"
+        (repo / "docs" / "progress" / "P1_gate_verdicts.json").write_text(json.dumps(
+            {"headSha": "e" * 40, "lune": True}))
+        (repo / "docs" / "progress" / "P1_gate_expect.json").write_text(json.dumps(
+            {"files": {"src/a.txt": "1"}}))
+        return 0, "host ok"
+    monkeypatch.setattr(SC, "gate_place", lambda: "[TEST]")
+    SC.run_pipeline(_pipe_args(repo), run=run, log=lambda s: None)
+    calls = seen[2]
+    i = calls.index("calls")
+    assert calls[i - 2:i] == ["--place", "[TEST]"]
+    seen.clear()
+    monkeypatch.setattr(SC, "gate_place", lambda: "")
+    SC.run_pipeline(_pipe_args(repo), run=run, log=lambda s: None)
+    assert "--place" not in seen[2]
+
+
 def test_pipeline_host_failure_and_calls_error(tmp_path):
     repo = tmp_path / "au"
     (repo / "docs" / "progress").mkdir(parents=True)

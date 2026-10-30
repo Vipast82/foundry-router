@@ -236,6 +236,18 @@ def gate_ps1_cmd(a, finish: bool = False) -> list:
     return cmd
 
 
+def gate_place() -> str:
+    """The TEST place's name marker from the Foundry Client's [studio] settings
+    (studio.title_match, e.g. "[TEST]", set in the client UI), or "" without a client.
+    2026-10-30 18:49: with a second Studio open the gate could not tell which one to use
+    ("need exactly one Studio, found 2"); the client already knows which place is TEST."""
+    try:
+        from . import client_api
+        return str((client_api.studio_settings() or {}).get("title_match") or "").strip()
+    except Exception:
+        return ""
+
+
 def run_pipeline(a, run: Callable = run_step, log: Callable = print) -> dict:
     """host half -> calls -> -Finish at one HEAD. Returns the final pipeline record
     (also written to calls_pipeline.json): result PASS | FAIL | ERROR and the stage."""
@@ -278,6 +290,10 @@ def run_pipeline(a, run: Callable = run_step, log: Callable = print) -> dict:
                                           str(a.budget_min), "--group-min", str(a.group_min)])
     if split_ids(a.suites):
         calls_cmd += ["--suites", ",".join(split_ids(a.suites))]
+    place = getattr(a, "place", None) or gate_place()
+    if place:
+        # the calls subcommand's own --place (studio_gate.py): bind the TEST Studio by name
+        calls_cmd[calls_cmd.index("calls"):calls_cmd.index("calls")] = ["--place", place]
     env = dict(os.environ)
     env["PYTHONPATH"] = ROUTER_ROOT + (os.pathsep + env["PYTHONPATH"] if env.get("PYTHONPATH") else "")
     env["FOUNDRY_GATE_RUN_ID"] = a.run_id

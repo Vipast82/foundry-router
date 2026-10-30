@@ -2,6 +2,18 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.157.94 — the Studio gate picks the TEST Studio when more than one is open
+
+2026-10-30 18:49: a Studio left on its start page (no place open) ran next to the TEST Studio.
+Every scripted gate (MV2-11, GF-RT1) failed with "need exactly one Studio, found 2 (open: None,
+Animal Uprising [TEST])": the gate ran with no place filter, so any second Studio broke it.
+
+- **mcp_stdio:** a Studio with no place open (official: no name; community: no placeName and
+  no placeId) is never counted as a gate target.
+- **studio_calls:** the calls stage passes `--place` from the Foundry Client's
+  `studio.title_match` (e.g. "[TEST]", already set in the client UI), so a second Studio on
+  another place (a Studio slot, a sandbox) cannot be picked either. No client: unchanged.
+
 ## v0.157.93 — Studio with no place open gets the place reopened
 
 2026-10-30 18:19: Studio was running with no place open. GF-RT1's session reported "Place is

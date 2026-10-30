@@ -356,9 +356,12 @@ class OfficialStudio:
 
     def resolve(self, timeout: float = 30.0) -> str:
         studios = self.list_studios(timeout)
-        pick = studios
+        # 2026-10-30 18:49 MV2-11: a Studio left on its start page (no place open: name
+        # null) next to the TEST Studio made every gate fail "found 2". A Studio with no
+        # place open can never be the gate's target, so it does not count.
+        pick = [s for s in studios if str(s.get("name") or "").strip()]
         if self.place:
-            pick = [s for s in studios if self.place.lower() in str(s.get("name") or "").lower()]
+            pick = [s for s in pick if self.place.lower() in str(s.get("name") or "").lower()]
         if len(pick) != 1:
             names = ", ".join(str(s.get("name")) for s in studios) or "none"
             want = f" matching {self.place!r}" if self.place else ""
@@ -418,9 +421,10 @@ class CommunityStudio:
         while not inst and time.monotonic() < deadline:
             time.sleep(2.0)
             inst = self.instances(timeout)
-        pick = inst
+        # an instance with no place open (no placeName and no placeId) is never the target
+        pick = [i for i in inst if str(i.get("placeName") or "").strip() or i.get("placeId")]
         if self.place:
-            pick = [i for i in inst if self.place.lower() in str(i.get("placeName") or "").lower()]
+            pick = [i for i in pick if self.place.lower() in str(i.get("placeName") or "").lower()]
         if len(pick) != 1:
             open_ = ", ".join(f"{i.get('placeName')}({i.get('id')})" for i in inst) or "none"
             want = f" matching {self.place!r}" if self.place else ""
