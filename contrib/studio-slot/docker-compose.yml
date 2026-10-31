@@ -20,6 +20,11 @@ services:
       ROBLOX_STUDIO_NO_AUTH: "1"
       # AU's studio.lock (one Studio driver at a time) lives in the slot, not on C:
       AU_LOCK_DIR: "/home/studio/locks"
+      # 2-player playtests (edit + server + 2 clients, software rendering) ran the slot out of
+      # memory twice on 2026-10-31 (12 GB limit; this PC's Docker VM has ~16 GB of 31 GB): rows with
+      # players > 1 stay MANUAL here and run on the workstation Studio at the track's merge.
+      # A slot with more memory (a mini PC) can drop this line.
+      FOUNDRY_GATE_MULTIPLAYER: "0"
       # Roblox Open Cloud (Creator API) for asset uploads (Victor 2026-10-31): AU's
       # tools/assets/roblox_cloud.py is the only reader of this file (the key is never printed,
       # logged or on a command line). It reaches the slot as a read-only mount, never the image.
