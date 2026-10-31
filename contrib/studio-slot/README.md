@@ -82,7 +82,10 @@ workstation's TEST window by that name).
 4. **Rojo 7.7.1**, supervised (restarted if it exits), serving the slot's checkout on 34872.
 5. Studio plugin settings, written while Studio is closed: Rojo **Auto Reconnect** +
    **sync without asking**, Studio's MCP server on; LIVE (`ROJO_NEVER_PLACE_IDS`) loses any saved
-   Rojo connection. Auto-recovery is off (a slot's content comes from Rojo).
+   Rojo connection. The slot's own place gets a saved Rojo endpoint (`rojo-seed`: the `STUDIO_OPEN`
+   place id + the project's name) — Auto Reconnect only reconnects a place that has one, and without
+   it a reopened Studio stayed unsynced (2026-10-31). Auto-recovery is off (a slot's content comes
+   from Rojo).
 6. Studio opening SLOT-1 full screen (the editor window only; playtest windows stay small).
 7. A **watchdog**: if Studio is gone for a minute, `studio-reopen` opens it again.
 
@@ -152,6 +155,7 @@ commands the asset plans use on the workstation (with `blender` instead of the W
 | `studio-reopen.sh` | close and reopen the slot's Studio cleanly |
 | `studio-mcp-official.sh` | Roblox's StudioMCP.exe under Wine (newest Studio version) |
 | `studio-plugin-settings.js` | Rojo auto-sync + Studio MCP plugin settings |
+| `rojo-seed.sh` | the slot place's saved Rojo endpoint (`<placeId>=<project>`) for the settings |
 | `studio-auth-handler.sh`, `studio-auth.desktop` | the browser sign-in hand-back |
 | `openbox-studio.xml` | window rules (playtest windows stay small) |
 | `vinegar-config.toml` | Vinegar settings that work in a container |

@@ -77,6 +77,7 @@ fi
 # places never auto-synced (LIVE).
 node /opt/studio-slot/studio-plugin-settings.js \
     "$HOME/.local/share/vinegar/prefixes/studio/drive_c/users/$(id -un)/AppData/Local/Roblox" \
+    $(ROJO_PROJECT="$ROJO_PROJECT" rojo-seed) \
     ${ROJO_NEVER_PLACE_IDS:-138024886323256} >>"$HOME/rojo.log" 2>&1 || true
 
 # No "Auto Recovery File Found" question on start: a slot's place content comes from

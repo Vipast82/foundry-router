@@ -12,7 +12,7 @@ for p in $(pgrep -f '[R]obloxStudioBeta'); do kill "$p" 2>/dev/null; done
 sleep 2
 WINEPREFIX="$PREFIX" wineserver -k 2>/dev/null
 sleep 2
-node /opt/studio-slot/studio-plugin-settings.js "$RBX" ${ROJO_NEVER_PLACE_IDS:-138024886323256} \
+node /opt/studio-slot/studio-plugin-settings.js "$RBX" $(rojo-seed) ${ROJO_NEVER_PLACE_IDS:-138024886323256} \
     >>"$HOME/rojo.log" 2>&1 || true
 rm -f "$HOME"/.local/share/vinegar/appdata/Roblox/RobloxStudio/AutoSaves/*_AutoRecovery_*.rbxl 2>/dev/null
 export DISPLAY="${DISPLAY:-:1}" GTK_A11Y=none

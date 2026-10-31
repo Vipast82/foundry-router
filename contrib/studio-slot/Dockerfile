@@ -101,10 +101,12 @@ COPY studio-auth-handler.sh /usr/local/bin/studio-auth-handler
 COPY studio-mcp-official.sh /usr/local/bin/studio-mcp-official
 COPY studio-reopen.sh /usr/local/bin/studio-reopen
 COPY slot-checkout.sh /usr/local/bin/slot-checkout
+COPY rojo-seed.sh /usr/local/bin/rojo-seed
 COPY studio-auth.desktop /usr/share/applications/studio-auth.desktop
 COPY openbox-studio.xml /etc/studio-slot/openbox-studio.xml
 RUN chmod 755 /usr/local/bin/entrypoint.sh /usr/local/bin/studio-auth-handler \
         /usr/local/bin/studio-mcp-official /usr/local/bin/studio-reopen /usr/local/bin/slot-checkout \
+        /usr/local/bin/rojo-seed \
     && update-desktop-database /usr/share/applications \
     && sed -i '/<\/applications>/e cat /etc/studio-slot/openbox-studio.xml' /etc/xdg/openbox/rc.xml \
     && grep -q 'title="Place1 - Roblox Studio"' /etc/xdg/openbox/rc.xml
