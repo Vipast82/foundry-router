@@ -199,6 +199,21 @@ def luau_value(v) -> str:
     raise TypeError(f"no Luau literal for {type(v).__name__}")
 
 
+CAPTURE_SIZE_MIN, CAPTURE_SIZE_MAX = 320, 3840
+
+
+def capture_size(relp: str, rest: str = "") -> Optional[tuple]:
+    """The size a CAPTURE_READY frame asks for: `viewport=WxH` on its line, else a `_WxH`
+    file-name suffix (lunchbox_390x844.png); None when it names none or an absurd one."""
+    m = re.search(r"\bviewport=(\d{3,4})x(\d{3,4})\b", rest or "", re.I) or \
+        re.search(r"_(\d{3,4})x(\d{3,4})\.(?:png|jpe?g)$", relp or "", re.I)
+    if not m:
+        return None
+    w, h = int(m.group(1)), int(m.group(2))
+    ok = all(CAPTURE_SIZE_MIN <= v <= CAPTURE_SIZE_MAX for v in (w, h))
+    return (w, h) if ok else None
+
+
 def png_size(data: bytes) -> Optional[tuple]:
     if len(data) >= 24 and data[:8] == b"\x89PNG\r\n\x1a\n" and data[12:16] == b"IHDR":
         return int.from_bytes(data[16:20], "big"), int.from_bytes(data[20:24], "big")
@@ -1424,19 +1439,40 @@ class Gate:
                     os.path.abspath(os.path.join(self.repo, *want.rstrip("/").split("/")))):
                 out.append(f"FAIL: CAPTURE {relp} - refused: a capture path must be under {want}")
             else:
+                # 2026-10-31 GF-RT1: phone frames (lunchbox_390x844.png) were taken at the
+                # play viewport (1920x1080) and saved under phone names; the sprint could
+                # never make a valid one (23 attempts). A frame names its size with
+                # `viewport=WxH` on the line or a `_WxH` file-name suffix: the runner sizes
+                # the play client to it, takes the frame, checks its size, and restores.
+                want = capture_size(relp, rest)
+                resized = bool(want and want != PLAY_VIEWPORT)
                 png, why = None, ""
-                try:
-                    r = self.community.call_tool("capture_screenshot", {"format": "png"},
-                                                 timeout=self.call_timeout)
-                    png = None if r["is_error"] else next(
-                        (b for mime, b in r["images"] if "png" in mime), None)
-                    why = "" if png else one_line(r["text"], 200)
-                except Exception as e:                            # noqa: BLE001
-                    why = f"{type(e).__name__}: {e}"[:200]
-                if png is None:
+                if resized:
+                    why = self.set_play_viewport(f"capture {want[0]}x{want[1]}", [], want)
+                    if why:
+                        why = f"could not size the play client to {want[0]}x{want[1]}: {why}"
+                if not why:
+                    try:
+                        r = self.community.call_tool("capture_screenshot", {"format": "png"},
+                                                     timeout=self.call_timeout)
+                        png = None if r["is_error"] else next(
+                            (b for mime, b in r["images"] if "png" in mime), None)
+                        why = "" if png else one_line(r["text"], 200)
+                    except Exception as e:                        # noqa: BLE001
+                        why = f"{type(e).__name__}: {e}"[:200]
+                if resized:
+                    self.set_play_viewport("capture restore", [])
+                got = png_size(png) if png is not None else None
+                if png is not None and want and not (
+                        got and abs(got[0] - want[0]) <= VIEWPORT_TOLERANCE_PX
+                        and abs(got[1] - want[1]) <= VIEWPORT_TOLERANCE_PX):
+                    out.append(f"FAIL: CAPTURE {relp} - got {got[0] if got else '?'}x"
+                               f"{got[1] if got else '?'}, want {want[0]}x{want[1]} "
+                               f"(no file written)")
+                    png = None
+                elif png is None:
                     out.append(f"FAIL: CAPTURE {relp} - no PNG from capture_screenshot: {why}")
-                else:
-                    got = png_size(png)
+                if png is not None:
                     size = f"{got[0]}x{got[1]}" if got else "?"
                     data, why = png, ""
                     if not relp.lower().endswith(".png"):
@@ -1949,7 +1985,8 @@ class Gate:
         self.stop_playtest()
         return False
 
-    def set_play_viewport(self, label: str, sink: list) -> Optional[str]:
+    def set_play_viewport(self, label: str, sink: list,
+                          size: Optional[tuple] = None) -> Optional[str]:
         """Pin the playtest client's viewport to PLAY_VIEWPORT the way AU's recipe says
         (set_device_simulator target=client-1 deviceId=average_laptop + resolution override,
         pixelDensity 96, ActualResolution; settle 1.2 s) and read it back. The Edit-time
@@ -1957,7 +1994,7 @@ class Gate:
         (GF-GATE1 2026-10-28: the play client measured 1920x1060 and GF_UI1/GF_UI1b FAILed
         `SIZE 1920x1080`). None when verified; else the honest tooling reason (recorded as
         an UNKNOWN check; the group's client CALLs are UNKNOWN, never a product FAIL)."""
-        w, h = PLAY_VIEWPORT
+        w, h = size or PLAY_VIEWPORT
         args = {"target": "client-1", "deviceId": "average_laptop",
                 "resolution": {"width": w, "height": h}, "pixelDensity": 96,
                 "scalingMode": "ActualResolution"}

@@ -2,6 +2,19 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.158.11 — the Studio gate takes phone-sized frames, and never a wrong-size one
+
+2026-10-31 03:35: GF-RT1 ran out of attempts again (23). Its visual review needs phone frames
+(lunchbox_390x844.png, lunchbox_844x390.png), but CAPTURE_READY always took the play viewport
+(1920x1080) and wrote whatever came back under the requested name. Any UI fix staled the old
+frames, and no valid new one could ever be taken (diagnosis by Lead case rc-defcb91f).
+
+- **AU studio_gate `capture_ready`:** a frame names its size with `viewport=WxH` on the
+  CAPTURE_READY line or a `_WxH` file-name suffix (320..3840). The runner sizes the play client
+  to it (set_device_simulator, ActualResolution, read back), takes the frame, restores the play
+  viewport, and writes the file only when the PNG is that size (else `FAIL: CAPTURE ... got AxB,
+  want WxH (no file written)`). Frames that name no size behave as before.
+
 ## v0.158.10 — the chain order check accepts any earlier prerequisite PASS
 
 2026-10-31 03:01: GF-RT1 used all 21 implementation attempts while every scripted gate passed.

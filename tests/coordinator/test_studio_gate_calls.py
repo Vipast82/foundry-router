@@ -771,3 +771,45 @@ def test_a_leftover_playtest_at_verify_is_stopped_and_verify_retried(fakes, repo
     assert "NOTE PRE-PLAY verify hit Play mode" in text, text[-2000:]
     assert "FAIL: GATE verify PRE-PLAY" not in text
     assert tool_calls(calls, "solo_playtest")                      # stopped, then played
+
+
+def _png(w, h):
+    import struct
+    return b"\x89PNG\r\n\x1a\n" + struct.pack(">I", 13) + b"IHDR" + struct.pack(">II", w, h) + b"\x08\x02\x00\x00\x00"
+
+
+def _capture_gate(tmp_path, shot):
+    from foundry_coordinator.projects.animaluprising import studio_gate as G
+    g = object.__new__(G.Gate)
+    g.sprint, g.repo, g.lines, g.capture_log, g.call_timeout = "CS", str(tmp_path), None, [], 30
+    sized = []
+    g.set_play_viewport = lambda label, sink, size=None: sized.append(size) or None
+    g._community = type("C", (), {"call_tool": lambda self, tool, args, timeout=0: {
+        "is_error": False, "text": "{}", "images": [("image/png", shot(sized))]}})()
+    return g, sized
+
+
+def test_capture_ready_sizes_a_phone_frame_and_restores_the_play_viewport(tmp_path):
+    """2026-10-31 GF-RT1: phone frames were taken at 1920x1080 and saved under phone names;
+    the sprint could never produce a valid lunchbox_390x844.png (23 attempts)."""
+    from foundry_coordinator.projects.animaluprising.studio_gate import capture_size
+    assert capture_size("docs/evidence/X/a_390x844.png") == (390, 844)
+    assert capture_size("docs/evidence/X/a.png", "viewport=844x390 runtime=playtest") == (844, 390)
+    assert capture_size("docs/evidence/X/a.png") is None
+    assert capture_size("docs/evidence/X/a_10x10.png") is None
+    g, sized = _capture_gate(tmp_path, lambda s: _png(*(s[-1] or (1920, 1080))))
+    g.capture_ready("CAPTURE_READY docs/evidence/CS/lunch_390x844.png runtime=playtest")
+    assert sized == [(390, 844), None]                  # sized, then restored
+    assert (tmp_path / "docs/evidence/CS/lunch_390x844.png").is_file()
+    assert "PASS: CAPTURE docs/evidence/CS/lunch_390x844.png 390x844 written by the runner " \
+        "at CAPTURE_READY" in g.capture_log
+
+
+def test_capture_ready_never_writes_a_frame_of_the_wrong_size(tmp_path):
+    g, sized = _capture_gate(tmp_path, lambda s: _png(1920, 1080))
+    g.capture_ready("CAPTURE_READY docs/evidence/CS/lunch_844x390.png runtime=playtest")
+    assert not (tmp_path / "docs/evidence/CS/lunch_844x390.png").exists()
+    assert any("FAIL: CAPTURE docs/evidence/CS/lunch_844x390.png - got 1920x1080, want 844x390"
+               in ln for ln in g.capture_log)
+    g.capture_ready("CAPTURE_READY docs/evidence/CS/plain.png runtime=playtest")   # no size named
+    assert (tmp_path / "docs/evidence/CS/plain.png").is_file() and len(sized) == 2
