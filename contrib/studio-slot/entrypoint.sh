@@ -116,7 +116,12 @@ if [ "${START_VINEGAR:-1}" = "1" ]; then
             sleep 120
             gone=0
             while sleep 20; do
-                if pgrep -f '[R]obloxStudioBeta' >/dev/null || [ -e /tmp/studio-reopening ]; then
+                # the EDIT Studio only: its program is RobloxStudioBeta.exe and it is not a playtest
+                # server/client (-studiotestservicemode). Those, and the WebView2 helpers (whose
+                # args name RobloxStudioBeta.exe), outlive a crashed editor and kept this watchdog
+                # quiet (2026-10-31, AS-J05)
+                if pgrep -fa 'RobloxStudioBeta' | awk '$2 ~ /RobloxStudioBeta\.exe$/' \
+                        | grep -qv -- '-studiotestservicemode' || [ -e /tmp/studio-reopening ]; then
                     gone=0
                 else
                     gone=$((gone + 1))
