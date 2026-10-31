@@ -593,13 +593,27 @@ def _commit(c, P, e: dict, cfg: dict) -> tuple[str, str]:
 def _apply_patch(c, P, e: dict, path: str, cfg: dict) -> tuple[Optional[str], str]:
     ws = P.profile.workspace
     chk = _git(ws, "apply", "--index", "--check", path)
+    mode = []
     if chk.returncode != 0:
         rev = _git(ws, "apply", "--reverse", "--check", path)
         if rev.returncode == 0:
             return "", "already in the tree (the reverse patch applies); nothing to commit"
-        return None, f"git apply --check failed at {_head(ws)[:12]}: {_out(chk)[-2000:]}"
-    r = _git(ws, "apply", "--index", path)
+        # 2026-10-30 pq-a18215c796: the NAME1 merge failed "patch failed:
+        # SPRINT_STATUS.md:236" because master had edited nearby lines since the branch was
+        # cut. A 3-way apply uses the patch's blob ids to merge non-overlapping edits; a real
+        # overlap still fails this check and the entry is refused as before.
+        chk3 = _git(ws, "apply", "--3way", "--index", "--check", path)
+        if chk3.returncode != 0:
+            return None, (f"git apply --check failed at {_head(ws)[:12]}: {_out(chk)[-1500:]}"
+                          f" | 3-way: {_out(chk3)[-500:]}")
+        mode = ["--3way"]
+    r = _git(ws, "apply", *mode, "--index", path)
     if r.returncode != 0:
+        if mode:
+            # `--3way --check` cannot see an overlapping edit; the apply leaves conflicts and
+            # the batch resets the checkout to its start (the entry is refused as before)
+            return None, (f"git apply --check failed at {_head(ws)[:12]}: {_out(chk)[-1500:]} | "
+                          f"3-way: overlapping edits: {_out(r)[-500:]}")
         return None, f"git apply failed: {_out(r)[-2000:]}"
     return _commit(c, P, e, cfg)
 

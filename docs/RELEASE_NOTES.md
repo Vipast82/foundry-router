@@ -2,6 +2,17 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.158.0 — prep entries land with a 3-way apply when master moved nearby
+
+2026-10-30 23:09: two prep entries (the GF-NAME1 merge and the owner-decisions docs) failed
+"git apply --check failed: patch failed: docs/progress/SPRINT_STATUS.md:236": master had edited
+lines near their hunks after the branches were cut, and the plain patch apply needs the context to
+match exactly.
+
+- **prep_queue:** when the plain `git apply --check` fails (and the patch is not already in the
+  tree), a `git apply --3way` check follows; non-overlapping edits then land 3-way. An overlapping
+  edit is still refused (reported as a failed check), and the batch resets the checkout as before.
+
 ## v0.157.99 — the Studio gate runs 2-player suites in a multiplayer playtest
 
 2026-10-30: MV2-11 parked on suite S17 (`players = 2`). Since 2026-10-27 the scripted gate listed

@@ -298,6 +298,28 @@ def test_patch_that_does_not_apply_fails_the_batch(game, tmp_path):
     assert res["result"] == "failed"
     assert "git apply --check failed" in "\n".join(x["msg"] for x in
                                                    PQ.get(c.store, e["id"])["log"])
+    # an overlapping edit is refused even after the 3-way fallback, and no conflict is left
+    assert (root / "src" / "a.txt").read_text() == "conflict\n"
+    assert subprocess.run(["git", "-C", str(root), "status", "--porcelain", "--", "src"],
+                          capture_output=True, text=True).stdout.strip() == ""
+
+
+def test_a_patch_whose_context_moved_lands_with_a_three_way_apply(game, tmp_path):
+    """2026-10-30 pq-a18215c796: master edited lines near the patch's hunk after the branch was
+    cut ('patch failed: SPRINT_STATUS.md:236'); non-overlapping edits now land 3-way."""
+    c, P, root, remote, pushes = game
+    base = "".join(f"line {i}\n" for i in range(1, 9))
+    (root / "src" / "s.txt").write_text(base)
+    git(root, "add", "-A")
+    git(root, "commit", "-qm", "status file")
+    p = make_patch(root, tmp_path, "x", {"src/s.txt": base.replace("line 7\n", "line 7 (patch)\n")})
+    (root / "src" / "s.txt").write_text(base.replace("line 5\n", "line 5 (master)\n"))
+    git(root, "commit", "-qam", "master moved on nearby")
+    e = PQ.add(c, "game", "patch", "prep: x", source=p)
+    assert land(c, P)["result"] == "landed"
+    text = (root / "src" / "s.txt").read_text()
+    assert "line 5 (master)" in text and "line 7 (patch)" in text
+    assert PQ.get(c.store, e["id"])["status"] == "landed"
 
 
 def test_commit_uses_the_adapter_commit_env(game, tmp_path):
