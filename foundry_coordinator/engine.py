@@ -6953,8 +6953,24 @@ class Coordinator:
                 auto = False
             return bool(kinds) and kinds <= {"visual"} and auto
         if st == S.BLOCKED:
-            ah = (o.get("data") or {}).get("auto_heal") or {}
-            return bool(ah.get("retry_at")) and str(o.get("blocker") or "").startswith("auto-heal")
+            data = o.get("data") or {}
+            ah = data.get("auto_heal") or {}
+            if ah.get("retry_at") and str(o.get("blocker") or "").startswith("auto-heal"):
+                return True
+            # 2026-10-30 20:55-21:12: MV2-11 and GF-RT1 blocked into lead cases and the next
+            # main sprint took the checkout in the same tick. The lead (write access) waits
+            # for the workspace lock, so no lead call ran for 2 h; the 3-min decision timeout
+            # read that as "lead unavailable" and parked MV2-11. A sprint whose lead case is
+            # working (not DEFERRED, not paused) keeps its place, so the lead runs at once.
+            cid = data.get("recovery_case")
+            L = getattr(self, "lead", None)
+            if cid and L is not None:
+                try:
+                    case = L.case(cid)
+                except Exception:                                     # noqa: BLE001
+                    case = None
+                return bool(case) and case.get("state") in ("DIAGNOSING", "REPAIRING") \
+                    and not case.get("paused")
         return False
 
     def _session_locks(self, P: Project, t: Optional[dict] = None) -> list[str]:

@@ -1115,3 +1115,29 @@ def test_an_automatic_pause_keeps_the_main_checkout(game):
     assert c._main_sprint_in_flight(P, c.store.task("game", "T2")) == "T1"
     c.store.update_task("game", "T1", blocker="lead recovery: DIAGNOSING", data={})
     assert c._main_sprint_in_flight(P, c.store.task("game", "T2")) == ""
+
+
+def test_a_sprint_with_a_working_lead_case_keeps_the_main_checkout(game, monkeypatch):
+    """2026-10-30 20:55-21:12: MV2-11 and GF-RT1 blocked into lead cases and the next main
+    sprint took the checkout in the same tick; the lead waits for the workspace lock, so no
+    lead call ran for 2 h and the 3-min decision timeout parked MV2-11 as 'lead unavailable'."""
+    tmp, _, _, prof = game
+    c = coordinator(tmp, [prof], {"game": write_ok("src/b.txt")})
+    P = c.projects["game"]
+    for tid in ("T1", "T2"):
+        c.approve("game", tid, [], "victor")
+    cases = {"rc-1": {"case_id": "rc-1", "state": "DIAGNOSING", "paused": 0}}
+    from types import SimpleNamespace
+    monkeypatch.setattr(c, "lead", SimpleNamespace(case=lambda cid: cases.get(cid)), raising=False)
+    c.store.update_task("game", "T1", state=S.BLOCKED, started_ts=100.0,
+                        blocker="lead recovery: DIAGNOSING (case rc-1)",
+                        data={"recovery_case": "rc-1"})
+    c.store.update_task("game", "T2", state=S.READY, started_ts=None)
+    assert c._main_sprint_in_flight(P, c.store.task("game", "T2")) == "T1"
+    cases["rc-1"]["state"] = "REPAIRING"
+    assert c._main_sprint_in_flight(P, c.store.task("game", "T2")) == "T1"
+    for state, paused in (("DEFERRED", 0), ("NEEDS_VICTOR", 0), ("DIAGNOSING", 1)):
+        cases["rc-1"].update(state=state, paused=paused)        # waiting on quota or a person
+        assert c._main_sprint_in_flight(P, c.store.task("game", "T2")) == ""
+    c.store.update_task("game", "T1", data={"recovery_case": "rc-gone"})
+    assert c._main_sprint_in_flight(P, c.store.task("game", "T2")) == ""

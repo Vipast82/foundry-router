@@ -2,6 +2,18 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.157.97 — a sprint in a working Lead case keeps the main checkout
+
+2026-10-30 20:55-21:12: MV2-11 and then GF-RT1 blocked into Lead cases, and in the same tick
+the next main sprint (GF-RT1, then GF-SEC3) started and took the main checkout. The Lead has
+write access, so it waits for the workspace lock; no Lead call ran from 19:08 to 21:20. The
+3-minute decision timeout read "DIAGNOSING without a lead call" as "lead unavailable", handed
+the case back to self-repair, and MV2-11 was parked.
+
+- **engine:** `_main_pause_is_automatic` also covers a BLOCKED sprint whose Lead case is
+  DIAGNOSING or REPAIRING (not DEFERRED, not paused, not waiting on a person): it keeps its
+  place in the main checkout, so the Lead runs at once instead of after the next sprint.
+
 ## v0.157.96 — the Studio gate's file list keeps the files Studio loads
 
 2026-10-30 19:08 MV2-11: the scripted gate passed `-Files` from the whole base..HEAD diff, sorted
