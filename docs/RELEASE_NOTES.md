@@ -2,6 +2,15 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.158.17 — a lead on a slot-bound track leaves the workstation's studio.lock alone
+
+2026-10-31 10:19: the lead of AS-J05 (track slot1-props on slot-1) followed the project's lock
+protocol and took the workstation's studio.lock (tools/coord/lock.py) for Studio work that went to
+the container; MV2-V1's gate on the main Studio stopped "studio.lock is held".
+
+- **lead `_lead_prompt`:** for a task on a slot-bound track, the lead is told its Studio tools reach
+  the slot and to never take, wait for or release the workstation's studio.lock.
+
 ## v0.158.16 — a lead abort a CLI process could not confirm is retried by the coordinator
 
 2026-10-31 10:19: an operator `unblock AS-J05` (CLI) cancelled lead case rc-4da8ec15; its abort ran

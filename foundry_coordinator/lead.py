@@ -1900,9 +1900,28 @@ class LeadManager:
             "root cause.",
             ("Current project recovery policy (higher priority than historical plan notes): "
              + policy) if policy else "",
+            self._slot_text(P, t),
             self._memory_text(P, t),
             report_contract(bool(self.settings(P).get("full_authority")),
                             bool(self.settings(P).get("write_access"))), "", text])
+
+    def _slot_text(self, P, t: dict) -> str:
+        """2026-10-31 AS-J05: a lead on a slot-bound track took the WORKSTATION's studio.lock
+        (tools/coord/lock.py on the host) for Studio work that went to the slot, and MV2-V1's
+        gate on the main Studio stopped "studio.lock is held"."""
+        try:
+            name = self.store.task_track(P.id, t["task_id"]) or ""
+            row = self.store.track(P.id, name) if name else None
+            slot = str(((row or {}).get("data") or {}).get("slot") or "")
+        except Exception:                                         # noqa: BLE001
+            return ""
+        if not slot:
+            return ""
+        return (f"This task runs on track `{name}`, bound to Studio slot `{slot}` (a containerised "
+                "Studio): your Studio MCP tools reach the slot's Studio, never the workstation's. "
+                "Never take, wait for or release the workstation's studio.lock "
+                "(tools/coord/lock.py, C:\\Roblox\\_scratch): it guards the main Studio, which "
+                "another sprint may be using.")
 
     def _memory_text(self, P, t: dict) -> str:
         """The project memory slice (docs/memory) for the lead, plus the playbook

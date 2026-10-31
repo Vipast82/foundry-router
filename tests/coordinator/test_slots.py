@@ -133,3 +133,15 @@ def test_a_lead_abort_that_fails_here_is_queued_and_retried_by_the_running_coord
     assert lm.retry_aborts() == ["ses_x"]
     assert json.loads(store.meta(LeadManager.ABORT_PENDING_KEY)) == []
     assert calls == [("ses_x", None), ("ses_x", True)]
+
+
+def test_a_lead_on_a_slot_track_is_told_to_leave_the_workstation_studio_lock_alone():
+    from foundry_coordinator.lead import LeadManager
+    lm = LeadManager.__new__(LeadManager)
+    rows = {"t1": {"data": {"slot": "slot-1"}}, "t2": {"data": {}}}
+    tasks = {"AS-J05": "t1", "X": "t2", "M": ""}
+    lm.store = SimpleNamespace(task_track=lambda pid, tid: tasks[tid], track=lambda pid, n: rows[n])
+    P = SimpleNamespace(id="game")
+    txt = lm._slot_text(P, {"task_id": "AS-J05"})
+    assert "slot-1" in txt and "studio.lock" in txt
+    assert lm._slot_text(P, {"task_id": "X"}) == "" and lm._slot_text(P, {"task_id": "M"}) == ""
