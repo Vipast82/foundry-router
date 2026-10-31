@@ -2477,11 +2477,63 @@ class LeadManager:
         self._release_locks(P, key)
         return []
 
+    ABORT_PENDING_KEY = "lead_abort_pending"
+    ABORT_PENDING_TTL_S = 24 * 3600
+
     def _abort(self, P, sid: str, directory: str) -> None:
+        """Abort a lead/repair session. 2026-10-31 AS-J05: an operator `unblock` from the CLI
+        cancelled a case in a process with no Kilo credentials; the abort failed silently and
+        the lead session kept running (it took the workstation's studio.lock and stopped
+        MV2-V1's gate). A failed abort is now queued; the running coordinator retries it
+        (`retry_aborts`, every tick) with its own client."""
+        if not sid:
+            return
+        ok = False
         try:
-            P.client.abort(sid, directory=directory)
+            ok = P.client.abort(sid, directory=directory) is not False
         except Exception:                                        # noqa: BLE001
-            pass
+            ok = False
+        if not ok:
+            self._queue_abort(P, sid, directory)
+
+    def _queue_abort(self, P, sid: str, directory: str) -> None:
+        try:
+            cur = json.loads(self.store.meta(self.ABORT_PENDING_KEY) or "[]")
+        except ValueError:
+            cur = []
+        if not any(x.get("sid") == sid for x in cur):
+            cur.append({"sid": sid, "directory": directory, "project_id": P.id, "ts": self.clock()})
+            self.store.set_meta(self.ABORT_PENDING_KEY, json.dumps(cur))
+            self.store.event(P.id, "", "lead_abort_pending", detail={
+                "session_id": sid, "directory": directory,
+                "why": "abort not confirmed here; the running coordinator retries it"})
+
+    def retry_aborts(self) -> list:
+        """Retry the queued aborts with this process's clients; returns the aborted ids."""
+        try:
+            cur = json.loads(self.store.meta(self.ABORT_PENDING_KEY) or "[]")
+        except ValueError:
+            cur = []
+        if not cur:
+            return []
+        keep, done = [], []
+        for x in cur:
+            P = (getattr(self.c, "projects", None) or {}).get(x.get("project_id"))
+            if P is None:
+                keep.append(x)
+                continue
+            try:
+                ok = P.client.abort(x["sid"], directory=x.get("directory") or P.profile.workspace) \
+                    is not False
+            except Exception:                                    # noqa: BLE001
+                ok = False
+            if ok:
+                done.append(x["sid"])
+                self.store.event(P.id, "", "lead_abort_retried", detail={"session_id": x["sid"]})
+            elif self.clock() - float(x.get("ts") or 0) < self.ABORT_PENDING_TTL_S:
+                keep.append(x)
+        self.store.set_meta(self.ABORT_PENDING_KEY, json.dumps(keep))
+        return done
 
     def _abort_sessions(self, P, case: dict, why: str) -> None:
         for kind in ("lead_call", "repair_session", TRACK_REPAIR_KIND):

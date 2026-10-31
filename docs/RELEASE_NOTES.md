@@ -2,6 +2,17 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.158.16 — a lead abort a CLI process could not confirm is retried by the coordinator
+
+2026-10-31 10:19: an operator `unblock AS-J05` (CLI) cancelled lead case rc-4da8ec15; its abort ran
+in the CLI process, which has no Kilo server credentials (HTTP 401), failed silently, and the lead
+session kept working in the slot track's worktree. It took the workstation's studio.lock and
+MV2-V1's scripted gate stopped "studio.lock is held".
+
+- **lead `_abort`:** an abort Kilo does not confirm (False or an error) is queued in meta
+  `lead_abort_pending` with an event; **`retry_aborts`** retries it from the running coordinator's
+  own client every tick (`engine.tick`), for up to 24 h.
+
 ## v0.158.15 — Studio slots: a track can run its Studio work in a containerised Studio
 
 2026-10-31 (Victor: "build dispatch, real sprint" — first run AS-J05 on contrib/studio-slot).

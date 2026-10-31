@@ -361,6 +361,11 @@ class Coordinator:
                                 == want.get(k[2]))
         except Exception as e:                                    # noqa: BLE001
             self.log(f"background checks sweep failed: {type(e).__name__}: {e}")
+        try:
+            # 2026-10-31: aborts a CLI process could not confirm (no Kilo credentials there)
+            self.lead.retry_aborts()
+        except Exception as e:                                    # noqa: BLE001
+            self.log(f"lead abort retry failed: {type(e).__name__}: {e}")
         __import__(f"{__package__}.prep_queue", fromlist=["tick"]).tick(self)  # SD part 3
         rr = int(self.store.meta("rr") or 0) % len(ids)
         order = ids[rr:] + ids[:rr]

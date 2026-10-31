@@ -102,3 +102,34 @@ def test_a_slot_track_takes_the_slot_lock_never_the_workstation_studio():
     assert "slot:slot-1" in locks and not any(x.startswith("studio:") for x in locks)
     sc2, P2 = _calls_for_track("")
     assert sc2._slot(P2) is None
+
+
+def test_a_lead_abort_that_fails_here_is_queued_and_retried_by_the_running_coordinator(tmp_path):
+    """2026-10-31 AS-J05: a CLI `unblock` cancelled a lead case in a process with no Kilo
+    credentials; the abort failed silently and the lead session kept the workstation's
+    studio.lock. Now it is queued and the coordinator retries it."""
+    from foundry_coordinator.lead import LeadManager
+    from foundry_coordinator.store import Store
+    store = Store(str(tmp_path / "c.sqlite"))
+    calls = []
+
+    class Client:
+        def __init__(self, ok):
+            self.ok = ok
+
+        def abort(self, sid, directory):
+            calls.append((sid, self.ok))
+            if self.ok is None:
+                raise RuntimeError("HTTP 401")
+            return self.ok
+
+    P_cli = SimpleNamespace(id="game", client=Client(None), profile=SimpleNamespace(workspace="w"))
+    lm = LeadManager.__new__(LeadManager)
+    lm.store, lm.clock = store, (lambda: 100.0)
+    lm.c = SimpleNamespace(projects={"game": SimpleNamespace(id="game", client=Client(True),
+                                                            profile=SimpleNamespace(workspace="w"))})
+    lm._abort(P_cli, "ses_x", "C:/tracks/t1")
+    assert json.loads(store.meta(LeadManager.ABORT_PENDING_KEY))[0]["sid"] == "ses_x"
+    assert lm.retry_aborts() == ["ses_x"]
+    assert json.loads(store.meta(LeadManager.ABORT_PENDING_KEY)) == []
+    assert calls == [("ses_x", None), ("ses_x", True)]
