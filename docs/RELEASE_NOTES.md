@@ -2,6 +2,17 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.157.96 — the Studio gate's file list keeps the files Studio loads
+
+2026-10-30 19:08 MV2-11: the scripted gate passed `-Files` from the whole base..HEAD diff, sorted
+and capped at 200. After other tracks merged, that diff held 1381 paths, mostly
+`assets/exports/*.fbx`; the first 200 were all exports, so PRE-PLAY had no Studio-loaded file
+to verify ("no hash map for the files under test"), auto-heal read it as a stale Rojo sync, and
+the sprint looped until a no-progress decision. Found by the Lead (case rc-6e86136d8fdf85dc).
+
+- **studio_calls:** the gate's file list puts Luau sources first, then the rest of `src/`,
+  `tests/` and `default.project.json`, then everything else, before the 200-file cap.
+
 ## v0.157.95 — Rojo reconnects and syncs by itself after a Studio reopen
 
 Victor 2026-10-30: "make Rojo automatically connect and sync so it doesn't ask; if needed the

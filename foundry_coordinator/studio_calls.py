@@ -65,6 +65,19 @@ ID_RE = re.compile(r"[A-Za-z0-9_.\-]{1,64}")
 SEL_RE = re.compile(r"(?:none|full|subset:[A-Za-z0-9_.\-]+|[A-Za-z0-9_.\-]+(?:[, ]+[A-Za-z0-9_.\-]+)*)")
 PATH_RE = re.compile(r"[A-Za-z0-9_./\-]+")
 DEFAULT_FILES = ["tests/RegressionIndex.lua", "tests/GateRunner.lua"]
+MAX_GATE_FILES = 200
+
+
+def _studio_rank(path: str) -> int:
+    """Order for the gate's -Files cap: Luau sources (what PRE-PLAY verifies in Studio)
+    first, then the rest of src/ and tests/ and the project file, then everything else
+    (asset exports, images). sorted() keeps the diff order within a rank."""
+    p = path.lower()
+    if p.endswith((".lua", ".luau")):
+        return 0
+    if p.startswith(("src/", "tests/")) or p == "default.project.json":
+        return 1
+    return 2
 # 2026-10-29 AS-P5: the frames a PASS run commits (v0.157.50) are its own outputs too;
 # without them each outputs commit made the gate look stale -> ~60 PASS runs in 35 min
 EXEMPT = ("docs/progress/{task}_*", "docs/memory/**", "docs/evidence/{task}/*.png",
@@ -486,7 +499,11 @@ class StudioCalls:
         except Exception:                                         # noqa: BLE001
             files = []
         files = [f.replace("\\", "/") for f in files if PATH_RE.fullmatch(f.replace("\\", "/"))]
-        return files[:200] or list(DEFAULT_FILES)
+        # 2026-10-30 19:08 MV2-11: base..HEAD held 1381 paths (other sprints' merged
+        # assets/exports/*.fbx); sorted and capped at 200 they were all exports, so PRE-PLAY
+        # had no Studio-loaded file to verify ("no hash map for the files under test") and
+        # the gate looped as a stale-Rojo stop. Studio-loaded files go first.
+        return sorted(files, key=_studio_rank)[:MAX_GATE_FILES] or list(DEFAULT_FILES)
 
     def _studio_lock_free(self, P, t: dict) -> bool:
         """AU's studio.lock: free, or this task's own idle session left it behind (the

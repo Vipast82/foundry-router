@@ -617,3 +617,19 @@ def test_an_auto_verify_error_on_unchanged_code_stops_once_never_reruns(env):
     sc_._start = lambda *a, **k: started.append(1)
     assert sc_.verify_hold(P, task(e), NS(task_id="T1"), P.ws.head()) is True
     assert stopped and "live=missing" in stopped[0] and not started
+
+
+def test_gate_files_put_studio_loaded_sources_before_asset_exports():
+    """2026-10-30 19:08 MV2-11: base..HEAD held 1381 paths, mostly other sprints' merged
+    .fbx exports; capped at 200 in sort order they were all exports, so PRE-PLAY had nothing
+    Studio-loaded to verify and the gate looped as a stale-Rojo stop."""
+    exports = [f"assets/exports/EN-{i:04d}_Run.fbx" for i in range(1300)]
+    lua = ["src/server/MatchService.lua", "tests/MV2_11_check.lua"]
+    ws = SimpleNamespace(changed_files=lambda base, head: exports + ["docs/x.md", "default.project.json"] + lua)
+    P = SimpleNamespace(ws=ws)
+    sc = SC.StudioCalls.__new__(SC.StudioCalls)
+    got = sc._files(P, {"task_id": "MV2-11", "data": {"task_base": "b" * 40}}, "h" * 40)
+    assert len(got) == SC.MAX_GATE_FILES
+    assert got[:3] == lua + ["default.project.json"]
+    assert "docs/x.md" not in got and got[3].endswith(".fbx")
+    assert sc._files(P, {"task_id": "X", "data": {}}, "h" * 40) == SC.DEFAULT_FILES
