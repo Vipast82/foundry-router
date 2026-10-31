@@ -885,11 +885,27 @@ def test_bridge_serves_tests_from_head_only(repo):
 
 # ---- bridge execution shapes (GF-GATE1 full run 2026-10-28) ------------------------------
 def _lune():
-    """A runnable Lune: AU_LUNE, rokit's tool storage (the rokit shim needs a project
-    manifest in cwd), else lune on PATH."""
-    stored = sorted(glob.glob(os.path.join(os.path.expanduser("~"), ".rokit", "tool-storage",
-                                           "lune-org", "lune", "*", "lune*")))
-    return os.environ.get("AU_LUNE") or (stored[-1] if stored else shutil.which("lune"))
+    """A runnable Lune: AU_LUNE, rokit's tool storage (ROKIT_TOOL_STORAGE in a repair
+    sandbox, else ~/.rokit/tool-storage; the rokit shim needs a project manifest in cwd),
+    else lune on PATH. None (the test skips) when the candidate does not actually run:
+    2026-10-30 the shim on PATH failed in every repair sandbox and failed the test."""
+    roots = [os.environ.get("ROKIT_TOOL_STORAGE") or "",
+             os.path.join(os.path.expanduser("~"), ".rokit", "tool-storage")]
+    stored = []
+    for r in roots:
+        if r:
+            stored = sorted(glob.glob(os.path.join(r, "lune-org", "lune", "*", "lune*")))
+            if stored:
+                break
+    cand = os.environ.get("AU_LUNE") or (stored[-1] if stored else shutil.which("lune"))
+    if not cand:
+        return None
+    try:
+        ok = subprocess.run([cand, "--version"], capture_output=True, timeout=30,
+                            cwd=os.path.dirname(os.path.abspath(cand))).returncode == 0
+    except (OSError, subprocess.TimeoutExpired):
+        ok = False
+    return cand if ok else None
 
 
 LUNE = _lune()

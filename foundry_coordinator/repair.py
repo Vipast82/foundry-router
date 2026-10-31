@@ -160,6 +160,15 @@ def sandbox_env(sandbox: str, base: Optional[dict] = None) -> dict:
             continue
         env[k] = v
     os.makedirs(sandbox, exist_ok=True)
+    # 2026-10-30 (GF-RT1, five lead repair candidates rejected): with HOME moved into the
+    # sandbox, tests that find a tool in the user's rokit storage (~/.rokit/tool-storage, e.g.
+    # Lune) fell back to the rokit shim, which only runs inside a folder with a rokit.toml,
+    # so test_bridge_wrapper_runs_every_suite_shape_under_luau failed on every candidate. The
+    # storage folder (binaries, no credentials) stays reachable as ROKIT_TOOL_STORAGE.
+    home = src.get("USERPROFILE") or src.get("HOME") or ""
+    store = os.path.join(home, ".rokit", "tool-storage") if home else ""
+    if store and os.path.isdir(store) and "ROKIT_TOOL_STORAGE" not in env:
+        env["ROKIT_TOOL_STORAGE"] = store
     for k in ("HOME", "USERPROFILE", "TEMP", "TMP", "TMPDIR"):
         env[k] = sandbox
     env["PYTHONDONTWRITEBYTECODE"] = "1"

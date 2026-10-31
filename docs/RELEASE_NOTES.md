@@ -2,6 +2,20 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.158.2 — Lead repair validation finds Lune (studio_gate candidates were all rejected)
+
+2026-10-30: GF-RT1's Lead produced five candidates for the per-frame capture viewport; every one
+was rejected "tests/coordinator/test_studio_gate.py: 1 failed (test_bridge_wrapper_runs_every_
+suite_shape_under_luau)". The same test passes at each candidate outside the sandbox. Repair
+validation runs pytest with HOME/USERPROFILE moved into a sandbox, so the test could not find Lune
+in `~/.rokit/tool-storage`, fell back to the rokit shim on PATH, and the shim only runs inside a
+folder with a rokit.toml. Every Lead repair touching studio_gate.py failed validation this way.
+
+- **repair `sandbox_env`:** the user's rokit tool storage (binaries, no credentials) stays
+  reachable as `ROKIT_TOOL_STORAGE`.
+- **test_studio_gate `_lune`:** looks in `ROKIT_TOOL_STORAGE` first and checks the candidate
+  actually runs (`lune --version`); a Lune that cannot run skips the test instead of failing it.
+
 ## v0.158.1 — an interrupted prep batch that already pushed is kept
 
 2026-10-30 23:43: a forced coordinator restart (a deploy) hit after a prep batch had committed and

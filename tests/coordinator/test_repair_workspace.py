@@ -510,6 +510,16 @@ def test_test_subprocess_env_is_scrubbed(ws, router, monkeypatch):
     assert env["PATH"] == "p" and env["SYSTEMROOT"] == "C:/Windows" and env["VIRTUAL_ENV"] == "v"
     assert "X_KEY" not in env and "FOUNDRY_COORD_STATE" not in env
     assert env["HOME"] == env["TEMP"] == str(ws.root)
+    # 2026-10-30: the user's rokit tool storage (binaries only) stays reachable for tests that
+    # run a tool such as Lune; without it every studio_gate candidate failed in the sandbox
+    from pathlib import Path
+    root = Path(ws.root)
+    home = root / "realhome"
+    (home / ".rokit" / "tool-storage").mkdir(parents=True)
+    env = RP.sandbox_env(str(root / "sb"), {"USERPROFILE": str(home), "PATH": "p"})
+    assert env["ROKIT_TOOL_STORAGE"] == os.path.join(str(home), ".rokit", "tool-storage")
+    assert env["USERPROFILE"] == str(root / "sb")
+    assert "ROKIT_TOOL_STORAGE" not in RP.sandbox_env(str(root / "sb2"), {"PATH": "p"})
 
 
 def test_existing_test_dropped_at_runtime_refused(ws, router):
