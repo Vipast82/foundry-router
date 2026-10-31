@@ -2,6 +2,14 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.158.8 — "No Roblox Studio instances are connected" reopens Studio
+
+2026-10-31 02:04: the workstation Studio's TEST place closed during MV2-11's scripted gate
+(Studio stayed up on its start page). The official MCP said "No Roblox Studio instances are
+connected", which no autoheal pattern matched, so it became a Lead case instead of a reopen.
+
+- **autoheal `studio_reload`:** also matches "no (roblox) studio instance(s) (are/is) connected".
+
 ## v0.158.7 — the post-review check uses the same unchanged-frames rule
 
 - **visual_approval `step`:** after the model answers, the "became stale" check accepts a HEAD

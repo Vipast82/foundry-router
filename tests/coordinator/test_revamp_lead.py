@@ -229,6 +229,11 @@ def test_studio_with_no_place_open_gets_a_reopen():
            "found 0 (connected: none)")
     assert autoheal.plan("session_blocked", rt1) == ("studio_reload", "restart")
     assert autoheal.plan("studio_calls_error", mv2) == ("studio_reload", "restart")
+    # 2026-10-31 MV2-11: the official MCP's wording for the same state
+    off = ("scripted Studio gate: tooling: GateRunner.run for the 1 selected rows failed: "
+           "GateRunner.run tool error: No Roblox Studio instances are connected. Ask the user "
+           "to confirm that Studio is running with a place open")
+    assert autoheal.plan("studio_calls_error", off) == ("studio_reload", "restart")
     assert autoheal.infra_signature("the shop panel is not open on mobile") == ""
 
 
