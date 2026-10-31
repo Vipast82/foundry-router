@@ -63,7 +63,7 @@ DEFAULTS: dict[str, Any] = {
     # Studio auto-reopen (studio.py): off by default; the TEST place only
     "studio": {"auto_reopen": False, "place_id": 0, "universe_id": 0, "title_match": "",
                "never_place_ids": [], "idle_minutes": 2, "max_wait_minutes": 10,
-               "max_per_hour": 2},
+               "max_per_hour": 2, "rojo_auto_sync": True},
     "components": {
         "kilo": {"enabled": True, "path": "", "port": 4096, "args": [],
                  "env": {"KILO_DISABLE_EXTERNAL_SKILLS": "true"},

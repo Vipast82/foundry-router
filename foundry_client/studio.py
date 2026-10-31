@@ -47,13 +47,59 @@ DEFAULTS = {
     "idle_minutes": 2,
     "max_wait_minutes": 10,
     "max_per_hour": 2,
+    # 2026-10-30 Victor: "make Rojo automatically connect and sync so it doesn't ask"
+    "rojo_auto_sync": True,
 }
+
+# Rojo plugin settings (rojo-rbx/rojo v7.7.1 plugin/src/App/init.lua): autoReconnect
+# connects on place open when that place synced before (priorEndpoints[placeId]) and
+# the server's project name matches; confirmationBehavior "Never" accepts every patch.
+ROJO_AUTO_SYNC = {"Rojo_autoReconnect": True, "Rojo_confirmationBehavior": "Never"}
+
+
+def plugin_settings_files(base: Optional[str] = None) -> list[Path]:
+    """Studio's per-user plugin settings: %LOCALAPPDATA%/Roblox/<userId>/InstalledPlugins/
+    0/settings.json (local-file plugins such as Rojo keep their settings there)."""
+    root = Path(base or os.path.join(os.environ.get("LOCALAPPDATA", ""), "Roblox"))
+    try:
+        return sorted(p for p in root.glob("*/InstalledPlugins/0/settings.json")
+                      if p.parent.parent.parent.name.isdigit())
+    except OSError:
+        return []
+
+
+def apply_rojo_auto_sync(never_place_ids=(), base: Optional[str] = None) -> list[str]:
+    """Turn on Rojo auto-reconnect and sync-without-asking in every Studio user's plugin
+    settings; drop any saved Rojo connection for a never_place_ids place (LIVE) so it is
+    never auto-synced. Studio keeps these in memory and writes them back, so call this
+    only while Studio is closed. Returns the files changed."""
+    never = {str(x) for x in never_place_ids or ()}
+    changed = []
+    for p in plugin_settings_files(base):
+        try:
+            data = json.loads(p.read_text(encoding="utf-8-sig"))
+        except (OSError, ValueError):
+            continue
+        if not isinstance(data, dict):
+            continue
+        new = dict(data)
+        new.update(ROJO_AUTO_SYNC)
+        prior = new.get("Rojo_priorEndpoints")
+        if isinstance(prior, dict) and never & set(map(str, prior)):
+            new["Rojo_priorEndpoints"] = {k: v for k, v in prior.items() if str(k) not in never}
+        if new != data:
+            tmp = p.with_name(p.name + ".foundry-tmp")
+            tmp.write_text(json.dumps(new), encoding="utf-8")
+            os.replace(tmp, p)
+            changed.append(str(p))
+    return changed
 
 
 def validate(st: dict) -> list[str]:
     errs = []
-    if not isinstance(st.get("auto_reopen"), bool):
-        errs.append("studio.auto_reopen must be true or false")
+    for k in ("auto_reopen", "rojo_auto_sync"):
+        if not isinstance(st.get(k), bool):
+            errs.append(f"studio.{k} must be true or false")
     for k in ("place_id", "universe_id", "idle_minutes", "max_wait_minutes", "max_per_hour"):
         v = st.get(k)
         if isinstance(v, bool) or not isinstance(v, int) or v < 0:
@@ -162,7 +208,9 @@ class StudioReopen:
                  backend_factory: Callable[[], object] = WinBackend,
                  alert: Callable[[str, str], None] = lambda key, text: None,
                  clock: Callable[[], float] = time.time,
-                 sleep: Callable[[float], None] = time.sleep):
+                 sleep: Callable[[float], None] = time.sleep,
+                 plugin_settings_dir: Optional[str] = None):
+        self.plugin_settings_dir = plugin_settings_dir
         self.get_settings = get_settings
         self.state_dir = state_dir
         self.backend_factory = backend_factory
@@ -293,6 +341,17 @@ class StudioReopen:
             if be.pid_alive(w["pid"]):
                 return "failed", f"Studio (pid {w['pid']}) did not close within {CLOSE_WAIT_S} s"
             self._step(job, "Studio closed")
+        if st.get("rojo_auto_sync"):
+            # Studio is closed now, so its plugin settings can be written without being
+            # overwritten from memory: Rojo reconnects and syncs on open without a prompt
+            try:
+                ch = apply_rojo_auto_sync(st.get("never_place_ids") or [], self.plugin_settings_dir)
+                note = (f"updated {len(ch)} settings file(s)" if ch else "already set")
+                if ch and others:
+                    note += "; other open Studios may write their own copy back"
+                self._step(job, f"Rojo auto-reconnect + sync without asking: {note}")
+            except OSError as e:
+                self._step(job, f"Rojo settings not updated: {e}")
         self._record()
         be.launch(uri)
         self._step(job, f"opened {uri}")

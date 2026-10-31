@@ -3,13 +3,15 @@ that never loses unsaved work, an idle wait, a rate limit, and a dry run."""
 
 from __future__ import annotations
 
+import json
+
 import pytest
 
 from foundry_client import config, studio as SR
 
 TEST_ST = {"auto_reopen": True, "place_id": 77417134434265, "universe_id": 10772507751,
            "title_match": "[TEST]", "never_place_ids": [138024886323256], "idle_minutes": 2,
-           "max_wait_minutes": 10, "max_per_hour": 2}
+           "max_wait_minutes": 10, "max_per_hour": 2, "rojo_auto_sync": True}
 
 
 class Clock:
@@ -65,7 +67,8 @@ class FakeStudio:
 def _job(tmp_path, fake, clock, st=None, dry=False):
     alerts = []
     r = SR.StudioReopen(lambda: dict(st or TEST_ST), str(tmp_path), backend_factory=lambda: fake,
-                        alert=lambda k, t: alerts.append(t), clock=clock, sleep=clock.sleep)
+                        alert=lambda k, t: alerts.append(t), clock=clock, sleep=clock.sleep,
+                        plugin_settings_dir=str(tmp_path / "Roblox"))
     j = r.start(task="T1", dry_run=dry, wait=True)
     return r, j, alerts
 
@@ -137,3 +140,48 @@ def test_settings_validation():
     assert cfg["studio"]["auto_reopen"] is False
     bad = config._merge(cfg, {"studio": {"auto_reopen": True}})
     assert any("place_id" in e for e in config.validate(bad))
+
+
+def _settings_file(tmp_path, uid="95289024", data=None):
+    p = tmp_path / "Roblox" / uid / "InstalledPlugins" / "0" / "settings.json"
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text(json.dumps(data if data is not None else {
+        "Rojo_autoReconnect": False, "Rojo_confirmationBehavior": "Initial", "Rojo_logLevel": "Info",
+        "Rojo_priorEndpoints": {"77417134434265": {"projectName": "AnimalUprising"},
+                                "138024886323256": {"projectName": "AnimalUprising"}}}),
+        encoding="utf-8")
+    return p
+
+
+def test_reopen_sets_rojo_to_reconnect_and_sync_without_asking_while_studio_is_closed(tmp_path):
+    """2026-10-30 Victor: Rojo should connect and sync by itself after a Studio reopen."""
+    p = _settings_file(tmp_path)
+    clock = Clock()
+    fake = FakeStudio(clock)
+    _, j, _ = _job(tmp_path, fake, clock)
+    assert j["state"] == "done", j
+    d = json.loads(p.read_text(encoding="utf-8"))
+    assert d["Rojo_autoReconnect"] is True and d["Rojo_confirmationBehavior"] == "Never"
+    assert d["Rojo_logLevel"] == "Info"                                  # other keys kept
+    # the LIVE place (never_place_ids) never auto-reconnects and auto-syncs
+    assert list(d["Rojo_priorEndpoints"]) == ["77417134434265"]
+    steps = [s["text"] for s in j["steps"]]
+    i_closed = steps.index("Studio closed")
+    i_rojo = next(i for i, s in enumerate(steps) if s.startswith("Rojo auto-reconnect"))
+    i_open = next(i for i, s in enumerate(steps) if s.startswith("opened "))
+    assert i_closed < i_rojo < i_open                      # written only while Studio is closed
+    assert SR.apply_rojo_auto_sync([138024886323256], str(tmp_path / "Roblox")) == []
+
+
+def test_rojo_auto_sync_off_and_bad_files_are_left_alone(tmp_path):
+    p = _settings_file(tmp_path)
+    clock = Clock()
+    _, j, _ = _job(tmp_path, FakeStudio(clock), clock, st=dict(TEST_ST, rojo_auto_sync=False))
+    assert j["state"] == "done"
+    assert json.loads(p.read_text(encoding="utf-8"))["Rojo_confirmationBehavior"] == "Initial"
+    bad = tmp_path / "Roblox" / "1" / "InstalledPlugins" / "0" / "settings.json"
+    bad.parent.mkdir(parents=True)
+    bad.write_text("not json", encoding="utf-8")
+    assert SR.apply_rojo_auto_sync([], str(tmp_path / "Roblox")) == [str(p)]
+    assert bad.read_text(encoding="utf-8") == "not json"
+    assert "studio.rojo_auto_sync must be true or false" in SR.validate(dict(TEST_ST, rojo_auto_sync="yes"))

@@ -2,6 +2,26 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.157.95 — Rojo reconnects and syncs by itself after a Studio reopen
+
+Victor 2026-10-30: "make Rojo automatically connect and sync so it doesn't ask; if needed the
+AI can close and reopen Studio and it auto-connects and syncs". Rojo's plugin had Auto
+Reconnect on, but its confirmation setting was "Initial": the first sync of every Studio
+session waited for an Accept click.
+
+- **Foundry Client, Studio auto-reopen:** new setting `studio.rojo_auto_sync` (default on).
+  Between closing Studio and opening the TEST place, the client writes Rojo's plugin settings
+  for every Studio user (`%LOCALAPPDATA%/Roblox/<userId>/InstalledPlugins/0/settings.json`):
+  `Rojo_autoReconnect = true` and `Rojo_confirmationBehavior = "Never"` (Rojo 7.7 values). It
+  writes only while Studio is closed, because Studio keeps these in memory and writes its copy
+  back.
+- **LIVE stays manual:** any saved Rojo connection for a `never_place_ids` place is removed,
+  so Rojo never auto-connects and auto-syncs into LIVE.
+- The client must be restarted once to load this (tray → restart, or the next sign-in).
+- Studio slot container (`contrib/studio-slot`): the same settings are applied before Studio
+  starts, and auto-recovery prompts are turned off there; verified: start → SLOT-1 opens →
+  Rojo connects and syncs → playtest, no clicks.
+
 ## v0.157.94 — the Studio gate picks the TEST Studio when more than one is open
 
 2026-10-30 18:49: a Studio left on its start page (no place open) ran next to the TEST Studio.
