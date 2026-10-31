@@ -633,3 +633,47 @@ def test_gate_files_put_studio_loaded_sources_before_asset_exports():
     assert got[:3] == lua + ["default.project.json"]
     assert "docs/x.md" not in got and got[3].endswith(".fbx")
     assert sc._files(P, {"task_id": "X", "data": {}}, "h" * 40) == SC.DEFAULT_FILES
+
+
+def test_default_request_drops_suite_ids_the_regression_index_does_not_have(tmp_path):
+    """2026-10-31 as-d19: a plan's merge-owed Studio checks were labelled S1-S4; the merge
+    batch asked gate.ps1 for those suites and the host half failed '-Suites S1 has no index
+    row'. Only RegressionIndex row ids are suites."""
+    from types import SimpleNamespace
+    ws = tmp_path / "au"
+    (ws / "tests").mkdir(parents=True)
+    (ws / "docs" / "progress").mkdir(parents=True)
+    (ws / "tests" / "RegressionIndex.lua").write_text(
+        'return { { id = "S17", file = "S17_check" }, { id = "AS_D19", file = "x" } }',
+        encoding="utf-8")
+    checks = [{"check_id": "suite:S1"}, {"check_id": "suite:S2"}, {"check_id": "suite:S17"}]
+    P = SimpleNamespace(profile=SimpleNamespace(workspace=str(ws)),
+                        adapter=SimpleNamespace(required_checks=lambda spec, phase: checks))
+    sc = SC.StudioCalls.__new__(SC.StudioCalls)
+    sc._tier = lambda P, tid, spec=None: "C"
+    assert sc.default_request(P, "AS-D19", object())["suites"] == ["S17"]
+    checks[:] = [{"check_id": "suite:S1"}, {"check_id": "suite:S4"}]
+    assert sc.default_request(P, "AS-D19", object()) is None       # -> the shared regression
+    (ws / "docs" / "progress" / "AS-D19_EVIDENCE_RAW.log").write_text(
+        "GATE RUN sprint=AS-D19 tier=C regression=none suites=[S1,S3,S17]\n", encoding="utf-8")
+    assert sc.default_request(P, "AS-D19", object())["suites"] == ["S17"]
+
+
+def test_default_request_keeps_every_required_suite_after_a_one_suite_rerun(tmp_path):
+    """2026-10-31 MV2-11: the last host half re-ran S17 only; each automatic re-gate copied it
+    and S46 (required, staled by newer code) never got a fresh record."""
+    from types import SimpleNamespace
+    ws = tmp_path / "au"
+    (ws / "tests").mkdir(parents=True)
+    (ws / "docs" / "progress").mkdir(parents=True)
+    (ws / "tests" / "RegressionIndex.lua").write_text(
+        'return { { id = "S17" }, { id = "S46" }, { id = "MV2_11" } }', encoding="utf-8")
+    checks = [{"check_id": "suite:S17"}, {"check_id": "suite:S46"}, {"check_id": "suite:MV2_11"}]
+    P = SimpleNamespace(profile=SimpleNamespace(workspace=str(ws)),
+                        adapter=SimpleNamespace(required_checks=lambda spec, phase: checks))
+    sc = SC.StudioCalls.__new__(SC.StudioCalls)
+    sc._tier = lambda P, tid, spec=None: "A"
+    (ws / "docs" / "progress" / "MV2-11_EVIDENCE_RAW.log").write_text(
+        "GATE RUN sprint=MV2-11 tier=A regression=subset:map suites=[S17]\n", encoding="utf-8")
+    req = sc.default_request(P, "MV2-11", object())
+    assert req["suites"] == ["S17", "S46", "MV2_11"] and req["regression"] == "subset:map"

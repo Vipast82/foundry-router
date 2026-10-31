@@ -2,6 +2,18 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.158.5 — automatic gates run every required suite; plan labels are never suites
+
+2026-10-31 01:00: two sprints stopped on the automatic Studio gate's suite list.
+- MV2-11 parked "no fresh verified record" for S46: its last host half had re-run S17 only, and
+  every automatic re-gate copied that list, so S46 (required, staled by newer code) never ran.
+- The as-d19 track merge went red "-Suites S1 has no index row": the plan labelled its
+  merge-owed Studio checks S1-S4 and they were read as suite ids.
+
+- **studio_calls `default_request`:** the sprint's required suites (BUILD `suite:` checks) always
+  join the last run's suites; and only ids present in `tests/RegressionIndex.lua` are kept (a
+  sprint left with none shares the merge's full regression, as Blender sprints do).
+
 ## v0.158.4 — Roblox's own Studio MCP waits for Studio to connect (Studio slot containers)
 
 2026-10-31: in the studio-slot container, studio_gate's doctor failed "need exactly one Studio

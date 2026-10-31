@@ -1160,22 +1160,48 @@ class StudioCalls:
                                   % re.escape(tid), f.read(), re.M)
         except OSError:
             runs = []
-        if runs:
-            tier, reg, suites = runs[-1]
-            req = {"suites": split_ids(suites), "regression": reg, "tier": tier.upper(),
-                   "rerun": "failed", "files": []}
-            if req["suites"] or req["regression"] != "none":
-                return req
+        known = _index_ids(ws)
         try:
             req_checks = P.adapter.required_checks(spec, "BUILD") or []
         except Exception:                                         # noqa: BLE001
             req_checks = []
-        suites = [str(r["check_id"]).split(":", 1)[1] for r in req_checks
-                  if str(r.get("check_id") or "").startswith("suite:")]
+        suites = _known_suites([str(r["check_id"]).split(":", 1)[1] for r in req_checks
+                                if str(r.get("check_id") or "").startswith("suite:")], known)
+        if runs:
+            tier, reg, last = runs[-1]
+            # 2026-10-31 MV2-11: the last host half re-ran S17 only; every automatic re-gate
+            # copied that and S46 (a required suite whose record the newer code had staled)
+            # never got a fresh record, so the submission refused it until self-repair parked
+            # the sprint. The sprint's required suites always join the last run's.
+            own = _known_suites(split_ids(last), known)
+            req = {"suites": own + [s for s in suites if s not in own], "regression": reg,
+                   "tier": tier.upper(), "rerun": "failed", "files": []}
+            if req["suites"] or req["regression"] != "none":
+                return req
         if not suites:
             return None
         return {"suites": suites, "regression": "none", "tier": self._tier(P, tid, spec),
                 "rerun": "failed", "files": []}
+
+
+def _index_ids(ws: str) -> Optional[set]:
+    """The row ids of the workspace's tests/RegressionIndex.lua (`id = "S17"`), or None when
+    the index cannot be read (then nothing is filtered)."""
+    try:
+        with open(os.path.join(ws, "tests", "RegressionIndex.lua"), encoding="utf-8",
+                  errors="replace") as f:
+            return set(re.findall(r'\bid\s*=\s*"([^"]+)"', f.read()))
+    except OSError:
+        return None
+
+
+def _known_suites(suites: list, known: Optional[set]) -> list:
+    """2026-10-31 as-d19: the merge Studio batch asked gate.ps1 for suites S1-S4 read from a
+    plan's "Owed at the track merge" list (labels, not RegressionIndex rows) and the host half
+    failed "-Suites S1 has no index row". Only ids the index has are a suite."""
+    if known is None:
+        return list(suites)
+    return [s for s in suites if s in known]
 
 
 # ============================================================================ texts
