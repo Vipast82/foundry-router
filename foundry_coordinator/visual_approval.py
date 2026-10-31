@@ -454,7 +454,7 @@ def step(c, P, t: dict, spec, rule, revision: str) -> None:
         "revision": revision, "artifacts": arts, "findings": findings[:10]})
     remember_clean(c.store, pid, tid, [arts[r] for r in clean_frames(
         verdict, findings, [rel for rel, _, _ in frames])])
-    if (P.ws.head() != revision or
+    if ((P.ws.head() != revision and not _frames_unchanged_since(P, spec, rule, revision)) or
             P.adapter.approval_artifacts(spec, rule.artifacts) != arts or
             any(path in {p for _, p in P.ws.status()} for path in arts)):
         c.store.update_task(pid, tid, next_action="visual review became stale; recapture "

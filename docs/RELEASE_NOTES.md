@@ -2,6 +2,12 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.158.7 — the post-review check uses the same unchanged-frames rule
+
+- **visual_approval `step`:** after the model answers, the "became stale" check accepts a HEAD
+  that moved past the closeout revision when no named frame changed (v0.158.6's rule). Before,
+  the verdict was applied only on the next tick, from its record, with a misleading "stale" note.
+
 ## v0.158.6 — visual approval runs after a later commit that leaves the frames alone
 
 2026-10-31 01:25: GF-RT1 passed deep review and closed at 1dc4bef, then a docs-only prep commit
