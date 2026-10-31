@@ -145,3 +145,21 @@ def test_a_lead_on_a_slot_track_is_told_to_leave_the_workstation_studio_lock_alo
     txt = lm._slot_text(P, {"task_id": "AS-J05"})
     assert "slot-1" in txt and "studio.lock" in txt
     assert lm._slot_text(P, {"task_id": "X"}) == "" and lm._slot_text(P, {"task_id": "M"}) == ""
+
+
+def test_autoheal_on_a_slot_track_repairs_the_slot_never_the_workstation(monkeypatch):
+    """2026-10-31 AS-J05: a slot track's stale Rojo sync reopened the WORKSTATION's TEST Studio
+    twice (the main sprint's Studio closed; the slot stayed stale)."""
+    from foundry_coordinator import autoheal, client_api
+    slot = {**SL.DEFAULTS, **SLOT_CFG, "id": "slot-1"}
+    monkeypatch.setattr(SL, "slot_for", lambda c, P: slot)
+    seen = {}
+    monkeypatch.setattr(SL, "resync", lambda s, restart_rojo=True: (seen.setdefault("slot", s["id"]), True)[1:] + ("Studio is back",))
+    monkeypatch.setattr(client_api, "studio_reopen", lambda *a, **k: (_ for _ in ()).throw(AssertionError("workstation reopen")))
+    monkeypatch.setattr(client_api, "restart_component", lambda *a, **k: (_ for _ in ()).throw(AssertionError("workstation rojo")))
+    events = []
+    c = SimpleNamespace(store=SimpleNamespace(event=lambda *a, **k: events.append(a)))
+    P = SimpleNamespace(id="game", profile=SimpleNamespace(workspace="w"))
+    out = autoheal.repair(c, P, {"task_id": "AS-J05", "data": {}}, "rojo_stale", "retry")
+    assert seen["slot"] == "slot-1" and out[0]["repair"] == "slot_resync" and out[0]["ok"]
+    assert autoheal.request_studio_reopen(c, P, {"task_id": "AS-J05"})[0] == ""

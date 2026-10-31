@@ -319,6 +319,12 @@ def studio_guard(c, P, t: dict) -> str:
 def request_studio_reopen(c, P, t: dict) -> tuple[str, str]:
     """(job id, '') when the client started a reopen, else ('', why not)."""
     from . import client_api
+    try:
+        from . import slots
+        if slots.slot_for(c, P) is not None:
+            return "", "a slot-bound track's Studio is its slot's, never the workstation's"
+    except Exception:                                            # noqa: BLE001
+        pass
     st = client_api.studio_settings()
     if not st:
         return "", "no Foundry Client with Studio auto-reopen here"
@@ -344,6 +350,23 @@ def repair(c, P, t: dict, sig: str, action: str) -> list[dict]:
     def add(name, ok, detail=""):
         out.append({"repair": name, "ok": bool(ok), "detail": str(detail)[:300]})
     try:
+        slot = None
+        try:
+            from . import slots
+            slot = slots.slot_for(c, P)
+        except Exception:                                        # noqa: BLE001
+            slot = None
+        if slot is not None:
+            # 2026-10-31 AS-J05: a slot-bound track's stale sync reopened the WORKSTATION's TEST
+            # Studio twice (11:00, 11:04: the main sprint's Studio closed, the slot unchanged).
+            # A slot track's Studio / Rojo repairs run inside its slot, never on the workstation.
+            if sig in ("gate_tooling",) + STUDIO_SYNC_SIGS or action == "verify":
+                ok, detail = slots.resync(slot, restart_rojo=sig != "studio_reload")
+                add("slot_resync", ok, f"slot {slot['id']}: {detail}")
+            if out:
+                c.store.event(P.id, t["task_id"], "auto_heal_repair", detail={
+                    "signature": sig, "action": action, "repairs": out, "slot": slot["id"]})
+            return out
         if sig in ("gate_tooling",) + STUDIO_SYNC_SIGS or action == "verify":
             lock = clear_stale_runner_lock(ws)
             if lock["cleared"]:

@@ -197,6 +197,23 @@ def run(a) -> int:
     return rc
 
 
+def resync(slot: dict, restart_rojo: bool = True, timeout: float = 420) -> tuple:
+    """Repair a stale Studio <-> Rojo sync INSIDE the slot (never the workstation): restart the
+    slot's supervised `rojo serve` (its loop starts a fresh one), then `studio-reopen --wait` so
+    the Rojo plugin auto-reconnects and syncs. Returns (ok, detail)."""
+    # -x rojo: the binary only (a -f 'rojo serve' match also hit this shell and the supervisor)
+    script = ("pkill -x rojo || true; sleep 3; " if restart_rojo else "") + \
+             "studio-reopen --wait"
+    try:
+        r = _docker(slot["container"], script, timeout=timeout)
+    except subprocess.TimeoutExpired:
+        return False, "studio-reopen timed out in the slot"
+    except OSError as e:
+        return False, f"docker: {e}"[:200]
+    text = (r.stdout or b"").decode("utf-8", "replace").strip()
+    return r.returncode == 0, (text.splitlines()[-1] if text else f"rc={r.returncode}")[:200]
+
+
 def stop(container: str) -> None:
     """Best effort: stop a pipeline left running in the slot."""
     try:

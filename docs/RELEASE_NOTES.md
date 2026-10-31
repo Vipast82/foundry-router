@@ -2,6 +2,20 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.158.18 — auto-heal repairs a slot track's Studio in its slot, never the workstation's
+
+2026-10-31 11:00 / 11:04: AS-J05 (track slot1-props on slot-1) hit a stale Studio <-> Rojo sync
+in the container (after the container was recreated). Auto-heal treated it like a main stop and
+reopened the WORKSTATION's TEST Studio twice: the main sprint's Studio closed, the slot stayed stale.
+
+- **autoheal `repair`:** for a slot-bound track, every Studio/Rojo signature (and verify) runs
+  `slots.resync`: the slot's `rojo` binary is restarted by its supervisor and `studio-reopen --wait`
+  reopens the slot's place (the plugin auto-reconnects). The workstation path never runs.
+- **autoheal `request_studio_reopen`:** refuses a slot-bound track's task outright.
+- **slots `resync`:** `pkill -x rojo` (the binary only; a `-f 'rojo serve'` match also hit the shell).
+- Live check on slot-1: resync -> "studio-reopen: Studio is back", new Rojo pid, `studio_gate doctor`
+  DOCTOR READY.
+
 ## v0.158.17 — a lead on a slot-bound track leaves the workstation's studio.lock alone
 
 2026-10-31 10:19: the lead of AS-J05 (track slot1-props on slot-1) followed the project's lock
