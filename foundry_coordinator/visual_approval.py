@@ -304,13 +304,29 @@ def _accept_with_notes(c, P, t: dict, revision: str, arts: dict, actor: str, not
         "revision": revision, "why": why, "notes": notes[:20]})
 
 
+def _frames_unchanged_since(P, spec, rule, revision: str) -> bool:
+    """HEAD moved past the closeout revision (another sprint or a prep entry landed), but
+    no commit since touched a frame the rule names: the bytes on disk are the revision's.
+    2026-10-31 GF-RT1: a docs-only prep commit after its closeout left it waiting forever."""
+    try:
+        if not P.ws.is_ancestor(revision, P.ws.head()):
+            return False
+        changed = P.ws.changed_files(revision, P.ws.head())
+    except Exception:                                    # noqa: BLE001 - fail closed
+        return False
+    pats = [p.replace("{task}", spec.task_id) for p in (rule.artifacts or [])]
+    named = {p.replace("\\", "/") for p in spec.scope
+             if p.lower().endswith((".png", ".jpg", ".jpeg"))}
+    return not any(path in named or (pats and matches_any(path, pats)) for path in changed)
+
+
 def step(c, P, t: dict, spec, rule, revision: str) -> None:
     """One fail-closed approval attempt; the caller rechecks artifact hashes."""
     if not enabled(P) or rule.kind != "visual" or P.foundry is None:
         return
     pid, tid = P.id, t["task_id"]
     dirty = {path for _, path in P.ws.status()}
-    if P.ws.head() != revision:
+    if P.ws.head() != revision and not _frames_unchanged_since(P, spec, rule, revision):
         c.store.update_task(pid, tid, next_action="visual approval waits for the exact clean "
                             "closeout revision")
         return

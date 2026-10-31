@@ -2,6 +2,16 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.158.6 — visual approval runs after a later commit that leaves the frames alone
+
+2026-10-31 01:25: GF-RT1 passed deep review and closed at 1dc4bef, then a docs-only prep commit
+landed on master. Its visual approval only ran while HEAD was the exact closeout revision, so it
+sat in AWAITING_HUMAN ("waits for the exact clean closeout revision") with no way forward.
+
+- **visual_approval `step`:** when HEAD has moved on, the review still runs if the closeout
+  revision is an ancestor of HEAD and no commit since touched a frame the rule names (a named
+  scope frame or a path matching the rule's artifact patterns). Otherwise it waits, as before.
+
 ## v0.158.5 — automatic gates run every required suite; plan labels are never suites
 
 2026-10-31 01:00: two sprints stopped on the automatic Studio gate's suite list.

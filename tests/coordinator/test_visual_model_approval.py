@@ -162,3 +162,19 @@ def test_uncertain_word_over_clean_verified_frames_is_an_approval():
     got, f = VA._valid_verdict({"verdict": "uncertain",
                                 "frames": [row("a.png"), row("b.png", findings=["clipped"])]}, frames, arts)
     assert got == "uncertain" and f == ["b.png: clipped"]        # a finding: not an approval
+
+
+def test_frames_unchanged_since_closeout_lets_a_later_head_be_reviewed(tmp_path):
+    from foundry_coordinator.visual_approval import _frames_unchanged_since
+    project, spec, rule, rel, _ = _review_setup(tmp_path)
+    changed = {"files": ["docs/plans/AS-D19_PLAN.md"]}
+    project.ws = SimpleNamespace(head=lambda: "later", is_ancestor=lambda a, b: True,
+                                 changed_files=lambda a, b: changed["files"])
+    assert _frames_unchanged_since(project, spec, rule, "closeout")
+    changed["files"] = ["docs/plans/x.md", rel]          # a named frame changed since
+    assert not _frames_unchanged_since(project, spec, rule, "closeout")
+    changed["files"] = ["docs/evidence/UI-02/new.png"]   # a new frame under the rule
+    assert not _frames_unchanged_since(project, spec, rule, "closeout")
+    project.ws.is_ancestor = lambda a, b: False          # history rewritten: fail closed
+    changed["files"] = []
+    assert not _frames_unchanged_since(project, spec, rule, "closeout")
