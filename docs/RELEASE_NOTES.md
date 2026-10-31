@@ -2,6 +2,17 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.158.1 — an interrupted prep batch that already pushed is kept
+
+2026-10-30 23:43: a forced coordinator restart (a deploy) hit after a prep batch had committed and
+pushed its two entries but before the in-flight marker was cleared. On the next start the
+recovery reset master to the batch start, so origin/master held commits the main checkout no
+longer had (fixed by hand with a fast-forward).
+
+- **prep_queue `_recover`:** a batch whose HEAD is already on the upstream branch, or whose entries
+  are all marked landed, is kept (the marker is cleared and the event says "kept"); only a really
+  half-landed batch is rolled back to its start.
+
 ## v0.158.0 — prep entries land with a 3-way apply when master moved nearby
 
 2026-10-30 23:09: two prep entries (the GF-NAME1 merge and the owner-decisions docs) failed

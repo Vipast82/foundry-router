@@ -482,6 +482,30 @@ def test_interrupted_batch_is_rolled_back_on_the_next_tick(game, tmp_path):
     assert [x for x in c.store.events("game") if x["kind"] == "prep_recovered"]
 
 
+def test_an_interrupted_batch_that_already_pushed_is_kept(game, tmp_path):
+    """2026-10-30 23:43: a forced restart hit after the batch committed and pushed but before
+    the in-flight marker was cleared; the next start reset master to the batch start and the
+    main checkout lost two commits origin/master already had."""
+    c, P, root, *_ = game
+    start = git(root, "rev-parse", "HEAD")
+    e = PQ.add(c, "game", "patch", "prep: x",
+               source=make_patch(root, tmp_path, "x", {"src/x.txt": "x\n"}))
+    (root / "src" / "x.txt").write_text("x\n")
+    git(root, "add", "-A")
+    git(root, "commit", "-q", "-m", "prep: x")
+    landed = git(root, "rev-parse", "HEAD")
+    git(root, "push", "-q", "-u", "origin", "HEAD")
+    PQ._set(c.store, e["id"], status="landed", sha=landed)
+    c.store.set_meta("prep_queue:inflight:game", json.dumps({"batch": "pb-dead", "start": start,
+                                                            "ids": [e["id"]]}))
+    PQ._recover(c, P)
+    assert git(root, "rev-parse", "HEAD") == landed                # not reset to the start
+    assert (root / "src" / "x.txt").exists()
+    ev = [x for x in c.store.events("game") if x["kind"] == "prep_recovered"]
+    assert ev and "kept" in json.dumps(ev[-1]["detail"])
+    assert not c.store.meta("prep_queue:inflight:game")
+
+
 def test_engine_tick_lands_and_respects_the_interval_and_settings(game, tmp_path):
     c, P, root, remote, pushes = game
     e = PQ.add(c, "game", "patch", "prep: x",

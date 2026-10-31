@@ -792,7 +792,20 @@ def _recover(c, P) -> None:
     ws = P.profile.workspace
     start = str(inf.get("start") or "")
     note = "interrupted batch (the coordinator stopped while landing it)"
-    if start and _git(ws, "merge-base", "--is-ancestor", start, "HEAD").returncode == 0:
+    entries = [get(c.store, eid) for eid in inf.get("ids") or []]
+    all_landed = bool(entries) and all(e and e["status"] in ("landed", "already_applied")
+                                       for e in entries)
+    # 2026-10-30 23:43: a forced coordinator restart hit after the batch had committed AND
+    # pushed but before the in-flight marker was cleared; the next start reset master back
+    # to the batch start, so origin/master held two commits the main checkout no longer had.
+    # Commits the upstream already has (or a batch whose entries all landed) are kept.
+    on_upstream = _git(ws, "merge-base", "--is-ancestor", "HEAD", "@{u}").returncode == 0 \
+        and _head(ws) != start
+    if all_landed or on_upstream:
+        note += ("; kept: the batch had landed and been pushed (HEAD "
+                 f"{_head(ws)[:12]} is on the upstream)" if on_upstream else
+                 "; kept: every entry had already landed")
+    elif start and _git(ws, "merge-base", "--is-ancestor", start, "HEAD").returncode == 0:
         note += "; " + _rollback(ws, start)
     for eid in inf.get("ids") or []:
         e = get(c.store, eid)
