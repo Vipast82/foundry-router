@@ -356,6 +356,14 @@ class OfficialStudio:
 
     def resolve(self, timeout: float = 30.0) -> str:
         studios = self.list_studios(timeout)
+        # 2026-10-31 (studio slot): where no Studio-side MCP host runs yet (a container slot),
+        # StudioMCP.exe becomes the host itself and Studio connects a few seconds after it
+        # starts; the first list is empty. Wait for it, as the community server does.
+        deadline = time.monotonic() + CONNECT_WAIT_S
+        while not any(str(s.get("name") or "").strip() for s in studios) \
+                and time.monotonic() < deadline:
+            time.sleep(2.0)
+            studios = self.list_studios(timeout)
         # 2026-10-30 18:49 MV2-11: a Studio left on its start page (no place open: name
         # null) next to the TEST Studio made every gate fail "found 2". A Studio with no
         # place open can never be the gate's target, so it does not count.

@@ -247,3 +247,20 @@ def test_community_resolve_waits_for_the_plugin_to_connect(monkeypatch):
     com = M.CommunityStudio(Stub())
     com.resolve()
     assert com.place_name == "Animal Uprising" and not replies
+
+
+def test_official_resolve_waits_for_studio_to_connect_to_a_fresh_host(monkeypatch):
+    """2026-10-31 studio slot: StudioMCP.exe is the MCP host itself in a container and Studio
+    connects a few seconds after it starts, so the first list is empty."""
+    replies = [[], [], [{"id": "S1", "name": "Animal Uprising [SLOT-1] (placeId: 1)"}]]
+
+    class Off:
+        def call_tool(self, name, args, timeout=0):
+            return {"is_error": False, "images": [],
+                    "text": json.dumps({"studios": replies.pop(0) if replies else []})}
+    monkeypatch.setattr(M.time, "sleep", lambda s: None)
+    assert M.OfficialStudio(Off(), place="[SLOT-").resolve() == "S1"
+    t = [0.0]
+    monkeypatch.setattr(M.time, "monotonic", lambda: t.__setitem__(0, t[0] + 5.0) or t[0])
+    with pytest.raises(M.McpError, match="found 0"):          # gives up after CONNECT_WAIT_S
+        M.OfficialStudio(Off()).resolve()

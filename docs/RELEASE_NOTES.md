@@ -2,6 +2,17 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.158.4 — Roblox's own Studio MCP waits for Studio to connect (Studio slot containers)
+
+2026-10-31: in the studio-slot container, studio_gate's doctor failed "need exactly one Studio
+matching '[SLOT-', found 0 (open: none)" while the community MCP saw Studio. There is no Studio-side
+MCP host running before the gate starts StudioMCP.exe, so it becomes the host and Studio connects a
+few seconds later; the gate listed Studios at once.
+
+- **mcp_stdio `OfficialStudio.resolve`:** when no Studio with a place is listed yet, list again every
+  2 s for up to `CONNECT_WAIT_S` (as the community server already does). With the fix the
+  container's `studio_gate doctor` is READY.
+
 ## v0.158.3 — the 2-player lane's suites get evidence records
 
 2026-10-31: MV2-11's gate ran S17 in the multiplayer lane and passed 14/14 (v0.157.99), yet the
