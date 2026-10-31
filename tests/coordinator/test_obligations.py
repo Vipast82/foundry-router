@@ -644,3 +644,18 @@ def test_plan_capture_lines_naming_tracked_files_by_bare_name_are_not_conflicts(
     assert "plan_requirement_untracked" not in kinds
     kinds = {x["kind"] for x in ob.reconcile(P, spec(), "capture other_frame.png")}
     assert "plan_requirement_untracked" in kinds
+
+
+def test_plan_seeded_suite_labels_are_retired_when_not_a_suite(store):
+    """2026-10-31 AS-D19: build.suite.S1..S4 (plan labels) stayed open and refused every
+    submission; a real suite obligation is kept."""
+    ob = Obligations(store)
+    stub = SimpleNamespace(_is_suite=lambda sid, spec: sid == "S45")
+    P = project(adapter=stub)
+    for sid in ("S1", "S45"):
+        ob._put("game", "UI-01", {"obligation_id": f"build.suite.{sid}", "title": sid,
+                                  "phase": "BUILD", "source": "plan:docs/progress/UI-01_PLAN.md",
+                                  "required_evidence": [{"kind": "check", "ref": f"suite:{sid}"}]})
+    ob._retire_non_suites(P, spec())
+    assert ob.get("game", "UI-01", "build.suite.S1")["status"] == "superseded"
+    assert ob.get("game", "UI-01", "build.suite.S45")["status"] == "open"

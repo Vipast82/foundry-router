@@ -2122,7 +2122,7 @@ Change no code or test file in this session; if one needs changing, stop and rep
         own = re.sub(r"[-.]", "_", t)
         # a suite is required by list / table structure or a run / verdict verb, never by a
         # bare mention in prose (_required_suites has the rule)
-        suites = [s for s in _required_suites(wanted) if s != own]
+        suites = [s for s in _required_suites(wanted) if s != own and self._is_suite(s, spec)]
         if (re.search(r"\b%s\b" % re.escape(own), wanted)
                 or any(s.startswith(f"tests/{own}_check.") for s in spec.scope)):
             suites.insert(0, own)
@@ -2131,6 +2131,22 @@ Change no code or test file in this session; if one needs changing, stop and rep
         return {"suites": suites, "gate": tier in ("A", "B"), "captures": captures,
                 "acceptance": _accept_section(body), "plan": plan,
                 "lune": bool(re.search(r"\bLUNE\b|\blune\b", wanted))}
+
+    def _is_suite(self, sid: str, spec: TaskSpec) -> bool:
+        """2026-10-31 AS-D19: a plan line "suites S1-S4" (labels of merge-owed Studio checks)
+        became required suites S1..S4 and the session ran the network suites S01-S04 instead.
+        A required suite is a RegressionIndex row, or a check file the sprint has or adds;
+        when the index cannot be read nothing is dropped."""
+        try:
+            index = self._read("tests/RegressionIndex.lua")
+        except OSError:
+            return True
+        if re.search(r'\bid\s*=\s*"%s"' % re.escape(sid), index):
+            return True
+        check = f"tests/{sid}_check."
+        return any(str(s).startswith(check) for s in spec.scope) or any(
+            os.path.isfile(os.path.join(self.p.workspace, "tests", f"{sid}_check{ext}"))
+            for ext in (".lua", ".luau"))
 
     def _required_captures(self, spec: TaskSpec, plan_body: str) -> list[str]:
         """The same rule as _capture_evidence: non-glob image paths under

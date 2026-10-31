@@ -937,3 +937,19 @@ def test_a_complete_ledger_row_counts_as_done(tmp_path):
     assert not a.dependency_done("AS-R9")
     a.p.deps_accept_pending = ["visual"]
     assert a.dependency_done("AS-R9")
+
+
+def test_plan_suite_labels_that_are_not_index_rows_are_not_required(repo):
+    """2026-10-31 AS-D19: "Owed at merge: suites S1-S4" (labels of merge-owed Studio checks)
+    became required suites S1..S4, and the session ran the network suites S01-S04 instead."""
+    a, ws = repo["a"], repo["ws"]
+    _write(ws, "tests/RegressionIndex.lua", 'return { rows = { { id = "S45" }, { id = "S39" } } }\n')
+    plan = PLAN.replace("## Acceptance lines\n", (
+        "## Test plan\n- S45, S1 (regression subset)\n- S39 and S2 must pass\n\n"
+        "## Acceptance lines\n"))
+    _write(ws, PLAN_REL, plan)
+    spec = a.describe(T)
+    spec.data.pop("spec_revision", None)
+    suites = a._plan_requirements(spec)["suites"]
+    assert "S45" in suites and "S39" in suites
+    assert "S1" not in suites and "S2" not in suites

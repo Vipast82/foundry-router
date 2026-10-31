@@ -546,7 +546,30 @@ class Obligations:
                         (str(ob.get("title") or "")[:500],
                          str(ob.get("acceptance") or "")[:2000], self.clock(),
                          P.id, task, "approval.visual"))
+            self._retire_non_suites(P, spec)
         return added
+
+    def _retire_non_suites(self, P, spec) -> None:
+        """2026-10-31 AS-D19: plan-seeded `build.suite.S1..S4` (labels, not suites) stayed open
+        after the adapter stopped deriving them, and every submission was refused for them.
+        An open plan-sourced suite obligation the adapter says is not a suite is superseded."""
+        fn = getattr(P.adapter, "_is_suite", None)
+        if not callable(fn):
+            return
+        for ob in self.all(P.id, spec.task_id):
+            oid = str(ob.get("obligation_id") or "")
+            if not oid.startswith("build.suite.") or ob.get("status") != "open" or \
+                    not str(ob.get("source") or "").startswith("plan:"):
+                continue
+            try:
+                real = fn(oid[len("build.suite."):], spec)
+            except Exception:                                     # noqa: BLE001
+                real = True
+            if not real:
+                self.store.x("UPDATE obligations SET status='superseded', next_action=?, "
+                             "updated_ts=? WHERE project_id=? AND task_id=? AND obligation_id=?",
+                             ("not a RegressionIndex suite (a plan label); no evidence owed",
+                              self.clock(), P.id, spec.task_id, oid))
 
     def screen_text(self, P, task: str, text: str, source: str) -> list[dict]:
         """Refuse any line of a model/plan/helper text that moves BUILD work to

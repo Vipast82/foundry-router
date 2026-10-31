@@ -2,6 +2,17 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.158.12 — plan suite labels that are not suites are never required
+
+2026-10-31 03:58: AS-D19 (the Baroness) stopped: its plan line "Owed at merge: suites S1-S4"
+(labels of merge-owed Studio checks) had seeded required suites S1..S4; the session ran the
+network suites S01-S04 instead and blocked on S03's play-session legs.
+
+- **AU adapter `_plan_requirements`:** a suite the plan requires must be a
+  `tests/RegressionIndex.lua` row or a check file the sprint has or adds (`tests/<id>_check.*`).
+- **obligations `seed`:** an open plan-seeded `build.suite.<id>` obligation whose id the adapter
+  says is not a suite is marked superseded ("a plan label; no evidence owed").
+
 ## v0.158.11 — the Studio gate takes phone-sized frames, and never a wrong-size one
 
 2026-10-31 03:35: GF-RT1 ran out of attempts again (23). Its visual review needs phone frames
