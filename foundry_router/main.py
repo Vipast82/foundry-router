@@ -162,6 +162,9 @@ class Services:
         from .secret_store import SecretStore
         self.secret_store = SecretStore(
             Path(getattr(db, "path", data_dir() / "foundry.sqlite")).parent / "secrets.sqlite")
+        # Access → Machines: enrollment codes for slot hosts (machines.py)
+        from .machines import Machines
+        self.machines = Machines(db)
         # operator chat (W3): threads, tool catalog, confirm cards; its model
         # calls go through this app's own /v1/chat/completions (app set in create_app)
         from .chat_engine import ChatEngine
@@ -782,5 +785,7 @@ def create_app(config_path: Optional[Path] = None,
     app.include_router(alerts_router)
     from .secrets_api import router as secrets_router
     app.include_router(secrets_router)
+    from .machines import router as machines_router
+    app.include_router(machines_router)
     app.include_router(ui_router)
     return app

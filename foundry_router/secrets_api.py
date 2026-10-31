@@ -170,15 +170,19 @@ async def pull_bundle(request: Request, project: str = "", slot: str = ""):
     try:
         served = store.bundle(groups, names or None) if (names or not wanted) else []
     except SecretStoreError as e:
-        if e.status == 503:
-            _alert(request, "secrets_locked", "secrets_locked", "high",
-                   "Secret store is locked: slots can't pull their keys",
-                   f"{who} tried to pull its secrets ({project or 'shared'}"
-                   f"{'/' + slot if slot else ''}) at {addr or 'an unknown address'}, but the "
-                   "store is locked (the router restarted). Unlock it on Setup → Secrets. "
-                   "Slots keep the files they pulled last until then.", project)
-        store.record_pull(who, addr, agent, tr, project, slot, [], "locked", e.code)
-        return _err(e)
+        if e.code != "uninitialized":
+            if e.status == 503:
+                _alert(request, "secrets_locked", "secrets_locked", "high",
+                       "Secret store is locked: slots can't pull their keys",
+                       f"{who} tried to pull its secrets ({project or 'shared'}"
+                       f"{'/' + slot if slot else ''}) at {addr or 'an unknown address'}, but "
+                       "the store is locked (the router restarted). Unlock it on Setup → "
+                       "Secrets. Slots keep the files they pulled last until then.", project)
+            store.record_pull(who, addr, agent, tr, project, slot, [], "locked", e.code)
+            return _err(e)
+        # no passphrase was ever set, so there are no values: the slot still gets its settings
+        # (a LOCKED store answers 503 above, so slots keep their files)
+        served = []
     etag = _etag(served, config)
     first = not store.has_pulled(who)
     if (request.headers.get("if-none-match") or "").strip() == etag:

@@ -293,6 +293,47 @@ class AutomationStore:
         out["restart_needed"] = val.get("restart_needed") or []
         return out
 
+    def put_slot(self, project: str, slot: str, settings: Optional[dict], actor: str,
+                 note: str = "") -> dict:
+        """Add, change (settings) or remove (None) one Studio slot as a new DEPLOYED revision,
+        and the same in an open draft, so a later deploy of that draft keeps it (Access →
+        Machines, machines.py). Needs a deployed revision to build on."""
+        project = check_project(project)
+        if project == ROUTER_DOC:
+            raise StoreError("slots belong to a project", "bad_project")
+        with self._lock:
+            dep = self._latest(project)
+            if not dep:
+                raise StoreError(f"{project} has no deployed settings yet: deploy them once on "
+                                 "the Automation page (or import the coordinator's profile)",
+                                 "no_revision", 409)
+
+            def apply(doc: dict) -> dict:
+                doc = copy.deepcopy(doc)
+                slots = doc.setdefault("settings", {}).setdefault("slots", {})
+                if settings is None:
+                    slots.pop(slot, None)
+                    if not slots:
+                        doc["settings"].pop("slots", None)
+                else:
+                    slots[slot] = {**(slots.get(slot) or {}), **settings}
+                return doc
+            new = apply(dep["doc"])
+            if D.canonical(new) == D.canonical(dep["doc"]):
+                return {"rev": dep["rev"], "hash": dep["hash"], "unchanged": True}
+            val = D.validate(new, project)
+            mine = [e for e in val["errors"] if e["path"].startswith("slots")]
+            if mine:
+                raise StoreError("; ".join(e["message"] for e in mine), "invalid", 422,
+                                 validation={"ok": False, "errors": mine, "warnings": []})
+            out = self._append(project, new, actor, note or f"slot {slot}", "machines")
+            row = self._draft_row(project)
+            if row is not None:
+                self._write_draft(project, apply(row["doc"]), row["base_rev"], row["actor"])
+        self._audit(project, actor, "slot_" + ("removed" if settings is None else "set"),
+                    out["rev"], {"slot": slot})
+        return out
+
     def rollback(self, project: str, rev: int, note: str, actor: str,
                  reset_draft: bool = True) -> dict:
         project = check_project(project)

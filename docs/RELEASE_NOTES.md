@@ -2,6 +2,66 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.160.0 — Machines and enrollment codes: a Studio slot in one code and one command
+
+2026-10-31 (Victor: "easy to use, one shot, ask for any config it needs"; the fresh-install plan
+docs/plans/FRESH_INSTALL_PLAN.md, phase 1 with the recommended answers). Guide:
+docs/INSTALL_SLOTS.md.
+
+- **router — Access → Machines:** add a Studio slot (game, slot id, IP, its place link). It:
+  - writes `slots.<id>` into the project's settings as a new deployed revision, and into an open
+    draft, so a later deploy keeps it (`AutomationStore.put_slot`);
+  - makes a one-time **enrollment code** (`FNDR-XXXX-XXXX-XXXX`, 60 bits; only its hash is stored;
+    single use; 30 min, `machines.code_minutes`);
+  - shows the exact install commands.
+
+  The slot starts **off**. Revoke, New code and Delete are on the page, and so is the
+  **Workstation ssh keys** list (`machines.slot_ssh_keys`, public keys only), with an event log.
+- **router — `POST /v1/foundry/enroll {code}`** (no key; the code is the credential): returns the
+  slot's client key, made at that moment and stored hashed (`secrets` scope, that project and slot
+  only). It also returns the slot settings, the router version, the workstation ssh keys and the
+  HTTPS fingerprint.
+  - Wrong codes are rate-limited per address (10 in 10 min).
+  - Every enrollment is audited and raises an alert.
+  - `secrets.allow_http` applies.
+- **router — `POST /v1/foundry/secrets/ready`** (the slot's own key): switches the slot on once
+  its container runs.
+- **router — bundle:** a store that never had a passphrase now returns the slot settings with no
+  secrets (a locked store still answers 503).
+- **coordinator:** a remote slot's `au_push_url`, `foundry_push_url` and `foundry_host_dir` default
+  to the installer's layout under `/srv/studio-slot` when empty. The default slot ssh accepts a new
+  host key on first contact (`StrictHostKeyChecking=accept-new`, Victor D3) and gives up after 15 s
+  (`ConnectTimeout`).
+- **contrib/studio-slot:**
+  - `proxmox/setup-host.sh` is now the **one-shot installer**. It asks for the router address and
+    the code, then installs Docker, enrolls, saves the key (mode 600, never shown), authorizes the
+    workstation, clones Foundry at the router's version, writes the mirrors and `slot.env`
+    (`.env`), builds and starts the container, waits for its first secrets pull and reports ready.
+    `--no-build` and `--code-stdin` cover tests and scripting. The enrollment answer is removed
+    whatever happens.
+  - New `proxmox/create-slot-lxc.sh` (Proxmox host) asks for id, IP, sizes, the router and the
+    code. It downloads the Debian 13 template, creates the LXC (unprivileged, nesting/keyctl,
+    onboot, optional iGPU) and runs the installer inside it.
+  - `slot-checkout` clones the game itself on a new host's first gate and installs its toolchain.
+    Rojo waits for the project file.
+  - The Proxmox compose file no longer requires `STUDIO_OPEN` and passes `ROJO_NEVER_PLACE_IDS`.
+- **Verified:**
+  - `tests/test_machines.py` 6/6 and the derived-defaults test in `test_slots.py`;
+  - 194 related tests green;
+  - a **dry run of the real installer** in a clean `debian:trixie` container against a throwaway
+    router: enrolled, key file 600/studio, workstation key authorized, Foundry v0.159.1 cloned and
+    its mirror set, `slot.env` with the place, nothing left behind. It caught two bugs, now fixed:
+    a shallow clone can't be pushed to the mirror, and a failure left the enrollment answer on
+    disk;
+  - `slot-checkout`'s first clone, run in the built image against a mirror holding only a track
+    branch.
+
+  Not run: a real Proxmox host (`create-slot-lxc.sh`) and a real build in an LXC. That is the
+  slot-1 move.
+- **Rollout:** rebuild the router on .112; restart the coordinator (the slot defaults). Then on
+  Access → Machines, paste this PC's public ssh key and add slot-1 (see INSTALL_SLOTS.md, "Moving
+  a slot").
+
 ## v0.159.1 — Proxmox slot readiness: setup gaps closed before the first LXC
 
 2026-10-31 (Victor: move slot-1 to Proxmox; "make sure EVERYTHING for the container build is

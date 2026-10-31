@@ -254,3 +254,21 @@ def test_a_remote_run_stops_before_checkout_when_the_push_fails(monkeypatch):
     argv = SL.wrap_pipeline(REMOTE, ["pipeline"], "C:/t", "AS-J05", "abc123")
     assert SL.main(argv[argv.index("run"):]) == 3
     assert not any("slot-checkout" in " ".join(c) for c in calls)
+
+
+def test_a_remote_slot_derives_its_push_targets_and_ssh_accepts_a_new_host_once():
+    class P:
+        raw = {"slots": {"slot-2": {"container": "studio-slot", "host": "studio@10.0.0.6"},
+                         "slot-3": {"container": "x", "host": "studio@10.0.0.7",
+                                    "au_push_url": "ssh://studio@10.0.0.7/other.git"},
+                         "off": {"container": "y", "enabled": False}}}
+    got = SL.configured(P)
+    assert set(got) == {"slot-2", "slot-3"}
+    s2 = got["slot-2"]
+    assert s2["au_push_url"] == "ssh://studio@10.0.0.6/srv/studio-slot/AnimalUprising.git"
+    assert s2["foundry_push_url"] == "ssh://studio@10.0.0.6/srv/studio-slot/foundry.git"
+    assert s2["foundry_host_dir"] == "/srv/studio-slot/foundry"
+    assert got["slot-3"]["au_push_url"] == "ssh://studio@10.0.0.7/other.git"
+    argv = SL.exec_argv(s2, ["true"])
+    assert "StrictHostKeyChecking=accept-new" in argv and "BatchMode=yes" in argv
+    assert argv[argv.index("studio@10.0.0.6") + 1].startswith("docker exec studio-slot")

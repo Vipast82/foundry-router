@@ -156,52 +156,23 @@ commands the asset plans use on the workstation (with `blender` instead of the W
 
 ## On a Proxmox LXC (mini PCs): `proxmox/`
 
-The workstation's Foundry drives a slot on another machine over **ssh** (`foundry_coordinator/slots.py`,
-a slot with `host`): every container command is `ssh <host> docker exec ...`, the track's Kilo
-Studio MCP servers are stdio over ssh, and nothing from the workstation is mounted. Before each
-gate run Foundry pushes the track's commit to a bare AU mirror on the host (`slot/<task>`, the
-slot's `origin`) and the deployed Foundry to a Foundry mirror whose checkout is the slot's
-`/opt/foundry`.
+**Install guide: `docs/INSTALL_SLOTS.md`** (since v0.160.0). In short:
+1. Router → Access → Machines → Add a Studio slot (id, IP, its place). This gives a one-time
+   enrollment code.
+2. Proxmox host shell: `bash create-slot-lxc.sh`. It creates the LXC and runs `setup-host.sh`
+   inside it; on a machine you made yourself, run `setup-host.sh` directly.
+3. Sign Studio in once through the noVNC tunnel the installer prints.
 
-0. **Workstation ssh key** (once): Foundry connects with key auth only. If
-   `%USERPROFILE%\.ssh\id_ed25519.pub` does not exist, make one with
-   `ssh-keygen -t ed25519 -f %USERPROFILE%\.ssh\id_ed25519 -C foundry-slots`. With no passphrase
-   the unattended coordinator can use it; the key only opens the `studio` user on slot hosts.
-1. **LXC** (Proxmox host): Debian 13 template, unprivileged, a static LAN IP, a disk of 80 GB or
-   more, and the lines in `proxmox/lxc.conf.example` (nesting + keyctl, 16 GB, 6 cores; the Intel
-   iGPU lines are optional; storage notes there).
-2. **Inside the LXC** as root (Proxmox console): fetch `setup-host.sh` from the release
-   (`curl -fsSLO https://raw.githubusercontent.com/Vipast82/foundry-router/<tag>/contrib/studio-slot/proxmox/setup-host.sh`),
-   then `bash setup-host.sh "<workstation ssh public key>"`: Docker + compose,
-   the `studio` user (uid 1000, the image's), `/srv/studio-slot/{AnimalUprising.git, foundry.git,
-   foundry, slot-key}`. It prints the remaining steps:
-3. the first ssh from the workstation accepts the LXC's host key
-   (`ssh -o StrictHostKeyChecking=accept-new studio@<lxc> docker ps`; Foundry's own ssh uses
-   BatchMode and refuses unknown hosts), then seed the two mirrors (`git push` over ssh) and check
-   out Foundry on the host;
-4. `proxmox/.env`:
-   - the slot's **own place** (one edit session per place per account: never the workstation's
-     TEST place or another slot's place);
-   - `FOUNDRY_URL` and `FOUNDRY_SLOT`;
-5. the slot's **key** (Access → Clients & Keys, preset slot): **you** copy it to
-   `/srv/studio-slot/slot-key/slot-key.txt` (mode 600, owner 1000). The Open Cloud key stays on the
-   router;
-6. `docker compose up -d --build` in `proxmox/`, then sign Studio in once through an ssh tunnel
-   (`ssh -L 6080:localhost:6080 studio@<lxc>`; noVNC never leaves the LXC's localhost);
-7. the router: Automation → Settings → Studio slots, add `slot-2` and deploy (or in
-   `project.toml`):
-
-   ```toml
-   [slots.slot-2]
-   container = "studio-slot"
-   host = "studio@<lxc>"
-   au_push_url = "ssh://studio@<lxc>/srv/studio-slot/AnimalUprising.git"
-   foundry_push_url = "ssh://studio@<lxc>/srv/studio-slot/foundry.git"
-   foundry_host_dir = "/srv/studio-slot/foundry"
-   enabled = true
-   ```
-
-   then `tracks start ... --slot slot-2`.
+How a remote slot works: the workstation's Foundry drives it over **ssh**
+(`foundry_coordinator/slots.py`, a slot with `host`).
+- Every container command is `ssh <host> docker exec ...`, and the track's Kilo Studio MCP servers
+  are stdio over ssh. Nothing from the workstation is mounted.
+- Before each gate run, Foundry pushes the track's commit to the host's bare game mirror
+  (`slot/<task>`, the slot's `origin`) and the deployed Foundry to the host's Foundry mirror, whose
+  checkout is the slot's `/opt/foundry`.
+- The push targets default to the installer's layout under `/srv/studio-slot`.
+- A new host's ssh key is accepted on first contact.
+- The first gate clones the game into the slot.
 
 Memory: Studio + a solo playtest fits 12 GB in software rendering; 2-player rows need about 14+ GB
 (`SLOT_MULTIPLAYER=1` in `.env` only then). Vinegar's Graphics Mode: DXVK (Vulkan) on Intel Gen9+
@@ -220,8 +191,9 @@ iGPUs once `/dev/dri` is mapped; WineD3D if DXVK misbehaves.
 | `studio-plugin-settings.js` | Rojo auto-sync + Studio MCP plugin settings |
 | `rojo-seed.sh` | the slot place's saved Rojo endpoint (`<placeId>=<project>`) for the settings |
 | `slot-secrets.py` | pulls the slot's secrets + settings from the router into `/run/secrets` (tmpfs) |
-| `proxmox/docker-compose.yml`, `proxmox/.env.example` | the slot on a Proxmox LXC (no Windows mounts) |
-| `proxmox/setup-host.sh` | prepares the LXC (Docker, `studio` user, mirrors, slot-key dir) |
+| `proxmox/docker-compose.yml` | the slot on a Proxmox LXC (no Windows mounts; its `.env` is written by setup-host.sh) |
+| `proxmox/create-slot-lxc.sh` | Proxmox host: creates the LXC and runs setup-host.sh in it |
+| `proxmox/setup-host.sh` | the one-shot slot installer: router address + enrollment code → a running, connected slot |
 | `proxmox/lxc.conf.example` | the Proxmox container settings (nesting, keyctl, memory, iGPU) |
 | `studio-auth-handler.sh`, `studio-auth.desktop` | the browser sign-in hand-back |
 | `openbox-studio.xml` | window rules (playtest windows stay small) |

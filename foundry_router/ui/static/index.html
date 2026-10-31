@@ -1051,6 +1051,7 @@ const TABS = {
   "Training":       tabTraining,
   "Clients & Keys": tabClients,
   "Secrets":        tabSecrets,
+  "Machines":       tabMachines,
   "Helpers & Limits": tabLimits,
   "Alerts & digest": tabAlerts,
   "Client":         tabClient,
@@ -1067,7 +1068,7 @@ const GROUPS = [
   ["Tools & MCP", ["Tools", "MCP Servers", "MCP Metrics", "Agents"]],
   ["Labs",        ["Research", "Evals"]],
   ["Logs",        ["Usage Log", "Events", "Dev Log", "Data", "Training"]],
-  ["Access",      ["Clients & Keys", "Secrets", "Helpers & Limits"]],
+  ["Access",      ["Machines", "Clients & Keys", "Secrets", "Helpers & Limits"]],
   // the workstation app: download, connected clients, install guide
   ["Client",      ["Client"]],
 ];
@@ -3268,6 +3269,101 @@ async function tabClients() {
   });
   const rc = $("#rej-clear");
   if (rc) rc.onclick = () => run(api("setup/rejected", {method: "DELETE"}));
+}
+
+// Access → Machines (machines.py): add a Studio slot, get its one-time enrollment code and the
+// exact install commands, see each machine's state, revoke or re-enroll it.
+async function tabMachines() {
+  const d = await api("machines");
+  const when = ts => ts ? esc(_tsText(ts)) : "";
+  const pill = (t, cls = "") => `<span class="pill ${cls}">${esc(t)}</span>`;
+  const state = m => {
+    if (m.key === "disabled") return pill("revoked", "bad");
+    if (!m.enrolled_ts) return m.code_pending ? pill("waiting for its installer", "warn") : pill("not installed", "warn");
+    if (m.settings && m.settings.enabled === false) return pill("installed, not ready yet", "warn");
+    return pill("connected", "ok");
+  };
+  const rows = d.machines.map(m => {
+    const s = m.settings || {}, lp = m.last_pull;
+    return `<tr><td class="nw"><b>${esc(m.name)}</b><div class="hint">${esc(m.kind)} · ${esc(m.project)}${m.note ? " · " + esc(m.note) : ""}</div></td>
+      <td class="nw">${state(m)}${m.code_pending ? `<div class="hint">code valid until ${when(m.code_expires)}</div>` : ""}</td>
+      <td class="nw"><code>${esc(m.host || "")}</code><div class="hint">${esc(s.container || "")}${m.enrolled_hostname ? " · " + esc(m.enrolled_hostname) : ""}</div></td>
+      <td class="nw">${s.place_id ? `place ${esc(s.place_id)}` : '<span class="hint">no place</span>'}</td>
+      <td class="hint" style="white-space:normal">${m.enrolled_ts ? `enrolled ${when(m.enrolled_ts)} from ${esc(m.enrolled_addr || "")}` : ""}
+        ${lp ? `<div>last secrets pull ${when(lp.ts)} · ${esc(lp.outcome)}</div>` : ""}</td>
+      <td class="nw"><button class="act" data-mc-code="${esc(m.name)}">New code</button>
+        ${m.key === "enabled" ? `<button class="act" data-mc-revoke="${esc(m.name)}">Revoke</button>` : ""}
+        <button class="act danger" data-mc-del="${esc(m.name)}">Delete</button></td></tr>`;
+  }).join("");
+  const keys = (d.settings.slot_ssh_keys || []).join("\n");
+  const ev = (d.events || []).slice(0, 15).map(e => `<tr><td class="nw hint">${when(e.ts)}</td><td class="nw">${esc(e.machine)}</td>
+    <td class="nw">${esc(e.event)}</td><td class="hint">${esc(e.addr || "")} ${esc(e.detail || "")}</td></tr>`).join("");
+  $("#main").innerHTML = `
+    <h2>Machines</h2>
+    <p class="hint">Every machine that works for Foundry is added here. You get a one-time <b>enrollment code</b>; the machine's
+      installer trades it for its own key and settings, so you never copy a key by hand. Revoking a machine turns its key off at once.
+      Studio slots: docs/INSTALL_SLOTS.md.</p>
+    ${keys ? "" : `<div class="card"><span class="pill warn">no workstation ssh key</span> Add your workstation's <b>public</b> ssh key below
+      before installing a slot: Foundry reaches slots over ssh, and the slot installer authorizes the keys listed here.</div>`}
+    <div class="card"><h3>Machines</h3>
+      ${rows ? `<div class="tscroll"><table><tr><th>machine</th><th>state</th><th>host</th><th>place</th><th>activity</th><th></th></tr>${rows}</table></div>` : '<p class="hint">None yet.</p>'}</div>
+    <div class="card"><h3>Add a Studio slot</h3>
+      <div class="row"><label>game</label><select id="mc-project">${d.projects.map(p => `<option>${esc(p)}</option>`).join("")}</select>
+        <label title="The slot's id, e.g. slot-2. Tracks are bound to it (tracks start ... --slot slot-2).">slot id</label><input id="mc-slot" placeholder="slot-2" style="width:110px">
+        <label title="The static IP the slot's LXC will have (create-slot-lxc.sh asks for the same one).">IP</label><input id="mc-ip" placeholder="192.168.0.52" style="width:140px"></div>
+      <div class="row"><label title="The slot's OWN place: a private experience per slot (e.g. 'Animal Uprising [SLOT-2]'). Paste its Studio link or games URL, or the place id. Never the workstation's test place or another slot's place: one edit session per place per account.">its place</label>
+        <input id="mc-place" placeholder="roblox-studio:… link, https://www.roblox.com/games/<id>/…, or the place id" style="min-width:380px">
+        <label title="Only needed when the link has no universe id">universe id</label><input id="mc-universe" placeholder="optional" style="width:140px"></div>
+      <div class="row"><label title="Places Rojo never auto-syncs in this slot (your LIVE places), space-separated">never-sync places</label><input id="mc-never" placeholder="138024886323256" style="width:220px">
+        <label>note</label><input id="mc-note" placeholder="e.g. mini PC 2" style="width:200px">
+        <button class="act primary" id="mc-add">Add slot and make a code</button></div>
+      <p class="hint">The slot starts switched off and its installer switches it on when its container is ready, so no gate goes to a half-built slot.
+        Moving a slot from another machine? Stop the old container first: one place can be open in one Studio at a time.</p></div>
+    <div class="card"><h3>Workstation ssh keys</h3>
+      <p class="hint">The <b>public</b> key(s) of the PC that runs the coordinator (Windows: <code>type %USERPROFILE%\\.ssh\\id_ed25519.pub</code>). Slot installers allow these to log in as <code>studio</code>. One per line.</p>
+      <textarea id="mc-keys" rows="3" style="width:100%;font-family:monospace" placeholder="ssh-ed25519 AAAA… foundry-slots@PC">${esc(keys)}</textarea>
+      <div class="row"><label title="How long a new enrollment code works">code valid for (minutes)</label><input type="number" id="mc-mins" min="5" max="1440" value="${esc(d.settings.code_minutes)}" style="width:90px">
+        <button class="act primary" id="mc-save">Save</button></div></div>
+    <div class="card"><h3>Recent events</h3>${ev ? `<div class="tscroll"><table>${ev}</table></div>` : '<p class="hint">None.</p>'}</div>`;
+  const showCode = (title, r) => {
+    const i = r.install || {};
+    const body = openModal(title, `
+      <p>Enrollment code (works once, until ${when(r.code_expires)}):</p>
+      <div class="row"><code style="font-size:20px;letter-spacing:1px">${esc(r.code)}</code> <button class="act" id="mc-copy">Copy</button></div>
+      <h4>Easiest: create the LXC and install in one go</h4>
+      <p class="hint">In the Proxmox <b>host</b> shell (Datacenter → node → Shell). It asks for the IP, sizes, the router address (<code>${esc(i.router_url || "")}</code>) and this code.</p>
+      <pre style="white-space:pre-wrap;overflow-wrap:anywhere">${esc(i.proxmox_host || "")}</pre>
+      <h4>Or: an LXC / Debian 13 machine you made yourself</h4>
+      <p class="hint">As root inside it (needs nesting + keyctl on Proxmox).</p>
+      <pre style="white-space:pre-wrap;overflow-wrap:anywhere">${esc(i.inside_lxc || "")}</pre>
+      <p class="hint">After the build (20-40 min) the installer prints how to sign Studio in once. That is the only step left.</p>`);
+    $("#mc-copy", body).onclick = () => navigator.clipboard.writeText(r.code).then(() => toast("Code copied"), () => toast("Select and copy it", true));
+  };
+  $("#mc-add").onclick = () => {
+    const place = $("#mc-place").value.trim();
+    const body = {kind: "slot", project: $("#mc-project").value, slot: $("#mc-slot").value.trim(), ip: $("#mc-ip").value.trim(),
+                  note: $("#mc-note").value, rojo_never_place_ids: $("#mc-never").value.trim()};
+    if (/^\d+$/.test(place)) body.place_id = place; else if (place) body.place_link = place;
+    if ($("#mc-universe").value.trim()) body.universe_id = $("#mc-universe").value.trim();
+    api("machines", {method: "POST", body}).then(r => { render(); showCode(`Slot ${r.machine.name} added`, r); }).catch(e => toast(e.message, true));
+  };
+  $("#mc-save").onclick = () => api("machines/settings", {method: "POST", body: {slot_ssh_keys: $("#mc-keys").value,
+    code_minutes: Number($("#mc-mins").value)}}).then(() => { toast("Saved"); render(); }).catch(e => toast(e.message, true));
+  document.querySelectorAll("[data-mc-code]").forEach(b => b.onclick = () => {
+    const n = b.dataset.mcCode;
+    if (!confirm(`Make a new enrollment code for ${n}? Installing with it gives ${n} a new key (the old one stops working).`)) return;
+    api(`machines/${encodeURIComponent(n)}/code`, {method: "POST"}).then(r => { render(); showCode(`New code for ${n}`, r); }).catch(e => toast(e.message, true));
+  });
+  document.querySelectorAll("[data-mc-revoke]").forEach(b => b.onclick = () => {
+    const n = b.dataset.mcRevoke;
+    if (confirm(`Revoke ${n}? Its key stops working now; the slot deletes its secret files at its next pull.`))
+      api(`machines/${encodeURIComponent(n)}/revoke`, {method: "POST"}).then(() => { toast("Revoked"); render(); }).catch(e => toast(e.message, true));
+  });
+  document.querySelectorAll("[data-mc-del]").forEach(b => b.onclick = () => {
+    const n = b.dataset.mcDel;
+    if (confirm(`Delete ${n}? Its key and its slot settings are removed (the LXC itself is not touched).`))
+      api(`machines/${encodeURIComponent(n)}`, {method: "DELETE"}).then(() => { toast("Deleted"); render(); }).catch(e => toast(e.message, true));
+  });
 }
 
 // Access → Secrets (secret_store.py / secrets_api.py): the central, write-only

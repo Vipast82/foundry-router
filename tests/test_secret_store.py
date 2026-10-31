@@ -247,9 +247,9 @@ def test_slots_schema_validates():
     d["settings"]["slots"] = {"slot-1": {"container": ""}}
     errs = [e["path"] for e in D.validate(d, "animaluprising")["errors"]]
     assert "slots.slot-1.container" in errs
-    d["settings"]["slots"] = {"slot-1": {"container": "c", "host": "studio@h"}}
+    d["settings"]["slots"] = {"slot-1": {"container": "c"}, "slot-2": {"container": "c"}}
     errs = [e["path"] for e in D.validate(d, "animaluprising")["errors"]]
-    assert "slots.slot-1.au_push_url" in errs
+    assert "slots.slot-2.container" in errs                   # two slots, one container
     d["settings"]["slots"] = {"slot-1": {"container": "c", "place_id": "x"}}
     errs = [e["path"] for e in D.validate(d, "animaluprising")["errors"]]
     assert "slots.slot-1.place_id" in errs

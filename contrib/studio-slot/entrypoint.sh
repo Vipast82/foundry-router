@@ -72,10 +72,13 @@ fi
 # Rojo: serve the slot's checkout (else the mount). The image's Rojo (7.7.1), not the one
 # rokit.toml pins, so it matches the Studio plugin the image installs.
 ROJO_PROJECT="${ROJO_PROJECT:-$AU_CHECKOUT/default.project.json}"
-[ -f "$ROJO_PROJECT" ] || ROJO_PROJECT="$AU_SOURCE/default.project.json"
-if [ -f "$ROJO_PROJECT" ]; then
+[ -f "$ROJO_PROJECT" ] || [ ! -f "$AU_SOURCE/default.project.json" ] ||     ROJO_PROJECT="$AU_SOURCE/default.project.json"
+# A new slot host's game mirror may still be empty: then the first gate's slot-checkout clones
+# the game, and Rojo starts as soon as the project file exists.
+if true; then
     # supervised: slot-checkout restarts Rojo by killing it (Rojo 7.7 misses new files)
-    ( cd "$(dirname "$ROJO_PROJECT")" && while true; do
+    ( while [ ! -f "$ROJO_PROJECT" ]; do sleep 10; done
+      cd "$(dirname "$ROJO_PROJECT")" && while true; do
           /usr/local/bin/rojo serve --port "${ROJO_PORT:-34872}" "$(basename "$ROJO_PROJECT")" \
               >>"$HOME/rojo.log" 2>&1
           sleep 2

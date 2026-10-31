@@ -56,11 +56,18 @@ from typing import Optional
 LOCK_PREFIX = "slot:"
 OUTPUT_GLOBS = ("docs/progress/{task}_*", "docs/evidence/{task}", ".plan/tmp/gate/{task}")
 STUDIO_MCP = {"Roblox_Studio": "official_mcp", "robloxstudio-mcp": "community_mcp"}
+# Key auth only, never a prompt; a new slot host's key is accepted on first contact (LAN, trust on
+# first use: Victor 2026-10-31) and checked on every later connection; an unreachable host fails
+# in 15 s instead of hanging a gate.
+SSH_DEFAULT = ["ssh", "-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=accept-new",
+               "-o", "ConnectTimeout=15"]
+# setup-host.sh's layout on a slot host: what a remote slot's push targets default to
+HOST_ROOT = "/srv/studio-slot"
 DEFAULTS = {"container": "", "repo": "/home/studio/work/AnimalUprising", "foundry": "/opt/foundry",
             "path_prefix": "/home/studio/.rokit/bin",
             "official_mcp": "/usr/local/bin/studio-mcp-official",
             "community_mcp": "/usr/local/bin/robloxstudio-mcp", "enabled": True,
-            "checkout_timeout_s": 600, "host": "", "ssh": ["ssh", "-o", "BatchMode=yes"],
+            "checkout_timeout_s": 600, "host": "", "ssh": SSH_DEFAULT,
             "au_push_url": "", "foundry_push_url": "", "foundry_host_dir": ""}
 FOUNDRY_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 _NO_WINDOW = 0x08000000 if os.name == "nt" else 0
@@ -78,6 +85,11 @@ def configured(profile) -> dict:
         s = {**DEFAULTS, **cfg}
         if s.get("enabled") is False or not s.get("container"):
             continue
+        host = str(s.get("host") or "").strip()
+        if host:                    # remote: setup-host.sh's mirrors unless set explicitly
+            s["au_push_url"] = s.get("au_push_url") or f"ssh://{host}{HOST_ROOT}/AnimalUprising.git"
+            s["foundry_push_url"] = s.get("foundry_push_url") or f"ssh://{host}{HOST_ROOT}/foundry.git"
+            s["foundry_host_dir"] = s.get("foundry_host_dir") or f"{HOST_ROOT}/foundry"
         out[str(sid)] = s
     return out
 

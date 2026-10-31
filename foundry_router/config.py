@@ -765,6 +765,15 @@ class SecretsConfig(BaseModel):
     alert_on_new_access: bool = True
 
 
+class MachinesConfig(BaseModel):
+    """Access → Machines (machines.py): enrollment of slot hosts and other machines."""
+    # Public ssh keys of the workstation(s) that drive Studio slots: each slot installer adds them
+    # to its `studio` user, so Foundry's ssh reaches the slot. Public keys only.
+    slot_ssh_keys: list[str] = Field(default_factory=list)
+    # How long a one-time enrollment code works.
+    code_minutes: int = Field(default=30, ge=5, le=1440)
+
+
 class ClientAuthConfig(BaseModel):
     # optional: keyless requests pass as "anonymous" (wrong keys are refused);
     # required: inference/media need a valid client key.
@@ -1044,6 +1053,7 @@ class AppConfig(BaseModel):
     clients: list[ClientConfig] = Field(default_factory=list)
     client_auth: ClientAuthConfig = Field(default_factory=ClientAuthConfig)
     secrets: SecretsConfig = Field(default_factory=SecretsConfig)
+    machines: MachinesConfig = Field(default_factory=MachinesConfig)
     media: MediaConfig = Field(default_factory=MediaConfig)
     # Default persona sets (profiles.py) applied at startup: missing personas
     # are created, untouched ones updated to the profile's newer version, edited

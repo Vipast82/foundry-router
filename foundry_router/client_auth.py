@@ -95,6 +95,10 @@ def scope_for(path: str) -> Optional[str]:
         return "media"         # Foundry's built-in image tools
     if path.startswith("/mcp"):
         return None            # Foundry-MCP has its own token (mcp_aggregator.token)
+    if path == "/v1/foundry/enroll":
+        # A machine installer trading its one-time enrollment code for its key (machines.py):
+        # the code is the credential (single use, expiring, rate-limited, audited).
+        return None
     if path.startswith("/v1/foundry/secrets/"):
         return "secrets"         # Studio slots / machines pulling their bundle (secrets_api.py)
     if path.startswith("/v1/foundry/telemetry/"):

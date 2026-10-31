@@ -514,7 +514,9 @@ SLOT_FIELDS = [
     ("container", "str", "", "Docker container name (e.g. studio-slot-poc).", None, None),
     ("host", "str", "", "ssh target that runs docker for this slot (e.g. studio@192.168.0.50); "
      "empty = this PC.", None, None),
-    ("ssh", "list", ["ssh", "-o", "BatchMode=yes"], "The ssh command (key auth, no prompts).",
+    ("ssh", "list", ["ssh", "-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=accept-new",
+             "-o", "ConnectTimeout=15"],
+     "The ssh command (key auth, no prompts; a new host's key is accepted on first contact).",
      "str", None),
     ("repo", "str", "/home/studio/work/AnimalUprising", "The slot's own game checkout.", None,
      None),
@@ -527,10 +529,11 @@ SLOT_FIELDS = [
      "Community Studio MCP server command in the slot.", None, None),
     ("checkout_timeout_s", "int", 600, "Seconds slot-checkout may take.", None, 30),
     ("au_push_url", "str", "", "Remote slot: the host's bare game mirror the track commit is "
-     "pushed to.", None, None),
-    ("foundry_push_url", "str", "", "Remote slot: the host's Foundry mirror.", None, None),
-    ("foundry_host_dir", "str", "", "Remote slot: the host folder mounted at `foundry`.", None,
-     None),
+     "pushed to (empty = ssh://<host>/srv/studio-slot/AnimalUprising.git).", None, None),
+    ("foundry_push_url", "str", "", "Remote slot: the host's Foundry mirror (empty = "
+     "ssh://<host>/srv/studio-slot/foundry.git).", None, None),
+    ("foundry_host_dir", "str", "", "Remote slot: the host folder mounted at `foundry` (empty "
+     "= /srv/studio-slot/foundry).", None, None),
     ("place_id", "int", 0, "The slot's own Roblox place (0 = Studio start page). Never the "
      "workstation's test place: one edit session per place per account.", None, 0),
     ("universe_id", "int", 0, "The universe (experience) of place_id.", None, 0),
@@ -565,9 +568,6 @@ def slots_table(path: str, raw) -> dict:
             raise SettingsError(f"{path}: {where} and slots.{containers[key]} use the same "
                                 f"container", where + ".container")
         containers[key] = sid
-        if s.get("host") and not s.get("au_push_url"):
-            raise SettingsError(f"{path}: {where}: a remote slot (host) needs au_push_url",
-                                where + ".au_push_url")
     return slots
 
 
