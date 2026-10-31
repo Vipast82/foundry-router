@@ -813,3 +813,16 @@ def test_capture_ready_never_writes_a_frame_of_the_wrong_size(tmp_path):
                in ln for ln in g.capture_log)
     g.capture_ready("CAPTURE_READY docs/evidence/CS/plain.png runtime=playtest")   # no size named
     assert (tmp_path / "docs/evidence/CS/plain.png").is_file() and len(sized) == 2
+
+
+def test_a_red_run_on_code_the_sprints_base_never_had_is_not_a_baseline(tmp_path, monkeypatch):
+    """2026-10-31 MV2-V1: MV2-11's UseV2-on run was red on S15/UI_02a..05a/UI_POLISH1, MV2-11
+    reverted the flip, and MV2-V1 flipped it again: those reds were MV2-V1's own change, yet
+    they were skipped as pre-existing. A run whose code differs from the sprint's base in the
+    src files the sprint changed is no baseline; an older run that matches still decides."""
+    g = _pre_gate(tmp_path, monkeypatch, own=["src/shared/Config/MapGen.lua"])
+    g._own_base = lambda memo: "base"
+    g.run_cmd = lambda cmd, cwd, t: (0, "src/shared/Config/MapGen.lua" if "b" * 40 in cmd else "")
+    out = g.preexisting_plan(["S39", "S48", "UI_1"], "p")
+    assert "S39" not in out and "S48" not in out          # C1 (flag on) skipped; B1 had them green
+    assert out["UI_1"]["sprint"] == "B1"                   # red at the matching older run

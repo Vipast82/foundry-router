@@ -2,6 +2,17 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.158.14 — a red run on code the sprint's base never had is no "pre-existing" baseline
+
+2026-10-31: MV2-V1's gate skipped S15, UI_02a..05a and UI_POLISH1 as PRE-EXISTING: they were red in
+MV2-11's UseV2-on run, but MV2-11 reverted the flip and MV2-V1 flipped it again, so those reds were
+MV2-V1's own change (Victor: the v2 map has to work; nothing gets excused).
+
+- **AU studio_gate `preexisting_plan`:** a stored run is a baseline only if every `src/` file this
+  sprint's own commits changed has the same content at that run as at the sprint's base (the
+  parent of its first own commit). Otherwise the run is skipped and an older matching run, if any,
+  decides.
+
 ## v0.158.13 — a task base left on a failed track falls back to the main base
 
 2026-10-31 04:16: GF-SEC3's gate passed but verification failed `coordinator.history`

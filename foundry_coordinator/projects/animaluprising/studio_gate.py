@@ -2405,6 +2405,39 @@ class Gate:
         memo["__own__"] = out
         return out
 
+    def _own_base(self, memo: dict) -> Optional[str]:
+        """The parent of this sprint's first own commit ("<ID>: ...") on HEAD's history."""
+        if "__own_base__" in memo:
+            return memo["__own_base__"]
+        base = None
+        rc, txt = self.run_cmd(["git", "log", "-n", "400", "--format=%H %P@@%s", self.head or "HEAD"],
+                               self.repo, 60)
+        if rc == 0:
+            for ln in (txt or "").splitlines():       # newest first: the last match is the first
+                shas, _, subj = ln.partition("@@")
+                parts = shas.split()
+                if subj.startswith(f"{self.sprint}:") and len(parts) >= 2:
+                    base = parts[1]
+        memo["__own_base__"] = base
+        return base
+
+    def _run_matches_own_base(self, v: dict, own: set, memo: dict) -> bool:
+        """A red run is a baseline for this sprint only if every src/ file the sprint changed
+        had the same content at that run as at the sprint's base (else the run saw code the
+        sprint's base never had, e.g. a flag the sprint itself flips)."""
+        src = sorted(f for f in own if f.startswith("src/"))
+        if not src:
+            return True
+        base = self._own_base(memo)
+        if not base:
+            return True
+        key = ("__own_vs__", str(v["head"]))
+        if key not in memo:
+            rc, txt = self.run_cmd(["git", "diff", "--name-only", str(v["head"]), base, "--"] + src,
+                                   self.repo, 60)
+            memo[key] = rc == 0 and not (txt or "").strip()
+        return memo[key]
+
     def preexisting_plan(self, ids: list, plan_file: str) -> dict:
         """2026-10-29 (assets-local merge, HK-CLEAN1): legacy regression rows (S39 'no active
         profile', S48, UI_02a..UI_V1) were red on master and failed every sprint whose
@@ -2457,6 +2490,11 @@ class Gate:
             changed = self._changed_since(v, head, memo)
             if changed is None:
                 continue                          # not on HEAD's history: says nothing here
+            if not self._run_matches_own_base(v, own, memo):
+                # 2026-10-31 MV2-V1: MV2-11's UseV2-on run was red on S15/UI_02a..05a/UI_POLISH1;
+                # MV2-11 then reverted the flip and MV2-V1 flipped it again, so that red was this
+                # sprint's own change, not something its base already had
+                continue
             hit: set = set()
             for f in changed:
                 if f.startswith(("src/", "tests/")) and f not in harness_files:
