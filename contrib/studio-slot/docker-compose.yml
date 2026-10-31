@@ -20,6 +20,10 @@ services:
       ROBLOX_STUDIO_NO_AUTH: "1"
       # AU's studio.lock (one Studio driver at a time) lives in the slot, not on C:
       AU_LOCK_DIR: "/home/studio/locks"
+      # Roblox Open Cloud (Creator API) for asset uploads (Victor 2026-10-31): AU's
+      # tools/assets/roblox_cloud.py is the only reader of this file (the key is never printed,
+      # logged or on a command line). It reaches the slot as a read-only mount, never the image.
+      AU_ROBLOX_KEY_FILE: "/run/secrets/roblox_open_cloud_key.txt"
     volumes:
       # keeps the Wine prefix, Studio install and your Studio sign-in across restarts
       - studio-home:/home/studio
@@ -29,6 +33,8 @@ services:
       # the deployed Foundry (the gate runner, studio_gate), read-only; on a mini PC this is a
       # clone of the release tag instead
       - "C:/Users/shock/foundry-deploy:/opt/foundry:ro"
+      # the Open Cloud key file (one line), read-only; see AU_ROBLOX_KEY_FILE above
+      - "C:/Roblox/_secrets/roblox_open_cloud_key.txt:/run/secrets/roblox_open_cloud_key.txt:ro"
     shm_size: "2gb"
     cpus: 8
     # a multiplayer playtest runs edit + server + one Studio per client, each rendering

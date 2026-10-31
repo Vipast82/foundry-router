@@ -5,9 +5,24 @@ gate runner, on a headless Linux desktop you open in a browser. It can run a spr
 (host half + scripted Studio calls + `-Finish`) on its own place, beside the workstation's Studio.
 Target: one LXC per Proxmox mini PC (Intel iGPU, no passthrough).
 
-**Status (2026-10-31):** everything below is built and tested on this PC (Docker Desktop). The
-coordinator does not yet send work to a slot (that is the next Foundry step: a second Studio
-resource and a dispatch to the slot).
+**Status (2026-10-31):** everything below is built and tested on this PC (Docker Desktop). Since
+Foundry v0.158.15 the coordinator sends work to a slot: a track started with
+`tracks start <project> <name> <sprints> --slot slot-1` runs its scripted Studio gate inside the
+slot (the slot's checkout is moved to the track's commit, outputs are copied back into the track's
+worktree) and its sessions' Studio MCP tools reach the slot's Studio (`docker exec`). The slot is
+configured in the project's `project.toml` as `[slots.slot-1]`. First real sprint: AS-J05.
+
+## Roblox Open Cloud (Creator API) access
+
+Asset sprints upload models, animations, audio and images through AU's
+`tools/assets/roblox_cloud.py`, the only tool that reads the Open Cloud key. The slot gets the
+workstation's key file as a **read-only mount** (`/run/secrets/roblox_open_cloud_key.txt`, never baked
+into the image) and `AU_ROBLOX_KEY_FILE` points the tool at it (docker-compose.yml). Check it without
+touching the key:
+
+    docker exec studio-slot-poc bash -lc 'cd ~/work/AnimalUprising && python3 tools/assets/roblox_cloud.py selftest && python3 tools/assets/roblox_cloud.py asset --id <an uploaded asset id>'
+
+On a mini PC, put the key file on the host (mode 600) and mount it the same way.
 
 ## Run on this PC (Docker Desktop)
 
