@@ -1,0 +1,44 @@
+# A Studio slot on a Proxmox mini PC (an LXC running Docker; setup-host.sh prepares it).
+# Nothing from the workstation is mounted: Foundry pushes each track commit to the bare AU mirror
+# and the deployed Foundry to the Foundry mirror (foundry_coordinator/slots.py, `host` slots).
+#   cd /srv/studio-slot/foundry/contrib/studio-slot/proxmox && docker compose up -d --build
+# Settings come from .env next to this file (copy .env.example).
+services:
+  studio-slot:
+    image: foundry/studio-slot:${SLOT_IMAGE_TAG:-latest}
+    build: ..
+    container_name: ${SLOT_CONTAINER:-studio-slot}
+    ports:
+      # noVNC stays on the LXC's localhost: reach it through an ssh tunnel
+      #   ssh -L 6080:localhost:6080 studio@<lxc>   then http://localhost:6080/vnc.html
+      - "127.0.0.1:${SLOT_NOVNC_PORT:-6080}:6080"
+    environment:
+      GEOMETRY: "2560x1440"
+      # this slot's OWN place (one edit session per place per account: never the workstation's
+      # TEST place, never another slot's place)
+      STUDIO_OPEN: "${STUDIO_OPEN:?set STUDIO_OPEN in .env to this slot's place link}"
+      FOUNDRY_MCP_OFFICIAL: '["/usr/local/bin/studio-mcp-official"]'
+      FOUNDRY_MCP_COMMUNITY: '["/usr/local/bin/robloxstudio-mcp"]'
+      ROBLOX_STUDIO_NO_AUTH: "1"
+      AU_LOCK_DIR: "/home/studio/locks"
+      # 2-player playtests need about 14+ GB in software rendering; 0 keeps those rows MANUAL
+      # (they run on the workstation Studio at the track's merge)
+      FOUNDRY_GATE_MULTIPLAYER: "${SLOT_MULTIPLAYER:-0}"
+      AU_ROBLOX_KEY_FILE: "/run/secrets/roblox_open_cloud_key.txt"
+    volumes:
+      - studio-home:/home/studio
+      # the bare AU mirror Foundry pushes to (the slot clones and fetches from it)
+      - "/srv/studio-slot/AnimalUprising.git:/work/AnimalUprising:ro"
+      # the Foundry checkout Foundry moves to its deployed commit before each gate run
+      - "/srv/studio-slot/foundry:/opt/foundry:ro"
+      # the Open Cloud key (one line, mode 600 on the host); never in the image
+      - "/srv/studio-slot/secrets/roblox_open_cloud_key.txt:/run/secrets/roblox_open_cloud_key.txt:ro"
+    # Intel iGPU (Vinegar DXVK on Gen9+): uncomment once /dev/dri is mapped into the LXC
+    # devices:
+    #   - /dev/dri:/dev/dri
+    shm_size: "2gb"
+    cpus: ${SLOT_CPUS:-6}
+    mem_limit: ${SLOT_MEM:-12g}
+    restart: unless-stopped
+volumes:
+  studio-home:

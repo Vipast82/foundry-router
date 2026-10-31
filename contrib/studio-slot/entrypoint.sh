@@ -43,7 +43,10 @@ for d in "$AU_SOURCE" "$AU_SOURCE/.git"; do
     git config --global --get-all safe.directory | grep -qxF "$d" || \
         git config --global --add safe.directory "$d"
 done
-if [ ! -d "$AU_CHECKOUT/.git" ] && [ -d "$AU_SOURCE/.git" ]; then
+# AU_SOURCE is a working checkout (this PC: the mounted workstation folder) or a bare mirror
+# (a Proxmox slot host: /srv/studio-slot/AnimalUprising.git, which Foundry pushes track commits to)
+if [ ! -d "$AU_CHECKOUT/.git" ] && git -C "$AU_SOURCE" rev-parse --git-dir >/dev/null 2>&1 \
+        && git -C "$AU_SOURCE" rev-parse -q --verify HEAD >/dev/null 2>&1; then
     mkdir -p "$(dirname "$AU_CHECKOUT")"
     git clone -q "$AU_SOURCE" "$AU_CHECKOUT" >"$HOME/checkout.log" 2>&1
 fi

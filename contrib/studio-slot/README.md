@@ -133,16 +133,43 @@ the Lobby phase itself rather than depend on speed (an AU test fix, not a slot f
 `blender -b --python tools/blender/<builder>.py -- <args>` from the slot's checkout, the same
 commands the asset plans use on the workstation (with `blender` instead of the Windows path).
 
-## On a Proxmox LXC (mini PCs)
+## On a Proxmox LXC (mini PCs): `proxmox/`
 
-- Unprivileged LXC with Docker inside (or the image's contents installed directly).
-- Map the Intel iGPU: `lxc.cgroup2.devices.allow: c 226:* rwm` and
-  `lxc.mount.entry: /dev/dri dev/dri none bind,optional,create=dir`, then in compose add
-  `devices: ["/dev/dri:/dev/dri"]`.
-- Replace the two Windows mounts: clone the AU repo (the slot's `origin`) and a Foundry release
-  tag instead of mounting the workstation's folders.
-- noVNC must get a password (or a VPN) before it leaves localhost.
-- Vinegar's Graphics Mode: DXVK (Vulkan) on Intel Gen9+ iGPUs; WineD3D if DXVK misbehaves.
+The workstation's Foundry drives a slot on another machine over **ssh** (`foundry_coordinator/slots.py`,
+a slot with `host`): every container command is `ssh <host> docker exec ...`, the track's Kilo
+Studio MCP servers are stdio over ssh, and nothing from the workstation is mounted. Before each
+gate run Foundry pushes the track's commit to a bare AU mirror on the host (`slot/<task>`, the
+slot's `origin`) and the deployed Foundry to a Foundry mirror whose checkout is the slot's
+`/opt/foundry`.
+
+1. **LXC** (Proxmox host): Debian 13 template, unprivileged, the lines in `proxmox/lxc.conf.example`
+   (nesting + keyctl, 16 GB, 6 cores; the Intel iGPU lines are optional).
+2. **Inside the LXC** as root: `bash setup-host.sh "<workstation ssh public key>"`: Docker + compose,
+   the `studio` user (uid 1000, the image's), `/srv/studio-slot/{AnimalUprising.git, foundry.git,
+   foundry, secrets}`. It prints the remaining steps:
+3. seed the two mirrors from the workstation (`git push` over ssh), check out Foundry on the host;
+4. the slot's **own place** in `proxmox/.env` (one edit session per place per account: never the
+   workstation's TEST place or another slot's place);
+5. the Open Cloud key: **you** copy it to `/srv/studio-slot/secrets/` (mode 600, owner 1000);
+6. `docker compose up -d --build` in `proxmox/`, then sign Studio in once through an ssh tunnel
+   (`ssh -L 6080:localhost:6080 studio@<lxc>`; noVNC never leaves the LXC's localhost);
+7. `project.toml`:
+
+   ```toml
+   [slots.slot-2]
+   container = "studio-slot"
+   host = "studio@<lxc>"
+   au_push_url = "ssh://studio@<lxc>/srv/studio-slot/AnimalUprising.git"
+   foundry_push_url = "ssh://studio@<lxc>/srv/studio-slot/foundry.git"
+   foundry_host_dir = "/srv/studio-slot/foundry"
+   enabled = true
+   ```
+
+   then `tracks start ... --slot slot-2`.
+
+Memory: Studio + a solo playtest fits 12 GB in software rendering; 2-player rows need about 14+ GB
+(`SLOT_MULTIPLAYER=1` in `.env` only then). Vinegar's Graphics Mode: DXVK (Vulkan) on Intel Gen9+
+iGPUs once `/dev/dri` is mapped; WineD3D if DXVK misbehaves.
 
 ## Files
 
@@ -156,6 +183,9 @@ commands the asset plans use on the workstation (with `blender` instead of the W
 | `studio-mcp-official.sh` | Roblox's StudioMCP.exe under Wine (newest Studio version) |
 | `studio-plugin-settings.js` | Rojo auto-sync + Studio MCP plugin settings |
 | `rojo-seed.sh` | the slot place's saved Rojo endpoint (`<placeId>=<project>`) for the settings |
+| `proxmox/docker-compose.yml`, `proxmox/.env.example` | the slot on a Proxmox LXC (no Windows mounts) |
+| `proxmox/setup-host.sh` | prepares the LXC (Docker, `studio` user, mirrors, secrets dir) |
+| `proxmox/lxc.conf.example` | the Proxmox container settings (nesting, keyctl, memory, iGPU) |
 | `studio-auth-handler.sh`, `studio-auth.desktop` | the browser sign-in hand-back |
 | `openbox-studio.xml` | window rules (playtest windows stay small) |
 | `vinegar-config.toml` | Vinegar settings that work in a container |
