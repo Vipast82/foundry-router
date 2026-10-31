@@ -2,6 +2,17 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.158.19 — "need exactly one Studio, found 0" reopens Studio (in the slot for a slot track)
+
+2026-10-31 11:50: the slot's edit Studio crashed during AS-J05's 2-player playtest; the gate said
+"McpError: need exactly one Studio, found 0 (open: none)" (OfficialStudio.resolve), which no autoheal
+pattern matched, so it became a Lead case.
+
+- **autoheal `studio_reload`:** also matches "exactly one Studio..., found 0" and "(open: none)". For
+  a slot-bound track the repair runs in the slot (v0.158.18).
+- contrib/studio-slot (image rebuild): the watchdog reopens Studio when the EDIT Studio is gone, even
+  while a crashed playtest's server/client processes and the WebView2 helpers are still alive.
+
 ## v0.158.18 — auto-heal repairs a slot track's Studio in its slot, never the workstation's
 
 2026-10-31 11:00 / 11:04: AS-J05 (track slot1-props on slot-1) hit a stale Studio <-> Rojo sync

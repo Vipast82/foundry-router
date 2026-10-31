@@ -83,6 +83,9 @@ INFRA_SIGNATURES = (
                                  # 2026-10-31 MV2-11: the official MCP's wording when Studio
                                  # is up on its start page (the place closed mid-gate)
                                  r"no (?:roblox )?studio instances? (?:are |is )?connected|"
+                                 # 2026-10-31 AS-J05: OfficialStudio.resolve in the container
+                                 # slot ("need exactly one Studio, found 0 (open: none)")
+                                 r"exactly one studio[^,\n]{0,40},? found 0|\(open: none\)|"
                                  r"place needs (?:reopening|to be reopened)", re.I)),
     ("studio", re.compile(r"\bstudio\b[^.\n]{0,80}(?:not connected|disconnected|not "
                           r"running|plugin[^.\n]{0,30}(?:connect|timeout)|mcp[^.\n]{0,40}"

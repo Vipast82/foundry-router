@@ -263,3 +263,12 @@ def test_a_repair_worktree_gets_the_project_kilo_config_outside_git(tmp_path):
     assert ensure_repair_kilo_config(P, str(wt)) == out      # idempotent
     (ws / "kilo.jsonc").unlink()
     assert ensure_repair_kilo_config(P, str(tmp_path / "missing")) == ""
+
+
+def test_the_official_mcp_found_0_wording_reopens_studio():
+    """2026-10-31 AS-J05: the slot's Studio crashed in a 2-player playtest; the official MCP
+    said "need exactly one Studio, found 0 (open: none)", which no pattern matched."""
+    from foundry_coordinator import autoheal
+    msg = "scripted Studio gate: McpError: need exactly one Studio, found 0 (open: none)"
+    assert autoheal.plan("studio_calls_error", msg) == ("studio_reload", "restart")
+    assert autoheal.infra_signature("the shop panel opens with none selected") == ""
