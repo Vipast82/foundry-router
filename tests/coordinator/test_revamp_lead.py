@@ -230,3 +230,31 @@ def test_studio_with_no_place_open_gets_a_reopen():
     assert autoheal.plan("session_blocked", rt1) == ("studio_reload", "restart")
     assert autoheal.plan("studio_calls_error", mv2) == ("studio_reload", "restart")
     assert autoheal.infra_signature("the shop panel is not open on mobile") == ""
+
+
+def test_a_repair_worktree_gets_the_project_kilo_config_outside_git(tmp_path):
+    """2026-10-30: all 60 lead repair sessions since 10-20 died 'the prompt was never
+    admitted': the Foundry-Router repair worktree had no kilo.jsonc, so the persona's
+    foundry/... model did not resolve there and Kilo never ran the turn."""
+    import subprocess
+    from types import SimpleNamespace
+    from foundry_coordinator.lead import ensure_repair_kilo_config
+    ws = tmp_path / "game"
+    ws.mkdir()
+    (ws / "kilo.jsonc").write_text('{"provider": {"foundry": {"models": {"P": {}}}}}', encoding="utf-8")
+    wt = tmp_path / "repair"
+    wt.mkdir()
+    subprocess.run(["git", "init", "-q", str(wt)], check=True)
+    (wt / "a.txt").write_text("x", encoding="utf-8")
+    subprocess.run(["git", "-C", str(wt), "add", "a.txt"], check=True)
+    subprocess.run(["git", "-C", str(wt), "-c", "user.email=t@t", "-c", "user.name=t",
+                    "commit", "-qm", "base", "--no-verify"], check=True)
+    P = SimpleNamespace(profile=SimpleNamespace(workspace=str(ws), raw={}))
+    out = ensure_repair_kilo_config(P, str(wt))
+    assert out and (wt / "kilo.jsonc").read_text(encoding="utf-8").startswith('{"provider"')
+    st = subprocess.run(["git", "-C", str(wt), "status", "--porcelain"], capture_output=True,
+                        text=True, check=True).stdout
+    assert st.strip() == ""                       # never counted as a change of the repair
+    assert ensure_repair_kilo_config(P, str(wt)) == out      # idempotent
+    (ws / "kilo.jsonc").unlink()
+    assert ensure_repair_kilo_config(P, str(tmp_path / "missing")) == ""

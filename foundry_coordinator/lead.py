@@ -883,6 +883,40 @@ def is_read_only(rules: list[dict]) -> bool:
     return True
 
 
+def ensure_repair_kilo_config(P, path: str) -> str:
+    """Give a Foundry-Router repair worktree the project's kilo.jsonc (as a track worktree
+    gets one), kept out of git. 2026-10-30: all 60 lead repair sessions since 10-20 died
+    "the prompt was never admitted": a repair worktree is a Foundry-Router checkout with no
+    kilo.jsonc, the global config's `foundry` provider has no models, so the persona's model
+    (foundry/Foundry-Kilo-Lead-Manager) did not resolve and Kilo never ran the turn. Lead
+    calls worked only because they run in the game workspace, which has the file.
+    Returns the path written (or already there), '' when there is nothing to copy."""
+    import shutil
+    from .kilo_config import kilo_path
+    if not path or not os.path.isdir(path):
+        return ""
+    src, dst = kilo_path(P.profile), os.path.join(path, "kilo.jsonc")
+    if not os.path.isfile(src):
+        return ""
+    if not os.path.isfile(dst):
+        try:
+            shutil.copyfile(src, dst)
+        except OSError:
+            return ""
+    try:
+        excl = subprocess.run(["git", "-C", path, "rev-parse", "--git-path", "info/exclude"],
+                              capture_output=True, text=True, check=True).stdout.strip()
+        excl = excl if os.path.isabs(excl) else os.path.join(path, excl)
+        cur = open(excl, encoding="utf-8").read() if os.path.isfile(excl) else ""
+        if "/kilo.jsonc" not in cur.splitlines():
+            os.makedirs(os.path.dirname(excl), exist_ok=True)
+            with open(excl, "a", encoding="utf-8") as f:
+                f.write(("" if cur.endswith("\n") or not cur else "\n") + "/kilo.jsonc\n")
+    except (OSError, subprocess.CalledProcessError):
+        pass
+    return dst
+
+
 def repair_permissions(P, spec=None, python: str = "") -> list[dict]:
     """A coordinator repair session edits only its own worktree (the session's
     directory; external_directory stays denied) and cannot publish. Its
@@ -3573,6 +3607,8 @@ class LeadManager:
                 return self._escalate_bound(P, t, case, "quota_calls")
             agent = s["repair_agent"] or (P.profile.client or {}).get("agent") or "code"
             py = getattr(rw, "python", "") or ""
+            if self._action(key) is None:
+                ensure_repair_kilo_config(P, path)
             r = self._session_call(
                 P, t, case, key, "repair_session", directory=path, persona=s["persona"],
                 agent=agent, permissions=repair_permissions(P, self._spec(P, t["task_id"]),

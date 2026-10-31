@@ -2,6 +2,20 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.157.98 — Lead repair sessions run (they never had since 10-20)
+
+2026-10-30 21:47: GF-RT1's Lead diagnosed a coordinator fix (per-frame viewport on
+CAPTURE_READY) and its repair session died "the prompt was never admitted", as at 18:49 and
+19:12. Kilo's database shows all 60 repair sessions since 10-20 with only the prompt and no
+reply. A repair worktree is a Foundry-Router checkout with no kilo.jsonc; the global Kilo
+config's `foundry` provider has no models, so the persona's model
+(`foundry/Foundry-Kilo-Lead-Manager`) did not resolve there and Kilo never ran the turn. Lead
+calls worked only because they run in the game workspace, which has the file.
+
+- **lead:** before each repair session, the repair worktree gets the project's kilo.jsonc
+  (as track worktrees do), listed in the repo's `info/exclude` so it is never part of the
+  repair's change.
+
 ## v0.157.97 — a sprint in a working Lead case keeps the main checkout
 
 2026-10-30 20:55-21:12: MV2-11 and then GF-RT1 blocked into Lead cases, and in the same tick
