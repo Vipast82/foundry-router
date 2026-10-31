@@ -2,6 +2,24 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.158.20 — Studio slots on another machine (Proxmox LXC) over ssh
+
+2026-10-31 (Victor: "start it"): a slot no longer has to be a container on the workstation.
+
+- **slots:** a `[slots.<id>]` with `host = "user@machine"` runs every container command as
+  `ssh <host> docker exec ...` (`ssh` setting, default `ssh -o BatchMode=yes`; the remote side gets
+  one shell-quoted command). That covers the gate run, copy-back, resync, stop, the slot
+  stop-playtest, and the track's Kilo Studio MCP servers (stdio over ssh).
+- **sources:** before a remote gate run, `au_push_url` gets the track's commit as
+  `refs/heads/slot/<task>` (the slot's `origin` is that bare mirror, so `slot-checkout` fetches it),
+  and `foundry_push_url` gets the deployed Foundry's HEAD as `deploy`, which `foundry_host_dir`
+  (mounted at `/opt/foundry` in the slot) then checks out. A failed push stops the run before
+  checkout (exit 3). A local slot (no `host`) is unchanged.
+- contrib/studio-slot `proxmox/` (compose with no Windows mounts, `setup-host.sh`, LXC settings) and
+  `entrypoint.sh` cloning from a bare mirror.
+- Verified on this PC: a real AS_P7 gate in remote mode through an ssh stand-in (push + host Foundry
+  checkout, slot-checkout, pipeline, 21 files copied back); `tests/coordinator/test_slots.py` 13/13.
+
 ## v0.158.19 — "need exactly one Studio, found 0" reopens Studio (in the slot for a slot track)
 
 2026-10-31 11:50: the slot's edit Studio crashed during AS-J05's 2-player playtest; the gate said

@@ -163,3 +163,94 @@ def test_autoheal_on_a_slot_track_repairs_the_slot_never_the_workstation(monkeyp
     out = autoheal.repair(c, P, {"task_id": "AS-J05", "data": {}}, "rojo_stale", "retry")
     assert seen["slot"] == "slot-1" and out[0]["repair"] == "slot_resync" and out[0]["ok"]
     assert autoheal.request_studio_reopen(c, P, {"task_id": "AS-J05"})[0] == ""
+
+
+# ---- remote slots (Proxmox LXC over ssh), 2026-10-31 ------------------------------------------
+
+REMOTE = {"id": "slot-2", "container": "studio-slot", "host": "studio@10.0.0.5",
+          "ssh": ["ssh", "-o", "BatchMode=yes"], "repo": "/home/studio/work/AnimalUprising",
+          "foundry": "/opt/foundry", "path_prefix": "/home/studio/.rokit/bin",
+          "official_mcp": "/usr/local/bin/studio-mcp-official",
+          "community_mcp": "/usr/local/bin/robloxstudio-mcp",
+          "au_push_url": "ssh://studio@10.0.0.5/srv/studio-slot/AnimalUprising.git",
+          "foundry_push_url": "ssh://studio@10.0.0.5/srv/studio-slot/foundry.git",
+          "foundry_host_dir": "/srv/studio-slot/foundry"}
+
+
+def test_a_local_slot_runs_docker_here_and_a_remote_one_over_ssh_with_one_quoted_command():
+    import shlex
+    assert SL.exec_argv({"container": "c"}, ["bash", "-lc", "echo 'a b'"]) == \
+        ["docker", "exec", "c", "bash", "-lc", "echo 'a b'"]
+    argv = SL.exec_argv(REMOTE, ["bash", "-lc", "cd /r && echo 'x y' $HOME"])
+    assert argv[:4] == ["ssh", "-o", "BatchMode=yes", "studio@10.0.0.5"] and len(argv) == 5
+    # the remote shell splits the one string back into exactly the argv we meant
+    assert shlex.split(argv[4]) == ["docker", "exec", "studio-slot", "bash", "-lc",
+                                    "cd /r && echo 'x y' $HOME"]
+    assert SL.ssh_cmd({"ssh": "ssh -p 2222 -o BatchMode=yes"}) == ["ssh", "-p", "2222", "-o", "BatchMode=yes"]
+
+
+def test_a_remote_slots_kilo_studio_mcp_is_stdio_over_ssh():
+    import shlex
+    blocks = SL.kilo_mcp_overrides(REMOTE)
+    cmd = blocks["robloxstudio-mcp"]["command"]
+    assert cmd[:4] == ["ssh", "-o", "BatchMode=yes", "studio@10.0.0.5"]
+    assert shlex.split(cmd[4]) == ["docker", "exec", "-i", "studio-slot", "/usr/local/bin/robloxstudio-mcp"]
+
+
+def test_the_wrapped_pipeline_carries_the_remote_settings_and_run_parses_them_back():
+    argv = SL.wrap_pipeline(REMOTE, ["pipeline", "--repo", "C:/t", "--sprint", "AS-J05"],
+                            "C:/t", "AS-J05", "abc123")
+    i = argv.index("run")
+    seen = {}
+    real = SL.run
+    try:
+        SL.run = lambda a: seen.setdefault("a", a) and 0
+        SL.main(argv[i:])
+    finally:
+        SL.run = real
+    a = seen["a"]
+    assert (a.host, a.au_push_url, a.foundry_host_dir) == (REMOTE["host"], REMOTE["au_push_url"],
+                                                           REMOTE["foundry_host_dir"])
+    assert a.ssh == "ssh -o BatchMode=yes" and a.pipeline[0] == "pipeline"
+    # a local slot's wrapper has no remote flags at all
+    assert "--host" not in SL.wrap_pipeline({**REMOTE, "host": ""}, [], "C:/t", "T", "h")
+
+
+def test_a_remote_run_pushes_the_track_commit_and_the_deployed_foundry_before_checkout(monkeypatch):
+    calls = []
+
+    def fake_run(cmd, **kw):
+        calls.append(cmd)
+        out = b"SLOT-CHECKOUT abc OK\n" if "slot-checkout" in " ".join(cmd) else b"0123456789ab\n"
+        return SimpleNamespace(returncode=0, stdout=out, stderr=b"")
+
+    class P:
+        def __init__(self, cmd, **kw):
+            calls.append(cmd)
+
+        def wait(self):
+            return 0
+    monkeypatch.setattr(SL.subprocess, "run", fake_run)
+    monkeypatch.setattr(SL.subprocess, "Popen", P)
+    monkeypatch.setattr(SL, "copy_back", lambda *a, **k: [])
+    argv = SL.wrap_pipeline(REMOTE, ["pipeline", "--repo", "C:/t"], "C:/t", "AS-J05", "abc123")
+    assert SL.main(argv[argv.index("run"):]) == 0
+    flat = [" ".join(c) for c in calls]
+    au = next(i for i, c in enumerate(flat) if "AnimalUprising.git" in c)
+    fd = next(i for i, c in enumerate(flat) if "foundry.git" in c and "push" in c)
+    co = next(i for i, c in enumerate(flat) if "slot-checkout" in c)
+    assert au < co and fd < co
+    assert "abc123:refs/heads/slot/AS-J05" in flat[au] and "HEAD:refs/heads/deploy" in flat[fd]
+    assert any("checkout -q --force --detach FETCH_HEAD" in c and c.startswith("ssh") for c in flat)
+
+
+def test_a_remote_run_stops_before_checkout_when_the_push_fails(monkeypatch):
+    calls = []
+
+    def fake_run(cmd, **kw):
+        calls.append(cmd)
+        return SimpleNamespace(returncode=1, stdout=b"permission denied", stderr=b"")
+    monkeypatch.setattr(SL.subprocess, "run", fake_run)
+    argv = SL.wrap_pipeline(REMOTE, ["pipeline"], "C:/t", "AS-J05", "abc123")
+    assert SL.main(argv[argv.index("run"):]) == 3
+    assert not any("slot-checkout" in " ".join(c) for c in calls)

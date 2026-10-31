@@ -23,7 +23,22 @@ Config (project.toml, also editable from the router UI):
     community_mcp = "/usr/local/bin/robloxstudio-mcp"
     enabled = true
 
+A slot on ANOTHER machine (a Proxmox LXC running Docker, contrib/studio-slot/proxmox) adds:
+
+    host = "studio@192.168.0.50"                # ssh target that runs `docker` ("" = this PC)
+    ssh = ["ssh", "-o", "BatchMode=yes"]        # the ssh command (key auth, no prompts)
+    au_push_url = "ssh://studio@192.168.0.50/srv/studio-slot/AnimalUprising.git"
+    foundry_push_url = "ssh://studio@192.168.0.50/srv/studio-slot/foundry.git"
+    foundry_host_dir = "/srv/studio-slot/foundry"   # mounted read-only at `foundry` in the slot
+
+Every container command then runs as `ssh <host> docker exec ...` (the Kilo Studio MCP servers
+too: stdio over ssh). Before a gate run the track's commit is pushed to the host's bare AU
+mirror (`refs/heads/slot/<task>`; the slot's `origin`, so `slot-checkout` fetches it) and the
+deployed Foundry's HEAD to the host's Foundry mirror, which `foundry_host_dir` then checks out.
+No Windows path is mounted into a remote slot.
+
 2026-10-31 (Victor): "build dispatch, real sprint" — first run AS-J05 (props live).
+2026-10-31 (Victor): "start it" — remote slots for Proxmox mini PCs.
 """
 
 from __future__ import annotations
@@ -45,7 +60,9 @@ DEFAULTS = {"container": "", "repo": "/home/studio/work/AnimalUprising", "foundr
             "path_prefix": "/home/studio/.rokit/bin",
             "official_mcp": "/usr/local/bin/studio-mcp-official",
             "community_mcp": "/usr/local/bin/robloxstudio-mcp", "enabled": True,
-            "checkout_timeout_s": 600}
+            "checkout_timeout_s": 600, "host": "", "ssh": ["ssh", "-o", "BatchMode=yes"],
+            "au_push_url": "", "foundry_push_url": "", "foundry_host_dir": ""}
+FOUNDRY_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 _NO_WINDOW = 0x08000000 if os.name == "nt" else 0
 
 
@@ -93,15 +110,42 @@ def lock_name(slot: dict) -> str:
 
 # ----------------------------------------------------------------------------- commands
 
+def ssh_cmd(slot: dict) -> list:
+    """The ssh command of a remote slot (a list; a string is split shell-style)."""
+    v = slot.get("ssh") or DEFAULTS["ssh"]
+    return shlex.split(v) if isinstance(v, str) else [str(x) for x in v]
+
+
+def host_argv(slot: dict, args: list) -> list:
+    """argv that runs `args` on the machine that runs the slot's docker: as-is on this PC, else
+    `ssh <host> <args, shell-quoted>` (ssh hands the remote side one command string)."""
+    host = str(slot.get("host") or "").strip()
+    if not host:
+        return list(args)
+    return ssh_cmd(slot) + [host, shlex.join([str(a) for a in args])]
+
+
+def exec_argv(slot: dict, args: list, interactive: bool = False) -> list:
+    """argv for `docker exec [-i] <container> <args>` on the slot's machine."""
+    return host_argv(slot, ["docker", "exec"] + (["-i"] if interactive else [])
+                     + [slot["container"]] + [str(a) for a in args])
+
+
 def wrap_pipeline(slot: dict, pipeline_args: list, worktree: str, task: str, head: str) -> list:
     """The host command that runs `pipeline_args` (the `studio_calls pipeline ...` argv after the
     module, with --repo set to the HOST worktree) inside the slot and copies the outputs back."""
+    remote = []
+    if str(slot.get("host") or "").strip():
+        remote = ["--host", str(slot["host"]), "--ssh", shlex.join(ssh_cmd(slot)),
+                  "--au-push-url", slot.get("au_push_url") or "",
+                  "--foundry-push-url", slot.get("foundry_push_url") or "",
+                  "--foundry-host-dir", slot.get("foundry_host_dir") or ""]
     return [sys.executable, "-m", "foundry_coordinator.slots", "run",
             "--container", slot["container"], "--slot-repo", slot["repo"],
             "--foundry", slot["foundry"], "--path-prefix", slot.get("path_prefix") or "",
             "--worktree", worktree, "--task", task, "--head", head,
-            "--checkout-timeout", str(int(slot.get("checkout_timeout_s") or 600)),
-            "--"] + list(pipeline_args)
+            "--checkout-timeout", str(int(slot.get("checkout_timeout_s") or 600))] \
+        + remote + ["--"] + list(pipeline_args)
 
 
 def slot_pipeline_args(args: list, slot_repo: str) -> list:
@@ -113,17 +157,63 @@ def slot_pipeline_args(args: list, slot_repo: str) -> list:
     return out
 
 
-def _docker(container: str, script: str, timeout: Optional[float] = None,
+def _slot_of(x) -> dict:
+    """A slot dict from a slot dict or a bare (local) container name."""
+    return x if isinstance(x, dict) else {"container": str(x)}
+
+
+def _docker(slot, script: str, timeout: Optional[float] = None,
             stdout=None) -> subprocess.CompletedProcess:
-    return subprocess.run(["docker", "exec", container, "bash", "-lc", script],
+    return subprocess.run(exec_argv(_slot_of(slot), ["bash", "-lc", script]),
+                          stdin=subprocess.DEVNULL,
                           stdout=stdout if stdout is not None else subprocess.PIPE,
                           stderr=subprocess.STDOUT, timeout=timeout, creationflags=_NO_WINDOW)
+
+
+def _git(cwd: str, *args, timeout: float = 300) -> subprocess.CompletedProcess:
+    return subprocess.run(["git", "-C", cwd] + list(args), stdin=subprocess.DEVNULL,
+                          stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=timeout,
+                          creationflags=_NO_WINDOW)
+
+
+def push_sources(slot: dict, worktree: str, task: str, head: str) -> tuple:
+    """A remote slot's sources, before its gate run: the track's commit -> the host's bare AU
+    mirror as `slot/<task>` (the slot's origin), and the deployed Foundry's HEAD -> the host's
+    Foundry mirror, which `foundry_host_dir` (mounted at `foundry` in the slot) then checks out.
+    Returns (ok, detail); a local slot (no host) has nothing to push."""
+    if not str(slot.get("host") or "").strip():
+        return True, "local slot"
+    done = []
+    url = slot.get("au_push_url") or ""
+    if url:
+        if not _TASK_RE.fullmatch(task or ""):
+            return False, f"bad task id {task!r}"
+        r = _git(worktree, "push", "-q", "--force", url, f"{head}:refs/heads/slot/{task}")
+        if r.returncode != 0:
+            return False, "AU push: " + (r.stdout or b"").decode("utf-8", "replace")[-300:]
+        done.append(f"AU {head[:12]} -> slot/{task}")
+    furl, fdir = slot.get("foundry_push_url") or "", slot.get("foundry_host_dir") or ""
+    if furl and fdir:
+        r = _git(FOUNDRY_ROOT, "push", "-q", "--force", furl, "HEAD:refs/heads/deploy")
+        if r.returncode != 0:
+            return False, "Foundry push: " + (r.stdout or b"").decode("utf-8", "replace")[-300:]
+        q = shlex.quote(fdir)
+        r = subprocess.run(host_argv(slot, ["sh", "-c",
+                           f"git -C {q} fetch -q origin deploy && "
+                           f"git -C {q} -c advice.detachedHead=false checkout -q --force --detach FETCH_HEAD && "
+                           f"git -C {q} rev-parse --short=12 HEAD"]),
+                           stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                           timeout=300, creationflags=_NO_WINDOW)
+        if r.returncode != 0:
+            return False, "Foundry checkout on the host: " + (r.stdout or b"").decode("utf-8", "replace")[-300:]
+        done.append("Foundry " + (r.stdout or b"").decode("utf-8", "replace").strip()[-12:])
+    return True, "; ".join(done) or "nothing to push"
 
 
 _TASK_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}")
 
 
-def copy_back(container: str, slot_repo: str, worktree: str, task: str) -> list:
+def copy_back(slot, slot_repo: str, worktree: str, task: str) -> list:
     """Stream the run's outputs out of the slot (tar over `docker exec`) into the worktree.
     Only paths under the OUTPUT_GLOBS for this task; never anything else. Returns the paths."""
     if not _TASK_RE.fullmatch(task or ""):
@@ -133,9 +223,9 @@ def copy_back(container: str, slot_repo: str, worktree: str, task: str) -> list:
     globs = " ".join(g.replace("{task}", task) for g in OUTPUT_GLOBS)
     script = (f"cd {shlex.quote(slot_repo)} && shopt -s nullglob && set -- {globs}; "
               'if [ "$#" -gt 0 ]; then tar -cf - "$@"; fi')
-    r = subprocess.run(["docker", "exec", container, "bash", "-lc", script],
-                       stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=300,
-                       creationflags=_NO_WINDOW)
+    r = subprocess.run(exec_argv(_slot_of(slot), ["bash", "-lc", script]),
+                       stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                       timeout=300, creationflags=_NO_WINDOW)
     if not r.stdout:
         return []
     allowed = tuple(g.replace("{task}", task).rstrip("*") for g in OUTPUT_GLOBS)
@@ -168,8 +258,18 @@ def copy_back(container: str, slot_repo: str, worktree: str, task: str) -> list:
 def run(a) -> int:
     """`python -m foundry_coordinator.slots run ...`: checkout -> pipeline in the slot -> copy back.
     Exit code = the pipeline's (or 3 when the slot could not be moved to the commit)."""
-    c, repo = a.container, a.slot_repo
-    print(f"SLOT {c}: slot-checkout {a.head[:12]} (task {a.task})", flush=True)
+    slot = {"container": a.container, "host": a.host or "", "ssh": shlex.split(a.ssh) if a.ssh else None,
+            "au_push_url": a.au_push_url or "", "foundry_push_url": a.foundry_push_url or "",
+            "foundry_host_dir": a.foundry_host_dir or ""}
+    c, repo = slot, a.slot_repo
+    if slot["host"]:
+        ok, detail = push_sources(slot, a.worktree, a.task, a.head)
+        print(f"SLOT push ({slot['host']}): {detail}", flush=True)
+        if not ok:
+            print("SLOT FAIL: could not push the sources to the slot host", flush=True)
+            return 3
+    print(f"SLOT {a.container}{' @ ' + slot['host'] if slot['host'] else ''}: "
+          f"slot-checkout {a.head[:12]} (task {a.task})", flush=True)
     try:
         r = _docker(c, f"slot-checkout {shlex.quote(a.head)}", timeout=a.checkout_timeout)
     except subprocess.TimeoutExpired:
@@ -189,8 +289,8 @@ def run(a) -> int:
     script = (env + f"cd {shlex.quote(repo)} && python3 -m foundry_coordinator.studio_calls "
               + " ".join(shlex.quote(x) for x in args))
     print("SLOT run: " + script[:400], flush=True)
-    p = subprocess.Popen(["docker", "exec", c, "bash", "-lc", script], stdout=sys.stdout,
-                         stderr=subprocess.STDOUT, creationflags=_NO_WINDOW)
+    p = subprocess.Popen(exec_argv(c, ["bash", "-lc", script]), stdin=subprocess.DEVNULL,
+                         stdout=sys.stdout, stderr=subprocess.STDOUT, creationflags=_NO_WINDOW)
     rc = p.wait()
     copied = copy_back(c, repo, a.worktree, a.task)
     print(f"SLOT copied back {len(copied)} file(s): " + ", ".join(copied[:20]), flush=True)
@@ -205,7 +305,7 @@ def resync(slot: dict, restart_rojo: bool = True, timeout: float = 420) -> tuple
     script = ("pkill -x rojo || true; sleep 3; " if restart_rojo else "") + \
              "studio-reopen --wait"
     try:
-        r = _docker(slot["container"], script, timeout=timeout)
+        r = _docker(slot, script, timeout=timeout)
     except subprocess.TimeoutExpired:
         return False, "studio-reopen timed out in the slot"
     except OSError as e:
@@ -214,10 +314,10 @@ def resync(slot: dict, restart_rojo: bool = True, timeout: float = 420) -> tuple
     return r.returncode == 0, (text.splitlines()[-1] if text else f"rc={r.returncode}")[:200]
 
 
-def stop(container: str) -> None:
-    """Best effort: stop a pipeline left running in the slot."""
+def stop(slot) -> None:
+    """Best effort: stop a pipeline left running in the slot (a slot dict or a local container)."""
     try:
-        _docker(container, "pkill -f 'foundry_coordinator.studio_calls' || true; "
+        _docker(slot, "pkill -f 'foundry_coordinator.studio_calls' || true; "
                            "pkill -f 'foundry_coordinator.projects.animaluprising.studio_gate' || true",
                 timeout=30)
     except Exception:                                             # noqa: BLE001
@@ -231,7 +331,7 @@ def kilo_mcp_overrides(slot: dict) -> dict:
     out = {}
     for name, key in STUDIO_MCP.items():
         out[name] = {"type": "local", "enabled": True, "timeout": 60000,
-                     "command": ["docker", "exec", "-i", slot["container"], slot[key]]}
+                     "command": exec_argv(slot, [slot[key]], interactive=True)}
     return out
 
 
@@ -267,6 +367,11 @@ def main(argv=None) -> int:
     r.add_argument("--task", required=True)
     r.add_argument("--head", required=True)
     r.add_argument("--checkout-timeout", type=float, default=600)
+    r.add_argument("--host", default="")
+    r.add_argument("--ssh", default="")
+    r.add_argument("--au-push-url", default="")
+    r.add_argument("--foundry-push-url", default="")
+    r.add_argument("--foundry-host-dir", default="")
     r.add_argument("pipeline", nargs=argparse.REMAINDER)
     a = ap.parse_args(argv)
     if a.cmd == "run":

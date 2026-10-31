@@ -740,10 +740,11 @@ class StudioCalls:
         if slot is not None:
             # never the workstation's Studio: stop the playtest inside the slot
             try:
+                from . import slots
                 subprocess.Popen(
-                    ["docker", "exec", slot["container"], "bash", "-lc",
-                     f"cd {slot['repo']} && PYTHONPATH={slot['foundry']} python3 -m {mod} "
-                     f"--repo {slot['repo']} stop-playtest"],
+                    slots.exec_argv(slot, ["bash", "-lc",
+                                           f"cd {slot['repo']} && PYTHONPATH={slot['foundry']} python3 -m {mod} "
+                                           f"--repo {slot['repo']} stop-playtest"]),
                     cwd=ROUTER_ROOT, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
                     stderr=subprocess.DEVNULL, creationflags=_NO_WINDOW)
             except OSError as e:
@@ -776,7 +777,7 @@ class StudioCalls:
         if slot is not None:
             # killing the host wrapper leaves the in-container pipeline running: stop it too
             from . import slots
-            slots.stop(slot["container"])
+            slots.stop(slot)
         if st.get("playing") or slot is not None:
             self._stop_playtest(P, tid)
         self._release_runner_lock(tid)
