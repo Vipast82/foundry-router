@@ -848,3 +848,22 @@ def test_a_carried_pass_is_not_an_order_violation(store, led, tmp_path):
     (cs,) = led.chain_status(P, spec(), r1)
     assert cs["status"] == "complete"
     assert led.missing(P, spec(), r1) == []
+
+
+def test_a_newer_prerequisite_run_is_not_an_order_violation(store, led, tmp_path):
+    """2026-10-31 GF-RT1: the suite's deciding PASS was an older run and its prerequisite's
+    deciding PASS the newest run; the prerequisite also passed before the suite, so the
+    chain is in order (21 attempts were spent on this false order_violation)."""
+    import uuid
+    P, r1 = _chain_P(store, tmp_path, [("S47_1", 10), ("S47_2", 15), ("S47_3", 20)])
+    led.recover(P, {"task_id": "T1"})
+    (rec,) = [r for r in led.records("p", "T1") if r["check_id"] == "S47_2"]
+    cols = [c["name"] for c in store.q("PRAGMA table_info(ev_records)")]
+    row = dict(store.q("SELECT * FROM ev_records WHERE record_id=?", (rec["record_id"],))[0])
+    row.update(record_id="ev-" + uuid.uuid4().hex[:12], idem_key=uuid.uuid4().hex,
+               started_ts=(row["started_ts"] or 0) + 100, ended_ts=(row["ended_ts"] or 0) + 100)
+    store.x(f"INSERT INTO ev_records ({', '.join(cols)}) VALUES ({', '.join('?' for _ in cols)})",
+            [row[c] for c in cols])
+    (cs,) = led.chain_status(P, spec(), r1)
+    assert cs["status"] == "complete", cs
+    assert led.missing(P, spec(), r1) == []

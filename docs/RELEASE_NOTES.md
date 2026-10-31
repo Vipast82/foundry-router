@@ -2,6 +2,16 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.158.10 — the chain order check accepts any earlier prerequisite PASS
+
+2026-10-31 03:01: GF-RT1 used all 21 implementation attempts while every scripted gate passed.
+Its submission was refused "suite:GF_RT1 order_violation (ran before prerequisite boot:server,
+boot:client)": the suite's deciding record is its highest-tier PASS (a 01:06 "reviewed" run),
+the boots' is their newest PASS (03:00), and comparing the two said the suite ran first.
+
+- **evidence `_evaluate`:** a prerequisite is in order when any of its creditable fresh PASSes
+  ran at or before the dependant's deciding record (each check still decides on its own).
+
 ## v0.158.9 — bare evidence names are tracked; a closed lead case no longer delays decisions for hours
 
 2026-10-31 02:14: GF-RT1's fix round blocked "the plan requires GF-RT1_EVIDENCE_RAW.log but no

@@ -1021,6 +1021,10 @@ class EvidenceLedger:
                 best = max(decisive, key=lambda r: (_RANK[r["tier"]], self._exec_key(r)))
                 if _RANK[best["tier"]] >= _RANK.get(min_tier, 2):
                     e.update(sat=best, rec=best, reason="", detail="")
+                    # every creditable PASS's run time: the chain order check accepts a
+                    # prerequisite that passed at or before its dependant (see _evaluate)
+                    e["pass_ts"] = [self._exec_key(r)[0] for r in decisive
+                                    if _RANK[r["tier"]] >= _RANK.get(min_tier, 2)]
                 else:
                     e.update(rec=best, detail=f"best fresh PASS at tier {best['tier']} "
                                               f"(needs PASS at {min_tier})")
@@ -1100,8 +1104,14 @@ class EvidenceLedger:
                     # earlier run after that run's boot; this run's boot records are newer by
                     # construction, so the order check refused 6 passed suites
                     continue
-                late = [p for p in pre if (ev[p]["sat"]["ended_ts"] or
-                                           ev[p]["sat"]["started_ts"] or 0) > t_me]
+                # 2026-10-31 GF-RT1: each check's deciding record is chosen on its own (the
+                # suite's highest tier was a 01:06 "reviewed" PASS, the boots' the newest
+                # 03:00 run), so comparing those two read as "ran before prerequisite" every
+                # attempt (21 used). A prerequisite is in order when ANY of its creditable
+                # fresh PASSes ran at or before the dependant's.
+                late = [p for p in pre
+                        if not any(ts <= t_me for ts in (ev[p].get("pass_ts") or [
+                            ev[p]["sat"]["ended_ts"] or ev[p]["sat"]["started_ts"] or 0]))]
                 if late:
                     e.update(order=late)
                     viol.append({"check_id": cid, "seq": e["req"].get("seq"),
