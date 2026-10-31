@@ -1,0 +1,9 @@
+  <!-- studio-slot: playtest server and client windows stay small (each renders in
+       software; full-screen copies ran the slot out of memory, 2026-10-30). The slot's own
+       editor window is made full-screen by entrypoint.sh (STUDIO_FULLSCREEN_TITLE), not
+       here: at launch every Studio window is just "Roblox Studio", so a title rule here
+       cannot tell the editor from a test server. -->
+  <application title="Place1 - Roblox Studio" type="normal">
+    <maximized>no</maximized>
+    <size><width>960</width><height>640</height></size>
+  </application>

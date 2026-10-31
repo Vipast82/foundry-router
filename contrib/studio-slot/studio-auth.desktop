@@ -1,0 +1,6 @@
+[Desktop Entry]
+Type=Application
+Name=Roblox Studio sign-in (Studio slot)
+Exec=/usr/local/bin/studio-auth-handler %u
+NoDisplay=true
+MimeType=x-scheme-handler/roblox-studio-auth;

@@ -1,0 +1,12 @@
+# Vinegar settings for a Studio slot (copied to ~/.config/vinegar/config.toml on first start)
+[studio]
+# Debian's Wine 10: Vinegar's own Kombucha build could not open any window on an X
+# virtual display (TigerVNC / Xvfb / Xorg dummy: "no driver could be loaded").
+wineroot = "/usr"
+# WineD3D (OpenGL). Switch to "DXVK" on an iGPU slot if it renders better there.
+renderer = "D3D11"
+
+[studio.env]
+# WebView2 (Studio's sign-in page and start page) cannot create its sandbox inside a
+# container (user namespaces: EPERM); without this the sign-in never completes.
+WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS = "--no-sandbox"

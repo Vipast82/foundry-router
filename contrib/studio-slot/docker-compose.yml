@@ -1,0 +1,42 @@
+# Proof-of-concept Studio slot on this PC (Docker Desktop / WSL2).
+# Desktop in a browser: http://localhost:6080/vnc.html  (bound to this PC only)
+services:
+  studio-slot:
+    image: foundry/studio-slot:poc
+    build: .
+    container_name: studio-slot-poc
+    ports:
+      - "127.0.0.1:6080:6080"
+    environment:
+      GEOMETRY: "2560x1440"   # screenshots capture the maximized Studio viewport
+      # a roblox-studio: link to open at start (empty = Studio start page). Use the slot's
+      # OWN place: opening the workstation's TEST place kicks the workstation's Studio out
+      # of it (one edit session per place per account; this stopped 3 sprints 2026-10-30).
+      # slot 1: "Animal Uprising [SLOT-1]", a private experience of its own (2026-10-30)
+      STUDIO_OPEN: "roblox-studio:1+launchmode:edit+task:EditPlace+placeId:116058790793121+universeId:10773901724"
+      # Foundry's gate (studio_gate) reaches the slot's two MCP servers through these
+      FOUNDRY_MCP_OFFICIAL: '["/usr/local/bin/studio-mcp-official"]'
+      FOUNDRY_MCP_COMMUNITY: '["/usr/local/bin/robloxstudio-mcp"]'
+      ROBLOX_STUDIO_NO_AUTH: "1"
+      # AU's studio.lock (one Studio driver at a time) lives in the slot, not on C:
+      AU_LOCK_DIR: "/home/studio/locks"
+    volumes:
+      # keeps the Wine prefix, Studio install and your Studio sign-in across restarts
+      - studio-home:/home/studio
+      # the AU checkout the slot clones and fetches from, read-only (the slot works in its own
+      # clone at ~/work/AnimalUprising)
+      - "C:/Roblox/AnimalUprising:/work/AnimalUprising:ro"
+      # the deployed Foundry (the gate runner, studio_gate), read-only; on a mini PC this is a
+      # clone of the release tag instead
+      - "C:/Users/shock/foundry-deploy:/opt/foundry:ro"
+    shm_size: "2gb"
+    cpus: 8
+    # a multiplayer playtest runs edit + server + one Studio per client, each rendering
+    # in software: 8g ran out of memory (OOM kill) with 2 clients on 2026-10-30
+    mem_limit: 12g
+    restart: "no"
+    # On a Proxmox LXC / Linux host with an Intel iGPU, add:
+    # devices:
+    #   - /dev/dri:/dev/dri
+volumes:
+  studio-home:
