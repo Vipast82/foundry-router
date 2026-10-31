@@ -636,12 +636,17 @@ class Obligations:
                                  {"obligation_id": ob["obligation_id"], "ref": e["ref"]},
                                  [ob["obligation_id"]])
         # plan acceptance captures that no obligation tracks
-        refs = {str(e.get("ref")) for o in stored.values() for e in o["required_evidence"]}
+        # a log_marker ref is "path::marker": its path is the tracked file
+        refs = {str(e.get("ref")).split("::", 1)[0]
+                for o in stored.values() for e in o["required_evidence"]}
         for line in (plan_text_at_rev or "").splitlines():
             if not re.search(r"acceptance|capture|screenshot", line, re.I):
                 continue
             for path in re.findall(r"[\w.\-/]+\.(?:png|jpe?g|gif|webp|mp4|log)\b", line):
-                if not any(path == r or (_is_glob(r) and glob_match(path, r))
+                # 2026-10-31 GF-RT1: plans name evidence by bare file name
+                # ("GF-RT1_EVIDENCE_RAW.log"); it is tracked when a ref ends with it
+                if not any(path == r or (_is_glob(r) and glob_match(path, r)) or
+                           ("/" not in path and r.endswith("/" + path))
                            for r in refs):
                     conflict("plan_requirement_untracked",
                              f"the plan requires {path} but no obligation tracks it",

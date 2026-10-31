@@ -622,3 +622,25 @@ def test_closeout_files_are_never_an_outside_scope_conflict(store):
     ob2, P2 = Obligations(store), project(pid="other")
     ob2.seed(P2, spec(scope=["src/**"]))
     assert "evidence_outside_scope" in {x["kind"] for x in ob2.reconcile(P2, spec(scope=["src/**"]), "")}
+
+
+def test_plan_capture_lines_naming_tracked_files_by_bare_name_are_not_conflicts(store):
+    """2026-10-31 GF-RT1: a plan line 'removed the phone lines from CAPTURES ...
+    appended to GF-RT1_EVIDENCE_RAW.log' opened a conflict that blocked review: the log is
+    tracked as a log_marker ref ('docs/progress/...log::GATE ... PASS') and the plan named
+    it without its folder."""
+    ob, P = Obligations(store), project()
+    ob.seed(P, spec())
+    ob._put("game", "UI-01", {"obligation_id": "close.done_check", "title": "done check",
+                              "phase": "CLOSE", "required_evidence": [
+                                  {"kind": "log_marker", "ref": "docs/progress/"
+                                   "UI-01_EVIDENCE_RAW.log::DONE-CHECK UI-01 PASS"}]})
+    refs = {e["ref"] for o in ob.all("game", "UI-01") for e in o["required_evidence"]}
+    log = next(r.split("::")[0] for r in refs if "::" in r)
+    png = next(r for r in refs if r.endswith(".png"))
+    plan = (f"- [x] capture fixed; VALID=OK appended to {log.rsplit('/', 1)[-1]}\n"
+            f"- [x] screenshot {png.rsplit('/', 1)[-1]} recaptured\n")
+    kinds = {x["kind"] for x in ob.reconcile(P, spec(), plan)}
+    assert "plan_requirement_untracked" not in kinds
+    kinds = {x["kind"] for x in ob.reconcile(P, spec(), "capture other_frame.png")}
+    assert "plan_requirement_untracked" in kinds

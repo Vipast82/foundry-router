@@ -631,7 +631,10 @@ def sweep(c, force: bool = False) -> list[str]:
             # default (often "park the sprint") fired mid-repair and parked
             # GF-NAME1 and GF-GATE1 on 2026-10-27. The deadline follows the case's
             # own bound; once the lead gives up or the case closes, it applies.
-            new = max(now + 300, float(case.get("deadline_ts") or 0) + 60)
+            # 2026-10-31 GF-RT1: re-checked every 5 min while the case works, never moved to
+            # the case's own multi-hour bound (a case that closed minutes later left the
+            # decision waiting until that bound: 4 h)
+            new = now + 300
             c.store.x("UPDATE decisions SET deadline_ts=? WHERE decision_id=?",
                       (new, d["decision_id"]))
             c.store.event(d["project_id"], d["task_id"], "decision_timeout_deferred", detail={

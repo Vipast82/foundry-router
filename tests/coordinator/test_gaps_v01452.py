@@ -39,7 +39,7 @@ def test_the_timeout_waits_while_the_lead_is_working(tmp_path):
     c, now, did = _setup(tmp_path, "REPAIRING")
     assert DP.sweep(c, force=True) == []
     d = c.obligations.decision(did)
-    assert d["status"] == "open" and d["deadline_ts"] >= now[0] + 3600
+    assert d["status"] == "open" and now[0] + 300 <= d["deadline_ts"] < now[0] + 3600
     assert [e for e in c.store.events("game", 50) if e["kind"] == "decision_timeout_deferred"]
     # the lead gave up: the default applies at the (moved) deadline
     c.store.x("UPDATE recovery_cases SET state='NEEDS_VICTOR' WHERE case_id='rc-x'")

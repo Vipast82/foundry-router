@@ -2,6 +2,19 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.158.9 — bare evidence names are tracked; a closed lead case no longer delays decisions for hours
+
+2026-10-31 02:14: GF-RT1's fix round blocked "the plan requires GF-RT1_EVIDENCE_RAW.log but no
+obligation tracks it". The plan line mentioned CAPTURES and named the evidence log without its
+folder; the log is tracked as a log_marker ref (`docs/progress/GF-RT1_EVIDENCE_RAW.log::GATE ...`).
+The 3-minute decision then waited until 06:10: a lead case had been DIAGNOSING at its first
+deadline, so the deadline moved to the case's 4-hour bound and stayed there when the case closed.
+
+- **obligations `reconcile`:** plan-named files are compared against each ref's path (the part
+  before `::`), and a bare file name is tracked when a ref ends with `/<name>`.
+- **decision_policy `sweep`:** while a lead case works, a due decision is re-checked every 5 min
+  instead of being moved to the case's own deadline.
+
 ## v0.158.8 — "No Roblox Studio instances are connected" reopens Studio
 
 2026-10-31 02:04: the workstation Studio's TEST place closed during MV2-11's scripted gate
