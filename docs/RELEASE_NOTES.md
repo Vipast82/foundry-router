@@ -2,6 +2,30 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.158.15 — Studio slots: a track can run its Studio work in a containerised Studio
+
+2026-10-31 (Victor: "build dispatch, real sprint" — first run AS-J05 on contrib/studio-slot).
+A track used to have no Studio (one Rojo-served main checkout): its Studio checks waited for the
+merge. A track bound to a slot now runs them in the slot.
+
+- **New `foundry_coordinator/slots.py` + `[slots.<id>]` in project.toml** (container, repo, foundry,
+  path_prefix, official_mcp, community_mcp, enabled). `python -m foundry_coordinator.slots run`
+  moves the slot to the commit (`slot-checkout`: fetch, detached checkout, Rojo restart and Studio
+  reopen when files were added), runs the same `studio_calls pipeline` inside the slot, and copies
+  only that task's outputs (docs/progress/<ID>_*, docs/evidence/<ID>/, .plan/tmp/gate/<ID>/) back
+  into the track's worktree for the coordinator to commit.
+- **`tracks start <project> <name> <sprints> --slot <id>`** binds the track; its kilo.jsonc's
+  enabled Studio MCP servers run `docker exec -i <container> <mcp>` (also after `set-needs`).
+- **studio_calls:** a slot-bound track gets the scripted gate; its run takes `slot:<id>` instead of
+  `studio:*` (never the workstation's Studio), skips the workstation studio.lock, stops a
+  playtest/pipeline inside the slot when killed.
+- **Track rules:** `TrackManager.studio_less(P)` (a track with no slot) replaces "is a track" for the
+  Studio-only decisions: full verify incl. the gate binding and the GATE/BOOT/EVIDENCE rows, the
+  review keeps Studio evidence, visual approval runs in-track, the BUILD/CLOSE prompts give the
+  slot notice instead of "no Studio here".
+- Live check: a GF-SEC3 run through `slots run` on the container: checkout + Rojo restart + Studio
+  reopen, host half PASS, scripted half 14/15 (the known SEC3.0b timing red), 18 outputs copied back.
+
 ## v0.158.14 — a red run on code the sprint's base never had is no "pre-existing" baseline
 
 2026-10-31: MV2-V1's gate skipped S15, UI_02a..05a and UI_POLISH1 as PRE-EXISTING: they were red in

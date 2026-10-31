@@ -457,6 +457,14 @@ class AnimalUprisingAdapter(GenericAdapter):
         """The parallel track this adapter's workspace belongs to ('' = the main checkout)."""
         return str(getattr(self.p, "__dict__", {}).get("track") or "")
 
+    def _slot(self) -> str:
+        """The Studio slot this track is bound to ('' = none): it HAS Studio (2026-10-31)."""
+        return str(getattr(self.p, "__dict__", {}).get("slot") or "")
+
+    def _studio_less(self) -> str:
+        """A track with no Studio (no slot): its Studio rows belong to the merge gate."""
+        return self._track() if not self._slot() else ""
+
     def _done_check_cmd(self, task_id: str, skip: tuple = ()) -> str:
         flag = f" {self.SKIP_ROWS_FLAG} {','.join(skip)}" if skip else ""
         return f"py -3 tools\\guard\\done_check.py {task_id}{flag}"
@@ -602,11 +610,19 @@ The approved plan and its checklist are this attempt's plan: do not spawn planne
         affected checks (never rerun passed work), nobody pushes, no dead prompt text."""
         t = spec.task_id
         tier = spec.data.get("tier", "A")
-        track = self._track()
+        track = self._studio_less()          # a slot-bound track has Studio (in the slot)
+        slot_track, slot = self._track(), self._slot()
         repair = findings is not None
         head = ("REPAIR" if repair else "BUILD") + f" session for sprint {t} — {spec.title}"
         notice = ""
-        if track:
+        if slot:
+            notice = (f"\nTRACK SPRINT ON STUDIO SLOT `{slot}` (track `{slot_track}`, worktree "
+                      f"`{self.p.workspace}`): this track's Studio is a separate containerised "
+                      "Studio, not the main one. Your Studio MCP tools reach the slot. The slot's "
+                      "Rojo serves COMMITTED code only: the coordinator moves the slot to your HEAD "
+                      "for each scripted gate, so commit before asking for it. Never touch the main "
+                      "checkout or studio.lock.\n")
+        elif track:
             notice = (f"\nTRACK SPRINT (track `{track}`, worktree `{self.p.workspace}`): no Studio "
                       "here. The main sprint owns Studio and Rojo. Never run tools/gate.ps1, a "
                       "playtest or a boot check, never take or wait for studio.lock, never touch "
@@ -714,7 +730,7 @@ Never edit files outside the plan's "Files this sprint may change" list (§3, th
         approval_tail = ("recorded visual approval" if self._model_visual_approval()
                          else "Victor's approval")
         last = spec.data.get("close_step") or ""
-        skip = STUDIO_ROWS if self._track() else ()
+        skip = STUDIO_ROWS if self._studio_less() else ()
         dc = self._done_check_cmd(t, skip)
         return [
             {"id": "summary",
@@ -805,7 +821,7 @@ Never edit files outside the plan's "Files this sprint may change" list (§3, th
                  f"{ctx['retry_reason']}\n") if ctx.get("retry_reason") else ""
         steps = "\n".join(f"{i}. {step}" for i, step in
                           enumerate((d["step"] for d in self._close_duties(spec) if d["step"]), 1))
-        track = self._track()
+        track = self._studio_less()
         passed = ("the Studio-free checks passed (the merge gate runs Studio when the track "
                   "merges)" if track else "the gate passed")
         studio = (" No Studio, gate, playtest or studio.lock in this session." if track else "")

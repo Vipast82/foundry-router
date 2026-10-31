@@ -219,6 +219,13 @@ class TrackManager:
         return bool(getattr(P.profile, "__dict__", {}).get("track"))
 
     @staticmethod
+    def studio_less(P) -> bool:
+        """A track WITHOUT Studio: unbound to a Studio slot (2026-10-31). Its Studio rows,
+        visual approval and gate belong to the merge gate; a slot-bound track runs them."""
+        d = getattr(P.profile, "__dict__", {})
+        return bool(d.get("track")) and not d.get("slot")
+
+    @staticmethod
     def track_name(P) -> str:
         return str(getattr(P.profile, "__dict__", {}).get("track") or "")
 
@@ -238,6 +245,8 @@ class TrackManager:
             fast_lane={**(prof.fast_lane or {}), "enabled": False})
         tp.__dict__["track"] = row["name"]
         tp.__dict__["main_workspace"] = prof.workspace
+        # 2026-10-31: a track bound to a Studio slot has Studio (in the slot)
+        tp.__dict__["slot"] = str((row.get("data") or {}).get("slot") or "")
         try:
             adapter = load_adapter(tp, self.c.state_dir)
         except Exception as e:                                    # noqa: BLE001
@@ -372,10 +381,16 @@ class TrackManager:
         return dst if os.path.isfile(dst) else ""
 
     def create(self, P, name: str, sprints: list[str], needs: Optional[list[str]] = None,
-               actor: str = "operator", kind: str = "parallel") -> dict:
-        """Create the worktree + branch and register the track (state planned)."""
+               actor: str = "operator", kind: str = "parallel", slot: str = "") -> dict:
+        """Create the worktree + branch and register the track (state planned). `slot`: a
+        [slots.<id>] Studio slot the track's Studio gate and Studio MCP run in (2026-10-31)."""
         P = self.main_of(P)
         name = self._check_name(name)
+        if slot:
+            from .. import slots as SL
+            if slot not in SL.configured(P.profile):
+                raise TrackError(f"no enabled Studio slot {slot!r} in [slots] "
+                                 f"({', '.join(SL.configured(P.profile)) or 'none configured'})")
         if self.store.track(P.id, name):
             raise TrackError(f"track {name} already exists ({self.store.track(P.id, name)['state']})")
         sprints = self._check_sprints(P, sprints)
@@ -405,10 +420,22 @@ class TrackManager:
                 _git(P.profile.workspace, "worktree", "add", path, branch)
             else:
                 _git(P.profile.workspace, "worktree", "add", "-b", branch, path, base)
+        data = {"created_ts": self.clock()}
+        if slot:
+            data["slot"] = slot
         row = self.store.add_track(P.id, name, kind, os.path.realpath(path), branch, base,
-                                   list(needs or []), sprints, actor,
-                                   data={"created_ts": self.clock()})
+                                   list(needs or []), sprints, actor, data=data)
         kc = self._kilo_config(P, row)
+        if slot and kc:
+            # the track's sessions reach the slot's Studio, never the workstation's
+            from .. import slots as SL
+            try:
+                changed = SL.patch_kilo_config(kc, {**SL.configured(P.profile)[slot], "id": slot})
+                self.store.event(P.id, "", "track_slot_mcp", detail={
+                    "track": name, "slot": slot, "servers": changed})
+            except Exception as e:                                # noqa: BLE001
+                self.store.event(P.id, "", "track_kilo_config_failed",
+                                 detail={"track": name, "error": f"slot mcp: {e}"[:300]})
         row = self.store.update_track(P.id, name, data={**row["data"], "kilo_config": kc})
         self.store.event(P.id, "", "track_created", detail={
             "track": name, "branch": branch, "worktree": row["worktree"], "base": base[:12],
@@ -457,6 +484,12 @@ class TrackManager:
             raise TrackError(f"no valid needs in {needs!r} (one of {', '.join(SM.NEEDS)})")
         row = self.store.update_track(P.id, name, needs=new)
         kc = self._kilo_config(P, row)
+        slot = str((row.get("data") or {}).get("slot") or "")
+        if slot and kc:
+            from .. import slots as SL
+            cfg = SL.configured(P.profile).get(slot)
+            if cfg:
+                SL.patch_kilo_config(kc, {**cfg, "id": slot})
         row = self.store.update_track(P.id, name, data={**(row.get("data") or {}),
                                                         "kilo_config": kc})
         self.store.event(P.id, "", "track_needs_changed", detail={
@@ -617,8 +650,9 @@ class TrackManager:
         """A track sprint's project checks without Studio (verify and closeout):
         the adapter's `verify_track` when it has one, else its plain verify."""
         fn = getattr(P.adapter, "verify_track", None)
-        if callable(fn):
+        if callable(fn) and self.studio_less(P):
             return fn(spec, phase, head, base)
+        # a slot-bound track has Studio: the full checks, gate binding included
         return P.adapter.verify(spec, phase, head, base)
 
     # ------------------------------------------------------------------ analysis / proposal

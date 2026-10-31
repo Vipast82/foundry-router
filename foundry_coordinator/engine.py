@@ -1116,7 +1116,7 @@ class Coordinator:
             self.helpers.expire_lane_results(P, tid, "the primary finished; lane results are "
                                                      "never delivered after verification starts")
         data = self.store.merge_data(pid, tid, helper_wait_since=None)
-        if blocked and self.tracks.is_track(P) and \
+        if blocked and self.tracks.studio_less(P) and \
                 TRACK_STUDIO_BLOCKER.search(str(rep.get("blocker") or rep.get("summary") or "")):
             # a track never needs Studio (TRACK_BRIEF): its committed work goes to the
             # Studio-free verify, and the merge gate runs Studio; no decision, no lead
@@ -2513,7 +2513,7 @@ class Coordinator:
         mem_note = self._memory_review_note(P, spec)
         if mem_note:
             dnotes.append(mem_note)
-        if self.tracks.is_track(P):
+        if self.tracks.studio_less(P):
             # 0.145.3: a track has no Studio; its gate log and Studio checks belong to
             # the merge gate, so the reviewer is told and never asks for them
             owns = self.tracks.merge_gate_owns
@@ -3412,7 +3412,7 @@ class Coordinator:
         for rule in P.profile.approvals:
             if rule.stage != stage or not any(matches_any(tag, [rule.match]) for tag in spec.tags):
                 continue
-            if rule.kind == "visual" and self.tracks.is_track(P):
+            if rule.kind == "visual" and self.tracks.studio_less(P):
                 # 2026-10-29 S52: a track has no Studio, so it has no frames to approve; the
                 # visual sign-off belongs to the merge's Studio batch (Victor's batch approval)
                 if not (t.get("data") or {}).get("visual_owed_at_merge"):
@@ -5571,7 +5571,7 @@ class Coordinator:
         owns (the Studio gate line, suite tallies, boot counts, captures, visual frames) is an
         approval. 2026-10-29 MV2-5: the reviewer kept citing the plan's BUILD contract for
         "GATE MV2-5 PASS" despite the track note; 5 review rounds, then a decision."""
-        if rev.get("verdict") not in ("CHANGES_REQUIRED", "BLOCKED") or not self.tracks.is_track(P):
+        if rev.get("verdict") not in ("CHANGES_REQUIRED", "BLOCKED") or not self.tracks.studio_less(P):
             return rev
         res = rev.get("result") or {}
         fs = [f for f in res.get("findings") or [] if f.get("severity") in ("blocker", "major",

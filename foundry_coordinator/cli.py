@@ -781,6 +781,8 @@ def main(argv=None, clients=None, foundry=None) -> int:
     x1 = xs.add_parser("start", help="create a track (worktree + branch) and queue its sprints")
     x1.add_argument("project"); x1.add_argument("name"); x1.add_argument("sprints", nargs="*")
     x1.add_argument("--plan", default="", help="start every track of a proposal instead")
+    x1.add_argument("--slot", default="", help="bind the track to a Studio slot ([slots.<id>]): "
+                                              "its Studio gate and Studio MCP run in the slot")
     x1.add_argument("--by", default="operator")
     x1 = xs.add_parser("stop"); x1.add_argument("project"); x1.add_argument("name")
     x1.add_argument("--reason", default=""); x1.add_argument("--by", default="operator")
@@ -1143,7 +1145,7 @@ def _tracks(c: Coordinator, a) -> int:
             if a.plan:
                 rows = tm.start_plan(P, a.plan, a.by)
             else:
-                tm.create(P, a.name, a.sprints, None, a.by)
+                tm.create(P, a.name, a.sprints, None, a.by, slot=getattr(a, "slot", "") or "")
                 rows = [tm.start(P, a.name, a.by)]
             for r in rows:
                 print(f"track {r['name']} {r['state']}: {r['branch']} at {r['worktree']}; "

@@ -400,15 +400,24 @@ class StudioCalls:
         except Exception:                                         # noqa: BLE001
             return "A"
 
+    def _slot(self, P) -> Optional[dict]:
+        """The Studio slot (contrib/studio-slot) a track is bound to, else None (main or unbound)."""
+        try:
+            from . import slots
+            return slots.slot_for(self.c, P)
+        except Exception:                                         # noqa: BLE001
+            return None
+
     def on(self, P, tid: str, spec=None) -> bool:
-        """[studio_calls] covers this task (never a fast-lane task, never a track)."""
+        """[studio_calls] covers this task (never a fast-lane task; a track only when it is
+        bound to a Studio slot: its gate runs in the slot, 2026-10-31)."""
         fn = getattr(P.profile, "studio_calls_task", None)
         try:
             if not callable(fn) or not fn(tid, self._tier(P, tid, spec)):
                 return False
             if self.c.fast_lane.on(P, tid):
                 return False
-            return not self.c.tracks.is_track(P)
+            return not self.c.tracks.is_track(P) or self._slot(P) is not None
         except Exception:                                         # noqa: BLE001
             return False
 
@@ -542,12 +551,22 @@ class StudioCalls:
                       else s["run_budget_minutes"])
         return (int(s["host_timeout_minutes"]) + budget + 15) * 60
 
-    def _command(self, P, tid: str, req: dict, files: list, run_id: str, tier: str) -> list:
+    def _command(self, P, tid: str, req: dict, files: list, run_id: str, tier: str,
+                 head: str = "") -> list:
+        args = self._pipeline_args(P, tid, req, files, run_id, tier)
+        slot = self._slot(P)
+        if slot is not None:
+            # 2026-10-31: a slot-bound track's gate runs inside the slot (checkout -> pipeline
+            # -> outputs copied back into the worktree)
+            from . import slots
+            return slots.wrap_pipeline(slot, args, P.profile.workspace, tid, head or P.ws.head())
+        return _module_cmd(settings(P)["pipeline_module"]) + args
+
+    def _pipeline_args(self, P, tid: str, req: dict, files: list, run_id: str, tier: str) -> list:
         s = settings(P)
         budget = (s["full_run_budget_minutes"] if req.get("regression") == "full"
                   else s["run_budget_minutes"])
-        return (_module_cmd(s["pipeline_module"])
-                + ["pipeline", "--repo", P.profile.workspace, "--sprint", tid, "--run-id", run_id,
+        return (["pipeline", "--repo", P.profile.workspace, "--sprint", tid, "--run-id", run_id,
                    "--files", ",".join(files), "--suites", ",".join(req.get("suites") or []),
                    "--regression", req.get("regression") or "none", "--tier", tier,
                    "--rerun", req.get("rerun") or "failed", "--runner", s["runner_module"],
@@ -572,7 +591,13 @@ class StudioCalls:
                                     stdin=subprocess.DEVNULL, env=env, creationflags=flags)
 
     def _run_locks(self, P) -> list:
-        return list(dict.fromkeys(self.c._workspace_locks(P) + self.c._session_locks(P)))
+        locks = list(dict.fromkeys(self.c._workspace_locks(P) + self.c._session_locks(P)))
+        slot = self._slot(P)
+        if slot is not None:
+            # a slot-bound track's run drives the slot's Studio, never the workstation's
+            from . import slots
+            locks = [x for x in locks if not str(x).startswith("studio:")] + [slots.lock_name(slot)]
+        return locks
 
     def _start(self, P, t: dict, pend: dict) -> bool:
         tid = t["task_id"]
@@ -585,7 +610,8 @@ class StudioCalls:
         # clean checks failed on AS-P5's half-written gate files)
         if not pend.get("track") and self.c._acquire(P, t, self._run_locks(P)):
             return False                          # another task holds Studio: wait
-        if not self._studio_lock_free(P, t):
+        # the workstation's studio.lock says nothing about a slot (each slot has its own)
+        if self._slot(P) is None and not self._studio_lock_free(P, t):
             return False
         head = P.ws.head()
         req = dict(pend.get("req") or {})
@@ -593,7 +619,7 @@ class StudioCalls:
         files = list(req.get("files") or []) or self._files(P, t, head)
         run_id = f"{tid}-calls-{head[:12]}-{secrets.token_hex(6)}"
         log = os.path.join(evidence_dir(self.c.state_dir, P.id, tid, head), "studio_calls.log")
-        cmd = self._command(P, tid, req, files, run_id, tier)
+        cmd = self._command(P, tid, req, files, run_id, tier, head)
         with_pipeline = os.path.join(self._gate_dir(P, tid), PIPELINE_FILE)
         try:
             os.remove(with_pipeline)                 # never read an older run's record
@@ -710,6 +736,19 @@ class StudioCalls:
         mod = str(settings(P)["runner_module"]).strip()
         if mod.endswith(".py"):
             return
+        slot = self._slot(P)
+        if slot is not None:
+            # never the workstation's Studio: stop the playtest inside the slot
+            try:
+                subprocess.Popen(
+                    ["docker", "exec", slot["container"], "bash", "-lc",
+                     f"cd {slot['repo']} && PYTHONPATH={slot['foundry']} python3 -m {mod} "
+                     f"--repo {slot['repo']} stop-playtest"],
+                    cwd=ROUTER_ROOT, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL, creationflags=_NO_WINDOW)
+            except OSError as e:
+                self.store.event(P.id, tid, "warning", detail={"studio_calls": f"slot stop-playtest: {e}"[:300]})
+            return
         try:
             subprocess.Popen(_module_cmd(mod) + ["--repo", P.profile.workspace, "stop-playtest"],
                              cwd=ROUTER_ROOT, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
@@ -733,7 +772,12 @@ class StudioCalls:
                 _kill_tree(int(run["pid"]))
         except Exception as e:                                    # noqa: BLE001
             self.store.event(P.id, tid, "warning", detail={"studio_calls": f"kill: {e}"[:300]})
-        if st.get("playing"):
+        slot = self._slot(P)
+        if slot is not None:
+            # killing the host wrapper leaves the in-container pipeline running: stop it too
+            from . import slots
+            slots.stop(slot["container"])
+        if st.get("playing") or slot is not None:
             self._stop_playtest(P, tid)
         self._release_runner_lock(tid)
         self.store.event(P.id, tid, "studio_calls_stopped", detail={
