@@ -25,7 +25,7 @@ OFFICIAL = ["list_roblox_studios", "execute_luau", "screen_capture", "get_studio
             "start_stop_play", "get_console_output", "skill", "subagent"]
 COMMUNITY = ["capture_screenshot", "eval_server_runtime", "eval_client_runtime", "execute_luau",
              "solo_playtest", "capture_device_matrix", "get_connected_instances",
-             "set_device_simulator"]
+             "set_device_simulator", "multiplayer_playtest"]
 # The play client's viewport before set_device_simulator lands on it: the Edit-time device
 # does not hold in play (GF-GATE1 2026-10-28 measured 1920x1060).
 PLAY_VIEWPORT_DEFAULT = (1920, 1060)

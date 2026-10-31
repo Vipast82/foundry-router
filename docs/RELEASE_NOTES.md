@@ -2,6 +2,21 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.157.99 — the Studio gate runs 2-player suites in a multiplayer playtest
+
+2026-10-30: MV2-11 parked on suite S17 (`players = 2`). Since 2026-10-27 the scripted gate listed
+such rows as MANUAL ("the session runs it with multiplayer_playtest") and never ran them, while the
+evidence obligations still required a fresh S17 record, so the sprint could not close either way.
+Victor: "build it".
+
+- **studio_gate calls:** rows with `players > 1` now run after the solo rows, one lane per player
+  count, in a `multiplayer_playtest` with that many clients (start waits for every player; the lane
+  ends the playtest). Each lane gets its own Studio CALL plan and `GateRunner.tally`, merged into the
+  run's suites; the rows score like any other row (fresh PASS/FAIL), never MANUAL. Unscoped
+  `eval_server_runtime` / `eval_client_runtime` reach the group's server and client-1
+  (verified live on robloxstudio-mcp 3.4.2 in the studio-slot container).
+- `FOUNDRY_GATE_MULTIPLAYER=0` keeps the old MANUAL behaviour.
+
 ## v0.157.98 — Lead repair sessions run (they never had since 10-20)
 
 2026-10-30 21:47: GF-RT1's Lead diagnosed a coordinator fix (per-frame viewport on

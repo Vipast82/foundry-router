@@ -275,7 +275,9 @@ def test_calls_writes_a_finish_ready_lines_file_live(fakes, repo, lock_dir):
     assert "S28,S46,S49,S45,S04" in run["args"]["code"]          # the explicit ordered id list
 
 
-def test_manual_rows_are_listed_skipped_and_never_red(fakes, repo):
+def test_manual_rows_are_listed_skipped_and_never_red(fakes, repo, monkeypatch):
+    """With the multiplayer lane switched off (FOUNDRY_GATE_MULTIPLAYER=0)."""
+    monkeypatch.setattr(G, "RUN_MULTIPLAYER", False)
     set_rules, calls = fakes
     index = INDEX.replace('id = "S45", file', 'id = "S45", players = 2, file')
     (repo / "tests" / "RegressionIndex.lua").write_text(index, encoding="utf-8")
@@ -296,6 +298,37 @@ def test_manual_rows_are_listed_skipped_and_never_red(fakes, repo):
     assert v["manual"] == [{"row": "S45", "players": 2, "calls": [8], "why": G.MANUAL_WHY}]
     assert v["rows"]["S45"]["verdict"] == "MANUAL"
     assert "MANUAL S45 (CALL 8)" in "\n".join(v["summary"])
+
+
+def test_two_player_rows_run_in_a_multiplayer_lane_and_count_as_fresh(fakes, repo):
+    """2026-10-30 MV2-11: S17 (players = 2) was MANUAL, so its suite never got a fresh record
+    and the sprint parked. Now the row runs after the solo rows in a multiplayer_playtest with
+    that many clients, tallied on its own, and scores like any other row."""
+    set_rules, calls = fakes
+    index = INDEX.replace('id = "S46", file', 'id = "S46", players = 2, file')
+    (repo / "tests" / "RegressionIndex.lua").write_text(index, encoding="utf-8")
+    commit(repo, "S46 needs two players")
+    solo = ["S28", "S49", "S45", "S04"]
+    two = [{"tool": "eval_server_runtime", "match": "return #game", "text": "2"},
+           # the fake matches against json.dumps(args): the long bracket's newline is "\\n"
+           {"tool": "execute_luau", "match": r"\.run\(\[=*\[\\nS46\]", "text": plan_for(index, ["S46"])},
+           {"tool": "execute_luau", "match": r"\.tally\(\[=*\[\\nS46\]",
+            "mirror": mirror_for(index, ["S46"])}]
+    off, comm = rules(solo, index=index, extra_off=two[1:], extra_comm=two[:1])
+    set_rules(off, comm)
+    head = host_half(repo, "MP1")
+    rc, out = run_calls(repo, "MP1", "--regression", "subset:ui")
+    assert rc == 0, out
+    text = lines_of(repo, "MP1")
+    assert "MULTIPLAYER lane: S46 in a 2-player playtest" in text
+    assert "SKIP: GATE suite S46 - MANUAL" not in text
+    assert "SUITE S46 pass=2 fail=0" in text and finish_would_pass(text)
+    mp = [c["args"] for c in calls() if c["tool"] == "multiplayer_playtest"]
+    assert mp and mp[0]["action"] == "start" and mp[0]["numPlayers"] == 2
+    assert mp[-1]["action"] == "end"
+    v = json.load(open(gate_file(repo, "MP1", f"{head[:12]}.calls.json")))
+    assert v["rows"]["S46"]["verdict"] == "PASS" and v["rows"]["S46"]["fresh"] is True
+    assert v["counts"]["manual"] == 0 and v["manual"] == []
 
 
 def test_rerun_failed_carries_only_passed_untouched_regression_rows(fakes, repo):

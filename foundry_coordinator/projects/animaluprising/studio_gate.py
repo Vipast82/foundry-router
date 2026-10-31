@@ -1288,6 +1288,9 @@ class Gate:
         self.bridge = RepoBridge(self.repo, rev=lambda: self.head or "HEAD")
         self.console_base = None
         self._playing = False
+        # players > 1: start_playtest / stop_playtest drive a multiplayer_playtest (2026-10-30)
+        self.players = 1
+        self.mp_ran: set = set()
         self._last_end = None
         self._all_results: dict = {}
         # `calls` mode (2026-10-27, STUDIO_GATE_SCRIPTED_PLAN.md): the live lines file, the
@@ -1891,26 +1894,32 @@ class Gate:
 
     # ---- playtest ---------------------------------------------------------------
     def start_playtest(self, wait: float = 90.0, cid: str = "host.playtest", sink=None) -> bool:
-        """Start a solo playtest and wait for a player + SETTLE_S. Any start that was
-        issued and did not end with a player is stopped again here (M1)."""
+        """Start a solo playtest (or, with self.players > 1, a multiplayer_playtest with that
+        many clients) and wait for the players + SETTLE_S. Any start that was issued and did
+        not end with its players is stopped again here (M1)."""
         add = (sink.append if sink is not None else self.add)
+        want = max(1, int(self.players or 1))
+        if want > 1:
+            tool, args = "multiplayer_playtest", {"action": "start", "numPlayers": want,
+                                                  "timeout": MP_START_TIMEOUT_S}
+            call_t, wait = max(self.call_timeout, MP_START_TIMEOUT_S + 30), max(wait, MP_WAIT_S)
+        else:
+            tool, args, call_t = "solo_playtest", {"action": "start", "mode": "play"}, self.call_timeout
         try:
-            r = self.community.call_tool("solo_playtest", {"action": "start", "mode": "play"},
-                                         timeout=self.call_timeout)
-            self.raw("solo_playtest start", "{}", r["text"])
+            r = self.community.call_tool(tool, args, timeout=call_t)
+            self.raw(f"{tool} start", json.dumps(args), r["text"])
             # Studio still leaving the previous playtest: "Wait for Studio to finish its current
             # playtest transition" (UI-02a, 2026-10-20). Nothing started; retry for ~30 s.
             for _ in range(10):
                 if not (r["is_error"] or "not ready" in r["text"]) or "transition" not in r["text"]:
                     break
                 time.sleep(3.0)
-                r = self.community.call_tool("solo_playtest", {"action": "start", "mode": "play"},
-                                             timeout=self.call_timeout)
-                self.raw("solo_playtest start (retry)", "{}", r["text"])
+                r = self.community.call_tool(tool, args, timeout=call_t)
+                self.raw(f"{tool} start (retry)", json.dumps(args), r["text"])
             self._playing = True
             if r["is_error"] or ('"success":false' in r["text"].replace(" ", "")
-                                 and "transition" in r["text"]):
-                add(check(cid, "UNKNOWN", "solo_playtest start: " + r["text"][:200]))
+                                 and ("transition" in r["text"] or want > 1)):
+                add(check(cid, "UNKNOWN", f"{tool} start: " + r["text"][:200]))
                 self.stop_playtest()
                 return False
         except M.McpError as e:
@@ -1922,19 +1931,21 @@ class Gate:
                 self._mcp_fail += 1
                 if self.mcp_fail_limit and self._mcp_fail >= self.mcp_fail_limit:
                     raise GateTooling(f"{self._mcp_fail} MCP connect/transport failures in a row "
-                                      f"(last: solo_playtest start: {one_line(e, 300)})")
+                                      f"(last: {tool} start: {one_line(e, 300)})")
             return False
-        self.status("playtest", "waiting for a player")
+        self.status("playtest", f"waiting for {want} player(s)")
         end = time.monotonic() + wait
         while time.monotonic() < end:
             text, err = self.vm("server", 'return #game:GetService("Players"):GetPlayers()', "player?", 15)
             m = re.search(r"\b(\d+)\b", text or "")
-            if not err and m and int(m.group(1)) >= 1:
+            if not err and m and int(m.group(1)) >= want:
                 time.sleep(SETTLE_S)
-                add(check(cid, "PASS", "solo playtest running, player in world"))
+                add(check(cid, "PASS", "solo playtest running, player in world" if want == 1 else
+                          f"{want}-player multiplayer playtest running, {want} players in world"))
                 return True
             time.sleep(1.0)
-        add(check(cid, "UNKNOWN", "no player in world after start (playtest stopped again)"))
+        add(check(cid, "UNKNOWN", f"fewer than {want} player(s) in world after start (playtest "
+                                  f"stopped again)"))
         self.stop_playtest()
         return False
 
@@ -1978,9 +1989,13 @@ class Gate:
         return why
 
     def stop_playtest(self):
+        if int(self.players or 1) > 1:
+            tool, args = "multiplayer_playtest", {"action": "end", "timeout": 60}
+        else:
+            tool, args = "solo_playtest", {"action": "stop"}
         with contextlib.suppress(M.McpError):
-            r = self.community.call_tool("solo_playtest", {"action": "stop"}, timeout=self.call_timeout)
-            self.raw("solo_playtest stop", "{}", r["text"])
+            r = self.community.call_tool(tool, args, timeout=max(self.call_timeout, 90))
+            self.raw(f"{tool} {args['action']}", json.dumps(args), r["text"])
         self._playing = False
 
     # ---- regression CALL plan ---------------------------------------------------
@@ -3264,6 +3279,15 @@ def _record_tally(g: Gate, selection: str, t: dict):
 # never a red gate; the session runs just those with multiplayer_playtest.
 STUDIO_LOCK_OWNER = "studio_gate"
 MANUAL_WHY = "needs a 2-player playtest (session runs it with multiplayer_playtest)"
+# 2026-10-30 (MV2-11 parked on S17, Victor "build it"): rows needing players > 1 now RUN, after
+# the solo rows, in a multiplayer_playtest with that many clients (one lane per player count,
+# tallied on its own). Unscoped eval_server_runtime / eval_client_runtime reach the group's
+# server and client-1 (verified on robloxstudio-mcp 3.4.2). FOUNDRY_GATE_MULTIPLAYER=0 keeps
+# the old MANUAL behaviour.
+RUN_MULTIPLAYER = os.environ.get("FOUNDRY_GATE_MULTIPLAYER", "1") != "0"
+MP_START_TIMEOUT_S = 170
+MP_WAIT_S = 180.0
+MP_KEY_OFFSET = 100000
 LINES_REL = "docs/progress/{sprint}_studio_lines.txt"
 GROUP_BUDGET_MIN = 10.0
 RUN_BUDGET_FULL_MIN = 150.0
@@ -3656,6 +3680,46 @@ def _calls_lane(g: "Gate", exec_rows: list, disp: dict, total: int, rows: list,
             "studio_calls": len(plan["calls"])}
 
 
+def _multiplayer_lanes(g: "Gate", mrows: list, disp: dict, total: int, rows: list, carry: dict,
+                       run_deadline: float, budget_min: float) -> dict:
+    """Run the players > 1 rows: one lane per player count, each through _calls_lane with
+    g.players set (so every group starts a multiplayer_playtest), tallied on its own and
+    merged into g.regression. Results / entry_of are keyed past MP_KEY_OFFSET so they never
+    collide with the solo lane's Studio CALL numbers."""
+    out: dict = {"results": {}, "entry_of": {}, "ran": []}
+    by_n: dict = collections.defaultdict(list)
+    for e in mrows:
+        by_n[max(2, int(e.get("players") or 2))].append(e)
+    for k, (n, es) in enumerate(sorted(by_n.items()), 1):
+        g.emit(f"MULTIPLAYER lane: {', '.join(e['id'] for e in es)} in a {n}-player playtest "
+               f"(multiplayer_playtest numPlayers={n}; server and client-1 reached unscoped)")
+        g.players = n
+        try:
+            ctx = _calls_lane(g, es, disp, total, rows, carry, run_deadline, budget_min)
+        finally:
+            if g._playing:
+                g.stop_playtest()
+            g.players = 1
+        prev = dict(g.regression or {})
+        t = g.tally(ctx["sel"], ctx["results"])
+        _record_tally(g, ctx["sel"], t)
+        g.regression["suites"] = {**(prev.get("suites") or {}), **g.regression["suites"]}
+        g.regression["tally"] = "\n".join(x for x in (prev.get("tally"), t.get("raw")) if x)
+        if prev.get("selection"):
+            g.regression["selection"] = prev["selection"] + "," + ctx["sel"]
+        g.emit(f"R3 tally (multiplayer, {n} players): GateRunner.tally(<{ctx['sel']}>, the raw "
+               f"CALL results of this lane)")
+        if t["verdict"] == "UNKNOWN":
+            g.emit(f"FAIL: GATE tally (multiplayer) - no verdict: {one_line(t.get('raw'), 300)}")
+        else:
+            g.lines.line(t.get("raw") or "")
+        off = MP_KEY_OFFSET * k
+        out["results"].update({off + c: v for c, v in (ctx.get("results") or {}).items()})
+        out["entry_of"].update({off + c: v for c, v in (ctx.get("entry_of") or {}).items()})
+        out["ran"] += [e["id"] for e in es]
+    return out
+
+
 def run_calls(a, out=print, official=None, community=None, run_cmd=default_run_cmd) -> int:
     """`calls`: refuse unless the host half passed at HEAD; take the runner lock and
     AU's studio.lock; run; release both."""
@@ -3808,6 +3872,14 @@ def _run_calls(a, sprint, run_id, out, official, community, run_cmd) -> int:
                 g.emit(f"FAIL: GATE tally - no verdict: {one_line(t.get('raw'), 300)}")
             else:
                 g.lines.line(t.get("raw") or "")
+        if manual and RUN_MULTIPLAYER:
+            g.status("multiplayer", f"{len(manual)} row(s)")
+            mp = _multiplayer_lanes(g, manual, disp, total, rows, carry,
+                                    start + budget * 60, budget)
+            ctx["results"] = {**(ctx.get("results") or {}), **mp["results"]}
+            ctx["entry_of"] = {**(ctx.get("entry_of") or {}), **mp["entry_of"]}
+            g.mp_ran = set(mp["ran"])
+        manual = [e for e in manual if e["id"] not in g.mp_ran]
         for sid, src in carry.items():
             tag = str(src.get("head") or "")[:12] + (" (baseline)" if src.get("mode") == "baseline"
                                                      else "")
@@ -3902,7 +3974,7 @@ def finish_calls(g: "Gate", a, error, tooling, ctx, rows, disp, carry, manual, s
         sp = [spans[n] for n in ns if n in spans]
         span = [min(x[0] for x in sp), max(x[1] for x in sp)] if sp else None
         chk = next((c for c in reversed(g.checks) if c.get("id") == f"regression.{sid}"), None)
-        if is_manual(e):
+        if is_manual(e) and sid not in g.mp_ran:
             verdict, fresh = "MANUAL", False
         elif sid in (ctx.get("pre_existing") or {}):
             verdict, fresh = "PRE_EXISTING", False
