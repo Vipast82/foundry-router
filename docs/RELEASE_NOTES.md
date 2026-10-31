@@ -2,6 +2,15 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.158.13 — a task base left on a failed track falls back to the main base
+
+2026-10-31 04:16: GF-SEC3's gate passed but verification failed `coordinator.history`
+("324b16cb is no longer an ancestor ... history rewritten"): its task_base was a commit of the
+failed pt track; the sprint had restarted on main at base_sha. 6 attempts were used up.
+
+- **engine `_generic_checks_uncached`:** when task_base is not an ancestor of HEAD but base_sha
+  is, the history / scope / commit checks are measured from base_sha.
+
 ## v0.158.12 — plan suite labels that are not suites are never required
 
 2026-10-31 03:58: AS-D19 (the Baroness) stopped: its plan line "Owed at merge: suites S1-S4"

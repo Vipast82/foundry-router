@@ -2116,6 +2116,11 @@ class Coordinator:
         task-owned unfinished files are carried into the next BUILD session.
         Final verification and closeout never pass this flag."""
         base = t["data"].get("task_base") or t["base_sha"]
+        if base != t["base_sha"] and t["base_sha"] and not P.ws.is_ancestor(base, head) \
+                and P.ws.is_ancestor(t["base_sha"], head):
+            # 2026-10-31 GF-SEC3: task_base was a commit of the failed pt track; the sprint
+            # restarted on main (base_sha) and every verification failed "history rewritten"
+            base = t["base_sha"]
         # 0.145.1: a track that merged the main branch is measured from that merge
         base = self.tracks.effective_base(P, base, head)
         # 0.145.1: docs/memory is the coordinator's (notes reach it through the
