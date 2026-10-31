@@ -2,6 +2,29 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.159.1 — Proxmox slot readiness: setup gaps closed before the first LXC
+
+2026-10-31 (Victor: move slot-1 to Proxmox; "make sure EVERYTHING for the container build is
+ready"). Docs and setup text only; no code change.
+
+- **Workstation ssh key:** this PC had none, and Foundry's ssh to a slot host is key-only. The
+  README now has a step 0: `ssh-keygen -t ed25519`, no passphrase so the unattended coordinator can
+  use it.
+- **First connection:** Foundry's ssh uses BatchMode, which refuses an unknown host key. The first
+  `ssh` now uses `StrictHostKeyChecking=accept-new` (setup-host.sh next steps, README).
+- **Getting setup-host.sh onto a new LXC:** fetched from the release tag on GitHub
+  (raw.githubusercontent.com), in the script header and the README.
+- **lxc.conf.example:**
+  - disk 80 GB or more;
+  - Docker overlay2 storage: LVM-thin or a directory, or ZFS with Proxmox VE 8.1+;
+  - a static LAN IP that can reach the router.
+- **Checked:**
+  - every pinned download in the Dockerfile answers 200;
+  - the v0.159.0 image builds, `slot-secrets` runs as `studio`;
+  - the Proxmox compose file validates with a sample `.env`;
+  - the tmpfs `/run/secrets` mount is 700, owned by `studio`, and detected as memory-only;
+  - all slot scripts pass `bash -n`.
+
 ## v0.159.0 — central secret store: slots pull their keys and settings from the router
 
 2026-10-31 (Victor: design agreed; passphrase master key, HTTP and HTTPS both your choice, the admin

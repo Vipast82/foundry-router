@@ -1,7 +1,10 @@
 #!/bin/bash
 # Prepare a Proxmox LXC (Debian 13, unprivileged, nesting+keyctl; see lxc.conf.example) to run a
-# Studio slot that the workstation's Foundry drives over ssh. Run as root INSIDE the LXC:
-#   bash setup-host.sh "<the workstation's ssh public key, one line>"
+# Studio slot that the workstation's Foundry drives over ssh. Run as root INSIDE the LXC (the
+# Proxmox console). Fetch it from the release you deploy, e.g.
+#   apt-get update && apt-get install -y curl
+#   curl -fsSLO https://raw.githubusercontent.com/Vipast82/foundry-router/v0.159.1/contrib/studio-slot/proxmox/setup-host.sh
+#   bash setup-host.sh "<the workstation's ssh public key, one line: type %USERPROFILE%\.ssh\id_ed25519.pub>"
 # Idempotent: re-running keeps what exists. It never handles the Open Cloud key: copy that
 # yourself (step 4 below).
 set -euo pipefail
@@ -50,7 +53,9 @@ chmod -R a+rX AnimalUprising.git foundry.git foundry
 cat <<EOF
 
 == next steps (from the workstation unless noted; <lxc> = this LXC's address)
-1. ssh works without a password:   ssh -o BatchMode=yes $USER_NAME@<lxc> docker ps
+1. ssh works without a password. The FIRST connection accepts the LXC's host key; Foundry
+   itself only ever connects with BatchMode, which refuses unknown hosts:
+     ssh -o StrictHostKeyChecking=accept-new $USER_NAME@<lxc> docker ps
 2. seed the mirrors (once; afterwards Foundry pushes before every gate run):
      git -C C:\\Roblox\\AnimalUprising push ssh://$USER_NAME@<lxc>$ROOT/AnimalUprising.git master
      git -C C:\\Users\\shock\\foundry-deploy push ssh://$USER_NAME@<lxc>$ROOT/foundry.git HEAD:refs/heads/deploy

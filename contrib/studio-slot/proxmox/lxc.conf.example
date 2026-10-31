@@ -1,4 +1,15 @@
 # Lines for /etc/pve/lxc/<CTID>.conf on the Proxmox HOST (Debian 13 / trixie template, unprivileged).
+#
+# When you create the LXC (Proxmox UI → Create CT):
+#   template  debian-13-standard (trixie); Unprivileged container: yes
+#   disk      80 GB or more. The image is ~6 GB, its build cache ~3 GB, and Studio + the Wine prefix,
+#             the game checkout and Packages live in the studio-home volume (~10 GB).
+#             Docker's overlay2 needs the rootfs on LVM-thin or a directory (ext4/xfs), or on ZFS with
+#             Proxmox VE 8.1+ (ZFS 2.2). On older ZFS Docker falls back to `vfs`, which is very slow.
+#   network   a STATIC IP on the LAN bridge (vmbr0), e.g. 192.168.0.50/24 with the LAN gateway.
+#             Foundry reaches the slot by this address, and the slot must reach the router
+#             (192.168.0.112:11435).
+#   then add the lines below to /etc/pve/lxc/<CTID>.conf before the first start.
 # Docker inside an unprivileged LXC needs nesting + keyctl:
 features: keyctl=1,nesting=1
 # Studio + a solo playtest in software rendering: give the LXC 16 GB and 6+ cores

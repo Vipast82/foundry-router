@@ -163,12 +163,22 @@ gate run Foundry pushes the track's commit to a bare AU mirror on the host (`slo
 slot's `origin`) and the deployed Foundry to a Foundry mirror whose checkout is the slot's
 `/opt/foundry`.
 
-1. **LXC** (Proxmox host): Debian 13 template, unprivileged, the lines in `proxmox/lxc.conf.example`
-   (nesting + keyctl, 16 GB, 6 cores; the Intel iGPU lines are optional).
-2. **Inside the LXC** as root: `bash setup-host.sh "<workstation ssh public key>"`: Docker + compose,
+0. **Workstation ssh key** (once): Foundry connects with key auth only. If
+   `%USERPROFILE%\.ssh\id_ed25519.pub` does not exist, make one with
+   `ssh-keygen -t ed25519 -f %USERPROFILE%\.ssh\id_ed25519 -C foundry-slots`. With no passphrase
+   the unattended coordinator can use it; the key only opens the `studio` user on slot hosts.
+1. **LXC** (Proxmox host): Debian 13 template, unprivileged, a static LAN IP, a disk of 80 GB or
+   more, and the lines in `proxmox/lxc.conf.example` (nesting + keyctl, 16 GB, 6 cores; the Intel
+   iGPU lines are optional; storage notes there).
+2. **Inside the LXC** as root (Proxmox console): fetch `setup-host.sh` from the release
+   (`curl -fsSLO https://raw.githubusercontent.com/Vipast82/foundry-router/<tag>/contrib/studio-slot/proxmox/setup-host.sh`),
+   then `bash setup-host.sh "<workstation ssh public key>"`: Docker + compose,
    the `studio` user (uid 1000, the image's), `/srv/studio-slot/{AnimalUprising.git, foundry.git,
    foundry, slot-key}`. It prints the remaining steps:
-3. seed the two mirrors from the workstation (`git push` over ssh), check out Foundry on the host;
+3. the first ssh from the workstation accepts the LXC's host key
+   (`ssh -o StrictHostKeyChecking=accept-new studio@<lxc> docker ps`; Foundry's own ssh uses
+   BatchMode and refuses unknown hosts), then seed the two mirrors (`git push` over ssh) and check
+   out Foundry on the host;
 4. `proxmox/.env`:
    - the slot's **own place** (one edit session per place per account: never the workstation's
      TEST place or another slot's place);
