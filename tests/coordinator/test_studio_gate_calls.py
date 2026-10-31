@@ -329,6 +329,9 @@ def test_two_player_rows_run_in_a_multiplayer_lane_and_count_as_fresh(fakes, rep
     v = json.load(open(gate_file(repo, "MP1", f"{head[:12]}.calls.json")))
     assert v["rows"]["S46"]["verdict"] == "PASS" and v["rows"]["S46"]["fresh"] is True
     assert v["counts"]["manual"] == 0 and v["manual"] == []
+    # the multiplayer lane's tally reaches the evidence block (suite:S46 record), not only
+    # the solo lane's (2026-10-31 MV2-11: S17 never got a fresh record)
+    assert "SUITE S46" in v["evidence"]["tally"] and "SUITE S28" in v["evidence"]["tally"]
 
 
 def test_rerun_failed_carries_only_passed_untouched_regression_rows(fakes, repo):

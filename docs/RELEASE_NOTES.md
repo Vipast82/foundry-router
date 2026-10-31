@@ -2,6 +2,16 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.158.3 — the 2-player lane's suites get evidence records
+
+2026-10-31: MV2-11's gate ran S17 in the multiplayer lane and passed 14/14 (v0.157.99), yet the
+submission kept refusing "check suite:S17: no fresh verified record". The calls verdict's evidence
+block carried only the solo lane's GateRunner.tally, so S17's `SUITE` line never became a
+`suite:S17` record.
+
+- **studio_gate calls:** each multiplayer lane's tally is appended to the evidence tally, so its
+  rows are recorded like the solo rows.
+
 ## v0.158.2 — Lead repair validation finds Lune (studio_gate candidates were all rejected)
 
 2026-10-30: GF-RT1's Lead produced five candidates for the per-frame capture viewport; every one

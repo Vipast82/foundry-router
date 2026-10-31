@@ -3717,6 +3717,7 @@ def _multiplayer_lanes(g: "Gate", mrows: list, disp: dict, total: int, rows: lis
         out["results"].update({off + c: v for c, v in (ctx.get("results") or {}).items()})
         out["entry_of"].update({off + c: v for c, v in (ctx.get("entry_of") or {}).items()})
         out["ran"] += [e["id"] for e in es]
+        out.setdefault("tally", []).append(t.get("raw") or "")
     return out
 
 
@@ -3879,6 +3880,11 @@ def _run_calls(a, sprint, run_id, out, official, community, run_cmd) -> int:
             ctx["results"] = {**(ctx.get("results") or {}), **mp["results"]}
             ctx["entry_of"] = {**(ctx.get("entry_of") or {}), **mp["entry_of"]}
             g.mp_ran = set(mp["ran"])
+            # 2026-10-31 MV2-11: the evidence block only carried the solo lane's tally, so
+            # S17's SUITE line (multiplayer lane) never became a suite:S17 record and the
+            # submission kept refusing "no fresh verified record"
+            ctx["tally"] = "\n".join(x for x in [ctx.get("tally") or "", *mp.get("tally", [])]
+                                     if x)
         manual = [e for e in manual if e["id"] not in g.mp_ran]
         for sid, src in carry.items():
             tag = str(src.get("head") or "")[:12] + (" (baseline)" if src.get("mode") == "baseline"
