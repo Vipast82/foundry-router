@@ -36,3 +36,6 @@ htmlcov/
 # Coordinator project profiles are machine-specific; commit project.example.toml
 foundry_coordinator/projects/*/project.toml
 packaging/foundry-client.ico
+
+# a Studio slot's own client key (contrib/studio-slot/docker-compose.yml mounts this folder)
+contrib/studio-slot/secrets/

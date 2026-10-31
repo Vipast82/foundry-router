@@ -25,14 +25,23 @@ services:
       # (they run on the workstation Studio at the track's merge)
       FOUNDRY_GATE_MULTIPLAYER: "${SLOT_MULTIPLAYER:-0}"
       AU_ROBLOX_KEY_FILE: "/run/secrets/roblox_open_cloud_key.txt"
+      # secrets from the Foundry router (Setup → Secrets) with this slot's own key
+      FOUNDRY_URL: "${FOUNDRY_URL:?set FOUNDRY_URL in .env (the router, e.g. http://192.168.0.112:11435)}"
+      FOUNDRY_TLS_FINGERPRINT: "${FOUNDRY_TLS_FINGERPRINT:-}"
+      FOUNDRY_PROJECT: "${FOUNDRY_PROJECT:-animaluprising}"
+      FOUNDRY_SLOT: "${FOUNDRY_SLOT:?set FOUNDRY_SLOT in .env (this slot's id, e.g. slot-2)}"
+      FOUNDRY_SLOT_KEY_FILE: "/run/slot-key/slot-key.txt"
     volumes:
       - studio-home:/home/studio
       # the bare AU mirror Foundry pushes to (the slot clones and fetches from it)
       - "/srv/studio-slot/AnimalUprising.git:/work/AnimalUprising:ro"
       # the Foundry checkout Foundry moves to its deployed commit before each gate run
       - "/srv/studio-slot/foundry:/opt/foundry:ro"
-      # the Open Cloud key (one line, mode 600 on the host); never in the image
-      - "/srv/studio-slot/secrets/roblox_open_cloud_key.txt:/run/secrets/roblox_open_cloud_key.txt:ro"
+      # this slot's own client key (secrets scope), mode 600 on the host; never in the image
+      - "/srv/studio-slot/slot-key:/run/slot-key:ro"
+    # the pulled values live in memory only (mode 600 files, gone when the container stops)
+    tmpfs:
+      - "/run/secrets:mode=0700,uid=1000,gid=1000,size=1m"
     # Intel iGPU (Vinegar DXVK on Gen9+): uncomment once /dev/dri is mapped into the LXC
     # devices:
     #   - /dev/dri:/dev/dri

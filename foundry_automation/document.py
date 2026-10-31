@@ -22,7 +22,8 @@ from . import role_rules as RR
 from .schema import (KNOWN_LANES, LOCAL_KEYS, PROFILE_SCHEMA, SettingsError, TABLES_BY_NAME,
                      automation_table, check_value, fast_lane_table, find_field, is_local_key,
                      lead_manager_table,
-                     lifecycle_table, role_overrides_table, roles_table, walk_secrets)
+                     lifecycle_table, role_overrides_table, roles_table, slots_table,
+                     walk_secrets)
 
 # keys never part of a document (the coordinator's own identity)
 _IDENTITY = ("schema_version", "id")
@@ -324,6 +325,7 @@ def validate(doc: Any, project: str = "") -> dict:
                   ("role_overrides", lambda: role_overrides_table(where,
                                                                   settings.get("role_overrides"))),
                   ("roles", lambda: roles_table(where, settings.get("roles"))),
+                  ("slots", lambda: slots_table(where, settings.get("slots"))),
                   ("automation", lambda: automation_table(where, settings.get("automation")))]
         for table, fn in checks:
             if table not in settings and table != "roles":

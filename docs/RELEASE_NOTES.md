@@ -2,6 +2,76 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.159.0 — central secret store: slots pull their keys and settings from the router
+
+2026-10-31 (Victor: design agreed; passphrase master key, HTTP and HTTPS both your choice, the admin
+key optional, new containers pull by default, no automatic migration). docs/SECRETS_STORE.md.
+
+- **router — Access → Secrets:** a write-only store of keys and passwords per game (project) plus
+  `shared`.
+  - **At rest:** AES-256-GCM in its own file `<data>/secrets.sqlite`, never `config.yaml`, its
+    history or export bundles.
+  - **Master key:** derived from a passphrase (scrypt) and never stored. After every router restart
+    the store is locked until you unlock it on the page. While it is locked, pulls answer 503 and
+    raise a "Secret store is locked" alert (user-action class).
+  - **On the page:** set or rotate (typed or from a file), clear, delete, change the passphrase.
+    It shows set or not set, last set, last pulled (who and from where), and which keys can read
+    each secret.
+  - **Pull log:** every pull is logged, values never.
+  - **Scrubbing:** stored values are removed from diagnostic text while the store is unlocked.
+- **router — `secrets` client scope:** preset **slot** on Access → Clients & Keys. A key reads
+  `shared` plus its `projects` (none = `shared` only), narrowed by the new `slots` and
+  `secret_names` fields. Projects, slots and names are now editable on the Add and Edit forms.
+  - Creating a key with this scope, or giving a key the scope, raises an alert, and so does a
+    key's first pull (`secrets.alert_on_new_access`).
+- **router — pull API:** `GET /v1/foundry/secrets/bundle?project=&slot=` returns the values plus
+  the slot's settings from the deployed revision. ETag/304 makes the per-gate re-pull cheap, and
+  every answer sends `no-store`.
+- **router — transport (Access → Secrets → Transport):**
+  - an optional HTTPS listener (`secrets.https_enabled`, port 11436) with a self-signed certificate
+    whose fingerprint clients pin;
+  - `secrets.allow_http` off = secret values travel only over HTTPS.
+  - The router's compose file now publishes 11436. Changing either setting needs a router restart.
+- **settings — Studio slots:** `[slots.<id>]` is part of the project settings schema, with its own
+  editor on Automation → Settings and validation:
+  - a container is required;
+  - two slots can't share a container;
+  - a remote slot needs `au_push_url`.
+
+  New fields: `place_id`, `universe_id`, `rojo_never_place_ids`, `secrets`. The coordinator's
+  existing config pull delivers deployed slots. A `[slots]` table in `project.toml` keeps working.
+- **contrib/studio-slot (image rebuild):** new `slot-secrets` helper.
+  - **When:** at container start, and from `slot-checkout` before every gate run.
+  - **Where:** the slot's bundle goes into `/run/secrets` (a tmpfs, mode 600 files; it refuses a
+    disk folder). The slot settings go into `~/.config/foundry-slot/slot.env`, which `entrypoint.sh`
+    and `studio-reopen` read over the compose values.
+  - **Failures:** router away or store locked keeps the last files; a revoked key deletes them; a
+    secret no longer served is removed.
+  - **Compose:** both files drop the Open Cloud key mount for `FOUNDRY_URL`/`FOUNDRY_SLOT` plus the
+    slot's own key file (`./secrets/slot-key.txt`, git-ignored; on Proxmox
+    `/srv/studio-slot/slot-key/`).
+  - AU is unchanged (`AU_ROBLOX_KEY_FILE`).
+- **New dependency:** `cryptography==49.0.0` (router image rebuild).
+- **To take it into use** (docs/SECRETS_STORE.md "Moving the Open Cloud key"):
+  1. Rebuild the router on .112.
+  2. Set the passphrase on Access → Secrets and load the key with the file picker.
+  3. Make the `slot-1` key and put it in `contrib/studio-slot/secrets/slot-key.txt`.
+  4. Recreate the slot.
+
+  Until then the running slot keeps its current mount.
+- **Verified:**
+  - `tests/test_secret_store.py` 15/15 and `tests/test_slot_secrets.py` 6/6;
+  - 185 related router and coordinator tests green;
+  - a live run inside `studio-slot-poc` against a throwaway router with a test value:
+    - HTTP pull, then 304;
+    - wrong HTTPS fingerprint refused before the request;
+    - pinned HTTPS works;
+    - HTTPS-only router refuses HTTP;
+    - locked store keeps the files;
+    - a rotated value arrives (hash matched);
+    - a disabled key deletes the files;
+    - no test value in the router log.
+
 ## v0.158.20 — Studio slots on another machine (Proxmox LXC) over ssh
 
 2026-10-31 (Victor: "start it"): a slot no longer has to be a container on the workstation.

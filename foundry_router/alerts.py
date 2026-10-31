@@ -253,7 +253,7 @@ class AlertService:
             return "product_decision"
         if kind == "question":
             return "product_decision"
-        if kind == "permission":
+        if kind in ("permission", "secrets_locked"):
             return "user_action"
         tdata = {}
         if a.get("project_id") and a.get("task_id"):

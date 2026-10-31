@@ -22,7 +22,7 @@ from ..kilo_roles import CANONICAL, COORDINATOR_DIRECT_ROLES, coordinator_role_g
 router = APIRouter()
 
 NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,39}$")
-SCOPES = ("inference", "media", "admin", "orchestration", "telemetry", "operator")
+SCOPES = ("inference", "media", "admin", "orchestration", "telemetry", "operator", "secrets")
 # What each kind of client usually needs, offered as presets in the UI.
 PRESETS = {
     "cline": {"scopes": ["inference"], "note": "Cline (VS Code), OpenAI-compatible provider"},
@@ -43,6 +43,9 @@ PRESETS = {
     "operator": {"scopes": ["operator"], "note": "a person using the coordinator control center"},
     "bridge": {"scopes": ["telemetry"], "note": "workstation telemetry bridge "
                                                 "(python -m foundry_coordinator bridge)"},
+    # one key per Studio slot / machine: it pulls only its own bundle (Setup → Secrets)
+    "slot": {"scopes": ["secrets"], "note": "Studio slot container (slot-secrets pulls its "
+                                            "bundle at start and before each gate run)"},
 }
 
 
@@ -73,6 +76,8 @@ def _usage(svc) -> dict:
 def _view(c, usage: dict, seen: dict) -> dict:
     return {"name": c.name, "scopes": list(c.scopes), "personas": list(c.personas),
             "projects": list(getattr(c, "projects", None) or []), "enabled": c.enabled, "note": c.note, "created": c.created,
+            "secret_names": list(getattr(c, "secret_names", None) or []),
+            "slots": list(getattr(c, "slots", None) or []),
             "route_footer": bool(getattr(c, "route_footer", False)),
             "mcp_with_client_tools": getattr(c, "mcp_with_client_tools", None),
             "key_kind": client_keys.key_kind(c),
@@ -136,6 +141,8 @@ async def create_client(request: Request):
              "key_hint": client_keys.hint(key), "scopes": scopes,
              "personas": [str(p) for p in body.get("personas") or []],
              "projects": [str(p) for p in body.get("projects") or []],
+             "secret_names": [str(p) for p in body.get("secret_names") or []],
+             "slots": [str(p) for p in body.get("slots") or []],
              "note": str(body.get("note") or "")[:200],
              "created": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())}
 
@@ -146,6 +153,9 @@ async def create_client(request: Request):
         raw["clients"].append(entry)
     svc.config_store.save(mutate)
     svc.db.log_event("info", "client_auth", f"client {name} created (scopes {', '.join(scopes)})")
+    if "secrets" in scopes:
+        from ..secrets_api import new_access_alert
+        new_access_alert(svc, name, "created")
     return {"ok": True, "key": key, "client": entry | {"key_hash": None},
             "shown_once": "Copy this key now: Foundry stores only its hash."}
 
@@ -192,6 +202,9 @@ async def update_client(request: Request, name: str):
         upd["personas"] = [str(p) for p in body["personas"] or []]
     if "projects" in body:
         upd["projects"] = [str(p) for p in body["projects"] or []]
+    for k in ("secret_names", "slots"):
+        if k in body:
+            upd[k] = [str(p) for p in body[k] or []]
     if "note" in body:
         upd["note"] = str(body["note"] or "")[:200]
     if "enabled" in body:
@@ -217,6 +230,9 @@ async def update_client(request: Request, name: str):
             if c.get("name") == name:
                 c.update(upd)
     svc.config_store.save(mutate)
+    if "secrets" in upd.get("scopes", []) and "secrets" not in cur.scopes:
+        from ..secrets_api import new_access_alert
+        new_access_alert(svc, name, "given access")
     return {"ok": True, "warnings": tool_warnings}
 
 

@@ -5,6 +5,13 @@ set -u
 GEOM="${GEOMETRY:-2560x1440}"
 mkdir -p "$HOME/.vnc" "$XDG_RUNTIME_DIR"
 
+# This slot's secrets and settings from the router (Setup → Secrets), with the slot's own key
+# (a mounted file): values go to /run/secrets (a tmpfs, memory only), never the image, the
+# environment or a log. The router's slot settings (place, universe, never-sync places) come as
+# slot.env and win over the compose values. Re-pulled by slot-checkout before every gate run.
+slot-secrets >>"$HOME/slot-secrets.log" 2>&1 && [ -f "$HOME/.config/foundry-slot/slot.env" ] && \
+    . "$HOME/.config/foundry-slot/slot.env"
+
 # VNC itself only listens inside the container (localhost); noVNC is the way in.
 Xvnc :1 -geometry "$GEOM" -depth 24 -SecurityTypes None -localhost yes \
      -AlwaysShared -AcceptSetDesktopSize >"$HOME/xvnc.log" 2>&1 &

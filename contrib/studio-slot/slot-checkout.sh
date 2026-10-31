@@ -13,6 +13,8 @@ ref="${1:?usage: slot-checkout <ref>}"
 CO="${AU_CHECKOUT:-$HOME/work/AnimalUprising}"
 export PATH="$HOME/.rokit/bin:$PATH"
 cd "$CO"
+# a rotated key reaches the slot before the gate (unchanged = one cheap 304); never fails the move
+slot-secrets >&2 || true
 git fetch -q origin '+refs/heads/*:refs/remotes/origin/*'
 target=$(git rev-parse --verify -q "origin/$ref^{commit}" || git rev-parse --verify "$ref^{commit}")
 old=$(git rev-parse HEAD)

@@ -13,7 +13,11 @@ Give every client its own Foundry key so requests, budgets and the logs know
   it **once**, with the exact steps to connect that program. Only a SHA-256
   hash is stored in config.yaml, so the key never appears in config history
   or export bundles.
-- **Edit** scopes, personas, note or enabled; **New key** rotates (the old key
+- **Secrets scope** (v0.159.0): a Studio slot or another machine pulling its
+  keys from the central store (preset **slot**; docs/SECRETS_STORE.md). It is
+  limited by `projects` (empty = the `shared` group only), `slots` and
+  `secret_names`, all of which are on the Add and Edit forms.
+- **Edit** scopes, personas, projects, note or enabled; **New key** rotates (the old key
   stops working at once); **Delete**. The name is the client's identifier in
   logs, budget rules (`match: {client: …}`) and the Work view, so it isn't
   renamed.

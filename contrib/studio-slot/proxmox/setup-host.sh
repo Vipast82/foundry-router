@@ -44,7 +44,7 @@ cd "$ROOT"
 [ -d AnimalUprising.git ] || sudo -u "$USER_NAME" git init -q --bare -b master AnimalUprising.git
 [ -d foundry.git ] || sudo -u "$USER_NAME" git init -q --bare -b deploy foundry.git
 [ -d foundry ] || sudo -u "$USER_NAME" git clone -q foundry.git foundry 2>/dev/null || true
-install -d -m 700 -o "$SLOT_UID" -g "$SLOT_UID" secrets
+install -d -m 700 -o "$SLOT_UID" -g "$SLOT_UID" slot-key
 chmod -R a+rX AnimalUprising.git foundry.git foundry
 
 cat <<EOF
@@ -57,12 +57,16 @@ cat <<EOF
      ssh $USER_NAME@<lxc> "git -C $ROOT/foundry fetch -q origin deploy && git -C $ROOT/foundry checkout -q --detach FETCH_HEAD"
 3. the slot's own place: a private experience "Animal Uprising [SLOT-n]"; put its link in
      $ROOT/foundry/contrib/studio-slot/proxmox/.env (copy .env.example)
-4. the Open Cloud key (you copy it; nothing else reads or prints it):
-     scp <key file> $USER_NAME@<lxc>:$ROOT/secrets/roblox_open_cloud_key.txt
-     then on the LXC: chmod 600 $ROOT/secrets/roblox_open_cloud_key.txt; chown $SLOT_UID $ROOT/secrets/roblox_open_cloud_key.txt
+4. the slot's key: on the router, Access → Clients & Keys → preset "slot" (scope secrets, project
+   animaluprising, only slots = this slot's id). Copy the key it shows once into a file (you do this;
+   nothing else reads or prints it):
+     scp <key file> $USER_NAME@<lxc>:$ROOT/slot-key/slot-key.txt
+     then on the LXC: chmod 600 $ROOT/slot-key/slot-key.txt; chown $SLOT_UID $ROOT/slot-key/slot-key.txt
+   The Open Cloud key itself lives on the router (Setup → Secrets); the slot pulls it at start.
 5. build and start (on the LXC, as $USER_NAME):
      cd $ROOT/foundry/contrib/studio-slot/proxmox && docker compose up -d --build
 6. sign Studio in once: ssh -L 6080:localhost:6080 $USER_NAME@<lxc>, open http://localhost:6080/vnc.html
-7. add the slot to project.toml ([slots.slot-n] with host/au_push_url/foundry_push_url/
-   foundry_host_dir; see foundry_coordinator/slots.py) and start a track with --slot slot-n
+7. add the slot on the router: Automation → Settings → Studio slots (slot-n with container, host,
+   au_push_url, foundry_push_url, foundry_host_dir, place_id, universe_id), deploy, and start a track
+   with --slot slot-n
 EOF

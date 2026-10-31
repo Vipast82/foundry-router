@@ -27,8 +27,16 @@ services:
       FOUNDRY_GATE_MULTIPLAYER: "0"
       # Roblox Open Cloud (Creator API) for asset uploads (Victor 2026-10-31): AU's
       # tools/assets/roblox_cloud.py is the only reader of this file (the key is never printed,
-      # logged or on a command line). It reaches the slot as a read-only mount, never the image.
+      # logged or on a command line).
       AU_ROBLOX_KEY_FILE: "/run/secrets/roblox_open_cloud_key.txt"
+      # Secrets come from the Foundry router (Setup → Secrets): slot-secrets pulls this slot's
+      # bundle with its own key at start and before every gate run, into /run/secrets (the tmpfs
+      # below). https://<router>:11436 with the HTTPS listener (then set the fingerprint too).
+      FOUNDRY_URL: "${FOUNDRY_URL:-http://192.168.0.112:11435}"
+      FOUNDRY_TLS_FINGERPRINT: "${FOUNDRY_TLS_FINGERPRINT:-}"
+      FOUNDRY_PROJECT: "animaluprising"
+      FOUNDRY_SLOT: "slot-1"
+      FOUNDRY_SLOT_KEY_FILE: "/run/slot-key/slot-key.txt"
     volumes:
       # keeps the Wine prefix, Studio install and your Studio sign-in across restarts
       - studio-home:/home/studio
@@ -38,8 +46,12 @@ services:
       # the deployed Foundry (the gate runner, studio_gate), read-only; on a mini PC this is a
       # clone of the release tag instead
       - "C:/Users/shock/foundry-deploy:/opt/foundry:ro"
-      # the Open Cloud key file (one line), read-only; see AU_ROBLOX_KEY_FILE above
-      - "C:/Roblox/_secrets/roblox_open_cloud_key.txt:/run/secrets/roblox_open_cloud_key.txt:ro"
+      # this slot's own client key (secrets scope; Access → Clients & Keys, preset "slot"):
+      # ./secrets/slot-key.txt next to this file (git-ignored). Revoke the slot = disable its key.
+      - "./secrets:/run/slot-key:ro"
+    # the pulled values live in memory only (mode 600 files, gone when the container stops)
+    tmpfs:
+      - "/run/secrets:mode=0700,uid=1000,gid=1000,size=1m"
     shm_size: "2gb"
     cpus: 8
     # a multiplayer playtest runs edit + server + one Studio per client, each rendering

@@ -1050,6 +1050,7 @@ const TABS = {
   "Data":           tabData,
   "Training":       tabTraining,
   "Clients & Keys": tabClients,
+  "Secrets":        tabSecrets,
   "Helpers & Limits": tabLimits,
   "Alerts & digest": tabAlerts,
   "Client":         tabClient,
@@ -1066,7 +1067,7 @@ const GROUPS = [
   ["Tools & MCP", ["Tools", "MCP Servers", "MCP Metrics", "Agents"]],
   ["Labs",        ["Research", "Evals"]],
   ["Logs",        ["Usage Log", "Events", "Dev Log", "Data", "Training"]],
-  ["Access",      ["Clients & Keys", "Helpers & Limits"]],
+  ["Access",      ["Clients & Keys", "Secrets", "Helpers & Limits"]],
   // the workstation app: download, connected clients, install guide
   ["Client",      ["Client"]],
 ];
@@ -3201,8 +3202,11 @@ async function tabClients() {
       <div class="row"><label>scopes</label>${d.scopes.map(s => `<label style="min-width:0"><input type="checkbox" class="nc-scope" value="${s}" ${(ps.scopes || []).includes(s) ? "checked" : ""}> ${s}</label>`).join(" ")}</div>
       <div class="row"><label title="Leave empty for all personas. Otherwise only these are listed and usable for this client.">only personas</label><input id="nc-personas" data-multi="csv" data-options="personas" data-free="0" placeholder="all personas (pick to restrict)" value="${esc((ps.personas || []).join(", "))}">
         <button class="act primary" id="nc-create">Create client and key</button></div>
+      <div class="row"><label title="Comma-separated. Empty = every project; for the secrets scope empty = the shared group only.">only projects</label><input id="nc-projects" placeholder="e.g. animaluprising">
+        <label title="secrets scope: only these Studio slots">only slots</label><input id="nc-slots" placeholder="e.g. slot-1">
+        <label title="secrets scope: only these secret names">only secret names</label><input id="nc-snames" placeholder="all of its groups"></div>
       ${ps.roles ? `<p class="hint">Persona allowlist by coordinator role: ${Object.entries(ps.roles).map(([r, n]) => `<b>${esc(r)}</b> → <code>${esc(n)}</code>`).join(" · ")}. ${esc(ps.roles_note || "")} Legacy aliases (Foundry-Kilo-Sonnet, -Opus…) don't authorize these ids.</p>` : ""}
-      <p class="hint">Scopes: <b>inference</b> chat/models · <b>media</b> image jobs · <b>orchestration</b> coordinator bindings, training capture and control-center actions · <b>telemetry</b> the workstation bridge · <b>operator</b> a person using the control center · <b>admin</b> this web UI's API.</p></div>
+      <p class="hint">Scopes: <b>inference</b> chat/models · <b>media</b> image jobs · <b>orchestration</b> coordinator bindings, training capture and control-center actions · <b>telemetry</b> the workstation bridge · <b>operator</b> a person using the control center · <b>secrets</b> a Studio slot or machine pulling its keys (Access → Secrets) · <b>admin</b> this web UI's API.</p></div>
     <div class="card"><h3>Keys that matched no client</h3>
       <p class="hint">A program sending a key Foundry doesn't know (since restart; only a fingerprint is kept, never the key). Usually a placeholder or an old key in that program's API-key field: make a client above and paste its key there.</p>
       ${rej ? `<div class="tscroll"><table><tr><th>fingerprint</th><th>looks like</th><th>requests</th><th>result</th><th>last path</th><th>from</th><th>last</th></tr>${rej}</table></div><div class="row"><button class="act" id="rej-clear">Clear list</button></div>` : '<p class="hint">None.</p>'}</div>`;
@@ -3224,7 +3228,8 @@ async function tabClients() {
     .catch(e => toast(e.message, true));
   $("#nc-preset").onchange = e => { o.preset = e.target.value; render(); };
   $("#nc-create").onclick = () => api("setup/clients", {method: "POST", body: {name: $("#nc-name").value.trim(),
-    note: $("#nc-note").value, scopes: scopesOf(".nc-scope"), personas: list($("#nc-personas").value)}})
+    note: $("#nc-note").value, scopes: scopesOf(".nc-scope"), personas: list($("#nc-personas").value),
+    projects: list($("#nc-projects").value), slots: list($("#nc-slots").value), secret_names: list($("#nc-snames").value)}})
     .then(r => { render(); showKey(`Client ${r.client.name} created`, r.client.name, r.key, o.preset); })
     .catch(e => toast(e.message, true));
   document.querySelectorAll("[data-rotate]").forEach(b => b.onclick = () => {
@@ -3247,6 +3252,9 @@ async function tabClients() {
       <div class="row"><label>scopes</label>${d.scopes.map(s => `<label style="min-width:0"><input type="checkbox" class="ed-scope" value="${s}" ${c.scopes.includes(s) ? "checked" : ""}> ${s}</label>`).join(" ")}</div>
       <div class="row"><label>only personas</label><input id="ed-personas" data-multi="csv" data-options="personas" data-free="0" value="${esc(c.personas.join(", "))}" placeholder="all personas (pick to restrict)"></div>
       <div class="row"><label>note</label><input id="ed-note" value="${esc(c.note || "")}" style="min-width:300px"></div>
+      <div class="row"><label title="Only these coordinator projects (control center, telemetry, operator actions; for the secrets scope: the games whose secrets it reads besides shared). Comma-separated; empty = every project (secrets: shared only).">only projects</label><input id="ed-projects" value="${esc((c.projects || []).join(", "))}" placeholder="all projects" style="min-width:240px"></div>
+      <div class="row"><label title="secrets scope: only these secret names (comma-separated; empty = every secret of its groups)">only secret names</label><input id="ed-snames" value="${esc((c.secret_names || []).join(", "))}" placeholder="all of its groups" style="min-width:240px">
+        <label title="secrets scope: only these Studio slots (comma-separated; empty = any slot of its projects)">only slots</label><input id="ed-slots" value="${esc((c.slots || []).join(", "))}" placeholder="any slot"></div>
       <div class="row"><label title="Add '— via <model> @ <backend>' under every answer this client gets (and the route line in buffered replies' reasoning). For AnythingLLM / Open WebUI, which hide reasoning."><input type="checkbox" id="ed-footer" ${c.route_footer ? "checked" : ""}> show which model and backend answered</label></div>
       <div class="row"><label title="When this client sends its own tools (AnythingLLM @agent, Cline, Kilo, Open WebUI tools), which of the persona's MCP tools ride along. Wins over the persona's own setting; never adds a tool the persona isn't granted. e.g. Cline/Kilo: off · AnythingLLM: acestep-music, stable-audio, kokoro-tts, chatterbox-tts, searxng · Open WebUI: all.">MCP tools with client tools</label>${_mcpPolicyHTML("ed-mcp", c.mcp_with_client_tools, "follow the persona")}</div>
       <div class="row"><label><input type="checkbox" id="ed-enabled" ${c.enabled ? "checked" : ""}> enabled</label>
@@ -3254,11 +3262,157 @@ async function tabClients() {
       <p class="hint">The name is this client's identifier in logs and budget rules, so it isn't renamed; make a new client instead.</p>`);
     $("#ed-save", body).onclick = () => api(`setup/clients/${encodeURIComponent(c.name)}`, {method: "PATCH", body: {
       scopes: scopesOf(".ed-scope"), personas: list($("#ed-personas", body).value), note: $("#ed-note", body).value,
+      projects: list($("#ed-projects", body).value), secret_names: list($("#ed-snames", body).value), slots: list($("#ed-slots", body).value),
       enabled: $("#ed-enabled", body).checked, route_footer: $("#ed-footer", body).checked,
       mcp_with_client_tools: _mcpPolicyRead("ed-mcp", body)}}).then(r => { closeModal(); toast((r.warnings || []).join(" ") || "Saved", !!(r.warnings || []).length); render(); }).catch(e => toast(e.message, true));
   });
   const rc = $("#rej-clear");
   if (rc) rc.onclick = () => run(api("setup/rejected", {method: "DELETE"}));
+}
+
+// Access → Secrets (secret_store.py / secrets_api.py): the central, write-only
+// store that Studio slots and other machines pull from with their own key.
+// Values go in (typed or from a file) and are never shown back.
+async function tabSecrets() {
+  const d = await api("secrets");
+  const st = d.status, s = d.settings, tls = d.tls;
+  const when = ts => ts ? esc(_tsText(ts)) : "";
+  const pill = (t, cls = "") => `<span class="pill ${cls}">${esc(t)}</span>`;
+  const stPill = {unlocked: pill("unlocked", "ok"), locked: pill("locked", "bad"),
+                  uninitialized: pill("no passphrase yet", "warn")}[st.state] || "";
+  const pw = (id, ph) => `<input type="password" id="${id}" autocomplete="new-password" spellcheck="false" placeholder="${esc(ph)}" style="min-width:240px">`;
+  let lockCard;
+  if (st.state === "uninitialized") lockCard = `<p>Choose a passphrase (at least ${st.min_passphrase} characters). Foundry stores only a check value,
+      never the passphrase: <b>after every router restart the store is locked</b> until you enter it here, and a lost passphrase means
+      every value has to be set again.</p>
+      <div class="row">${pw("sx-p1", "passphrase")} ${pw("sx-p2", "again")} <button class="act primary" id="sx-init">Set passphrase</button></div>`;
+  else if (st.state === "locked") lockCard = `<p>The store is locked (the router restarted). Slots keep the files they pulled last; new pulls wait for the passphrase.</p>
+      <div class="row">${pw("sx-unlock-p", "passphrase")} <button class="act primary" id="sx-unlock">Unlock</button></div>`;
+  else lockCard = `<div class="row"><button class="act" id="sx-lock">Lock now</button>
+      <details><summary>Change passphrase</summary><div class="row">${pw("sx-old", "current passphrase")} ${pw("sx-new1", "new passphrase")} ${pw("sx-new2", "again")}
+      <button class="act" id="sx-change">Change</button></div><p class="hint">Every value is re-encrypted under the new passphrase.</p></details></div>`;
+  const warnAdmin = d.protect_admin ? "" : `<div class="card"><span class="pill warn">no admin key</span> <b>The web UI has no admin key.</b> Anyone who can reach this
+      router can make a client key with the secrets scope and pull these values. You get an alert when a key gets secrets access or pulls for the
+      first time. Turn on “protect the web UI” on Access → Clients &amp; Keys to require your admin key.</div>`;
+  const httpNote = d.transport === "http" && !s.allow_http ? `<div class="card"><span class="pill bad">HTTPS only</span> This page is open over plain HTTP,
+      which this router refuses for secret values. Open it on the HTTPS port${tls ? " " + esc(tls.port) : ""} to set values or unlock.</div>` : "";
+  const groups = d.groups;
+  const rows = d.secrets.map(x => `<tr>
+      <td class="nw"><b>${esc(x.name)}</b><div class="hint">${esc(x.description || "")}</div></td>
+      <td class="nw">${esc(x.group)}</td><td class="nw"><code>/run/secrets/${esc(x.file)}</code></td>
+      <td class="nw">${x.set ? pill("set", "ok") : pill("not set", "warn")}<div class="hint">${x.set_at ? when(x.set_at) + (x.set_by ? " · " + esc(x.set_by) : "") : ""}</div></td>
+      <td class="hint" style="white-space:normal">${x.last_pulled_at ? `${when(x.last_pulled_at)} · ${esc(x.last_pulled_by || "")} · ${esc(x.last_pulled_addr || "")}` : "never"}</td>
+      <td class="hint" style="white-space:normal">${x.readers.length ? esc(x.readers.join(", ")) : "no key"}</td>
+      <td class="nw"><button class="act primary" data-sx-set="${esc(x.group)}/${esc(x.name)}">Set / rotate</button>
+        <button class="act" data-sx-edit="${esc(x.group)}/${esc(x.name)}">Edit</button>
+        ${x.set ? `<button class="act" data-sx-clear="${esc(x.group)}/${esc(x.name)}">Clear</button>` : ""}
+        <button class="act danger" data-sx-del="${esc(x.group)}/${esc(x.name)}">Delete</button></td></tr>`).join("");
+  const keys = d.keys.map(k => `<tr><td class="nw"><b>${esc(k.name)}</b><div class="hint">${esc(k.note || "")}</div></td>
+      <td class="nw">${k.enabled ? pill("on", "ok") : pill("off")}</td>
+      <td class="hint">shared${k.projects.length ? ", " + esc(k.projects.join(", ")) : " only"}</td>
+      <td class="hint">${k.secret_names.length ? esc(k.secret_names.join(", ")) : "all of its groups"}</td>
+      <td class="hint">${k.slots.length ? esc(k.slots.join(", ")) : "any"}</td></tr>`).join("");
+  $("#main").innerHTML = `
+    <h2>Secrets</h2>
+    <p class="hint">Keys and passwords that Studio slot containers (and other Foundry machines) pull from this router, grouped per game
+      (project) plus <b>shared</b>. Values are encrypted at rest and <b>write-only</b>: you can set, rotate or clear them, never read them back.
+      Each container gets its own client key with the <b>secrets</b> scope (Access → Clients &amp; Keys, preset “slot”), so revoking one
+      machine means disabling its key. A slot writes its values to <code>/run/secrets/&lt;file&gt;</code> (memory only, mode 600).</p>
+    ${warnAdmin}${httpNote}
+    <div class="card"><h3>Store ${stPill}</h3>${lockCard}
+      ${st.failed_unlocks ? `<p class="hint">${st.failed_unlocks} wrong passphrase(s) since the last unlock.</p>` : ""}</div>
+    <div class="card"><h3>Values</h3>
+      ${rows ? `<div class="tscroll"><table><tr><th>name</th><th>group</th><th>file in the slot</th><th>value</th><th>last pulled</th><th>keys that can read it</th><th></th></tr>${rows}</table></div>` : '<p class="hint">No secrets yet.</p>'}
+      <h4>Add a secret</h4>
+      <div class="row"><label title="shared, or a game (project). Type a project id that isn't listed yet.">group</label><input id="sx-g" list="sx-groups" value="${esc(groups[0] || "shared")}" style="width:160px"><datalist id="sx-groups">${groups.map(g => `<option value="${esc(g)}">`).join("")}</datalist>
+        <label title="UPPER_SNAKE_CASE">name</label><input id="sx-n" placeholder="ROBLOX_OPEN_CLOUD_KEY">
+        <label title="The file name in the slot's /run/secrets (default: the name in lower case + .txt)">file</label><input id="sx-f" placeholder="roblox_open_cloud_key.txt"></div>
+      <div class="row"><label>description</label><input id="sx-desc" style="min-width:320px" placeholder="what it is for, who reads it">
+        <button class="act primary" id="sx-add">Add</button></div></div>
+    <div class="card"><h3>Keys with the secrets scope</h3>
+      ${keys ? `<div class="tscroll"><table><tr><th>key</th><th>enabled</th><th>groups</th><th>names</th><th>slots</th></tr>${keys}</table></div>` : '<p class="hint">None yet. Make one on Access → Clients &amp; Keys with the “slot” preset.</p>'}</div>
+    <div class="card"><h3>Transport</h3>
+      <div class="row"><label title="Serve secret values (pulls, setting a value, the passphrase) over plain HTTP too. Off = HTTPS only."><input type="checkbox" id="sx-http" ${s.allow_http ? "checked" : ""}> allow plain HTTP for secrets</label>
+        <label title="A second, HTTPS-only port with a self-signed certificate the router makes. Clients pin its fingerprint. Restart the router after changing this."><input type="checkbox" id="sx-https" ${s.https_enabled ? "checked" : ""}> HTTPS listener</label>
+        <label>port</label><input type="number" id="sx-port" min="1" max="65535" value="${esc(s.https_port)}" style="width:90px"></div>
+      <div class="row"><label title="Days of pull log kept (0 = forever)">pull log days</label><input type="number" id="sx-days" min="0" max="3650" value="${esc(s.pull_log_days)}" style="width:90px">
+        <label title="A control-center alert when a key gets the secrets scope and on a key's first pull."><input type="checkbox" id="sx-alert" ${s.alert_on_new_access ? "checked" : ""}> alert on new secret access</label>
+        <button class="act primary" id="sx-save">Save</button></div>
+      <p class="hint">This page: <b>${esc(d.transport.toUpperCase())}</b>.
+        ${tls ? `HTTPS port ${esc(tls.port)} ${tls.listening ? pill("listening", "ok") : pill("not running: restart the router", "warn")}
+          ${tls.fingerprint ? `<br>Certificate SHA-256: <code style="overflow-wrap:anywhere">${esc(tls.fingerprint)}</code> (a slot's <code>FOUNDRY_TLS_FINGERPRINT</code>)` : ""}` : "HTTPS listener off."}
+        The router's compose file must publish the HTTPS port (<code>FOUNDRY_TLS_PORT</code>, default 11436).</p></div>
+    <div class="card"><h3>Pull log</h3><div class="row"><label>client</label><input id="sx-pc" placeholder="any">
+      <button class="act" id="sx-pl">Show</button></div><div id="sx-pulls"></div></div>`;
+  const val = id => ($("#" + id) || {}).value || "";
+  const wipe = (...ids) => ids.forEach(id => { const e = $("#" + id); if (e) e.value = ""; });
+  const after = p => p.then(r => { toast("Saved"); render(); return r; }).catch(e => toast(e.message, true));
+  const bi = $("#sx-init");
+  if (bi) bi.onclick = () => {
+    if (val("sx-p1") !== val("sx-p2")) return toast("The two passphrases differ", true);
+    const p = val("sx-p1"); wipe("sx-p1", "sx-p2");
+    after(api("secrets/init", {method: "POST", body: {passphrase: p}}));
+  };
+  const bu = $("#sx-unlock");
+  if (bu) { const go = () => { const p = val("sx-unlock-p"); wipe("sx-unlock-p"); after(api("secrets/unlock", {method: "POST", body: {passphrase: p}})); };
+    bu.onclick = go; $("#sx-unlock-p").onkeydown = e => { if (e.key === "Enter") go(); }; }
+  const bl = $("#sx-lock");
+  if (bl) bl.onclick = () => { if (confirm("Lock the store? Pulls fail until you unlock it again.")) after(api("secrets/lock", {method: "POST"})); };
+  const bc = $("#sx-change");
+  if (bc) bc.onclick = () => {
+    if (val("sx-new1") !== val("sx-new2")) return toast("The two new passphrases differ", true);
+    const body = {old: val("sx-old"), new: val("sx-new1")}; wipe("sx-old", "sx-new1", "sx-new2");
+    after(api("secrets/passphrase", {method: "POST", body}));
+  };
+  $("#sx-add").onclick = () => after(api("secrets/define", {method: "POST", body: {group: val("sx-g").trim(),
+    name: val("sx-n").trim(), file: val("sx-f").trim(), description: val("sx-desc")}}));
+  $("#sx-save").onclick = () => api("secrets/settings", {method: "POST", body: {allow_http: $("#sx-http").checked,
+    https_enabled: $("#sx-https").checked, https_port: Number(val("sx-port")), pull_log_days: Number(val("sx-days")),
+    alert_on_new_access: $("#sx-alert").checked}})
+    .then(r => { toast(r.note || "Saved", !!r.restart_needed); render(); }).catch(e => toast(e.message, true));
+  const path = gn => gn.split("/").map(encodeURIComponent).join("/");
+  document.querySelectorAll("[data-sx-set]").forEach(b => b.onclick = () => {
+    const gn = b.dataset.sxSet;
+    const body = openModal(`Set ${gn}`, `
+      <p>Type or paste the value, or load it from a file (it goes straight to the router; this page never shows it again).</p>
+      <div class="row"><input type="password" id="sxv" autocomplete="new-password" spellcheck="false" style="min-width:360px" placeholder="value"></div>
+      <div class="row"><label>or from a file</label><input type="file" id="sxf"></div>
+      <div class="row"><button class="act primary" id="sxv-go">Save value</button></div>
+      <p class="hint">Rotating: slots pick the new value up at their next pull (container start and each gate run).</p>`);
+    $("#sxv-go", body).onclick = async () => {
+      let v = $("#sxv", body).value;
+      const f = $("#sxf", body).files[0];
+      if (!v && f) { if (f.size > 16384) return toast("The file is over 16 KB", true); v = await f.text(); }
+      if (!v) return toast("No value", true);
+      $("#sxv", body).value = ""; $("#sxf", body).value = "";
+      api(`secrets/${path(gn)}`, {method: "PUT", body: {value: v}}).then(() => { v = ""; closeModal(); toast("Value saved"); render(); })
+        .catch(e => { v = ""; toast(e.message, true); });
+    };
+  });
+  document.querySelectorAll("[data-sx-edit]").forEach(b => b.onclick = () => {
+    const x = d.secrets.find(y => `${y.group}/${y.name}` === b.dataset.sxEdit);
+    const body = openModal(`Edit ${b.dataset.sxEdit}`, `
+      <div class="row"><label>file</label><input id="sxe-f" value="${esc(x.file)}"></div>
+      <div class="row"><label>description</label><input id="sxe-d" value="${esc(x.description || "")}" style="min-width:320px"></div>
+      <div class="row"><button class="act primary" id="sxe-go">Save</button></div>
+      <p class="hint">To move a secret to another group, add it there and delete this one.</p>`);
+    $("#sxe-go", body).onclick = () => api("secrets/define", {method: "POST", body: {group: x.group, name: x.name,
+      file: $("#sxe-f", body).value.trim(), description: $("#sxe-d", body).value}}).then(() => { closeModal(); toast("Saved"); render(); }).catch(e => toast(e.message, true));
+  });
+  document.querySelectorAll("[data-sx-clear]").forEach(b => b.onclick = () => {
+    if (confirm(`Clear the value of ${b.dataset.sxClear}? Slots lose it at their next pull.`)) after(api(`secrets/${path(b.dataset.sxClear)}/clear`, {method: "POST"}));
+  });
+  document.querySelectorAll("[data-sx-del]").forEach(b => b.onclick = () => {
+    if (confirm(`Delete ${b.dataset.sxDel}? Its value is gone for good.`)) after(api(`secrets/${path(b.dataset.sxDel)}`, {method: "DELETE"}));
+  });
+  const showPulls = () => api(`secrets/pulls?limit=100&client=${encodeURIComponent(val("sx-pc").trim())}`).then(r => {
+    $("#sx-pulls").innerHTML = r.pulls.length ? `<div class="tscroll"><table><tr><th>when</th><th>client</th><th>from</th><th>via</th><th>project / slot</th><th>result</th><th>names</th></tr>${r.pulls.map(p => `<tr>
+      <td class="nw">${when(p.ts)}</td><td class="nw">${esc(p.client)}</td><td class="hint">${esc(p.addr || "")}<div>${esc((p.agent || "").slice(0, 50))}</div></td>
+      <td class="nw">${esc(p.transport || "")}</td><td class="nw">${esc(p.project || "shared")}${p.slot ? " / " + esc(p.slot) : ""}</td>
+      <td class="nw">${p.outcome === "ok" || p.outcome === "unchanged" ? pill(p.outcome, "ok") : pill(p.outcome, "bad")}<div class="hint">${esc(p.detail || "")}</div></td>
+      <td class="hint" style="white-space:normal">${esc((p.names || []).join(", "))}</td></tr>`).join("")}</table></div>` : '<p class="hint">No pulls yet.</p>';
+  }).catch(e => toast(e.message, true));
+  $("#sx-pl").onclick = showPulls; showPulls();
 }
 
 // Setup → Helpers & Limits: per-backend concurrency and helper streams,

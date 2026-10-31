@@ -8,6 +8,9 @@ pydantic==2.10.4
 PyYAML==6.0.2
 langgraph==1.0.2
 mcp==1.9.4
+# The central secret store (AES-256-GCM at rest) and the HTTPS listener's
+# self-signed certificate (secret_store.py, tls.py).
+cryptography==49.0.0
 # Semantic cache vector search (optional acceleration): if the SQLite build
 # can't load extensions, the cache falls back to a pure-Python cosine scan.
 sqlite-vec==0.1.6

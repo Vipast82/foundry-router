@@ -722,10 +722,15 @@ class ClientConfig(BaseModel):
     key_hash: Optional[str] = None
     key_hint: Optional[str] = None
     scopes: list[Literal["inference", "media", "admin", "orchestration", "telemetry",
-                         "operator"]] = Field(default_factory=lambda: ["inference"])
+                         "operator", "secrets"]] = Field(default_factory=lambda: ["inference"])
     # Optional: only these coordinator projects (control center, telemetry,
-    # operator actions). Empty = every project.
+    # operator actions). Empty = every project. For the `secrets` scope empty
+    # means the `shared` group only (secrets_api.py).
     projects: list[str] = Field(default_factory=list)
+    # `secrets` scope only: only these secret names (empty = every secret of its
+    # groups) and only these Studio slots (empty = any slot of its projects).
+    secret_names: list[str] = Field(default_factory=list)
+    slots: list[str] = Field(default_factory=list)
     # Optional: only these personas are visible/usable for this client.
     personas: list[str] = Field(default_factory=list)
     enabled: bool = True
@@ -740,6 +745,24 @@ class ClientConfig(BaseModel):
     mcp_with_client_tools: Optional[Union[str, list]] = None
     note: str = ""                     # free text: what/where this client is
     created: Optional[str] = None      # ISO time the key was made / last rotated
+
+
+class SecretsConfig(BaseModel):
+    """The central secret store (secret_store.py, Setup → Secrets). Values never
+    live here: only how they may travel."""
+    # Serve secret traffic (pulls, value writes, unlock) over plain HTTP too.
+    # Off = HTTPS only (needs https_enabled).
+    allow_http: bool = True
+    # A second, HTTPS-only listener with a self-signed certificate the router
+    # makes (<data>/tls/); its SHA-256 fingerprint is shown on Setup → Secrets and
+    # pinned by slot-secrets. Restart the router after changing these.
+    https_enabled: bool = False
+    https_port: int = Field(default=11436, ge=1, le=65535)
+    # Days of pull log kept (0 = forever).
+    pull_log_days: int = Field(default=180, ge=0, le=3650)
+    # Raise a control-center alert when a key is given the secrets scope and on
+    # a key's first pull (always on while the web UI is unprotected).
+    alert_on_new_access: bool = True
 
 
 class ClientAuthConfig(BaseModel):
@@ -1020,6 +1043,7 @@ class AppConfig(BaseModel):
     logging: LoggingConfig = Field(default_factory=LoggingConfig)
     clients: list[ClientConfig] = Field(default_factory=list)
     client_auth: ClientAuthConfig = Field(default_factory=ClientAuthConfig)
+    secrets: SecretsConfig = Field(default_factory=SecretsConfig)
     media: MediaConfig = Field(default_factory=MediaConfig)
     # Default persona sets (profiles.py) applied at startup: missing personas
     # are created, untouched ones updated to the profile's newer version, edited

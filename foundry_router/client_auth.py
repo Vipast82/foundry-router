@@ -13,6 +13,8 @@ in the logs and budgets) and its scopes decide what it may reach:
   orchestration  /v1/foundry/* (coordinator bindings/state, claiming operator actions)
   telemetry  /v1/foundry/telemetry/* (the workstation bridge's observations; also
              accepted from an orchestration key)
+  secrets    /v1/foundry/secrets/* (a Studio slot or machine pulling its secret
+             bundle; limited by the key's projects, secret_names and slots)
   operator   the coordinator control center (/control/api/*): a person signs in
              once with this key and gets an HttpOnly session; the key is never
              kept by the browser (control_api.py). admin also works.
@@ -93,6 +95,8 @@ def scope_for(path: str) -> Optional[str]:
         return "media"         # Foundry's built-in image tools
     if path.startswith("/mcp"):
         return None            # Foundry-MCP has its own token (mcp_aggregator.token)
+    if path.startswith("/v1/foundry/secrets/"):
+        return "secrets"         # Studio slots / machines pulling their bundle (secrets_api.py)
     if path.startswith("/v1/foundry/telemetry/"):
         return "telemetry"       # workstation bridge: read-only observations in (control_api.py)
     if path.startswith("/v1/foundry/"):
@@ -140,7 +144,9 @@ def identify(cfg, headers: dict, agent_tokens: Optional[dict] = None) -> tuple[O
             if matches(k, c):
                 return ({"client_id": c.name, "scopes": list(c.scopes or ["inference"]),
                          "personas": list(c.personas or []),
-                         "projects": list(getattr(c, "projects", None) or [])}, True)
+                         "projects": list(getattr(c, "projects", None) or []),
+                         "secret_names": list(getattr(c, "secret_names", None) or []),
+                         "slots": list(getattr(c, "slots", None) or [])}, True)
         for tok, name in (agent_tokens or {}).items():
             if tok and hmac.compare_digest(k.encode(), tok.encode()):
                 return ({"client_id": f"agent:{name}", "scopes": ["inference", "media"],
@@ -204,6 +210,11 @@ class ClientAuthMiddleware:
                 problem = _deny(401 if client is None else 403,
                                 "telemetry needs a client key with the telemetry (or "
                                 "orchestration) scope", "insufficient_scope")
+        elif need == "secrets":
+            if client is None or "secrets" not in client["scopes"]:
+                problem = _deny(401 if client is None else 403,
+                                "secret pulls need a client key with the secrets scope",
+                                "insufficient_scope")
         elif need == "orchestration":
             ok = {"orchestration", "admin"} | (
                 {"operator"} if path in CLIENT_RELAY_PATHS or path.startswith(

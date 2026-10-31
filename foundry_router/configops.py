@@ -113,6 +113,9 @@ def secret_values(svc) -> set[str]:
     for k, v in os.environ.items():
         if _SECRET_ENV_RE.search(k) and v and len(v) >= 6:
             vals.add(v)
+    store = getattr(svc, "secret_store", None)          # the central store, while unlocked
+    if store is not None:
+        vals |= store.known_values()
     return vals
 
 

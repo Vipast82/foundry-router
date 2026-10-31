@@ -15,6 +15,9 @@ services:
     restart: unless-stopped
     ports:
       - "${FOUNDRY_PORT:-11435}:11435"
+      # the HTTPS listener for secret traffic (Access → Secrets → Transport; off until you
+      # turn it on there and restart). Nothing listens here while it is off.
+      - "${FOUNDRY_TLS_PORT:-11436}:11436"
     volumes:
       # Both mounts are load-bearing: config.yaml and the SQLite DB must
       # survive `docker compose down && up` and image rebuilds.

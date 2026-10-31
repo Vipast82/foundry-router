@@ -203,7 +203,8 @@
   .sf .ctl { grid-row:span 2; display:flex; align-items:center; gap:6px; align-self:start; }
   .sf .d { color:var(--dim); font-size:12px; }
   .sf .err { grid-column:1 / -1; color:var(--bad); font-size:12px; }
-  .sf.mod label.k::before { content:""; width:6px; height:6px; border-radius:50%; background:var(--accent); }
+  .sf.sf-slots { display:block; } .sf-slots fieldset { min-width:0; } .sf-slots legend { display:flex; gap:8px; align-items:center; }
+  .sf.mod > label.k::before { content:""; width:6px; height:6px; border-radius:50%; background:var(--accent); }
   .sf input[type=number] { width:7em; } .sf input[type=text] { width:min(260px, 52vw); }
   .sf textarea { width:min(300px, 60vw); min-height:58px; }
   /* role rules */
@@ -1113,6 +1114,7 @@ $("#main").addEventListener("change", e => {
   }
   else if (a === "dr-whatif") { $("#dr-whatif-box").hidden = !t.checked; }
   else if (a === "set") setField(t);
+  else if (a === "slot-set") slotSet(t);
   else if (a === "q-project") { S.project = t.value; S.queue = null; renderQueue(); }
   else if (a === "q-view") { S.qView = t.value === "table" ? "table" : "board"; store("fr.auto.qview", S.qView); renderQueue(); }
 });
@@ -1139,6 +1141,16 @@ $("#main").addEventListener("click", e => {
   else if (a === "role-rules") openCell(b.dataset.role, "_role");
   else if (a === "test-path") testPath($("#pt-role").value, $("#pt-op").value, $("#pt-path").value, $("#pt-out"));
   else if (a === "set-reset") resetField(b.dataset.key);
+  else if (a === "slot-add") {
+    const sid = ($("#slot-new").value || "").trim();
+    if (!/^[A-Za-z0-9][A-Za-z0-9_-]{0,39}$/.test(sid)) return toast("Slot ids are letters, digits, _ and -", true);
+    edit(dd => { dd.settings = dd.settings || {}; dd.settings.slots = dd.settings.slots || {};
+                 if (!dd.settings.slots[sid]) dd.settings.slots[sid] = {container: "", enabled: true}; });
+  }
+  else if (a === "slot-del") {
+    if (!confirm(`Remove slot ${b.dataset.slot} from the draft?`)) return;
+    edit(dd => { delete ((dd.settings || {}).slots || {})[b.dataset.slot]; });
+  }
   else if (a.startsWith("tr-")) trackClick(a, b);
   else if (a.startsWith("pq-")) prepClick(a, b);
   else if (a.startsWith("svc-")) servicesClick(a, b);
@@ -1265,6 +1277,11 @@ function schemaFields() {
     const prefix = f.key.slice(0, f.key.indexOf(".*"));
     if (!prefix || seen.has(prefix) || [...explicit].some(k => k.startsWith(prefix + "."))) continue;
     seen.add(prefix);
+    if (prefix === "slots") {         // Studio slots: one form per named slot (slotsHtml)
+      out.push({...f, key: "slots", type: "slots", default: {}, table: "slots", label: "Studio slots",
+                description: "One container per slot. Add a slot, fill in its container (and host for another machine), deploy."});
+      continue;
+    }
     out.push({...f, key: prefix, type: "map", item_type: f.type, default: {}, table: prefix.split(".")[0],
               label: prefix.split(".").pop().replace(/_/g, " ") + " (by name)"});
   }
@@ -1273,7 +1290,47 @@ function schemaFields() {
   return out;
 }
 function settingVal(f, d = doc()) { const v = getPath(d.settings || {}, f.key); return v === undefined ? f.default : v; }
+// Studio slots (schema slots.*.<key>): a small form per slot, edited in the draft
+function slotFields() { return ((S.schema && S.schema.fields) || []).filter(f => f.key.startsWith("slots.*.")); }
+function slotsHtml(f) {
+  const v = settingVal(f) || {}, dep = settingVal(f, S.deployed) || {};
+  const mod = JSON.stringify(v) !== JSON.stringify(dep);
+  const rows = Object.entries(v).map(([sid, s]) => {
+    const ctl = slotFields().map(sf => {
+      const k = sf.key.slice(8), val = s[k] === undefined ? sf.default : s[k];
+      const id = `slot-${sid}-${k}`.replace(/[^a-zA-Z0-9_-]/g, "-");
+      const common = `id="${esc(id)}" data-act="slot-set" data-slot="${esc(sid)}" data-k="${esc(k)}" title="${esc(sf.description || "")}"`;
+      let c;
+      if (sf.type === "bool") c = `<label class="sw"><input type="checkbox" ${common} ${val ? "checked" : ""}>${val ? "On" : "Off"}</label>`;
+      else if (sf.type === "int") c = `<input type="number" ${common} value="${esc(val ?? 0)}" step="1" ${sf.min != null ? `min="${sf.min}"` : ""}>`;
+      else if (sf.type === "list") c = `<input type="text" ${common} value="${esc((val || []).join(" "))}" placeholder="space-separated">`;
+      else c = `<input type="text" ${common} value="${esc(val ?? "")}">`;
+      return `<div class="sf"><label class="k" for="${esc(id)}">${esc(k.replace(/_/g, " "))}</label><div class="ctl">${c}</div><div class="d">${esc(sf.description || "")}</div></div>`;
+    }).join("");
+    return `<fieldset class="card" style="margin:8px 0"><legend><b>${esc(sid)}</b>
+      <button class="ic" type="button" data-act="slot-del" data-slot="${esc(sid)}" aria-label="Remove slot ${esc(sid)}" title="Remove this slot">✕</button></legend>${ctl}</fieldset>`;
+  }).join("");
+  return `<div class="sf sf-slots${mod ? " mod" : ""}" data-sf="slots">
+    <label class="k">Studio slots <code class="hint" style="margin:0;font-weight:400">slots</code>${mod ? ` <span class="pill info">changed</span>` : ""}</label>
+    <div class="d">${esc(f.description || "")} A slot's secrets come from Setup → Secrets with its own slot key.</div>
+    ${rows || `<p class="hint">No slots in the router's settings yet (the coordinator may still have some in its project.toml: Import brings them in).</p>`}
+    <div class="row"><input type="text" id="slot-new" placeholder="new slot id, e.g. slot-2" aria-label="New slot id">
+      <button class="act" type="button" data-act="slot-add">Add slot</button></div>
+    ${storeErr("slots") ? `<div class="err" role="alert">${esc(storeErr("slots"))}</div>` : ""}</div>`;
+}
+function slotSet(t) {
+  const sf = slotFields().find(x => x.key === "slots.*." + t.dataset.k); if (!sf) return;
+  let v;
+  if (sf.type === "bool") v = t.checked;
+  else if (sf.type === "int") { v = Number(t.value || 0); if (!Number.isInteger(v)) return toast("Whole number", true); }
+  else if (sf.type === "list") { const xs = t.value.split(/[\s,]+/).filter(Boolean); v = sf.item_type === "int" ? xs.map(Number) : xs;
+    if (sf.item_type === "int" && v.some(x => !Number.isInteger(x))) return toast("Whole numbers", true); }
+  else v = t.value;
+  edit(dd => { dd.settings = dd.settings || {}; dd.settings.slots = dd.settings.slots || {};
+               (dd.settings.slots[t.dataset.slot] = dd.settings.slots[t.dataset.slot] || {})[t.dataset.k] = v; }, false);
+}
 function fieldHtml(f) {
+  if (f.type === "slots") return slotsHtml(f);
   const v = settingVal(f), id = "sf-" + f.key.replace(/[^a-zA-Z0-9_-]/g, "-");
   const mod = JSON.stringify(v) !== JSON.stringify(settingVal(f, S.deployed));
   const isDef = JSON.stringify(v) === JSON.stringify(f.default);

@@ -10,19 +10,40 @@ Foundry v0.158.15 the coordinator sends work to a slot: a track started with
 `tracks start <project> <name> <sprints> --slot slot-1` runs its scripted Studio gate inside the
 slot (the slot's checkout is moved to the track's commit, outputs are copied back into the track's
 worktree) and its sessions' Studio MCP tools reach the slot's Studio (`docker exec`). The slot is
-configured in the project's `project.toml` as `[slots.slot-1]`. First real sprint: AS-J05.
+configured on the router (Automation → Settings → Studio slots, `[slots.slot-1]`; a coordinator's
+`project.toml` still works). First real sprint: AS-J05.
 
-## Roblox Open Cloud (Creator API) access
+## Secrets and slot settings come from the router (since Foundry v0.159.0)
 
-Asset sprints upload models, animations, audio and images through AU's
-`tools/assets/roblox_cloud.py`, the only tool that reads the Open Cloud key. The slot gets the
-workstation's key file as a **read-only mount** (`/run/secrets/roblox_open_cloud_key.txt`, never baked
-into the image) and `AU_ROBLOX_KEY_FILE` points the tool at it (docker-compose.yml). Check it without
-touching the key:
+The slot pulls its secrets from the Foundry router's central store (Access → Secrets, see
+`docs/SECRETS_STORE.md`) with **its own client key**. `slot-secrets` runs at container start and
+from `slot-checkout` before every gate run. It writes each value to `/run/secrets/<file>`: a
+**tmpfs** (memory only, mode 600, gone when the container stops), never the image, the environment
+or a log.
+
+- **Router away or store locked:** the last files stay.
+- **Key disabled:** the files are deleted at the next pull, which is how you revoke a slot.
+- **Settings:** the router's slot settings (place, universe, never-sync places) go to
+  `~/.config/foundry-slot/slot.env` and win over the compose values.
+
+Set up once:
+1. On the router, Access → Clients & Keys:
+   - preset **slot**;
+   - only projects `animaluprising`, only slots `slot-1`;
+   - copy the key it shows once into `contrib/studio-slot/secrets/slot-key.txt` (git-ignored; on a
+     mini PC: `/srv/studio-slot/slot-key/slot-key.txt`, mode 600, owner 1000).
+2. `FOUNDRY_URL` in `docker-compose.yml` points at the router (`http://192.168.0.112:11435`). With
+   the router's HTTPS listener, use `https://...:11436` and set `FOUNDRY_TLS_FINGERPRINT` to the
+   fingerprint the Secrets page shows.
+3. `docker compose up -d --build`, then check:
+   `docker exec studio-slot-poc slot-secrets --status` (names and dates only).
+
+Roblox Open Cloud (Creator API): asset sprints upload through AU's `tools/assets/roblox_cloud.py`,
+the only reader of the key. It reads `AU_ROBLOX_KEY_FILE=/run/secrets/roblox_open_cloud_key.txt`,
+the file the router's `ROBLOX_OPEN_CLOUD_KEY` secret (group `animaluprising`) lands in. Check it
+without touching the key:
 
     docker exec studio-slot-poc bash -lc 'cd ~/work/AnimalUprising && python3 tools/assets/roblox_cloud.py selftest && python3 tools/assets/roblox_cloud.py asset --id <an uploaded asset id>'
-
-On a mini PC, put the key file on the host (mode 600) and mount it the same way.
 
 ## Run on this PC (Docker Desktop)
 
@@ -146,14 +167,19 @@ slot's `origin`) and the deployed Foundry to a Foundry mirror whose checkout is 
    (nesting + keyctl, 16 GB, 6 cores; the Intel iGPU lines are optional).
 2. **Inside the LXC** as root: `bash setup-host.sh "<workstation ssh public key>"`: Docker + compose,
    the `studio` user (uid 1000, the image's), `/srv/studio-slot/{AnimalUprising.git, foundry.git,
-   foundry, secrets}`. It prints the remaining steps:
+   foundry, slot-key}`. It prints the remaining steps:
 3. seed the two mirrors from the workstation (`git push` over ssh), check out Foundry on the host;
-4. the slot's **own place** in `proxmox/.env` (one edit session per place per account: never the
-   workstation's TEST place or another slot's place);
-5. the Open Cloud key: **you** copy it to `/srv/studio-slot/secrets/` (mode 600, owner 1000);
+4. `proxmox/.env`:
+   - the slot's **own place** (one edit session per place per account: never the workstation's
+     TEST place or another slot's place);
+   - `FOUNDRY_URL` and `FOUNDRY_SLOT`;
+5. the slot's **key** (Access → Clients & Keys, preset slot): **you** copy it to
+   `/srv/studio-slot/slot-key/slot-key.txt` (mode 600, owner 1000). The Open Cloud key stays on the
+   router;
 6. `docker compose up -d --build` in `proxmox/`, then sign Studio in once through an ssh tunnel
    (`ssh -L 6080:localhost:6080 studio@<lxc>`; noVNC never leaves the LXC's localhost);
-7. `project.toml`:
+7. the router: Automation → Settings → Studio slots, add `slot-2` and deploy (or in
+   `project.toml`):
 
    ```toml
    [slots.slot-2]
@@ -183,8 +209,9 @@ iGPUs once `/dev/dri` is mapped; WineD3D if DXVK misbehaves.
 | `studio-mcp-official.sh` | Roblox's StudioMCP.exe under Wine (newest Studio version) |
 | `studio-plugin-settings.js` | Rojo auto-sync + Studio MCP plugin settings |
 | `rojo-seed.sh` | the slot place's saved Rojo endpoint (`<placeId>=<project>`) for the settings |
+| `slot-secrets.py` | pulls the slot's secrets + settings from the router into `/run/secrets` (tmpfs) |
 | `proxmox/docker-compose.yml`, `proxmox/.env.example` | the slot on a Proxmox LXC (no Windows mounts) |
-| `proxmox/setup-host.sh` | prepares the LXC (Docker, `studio` user, mirrors, secrets dir) |
+| `proxmox/setup-host.sh` | prepares the LXC (Docker, `studio` user, mirrors, slot-key dir) |
 | `proxmox/lxc.conf.example` | the Proxmox container settings (nesting, keyctl, memory, iGPU) |
 | `studio-auth-handler.sh`, `studio-auth.desktop` | the browser sign-in hand-back |
 | `openbox-studio.xml` | window rules (playtest windows stay small) |

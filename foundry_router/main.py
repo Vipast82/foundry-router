@@ -157,6 +157,11 @@ class Services:
         self.alerts = AlertService(self.control, lambda: self.config_store.config.alerts)
         from .automation_store import AutomationStore
         self.automation = AutomationStore(db)
+        # the central secret store: its own file beside the DB, locked until the
+        # passphrase is entered on Setup → Secrets (secret_store.py)
+        from .secret_store import SecretStore
+        self.secret_store = SecretStore(
+            Path(getattr(db, "path", data_dir() / "foundry.sqlite")).parent / "secrets.sqlite")
         # operator chat (W3): threads, tool catalog, confirm cards; its model
         # calls go through this app's own /v1/chat/completions (app set in create_app)
         from .chat_engine import ChatEngine
@@ -531,6 +536,11 @@ class Services:
                                         self.config_store.config.budgets.retention_days or 90)
             except Exception:
                 log.exception("media / ledger prune failed")
+            try:
+                await asyncio.to_thread(self.secret_store.prune,
+                                        self.config_store.config.secrets.pull_log_days)
+            except Exception:
+                log.exception("secret pull log prune failed")
             await asyncio.sleep(max(5, int(cfg.prune_interval_minutes or 60)) * 60)
 
     async def refresh_brain_health(self) -> dict:
@@ -770,5 +780,7 @@ def create_app(config_path: Optional[Path] = None,
     services.chat.app = app
     from .ui.alerts_routes import router as alerts_router
     app.include_router(alerts_router)
+    from .secrets_api import router as secrets_router
+    app.include_router(secrets_router)
     app.include_router(ui_router)
     return app

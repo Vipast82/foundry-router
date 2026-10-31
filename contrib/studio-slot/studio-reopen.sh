@@ -5,6 +5,8 @@
 # closed, so Rojo reconnects and syncs on open without a prompt.
 #   studio-reopen [--wait]     --wait: block until the slot's window is back (max 240 s)
 set -u
+# the router's slot settings (slot-secrets): this slot's place link and never-sync places
+[ -f "$HOME/.config/foundry-slot/slot.env" ] && . "$HOME/.config/foundry-slot/slot.env"
 PREFIX="$HOME/.local/share/vinegar/prefixes/studio"
 RBX="$PREFIX/drive_c/users/$(id -un)/AppData/Local/Roblox"
 touch /tmp/studio-reopening
