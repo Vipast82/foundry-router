@@ -1,7 +1,9 @@
 # Animal Uprising 3D asset pipeline: review against "4 ways to make 3D models with AI" (2026-11-01)
 
 Status: **approved 2026-11-01** (Victor: "Yes, recommended": D1-D5 as recommended below; start
-Phase A). Phase A is the AU sprint AS-P9 "reference packs"; Phase B waits until AS-P9 is queued.
+Phase A). Phase A is the AU sprint AS-P9 "reference packs": its plan is pre-coded (a one-file
+prep patch that adds `docs/progress/AS-P9_PLAN.md`) and not queued yet. Phase B waits until AS-P9 is
+queued.
 Sources read: the video page, chapters, description and transcript (built-in browser, 2026-11-01);
 AU (read only) `docs/ASSET_PIPELINE.md`, `docs/ASSET_AUTOPILOT.md`, `docs/design/ASSET_BIBLE.md`
 §0/§2.5/§2.6/§4.0, `tools/blender/*` (`build_bs_king.py`, `ref_setup.py`, `ref_template.json`,
@@ -23,7 +25,7 @@ AU (read only) `docs/ASSET_PIPELINE.md`, `docs/ASSET_AUTOPILOT.md`, `docs/design
      model is built as `UNSCALED CONCEPT`. Nothing checks that the front, side and back panels
      agree.
   2. **Only one side view.** The other side, the top and the underside are guessed. Three
-     sprints hit mirror mistakes (AS-E10, AS-G02, AS-P5).
+     sprints hit mirror mistakes (AS-E10, AS-J03, AS-G02).
   3. **The look gate is the builder grading its own work.** Foundry's independent vision
      approval sees Studio captures with a UI checklist, and never sees the concept.
   4. **One long session builds the model, faces, clips, Studio checks and upload**, instead of
@@ -161,9 +163,9 @@ upload → `studio_asset_check.luau` and 4 Studio captures → batch review card
   panels are not on a checked common scale, and there is one side view, not two.
 - **Mirror mistakes:**
   - **AS-E10:** "the grill was mirrored to the concept side" in the look gate.
-  - **AS-G02:** a lever and a crate brace were mirrored to the concept front in a look-gate
+  - **AS-J03:** a lever and a crate brace were mirrored to the concept front in a look-gate
     rework.
-  - **AS-P5:** the concept's FRONT and IN HAND panels are mirror images of each other. The
+  - **AS-G02:** the concept's FRONT and IN HAND panels are mirror images of each other. The
     cleaver was built from one, crossed the rig's face in Studio, and had to be rebuilt and
     re-uploaded.
 - **Left/right words in specs:** the King's builder says "His RIGHT side is +X … the monocle is
@@ -254,7 +256,7 @@ Ranked by impact per effort. "AU" means a change in the AU repo, done by a coord
   - **A small check** (in `mesh_report.py` or a new `side_check.py`) reads the built `.blend` and
     confirms each listed part's bounding-box centre is on the declared side of X. A mirrored part
     then fails in seconds, before export.
-  - **When two panels of one sheet are mirror images** (the AS-P5 case), `ref_align.py` reports
+  - **When two panels of one sheet are mirror images** (the AS-G02 case), `ref_align.py` reports
     it and the plan picks one before building.
 
 ### 3. Measure how well the shape matches the views
@@ -376,8 +378,8 @@ SLOT_BLENDER_PLAN B2b.
    that sprint.
 2. **Phase B, Foundry release(s):** gap 4 (asset judge), gap 7 (skills), gap 8 (replay), gap 5
    (turnaround recipe).
-3. **Phase C, pilot:** rebuild one asymmetric asset that is already done (e.g. the AS-G02 lever
-   prop or AS-P5's cleaver), the old way vs the new way. The judge scores both under shuffled
+3. **Phase C, pilot:** rebuild one asymmetric asset that is already done (e.g. the AS-J03 lever
+   prop or AS-G02's cleaver), the old way vs the new way. The judge scores both under shuffled
    letters; Victor compares on the review page.
 4. **Phase D** (only if the pilot shows a gain): gap 9 (fresh builder per model, optional second
    candidate) for all AS- sprints. Gaps 6 and 10 ride along in plan templates and config.
