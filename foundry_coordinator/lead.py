@@ -825,10 +825,17 @@ def router_moved_by_deploy(before: dict, after: dict) -> bool:
     """A deploy (fast-forward / checkout of a release) moves the router checkout's
     HEAD and leaves its tree clean; an edit by a session leaves it dirty. Only the
     first is ignored by the guard (revamp B9: 5 of 6 guard violations were
-    deploys while a lead ran)."""
-    return bool(before.get("head")) and bool(after.get("head")) and \
-        before.get("head") != after.get("head") and before.get("clean") is True and \
-        after.get("clean") is True
+    deploys while a lead ran).
+    2026-11-01: the live deploy checkout is never clean (it keeps untracked
+    project.toml backups), so a deploy there still aborted a lead call. A deploy
+    is also a HEAD move onto a release tag (vX.Y.Z) that leaves the dirty set as
+    it was; a session's edit changes the dirty set and its commit has no tag."""
+    if not (before.get("head") and after.get("head")) or before.get("head") == after.get("head"):
+        return False
+    if before.get("clean") is True and after.get("clean") is True:
+        return True
+    return bool(after.get("release_tag")) and bool(before.get("status")) and \
+        before.get("status") == after.get("status")
 
 
 def kilo_decision(rules: list[dict], perm: str, value: str) -> Optional[str]:
@@ -2411,9 +2418,13 @@ class LeadManager:
             st = subprocess.run(["git", "-C", path, "status", "--porcelain",
                                  "--untracked-files=all"], capture_output=True, text=True,
                                 timeout=120).stdout
+            tags = subprocess.run(["git", "-C", path, "tag", "--points-at", "HEAD"],
+                                  capture_output=True, text=True, timeout=60).stdout.split()
         except Exception:                                        # noqa: BLE001
             return {"path": path, "head": "", "status": ""}
-        return {"path": path, "head": head, "status": _sha(st)[:16], "clean": not st.strip()}
+        rel = next((x for x in tags if re.fullmatch(r"v\d+\.\d+\.\d+", x)), "")
+        return {"path": path, "head": head, "status": _sha(st)[:16], "clean": not st.strip(),
+                "release_tag": rel}
 
     def _db_marker(self, project_id: str, task_id: str) -> str:
         """An mtime-independent marker of the coordinator rows a session must

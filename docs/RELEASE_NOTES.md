@@ -2,6 +2,22 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.163.1 — a deploy no longer aborts a running lead call
+
+2026-11-01. The v0.163.0 deploy moved `foundry-deploy` while GF-RT3's lead diagnosis ran. The
+guard counted it as the lead touching the router checkout, discarded its report and asked a
+3-minute question whose default parked the sprint.
+
+- **Deploy check (`lead.router_moved_by_deploy`):** a deploy was recognised only on a clean
+  checkout, and the live checkout is never clean (untracked `project.toml` backups). A HEAD move
+  now also counts as a deploy when the new HEAD carries a release tag (`vX.Y.Z`) and the
+  checkout's dirty set is unchanged. An edit (dirty set changed) or an untagged commit is still
+  a violation.
+- The router snapshot (`LeadManager._git_state`) records `release_tag`, the `vX.Y.Z` tag at
+  HEAD, if any.
+- Tests: `tests/coordinator/test_revamp_lead.py` (deploy onto a tag with untracked backups; the
+  snapshot names the tag on a real git repo). 241 lead + engine tests pass.
+
 ## v0.163.0 — foundry-blender: run Blender on a Studio slot (slot Blender plan B1)
 
 2026-11-01. docs/plans/SLOT_BLENDER_PLAN.md (Victor: "do the container plan first"; D-B1 to

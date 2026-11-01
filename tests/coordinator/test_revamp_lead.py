@@ -175,6 +175,45 @@ def test_a_deploy_moving_the_router_head_on_a_clean_tree_is_not_a_violation():
     assert not router_moved_by_deploy({"head": "a"}, {"head": "b", "clean": True})
 
 
+def test_a_deploy_onto_a_release_tag_counts_even_when_the_checkout_keeps_untracked_backups():
+    # 2026-11-01: the live foundry-deploy checkout always has untracked project.toml backups,
+    # so it is never clean; v0.163.0's deploy aborted GF-RT3's lead call as a "violation"
+    before = {"path": "r", "head": "a" * 40, "status": "same", "clean": False, "release_tag": ""}
+    deploy = {**before, "head": "b" * 40, "release_tag": "v0.163.0"}
+    assert router_moved_by_deploy(before, deploy)
+    # the dirty set changed as well: an edit, not only a deploy
+    assert not router_moved_by_deploy(before, {**deploy, "status": "other"})
+    # a commit made in the checkout carries no release tag
+    assert not router_moved_by_deploy(before, {**deploy, "release_tag": ""})
+    # the head did not move: nothing to excuse
+    assert not router_moved_by_deploy(before, {**before, "release_tag": "v0.163.0"})
+
+
+def test_the_router_snapshot_names_the_release_tag_at_head(tmp_path):
+    import subprocess
+    from foundry_coordinator.lead import LeadManager
+    r = tmp_path / "router"
+    r.mkdir()
+
+    def g(*a):
+        subprocess.run(["git", "-C", str(r), *a], check=True, capture_output=True)
+    g("init", "-q")
+    g("config", "user.email", "t@t")
+    g("config", "user.name", "t")
+    (r / "f.txt").write_text("x")
+    g("add", "f.txt")
+    g("commit", "-qm", "one")
+    (r / "backup.bak").write_text("untracked")
+    s1 = LeadManager._git_state(str(r))
+    assert s1["release_tag"] == "" and s1["clean"] is False
+    (r / "f.txt").write_text("y")
+    g("commit", "-qam", "two")
+    g("tag", "v9.9.9")
+    s2 = LeadManager._git_state(str(r))
+    assert s2["release_tag"] == "v9.9.9" and s2["status"] == s1["status"]
+    assert router_moved_by_deploy(s1, s2)
+
+
 def test_a_write_access_fix_is_reverified_even_when_the_lead_says_wait(tmp_path):
     wait = {"classification": "environment",
             "hypothesis": "A stale harness line blocked the gate; I fixed and committed it.",
