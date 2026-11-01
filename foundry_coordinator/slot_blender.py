@@ -71,7 +71,115 @@ def local_changes(repo: str) -> tuple[list, list]:
     return files, deleted
 
 
-def remote_script(run_id: str, wait: int, threads: int, blender_args: list) -> str:
+# ----------------------------------------------------------------------------- B2b: library
+
+LIB_DIR = "$HOME/assetlib"                 # in the slot container's persistent home volume
+_LIB_MANIFEST, _LIB_HASH, _LIB_DELETE = ".foundry-manifest.json", ".foundry-manifest.sha", \
+    ".foundry-delete"
+# AU's tools that hard-code the library: on Linux these are paths relative to the checkout,
+# where foundry-blender puts links to the slot's copy (SLOT_BLENDER_PLAN B2b)
+LIB_SHIMS = ("C:/Roblox/AssetLibrary", "C:\\Roblox\\AssetLibrary")
+
+
+def lib_manifest(root: str) -> dict:
+    """{posix relpath: [size, whole-second mtime]} of every file under the library (hidden
+    names skipped)."""
+    out = {}
+    for d, dirs, files in os.walk(root):
+        dirs[:] = sorted(x for x in dirs if not x.startswith("."))
+        for f in files:
+            if f.startswith("."):
+                continue
+            p = os.path.join(d, f)
+            try:
+                st = os.stat(p)
+            except OSError:
+                continue
+            out[os.path.relpath(p, root).replace("\\", "/")] = [st.st_size, int(st.st_mtime)]
+    return out
+
+
+def lib_hash(manifest: dict) -> str:
+    import hashlib
+    return hashlib.sha256(json.dumps(manifest, sort_keys=True).encode()).hexdigest()
+
+
+def lib_diff(local: dict, remote: dict) -> tuple[list, list]:
+    """(files to send, files to delete on the slot)."""
+    send = sorted(p for p, v in local.items() if remote.get(p) != v)
+    gone = sorted(p for p in remote if p not in local)
+    return send, gone
+
+
+def _slot_out(slot, script: str, timeout: float = 120) -> tuple[int, bytes]:
+    from . import slots
+    r = subprocess.run(slots.exec_argv(slot, ["bash", "-c", script]), stdin=subprocess.DEVNULL,
+                       stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=timeout,
+                       creationflags=_NO_WINDOW)
+    return r.returncode, r.stdout
+
+
+def lib_sync(slot: dict, root: str, wait: int = 600) -> tuple[bool, str]:
+    """Bring the slot's copy of the library up to date: only new or changed files are sent (a
+    tar on stdin), files gone here are removed there, and the slot's manifest is written last
+    (an interrupted sync is simply redone). Holds the slot's Blender lock while it writes."""
+    from . import slots
+    if not root or not os.path.isdir(root):
+        return True, f"no asset library at {root or '(none set)'}: skipped"
+    local = lib_manifest(root)
+    h = lib_hash(local)
+    rc, out = _slot_out(slot, f'cat "{LIB_DIR}/{_LIB_HASH}" 2>/dev/null || true')
+    if rc != 0:
+        return False, "the slot did not answer"
+    if out.decode("utf-8", "replace").strip() == h:
+        return True, f"asset library up to date ({len(local)} files)"
+    rc, out = _slot_out(slot, f'cat "{LIB_DIR}/{_LIB_MANIFEST}" 2>/dev/null || echo "{{}}"', 300)
+    try:
+        remote = json.loads(out.decode("utf-8", "replace") or "{}")
+        remote = remote if isinstance(remote, dict) else {}
+    except ValueError:
+        remote = {}
+    send, gone = lib_diff(local, remote)
+    size = sum(local[p][0] for p in send)
+    log(f"asset library: sending {len(send)} file(s), {size / 1048576:.0f} MB; removing "
+        f"{len(gone)} (first copy is the whole library)")
+    script = f"""set -u
+mkdir -p "$HOME/locks" "{LIB_DIR}"
+exec 9>"$HOME/locks/blender.lock"
+flock -w {int(wait)} 9 || {{ echo "foundry-blender: the slot stayed busy" >&2; exit {BUSY_EXIT}; }}
+tar -xf - -C "{LIB_DIR}" || exit 70
+if [ -f "{LIB_DIR}/{_LIB_DELETE}" ]; then
+    (cd "{LIB_DIR}" && xargs -0 -r rm -f -- < "{_LIB_DELETE}"); rm -f "{LIB_DIR}/{_LIB_DELETE}"
+fi
+"""
+    p = subprocess.Popen(slots.exec_argv(slot, ["bash", "-c", script], interactive=True),
+                         stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=None,
+                         creationflags=_NO_WINDOW)
+    try:
+        with tarfile.open(fileobj=p.stdin, mode="w|") as tf:
+            for rel in send:
+                tf.add(os.path.join(root, *rel.split("/")), arcname=rel, recursive=False)
+            for name, data in ((_LIB_DELETE, "\0".join(gone).encode()),
+                               (_LIB_MANIFEST, json.dumps(local).encode()),
+                               (_LIB_HASH, h.encode())):           # the manifest goes last
+                if name == _LIB_DELETE and not gone:
+                    continue
+                ti = tarfile.TarInfo(name)
+                ti.size = len(data)
+                tf.addfile(ti, io.BytesIO(data))
+        p.stdin.close()
+    except (BrokenPipeError, OSError) as e:
+        p.kill()
+        p.wait()
+        return False, f"the library copy broke off ({e})"
+    rc = p.wait()
+    if rc != 0:
+        return False, f"the library copy failed (exit {rc})"
+    return True, f"asset library synced: {len(send)} sent, {len(gone)} removed"
+
+
+def remote_script(run_id: str, wait: int, threads: int, blender_args: list,
+                  library: bool = False) -> str:
     """The one script the slot runs (bash, in the container). `run_id` is [A-Za-z0-9._-]."""
     args = list(blender_args)
     if not any(a in ("-t", "--threads") for a in args):
@@ -98,7 +206,7 @@ if [ "$T" -le 0 ]; then
     T=$(awk '{{if ($1 == "max") print 0; else print int($1 / $2)}}' /sys/fs/cgroup/cpu.max 2>/dev/null)
     [ -n "$T" ] && [ "$T" -gt 0 ] || T=$(nproc)
 fi
-M="$HOME/locks/blender.marker"
+{_lib_shim_script() if library else ""}M="$HOME/locks/blender.marker"
 touch "$M"; sleep 1
 cd "$W"
 echo "foundry-blender: running on $(hostname) with $T threads: blender {quoted}" >&2
@@ -108,6 +216,16 @@ find . \\( -path ./.git -o -name __pycache__ \\) -prune -o -type f -newer "$M" -
     | tar --null -T - -cf -
 exit $rc
 """
+
+
+def _lib_shim_script() -> str:
+    """bash lines (in the slot, before Blender): AU_ASSET_LIBRARY, and the hard-coded library
+    paths of AU's tools linked to the slot's copy inside the checkout (made after `git clean`,
+    links only: never copied back, never committed)."""
+    lines = [f'export AU_ASSET_LIBRARY="{LIB_DIR}"', 'mkdir -p "$W/C:/Roblox"']
+    for shim in LIB_SHIMS:
+        lines.append(f'ln -sfn "{LIB_DIR}" "$W/{shim}"')
+    return "\n".join(lines) + "\n"
 
 
 def _send_tar(stream, repo: str, files: list, deleted: list) -> None:
@@ -225,7 +343,17 @@ def run(a, blender_args: list) -> int:
         log("cannot reach the slot's game mirror: "
             + (r.stderr or r.stdout).decode("utf-8", "replace").strip()[-300:])
         return 3
-    script = remote_script(run_id, a.wait, a.threads, blender_args)
+    # B2b: the game's asset library, copied into the slot (only what changed) before the run
+    library = "" if a.no_library else (a.library or str(cfg.get("library") or ""))
+    if library and os.path.isdir(library):
+        ok, msg = lib_sync(slot, library, a.wait)
+        log(msg)
+        if not ok:
+            return 3
+    elif library:
+        log(f"no asset library at {library} on this PC: running without it")
+        library = ""
+    script = remote_script(run_id, a.wait, a.threads, blender_args, library=bool(library))
     p = subprocess.Popen(slots.exec_argv(slot, ["bash", "-c", script], interactive=True),
                          stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=None,
                          creationflags=_NO_WINDOW)
@@ -321,6 +449,9 @@ def prepare(profile, state_dir: str) -> Optional[dict]:
     os.makedirs(os.path.dirname(cfg_path), exist_ok=True)
     cfg = {"project": getattr(profile, "id", ""), "slot": slot_id,
            "workspace": os.path.realpath(str(profile.workspace)),
+           # B2b: the asset library on this PC (setting blender.library; empty = none)
+           "library": str(((getattr(profile, "raw", None) or {}).get("blender") or {})
+                          .get("library", "C:/Roblox/AssetLibrary") or ""),
            **{k: s.get(k) for k in ("host", "container", "au_push_url")}}
     if [str(x) for x in (s.get("ssh") or [])] not in ([], slots.SSH_DEFAULT):
         cfg["ssh"] = s["ssh"]
@@ -382,6 +513,9 @@ def add_parser(sub) -> None:
     b.add_argument("--id", default="", help="run id (default: worktree name + time)")
     b.add_argument("--threads", type=int, default=0, help="0 = the slot's CPU limit")
     b.add_argument("--wait", type=int, default=600, help="seconds to wait for a busy slot")
+    b.add_argument("--library", default="", help="the asset library folder on this PC "
+                   "(default: the settings' blender.library)")
+    b.add_argument("--no-library", action="store_true", help="run without the asset library")
     b.add_argument("blender", nargs="*", help="the Blender arguments, after --")
 
 

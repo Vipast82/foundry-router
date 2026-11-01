@@ -2,6 +2,37 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.165.0 — The game's asset library on the slots: every AU Blender tool runs on a mini PC (B2b)
+
+2026-11-01. docs/plans/SLOT_BLENDER_PLAN.md B2b (Victor: "Yes, start B2b").
+- **Setting** `blender.library` (default `C:/Roblox/AssetLibrary`; empty = none): the library's
+  folder on the main PC. `prepare()` writes it into each worktree's drop-in settings;
+  `--library` / `--no-library` override it.
+- **Copy:** `foundry-blender` keeps a copy of the library in the slot container's persistent home
+  volume (`~/assetlib`), so no new mount and no reinstall are needed.
+  - Before each run it compares a size and whole-second mtime manifest. When nothing changed it
+    reads one hash file from the slot.
+  - Otherwise, under the slot's Blender lock, it sends only new or changed files (a tar on
+    stdin) and removes files gone here. The manifest is written last, so an interrupted copy is
+    redone next time.
+  - A failed copy fails the run (exit 3), never Blender on a stale library.
+- **In the run:**
+  - `AU_ASSET_LIBRARY` points at the copy (6 tools read it);
+  - `C:/Roblox/AssetLibrary` and `C:\Roblox\AssetLibrary` are linked to it inside the checkout,
+    for the 16 tools that hard-code the path. On Linux those are paths relative to the checkout.
+    The links are made after `git clean` and before the copy-back marker, so they are never sent
+    back.
+- **Proof on slot-1** (a scratch clone, through the drop-in):
+  - the first copy sent the whole library, 30,904 files and 4,177 MB, and `build_env_cave.py
+    --selftest` passed (397 s, nearly all of it the copy);
+  - then `selftest_all.py --blender <drop-in>` passed **50 of 50 Blender tools** (it was 44 of
+    50 without the library), in 357 s, about 7 s a tool.
+
+  The one failing entry is `roblox_cloud.py`, which runs on this PC and needs the Open Cloud key.
+- **Still for AU** (a game sprint): every tool should read `AU_ASSET_LIBRARY` instead of the
+  hard-coded path. The links cover it until then.
+- Tests: test_slot_blender (+4).
+
 ## v0.164.0 — Sprints run Blender on a slot by themselves (slot Blender plan B2)
 
 2026-11-01. docs/plans/SLOT_BLENDER_PLAN.md B2.

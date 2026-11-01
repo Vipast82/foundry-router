@@ -1111,6 +1111,11 @@ FIELDS: list[Field] = [
       "that Studio slot's Blender, through foundry-blender (the sprint's files go there, the "
       "outputs come back; the local blender.exe is denied). A track bound to a slot uses its "
       "own slot.", "fast_lane", "coordinator.slot_blender"),
+    F("blender.library", "str", "C:/Roblox/AssetLibrary", "The asset library's folder on the "
+      "main PC (the game's Blender tools read model kits from it). When Blender runs on a slot, "
+      "foundry-blender keeps a copy in the slot (only changed files are sent) and points "
+      "AU_ASSET_LIBRARY and the hard-coded C:/Roblox/AssetLibrary paths at it. Empty = no "
+      "library.", "fast_lane", "coordinator.slot_blender"),
     # helpers & lanes ------------------------------------------------------------
     F("helpers.enabled", "bool", False, "Read-only coding helpers on frontier quota.", "helpers",
       "coordinator.helpers"),

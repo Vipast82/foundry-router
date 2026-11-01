@@ -202,3 +202,52 @@ def test_the_config_pull_rewrites_kilo_when_the_blender_setting_changes():
     b = D.empty("x")
     b["settings"]["blender"] = {"slot": "slot-1"}
     assert role_rules_changed(a, b)
+
+
+# ----------------------------------------------------------------------------- B2b: library
+
+def test_library_manifest_and_diff(tmp_path):
+    lib = tmp_path / "AssetLibrary"
+    (lib / "K1_KenneyNatureKit" / "Models").mkdir(parents=True)
+    (lib / "K1_KenneyNatureKit" / "Models" / "rock.glb").write_bytes(b"rock")
+    (lib / "Q4b" ).mkdir()
+    (lib / "Q4b" / "Lilypad.fbx").write_bytes(b"lily")
+    (lib / ".cache").mkdir()
+    (lib / ".cache" / "x").write_bytes(b"skip")
+    m = SB.lib_manifest(str(lib))
+    assert sorted(m) == ["K1_KenneyNatureKit/Models/rock.glb", "Q4b/Lilypad.fbx"]
+    assert m["Q4b/Lilypad.fbx"][0] == 4
+    # nothing on the slot yet: everything goes
+    assert SB.lib_diff(m, {}) == (sorted(m), [])
+    # the slot has an old rock and a file deleted here
+    remote = {"K1_KenneyNatureKit/Models/rock.glb": [3, 1], "Q4b/Lilypad.fbx": m["Q4b/Lilypad.fbx"],
+              "old/gone.fbx": [1, 1]}
+    assert SB.lib_diff(m, remote) == (["K1_KenneyNatureKit/Models/rock.glb"], ["old/gone.fbx"])
+    assert SB.lib_hash(m) == SB.lib_hash(dict(reversed(list(m.items()))))   # order-free
+
+
+def test_library_sync_skips_a_missing_library(tmp_path):
+    ok, msg = SB.lib_sync({"container": "c", "host": "h"}, str(tmp_path / "none"))
+    assert ok and "skipped" in msg
+
+
+def test_run_script_points_the_tools_at_the_slots_copy():
+    s = SB.remote_script("x", 5, 0, ["-b"], library=True)
+    assert 'export AU_ASSET_LIBRARY="$HOME/assetlib"' in s
+    assert 'ln -sfn "$HOME/assetlib" "$W/C:/Roblox/AssetLibrary"' in s
+    assert 'ln -sfn "$HOME/assetlib" "$W/C:\Roblox\AssetLibrary"' in s
+    # links are made after `git clean` and before the marker, so they are never copied back
+    assert s.index("clean -q -fd") < s.index("ln -sfn") < s.index('touch "$M"')
+    assert "AU_ASSET_LIBRARY" not in SB.remote_script("x", 5, 0, ["-b"])
+
+
+def test_prepare_records_the_library(tmp_path, monkeypatch):
+    monkeypatch.setenv("FOUNDRY_BLENDER_DIR", str(tmp_path / "fb"))
+    ws = tmp_path / "w"
+    ws.mkdir()
+    raw = _raw()
+    b = SB.prepare(_Prof(ws, raw), str(tmp_path))
+    assert json.loads(open(b["config"], encoding="utf-8").read())["library"] == "C:/Roblox/AssetLibrary"
+    raw["blender"]["library"] = ""
+    b = SB.prepare(_Prof(ws, raw), str(tmp_path))
+    assert json.loads(open(b["config"], encoding="utf-8").read())["library"] == ""

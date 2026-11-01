@@ -1,8 +1,9 @@
 # Plan: Blender work on the Studio slots (the mini PCs)
 
 Status: **approved 2026-11-01** (Victor: "Yes, recommended": D-B1 to D-B5 as recommended
-below). **B1 done (v0.163.0), B2 done (v0.164.0).** B2b (the asset library on the slots) is
-next: until it lands, keep "Blender runs on" at this PC for env and NPC builders. Victor: "I thought we were going to add blender in
+below). **B1 (v0.163.0), B2 (v0.164.0) and B2b (v0.165.0) are done.** With B2b all 50 of AU's
+Blender tools pass on slot-1 through foundry-blender. B3 (CPU for Blender on a GPU slot) is
+next. Victor: "I thought we were going to add blender in
 the container so it would use the CPU on the mini PCS to do blender actions / creations"; "do the
 container plan first so I can implement this, then when its complete, work on the workstation".
 It comes before docs/plans/LINUX_WORKSTATION_PLAN.md W2.
