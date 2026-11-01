@@ -72,6 +72,9 @@ def deps_in_field(text: str) -> list:
     S52 a dependency; AS-C20's "...; consumed by UI-SKIN1" made UI-SKIN1 one)."""
     field = str(text or "").split("**")[0]
     field = "" if re.match(r"\s*none\b", field, re.I) else field.split(";")[0]
+    # a bracketed note is commentary too (2026-11-01: AS-E10's "AS-P6 (live items deferred to
+    # AS-P6 / AS-E11, ...)" made AS-E11 a dependency, and AS-E11 depends on AS-E10: a loop)
+    field = re.sub(r"\([^()]*\)", " ", field)
     return re.findall(r"\b([A-Z]{1,5}[0-9]?-?[A-Za-z0-9.-]*[0-9][A-Za-z0-9]*)\b", field)
 
 

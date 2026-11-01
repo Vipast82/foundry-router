@@ -2,6 +2,18 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.166.1 — a bracketed note in a plan's "Depends on" line is not a dependency
+
+2026-11-01. AS-E10's plan reads "**Depends on:** AS-P6 (not landed: live items deferred to
+AS-P6 / AS-E11, lane-B default) + AS-P4b". The id inside the brackets made AS-E11 a
+dependency, and AS-E11 depends on AS-E10, so the approved sprint went straight to a paid Lead
+case. GF-REPO1's "(GF-FX4 retired → UI-02)" had the same problem.
+
+- **`animaluprising.adapter.deps_in_field`:** bracketed text is commentary, like the "; ..."
+  clause already was. Across all AU plans this drops only notes and non-sprint labels (R8,
+  LOOP1a/b, UseV2, D8/D9) plus three soft mentions of finished sprints.
+- Test: `tests/coordinator/test_tracks_analysis.py`. 180 tracks and AU-adapter tests pass.
+
 ## v0.166.0 — The main sprints' Studio can live on a slot (Linux workstation plan W2)
 
 2026-11-01. docs/plans/LINUX_WORKSTATION_PLAN.md W2 (D-L1: the main Studio in the slot image).

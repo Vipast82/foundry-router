@@ -303,6 +303,10 @@ def test_depends_on_none_and_semicolon_commentary_are_no_dependencies():
     assert deps_in_field(" AS-C20 (batch pipeline); consumed by UI-SKIN1") == ["AS-C20"]
     assert deps_in_field(" AS-R1 + AS-P5 + ref sheets") == ["AS-R1", "AS-P5"]
     assert deps_in_field(" GF-ENT1, AS-P5 ** ignored S9") == ["GF-ENT1", "AS-P5"]
+    # 2026-11-01: a bracketed note names no dependency
+    assert deps_in_field(" AS-P6 (not landed: live items deferred to AS-P6 / AS-E11, lane-B "
+                         "default) + AS-P4b (merged) + ref.") == ["AS-P6", "AS-P4b"]
+    assert deps_in_field(" GF-FX2 (GF-FX4 retired → UI-02) · x") == ["GF-FX2"]
 
 
 def test_a_retired_plan_is_never_proposed():
