@@ -392,3 +392,14 @@ def test_installer_adds_the_gpu_compose_file_when_the_host_has_one():
     assert "- /dev/dri:/dev/dri" in gpu
     sk = _slot_keys()
     assert sk.gpu_report("bad name!")["in_use"] is False
+
+
+def test_slot_start_rebuilds_a_half_set_up_wine_prefix():
+    """2026-11-01 slot-2: a first-time Wine setup cut off by a restart left a 31 KB registry
+    (WebView2 exit 10, every Studio HTTP request failing). The container's start moves such a
+    prefix aside before Vinegar runs, so Vinegar builds a whole one."""
+    entry = (Path(__file__).resolve().parents[1] / "contrib" / "studio-slot" / "entrypoint.sh"
+             ).read_text(encoding="utf-8")
+    check = entry.index('[ "$(stat -c %s "$VPFX/system.reg")" -lt 524288 ]')
+    assert check < entry.index('if [ "${START_VINEGAR:-1}" = "1" ]; then')
+    assert 'mv "$VPFX" "$VPFX.incomplete"' in entry and 'rm -rf "$VPFX.incomplete"' in entry

@@ -146,6 +146,17 @@ SCREEN_W="${GEOM%x*}"; SCREEN_H="${GEOM#*x}"
 ) &
 
 export GTK_A11Y=none
+# A Wine prefix whose first-time setup was cut off (the container stopped part-way, e.g. the LXC
+# restarted) keeps a stub registry: no "Program Files (x86)" (WebView2 cannot install: exit 10),
+# no RpcSs service (every Studio HTTP request fails at once: "Trouble launching Studio").
+# slot-2, 2026-11-01: system.reg 31 KB, a whole one ~2.3 MB. At the container's start nothing
+# runs in the prefix yet: move such a one aside (the newest one kept) and Vinegar builds it anew.
+VPFX="$HOME/.local/share/vinegar/prefixes/studio"
+if [ -f "$VPFX/system.reg" ] && [ "$(stat -c %s "$VPFX/system.reg")" -lt 524288 ]; then
+    rm -rf "$VPFX.incomplete"
+    mv "$VPFX" "$VPFX.incomplete" \
+        && echo "studio-slot: the Wine prefix was only half set up (its registry is $(stat -c %s "$VPFX.incomplete/system.reg") bytes): moved to $VPFX.incomplete, Vinegar builds a new one" >&2
+fi
 if [ "${START_VINEGAR:-1}" = "1" ]; then
     # STUDIO_OPEN: a roblox-studio: link to open at start (opening one into a running
     # Studio hangs under Wine, so it has to be the first launch)

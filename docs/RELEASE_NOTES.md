@@ -2,6 +2,27 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.166.2 — A slot rebuilds a half-set-up Wine prefix by itself
+
+2026-11-01. Victor: "slot2 seems to be having issues", then "Yes, add the check".
+- **What happened on slot-2:** its Wine prefix's first-time setup was cut off (the LXC restarted
+  9 minutes before), leaving a 31 KB `system.reg` where a whole one is ~2.3 MB. Then:
+  - no `C:\Program Files (x86)`, so the WebView2 install failed ("Failed to get a valid install
+    target path. Exit code: 10") and Studio showed "Something went wrong";
+  - no RpcSs service ("Failed to open RpcSs service"), so every Studio HTTP request failed within
+    2 ms (`HttpError: Unknown/-1`) and Studio quit ("Trouble launching Studio").
+
+  The Linux side, the packages (all 511 identical to slot-1's) and the clock were fine.
+- **Fixed by hand:** the prefix was moved aside (`prefixes/studio.broken-20261101`), Vinegar built
+  a whole one (2.35 MB), and Studio reached its sign-in window.
+- **entrypoint.sh** now does the same at the container's start, before Vinegar runs: a prefix
+  whose `system.reg` is under 512 KB is moved to `prefixes/studio.incomplete` (the newest one
+  kept), and Vinegar builds it anew. A whole prefix, or none, is left alone; this was tried in the
+  slot container on stub/whole/none copies.
+
+  It takes effect with the slot image from the next installer run.
+- Tests: test_slot_ssh (+1).
+
 ## v0.166.1 — a bracketed note in a plan's "Depends on" line is not a dependency
 
 2026-11-01. AS-E10's plan reads "**Depends on:** AS-P6 (not landed: live items deferred to
