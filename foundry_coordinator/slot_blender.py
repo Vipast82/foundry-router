@@ -190,6 +190,10 @@ def run(a, blender_args: list) -> int:
         log(f"{repo} is not a git checkout")
         return 2
     repo = os.path.abspath(top.stdout.decode().strip())
+    blender_args, why = relative_args(repo, blender_args)
+    if why:
+        log(why)
+        return 2
     cfg = load_config(repo, a.config)
     slot = {**slots.DEFAULTS, **{k: v for k, v in cfg.items() if k in slots.DEFAULTS}}
     for k in ("host", "container", "au_push_url"):
@@ -256,6 +260,115 @@ def run(a, blender_args: list) -> int:
     if len(back) > 200:
         print(f"  ... and {len(back) - 200} more", file=sys.stderr)
     return rc
+
+
+# ----------------------------------------------------------------------------- B2: sprints
+
+# what a sprint may not run while its Blender is on a slot (Kilo bash rules, kilo_config)
+LOCAL_BLENDER = ("*blender.exe*", "*Blender Foundation*")
+
+
+def blender_slot(profile) -> str:
+    """The slot this project's Blender runs on ('' = this PC): a track bound to a slot uses
+    its own slot (D-B1), else the project's `blender.slot` setting."""
+    d = getattr(profile, "__dict__", {}) or {}
+    if d.get("slot"):
+        return str(d["slot"])
+    raw = getattr(profile, "raw", None) or {}
+    return str((raw.get("blender") or {}).get("slot") or "").strip()
+
+
+def deny_rules(profile) -> list:
+    """Kilo rules that keep a sprint off the local Blender while its Blender is on a slot."""
+    if not blender_slot(profile):
+        return []
+    return [{"permission": "bash", "pattern": p, "action": "deny"} for p in LOCAL_BLENDER]
+
+
+def wrapper_dir() -> str:
+    """Where the drop-ins live: ~/.foundry-blender (FOUNDRY_BLENDER_DIR). Not under the
+    coordinator's state folder: Kilo's bash rules deny every command naming
+    `.foundry-coordinator`, so a sprint could not run a drop-in from there."""
+    return os.environ.get("FOUNDRY_BLENDER_DIR") or \
+        os.path.join(os.path.expanduser("~"), ".foundry-blender")
+
+
+def wrapper_paths(profile, state_dir: str = "") -> tuple[str, str]:
+    """(<wrapper_dir>/<project>-<worktree hash>.json, the matching .cmd / shell script)."""
+    import hashlib
+    ws = os.path.realpath(str(getattr(profile, "workspace", "") or ""))
+    h = hashlib.sha256(ws.lower().encode("utf-8")).hexdigest()[:10]
+    base = os.path.join(wrapper_dir(), f"{getattr(profile, 'id', 'project')}-{h}")
+    return base + ".json", base + (".cmd" if os.name == "nt" else ".sh")
+
+
+def prepare(profile, state_dir: str) -> Optional[dict]:
+    """When this project's Blender runs on a slot: write its settings and a drop-in for the
+    `blender` command (same arguments) for this worktree; return {slot, command} or
+    {slot, error}. None when Blender runs on this PC."""
+    from . import slots
+    slot_id = blender_slot(profile)
+    if not slot_id:
+        return None
+    s = slots.configured(profile).get(slot_id)
+    if not s:
+        return {"slot": slot_id, "error": f"Blender is set to run on {slot_id}, but no enabled "
+                                          f"slot {slot_id} is configured"}
+    if not str(s.get("host") or "").strip():
+        return {"slot": slot_id, "error": f"{slot_id} is a local container slot: foundry-blender "
+                                          "runs Blender on remote slots (a mini PC)"}
+    cfg_path, cmd_path = wrapper_paths(profile, state_dir)
+    os.makedirs(os.path.dirname(cfg_path), exist_ok=True)
+    cfg = {"project": getattr(profile, "id", ""), "slot": slot_id,
+           "workspace": os.path.realpath(str(profile.workspace)),
+           **{k: s.get(k) for k in ("host", "container", "au_push_url")}}
+    if [str(x) for x in (s.get("ssh") or [])] not in ([], slots.SSH_DEFAULT):
+        cfg["ssh"] = s["ssh"]
+    _write(cfg_path, json.dumps(cfg, indent=1))
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    if os.name == "nt":
+        text = ("@echo off\r\n"
+                "rem foundry-blender for this worktree (SLOT_BLENDER_PLAN B2): use it wherever you\r\n"
+                "rem would run blender.exe; Blender runs on the slot and the outputs come back.\r\n"
+                f'set "PYTHONPATH={root}"\r\n'
+                f'set "FOUNDRY_COORD_STATE={state_dir}"\r\n'
+                f'"{sys.executable}" -m foundry_coordinator.slots blender --config "{cfg_path}" '
+                f'--repo "{cfg["workspace"]}" -- %*\r\n'
+                "exit /b %ERRORLEVEL%\r\n")
+    else:
+        text = ("#!/bin/sh\n# foundry-blender for this worktree (SLOT_BLENDER_PLAN B2)\n"
+                f"PYTHONPATH={shlex.quote(root)} FOUNDRY_COORD_STATE={shlex.quote(state_dir)} "
+                f"exec {shlex.quote(sys.executable)} -m foundry_coordinator.slots blender "
+                f"--config {shlex.quote(cfg_path)} --repo {shlex.quote(cfg['workspace'])} -- \"$@\"\n")
+    _write(cmd_path, text)
+    if os.name != "nt":
+        os.chmod(cmd_path, 0o755)
+    return {"slot": slot_id, "command": cmd_path, "config": cfg_path}
+
+
+def _write(path: str, text: str) -> None:
+    tmp = path + ".tmp"
+    with open(tmp, "w", encoding="utf-8", newline="") as f:
+        f.write(text)
+    os.replace(tmp, path)
+
+
+def relative_args(repo: str, args: list) -> tuple[list, str]:
+    """Blender's arguments with absolute paths inside the worktree made repo-relative (the slot
+    has the same tree, not the same drive); ('', why) for one outside the worktree."""
+    root = os.path.realpath(repo)
+    out = []
+    for a in args:
+        if re.match(r"^[A-Za-z]:[\\/]", a) or (os.name != "nt" and a.startswith("/")
+                                               and os.path.exists(a)):
+            p = os.path.realpath(a)
+            if p == root or p.startswith(root + os.sep):
+                out.append(os.path.relpath(p, root).replace("\\", "/"))
+                continue
+            return [], (f"{a} is outside the worktree: the slot only has the worktree's files "
+                        "(use a path inside it)")
+        out.append(a)
+    return out, ""
 
 
 def add_parser(sub) -> None:

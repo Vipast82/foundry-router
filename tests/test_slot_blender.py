@@ -1,6 +1,7 @@
 """foundry-blender (docs/plans/SLOT_BLENDER_PLAN.md B1): Blender on a Studio slot."""
 
 import io
+import json
 import os
 import subprocess
 import tarfile
@@ -114,3 +115,90 @@ def test_no_slot_means_no_run_and_never_a_local_blender(tmp_path, capsys):
                        "au_push_url": "", "ssh": "", "id": "", "threads": 0, "wait": 5})()
     assert SB.run(a, ["-b"]) == 2
     assert "no slot to run on" in capsys.readouterr().err
+
+
+# ----------------------------------------------------------------------------- B2: sprints
+
+class _Prof:
+    def __init__(self, workspace, raw, pid="animaluprising", slot=""):
+        self.workspace, self.raw, self.id = str(workspace), raw, pid
+        if slot:
+            self.__dict__["slot"] = slot
+
+
+def _raw(blender_slot="slot-1", host="studio@192.168.0.115"):
+    return {"blender": {"slot": blender_slot},
+            "slots": {"slot-1": {"container": "studio-slot", "host": host},
+                      "slot-9": {"container": "x", "host": "studio@h9", "enabled": False}},
+            "role_rules": {}}
+
+
+def test_blender_slot_comes_from_the_track_then_the_project():
+    assert SB.blender_slot(_Prof("w", _raw())) == "slot-1"
+    assert SB.blender_slot(_Prof("w", _raw(""))) == ""
+    assert SB.blender_slot(_Prof("w", _raw(""), slot="slot-2")) == "slot-2"   # a slot-bound track
+    assert SB.deny_rules(_Prof("w", _raw(""))) == []
+    assert {r["pattern"] for r in SB.deny_rules(_Prof("w", _raw()))} == set(SB.LOCAL_BLENDER)
+
+
+def test_prepare_writes_a_drop_in_for_blender(tmp_path, monkeypatch):
+    monkeypatch.setenv("FOUNDRY_BLENDER_DIR", str(tmp_path / "fb"))
+    ws = tmp_path / "AnimalUprising"
+    ws.mkdir()
+    b = SB.prepare(_Prof(ws, _raw()), str(tmp_path / "state"))
+    assert b["slot"] == "slot-1" and os.path.isfile(b["command"])
+    cfg = json.loads(open(b["config"], encoding="utf-8").read())
+    assert cfg["host"] == "studio@192.168.0.115" and cfg["container"] == "studio-slot"
+    assert cfg["workspace"] == os.path.realpath(str(ws))
+    text = open(b["command"], encoding="utf-8").read()
+    assert "-m foundry_coordinator.slots blender --config" in text and "--repo" in text
+    assert ".foundry-coordinator" not in b["command"]
+    assert ("%*" in text) if os.name == "nt" else ('"$@"' in text)
+    assert SB.prepare(_Prof(ws, _raw("")), str(tmp_path / "state")) is None
+    assert "no enabled slot slot-9" in SB.prepare(_Prof(ws, _raw("slot-9")), str(tmp_path))["error"]
+    assert "local container slot" in SB.prepare(_Prof(ws, _raw(host="")), str(tmp_path))["error"]
+
+
+def test_absolute_paths_inside_the_worktree_become_relative(tmp_path):
+    r = tmp_path / "wt"
+    (r / "tools" / "blender").mkdir(parents=True)
+    tool = r / "tools" / "blender" / "x.py"
+    tool.write_text("", encoding="utf-8")
+    out, why = SB.relative_args(str(r), ["-b", "-P", str(tool), "--", "--selftest"])
+    assert why == "" and out == ["-b", "-P", "tools/blender/x.py", "--", "--selftest"]
+    other = tmp_path / "elsewhere.blend"
+    other.write_text("", encoding="utf-8")
+    out, why = SB.relative_args(str(r), ["-b", str(other)])
+    assert out == [] and "outside the worktree" in why
+
+
+def test_kilo_rules_deny_the_local_blender_while_it_runs_on_a_slot(tmp_path):
+    from foundry_coordinator import kilo_config as KC
+    rules = KC.with_extra({"implementer": {}}, SB.deny_rules(_Prof("w", _raw())))
+    from foundry_automation import role_rules as RR
+    for role in RR.RULE_ROLES:
+        assert {"permission": "bash", "pattern": "*blender.exe*", "action": "deny"} \
+            in rules[role]["extra"]
+    assert KC.with_extra({"implementer": {}}, []) == {"implementer": {}}
+    # what the GUI path tester says for the generated rules (it takes one role's rules)
+    t = RR.test("implementer", rules["implementer"], "bash",
+                '"C:/Program Files/Blender Foundation/Blender 4.5/blender.exe" -b')
+    assert t["decision"] == "deny", t
+    t = RR.test("implementer", rules["implementer"], "bash",
+                'py -3 tools\\guard\\run.py --name blender --shell none -- '
+                '"C:/Users/x/.foundry-blender/animaluprising-1.cmd" -b')
+    # the drop-in itself is allowed: it lives in ~/.foundry-blender (bash rules deny every
+    # command naming .foundry-coordinator, where it first lived)
+    assert t["decision"] == "allow", t
+    # the Blender tools themselves stay allowed
+    t = RR.test("implementer", rules["implementer"], "bash", "py -3 tools/assets/selftest_all.py")
+    assert t["decision"] == "allow", t
+
+
+def test_the_config_pull_rewrites_kilo_when_the_blender_setting_changes():
+    from foundry_automation import document as D
+    from foundry_coordinator.config_pull import role_rules_changed
+    a = D.empty("x")
+    b = D.empty("x")
+    b["settings"]["blender"] = {"slot": "slot-1"}
+    assert role_rules_changed(a, b)

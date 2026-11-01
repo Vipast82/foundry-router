@@ -461,6 +461,30 @@ class AnimalUprisingAdapter(GenericAdapter):
         """The Studio slot this track is bound to ('' = none): it HAS Studio (2026-10-31)."""
         return str(getattr(self.p, "__dict__", {}).get("slot") or "")
 
+    def _blender_notice(self) -> str:
+        """SLOT_BLENDER_PLAN B2: when this project's Blender runs on a slot, how to run it ('' =
+        Blender runs on this PC, as ENVIRONMENT.md says). Writes the worktree's drop-in."""
+        from ...slot_blender import prepare
+        try:
+            b = prepare(self.p, self.state_dir)
+        except Exception as e:                                    # noqa: BLE001
+            b = {"slot": "?", "error": f"foundry-blender could not be prepared: {e}"}
+        if not b:
+            return ""
+        if b.get("error"):
+            return (f"\nBLENDER: {b['error']}. Do not run the local blender.exe (Blender is set "
+                    "to run on a slot); if this sprint needs Blender, stop and report BLOCKED "
+                    "with this line.\n")
+        cmd = b["command"]
+        return (f"\nBLENDER RUNS ON STUDIO SLOT `{b['slot']}` (a mini PC), not on this PC. Use "
+                f"`{cmd}` wherever docs/ENVIRONMENT.md says blender.exe: the same arguments "
+                f"(e.g. `py -3 tools\\guard\\run.py --name blender --shell none -- \"{cmd}\" -b --factory-startup "
+                f"-P tools\\blender\\<tool>.py -- <args>`, or `selftest_all.py --blender "
+                f"\"{cmd}\"`). It sends this worktree to the slot (uncommitted changes too), runs "
+                "Blender there and brings back every file the run writes, into the same paths. "
+                "Paths must be inside this worktree. The local blender.exe is denied. Exit 75 = "
+                "the slot's Blender stayed busy (another job): retry once, then report it.\n")
+
     def _studio_less(self) -> str:
         """A track with no Studio (no slot): its Studio rows belong to the merge gate."""
         return self._track() if not self._slot() else ""
@@ -628,6 +652,7 @@ The approved plan and its checklist are this attempt's plan: do not spawn planne
                       "playtest or a boot check, never take or wait for studio.lock, never touch "
                       "the main checkout. The coordinator runs the Studio gate on the merge "
                       "result when this track merges.\n")
+        notice += self._blender_notice()
         a = ctx.get("assignment") if isinstance(ctx.get("assignment"), dict) else {}
         rerun = [str(x) for x in (a.get("affected_checks_to_rerun") or [])][:20]
         rerun_txt = (", ".join(rerun) if rerun else "the checks the findings below name")

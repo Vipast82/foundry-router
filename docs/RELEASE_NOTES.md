@@ -2,6 +2,35 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.164.0 — Sprints run Blender on a slot by themselves (slot Blender plan B2)
+
+2026-11-01. docs/plans/SLOT_BLENDER_PLAN.md B2.
+- **Setting** `blender.slot` (Automation → Settings): empty = this PC (the default, so nothing
+  changes until it is set); a slot id = that slot. A track bound to a slot uses its own slot
+  (D-B1).
+- **Drop-in for `blender.exe`:** `slot_blender.prepare()` writes, per worktree,
+  `~/.foundry-blender/<project>-<hash>.cmd` (`.sh` on Linux) and its settings.
+  - It takes Blender's own arguments and runs `foundry_coordinator.slots blender --config …
+    --repo <worktree> -- …`. Absolute paths inside the worktree become repo-relative; a path
+    outside it is refused.
+  - It is not under `.foundry-coordinator`: Kilo's bash rules deny any command naming that
+    folder, and the role-rule tester showed the first draft blocked there.
+- **Sprint prompt** (AU adapter `_blender_notice`): when Blender runs on a slot, the BUILD and
+  repair prompts say to use the drop-in wherever docs/ENVIRONMENT.md says blender.exe. They give
+  the guard-runner form and `selftest_all.py --blender "<drop-in>"`, the copy-back, and what
+  exit 75 means. A slot that is missing or local gives a BLOCKED instruction instead.
+- **Kilo rules:** while Blender runs on a slot, every role gets bash denies for `*blender.exe*`
+  and `*Blender Foundation*`.
+  - This covers the main kilo.jsonc (`kilo_config.regenerate`) and track worktrees
+    (`track_kilo_config`).
+  - The config pull now also rewrites kilo.jsonc when `blender.*` changes, not only
+    `role_rules.*`.
+- **Proof on slot-1:** AU's `selftest_all.py --blender <drop-in>` (a scratch clone) passed **44
+  of 50** Blender tools there. All 6 failures read AU's asset library `C:\Roblox\AssetLibrary`,
+  which the slot does not have yet: B2b, next. Until then, keep `blender.slot` empty for env and
+  NPC builders.
+- Tests: test_slot_blender (+5).
+
 ## v0.163.3 — a BUILD that keeps leaving the same plan steps open stops instead of looping
 
 2026-11-01. GF-AFK1's plan left one checklist line for "the coordinator", a Studio negative

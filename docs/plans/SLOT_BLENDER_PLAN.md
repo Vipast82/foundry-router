@@ -1,7 +1,8 @@
 # Plan: Blender work on the Studio slots (the mini PCs)
 
 Status: **approved 2026-11-01** (Victor: "Yes, recommended": D-B1 to D-B5 as recommended
-below). **B1 is done (v0.163.0), proven on slot-1.** B2 (sprints use it) is next. Victor: "I thought we were going to add blender in
+below). **B1 done (v0.163.0), B2 done (v0.164.0).** B2b (the asset library on the slots) is
+next: until it lands, keep "Blender runs on" at this PC for env and NPC builders. Victor: "I thought we were going to add blender in
 the container so it would use the CPU on the mini PCS to do blender actions / creations"; "do the
 container plan first so I can implement this, then when its complete, work on the workstation".
 It comes before docs/plans/LINUX_WORKSTATION_PLAN.md W2.
@@ -53,6 +54,22 @@ as AU's tools already use them.
   a run can't drift back to the PC unnoticed.
 - **AU's selftest** (`selftest_all.py --blender`) gets a slot form, so asset sprints can prove
   the slot's Blender before using it.
+
+**B2b. AU's asset library on the slots** (found by B2's proof, 2026-11-01).
+- **The gap:** 22 of AU's Blender tools read model kits from `C:\Roblox\AssetLibrary` (4.2 GB,
+  outside the repo). Only 6 honour `AU_ASSET_LIBRARY`; 16 hard-code the path. On slot-1,
+  `selftest_all.py` through foundry-blender passed 44 of 50 Blender tools. The 6 failures were
+  all "no such file … AssetLibrary/…".
+- **Copy:** the library goes to each slot host (`/srv/studio-slot/assetlib`). The first copy is
+  4.2 GB; after that foundry-blender sends only the changed files (by size and time), before each
+  run.
+- **Mount:** read-only into the container (`/opt/assetlib`), with `AU_ASSET_LIBRARY` set.
+- **Shim:** for the 16 hard-coded tools, `C:/Roblox/AssetLibrary` and `C:\Roblox\AssetLibrary`
+  in the slot's checkout point at it. On Linux those paths are relative to the checkout, where the
+  links live.
+- **The setting:** the library's folder on the main PC (default `C:\Roblox\AssetLibrary`).
+- **The proper fix,** for AU (a game sprint, not Foundry): every tool reads
+  `AU_ASSET_LIBRARY`.
 
 **B3. The slot's CPU with Blender.**
 - Studio on the GPU needs little, so a slot with a GPU gets a higher default limit: all cores but

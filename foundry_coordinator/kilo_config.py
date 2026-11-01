@@ -173,6 +173,20 @@ def plan(text: str, role_rules: Optional[dict], workspace: str) -> dict:
     return out
 
 
+def with_extra(role_rules: Optional[dict], extra: list) -> Optional[dict]:
+    """The role rules with `extra` raw Kilo rules added to every role (e.g. the local
+    blender.exe denied while Blender runs on a slot: slot_blender.deny_rules)."""
+    if not extra or not role_rules:
+        return role_rules
+    out = copy.deepcopy(role_rules)
+    for role in RR.RULE_ROLES:
+        r = RR.normalize(role, out.get(role))
+        have = list(r.get("extra") or [])
+        r["extra"] = have + [x for x in extra if x not in have]
+        out[role] = r
+    return out
+
+
 def regenerate(profile, role_rules: Optional[dict] = None, apply: bool = False,
                path: str = "", store=None, clock=time.time) -> dict:
     """Dry run (default) or apply. Returns a JSON-able result."""
@@ -182,6 +196,8 @@ def regenerate(profile, role_rules: Optional[dict] = None, apply: bool = False,
     if not rules:
         raise KiloConfigError("no role rules: deploy role rules from the router GUI first "
                               "(or put [role_rules] in the profile)")
+    from .slot_blender import deny_rules
+    rules = with_extra(rules, deny_rules(profile))
     try:
         with open(path, encoding="utf-8") as f:
             text = f.read()
@@ -320,6 +336,14 @@ def track_kilo_config(track, *, profile=None, role_rules: Optional[dict] = None,
         raise KiloConfigError("no source kilo.jsonc: pass source= or profile=")
     if role_rules is None and profile is not None:
         role_rules = (getattr(profile, "raw", None) or {}).get("role_rules")
+    # SLOT_BLENDER_PLAN B2: a track bound to a slot (or a project whose Blender is on a slot)
+    # never runs the local blender.exe
+    from . import slot_blender
+    data = _attr(track, "data")
+    tslot = str(_attr(track, "slot") or (data.get("slot") if isinstance(data, dict) else "") or "")
+    if tslot or (profile is not None and slot_blender.blender_slot(profile)):
+        role_rules = with_extra(role_rules, [{"permission": "bash", "pattern": p, "action": "deny"}
+                                             for p in slot_blender.LOCAL_BLENDER])
     try:
         with open(source, encoding="utf-8") as f:
             text = f.read()

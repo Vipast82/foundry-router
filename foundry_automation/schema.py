@@ -1106,6 +1106,11 @@ FIELDS: list[Field] = [
     # Studio slots (named tables) --------------------------------------------------
     *[F(f"slots.*.{k}", t, v, d, "fast_lane", "coordinator.slots", item_type=it, min=mn)
       for k, t, v, d, it, mn in SLOT_FIELDS],
+    # Blender on a slot (docs/plans/SLOT_BLENDER_PLAN.md B2) -----------------------------
+    F("blender.slot", "str", "", "Blender runs on: empty = this PC; a slot id (e.g. slot-1) = "
+      "that Studio slot's Blender, through foundry-blender (the sprint's files go there, the "
+      "outputs come back; the local blender.exe is denied). A track bound to a slot uses its "
+      "own slot.", "fast_lane", "coordinator.slot_blender"),
     # helpers & lanes ------------------------------------------------------------
     F("helpers.enabled", "bool", False, "Read-only coding helpers on frontier quota.", "helpers",
       "coordinator.helpers"),

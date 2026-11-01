@@ -70,7 +70,9 @@ def hold_restart_keys(merged: dict, live_raw: dict, paths: list[str]) -> dict:
 
 
 def role_rules_changed(prev: Optional[dict], doc: dict) -> bool:
-    return any(c["path"].startswith("role_rules.") for c in D.diff(prev, doc))
+    """The kilo.jsonc agent blocks depend on these: the role rules, and where Blender runs
+    (the local blender.exe is denied while it runs on a slot: SLOT_BLENDER_PLAN B2)."""
+    return any(c["path"].startswith(("role_rules.", "blender.")) for c in D.diff(prev, doc))
 
 
 def startup_overlay(state_dir: str, raw: dict) -> tuple[dict, Optional[dict]]:
