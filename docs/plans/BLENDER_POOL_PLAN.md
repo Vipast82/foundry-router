@@ -1,6 +1,6 @@
 # Plan: a Blender pool (slot-1, slot-2 and this PC)
 
-Status: **plan, waiting for Victor** (2026-11-01). Victor: "I want to run multiple blenders in
+Status: **approved 2026-11-01** (Victor: "Yes, recommended": D-P1 to D-P7 as recommended). Victor: "I want to run multiple blenders in
 multiple containers / slots and even the main pc to increase speed of asset creation". Nothing
 is built. It builds on docs/plans/SLOT_BLENDER_PLAN.md (foundry-blender, B1–B3) and
 docs/plans/BLENDER_BUILD_REPLAY_PLAN.md (the journal).
