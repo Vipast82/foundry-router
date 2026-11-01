@@ -2,6 +2,21 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.167.1 — designed-fail legs are not a "session shape" gap
+
+2026-11-01. MV2-CL1 pinned S03's two legs that need a play session as designed FAILs (expectPass 5,
+designedFails 2). GateRunner's tally then said `SUITE S03 ... VERDICT PASS`, but the runner's
+check for each call still marked those two FAIL lines `UNKNOWN` ("needs a session shape").
+The sprint saw the contradiction and stopped (lead case).
+
+- **`studio_gate` regression calls:** when a bridge reply's FAIL lines all say the leg needs a
+  session shape, and their count is within the suite's own `designedFails`, they are designed,
+  not a gap. No `UNKNOWN` check is added. A reply with more such lines than designed is still
+  `UNKNOWN`, and a real FAIL among them still keeps the row FAIL.
+- Test: `tests/coordinator/test_studio_gate_calls.py`
+  (`test_session_shape_fail_lines_the_suite_pins_as_designed_fails_are_not_a_gap`); it fails on
+  v0.167.0. 121 Studio-gate and studio_calls tests pass.
+
 ## v0.167.0 — Asset judge: an independent, blind vision check for 3D model sprints
 
 2026-11-01. Phase B of `reports/ASSET_PIPELINE_REVIEW_2026-11.md` (gap 4; Victor: "Yes,

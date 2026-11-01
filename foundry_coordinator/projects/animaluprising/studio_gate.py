@@ -2152,6 +2152,16 @@ class Gate:
                         final.append(unit([e], rerun=trig))
         return final
 
+    def _designed_fails(self, entry_id) -> int:
+        """The RegressionIndex row's designedFails for `entry_id` (0 when unknown)."""
+        for e in (self.index or {}).get("entries") or []:
+            if e.get("id") == entry_id:
+                try:
+                    return int(e.get("designedFails") or 0)
+                except (TypeError, ValueError):
+                    return 0
+        return 0
+
     def _exec_calls(self, calls: list, g: dict, att: dict, entry_of: dict):
         res, chk, tool_err = att["res"], att["chk"], att["tool_err"]
         for i, c in enumerate(calls, 1):
@@ -2241,6 +2251,12 @@ class Gate:
                 else:
                     res[n] = text
                     gaps = capability_gaps(text) if kind == "bridge" else []
+                    # 2026-11-01 MV2-CL1: S03 pins its two session-shape legs as designed FAILs
+                    # (expectPass 5, designedFails 2) and GateRunner's tally says PASS; the
+                    # UNKNOWN here contradicted it and the sprint stopped. FAIL lines the
+                    # suite's own index row counts as designed are not a gap.
+                    if gaps and len(gaps) <= self._designed_fails(entry_of.get(n)):
+                        gaps = []
                     if gaps:
                         chk.append(check(f"regression.call{dn}", "UNKNOWN",
                                          f"every FAIL line ({len(gaps)}) is a leg the suite says needs a "

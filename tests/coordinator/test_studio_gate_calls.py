@@ -570,6 +570,28 @@ def test_suite_fail_lines_that_only_say_the_session_shape_is_missing_are_unknown
     assert v["rows"]["S28"]["verdict"] == "FAIL"
 
 
+def test_session_shape_fail_lines_the_suite_pins_as_designed_fails_are_not_a_gap(fakes, repo):
+    """2026-11-01 MV2-CL1: S03 pins its two session-shape legs as designed FAILs and the tally
+    says PASS; the runner's UNKNOWN contradicted it and the sprint stopped."""
+    set_rules, calls = fakes
+    index = INDEX.replace('expectPass = 3, loader = "bridge"',
+                          'expectPass = 0, designedFails = 2, loader = "bridge"')
+    (repo / "tests" / "RegressionIndex.lua").write_text(index, encoding="utf-8")
+    commit(repo, "S28 pins its two session-shape legs as designed FAILs")
+    gap = json.dumps({"returnValue": "FAIL: c1 - Needs a 2-client playtest (got 1 player)\n"
+                                     "FAIL: c2 - Needs a 2-client playtest (got 1 player)",
+                      "success": True, "output": []})
+    off, comm = rules(UI, index=index,
+                      extra_comm=[{"tool": "execute_luau", "match": "GetAsync", "text": gap}])
+    set_rules(off, comm)
+    host_half(repo, "DF")
+    rc, out = run_calls(repo, "DF", "--regression", "subset:ui")
+    v = json.load(open(gate_file(repo, "DF", "latest/calls.json")))
+    assert v["rows"]["S28"]["verdict"] == "PASS", v["rows"]["S28"]
+    assert not any(c["id"] == "regression.call3" and c["result"] == "UNKNOWN"
+                   for c in v["checks"]), [c for c in v["checks"] if c["id"] == "regression.call3"]
+
+
 def test_each_playtest_pins_the_client_viewport_with_the_device_simulator(fakes, repo):
     """GF_UI1/GF_UI1b FAILed `SIZE 1920x1080 - the viewport is 1920x1060`: the Edit-time device
     does not hold in play. Every playtest with a client CALL now applies AU's recipe on
