@@ -203,6 +203,8 @@ Installer output, at the end:
   The installer then never asks for a key or place id. The alternative is that the installer asks
   for everything and registers the slot itself.
 - **D3. Trust a new slot's ssh host key automatically on first contact** (LAN). *Recommended.*
+  - *Superseded in v0.162.0 (Victor, 2026-11-01):* slots report their host key to the router, the
+    coordinator checks them strictly, and the main PC registers its own ssh key (no pasting).
 - **D4. Model-provider credentials** (Meridian, OpenRouter, LiteLLM keys; today in the router's
   `.env`):
   - (a) stay in `.env`, with the router installer and wizard writing them for you;

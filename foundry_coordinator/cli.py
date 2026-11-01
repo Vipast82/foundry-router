@@ -1246,6 +1246,10 @@ def _dispatch(a, c: Coordinator) -> int:
         puller = ConfigPuller(c, log=c.log)
         if any(puller.enabled(pid) for pid in c.projects):
             c.after_tick.append(puller.poll)
+        # Studio slots: this PC's own ssh key registered with the router, the slots' host keys
+        # back into Foundry's known_hosts (slot_ssh.py); at start, then every 10 minutes
+        from .slot_ssh import SlotSsh
+        c.after_tick.append(SlotSsh(c, log=c.log).poll)
         if a.telemetry:
             import threading
             bridge = _bridge(c, a)

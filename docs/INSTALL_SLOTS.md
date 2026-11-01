@@ -4,21 +4,29 @@ Since v0.160.0. A **Studio slot** is a container that runs Roblox Studio, Rojo a
 runner on another machine, so track sprints are gated there instead of on your PC. You add a slot
 in the router, run one installer, and sign Studio in once. Nothing else is edited by hand.
 
-## Once: let Foundry reach slots
+## How Foundry reaches slots (automatic since v0.162.0)
 
-Foundry drives slots over ssh from the PC that runs the coordinator.
+Foundry drives slots over ssh from the PC that runs the coordinator, your **main PC**. Nothing
+needs pasting.
 
-1. On that PC, check for a key:
+- **The main PC registers itself.** When its coordinator starts (and every 10 minutes), it:
+  - makes Foundry's own key, `~/.foundry-coordinator/ssh/id_ed25519`, if there is none;
+  - sends the PUBLIC half to the router. Access → Machines → **Workstations** lists it.
 
-       type %USERPROFILE%\.ssh\id_ed25519.pub
-
-   If there is none, make one. Press Enter at the passphrase prompts; the coordinator runs
-   unattended, and the key only opens the `studio` user on slot machines:
-
-       ssh-keygen -t ed25519 -f %USERPROFILE%\.ssh\id_ed25519 -C foundry-slots
-
-2. Router → **Access → Machines → Workstation ssh keys**: paste the contents of the `.pub` file
-   (the PUBLIC key) and save. Every slot installer authorizes the keys listed there.
+  A new main PC only has to start its coordinator.
+- **Slots allow every registered PC.** The slot installer, then a timer on the slot host
+  (`foundry-slot-keys.timer`, every 5 minutes), writes the registered keys into a Foundry block
+  of `/home/studio/.ssh/authorized_keys`. **Remove** on Workstations takes a PC out within 5
+  minutes. Keys you add by hand outside that block stay.
+- **Slots report their ssh host key.** The coordinator gets it back and checks each slot strictly
+  against Foundry's own known_hosts (`~/.foundry-coordinator/ssh/known_hosts`). A reinstalled slot
+  or a reused IP updates by itself; anything else is refused.
+  - A slot installed before v0.162.0 keeps trusting on first use until it is reinstalled.
+  - Machines shows it as "host key not reported".
+- **Check it:** `python -m foundry_client status` has a "Slot ssh" line, and Machines shows each
+  PC's key and each slot's host key fingerprint.
+- **Extra keys (optional):** Access → Machines → Extra ssh keys, e.g. your own key for manual
+  checks.
 
 ## Each slot
 
@@ -155,5 +163,6 @@ The slot is ready. On the first gate, Foundry:
 | "cannot reach the router" | from the slot, try `curl http://<router>:11435/health`; check the IP, gateway and DNS |
 | "Docker does not start" | the LXC needs `features: nesting=1,keyctl=1` (create-slot-lxc.sh sets it) |
 | build fails | `/srv/studio-slot/build.log`; re-run the installer with a new code after fixing |
-| "no workstation ssh key" | add it on Access → Machines, then reinstall with a new code (or append it to `/home/studio/.ssh/authorized_keys`) |
+| "no workstation ssh key" / "Permission denied (publickey)" | start the coordinator on your main PC (it registers its key), then wait up to 5 minutes or run `foundry-slot-keys` on the slot host |
+| "Host key verification failed" | the slot's host key changed without it reporting the new one: run `foundry-slot-keys` on the slot host (or reinstall with a new code) |
 | gates never go to the slot | Access → Machines shows "not ready yet": switch it on under Automation → Settings → Studio slots; Foundry also needs `[config_pull]` on (the default) |

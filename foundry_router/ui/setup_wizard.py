@@ -75,7 +75,8 @@ def state(svc) -> dict:
                               for r in cfg.budgets.rules]},
         "game": {"done": bool(projects), "projects": projects},
         "machines": {"done": bool(machines), "count": len(machines),
-                     "ssh_keys": len(cfg.machines.slot_ssh_keys)},
+                     "ssh_keys": len(cfg.machines.slot_ssh_keys)
+                     + len(svc.machines.workstations())},
     }
     return {"version": __version__, "completed": bool(cfg.setup.completed),
             "fresh": bool(getattr(svc.config_store, "fresh", False)),

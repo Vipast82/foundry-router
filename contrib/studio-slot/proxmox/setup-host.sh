@@ -191,24 +191,7 @@ py write-key "$ROOT/slot-key/slot-key.txt"
 chown "$SLOT_UID:$SLOT_UID" "$ROOT/slot-key/slot-key.txt"
 ok "slot key saved in $ROOT/slot-key/slot-key.txt (mode 600, never shown)"
 
-bold "3/6 ssh access for Foundry"
-install -d -m 700 -o "$USER_NAME" -g "$USER_NAME" "/home/$USER_NAME/.ssh"
-AK="/home/$USER_NAME/.ssh/authorized_keys"
-touch "$AK"
-n=0
-while IFS= read -r k; do
-    [ -n "$k" ] || continue
-    grep -qxF "$k" "$AK" || { echo "$k" >> "$AK"; n=$((n + 1)); }
-done < <(py ssh-keys)
-chown "$USER_NAME:$USER_NAME" "$AK"; chmod 600 "$AK"
-if [ "$(grep -c . "$AK" || true)" = 0 ]; then
-    warn "the router has no workstation ssh key yet (Access → Machines → Workstation ssh keys)."
-    warn "Foundry can't reach this slot until you add it there and re-run this installer with a new code."
-else
-    ok "$(grep -c . "$AK") workstation key(s) allowed ($n new)"
-fi
-
-bold "4/6 Foundry v$VERSION and the mirrors"
+bold "3/6 Foundry v$VERSION and the mirrors"
 cd "$ROOT"
 [ -d AnimalUprising.git ] || runuser -u "$USER_NAME" -- git init -q --bare -b master AnimalUprising.git
 [ -d foundry.git ] || runuser -u "$USER_NAME" -- git init -q --bare -b deploy foundry.git
@@ -227,6 +210,51 @@ runuser -u "$USER_NAME" -- git -C foundry push -q --force "$ROOT/foundry.git" HE
 runuser -u "$USER_NAME" -- git -C foundry remote set-url origin "$ROOT/foundry.git"
 chmod -R a+rX AnimalUprising.git foundry.git foundry
 ok "Foundry $(runuser -u "$USER_NAME" -- git -C foundry describe --tags --always) in $ROOT/foundry; game mirror $ROOT/AnimalUprising.git"
+
+bold "4/6 ssh access for Foundry"
+# The main PC's coordinator registers its own ssh key with the router (v0.162.0), and this host
+# reports its ssh host keys there. slot-keys.py does both now and every 5 minutes after (a
+# systemd timer), so a new or replaced main PC gets in without reinstalling this slot.
+install -d -m 700 -o "$USER_NAME" -g "$USER_NAME" "/home/$USER_NAME/.ssh"
+AK="/home/$USER_NAME/.ssh/authorized_keys"
+touch "$AK"; chown "$USER_NAME:$USER_NAME" "$AK"; chmod 600 "$AK"
+install -m 755 "$ROOT/foundry/contrib/studio-slot/proxmox/slot-keys.py" /usr/local/sbin/foundry-slot-keys
+if ! /usr/local/sbin/foundry-slot-keys --router "$(py get router)" --fingerprint "$(py get tls_pinned)"; then
+    warn "could not sync the ssh keys with the router now; the timer retries every 5 minutes"
+fi
+cat > /etc/systemd/system/foundry-slot-keys.service <<'UNIT'
+[Unit]
+Description=Foundry: sync this Studio slot's ssh keys with the router
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/python3 /usr/local/sbin/foundry-slot-keys
+UNIT
+cat > /etc/systemd/system/foundry-slot-keys.timer <<'UNIT'
+[Unit]
+Description=Foundry: sync this Studio slot's ssh keys with the router every 5 minutes
+
+[Timer]
+OnBootSec=1min
+OnUnitActiveSec=5min
+
+[Install]
+WantedBy=timers.target
+UNIT
+if systemctl daemon-reload >/dev/null 2>&1 && systemctl enable --now foundry-slot-keys.timer >/dev/null 2>&1; then
+    ok "key refresh every 5 minutes (foundry-slot-keys.timer)"
+else
+    warn "could not start foundry-slot-keys.timer: run 'foundry-slot-keys' after adding a main PC"
+fi
+NKEYS=$(sed -n '/^# >>> foundry-managed keys/,/^# <<< foundry-managed keys/p' "$AK" | grep -c '^ssh-\|^ecdsa-\|^sk-' || true)
+if [ "${NKEYS:-0}" = 0 ] && [ "$(grep -c '^ssh-\|^ecdsa-\|^sk-' "$AK" || true)" = 0 ]; then
+    warn "no main PC has registered its ssh key yet: start the coordinator on your main PC (it"
+    warn "registers itself), or add a key on Access → Machines; this slot allows it within 5 minutes."
+else
+    ok "${NKEYS:-0} workstation key(s) allowed from the router"
+fi
 
 bold "5/6 the slot container ($CONTAINER)"
 COMPOSE_DIR="$ROOT/foundry/contrib/studio-slot/proxmox"

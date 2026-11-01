@@ -2,6 +2,57 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.162.0 — Slot ssh without pasting keys: the main PC registers itself, slots report their host key
+
+2026-11-01. Victor: "can there be a place in Foundry-Router to add the SSH key, so it does the
+setup for the client side on the MAIN PC, whichever the main implementation PC is going to be";
+approved with the recommended choices (A: the coordinator does it at start; B: Foundry's own
+key; C: host keys reported and checked strictly, replacing plan D3's trust on first use; D:
+existing slots pick it up at a reinstall). It also fixes what broke on 2026-11-01: a slot reusing
+192.168.0.115 failed on a stale host key in ~/.ssh/known_hosts.
+
+- **router** (`machines.py`):
+  - `POST /v1/foundry/control/workstation-ssh` {name, public_key} (orchestration key)
+    registers or refreshes the workstation's key. A new or changed key is an event plus an info
+    alert. It answers with every slot's address and reported host keys.
+  - `GET /v1/foundry/secrets/authorized-keys` and `POST /v1/foundry/secrets/host-keys` are for
+    the enrolled slot's own key only.
+  - `DELETE /admin/api/machines/workstations/{name}`.
+  - Enrollment hands out the registered keys plus the extra keys.
+  - New table `workstation_keys`, and a `machines.host_keys` column.
+- **coordinator** (`slot_ssh.py`): at start and every 10 minutes it
+  - makes `<state_dir>/ssh/id_ed25519` if missing;
+  - registers it as this PC's hostname;
+  - writes the slots' host keys into `<state_dir>/ssh/known_hosts`;
+  - records `state.json` (no secrets).
+
+  `slots.ssh_cmd` (docker exec, Kilo's Studio MCP, the pipeline runner) and the mirror pushes
+  (now `GIT_SSH_COMMAND`, the same ssh) use Foundry's key first, then the personal
+  `~/.ssh/id_*`, because `-i` turns ssh's defaults off. A slot whose host key the router knows
+  is checked strictly against Foundry's known_hosts; others keep the old trust on first use.
+  A custom slot `ssh` setting is used as it is.
+- **slot host:** `contrib/studio-slot/proxmox/slot-keys.py`, installed as
+  `/usr/local/sbin/foundry-slot-keys` plus `foundry-slot-keys.timer` (every 5 minutes).
+  - It reports `/etc/ssh/ssh_host_*_key.pub` and rewrites a Foundry block in
+    `/home/studio/.ssh/authorized_keys`; lines outside the block stay.
+  - setup-host.sh now downloads Foundry (3/6) before the ssh step (4/6).
+- **UI** (Access → Machines):
+  - a **Workstations** card (PC, key fingerprint, registered and last seen, Remove);
+  - each slot's host key fingerprint, or "host key not reported";
+  - "Workstation ssh keys" became "Extra ssh keys (optional)".
+
+  The wizard's Machines step counts registered PCs. `foundry_client status` has a "Slot ssh"
+  line.
+- **Checked live** against slot-1 (read-only):
+  - Foundry's key plus the strict check against slot-1's verified host key ran ssh,
+    `docker exec` and git `ls-remote` OK through the personal-key fallback;
+  - a wrong host key was refused.
+- Tests: test_slot_ssh (11).
+- **To apply:**
+  - rebuild the router, then deploy the coordinator, which registers this PC at its next start;
+  - for slot-1, a reinstall (New code) installs the timer and reports its host key. Until then it
+    keeps working with the personal key and the known_hosts entry from 2026-11-01.
+
 ## v0.161.2 — A slot hides Studio's leftover splash window
 
 2026-11-01. On slot-1, Studio's splash (a 600x300 window titled "RobloxStudio") stayed on top of the

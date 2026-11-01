@@ -48,6 +48,7 @@ import io
 import os
 import re
 import shlex
+import shutil
 import subprocess
 import sys
 import tarfile
@@ -123,9 +124,23 @@ def lock_name(slot: dict) -> str:
 # ----------------------------------------------------------------------------- commands
 
 def ssh_cmd(slot: dict) -> list:
-    """The ssh command of a remote slot (a list; a string is split shell-style)."""
+    """The ssh command of a remote slot (a list; a string is split shell-style). A slot with the
+    default command gets Foundry's own key and, once the router knows the slot's host key, a
+    strict check against Foundry's known_hosts (slot_ssh.py, v0.162.0); a custom `ssh` setting
+    is used as it is."""
     v = slot.get("ssh") or DEFAULTS["ssh"]
+    if not isinstance(v, str) and [str(x) for x in v] == SSH_DEFAULT:
+        from . import slot_ssh
+        return ["ssh"] + slot_ssh.ssh_options(str(slot.get("host") or ""))
     return shlex.split(v) if isinstance(v, str) else [str(x) for x in v]
+
+
+def git_ssh_env(slot: dict) -> dict:
+    """The environment for a git push to the slot's mirrors: the same ssh as every other slot
+    command (GIT_SSH_COMMAND), so git uses Foundry's key and known_hosts too."""
+    cmd = ssh_cmd(slot)
+    exe = shutil.which(cmd[0]) or cmd[0]
+    return {**os.environ, "GIT_SSH_COMMAND": shlex.join([exe.replace("\\", "/")] + cmd[1:])}
 
 
 def host_argv(slot: dict, args: list) -> list:
@@ -182,10 +197,11 @@ def _docker(slot, script: str, timeout: Optional[float] = None,
                           stderr=subprocess.STDOUT, timeout=timeout, creationflags=_NO_WINDOW)
 
 
-def _git(cwd: str, *args, timeout: float = 300) -> subprocess.CompletedProcess:
+def _git(cwd: str, *args, timeout: float = 300, env: Optional[dict] = None
+         ) -> subprocess.CompletedProcess:
     return subprocess.run(["git", "-C", cwd] + list(args), stdin=subprocess.DEVNULL,
                           stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=timeout,
-                          creationflags=_NO_WINDOW)
+                          creationflags=_NO_WINDOW, env=env)
 
 
 def push_sources(slot: dict, worktree: str, task: str, head: str) -> tuple:
@@ -200,13 +216,15 @@ def push_sources(slot: dict, worktree: str, task: str, head: str) -> tuple:
     if url:
         if not _TASK_RE.fullmatch(task or ""):
             return False, f"bad task id {task!r}"
-        r = _git(worktree, "push", "-q", "--force", url, f"{head}:refs/heads/slot/{task}")
+        r = _git(worktree, "push", "-q", "--force", url, f"{head}:refs/heads/slot/{task}",
+                 env=git_ssh_env(slot))
         if r.returncode != 0:
             return False, "AU push: " + (r.stdout or b"").decode("utf-8", "replace")[-300:]
         done.append(f"AU {head[:12]} -> slot/{task}")
     furl, fdir = slot.get("foundry_push_url") or "", slot.get("foundry_host_dir") or ""
     if furl and fdir:
-        r = _git(FOUNDRY_ROOT, "push", "-q", "--force", furl, "HEAD:refs/heads/deploy")
+        r = _git(FOUNDRY_ROOT, "push", "-q", "--force", furl, "HEAD:refs/heads/deploy",
+                 env=git_ssh_env(slot))
         if r.returncode != 0:
             return False, "Foundry push: " + (r.stdout or b"").decode("utf-8", "replace")[-300:]
         q = shlex.quote(fdir)

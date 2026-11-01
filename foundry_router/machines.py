@@ -56,7 +56,33 @@ CREATE TABLE IF NOT EXISTS machines (
 CREATE TABLE IF NOT EXISTS machine_events (
     id INTEGER PRIMARY KEY AUTOINCREMENT, ts REAL NOT NULL, machine TEXT NOT NULL DEFAULT '',
     event TEXT NOT NULL, addr TEXT NOT NULL DEFAULT '', detail TEXT NOT NULL DEFAULT '');
+CREATE TABLE IF NOT EXISTS workstation_keys (
+    name TEXT PRIMARY KEY, public_key TEXT NOT NULL, fingerprint TEXT NOT NULL,
+    client TEXT NOT NULL DEFAULT '', addr TEXT NOT NULL DEFAULT '',
+    first_ts REAL NOT NULL, last_ts REAL NOT NULL);
 """
+# a PUBLIC ssh key line: type, base64 blob, optional comment (never a private key)
+PUBKEY_RE = re.compile(r"^(ssh-ed25519|ssh-rsa|ecdsa-sha2-nistp(?:256|384|521)|"
+                       r"sk-ssh-ed25519@openssh\.com) ([A-Za-z0-9+/=]{40,})( [^\r\n]{0,200})?$")
+WS_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$")
+
+
+def check_pubkey(k: str, what: str = "key") -> str:
+    k = str(k or "").strip()
+    if not PUBKEY_RE.match(k):
+        raise MachineError(f"{what}: one PUBLIC ssh key (ssh-ed25519 AAAA… comment); never a "
+                           "private key")
+    return k
+
+
+def fingerprint(k: str) -> str:
+    """OpenSSH's SHA256 fingerprint of a public key line (SHA256:base64, no padding)."""
+    import base64
+    try:
+        blob = base64.b64decode(k.split()[1])
+    except (IndexError, ValueError):
+        return ""
+    return "SHA256:" + base64.b64encode(hashlib.sha256(blob).digest()).decode().rstrip("=")
 
 
 class MachineError(Exception):
@@ -100,6 +126,10 @@ class Machines:
         for stmt in SCHEMA.strip().split(";"):
             if stmt.strip():
                 db.execute(stmt)
+        try:                       # v0.162.0: a slot's ssh host keys, reported by its host
+            db.execute("ALTER TABLE machines ADD COLUMN host_keys TEXT NOT NULL DEFAULT '[]'")
+        except Exception:                                        # noqa: BLE001 (already there)
+            pass
 
     def event(self, machine: str, event: str, addr: str = "", detail: str = "") -> None:
         self.db.execute("INSERT INTO machine_events (ts, machine, event, addr, detail) VALUES "
@@ -166,6 +196,46 @@ class Machines:
 
     def remove(self, name: str) -> None:
         self.db.execute("DELETE FROM machines WHERE name=?", (name,))
+
+    # -- ssh: slot host keys (reported by the slot host) and workstation keys (v0.162.0)
+
+    def host_keys(self, name: str) -> list:
+        row = self.get(name) or {}
+        try:
+            v = json.loads(row.get("host_keys") or "[]")
+        except ValueError:
+            v = []
+        return [k for k in v if isinstance(k, str)]
+
+    def set_host_keys(self, name: str, keys: list) -> bool:
+        """Store a slot's host keys; True when they changed."""
+        keys = sorted(set(keys))
+        if keys == sorted(self.host_keys(name)):
+            return False
+        self.db.execute("UPDATE machines SET host_keys=? WHERE name=?", (json.dumps(keys), name))
+        return True
+
+    def workstations(self) -> list[dict]:
+        return self.db.query("SELECT * FROM workstation_keys ORDER BY last_ts DESC")
+
+    def register_workstation(self, name: str, key: str, client: str, addr: str) -> str:
+        """Add or refresh a workstation's key; returns 'new', 'changed' or 'seen'."""
+        now = self.clock()
+        row = self.db.query_one("SELECT * FROM workstation_keys WHERE name=?", (name,))
+        if row and row["public_key"] == key:
+            self.db.execute("UPDATE workstation_keys SET last_ts=?, addr=?, client=? WHERE name=?",
+                            (now, addr[:80], client[:80], name))
+            return "seen"
+        self.db.execute("INSERT INTO workstation_keys (name, public_key, fingerprint, client, addr, "
+                        "first_ts, last_ts) VALUES (?,?,?,?,?,?,?) ON CONFLICT(name) DO UPDATE SET "
+                        "public_key=excluded.public_key, fingerprint=excluded.fingerprint, "
+                        "client=excluded.client, addr=excluded.addr, first_ts=excluded.first_ts, "
+                        "last_ts=excluded.last_ts",
+                        (name, key, fingerprint(key), client[:80], addr[:80], now, now))
+        return "changed" if row else "new"
+
+    def remove_workstation(self, name: str) -> bool:
+        return self.db.execute_count("DELETE FROM workstation_keys WHERE name=?", (name,)) == 1
 
 
 # ----------------------------------------------------------------------------- helpers
@@ -267,7 +337,9 @@ def _view(svc, m: dict, act_seen: dict) -> dict:
             "last_seen": seen.get("last_ts"), "last_addr": seen.get("addr"),
             "last_pull": pulls[0] if pulls else None,
             "settings": settings,
-            "vnc": _vnc_view(svc, m, settings) if m["kind"] == "slot" else None}
+            "vnc": _vnc_view(svc, m, settings) if m["kind"] == "slot" else None,
+            "host_keys": [{"type": k.split()[0], "fingerprint": fingerprint(k)}
+                          for k in svc.machines.host_keys(m["name"])]}
 
 
 VNC_SECRET = "SLOT_VNC_PASSWORD"          # entrypoint.sh reads its default file name
@@ -304,6 +376,8 @@ async def list_machines(request: Request):
     from .secrets_api import _projects
     return JSONResponse({
         "machines": [_view(svc, m, act) for m in svc.machines.list()],
+        "workstations": [{k: w[k] for k in ("name", "fingerprint", "client", "addr", "first_ts",
+                                            "last_ts")} for w in svc.machines.workstations()],
         "settings": svc.config_store.config.machines.model_dump(),
         "projects": _projects(svc), "kinds": list(KINDS), "tls": _tls(request),
         "events": svc.machines.events(30)}, headers={"Cache-Control": "no-store"})
@@ -549,7 +623,7 @@ async def enroll(request: Request):
             "key": key, "router_version": __version__,
             "settings": slot_settings(svc, m["project"], m["slot"]),
             "vnc": _vnc_view(svc, m, slot_settings(svc, m["project"], m["slot"])),
-            "ssh_authorized_keys": list(cfg.machines.slot_ssh_keys or []),
+            "ssh_authorized_keys": authorized_keys(svc),
             "tls": _tls(request)}
     return JSONResponse(body, headers={"Cache-Control": "no-store"})
 
@@ -573,4 +647,116 @@ async def machine_ready(request: Request):
     return {"ok": True, "settings_rev": rev.get("rev")}
 
 
-__all__ = ["router", "Machines", "derived_slot", "new_code", "norm_code", "code_hash"]
+# ----------------------------------------------------------------------------- ssh (v0.162.0)
+#
+# The workstation that runs the coordinator registers its own ssh PUBLIC key here at start
+# (POST /v1/foundry/control/workstation-ssh, orchestration key), so it is never pasted by hand
+# and a new main PC simply registers itself. Every slot host allows these keys (its installer,
+# then a timer: GET /v1/foundry/secrets/authorized-keys) and reports its own ssh HOST keys
+# (POST /v1/foundry/secrets/host-keys), which the coordinator gets back to check each slot
+# strictly (foundry_coordinator/slot_ssh.py) instead of trusting on first use.
+
+def authorized_keys(svc) -> list[str]:
+    """What slot hosts allow: the registered workstation keys + the extra keys on Machines."""
+    out = []
+    for k in [w["public_key"] for w in svc.machines.workstations()] + \
+            list(svc.config_store.config.machines.slot_ssh_keys or []):
+        if k and k not in out:
+            out.append(k)
+    return out
+
+
+def _slot_caller(svc) -> dict:
+    """The enrolled slot behind this secrets-scope key (or MachineError)."""
+    c = client_auth.current()
+    m = svc.machines.get(str(c.get("client_id") or ""))
+    if not m or m["kind"] != "slot" or m["slot"] not in (c.get("slots") or []):
+        raise MachineError("this key is not an enrolled slot", "forbidden", 403)
+    return m
+
+
+def slot_hosts(svc) -> list[dict]:
+    """Every slot's ssh address and reported host keys (for the coordinator's known_hosts)."""
+    out = []
+    for m in svc.machines.list():
+        if m["kind"] != "slot" or not m.get("host"):
+            continue
+        out.append({"machine": m["name"], "project": m["project"], "slot": m["slot"],
+                    "host": m["host"].split("@")[-1], "host_keys": svc.machines.host_keys(m["name"])})
+    return out
+
+
+@router.post("/v1/foundry/control/workstation-ssh")
+async def workstation_ssh(request: Request):
+    """{name, public_key} from the coordinator at start -> {status, fingerprint, slots}."""
+    svc = _svc(request)
+    try:
+        b = await _body(request)
+        name = str(b.get("name") or "").strip()
+        if not WS_NAME_RE.match(name):
+            raise MachineError("name: the workstation's name (letters, digits, . _ -)")
+        key = check_pubkey(b.get("public_key"), "public_key")
+    except MachineError as e:
+        return _err(e)
+    client = str(client_auth.current().get("client_id") or "")
+    status = svc.machines.register_workstation(name, key, client, _addr())
+    if status != "seen":
+        fp = fingerprint(key)
+        svc.machines.event(name, "workstation_key_" + status, _addr(), f"{fp} via {client}")
+        try:
+            svc.control.raise_alert(
+                f"workstation_key:{name}:{fp}", "workstation_key", "info",
+                f"Workstation {name} registered its ssh key",
+                f"{name} ({_addr() or '?'}, client {client}) registered ssh key {fp}. Studio slots "
+                "allow it within a few minutes. If this is not your PC, remove it on Access → "
+                "Machines → Workstations.", {})
+        except Exception:                                        # noqa: BLE001
+            pass
+    return JSONResponse({"ok": True, "status": status, "fingerprint": fingerprint(key),
+                         "slots": slot_hosts(svc)}, headers={"Cache-Control": "no-store"})
+
+
+@router.get("/v1/foundry/secrets/authorized-keys")
+async def slot_authorized_keys(request: Request):
+    """The keys a slot host allows to log in as `studio` (its key-refresh timer)."""
+    svc = _svc(request)
+    try:
+        m = _slot_caller(svc)
+    except MachineError as e:
+        return _err(e)
+    return JSONResponse({"keys": authorized_keys(svc)}, headers={"Cache-Control": "no-store"})
+
+
+@router.post("/v1/foundry/secrets/host-keys")
+async def slot_host_keys(request: Request):
+    """{keys: [ssh host public keys]} from the slot host (installer and timer)."""
+    svc = _svc(request)
+    try:
+        m = _slot_caller(svc)
+        b = await _body(request)
+        raw = b.get("keys")
+        if not isinstance(raw, list) or not raw or len(raw) > 8:
+            raise MachineError("keys: the host's ssh public keys (1-8)")
+        # host keys carry the host's name as comment: keep "type blob" only
+        keys = [" ".join(check_pubkey(k, "keys").split()[:2]) for k in raw]
+    except MachineError as e:
+        return _err(e)
+    if svc.machines.set_host_keys(m["name"], keys):
+        svc.machines.event(m["name"], "host_keys", _addr(),
+                           ", ".join(fingerprint(k) for k in sorted(set(keys))))
+    return {"ok": True, "count": len(set(keys))}
+
+
+@router.delete(A + "/workstations/{name}")
+@_guard
+async def remove_workstation(request: Request, name: str):
+    """Forget a workstation's ssh key: slot hosts drop it at their next key refresh."""
+    svc = _svc(request)
+    if not svc.machines.remove_workstation(name):
+        raise MachineError(f"no workstation {name!r}", "not_found", 404)
+    svc.machines.event(name, "workstation_key_removed", _addr())
+    return {"ok": True}
+
+
+__all__ = ["router", "Machines", "derived_slot", "new_code", "norm_code", "code_hash",
+           "authorized_keys", "fingerprint", "check_pubkey"]

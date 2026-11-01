@@ -523,7 +523,7 @@ VIEWS.machines = () => {
   return `<h2>Machines</h2>
     <p class="hint">Every machine that works for Foundry joins with a one-time <b>enrollment code</b> from Access → Machines: you never copy a key by hand.</p>
     <div class="card">${s.count ? `<span class="pill ok">${s.count} machine(s)</span>` : '<span class="pill">none yet</span>'}
-      ${s.ssh_keys ? `<span class="pill ok">workstation ssh key set</span>` : '<span class="pill warn">no workstation ssh key</span>'}</div>
+      ${s.ssh_keys ? `<span class="pill ok">workstation ssh key registered</span>` : '<span class="pill" title="Your main PC registers its own ssh key when its coordinator starts">no workstation ssh key yet (the main PC registers it by itself)</span>'}</div>
     <div class="card"><h3>Studio slots</h3>
       <p class="hint">Add a slot on Access → Machines (its id, IP and place), then run the one command it shows on your Proxmox host. Guide: docs/INSTALL_SLOTS.md.</p>
       <a class="act" href="/ui#Machines">Open Access → Machines</a></div>

@@ -24,6 +24,22 @@ import urllib.request
 import webbrowser
 
 
+def _slot_ssh_line(cfg) -> str:
+    """The coordinator's Studio-slot ssh state (foundry_coordinator/slot_ssh.py state.json)."""
+    from pathlib import Path
+    from . import config
+    p = Path(config.expand(cfg["client"]["state_dir"])) / "ssh" / "state.json"
+    try:
+        s = json.loads(p.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return f"{'unknown':<10} the coordinator has not registered this PC's ssh key yet"
+    age = max(0, int((time.time() - float(s.get("ts") or 0)) / 60))
+    if s.get("ok"):
+        return (f"{'ok':<10} key {s.get('fingerprint')} registered as {s.get('name')} "
+                f"{age} min ago; {s.get('host_keys', 0)} slot host key(s)")
+    return f"{'error':<10} {s.get('error', '')} ({age} min ago)"
+
+
 def _api(cfg, path: str, method: str = "GET", body=None, timeout: float = 10):
     from .api import load_token
     url = f"http://127.0.0.1:{cfg['client']['api_port']}{path}"
@@ -183,6 +199,7 @@ def main(argv=None) -> int:
         r = st.get("router") or {}
         print(f"{'Foundry router':<20} " + (f"{'reachable':<10} v{r.get('version')}"
               if r.get("reachable") else f"{'unreachable':<10} {r.get('error', '')}"))
+        print(f"{'Slot ssh':<20} " + _slot_ssh_line(cfg))
         for al in st.get("alerts") or []:
             print(f"! {al['text']}")
         u = st.get("update") or {}

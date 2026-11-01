@@ -3295,7 +3295,9 @@ async function tabMachines() {
     const s = m.settings || {}, lp = m.last_pull;
     return `<tr><td class="nw"><b>${esc(m.name)}</b><div class="hint">${esc(m.kind)} · ${esc(m.project)}${m.note ? " · " + esc(m.note) : ""}</div></td>
       <td class="nw">${state(m)}${m.code_pending ? `<div class="hint">code valid until ${when(m.code_expires)}</div>` : ""}</td>
-      <td class="nw"><code>${esc(m.host || "")}</code><div class="hint">${esc(s.container || "")}${m.enrolled_hostname ? " · " + esc(m.enrolled_hostname) : ""}</div></td>
+      <td class="nw"><code>${esc(m.host || "")}</code><div class="hint">${esc(s.container || "")}${m.enrolled_hostname ? " · " + esc(m.enrolled_hostname) : ""}</div>
+        ${(m.host_keys || []).length ? `<div class="hint" title="ssh host key reported by the slot; the coordinator checks the slot against it">host key ${esc((m.host_keys.find(k => k.type === "ssh-ed25519") || m.host_keys[0]).fingerprint)}</div>`
+          : (m.kind === "slot" && m.enrolled_ts ? `<div class="hint" title="Installed before v0.162.0: reinstall it (New code) so it reports its ssh host key">host key not reported</div>` : "")}</td>
       <td class="nw">${s.place_id ? `place ${esc(s.place_id)}` : '<span class="hint">no place</span>'}</td>
       <td class="nw">${vncCell(m.vnc)}</td>
       <td class="hint" style="white-space:normal">${m.enrolled_ts ? `enrolled ${when(m.enrolled_ts)} from ${esc(m.enrolled_addr || "")}` : ""}
@@ -3306,6 +3308,11 @@ async function tabMachines() {
         <button class="act danger" data-mc-del="${esc(m.name)}">Delete</button></td></tr>`;
   }).join("");
   const keys = (d.settings.slot_ssh_keys || []).join("\n");
+  const ws = d.workstations || [];
+  const wsRows = ws.map(w => `<tr><td class="nw"><b>${esc(w.name)}</b><div class="hint">${esc(w.client || "")}${w.addr ? " · " + esc(w.addr) : ""}</div></td>
+      <td class="nw"><code>${esc(w.fingerprint)}</code></td>
+      <td class="nw hint">registered ${when(w.first_ts)}<div>last seen ${when(w.last_ts)}</div></td>
+      <td class="nw"><button class="act danger" data-ws-del="${esc(w.name)}">Remove</button></td></tr>`).join("");
   const ev = (d.events || []).slice(0, 15).map(e => `<tr><td class="nw hint">${when(e.ts)}</td><td class="nw">${esc(e.machine)}</td>
     <td class="nw">${esc(e.event)}</td><td class="hint">${esc(e.addr || "")} ${esc(e.detail || "")}</td></tr>`).join("");
   $("#main").innerHTML = `
@@ -3313,8 +3320,8 @@ async function tabMachines() {
     <p class="hint">Every machine that works for Foundry is added here. You get a one-time <b>enrollment code</b>; the machine's
       installer trades it for its own key and settings, so you never copy a key by hand. Revoking a machine turns its key off at once.
       Studio slots: docs/INSTALL_SLOTS.md.</p>
-    ${keys ? "" : `<div class="card"><span class="pill warn">no workstation ssh key</span> Add your workstation's <b>public</b> ssh key below
-      before installing a slot: Foundry reaches slots over ssh, and the slot installer authorizes the keys listed here.</div>`}
+    ${keys || ws.length ? "" : `<div class="card"><span class="pill warn">no workstation ssh key</span> Start the coordinator on your main PC:
+      it registers its own ssh key here (Workstations below), and slots allow it. Foundry reaches slots over ssh.</div>`}
     <div class="card"><h3>Machines</h3>
       ${rows ? `<div class="tscroll"><table><tr><th>machine</th><th>state</th><th>host</th><th>place</th><th>VNC</th><th>activity</th><th></th></tr>${rows}</table></div>` : '<p class="hint">None yet.</p>'}</div>
     <div class="card"><h3>Add a Studio slot</h3>
@@ -3332,8 +3339,13 @@ async function tabMachines() {
         <button class="act primary" id="mc-add">Add slot and make a code</button></div>
       <p class="hint">The slot starts switched off and its installer switches it on when its container is ready, so no gate goes to a half-built slot.
         Moving a slot from another machine? Stop the old container first: one place can be open in one Studio at a time.</p></div>
-    <div class="card"><h3>Workstation ssh keys</h3>
-      <p class="hint">The <b>public</b> key(s) of the PC that runs the coordinator (Windows: <code>type %USERPROFILE%\\.ssh\\id_ed25519.pub</code>). Slot installers allow these to log in as <code>studio</code>. One per line.</p>
+    <div class="card"><h3>Workstations</h3>
+      <p class="hint">The PCs that run the coordinator. Each registers its own ssh key here when its coordinator starts
+        (its key lives in <code>~/.foundry-coordinator/ssh</code>), and every slot allows it within 5 minutes. A new main PC only
+        has to start its coordinator. <b>Remove</b> a PC you no longer use: slots drop its key at their next refresh.</p>
+      ${wsRows ? `<div class="tscroll"><table><tr><th>PC</th><th>ssh key</th><th>activity</th><th></th></tr>${wsRows}</table></div>` : '<p class="hint">None registered yet.</p>'}</div>
+    <div class="card"><h3>Extra ssh keys (optional)</h3>
+      <p class="hint">Other <b>public</b> keys slots should allow to log in as <code>studio</code>, e.g. your own for manual checks. One per line.</p>
       <textarea id="mc-keys" rows="3" style="width:100%;font-family:monospace" placeholder="ssh-ed25519 AAAA… foundry-slots@PC">${esc(keys)}</textarea>
       <div class="row"><label title="How long a new enrollment code works">code valid for (minutes)</label><input type="number" id="mc-mins" min="5" max="1440" value="${esc(d.settings.code_minutes)}" style="width:90px">
         <button class="act primary" id="mc-save">Save</button></div></div>
@@ -3383,6 +3395,11 @@ async function tabMachines() {
     $("#mv-save", body).onclick = () => api(`machines/${encodeURIComponent(n)}/vnc`, {method: "POST",
       body: {vnc_lan: $("#mv-lan", body).checked, vnc_port: Number($("#mv-port", body).value || 6080)}})
       .then(() => { toast("Saved: re-run the slot's installer to apply it"); closeModal(); render(); }).catch(e => toast(e.message, true));
+  });
+  document.querySelectorAll("[data-ws-del]").forEach(b => b.onclick = () => {
+    const n = b.dataset.wsDel;
+    if (confirm(`Remove ${n}'s ssh key? Slots stop allowing it within 5 minutes. If ${n}'s coordinator is still running, it registers again.`))
+      api(`machines/workstations/${encodeURIComponent(n)}`, {method: "DELETE"}).then(() => { toast("Removed"); render(); }).catch(e => toast(e.message, true));
   });
   document.querySelectorAll("[data-mc-revoke]").forEach(b => b.onclick = () => {
     const n = b.dataset.mcRevoke;
