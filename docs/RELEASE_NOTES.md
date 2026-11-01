@@ -2,6 +2,22 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.163.3 — a BUILD that keeps leaving the same plan steps open stops instead of looping
+
+2026-11-01. GF-AFK1's plan left one checklist line for "the coordinator", a Studio negative
+control that the coordinator never runs. Each 1-minute session re-ran the gate, and the
+coordinator's evidence commit moved HEAD, so each session counted as partial-BUILD progress
+and got a free next session. Seven sessions ran between 07:47 and 07:53.
+
+- **Partial-BUILD continuation (`Coordinator._implementing`):** the open plan steps are compared
+  with the previous continuation's. When the same steps come back `BUILD_STALL_LIMIT` (2) times
+  in a row, the sprint stops BLOCKED (`build_stalled`, a lead case with the lead manager on)
+  with an event `build_progress_stalled`, instead of taking another free session. A change in
+  the open steps resets the count.
+- Test: `tests/coordinator/test_lifecycle_engine.py`
+  (`test_the_same_open_build_steps_three_sessions_in_a_row_stop_as_a_stall`). 477 lifecycle,
+  engine, Lead, recovery, control and scenario tests pass.
+
 ## v0.163.2 — a sprint waiting on a soon-answered decision keeps the main checkout
 
 2026-11-01. At 05:28 MV2-V1 blocked on a decision with a 3-minute default. GF-AFK1 took the main

@@ -1165,3 +1165,31 @@ extra_attempts = 1
     # no question is opened at all (an opened-then-withdrawn one still notified Victor)
     n1 = c.store.q("SELECT COUNT(*) AS n FROM decisions WHERE task_id='T1'")[0]["n"]
     assert n1 == n0, "a free continuation opened a question"
+
+
+def test_the_same_open_build_steps_three_sessions_in_a_row_stop_as_a_stall(tmp_path,
+                                                                          monkeypatch):
+    """2026-11-01 GF-AFK1: its plan left a step 'for the coordinator'; every 1-minute session
+    re-ran the gate (a new commit), left the same line open and got another free session."""
+    monkeypatch.setattr(LifecycleAdapter, "pending_build_steps",
+                        lambda self, spec, revision, ws: ["- [ ] negative control: the "
+                                                          "coordinator runs it"],
+                        raising=False)
+    turns = []
+
+    def script(ctx):
+        turns.append(ctx["session_id"])
+        return {"writes": {"src/core.txt": f"OK {len(turns)}"},
+                "commit": f"T1: gate rerun {len(turns)}",
+                "final": report(summary="the coordinator runs the negative control")}
+
+    c, _, _, _, _ = _game(tmp_path, script)
+    c.approve("game", "T1", [], "victor")
+    assert run_until(c, lambda: _state(c) == S.BLOCKED, limit=80), (
+        _state(c), len(turns), [(h["from_state"], h["to_state"]) for h in
+                                c.store.history("game", "T1")[-6:]])
+    assert len(turns) == 3                       # two free continuations, then the stop
+    ev = [e for e in c.store.q("SELECT kind, detail FROM events WHERE task_id='T1'")
+          if e["kind"] == "build_progress_stalled"]
+    assert len(ev) == 1
+    assert "BUILD stalled" in (c.store.task("game", "T1")["blocker"] or "")

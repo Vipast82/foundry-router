@@ -1166,6 +1166,26 @@ class Coordinator:
                     findings = ["Continue the committed plan's open BUILD steps; "
                                 "final gate and review remain required."]
                     total = self._build_total(P, spec, head)
+                    # 2026-11-01 07:47-07:53: GF-AFK1's plan said "the coordinator runs" its
+                    # Studio negative control; seven 1-minute sessions each re-ran the gate
+                    # (the coordinator's evidence commit moved HEAD), left that one line
+                    # open and got another free session. The same open steps coming back
+                    # BUILD_STALL_LIMIT times in a row is a stall for the lead, not progress.
+                    prev = data.get("build_progress")
+                    stalls = (int(data.get("build_stalls") or 0) + 1) \
+                        if isinstance(prev, list) and prev == pending[:12] else 0
+                    if stalls >= self.BUILD_STALL_LIMIT:
+                        self.store.event(pid, tid, "build_progress_stalled", detail={
+                            "open_steps": pending[:12], "stalls": stalls, "head": head})
+                        self._release_session(P, t)
+                        return self._stop(P, t, S.BLOCKED, {
+                            "blocker": f"BUILD stalled: the same {len(pending)} open plan "
+                                       f"step(s) after {stalls + 1} sessions in a row: "
+                                       + "; ".join(pending[:3])[:600],
+                            "session_id": t["session_id"], "open_steps": pending[:12]},
+                            cls="build_stalled",
+                            blocker="BUILD stalled on the same open plan steps")
+                    data = {**data, "build_stalls": stalls}
                     self._release_session(P, t)
                     return self.store.transition(pid, tid, S.CHANGES_REQUIRED, {
                         "head_sha": head, "build_progress": True,
@@ -7014,6 +7034,9 @@ class Coordinator:
         return False
 
     LEAD_SHORT_DEFER_SECONDS = 900
+    # a partial-BUILD continuation whose open plan steps came back unchanged this many
+    # times in a row stops (BLOCKED for the lead) instead of taking another free session
+    BUILD_STALL_LIMIT = 2
 
     def _session_locks(self, P: Project, t: Optional[dict] = None) -> list[str]:
         """The profile's exclusive resources, plus `gpu` for a sprint whose implementer is a
